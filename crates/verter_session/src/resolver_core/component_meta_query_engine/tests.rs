@@ -606,7 +606,7 @@ export interface TabsProps<T extends TabsItem = TabsItem> extends Pick<TabsRootP
         ],
     );
 
-    let _store_view = host.resolver_store_view();
+    let _store_view = host.resolver_store_view_read().into_owned_view();
     let mut query_engine = ComponentMetaQueryEngine::new(&host);
     let expr = TypeExpr::IndexedAccess {
         object: Arc::new(TypeExpr::IndexedAccess {
@@ -673,7 +673,7 @@ export interface LinkProps extends NuxtLinkProps {
         ws,
     );
     assert!(host.ensure_loaded("/src/Link.vue"));
-    let _store_view = host.resolver_store_view();
+    let _store_view = host.resolver_store_view_read().into_owned_view();
     let mut query_engine = ComponentMetaQueryEngine::new(&host);
     let route =
         crate::resolver_core::RouteDemand::Pick(vec!["to".to_string(), "target".to_string()]);
@@ -860,7 +860,7 @@ export interface LinkProps extends NuxtLinkProps {
         ws,
     );
     assert!(host.ensure_loaded("/src/Link.vue"));
-    let _store_view = host.resolver_store_view();
+    let _store_view = host.resolver_store_view_read().into_owned_view();
     let mut query_engine = ComponentMetaQueryEngine::new(&host);
     let route =
         crate::resolver_core::RouteDemand::Pick(vec!["to".to_string(), "target".to_string()]);
@@ -961,7 +961,7 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
         ws,
     );
     assert!(host.ensure_loaded("/src/Link.vue"));
-    let _store_view = host.resolver_store_view();
+    let _store_view = host.resolver_store_view_read().into_owned_view();
     let mut query_engine = ComponentMetaQueryEngine::new(&host);
     let route =
         crate::resolver_core::RouteDemand::Pick(vec!["to".to_string(), "target".to_string()]);
@@ -1090,7 +1090,7 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
         ws,
     );
     assert!(host.ensure_loaded("/src/Link.vue"));
-    let _store_view = host.resolver_store_view();
+    let _store_view = host.resolver_store_view_read().into_owned_view();
     let mut query_engine = ComponentMetaQueryEngine::new(&host);
     let route =
         crate::resolver_core::RouteDemand::Pick(vec!["target".to_string(), "to".to_string()]);
@@ -1220,7 +1220,7 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
             },
         ],
     );
-    let _store_view = host.resolver_store_view();
+    let _store_view = host.resolver_store_view_read().into_owned_view();
     let mut query_engine = ComponentMetaQueryEngine::new(&host);
     let route =
         crate::resolver_core::RouteDemand::Pick(vec!["target".to_string(), "to".to_string()]);
@@ -1375,7 +1375,7 @@ export type EditorToolbarProps<T extends ArrayOrNested<EditorToolbarItem> = Arra
         ],
     );
 
-    let _store_view = host.resolver_store_view();
+    let _store_view = host.resolver_store_view_read().into_owned_view();
     let mut query_engine = ComponentMetaQueryEngine::new(&host);
 
     let projected = crate::meta_resolve::project_type_surface_expr_via_host_threaded(
@@ -1501,7 +1501,7 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
         ],
     );
 
-    let _store_view = host.resolver_store_view();
+    let _store_view = host.resolver_store_view_read().into_owned_view();
     let mut query_engine = ComponentMetaQueryEngine::new(&host);
 
     let projected = crate::meta_resolve::project_type_surface_expr_via_host_threaded(
@@ -1608,7 +1608,7 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
         ],
     );
 
-    let _store_view = host.resolver_store_view();
+    let _store_view = host.resolver_store_view_read().into_owned_view();
     let mut query_engine = ComponentMetaQueryEngine::new(&host);
 
     let projected = crate::meta_resolve::project_type_surface_expr_via_host_threaded(
@@ -1729,7 +1729,7 @@ import theme from './theme'
         ],
     );
 
-    let _store_view = host.resolver_store_view();
+    let _store_view = host.resolver_store_view_read().into_owned_view();
     let mut query_engine = ComponentMetaQueryEngine::new(&host);
 
     // `keyof ComponentConfig<typeof theme>['variants']['color']`
@@ -1803,7 +1803,7 @@ type Wrapper<T> = { value: T; label: string }
     );
     assert!(host.ensure_loaded("/src/App.vue"));
 
-    let _store_view = host.resolver_store_view();
+    let _store_view = host.resolver_store_view_read().into_owned_view();
     let mut query_engine = ComponentMetaQueryEngine::new(&host);
 
     // `Partial<Wrapper<number>>` — utility wrapper over an instantiated
@@ -1912,7 +1912,7 @@ type F<T> = <T>(x: T) => T
     );
     assert!(host.ensure_loaded("/src/App.vue"));
 
-    let _store_view = host.resolver_store_view();
+    let _store_view = host.resolver_store_view_read().into_owned_view();
     let query_engine = ComponentMetaQueryEngine::new(&host);
 
     // `F<string>` — instantiate the generic function-typed alias with the
@@ -2033,7 +2033,7 @@ type Cond<T> = T extends number ? { value: T; label: string } : never
     );
     assert!(host.ensure_loaded("/src/App.vue"));
 
-    let _store_view = host.resolver_store_view();
+    let _store_view = host.resolver_store_view_read().into_owned_view();
     let mut query_engine = ComponentMetaQueryEngine::new(&host);
 
     // `Partial<Cond<number>>` — utility wrapper over an instantiated
@@ -2158,7 +2158,7 @@ import type { Cfg } from './cfg'
         }],
     );
 
-    let _store_view = host.resolver_store_view();
+    let _store_view = host.resolver_store_view_read().into_owned_view();
     let mut query_engine = ComponentMetaQueryEngine::new(&host);
 
     // `keyof Cfg<true>['variants']['color']`
@@ -2254,7 +2254,7 @@ import type { Outer } from './cfg'
         }],
     );
 
-    let _store_view = host.resolver_store_view();
+    let _store_view = host.resolver_store_view_read().into_owned_view();
     let mut query_engine = ComponentMetaQueryEngine::new(&host);
 
     // `keyof Outer<number>['variants']['color']`
@@ -2403,7 +2403,7 @@ type Button = ComponentConfig<typeof theme, AppConfig, 'button'>
         ],
     );
 
-    let _store_view = host.resolver_store_view();
+    let _store_view = host.resolver_store_view_read().into_owned_view();
     let mut query_engine = ComponentMetaQueryEngine::new(&host);
 
     let expr = TypeExpr::IndexedAccess {
@@ -3795,7 +3795,7 @@ export type UnionAlias<T = ArmA> = ArmA | ArmB
     );
     assert!(host.ensure_loaded("/src/App.vue"));
 
-    let _store_view = host.resolver_store_view();
+    let _store_view = host.resolver_store_view_read().into_owned_view();
     let mut query_engine = ComponentMetaQueryEngine::new(&host);
 
     let projected = crate::meta_resolve::project_type_surface_expr_via_host_threaded(
@@ -3873,7 +3873,7 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
     );
     assert!(host.ensure_loaded("/src/App.vue"));
 
-    let _store_view = host.resolver_store_view();
+    let _store_view = host.resolver_store_view_read().into_owned_view();
     let mut query_engine = ComponentMetaQueryEngine::new(&host);
 
     let projected = crate::meta_resolve::project_type_surface_expr_via_host_threaded(
@@ -3932,7 +3932,7 @@ export interface Derived extends ButtonProps {
     );
     assert!(host.ensure_loaded("/src/App.vue"));
 
-    let _store_view = host.resolver_store_view();
+    let _store_view = host.resolver_store_view_read().into_owned_view();
     let mut query_engine = ComponentMetaQueryEngine::new(&host);
 
     let projected = crate::meta_resolve::project_type_surface_expr_via_host_threaded(

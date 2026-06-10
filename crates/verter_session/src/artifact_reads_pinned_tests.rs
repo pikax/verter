@@ -393,7 +393,8 @@ fn indexed_for_current_content_pins_overlay_artifact_through_session_context() {
 
     // Drive the content-pinned read through the session context.
     let store_view = host
-        .resolver_store_view()
+        .resolver_store_view_read()
+        .into_owned_view()
         .with_session_overlay(&host, &view);
     let ctx = SessionResolverContext::new(
         &host,
@@ -541,7 +542,7 @@ fn host_store_view_route_fact_ignores_stale_indexed_when_current_is_route_owned(
     );
 
     // Build the production `HostStoreView`.
-    let view = host.resolver_store_view();
+    let view = host.resolver_store_view_read().into_owned_view();
     let view_route_hash = view.derived_hash(probe, crate::resolver_core::DerivedFactKind::Route);
 
     // Discriminating assertion: the view's `Route` derived hash must be
@@ -711,7 +712,7 @@ fn host_store_view_suppresses_lingering_route_owned_hash_when_current_indexed_la
         .publish(Arc::from(probe), Arc::new(lingering));
 
     // Build the production `HostStoreView`.
-    let view = host.resolver_store_view();
+    let view = host.resolver_store_view_read().into_owned_view();
     let view_route_hash = view.derived_hash(probe, crate::resolver_core::DerivedFactKind::Route);
 
     // Discriminating assertion: the view must carry NO `Route` derived

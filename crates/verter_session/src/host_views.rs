@@ -55,13 +55,17 @@ impl VerterHost {
     }
 
     /// Get script analysis from the scheduler's analysis snapshot.
+    ///
+    /// Returns an `Arc::clone` of the shared snapshot — a refcount bump, not a
+    /// deep copy of the ~18 owned vectors. Callers that need an owned copy call
+    /// `.as_ref().clone()`.
     pub fn scheduler_script_analysis(
         &self,
         canonical_id: &str,
-    ) -> Option<verter_semantic::analysis::ScriptAnalysisSnapshot> {
+    ) -> Option<Arc<verter_semantic::analysis::ScriptAnalysisSnapshot>> {
         let snap = self.scheduler.try_get_analysis(canonical_id)?;
         let data = snap.downcast_data::<host_executor::HostAnalysisData>()?;
-        Some(data.script_analysis.clone())
+        Some(Arc::clone(&data.script_analysis))
     }
 
     /// Get compiled virtual files from the scheduler's artifact snapshot.

@@ -106,6 +106,48 @@ impl<'a> HostResolverContext<'a> {
         }
     }
 
+    /// Construct a request-bound wrapper rooted on a PROVEN-CURRENT base
+    /// view ([`crate::resolver_store::CurrentHostStoreView`]).
+    ///
+    /// Use this when the caller obtained the view through
+    /// [`crate::resolver_store::StoreViewRead::current`] (e.g. a typeinfo
+    /// query-returner after a bounded retry settled on a current read):
+    /// the nested warm-cache probes inside the dispatch may validate
+    /// against the view because the manager proved it coherent.
+    #[must_use]
+    pub(crate) fn from_current(
+        inner: &'a crate::VerterHost,
+        base: &'a crate::resolver_store::CurrentHostStoreView,
+        overlay: Arc<CanonicalCompletionOverlay>,
+    ) -> Self {
+        Self {
+            inner,
+            view: RequestStoreView::new(base.view(), overlay),
+        }
+    }
+
+    /// Construct a request-bound wrapper rooted on a COLD-SEED base view
+    /// ([`crate::resolver_store::ColdSeedHostStoreView`]).
+    ///
+    /// Use this for a fenced cold builder or a post-fence extraction
+    /// binder. The cold-seed carries its own currentness: if the seed
+    /// originated from a non-current (`ReturnOnly`) read, EVERY nested
+    /// warm-cache probe through this context MISSES (the `RequestStoreView`
+    /// fails its `validates*` family closed), so a result computed against
+    /// the stale seed can never be warm-served — the builder's own
+    /// `is_stable` / publish fence guards top-level promotion.
+    #[must_use]
+    pub(crate) fn from_cold_seed(
+        inner: &'a crate::VerterHost,
+        base: &'a crate::resolver_store::ColdSeedHostStoreView,
+        overlay: Arc<CanonicalCompletionOverlay>,
+    ) -> Self {
+        Self {
+            inner,
+            view: RequestStoreView::new_cold_seed(base.view(), overlay, base.is_current()),
+        }
+    }
+
     /// Borrow the inner host.
     ///
     /// Reserved accessor for cooperative-admission lanes that inherit a
@@ -246,14 +288,13 @@ impl<'a> ResolverContext for HostResolverContext<'a> {
     #[inline]
     #[track_caller]
     fn resolver_store_view(&self) -> HostStoreView {
-        // Owned-view variant — preserves the pre-6.c semantics of
-        // building a fresh snapshot per call. Retained for cold-path
-        // callers that need an owned snapshot; production hot-path
-        // callers should prefer [`Self::store_view`] (the borrow into
-        // the request-bound view with shadowing overlay) for
+        // Owned-view variant — builds a fresh snapshot per call. Retained
+        // for cold-path callers that need an owned snapshot; production
+        // hot-path callers should prefer [`Self::store_view`] (the borrow
+        // into the request-bound view with shadowing overlay) for
         // zero-allocation cache-validity reads.
         bump_resolver_store_view_call();
-        crate::VerterHost::resolver_store_view(self.inner)
+        crate::VerterHost::resolver_store_view(self.inner).into_owned_view()
     }
 
     #[inline]
@@ -477,7 +518,7 @@ pub(crate) fn with_bare_host_ctx_for_test<R>(
     host: &crate::VerterHost,
     f: impl FnOnce(&dyn ResolverContext) -> R,
 ) -> R {
-    let view = crate::VerterHost::resolver_store_view(host);
+    let view = crate::VerterHost::resolver_store_view(host).into_owned_view();
     let overlay = Arc::new(CanonicalCompletionOverlay::new());
     let host_ctx = HostResolverContext::new(host, &view, overlay);
     f(&host_ctx)

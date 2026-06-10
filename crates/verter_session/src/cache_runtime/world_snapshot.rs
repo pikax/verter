@@ -251,7 +251,11 @@ mod tests {
     use std::hash::{Hash, Hasher};
 
     fn token(epoch: u64, session: Option<u64>) -> StoreViewCompatToken {
-        StoreViewCompatToken { epoch, session }
+        StoreViewCompatToken {
+            epoch,
+            session,
+            validity_fingerprint: 0,
+        }
     }
 
     fn dims_seed() -> WorldSnapshotDims {

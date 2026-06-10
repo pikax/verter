@@ -75,6 +75,7 @@ fn make_token() -> StoreViewCompatToken {
     StoreViewCompatToken {
         epoch: 1,
         session: None,
+        validity_fingerprint: 0,
     }
 }
 

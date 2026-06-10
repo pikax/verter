@@ -33,6 +33,7 @@ impl StoreView for RejectImportRefView {
         StoreViewCompatToken {
             epoch: 0,
             session: None,
+            validity_fingerprint: 0,
         }
     }
 

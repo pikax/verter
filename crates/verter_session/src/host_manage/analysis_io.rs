@@ -390,7 +390,11 @@ impl VerterHost {
             if file_kind == FileKind::VueSfc
                 && (!scope.needs_script_analysis() || !scope.needs_style_analysis())
             {
-                let stored_script = hd.parse.script_analysis.clone();
+                // This branch builds an OWNED, mutated snapshot (it calls
+                // `mark_bindings_used_in_style` and moves fields out), so it
+                // needs an owned value, not the shared `Arc`. The scheduler
+                // still holds the snapshot, so materialise one owned copy.
+                let stored_script = (*hd.parse.script_analysis).clone();
                 let stored_styles = self
                     .scheduler
                     .try_get_analysis(canonical)
@@ -1879,7 +1883,7 @@ impl VerterHost {
         canonical_or_alias: &str,
     ) -> Option<(
         FileKind,
-        verter_semantic::analysis::ScriptAnalysisSnapshot,
+        Arc<verter_semantic::analysis::ScriptAnalysisSnapshot>,
         Vec<verter_semantic::analysis::ExportSignature>,
     )> {
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
@@ -1904,7 +1908,7 @@ impl VerterHost {
                         analysis_snap.downcast_data::<crate::host_executor::HostAnalysisData>()?;
                     return Some((
                         file_kind,
-                        analysis.script_analysis.clone(),
+                        Arc::clone(&analysis.script_analysis),
                         analysis.export_signatures.clone(),
                     ));
                 }
@@ -1922,7 +1926,7 @@ impl VerterHost {
                     } else {
                         FileKind::NonSfc
                     },
-                    script_analysis.as_ref().clone(),
+                    Arc::clone(script_analysis),
                     export_signatures.as_ref().clone(),
                 ));
             }

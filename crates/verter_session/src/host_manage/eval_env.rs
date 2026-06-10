@@ -214,7 +214,11 @@ impl VerterHost {
     }
 
     pub(crate) fn build_snapshot_from_parse(parse: crate::ParseSnapshot) -> FileAnalysisSnapshot {
-        let script_analysis = parse.script_analysis;
+        // The snapshot is shared by `Arc`; this builder consumes a freshly
+        // parsed `ParseSnapshot` whose snapshot is uniquely held, so
+        // `unwrap_or_clone` moves the inner value out without copying (it only
+        // deep-copies in the rare case the snapshot is still shared).
+        let script_analysis = Arc::unwrap_or_clone(parse.script_analysis);
         FileAnalysisSnapshot {
             imports: script_analysis.imports,
             bindings: script_analysis.bindings,

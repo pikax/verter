@@ -465,28 +465,45 @@ impl CompileOutputNodeFactValidatedSession {
     ///
     /// Returns `Some(value)` only when:
     /// 1. A slot exists for `profile_hash`.
-    /// 2. The slot's `semantic_hash`, `style_override_hash`, and
-    ///    `content_override_hash` match the supplied references.
-    /// 3. The slot's path-precise fact signature validates against the
-    ///    caller's live store view (`validate_facts` callback).
-    /// 4. The slot's carrier is `Cacheable` (i.e. not an overflowed
+    /// 2. The slot's carrier is `Cacheable` (i.e. not an overflowed
     ///    signature that snuck in).
+    /// 3. The slot's `semantic_hash`, `style_override_hash`, and
+    ///    `content_override_hash` match the supplied references.
+    /// 4. `acquire_view` yields a proven-current view (it returns
+    ///    `None` when the manager could not prove the view current,
+    ///    which misses to cold).
+    /// 5. The slot's path-precise fact signature validates against that
+    ///    view (`validate_facts`), when the fact rail is non-empty.
     ///
-    /// The caller passes the live override / semantic hashes and a
-    /// closure that validates the fact rail. The closure is invoked
-    /// at most once per lookup and only after the cheaper hash
-    /// predicates pass.
-    pub(crate) fn lookup<F>(
+    /// `acquire_view` is the cost gate. The caller threads the
+    /// (potentially expensive) store-view read through it, and this
+    /// method invokes it at most once — and ONLY after the cheap
+    /// predicates (steps 1–3) confirm there is a real candidate slot
+    /// worth validating. A cold miss (no slot), an overflowed carrier,
+    /// or a hash mismatch returns before `acquire_view` runs, so those
+    /// paths never pay for the view read.
+    ///
+    /// `acquire_view` runs whether or not the fact rail is empty: an
+    /// empty-fact slot still tracks the owning file's own content
+    /// through `semantic_hash`, but a warm hit returns the cached
+    /// compile output to the caller with no outer publish / is_stable
+    /// fence, so the currentness proof gates the hit unconditionally. A
+    /// non-empty fact rail additionally walks `validate_facts` against
+    /// the acquired view; that closure is invoked at most once and only
+    /// after `acquire_view` has yielded a view.
+    pub(crate) fn lookup<V, A, F>(
         &self,
         profile_state: &ProfileState,
         profile_hash: u64,
         live_semantic_hash: &Hash16,
         live_style_override_hash: u64,
         live_content_override_hash: u64,
+        acquire_view: A,
         validate_facts: F,
     ) -> Option<SessionLookupHit>
     where
-        F: FnOnce(&ReadSetSignature) -> bool,
+        A: FnOnce() -> Option<V>,
+        F: FnOnce(&V, &ReadSetSignature) -> bool,
     {
         let slot = profile_state.compile_slot_for_node(profile_hash)?;
         // Carrier-defence: overflowed slots must never satisfy a warm
@@ -503,7 +520,13 @@ impl CompileOutputNodeFactValidatedSession {
         {
             return None;
         }
-        if !slot.fact_dep_signature.facts.is_empty() && !validate_facts(&slot.fact_dep_signature) {
+        // The cheap predicates passed → there is a candidate slot worth
+        // validating. ONLY NOW pay for the store-view read; a
+        // non-current read (`None`) misses to cold.
+        let view = acquire_view()?;
+        if !slot.fact_dep_signature.facts.is_empty()
+            && !validate_facts(&view, &slot.fact_dep_signature)
+        {
             return None;
         }
         Some(SessionLookupHit {

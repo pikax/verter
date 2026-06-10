@@ -128,14 +128,26 @@ pub(crate) fn ensure_indexed_ready_with_view(
 /// materialisation (R18 — view passed explicitly via the
 /// `ResolverContext` trait surface, not a thread-local).
 pub(crate) fn prewarm_view_overlays(host: &VerterHost, view: &dyn SessionView) {
-    // Build the overlay-rooted store view ONCE here so the
+    // Build the overlay-rooted cold-seed view ONCE here so the
     // SessionResolverContext threads a borrow into the pre-warm loop
-    // rather than rebuilding the view per-overlay-canonical (per Block
-    // 6.c per-request hoist).
-    let store_view = host.resolver_store_view().with_session_overlay(host, view);
+    // rather than rebuilding the view per-overlay-canonical. This is an
+    // overlay-materialisation pre-warm (an `ensure_indexed_ready` pass);
+    // it seeds from the cold-seed and overlays via the
+    // currentness-preserving `ColdSeedHostStoreView::with_session_overlay`
+    // (never `.into_inner()`, which drops the flag), so any nested
+    // warm-cache probe reachable from `ensure_indexed_ready` fails closed
+    // on a non-current seed.
+    let store_view = host
+        .resolver_store_view_read()
+        .into_cold_seed_view()
+        .with_session_overlay(host, view);
     let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let session_ctx =
-        crate::resolver_core::SessionResolverContext::new(host, view, &store_view, overlay);
+    let session_ctx = crate::resolver_core::SessionResolverContext::from_cold_seed(
+        host,
+        view,
+        &store_view,
+        overlay,
+    );
     for canonical in view.overlay_canonicals() {
         let _ = ResolverContext::ensure_indexed_ready(&session_ctx, canonical.as_str());
     }

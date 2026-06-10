@@ -4570,6 +4570,23 @@ mod foundations_guards {
         // `src/bin/oracle_gen` binary (a separate crate that sees only non-test
         // `pub` lib items) can invoke it. The default build never compiles it.
         "pub use crate::typeinfo::oracle_core::gen::{run_oracle_gen, GenError}",
+        // Actual base-view sweep counter (one bump per `build_coherent`
+        // sweep, NOT per `from_host` call): `store_view_coherent_build_sweeps`
+        // + `reset_store_view_coherent_build_sweeps`. A batch-saturation
+        // gate reads these to assert the `StoreViewManager` collapses a
+        // warm batch onto ~O(1) full-workspace sweeps. The re-export
+        // statement wraps to multiple lines (long symbol names), so the
+        // line-based surface extractor normalizes it to the bare
+        // `pub use resolver_store::` prefix.
+        "pub use resolver_store::",
+        // NOTE: the session-overlay copy-on-write counter is intentionally
+        // ABSENT from this surface. It was retired as a process-global
+        // re-export and rehomed PER-HOST onto
+        // `VerterHost::provenance().session_overlay_cows`
+        // (`crate::types::MetaProvenance`) so the batch regression gate
+        // measures only its own host's overlay COWs — worker-side per-job
+        // COWs included, other hosts' (other tests') excluded. No
+        // `pub use resolver_store::{*session_overlay_cows*}` entry exists.
     ];
 
     /// Compare the live surface against the snapshot; report any
@@ -16954,5 +16971,969 @@ fn artifact_removal_routes_through_single_chokepoint() {
         "`evict_artifact_keys` MUST call \
          `invalidate_augmentation_index_for_augmenter` — the chokepoint exists \
          precisely to make removal and index-invalidation inseparable."
+    );
+}
+
+// =====================================================================
+// Non-current store-view contract — capability-split chokepoint guard.
+//
+// CRITICAL rule: "Non-current (`ReturnOnly`) store-view contract —
+// capability split at the general accessor". The general store-view
+// accessor MUST hand back the capability-split `StoreViewRead`, never a
+// raw `HostStoreView`, so a warm validator cannot validate (or a
+// query-returner cannot return) against a known-stale snapshot by
+// accident. Warm-validation entry points accept ONLY a proven-current
+// view (`&CurrentHostStoreView`); cold builders take a
+// `ColdSeedHostStoreView`, which exposes NO `validates*` surface. The raw
+// `HostStoreView` escape hatch (`StoreViewRead::into_owned_view`) is
+// confined to an allowlist of bare-host / driver-snapshot / test-fixture
+// producers that do not warm-validate against the value.
+//
+// These four parts are mechanically discriminating: each FAILS if the
+// guarded invariant regresses (proven by the `_guard_is_discriminating`
+// self-test below).
+// =====================================================================
+
+/// The single allowlist of production files permitted to unwrap a
+/// `StoreViewRead` to a raw `HostStoreView` via `into_owned_view()`.
+///
+/// Every entry is a bare-host owned-view rail (`ResolverContext::
+/// resolver_store_view`, reachable only when no request-bound context was
+/// installed), a request-driver owned-view snapshot accessor (currentness
+/// gated separately by `snapshot_view_is_current`), a fenced cold-builder
+/// seed (`.into_cold_seed_view().into_inner()`), or a `#[cfg(...)]`
+/// test/debug fixture. NONE of them warm-validate a cache entry against
+/// the unwrapped value. Adding a new production warm validator that grabs
+/// a raw view fails [`resolver_store_view_into_owned_view_is_allowlisted`].
+const INTO_OWNED_VIEW_ALLOWLIST: &[&str] = &[
+    // The capability-split producer + the bare-host owned-view rail.
+    "crates/verter_session/src/resolver_store.rs",
+    "crates/verter_session/src/resolver_core/resolver_context.rs",
+    "crates/verter_session/src/resolver_core/host_resolver_context.rs",
+    // Request-driver owned-view snapshot accessors (currentness gated by
+    // `snapshot_view_is_current`, not by the unwrapped value).
+    "crates/verter_session/src/host_manage.rs",
+    "crates/verter_session/src/host_manage/component_meta_request_impl.rs",
+    // Fenced cold-builder seeds (`.into_inner()`), gated by the driver's
+    // `is_stable` / publish fence.
+    "crates/verter_session/src/host_manage/component_meta_methods.rs",
+    "crates/verter_session/src/host_manage/imported_type_root.rs",
+    "crates/verter_session/src/host_resolve/frontier_engine.rs",
+    "crates/verter_session/src/host_resolve/route_owned_shallow.rs",
+    // Build-time oracle-snapshot generator (`oracle-gen` feature only — never
+    // on the consumption path): builds a quiescent owned view over a
+    // freshly-constructed standalone host for the source-side walk.
+    "crates/verter_session/src/typeinfo/oracle_core/gen.rs",
+];
+
+fn store_view_guard_production_rs_files() -> Vec<std::path::PathBuf> {
+    let mut files = Vec::new();
+    let root = workspace_root().join("crates/verter_session/src");
+    walk_dir_collect_rs_and_ts(&root, &mut |path| {
+        if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+            files.push(path.to_path_buf());
+        }
+    });
+    files
+}
+
+fn rel_path(path: &std::path::Path) -> String {
+    path.strip_prefix(workspace_root())
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+/// Whether a `src/**` file is a test/debug module (inline `#[cfg(test)]`
+/// modules, `*_tests.rs`, `*/tests.rs`, `*/tests/*`, `typeinfo_tests`).
+/// The contract is a PRODUCTION invariant; test/debug fixtures that build
+/// a quiescent view for assertions are out of scope.
+fn store_view_guard_is_test_file(rel: &str) -> bool {
+    rel.ends_with("_tests.rs")
+        || rel.ends_with("/tests.rs")
+        || rel.contains("/tests/")
+        || rel.contains("/typeinfo_tests/")
+}
+
+#[test]
+fn resolver_store_view_returns_store_view_read() {
+    // Part A — the general accessor's return type is the capability-split
+    // `StoreViewRead`, and the raw-`HostStoreView` form is gone. A
+    // re-introduced `fn resolver_store_view(&self) -> HostStoreView` on
+    // `VerterHost` (the leak this contract closes) fails here.
+    let src = read_workspace_file("crates/verter_session/src/resolver_store.rs");
+    assert!(
+        src.contains("pub(crate) fn resolver_store_view(&self) -> StoreViewRead"),
+        "VerterHost::resolver_store_view must return the capability-split \
+         `StoreViewRead`; the raw-`HostStoreView` accessor is the contract leak \
+         this guard closes. Did the signature regress?"
+    );
+    assert!(
+        !src.contains("fn resolver_store_view(&self) -> HostStoreView"),
+        "VerterHost::resolver_store_view must NOT hand back a raw `HostStoreView` \
+         — that erases the non-current proof and lets a warm validator validate \
+         against a stale snapshot. Return `StoreViewRead` and let callers choose \
+         `.current()` (warm) or `.into_cold_seed_view()` (fenced cold)."
+    );
+}
+
+#[test]
+fn cold_seed_store_view_exposes_no_validation_surface() {
+    // Part B — `ColdSeedHostStoreView` must NOT expose any `validates*`
+    // method. The whole point of the cold-seed wrapper is that a stale
+    // seed CANNOT reach a fact validator by construction; a `validates`
+    // method on it would re-open that door.
+    let src = read_workspace_file("crates/verter_session/src/resolver_store.rs");
+    let marker = "impl ColdSeedHostStoreView {";
+    let start = src
+        .find(marker)
+        .expect("ColdSeedHostStoreView impl block must exist");
+    // Bound the scan to the impl block (up to the next top-level `\n}\n`).
+    let rest = &src[start + marker.len()..];
+    let end = rest.find("\n}\n").unwrap_or(rest.len());
+    let block = &rest[..end];
+    let banned = [
+        "fn validates(",
+        "fn validates_fact_signature(",
+        "fn validates_self_root_whole_hash(",
+        "fn validates_parse_domain(",
+        "fn validates_resolve_imports_domain(",
+        "fn validates_route_surface_domain(",
+    ];
+    let hits = count_callsites(block, &banned);
+    assert_eq!(
+        hits, 0,
+        "ColdSeedHostStoreView must expose NO `validates*` method — a cold-seed \
+         view is for fenced cold-builder seeding only and must never validate a \
+         warm cache entry. Found {hits} validation method(s) in its impl block."
+    );
+}
+
+#[test]
+fn warm_validation_entry_points_require_current_store_view() {
+    // Part C — the top-level warm-validation entry points (no outer
+    // publish fence) accept ONLY a proven-`CurrentHostStoreView`. A
+    // regression that loosened any of these to a raw `&HostStoreView`
+    // would let a known-stale `ReturnOnly` snapshot validate a cache
+    // entry's fact signature against already-mutated dependency state.
+    let checks: &[(&str, &str)] = &[
+        (
+            "crates/verter_session/src/component_meta_result_db.rs",
+            "current_view: &crate::resolver_store::CurrentHostStoreView",
+        ),
+        (
+            "crates/verter_session/src/host_manage/component_meta_methods.rs",
+            "current_view: &crate::resolver_store::CurrentHostStoreView",
+        ),
+    ];
+    for (rel, needle) in checks {
+        let src = read_workspace_file(rel);
+        assert!(
+            src.contains(needle),
+            "{rel} must keep a warm-validation entry point that requires \
+             `{needle}` — a proven-current view is the type-level proof that a \
+             `ReturnOnly` snapshot cannot reach fact validation. Did a warm \
+             validator regress to a raw `&HostStoreView`?"
+        );
+    }
+}
+
+#[test]
+fn resolver_store_view_into_owned_view_is_allowlisted() {
+    // Part D — the raw-`HostStoreView` escape hatch
+    // (`StoreViewRead::into_owned_view`) appears in production ONLY in the
+    // allowlisted bare-host / driver-snapshot / fenced-cold-seed
+    // producers. A new production file that grabs a raw view (the seam a
+    // future warm-validation regression would slip through) fails here and
+    // must instead choose `.current()` (warm) or
+    // `.into_cold_seed_view()` (fenced cold).
+    let allow: std::collections::HashSet<&str> =
+        INTO_OWNED_VIEW_ALLOWLIST.iter().copied().collect();
+    let mut offenders: Vec<String> = Vec::new();
+    for path in store_view_guard_production_rs_files() {
+        let rel = rel_path(&path);
+        if store_view_guard_is_test_file(&rel) {
+            continue;
+        }
+        let src = std::fs::read_to_string(&path).unwrap_or_default();
+        if src.contains(".into_owned_view()") && !allow.contains(rel.as_str()) {
+            offenders.push(rel);
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "`StoreViewRead::into_owned_view()` (the raw-`HostStoreView` escape hatch) \
+         is confined to the bare-host / driver-snapshot / fenced-cold-seed \
+         allowlist. A new production caller must choose `.current()` (warm \
+         validation) or `.into_cold_seed_view()` (fenced cold builder), not the \
+         raw owned view. Offending files:\n  {}",
+        offenders.join("\n  ")
+    );
+}
+
+/// The single allowlist of production files permitted to drop a cold-seed's
+/// currentness via `ColdSeedHostStoreView::into_inner()`
+/// (the `.into_cold_seed_view().into_inner()` raw-unwrap pattern).
+///
+/// Every entry is a NON-VALIDATING consumer of the unwrapped raw view:
+///
+/// * A request-driver `snapshot_store_view()` accessor — the driver gates
+///   the snapshot's currentness SEPARATELY via `snapshot_view_is_current()`
+///   and threads it into `compute(.., base_is_current)`; the raw view it
+///   hands the driver is never the thing a nested validator reads through.
+/// * A `#[cfg(any(test, debug_assertions))]` direct-`host` convenience
+///   wrapper whose production counterpart routes through a ctx-bound
+///   request boundary; under test the token never churns, so the seed is
+///   always `Current` and `into_inner()` is harmless.
+///
+/// A NEW production cold-compute path that unwraps a cold-seed and feeds
+/// the raw view into a resolver context performing NESTED warm-cache
+/// validation MUST instead preserve the currentness — derive the cold-seed
+/// from its own read via [`StoreViewRead::into_cold_seed_view`] (currentness
+/// intrinsic to the arm), overlay-re-root via
+/// [`ColdSeedHostStoreView::with_session_overlay`], then build the context
+/// with `HostResolverContext::from_cold_seed` /
+/// `SessionResolverContext::from_cold_seed`. An executor-snapshot path that
+/// holds a single-read `(view, is_current)` pair re-binds it via
+/// [`StoreViewRead::from_executor_snapshot`] — so a `ReturnOnly` seed fails
+/// the context's `validates*` family closed. Adding such a path without
+/// preserving currentness fails
+/// [`cold_seed_into_inner_confined_to_non_validating_allowlist`].
+const COLD_SEED_INTO_INNER_ALLOWLIST: &[&str] = &[
+    // The `ColdSeedHostStoreView::into_inner` definition + its sibling
+    // `with_session_overlay` constructor.
+    "crates/verter_session/src/resolver_store.rs",
+    // Request-driver owned-view snapshot accessors (`snapshot_store_view`),
+    // currentness gated by `snapshot_view_is_current` + threaded into
+    // `compute(.., base_is_current)`, NOT by the unwrapped raw view.
+    "crates/verter_session/src/host_manage.rs",
+    "crates/verter_session/src/host_manage/component_meta_request_impl.rs",
+    // The overlay-aware `capture_component_meta_inputs_with_view` accessor
+    // unwraps a raw view ONLY to build `CapturedComponentMetaInputs` (source
+    // + snapshot read) — a NON-validating consumer. The validating
+    // cold-compute helpers in this file no longer unwrap: the view-bound and
+    // overlay entries derive the cold-seed from a fresh read via
+    // `into_cold_seed_view` (currentness intrinsic), and the
+    // executor-snapshot `*_with_view_arg` entries re-bind the executor's
+    // single-read pair via `from_executor_snapshot`.
+    "crates/verter_session/src/host_manage/component_meta_methods.rs",
+    // `#[cfg(any(test, debug_assertions))]` direct-`host` convenience
+    // wrappers; production routes through a ctx-bound request boundary.
+    "crates/verter_session/src/host_manage/imported_type_root.rs",
+    "crates/verter_session/src/host_resolve/frontier_engine.rs",
+    "crates/verter_session/src/host_resolve/route_owned_shallow.rs",
+];
+
+/// Whether `src` contains the cold-seed raw-unwrap escape-hatch pattern
+/// `.into_cold_seed_view()` ... `.into_inner()` (tolerating intervening
+/// whitespace / method-chain newlines).
+fn contains_cold_seed_into_inner(src: &str) -> bool {
+    let mut search_from = 0;
+    while let Some(rel) = src[search_from..].find(".into_cold_seed_view()") {
+        let after = search_from + rel + ".into_cold_seed_view()".len();
+        // The unwrap must be the NEXT method call in the chain (only
+        // whitespace + the leading `.` between them); a `.is_current()` /
+        // `.with_session_overlay(` / `.view()` in between means the
+        // currentness was consulted, not dropped.
+        let tail = src[after..].trim_start();
+        if tail.starts_with(".into_inner()") {
+            return true;
+        }
+        search_from = after;
+    }
+    false
+}
+
+#[test]
+fn cold_seed_into_inner_confined_to_non_validating_allowlist() {
+    // The cold-seed raw-unwrap escape hatch
+    // (`ColdSeedHostStoreView::into_inner` via
+    // `.into_cold_seed_view().into_inner()`) DROPS the seed's `is_current`
+    // flag. It appears in production ONLY in the non-validating allowlist
+    // (driver-snapshot accessors + `#[cfg(test)]` direct-host wrappers).
+    //
+    // This is the INDIRECT-validation seam the earlier capability-split
+    // guard missed: a raw cold-seed view fed into a resolver context
+    // (`HostResolverContext::new` / `SessionResolverContext::new`) whose
+    // nested `validates*` family then validated a warm-cache entry against
+    // a stale seed. A new cold-compute path that unwraps a cold-seed must
+    // instead carry the currentness (`into_cold_seed_view` straight into
+    // `with_session_overlay` / `from_cold_seed`, or the executor-boundary
+    // re-bind `from_executor_snapshot`).
+    let allow: std::collections::HashSet<&str> =
+        COLD_SEED_INTO_INNER_ALLOWLIST.iter().copied().collect();
+    let mut offenders: Vec<String> = Vec::new();
+    for path in store_view_guard_production_rs_files() {
+        let rel = rel_path(&path);
+        if store_view_guard_is_test_file(&rel) {
+            continue;
+        }
+        let src = std::fs::read_to_string(&path).unwrap_or_default();
+        if contains_cold_seed_into_inner(&src) && !allow.contains(rel.as_str()) {
+            offenders.push(rel);
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "`ColdSeedHostStoreView::into_inner()` (the `.into_cold_seed_view().into_inner()` \
+         raw-unwrap that DROPS the seed's `is_current` flag) is confined to the \
+         non-validating driver-snapshot / `#[cfg(test)]`-wrapper allowlist. A new \
+         cold-compute path that unwraps a cold-seed and feeds the raw view into a \
+         resolver context performing nested warm-cache validation MUST instead \
+         preserve currentness — `StoreViewRead::into_cold_seed_view` straight into \
+         `with_session_overlay` + `*ResolverContext::from_cold_seed`, or the \
+         executor-boundary re-bind `StoreViewRead::from_executor_snapshot(view, is_current)` \
+         — so a `ReturnOnly` seed fails the context's `validates*` family closed. Offending \
+         files:\n  {}",
+        offenders.join("\n  ")
+    );
+}
+
+#[test]
+fn cold_compute_context_constructors_carry_currentness() {
+    // Positive half of the indirect-validation guard: the request-bound
+    // resolver-context constructors that a cold compute uses MUST be the
+    // currentness-carrying `from_cold_seed` form, and that form MUST root
+    // its request-bound view via `RequestStoreView::new_cold_seed` (which
+    // fails `validates*` closed on a non-current seed) — NOT the
+    // always-current `RequestStoreView::new`.
+    let host_ctx =
+        read_workspace_file("crates/verter_session/src/resolver_core/host_resolver_context.rs");
+    let session_ctx =
+        read_workspace_file("crates/verter_session/src/resolver_core/session_resolver_context.rs");
+    for (rel, src) in [
+        ("host_resolver_context.rs", host_ctx.as_str()),
+        ("session_resolver_context.rs", session_ctx.as_str()),
+    ] {
+        assert!(
+            src.contains("pub(crate) fn from_cold_seed("),
+            "{rel} must expose a cold-seed context constructor `from_cold_seed` so a \
+             cold compute threads the seed's currentness into the request-bound view"
+        );
+        assert!(
+            src.contains("RequestStoreView::new_cold_seed("),
+            "{rel}::from_cold_seed must root its request-bound view via \
+             `RequestStoreView::new_cold_seed` (fails `validates*` closed on a \
+             non-current seed), not the always-current `RequestStoreView::new`"
+        );
+    }
+    // The cold-seed wrapper must expose the currentness-preserving overlay
+    // re-root, so a cold compute never has to drop the flag to overlay.
+    // Scope the search to the `impl ColdSeedHostStoreView` block so the
+    // method is proven to live ON the cold-seed type (not merely somewhere
+    // in the file).
+    let resolver_store = read_workspace_file("crates/verter_session/src/resolver_store.rs");
+    let marker = "impl ColdSeedHostStoreView {";
+    let start = resolver_store
+        .find(marker)
+        .expect("ColdSeedHostStoreView impl block must exist");
+    let rest = &resolver_store[start + marker.len()..];
+    let end = rest.find("\n}\n").unwrap_or(rest.len());
+    let cold_seed_impl = &rest[..end];
+    assert!(
+        cold_seed_impl.contains("fn with_session_overlay("),
+        "ColdSeedHostStoreView must expose `with_session_overlay` (re-root through \
+         a session overlay WITHOUT dropping currentness)"
+    );
+    // The cold-seed view's currentness must come from a `StoreViewRead`
+    // (intrinsic to its arm), NOT a separate constructor that pairs a raw
+    // view with a caller-supplied bool. The retired `from_raw_for_compute`
+    // was exactly such a footgun — a view from one read could be re-bound
+    // with a currentness flag from ANOTHER read. It must stay gone.
+    assert!(
+        !cold_seed_impl.contains("fn from_raw_for_compute("),
+        "ColdSeedHostStoreView must NOT expose `from_raw_for_compute(view, current)` — \
+         a constructor that pairs a raw view with a separately-sourced currentness bool \
+         lets the flag and the view describe DIFFERENT reads (a stale view marked \
+         current). Currentness must come from the SAME read via \
+         `StoreViewRead::into_cold_seed_view`; the one executor-boundary re-bind is \
+         `StoreViewRead::from_executor_snapshot`."
+    );
+    // The sole currentness-bound re-bind lives on `StoreViewRead` (it
+    // returns the intrinsic-currentness enum, consumed via
+    // `into_cold_seed_view`), so a cold compute that holds an executor's
+    // single-read `(view, is_current)` pair never has to fabricate the
+    // cold-seed's `current` field directly.
+    let store_view_read_marker = "impl StoreViewRead {";
+    let sv_start = resolver_store
+        .find(store_view_read_marker)
+        .expect("StoreViewRead impl block must exist");
+    let sv_rest = &resolver_store[sv_start + store_view_read_marker.len()..];
+    let sv_end = sv_rest.find("\n}\n").unwrap_or(sv_rest.len());
+    let store_view_read_impl = &sv_rest[..sv_end];
+    assert!(
+        store_view_read_impl.contains("fn from_executor_snapshot("),
+        "StoreViewRead must expose `from_executor_snapshot(view, is_current)` — the SOLE \
+         constructor that re-binds an executor's single-read `(view, is_current)` pair into \
+         the intrinsic-currentness typed read, so cold-seed currentness flows through \
+         `into_cold_seed_view` and never as a free-floating flag a downstream helper \
+         re-pairs with a different read."
+    );
+}
+
+/// Files permitted to call `StoreViewRead::from_executor_snapshot(view,
+/// is_current)` — the one re-bind point that pairs a raw view with a
+/// separately-named currentness bit.
+///
+/// Every entry is a stable-request EXECUTOR boundary where the `(view,
+/// is_current)` pair provably came from a SINGLE
+/// `resolver_store_view_with_currentness` read (the executor's
+/// `snapshot_view` destructured one `StoreViewRead` and threaded both into
+/// `compute`). A cold-compute helper that does its OWN fresh read must NOT
+/// appear here — it must take the cold-seed straight from that read via
+/// `into_cold_seed_view`, so the view and its currentness originate from one
+/// read with no flag to mismatch.
+const FROM_EXECUTOR_SNAPSHOT_ALLOWLIST: &[&str] = &[
+    // The constructor definition.
+    "crates/verter_session/src/resolver_store.rs",
+    // Fallthrough cold compute: re-binds the executor's `(store_view,
+    // base_is_current)` pair (threaded from `snapshot_view`).
+    "crates/verter_session/src/host_manage.rs",
+    // Component-meta `*_with_view_arg` cold compute: re-binds the executor's
+    // `(store_view, base_is_current)` pair. The view-bound + overlay entries
+    // in this same file do NOT pair — they derive the cold-seed from a fresh
+    // read via `into_cold_seed_view`; the guard below proves they take the
+    // executor-supplied `store_view`, never a fresh `resolver_store_view_read`.
+    "crates/verter_session/src/host_manage/component_meta_methods.rs",
+    // `ViewBoundRequestHost::compute_component_meta` re-binds the executor's
+    // `(store_view, base_is_current)` pair into the session-overlay cold-seed,
+    // so the compute seed IS the read the promotion fence gates on. The
+    // executor-supplied `store_view` parameter is re-bound (one executor read),
+    // never a fresh `resolver_store_view_read()`; the `None` robustness arm
+    // takes its cold-seed straight from a single fresh read via
+    // `view_bound_cold_seed` (currentness intrinsic), so Rail 2 below stays
+    // clean.
+    "crates/verter_session/src/host_manage/component_meta_request_impl.rs",
+];
+
+/// Whether `src` contains the fresh-read-then-rebind footgun: a
+/// `resolver_store_view_read()` whose result flows into
+/// `StoreViewRead::from_executor_snapshot(` within the same statement chain.
+///
+/// This is the EXACT sub-class the constructor-shape guards missed — a fresh
+/// second read paired with a currentness flag from an EARLIER read. The
+/// production cold path must instead either (a) re-bind the EXECUTOR-supplied
+/// `store_view` parameter (one executor read), or (b) take the cold-seed
+/// straight from the fresh read via `into_cold_seed_view` (currentness
+/// intrinsic). Pairing a fresh `resolver_store_view_read()` with
+/// `from_executor_snapshot` mixes a fresh view with a foreign flag.
+fn contains_fresh_read_into_executor_snapshot(src: &str) -> bool {
+    let mut search_from = 0;
+    while let Some(rel) = src[search_from..].find("from_executor_snapshot(") {
+        let abs = search_from + rel;
+        // Look back over the immediately-preceding argument expression: if a
+        // fresh `resolver_store_view_read()` feeds the first argument
+        // (within the same `from_executor_snapshot( ... )` argument window),
+        // the view came from a SECOND read while the flag is supplied
+        // separately — the footgun.
+        let arg_window_start = abs + "from_executor_snapshot(".len();
+        // Bound the window at the matching close paren conservatively by the
+        // next `.into_cold_seed_view()` or a 240-char cap (the call is a
+        // single chained statement in production).
+        let window_end = (arg_window_start + 240).min(src.len());
+        let window = &src[arg_window_start..window_end];
+        if window.contains("resolver_store_view_read()") {
+            return true;
+        }
+        search_from = abs + "from_executor_snapshot(".len();
+    }
+    false
+}
+
+#[test]
+fn cold_seed_currentness_is_intrinsic_to_the_read() {
+    // The strengthened currentness guard — closes the sub-class the
+    // constructor-SHAPE guards
+    // (`cold_compute_context_constructors_carry_currentness`,
+    // `cold_seed_into_inner_confined_to_non_validating_allowlist`) could not
+    // see: a currentness flag SOURCED FROM A DIFFERENT READ than the view it
+    // describes.
+    //
+    // Two rails:
+    //
+    // 1. `StoreViewRead::from_executor_snapshot(view, is_current)` — the one
+    //    constructor that pairs a raw view with a separately-named bit — is
+    //    confined to the executor-boundary allowlist, where the pair provably
+    //    came from one read. A new caller that re-binds a `(view, flag)` pair
+    //    elsewhere fails here and must instead derive currentness from a
+    //    `StoreViewRead` (intrinsic to its arm).
+    //
+    // 2. No production file pairs a FRESH `resolver_store_view_read()` with
+    //    `from_executor_snapshot` — that is the exact divergence the
+    //    view-bound component-meta cold path produced (a stale second read
+    //    marked current). A cold-compute helper doing its own fresh read must
+    //    take the cold-seed straight from that read via `into_cold_seed_view`.
+    let allow: std::collections::HashSet<&str> =
+        FROM_EXECUTOR_SNAPSHOT_ALLOWLIST.iter().copied().collect();
+    let mut snapshot_offenders: Vec<String> = Vec::new();
+    let mut fresh_read_offenders: Vec<String> = Vec::new();
+    for path in store_view_guard_production_rs_files() {
+        let rel = rel_path(&path);
+        if store_view_guard_is_test_file(&rel) {
+            continue;
+        }
+        let src = std::fs::read_to_string(&path).unwrap_or_default();
+        // Rail 1 — `from_executor_snapshot` confined to the allowlist. Skip
+        // the constructor's own doc/definition file lines by allowlisting it.
+        if src.contains("from_executor_snapshot(") && !allow.contains(rel.as_str()) {
+            snapshot_offenders.push(rel.clone());
+        }
+        // Rail 2 — the fresh-read-then-rebind footgun is banned EVERYWHERE,
+        // including inside allowlisted files (the allowlist permits the
+        // executor-supplied-view re-bind, not a fresh second read).
+        if contains_fresh_read_into_executor_snapshot(&src) {
+            fresh_read_offenders.push(rel);
+        }
+    }
+    assert!(
+        snapshot_offenders.is_empty(),
+        "`StoreViewRead::from_executor_snapshot(view, is_current)` (the one re-bind that pairs a \
+         raw view with a separately-named currentness bit) is confined to the executor-boundary \
+         allowlist. A new caller must instead derive currentness from a `StoreViewRead` arm via \
+         `into_cold_seed_view` (intrinsic), not fabricate a `(view, flag)` pair. Offending \
+         files:\n  {}",
+        snapshot_offenders.join("\n  ")
+    );
+    assert!(
+        fresh_read_offenders.is_empty(),
+        "a production cold path paired a FRESH `resolver_store_view_read()` with \
+         `from_executor_snapshot` — the exact currentness/view divergence this guard closes (a \
+         stale second read marked current via an earlier flag). A helper doing its own fresh read \
+         MUST take the cold-seed straight from that read via `into_cold_seed_view` so the view and \
+         its currentness come from ONE read. Offending files:\n  {}",
+        fresh_read_offenders.join("\n  ")
+    );
+}
+
+#[test]
+fn store_view_capability_split_guard_is_discriminating() {
+    // Self-test (anti-stub): each guarded predicate FLAGS the regression
+    // it is meant to catch. If any of these stopped flagging, the
+    // corresponding guard would be vacuous.
+
+    // Part A predicate flips on the raw-view signature.
+    let leaky = "pub(crate) fn resolver_store_view(&self) -> HostStoreView { todo!() }";
+    assert!(
+        leaky.contains("fn resolver_store_view(&self) -> HostStoreView"),
+        "Part A predicate must catch a raw-`HostStoreView` accessor signature"
+    );
+    let fixed = "pub(crate) fn resolver_store_view(&self) -> StoreViewRead { todo!() }";
+    assert!(
+        !fixed.contains("fn resolver_store_view(&self) -> HostStoreView")
+            && fixed.contains("fn resolver_store_view(&self) -> StoreViewRead"),
+        "Part A predicate must accept the capability-split signature"
+    );
+
+    // Part B predicate flips on a `validates` method inside a cold-seed
+    // impl block.
+    let leaky_block =
+        "impl ColdSeedHostStoreView {\n    fn validates(&self, f: &F) -> bool { true }\n}\n";
+    let marker = "impl ColdSeedHostStoreView {";
+    let start = leaky_block.find(marker).unwrap();
+    let rest = &leaky_block[start + marker.len()..];
+    let end = rest.find("\n}\n").unwrap_or(rest.len());
+    assert!(
+        count_callsites(&rest[..end], &["fn validates("]) > 0,
+        "Part B predicate must catch a `validates` method on the cold-seed view"
+    );
+
+    // Part D predicate flips on a non-allowlisted `into_owned_view()`
+    // user.
+    let allow: std::collections::HashSet<&str> =
+        INTO_OWNED_VIEW_ALLOWLIST.iter().copied().collect();
+    assert!(
+        !allow.contains("crates/verter_session/src/typeinfo/resolve_named_symbol.rs"),
+        "a typeinfo query-returner must NOT be on the into_owned_view allowlist — \
+         it resolves through a proven-current view, never a raw owned view"
+    );
+    let synthetic_offender_src = "let v = x.into_owned_view();";
+    assert!(
+        synthetic_offender_src.contains(".into_owned_view()"),
+        "Part D predicate must catch an `.into_owned_view()` call"
+    );
+
+    // Cold-seed-into-inner predicate flips on the raw-unwrap pattern: a
+    // non-allowlisted file that does `.into_cold_seed_view().into_inner()`
+    // (the INDIRECT-validation seam — raw cold-seed view fed into a
+    // context that then validates) must be flagged.
+    let leaky_indirect = "let v = self\n    .resolver_store_view_read()\n    .into_cold_seed_view()\n    .into_inner();\nlet ctx = SessionResolverContext::new(self, view, &v, overlay);";
+    assert!(
+        contains_cold_seed_into_inner(leaky_indirect),
+        "cold-seed-into-inner predicate must catch the `.into_cold_seed_view().into_inner()` \
+         raw-unwrap that drops currentness before a context build"
+    );
+    // The currentness-preserving forms must NOT trip the predicate: an
+    // `.is_current()` read or a `.with_session_overlay(` re-root between
+    // the cold-seed and any `into_inner` means the flag was consulted, not
+    // silently dropped.
+    let fixed_is_current = "let seed = self.resolver_store_view_read().into_cold_seed_view();\nlet cur = seed.is_current();\nlet v = seed.into_inner();";
+    assert!(
+        !contains_cold_seed_into_inner(fixed_is_current),
+        "predicate must NOT flag a cold-seed whose `.is_current()` is read before `into_inner` \
+         (the currentness is carried, not dropped)"
+    );
+    let fixed_overlay = "let v = self.resolver_store_view_read().into_cold_seed_view().with_session_overlay(self, view);";
+    assert!(
+        !contains_cold_seed_into_inner(fixed_overlay),
+        "predicate must NOT flag a cold-seed re-rooted via `with_session_overlay` (currentness \
+         preserved through the overlay)"
+    );
+    // The allowlist must NOT contain a view-bound component-meta or
+    // fallthrough cold-compute entry that builds a validating context: the
+    // fix routed those through `from_cold_seed`, so they neither unwrap a
+    // raw cold-seed nor need an allowlist exemption.
+    let cold_seed_allow: std::collections::HashSet<&str> =
+        COLD_SEED_INTO_INNER_ALLOWLIST.iter().copied().collect();
+    assert!(
+        !cold_seed_allow.contains("crates/verter_session/src/host_manage/fallthrough.rs"),
+        "the fallthrough cold-compute resolver must NOT be on the cold-seed-into-inner \
+         allowlist — it validates node-cache entries through the currentness-gated \
+         `ctx.store_view()`, never a raw unwrapped cold-seed"
+    );
+    assert!(
+        !cold_seed_allow.contains("crates/verter_session/src/host_manage/overlay_priority.rs"),
+        "the prewarm pass must NOT be on the cold-seed-into-inner allowlist — it routes \
+         through `SessionResolverContext::from_cold_seed` via a currentness-preserving \
+         `with_session_overlay`, never a raw unwrapped cold-seed"
+    );
+
+    // `cold_seed_currentness_is_intrinsic_to_the_read` Rail 2 predicate: the
+    // fresh-read-then-rebind footgun (a fresh `resolver_store_view_read()`
+    // feeding `from_executor_snapshot`) is flagged. This is the EXACT shape
+    // the closed bug had — a fresh second read paired with an earlier flag.
+    let leaky_rebind = "let s = crate::resolver_store::StoreViewRead::from_executor_snapshot(\n    self.resolver_store_view_read().into_cold_seed_view().into_inner(),\n    base_is_current,\n).into_cold_seed_view();";
+    assert!(
+        contains_fresh_read_into_executor_snapshot(leaky_rebind),
+        "fresh-read-into-executor-snapshot predicate must catch a fresh \
+         `resolver_store_view_read()` feeding `from_executor_snapshot` (the view+flag \
+         divergence the closed bug produced)"
+    );
+    // The executor-supplied-view re-bind (the SAFE pattern) must NOT trip the
+    // predicate: the view is the `store_view` parameter, not a fresh read.
+    let safe_rebind = "let s = crate::resolver_store::StoreViewRead::from_executor_snapshot(\n    store_view.clone(),\n    base_is_current,\n).into_cold_seed_view();";
+    assert!(
+        !contains_fresh_read_into_executor_snapshot(safe_rebind),
+        "predicate must NOT flag the executor-supplied-view re-bind \
+         `from_executor_snapshot(store_view.clone(), base_is_current)` — its view came from the \
+         executor's single read, not a fresh second read"
+    );
+    // The intrinsic-currentness production builder (a fresh read taken
+    // straight to `into_cold_seed_view`, NO `from_executor_snapshot`) must
+    // NOT trip the predicate.
+    let fixed_intrinsic =
+        "self.resolver_store_view_read().into_cold_seed_view().with_session_overlay(self, view)";
+    assert!(
+        !contains_fresh_read_into_executor_snapshot(fixed_intrinsic),
+        "predicate must NOT flag a fresh read taken straight to `into_cold_seed_view` (currentness \
+         intrinsic to the read, no re-bind)"
+    );
+    // Rail 1 allowlist must NOT contain the view-bound cold-seed builder's
+    // route: `view_bound_cold_seed` and the `*_with_overlay` entries derive
+    // currentness from a fresh read via `into_cold_seed_view`, so they must
+    // not call `from_executor_snapshot` at all — confirm the allowlist is
+    // scoped to executor-boundary files, not opened to arbitrary callers.
+    let snapshot_allow: std::collections::HashSet<&str> =
+        FROM_EXECUTOR_SNAPSHOT_ALLOWLIST.iter().copied().collect();
+    assert!(
+        !snapshot_allow.contains("crates/verter_session/src/host_manage/overlay_priority.rs"),
+        "the prewarm pass must NOT be on the from_executor_snapshot allowlist — it never re-binds \
+         an executor `(view, flag)` pair"
+    );
+    // A synthetic non-allowlisted call must be catchable.
+    let synthetic_snapshot = "let s = StoreViewRead::from_executor_snapshot(v, c);";
+    assert!(
+        synthetic_snapshot.contains("from_executor_snapshot("),
+        "Rail 1 predicate must catch a `from_executor_snapshot(` call"
+    );
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Token-generation bump-on-mutation guard
+//
+// `StoreViewValidationToken` folds `RouteOwnedShallowDb::artifact_generation`
+// (the `route_owned_generation` token dimension) and a `HostStoreView`
+// snapshots that DB's `Route` derived hashes BY VALUE. Any method on the DB
+// that mutates `self.entries` (insert / remove / clear / retain / evict)
+// therefore MUST advance the generation — a mutation that drops or replaces
+// rows without bumping leaves a previously-snapshotted view validating
+// against state the store no longer holds (the exact soundness gap the
+// schema-mismatch eviction path had: it cleared `entries` without a bump).
+//
+// The guard parses `project_type_store.rs`, finds every method on
+// `RouteOwnedShallowDb`, and asserts each one whose body mutates
+// `self.entries` also references `self.artifact_generation` somewhere in the
+// same body. A new mutation path that forgets the bump fails here.
+// ──────────────────────────────────────────────────────────────────────────
+
+/// The field whose generation is folded into the `StoreViewValidationToken`
+/// (`route_owned_generation`) and must advance on every entry mutation.
+const ROUTE_OWNED_BUMP_FIELD: &str = "artifact_generation";
+/// The DB whose entry map is snapshotted by value into the validation token.
+const ROUTE_OWNED_DB_TYPE: &str = "RouteOwnedShallowDb";
+/// The entry-map field that backs the token's by-value `Route` derived hashes.
+const ROUTE_OWNED_ENTRIES_FIELD: &str = "entries";
+/// Mutating `DashMap` methods that change the row set (and thus the
+/// snapshotted derived-hash source). Pure reads (`get`, `iter`, `len`,
+/// `is_empty`, `contains_key`) are intentionally absent — they do not mutate
+/// and so do not require a bump.
+const ROUTE_OWNED_MUTATING_METHODS: &[&str] = &[
+    "insert",
+    "remove",
+    "remove_if",
+    "clear",
+    "retain",
+    "alter",
+    "alter_all",
+    "entry", // `entry(..)` yields an `OccupiedEntry` whose `.or_insert`/`.insert` mutate.
+];
+
+/// Result of scanning one `RouteOwnedShallowDb` method body for the
+/// mutate-without-bump pattern.
+struct RouteOwnedMethodScan {
+    method_name: String,
+    mutates_entries: bool,
+    references_bump_field: bool,
+}
+
+/// Parse `src` and return, for every method declared in an `impl … for
+/// RouteOwnedShallowDb` / `impl RouteOwnedShallowDb` block, whether its body
+/// mutates `self.entries` and whether it references `self.artifact_generation`.
+///
+/// Pulled out as a pure function (no I/O) so the discriminator self-test can
+/// feed it synthetic sources.
+fn scan_route_owned_db_methods(src: &str) -> Vec<RouteOwnedMethodScan> {
+    use syn::visit::Visit;
+    use syn::{Expr, ImplItem, Item, Member};
+
+    /// Whether `expr` is exactly the field access `self.<field>`.
+    fn is_self_field(expr: &Expr, field: &str) -> bool {
+        if let Expr::Field(f) = expr {
+            if let Expr::Path(p) = &*f.base {
+                if p.path.is_ident("self") {
+                    if let Member::Named(name) = &f.member {
+                        return name == field;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Counts (a) mutating method calls whose receiver is `self.entries` and
+    /// (b) references to the `self.artifact_generation` field, in one body.
+    struct BodyScan {
+        mutates_entries: bool,
+        references_bump_field: bool,
+    }
+    impl<'ast> Visit<'ast> for BodyScan {
+        fn visit_expr_method_call(&mut self, mc: &'ast syn::ExprMethodCall) {
+            // A mutating call on `self.entries` directly (e.g.
+            // `self.entries.insert(...)` / `self.entries.clear()`).
+            if is_self_field(&mc.receiver, ROUTE_OWNED_ENTRIES_FIELD)
+                && ROUTE_OWNED_MUTATING_METHODS.iter().any(|m| mc.method == m)
+            {
+                self.mutates_entries = true;
+            }
+            syn::visit::visit_expr_method_call(self, mc);
+        }
+        fn visit_expr_field(&mut self, f: &'ast syn::ExprField) {
+            // Any reference to `self.artifact_generation` (the bump field) —
+            // typically `self.artifact_generation.fetch_add(...)`.
+            if let Expr::Path(p) = &*f.base {
+                if p.path.is_ident("self") {
+                    if let Member::Named(name) = &f.member {
+                        if name == ROUTE_OWNED_BUMP_FIELD {
+                            self.references_bump_field = true;
+                        }
+                    }
+                }
+            }
+            syn::visit::visit_expr_field(self, f);
+        }
+    }
+
+    let file = match syn::parse_file(src) {
+        Ok(f) => f,
+        Err(_) => return Vec::new(),
+    };
+    let mut scans = Vec::new();
+    for item in &file.items {
+        let Item::Impl(item_impl) = item else {
+            continue;
+        };
+        // Only impls whose self-type is `RouteOwnedShallowDb`.
+        let self_ty_is_db = matches!(
+            &*item_impl.self_ty,
+            syn::Type::Path(tp)
+                if tp.path.segments.last().map(|s| s.ident == ROUTE_OWNED_DB_TYPE).unwrap_or(false)
+        );
+        if !self_ty_is_db {
+            continue;
+        }
+        for impl_item in &item_impl.items {
+            let ImplItem::Fn(method) = impl_item else {
+                continue;
+            };
+            let mut body = BodyScan {
+                mutates_entries: false,
+                references_bump_field: false,
+            };
+            body.visit_block(&method.block);
+            scans.push(RouteOwnedMethodScan {
+                method_name: method.sig.ident.to_string(),
+                mutates_entries: body.mutates_entries,
+                references_bump_field: body.references_bump_field,
+            });
+        }
+    }
+    scans
+}
+
+#[test]
+fn route_owned_shallow_db_entry_mutations_bump_token_generation() {
+    let src = read_workspace_file("crates/verter_session/src/project_type_store.rs");
+    let scans = scan_route_owned_db_methods(&src);
+    assert!(
+        !scans.is_empty(),
+        "guard found no RouteOwnedShallowDb methods — the AST scan or the type \
+         name regressed (RouteOwnedShallowDb is the route-owned-shallow DB whose \
+         artifact_generation is folded into StoreViewValidationToken)"
+    );
+    // Sanity: the scan must actually see at least one mutating method (publish /
+    // remove / clear_all / evict_if_schema_mismatch), else the mutation
+    // detector is vacuous and the guard would pass trivially.
+    assert!(
+        scans.iter().any(|s| s.mutates_entries),
+        "guard saw zero entry-mutating RouteOwnedShallowDb methods — the \
+         `self.entries.<mutator>` detector regressed and the guard is now vacuous"
+    );
+    let offenders: Vec<&str> = scans
+        .iter()
+        .filter(|s| s.mutates_entries && !s.references_bump_field)
+        .map(|s| s.method_name.as_str())
+        .collect();
+    assert!(
+        offenders.is_empty(),
+        "every RouteOwnedShallowDb method that mutates `self.entries` MUST also \
+         advance `self.{ROUTE_OWNED_BUMP_FIELD}` (the `route_owned_generation` \
+         dimension folded into StoreViewValidationToken) — a mutation without a \
+         bump leaves a previously-snapshotted HostStoreView validating against \
+         drained/replaced route-owned `Route` derived hashes. Offending \
+         method(s): {offenders:?}"
+    );
+}
+
+#[test]
+fn route_owned_shallow_db_bump_guard_is_discriminating() {
+    // Self-test (anti-stub): the scanner FLAGS a mutate-without-bump method and
+    // ACCEPTS a mutate-with-bump method. If either property failed, the guard
+    // above would be vacuous.
+
+    // A synthetic DB whose `clear`-like method drains `self.entries` WITHOUT
+    // touching the bump field — exactly the closed bug's shape. The scanner
+    // must see a mutating method with NO bump reference.
+    let leaky = r#"
+        struct RouteOwnedShallowDb { entries: u8, artifact_generation: u8 }
+        impl crate::cache_schema::CacheSchemaVersioned for RouteOwnedShallowDb {
+            fn evict_if_schema_mismatch(&self, current: u32) -> usize {
+                let count = self.entries.len();
+                self.entries.clear();
+                count
+            }
+        }
+    "#;
+    let leaky_scans = scan_route_owned_db_methods(leaky);
+    let leaky_offenders: Vec<&str> = leaky_scans
+        .iter()
+        .filter(|s| s.mutates_entries && !s.references_bump_field)
+        .map(|s| s.method_name.as_str())
+        .collect();
+    assert_eq!(
+        leaky_offenders,
+        vec!["evict_if_schema_mismatch"],
+        "discriminator: a method that clears `self.entries` without referencing \
+         `self.artifact_generation` MUST be flagged as an offender"
+    );
+
+    // The fixed shape: the same drain plus a bump reference. The scanner must
+    // see the mutation AND the bump, so it is NOT an offender.
+    let fixed = r#"
+        struct RouteOwnedShallowDb { entries: u8, artifact_generation: u8 }
+        impl crate::cache_schema::CacheSchemaVersioned for RouteOwnedShallowDb {
+            fn evict_if_schema_mismatch(&self, current: u32) -> usize {
+                let count = self.entries.len();
+                self.entries.clear();
+                if count > 0 {
+                    self.artifact_generation.fetch_add(1, Ordering::AcqRel);
+                }
+                count
+            }
+        }
+    "#;
+    let fixed_scans = scan_route_owned_db_methods(fixed);
+    let fixed_method = fixed_scans
+        .iter()
+        .find(|s| s.method_name == "evict_if_schema_mismatch")
+        .expect("discriminator: fixed source must expose the method");
+    assert!(
+        fixed_method.mutates_entries,
+        "discriminator: the fixed method still mutates `self.entries`"
+    );
+    assert!(
+        fixed_method.references_bump_field,
+        "discriminator: the fixed method references `self.artifact_generation`"
+    );
+    let fixed_offenders: Vec<&str> = fixed_scans
+        .iter()
+        .filter(|s| s.mutates_entries && !s.references_bump_field)
+        .map(|s| s.method_name.as_str())
+        .collect();
+    assert!(
+        fixed_offenders.is_empty(),
+        "discriminator: a method that bumps after mutating `self.entries` MUST \
+         NOT be flagged"
+    );
+
+    // A pure-read method (`is_empty` over `self.entries`) must NOT be treated
+    // as a mutation — the bump is required only for row-changing methods, and
+    // demanding a bump on a read would be a false positive.
+    let read_only = r#"
+        struct RouteOwnedShallowDb { entries: u8, artifact_generation: u8 }
+        impl RouteOwnedShallowDb {
+            fn is_empty(&self) -> bool { self.entries.is_empty() }
+            fn for_each(&self) { for _e in self.entries.iter() {} }
+        }
+    "#;
+    let read_scans = scan_route_owned_db_methods(read_only);
+    assert!(
+        read_scans.iter().all(|s| !s.mutates_entries),
+        "discriminator: pure-read methods (`is_empty` / `iter`) MUST NOT be \
+         classified as entry mutations"
+    );
+
+    // The `entry(...).or_insert(...)` shape (used by the snapshot fallback path
+    // elsewhere, but the canonical mutate-via-entry shape) must be classified
+    // as a mutation so a future `entry`-based write that forgets the bump is
+    // caught.
+    let entry_mut = r#"
+        struct RouteOwnedShallowDb { entries: u8, artifact_generation: u8 }
+        impl RouteOwnedShallowDb {
+            fn upsert(&self) { self.entries.entry(k).or_insert(v); }
+        }
+    "#;
+    let entry_scans = scan_route_owned_db_methods(entry_mut);
+    let entry_method = entry_scans
+        .iter()
+        .find(|s| s.method_name == "upsert")
+        .expect("discriminator: entry source must expose the method");
+    assert!(
+        entry_method.mutates_entries,
+        "discriminator: `self.entries.entry(..)` MUST be classified as a mutation \
+         (its returned entry handle inserts/mutates)"
+    );
+    assert!(
+        !entry_method.references_bump_field,
+        "discriminator: the synthetic entry-mutation has no bump, so it is an \
+         offender shape"
     );
 }

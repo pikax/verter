@@ -55,6 +55,13 @@ impl VerterHost {
         self.resolved_type_cache().clear();
         self.eval_env_cache().clear();
         self.semantic_invalidate_all();
+        // The workspace authority swapped, so the cached base-view snapshot
+        // (built against the OLD workspace / project graph) is structurally
+        // stale. Drop its `Arc` in lockstep with the other full-clear
+        // cascade steps so the snapshot's per-file maps are released now
+        // rather than lingering until the next store-view request replaces
+        // the entry.
+        self.store_view_manager().clear();
         self.bump_store_view_epoch();
     }
 
@@ -107,6 +114,27 @@ impl VerterHost {
     pub(crate) fn bump_store_view_epoch(&self) -> u64 {
         self.clear_thread_local_parsed_eval_program_cache();
         self.store_view_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1
+    }
+
+    /// Current first-time additive-load generation. Folded into the
+    /// `StoreViewValidationToken` so a `StoreViewManager`-cached base view
+    /// built before a first-time load is invalidated once the load lands.
+    #[must_use]
+    pub(crate) fn current_load_generation(&self) -> u64 {
+        self.load_generation
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Advance the first-time additive-load generation. Called from
+    /// `ensure_loaded` on a successful first-time load (and a content-
+    /// changing reload). Does NOT clear thread-local caches — the loaded
+    /// canonical's content is additive, not a change to already-cached
+    /// state. See the `load_generation` field docs for why this is a
+    /// dedicated dimension excluded from `externally_superseded_by`.
+    pub(crate) fn bump_load_generation(&self) -> u64 {
+        self.load_generation
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             + 1
     }
@@ -354,6 +382,16 @@ impl VerterHost {
         // ImportedRootDb), so route-resolution facts are gone; clear
         // the route-only shallow DB in lockstep.
         self.project_type_store.route_owned_shallow().clear_all();
+        // Drop the StoreViewManager's cached base-view `Arc`. The epoch
+        // bump below invalidates it as a warm-hit candidate, but a
+        // token bump alone keeps the `Arc<StoreViewSnapshot>` (and its
+        // per-file maps / fact `Arc`s) strongly held until a later
+        // store-view request rebuilds and replaces it. A closed-not-reused
+        // host (NAPI finalisation) never issues that next request, so
+        // without the explicit clear the snapshot stays resident —
+        // regressing close()'s memory-release contract. Clearing releases
+        // it now.
+        self.store_view_manager().clear();
         self.bump_store_view_epoch();
     }
 
@@ -407,6 +445,12 @@ impl VerterHost {
         // any in-flight cold publish that started before the bump.
         self.project_type_store.bump_project_generation_and_evict();
         self.project_type_store.route_owned_shallow().clear_all();
+        // The project graph changed (project_generation bumped, the
+        // project-shape cluster evicted), so the cached base-view snapshot
+        // is rooted on a stale project identity. Drop its `Arc` alongside
+        // the other full-clear cascade steps so its per-file maps release
+        // now rather than lingering until the next store-view request.
+        self.store_view_manager().clear();
         self.bump_store_view_epoch();
     }
 
@@ -675,31 +719,88 @@ impl VerterHost {
         self.provenance
             .ensure_loaded_work_ns
             .fetch_add(work_start.elapsed().as_nanos() as u64, Relaxed);
-        // First-time loads are purely additive: they populate host
-        // state for a file that no previously-captured view tracks, so
-        // they cannot invalidate any existing snapshot's facts. Only
-        // re-loads (content reload after an evict) may have changed
-        // the file's hash relative to what older views pinned, so only
-        // those need to bump the global mutation epoch.
+        // Every successful load — first-time additive OR reload — adds or
+        // changes host state that `HostStoreView::build` snapshots BY
+        // VALUE: a scheduler node + `whole_hashes` entry, the
+        // `derived_raw_cache` known-miss tag the build folds into
+        // `resolved_import_facts_known_miss_tags`, and the dependency/alias
+        // maps. A `StoreViewManager`-cached base snapshot built BEFORE this
+        // load does not track the newly-loaded canonical, so the token MUST
+        // advance or the manager would hand a stale pre-load snapshot back
+        // to the next caller (and the untracked-file `None => true`
+        // optimistic-accept would fossilize against it).
+        // `integrate_scheduler_snapshot` does NOT publish into
+        // `FileArtifactStore`, so `artifact_generation` does not cover it.
         //
-        // Compare post-reload hash to the pre-evict hash; if identical,
-        // the reload is a content no-op and we can skip the bump
-        // entirely. This preserves the type-context cache across
-        // load→evict→ensure_loaded cycles that don't actually change
-        // the file. `pre_evict_hash == None` (e.g. evict triggered
-        // without a prior scheduler snapshot) falls back to the
-        // conservative bump.
-        if loaded && reload_from_workspace {
-            let post_reload_hash = self
-                .scheduler
-                .try_get_source(canonical_id)
-                .map(|s| s.whole_hash);
-            let hash_unchanged = match (pre_evict_hash, post_reload_hash) {
-                (Some(pre), Some(post)) => pre == post,
-                _ => false,
-            };
-            if !hash_unchanged {
-                self.bump_store_view_epoch();
+        // The dimension that advances depends on the load KIND:
+        //
+        // - FIRST-TIME additive load → `bump_load_generation()`. This is
+        //   the compute's OWN work (a cold compute loads its dependencies),
+        //   not an external content/project/env mutation, so it advances a
+        //   DEDICATED `load_generation` dimension that the `StoreViewManager`
+        //   reuse oracle includes (invalidating the cached base view) but
+        //   that the publish fence's `externally_superseded_by` EXCLUDES —
+        //   exactly like `artifact_generation`. Otherwise a scalar/batch
+        //   cold compute that loads a dependency would self-fence its own
+        //   result promotion. It also does NOT clear thread-local caches.
+        //
+        // - RELOAD (after evict) with CHANGED content → `bump_store_view_epoch()`.
+        //   That is a genuine content change to an already-known file
+        //   (an external-supersession class, like an upsert): older views'
+        //   facts about that file are now stale, so it advances the epoch.
+        //   `pre_evict_hash == None` (an evict with no prior scheduler
+        //   snapshot) falls back to the conservative epoch bump.
+        //
+        // - RELOAD (after evict) with BYTE-IDENTICAL content →
+        //   `bump_load_generation()`. The content is unchanged (R1: no
+        //   epoch bump, the warm type-context cache survives the
+        //   load→evict→ensure_loaded cycle), BUT the evict→present
+        //   VISIBILITY transition IS validator-visible: `evict()` bumped
+        //   the epoch and the canonical went invisible, so a concurrent
+        //   `resolver_store_view()` built DURING the evict window caches a
+        //   base snapshot that does NOT track the file under the
+        //   post-evict token. Without a token advance on the reload, that
+        //   mid-evict snapshot's token still matches the live token after
+        //   the file is restored, so the manager keeps handing back a view
+        //   that omits the reloaded canonical. The additive
+        //   `load_generation` dimension covers this: it invalidates the
+        //   manager-cached base view (it is in the reuse oracle) WITHOUT
+        //   counting as an external supersession (excluded from
+        //   `externally_superseded_by`), consistent with the
+        //   bump-on-genuine-transition rule — an evict→reload IS a
+        //   transition even when the bytes match.
+        //
+        // The within-wave churn the first-time-load bump introduces is
+        // bounded: the batch engine acquires its fixed snapshot AFTER its
+        // prefetch wave completes (so the token is stable then) and the
+        // cold store-view build singleflights, so a load burst rebuilds the
+        // manager cache at most once per wave rather than per load.
+        if loaded {
+            if reload_from_workspace {
+                let post_reload_hash = self
+                    .scheduler
+                    .try_get_source(canonical_id)
+                    .map(|s| s.whole_hash);
+                let content_changed = match (pre_evict_hash, post_reload_hash) {
+                    // Byte-identical reload — content no-op.
+                    (Some(pre), Some(post)) => pre != post,
+                    // Unknown pre/post hash — conservative content-change.
+                    _ => true,
+                };
+                if content_changed {
+                    self.bump_store_view_epoch();
+                } else {
+                    // Byte-identical reload-after-evict: no content change,
+                    // but the evict→present visibility transition must
+                    // advance the additive load_generation so a snapshot
+                    // built mid-evict is invalidated.
+                    self.bump_load_generation();
+                }
+            } else {
+                // First-time additive load — advances the dedicated
+                // load-generation dimension (own-work, excluded from the
+                // publish fence's external-supersession check).
+                self.bump_load_generation();
             }
         }
         loaded

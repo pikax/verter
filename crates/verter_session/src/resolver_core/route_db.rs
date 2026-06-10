@@ -746,6 +746,7 @@ mod tests {
                 token: StoreViewCompatToken {
                     epoch: token,
                     session: None,
+                    validity_fingerprint: 0,
                 },
             }
         }

@@ -70,7 +70,7 @@ fn route_owned_bundle_materialisation_populates_overlay_whole_hash() {
 
     // Build the per-request view + overlay PAIR exactly like the
     // audited entry does. The overlay starts empty.
-    let base = host.resolver_store_view();
+    let base = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(CanonicalCompletionOverlay::new());
     let view = RequestStoreView::new(&base, Arc::clone(&overlay));
 
@@ -137,7 +137,7 @@ fn route_owned_bundle_materialisation_view_lookup_observes_overlay_whole_hash() 
     // view's strict reject (the base view never saw the route-owned
     // canonical because it was published mid-request).
     let host = build_host_with_dts();
-    let base = host.resolver_store_view();
+    let base = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(CanonicalCompletionOverlay::new());
     let view = RequestStoreView::new(&base, Arc::clone(&overlay));
 
@@ -172,7 +172,7 @@ fn route_owned_bundle_materialisation_optional_import_route_promotion() {
     // *when* the host carries an import-route hash for the route-
     // owned canonical, the overlay MUST carry the same hash.
     let host = build_host_with_dts();
-    let base = host.resolver_store_view();
+    let base = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(CanonicalCompletionOverlay::new());
     let view = RequestStoreView::new(&base, Arc::clone(&overlay));
 

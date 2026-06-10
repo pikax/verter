@@ -232,7 +232,7 @@ fn skeleton_structural_transit_instantiate_preserves_operator_carriers() {
     );
 
     // (b) bare structural-transit Skeleton Instantiate.
-    let store_view = host.resolver_store_view();
+    let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
     let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host_ctx);
@@ -268,5 +268,51 @@ fn skeleton_structural_transit_instantiate_preserves_operator_carriers() {
         "bare structural-transit Skeleton Instantiate must return the \
          un-reduced IndexedAccess carrier, got {:?}",
         data.as_deref()
+    );
+}
+
+#[test]
+fn evaluate_keyof_reduces_on_cold_navigate_dispatch() {
+    // DISCRIMINATING (cold-path Navigate keyof): Navigate-mode body lowering
+    // deliberately preserves a no-args named reference as a `DeclRef` carrier
+    // (cycle-BFS visibility — `lower.rs` carrier-preservation), so a COLD
+    // `Instantiate { published(Navigate) }` of `type X = keyof Y` hands
+    // `build_key_of` a `DeclRef` operand. `build_key_of`'s own contract
+    // (documented at the bridge's KeyOf arm) is that an UN-RESOLVED reference
+    // operand returns the deferred `KeyOf` carrier — which the shared
+    // materializer bridge then surfaces and reduces. A `DeclRef` operand
+    // falling through to the `Opaque(Miss)` arm instead publishes a
+    // `semanticMiss` terminal for the whole evaluate.
+    //
+    // FAILS while `build_key_of` lacks the `DeclRef`/`InstantiationRef`
+    // carrier arm (evaluate returns `Unknown { raw: "semanticMiss" }`);
+    // PASSES once the carrier defers and the bridge reduces it. The warm
+    // path cannot mask this: the keyof evaluate is the FIRST dispatch on a
+    // fresh host, so no prior Expanded materialization can satisfy it.
+    let host = make_host_with_footprint();
+    upsert(&host);
+    let scope = "/fixtures/operator_reduction.ts";
+
+    let (named_keys, _r) =
+        resolve_expr(&host, scope, "ConcreteKeys", &[], ProjectionMode::Navigate);
+    // The named value is anchored to the REAL key union (not merely compared
+    // against the evaluate result): pre-fix BOTH cold Navigate paths degraded
+    // to the same `semanticMiss` terminal, so a bare parity assert would pass
+    // vacuously.
+    assert_literal_union(&named_keys, &["count", "id"]);
+    let host2 = make_host_with_footprint();
+    upsert(&host2);
+    let (evaluated_keys, _r) =
+        evaluate_expr(&host2, scope, "keyof KeySurface", ProjectionMode::Navigate);
+    assert!(
+        !matches!(evaluated_keys, TypeExpr::KeyOf(_)),
+        "cold Navigate FFI evaluate must REDUCE the keyof operator, not publish \
+         the un-reduced carrier: {evaluated_keys:?}"
+    );
+    assert_eq!(
+        evaluated_keys, named_keys,
+        "cold Navigate FFI evaluate of `keyof KeySurface` must reduce IDENTICALLY \
+         to the named-resolve of `ConcreteKeys` — a `DeclRef` operand must defer \
+         to the bridge, not degrade to a semanticMiss terminal"
     );
 }

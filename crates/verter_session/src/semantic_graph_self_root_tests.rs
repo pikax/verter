@@ -1459,7 +1459,7 @@ fn resolve_macro_payload_roots_on_type_argument_file() {
 /// (`MemoEntry::validate` → `validate_with_self_roots` →
 /// `validate_fact_signature_with_self_roots` →
 /// `view.validates_self_root_whole_hash`) routes the self-root through
-/// `ctx.resolver_store_view()`. Pre-fix `SessionResolverContext::
+/// `ctx.resolver_store_view_read().into_owned_view()`. Pre-fix `SessionResolverContext::
 /// resolver_store_view` delegated straight to the base host, whose
 /// `HostStoreView.whole_hashes` records the BASE content hash — so an
 /// overlay-rooted self-root never matched and every session-overlay
@@ -1613,7 +1613,8 @@ fn session_overlay_warm_validation_matrix() {
         let graph = SemanticGraphStore::new();
         let published = publish_entry_rooted_on(&graph, overlay_hash);
         let session_store_view = host
-            .resolver_store_view()
+            .resolver_store_view_read()
+            .into_owned_view()
             .with_session_overlay(&host, &view);
         let session_ctx = SessionResolverContext::new(
             &host,
@@ -1646,7 +1647,8 @@ fn session_overlay_warm_validation_matrix() {
         let graph = SemanticGraphStore::new();
         let _published = publish_entry_rooted_on(&graph, stale_overlay_hash);
         let session_store_view = host
-            .resolver_store_view()
+            .resolver_store_view_read()
+            .into_owned_view()
             .with_session_overlay(&host, &view);
         let session_ctx = SessionResolverContext::new(
             &host,
@@ -1677,7 +1679,8 @@ fn session_overlay_warm_validation_matrix() {
         let graph = SemanticGraphStore::new();
         let _published = publish_entry_rooted_on(&graph, base_hash);
         let session_store_view = host
-            .resolver_store_view()
+            .resolver_store_view_read()
+            .into_owned_view()
             .with_session_overlay(&host, &view);
         let session_ctx = SessionResolverContext::new(
             &host,
@@ -1906,7 +1909,8 @@ fn session_overlay_parse_fact_carrier_warm_validation() {
         let graph = SemanticGraphStore::new();
         let published = publish_entry(&graph, overlay_hash, &overlay_parse_fact);
         let session_store_view = host
-            .resolver_store_view()
+            .resolver_store_view_read()
+            .into_owned_view()
             .with_session_overlay(&host, &view);
         let session_ctx = SessionResolverContext::new(
             &host,
@@ -1952,7 +1956,8 @@ fn session_overlay_parse_fact_carrier_warm_validation() {
         };
         let _published = publish_entry(&graph, overlay_hash, &stale_parse_fact);
         let session_store_view = host
-            .resolver_store_view()
+            .resolver_store_view_read()
+            .into_owned_view()
             .with_session_overlay(&host, &view);
         let session_ctx = SessionResolverContext::new(
             &host,
@@ -2192,7 +2197,8 @@ fn session_tombstone_rejects_base_rooted_warm_entry() {
             deleted_canonical,
         );
         let session_store_view = host
-            .resolver_store_view()
+            .resolver_store_view_read()
+            .into_owned_view()
             .with_session_overlay(&host, &view);
         let session_ctx = SessionResolverContext::new(
             &host,
@@ -2240,7 +2246,8 @@ fn session_tombstone_rejects_base_rooted_warm_entry() {
             deleted_canonical,
         );
         let session_store_view = host
-            .resolver_store_view()
+            .resolver_store_view_read()
+            .into_owned_view()
             .with_session_overlay(&host, &view);
         let session_ctx = SessionResolverContext::new(
             &host,
@@ -2283,7 +2290,8 @@ fn session_tombstone_rejects_base_rooted_warm_entry() {
             sibling_canonical,
         );
         let session_store_view = host
-            .resolver_store_view()
+            .resolver_store_view_read()
+            .into_owned_view()
             .with_session_overlay(&host, &view);
         let session_ctx = SessionResolverContext::new(
             &host,
@@ -2458,7 +2466,8 @@ fn session_tombstone_rejects_cross_file_dependency_whole_hash() {
             "fixture invariant: the parent canonical is NOT tombstoned",
         );
         let session_store_view = host
-            .resolver_store_view()
+            .resolver_store_view_read()
+            .into_owned_view()
             .with_session_overlay(&host, &view);
         let session_ctx = SessionResolverContext::new(
             &host,
@@ -2504,7 +2513,8 @@ fn session_tombstone_rejects_cross_file_dependency_whole_hash() {
             "fixture invariant: the child canonical is NOT tombstoned in case 2",
         );
         let session_store_view = host
-            .resolver_store_view()
+            .resolver_store_view_read()
+            .into_owned_view()
             .with_session_overlay(&host, &view);
         let session_ctx = SessionResolverContext::new(
             &host,

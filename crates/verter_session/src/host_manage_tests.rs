@@ -418,7 +418,7 @@ export interface ButtonProps extends UseComponentIconsProps, LinkProps {
 <template><button /></template>"#,
     );
 
-    let _view = host.resolver_store_view();
+    let _view = host.resolver_store_view_read().into_owned_view();
 
     assert_eq!(
         host.resolve_type_dependency_canonical(
@@ -569,7 +569,7 @@ fn prepared_type_decl_bundle_invalidates_when_exact_resolution_changes() {
         vec![exact_dependency("./dep", "/src/base.ts")],
     );
 
-    let _view_before = host.resolver_store_view();
+    let _view_before = host.resolver_store_view_read().into_owned_view();
     let initial = host
         .prepared_type_decl("/src/types.ts", "Props")
         .expect("Props should materialize before the route change");
@@ -586,7 +586,7 @@ fn prepared_type_decl_bundle_invalidates_when_exact_resolution_changes() {
         vec![exact_dependency("./dep", "/src/alt.ts")],
     );
 
-    let _view_after = host.resolver_store_view();
+    let _view_after = host.resolver_store_view_read().into_owned_view();
     let rebuilt = host
         .prepared_type_decl("/src/types.ts", "Props")
         .expect("Props should rebuild after the effective dependency target changes");
@@ -686,7 +686,7 @@ fn prepared_decl_bundle_with_store_view_reuses_cache_for_structural_exact_resolu
         vec![exact_dependency("./dep", "/workspace/dep.ts")],
     );
 
-    let _view = host.resolver_store_view();
+    let _view = host.resolver_store_view_read().into_owned_view();
     host.provenance().reset();
 
     let first = host
@@ -1060,7 +1060,7 @@ fn resolve_imported_type_root_caches_stable_miss_in_imported_root_db() {
 
     host.ensure_indexed_ready(canonical_id)
         .expect("module facts should seed the provider before capturing a store view");
-    let view = host.resolver_store_view();
+    let view = host.resolver_store_view_read().into_owned_view();
 
     let resolved = host.resolve_imported_type_root(canonical_id, "MissingProps");
     assert_eq!(
@@ -1158,7 +1158,7 @@ fn prepared_type_decl_reuses_route_owned_package_shallow_state_without_indexed_r
         )],
     );
 
-    let _view = host.resolver_store_view();
+    let _view = host.resolver_store_view_read().into_owned_view();
     let (target_canonical, target_name) = host.resolve_imported_type_root(
         "/workspace/node_modules/pkg/dist/index.d.ts",
         "PackageEmits",
@@ -1263,7 +1263,7 @@ defineProps<Props>()
         }],
     );
 
-    let view = host.resolver_store_view();
+    let view = host.resolver_store_view_read().into_owned_view();
 
     assert!(
         view.whole_hash("/src/types.ts").is_some(),
@@ -1334,7 +1334,7 @@ defineProps<Props>()
     host.project_type_store().indexed().remove("/src/unused.ts");
     host.provenance().reset();
 
-    let view = host.resolver_store_view();
+    let view = host.resolver_store_view_read().into_owned_view();
     let provenance = host.provenance_snapshot();
 
     assert_eq!(
@@ -1377,7 +1377,7 @@ fn resolver_store_view_tracks_reexport_import_routes() {
     );
     upsert_non_sfc(&host, "/src/index.ts", "export { Props } from './dep'\n");
 
-    let _view = host.resolver_store_view();
+    let _view = host.resolver_store_view_read().into_owned_view();
 
     assert_eq!(
         host.resolve_type_dependency_canonical_shallow("/src/index.ts", "./dep")
@@ -1403,7 +1403,7 @@ fn resolver_store_view_prefers_declaration_companion_routes_for_dts_imports() {
     );
     upsert_non_sfc(&host, "/src/inner.js", "export const runtimeOnly = true\n");
 
-    let _view = host.resolver_store_view();
+    let _view = host.resolver_store_view_read().into_owned_view();
 
     assert_eq!(
         host.resolve_type_dependency_canonical("/src/index.d.ts", "./inner.js")
@@ -1457,7 +1457,7 @@ defineProps<ButtonProps>()
         "entry file should load from workspace",
     );
 
-    let _view = host.resolver_store_view();
+    let _view = host.resolver_store_view_read().into_owned_view();
     let exports = host.resolve_exports("/workspace/types/index.ts");
 
     assert!(
@@ -1485,7 +1485,7 @@ fn store_view_generic_dependency_paths_promote_snapshot_and_env_into_imported_ca
         ws,
     );
 
-    let _view = host.resolver_store_view();
+    let _view = host.resolver_store_view_read().into_owned_view();
     let source = host
         .read_analysis_source("/workspace/node_modules/pkg/dist/shared.d.ts")
         .expect("dependency source should load into the imported dependency cache");
@@ -1543,7 +1543,7 @@ fn store_view_imported_seed_reuses_cached_source_for_snapshot_and_env() {
         ws.clone(),
     );
 
-    let _view = host.resolver_store_view();
+    let _view = host.resolver_store_view_read().into_owned_view();
     ws.reset_reads();
 
     let entry = host
@@ -1616,7 +1616,7 @@ fn store_view_warm_imported_eval_env_hit_reuses_route_owned_shallow_hash_without
         ws.clone(),
     );
 
-    let _view = host.resolver_store_view();
+    let _view = host.resolver_store_view_read().into_owned_view();
     assert!(
         host.route_owned_shallow_state(canonical_id).is_some(),
         "route-owned shallow state should seed the imported declaration lazily",
@@ -1665,7 +1665,7 @@ fn store_view_route_owned_imported_seed_reuses_cached_source_for_snapshot_and_en
         ws.clone(),
     );
 
-    let _view = host.resolver_store_view();
+    let _view = host.resolver_store_view_read().into_owned_view();
     assert!(
         host.route_owned_shallow_state(canonical_id).is_some(),
         "route-owned shallow seeding should load the imported dependency state",
@@ -1756,7 +1756,7 @@ const props = defineProps<{ label: string }>()
         ws.clone(),
     );
 
-    let _view = host.resolver_store_view();
+    let _view = host.resolver_store_view_read().into_owned_view();
     assert!(
         host.route_owned_shallow_state(canonical_id).is_some(),
         "route-owned shallow seeding should cache the imported Vue file parse state",
@@ -1803,7 +1803,7 @@ fn route_owned_imported_non_sfc_snapshot_reuses_cached_snapshot_state() {
         ws,
     );
 
-    let _view = host.resolver_store_view();
+    let _view = host.resolver_store_view_read().into_owned_view();
     assert!(
         host.route_owned_shallow_state(canonical_id).is_some(),
         "route-owned shallow seeding should cache imported declaration state",
@@ -1847,7 +1847,7 @@ fn route_owned_imported_cache_reuses_current_version_across_store_views() {
         ws.clone(),
     );
 
-    let view1 = host.resolver_store_view();
+    let view1 = host.resolver_store_view_read().into_owned_view();
     assert!(
         host.route_owned_shallow_state(canonical_id).is_some(),
         "initial route-owned imported seed should succeed",
@@ -1863,9 +1863,9 @@ fn route_owned_imported_cache_reuses_current_version_across_store_views() {
         "/workspace/src/Unrelated.ts",
         "export const changed = 1",
     );
-    let view2 = host.resolver_store_view();
+    let view2 = host.resolver_store_view_read().into_owned_view();
     assert!(
-        host.view_mutation_epoch(&view2) > host.view_mutation_epoch(&view1),
+        view2.mutation_epoch() > view1.mutation_epoch(),
         "the second store view should reflect the unrelated host mutation",
     );
 
@@ -1899,7 +1899,7 @@ fn cached_import_route_resolution_reuses_untracked_current_version_across_epoch_
     );
     host.set_import_dependencies(provider, vec![exact_dependency("./inner.d.ts", target)]);
 
-    let _view = host.resolver_store_view();
+    let _view = host.resolver_store_view_read().into_owned_view();
     assert!(
         host.route_owned_shallow_state(provider).is_some(),
         "route-owned seeding should build the current provider surface after the view snapshot",
@@ -1983,7 +1983,7 @@ const emit = defineEmits<PackageEmits>()
         )],
     );
 
-    let _view = host.resolver_store_view();
+    let _view = host.resolver_store_view_read().into_owned_view();
     assert!(
         host.route_owned_shallow_state("/workspace/node_modules/pkg/dist/index3.d.ts")
             .is_some(),
@@ -2018,7 +2018,7 @@ fn store_view_seeded_imported_barrel_backfills_wildcard_import_routes() {
         ws.clone(),
     );
 
-    let _view = host.resolver_store_view();
+    let _view = host.resolver_store_view_read().into_owned_view();
 
     let facts = host
         .ensure_indexed_ready(barrel)
@@ -2483,7 +2483,7 @@ import Link from './Link.vue'
         vec![exact_dependency("./Link.vue", "/src/Link.vue")],
     );
 
-    let _store_view = host.resolver_store_view();
+    let _store_view = host.resolver_store_view_read().into_owned_view();
 
     upsert_non_sfc(&host, "/src/shared.ts", "export const shared = 'shared'");
     upsert_vue(
@@ -2714,7 +2714,7 @@ fn prepared_type_decl_lookup_rejects_stale_cache_entries() {
         .expect("types dependency should materialize");
 
     // Warm the bundle cache so the fact-validated entry exists.
-    let _view_before = host.resolver_store_view();
+    let _view_before = host.resolver_store_view_read().into_owned_view();
     assert!(
         host.prepared_type_decl("/src/types.ts", "Props").is_some(),
         "prepared lookup should succeed before the file content changes"
@@ -2731,7 +2731,7 @@ fn prepared_type_decl_lookup_rejects_stale_cache_entries() {
         .expect("types dependency should re-materialize after content change");
 
     // Take a new view that records the updated hash.
-    let _view_after = host.resolver_store_view();
+    let _view_after = host.resolver_store_view_read().into_owned_view();
 
     // The stale bundle (cached with original hash) must be rejected by
     // fact validation against the new view, and the re-materialized
@@ -6186,7 +6186,8 @@ fn overlay_reader_retargets_wildcard_after_base_file_set_change() {
     ws.inject_file("/workspace/runtime.ts", "export type Runtime = boolean;\n");
 
     let base = host
-        .resolver_store_view()
+        .resolver_store_view_read()
+        .into_owned_view()
         .with_session_overlay(&host, &view);
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let ctx = crate::resolver_core::SessionResolverContext::new(&host, &view, &base, overlay);
@@ -7357,7 +7358,7 @@ type Button = ComponentConfig<typeof theme, AppConfig, 'button'>
         ],
     );
 
-    let _store_view = host.resolver_store_view();
+    let _store_view = host.resolver_store_view_read().into_owned_view();
     let prepared = host
         .prepared_type_decl("/src/Button.vue", "Button")
         .expect("Button should prepare from the owner-local shallow cache");
@@ -7845,7 +7846,7 @@ fn direct_imported_type_root_fast_path_resolves_cold_target_under_store_view() {
         vec![exact_dependency("./target", "/src/target.ts")],
     );
 
-    let _view = host.resolver_store_view();
+    let _view = host.resolver_store_view_read().into_owned_view();
     let (resolved, facts) = host
         .resolve_direct_imported_type_root_fast_path("/src/index.ts", "Props")
         .expect(
@@ -8008,7 +8009,7 @@ fn current_dependency_fact_versions_keeps_imported_barrel_route_facts_shallow() 
 
     host.ensure_indexed_ready("/src/types/index.ts")
         .expect("barrel should materialize shallow imported state");
-    let _view = host.resolver_store_view();
+    let _view = host.resolver_store_view_read().into_owned_view();
 
     ws.reset_resolves();
 
@@ -8221,7 +8222,7 @@ fn store_view_import_routes_do_not_depend_on_live_owner_state() {
 
     host.ensure_indexed_ready("/src/types/index.ts")
         .expect("barrel should materialize shallow export state");
-    let view = host.resolver_store_view();
+    let view = host.resolver_store_view_read().into_owned_view();
 
     assert!(
         view.derived_hash(
@@ -8930,7 +8931,7 @@ export interface UnusedProps {
         ],
     );
 
-    let _view = host.resolver_store_view();
+    let _view = host.resolver_store_view_read().into_owned_view();
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
     let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
@@ -8960,7 +8961,7 @@ export interface UnusedProps {
         "route-only frontier discovery should keep unrelated same-layer siblings off FileArtifactStore",
     );
 
-    let _final_view = host.resolver_store_view();
+    let _final_view = host.resolver_store_view_read().into_owned_view();
     let unused_reads_before = ws.read_count("/src/Unused.vue");
     let _facts = host.current_dependency_fact_versions("/src/Consumer.vue", &tracked_deps);
 
@@ -9062,7 +9063,7 @@ export interface UnusedProps {
         ],
     );
 
-    let _view = host.resolver_store_view();
+    let _view = host.resolver_store_view_read().into_owned_view();
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
     let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
@@ -9189,7 +9190,7 @@ export interface IconProps {
         ],
     );
 
-    let _view = host.resolver_store_view();
+    let _view = host.resolver_store_view_read().into_owned_view();
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
     let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
@@ -9274,7 +9275,7 @@ export interface ButtonProps {
         vec![exact_dependency("./Button.vue", "/src/Button.vue")],
     );
 
-    let _view = host.resolver_store_view();
+    let _view = host.resolver_store_view_read().into_owned_view();
     let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
 
     let mut tracked_deps_first = std::collections::BTreeSet::new();
@@ -9384,7 +9385,7 @@ const emit = defineEmits<PackageEmits>()
         )],
     );
 
-    let _view = host.resolver_store_view();
+    let _view = host.resolver_store_view_read().into_owned_view();
     host.provenance().reset();
 
     let mut tracked_deps_first = std::collections::BTreeSet::new();
@@ -9522,7 +9523,7 @@ export interface ButtonProps {
         vec![exact_dependency("./Button.vue", "/src/Button.vue")],
     );
 
-    let _view = host.resolver_store_view();
+    let _view = host.resolver_store_view_read().into_owned_view();
     let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
@@ -9625,7 +9626,7 @@ const emit = defineEmits<PackageEmits>()
         )],
     );
 
-    let _view = host.resolver_store_view();
+    let _view = host.resolver_store_view_read().into_owned_view();
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
     let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
@@ -9712,7 +9713,7 @@ const emit = defineEmits<PackageEmits>()
         )],
     );
 
-    let _view = host.resolver_store_view();
+    let _view = host.resolver_store_view_read().into_owned_view();
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
     let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
@@ -9804,7 +9805,7 @@ export interface IconProps {
         ],
     );
 
-    let _view = host.resolver_store_view();
+    let _view = host.resolver_store_view_read().into_owned_view();
     let routes = host.required_import_routes_for_exported_route(
         "/src/types.ts",
         "Props",
@@ -9977,7 +9978,7 @@ export interface UnusedProps {
         ],
     );
 
-    let _view = host.resolver_store_view();
+    let _view = host.resolver_store_view_read().into_owned_view();
     let root = host.resolve_imported_type_root("/src/types.ts", "LinkProps");
 
     assert_eq!(
@@ -10867,7 +10868,7 @@ fn lazy_promotion_stability() {
     );
 
     // First lookup — materializes the bundle with effective target = /src/dep.d.ts.
-    let _view_before = host.resolver_store_view();
+    let _view_before = host.resolver_store_view_read().into_owned_view();
     let initial = host
         .prepared_type_decl("/src/types.ts", "Props")
         .expect("Props should prepare with lazy resolution");
@@ -10891,7 +10892,7 @@ fn lazy_promotion_stability() {
     );
 
     // After promotion, the effective target is unchanged — bundle should survive.
-    let _view_after = host.resolver_store_view();
+    let _view_after = host.resolver_store_view_read().into_owned_view();
     let after_promotion = host
         .prepared_type_decl("/src/types.ts", "Props")
         .expect("Props should still be found after lazy promotion");
@@ -10944,7 +10945,7 @@ fn atomic_rebuild_on_route_change() {
         vec![exact_dependency("./inner", "/src/inner-v1.ts")],
     );
 
-    let _view_v1 = host.resolver_store_view();
+    let _view_v1 = host.resolver_store_view_read().into_owned_view();
     let props_v1 = host
         .prepared_type_decl("/src/types.ts", "Props")
         .expect("Props should prepare pointing to v1");
@@ -10974,7 +10975,7 @@ fn atomic_rebuild_on_route_change() {
         vec![exact_dependency("./inner", "/src/inner-v2.ts")],
     );
 
-    let _view_v2 = host.resolver_store_view();
+    let _view_v2 = host.resolver_store_view_read().into_owned_view();
     let props_v2 = host
         .prepared_type_decl("/src/types.ts", "Props")
         .expect("Props should rebuild after route change");
@@ -11237,7 +11238,7 @@ fn archived_indexed_ready_rejected_when_workspace_dep_changes_content() {
     assert!(host.ensure_loaded("/src/dep.ts"));
 
     // Step 4: create a store view snapshotted AFTER the content change.
-    let _view = host.resolver_store_view();
+    let _view = host.resolver_store_view_read().into_owned_view();
 
     // Step 5: query module_facts with the store view. The validated cache
     // must NOT return the stale V1 facts from the archive.
@@ -11289,7 +11290,7 @@ fn imported_root_invalidates_on_intermediate_barrel_change() {
     );
 
     // Warm: resolve Props through the chain
-    let _view1 = host.resolver_store_view();
+    let _view1 = host.resolver_store_view_read().into_owned_view();
     let root1 = host.resolve_imported_type_root("/src/index.ts", "Props");
     assert_eq!(
         root1.0.as_str(),
@@ -11310,7 +11311,7 @@ fn imported_root_invalidates_on_intermediate_barrel_change() {
 
     // The provider (/src/index.ts) and the old leaf (/src/types-a.ts)
     // are unchanged. Only the barrel changed.
-    let _view2 = host.resolver_store_view();
+    let _view2 = host.resolver_store_view_read().into_owned_view();
     let root2 = host.resolve_imported_type_root("/src/index.ts", "Props");
     assert_eq!(
         root2.0.as_str(),

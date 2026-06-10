@@ -392,26 +392,90 @@ impl VerterHost {
         // `import_routes_known_miss_recorded_at_generation` is
         // intentionally untouched — see docstring for the
         // architectural invariant.
-        {
+        // Compare-before-insert: a positive route re-admission is a
+        // SEMANTIC NO-OP when repeated blocker hydration / concurrent
+        // resolution re-resolves the same `(owner, specifier)` to the same
+        // canonical (and the dependency edge already exists). Bumping a
+        // token dimension on a no-op needlessly invalidates the
+        // `StoreViewManager` base snapshot and forks singleflight lanes.
+        // The bump fires IFF either the route map or the dependency set
+        // actually changes a value the base store view snapshots BY VALUE.
+        //
+        // The route map is a NO-OP iff a prior entry exists AND resolves
+        // to the same canonical. The single writer here always produces
+        // `resolved_canonical_id = Some(resolved)` + a singleton
+        // `possible_canonical_ids`, so comparing `resolved_canonical_id`
+        // fully captures whether the snapshotted `ImportRoute` derived
+        // hash would change.
+        let route_changed = {
             let mut derived_ref = self
                 .derived_raw_cache()
                 .entry(owner_canonical.to_string())
                 .or_default();
-            derived_ref
+            let previous = derived_ref
                 .value_mut()
                 .import_routes
                 .insert(import_source.to_string(), resolution.clone());
-        }
-        {
+            previous
+                .map(|prev| prev.resolved_canonical_id.as_deref() != Some(resolved_canonical_id))
+                .unwrap_or(true)
+        };
+        let dependency_changed = {
             let mut dep_ref = self
                 .dependency_cache()
                 .entry(owner_canonical.to_string())
                 .or_default();
+            // `BTreeSet::insert` returns `true` iff the canonical was
+            // newly inserted (i.e. the dependency edge actually changed).
             dep_ref
                 .value_mut()
                 .dependencies
-                .insert(resolved_canonical_id.to_string());
+                .insert(resolved_canonical_id.to_string())
+        };
+
+        // A genuine positive route admission mutates
+        // `DerivedRawState.import_routes`, which the base store view
+        // snapshots BY VALUE (the `ImportRoute` derived-hash domain, via
+        // `generation_current_import_route_hash`'s `DerivedRawState`
+        // fallback). Like a first-time additive `ensure_loaded`, this is
+        // additive derived-state that does NOT publish into
+        // `FileArtifactStore` and is NOT a content/project/env mutation,
+        // so it advances the dedicated `load_generation` dimension:
+        //
+        // * It moves the FULL reuse token → a `StoreViewManager`-cached
+        //   base view built before the admission is invalidated on the
+        //   next request, so warm validation never compares against a
+        //   stale `ImportRoute` hash.
+        // * `load_generation` is EXCLUDED from `externally_superseded_by`,
+        //   so a cold compute that resolves its own import as part of its
+        //   work does not self-fence its own result promotion.
+        //
+        // bump-IFF-transition: a no-op re-admission (same route + existing
+        // dependency edge) advances NOTHING, so a manager-cached base view
+        // stays valid and concurrent callers keep coalescing on one lane.
+        if route_changed || dependency_changed {
+            self.bump_load_generation();
         }
+    }
+
+    /// Test-only shim exposing the `pub(super)`
+    /// [`Self::cache_positive_import_route_result`] producer to the
+    /// crate-root inline test modules (which cannot name a `pub(super)`
+    /// item of this submodule). Drives the exact positive-route admission
+    /// path so the store-view token-advance regression can assert the
+    /// admission moves a token dimension.
+    #[cfg(test)]
+    pub(crate) fn cache_positive_import_route_result_for_tests(
+        &self,
+        owner_canonical: &str,
+        import_source: &str,
+        resolved_canonical_id: &str,
+    ) {
+        self.cache_positive_import_route_result(
+            owner_canonical,
+            import_source,
+            resolved_canonical_id,
+        );
     }
 
     fn resolve_workspace_dependency_and_cache(

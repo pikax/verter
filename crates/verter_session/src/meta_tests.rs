@@ -474,7 +474,7 @@ fn snapshot_view_is_stale_but_coherent_after_host_changes() {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn ensure_loaded_first_time_does_not_invalidate_existing_views() {
+fn ensure_loaded_first_time_advances_the_validation_token() {
     let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
         verter_workspace::MemoryOptions::default(),
     ));
@@ -484,36 +484,42 @@ fn ensure_loaded_first_time_does_not_invalidate_existing_views() {
     );
 
     let project = make_workspace_project(ws.clone());
-    let before_view = project.host().snapshot_view();
-    let before_epoch = before_view.mutation_epoch();
+    let before_token = project.host().current_validation_token();
 
     assert!(
         project.ensure_loaded("/workspace/App.vue").unwrap(),
         "ensure_loaded should load the workspace file into the host"
     );
 
-    let after_view = project.host().snapshot_view();
-    // First-time loads are purely additive and must not bump the global mutation
-    // epoch: existing views never tracked the new file, so their facts about
-    // other files remain consistent. Bumping here would invalidate every other
-    // view-pinned read mid-query (e.g. inside ComponentMetaQueryEngine when its
-    // own `ensure_loaded` fallback warms a dependency).
-    assert_eq!(
-        before_epoch,
-        after_view.mutation_epoch(),
-        "first-time load must not advance the mutation epoch"
+    let after_token = project.host().current_validation_token();
+    // SOUNDNESS: a first-time additive load adds a
+    // scheduler node + `whole_hashes` entry and populates
+    // `derived_raw_cache` — all of which `HostStoreView::build` snapshots
+    // BY VALUE. A `StoreViewManager`-cached base snapshot built before the
+    // load does NOT track the new canonical, so the FULL reuse token MUST
+    // advance or the manager would hand a stale pre-load snapshot to the
+    // next caller and the untracked-file optimistic-accept would fossilize
+    // against it. `integrate_scheduler_snapshot` does not publish into
+    // `FileArtifactStore`, so the DEDICATED `load_generation` dimension is
+    // what moves (NOT `store_view_epoch`, which the publish fence checks —
+    // a cold compute's own dependency loads must not self-fence promotion).
+    assert_ne!(
+        before_token, after_token,
+        "first-time load MUST advance the full validation token (a manager-cached \
+         base view must be invalidated)"
+    );
+    assert_ne!(
+        before_token.load_generation, after_token.load_generation,
+        "first-time load MUST advance the dedicated load_generation token dimension"
     );
     assert_eq!(
-        before_view.compat_token(),
-        after_view.compat_token(),
-        "first-time load must not change compat tokens of existing views"
+        before_token.store_view_epoch, after_token.store_view_epoch,
+        "first-time load MUST NOT bump store_view_epoch — it is the compute's own \
+         additive work, excluded from the publish fence's external-supersession check"
     );
 
     // Reloading the same file via evict + ensure_loaded with CHANGED content IS
-    // a content-change boundary that must invalidate older views. (Per §4.6
-    // Sub-task B, reload with identical content is a no-op and does NOT bump —
-    // covered by the `ensure_loaded_reload_with_identical_content_does_not_bump_epoch`
-    // regression test in `host_manage_tests.rs`.)
+    // a content-change boundary that must advance the store_view_epoch.
     project.host().evict("/workspace/App.vue");
     ws.inject_file(
         "/workspace/App.vue".to_string(),
@@ -532,8 +538,102 @@ fn ensure_loaded_first_time_does_not_invalidate_existing_views() {
     );
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn store_view_compat_token_matches_snapshot_epoch() {
+fn byte_identical_reload_after_evict_advances_load_generation_and_invalidates_mid_evict_snapshot() {
+    // UNDER-BUMP GUARD: when an evicted file reloads with IDENTICAL
+    // bytes, the content is unchanged (R1: no epoch bump, warm caches
+    // survive). BUT the evict→present VISIBILITY transition is
+    // validator-visible: a base store view built DURING the evict window
+    // (file closed / canonical still evicted) caches a snapshot that does
+    // NOT track the file. Without a token advance on the byte-identical
+    // reload, that mid-evict snapshot's token still hits → the manager
+    // hands back a view that omits the reloaded file forever.
+    //
+    // The byte-identical reload-after-evict advances the additive
+    // `load_generation` (NOT the epoch — content is unchanged), which is
+    // in the manager REUSE oracle, so the mid-evict snapshot is
+    // invalidated; and excluded from `externally_superseded_by`, so a
+    // cold compute's own reload does not self-fence promotion.
+    //
+    // DISCRIMINATION: a byte-identical branch that bumped NOTHING would
+    // leave (a) `load_generation` unchanged across the reload AND (b) the
+    // mid-evict snapshot built under the post-evict token still validating
+    // (its token matched the live token), so `cached_token()` would be
+    // unchanged after the reload. `load_generation` advances and the
+    // mid-evict cached token no longer matches.
+    let identical = sfc("msg: string");
+    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/workspace/App.vue".to_string(),
+        Arc::from(identical.as_str()),
+    );
+    let project = make_workspace_project(ws.clone());
+
+    assert!(
+        project.ensure_loaded("/workspace/App.vue").unwrap(),
+        "first load must succeed"
+    );
+
+    // Evict the file (`evict()` bumps the epoch). Build a base store view
+    // DURING the evict window and warm the manager cache with it — this is
+    // the snapshot whose token must be INVALIDATED by the reload (or a
+    // concurrent reader keeps hitting it after the file is restored).
+    project.host().evict("/workspace/App.vue");
+    let _mid_evict_view = project.host().snapshot_view();
+    let mid_evict_token = project
+        .host()
+        .store_view_manager()
+        .cached_token()
+        .expect("manager must have a warm base view built during the evict window");
+    let before_reload_load_gen = mid_evict_token.load_generation;
+    let before_reload_epoch = mid_evict_token.store_view_epoch;
+
+    // Reload with BYTE-IDENTICAL content.
+    assert!(
+        project.ensure_loaded("/workspace/App.vue").unwrap(),
+        "evicted file must reload via ensure_loaded"
+    );
+
+    let after_reload_token = project.host().current_validation_token();
+    // The byte-identical reload-after-evict advances the additive
+    // load_generation. A byte-identical branch that bumped NOTHING would
+    // fail this assertion (load_generation unchanged).
+    assert_ne!(
+        before_reload_load_gen, after_reload_token.load_generation,
+        "a byte-identical reload-after-evict MUST advance the additive load_generation \
+         (the evict→present visibility transition is validator-visible)"
+    );
+    assert_eq!(
+        before_reload_epoch, after_reload_token.store_view_epoch,
+        "a byte-identical reload-after-evict MUST NOT bump store_view_epoch — the \
+         content is unchanged (R1); only the additive load_generation moves"
+    );
+    // The mid-evict snapshot's FULL token no longer matches the live
+    // token (load_generation advanced), so the manager REUSE oracle
+    // invalidates it — the next reader rebuilds instead of being handed
+    // the stale mid-evict view.
+    assert_ne!(
+        mid_evict_token, after_reload_token,
+        "the mid-evict snapshot token MUST be invalidated by the reload (the manager \
+         reuse oracle includes load_generation), so a snapshot built mid-evict is \
+         never re-served after the file is restored"
+    );
+    // …but the byte-identical reload must NOT count as an EXTERNAL
+    // supersession: the reload is the host's own additive work, and
+    // load_generation is excluded from `externally_superseded_by` so a
+    // cold compute's own reload does not self-fence promotion.
+    assert!(
+        !mid_evict_token.externally_superseded_by(&after_reload_token),
+        "a byte-identical reload is the host's own additive work — it must NOT count \
+         as an EXTERNAL supersession (load_generation is excluded from the fence)"
+    );
+}
+
+#[test]
+fn store_view_compat_token_matches_snapshot_epoch_and_external_supersession_fingerprint() {
     let project = make_project();
     project
         .upsert_base("/App.vue", &sfc("msg: string"))
@@ -541,13 +641,28 @@ fn store_view_compat_token_matches_snapshot_epoch() {
 
     let view = project.host().snapshot_view();
 
+    // The compat (coalescing-lane) token threads the snapshot epoch + a
+    // `None` session for a base view, AND folds the EXTERNAL-supersession
+    // dimensions of the `StoreViewValidationToken` into `validity_fingerprint`
+    // (the SAME oracle the promotion fence `is_stable` applies) so two views
+    // whose EXTERNAL validity differs in a dimension `epoch` does not cover
+    // (env / identity / project / overlay) never share a singleflight /
+    // stability lane.
+    let expected_fingerprint = view.validation_token_for_tests().lane_fingerprint();
     assert_eq!(
         view.compat_token(),
         crate::resolver_core::StoreViewCompatToken {
             epoch: view.mutation_epoch(),
-            session: None
+            session: None,
+            validity_fingerprint: expected_fingerprint,
         },
-        "v1 store-view compatibility must be exact snapshot epoch equality"
+        "the compat token must thread the snapshot epoch + the external-supersession fingerprint"
+    );
+    assert_ne!(
+        view.compat_token().validity_fingerprint,
+        0,
+        "a real base view's compat token MUST carry a non-zero external-supersession \
+         fingerprint (the lane identity gates on external dims, not epoch-only)"
     );
 }
 
@@ -1780,7 +1895,7 @@ import Child from './Child.vue'
             .host()
             .resolver_runtime()
             .fallthrough
-            .get_cached_node(&key, &project.host().resolver_store_view())
+            .get_cached_node(&key, &project.host().resolver_store_view_read().into_owned_view())
             .is_some(),
         "top-level fallthrough should live only in runtime nodes once runtime owns top-level authority"
     );
@@ -2030,7 +2145,7 @@ defineProps<{
         )
         .unwrap();
 
-    let _view = project.host().resolver_store_view();
+    let _view = project.host().resolver_store_view_read().into_owned_view();
     assert_eq!(
         project
             .host()
@@ -14016,7 +14131,7 @@ defineSlots<ButtonSlots>()
         .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("component meta resolution should warm the prepared-decl route");
 
-    let _store_view = project.host().resolver_store_view();
+    let _store_view = project.host().resolver_store_view_read().into_owned_view();
     let component_config = project
         .host()
         .prepared_type_decl("/src/types.ts", "ComponentConfig")
@@ -15738,7 +15853,7 @@ defineProps<{
         }],
     );
 
-    let _store_view = project.host().resolver_store_view();
+    let _store_view = project.host().resolver_store_view_read().into_owned_view();
     let prepared = project
         .host()
         .prepared_type_decl("/src/types.ts", "StringOrVNode")
@@ -15852,7 +15967,7 @@ defineProps<{
         }],
     );
 
-    let store_view = project.host().resolver_store_view();
+    let store_view = project.host().resolver_store_view_read().into_owned_view();
     let prepared = project
         .host()
         .prepared_type_decl("/src/types.ts", "StringOrVNode")

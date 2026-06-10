@@ -3513,6 +3513,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 | SemanticNodeData::TypeOf { .. }
                 | SemanticNodeData::Conditional { .. }
                 | SemanticNodeData::Alias(_)
+                // Un-resolved reference carriers. Navigate / Skeleton body
+                // lowering deliberately preserves a no-args named reference
+                // as a `DeclRef` / `InstantiationRef` shell (cycle-BFS
+                // visibility — the carrier-preservation branch in
+                // `lower.rs`), so a COLD reduce-demanded keyof can receive
+                // one as its operand. Per this builder's contract
+                // (documented at the `materialize_through_aliases` KeyOf
+                // bridge arm), an un-resolved reference operand returns the
+                // DEFERRED carrier — the bridge surfaces the operand through
+                // the shared empty-path projection and re-dispatches —
+                // rather than degrading the whole reduction to a
+                // `semanticMiss` terminal.
+                | SemanticNodeData::DeclRef { .. }
+                | SemanticNodeData::InstantiationRef { .. }
                 | SemanticNodeData::Opaque(QueryError::DeclPlaceholder { .. }),
             ) => self.graph().intern_node(SemanticNodeData::KeyOf { base }),
             _ => self.opaque(QueryError::Miss),

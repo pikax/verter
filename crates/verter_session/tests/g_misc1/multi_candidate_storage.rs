@@ -53,6 +53,7 @@ fn view_with(facts: &[FactVersionRef]) -> TestView {
         token: StoreViewCompatToken {
             epoch: 1,
             session: None,
+            validity_fingerprint: 0,
         },
         valid_facts: facts.iter().cloned().collect(),
     }

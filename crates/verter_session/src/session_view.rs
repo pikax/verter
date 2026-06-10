@@ -479,6 +479,22 @@ pub struct OverlaidView {
     overlay_hashes: Arc<FxHashMap<String, Hash16>>,
     base: Arc<VerterHost>,
     env_hashes: EnvHashes,
+    /// Overlay-set fingerprint, computed LAZILY on the first
+    /// [`SessionView::fingerprint`] read via [`overlay_set_fingerprint`]
+    /// over the immutable `overlay_hashes` map, then memoized for the
+    /// view's lifetime — no per-call collect + sort + hash, and ZERO
+    /// computations for a view that never reads the fingerprint (e.g. an
+    /// analysis-only request, whose path never touches it). The overlay
+    /// map is behind an `Arc` and never mutated in place (R17 — mutation
+    /// builds a new view), so the lazily-computed value is correct for
+    /// the view's whole lifetime. The cell is `OnceLock` (NOT `OnceCell`)
+    /// because the view is shared across rayon worker threads during a
+    /// batch and so MUST be `Sync`; concurrent first-readers are handled
+    /// by `OnceLock::get_or_init` (one computes, the rest block then read
+    /// the same value). `Clone` copies the cell's contents, so a cloned
+    /// view either carries the already-computed value or recomputes the
+    /// identical value on its own first read.
+    overlay_set_fingerprint: std::sync::OnceLock<u64>,
 }
 
 impl OverlaidView {
@@ -501,6 +517,10 @@ impl OverlaidView {
             overlay_hashes: Arc::new(overlay_hashes),
             base,
             env_hashes,
+            // Lazy: computed on the first `fingerprint()` read through the
+            // single shared algorithm, then memoized. A view that never
+            // reads the fingerprint never pays the collect + sort + hash.
+            overlay_set_fingerprint: std::sync::OnceLock::new(),
         }
     }
 
@@ -518,6 +538,8 @@ impl OverlaidView {
             overlay_hashes,
             base,
             env_hashes,
+            // Lazy: see `Self::new`.
+            overlay_set_fingerprint: std::sync::OnceLock::new(),
         }
     }
 
@@ -624,7 +646,15 @@ impl SessionView for OverlaidView {
     }
 
     fn fingerprint(&self) -> u64 {
-        overlay_set_fingerprint(self.overlay_hashes.as_ref(), None)
+        // Lazily memoized (see `Self::overlay_set_fingerprint`): computed
+        // on the first read through the single shared algorithm, then
+        // returned directly with no recompute. The overlay map is
+        // immutable for this view's lifetime, so the first-read value is
+        // correct for the whole lifetime. `OverlaidView` carries no
+        // tombstone set, so `None` is passed.
+        *self.overlay_set_fingerprint.get_or_init(|| {
+            overlay_set_fingerprint(&self.overlay_hashes, None, self.base.provenance())
+        })
     }
 
     fn overlay_canonicals(&self) -> Vec<String> {
@@ -733,6 +763,26 @@ pub struct OverlaidViewRef<'a> {
     overlay_tombstones: &'a std::collections::HashSet<String>,
     base: &'a VerterHost,
     env_hashes: EnvHashes,
+    /// Overlay-set fingerprint, computed LAZILY on the first
+    /// [`SessionView::fingerprint`] read via [`overlay_set_fingerprint`]
+    /// over the immutable `overlay_hashes` map + `overlay_tombstones`
+    /// set, then memoized for the view's lifetime — no per-call collect +
+    /// sort + hash, and ZERO computations for a view that never reads the
+    /// fingerprint. The analysis-only path (`get_analysis` →
+    /// [`crate::meta::MetaSession::with_overlay_view`] →
+    /// `get_analysis_via_view`) reads only tombstone / source / overlay
+    /// content hash and never calls `fingerprint()`, so it pays nothing;
+    /// the cache-key paths (component-meta / payload) read it once on
+    /// first use and reuse the memo. The view holds the overlay maps as
+    /// immutable borrows for its (single query-scoped) lifetime, so the
+    /// first-read value is correct for the whole lifetime. A session
+    /// mutation builds a NEW view over NEW maps, so the memo can never go
+    /// stale — there is no in-place mutation path. The cell is `OnceLock`
+    /// (NOT `OnceCell`) because the view is shared across rayon worker
+    /// threads during a batch and so MUST be `Sync`; concurrent
+    /// first-readers are handled by `OnceLock::get_or_init` (one computes,
+    /// the rest block then read the same value).
+    overlay_set_fingerprint: std::sync::OnceLock<u64>,
 }
 
 impl<'a> OverlaidViewRef<'a> {
@@ -755,6 +805,12 @@ impl<'a> OverlaidViewRef<'a> {
             overlay_tombstones,
             base,
             env_hashes,
+            // Lazy: computed on the first `fingerprint()` read through the
+            // single shared algorithm, then memoized. An analysis-only
+            // request never reads it, so it pays nothing; the cache-key
+            // paths read it once on first use. The O(N²) per-query
+            // recompute the batch path paid is gone either way.
+            overlay_set_fingerprint: std::sync::OnceLock::new(),
         }
     }
 
@@ -876,7 +932,21 @@ impl SessionView for OverlaidViewRef<'_> {
     }
 
     fn fingerprint(&self) -> u64 {
-        overlay_set_fingerprint(self.overlay_hashes, Some(self.overlay_tombstones))
+        // Lazily memoized (see `Self::overlay_set_fingerprint`): computed
+        // on the first read through the single shared algorithm, then
+        // returned directly with no recompute. The overlay maps are
+        // immutable for this view's lifetime, so the first-read value is
+        // correct for the whole lifetime. On the hot batch path every
+        // per-job `cache_key` / warm-probe / store after the first reads
+        // the memo O(1); an analysis-only view that never calls this pays
+        // nothing.
+        *self.overlay_set_fingerprint.get_or_init(|| {
+            overlay_set_fingerprint(
+                self.overlay_hashes,
+                Some(self.overlay_tombstones),
+                self.base.provenance(),
+            )
+        })
     }
 
     fn overlay_canonicals(&self) -> Vec<String> {
@@ -1005,19 +1075,45 @@ fn overlay_artifact_discriminator_from_fingerprint(fingerprint: u64) -> Hash16 {
 /// overlay set return the same fingerprint regardless of insertion
 /// order.
 ///
-/// `fingerprint()` invokes this on every call. The function is
-/// pure over its inputs (the overlay map and the tombstone set) and
-/// views are immutable after construction, so repeated calls on the
-/// same view return the same value. The cost is bounded by the
-/// overlay-set cardinality — only canonicals the session has
-/// upserted or tombstoned participate — not by workspace size.
+/// This fold is the [`SessionView::fingerprint`] surface identity — the
+/// `u64` used for cache-key derivation and the augmentation-population
+/// identity. It is one of TWO overlay-set folds in this crate: the other
+/// is the validation-token overlay identity
+/// (`OverlayIdentity::overlay_fingerprint`, built in
+/// `resolver_store.rs::with_session_overlay`), a `Hash16` fold with
+/// per-entry tombstone/upsert domain markers that discriminates
+/// validation-token (singleflight-lane) identities. The two serve
+/// different surfaces with different layouts and output widths; they are
+/// deliberately NOT unified — changing either fold changes that surface's
+/// identity values. Overlay views
+/// ([`OverlaidView`], [`OverlaidViewRef`]) memoize the result LAZILY in a
+/// [`std::sync::OnceLock`]: the first [`SessionView::fingerprint`] read
+/// computes it through this function, and every later read returns the
+/// stored value with no recompute. A view that never reads its
+/// fingerprint (e.g. an analysis-only request) never calls this function
+/// at all. The function is pure over its inputs (the overlay map and the
+/// tombstone set) and the views hold those maps immutably for their
+/// lifetime, so the first-read value stays correct for the view's whole
+/// lifetime. The cost is bounded by the overlay-set cardinality — only
+/// canonicals the session has upserted or tombstoned participate — not by
+/// workspace size.
+///
+/// `provenance` counts each FULL computation (the collect + sort + hash
+/// body, NOT the empty short-circuit) on the owning host via
+/// [`crate::types::MetaProvenance::overlay_set_fingerprint_full_computations`],
+/// so both the per-batch O(1) memoization AND the zero-cost analysis-only
+/// path are mechanically observable.
 fn overlay_set_fingerprint(
     overlay_hashes: &FxHashMap<String, Hash16>,
     tombstones: Option<&std::collections::HashSet<String>>,
+    provenance: &crate::types::MetaProvenance,
 ) -> u64 {
     if overlay_hashes.is_empty() && tombstones.is_none_or(std::collections::HashSet::is_empty) {
         return 0;
     }
+    provenance
+        .overlay_set_fingerprint_full_computations
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     use std::hash::{Hash, Hasher};
     let mut entries: Vec<(&str, [u8; 16])> = overlay_hashes
         .iter()
@@ -1197,6 +1293,164 @@ mod tests {
         // (compares against an explicit sentinel value).
         assert!(assert_dyn(host_view.as_ref()));
         assert!(assert_dyn(overlaid.as_ref()));
+    }
+
+    /// The memoized `view.fingerprint()` equals a fresh
+    /// `overlay_set_fingerprint(...)` recomputation over the SAME overlay
+    /// maps — proving the memo carries the value the single shared
+    /// algorithm produces (no second algorithm, no divergence). Holds for
+    /// both the Arc-based `OverlaidView` and the borrow-based
+    /// `OverlaidViewRef` (the hot path, with a tombstone set).
+    #[test]
+    fn memoized_fingerprint_matches_fresh_overlay_set_fingerprint() {
+        let host = fresh_host();
+        upsert(&host, "/a.ts", "export const a = 1;");
+        upsert(&host, "/b.ts", "export const b = 2;");
+
+        // Arc-based OverlaidView.
+        let mut overlays_arc: FxHashMap<String, Arc<str>> = FxHashMap::default();
+        overlays_arc.insert("/a.ts".to_string(), Arc::from("export const a = 9;"));
+        overlays_arc.insert("/b.ts".to_string(), Arc::from("export const b = 8;"));
+        let arc_view = OverlaidView::new(Arc::clone(&host), overlays_arc);
+        let fresh_arc =
+            overlay_set_fingerprint(arc_view.overlay_hashes.as_ref(), None, host.provenance());
+        assert_eq!(
+            arc_view.fingerprint(),
+            fresh_arc,
+            "OverlaidView memoized fingerprint must equal a fresh recomputation \
+             over the same overlay-hash map",
+        );
+
+        // Borrow-based OverlaidViewRef WITH a tombstone (the hot path).
+        let mut overlays: FxHashMap<String, Arc<str>> = FxHashMap::default();
+        overlays.insert("/a.ts".to_string(), Arc::from("export const a = 9;"));
+        let mut overlay_hashes: FxHashMap<String, Hash16> = FxHashMap::default();
+        overlay_hashes.insert(
+            "/a.ts".to_string(),
+            crate::hash::hash_16(b"export const a = 9;"),
+        );
+        let mut tombstones: std::collections::HashSet<String> = std::collections::HashSet::new();
+        tombstones.insert("/b.ts".to_string());
+        let ref_view = OverlaidViewRef::new(&host, &overlays, &overlay_hashes, &tombstones);
+        let fresh_ref =
+            overlay_set_fingerprint(&overlay_hashes, Some(&tombstones), host.provenance());
+        assert_eq!(
+            ref_view.fingerprint(),
+            fresh_ref,
+            "OverlaidViewRef memoized fingerprint must equal a fresh \
+             recomputation over the same overlay-hash map + tombstone set",
+        );
+        assert_ne!(
+            ref_view.fingerprint(),
+            0,
+            "a non-empty overlay set must not collapse to the base sentinel 0",
+        );
+    }
+
+    /// The memoized fingerprint NEVER goes stale: a different overlay set
+    /// yields a different fingerprint, the SAME overlay set yields the
+    /// SAME fingerprint, and a tombstone is fingerprint-significant. Each
+    /// view memoizes the fingerprint of the EXACT immutable maps it was
+    /// constructed from, so a session mutation (which builds a fresh view
+    /// over fresh maps) is reflected — a stale value can never be served.
+    #[test]
+    fn memoized_fingerprint_tracks_overlay_set_changes() {
+        let host = fresh_host();
+        upsert(&host, "/a.ts", "export const a = 1;");
+        upsert(&host, "/b.ts", "export const b = 2;");
+
+        let empty_overlays: FxHashMap<String, Arc<str>> = FxHashMap::default();
+        let empty_hashes: FxHashMap<String, Hash16> = FxHashMap::default();
+        let no_tombstones: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        // Empty overlay set → base sentinel 0 (no behavior change for base
+        // sessions).
+        let base_view = OverlaidViewRef::new(&host, &empty_overlays, &empty_hashes, &no_tombstones);
+        assert_eq!(
+            base_view.fingerprint(),
+            0,
+            "empty overlay set + no tombstones must fingerprint to 0",
+        );
+
+        // Overlay set {a}.
+        let mut overlays_a: FxHashMap<String, Arc<str>> = FxHashMap::default();
+        overlays_a.insert("/a.ts".to_string(), Arc::from("export const a = 9;"));
+        let mut hashes_a: FxHashMap<String, Hash16> = FxHashMap::default();
+        hashes_a.insert(
+            "/a.ts".to_string(),
+            crate::hash::hash_16(b"export const a = 9;"),
+        );
+        let view_a = OverlaidViewRef::new(&host, &overlays_a, &hashes_a, &no_tombstones);
+        let fp_a = view_a.fingerprint();
+
+        // A SECOND view over the IDENTICAL overlay set → IDENTICAL
+        // fingerprint (order-independent, stable). Distinct view value,
+        // distinct memo slot, same algorithm input → same output.
+        let view_a2 = OverlaidViewRef::new(&host, &overlays_a, &hashes_a, &no_tombstones);
+        assert_eq!(
+            fp_a,
+            view_a2.fingerprint(),
+            "two views over the same overlay set must produce the same \
+             fingerprint (the memo is per-view but the value is a pure \
+             function of the overlay set)",
+        );
+
+        // Overlay set {a, b}: adding a second overlay entry MUST change
+        // the fingerprint (a stale memo would keep reporting fp_a).
+        let mut overlays_ab = overlays_a.clone();
+        overlays_ab.insert("/b.ts".to_string(), Arc::from("export const b = 8;"));
+        let mut hashes_ab = hashes_a.clone();
+        hashes_ab.insert(
+            "/b.ts".to_string(),
+            crate::hash::hash_16(b"export const b = 8;"),
+        );
+        let view_ab = OverlaidViewRef::new(&host, &overlays_ab, &hashes_ab, &no_tombstones);
+        let fp_ab = view_ab.fingerprint();
+        assert_ne!(
+            fp_a, fp_ab,
+            "adding a second overlay entry must change the fingerprint — a \
+             stale memo serving the old set's value is a wrong-cache-hit risk",
+        );
+
+        // Tombstoning a canonical (overlay set {a} + tombstone {b}) MUST
+        // differ from both {a} and {a,b} — the tombstone domain separator
+        // is fingerprint-significant.
+        let mut tombstone_b: std::collections::HashSet<String> = std::collections::HashSet::new();
+        tombstone_b.insert("/b.ts".to_string());
+        let view_a_tomb_b = OverlaidViewRef::new(&host, &overlays_a, &hashes_a, &tombstone_b);
+        let fp_a_tomb_b = view_a_tomb_b.fingerprint();
+        assert_ne!(
+            fp_a, fp_a_tomb_b,
+            "adding a tombstone must change the fingerprint vs the same \
+             overlay set with no tombstone",
+        );
+        assert_ne!(
+            fp_ab, fp_a_tomb_b,
+            "an overlay {{a}} + tombstone {{b}} must not collide with an \
+             overlay {{a, b}} (the tombstone domain separator distinguishes \
+             them)",
+        );
+
+        // Changing an overlay's CONTENT hash (same canonical, different
+        // body) MUST change the fingerprint.
+        let mut overlays_a_changed: FxHashMap<String, Arc<str>> = FxHashMap::default();
+        overlays_a_changed.insert("/a.ts".to_string(), Arc::from("export const a = 777;"));
+        let mut hashes_a_changed: FxHashMap<String, Hash16> = FxHashMap::default();
+        hashes_a_changed.insert(
+            "/a.ts".to_string(),
+            crate::hash::hash_16(b"export const a = 777;"),
+        );
+        let view_a_changed = OverlaidViewRef::new(
+            &host,
+            &overlays_a_changed,
+            &hashes_a_changed,
+            &no_tombstones,
+        );
+        assert_ne!(
+            fp_a,
+            view_a_changed.fingerprint(),
+            "changing an overlay's content hash must change the fingerprint",
+        );
     }
 
     #[test]

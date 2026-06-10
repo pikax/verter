@@ -371,6 +371,7 @@ mod tests {
             token: StoreViewCompatToken {
                 epoch: token,
                 session: None,
+                validity_fingerprint: 0,
             },
             valid_facts: facts.into_iter().collect(),
         }

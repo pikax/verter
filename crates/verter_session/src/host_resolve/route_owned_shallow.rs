@@ -224,9 +224,14 @@ impl VerterHost {
         // pattern at host_manage.rs:3725–3743 — uses `()` error type, returns
         // `Option` at the outer fn.
         let canonical_arc: Arc<str> = Arc::from(canonical_id);
+        // Fixed lane identity: this singleflight is keyed by `canonical_arc`
+        // and re-checks freshness inside the flight (STEP 3), so all callers
+        // intentionally coalesce onto one lane per canonical regardless of
+        // view — `validity_fingerprint` stays `0`.
         let token = crate::resolver_core::StoreViewCompatToken {
             epoch: 0,
             session: None,
+            validity_fingerprint: 0,
         };
         let materialize =
             || -> Result<Arc<crate::project_type_store::RouteOwnedShallowEntry>, ()> {
@@ -613,7 +618,16 @@ impl VerterHost {
         dep_canonical: &str,
         requested_name: &str,
     ) -> Option<(String, String)> {
-        let live_view = self.resolver_store_view();
+        // Test-only convenience: seed the resolve-and-cache method with a
+        // cold-seed view (either `StoreViewRead` arm). Production
+        // warm-validation of this route cache runs at the ctx-bound
+        // request boundary, fenced by the outer publish token recheck;
+        // these bare wrappers serve only direct-`host` test fixtures and
+        // never churn the token mid-resolution.
+        let live_view = self
+            .resolver_store_view_read()
+            .into_cold_seed_view()
+            .into_inner();
         self.resolve_named_type_export_target_with_store_view(
             &live_view,
             dep_canonical,

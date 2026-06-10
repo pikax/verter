@@ -175,6 +175,7 @@ impl AcceptAllView {
             token: StoreViewCompatToken {
                 epoch,
                 session: None,
+                validity_fingerprint: 0,
             },
         }
     }
@@ -533,6 +534,7 @@ fn augmenter_publish_invalidates_downstream_via_artifact_api() {
         token: StoreViewCompatToken {
             epoch: 2,
             session: None,
+            validity_fingerprint: 0,
         },
         target_spec: "vue".to_owned(),
         stale_fingerprint: initial_fingerprint,
@@ -610,6 +612,7 @@ fn augmenter_publish_invalidates_downstream_via_artifact_api() {
         token: StoreViewCompatToken {
             epoch: 3,
             session: None,
+            validity_fingerprint: 0,
         },
         target_spec: "vue".to_owned(),
         new_fingerprint,
@@ -716,6 +719,7 @@ fn edit_augmenting_file_invalidates_consumer() {
         token: StoreViewCompatToken {
             epoch: 2,
             session: None,
+            validity_fingerprint: 0,
         },
         edited_canonical: "/aug.ts".to_owned(),
         new_hash: [99u8; 16], // post-edit hash
@@ -818,6 +822,7 @@ fn edit_unrelated_file_does_not_invalidate_consumer() {
         token: StoreViewCompatToken {
             epoch: 2,
             session: None,
+            validity_fingerprint: 0,
         },
         aug_canonical: "/aug.ts".to_owned(),
         aug_hash,
@@ -1071,6 +1076,7 @@ impl SessionScopedView {
             token: StoreViewCompatToken {
                 epoch,
                 session: Some(session),
+                validity_fingerprint: 0,
             },
         }
     }
@@ -2166,6 +2172,7 @@ impl StoreView for SessionContentView {
         StoreViewCompatToken {
             epoch: 1,
             session: Some(self.session),
+            validity_fingerprint: 0,
         }
     }
     fn validates(&self, fact: &FactVersionRef) -> bool {

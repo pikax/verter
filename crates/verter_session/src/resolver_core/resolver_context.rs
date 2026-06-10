@@ -628,7 +628,7 @@ impl ResolverContext for crate::VerterHost {
         // via a one-shot owned-view rebuild.
         #[cfg(any(test, debug_assertions))]
         {
-            let view = crate::VerterHost::resolver_store_view(self);
+            let view = crate::VerterHost::resolver_store_view(self).into_owned_view();
             crate::VerterHost::prepared_decl_bundle_with_store_view(self, &view, canonical_id)
         }
         #[cfg(not(any(test, debug_assertions)))]
@@ -649,7 +649,7 @@ impl ResolverContext for crate::VerterHost {
     ) -> Option<Arc<PreparedTypeDecl>> {
         #[cfg(any(test, debug_assertions))]
         {
-            let view = crate::VerterHost::resolver_store_view(self);
+            let view = crate::VerterHost::resolver_store_view(self).into_owned_view();
             crate::VerterHost::prepared_type_decl_with_store_view(
                 self,
                 &view,
@@ -675,7 +675,7 @@ impl ResolverContext for crate::VerterHost {
     ) -> Option<Arc<PreparedValueDecl>> {
         #[cfg(any(test, debug_assertions))]
         {
-            let view = crate::VerterHost::resolver_store_view(self);
+            let view = crate::VerterHost::resolver_store_view(self).into_owned_view();
             crate::VerterHost::prepared_value_decl_with_store_view(
                 self,
                 &view,
@@ -734,7 +734,12 @@ impl ResolverContext for crate::VerterHost {
     #[track_caller]
     fn resolver_store_view(&self) -> HostStoreView {
         crate::request_context::bump_resolver_store_view_call();
-        crate::VerterHost::resolver_store_view(self)
+        // Bare-host validation rail (the `!is_request_bound()` arm of the
+        // fact-signature helpers, reachable only when no request-bound
+        // context was installed — production reaches the `store_view()`
+        // panic instead). Hand back the proven-current base view for the
+        // fact validation; under churn it falls to the cold-seed's inner.
+        crate::VerterHost::resolver_store_view(self).into_owned_view()
     }
 
     #[inline]
@@ -774,7 +779,7 @@ impl ResolverContext for crate::VerterHost {
         // builds reach the `cfg(not(test))` panic arm below.
         #[cfg(any(test, debug_assertions))]
         {
-            let view = crate::VerterHost::resolver_store_view(self);
+            let view = crate::VerterHost::resolver_store_view(self).into_owned_view();
             let leaked: &'static HostStoreView = Box::leak(Box::new(view));
             leaked as &dyn crate::resolver_core::StoreView
         }
@@ -812,7 +817,7 @@ impl ResolverContext for crate::VerterHost {
         // to perform inline.
         #[cfg(any(test, debug_assertions))]
         {
-            let view = crate::VerterHost::resolver_store_view(self);
+            let view = crate::VerterHost::resolver_store_view(self).into_owned_view();
             crate::VerterHost::resolve_imported_type_root_with_store_view(
                 self,
                 &view,
@@ -839,7 +844,7 @@ impl ResolverContext for crate::VerterHost {
     ) -> Option<(String, String)> {
         #[cfg(any(test, debug_assertions))]
         {
-            let view = crate::VerterHost::resolver_store_view(self);
+            let view = crate::VerterHost::resolver_store_view(self).into_owned_view();
             crate::VerterHost::resolve_named_type_export_target_with_store_view(
                 self,
                 &view,
@@ -865,7 +870,7 @@ impl ResolverContext for crate::VerterHost {
     ) -> Option<(String, String)> {
         #[cfg(any(test, debug_assertions))]
         {
-            let view = crate::VerterHost::resolver_store_view(self);
+            let view = crate::VerterHost::resolver_store_view(self).into_owned_view();
             crate::VerterHost::resolve_named_type_export_target_shallow_with_store_view(
                 self,
                 &view,
@@ -891,7 +896,7 @@ impl ResolverContext for crate::VerterHost {
     ) -> Option<(String, String)> {
         #[cfg(any(test, debug_assertions))]
         {
-            let view = crate::VerterHost::resolver_store_view(self);
+            let view = crate::VerterHost::resolver_store_view(self).into_owned_view();
             crate::VerterHost::resolve_owner_direct_import_with_store_view(
                 self,
                 &view,

@@ -6509,7 +6509,8 @@ fn cross_view_joiner_forks_when_winner_carrier_fails_follower_validation() {
         );
         let session_store_view = follower_host
             .as_ref()
-            .resolver_store_view()
+            .resolver_store_view_read()
+            .into_owned_view()
             .with_session_overlay(follower_host.as_ref(), &view);
         let session_ctx = SessionResolverContext::new(
             follower_host.as_ref(),
@@ -6903,7 +6904,8 @@ fn cross_view_joiner_of_suppressed_overflow_winner_forks() {
         );
         let session_store_view = follower_host
             .as_ref()
-            .resolver_store_view()
+            .resolver_store_view_read()
+            .into_owned_view()
             .with_session_overlay(follower_host.as_ref(), &view);
         let session_ctx = SessionResolverContext::new(
             follower_host.as_ref(),
@@ -7168,7 +7170,8 @@ fn cross_view_joiner_of_suppressed_unrootable_winner_forks() {
         );
         let session_store_view = follower_host
             .as_ref()
-            .resolver_store_view()
+            .resolver_store_view_read()
+            .into_owned_view()
             .with_session_overlay(follower_host.as_ref(), &view);
         let session_ctx = SessionResolverContext::new(
             follower_host.as_ref(),
@@ -7454,7 +7457,8 @@ fn cross_view_joiner_of_nonsuppressed_miss_winner_without_self_root_forks() {
         );
         let session_store_view = follower_host
             .as_ref()
-            .resolver_store_view()
+            .resolver_store_view_read()
+            .into_owned_view()
             .with_session_overlay(follower_host.as_ref(), &view);
         let session_ctx = SessionResolverContext::new(
             follower_host.as_ref(),

@@ -90,7 +90,7 @@ fn session_node_misses_when_no_slot_present() {
     let node = CompileOutputNodeFactValidatedSession::new();
     let state = ProfileState::default();
     let semantic = [0u8; 16];
-    let hit = node.lookup(&state, 42, &semantic, 0, 0, |_| true);
+    let hit = node.lookup(&state, 42, &semantic, 0, 0, || Some(()), |_, _| true);
     assert!(hit.is_none(), "no slot for profile_hash → no warm hit");
 }
 
@@ -102,7 +102,7 @@ fn session_publish_then_lookup_round_trips_under_matching_hashes() {
     let admission = SignatureAdmission::Cacheable(ReadSetSignature::new(empty_fact_signature()));
     let outcome = node.publish(&mut state, 42, admission, value(semantic), 0);
     assert_eq!(outcome, SessionPublishOutcome::Admitted);
-    let hit = node.lookup(&state, 42, &semantic, 0, 0, |_| true);
+    let hit = node.lookup(&state, 42, &semantic, 0, 0, || Some(()), |_, _| true);
     assert!(hit.is_some(), "matching hashes → warm hit");
 }
 
@@ -115,7 +115,7 @@ fn session_lookup_misses_when_semantic_hash_differs() {
     node.publish(&mut state, 42, admission, value(semantic), 0);
     // Live semantic_hash differs → miss.
     let other = [0xFF; 16];
-    let hit = node.lookup(&state, 42, &other, 0, 0, |_| true);
+    let hit = node.lookup(&state, 42, &other, 0, 0, || Some(()), |_, _| true);
     assert!(
         hit.is_none(),
         "differing semantic_hash MUST miss the warm slot"
@@ -134,16 +134,129 @@ fn session_lookup_misses_when_validate_facts_returns_false() {
     let admission = SignatureAdmission::Cacheable(ReadSetSignature::new(facts));
     node.publish(&mut state, 42, admission, value(semantic), 0);
 
-    let hit = node.lookup(&state, 42, &semantic, 0, 0, |_sig| false);
+    let hit = node.lookup(&state, 42, &semantic, 0, 0, || Some(()), |_, _sig| false);
     assert!(
         hit.is_none(),
         "fact-validation closure returning false MUST miss the warm slot"
     );
 
-    let hit = node.lookup(&state, 42, &semantic, 0, 0, |_sig| true);
+    let hit = node.lookup(&state, 42, &semantic, 0, 0, || Some(()), |_, _sig| true);
     assert!(
         hit.is_some(),
         "fact-validation closure returning true → warm hit"
+    );
+}
+
+#[test]
+fn session_lookup_skips_acquire_view_until_cheap_predicates_pass() {
+    use std::cell::Cell;
+
+    // The store-view read is the expensive gate. `lookup` must invoke
+    // `acquire_view` ONLY after its cheap predicates (slot present for the
+    // profile, carrier cacheable, semantic/override hashes match) confirm a
+    // candidate slot worth validating. A cold miss (no slot) and a hash
+    // mismatch must reject WITHOUT calling `acquire_view`; a genuine hit must
+    // call it exactly once. This pins, in-module and independent of host
+    // wiring, the lazy-acquire contract the compile-path warm-validation sites
+    // depend on to avoid a full-workspace sweep on the cold/profile-miss path.
+    let node = CompileOutputNodeFactValidatedSession::new();
+    let semantic = [0x12u8; 16];
+
+    // 1. No slot for the profile → acquire_view must NOT run.
+    let empty = ProfileState::default();
+    let acquired = Cell::new(0u32);
+    let hit = node.lookup(
+        &empty,
+        42,
+        &semantic,
+        0,
+        0,
+        || {
+            acquired.set(acquired.get() + 1);
+            Some(())
+        },
+        |_, _| true,
+    );
+    assert!(hit.is_none(), "no slot for profile_hash → miss");
+    assert_eq!(
+        acquired.get(),
+        0,
+        "a cold miss (no slot) MUST reject before paying for the view read"
+    );
+
+    // 2. Slot present but the live semantic_hash mismatches → acquire_view
+    //    must NOT run (the cheap hash check rejects first).
+    let mut state = ProfileState::default();
+    let admission = SignatureAdmission::Cacheable(ReadSetSignature::new(empty_fact_signature()));
+    node.publish(&mut state, 42, admission, value(semantic), 0);
+    let other = [0xFFu8; 16];
+    let acquired = Cell::new(0u32);
+    let hit = node.lookup(
+        &state,
+        42,
+        &other,
+        0,
+        0,
+        || {
+            acquired.set(acquired.get() + 1);
+            Some(())
+        },
+        |_, _| true,
+    );
+    assert!(hit.is_none(), "hash mismatch → miss");
+    assert_eq!(
+        acquired.get(),
+        0,
+        "a hash mismatch MUST reject before paying for the view read"
+    );
+
+    // 3. Slot present AND hashes match → acquire_view runs exactly once,
+    //    even though the fact rail is empty (the currentness proof gates
+    //    every hit, including empty-fact slots).
+    let acquired = Cell::new(0u32);
+    let hit = node.lookup(
+        &state,
+        42,
+        &semantic,
+        0,
+        0,
+        || {
+            acquired.set(acquired.get() + 1);
+            Some(())
+        },
+        |_, _| true,
+    );
+    assert!(hit.is_some(), "matching hashes + current view → warm hit");
+    assert_eq!(
+        acquired.get(),
+        1,
+        "a genuine hit MUST acquire the view exactly once, even for an \
+         empty-fact slot"
+    );
+
+    // 4. A non-current view (`acquire_view` yields None) misses to cold even
+    //    when the cheap predicates pass — the currentness gate.
+    let acquired = Cell::new(0u32);
+    let hit = node.lookup(
+        &state,
+        42,
+        &semantic,
+        0,
+        0,
+        || {
+            acquired.set(acquired.get() + 1);
+            None::<()>
+        },
+        |_, _| true,
+    );
+    assert!(
+        hit.is_none(),
+        "a non-current view (acquire_view -> None) MUST miss to cold"
+    );
+    assert_eq!(
+        acquired.get(),
+        1,
+        "acquire_view runs once even when it then yields a non-current view"
     );
 }
 
@@ -155,7 +268,9 @@ fn session_publish_non_cacheable_removes_prior_slot() {
     // First publish: cacheable.
     let admission = SignatureAdmission::Cacheable(ReadSetSignature::new(empty_fact_signature()));
     node.publish(&mut state, 42, admission, value(semantic), 0);
-    assert!(node.lookup(&state, 42, &semantic, 0, 0, |_| true).is_some());
+    assert!(node
+        .lookup(&state, 42, &semantic, 0, 0, || Some(()), |_, _| true)
+        .is_some());
 
     // Second publish: NonCacheable (overflow). Must REMOVE the prior
     // slot so the carrier invariant `present ⇒ admitted cacheable`
@@ -168,7 +283,8 @@ fn session_publish_non_cacheable_removes_prior_slot() {
         other => panic!("expected Refused(SignatureOverflow), got {other:?}"),
     }
     assert!(
-        node.lookup(&state, 42, &semantic, 0, 0, |_| true).is_none(),
+        node.lookup(&state, 42, &semantic, 0, 0, || Some(()), |_, _| true)
+            .is_none(),
         "non-cacheable publish MUST drop the prior slot"
     );
 }

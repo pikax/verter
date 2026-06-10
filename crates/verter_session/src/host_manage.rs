@@ -32,6 +32,7 @@ pub(crate) mod component_meta_extract;
 // the `*_inner` audited variants). Belongs in host-impl tier per
 // sub-
 pub(crate) mod component_meta_methods;
+pub(crate) mod import_route_currency;
 // Moved from `meta_resolve/request_host.rs`. The file holds
 // `impl ComponentMetaRequestHost for VerterHost` and the session-scoped
 // variant `impl ComponentMetaRequestHost for SessionRequestHost<'_>`.
@@ -747,17 +748,30 @@ impl FallthroughRequestHost for VerterHost {
     }
 
     fn snapshot_store_view(&self) -> Self::View {
-        self.resolver_store_view()
+        // The fallthrough request driver gates currentness through
+        // `snapshot_store_view_read` + `snapshot_view_is_current`; this
+        // owned-view accessor hands back the cold-seed's inner view.
+        self.resolver_store_view_read()
+            .into_cold_seed_view()
+            .into_inner()
     }
 
-    fn view_mutation_epoch(&self, store_view: &Self::View) -> u64 {
-        store_view.mutation_epoch()
+    fn snapshot_store_view_read(&self) -> (Self::View, bool) {
+        self.resolver_store_view_with_currentness()
     }
 
-    fn current_store_view_epoch(&self) -> u64 {
-        VerterHost::current_store_view_epoch(self)
+    fn current_view_supersession_fingerprint(&self) -> u64 {
+        self.current_external_supersession_fingerprint()
     }
 
+    /// NESTED-cold validator: invoked only as the fallthrough request
+    /// driver's pre-flight `try_get_cached` peek, which `run_stable_request`
+    /// gates on `snapshot_view_is_current()` (a `StoreViewRead::ReturnOnly`
+    /// snapshot suppresses the warm peek) with the executor's `is_stable`
+    /// fence re-checking the external-supersession token before promotion.
+    /// The `store_view` is therefore the request-bound cold-seed view (raw,
+    /// not `Current`) by design — the outer fence owns currentness, so this
+    /// validator legitimately reads through the seed view.
     fn try_get_cached_fallthrough(
         &self,
         canonical_id: &str,
@@ -851,6 +865,7 @@ impl FallthroughRequestHost for VerterHost {
         prop_type_overrides: Option<&rustc_hash::FxHashMap<String, verter_type_expr::TypeExpr>>,
         visiting: &mut rustc_hash::FxHashSet<String>,
         store_view: &Self::View,
+        base_is_current: bool,
     ) -> Option<Self::Resolution> {
         // The trait-method signature is tightened to
         // require a request-bound `store_view` (no `Option`) — the
@@ -862,8 +877,26 @@ impl FallthroughRequestHost for VerterHost {
         // → executor → `compute(view)` with a request-bound view. There
         // is no production caller that arrives without a view; any
         // future caller must thread one through.
+        //
+        // Build the request-bound `HostResolverContext` from the executor's
+        // snapshot. `store_view` and `base_is_current` are the executor's
+        // SINGLE-read pair (its `snapshot_view` destructured one
+        // `StoreViewRead` and threaded both into `compute`), so re-binding
+        // them through `StoreViewRead::from_executor_snapshot` keeps
+        // currentness intrinsic to the seed: on a non-current (`ReturnOnly`)
+        // snapshot the context's `validates*` family fails closed, so the
+        // fallthrough resolver's per-element / per-child / per-root
+        // node-cache validation (which reads through `ctx.store_view()`)
+        // MISSES rather than consuming a stale warm hit. The outer
+        // `is_stable` / publish fence still gates promotion.
         let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let host_ctx = crate::resolver_core::HostResolverContext::new(self, store_view, overlay);
+        let cold_seed = crate::resolver_store::StoreViewRead::from_executor_snapshot(
+            store_view.clone(),
+            base_is_current,
+        )
+        .into_cold_seed_view();
+        let host_ctx =
+            crate::resolver_core::HostResolverContext::from_cold_seed(self, &cold_seed, overlay);
         let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &host_ctx;
         VerterHost::compute_fallthrough_surface_uncached(
             self,
@@ -888,15 +921,6 @@ pub(in crate::host_manage) struct HostFallthroughResolver<'a> {
     pub(in crate::host_manage) host: &'a VerterHost,
     pub(in crate::host_manage) parent_canonical_id: &'a str,
     pub(in crate::host_manage) parent_snapshot: &'a FileAnalysisSnapshot,
-    /// Request-scoped `HostStoreView`, built once at the fallthrough
-    /// request boundary and shared across every per-element /
-    /// per-child / per-branch cache validation. Eliminates the
-    /// per-lookup owned-view rebuild that the previous shape paid in
-    /// `intrinsic_members_for_tag`, `resolve_child_fallthrough`, and
-    /// `resolve_root_consumption` (the audit's #2 hottest bypass —
-    /// these methods fire ~per template element × per conditional
-    /// branch on nuxt-ui's Button template).
-    pub(in crate::host_manage) live_view: crate::resolver_store::HostStoreView,
     /// Request-bound resolver context plumbed from the cold-compute
     /// entry-point (`get_component_meta` / `..._via_view` /
     /// `..._with_resolution`). The per-element fallthrough engine
@@ -905,10 +929,23 @@ pub(in crate::host_manage) struct HostFallthroughResolver<'a> {
     /// bind to this ctx so cache validators inside the engine read
     /// through the overlay-aware
     /// [`crate::resolver_core::HostResolverContext`] instead of paying
-    /// a fresh workspace-sweep cost per call. Production callers
-    /// (`get_component_meta` / `..._via_view` / `..._with_resolution`)
-    /// supply a real ctx; tests / off-path callers go through
-    /// `with_bare_host_ctx_for_test` to construct one.
+    /// a fresh workspace-sweep cost per call.
+    ///
+    /// `ctx.store_view()` is ALSO the per-element / per-child / per-root
+    /// fallthrough-NODE cache validation view (see
+    /// `intrinsic_members_for_tag`, `resolve_child_fallthrough`,
+    /// `resolve_root_consumption`). It is the request-bound
+    /// `RequestStoreView` built once at the cold-compute boundary — a
+    /// borrow, not a per-lookup rebuild — and it CARRIES the seed's
+    /// currentness: when the cold compute's seed is non-current, every
+    /// `validates*` through it fails closed, so a stale warm
+    /// fallthrough-node hit is never consumed. A separate raw
+    /// `live_view: HostStoreView` field (re-read from the store view,
+    /// currentness dropped) was the leak this routing closes.
+    ///
+    /// Production callers (`get_component_meta` / `..._via_view` /
+    /// `..._with_resolution`) supply a real request-bound ctx; tests /
+    /// off-path callers go through `with_bare_host_ctx_for_test`.
     pub(in crate::host_manage) ctx: &'a dyn crate::resolver_core::resolver_context::ResolverContext,
 }
 
@@ -929,15 +966,18 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
             tag,
         );
 
-        // Use the request-scoped view from the resolver struct (built
-        // once at the fallthrough request boundary) instead of
-        // rebuilding a full owned `HostStoreView` per intrinsic-tag
-        // lookup — these fire ~per template element on nuxt-ui's Button.
+        // Validate through the request-bound `ctx.store_view()` (a borrow
+        // into the cold compute's currentness-gated `RequestStoreView`,
+        // built once at the request boundary) instead of rebuilding a full
+        // owned `HostStoreView` per intrinsic-tag lookup — these fire ~per
+        // template element on nuxt-ui's Button. On a non-current cold-seed
+        // the view fails its `validates*` closed, so a stale warm hit is
+        // never consumed.
         if let Some(node) = self
             .host
             .resolver_runtime()
             .fallthrough
-            .get_cached_node(&cache_key, &self.live_view)
+            .get_cached_node(&cache_key, &self.ctx.store_view())
         {
             if let Some(members) = self.host.runtime_intrinsic_node_to_members(node) {
                 return members;
@@ -1041,14 +1081,14 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
                 .unwrap_or_default(),
         );
 
-        // Use the request-scoped view from the resolver struct (see
+        // Validate through the request-bound `ctx.store_view()` (see
         // `intrinsic_members_for_tag` note) — eliminates the per-child
-        // owned-view rebuild on every fallthrough lookup.
+        // owned-view rebuild and fails closed on a non-current cold-seed.
         if let Some(node) = self
             .host
             .resolver_runtime()
             .fallthrough
-            .get_cached_node(&cache_key, &self.live_view)
+            .get_cached_node(&cache_key, &self.ctx.store_view())
         {
             if let Some(resolution) = self.host.runtime_child_node_to_resolution(node) {
                 return Some(resolution);
@@ -1093,14 +1133,15 @@ impl FallthroughComputeHost for HostFallthroughResolver<'_> {
             branch_key,
         );
 
-        // Use the request-scoped view from the resolver struct (see
+        // Validate through the request-bound `ctx.store_view()` (see
         // `intrinsic_members_for_tag` note) — eliminates the per-root-
-        // binding owned-view rebuild on every consumed-bindings lookup.
+        // binding owned-view rebuild and fails closed on a non-current
+        // cold-seed.
         if let Some(node) = self
             .host
             .resolver_runtime()
             .fallthrough
-            .get_cached_node(&cache_key, &self.live_view)
+            .get_cached_node(&cache_key, &self.ctx.store_view())
         {
             if let Some(resolved) = self.host.runtime_consumed_bindings_to_resolution(node) {
                 return resolved;

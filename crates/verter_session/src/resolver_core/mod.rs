@@ -130,15 +130,56 @@ pub use shallow_file_state::{
 };
 pub use surface_projector::{project_macro_surfaces, ProjectedMacroSurfaces, ResolvedNativeProp};
 
-/// Lane-identity token for singleflight deduplication.
+/// Lane-identity token for singleflight / stability-request
+/// deduplication.
 ///
-/// Carries session identity in addition to the epoch so two sessions
-/// with different overlays but the same epoch do not coalesce into
-/// the same singleflight lane.
+/// This token is the SOLE identity `run_stable_request` (and the
+/// `SingleflightGroup` lanes it drives) coalesce on, and a FOLLOWER
+/// receives the LEADER's stable result WITHOUT revalidating it against
+/// the follower's own view. The token must therefore be a COMPLETE
+/// validity oracle: two requests may coalesce onto one lane ONLY if
+/// their views are validation-equivalent.
+///
+/// `epoch` + `session` alone are NOT complete — a view's EXTERNAL
+/// validity can change (env-hash / project-identity / project-generation /
+/// overlay) WITHOUT moving the `store_view_epoch`. `validity_fingerprint`
+/// closes that hole: the production
+/// [`crate::resolver_store::HostStoreView`] folds the EXTERNAL-supersession
+/// dimensions of its `StoreViewValidationToken` into it (the SAME oracle
+/// the executors' promotion fence `is_stable` compares), so two views that
+/// would externally-supersede each other get distinct lane identities and
+/// never wrongly coalesce. Test / permissive stubs leave it `0` (their
+/// views are validation-trivial).
+///
+/// The additive `artifact_generation` / `route_owned_generation` /
+/// `load_generation` are DELIBERATELY EXCLUDED from the fold: a cold
+/// compute advances those generations as its OWN work (publishing
+/// artifacts, loading dependencies), so two concurrent identical cold
+/// requests legitimately observe different additive generations. Folding
+/// them would split those identical requests across distinct lanes and
+/// spawn multiple cold winners instead of one leader + N-1 dedup-joining
+/// followers — the same self-fencing the promotion oracle avoids. A
+/// follower on the same external lane IS validation-equivalent: the leader
+/// only promotes when the external dimensions are coherent.
+///
+/// `epoch` and `session` are retained as separate fields because callers
+/// read them directly (e.g. the route-surface validator inspects
+/// `session` to reject session views; the snapshot identity threads
+/// `epoch`). `validity_fingerprint` is additive: it tightens lane
+/// identity without changing what those reads observe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct StoreViewCompatToken {
     pub epoch: u64,
     pub session: Option<u64>,
+    /// Fold of the EXTERNAL-supersession dimensions of the
+    /// `StoreViewValidationToken` the view was built under (epoch,
+    /// project-generation, env-hash, project-identity, overlay). `0` for
+    /// validation-trivial stub views. Folds every external validity-
+    /// affecting dimension that `epoch` alone does not cover — and excludes
+    /// the additive artifact / route-owned / load generations a cold
+    /// compute advances as its own work — so the singleflight / stability
+    /// coalescing lane is the SAME oracle the promotion fence applies.
+    pub validity_fingerprint: u64,
 }
 
 pub trait StoreView {
@@ -298,14 +339,86 @@ pub trait StoreView {
     }
 }
 
+/// Forward [`StoreView`] through a shared reference, including the unsized
+/// `&dyn StoreView` form.
+///
+/// This lets a generic `view: &V where V: StoreView` validator accept a
+/// `ctx.store_view()` borrow (`&dyn StoreView`) directly — e.g. the
+/// fallthrough resolver validates per-element / per-child / per-root
+/// node-cache entries through `self.ctx.store_view()` so the validation
+/// rides the request-bound, currentness-gated `RequestStoreView` rather
+/// than a separately-rebuilt raw `HostStoreView`. Every method just
+/// re-dispatches to the referent.
+impl<T: StoreView + ?Sized> StoreView for &T {
+    #[inline]
+    fn compat_token(&self) -> StoreViewCompatToken {
+        (**self).compat_token()
+    }
+    #[inline]
+    fn validates(&self, fact: &FactVersionRef) -> bool {
+        (**self).validates(fact)
+    }
+    #[inline]
+    fn validates_parse_domain(&self, fact: &ParseFactRef) -> bool {
+        (**self).validates_parse_domain(fact)
+    }
+    #[inline]
+    fn validates_resolve_imports_domain(&self, fact: &ResolveImportsFactRef) -> bool {
+        (**self).validates_resolve_imports_domain(fact)
+    }
+    #[inline]
+    fn validates_route_surface_domain(&self, fact: &RouteSurfaceFactRef) -> bool {
+        (**self).validates_route_surface_domain(fact)
+    }
+    #[inline]
+    fn validates_self_root_whole_hash(&self, canonical_id: &str, hash: &ResolverHash16) -> bool {
+        (**self).validates_self_root_whole_hash(canonical_id, hash)
+    }
+    #[inline]
+    fn tracks_file(&self, canonical_id: &str) -> bool {
+        (**self).tracks_file(canonical_id)
+    }
+    #[inline]
+    fn derived_hash_for(
+        &self,
+        canonical_id: &str,
+        kind: DerivedFactKind,
+    ) -> Option<ResolverHash16> {
+        (**self).derived_hash_for(canonical_id, kind)
+    }
+    #[inline]
+    fn validates_fact_signature(&self, sig: &[FactVersionRef]) -> bool {
+        (**self).validates_fact_signature(sig)
+    }
+    #[inline]
+    fn promote_route_owned_completion(
+        &self,
+        canonical: &str,
+        whole_hash: crate::types::Hash16,
+        route_hash: Option<crate::types::Hash16>,
+        import_route_hash: Option<crate::types::Hash16>,
+    ) {
+        (**self).promote_route_owned_completion(
+            canonical,
+            whole_hash,
+            route_hash,
+            import_route_hash,
+        )
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PermissiveStoreView;
 
 impl StoreView for PermissiveStoreView {
     fn compat_token(&self) -> StoreViewCompatToken {
+        // Validation-trivial: `validates` accepts every fact, so any
+        // coalescing under this view is safe — `validity_fingerprint`
+        // stays `0`.
         StoreViewCompatToken {
             epoch: 0,
             session: None,
+            validity_fingerprint: 0,
         }
     }
 
@@ -564,6 +677,61 @@ where
 
     fn cache_key(&self) -> K;
     fn snapshot_view(&mut self) -> Self::View;
+    /// Whether the view the most recent [`Self::snapshot_view`] returned
+    /// was proven current by the underlying store-view manager.
+    ///
+    /// [`run_stable_request`] consults this to gate THREE decisions, not
+    /// one. A non-current snapshot (the manager handed back a known-stale
+    /// `StoreViewRead::ReturnOnly` view under sustained churn) must:
+    ///
+    /// 1. **never serve a warm cache hit** — validating a cache entry's
+    ///    fact signature against a stale view false-positives a superseded
+    ///    result;
+    /// 2. **never join the result-sharing singleflight** — the lane key's
+    ///    `compat_token` excludes the additive generations, so a
+    ///    non-current snapshot's token can still equal a lane an earlier
+    ///    current request retained a stable result on; joining it would
+    ///    Follower-return that pre-mutation result without running
+    ///    `compute` or `is_stable`;
+    /// 3. **never warm the shared cache** — its `is_stable` fence is false,
+    ///    so its own cold result is returned-only.
+    ///
+    /// So on a non-current snapshot the driver bypasses the lane entirely
+    /// and runs an isolated cold `compute` whose `is_stable` fence gates
+    /// promotion.
+    ///
+    /// REQUIRED (no default): `true` is a soundness claim that opens all
+    /// three gates above — a defaulted `true` would let an executor whose
+    /// snapshots CAN be non-current, but which forgets the override,
+    /// silently launder stale snapshots as proven-current. Executors
+    /// without a churn-prone manager (test stubs) state `true` explicitly.
+    fn snapshot_view_is_current(&self) -> bool;
+    /// Whether [`Self::snapshot_view`] returns an IMMUTABLE snapshot — the
+    /// same view, currentness, and supersession fingerprint on every
+    /// attempt, with no re-read of live host state.
+    ///
+    /// This is `true` only for a caller-pinned FIXED snapshot (e.g. the
+    /// component-meta batch's `BatchFixedView`). For such a snapshot a
+    /// result that is not [`Self::is_stable`] on the FIRST attempt can NEVER
+    /// become stable on a later one: the snapshot, its captured fingerprint,
+    /// and its captured currentness are frozen, so neither the
+    /// non-current-capture gate nor the captured-vs-live fingerprint gate can
+    /// flip across attempts. [`run_stable_request`] therefore returns the
+    /// first fenced (return-only) result immediately for an immutable
+    /// snapshot instead of recomputing it `max_attempts + 1` times — the
+    /// retries cannot converge and only waste cold compute (and the
+    /// request's projection budget). A CURRENT + fingerprint-MATCHING fixed
+    /// snapshot is stable on the first attempt and promotes exactly as
+    /// before; the short-circuit fires ONLY on an unstable immutable result.
+    ///
+    /// The default returns `false`: a per-attempt snapshot (the `None`
+    /// fixed-view path, and every test stub) re-reads live state on each
+    /// attempt, so a later attempt may legitimately obtain a freshly-coherent
+    /// snapshot and promote (the churn-then-settle case) — those executors
+    /// MUST keep retrying.
+    fn snapshot_is_immutable(&self) -> bool {
+        false
+    }
     fn try_get_cached(&mut self, view: &Self::View) -> Option<V>;
     fn compute(&mut self, view: &Self::View) -> Result<V, Self::Error>;
     fn is_stable(&mut self, view: &Self::View) -> bool;
@@ -588,6 +756,67 @@ where
 
     for attempt in 0..max_attempts {
         let store_view = executor.snapshot_view();
+        // Currentness of THIS attempt's snapshot. A non-current snapshot
+        // (the manager handed back a known-stale `ReturnOnly` view under
+        // sustained churn) must NOT serve a warm cache hit: validating a
+        // cache entry's fact signature against a stale view false-positives
+        // a superseded result. When false, every warm `try_get_cached`
+        // peek on this attempt is suppressed and the request falls to the
+        // cold flight, whose `is_stable` fence gates promotion.
+        let snapshot_is_current = executor.snapshot_view_is_current();
+
+        // A non-current snapshot must not only skip the warm probe — it
+        // must also stay OUT of the result-sharing singleflight. The lane
+        // key is `(cache_key, compat_token)`, and `compat_token`
+        // deliberately excludes the additive artifact / route-owned / load
+        // generations (so two identical cold computes coalesce). A snapshot
+        // can therefore be non-current — the manager could not prove this
+        // attempt's view coherent — while its `compat_token` still equals a
+        // lane an earlier CURRENT request retained a stable `Done` on. If
+        // this non-current attempt pinned and `run`-joined that lane it
+        // would Follower-return the earlier flight's value WITHOUT running
+        // `compute` or the `is_stable` fence — a post-mutation request
+        // receiving a pre-mutation result.
+        //
+        // So a non-current attempt runs its OWN cold compute OFF the shared
+        // lane, under its own `is_stable` promotion fence. It never joins,
+        // is never joined, and only a `stable` result warms the shared
+        // cache (`store_stable`) — a non-current/incoherent snapshot's
+        // `is_stable` is false, so its result is returned-only. Crucially
+        // this mirrors the on-lane unstable-result path's retry semantics:
+        // an UNSTABLE off-lane result does NOT terminate the request — the
+        // bounded outer loop continues to the next attempt, which may
+        // snapshot a freshly-coherent view and promote (the churn-then-
+        // settle case). Only a STABLE off-lane result returns immediately.
+        // The loop is bounded by `max_attempts`; on exhaustion the post-
+        // loop fallback returns a return-only result.
+        if !snapshot_is_current {
+            let value = executor.compute(&store_view)?;
+            if executor.is_stable(&store_view) {
+                executor.store_stable(&value);
+                return Ok(RequestRunResult {
+                    value,
+                    source: RequestSource::Fallback,
+                    attempts: attempt + 1,
+                });
+            }
+            // Unstable off-lane result. For a per-attempt snapshot, retry on
+            // the next attempt (bounded) — a later attempt may snapshot a
+            // freshly-coherent view and promote (churn-then-settle). For an
+            // IMMUTABLE snapshot (a caller-pinned fixed view) the next attempt
+            // re-presents the SAME non-current capture, so it can never
+            // converge to stable — retrying only re-runs the cold compute and
+            // burns projection budget. Return the first fenced (return-only)
+            // result now.
+            if executor.snapshot_is_immutable() {
+                return Ok(RequestRunResult {
+                    value,
+                    source: RequestSource::Fallback,
+                    attempts: attempt + 1,
+                });
+            }
+            continue;
+        }
 
         // Pin the singleflight lane for THIS attempt's whole lifetime,
         // BEFORE the pre-flight cache peek and the inner `run` claim, on
@@ -617,6 +846,10 @@ where
         // pre-bump result is no longer interchangeable).
         let _participation = singleflight.participate(cache_key.clone(), store_view.compat_token());
 
+        // The current path is the ONLY path that reaches here — a
+        // non-current snapshot returned above without pinning or joining a
+        // lane, so the participate pin and the `run_retaining` join below
+        // coalesce ONLY proven-current attempts on the same lane.
         if let Some(cached) = executor.try_get_cached(&store_view) {
             return Ok(RequestRunResult {
                 value: cached,
@@ -629,6 +862,10 @@ where
             cache_key.clone(),
             store_view.compat_token(),
             || {
+                // The leader is proven-current (the non-current branch
+                // returned before pinning), so the warm peek here is safe:
+                // a hit it retains as a `stable` rendezvous for followers
+                // was validated against a current view.
                 if let Some(cached) = executor.try_get_cached(&store_view) {
                     return Ok(StableExecutionValue {
                         value: cached,
@@ -678,6 +915,22 @@ where
             return Ok(RequestRunResult {
                 value: flight.value.value.clone(),
                 source,
+                attempts: attempt + 1,
+            });
+        }
+
+        // The on-lane flight produced an UNSTABLE result (e.g. a fixed view
+        // whose captured fingerprint no longer matches the live one). For a
+        // per-attempt snapshot the loop continues — a later attempt may
+        // snapshot fresh coherent state and promote. For an IMMUTABLE snapshot
+        // the next attempt re-presents the SAME stale capture, so the fence
+        // can never flip to stable; return the first fenced (return-only)
+        // result now instead of recomputing it every remaining attempt plus
+        // the fallback.
+        if executor.snapshot_is_immutable() {
+            return Ok(RequestRunResult {
+                value: flight.value.value.clone(),
+                source: RequestSource::Fallback,
                 attempts: attempt + 1,
             });
         }
@@ -2060,6 +2313,11 @@ mod tests {
         computes: usize,
         max_attempts: usize,
         last_stable: bool,
+        /// Currentness this executor reports from
+        /// [`StableRequestExecutor::snapshot_view_is_current`]. Defaults
+        /// to `true`; the non-current-lane-isolation test sets it `false`
+        /// to model the manager handing back a `ReturnOnly` seed.
+        current: bool,
     }
 
     impl TestRequestExecutor {
@@ -2078,7 +2336,15 @@ mod tests {
                 computes: 0,
                 max_attempts,
                 last_stable: true,
+                current: true,
             }
+        }
+
+        /// Mark this executor's snapshot as non-current (the manager could
+        /// not prove the view current — a `ReturnOnly` seed).
+        fn non_current(mut self) -> Self {
+            self.current = false;
+            self
         }
 
         fn view(&self) -> TestView {
@@ -2099,6 +2365,10 @@ mod tests {
 
         fn snapshot_view(&mut self) -> Self::View {
             self.view()
+        }
+
+        fn snapshot_view_is_current(&self) -> bool {
+            self.current
         }
 
         fn try_get_cached(&mut self, view: &Self::View) -> Option<usize> {
@@ -2143,6 +2413,7 @@ mod tests {
             token: StoreViewCompatToken {
                 epoch: 3,
                 session: None,
+                validity_fingerprint: 0,
             },
             valid_facts: [fact].into_iter().collect(),
         };
@@ -2169,6 +2440,7 @@ mod tests {
             token: StoreViewCompatToken {
                 epoch: 4,
                 session: None,
+                validity_fingerprint: 0,
             },
             valid_facts: FxHashSet::default(),
         };
@@ -2177,22 +2449,41 @@ mod tests {
     }
 
     #[test]
-    fn compat_token_is_exact_snapshot_epoch_in_v1() {
+    fn compat_token_identity_includes_validity_fingerprint() {
+        // The coalescing-lane token is a COMPLETE oracle: equal iff every
+        // dimension matches. Two tokens with the SAME epoch + session but
+        // a DIFFERENT `validity_fingerprint` (a validity-affecting change
+        // the epoch does not cover — artifact / route / load generation,
+        // env, identity, overlay) must NOT compare equal, so they never
+        // share a singleflight/stability lane.
         let first = StoreViewCompatToken {
             epoch: 10,
             session: None,
+            validity_fingerprint: 0,
         };
-        let second = StoreViewCompatToken {
+        let same = StoreViewCompatToken {
             epoch: 10,
             session: None,
+            validity_fingerprint: 0,
         };
-        let third = StoreViewCompatToken {
+        let diff_epoch = StoreViewCompatToken {
             epoch: 11,
             session: None,
+            validity_fingerprint: 0,
+        };
+        let diff_fingerprint = StoreViewCompatToken {
+            epoch: 10,
+            session: None,
+            validity_fingerprint: 0xDEAD_BEEF,
         };
 
-        assert_eq!(first, second);
-        assert_ne!(first, third);
+        assert_eq!(first, same);
+        assert_ne!(first, diff_epoch);
+        assert_ne!(
+            first, diff_fingerprint,
+            "a token differing only in validity_fingerprint MUST NOT compare equal — \
+             else two views with distinct complete tokens would wrongly coalesce"
+        );
     }
 
     #[test]
@@ -2204,6 +2495,7 @@ mod tests {
             StoreViewCompatToken {
                 epoch: 5,
                 session: None,
+                validity_fingerprint: 0,
             },
             3,
         );
@@ -2229,6 +2521,7 @@ mod tests {
             StoreViewCompatToken {
                 epoch: 5,
                 session: None,
+                validity_fingerprint: 0,
             },
             3,
         );
@@ -2266,6 +2559,7 @@ mod tests {
             StoreViewCompatToken {
                 epoch: 5,
                 session: None,
+                validity_fingerprint: 0,
             },
             2,
         );
@@ -2279,6 +2573,117 @@ mod tests {
         assert_eq!(result.attempts, 3);
         assert_eq!(executor.computes, 3);
         assert!(executor.published.is_empty());
+    }
+
+    /// A non-current snapshot must NEVER receive a retained flight's
+    /// result as a follower. The lane key folds `compat_token`, which
+    /// excludes the additive generations — so a snapshot the manager could
+    /// not prove current (a `ReturnOnly` seed: the FULL validation token
+    /// drifted on an additive dimension) can still carry a `compat_token`
+    /// equal to a lane an earlier CURRENT request retained a stable result
+    /// on. If the non-current request joined that retained lane it would
+    /// follower-return the pre-mutation value WITHOUT running `compute` or
+    /// the `is_stable` promotion fence.
+    ///
+    /// DISCRIMINATES: pre-fix, `run_stable_request` pinned and
+    /// `run_retaining`-joined the lane regardless of currentness, so the
+    /// non-current request returned the retained value (`computes == 0`,
+    /// `value == 7`). Post-fix, a non-current snapshot bypasses the shared
+    /// lane entirely and runs its OWN cold compute (`computes == 1`,
+    /// `value == 99`), and because the snapshot is non-current its
+    /// `is_stable` fence is false so nothing is promoted.
+    #[test]
+    fn non_current_snapshot_does_not_join_retained_flight() {
+        let token = StoreViewCompatToken {
+            epoch: 7,
+            session: None,
+            validity_fingerprint: 0,
+        };
+        let singleflight =
+            SingleflightGroup::<String, StableExecutionValue<usize>, &'static str>::default();
+
+        // Plant a RETAINED stable `Done` for ("node", token) carrying the
+        // stale value 7, kept joinable by an explicit participation pin
+        // (as a concurrent burst member would hold). This is exactly the
+        // lane an earlier current request would have retained.
+        let _pin = singleflight.participate("node".to_string(), token);
+        let leader = singleflight
+            .run_retaining(
+                "node".to_string(),
+                token,
+                || {
+                    Ok(StableExecutionValue {
+                        value: 7usize,
+                        stable: true,
+                        computed: true,
+                    })
+                },
+                |sev| sev.stable,
+            )
+            .unwrap();
+        assert_eq!(leader.role, SingleflightRole::Leader);
+        assert_eq!(leader.value.value, 7);
+        assert!(
+            leader.value.stable,
+            "the planted flight must be retained as stable"
+        );
+
+        // A NON-CURRENT request for the SAME key whose view carries the
+        // SAME compat_token. Its snapshot is non-current, modelling the
+        // production state where the manager could not prove the view
+        // coherent — so `is_stable` is false (it must not promote) and the
+        // bounded loop falls through to the post-loop fallback. The cache
+        // starts empty, so the ONLY way it could ever surface the retained
+        // flight's value `7` is by joining that lane — which it must not.
+        // Each off-lane attempt computes its own value; `max_attempts = 2`
+        // ⇒ 2 unstable in-loop attempts (99, 100) then the post-loop
+        // fallback (101).
+        let mut executor = TestRequestExecutor::new("node", token, 2).non_current();
+        executor.compute_values.extend([99, 100, 101]);
+        executor.stability.extend([false, false, false]);
+
+        let result = run_stable_request(&singleflight, &mut executor).unwrap();
+
+        assert!(
+            executor.computes >= 1,
+            "a non-current request MUST run its OWN cold compute, not join the retained flight \
+             (computes = {})",
+            executor.computes,
+        );
+        assert_ne!(
+            result.value, 7,
+            "JOIN-LAYER LEAK: a post-mutation (non-current) request received the retained \
+             flight's pre-mutation result (7) — it must compute its own value off the lane",
+        );
+        assert!(
+            [99, 100, 101].contains(&result.value),
+            "a non-current request MUST return one of its OWN computed values, got {}",
+            result.value,
+        );
+        assert_eq!(
+            result.source,
+            RequestSource::Fallback,
+            "a non-current request runs off the shared lane (Fallback), it is not a Flight join",
+        );
+        assert!(
+            executor.published.is_empty(),
+            "a non-current (is_stable=false) snapshot's result MUST NOT be promoted",
+        );
+
+        // The retained flight is still intact for a genuinely-current
+        // joiner — the non-current request neither consumed nor mutated it.
+        let mut current_joiner = TestRequestExecutor::new("node", token, 3);
+        current_joiner.compute_values.push_back(123);
+        current_joiner.stability.push_back(true);
+        let joined = run_stable_request(&singleflight, &mut current_joiner).unwrap();
+        assert_eq!(
+            current_joiner.computes, 0,
+            "a current joiner reuses the retained flight"
+        );
+        assert_eq!(
+            joined.value, 7,
+            "a current joiner receives the retained value"
+        );
     }
 
     #[test]
@@ -2300,6 +2705,7 @@ mod tests {
                             StoreViewCompatToken {
                                 epoch: 7,
                                 session: None,
+                                validity_fingerprint: 0,
                             },
                             || {
                                 computes.fetch_add(1, Ordering::SeqCst);
@@ -2360,6 +2766,7 @@ mod tests {
         let token = StoreViewCompatToken {
             epoch: 9,
             session: None,
+            validity_fingerprint: 0,
         };
         let computes = AtomicUsize::new(0);
 
@@ -2423,6 +2830,7 @@ mod tests {
         let token = StoreViewCompatToken {
             epoch: 3,
             session: None,
+            validity_fingerprint: 0,
         };
         let computes = AtomicUsize::new(0);
 
@@ -2517,9 +2925,15 @@ mod tests {
                 token: StoreViewCompatToken {
                     epoch: 1,
                     session: Some(self.session_id),
+                    validity_fingerprint: 0,
                 },
                 valid_facts: [self.shared.valid_fact.clone()].into_iter().collect(),
             }
+        }
+
+        // No churn-prone manager: every snapshot is current by construction.
+        fn snapshot_view_is_current(&self) -> bool {
+            true
         }
 
         fn try_get_cached(&mut self, view: &Self::View) -> Option<usize> {
@@ -2657,6 +3071,7 @@ mod tests {
         let run_lane = StoreViewCompatToken {
             epoch: 1,
             session: Some(SESSION_ID),
+            validity_fingerprint: 0,
         };
         let leader_baseline = singleflight.test_flight_strong_count(&"node".to_string(), run_lane);
         assert_eq!(
@@ -2805,6 +3220,7 @@ mod tests {
         let run_lane = StoreViewCompatToken {
             epoch: 4,
             session: Some(SESSION_ID),
+            validity_fingerprint: 0,
         };
 
         // --- Matched lane (the fix): pin lane == run lane == Some(id). ---
@@ -2854,6 +3270,7 @@ mod tests {
             let none_lane = StoreViewCompatToken {
                 epoch: 4,
                 session: None,
+                validity_fingerprint: 0,
             };
             let group = SingleflightGroup::<String, usize, &'static str>::default();
             let computes = AtomicUsize::new(0);
@@ -2901,10 +3318,12 @@ mod tests {
             StoreViewCompatToken {
                 epoch: 1,
                 session: None,
+                validity_fingerprint: 0,
             },
             StoreViewCompatToken {
                 epoch: 2,
                 session: None,
+                validity_fingerprint: 0,
             },
         ]
         .into_iter()
@@ -2952,6 +3371,7 @@ mod tests {
         let token = StoreViewCompatToken {
             epoch: 2,
             session: None,
+            validity_fingerprint: 0,
         };
         let computes = AtomicUsize::new(0);
 
@@ -3030,6 +3450,7 @@ mod tests {
         let token = StoreViewCompatToken {
             epoch: 6,
             session: None,
+            validity_fingerprint: 0,
         };
         let computes = AtomicUsize::new(0);
 
@@ -3144,6 +3565,7 @@ mod tests {
         let token = StoreViewCompatToken {
             epoch: 14,
             session: None,
+            validity_fingerprint: 0,
         };
 
         // Rendezvous: the leader's seam hook signals `at_seam`, then blocks on
@@ -3302,6 +3724,7 @@ mod tests {
         let token = StoreViewCompatToken {
             epoch: 8,
             session: None,
+            validity_fingerprint: 0,
         };
         let leader_in_compute = Arc::new((Mutex::new(false), Condvar::new()));
         let recompute_count = Arc::new(AtomicUsize::new(0));
@@ -3474,6 +3897,7 @@ mod tests {
         let token = StoreViewCompatToken {
             epoch: 12,
             session: None,
+            validity_fingerprint: 0,
         };
 
         // Leader: `compute` succeeds, then the `retain` predicate panics.
@@ -3526,6 +3950,79 @@ mod tests {
         assert_eq!(
             value, 55,
             "after a `retain` panic aborts the lane, a fresh claim must cold-compute to completion",
+        );
+    }
+
+    #[test]
+    fn singleflight_forks_same_epoch_distinct_validity_fingerprint() {
+        // SOUNDNESS: the coalescing lane is keyed by the
+        // COMPLETE compat token. Two requests for the same key whose views
+        // share an epoch + session but differ in `validity_fingerprint` (a
+        // validity-affecting change the epoch does not cover — e.g. a
+        // different `artifact_generation` / `load_generation` / env /
+        // identity) MUST fork into separate lanes and each compute its own
+        // result. A follower in `run_stable_request` returns the LEADER's
+        // result WITHOUT revalidating against its own view, so coalescing
+        // these would hand a follower a result computed under a different
+        // view. Were `StoreViewCompatToken` to carry no
+        // `validity_fingerprint` field, distinct-validity-same-epoch
+        // requests would collapse onto ONE lane (computes == 1, shared Arc)
+        // — exactly the hole this proves closed.
+        let group = Arc::new(SingleflightGroup::<String, usize, &'static str>::default());
+        let start = Arc::new(Barrier::new(3));
+        let computes = Arc::new(AtomicUsize::new(0));
+
+        let handles: Vec<_> = [
+            StoreViewCompatToken {
+                epoch: 9,
+                session: None,
+                validity_fingerprint: 0xA1A1_A1A1,
+            },
+            StoreViewCompatToken {
+                epoch: 9,
+                session: None,
+                validity_fingerprint: 0xB2B2_B2B2,
+            },
+        ]
+        .into_iter()
+        .map(|token| {
+            let group = Arc::clone(&group);
+            let start = Arc::clone(&start);
+            let computes = Arc::clone(&computes);
+            std::thread::spawn(move || {
+                start.wait();
+                group
+                    .run("node".to_string(), token, || {
+                        computes.fetch_add(1, Ordering::SeqCst);
+                        std::thread::sleep(Duration::from_millis(50));
+                        Ok(token.validity_fingerprint as usize)
+                    })
+                    .unwrap()
+            })
+        })
+        .collect();
+
+        start.wait();
+        let mut handles = handles.into_iter();
+        let first = handles.next().unwrap().join().unwrap();
+        let second = handles.next().unwrap().join().unwrap();
+
+        assert_eq!(
+            computes.load(Ordering::SeqCst),
+            2,
+            "two views with the same epoch but distinct validity fingerprints MUST \
+             fork into separate lanes and each compute (no follower coalescing)"
+        );
+        assert_eq!(first.role, SingleflightRole::Leader);
+        assert_eq!(second.role, SingleflightRole::Leader);
+        assert!(
+            first.forked_lane || second.forked_lane,
+            "the same-key/distinct-fingerprint lanes must be observed as forked"
+        );
+        assert!(
+            !Arc::ptr_eq(&first.value, &second.value),
+            "forked lanes MUST NOT share a result Arc (a follower must never receive \
+             a leader's result computed under a different complete token)"
         );
     }
 

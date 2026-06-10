@@ -126,6 +126,18 @@ pnpm --filter @verter/benchmark bench:meta:ui -- --backends=verter --scenarios=s
 
 CI uses `.github/workflows/meta-benchmark.yml` to pin the latest `nuxt/ui` `v4` SHA once, run the backend/scenario matrix, and aggregate JSON artifacts into one markdown report.
 
+### CPU Saturation Diagnostic (`bench:meta:ui:saturation`)
+
+When the question is "does the scheduler actually use the CPU?", use the saturation bench rather than `bench:meta:ui`. The standard runner drives the **interactive single-request path** one component at a time (child-process per query), so it never spikes the CPU by design — parallelism only comes from the **batch path** (`getComponentMetaBatch` → `Scheduler::dispatch_meta_jobs` → `cpu_pool.install(|| par_iter)`).
+
+```bash
+pnpm --filter @verter/benchmark bench:meta:ui:saturation -- --limit=24
+```
+
+`src/meta-ui-saturation.ts` drives the same corpus two ways against cold sessions and reports **cores used = process CPU time / wall time** for each (`process.cpuUsage()` is RUSAGE_SELF, so it counts the native Rayon workers). A sequential pass near `1.0x` confirms the single-core behaviour; a batch pass approaching `availableParallelism()` confirms the pool fanned out. Requires the prepared corpus (`bench:meta:ui:setup`) and a built native binding; it is a dev diagnostic and is excluded from `pnpm test`.
+
+The matching scheduler-side invariant is guarded in Rust by `SchedulerCounters::cpu_inflight_peak` (a `fetch_max` high-water-mark of concurrently-executing meta jobs, set via `enter_cpu_task()` inside `dispatch_meta_jobs`): the unit test `dispatch_meta_jobs_fans_out_across_cpu_pool` and the integration test `batch_component_meta_fans_out_across_cpu_pool` both assert the peak climbs above 1 (a serialized dispatch leaves it at 1 and fails).
+
 ### Component-Meta Trace / No-Trace Workflow
 
 For component-meta optimization work, use the trace runner directly instead of guessing from ad-hoc requests.

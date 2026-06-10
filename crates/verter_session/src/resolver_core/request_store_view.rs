@@ -329,9 +329,27 @@ impl CanonicalCompletionOverlay {
         canonical: &str,
         view: Option<&dyn crate::session_view::SessionView>,
     ) {
-        if host.current_store_view_epoch() != base.mutation_epoch() {
-            // The base view is already superseded. Skip the write; the
-            // outer executor will retry against a fresh view.
+        // The base view is superseded — skip the overlay write; the outer
+        // executor retries against a fresh view. Gated on the COMPLETE
+        // external-supersession dimensions (epoch / project-generation /
+        // env / identity), NOT `store_view_epoch` alone: an env-hash shift
+        // that moves no epoch still supersedes the base snapshot, so the
+        // epoch-only check would let a stale overlay write through
+        // (view-liveness). The compute's own artifact / route /
+        // load-generation advances are deliberately EXCLUDED (the base
+        // view stays live across its own dependency loads).
+        //
+        // The `overlay_identity` dimension is normalised OUT of the
+        // comparison: `base` may be a session-overlaid view (its overlay
+        // identity is `Some(_)`) while the host's live base token carries
+        // `None`, and the request's frozen overlay is not an external
+        // mutation — so an overlay-identity difference must NOT read as a
+        // supersession here.
+        let base_external = crate::resolver_store::StoreViewValidationToken {
+            overlay_identity: None,
+            ..base.validation_token()
+        };
+        if base_external.externally_superseded_by(&host.current_validation_token()) {
             return;
         }
 
@@ -627,13 +645,57 @@ impl CanonicalCompletionOverlay {
 pub(crate) struct RequestStoreView<'a> {
     base: &'a HostStoreView,
     overlay: Arc<CanonicalCompletionOverlay>,
+    /// Whether the base view was proven current by the
+    /// [`crate::resolver_store::StoreViewManager`] at request entry.
+    ///
+    /// When `false` (the base came from a known-stale
+    /// [`crate::resolver_store::ColdSeedHostStoreView`] / `ReturnOnly`
+    /// read), EVERY `validates*` method on this view fails CLOSED —
+    /// returns `false` — so every nested warm-cache probe inside the
+    /// dispatch MISSES rather than validating a cache entry against the
+    /// stale seed. This is the construction-grade enforcement of the
+    /// consult's "if cold-seeded, internal warm-cache probes must
+    /// MISS/BYPASS rather than validate": no individual nested validator
+    /// has to know about currentness — the single view they all read
+    /// through refuses to validate. Structural reads (`tracks_file`,
+    /// `derived_hash_for`, `compat_token`) and completion writes
+    /// (`promote_route_owned_completion`) are NOT validation-promotion
+    /// and stay live so the cold compute can still observe additive loads.
+    base_is_current: bool,
 }
 
 impl<'a> RequestStoreView<'a> {
-    /// Construct a wrapper over `(base, overlay)`.
+    /// Construct a wrapper over `(base, overlay)` rooted on a
+    /// proven-CURRENT base view. Every nested warm-cache probe may
+    /// validate against it.
     #[must_use]
     pub(crate) fn new(base: &'a HostStoreView, overlay: Arc<CanonicalCompletionOverlay>) -> Self {
-        Self { base, overlay }
+        Self {
+            base,
+            overlay,
+            base_is_current: true,
+        }
+    }
+
+    /// Construct a wrapper over a cold-seed `(base, overlay)`.
+    ///
+    /// `base_is_current` carries the seed's currentness
+    /// ([`crate::resolver_store::ColdSeedHostStoreView::is_current`]): a
+    /// cold builder that seeded from a freshly-current read still lets
+    /// nested probes validate (`true`), while a `ReturnOnly` seed
+    /// (`false`) fails every `validates*` closed so nothing stale can be
+    /// warm-served through the derived context.
+    #[must_use]
+    pub(crate) fn new_cold_seed(
+        base: &'a HostStoreView,
+        overlay: Arc<CanonicalCompletionOverlay>,
+        base_is_current: bool,
+    ) -> Self {
+        Self {
+            base,
+            overlay,
+            base_is_current,
+        }
     }
 
     /// Borrow the request-scoped overlay.
@@ -666,6 +728,14 @@ impl<'a> StoreView for RequestStoreView<'a> {
     }
 
     fn validates(&self, fact: &FactVersionRef) -> bool {
+        // Cold-seed fail-closed: a non-current base means the manager
+        // could not prove the snapshot coherent, so no warm-cache entry
+        // may validate through this view. Every nested probe misses and
+        // falls to its own cold path (whose promotion fence rejects a
+        // stale result).
+        if !self.base_is_current {
+            return false;
+        }
         match fact {
             FactVersionRef::FileWholeHash { canonical_id, hash } => {
                 if let Some(overlay_hash) = self.overlay.lookup_whole_hash(canonical_id) {
@@ -740,6 +810,9 @@ impl<'a> StoreView for RequestStoreView<'a> {
     }
 
     fn validates_self_root_whole_hash(&self, canonical_id: &str, hash: &ResolverHash16) -> bool {
+        if !self.base_is_current {
+            return false;
+        }
         if let Some(overlay_hash) = self.overlay.lookup_whole_hash(canonical_id) {
             // Shadowing: overlay is authoritative for the self-root
             // identity.
@@ -749,6 +822,9 @@ impl<'a> StoreView for RequestStoreView<'a> {
     }
 
     fn validates_parse_domain(&self, fact: &ParseFactRef) -> bool {
+        if !self.base_is_current {
+            return false;
+        }
         const ZERO_HASH: Hash16 = [0u8; 16];
         if let Some(overlay_facts) = self.overlay.lookup_file_facts(fact.canonical_id.as_str()) {
             // Shadowing: overlay `FileFacts` are authoritative for the
@@ -771,6 +847,9 @@ impl<'a> StoreView for RequestStoreView<'a> {
     }
 
     fn validates_resolve_imports_domain(&self, fact: &ResolveImportsFactRef) -> bool {
+        if !self.base_is_current {
+            return false;
+        }
         // The base view's `ResolvedImportFactsDb` is content-addressed
         // by `(content_hash, known_miss_generation, env_hashes,
         // resolver_version)` and is an `Arc` shared between the base
@@ -801,6 +880,9 @@ impl<'a> StoreView for RequestStoreView<'a> {
     }
 
     fn validates_route_surface_domain(&self, fact: &RouteSurfaceFactRef) -> bool {
+        if !self.base_is_current {
+            return false;
+        }
         // The augmentation-index is a project-wide structural index
         // populated only by the base view's `snapshot_augmentation_index`
         // (a single one-shot pass during `HostStoreView::build`); it is

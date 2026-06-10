@@ -314,13 +314,22 @@ fn resolve_named_symbol_inner(
     Result<Option<SemanticNodeId>, TypeResolutionRequestError>,
     ProjectionMode,
 ) {
-    // Build a request-bound `HostResolverContext` for the dispatch so
-    // resolver-tier reads bind to a real overlay-aware view rather
-    // than the panic-shimmed bare-host `impl ResolverContext for
-    // VerterHost`.
-    let store_view = host.resolver_store_view();
+    // This is a query-RETURNER, not a fenced publisher: it builds a
+    // request-bound dispatch context and returns the resolved node with no
+    // outer `run_stable_request` publish fence. So it MUST resolve against a
+    // PROVEN-CURRENT snapshot — a known-stale (`ReturnOnly`) read would
+    // resolve the query against already-superseded dependency state and
+    // return it as a normal result. Acquire a `CurrentHostStoreView` via a
+    // bounded retry; on sustained churn (`None`) surface a miss rather than
+    // computing against the stale view. A non-current settle is a non-fault
+    // miss (`Ok(None)`) — the FFI surface maps it to a `null` payload, so the
+    // consumer re-queries once the host settles.
+    let Some(current_view) = crate::typeinfo::current_store_view_for_query(host) else {
+        return (Ok(None), requested_mode.unwrap_or(ProjectionMode::Navigate));
+    };
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::from_current(host, &current_view, overlay);
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     let scope_arc: Arc<str> = Arc::from(canonical_id);
 
@@ -635,9 +644,70 @@ pub(crate) fn materialize_through_aliases(
                 // deferred carrier instead of the fault). The decode routes
                 // through [`classify_base_surfacing`] — the same fault/miss split
                 // as the rest of the resolver.
+                // Reference-carrier pre-resolution. Navigate / Skeleton body
+                // lowering preserves a named operand as a `DeclRef` /
+                // `InstantiationRef` shell (cycle-BFS visibility), and the
+                // empty-path `ProjectPath` surfacing below DELIBERATELY does
+                // not unwrap those carriers (the slot-binding indexed-access
+                // preservation policy in `expand_terminal_step`). `keyof`
+                // under a publication mode demands the operand's member
+                // surface, so resolve the reference ONE level first — the
+                // SAME `ResolveDecl` / `Instantiate` dispatches the
+                // path-walker's terminal-carrier resolution uses — then hand
+                // the resolved node to the surfacing. A non-fault resolution
+                // miss falls back to the carrier (the reducer round-trips it
+                // deferred); a genuine fault propagates.
+                let reference_resolved = match store.node_data(*base).as_deref() {
+                    Some(SemanticNodeData::DeclRef { identity }) => {
+                        let resolve_result = match dispatch.execute_type_node(
+                            SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+                                scope: ScopeId {
+                                    canonical_id: Arc::clone(&identity.canonical_id),
+                                    local_scope: None,
+                                },
+                                name: Arc::clone(&identity.decl_name),
+                            }),
+                        ) {
+                            QueryResult::Value(SemanticQueryOutput { value: node, .. }) => {
+                                QueryResult::Value(node)
+                            }
+                            QueryResult::Recursive(node) => QueryResult::Recursive(node),
+                            QueryResult::Error(err) => QueryResult::Error(err),
+                        };
+                        classify_base_surfacing(resolve_result, *base)?
+                    }
+                    Some(SemanticNodeData::InstantiationRef {
+                        base: ref_base,
+                        args,
+                    }) => {
+                        let inst_base = dispatch.type_slot_for(
+                            Arc::clone(&ref_base.canonical_id),
+                            Arc::clone(&ref_base.decl_name),
+                        );
+                        let inst_result =
+                            match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
+                                context: dispatch.instantiate_context_for(
+                                    &ref_base.canonical_id,
+                                    crate::semantic_query::ProjectionReductionContext::published(
+                                        mode,
+                                    ),
+                                ),
+                                base: inst_base,
+                                args: Arc::clone(args),
+                            }) {
+                                QueryResult::Value(SemanticQueryOutput { value: node, .. }) => {
+                                    QueryResult::Value(node)
+                                }
+                                QueryResult::Recursive(node) => QueryResult::Recursive(node),
+                                QueryResult::Error(err) => QueryResult::Error(err),
+                            };
+                        classify_base_surfacing(inst_result, *base)?
+                    }
+                    _ => *base,
+                };
                 let surfaced_result =
                     match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
-                        base: *base,
+                        base: reference_resolved,
                         path: Arc::from(Vec::new().into_boxed_slice()),
                         context: crate::semantic_query::ProjectionReductionContext::published(
                             ProjectionMode::Expanded,
@@ -649,7 +719,7 @@ pub(crate) fn materialize_through_aliases(
                         QueryResult::Recursive(node) => QueryResult::Recursive(node),
                         QueryResult::Error(err) => QueryResult::Error(err),
                     };
-                let surfaced_base = classify_base_surfacing(surfaced_result, *base)?;
+                let surfaced_base = classify_base_surfacing(surfaced_result, reference_resolved)?;
                 let key = SemanticQueryKey::KeyOf {
                     base: surfaced_base,
                     context: crate::semantic_query::ProjectionReductionContext::published(mode),

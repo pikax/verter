@@ -97,9 +97,15 @@ impl VerterHost {
         default_symbol.signatures.first()?.return_type.as_ref()?;
         let _whole_hash = indexed.whole_hash;
 
-        let store_view = self.resolver_store_view();
+        // Query-RETURNER: it returns the public instance surface with no
+        // outer publish fence, so it MUST resolve against a PROVEN-CURRENT
+        // snapshot. On sustained churn surface a miss (`None`) rather than a
+        // surface resolved against superseded state. The bounded retry
+        // terminates.
+        let current_view = crate::typeinfo::current_store_view_for_query(self)?;
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let host_ctx = crate::resolver_core::HostResolverContext::new(self, &store_view, overlay);
+        let host_ctx =
+            crate::resolver_core::HostResolverContext::from_current(self, &current_view, overlay);
         let dispatch = ProjectSemanticDispatch::new(&host_ctx);
 
         // Intermediate-hop demand: the keyed query lowers the instance object in

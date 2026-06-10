@@ -10,7 +10,7 @@
 //!    warm-hit drove a fresh `HostStoreView::from_host` rebuild; the
 //!    cumulative counter delta per request was 8-12+ on a small
 //!    fixture. Post-6.c, the delta is exactly 1 (the request entry's
-//!    `host.resolver_store_view()` call) plus any owned-view rebuilds
+//!    `host.resolver_store_view_read().into_owned_view()` call) plus any owned-view rebuilds
 //!    by the bare-host residual paths inside one request — which we
 //!    bound separately.
 //!
@@ -91,7 +91,7 @@ fn view_build_count_drops_under_hosted_request() {
     // Reset the counter so the assertion is scoped to one request.
     HOST_STORE_VIEW_FROM_HOST_BUILDS.with(|c| c.set(0));
 
-    let view = host.resolver_store_view();
+    let view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(CanonicalCompletionOverlay::new());
     let ctx = HostResolverContext::new(&host, &view, overlay);
 
@@ -143,7 +143,7 @@ fn view_build_count_drops_under_hosted_request() {
 fn repeated_prepared_type_decl_no_view_rebuild() {
     let (host, canonical) = small_host_with_one_component();
 
-    let view = host.resolver_store_view();
+    let view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(CanonicalCompletionOverlay::new());
     let ctx = HostResolverContext::new(&host, &view, overlay);
 
@@ -192,7 +192,7 @@ fn complete_canonical_is_no_op_when_epoch_superseded() {
     let (host, canonical) = small_host_with_one_component();
 
     // Capture the base view at the current epoch.
-    let view = host.resolver_store_view();
+    let view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(CanonicalCompletionOverlay::new());
     let ctx = HostResolverContext::new(&host, &view, overlay.clone());
 
@@ -244,7 +244,7 @@ fn complete_canonical_is_no_op_when_epoch_superseded() {
 ///
 /// Discriminating: in a pre-6.c tree, every resolver method on the
 /// session context would call
-/// `self.resolver_store_view().with_session_overlay(host, view)` —
+/// `self.resolver_store_view_read().into_owned_view().with_session_overlay(host, view)` —
 /// re-running the overlay re-root on every call. The post-6.c context
 /// reads through the borrowed pre-built view; the `from_host` counter
 /// delta is bounded.
@@ -293,7 +293,8 @@ fn session_overlay_rooting_runs_once_per_request() {
     // Construct the request-bound view + context ONCE — the
     // `with_session_overlay` runs here.
     let base = host
-        .resolver_store_view()
+        .resolver_store_view_read()
+        .into_owned_view()
         .with_session_overlay(&host, &session_view);
     let overlay = Arc::new(CanonicalCompletionOverlay::new());
     let ctx = SessionResolverContext::new(&host, &session_view, &base, overlay);
@@ -419,7 +420,8 @@ defineProps<ButtonProps>()
     // Build the request-bound session-rooted base view ONCE (matches
     // the production session-bearing request entry point).
     let base = host
-        .resolver_store_view()
+        .resolver_store_view_read()
+        .into_owned_view()
         .with_session_overlay(&host, &view);
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let ctx = SessionResolverContext::new(&host, &view, &base, Arc::clone(&overlay));
@@ -589,7 +591,7 @@ fn request_store_view_validates_resolve_imports_for_overlay_promoted_canonical()
     // plumbing. The captured snapshot retains every other field
     // (`resolved_import_facts` Arc, `env_hashes`, etc.), matching the
     // production base view's shape minus the absent canonical entry.
-    let mut base = host_arc.resolver_store_view();
+    let mut base = host_arc.resolver_store_view_read().into_owned_view();
     let owner_whole_hash = base
         .whole_hashes_get_for_tests("/owner.ts")
         .expect("base view tracks the owner immediately after upsert");

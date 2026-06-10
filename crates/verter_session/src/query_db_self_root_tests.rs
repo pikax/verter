@@ -2534,7 +2534,8 @@ fn resolvability_db_producer_overlay_discrimination() {
         .expect("overlay IndexedReady materialises");
 
     let overlay_store_view = host
-        .resolver_store_view()
+        .resolver_store_view_read()
+        .into_owned_view()
         .with_session_overlay(&host, &view);
     let overlay_ctx = SessionResolverContext::new(
         &host,
@@ -2592,7 +2593,8 @@ fn observed_prepared_type_decl_is_single_artifact_and_view_aware() {
     let (host, view, base_hash, overlay_hash) = overlay_disc_fixture(canonical);
 
     let overlay_store_view = host
-        .resolver_store_view()
+        .resolver_store_view_read()
+        .into_owned_view()
         .with_session_overlay(&host, &view);
     let overlay_ctx = SessionResolverContext::new(
         &host,
@@ -2817,7 +2819,8 @@ fn observe_materialize_scope_is_overlay_view_correct() {
 
     // Overlay-session observation — the overlay content hash.
     let overlay_store_view = host
-        .resolver_store_view()
+        .resolver_store_view_read()
+        .into_owned_view()
         .with_session_overlay(&host, &view);
     let overlay_ctx = SessionResolverContext::new(
         &host,
@@ -3332,7 +3335,8 @@ fn imported_registry_base_and_overlay_candidates_coexist() {
         .expect("overlay IndexedReady materialises");
     {
         let session_store_view = host
-            .resolver_store_view()
+            .resolver_store_view_read()
+            .into_owned_view()
             .with_session_overlay(&host, &view);
         let session_ctx = SessionResolverContext::new(
             &host,
@@ -3461,7 +3465,8 @@ fn imported_registry_coexisting_candidates_keep_live_counter_consistent() {
         .expect("overlay IndexedReady materialises");
     {
         let session_store_view = host
-            .resolver_store_view()
+            .resolver_store_view_read()
+            .into_owned_view()
             .with_session_overlay(&host, &view);
         let session_ctx = SessionResolverContext::new(
             &host,
@@ -5167,7 +5172,10 @@ fn component_meta_result_db_get_with_view_rejects_entry_from_superseded_generati
         .component_meta_results()
         .insert(key.clone(), owner_whole_hash, entry);
 
-    let view = host.resolver_store_view();
+    let view = host
+        .resolver_store_view_read()
+        .current()
+        .expect("a quiescent host must yield a current store view");
     let db = store.component_meta_results();
 
     // Same generation — the carrier validates vacuously and the
@@ -5192,7 +5200,10 @@ fn component_meta_result_db_get_with_view_rejects_entry_from_superseded_generati
          alone",
     );
 
-    let view_after = host.resolver_store_view();
+    let view_after = host
+        .resolver_store_view_read()
+        .current()
+        .expect("a quiescent host must yield a current store view");
     // DISCRIMINATOR: `get_with_view` must now MISS — the entry's
     // `validated_at_generation` no longer equals the live generation.
     // Without the generation gate `get_with_view`'s carrier check
@@ -5313,7 +5324,7 @@ fn owner_import_surface_get_with_view_rejects_surface_from_superseded_generation
     );
     surfaces.insert(Arc::from(owner), Arc::clone(&surface));
 
-    let view = host.resolver_store_view();
+    let view = host.resolver_store_view_read().into_owned_view();
 
     // Same generation — the carrier validates against the real owner
     // hash and the generation matches, so `get_with_view` HITs.
@@ -5337,7 +5348,7 @@ fn owner_import_surface_get_with_view_rejects_surface_from_superseded_generation
          the surface on the generation stamp alone",
     );
 
-    let view_after = host.resolver_store_view();
+    let view_after = host.resolver_store_view_read().into_owned_view();
     // DISCRIMINATOR: `get_with_view` must now MISS — the surface's
     // `validated_at_generation` no longer equals the live generation.
     // Without the generation gate the carrier check alone still

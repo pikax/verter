@@ -76,7 +76,7 @@ fn request_store_view_mirrors_base_derived_hash_for_known_entry() {
     let (host, canonical) = small_host_with_one_component();
 
     // Build the base view via the same path production uses.
-    let base = host.resolver_store_view();
+    let base = host.resolver_store_view_read().into_owned_view();
 
     // The base view's `derived_hashes` is populated by
     // `HostStoreView::build` from the project store. We assert the
@@ -114,7 +114,7 @@ fn request_store_view_mirrors_base_derived_hash_for_known_entry() {
 #[test]
 fn request_store_view_returns_overlay_derived_hash_when_base_absent() {
     let (host, _canonical) = small_host_with_one_component();
-    let base = host.resolver_store_view();
+    let base = host.resolver_store_view_read().into_owned_view();
 
     // Build an overlay and stage a synthetic `ImportRoute` entry
     // for an UNTRACKED canonical so the base view returns None for

@@ -115,6 +115,40 @@ impl<'a> SessionResolverContext<'a> {
         }
     }
 
+    /// Construct a session-bound wrapper rooted on a COLD-SEED base view
+    /// ([`crate::resolver_store::ColdSeedHostStoreView`]).
+    ///
+    /// Use this for a fenced view-bound cold builder (the view-bound
+    /// component-meta cold compute). The cold-seed carries its own
+    /// currentness: if the seed originated from a non-current
+    /// (`ReturnOnly`) read, EVERY nested warm-cache probe through this
+    /// context MISSES (the `RequestStoreView` fails its `validates*` family
+    /// closed), so a result computed against the stale seed can never be
+    /// warm-served — the builder's own `is_stable` / publish fence guards
+    /// top-level promotion. This is the session-bound counterpart of
+    /// [`crate::resolver_core::HostResolverContext::from_cold_seed`].
+    ///
+    /// `base` is the overlay-rooted seed — typically
+    /// `cold_seed.with_session_overlay(host, view)` — so the per-canonical
+    /// snapshots are re-rooted through the session overlay WITHOUT
+    /// dropping the seed's currentness. Never overlay through
+    /// `.into_inner()`: that boundary discards the flag, and a raw view
+    /// overlaid after it would validate warm cache entries against a
+    /// stale seed.
+    #[must_use]
+    pub(crate) fn from_cold_seed(
+        inner: &'a crate::VerterHost,
+        view: &'a dyn SessionView,
+        base: &'a crate::resolver_store::ColdSeedHostStoreView,
+        overlay: Arc<CanonicalCompletionOverlay>,
+    ) -> Self {
+        Self {
+            inner,
+            view,
+            request_view: RequestStoreView::new_cold_seed(base.view(), overlay, base.is_current()),
+        }
+    }
+
     /// Borrow the request-scoped overlay.
     ///
     /// Cooperative-admission lanes that inherit the context call this

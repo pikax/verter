@@ -146,7 +146,7 @@ fn materialize_prepared_decl_bundle_uses_dynamic_import_route_hash() {
     // Build a HostStoreView. The view's
     // `snapshot_tracked_import_route_hashes` records the dynamic
     // hash. Verify that.
-    let view = host.resolver_store_view();
+    let view = host.resolver_store_view_read().into_owned_view();
     let view_hash = view.derived_hash_for(owner, DerivedFactKind::ImportRoute);
     assert_eq!(
         view_hash,

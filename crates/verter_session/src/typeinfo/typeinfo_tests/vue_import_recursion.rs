@@ -94,7 +94,7 @@ fn public_member_names(host: &VerterHost, canonical_id: &str) -> Vec<String> {
 /// Resolve the keyed `Instantiate(.vue default)` to its object surface member
 /// names (sorted). Panics if the query does not resolve to an `Object`.
 fn vue_default_object_members(host: &VerterHost, canonical_id: &str) -> Vec<String> {
-    let store_view = host.resolver_store_view();
+    let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
@@ -146,7 +146,7 @@ fn vue_default_object_members(host: &VerterHost, canonical_id: &str) -> Vec<Stri
 /// whose `default` is a USERLAND value (not the synthesized public instance)
 /// must NOT yield a synthesized instance object here.
 fn vue_default_query_object_members(host: &VerterHost, canonical_id: &str) -> Option<Vec<String>> {
-    let store_view = host.resolver_store_view();
+    let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
@@ -196,7 +196,7 @@ fn vue_default_query_object_members(host: &VerterHost, canonical_id: &str) -> Op
 /// `.vue`-import expansion the convergence guarantees terminates by query
 /// identity.
 fn project_vue_default_path(host: &VerterHost, canonical_id: &str, path: &[&str]) -> TypeExpr {
-    let store_view = host.resolver_store_view();
+    let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
@@ -834,7 +834,7 @@ fn typeof_construct_return_is_produced_by_instantiate_vue_default() {
     const A: &str = "/w/A.vue";
     let host = make_host_with_files(&[(A, A_VUE)]);
 
-    let store_view = host.resolver_store_view();
+    let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
@@ -917,7 +917,7 @@ fn project_vue_default_path_eager(
     canonical_id: &str,
     path: &[&str],
 ) -> TypeExpr {
-    let store_view = host.resolver_store_view();
+    let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);

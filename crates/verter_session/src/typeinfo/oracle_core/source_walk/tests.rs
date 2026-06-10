@@ -36,7 +36,10 @@ fn upsert(host: &VerterHost, canonical_id: &str, source: &str) {
 /// Build a request-bound `HostResolverContext` (the same construction
 /// `support::shallow_surface_expr` uses) and run the source walk over it.
 fn walk(host: &VerterHost, locator: &SourceLocator) -> SourceWalkResult {
-    let store_view = host.resolver_store_view();
+    // Test fixture: build a quiescent owned view for the walk. The
+    // raw-view escape hatch is sanctioned in test/fixture code (the
+    // production `into_owned_view` allowlist guard exempts `*/tests.rs`).
+    let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(CanonicalCompletionOverlay::new());
     let ctx = HostResolverContext::new(host, &store_view, overlay);
     resolve_source_declarations(&ctx, locator)

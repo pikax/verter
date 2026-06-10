@@ -1071,7 +1071,7 @@ defineProps<Props>()
     assert!(live_result.is_some(), "live path should resolve Props");
 
     // Resolve via the store-view/graph path
-    let _view = host.resolver_store_view();
+    let _view = host.resolver_store_view_read().into_owned_view();
     let mut tracked = BTreeSet::new();
     let mut resolution = BTreeSet::new();
     let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
@@ -1673,7 +1673,7 @@ defineProps<Props>()
     let _ = resolve_type(&host, "/src/Consumer.vue", "./barrel", "Props");
 
     // Now use the frontier adapter
-    let view_for_ctx = host.resolver_store_view();
+    let view_for_ctx = host.resolver_store_view_read().into_owned_view();
     let overlay_for_ctx =
         std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx_for_adapter =
@@ -1741,7 +1741,7 @@ defineProps<Props>()
     // Populate caches
     let _ = resolve_type(&host, "/src/Consumer.vue", "./barrel", "Props");
 
-    let view_for_ctx = host.resolver_store_view();
+    let view_for_ctx = host.resolver_store_view_read().into_owned_view();
     let overlay_for_ctx =
         std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx_for_adapter =

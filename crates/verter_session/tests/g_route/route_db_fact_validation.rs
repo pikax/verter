@@ -65,6 +65,7 @@ impl AcceptAllView {
             token: StoreViewCompatToken {
                 epoch,
                 session: None,
+                validity_fingerprint: 0,
             },
         }
     }
@@ -558,6 +559,7 @@ fn effective_export_set_invalidates_when_augmenter_set_fingerprint_changes() {
         token: StoreViewCompatToken {
             epoch: 2,
             session: None,
+            validity_fingerprint: 0,
         },
         rejected_external_specifier: "vue".to_owned(),
         rejected_fingerprint: initial_fp,

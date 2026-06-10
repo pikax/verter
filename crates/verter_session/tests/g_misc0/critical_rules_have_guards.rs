@@ -553,6 +553,44 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             "display_needs_masked_out_of_typed_value_family_key",
         ],
     ),
+    (
+        // host-session SKILL.md — the general store-view accessor returns
+        // the capability-split `StoreViewRead`; warm validators require a
+        // proven-`CurrentHostStoreView`, cold builders take a
+        // `ColdSeedHostStoreView` (no `validates*` surface), and the
+        // raw-view escape hatch is confined to an allowlist.
+        "Non-Current Store-View Contract — Capability Split",
+        &[
+            "resolver_store_view_returns_store_view_read",
+            "cold_seed_store_view_exposes_no_validation_surface",
+            "warm_validation_entry_points_require_current_store_view",
+            "resolver_store_view_into_owned_view_is_allowlisted",
+            // Indirect-validation seam: a raw cold-seed unwrap
+            // (`into_cold_seed_view().into_inner()`) fed into a resolver
+            // context that then validates is confined to a non-validating
+            // allowlist; cold-compute context constructors carry currentness.
+            "cold_seed_into_inner_confined_to_non_validating_allowlist",
+            "cold_compute_context_constructors_carry_currentness",
+            // Currentness-source seam: a cold-seed's `is_current` must come
+            // from the SAME read as its view (intrinsic to a `StoreViewRead`
+            // arm). The one `(view, flag)` re-bind (`from_executor_snapshot`)
+            // is confined to the executor boundary, and a fresh
+            // `resolver_store_view_read()` may never feed it — closing the
+            // view+flag divergence the constructor-shape guards missed.
+            "cold_seed_currentness_is_intrinsic_to_the_read",
+            // Token-generation completeness seam: every mutation of a
+            // token-folded generation's backing state must advance that
+            // generation. `RouteOwnedShallowDb::artifact_generation` is folded
+            // into `StoreViewValidationToken` (the `route_owned_generation`
+            // dimension) and the view snapshots the DB's `Route` derived
+            // hashes by value, so any method that mutates `self.entries` must
+            // bump — closing the mutate-without-bump soundness class (the
+            // schema-mismatch eviction path that cleared entries without a
+            // bump). Paired with the discriminator self-test.
+            "route_owned_shallow_db_entry_mutations_bump_token_generation",
+            "route_owned_shallow_db_bump_guard_is_discriminating",
+        ],
+    ),
 ];
 
 fn workspace_root() -> PathBuf {

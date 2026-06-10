@@ -405,14 +405,43 @@ impl<P> ComponentMetaResultDb<P> {
     /// [`crate::types::MetaProvenance::component_meta_result_cache_misses`]
     /// on every miss path (absent candidate, fact-validation failure,
     /// or project-generation mismatch).
+    ///
+    /// Accepts ONLY a [`crate::resolver_store::CurrentHostStoreView`] —
+    /// the `StoreViewManager`'s type-level proof that the view was
+    /// published under a live-matching token. A known-stale
+    /// `StoreViewRead::ReturnOnly` snapshot CANNOT reach this validator by
+    /// construction, so it can never false-positive a superseded cache
+    /// entry against an already-mutated dependency.
+    /// Record a warm-lookup MISS without a candidate probe.
+    ///
+    /// Used by the consumer warm-validation entry points when the
+    /// store-view read is NON-CURRENT (`StoreViewRead::ReturnOnly`): a
+    /// known-stale view can never serve a sound warm hit, so the lookup
+    /// short-circuits to a miss BEFORE building a `CurrentHostStoreView`.
+    /// Keeping the miss accounting here (rather than only inside
+    /// [`Self::get_with_view`]) means the non-current short-circuit is
+    /// attributed exactly like a fact-validation miss.
+    pub(crate) fn record_non_current_view_miss(&self, host: &crate::VerterHost) {
+        host.provenance()
+            .component_meta_result_cache_misses
+            .fetch_add(1, Ordering::Relaxed);
+        if let Some(ctx) = crate::request_context::current_request_context() {
+            ctx.cache_counters
+                .component_meta
+                .misses
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     #[must_use]
-    pub fn get_with_view<V: StoreView + ?Sized>(
+    pub(crate) fn get_with_view(
         &self,
         host: &crate::VerterHost,
-        view: &V,
+        current_view: &crate::resolver_store::CurrentHostStoreView,
         key: &ComponentMetaResultKey,
         owner_whole_hash: Hash16,
     ) -> Option<Arc<ComponentMetaResultEntry<P>>> {
+        let view = current_view.view();
         let bump_miss = |host: &crate::VerterHost| {
             host.provenance()
                 .component_meta_result_cache_misses

@@ -460,6 +460,23 @@ impl VerterHost {
                 if hd.file_kind == FileKind::NonSfc {
                     return Ok(());
                 }
+                // TOP-LEVEL warm validator: a compile warm hit returns
+                // `Ok(())` (skip recompile) with NO outer publish /
+                // is_stable fence. Validate ONLY against a proven-`Current`
+                // view; a known-stale `StoreViewRead::ReturnOnly` snapshot
+                // (the manager could not prove the view current under
+                // churn) misses to cold — fall through to the recompile
+                // below, whose own request driver re-fences promotion.
+                //
+                // The expensive store-view read is threaded through the
+                // `acquire_view` callback `lookup` invokes ONLY after its
+                // cheap predicates (slot present for this profile, carrier
+                // cacheable, semantic/override hashes match) confirm there
+                // is a candidate slot worth validating. A cold miss (no
+                // `ProfileState`, or a present `ProfileState` with no slot
+                // for this profile_hash) and a hash mismatch both fall
+                // through to recompile WITHOUT building a full-workspace
+                // store-view snapshot.
                 if let Some(cc) = self.compile_cache().get(&canonical) {
                     let soh = cc
                         .style_overrides
@@ -490,7 +507,17 @@ impl VerterHost {
                             &hd.parse.semantic_hash,
                             soh,
                             coh,
-                            |sig| self.compile_slot_facts_validate(sig),
+                            || {
+                                // Test-only: count store-view reads that
+                                // actually happened — i.e. AFTER the cheap
+                                // predicates passed. A cold/profile/hash miss
+                                // never reaches this callback, so the counter
+                                // stays flat on those paths.
+                                #[cfg(test)]
+                                crate::resolver_store::record_compile_warm_validation_view_read();
+                                self.resolver_store_view_read().current()
+                            },
+                            |current_view, sig| self.compile_slot_facts_validate(current_view, sig),
                         )
                         .is_some()
                     {
@@ -530,15 +557,24 @@ impl VerterHost {
     /// gating predicate) BEFORE invoking this closure, so this method
     /// only walks a non-empty fact set.
     ///
-    /// `O(signature.len())` per call. Validation reads through the
-    /// `HostStoreView` snapshot captured at the start of the request;
-    /// concurrent edits do NOT race against this read.
+    /// `O(signature.len())` per call.
+    ///
+    /// Accepts ONLY a proven-`Current` view
+    /// ([`crate::resolver_store::CurrentHostStoreView`]): the compile warm
+    /// hit returns the cached compile output to the caller with NO outer
+    /// publish / is_stable fence, so a known-stale
+    /// `StoreViewRead::ReturnOnly` snapshot must NEVER reach this validator
+    /// — it would validate a cached slot's cross-file `fact_versions`
+    /// against already-mutated dependency state (`old == old`) and serve a
+    /// stale compile output under churn. The `Current` proof is obtained at
+    /// the warm-hit call sites, which miss to cold on a non-current read.
     #[inline]
     pub(crate) fn compile_slot_facts_validate(
         &self,
+        current_view: &crate::resolver_store::CurrentHostStoreView,
         signature: &crate::fact_signature_helpers::ReadSetSignature,
     ) -> bool {
-        let view = self.resolver_store_view();
+        let view = current_view.view();
         use crate::resolver_core::StoreView;
         signature.facts.iter().all(|fact| view.validates(fact))
     }
@@ -591,11 +627,29 @@ impl VerterHost {
             .get(&profile_hash)
             .map(|o| o.layer.hash)
             .unwrap_or(0);
+        // Mirror the writer's warm-hit gate exactly. The store-view read
+        // is threaded through `acquire_view`, which `lookup` invokes ONLY
+        // after the cheap slot-present + carrier + hash predicates pass —
+        // a profile-slot miss or hash mismatch reports "not warm" without
+        // building a workspace snapshot. A non-current read
+        // (`StoreViewRead::ReturnOnly`) can never serve a sound warm hit,
+        // so `acquire_view` yields `None` there and the predicate reports
+        // "not warm" — the consumer would route through cold recompute.
         let session_node = crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
         session_node
-            .lookup(&cc, profile_hash, &parse.semantic_hash, soh, coh, |sig| {
-                self.compile_slot_facts_validate(sig)
-            })
+            .lookup(
+                &cc,
+                profile_hash,
+                &parse.semantic_hash,
+                soh,
+                coh,
+                || {
+                    #[cfg(test)]
+                    crate::resolver_store::record_compile_warm_validation_view_read();
+                    self.resolver_store_view_read().current()
+                },
+                |current_view, sig| self.compile_slot_facts_validate(current_view, sig),
+            )
             .is_some()
     }
 
@@ -877,13 +931,44 @@ impl VerterHost {
                 }
                 let warm_hit: Option<WarmHit> = match actual_mode {
                     CompileCacheMode::Stateless => None,
+                    // TOP-LEVEL warm validator: a `Session` compile warm hit
+                    // returns the cached compile output to the caller with NO
+                    // outer publish / is_stable fence. The fact-validated
+                    // session node validates the slot's cross-file
+                    // `fact_versions`, so it MUST run against a proven-`Current`
+                    // view. A known-stale `StoreViewRead::ReturnOnly` snapshot
+                    // misses to cold (`acquire_view` yields `None`), routing the
+                    // request to the recompile below whose own request driver
+                    // re-fences promotion.
+                    //
+                    // `cc_ref` being `Some` only means a `ProfileState` exists
+                    // for this canonical — the first Session compile after an
+                    // upsert leaves an empty `ProfileState` with NO slot for
+                    // this profile_hash. The store-view read is threaded through
+                    // the `acquire_view` callback `lookup` invokes ONLY after
+                    // its cheap slot-present + carrier + hash predicates pass, so
+                    // that cold/profile-miss path (and a hash mismatch) never
+                    // builds a full-workspace store-view snapshot.
                     CompileCacheMode::Session => cc_ref.as_ref().and_then(|cc| {
                         let session_node =
                             crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
                         session_node
-                            .lookup(cc, profile_hash, &parse.semantic_hash, soh, coh, |sig| {
-                                self.compile_slot_facts_validate(sig)
-                            })
+                            .lookup(
+                                cc,
+                                profile_hash,
+                                &parse.semantic_hash,
+                                soh,
+                                coh,
+                                || {
+                                    #[cfg(test)]
+                                    crate::resolver_store::record_compile_warm_validation_view_read(
+                                    );
+                                    self.resolver_store_view_read().current()
+                                },
+                                |current_view, sig| {
+                                    self.compile_slot_facts_validate(current_view, sig)
+                                },
+                            )
                             .map(|hit| WarmHit {
                                 outputs: hit.outputs,
                                 diagnostics: hit.diagnostics,
@@ -1430,11 +1515,17 @@ impl VerterHost {
         let (external_types, transitive_macro_type_deps) = if macro_type_deps.is_empty() {
             (None, std::collections::BTreeSet::<String>::new())
         } else {
-            let store_view = self.resolver_store_view();
+            // Cold external-type collection context (compile-prep): seed
+            // from the cold-seed's inner view; nested probes fail closed on
+            // a stale seed.
+            let store_view = self.resolver_store_view_read().into_cold_seed_view();
             let overlay =
                 std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-            let host_ctx =
-                crate::resolver_core::HostResolverContext::new(self, &store_view, overlay);
+            let host_ctx = crate::resolver_core::HostResolverContext::from_cold_seed(
+                self,
+                &store_view,
+                overlay,
+            );
             let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &host_ctx;
             let (external_types, _, transitive) = self.collect_external_types_from_loaded_files(
                 ctx,
@@ -1625,11 +1716,17 @@ impl VerterHost {
                     std::collections::BTreeSet::<String>::new(),
                 )
             } else {
-                let store_view = self.resolver_store_view();
+                // Cold external-type collection context (compile-prep): seed
+                // from the cold-seed's inner view; nested probes fail closed
+                // on a stale seed.
+                let store_view = self.resolver_store_view_read().into_cold_seed_view();
                 let overlay =
                     std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-                let host_ctx =
-                    crate::resolver_core::HostResolverContext::new(self, &store_view, overlay);
+                let host_ctx = crate::resolver_core::HostResolverContext::from_cold_seed(
+                    self,
+                    &store_view,
+                    overlay,
+                );
                 let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &host_ctx;
                 self.collect_external_types_from_loaded_files(
                     ctx,

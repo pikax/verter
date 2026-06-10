@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
+use std::sync::Arc;
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::Program;
@@ -464,7 +465,7 @@ pub(crate) fn build_vue_snapshot_from_parsed(
         external_requests,
         src_blocks,
         parse_diagnostics,
-        script_analysis,
+        script_analysis: Arc::new(script_analysis),
         export_signatures,
         style_analyses,
         preprocessor_requests,
@@ -822,7 +823,7 @@ pub(crate) fn build_non_sfc_snapshot_from_program(
         external_requests: Vec::new(),
         src_blocks: Vec::new(),
         parse_diagnostics: DiagnosticsSnapshot::default(),
-        script_analysis,
+        script_analysis: Arc::new(script_analysis),
         export_signatures,
         style_analyses: Vec::new(),
         preprocessor_requests: Vec::new(),
@@ -847,7 +848,7 @@ pub(crate) fn parse_non_sfc_snapshot(canonical_id: &str, source: &str) -> ParseS
             external_requests: Vec::new(),
             src_blocks: Vec::new(),
             parse_diagnostics: DiagnosticsSnapshot::default(),
-            script_analysis: verter_semantic::analysis::ScriptAnalysisSnapshot::default(),
+            script_analysis: Arc::new(verter_semantic::analysis::ScriptAnalysisSnapshot::default()),
             export_signatures: Vec::new(),
             style_analyses: Vec::new(),
             preprocessor_requests: Vec::new(),

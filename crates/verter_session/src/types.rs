@@ -1694,7 +1694,11 @@ pub(crate) struct ParseSnapshot {
     pub(crate) external_requests: Vec<ExternalSourceRequest>,
     pub(crate) src_blocks: Vec<SrcBlockInfo>,
     pub(crate) parse_diagnostics: DiagnosticsSnapshot,
-    pub(crate) script_analysis: verter_semantic::analysis::ScriptAnalysisSnapshot,
+    /// Immutable post-parse script analysis, shared by `Arc` so the
+    /// override-aware `effective_file_state` read and the analysis-snapshot
+    /// reuse path bump a refcount instead of deep-copying ~18 owned vectors
+    /// for callers that read one or two scalar fields.
+    pub(crate) script_analysis: Arc<verter_semantic::analysis::ScriptAnalysisSnapshot>,
     pub(crate) export_signatures: Vec<verter_semantic::analysis::ExportSignature>,
     pub(crate) style_analyses: Vec<verter_semantic::analysis::StyleBlockAnalysis>,
     /// Blocks that need external preprocessing (non-native `lang` attributes).
@@ -2099,7 +2103,10 @@ pub struct DependencyState {
 pub(crate) struct EffectiveFileState {
     pub(crate) source: std::sync::Arc<str>,
     pub(crate) meta: FileMeta,
-    pub(crate) script_analysis: verter_semantic::analysis::ScriptAnalysisSnapshot,
+    /// Shared immutable script analysis — an `Arc::clone` of the snapshot the
+    /// scheduler (or the content override) holds. Reading it is a refcount
+    /// bump; consumers that need an owned copy call `.as_ref().clone()`.
+    pub(crate) script_analysis: std::sync::Arc<verter_semantic::analysis::ScriptAnalysisSnapshot>,
     pub(crate) cached_parse: Option<std::sync::Arc<verter_compiler::parser::types::ParsedSfc>>,
     pub(crate) whole_hash: Hash16,
 }
@@ -2301,6 +2308,53 @@ pub struct MetaProvenance {
     pub payload_cache_hits: std::sync::atomic::AtomicU64,
     pub payload_cache_misses: std::sync::atomic::AtomicU64,
     pub payload_encodes: std::sync::atomic::AtomicU64,
+    /// Count of session-overlay RE-ROOTS performed against THIS host —
+    /// incremented once per
+    /// [`crate::resolver_store::HostStoreView::with_session_overlay`] call
+    /// that reaches the `Arc::make_mut` re-root path (a non-empty overlay
+    /// or tombstone set). `Arc::make_mut` clones the shared
+    /// `StoreViewSnapshot` only when the `Arc` is actually shared
+    /// (refcount > 1); a uniquely-owned snapshot is mutated in place — so
+    /// this counter is an UPPER BOUND on full snapshot clones, counting
+    /// every entry into the re-root work (clone or in-place), which is
+    /// exactly the per-application cost the O(1) batch contract bounds. A
+    /// no-op (empty-overlay) application keeps the shared base `Arc`
+    /// untouched and does NOT bump this counter.
+    ///
+    /// PER-HOST (not process-global): every `with_session_overlay` call
+    /// already carries the `&VerterHost` it overlays, and every rayon
+    /// worker in a host batch operates on the SAME host, so this counter
+    /// observes worker-side per-job COWs while staying immune to other
+    /// hosts' (other tests') overlay activity. A component-meta batch over
+    /// an overlay session must apply the overlay ONCE per batch (the
+    /// per-batch capture) and SHARE it across all N jobs, so a warm or
+    /// cold batch of N performs O(1) overlay COWs on this host; a per-job
+    /// re-application drives it O(N) — the regression
+    /// `batch_over_overlay_session_applies_overlay_o1_not_per_job` gates
+    /// against.
+    pub session_overlay_cows: std::sync::atomic::AtomicU64,
+    /// Count of FULL overlay-set fingerprint computations performed
+    /// against THIS host — incremented once per
+    /// [`crate::session_view::overlay_set_fingerprint`] call that walks
+    /// the overlay-hash table (collect + sort by canonical + FxHash). An
+    /// overlay-bearing view's
+    /// [`crate::session_view::SessionView::fingerprint`] is a PURE
+    /// function of the view's immutable overlay maps, so the full
+    /// computation runs ONCE — at view construction — and every later
+    /// `fingerprint()` read returns the memoized `u64` with no recompute.
+    ///
+    /// PER-HOST (not process-global): an overlay view always carries the
+    /// `&VerterHost` it overlays, and every rayon worker in a host batch
+    /// reads the SAME shared view's memoized fingerprint, so this counter
+    /// observes worker-side reads while staying immune to other hosts'
+    /// (other tests') fingerprinting. A component-meta batch over an
+    /// overlay session constructs ONE view per batch and shares it across
+    /// all N jobs, so a warm or cold batch of N performs O(1) full
+    /// fingerprint computations on this host; recomputing per `cache_key`
+    /// / per warm-probe / per store would drive it O(N) — the regression
+    /// `batch_over_overlay_session_computes_fingerprint_o1_not_per_job`
+    /// gates against.
+    pub overlay_set_fingerprint_full_computations: std::sync::atomic::AtomicU64,
     /// `ComponentMetaResultDb::get_with_view` warm-hit count. Bumped
     /// once per call that returns `Some(entry)` after the entry's
     /// `fact_dep_signature` validates under the supplied
@@ -2476,6 +2530,8 @@ impl Default for MetaProvenance {
             payload_cache_hits: std::sync::atomic::AtomicU64::new(0),
             payload_cache_misses: std::sync::atomic::AtomicU64::new(0),
             payload_encodes: std::sync::atomic::AtomicU64::new(0),
+            session_overlay_cows: std::sync::atomic::AtomicU64::new(0),
+            overlay_set_fingerprint_full_computations: std::sync::atomic::AtomicU64::new(0),
             component_meta_result_cache_hits: std::sync::atomic::AtomicU64::new(0),
             component_meta_result_cache_misses: std::sync::atomic::AtomicU64::new(0),
             slot_binding_graph_fact_tracer_emissions: std::sync::atomic::AtomicU64::new(0),
@@ -2607,6 +2663,14 @@ impl std::fmt::Debug for MetaProvenance {
             )
             .field("payload_encodes", &self.payload_encodes.load(Relaxed))
             .field(
+                "session_overlay_cows",
+                &self.session_overlay_cows.load(Relaxed),
+            )
+            .field(
+                "overlay_set_fingerprint_full_computations",
+                &self.overlay_set_fingerprint_full_computations.load(Relaxed),
+            )
+            .field(
                 "indexed_ready_scheduler_snapshot_reuse",
                 &self.indexed_ready_scheduler_snapshot_reuse.load(Relaxed),
             )
@@ -2710,6 +2774,10 @@ impl MetaProvenance {
             payload_cache_hits: self.payload_cache_hits.load(Relaxed),
             payload_cache_misses: self.payload_cache_misses.load(Relaxed),
             payload_encodes: self.payload_encodes.load(Relaxed),
+            session_overlay_cows: self.session_overlay_cows.load(Relaxed),
+            overlay_set_fingerprint_full_computations: self
+                .overlay_set_fingerprint_full_computations
+                .load(Relaxed),
             component_meta_result_cache_hits: self.component_meta_result_cache_hits.load(Relaxed),
             component_meta_result_cache_misses: self
                 .component_meta_result_cache_misses
@@ -2803,6 +2871,9 @@ impl MetaProvenance {
         self.payload_cache_hits.store(0, Relaxed);
         self.payload_cache_misses.store(0, Relaxed);
         self.payload_encodes.store(0, Relaxed);
+        self.session_overlay_cows.store(0, Relaxed);
+        self.overlay_set_fingerprint_full_computations
+            .store(0, Relaxed);
         self.component_meta_result_cache_hits.store(0, Relaxed);
         self.component_meta_result_cache_misses.store(0, Relaxed);
         self.slot_binding_graph_fact_tracer_emissions
@@ -2903,6 +2974,22 @@ pub struct MetaProvenanceSnapshot {
     pub payload_cache_hits: u64,
     pub payload_cache_misses: u64,
     pub payload_encodes: u64,
+    /// Session-overlay re-roots performed against this host (one bump per
+    /// entry into the `Arc::make_mut` re-root path in
+    /// [`crate::resolver_store::HostStoreView::with_session_overlay`] —
+    /// an upper bound on actual snapshot clones, since a uniquely-owned
+    /// snapshot is mutated in place; no bump on a no-op empty-overlay
+    /// application). Per-host, so it observes worker-side per-job re-roots
+    /// in a batch while staying isolated from other hosts' overlay
+    /// activity.
+    pub session_overlay_cows: u64,
+    /// Full overlay-set fingerprint computations performed against this
+    /// host (one bump per [`crate::session_view::overlay_set_fingerprint`]
+    /// call that walks the overlay-hash table — collect + sort + hash —
+    /// NOT per memoized `fingerprint()` read). Per-host, so it observes
+    /// worker-side reads in a batch while staying isolated from other
+    /// hosts' fingerprinting.
+    pub overlay_set_fingerprint_full_computations: u64,
     pub component_meta_result_cache_hits: u64,
     pub component_meta_result_cache_misses: u64,
     /// Per-call count of `observe_fact_signature` fan-outs emitted

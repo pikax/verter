@@ -42,6 +42,7 @@ impl StoreView for TestView {
         StoreViewCompatToken {
             epoch: 0,
             session: None,
+            validity_fingerprint: 0,
         }
     }
 

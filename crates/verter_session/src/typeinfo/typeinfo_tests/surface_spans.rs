@@ -383,7 +383,7 @@ fn public_accessor_projects_full_surface_with_flags_and_roles() {
         names.contains(&"nested"),
         "object-alias-typed member `nested` present; got {names:?}"
     );
-    let graph_store_view = host.resolver_store_view();
+    let graph_store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx =
         crate::resolver_core::HostResolverContext::new(&host, &graph_store_view, overlay);
@@ -445,7 +445,7 @@ fn nested_object_member_stays_shallow_reference_not_materialized() {
         .resolve_shallow_surface(NESTED, "Nested")
         .expect("Nested must resolve to a one-level surface");
 
-    let graph_store_view = host.resolver_store_view();
+    let graph_store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx =
         crate::resolver_core::HostResolverContext::new(&host, &graph_store_view, overlay);
@@ -578,7 +578,7 @@ fn index_signature_build_uses_declaration_origin_for_scopeless_nodes() {
     const FILE: &str = "/src/idx_decl.ts";
 
     let host = make_host_with_footprint();
-    let graph_store_view = host.resolver_store_view();
+    let graph_store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx =
         crate::resolver_core::HostResolverContext::new(&host, &graph_store_view, overlay);
@@ -682,7 +682,7 @@ fn member_build_uses_declaration_origin_for_scopeless_value() {
     const FILE: &str = "/src/member_decl.ts";
 
     let host = make_host_with_footprint();
-    let graph_store_view = host.resolver_store_view();
+    let graph_store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx =
         crate::resolver_core::HostResolverContext::new(&host, &graph_store_view, overlay);

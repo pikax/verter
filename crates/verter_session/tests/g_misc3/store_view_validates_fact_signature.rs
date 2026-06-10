@@ -24,6 +24,7 @@ impl StoreView for RejectAllView {
         StoreViewCompatToken {
             epoch: 0,
             session: None,
+            validity_fingerprint: 0,
         }
     }
 
@@ -86,6 +87,7 @@ fn validates_fact_signature_short_circuits_on_first_failure() {
             StoreViewCompatToken {
                 epoch: 0,
                 session: None,
+                validity_fingerprint: 0,
             }
         }
 

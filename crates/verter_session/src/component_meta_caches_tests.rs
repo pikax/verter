@@ -124,6 +124,22 @@ defineProps<{
         .unwrap();
 }
 
+/// Fixture: a single SFC whose props are a self-contained inline literal
+/// with NO cross-file imports, so a cold component-meta compute drives no
+/// dependency-resolution store-view reads — the only `from_host` build the
+/// cold compute could take is its own SEED read.
+fn upsert_simple_props_fixture(project: &Arc<MetaProject>) {
+    project
+        .upsert_base(
+            "/Simple.vue",
+            r#"<script setup lang="ts">
+defineProps<{ msg: string; count: number }>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+}
+
 fn time_ns<F: FnOnce()>(f: F) -> u128 {
     let start = Instant::now();
     f();
@@ -286,12 +302,16 @@ impl<'a> ComponentMetaRequestHost for GatingRequestHost<'a> {
         self.inner.snapshot_store_view()
     }
 
-    fn view_mutation_epoch(&self, store_view: &Self::View) -> u64 {
-        self.inner.view_mutation_epoch(store_view)
+    fn snapshot_store_view_read(&self) -> (Self::View, bool) {
+        self.inner.snapshot_store_view_read()
     }
 
-    fn current_store_view_epoch(&self) -> u64 {
-        self.inner.current_store_view_epoch()
+    fn resolution_is_partial(&self, result: &Self::Resolution) -> bool {
+        self.inner.resolution_is_partial(result)
+    }
+
+    fn current_view_supersession_fingerprint(&self) -> u64 {
+        self.inner.current_view_supersession_fingerprint()
     }
 
     fn capture_component_meta_inputs(
@@ -319,6 +339,7 @@ impl<'a> ComponentMetaRequestHost for GatingRequestHost<'a> {
         mode: Self::Mode,
         captured: Option<&Self::CapturedInputs>,
         store_view: Option<&Self::View>,
+        base_is_current: bool,
     ) -> Option<Self::Resolution> {
         // Only the elected Leader reaches `compute`; Followers join the
         // in-flight lane and never call this. Signal entry, then park
@@ -326,7 +347,7 @@ impl<'a> ComponentMetaRequestHost for GatingRequestHost<'a> {
         self.gate.signal_entered();
         self.gate.wait_open();
         self.inner
-            .compute_component_meta(canonical, mode, captured, store_view)
+            .compute_component_meta(canonical, mode, captured, store_view, base_is_current)
     }
 
     fn store_component_meta_result(
@@ -946,5 +967,176 @@ fn shape_cache_db_admits_value_complete_shape_regardless_of_request_sticky() {
     assert!(
         db.peek(&key, ctx).is_some(),
         "the value-complete shape MUST be peekable after admission despite the sticky",
+    );
+}
+
+/// SOUNDNESS: the view-bound component-meta cold compute must seed from the
+/// SAME store-view read the promotion fence gates on — never a SECOND fresh
+/// read whose currentness the fence cannot see.
+///
+/// The promotion fence (`is_stable` in
+/// `resolver_core::component_meta_request`) gates on the EXECUTOR snapshot's
+/// external-supersession fingerprint and the executor snapshot's currentness.
+/// If `ViewBoundRequestHost::compute_component_meta` ignores the executor-
+/// supplied `(store_view, base_is_current)` pair and instead takes its OWN
+/// fresh base read (the pre-fix `view_bound_cold_seed` path), the compute seed
+/// and the promotion-gating seed are DIFFERENT reads. Under additive store-view
+/// churn — which advances the artifact / route-owned / load generations the
+/// external-supersession fingerprint deliberately EXCLUDES — the executor
+/// snapshot can be `Current` (fingerprint unchanged, fence would promote) while
+/// the compute's separate fresh read falls back to `ReturnOnly`. The fence then
+/// promotes a result computed from a NON-CURRENT seed.
+///
+/// The fix makes the view-bound compute REUSE the executor's `(store_view,
+/// base_is_current)` as the single seed (matching the bare-host and session-
+/// host paths, which already rebind through `StoreViewRead::from_executor_
+/// snapshot`). Then the compute seed IS the promotion-gating read — the
+/// divergence is structurally impossible.
+///
+/// DISCRIMINATING (deterministic): a recording wrapper measures the
+/// `from_host` store-view build count DURING the inner `compute_component_meta`
+/// delegate call, after the component-meta has been fully warmed so the cold
+/// compute's internal resolver reads are cache-served. Pre-fix, the inner
+/// compute drives `view_bound_cold_seed` → an EXTRA `resolver_store_view_read()`
+/// → a non-zero build delta. Post-fix it reuses the executor snapshot → ZERO
+/// additional builds for the seed.
+#[test]
+fn view_bound_cold_compute_seeds_from_executor_snapshot_not_a_second_read() {
+    use crate::resolver_store::HOST_STORE_VIEW_FROM_HOST_BUILDS;
+
+    /// Records the `from_host` build delta the inner `compute_component_meta`
+    /// incurs, so the test can assert the view-bound cold compute does NOT take
+    /// a second store-view read on top of the executor's snapshot.
+    struct SeedReadRecordingHost<'a> {
+        inner: ViewBoundRequestHost<'a>,
+        compute_build_delta: Arc<std::sync::atomic::AtomicU64>,
+    }
+
+    impl<'a> ComponentMetaRequestHost for SeedReadRecordingHost<'a> {
+        type View = <ViewBoundRequestHost<'a> as ComponentMetaRequestHost>::View;
+        type Mode = <ViewBoundRequestHost<'a> as ComponentMetaRequestHost>::Mode;
+        type Resolution = <ViewBoundRequestHost<'a> as ComponentMetaRequestHost>::Resolution;
+        type CapturedInputs =
+            <ViewBoundRequestHost<'a> as ComponentMetaRequestHost>::CapturedInputs;
+
+        fn cache_key(&self, canonical: &str, mode: Self::Mode) -> ResolutionNodeKey {
+            self.inner.cache_key(canonical, mode)
+        }
+        fn snapshot_store_view(&self) -> Self::View {
+            self.inner.snapshot_store_view()
+        }
+        fn snapshot_store_view_read(&self) -> (Self::View, bool) {
+            self.inner.snapshot_store_view_read()
+        }
+        fn resolution_is_partial(&self, result: &Self::Resolution) -> bool {
+            self.inner.resolution_is_partial(result)
+        }
+        fn current_view_supersession_fingerprint(&self) -> u64 {
+            self.inner.current_view_supersession_fingerprint()
+        }
+        fn capture_component_meta_inputs(
+            &self,
+            canonical: &str,
+            store_view: &Self::View,
+        ) -> Option<Self::CapturedInputs> {
+            self.inner
+                .capture_component_meta_inputs(canonical, store_view)
+        }
+        fn try_get_cached_component_meta(
+            &self,
+            _canonical: &str,
+            _mode: Self::Mode,
+            _store_view: &Self::View,
+        ) -> Option<Self::Resolution> {
+            // Force a result-cache MISS so the request always runs `compute`,
+            // even though the prior `get_component_meta` warmed the result
+            // cache. The internal resolver caches (prepared declarations,
+            // registry shapes) stay warm, so the cold compute's only remaining
+            // store-view read is its SEED read — exactly what this test
+            // measures.
+            None
+        }
+        fn compute_component_meta(
+            &self,
+            canonical: &str,
+            mode: Self::Mode,
+            captured: Option<&Self::CapturedInputs>,
+            store_view: Option<&Self::View>,
+            base_is_current: bool,
+        ) -> Option<Self::Resolution> {
+            let before = HOST_STORE_VIEW_FROM_HOST_BUILDS.with(std::cell::Cell::get);
+            let result = self.inner.compute_component_meta(
+                canonical,
+                mode,
+                captured,
+                store_view,
+                base_is_current,
+            );
+            let after = HOST_STORE_VIEW_FROM_HOST_BUILDS.with(std::cell::Cell::get);
+            self.compute_build_delta
+                .store(after - before, std::sync::atomic::Ordering::Relaxed);
+            result
+        }
+        fn store_component_meta_result(
+            &self,
+            canonical: &str,
+            mode: Self::Mode,
+            result: &Self::Resolution,
+        ) {
+            self.inner
+                .store_component_meta_result(canonical, mode, result)
+        }
+    }
+
+    let project = make_project();
+    upsert_simple_props_fixture(&project);
+    let session = project.open_session_batch().unwrap();
+    let host = session.host();
+    let mode = crate::types::ProjectionMode::Expanded;
+    let canonical = host.resolve_alias_or_canonical("/Simple.vue");
+
+    // Fully warm the component-meta so the cold compute's internal resolver
+    // reads (prepared declarations, registry shapes) are cache-served — the
+    // only store-view read the compute could still take is its SEED read.
+    let _ = host.get_component_meta("/Simple.vue");
+
+    let view = HostViewRef::new(host);
+    let delta = Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX));
+    let recording = SeedReadRecordingHost {
+        inner: ViewBoundRequestHost {
+            host,
+            view: &view,
+            overlay: Arc::new(CanonicalCompletionOverlay::new()),
+        },
+        compute_build_delta: Arc::clone(&delta),
+    };
+    let sf = host.resolver_runtime().component_meta.singleflight();
+    let result = run_component_meta_request(
+        &recording,
+        sf,
+        &canonical,
+        mode,
+        None,
+        crate::meta_resolve::STORE_VIEW_STABILITY_MAX_ATTEMPTS,
+    );
+    let observed = delta.load(std::sync::atomic::Ordering::Relaxed);
+
+    // The compute must have run (cold Leader / Fallback), so the delta was
+    // recorded — a Cache hit that skipped `compute` would leave it `u64::MAX`.
+    assert_ne!(
+        observed,
+        u64::MAX,
+        "the recording wrapper's compute must have run so the seed-read delta is observed; \
+         source={:?}",
+        result.source
+    );
+    assert_eq!(
+        observed, 0,
+        "REGRESSION (view-bound seed divergence): the view-bound cold compute took {observed} \
+         additional `from_host` store-view build(s) on top of the executor's snapshot. The cold \
+         compute must REUSE the executor's `(store_view, base_is_current)` seed — the same read \
+         the promotion fence gates on — never a SECOND fresh read whose currentness the fence \
+         cannot see. Under additive churn that second read can be non-current while the executor \
+         snapshot is current, promoting a result computed from a stale seed.",
     );
 }

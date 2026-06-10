@@ -225,7 +225,7 @@ defineProps<Props>()
         .unwrap();
 
     let host = project.host();
-    let _store_view = host.resolver_store_view();
+    let _store_view = host.resolver_store_view_read().into_owned_view();
     let snapshot = host
         .get_raw_analysis_snapshot("/src/App.vue")
         .expect("raw snapshot should exist");
@@ -299,7 +299,7 @@ defineProps<{ modelValue?: ModelValue<R> }>()
         .unwrap();
 
     let host = project.host();
-    let _store_view = host.resolver_store_view();
+    let _store_view = host.resolver_store_view_read().into_owned_view();
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
     let raw_body = query_engine
         .owner_collection_expr("/src/App.vue", "ModelValue")
@@ -364,7 +364,7 @@ defineProps<{ modelValue?: ModelValue<R> }>()
         .unwrap();
 
     let host = project.host();
-    let _store_view = host.resolver_store_view();
+    let _store_view = host.resolver_store_view_read().into_owned_view();
     let snapshot = host
         .get_raw_analysis_snapshot("/src/App.vue")
         .expect("raw snapshot should exist");
@@ -453,6 +453,8 @@ defineProps<{ bar: number }>()
         ProjectionMode::Expanded,
         Some(&captured),
         Some(&view),
+        // The fixed view is a current request-bound snapshot.
+        true,
     )
     .expect("component-meta should still resolve against captured owner inputs");
 
@@ -2669,7 +2671,7 @@ export interface Props { a: string }
 
     project.host().provenance().reset();
     let mut tracked_deps = std::collections::BTreeSet::new();
-    let _store_view = project.host().resolver_store_view();
+    let _store_view = project.host().resolver_store_view_read().into_owned_view();
 
     let resolved = crate::resolver_core::with_bare_host_ctx_for_test(project.host(), |ctx| {
         resolve_jsdoc_tag_type(
@@ -3700,7 +3702,7 @@ defineProps<DashboardSidebarCollapseProps>()
         )
         .unwrap();
 
-    let _store_view = project.host().resolver_store_view();
+    let _store_view = project.host().resolver_store_view_read().into_owned_view();
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(project.host());
     let button_projected = crate::meta_resolve::project_type_surface_expr_via_host_threaded(
         &mut query_engine,
@@ -4386,7 +4388,7 @@ export interface HTMLAttributes {
         .ensure_indexed_ready("/jsx_runtime.ts")
         .expect("jsx runtime barrel should seed module facts");
 
-    let _store_view = project.host().resolver_store_view();
+    let _store_view = project.host().resolver_store_view_read().into_owned_view();
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(project.host());
     // The bridge carries NO prepared-decl root-surface rescue, so this
     // proves the re-exported intrinsic shape is resolved by the DISPATCH
@@ -4460,7 +4462,7 @@ export interface ButtonProps extends Omit<LinkProps, 'href'> {
         .ensure_indexed_ready("/src/types.ts")
         .expect("types dependency should seed module facts");
 
-    let _store_view = host.resolver_store_view();
+    let _store_view = host.resolver_store_view_read().into_owned_view();
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(&host);
 
     let projected = crate::meta_resolve::project_type_surface_expr_via_host_threaded(
@@ -5433,7 +5435,7 @@ defineProps<Props>()
         .unwrap();
 
     let host = project.host();
-    let _store_view = host.resolver_store_view();
+    let _store_view = host.resolver_store_view_read().into_owned_view();
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
 
     let result1 = query_engine
@@ -5487,7 +5489,7 @@ fn component_meta_query_engine_routes_imported_registry_symbols_to_the_defining_
         .unwrap();
 
     let host = project.host();
-    let _store_view = host.resolver_store_view();
+    let _store_view = host.resolver_store_view_read().into_owned_view();
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
 
     let resolved = query_engine
@@ -5546,7 +5548,7 @@ defineSlots<Slots<T>>()
         .unwrap();
 
     let host = project.host();
-    let _store_view = host.resolver_store_view();
+    let _store_view = host.resolver_store_view_read().into_owned_view();
     let snapshot = host
         .get_raw_analysis_snapshot("/src/App.vue")
         .expect("raw snapshot should exist");
@@ -5651,7 +5653,7 @@ defineSlots<Slots<T>>()
         .unwrap();
 
     let host = project.host();
-    let store_view = host.resolver_store_view();
+    let store_view = host.resolver_store_view_read().into_owned_view();
     let whole_hash = store_view
         .whole_hash("/src/App.vue")
         .expect("whole hash should exist for the owner");
@@ -5727,7 +5729,7 @@ defineExpose({ exposed })
             possible_canonical_ids: Vec::new(),
         }],
     );
-    let store_view = host.resolver_store_view();
+    let store_view = host.resolver_store_view_read().into_owned_view();
     let whole_hash = store_view
         .whole_hash("/src/App.vue")
         .expect("whole hash should exist for the owner");
@@ -5866,7 +5868,7 @@ defineEmits<Emits>()
             possible_canonical_ids: Vec::new(),
         }],
     );
-    let store_view = host.resolver_store_view();
+    let store_view = host.resolver_store_view_read().into_owned_view();
     let whole_hash = store_view
         .whole_hash("/src/App.vue")
         .expect("whole hash should exist for the owner");
@@ -5963,7 +5965,7 @@ defineEmits<Emits>()
             possible_canonical_ids: Vec::new(),
         }],
     );
-    let store_view = host.resolver_store_view();
+    let store_view = host.resolver_store_view_read().into_owned_view();
     let whole_hash = store_view
         .whole_hash("/src/Child.vue")
         .expect("whole hash should exist for the owner");
@@ -6060,7 +6062,7 @@ defineEmits<Emits>()
             possible_canonical_ids: Vec::new(),
         }],
     );
-    let store_view = host.resolver_store_view();
+    let store_view = host.resolver_store_view_read().into_owned_view();
     let whole_hash = store_view
         .whole_hash("/src/Child.vue")
         .expect("whole hash should exist for the owner");
@@ -6160,7 +6162,7 @@ defineProps<{ first: Inner; second: Inner }>()
         .unwrap();
 
     let host = project.host();
-    let _store_view = host.resolver_store_view();
+    let _store_view = host.resolver_store_view_read().into_owned_view();
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
     let expr = verter_type_expr::TypeExpr::named("Inner");
 
@@ -6233,7 +6235,7 @@ defineProps<{ ui?: Button['ui'] }>()
         .unwrap();
 
     let host = project.host();
-    let _store_view = host.resolver_store_view();
+    let _store_view = host.resolver_store_view_read().into_owned_view();
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
     let expr = verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload("Button['ui']", None);
 
@@ -6282,7 +6284,7 @@ defineProps<{ first: Inner; second: Inner }>()
         .unwrap();
 
     let host = project.host();
-    let _store_view = host.resolver_store_view();
+    let _store_view = host.resolver_store_view_read().into_owned_view();
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
     let expr = verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload(
         "{ first: Inner; second: Inner }",
@@ -6436,7 +6438,7 @@ defineProps<{ x: string }>()
         .unwrap();
 
     let host = project.host();
-    let _store_view = host.resolver_store_view();
+    let _store_view = host.resolver_store_view_read().into_owned_view();
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
 
     // Built-in names should NOT be resolvable
@@ -6481,7 +6483,7 @@ defineProps<Props>()
         .unwrap();
 
     let host = project.host();
-    let _store_view = host.resolver_store_view();
+    let _store_view = host.resolver_store_view_read().into_owned_view();
 
     assert!(
         host.local_type_declaration_id("/src/App.vue", "Props")
@@ -9352,7 +9354,8 @@ fn overlay_session_vue_macro_dtos_sees_overlay_prop_without_leaking_to_base() {
     overlays.insert(SFC.to_string(), Arc::from(overlay_src));
     let view = crate::session_view::OverlaidView::new(Arc::clone(&host), overlays);
     let store_view = host
-        .resolver_store_view()
+        .resolver_store_view_read()
+        .into_owned_view()
         .with_session_overlay(&host, &view);
     let session_ctx = crate::resolver_core::SessionResolverContext::new(
         &host,
@@ -9475,7 +9478,8 @@ fn overlay_session_vue_macro_dtos_define_model_reads_overlay_without_leaking_to_
     overlays.insert(SFC.to_string(), Arc::from(overlay_src));
     let view = crate::session_view::OverlaidView::new(Arc::clone(&host), overlays);
     let store_view = host
-        .resolver_store_view()
+        .resolver_store_view_read()
+        .into_owned_view()
         .with_session_overlay(&host, &view);
     let session_ctx = crate::resolver_core::SessionResolverContext::new(
         &host,
@@ -9614,7 +9618,8 @@ fn overlay_session_vue_macro_slot_bindings_read_overlay_carrier_without_leaking_
     overlays.insert(SLOTS_TS.to_string(), Arc::from(overlay_slots));
     let view = crate::session_view::OverlaidView::new(Arc::clone(&host), overlays);
     let store_view = host
-        .resolver_store_view()
+        .resolver_store_view_read()
+        .into_owned_view()
         .with_session_overlay(&host, &view);
     let session_ctx = crate::resolver_core::SessionResolverContext::new(
         &host,

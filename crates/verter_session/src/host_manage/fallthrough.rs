@@ -258,16 +258,18 @@ impl VerterHost {
             host: self,
             parent_canonical_id: canonical_id,
             parent_snapshot: &resolved.snapshot,
-            // Build the request-scoped view ONCE — every per-element /
-            // per-child / per-branch lookup inside the recursive
-            // fallthrough surface walk reuses this view.
-            live_view: self.resolver_store_view(),
             // Carry the request-bound ctx through to the engine
             // constructions in `build_generic_child_prop_overrides`,
             // `resolve_root_consumption`, `resolve_dynamic_root_candidates`,
             // and `intrinsic_members_for_tag` so they bind to the
             // overlay-aware view rather than rebuild a workspace
             // snapshot inside the cold-compute `with_fact_tracer` scope.
+            // `ctx.store_view()` is ALSO the per-element / per-child /
+            // per-root fallthrough-node cache validation view — it is the
+            // currentness-gated `RequestStoreView`, built once, so a
+            // non-current cold-seed makes those node-cache validations fail
+            // closed (the prior separate raw `live_view` field dropped the
+            // currentness flag — the leak this closes).
             ctx,
         };
         // Build a lightweight fallthrough eval env: base owner env + runtime

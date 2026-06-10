@@ -540,7 +540,10 @@ fn cross_check_probe_strategy(
 /// resolver. Only the `standalone` host kind is first-class (§Scope).
 fn source_side_walk(spec: &QuerySpec) -> SourceWalkResult {
     let host = build_source_host(spec);
-    let store_view = host.resolver_store_view();
+    // Build-time oracle generator: build a quiescent owned view over the
+    // freshly-constructed standalone host. The raw-view escape hatch is
+    // allowlisted for this build-tool driver-snapshot rail.
+    let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(CanonicalCompletionOverlay::new());
     let ctx = HostResolverContext::new(&host, &store_view, overlay);
     let locator = SourceLocator {

@@ -215,26 +215,47 @@ impl VerterHost {
         // `verter_audit::NoOpObserver` so emit sites still see
         // `Some(observer)` without paying downstream cost.
         //
-        // Bind the dispatch ctor to a request-scoped
-        // `HostResolverContext` so cache validators inside the
-        // dispatch chain inherit the overlay-aware view instead of
-        // paying a fresh workspace-sweep cost per call.
-        let store_view = self.resolver_store_view();
-        let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let host_ctx = crate::resolver_core::HostResolverContext::new(self, &store_view, overlay);
-        let host_ctx_ref: &dyn crate::resolver_core::resolver_context::ResolverContext = &host_ctx;
+        // Query-RETURNER: it returns the resolved node with no outer
+        // `run_stable_request` publish fence, so it MUST resolve against a
+        // PROVEN-CURRENT snapshot. Acquire a `CurrentHostStoreView` via a
+        // bounded retry; on sustained churn surface a typed non-current
+        // result (`QueryError::UnstableState`) rather than resolving the
+        // query against already-superseded state and returning it as a
+        // normal answer. `UnstableState` decodes to `resolved = None` below,
+        // and the audit record still emits with the unstable signal.
         let request_start = Instant::now();
-        let result = match registration.as_ref() {
-            AuditRequestRegistration::Active(_) => {
-                let _ctx_guard = RequestContextGuard::install(Arc::clone(&ctx));
-                let dispatch = ProjectSemanticDispatch::new(host_ctx_ref);
-                dispatch.execute_type_node(query)
+        let result = match crate::typeinfo::current_store_view_for_query(self) {
+            Some(current_view) => {
+                // Bind the dispatch ctor to a request-scoped
+                // `HostResolverContext` so cache validators inside the
+                // dispatch chain inherit the overlay-aware view instead of
+                // paying a fresh workspace-sweep cost per call.
+                let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+                let host_ctx = crate::resolver_core::HostResolverContext::from_current(
+                    self,
+                    &current_view,
+                    overlay,
+                );
+                let host_ctx_ref: &dyn crate::resolver_core::resolver_context::ResolverContext =
+                    &host_ctx;
+                match registration.as_ref() {
+                    AuditRequestRegistration::Active(_) => {
+                        let _ctx_guard = RequestContextGuard::install(Arc::clone(&ctx));
+                        let dispatch = ProjectSemanticDispatch::new(host_ctx_ref);
+                        dispatch.execute_type_node(query)
+                    }
+                    AuditRequestRegistration::Noop => {
+                        let _noop_guard = verter_audit::install_noop_observer();
+                        let dispatch = ProjectSemanticDispatch::new(host_ctx_ref);
+                        dispatch.execute_type_node(query)
+                    }
+                }
             }
-            AuditRequestRegistration::Noop => {
-                let _noop_guard = verter_audit::install_noop_observer();
-                let dispatch = ProjectSemanticDispatch::new(host_ctx_ref);
-                dispatch.execute_type_node(query)
-            }
+            None => crate::semantic_query::QueryResult::Error(
+                crate::semantic_query::QueryError::UnstableState {
+                    attempts: crate::typeinfo::TYPEINFO_CURRENT_VIEW_RETRY_ATTEMPTS as u8,
+                },
+            ),
         };
         let total_ms = request_start.elapsed().as_secs_f64() * 1000.0;
 

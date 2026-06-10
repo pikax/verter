@@ -360,6 +360,10 @@ pub(crate) mod session_runtime;
 pub mod session_view;
 mod shared;
 pub(crate) mod source_map_remap;
+#[cfg(test)]
+mod store_view_manager_tests;
+#[cfg(test)]
+mod store_view_non_current_contract_tests;
 pub(crate) mod template_convert;
 pub mod typeinfo;
 mod types;
@@ -417,6 +421,17 @@ pub use types::*;
 // through the `#[track_caller]` rail from the warm-hit validator
 // down to `HostStoreView::from_host`.
 pub use resolver_store::{dump_from_host_call_sites, reset_from_host_call_sites};
+// Actual base-view sweep counter — a batch-saturation gate reads this
+// (NOT the per-call `from_host` count, which also bumps on cheap
+// token-stable Arc-clone hits) to assert a warm batch performs ~O(1)
+// full-workspace sweeps.
+pub use resolver_store::{
+    reset_store_view_coherent_build_sweeps, store_view_coherent_build_sweeps,
+};
+// The session-overlay copy-on-write counter is deliberately NOT a
+// process-global re-export: it lives per-host on
+// `VerterHost::provenance().session_overlay_cows` (`types::MetaProvenance`)
+// so the batch regression gate measures only its own host's overlay COWs.
 
 // Re-export for the LSP: standalone @verter/types .d.ts content.
 pub use verter_compiler::utils::oxc::vue::resolve_type::ResolvedMemberVisibility;
@@ -573,7 +588,23 @@ pub struct VerterHost {
     ///
     /// Unlike `tick`, which tracks compile/access recency, this counter only
     /// advances after host mutations that can change semantic resolution inputs.
+    /// It is an INPUT to the `StoreViewValidationToken`, not the validity
+    /// oracle by itself (see [`crate::resolver_store::StoreViewValidationToken`]).
     pub(crate) store_view_epoch: std::sync::atomic::AtomicU64,
+    /// First-time additive-load generation. Advances on every successful
+    /// FIRST-TIME `ensure_loaded` — additive state the base view snapshots
+    /// by value but that publishes into neither `FileArtifactStore` nor the
+    /// epoch. A dedicated dimension (not a `store_view_epoch` bump) because
+    /// the epoch bump clears the thread-local parsed-eval-program cache,
+    /// and the publish fence must EXCLUDE a compute's own loads while the
+    /// manager REUSE oracle includes them — full rationale on
+    /// [`crate::resolver_store::StoreViewValidationToken::load_generation`].
+    pub(crate) load_generation: std::sync::atomic::AtomicU64,
+    /// Caches one Arc-shareable base `HostStoreView` keyed by the
+    /// complete `StoreViewValidationToken`, so batch jobs reuse one
+    /// workspace snapshot by cheap Arc clone instead of re-sweeping the
+    /// workspace per job. See [`crate::resolver_store::StoreViewManager`].
+    pub(crate) store_view_manager: crate::resolver_store::StoreViewManager,
     /// Last computed cross-file prop constness overrides for
     /// invalidation tracking. Stores the LAST computed values for
     /// diff-detection on re-computation. **NOT a cache** of resolution

@@ -604,6 +604,14 @@ pub struct RouteOwnedShallowDb {
     /// Stale-sweep counter — bumped when [`Self::remove`] evicts an
     /// existing entry or a replacement supersedes a prior whole-hash.
     stale_sweeps: Arc<AtomicU64>,
+    /// Monotonic route-owned-shallow publication generation. A
+    /// `HostStoreView` snapshots a route-owned `Route` derived hash BY
+    /// VALUE; bumping this on every publish / remove / clear lets the
+    /// `StoreViewValidationToken` invalidate a view built before a lazy
+    /// route-owned publication landed. See
+    /// [`crate::file_artifact_store::FileArtifactStore::artifact_generation`]
+    /// for the same rationale on the indexed-artifact side.
+    artifact_generation: Arc<AtomicU64>,
     /// Cache-cluster schema version this Db was constructed under. See
     /// [`crate::cache_schema`] for the contract.
     schema_version: u32,
@@ -642,8 +650,17 @@ impl RouteOwnedShallowDb {
             entries: DashMap::new(),
             live_counter: live,
             stale_sweeps: stale,
+            artifact_generation: Arc::new(AtomicU64::new(0)),
             schema_version,
         }
+    }
+
+    /// Current route-owned-shallow publication generation. Folded into
+    /// the `StoreViewValidationToken` so a `HostStoreView` built before
+    /// a lazy route-owned publication is token-invalidated.
+    #[must_use]
+    pub fn artifact_generation(&self) -> u64 {
+        self.artifact_generation.load(Ordering::Acquire)
     }
 
     /// Look up the route-only artifact for `canonical_id` if the cached
@@ -716,6 +733,9 @@ impl RouteOwnedShallowDb {
         } else {
             self.live_counter.fetch_add(1, Ordering::Relaxed);
         }
+        // A `HostStoreView` snapshots the route-owned `Route` derived
+        // hash by value; bump so a pre-publication view is invalidated.
+        self.artifact_generation.fetch_add(1, Ordering::AcqRel);
     }
 
     /// Remove the entry for `canonical_id` (e.g. on per-canonical eviction
@@ -726,6 +746,7 @@ impl RouteOwnedShallowDb {
         if self.entries.remove(canonical_id).is_some() {
             self.live_counter.fetch_sub(1, Ordering::Relaxed);
             self.stale_sweeps.fetch_add(1, Ordering::Relaxed);
+            self.artifact_generation.fetch_add(1, Ordering::AcqRel);
         }
     }
 
@@ -740,6 +761,7 @@ impl RouteOwnedShallowDb {
             .fetch_sub(drained as u64, Ordering::Relaxed);
         self.stale_sweeps
             .fetch_add(drained as u64, Ordering::Relaxed);
+        self.artifact_generation.fetch_add(1, Ordering::AcqRel);
     }
 
     #[must_use]
@@ -828,6 +850,16 @@ impl crate::cache_schema::CacheSchemaVersioned for RouteOwnedShallowDb {
         if count > 0 {
             self.live_counter.fetch_sub(count as u64, Ordering::Relaxed);
             self.stale_sweeps.fetch_add(count as u64, Ordering::Relaxed);
+            // A `HostStoreView` snapshots the route-owned `Route` derived
+            // hash by value, and `route_owned_generation` is folded into
+            // the `StoreViewValidationToken`. Draining entries here mutates
+            // that snapshot source, so it MUST advance the generation
+            // exactly like `publish` / `remove` / `clear_all` — else a view
+            // captured before this sweep keeps validating against drained
+            // route-owned `Route` derived hashes. Bump-iff-changed: only
+            // when this sweep actually removed rows (mirrors the
+            // no-op-eviction gating on the per-key paths).
+            self.artifact_generation.fetch_add(1, Ordering::AcqRel);
         }
         count
     }

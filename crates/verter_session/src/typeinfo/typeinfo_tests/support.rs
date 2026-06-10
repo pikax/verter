@@ -162,7 +162,7 @@ pub(crate) fn shallow_surface_expr(host: &VerterHost, canonical_id: &str, name: 
         ProjectionReductionContext, ResolveDeclKey, ScopeId, SemanticQueryApi, SemanticQueryKey,
     };
 
-    let store_view = host.resolver_store_view();
+    let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
@@ -569,7 +569,7 @@ pub(crate) fn template_literal_reduce_read(
         })
         .collect();
 
-    let store_view = host.resolver_store_view();
+    let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);

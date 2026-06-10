@@ -554,6 +554,130 @@ impl FileArtifacts {
     }
 }
 
+/// `true` when `prev` and `next` are indistinguishable in EVERY dimension
+/// a base [`crate::resolver_store::HostStoreView`] snapshots BY VALUE — so
+/// replacing `prev` with `next` cannot change any base snapshot and the
+/// folded `artifact_generation` (hence the `StoreViewValidationToken`)
+/// MUST NOT advance for it.
+///
+/// ## Soundness (no under-bump)
+///
+/// This is the bump-iff-actually-changed gate for an artifact REPLACE. It
+/// is deliberately CONSERVATIVE: it returns `true` only when the precise
+/// by-value snapshot dimensions are bit-identical, so any real change to a
+/// base-visible value still bumps the token (the mandatory no-under-bump
+/// guarantee). The dimensions a base `HostStoreView::build` reads from a
+/// `FileArtifacts` value are exactly:
+///
+/// - `indexed.whole_hash` — seeds `whole_hashes` (via `snapshot_all`).
+/// - the file's route surface (`shallow_state.has_resolvable_surface()`
+///   gates whether a `Route` derived fact is emitted at all, and
+///   `hash_route_surface(&shallow_state)` is the fact's hash content).
+/// - `indexed.import_route_hash` — the content-pinned import-route summary;
+///   included defensively so a route-surface shift always bumps even though
+///   `build` re-resolves the live `ImportRoute` hash at host level.
+/// - `facts` — snapshotted into `file_facts` (`FileFacts` is `PartialEq`).
+///
+/// `parse_stable_hash` and `augmentations` are NOT read by the base view's
+/// per-canonical snapshot maps (the augmentation INDEX is a separate,
+/// lazily-populated structure with its own bump sites), so they are not
+/// part of this comparison.
+///
+/// A new `FileArtifactKey` (a FRESH insert) is never compared here — a
+/// fresh insert always bumps, because the canonical's snapshot value goes
+/// from absent to present.
+fn base_snapshot_equivalent(prev: &FileArtifacts, next: &FileArtifacts) -> bool {
+    let prev_indexed = &prev.indexed;
+    let next_indexed = &next.indexed;
+    prev_indexed.whole_hash == next_indexed.whole_hash
+        && prev_indexed.import_route_hash == next_indexed.import_route_hash
+        && prev_indexed.shallow_state.has_resolvable_surface()
+            == next_indexed.shallow_state.has_resolvable_surface()
+        && crate::resolver_store::hash_route_surface(&prev_indexed.shallow_state)
+            == crate::resolver_store::hash_route_surface(&next_indexed.shallow_state)
+        && prev.facts == next.facts
+}
+
+/// `true` when replacing the augmenter artifact `prev` with `next` cannot
+/// change ANY augmentation-index entry the augmenter participates in — i.e.
+/// it produces the IDENTICAL `AugmenterSet` contribution for every target.
+///
+/// Two orthogonal inputs determine that contribution, and BOTH must be
+/// unchanged for a true no-op:
+///
+/// 1. **Which target rows the augmenter contributes to** — governed by the
+///    `ModuleAugmentationFact` multiset (via [`augmenter_fact_could_contribute`]
+///    / [`augmenter_matches_target`]). A retargeted specifier, an
+///    added/removed augmented binding, or a changed
+///    `augmented_member_shape_fingerprint` changes the multiset.
+/// 2. **The fingerprint baked into each contributed row** — the row's
+///    [`AugmenterSet::fingerprint`] is [`compute_augmenter_set_fingerprint`]
+///    folded over each contributing augmenter's
+///    `(augmenter_canonical, parse_stable_hash)`. The fact multiset is NOT a
+///    fingerprint input. So an augmenter whose facts are unchanged but whose
+///    `parse_stable_hash` moved (a decl-skeleton edit reparsed under a new
+///    `FileArtifactKey`) still changes every contributed row's fingerprint.
+///
+/// The insert paths gate
+/// [`FileArtifactStore::invalidate_augmentation_index_for_augmenter`] on this
+/// equivalence so a byte-identical augmenter reinsert neither invalidates nor
+/// bumps the base-folded `artifact_generation` (the no-op perf win), while any
+/// real contribution change still invalidates the stale rows and bumps.
+///
+/// ## Soundness (no under-invalidation, no drift)
+///
+/// Equivalence is derived from the EXACT inputs that determine the contribution,
+/// not a hand-picked subset, so it cannot drift loose from the fingerprint
+/// definition (the [P2] under-invalidation class). The `parse_stable_hash`
+/// gate is the SAME value [`compute_augmenter_set_fingerprint`] folds; the
+/// augmenter canonical — the fingerprint's only other input — is identical at
+/// every call site (an augmenter artifact only ever replaces itself at its own
+/// canonical), so comparing `parse_stable_hash` here is exactly comparing the
+/// per-augmenter fingerprint contribution. The fact compare is order-
+/// INDEPENDENT (a multiset over the four fact dimensions) and CONSERVATIVE:
+/// any genuine membership change makes the multisets differ. The lockstep unit
+/// invariant
+/// `file_artifact_store_tests::augmentation_contribution_equivalence_tracks_fingerprint_inputs`
+/// pins this predicate to [`compute_augmenter_set_fingerprint`] so the two
+/// definitions cannot diverge.
+fn augmentation_contribution_equivalent(prev: &FileArtifacts, next: &FileArtifacts) -> bool {
+    // (2) Fingerprint contribution: `parse_stable_hash` is folded into the
+    // `AugmenterSet` fingerprint (with the augmenter canonical, which is fixed
+    // across a self-replace). A moved hash changes every contributed row's
+    // fingerprint, so it is NOT a no-op even when the facts are identical.
+    if prev.parse_stable_hash != next.parse_stable_hash {
+        return false;
+    }
+    // (1) Target membership: the `ModuleAugmentationFact` multiset governs which
+    // index rows the augmenter contributes to.
+    let prev_facts = prev.augmentations.as_slice();
+    let next_facts = next.augmentations.as_slice();
+    if prev_facts.len() != next_facts.len() {
+        return false;
+    }
+    // Multiset compare keyed by the four fact dimensions (all `Eq + Hash`).
+    // `ModuleAugmentationFact` is not `Eq`, so fold a per-fact count map and
+    // confirm `next` exactly drains it.
+    type FactKey = (InternedSpecifier, InternedName, SymbolSpace, Hash16);
+    let key_of = |fact: &ModuleAugmentationFact| -> FactKey {
+        (
+            fact.specifier.clone(),
+            fact.augmented_name.clone(),
+            fact.space,
+            fact.augmented_member_shape_fingerprint,
+        )
+    };
+    let mut counts: rustc_hash::FxHashMap<FactKey, i64> = rustc_hash::FxHashMap::default();
+    for fact in prev_facts {
+        *counts.entry(key_of(fact)).or_insert(0) += 1;
+    }
+    for fact in next_facts {
+        let entry = counts.entry(key_of(fact)).or_insert(0);
+        *entry -= 1;
+    }
+    counts.values().all(|&c| c == 0)
+}
+
 // ── FileArtifactStore ──
 
 /// The per-host content-addressed file-artifact cache.
@@ -583,6 +707,28 @@ pub struct FileArtifactStore {
     live_counter: Arc<AtomicU64>,
     /// Stale-sweep counter.
     stale_sweeps: Arc<AtomicU64>,
+    /// Monotonic artifact-publication generation.
+    ///
+    /// Bumped on every mutation that changes the per-canonical
+    /// `IndexedReady` / `FileFacts` / derived-hash content a
+    /// `HostStoreView` snapshots BY VALUE: artifact insert / replace /
+    /// evict / GC and every augmentation-index populate / refresh /
+    /// invalidate / clear. This is the dimension the
+    /// `StoreViewValidationToken` folds so a manager-cached base view is
+    /// invalidated when a lazy `ensure_indexed_ready` publication lands
+    /// after the snapshot was built (the lazy publish does NOT bump
+    /// `store_view_epoch`). Without this the cached snapshot's
+    /// `file_facts` / `derived_hashes` maps go stale and warm-hit
+    /// validation false-misses — a steady-state warm-cache regression.
+    /// The lazy-publication burst during a cold compute is bounded, so
+    /// the cache rebuilds once and then stays warm.
+    ///
+    /// Distinct from `live_counter` (which counts net live entries, not
+    /// mutations) and `stale_sweeps` (replacements / evictions only):
+    /// neither bumps on an augmentation-index mutation, and a content
+    /// REPLACE leaves `live_counter` unchanged while still changing the
+    /// snapshotted value.
+    artifact_generation: Arc<AtomicU64>,
     /// Cache-cluster schema version this store was constructed under.
     schema_version: u32,
     /// Inverse-lookup index for module augmentations. Populated at
@@ -648,11 +794,30 @@ impl FileArtifactStore {
             hit_counters: DashMap::new(),
             live_counter: live,
             stale_sweeps: stale,
+            artifact_generation: Arc::new(AtomicU64::new(0)),
             schema_version,
             augmentation_index: DashMap::new(),
             #[cfg(test)]
             test_audit_hook: parking_lot::Mutex::new(None),
         }
+    }
+
+    /// Current artifact-publication generation. Folded into the
+    /// `StoreViewValidationToken` so a `HostStoreView` snapshot built
+    /// before a lazy artifact publication is invalidated once the
+    /// publication lands. See the `artifact_generation` field docs.
+    #[must_use]
+    pub fn artifact_generation(&self) -> u64 {
+        self.artifact_generation.load(Ordering::Acquire)
+    }
+
+    /// Bump the artifact-publication generation. Called from every
+    /// mutation that changes a `HostStoreView`-snapshotted value
+    /// (artifact insert / replace / evict / GC, augmentation-index
+    /// mutation).
+    #[inline]
+    fn bump_artifact_generation(&self) {
+        self.artifact_generation.fetch_add(1, Ordering::AcqRel);
     }
 
     /// Install the host-level test audit hook (legacy `FileArtifactStore`
@@ -986,6 +1151,7 @@ impl FileArtifactStore {
         // entries, clears their hit counters, and invalidates the
         // augmentation index the evicted augmenters contributed to.
         let removed = self.evict_artifact_keys(&drop_keys);
+        let evicted_any = !removed.is_empty();
         for (key, _payload) in &removed {
             self.live_counter.fetch_sub(1, Ordering::Relaxed);
             self.stale_sweeps.fetch_add(1, Ordering::Relaxed);
@@ -999,6 +1165,9 @@ impl FileArtifactStore {
             if !has_more {
                 self.last_access.remove(&key.canonical);
             }
+        }
+        if evicted_any {
+            self.bump_artifact_generation();
         }
     }
 
@@ -1043,9 +1212,19 @@ impl FileArtifactStore {
         // entries, clears their hit counters, and invalidates the
         // augmentation index the evicted augmenters contributed to.
         let removed = self.evict_artifact_keys(&drop_keys);
+        let evicted_any = !removed.is_empty();
         for _ in &removed {
             self.live_counter.fetch_sub(1, Ordering::Relaxed);
             self.stale_sweeps.fetch_add(1, Ordering::Relaxed);
+        }
+        if evicted_any {
+            // Per-canonical retention dropped at least one artifact
+            // version a `HostStoreView` could have snapshotted; bump the
+            // generation so a pre-retention view is token-invalidated.
+            // This sweep runs on every `evict_unreachable_artifacts_with_policy`
+            // call, so it MUST advance the token like every other keyed
+            // removal.
+            self.bump_artifact_generation();
         }
     }
 
@@ -1092,35 +1271,148 @@ impl FileArtifactStore {
         let tick = self.access_tick.fetch_add(1, Ordering::Relaxed) + 1;
         self.last_access.insert(Arc::clone(&canonical_id), tick);
 
-        // Legacy semantics: drain every prior version of the same
-        // canonical before inserting. The new entry replaces them all.
-        // The drain routes through the single removal chokepoint, which
-        // invalidates the prior versions' augmentation-index entries — a
-        // content edit that RETARGETS or DROPS an augmentation must clean
-        // the PRIOR target's index entry, which the new facts alone would
-        // not cover.
+        // The base-visible identity for this insert is the legacy key at
+        // the NEW content hash — the exact key a base `HostStoreView`
+        // snapshots for this canonical's live content (`snapshot_all` /
+        // `snapshot_file_facts_into` gate on `content_hash == live
+        // whole_hash`). Compute it first so a base-equivalent replace can
+        // be detected BEFORE any removal and expose NO absent window for it.
+        let current_key = FileArtifactKey::legacy(Arc::clone(&canonical_id), whole_hash);
+        let payload = Arc::new(FileArtifacts::with_indexed(indexed));
+
+        // Is the new payload base-snapshot-equivalent to what already lives
+        // at the current key? Compared BEFORE draining: a byte-identical
+        // re-insert is a true no-op for the current key and must remain a
+        // LITERAL no-op — never a remove-then-insert that exposes an absent
+        // window. A base snapshot interleaving a remove-then-reinsert of the
+        // current key would observe the canonical's live-content artifact as
+        // momentarily ABSENT (a missing `file_facts` / `Route` fact) while
+        // `artifact_generation` is unchanged (no-op → no bump), caching an
+        // incomplete snapshot under the unchanged token. Leaving the
+        // base-equivalent current-key entry untouched closes that gap.
+        let current_key_is_base_equivalent = self
+            .artifacts
+            .get(&current_key)
+            .map(|e| base_snapshot_equivalent(e.value(), &payload))
+            .unwrap_or(false);
+
+        // Legacy semantics: exactly one entry per canonical regardless of
+        // content_hash. Drain every prior version EXCEPT the current key
+        // when it is base-equivalent (left in place above). Overlay-scoped
+        // prior versions are base-invisible (`snapshot_all` filters to
+        // legacy keys), so draining them alone does NOT force a base-token
+        // bump. The prior BASE (legacy-key) payload — captured before
+        // draining — is what the bump-iff-actually-changed gate compares
+        // against when the current key is NOT already present (a content
+        // change replacing a different-hash legacy entry). The drain itself
+        // routes through the single removal chokepoint, which invalidates
+        // the prior versions' augmentation-index entries — a content edit
+        // that RETARGETS or DROPS an augmentation must clean the PRIOR
+        // target's index entry, which the new facts alone would not cover.
         let prior_keys: Vec<FileArtifactKey> = self
             .artifacts
             .iter()
             .filter(|entry| entry.key().canonical.as_ref() == canonical_id.as_ref())
+            .filter(|entry| {
+                // When the current key is a base-equivalent no-op we leave
+                // it in place; do NOT drain it (that would open the absent
+                // window this fix exists to close). Every OTHER prior key
+                // (stale content hashes, overlay-scoped variants) still
+                // drains.
+                !(current_key_is_base_equivalent && entry.key() == &current_key)
+            })
             .map(|entry| entry.key().clone())
             .collect();
-        let had_prior = !prior_keys.is_empty();
-        let _drained = self.evict_artifact_keys(&prior_keys);
-
-        let key = FileArtifactKey::legacy(canonical_id, whole_hash);
-        let payload = Arc::new(FileArtifacts::with_indexed(indexed));
-        // Capture the NEW artifact's augmentations before the move so the
-        // publish-side invalidation can fold them (the drain above already
-        // cleaned the prior target).
+        let had_prior = !prior_keys.is_empty() || current_key_is_base_equivalent;
+        // Capture the prior BASE (legacy-key) payload BEFORE draining so the
+        // bump-iff-actually-changed gate can compare it against the new
+        // payload (a content change replacing a different-hash legacy entry).
+        let prior_base_payload: Option<Arc<FileArtifacts>> = prior_keys
+            .iter()
+            .find(|k| k.is_legacy())
+            .and_then(|k| self.artifacts.get(k).map(|e| Arc::clone(e.value())));
+        // Capture the NEW artifact's augmentations before the conditional
+        // insert moves the payload, so the publish-side invalidation can
+        // fold them (the drain below already cleaned the prior target).
         let new_augmentations: Vec<ModuleAugmentationFact> =
             payload.augmentations.iter().cloned().collect();
-        self.artifacts.insert(key, payload);
+        // Cheap `Arc` clone of the new payload so the no-op gate can compare the
+        // full augmentation contribution (fact set AND `parse_stable_hash`, the
+        // `AugmenterSet` fingerprint input) without re-fetching after the
+        // conditional insert below may move `payload`.
+        let payload_for_compare: Arc<FileArtifacts> = Arc::clone(&payload);
+        // Capture the base-equivalent current-key entry's payload BEFORE any
+        // mutation so the no-op gate can compare the augmentation contribution.
+        // Only meaningful when the current key is left in place (a true no-op
+        // reinsert); otherwise the current key is drained / replaced and the
+        // publish-side invalidation always runs.
+        let current_key_prior_payload: Option<Arc<FileArtifacts>> =
+            if current_key_is_base_equivalent {
+                self.artifacts
+                    .get(&current_key)
+                    .map(|e| Arc::clone(e.value()))
+            } else {
+                None
+            };
+        // Drain every (non-base-equivalent) prior version through the single
+        // removal chokepoint: it drops the entries, clears their hit
+        // counters, and invalidates the prior versions' augmentation-index
+        // entries. The chokepoint deliberately does NOT touch
+        // `artifact_generation` (counter bookkeeping is caller policy) — the
+        // base-folded bump for this insert is owned by the
+        // `snapshot_changed` gate below so an overlay-only / stale-hash
+        // drain does not churn the token.
+        let _drained = self.evict_artifact_keys(&prior_keys);
 
-        // Demand-driven coherence: the published artifact's augmentation
-        // facts invalidate every index entry they could touch (a retarget
-        // cleans the NEW target) so the next cold-rescan folds the change in.
-        self.invalidate_augmentation_index_for_augmenter(&new_augmentations);
+        // Bump the base-folded `artifact_generation` ONLY when this insert
+        // changes the canonical's base snapshot value. A base-equivalent
+        // re-insert at the current key is a literal no-op (the entry was
+        // left untouched) and never bumps. Otherwise: with no prior base
+        // (legacy) entry the canonical's base snapshot goes absent →
+        // present, which always bumps; a replace of a different-hash legacy
+        // entry bumps unless the new payload is base-snapshot-equivalent to
+        // it (R4 parity). The comparison is CONSERVATIVE: any real change to
+        // a base-visible dimension still bumps (mandatory no-under-bump).
+        let snapshot_changed = if current_key_is_base_equivalent {
+            false
+        } else {
+            match prior_base_payload.as_ref() {
+                Some(prev_base) => !base_snapshot_equivalent(prev_base, &payload),
+                None => true,
+            }
+        };
+        // Skip the re-insert entirely when the current key already holds a
+        // base-equivalent payload: it stays continuously present, so no base
+        // reader can ever observe it absent. Otherwise insert (fresh content
+        // or a base-visible change at the current key).
+        if !current_key_is_base_equivalent {
+            self.artifacts.insert(current_key, payload);
+        }
+        if snapshot_changed {
+            self.bump_artifact_generation();
+        }
+
+        // Demand-driven coherence — gated on augmentation-contribution
+        // equivalence. A base-equivalent reinsert whose augmentation facts AND
+        // `parse_stable_hash` (the `AugmenterSet` fingerprint input) are
+        // unchanged is a true no-op for the index: invalidating would remove a
+        // contributing row and bump `artifact_generation` on a no-op, churning
+        // the store-view validation token and forcing warm-cache misses /
+        // base-view rebuilds. A content change (current key NOT base-equivalent)
+        // always invalidates the NEW target — its contribution may differ — and
+        // the drain above already cleaned the prior versions' rows. A genuine
+        // contribution change at a base-equivalent key (rare: same base
+        // snapshot, different augmentation facts or moved `parse_stable_hash`)
+        // likewise invalidates.
+        let publish_invalidation_needed = match current_key_prior_payload.as_ref() {
+            Some(prior_payload) => {
+                !augmentation_contribution_equivalent(prior_payload, &payload_for_compare)
+            }
+            None => true,
+        };
+        if publish_invalidation_needed {
+            self.invalidate_augmentation_index_for_augmenter(&new_augmentations);
+        }
 
         if had_prior {
             // Replacement: live count unchanged, bump stale sweep.
@@ -1153,11 +1445,15 @@ impl FileArtifactStore {
         // counters and invalidates the augmentation index the removed
         // augmenters contributed to.
         let removed = self.evict_artifact_keys(&to_remove);
+        let removed_any = !removed.is_empty();
         for _ in &removed {
             self.live_counter.fetch_sub(1, Ordering::Relaxed);
             self.stale_sweeps.fetch_add(1, Ordering::Relaxed);
         }
         self.last_access.remove(canonical_id);
+        if removed_any {
+            self.bump_artifact_generation();
+        }
     }
 
     /// Number of live entries.
@@ -1344,28 +1640,75 @@ impl FileArtifactStore {
         let parse_env_hash = key.parse_env_hash;
         let tick = self.access_tick.fetch_add(1, Ordering::Relaxed) + 1;
         self.last_access.insert(Arc::clone(&canonical), tick);
-        // Capture the registry handle BEFORE moving `artifacts` into
-        // the DashMap. Cold-path: this is a cheap Arc clone over
-        // the public `facts: Arc<FileFacts>` field.
+        // Capture the registry handle + the full payload handle BEFORE
+        // moving `artifacts` into the DashMap. Cold-path: cheap Arc clones.
+        // `artifacts_for_compare` lets the bump-iff-actually-changed gate
+        // compare the replaced value against the incoming one without
+        // re-fetching from the map.
         let facts_for_emit: Arc<FileFacts> = Arc::clone(&artifacts.facts);
-        // Capture the new artifact's augmentations BEFORE the move so the
-        // index-coherence rail can fold them (∪ any replaced version's facts)
-        // without re-reading the DashMap.
-        let mut changed_augmentations: Vec<ModuleAugmentationFact> =
-            artifacts.augmentations.iter().cloned().collect();
+        // Capture the full payload handle too so the bump-iff-actually-changed
+        // gate can compare the replaced value against the incoming one without
+        // re-fetching from the map.
+        let artifacts_for_compare: Arc<FileArtifacts> = Arc::clone(&artifacts);
         let prev = self.artifacts.insert(key, artifacts);
-        if let Some(prev) = prev.as_ref() {
-            changed_augmentations.extend(prev.augmentations.iter().cloned());
+        // Demand-driven coherence — gated on augmentation-contribution
+        // equivalence. A byte-identical reinsert of a module-augmentation file
+        // leaves both the augmenter's `ModuleAugmentationFact` set AND its
+        // `parse_stable_hash` (the `AugmenterSet` fingerprint input) unchanged,
+        // so no index entry's fold can change: invalidating would bump the base-
+        // folded `artifact_generation` on a no-op (the invalidation removes
+        // contributing rows and bumps on removal), churning the store-view
+        // validation token and forcing warm-cache misses / base-view rebuilds.
+        // Only a CHANGED contribution (fresh augmenter, retarget, a changed
+        // augmented-member fingerprint, or a moved `parse_stable_hash`)
+        // invalidates — with the union of the new ∪ replaced facts, so both the
+        // prior and new targets are cleaned and the next cold rescan folds the
+        // change in.
+        let augmentation_contribution_changed = match prev.as_ref() {
+            Some(prev_value) => {
+                !augmentation_contribution_equivalent(prev_value, &artifacts_for_compare)
+            }
+            // A fresh insert that declares augmentations is an absent → present
+            // contribution: any index row scanned before this augmenter existed
+            // is stale and must be invalidated.
+            None => !artifacts_for_compare.augmentations.is_empty(),
+        };
+        if augmentation_contribution_changed {
+            let mut changed_augmentations: Vec<ModuleAugmentationFact> = artifacts_for_compare
+                .augmentations
+                .iter()
+                .cloned()
+                .collect();
+            if let Some(prev) = prev.as_ref() {
+                changed_augmentations.extend(prev.augmentations.iter().cloned());
+            }
+            self.invalidate_augmentation_index_for_augmenter(&changed_augmentations);
         }
-        // Demand-driven coherence: a published artifact whose augmentation
-        // contribution changed (new ∪ replaced facts) invalidates every index
-        // entry it could touch so the next cold-rescan folds the change in.
-        self.invalidate_augmentation_index_for_augmenter(&changed_augmentations);
         let is_fresh = prev.is_none();
         if is_fresh {
             self.live_counter.fetch_add(1, Ordering::Relaxed);
         } else {
             self.stale_sweeps.fetch_add(1, Ordering::Relaxed);
+        }
+        // Bump the base-folded `artifact_generation` ONLY when this insert
+        // actually changes a base-visible snapshot value (R4 parity with
+        // the bump-iff-transition treatment elsewhere). A FRESH insert
+        // always bumps (the canonical's snapshot value goes absent →
+        // present). A REPLACE bumps unless the new payload is
+        // indistinguishable from the old one in EVERY dimension a base
+        // `HostStoreView` snapshots BY VALUE (`base_snapshot_equivalent`) —
+        // a true no-op (re-insert of byte-identical content) and an
+        // overlay-scoped re-insert that does not alter any base snapshot
+        // must NOT churn the token, which would otherwise spuriously
+        // invalidate the manager-cached base view and split singleflight
+        // lanes. The comparison is CONSERVATIVE: any real change to a
+        // base-visible value still bumps (mandatory no-under-bump).
+        let snapshot_changed = match prev.as_ref() {
+            Some(prev_value) => !base_snapshot_equivalent(prev_value, &artifacts_for_compare),
+            None => true,
+        };
+        if snapshot_changed {
+            self.bump_artifact_generation();
         }
         // R23 typed event: a `FileArtifactStore` entry was admitted.
         // Best-effort emission — silent no-op when no observer
@@ -1406,6 +1749,17 @@ impl FileArtifactStore {
         if removed.is_some() {
             self.live_counter.fetch_sub(1, Ordering::Relaxed);
             self.stale_sweeps.fetch_add(1, Ordering::Relaxed);
+            // The chokepoint (`drop_artifact_entry` → `evict_artifact_keys`)
+            // already cleared the per-key hit counter and invalidated the
+            // augmentation index. A keyed removal drops a canonical's
+            // `IndexedReady` / `FileFacts` / derived hashes that a
+            // `HostStoreView` snapshots BY VALUE; bump the generation so a
+            // view built before this removal (e.g. a manager-cached base
+            // view surviving a reachability GC) is token-invalidated and
+            // rebuilt. This is the GC path
+            // (`evict_unreachable_artifacts_with_policy` routes every
+            // unreachable version through here).
+            self.bump_artifact_generation();
             // R23 typed event: a `FileArtifactStore` entry was
             // evicted. Best-effort emission.
             crate::host_manage::push_structured_event(
@@ -1439,6 +1793,10 @@ impl FileArtifactStore {
                 .fetch_sub(removed as u64, Ordering::Relaxed);
             self.stale_sweeps
                 .fetch_add(removed as u64, Ordering::Relaxed);
+            // Draining every version of a canonical drops by-value
+            // snapshot dimensions; bump the generation so a pre-removal
+            // `HostStoreView` is token-invalidated.
+            self.bump_artifact_generation();
             // R23 typed event: each eviction emits one event so
             // downstream telemetry can attribute drain footprint
             // per `FileArtifactKey` dimension.
@@ -1493,7 +1851,24 @@ impl FileArtifactStore {
         key: AugmentationTargetKey,
         set: Arc<AugmenterSet>,
     ) -> Option<Arc<AugmenterSet>> {
-        self.augmentation_index.insert(key, set)
+        let new_fingerprint = set.fingerprint;
+        let prev = self.augmentation_index.insert(key, set);
+        // `route_surface_index_fingerprints` is snapshotted BY VALUE on a
+        // `HostStoreView`. Bump the base-folded `artifact_generation` ONLY
+        // when this populate actually changes the snapshotted fingerprint
+        // (R4 parity with the bump-iff-actually-changed gate on the artifact
+        // insert paths): a re-populate of an identical augmenter set is a
+        // no-op for the base snapshot and must not churn the token. Any real
+        // fingerprint change (including absent → present) still bumps (no
+        // under-bump).
+        let snapshot_changed = match prev.as_ref() {
+            Some(prev_set) => prev_set.fingerprint != new_fingerprint,
+            None => true,
+        };
+        if snapshot_changed {
+            self.bump_artifact_generation();
+        }
+        prev
     }
 
     /// Snapshot the base-artifact augmenter rows into an owned `Vec`,
@@ -1653,6 +2028,20 @@ impl FileArtifactStore {
             .augmentation_index
             .insert(key.clone(), Arc::clone(&set));
         let prev_fingerprint = prev.as_ref().map(|p| p.fingerprint);
+        // `route_surface_index_fingerprints` is snapshotted BY VALUE on a
+        // `HostStoreView`, and `artifact_generation` is folded into the
+        // store-view reuse oracle. Bump it ONLY when this cold populate
+        // actually changes the snapshotted fingerprint (R4 parity with
+        // `populate_augmenter_set`): when two threads cold-scan the same
+        // target concurrently, the
+        // second `insert` replaces the first with an IDENTICAL fingerprint,
+        // a no-op for the base snapshot that must not churn the token (which
+        // would spuriously invalidate the manager-cached base view and split
+        // singleflight lanes under batch load). Any real fingerprint change
+        // (including absent → present) still bumps (no under-bump).
+        if prev_fingerprint != Some(fingerprint) {
+            self.bump_artifact_generation();
+        }
 
         // Emit `ModuleAugmentationIndexShape` typed audit event.
         emit_module_augmentation_index_shape_event(
@@ -1730,12 +2119,16 @@ impl FileArtifactStore {
                 removed += 1;
             }
         }
+        if removed > 0 {
+            self.bump_artifact_generation();
+        }
         removed
     }
 
     /// Drop every entry from the augmentation index.
     pub fn clear_augmentation_index(&self) {
         self.augmentation_index.clear();
+        self.bump_artifact_generation();
     }
 
     /// Number of entries in the augmentation index.
@@ -1820,6 +2213,7 @@ impl crate::cache_schema::CacheSchemaVersioned for FileArtifactStore {
             self.live_counter.fetch_sub(count as u64, Ordering::Relaxed);
             self.stale_sweeps.fetch_add(count as u64, Ordering::Relaxed);
         }
+        self.bump_artifact_generation();
         count
     }
 }

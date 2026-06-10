@@ -113,6 +113,21 @@ impl ScratchCache {
         self.entries.remove(uri).map(|e| e.node_id)
     }
 
+    /// Non-mutating ownership probe: is `uri` currently cache-owned?
+    ///
+    /// Unlike [`Self::get`] this does NOT bump the entry's `last_access`
+    /// tick — a cleanup-path ownership check must not refresh LRU recency
+    /// for an entry it is only inspecting. Returns `false` when capacity
+    /// is `0` (a no-cache cache owns nothing). Used by the
+    /// ownership-aware scratch cleanup to decide, under the cache lock,
+    /// whether a concurrent request already owns the scratch.
+    pub fn contains(&self, uri: &str) -> bool {
+        if self.capacity == 0 {
+            return false;
+        }
+        self.entries.contains_key(uri)
+    }
+
     /// Number of cached entries.
     #[cfg(test)]
     pub fn len(&self) -> usize {

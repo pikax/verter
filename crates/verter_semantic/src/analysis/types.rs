@@ -162,7 +162,14 @@ bitflags::bitflags! {
 
 /// Comprehensive script analysis captured during SFC parsing.
 /// Powers dependency tracking, type-aware linting, and codegen optimization.
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+///
+/// This is an immutable post-parse artifact: once produced it is never
+/// mutated, and the host shares it across readers via
+/// `Arc<ScriptAnalysisSnapshot>` rather than deep-copying ~18 owned vectors
+/// per read. `Clone` (derived) performs a genuine field-by-field deep copy and
+/// is reserved for the rare caller that needs an owned copy; the hot read path
+/// `Arc::clone`s the shared handle instead, which is a refcount bump.
+#[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScriptAnalysisSnapshot {
     /// All import declarations found in the script block(s).

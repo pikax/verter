@@ -20,6 +20,8 @@
     "bench:meta:ui": "node --expose-gc --import tsx src/meta-ui-bench.ts",
     "bench:meta:ui:json": "node --expose-gc --import tsx src/meta-ui-bench.ts --json",
     "bench:meta:ui:stress": "node --expose-gc --import tsx src/meta-ui-stress.ts",
+    "bench:meta:ui:saturation": "node --expose-gc --import tsx src/meta-ui-saturation.ts",
+    "bench:meta:ui:warm": "node --expose-gc --import tsx src/meta-ui-warm.ts",
     "bench:meta:ui:report": "node --import tsx src/meta-ui-report.ts",
     "bench:meta:ui:setup": "node ../../scripts/benchmark/setup-meta-ui.mjs",
     "test": "vitest run src/audit-validator.spec.ts src/corpus-trace-runner.spec.ts src/workspace-invariants.spec.ts src/audit-harness-bootstrap.spec.ts"

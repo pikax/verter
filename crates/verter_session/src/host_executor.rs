@@ -90,7 +90,7 @@ impl AnalysisArcs {
 #[derive(Debug)]
 #[allow(dead_code)] // arcs field is part of the get_analysis surface.
 pub struct HostAnalysisData {
-    pub(crate) script_analysis: verter_semantic::analysis::ScriptAnalysisSnapshot,
+    pub(crate) script_analysis: Arc<verter_semantic::analysis::ScriptAnalysisSnapshot>,
     pub(crate) export_signatures: Vec<verter_semantic::analysis::ExportSignature>,
     pub(crate) style_analyses: Arc<Vec<verter_semantic::analysis::StyleBlockAnalysis>>,
     pub(crate) arcs: AnalysisArcs,
@@ -305,7 +305,9 @@ impl StageExecutor for HostStageExecutor {
             Ok(AnalysisSnapshot {
                 generation,
                 data: Arc::new(HostAnalysisData {
-                    script_analysis: host_data.parse.script_analysis.clone(),
+                    // `Arc::clone` of the shared snapshot — refcount bump, not
+                    // a deep copy of ~18 owned vectors.
+                    script_analysis: Arc::clone(&host_data.parse.script_analysis),
                     export_signatures: host_data.parse.export_signatures.clone(),
                     style_analyses: Arc::new(host_data.parse.style_analyses.clone()),
                     arcs,

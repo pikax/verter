@@ -45,8 +45,15 @@ impl VerterHost {
         &self,
         canonical_id: &str,
     ) -> Option<std::sync::Arc<crate::resolver_core::prepared_decl::PreparedDeclBundle>> {
-        let view = self.resolver_store_view();
-        self.prepared_decl_bundle_with_store_view(&view, canonical_id)
+        // Route through a cold-seed `HostResolverContext` so the warm-cache
+        // probe reads through the cold-seed-aware `RequestStoreView`: a
+        // known-stale (`ReturnOnly`) read fails the warm validation closed
+        // and the bundle materialises cold, never validating a warm entry
+        // against a superseded snapshot.
+        let view = self.resolver_store_view_read().into_cold_seed_view();
+        let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+        let ctx = crate::resolver_core::HostResolverContext::from_cold_seed(self, &view, overlay);
+        self.prepared_decl_bundle_with_context(&ctx, canonical_id)
     }
 
     /// Attribute a prepared-decl bundle warm-read rejection to one of
@@ -756,8 +763,12 @@ impl VerterHost {
         canonical_id: &str,
         symbol_name: &str,
     ) -> Option<Arc<verter_semantic::analysis::type_solver::PreparedTypeDecl>> {
-        let view = self.resolver_store_view();
-        self.prepared_type_decl_with_store_view(&view, canonical_id, symbol_name)
+        // Cold-seed-routed (see [`Self::prepared_decl_bundle`]): a stale
+        // read fails the warm probe closed and the bundle materialises cold.
+        let view = self.resolver_store_view_read().into_cold_seed_view();
+        let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+        let ctx = crate::resolver_core::HostResolverContext::from_cold_seed(self, &view, overlay);
+        self.prepared_type_decl_with_context(&ctx, canonical_id, symbol_name)
     }
 
     /// View-bound variant of [`Self::prepared_type_decl`].
@@ -806,8 +817,12 @@ impl VerterHost {
         canonical_id: &str,
         symbol_name: &str,
     ) -> Option<Arc<verter_semantic::analysis::type_solver::PreparedValueDecl>> {
-        let view = self.resolver_store_view();
-        self.prepared_value_decl_with_store_view(&view, canonical_id, symbol_name)
+        // Cold-seed-routed (see [`Self::prepared_decl_bundle`]): a stale
+        // read fails the warm probe closed and the bundle materialises cold.
+        let view = self.resolver_store_view_read().into_cold_seed_view();
+        let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+        let ctx = crate::resolver_core::HostResolverContext::from_cold_seed(self, &view, overlay);
+        self.prepared_value_decl_with_context(&ctx, canonical_id, symbol_name)
     }
 
     /// View-bound variant of [`Self::prepared_value_decl`].
@@ -1744,7 +1759,10 @@ impl VerterHost {
             let script_analysis = self
                 .effective_file_state(canonical_id, None)
                 .filter(|state| state.whole_hash == whole_hash)
-                .map(|state| Arc::new(state.script_analysis))
+                // `state.script_analysis` is already the shared
+                // `Arc<ScriptAnalysisSnapshot>` — thread the same allocation
+                // onto `IndexedReady` instead of re-wrapping a deep copy.
+                .map(|state| state.script_analysis)
                 .or_else(|| {
                     Some(Arc::new(
                         verter_semantic::analysis::ScriptAnalysisSnapshot {
@@ -1819,9 +1837,14 @@ impl VerterHost {
         // Collapse concurrent cold loads for the same canonical file through
         // the dedicated singleflight group on the resolver runtime.
         let singleflight = &self.resolver.runtime.indexed_singleflight;
+        // Fixed lane identity: this singleflight is keyed by `canonical_id`
+        // and re-checks the content-discriminating cache inside the flight,
+        // so all callers intentionally coalesce onto one lane per canonical
+        // regardless of view — `validity_fingerprint` stays `0`.
         let token = crate::resolver_core::StoreViewCompatToken {
             epoch: 0,
             session: None,
+            validity_fingerprint: 0,
         };
         match singleflight.run(canonical_id.to_owned(), token, || {
             // Re-check cache inside the flight — another thread may have
@@ -2277,8 +2300,18 @@ impl VerterHost {
         &self,
         owner_canonical: &str,
     ) -> Option<Arc<crate::owner_import_surface::OwnerImportSurface>> {
-        let view = self.resolver_store_view();
-        self.owner_import_surface_with_store_view(&view, owner_canonical)
+        // Cold-seed-routed: the warm-surface probe inside
+        // `owner_import_surface_with_store_view` reads through the
+        // cold-seed-aware `RequestStoreView`, so a known-stale
+        // (`ReturnOnly`) read fails the `get_with_view` fact validation
+        // closed and the surface re-resolves cold rather than validating a
+        // stale entry against a superseded snapshot.
+        let cold_seed = self.resolver_store_view_read().into_cold_seed_view();
+        let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+        let ctx =
+            crate::resolver_core::HostResolverContext::from_cold_seed(self, &cold_seed, overlay);
+        use crate::resolver_core::resolver_context::ResolverContext;
+        self.owner_import_surface_with_store_view(ctx.store_view(), owner_canonical)
     }
 
     /// View-bound variant of [`Self::owner_import_surface`].
@@ -2476,8 +2509,20 @@ impl VerterHost {
         owner_canonical: &str,
         local_name: &str,
     ) -> Option<(String, String)> {
-        let view = self.resolver_store_view();
-        self.resolve_owner_direct_import_with_store_view(&view, owner_canonical, local_name)
+        // Cold-seed-routed: the warm direct-import surface read inside
+        // `_with_store_view` reads through the cold-seed-aware
+        // `RequestStoreView`, so a stale read fails the warm validation
+        // closed and the direct import re-resolves cold.
+        let cold_seed = self.resolver_store_view_read().into_cold_seed_view();
+        let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+        let ctx =
+            crate::resolver_core::HostResolverContext::from_cold_seed(self, &cold_seed, overlay);
+        use crate::resolver_core::resolver_context::ResolverContext;
+        self.resolve_owner_direct_import_with_store_view(
+            ctx.store_view(),
+            owner_canonical,
+            local_name,
+        )
     }
 
     /// View-bound variant of [`Self::resolve_owner_direct_import`].

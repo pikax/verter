@@ -1,22 +1,14 @@
 //! Host-method surface for component-meta on `VerterHost`.
 //!
-//! Domain 8 — the inherent `impl VerterHost { ... }` block that
-//! lives next to the materialization core. Owns ~18 host methods including
-//! `resolve_component_meta`, `compute_component_meta_state`, the
+//! An inherent `impl VerterHost { ... }` block (Rust supports several across
+//! files) that lives next to the materialization core. Owns ~18 host methods
+//! including `resolve_component_meta`, `compute_component_meta_state`, the
 //! `*_inner` audited variants, the registry-publication helpers
 //! (`append_component_meta_registry_entries`,
 //! `bridge_component_meta_registry_for_imported_macros`, ...), and the
-//! request-id / fact-version / fact-key plumbing.
-//!
-//! Lines 121-2528 of the post-commit-8 `meta_resolve.rs` shell. Rust
-//! supports multiple `impl VerterHost { ... }` blocks across files, so
-//! this is purely a textual move; no signatures change.
-//!
-//! All cross-module imports are listed at the top so the body retains its
-//! verbatim form. Items that still live in the parent shell
-//! (the registry / cycle / origin-graph predicates, the resolver
-//! adapter, etc.) are reached via `super::*` until those domains
-//! land in their final per-domain siblings
+//! request-id / fact-version / fact-key plumbing. Items owned by the parent
+//! shell (registry / cycle / origin-graph predicates, the resolver adapter)
+//! are reached via `super::*`.
 
 use crate::host_manage::{
     component_meta_debug, component_meta_debug_enabled, component_meta_trace_custom,
@@ -115,6 +107,29 @@ impl VerterHost {
         mode: ProjectionMode,
         view: &dyn crate::session_view::SessionView,
     ) -> Option<ResolvedComponentMetaState> {
+        self.resolve_component_meta_with_view_and_fixed(canonical_or_alias, mode, view, None)
+    }
+
+    /// [`Self::resolve_component_meta_with_view`] with an optional
+    /// caller-captured FIXED base store view.
+    ///
+    /// When `fixed_store_view` is `Some((base_view, captured_fingerprint,
+    /// captured_is_current))`, the request executor pins to that snapshot
+    /// instead of taking its own per-attempt `resolver_store_view_read()`
+    /// — the O(N)→O(1) warm-batch read collapse. The fixed view is
+    /// ALREADY overlay-rooted once per batch by `capture_batch_fixed_view`
+    /// (the executor consumes it directly, with no further per-job
+    /// `with_session_overlay`). Promotion stays FENCED: the executor promotes the
+    /// resolved-meta result into the shared cache only when the capture was
+    /// current AND its captured fingerprint still equals the live host
+    /// fingerprint (see [`run_component_meta_request`]).
+    pub(crate) fn resolve_component_meta_with_view_and_fixed(
+        &self,
+        canonical_or_alias: &str,
+        mode: ProjectionMode,
+        view: &dyn crate::session_view::SessionView,
+        fixed_store_view: Option<(&crate::resolver_store::HostStoreView, u64, bool)>,
+    ) -> Option<ResolvedComponentMetaState> {
         let started = component_meta_debug_enabled().then(Instant::now);
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
         let _ctx_guard = if crate::request_context::current_request_context().is_none() {
@@ -180,7 +195,7 @@ impl VerterHost {
             self.resolver_runtime().component_meta.singleflight(),
             &canonical,
             mode,
-            None,
+            fixed_store_view,
             STORE_VIEW_STABILITY_MAX_ATTEMPTS,
         );
 
@@ -434,51 +449,45 @@ impl VerterHost {
         })
     }
 
-    /// View-aware cold compute entry. Routes resolver-tier reads (and
-    /// every nested dispatcher / query-engine / prepared-decl call)
-    /// through the supplied `SessionResolverContext` so overlay
-    /// candidates published by the prewarm pass are observed by the
-    /// dep-source materialiser. Used by
-    /// [`crate::host_manage::component_meta_request_impl::ViewBoundRequestHost::compute_component_meta`].
-    pub(crate) fn compute_component_meta_state_with_view(
+    /// Build the overlay-rooted cold-seed view for a view-bound component-
+    /// meta cold compute, with currentness INTRINSIC to the read.
+    ///
+    /// This is the single owner of the view-bound cold-seed construction.
+    /// It takes a FRESH base read and derives the cold-seed's currentness
+    /// from the SAME read via [`crate::resolver_store::StoreViewRead::into_cold_seed_view`]
+    /// — there is no separate currentness flag to mismatch. A
+    /// [`crate::resolver_store::StoreViewRead::ReturnOnly`] read stays
+    /// non-current through [`crate::resolver_store::ColdSeedHostStoreView::with_session_overlay`],
+    /// so the [`crate::resolver_core::SessionResolverContext::from_cold_seed`]
+    /// built from it fails every nested warm-cache probe closed. The fenced
+    /// cold builder still computes from this seed; the outer `is_stable` /
+    /// publish fence rejects promotion of a non-current result. Because the
+    /// view and its currentness come from ONE read, there is no flag/view
+    /// divergence (a stale second read marked `Current`).
+    pub(crate) fn view_bound_cold_seed(
         &self,
-        canonical: &str,
-        mode: ProjectionMode,
-        whole_hash: Hash16,
         view: &dyn crate::session_view::SessionView,
-        overlay: &std::sync::Arc<crate::resolver_core::CanonicalCompletionOverlay>,
-    ) -> Option<ResolvedComponentMetaState> {
-        // Build the overlay-rooted view ONCE here so the
-        // [`SessionResolverContext`] threads a borrow down through the
-        // entire cold-compute pipeline (per per-request
-        // hoist). Canonicals additively loaded mid-request are promoted
-        // into the request-scoped
-        // [`crate::resolver_core::CanonicalCompletionOverlay`] so the
-        // self-root fact validator observes them without false-missing.
-        //
-        // The `overlay` parameter is the
-        // request-scoped overlay owned by the
-        // [`ViewBoundRequestHost`](crate::host_manage::component_meta_request_impl::ViewBoundRequestHost)
-        // adapter. The overlay is reused across calls so cold computes
-        // accumulate into it rather than each allocating a fresh empty
-        // `Arc::new(CCO::new())` and paying the shadowing write cost
-        // without cross-call accumulation.
-        let store_view = self.resolver_store_view().with_session_overlay(self, view);
-        self.compute_component_meta_state_with_session_view_and_base(
-            canonical,
-            mode,
-            whole_hash,
-            view,
-            &store_view,
-            overlay,
-        )
+    ) -> crate::resolver_store::ColdSeedHostStoreView {
+        self.resolver_store_view_read()
+            .into_cold_seed_view()
+            .with_session_overlay(self, view)
     }
 
-    /// Variant of [`Self::compute_component_meta_state_with_view`]
-    /// that reuses a caller-supplied `&HostStoreView` instead of
-    /// rebuilding it. Used by the singleflight executor path so the
-    /// view-snapshot the executor takes flows into the cold-compute
-    /// resolver context.
+    /// View-aware cold compute entry. Routes resolver-tier reads (and
+    /// every nested dispatcher / query-engine / prepared-decl call)
+    /// through a [`crate::resolver_core::SessionResolverContext`] built over
+    /// the caller-supplied overlay-rooted
+    /// [`crate::resolver_store::ColdSeedHostStoreView`], so overlay candidates
+    /// published by the prewarm pass are observed by the dep-source
+    /// materialiser. The cold-seed carries the snapshot's currentness, so the
+    /// `SessionResolverContext` fails its nested warm-cache probes closed on a
+    /// non-current seed.
+    ///
+    /// The caller
+    /// ([`ViewBoundRequestHost::compute_component_meta`](crate::host_manage::component_meta_request_impl::ViewBoundRequestHost))
+    /// builds the cold-seed from the EXECUTOR's snapshot/currentness pair —
+    /// the SAME read the driver's promotion fence gates on — so the compute
+    /// seed and the promotion-gating seed are one read.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn compute_component_meta_state_with_session_view_and_base(
         &self,
@@ -486,10 +495,10 @@ impl VerterHost {
         mode: ProjectionMode,
         whole_hash: Hash16,
         view: &dyn crate::session_view::SessionView,
-        store_view: &crate::resolver_store::HostStoreView,
+        store_view: &crate::resolver_store::ColdSeedHostStoreView,
         overlay: &std::sync::Arc<crate::resolver_core::CanonicalCompletionOverlay>,
     ) -> Option<ResolvedComponentMetaState> {
-        let session_ctx = crate::resolver_core::SessionResolverContext::new(
+        let session_ctx = crate::resolver_core::SessionResolverContext::from_cold_seed(
             self,
             view,
             store_view,
@@ -507,46 +516,12 @@ impl VerterHost {
         )
     }
 
-    /// View-aware variant of
     /// Captured-inputs variant of
-    /// [`Self::compute_component_meta_state_with_view`]. See that
-    /// method for the routing rationale.
-    pub(crate) fn compute_component_meta_state_from_captured_with_view(
-        &self,
-        canonical: &str,
-        mode: ProjectionMode,
-        captured: &CapturedComponentMetaInputs,
-        view: &dyn crate::session_view::SessionView,
-        overlay: &std::sync::Arc<crate::resolver_core::CanonicalCompletionOverlay>,
-    ) -> Option<ResolvedComponentMetaState> {
-        // Build the overlay-rooted store view ONCE here so the
-        // SessionResolverContext threads a borrow down through the entire
-        // cold-compute pipeline (per per-request hoist).
-        // Canonicals additively loaded mid-request are promoted into
-        // the request-scoped
-        // [`crate::resolver_core::CanonicalCompletionOverlay`] so the
-        // self-root fact validator observes them without false-missing.
-        //
-        // `overlay` is the request-scoped overlay
-        // owned by the
-        // [`ViewBoundRequestHost`](crate::host_manage::component_meta_request_impl::ViewBoundRequestHost)
-        // adapter; see
-        // [`Self::compute_component_meta_state_with_view`] for the
-        // rationale.
-        let store_view = self.resolver_store_view().with_session_overlay(self, view);
-        self.compute_component_meta_state_from_captured_with_session_view_and_base(
-            canonical,
-            mode,
-            captured,
-            view,
-            &store_view,
-            overlay,
-        )
-    }
-
-    /// Variant of [`Self::compute_component_meta_state_from_captured_with_view`]
-    /// that reuses a caller-supplied `&HostStoreView` instead of
-    /// rebuilding it.
+    /// [`Self::compute_component_meta_state_with_session_view_and_base`].
+    /// Routes through a [`crate::resolver_core::SessionResolverContext`] built
+    /// over the caller-supplied overlay-rooted cold-seed; the cold-seed's
+    /// currentness fails nested warm-cache probes closed on a non-current
+    /// seed.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn compute_component_meta_state_from_captured_with_session_view_and_base(
         &self,
@@ -554,10 +529,10 @@ impl VerterHost {
         mode: ProjectionMode,
         captured: &CapturedComponentMetaInputs,
         view: &dyn crate::session_view::SessionView,
-        store_view: &crate::resolver_store::HostStoreView,
+        store_view: &crate::resolver_store::ColdSeedHostStoreView,
         overlay: &std::sync::Arc<crate::resolver_core::CanonicalCompletionOverlay>,
     ) -> Option<ResolvedComponentMetaState> {
-        let session_ctx = crate::resolver_core::SessionResolverContext::new(
+        let session_ctx = crate::resolver_core::SessionResolverContext::from_cold_seed(
             self,
             view,
             store_view,
@@ -597,20 +572,28 @@ impl VerterHost {
         whole_hash: Hash16,
         overlay: &std::sync::Arc<crate::resolver_core::CanonicalCompletionOverlay>,
     ) -> Option<ResolvedComponentMetaState> {
-        let store_view = self.resolver_store_view();
-        self.compute_component_meta_state_with_view_arg(
-            canonical,
-            mode,
-            whole_hash,
-            &store_view,
-            overlay,
+        // Fenced cold compute (driver `run_stable_request` `compute`, gated
+        // by `is_stable`): seed from a FRESH base read whose currentness is
+        // INTRINSIC to the seed (`into_cold_seed_view` carries the read's
+        // `Current` / `ReturnOnly` arm). A `ReturnOnly` seed makes the
+        // derived `HostResolverContext` fail its nested warm-cache probes
+        // closed; there is no separate currentness flag to mismatch with the
+        // view.
+        let cold_seed = self.resolver_store_view_read().into_cold_seed_view();
+        self.compute_component_meta_state_with_cold_seed_arg(
+            canonical, mode, whole_hash, &cold_seed, overlay,
         )
     }
 
-    /// Compute cold-compute body with a caller-supplied view. The
-    /// view is the authority for the resolver-tier ctx, so the
-    /// trait-impl boundary in `ComponentMetaRequestHost` reuses the
+    /// Compute cold-compute body with a caller-supplied executor-snapshot
+    /// view. `store_view` and `base_is_current` are the executor's
+    /// SINGLE-read pair; re-binding them through
+    /// `StoreViewRead::from_executor_snapshot` keeps currentness intrinsic to
+    /// the seed, so the `HostResolverContext` fails its nested warm-cache
+    /// probes closed on a non-current snapshot. Used by the
+    /// `ComponentMetaRequestHost` trait-impl boundary, which reuses the
     /// executor-snapshotted view instead of rebuilding one inside.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn compute_component_meta_state_with_view_arg(
         &self,
         canonical: &str,
@@ -618,10 +601,34 @@ impl VerterHost {
         whole_hash: Hash16,
         store_view: &crate::resolver_store::HostStoreView,
         overlay: &std::sync::Arc<crate::resolver_core::CanonicalCompletionOverlay>,
+        base_is_current: bool,
     ) -> Option<ResolvedComponentMetaState> {
-        let host_ctx = crate::resolver_core::HostResolverContext::new(
+        let cold_seed = crate::resolver_store::StoreViewRead::from_executor_snapshot(
+            store_view.clone(),
+            base_is_current,
+        )
+        .into_cold_seed_view();
+        self.compute_component_meta_state_with_cold_seed_arg(
+            canonical, mode, whole_hash, &cold_seed, overlay,
+        )
+    }
+
+    /// Cold-compute body rooted on an already-built cold-seed whose
+    /// currentness is INTRINSIC (it came from one read, via
+    /// [`crate::resolver_store::StoreViewRead::into_cold_seed_view`]). The
+    /// single owner of the bare-host `HostResolverContext::from_cold_seed`
+    /// build, so neither caller can pair a view with a foreign flag.
+    fn compute_component_meta_state_with_cold_seed_arg(
+        &self,
+        canonical: &str,
+        mode: ProjectionMode,
+        whole_hash: Hash16,
+        cold_seed: &crate::resolver_store::ColdSeedHostStoreView,
+        overlay: &std::sync::Arc<crate::resolver_core::CanonicalCompletionOverlay>,
+    ) -> Option<ResolvedComponentMetaState> {
+        let host_ctx = crate::resolver_core::HostResolverContext::from_cold_seed(
             self,
-            store_view,
+            cold_seed,
             std::sync::Arc::clone(overlay),
         );
         let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &host_ctx;
@@ -637,8 +644,7 @@ impl VerterHost {
     }
 
     /// Captured-inputs variant of
-    /// [`Self::compute_component_meta_state_with_overlay`]. See that
-    /// method for the routing rationale.
+    /// [`Self::compute_component_meta_state_with_overlay`] (same routing).
     pub(crate) fn compute_component_meta_state_from_captured_with_overlay(
         &self,
         canonical: &str,
@@ -646,19 +652,25 @@ impl VerterHost {
         captured: &CapturedComponentMetaInputs,
         overlay: &std::sync::Arc<crate::resolver_core::CanonicalCompletionOverlay>,
     ) -> Option<ResolvedComponentMetaState> {
-        let store_view = self.resolver_store_view();
-        self.compute_component_meta_state_from_captured_with_view_arg(
-            canonical,
-            mode,
-            captured,
-            &store_view,
-            overlay,
+        // Fenced cold compute (driver `run_stable_request` `compute`, gated
+        // by `is_stable`): seed from a FRESH base read whose currentness is
+        // INTRINSIC to the seed (see
+        // [`Self::compute_component_meta_state_with_overlay`]). No separate
+        // flag to mismatch with the view.
+        let cold_seed = self.resolver_store_view_read().into_cold_seed_view();
+        self.compute_component_meta_state_from_captured_with_cold_seed_arg(
+            canonical, mode, captured, &cold_seed, overlay,
         )
     }
 
     /// View-bearing variant of
     /// [`Self::compute_component_meta_state_from_captured_with_overlay`].
     /// Reuses an executor-snapshotted view rather than rebuilding one.
+    /// `store_view` and `base_is_current` are the executor's SINGLE-read
+    /// pair; re-binding them through `StoreViewRead::from_executor_snapshot`
+    /// keeps currentness intrinsic to the seed, so the `HostResolverContext`
+    /// fails its nested warm-cache probes closed on a non-current snapshot.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn compute_component_meta_state_from_captured_with_view_arg(
         &self,
         canonical: &str,
@@ -666,10 +678,32 @@ impl VerterHost {
         captured: &CapturedComponentMetaInputs,
         store_view: &crate::resolver_store::HostStoreView,
         overlay: &std::sync::Arc<crate::resolver_core::CanonicalCompletionOverlay>,
+        base_is_current: bool,
     ) -> Option<ResolvedComponentMetaState> {
-        let host_ctx = crate::resolver_core::HostResolverContext::new(
+        let cold_seed = crate::resolver_store::StoreViewRead::from_executor_snapshot(
+            store_view.clone(),
+            base_is_current,
+        )
+        .into_cold_seed_view();
+        self.compute_component_meta_state_from_captured_with_cold_seed_arg(
+            canonical, mode, captured, &cold_seed, overlay,
+        )
+    }
+
+    /// Captured-inputs cold-compute body rooted on an already-built cold-seed
+    /// whose currentness is INTRINSIC. The single owner of the captured-inputs
+    /// bare-host `HostResolverContext::from_cold_seed` build.
+    fn compute_component_meta_state_from_captured_with_cold_seed_arg(
+        &self,
+        canonical: &str,
+        mode: ProjectionMode,
+        captured: &CapturedComponentMetaInputs,
+        cold_seed: &crate::resolver_store::ColdSeedHostStoreView,
+        overlay: &std::sync::Arc<crate::resolver_core::CanonicalCompletionOverlay>,
+    ) -> Option<ResolvedComponentMetaState> {
+        let host_ctx = crate::resolver_core::HostResolverContext::from_cold_seed(
             self,
-            store_view,
+            cold_seed,
             std::sync::Arc::clone(overlay),
         );
         let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &host_ctx;
@@ -768,11 +802,17 @@ impl VerterHost {
         }
 
         // No overlay for this canonical — delegate to the base capture
-        // path via the request-host trait impl on `&VerterHost`.
+        // path via the request-host trait impl on `&VerterHost`. The
+        // capture runs inside the request driver's fenced compute, so seed
+        // from the cold-seed's inner view.
+        let store_view = self
+            .resolver_store_view_read()
+            .into_cold_seed_view()
+            .into_inner();
         <Self as crate::resolver_core::ComponentMetaRequestHost>::capture_component_meta_inputs(
             self,
             canonical,
-            &self.resolver_store_view(),
+            &store_view,
         )
     }
 
@@ -3171,13 +3211,16 @@ impl VerterHost {
     /// than the base host's slot. Base-only callers pass `0` and the
     /// behaviour matches the historical entry point.
     ///
-    /// Convenience wrapper that builds an owned `HostStoreView` once and
-    /// delegates to
-    /// [`Self::try_get_cached_resolved_meta_for_view_fingerprint_with_store_view`].
-    /// Hot-path trait callers in `component_meta_request_impl.rs`
-    /// already hold a borrowed `&HostStoreView` and route directly
-    /// through the `_with_store_view` variant so the per-warm-hit
-    /// rebuild is eliminated on the component-meta hot path.
+    /// TOP-LEVEL convenience wrapper: reads the host store view as a typed
+    /// [`crate::resolver_store::StoreViewRead`] and validates the cached
+    /// resolved-meta against the view directly, returning it to the caller
+    /// with NO outer publish / is_stable fence. It therefore serves a warm
+    /// hit ONLY against a proven-`Current` view; a known-stale
+    /// `StoreViewRead::ReturnOnly` read misses to cold (`None`). The
+    /// hot-path trait callers in `component_meta_request_impl.rs` do NOT
+    /// route through here — they hold a request-bound (cold-seed) view and
+    /// call the `_with_store_view` variant directly, where the request
+    /// driver's own currentness gate + `is_stable` fence govern.
     #[allow(dead_code)]
     pub(crate) fn try_get_cached_resolved_meta_for_view_fingerprint(
         &self,
@@ -3185,9 +3228,9 @@ impl VerterHost {
         mode: ProjectionMode,
         view_fingerprint: u64,
     ) -> Option<ResolvedComponentMetaState> {
-        let view = self.resolver_store_view();
+        let current_view = self.resolver_store_view_read().current()?;
         self.try_get_cached_resolved_meta_for_view_fingerprint_with_store_view(
-            &view,
+            current_view.view(),
             canonical,
             mode,
             view_fingerprint,
@@ -3196,6 +3239,18 @@ impl VerterHost {
 
     /// View-aware implementation behind
     /// [`Self::try_get_cached_resolved_meta_for_view_fingerprint`].
+    ///
+    /// NESTED-cold validator: the production callers are the
+    /// `try_get_cached_component_meta` trait impls in
+    /// `component_meta_request_impl.rs`, reached only as the request
+    /// driver's pre-flight `try_get_cached` peek — which `run_stable_request`
+    /// gates on `snapshot_view_is_current()` (a `StoreViewRead::ReturnOnly`
+    /// snapshot suppresses the warm peek). The driver's `is_stable` fence
+    /// re-checks the external-supersession token before promoting. The view
+    /// is therefore the request-bound cold-seed `HostStoreView` (raw, not
+    /// `Current`) by design; the outer fence — not this validator — owns
+    /// currentness. The `Current`-only top-level wrapper above is the entry
+    /// point for callers WITHOUT that fence.
     pub(crate) fn try_get_cached_resolved_meta_for_view_fingerprint_with_store_view(
         &self,
         view: &crate::resolver_store::HostStoreView,
@@ -3423,28 +3478,61 @@ impl VerterHost {
     // ───────────────────────────────────────────────────────────────────────
 
     /// Try to return a cached encoded payload for the canonical
-    /// component-meta query. Validates fact versions against the live host
-    /// state.
+    /// component-meta query, taking a FRESH store-view read internally.
+    /// Validates the cached payload's fact versions against a
+    /// PROVEN-`Current` store view.
     ///
-    /// Convenience wrapper that builds an owned `HostStoreView` once and
-    /// delegates to [`Self::try_get_cached_meta_payload_with_store_view`].
-    /// Hot-path callers in `meta.rs` (`get_component_meta_payload_batch`
-    /// and `get_component_meta_payload`) already hold a session view
-    /// borrow and route through the `_with_store_view` variant so the
-    /// per-warm-hit rebuild is eliminated on the NAPI/WASM mirror hot
-    /// path.
+    /// Reads the host store view as a typed
+    /// [`crate::resolver_store::StoreViewRead`] and serves a warm hit only
+    /// when the manager proved it current. A known-stale
+    /// `StoreViewRead::ReturnOnly` read misses to cold (returns `None`).
+    ///
+    /// This is the NO-FIXED-VIEW accessor: it owns the store-view read for
+    /// a caller that does NOT already hold a captured view. The `meta.rs`
+    /// payload entry points capture ONE
+    /// [`crate::resolver_store::BatchFixedView`] per batch / request and
+    /// probe through the `_with_store_view` variant against that fixed
+    /// view's proven-current snapshot instead (the O(N)→O(1) warm-batch
+    /// read collapse), so they no longer route through this fresh-read
+    /// wrapper. It is
+    /// retained as the canonical no-view peek and is locked by the
+    /// `ReturnOnly`-suppression soundness test
+    /// (`warm_meta_payload_hit_is_suppressed_when_store_view_is_not_current`),
+    /// whose stale-view miss path cannot be expressed against the
+    /// `&CurrentHostStoreView`-only `_with_store_view` variant.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn try_get_cached_meta_payload(&self, canonical: &str) -> Option<Vec<u8>> {
-        let view = self.resolver_store_view();
-        self.try_get_cached_meta_payload_with_store_view(&view, canonical)
+        // TOP-LEVEL warm validator: the encoded-payload peek returns the
+        // cached payload directly to the FFI consumer with NO outer
+        // publish / is_stable fence. It MUST validate against a
+        // proven-`Current` view: a known-stale `StoreViewRead::ReturnOnly`
+        // snapshot (the manager could not prove the view current under
+        // sustained churn) would validate a cached payload's
+        // `fact_versions` against already-mutated dependency state
+        // (`old == old`) and hand the FFI consumer a stale full-meta
+        // payload. On a non-current read, miss to cold (return `None`):
+        // the caller falls through to `resolve_component_meta`, whose own
+        // request-driver `is_stable` / publish fence gates promotion.
+        let current_view = self.resolver_store_view_read().current()?;
+        self.try_get_cached_meta_payload_with_store_view(&current_view, canonical)
     }
 
     /// View-aware implementation behind [`Self::try_get_cached_meta_payload`].
+    ///
+    /// Accepts ONLY a
+    /// [`crate::resolver_store::CurrentHostStoreView`] — the
+    /// `StoreViewManager`'s type-level proof that the view was published
+    /// under a live-matching token. A known-stale
+    /// `StoreViewRead::ReturnOnly` snapshot CANNOT reach this validator by
+    /// construction, so it can never false-positive a superseded encoded
+    /// payload against an already-mutated dependency.
     pub(crate) fn try_get_cached_meta_payload_with_store_view(
         &self,
-        view: &crate::resolver_store::HostStoreView,
+        current_view: &crate::resolver_store::CurrentHostStoreView,
         canonical: &str,
     ) -> Option<Vec<u8>> {
         use crate::resolver_core::StoreView;
+        let view = current_view.view();
         // cached_meta_payload lives on DerivedRawState (D48 split).
         let entry = self.derived_raw_cache().get(canonical)?;
         let cached = entry.cached_meta_payload.as_ref()?;
@@ -3511,10 +3599,17 @@ impl VerterHost {
         &self,
         fact_versions: &[crate::resolver_core::FactVersionRef],
     ) -> bool {
-        let view = self.resolver_store_view();
+        // Test-only warm-validation helper: validate against a
+        // proven-`CurrentHostStoreView`. A known-stale (`ReturnOnly`) read
+        // is treated as "no match" — the same miss-to-cold semantics the
+        // production warm validators apply.
+        let Some(current) = self.resolver_store_view_read().current() else {
+            return false;
+        };
+        let view = current.view();
         fact_versions
             .iter()
-            .all(|fact| crate::resolver_core::StoreView::validates(&view, fact))
+            .all(|fact| crate::resolver_core::StoreView::validates(view, fact))
     }
 
     pub(crate) fn append_dependency_fact_versions(
@@ -3612,177 +3707,6 @@ impl VerterHost {
 
     pub(crate) fn current_cached_import_route_hash(&self, canonical_id: &str) -> Option<Hash16> {
         self.generation_current_import_route_hash(canonical_id)
-    }
-
-    /// Generation-current `ImportRoute` derived-fact hash for a file.
-    ///
-    /// The `ImportRoute` derived fact records a file's effective
-    /// import-target surface: which specifiers it imports and what
-    /// each one resolves to. A file's positive resolutions only
-    /// change when the file's own content changes (which re-keys its
-    /// content-addressed `IndexedReady`), so for a fully-resolved file
-    /// indexed with a non-empty route table the content-pinned
-    /// `IndexedReady.import_routes` is authoritative. A file whose
-    /// route table was populated *after* indexing keeps an empty
-    /// `IndexedReady` route table; the populated `DerivedRawState`
-    /// route table answers for it instead (see the source comment on
-    /// the route-source selection below).
-    ///
-    /// A file with an **unresolvable** specifier is different: the
-    /// cached route table records that specifier as a known-miss, but
-    /// the miss is a snapshot of one workspace generation. When a new
-    /// file later satisfies the previously-unresolvable specifier the
-    /// workspace `content_generation` advances while the importer's
-    /// content — hence its `IndexedReady` — does not. The
-    /// content-pinned `import_route_hash` would then keep reporting
-    /// the stale miss, so a cache entry whose `fact_versions` carry
-    /// the importer's `ImportRoute` fact would validate against its
-    /// own stale snapshot and never observe the appearance.
-    ///
-    /// This oracle closes that gap: when the cached route table has a
-    /// known-miss entry, the miss specifiers are re-resolved against
-    /// the *current* workspace before hashing. A specifier that has
-    /// since become resolvable folds its new target into the hash, so
-    /// the hash differs from the stored snapshot, the `ImportRoute`
-    /// fact mismatches on warm validation, and the dependent cache
-    /// entry recomputes. Fully-resolved files take the cached-hash
-    /// fast path with no re-resolution.
-    pub(crate) fn generation_current_import_route_hash(
-        &self,
-        canonical_id: &str,
-    ) -> Option<Hash16> {
-        let routes = self.current_import_route_table(canonical_id)?;
-        Some(self.hash_generation_current_route_table(canonical_id, &routes))
-    }
-
-    /// Coverage-checked variant of [`Self::generation_current_import_route_hash`]
-    /// (coverage-checked `ImportRoute` admission).
-    ///
-    /// Identical route-source selection and known-miss rehash logic, but
-    /// returns `None` unless EVERY `required_source` is present as a key in the
-    /// owner's route table. The hole-2 rooting loop records the unresolved
-    /// wildcard edges it actually hit as `(owner, source)` pairs; an owner can
-    /// have a fully-resolved route surface (so the plain
-    /// `generation_current_import_route_hash` returns `Some`) that nonetheless
-    /// does NOT track the wildcard source — e.g. a PARTIAL
-    /// `set_import_dependencies` snapshot that resolves a sibling but omits the
-    /// wildcard. Hashing that partial table produces a fact that is reproduced
-    /// verbatim after the wildcard target appears, stale-serving the cached
-    /// `Miss`. Requiring full coverage forces the rooting loop to fall back to
-    /// the empty-facts negative-cache path (served, never persisted) when the
-    /// hash cannot root every unresolved wildcard the traversal hit.
-    pub(crate) fn generation_current_import_route_hash_covering_sources(
-        &self,
-        canonical_id: &str,
-        required_sources: &[String],
-    ) -> Option<Hash16> {
-        let routes = self.current_import_route_table(canonical_id)?;
-        // The produced hash can only root a known-miss the rooting loop must
-        // observe if the source is actually present in the table re-resolved
-        // by `hash_generation_current_route_table`. A required source absent
-        // from the table is silently dropped from the hash — refuse to admit.
-        for source in required_sources {
-            if !routes.contains_key(source) {
-                return None;
-            }
-        }
-        Some(self.hash_generation_current_route_table(canonical_id, &routes))
-    }
-
-    /// Select the owner's effective import-route table for fact production —
-    /// the single source order shared by
-    /// [`Self::generation_current_import_route_hash`] and its coverage-checked
-    /// sibling.
-    ///
-    /// Content-pinned IndexedReady read. A permissive `get_any`
-    /// would let a stale `IndexedReady` surface its old route
-    /// table; `current_content_pinned_indexed` returns `None` for
-    /// a stale candidate so the `DerivedRawState` fallback answers
-    /// with the live-tracked route table.
-    ///
-    /// The IndexedReady route table is the import-target surface
-    /// captured when the file was indexed. It can be empty even
-    /// when the file does have resolved imports: routes recorded
-    /// *after* indexing — e.g. a compile-prefetch or external
-    /// `src=` resolution that lands in `DerivedRawState` via
-    /// `cache_positive_import_route_result` — do not back-fill the
-    /// already-materialised `IndexedReady`. An empty IndexedReady
-    /// route table must therefore fall through to the
-    /// `DerivedRawState` table rather than shadow it, otherwise a
-    /// file whose routes were populated post-indexing yields no
-    /// `ImportRoute` fact and dependent caches miss route changes.
-    /// The `.filter(non-empty)` makes an empty content-pinned table
-    /// behave the same as a missing one and defer to the fallback.
-    fn current_import_route_table(
-        &self,
-        canonical_id: &str,
-    ) -> Option<std::sync::Arc<rustc_hash::FxHashMap<String, crate::types::DependencyResolution>>>
-    {
-        let routes = self
-            .current_content_pinned_indexed(canonical_id)
-            .map(|facts| std::sync::Arc::clone(&facts.import_routes))
-            .filter(|routes| !routes.is_empty())
-            .or_else(|| {
-                // import_routes lives on DerivedRawState (D48 split).
-                self.derived_raw_cache()
-                    .get(canonical_id)
-                    .map(|entry| std::sync::Arc::new(entry.import_routes.clone()))
-            })?;
-        // Backstop: a genuinely route-less file (no indexed routes and
-        // no `DerivedRawState` routes) has no `ImportRoute` surface.
-        if routes.is_empty() {
-            return None;
-        }
-        Some(routes)
-    }
-
-    /// Hash the owner's import-route table after re-resolving any known-miss
-    /// specifier against the current workspace generation — the shared body of
-    /// [`Self::generation_current_import_route_hash`] and its coverage-checked
-    /// sibling.
-    fn hash_generation_current_route_table(
-        &self,
-        canonical_id: &str,
-        routes: &rustc_hash::FxHashMap<String, crate::types::DependencyResolution>,
-    ) -> Hash16 {
-        let has_known_miss = routes.values().any(Self::import_route_is_known_miss);
-        if !has_known_miss {
-            // Every specifier resolved — the route table is stable
-            // until the importer's own content changes.
-            return crate::resolver_store::hash_import_route_targets(routes);
-        }
-
-        // Re-resolve the known-miss specifiers against the current
-        // workspace so the hash reflects appearance of a previously
-        // unresolvable dependency. This runs on a cache-validation read
-        // path, so the re-resolve uses the side-effect-free
-        // `generation_current_known_miss_resolution` rather than
-        // `resolve_type_dependency_canonical` — the latter can
-        // materialize a shallow-only importer (`ensure_indexed_ready`)
-        // and rewrite the `import_routes` known-miss entry to a positive
-        // (`cache_positive_import_route_result`) while merely building
-        // the hash.
-        let mut generation_current: rustc_hash::FxHashMap<
-            String,
-            crate::types::DependencyResolution,
-        > = rustc_hash::FxHashMap::default();
-        for (specifier, resolution) in routes.iter() {
-            if Self::import_route_is_known_miss(resolution) {
-                let current =
-                    self.generation_current_known_miss_resolution(canonical_id, specifier);
-                generation_current.insert(
-                    specifier.clone(),
-                    crate::types::DependencyResolution {
-                        specifier: specifier.clone(),
-                        resolved_canonical_id: current.clone(),
-                        possible_canonical_ids: current.into_iter().collect(),
-                    },
-                );
-            } else {
-                generation_current.insert(specifier.clone(), resolution.clone());
-            }
-        }
-        crate::resolver_store::hash_import_route_targets(&generation_current)
     }
 }
 

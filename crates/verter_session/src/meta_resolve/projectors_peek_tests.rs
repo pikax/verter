@@ -471,7 +471,8 @@ fn h1_reduce_bare_alias_does_not_poison_expanded_typeexpr_cache_slot() {
     let session_view = crate::session_view::HostViewRef::new(mh.host());
     let base = mh
         .host()
-        .resolver_store_view()
+        .resolver_store_view_read()
+        .into_owned_view()
         .with_session_overlay(mh.host(), &session_view);
     let ctx = crate::resolver_core::SessionResolverContext::new(
         mh.host(),

@@ -49,6 +49,52 @@ pub mod surface;
 pub mod symbol_inventory;
 pub mod types;
 
+/// Bounded number of times a typeinfo query-returner re-reads the base
+/// store view trying to settle on a proven-[`crate::resolver_store::StoreViewRead::Current`]
+/// snapshot under churn before reporting a non-current miss.
+///
+/// A typeinfo query-returner builds a request-bound dispatch context from
+/// the base store view and RETURNS the resolved node — there is no outer
+/// `run_stable_request` publish fence to suppress a stale answer. So it MUST
+/// resolve against a CURRENT snapshot: a `ReturnOnly` read means the manager
+/// could not prove the snapshot coherent, and computing the query against it
+/// would return a result derived from already-superseded dependency state.
+/// The retry budget mirrors the store-view manager's own bounded
+/// no-torn-snapshot retries — a transient mutation burst settles within a
+/// few rounds; sustained churn exhausts the budget and the query-returner
+/// surfaces a miss (`None`) rather than a stale answer.
+pub(crate) const TYPEINFO_CURRENT_VIEW_RETRY_ATTEMPTS: usize = 3;
+
+/// Acquire a proven-[`crate::resolver_store::CurrentHostStoreView`] for a
+/// typeinfo query-returner, retrying a bounded number of times when the
+/// store-view manager hands back a known-stale
+/// [`crate::resolver_store::StoreViewRead::ReturnOnly`] read under churn.
+///
+/// Returns `None` when every attempt within
+/// [`TYPEINFO_CURRENT_VIEW_RETRY_ATTEMPTS`] observed a non-current read —
+/// the host is under sustained churn and the query CANNOT be answered
+/// against a coherent snapshot. `None` is the established typeinfo miss
+/// signal ("could not be resolved"): the FFI surface already maps it to a
+/// `null` payload, so the consumer re-queries on the next request once the
+/// host settles. The loop is bounded, so it always terminates — it never
+/// spins.
+#[must_use]
+pub(crate) fn current_store_view_for_query(
+    host: &crate::VerterHost,
+) -> Option<crate::resolver_store::CurrentHostStoreView> {
+    for _ in 0..TYPEINFO_CURRENT_VIEW_RETRY_ATTEMPTS {
+        if let Some(current) = host.resolver_store_view_read().current() {
+            return Some(current);
+        }
+        // Non-current read: the manager could not prove this snapshot
+        // coherent. Re-read — a transient mutation burst settles within
+        // the bounded budget. No sleep / yield: the manager's own
+        // build_coherent retry already absorbs the contention window, and
+        // a tight bounded re-read keeps the path non-blocking.
+    }
+    None
+}
+
 pub use resolve_named_symbol::ResolveMode;
 pub use surface::{
     CanonicalSpan, SurfaceMemberOrigin, TypeInfoIndexSignature, TypeInfoSurface,

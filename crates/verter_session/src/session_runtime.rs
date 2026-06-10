@@ -51,11 +51,6 @@ impl SessionRuntime {
         &self.project
     }
 
-    /// Return the current store-view epoch from this session's perspective.
-    pub fn current_store_view_epoch(&self) -> u64 {
-        self.host().current_store_view_epoch()
-    }
-
     // -------------------------------------------------------------------
     // Resolved-meta cache facade
     // -------------------------------------------------------------------
@@ -202,9 +197,13 @@ impl SessionRuntime {
         // Bind a request-scoped `HostResolverContext` around the
         // extract so engine constructions in the policy / fallthrough
         // path inherit the overlay-aware ctx instead of a bare-host.
-        let store_view = host.resolver_store_view();
+        // Post-fence extraction binder — `resolve_component_meta` already
+        // ran under its own publish fence — so thread a COLD-SEED view: a
+        // non-current seed fails nested warm probes closed.
+        let store_view = host.resolver_store_view_read().into_cold_seed_view();
         let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
+        let host_ctx =
+            crate::resolver_core::HostResolverContext::from_cold_seed(host, &store_view, overlay);
         let host_ctx_ref: &dyn crate::resolver_core::resolver_context::ResolverContext = &host_ctx;
         let (analysis, fallthrough_fact_versions) =
             crate::host_manage::extract_component_meta_from_resolved_with_facts(

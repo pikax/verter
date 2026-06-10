@@ -588,7 +588,8 @@ fn overlay_artifact_downstream_reachable_for_normalised_js() {
     // Drive the content-pinned read through the session context — the
     // downstream reader that is a genuine miss site.
     let session_store_view = host
-        .resolver_store_view()
+        .resolver_store_view_read()
+        .into_owned_view()
         .with_session_overlay(&host, &view);
     let ctx = SessionResolverContext::new(
         &host,
@@ -759,7 +760,8 @@ fn observe_materialize_scope_recovers_parse_facts_for_normalised_js_overlay() {
     // Drive the materialize-scope observation through the session
     // context — the parse-fact-recovery site.
     let session_store_view = host
-        .resolver_store_view()
+        .resolver_store_view_read()
+        .into_owned_view()
         .with_session_overlay(&host, &view);
     let ctx = SessionResolverContext::new(
         &host,
@@ -949,7 +951,8 @@ fn shallow_file_state_observes_overlay_for_normalised_js() {
     // miss site (`shallow_file_state_with_context`
     // normalises before the overlay-aware reads).
     let session_store_view = host
-        .resolver_store_view()
+        .resolver_store_view_read()
+        .into_owned_view()
         .with_session_overlay(&host, &view);
     let ctx = SessionResolverContext::new(
         &host,

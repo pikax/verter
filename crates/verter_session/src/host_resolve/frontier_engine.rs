@@ -1008,7 +1008,16 @@ impl VerterHost {
         dep_canonical: &str,
         requested_name: &str,
     ) -> Option<(String, String)> {
-        let live_view = self.resolver_store_view();
+        // Test-only convenience: seed the resolve-and-cache method with a
+        // cold-seed view (either `StoreViewRead` arm). Production
+        // warm-validation of this route cache runs at the ctx-bound
+        // request boundary, fenced by the outer publish token recheck;
+        // these bare wrappers serve only direct-`host` test fixtures and
+        // never churn the token mid-resolution.
+        let live_view = self
+            .resolver_store_view_read()
+            .into_cold_seed_view()
+            .into_inner();
         self.resolve_named_type_export_target_shallow_with_store_view(
             &live_view,
             dep_canonical,

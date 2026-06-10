@@ -522,7 +522,7 @@ function readNuxtCompilerOptions(uiRoot: string) {
   };
 }
 
-function buildCheckerConfig(
+export function buildCheckerConfig(
   prepared: PreparedProject,
   componentPaths: PreparedComponentSnapshot[],
 ): Record<string, unknown> {

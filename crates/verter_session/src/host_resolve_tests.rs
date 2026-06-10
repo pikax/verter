@@ -1914,7 +1914,7 @@ export interface Props {
         }],
     );
 
-    let _view = host.resolver_store_view();
+    let _view = host.resolver_store_view_read().into_owned_view();
     let mut requested_routes = super::FrontierRequestedRoutes::default();
     requested_routes.insert(
         ("/src/barrel.ts".to_string(), "PublicProps".to_string()),
@@ -1943,7 +1943,7 @@ export interface Props {
         "the active member route should be transferred onto the defining target",
     );
 
-    let view_for_ctx = host.resolver_store_view();
+    let view_for_ctx = host.resolver_store_view_read().into_owned_view();
     let overlay_for_ctx =
         std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx_for_adapter =
@@ -2077,7 +2077,7 @@ export interface Props {
         }],
     );
 
-    let _view = host.resolver_store_view();
+    let _view = host.resolver_store_view_read().into_owned_view();
     let mut requested_routes = super::FrontierRequestedRoutes::default();
     requested_routes.insert(
         ("/src/barrel.ts".to_string(), "PublicProps".to_string()),
@@ -2879,7 +2879,7 @@ defineProps<ButtonProps>()
 <template><div /></template>"#,
     );
 
-    let _view = host.resolver_store_view();
+    let _view = host.resolver_store_view_read().into_owned_view();
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
     let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
@@ -3337,6 +3337,228 @@ export function useEl(el: MaybeRef<HTMLElement | null>) { return el }
     );
 }
 
+#[test]
+fn cold_ensure_compiled_miss_does_not_read_store_view_in_cache_check() {
+    // `ensure_compiled`'s warm-hit cache check must NOT build a store view
+    // when there is no cached compile slot to validate. The store-view read
+    // is threaded through the `acquire_view` callback that
+    // `CompileOutputNodeFactValidatedSession::lookup` invokes ONLY after its
+    // cheap predicates (slot present for this profile, carrier cacheable,
+    // hashes match) confirm a candidate slot worth validating. A cold miss
+    // (no `ProfileState` at all, or a present `ProfileState` with no slot for
+    // this profile) falls through to recompile WITHOUT paying for a
+    // full-workspace store-view snapshot.
+    //
+    // The COLD miss (`compile_cache().get() == None`) is the state where a
+    // file's SOURCE is present in the scheduler but its `compile_cache`
+    // `ProfileState` has NOT been materialised. Both `upsert` and
+    // `ensure_loaded` materialise it (`entry().or_default()` in the upsert
+    // path / `integrate_scheduler_snapshot`), but a file whose source is
+    // pulled in as a side-effect of resolving ANOTHER file (a lazily-loaded
+    // dependency) reaches `ensure_compiled` with the source present yet no
+    // state. We reproduce that deterministically: upsert to load the source,
+    // then remove the materialised `compile_cache` state so `get()` is
+    // genuinely `None` while `try_get_source` still succeeds.
+    //
+    // Discrimination via a PER-THREAD counter
+    // (`compile_warm_validation_view_reads`) bumped inside the warm-validation
+    // `acquire_view` callback — i.e. exactly where a store-view read actually
+    // happens, after the cheap predicates pass. It is thread-local, so the
+    // synchronous `ensure_compiled` on THIS thread is isolated from any
+    // parallel test's store-view reads, AND it is immune to source-line
+    // shifts. On a cold miss `acquire_view` is never reached → the counter
+    // stays 0; an eager read before the cheap checks would bump it to 1.
+    use crate::resolver_store::{
+        compile_warm_validation_view_reads, reset_compile_warm_validation_view_reads,
+    };
+
+    let host = strict_host();
+    let source = "<script setup lang=\"ts\">\nconst a = 1\n</script>\n<template><div>{{ a }}</div></template>";
+    upsert_vue(&host, "/src/Cold.vue", source);
+    // Drop the materialised state so the cache-check sees a TRUE miss
+    // (`get() == None`) while the source remains present in the scheduler.
+    host.compile_cache().remove("/src/Cold.vue");
+    assert!(
+        host.compile_cache().get("/src/Cold.vue").is_none(),
+        "precondition: the compile_cache state must be absent (cold miss) while the \
+         source is still loaded"
+    );
+
+    reset_compile_warm_validation_view_reads();
+    let _ = host.ensure_compiled("/src/Cold.vue", &profile());
+    let cache_check_reads = compile_warm_validation_view_reads();
+    assert_eq!(
+        cache_check_reads, 0,
+        "REGRESSION (cold-miss store-view build): a COLD ensure_compiled (no compile \
+         slot) reached the warm-validation store-view read {cache_check_reads} time(s) \
+         even though there was no cached slot to validate. The store-view read must be \
+         threaded through `acquire_view`, which `lookup` invokes only after its cheap \
+         predicates pass, so a miss never builds the workspace snapshot."
+    );
+}
+
+#[test]
+fn warm_ensure_compiled_hit_still_validates_against_current_view() {
+    // SOUNDNESS guard paired with the cold-miss perf test above: making the
+    // store-view read lazy (threaded through `acquire_view` behind `lookup`'s
+    // cheap predicates) must NOT regress the warm-validation soundness
+    // contract. A warm `ensure_compiled` HIT still reads the store view and
+    // gates the cached slot on a proven-`Current` view (a `ReturnOnly`
+    // snapshot misses to cold). Here we prove the HIT path (a present slot
+    // whose hashes match) DOES reach the store-view read — the complement of
+    // the cold-miss test, confirming the read is gated by the cheap
+    // predicates, not removed outright.
+    use crate::resolver_store::{
+        compile_warm_validation_view_reads, reset_compile_warm_validation_view_reads,
+    };
+
+    let host = strict_host();
+    let source = "<script setup lang=\"ts\">\nconst a = 1\n</script>\n<template><div>{{ a }}</div></template>";
+    upsert_vue(&host, "/src/Warm.vue", source);
+
+    // Prime the compile cache so the next ensure_compiled is a warm HIT.
+    let _ = host.ensure_compiled("/src/Warm.vue", &profile());
+    assert!(
+        host.compile_slot_fact_dep_signature("/src/Warm.vue", &profile())
+            .is_some(),
+        "precondition: priming compile must populate the compile slot"
+    );
+    assert!(
+        host.compile_slot_is_warm("/src/Warm.vue", &profile()),
+        "precondition: the primed slot must be warm (validates against the current view)"
+    );
+
+    // A warm HIT (slot present + hashes match) MUST reach the store-view read
+    // to gate the cached slot on a proven-Current view. This file has no
+    // cross-file deps (an empty fact rail), so this also pins that the
+    // currentness proof gates empty-fact hits too — `acquire_view` runs
+    // regardless of whether the fact rail is empty.
+    reset_compile_warm_validation_view_reads();
+    let _ = host.ensure_compiled("/src/Warm.vue", &profile());
+    let cache_check_reads = compile_warm_validation_view_reads();
+    assert!(
+        cache_check_reads >= 1,
+        "a warm ensure_compiled HIT MUST still reach the store-view read to gate the \
+         cached slot on a proven-Current view (the warm-validation soundness contract). \
+         Observed zero reads — the lazy-acquire change must only AVOID the read on a \
+         miss/mismatch, never on a hit."
+    );
+}
+
+#[test]
+fn session_get_virtual_file_profile_miss_does_not_read_store_view() {
+    // `get_virtual_file`'s Session warm-hit consult must NOT build a store
+    // view when the per-profile compile slot is absent. A `ProfileState`
+    // existing for the canonical only means an upsert materialised it — the
+    // FIRST Session compile after an upsert leaves an EMPTY `ProfileState`
+    // with no slot for the requested profile_hash. The store-view read is
+    // threaded through the `acquire_view` callback that
+    // `CompileOutputNodeFactValidatedSession::lookup` invokes ONLY after its
+    // cheap slot-present + carrier + hash predicates pass, so this
+    // profile-miss path falls through to recompile WITHOUT paying for a
+    // full-workspace store-view snapshot.
+    //
+    // Discrimination via the same per-thread warm-validation counter used by
+    // the `ensure_compiled` pair. A self-contained SFC (no cross-file deps)
+    // upserts an empty `ProfileState`; the single cold `get_virtual_file`
+    // reaches the Session warm-hit arm with the slot absent, so `acquire_view`
+    // is never reached and the counter stays 0. An eager store-view read
+    // before the cheap predicates would bump it once even though there is no
+    // slot to validate.
+    use crate::resolver_store::{
+        compile_warm_validation_view_reads, reset_compile_warm_validation_view_reads,
+    };
+
+    let host = strict_host();
+    let source = "<script setup lang=\"ts\">\nconst a = 1\n</script>\n<template><div>{{ a }}</div></template>";
+    upsert_vue(&host, "/src/ProfileMiss.vue", source);
+    // Precondition: the `ProfileState` exists (upsert materialised it) but has
+    // no compiled slot for this profile yet — exactly the cold/profile-miss
+    // state the Session warm-hit arm must reject cheaply.
+    assert!(
+        host.compile_cache().get("/src/ProfileMiss.vue").is_some(),
+        "precondition: upsert must materialise the ProfileState"
+    );
+    assert!(
+        host.compile_slot_fact_dep_signature("/src/ProfileMiss.vue", &profile())
+            .is_none(),
+        "precondition: no compile slot for this profile yet (profile miss)"
+    );
+
+    reset_compile_warm_validation_view_reads();
+    let resp = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: Some("/src/ProfileMiss.vue".to_string()),
+            canonical_id: None,
+            node_kind: None,
+            compile_profile: profile(),
+        })
+        .expect("cold Session compile should succeed");
+    // The request must actually classify to Session so the Session warm-hit
+    // arm (the site under test) is the one reached.
+    assert_eq!(
+        resp.actual_mode,
+        crate::CompileCacheMode::Session,
+        "precondition: the request must classify to Session so the Session \
+         warm-hit arm is exercised"
+    );
+
+    let profile_miss_reads = compile_warm_validation_view_reads();
+    assert_eq!(
+        profile_miss_reads, 0,
+        "REGRESSION (profile-miss store-view build): a cold Session get_virtual_file \
+         whose ProfileState has no slot for the requested profile reached the \
+         warm-validation store-view read {profile_miss_reads} time(s) even though there \
+         was no slot to validate. The store-view read must be threaded through \
+         `acquire_view`, which `lookup` invokes only after its cheap slot-present + hash \
+         predicates pass, so a profile miss never builds the workspace snapshot."
+    );
+}
+
+#[test]
+fn compile_slot_is_warm_profile_miss_does_not_read_store_view() {
+    // `compile_slot_is_warm` is the third compile-path warm-validation site.
+    // It must NOT build a store view when the per-profile compile slot is
+    // absent: the predicate already short-circuits when the `ProfileState`
+    // itself is missing, but a present-but-empty `ProfileState` (the state
+    // after an upsert with no compile yet) must still reject cheaply via
+    // `lookup`'s slot-present predicate BEFORE the `acquire_view` callback
+    // reads the store view. This closes the warm-validation class at the
+    // third entry point.
+    use crate::resolver_store::{
+        compile_warm_validation_view_reads, reset_compile_warm_validation_view_reads,
+    };
+
+    let host = strict_host();
+    let source = "<script setup lang=\"ts\">\nconst a = 1\n</script>\n<template><div>{{ a }}</div></template>";
+    upsert_vue(&host, "/src/WarmProbeMiss.vue", source);
+    assert!(
+        host.compile_cache().get("/src/WarmProbeMiss.vue").is_some(),
+        "precondition: upsert must materialise the ProfileState"
+    );
+    assert!(
+        host.compile_slot_fact_dep_signature("/src/WarmProbeMiss.vue", &profile())
+            .is_none(),
+        "precondition: no compile slot for this profile yet (profile miss)"
+    );
+
+    reset_compile_warm_validation_view_reads();
+    let is_warm = host.compile_slot_is_warm("/src/WarmProbeMiss.vue", &profile());
+    assert!(
+        !is_warm,
+        "a profile miss (no slot) is not warm — the consumer routes to cold recompute"
+    );
+    let profile_miss_reads = compile_warm_validation_view_reads();
+    assert_eq!(
+        profile_miss_reads, 0,
+        "REGRESSION (profile-miss store-view build): compile_slot_is_warm reached the \
+         warm-validation store-view read {profile_miss_reads} time(s) on a profile miss \
+         (present ProfileState, no slot) even though there was no slot to validate. The \
+         read must be threaded through `acquire_view`, which `lookup` invokes only after \
+         its cheap slot-present + hash predicates pass."
+    );
+}
+
 // ── Workspace integration tests ──────────────────────────────────────
 
 #[test]
@@ -3608,7 +3830,7 @@ fn shallow_type_import_route_finds_loaded_overlay_relative_targets() {
         "export interface ComponentConfig { label: string }",
     );
 
-    let _store_view = host.resolver_store_view();
+    let _store_view = host.resolver_store_view_read().into_owned_view();
     let result = host.resolve_type_dependency_canonical_shallow("/src/Button.vue", "./tv");
 
     assert_eq!(
@@ -3763,7 +3985,7 @@ defineProps<FancyProps>()
         }],
     );
 
-    let _view = host.resolver_store_view();
+    let _view = host.resolver_store_view_read().into_owned_view();
     let resolved = host.resolve_type_dependency_canonical("/workspace/src/App.vue", "fancy");
 
     assert_eq!(
@@ -3841,7 +4063,7 @@ defineProps<FancyProps>()
         }],
     );
 
-    let _view = host.resolver_store_view();
+    let _view = host.resolver_store_view_read().into_owned_view();
     let _ = host
         .ensure_indexed_ready("/workspace/node_modules/fancy/dist/index.d.ts")
         .expect("package declaration entrypoint should materialize module facts");

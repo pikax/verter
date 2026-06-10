@@ -78,7 +78,17 @@ impl VerterHost {
         (String, String),
         Arc<[crate::resolver_core::FactVersionRef]>,
     ) {
-        let view = self.resolver_store_view();
+        // Test-only convenience: seed the resolve-and-cache method with a
+        // cold-seed view (either `StoreViewRead` arm). The production
+        // warm-validation of this route cache runs at the ctx-bound
+        // request boundary and is fenced by the outer
+        // `publish_component_meta_cache_entry` token recheck; these bare
+        // wrappers exist only for test fixtures that call `host.<method>`
+        // directly and never churn the token mid-resolution.
+        let view = self
+            .resolver_store_view_read()
+            .into_cold_seed_view()
+            .into_inner();
         self.resolve_imported_type_root_with_facts_with_store_view(
             &view,
             dep_canonical,

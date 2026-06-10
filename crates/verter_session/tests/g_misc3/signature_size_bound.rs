@@ -26,6 +26,7 @@ impl StoreView for TestView {
         StoreViewCompatToken {
             epoch: 1,
             session: None,
+            validity_fingerprint: 0,
         }
     }
     fn validates(&self, fact: &FactVersionRef) -> bool {

@@ -72,9 +72,15 @@ impl VerterHost {
         &self,
         request: &ShallowSurfaceRequest,
     ) -> Option<TypeInfoSurface> {
-        let store_view = self.resolver_store_view();
+        // Query-RETURNER: it returns the shallow surface with no outer
+        // publish fence, so it MUST resolve against a PROVEN-CURRENT
+        // snapshot. On sustained churn surface a miss (`None`) — the
+        // established surface miss signal — rather than a surface resolved
+        // against superseded state. The bounded retry terminates.
+        let current_view = crate::typeinfo::current_store_view_for_query(self)?;
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let host_ctx = crate::resolver_core::HostResolverContext::new(self, &store_view, overlay);
+        let host_ctx =
+            crate::resolver_core::HostResolverContext::from_current(self, &current_view, overlay);
         let dispatch = ProjectSemanticDispatch::new(&host_ctx);
 
         // Base = the declaration CARRIER (a `DeclPlaceholder`), NOT a

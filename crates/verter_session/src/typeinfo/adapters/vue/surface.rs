@@ -199,14 +199,18 @@ impl VerterHost {
         &self,
         request: &VueMacroSurfaceRequest,
     ) -> Option<VueMacroSurface> {
-        // Base-view entry point (tests, the host-method `vue_macro_dtos`
-        // wrapper). Builds a bare `HostResolverContext` over the base host view
-        // and routes the single resolution core through it. Overlay-bearing
-        // production callers MUST use `resolve_vue_macro_surface_with_ctx` with
-        // their active session context so the surface reads overlay content.
-        let store_view = self.resolver_store_view();
+        // Base-view query-RETURNER (tests, the host-method `vue_macro_dtos`
+        // wrapper). It returns the macro surface with no outer publish
+        // fence, so it MUST resolve against a PROVEN-CURRENT snapshot — on
+        // sustained churn surface a miss (`None`) rather than a surface
+        // resolved against superseded state. Overlay-bearing production
+        // callers MUST use `resolve_vue_macro_surface_with_ctx` with their
+        // active session context so the surface reads overlay content. The
+        // bounded retry terminates.
+        let current_view = crate::typeinfo::current_store_view_for_query(self)?;
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let host_ctx = crate::resolver_core::HostResolverContext::new(self, &store_view, overlay);
+        let host_ctx =
+            crate::resolver_core::HostResolverContext::from_current(self, &current_view, overlay);
         self.resolve_vue_macro_surface_with_ctx(&host_ctx, request)
     }
 
@@ -347,15 +351,22 @@ impl VerterHost {
     /// not re-attempt the cold resolution.
     #[must_use]
     pub fn vue_macro_dtos(&self, request: &VueMacroSurfaceRequest) -> Arc<VueMacroDtos> {
-        // Base-view entry point (tests + the materialiser's `typeinfo_macro_dtos`
-        // helper, until the materialiser is retired). Routes the single DTO
-        // resolution core through a bare `HostResolverContext` over the base
-        // host view. Overlay-bearing production callers
+        // Base-view query-RETURNER (tests + the materialiser's
+        // `typeinfo_macro_dtos` helper). It returns AND content-addressed
+        // caches the DTO bundle, so it MUST resolve against a
+        // PROVEN-CURRENT snapshot — a non-current execution must never warm
+        // the cache. On sustained churn return the empty "no surface"
+        // bundle WITHOUT computing or caching anything (the same outcome an
+        // unresolvable macro produces), leaving a later current request to
+        // resolve and cache. Overlay-bearing production callers
         // (`component_meta_resolved_macros`) MUST call `vue_macro_dtos_with_ctx`
-        // with their active session context so the surface reads overlay content.
-        let store_view = self.resolver_store_view();
+        // with their active session context. The bounded retry terminates.
+        let Some(current_view) = crate::typeinfo::current_store_view_for_query(self) else {
+            return Arc::new(VueMacroDtos::default());
+        };
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let host_ctx = crate::resolver_core::HostResolverContext::new(self, &store_view, overlay);
+        let host_ctx =
+            crate::resolver_core::HostResolverContext::from_current(self, &current_view, overlay);
         vue_macro_dtos_with_ctx(&host_ctx, request)
     }
 }

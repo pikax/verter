@@ -18,7 +18,25 @@
 //! Cacheable requests publish `(uri, node_id)` to the host-owned
 //! [`super::scratch_cache::ScratchCache`] so a repeat request reuses
 //! the synthesised file. Non-cacheable requests evict the upserted
-//! scratch file at the end of the call.
+//! scratch file at the end of the call (eviction preserves the
+//! scratch's semantic-graph memo for cross-mode materialized-point
+//! satisfaction; only miss/fault terminals fully remove).
+//!
+//! The scratch is upserted before resolution and only gains an LRU
+//! owner once a cacheable request reaches the `scratch_cache` write.
+//! Any miss/failure between the upsert and that write (a non-current
+//! store view, a missing shallow surface, a resolution error) returns
+//! with *this* request's scratch unowned, so those paths remove it
+//! regardless of `cacheable` — otherwise a repeatedly-missing cacheable
+//! request leaks orphaned host/scheduler state. The removal is
+//! **ownership-aware** (see [`remove_scratch`]): the URI is
+//! content-addressed, so a concurrent sibling request for the same
+//! triple may have reached the success path and now own the same URI in
+//! `scratch_cache`; the cleanup re-checks ownership under the
+//! `scratch_cache` lock and skips removal when a sibling owns it, so it
+//! never deletes a cache-owned host file. Removal is a full
+//! `host.remove` (not `host.evict`): a scratch URI is synthetic, so the
+//! "reload from disk later" eviction state would strand it.
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -74,8 +92,8 @@ impl VerterHost {
     ///
     /// **LRU eviction**: at default capacity 64 the oldest-accessed
     /// entry is evicted on cold insertion of a 65th URI. The evicted
-    /// scratch file is also removed from the host so memory does not
-    /// grow unbounded.
+    /// entry's scratch file is also fully removed from the host so
+    /// memory does not grow unbounded.
     ///
     /// Returns an [`crate::AuditedResult`] carrier. The error type is
     /// the shared [`TypeResolutionRequestError`] — the SAME
@@ -344,17 +362,39 @@ fn evaluate_inner(
     // dispatch lifts the `DeclPlaceholder` into a concrete body in the
     // requested mode.
     //
-    // Build a request-bound `HostResolverContext` for the dispatch so
-    // resolver-tier reads (prepared_decl_bundle, prepared_type_decl,
-    // etc.) bind to a real overlay-aware view rather than the
-    // panic-shimmed bare-host `impl ResolverContext for VerterHost`.
-    let store_view = host.resolver_store_view();
+    // This is a query-RETURNER (it returns the resolved node, and on a
+    // cacheable request it warms `scratch_cache`), so it MUST resolve
+    // against a PROVEN-CURRENT snapshot — read AFTER the scratch upsert
+    // above so the snapshot reflects the synthesised scratch content. A
+    // known-stale (`ReturnOnly`) read would resolve against superseded
+    // dependency state; on sustained churn surface a miss and drop the
+    // scratch WITHOUT warming `scratch_cache` (a non-current execution
+    // must never populate the cache). The bounded retry terminates.
+    //
+    // The scratch is now upserted but NOT yet in `scratch_cache` (the
+    // cache is warmed only on the success path below), so THIS request
+    // holds no LRU owner. Any miss between here and the cache write must
+    // drop the orphan regardless of `req.cacheable` — the scratch never
+    // entered the cache on this path, so nothing reclaims it otherwise.
+    // `remove_scratch` is ownership-aware: it skips removal only if a
+    // concurrent sibling request for the same content-addressed URI
+    // already owns it in `scratch_cache`.
+    let Some(current_view) = crate::typeinfo::current_store_view_for_query(host) else {
+        // A non-current settle is a non-fault miss (`Ok(None)`); drop the
+        // orphan (ownership-aware) without warming `scratch_cache`.
+        remove_scratch(host, scratch_uri);
+        return (Ok(None), false);
+    };
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::from_current(host, &current_view, overlay);
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     let scratch_canonical: Arc<str> = Arc::from(scratch_uri);
     let Some(shallow) = host.shallow_file_state(scratch_uri) else {
-        cleanup_scratch(host, scratch_uri, req.cacheable);
+        // Same orphan contract as the non-current branch above: this
+        // request's scratch is upserted but unowned, so drop it
+        // (ownership-aware; a non-fault miss rides `Ok(None)`).
+        remove_scratch(host, scratch_uri);
         return (Ok(None), false);
     };
     let scope_node = crate::semantic_query::NodeScopeId::File {
@@ -385,7 +425,9 @@ fn evaluate_inner(
             // materialise (the audit record still emits with the
             // chosen mode).
             if let Some(fault) = TypeResolutionRequestError::from_query_error(&err) {
-                cleanup_scratch(host, scratch_uri, req.cacheable);
+                // Fault before the cache write: this request's upserted
+                // scratch is unowned — drop it (ownership-aware).
+                remove_scratch(host, scratch_uri);
                 return (Err(fault), false);
             }
             let resolve_decl_key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
@@ -399,7 +441,10 @@ fn evaluate_inner(
                 QueryResult::Value(SemanticQueryOutput { value: n, .. }) => n,
                 QueryResult::Recursive(n) => n,
                 QueryResult::Error(err) => {
-                    cleanup_scratch(host, scratch_uri, req.cacheable);
+                    // Resolution failed before the cache write, so this
+                    // request's upserted scratch is unowned — drop it
+                    // (ownership-aware).
+                    remove_scratch(host, scratch_uri);
                     // A genuine dispatch fault rides `Err`; a non-fault
                     // miss rides `Ok(None)`.
                     return (
@@ -431,7 +476,9 @@ fn evaluate_inner(
             // propagates as `Err` rather than silently degrading to the
             // un-materialised placeholder.
             Err(fault) => {
-                cleanup_scratch(host, scratch_uri, req.cacheable);
+                // Fault before the cache write: this request's upserted
+                // scratch is unowned — drop it (ownership-aware).
+                remove_scratch(host, scratch_uri);
                 return (Err(fault), false);
             }
         },
@@ -445,24 +492,146 @@ fn evaluate_inner(
         let evicted = guard.insert(scratch_uri.to_string(), final_node);
         drop(guard);
         if let Some(evicted_uri) = evicted {
-            // Drop the evicted scratch file from the host so memory
-            // does not grow unbounded. Best-effort — failures are
-            // ignored.
-            host.evict(&evicted_uri);
+            // The LRU dropped an older scratch entry — fully remove its
+            // host file so memory does not grow unbounded. Uses the same
+            // synthetic-file removal as the unowned paths (a scratch has
+            // no workspace backing, so `evict`'s reload-pending semantics
+            // are wrong here). The removal is ownership-aware: between
+            // dropping the guard above and re-locking inside
+            // `remove_scratch`, a concurrent request could cold-resolve
+            // and re-insert the SAME evicted URI (it re-upserts its host
+            // file first); `remove_scratch` re-checks ownership under the
+            // lock and skips removal in that case, so the re-inserted
+            // entry keeps backing a live file.
+            remove_scratch(host, &evicted_uri);
         }
     } else {
-        cleanup_scratch(host, scratch_uri, false);
+        // Non-cacheable success: this request deliberately kept its
+        // scratch out of `scratch_cache`, so it holds no LRU owner.
+        // EVICT (not full-remove) on this path: a successful resolution
+        // admitted scratch-rooted entries into the semantic-graph memo,
+        // and the typeinfo mode contract pins cross-mode materialized-
+        // point satisfaction over them — a repeat evaluate of the SAME
+        // expression in another publication mode must warm-satisfy from
+        // this resolution's recorded materializations (the
+        // `operator_reduction` evaluate-parity tests pin it). A full
+        // `host.remove` purges the scratch's semantic-graph state and
+        // forces every repeat cold, breaking that pinned equivalence.
+        // `evict` reclaims the compile/derived state while preserving
+        // the memo; the miss/fault terminals below keep FULL removal
+        // (a failed resolution admitted nothing worth preserving —
+        // `cache_suppress` covers the memo side).
+        // Ownership-aware like the removal paths: a concurrent CACHEABLE
+        // request for the same content-addressed URI may own it in
+        // `scratch_cache`; evicting under it would clear that owner's
+        // live compile state.
+        evict_scratch(host, scratch_uri);
     }
 
     (Ok(Some(final_node)), false)
 }
 
-/// Drop the synthesised scratch file. Called for non-cacheable
-/// requests at the end of the call and for evicted entries.
-fn cleanup_scratch(host: &VerterHost, uri: &str, cacheable: bool) {
-    if !cacheable {
-        host.evict(uri);
+/// Drop a scratch file iff no concurrent request owns it in
+/// `scratch_cache`.
+///
+/// A scratch gains an LRU owner only when a cacheable request reaches
+/// the `scratch_cache` write below. Every miss/failure terminal between
+/// the upsert and that write, plus the non-cacheable success path that
+/// deliberately bypasses the cache, leaves *this* request's scratch with
+/// no cache entry to reclaim it — so it must be removed irrespective of
+/// `req.cacheable`. Skipping removal there would accumulate orphaned
+/// host/scheduler state.
+///
+/// The removal is nonetheless **ownership-aware**: the scratch URI is
+/// content-addressed, so a *different* request for the same
+/// `(scope, expression, extra_imports)` triple can be running
+/// concurrently. If that sibling reached the success path it upserted the
+/// same URI and inserted it into `scratch_cache` — it now OWNS a live
+/// host file the cache fast-path will hand back. An unconditional
+/// `host.remove` here would then delete a cache-owned scratch, leaving
+/// the cache able to return a `SemanticNodeId` for a removed host file.
+/// To prevent that, the presence check and the removal are made atomic
+/// with respect to the success-path ownership insert by holding the
+/// `scratch_cache` lock — the SAME lock `evaluate_inner`'s success path
+/// takes to `insert`/own the URI — across "is `uri` present? if NOT,
+/// `host.remove(uri)`". The two operations therefore serialise:
+/// - if the sibling is taking ownership, cleanup sees the URI present
+///   and SKIPS removal (the sibling upserts the host file *before* it
+///   inserts, so a present cache entry always backs a live file);
+/// - if cleanup removes first, the sibling's insert happens-after on an
+///   absent URI. This ordering is NOT fully exclusive: the sibling
+///   upserts its scratch BEFORE taking the lock to insert, so cleanup's
+///   `host.remove` can land in the window between the sibling's upsert
+///   and its cache insert — the sibling's entry then points at a removed
+///   host file. The actual bound is a stale cache ENTRY, never wrong
+///   served content. A later cache hit performs NO liveness check: the
+///   fast-path in `evaluate_inner` hands the cached `SemanticNodeId`
+///   straight back, and the semantic-graph node arena is append-only, so
+///   the id still dereferences to its immutable resolved node after the
+///   removal — the hit itself does NOT degrade to a miss. That is benign
+///   for what is served: the entry's node is exactly what a live-backed
+///   hit on the same content-addressed URI would return. What
+///   `host.remove` does guarantee is that the removed FILE's state can
+///   no longer be read as current: it drops the scratch's scheduler node
+///   and compile caches, drains every resolver / memo entry scoped to
+///   the canonical, and bumps the store-view epoch, so any path that
+///   re-reads the scratch file (shallow state, file facts, read-set-
+///   signature validation, cross-mode warm satisfaction) misses and
+///   re-synthesises instead of consuming removed-file state. The
+///   residual window is therefore an orphaned cache entry whose
+///   file-needing consumers pay a recompute — until LRU eviction or a
+///   fresh request re-upserts the file — not a stale-content hazard.
+///
+/// **Lock order (no deadlock):** `scratch_cache` is acquired here, then
+/// `host.remove` runs while it is held. `host.remove` takes the alias /
+/// workspace / scheduler / resolver / project-store locks and bumps the
+/// store-view epoch, but none of those paths ever acquire the
+/// `scratch_cache` lock (the only `scratch_cache` lock sites are this
+/// module's fast-path get, success insert, and this cleanup). The lock
+/// order `scratch_cache → {host.remove internals}` is therefore strictly
+/// one-directional and cannot invert.
+///
+/// This uses `host.remove` (full deletion), NOT `host.evict`: a scratch
+/// URI is synthetic and has no workspace backing, so `evict`'s
+/// "invisible until `ensure_loaded` reloads from disk" semantics would
+/// leave a zombie the next identical re-`upsert` cannot re-integrate
+/// (the no-op-reload short-circuit skips re-integration when the
+/// re-upserted content hashes identically to the evicted content).
+/// `remove` drops the scheduler node and resolver caches outright, so a
+/// later identical request re-synthesises the scratch cleanly.
+/// Evict (not remove) a scratch file iff no concurrent request owns it
+/// in `scratch_cache`. The non-cacheable SUCCESS terminal uses this:
+/// eviction reclaims compile/derived state but PRESERVES the scratch's
+/// semantic-graph memo, which the typeinfo cross-mode satisfaction
+/// contract depends on (see the call site). Ownership-check rationale is
+/// identical to [`remove_scratch`].
+fn evict_scratch(host: &VerterHost, uri: &str) {
+    let guard = host.scratch_cache().lock();
+    if guard.contains(uri) {
+        return;
     }
+    host.evict(uri);
+    drop(guard);
+}
+
+fn remove_scratch(host: &VerterHost, uri: &str) {
+    #[cfg(test)]
+    test_interleave::fire(uri);
+    let guard = host.scratch_cache().lock();
+    if guard.contains(uri) {
+        // A concurrent request owns this URI — its cache entry backs a
+        // live host file. Removing it now would strand that entry.
+        return;
+    }
+    // Still unowned under the lock: the check-and-remove is atomic with
+    // respect to a concurrent ownership insert (that insert serialises
+    // behind this guard). It is NOT exclusive with the sibling's UPSERT,
+    // which happens before the sibling takes this lock: a sibling that
+    // upserted before this remove will insert an entry pointing at the
+    // just-removed host file — the stale-entry-never-wrong-content bound
+    // documented above.
+    let _ = host.remove(uri);
+    drop(guard);
 }
 
 /// Compute the scratch URI for the evaluate-type-expression
@@ -642,5 +811,51 @@ fn push_import(out: &mut String, imp: &ImportSpec) {
         out.push_str(" from \"");
         out.push_str(&imp.specifier);
         out.push_str("\";\n");
+    }
+}
+
+/// Deterministic interleaving hook for the cleanup ownership-race test.
+///
+/// Fires at the very top of [`remove_scratch`], before the
+/// `scratch_cache` lock is taken, so a test can rendezvous a cleaning
+/// request with a concurrent owning request at the exact race window. The
+/// installed closure receives the scratch URI under cleanup; the test
+/// gates on its own URI so unrelated `remove_scratch` calls (LRU
+/// eviction, the owner's own paths, sibling tests) do not block. No-op
+/// when no closure is installed, and compiled out entirely in non-test
+/// builds.
+#[cfg(test)]
+pub(crate) mod test_interleave {
+    use std::sync::{Arc, Mutex};
+
+    type Hook = Arc<dyn Fn(&str) + Send + Sync>;
+
+    static HOOK: Mutex<Option<Hook>> = Mutex::new(None);
+
+    /// Install the cleanup-window rendezvous closure.
+    pub(crate) fn install(hook: impl Fn(&str) + Send + Sync + 'static) {
+        *HOOK.lock().expect("test interleave lock poisoned") = Some(Arc::new(hook));
+    }
+
+    /// Remove any installed closure.
+    pub(crate) fn clear() {
+        *HOOK.lock().expect("test interleave lock poisoned") = None;
+    }
+
+    /// Invoke the installed closure (if any) for `uri`. Called from
+    /// [`super::remove_scratch`] before the `scratch_cache` lock is taken.
+    pub(crate) fn fire(uri: &str) {
+        // Clone the `Arc` out from under the lock so the rendezvous — which
+        // may block the calling thread — runs WITHOUT holding the static
+        // `HOOK` lock. Holding it across a blocking closure would deadlock a
+        // concurrent `install`/`clear` from the test driver.
+        let hook = HOOK
+            .lock()
+            .expect("test interleave lock poisoned")
+            .as_ref()
+            .map(Arc::clone);
+        if let Some(hook) = hook {
+            hook(uri);
+        }
     }
 }

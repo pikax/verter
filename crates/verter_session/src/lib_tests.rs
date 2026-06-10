@@ -344,11 +344,12 @@ fn semantic_queries_use_current_analysis_snapshots() {
 fn build_upsert_result_first_insert() {
     let src = "<script setup>const n = 1</script><template><div/></template><style>.a{}</style>";
     let (snapshot, _) = parse_vue_snapshot("Comp.vue", src, AnalysisScope::LSP);
+    let script_analysis = std::sync::Arc::unwrap_or_clone(snapshot.script_analysis);
     let data = UpsertResultData {
         new_meta: snapshot.meta,
         parse_diagnostics: snapshot.parse_diagnostics,
-        imports: snapshot.script_analysis.imports,
-        module_references: snapshot.script_analysis.module_references,
+        imports: script_analysis.imports,
+        module_references: script_analysis.module_references,
         external_requests: snapshot.external_requests,
         preprocessor_requests: snapshot.preprocessor_requests,
         export_signatures: snapshot.export_signatures,
@@ -393,11 +394,12 @@ fn build_upsert_result_first_insert() {
 fn build_upsert_result_no_change() {
     let src = "<script setup>const n = 1</script><template><div/></template>";
     let (snapshot, _) = parse_vue_snapshot("Comp.vue", src, AnalysisScope::LSP);
+    let script_analysis = std::sync::Arc::unwrap_or_clone(snapshot.script_analysis);
     let data = UpsertResultData {
         new_meta: snapshot.meta,
         parse_diagnostics: snapshot.parse_diagnostics,
-        imports: snapshot.script_analysis.imports,
-        module_references: snapshot.script_analysis.module_references,
+        imports: script_analysis.imports,
+        module_references: script_analysis.module_references,
         external_requests: snapshot.external_requests,
         preprocessor_requests: snapshot.preprocessor_requests,
         export_signatures: snapshot.export_signatures,
@@ -1106,6 +1108,110 @@ fn tier3_unrelated_file_upsert_keeps_compile_slot_warm() {
     assert!(
         host.compile_slot_is_warm("/src/Comp.vue", &profile_dev()),
         "compile slot MUST stay warm after upsert to a file the consumer doesn't import (path-precision)"
+    );
+}
+
+/// SOUNDNESS: a `Session`-mode compile warm hit must NEVER validate its
+/// cross-file `fact_dep_signature` against a known-stale store view.
+///
+/// `compile_slot_is_warm` (and the `ensure_compiled` / `get_virtual_file`
+/// warm-hit consults it mirrors) routes through `compile_slot_facts_validate`,
+/// which returns a cached compile output to the caller with NO outer publish
+/// / is_stable fence. Before the typed-currentness split reached this
+/// surface, it built a RAW `resolver_store_view()` and validated
+/// `fact.validates(...)` with no `.current()` gate: under sustained churn the
+/// shared chokepoint could hand back a known-stale `StoreViewRead::ReturnOnly`
+/// view holding a dependency's OLD whole-hash, so a compile slot referencing
+/// the SAME old hash validates `old == old` — a FALSE-POSITIVE that reports a
+/// stale slot as warm and serves stale compile output under churn.
+///
+/// With the fix, `compile_slot_facts_validate` accepts ONLY a proven-
+/// `CurrentHostStoreView`; the warm-hit sites obtain it via `.current()` and
+/// report "not warm" / miss to cold on a `ReturnOnly` read.
+///
+/// Discrimination: prime a cross-file Session slot so a quiescent
+/// `compile_slot_is_warm` returns `true`, then under sustained token churn
+/// the SAME predicate must return `false`. Against a tree whose compile
+/// validator uses the raw view, the stale slot validates and the predicate
+/// returns `true` — so the `!warm_under_churn` assertion FAILS against such a
+/// tree. The bounded supersede loop always terminates; the run happens on a
+/// watchdog thread so a regression hang surfaces as a failure, not a hang.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn session_compile_warm_hit_is_suppressed_when_store_view_is_not_current() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+
+    let _ = upsert_vue(
+        &host,
+        "/src/Comp.vue",
+        "<script setup lang=\"ts\">\nimport type { MyType } from './types'\nconst props = defineProps<MyType>()\n</script>\n<template><div/></template>",
+    );
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "/src/types.ts".to_string(),
+            source: Arc::from("export interface MyType { foo: string }"),
+            file_kind: FileKind::NonSfc,
+            aliases: Vec::new(),
+        })
+        .unwrap();
+
+    // Cold Session compile → publishes a session slot whose
+    // `fact_dep_signature` references the dep `/src/types.ts` at its current
+    // (old) whole-hash.
+    let _ = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: Some("/src/Comp.vue".to_string()),
+            canonical_id: None,
+            node_kind: None,
+            compile_profile: profile_dev(),
+        })
+        .unwrap();
+
+    // Sanity arm: a quiescent predicate is warm (the slot is valid and
+    // warm-hittable under a current view).
+    assert!(
+        host.compile_slot_is_warm("/src/Comp.vue", &profile_dev()),
+        "the compile slot must be warm immediately after a successful cold \
+         compile (precondition: valid under a current view)"
+    );
+
+    // Force the store-view read NON-CURRENT for the next predicate: every
+    // `build_coherent` attempt churns the token mid-build, so `base_view`
+    // exhausts its retry budget and returns `ReturnOnly`. Run on a watchdog
+    // thread (the knob is thread-local; the bounded loop always terminates).
+    let host_for_watchdog = Arc::clone(&host);
+    let (tx, rx) = mpsc::channel::<bool>();
+    let watchdog = std::thread::spawn(move || {
+        // Bump the store-view epoch so the manager's cached base view
+        // false-misses and the next `base_view` must claim a build (where
+        // the persistent supersede knob engages → `ReturnOnly`). The epoch
+        // is not a fact in the compile signature — the slot still validates
+        // against the unchanged file whole-hashes, which is exactly the
+        // stale-but-validating window this test closes.
+        host_for_watchdog.bump_store_view_epoch();
+        crate::resolver_store::HostStoreView::arm_supersede_always_for_tests();
+        let warm_under_churn =
+            host_for_watchdog.compile_slot_is_warm("/src/Comp.vue", &profile_dev());
+        crate::resolver_store::HostStoreView::disarm_supersede_always_for_tests();
+        let _ = tx.send(warm_under_churn);
+    });
+
+    let warm_under_churn = rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("compile_slot_is_warm under sustained churn must return in bounded time");
+    watchdog.join().expect("watchdog thread must not panic");
+
+    assert!(
+        !warm_under_churn,
+        "SOUNDNESS REGRESSION: the Session compile warm-hit predicate \
+         reported a stale slot as WARM against a known-stale (ReturnOnly) \
+         store view — `compile_slot_facts_validate` validated against a raw, \
+         non-current view and false-positived the slot. A non-current read \
+         MUST report not-warm and miss to cold."
     );
 }
 

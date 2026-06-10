@@ -31,13 +31,16 @@ impl VerterHost {
     /// generation flip).
     #[must_use]
     pub fn project_node_to_type_expr(&self, node: SemanticNodeId) -> Option<TypeExpr> {
-        // Build a request-bound `HostResolverContext` for the dispatch
-        // so resolver-tier reads bind to a real overlay-aware view
-        // rather than the panic-shimmed bare-host
-        // `impl ResolverContext for VerterHost`.
-        let store_view = self.resolver_store_view();
+        // Query-RETURNER: it returns the raised `TypeExpr` with no outer
+        // publish fence, so it MUST raise against a PROVEN-CURRENT
+        // snapshot. A known-stale (`ReturnOnly`) read would raise the node
+        // against superseded graph state; on sustained churn surface a
+        // miss (`None`) — the established raise miss signal — rather than
+        // a stale projection. The bounded retry terminates.
+        let current_view = crate::typeinfo::current_store_view_for_query(self)?;
         let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let host_ctx = crate::resolver_core::HostResolverContext::new(self, &store_view, overlay);
+        let host_ctx =
+            crate::resolver_core::HostResolverContext::from_current(self, &current_view, overlay);
         let dispatch = ProjectSemanticDispatch::new(&host_ctx);
         dispatch.raise_node_to_type_expr(node)
     }
