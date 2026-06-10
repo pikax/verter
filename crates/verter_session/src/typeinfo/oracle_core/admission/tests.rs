@@ -82,18 +82,39 @@ fn contributor(raw: RawSourceSurface, body: TypeExpr) -> SourceContributor {
         raw_surface: raw,
         lowered_body: body,
         carve_out_root_def: None,
+        carve_out_root_surfaces: Vec::new(),
     }
 }
 
 /// A carve-out contributor whose root `Ref` is stamped as resolving to
-/// `root_def` — the source walk's same-file binding. Passing the SAME file as
-/// `def_canonical` models a provably-same-file root (admitted); a DIFFERENT file
-/// models an imported / cross-file root (rejected).
+/// `root_def` — the source walk's same-file binding — with a CLEAN root
+/// raw-fact record (the root-operand admission's positive case). Passing the
+/// SAME file as `def_canonical` models a provably-same-file root (admitted); a
+/// DIFFERENT file models an imported / cross-file root (rejected).
 fn carve_out_contributor(
     raw: RawSourceSurface,
     body: TypeExpr,
     def_canonical: &str,
     root_def: Option<&str>,
+) -> SourceContributor {
+    carve_out_contributor_with_root_surfaces(
+        raw,
+        body,
+        def_canonical,
+        root_def,
+        vec![clean_surface()],
+    )
+}
+
+/// [`carve_out_contributor`] with an explicit ROOT raw-fact contributor vector —
+/// the root-operand raw-fact admission guards drive the dirty / empty cases
+/// through this.
+fn carve_out_contributor_with_root_surfaces(
+    raw: RawSourceSurface,
+    body: TypeExpr,
+    def_canonical: &str,
+    root_def: Option<&str>,
+    root_surfaces: Vec<RawSourceSurface>,
 ) -> SourceContributor {
     SourceContributor {
         ordinal: 0,
@@ -101,6 +122,7 @@ fn carve_out_contributor(
         raw_surface: raw,
         lowered_body: body,
         carve_out_root_def: root_def.map(str::to_string),
+        carve_out_root_surfaces: root_surfaces,
     }
 }
 
@@ -636,9 +658,11 @@ fn source_root_carve_out_rejects_every_still_rejected_shape() {
             "KeySource[\"a\" | \"b\"]",
             RejectReason::DeferredConstruct("indexed-access"),
         ),
-        // `T[keyof T]` value-union lookup — the index is a `keyof`, not a literal.
+        // NOTE: `Root[keyof Root]` (same shared root) is the KeyofSelfIndex
+        // carve-out, owned by `keyof_self_index_source_root_carve_out`; a
+        // DIFFERENT-root lookup stays a plain deferred operator.
         (
-            "KeySource[keyof KeySource]",
+            "KeySource[keyof OtherSource]",
             RejectReason::DeferredConstruct("indexed-access"),
         ),
         // A type-argument-carrying root on the object side (`NonNullable<…>[…]`)
@@ -762,6 +786,284 @@ fn carve_out_does_not_leak_into_generic_hover_or_value_paths() {
             "/fixtures/keys.ts",
             Some("/fixtures/keys.ts"),
         )),
+        AdmissionVerdict::Reject(RejectReason::DeferredConstruct("indexed-access"))
+    );
+}
+
+// ---------------------------------------------------------------------------
+// §Q2 keyof-expansion extensions: the `Root[keyof Root]` self-index carve-out,
+// the per-shape capture-kind postcondition, and the root-operand raw-fact
+// admission (every carve-out shape).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn keyof_self_index_source_root_carve_out() {
+    let same: &str = "/fixtures/keys.ts";
+
+    // POSITIVE: `Root[keyof Root]` — BOTH refs the SAME bare unqualified root —
+    // classifies as the self-index carve-out, names the shared root, and admits
+    // through the same three-gate discipline (structure + same-file root +
+    // clean root raw facts).
+    let body = lower("Surface[keyof Surface]");
+    assert_eq!(classify_source_root(&body), SourceRootShape::KeyofSelfIndex);
+    assert_eq!(carve_out_root_ref_name(&body), Some("Surface"));
+    assert_eq!(
+        admit_source_contributor(&carve_out_contributor(
+            clean_surface(),
+            body.clone(),
+            same,
+            Some(same),
+        )),
+        AdmissionVerdict::Admit
+    );
+
+    // NEGATIVE: DIFFERENT roots (`Root[keyof Other]`) are NOT the self-index
+    // shape — and not a string-literal chain either — so the generic predicate
+    // rejects the bare operator.
+    let different = lower("Surface[keyof Other]");
+    assert_eq!(
+        classify_source_root(&different),
+        SourceRootShape::NotCarveOut
+    );
+    assert_eq!(carve_out_root_ref_name(&different), None);
+    assert_eq!(
+        admit_source_contributor(&carve_out_contributor(
+            clean_surface(),
+            different,
+            same,
+            Some(same),
+        )),
+        AdmissionVerdict::Reject(RejectReason::DeferredConstruct("indexed-access"))
+    );
+
+    // NEGATIVE: a type-argument-carrying or qualified root is NOT a carve-out
+    // root in either position.
+    assert_eq!(
+        classify_source_root(&lower("Box<string>[keyof Box<string>]")),
+        SourceRootShape::NotCarveOut
+    );
+    assert_eq!(
+        classify_source_root(&lower("A.B[keyof A.B]")),
+        SourceRootShape::NotCarveOut
+    );
+
+    // NEGATIVE: a NESTED self-index (inside an object member) never reaches the
+    // root carve-out.
+    assert_eq!(
+        classify_source_root(&lower("{ a: Surface[keyof Surface] }")),
+        SourceRootShape::NotCarveOut
+    );
+
+    // NEGATIVE: an IMPORTED root (resolves to ANOTHER file) rejects through the
+    // generic predicate; an UNBOUND root (no stamp) likewise.
+    assert_eq!(
+        admit_source_contributor(&carve_out_contributor(
+            clean_surface(),
+            body.clone(),
+            same,
+            Some("/fixtures/other.ts"),
+        )),
+        AdmissionVerdict::Reject(RejectReason::DeferredConstruct("indexed-access"))
+    );
+    assert_eq!(
+        admit_source_contributor(&carve_out_contributor(clean_surface(), body, same, None)),
+        AdmissionVerdict::Reject(RejectReason::DeferredConstruct("indexed-access"))
+    );
+}
+
+/// The Resolved walk for one carve-out contributor (the shape `admit_query`'s
+/// postcondition reads).
+fn resolved_walk_of(body: TypeExpr) -> SourceWalkResult {
+    let same = "/fixtures/keys.ts";
+    SourceWalkResult::Resolved {
+        contributors: vec![carve_out_contributor(
+            clean_surface(),
+            body,
+            same,
+            Some(same),
+        )],
+    }
+}
+
+#[test]
+fn keyof_capture_kind_postcondition_requires_property_key_value() {
+    const EXPANDED: ProjectionModeKind = ProjectionModeKind::Expanded;
+    let keyof_walk = resolved_walk_of(lower("keyof KeySource"));
+
+    // POSITIVE: string-literal unions and the string/number key primitives are
+    // materialized property-key values — they ADMIT under the keyof kind.
+    assert_eq!(
+        admit_query("\"count\" | \"id\" | \"nested\"", &keyof_walk, EXPANDED),
+        AdmissionVerdict::Admit
+    );
+    assert_eq!(
+        admit_query("string | number", &keyof_walk, EXPANDED),
+        AdmissionVerdict::Admit
+    );
+    assert_eq!(
+        admit_query("\"a\" | 42", &keyof_walk, EXPANDED),
+        AdmissionVerdict::Admit
+    );
+
+    // NEGATIVE (the DISCRIMINATING case): ordinary hover admission ADMITS
+    // booleans / objects / `symbol`, so ONLY the capture-kind postcondition can
+    // reject them under a KeyofBareRef-shaped row.
+    assert!(
+        matches!(
+            admit_query("\"a\" | true", &keyof_walk, EXPANDED),
+            AdmissionVerdict::Reject(RejectReason::KeyDomainViolation(_))
+        ),
+        "a boolean-bearing hover under the keyof capture kind must REJECT"
+    );
+    assert!(matches!(
+        admit_query("{ a: string }", &keyof_walk, EXPANDED),
+        AdmissionVerdict::Reject(RejectReason::KeyDomainViolation(_))
+    ));
+    assert!(
+        matches!(
+            admit_query("string | symbol", &keyof_walk, EXPANDED),
+            AdmissionVerdict::Reject(RejectReason::KeyDomainViolation(_))
+        ),
+        "the `symbol` key-domain arm is NOT a materialized property-key value"
+    );
+    assert!(matches!(
+        admit_query("string | null", &keyof_walk, EXPANDED),
+        AdmissionVerdict::Reject(RejectReason::KeyDomainViolation(_))
+    ));
+
+    // The postcondition is scoped PER CARVE-OUT SHAPE: a `Root[keyof Root]`
+    // (KeyofSelfIndex) row projects a VALUE union — ordinary admission only, so
+    // the full member value union (incl. boolean / null) ADMITS.
+    let self_index_walk = resolved_walk_of(lower("Surface[keyof Surface]"));
+    assert_eq!(
+        admit_query(
+            "string | number | boolean | null",
+            &self_index_walk,
+            EXPANDED
+        ),
+        AdmissionVerdict::Admit
+    );
+
+    // …and a NON-carve-out row is untouched by the postcondition (a boolean
+    // surface stays admissible).
+    let plain_walk = SourceWalkResult::Resolved {
+        contributors: vec![contributor(clean_surface(), bare_ref("Plain"))],
+    };
+    assert_eq!(
+        admit_query("boolean", &plain_walk, EXPANDED),
+        AdmissionVerdict::Admit
+    );
+}
+
+#[test]
+fn carve_out_root_raw_facts_admission_checked_for_every_shape() {
+    let same: &str = "/fixtures/keys.ts";
+    let mut unique_symbol_root = clean_surface();
+    unique_symbol_root.unique_symbol_ops = vec![UniqueSymbolOp];
+
+    // Every carve-out shape's ROOT raw facts are admission-checked: a root
+    // carrying a `unique symbol` member REJECTS loudly (the root's keyspace
+    // is not faithfully representable, so neither is its keyof / self-index /
+    // chain projection).
+    for body_text in [
+        "keyof KeySource",
+        "KeySource[\"nested\"][\"value\"]",
+        "Surface[keyof Surface]",
+    ] {
+        assert_eq!(
+            admit_source_contributor(&carve_out_contributor_with_root_surfaces(
+                clean_surface(),
+                lower(body_text),
+                same,
+                Some(same),
+                vec![unique_symbol_root.clone()],
+            )),
+            AdmissionVerdict::Reject(RejectReason::UniqueSymbol),
+            "a unique-symbol-bearing ROOT must reject the carve-out `{body_text}`"
+        );
+
+        // A MERGED root rejects if ANY contributor is dirty (a single clean
+        // contributor does not admit the merge).
+        assert_eq!(
+            admit_source_contributor(&carve_out_contributor_with_root_surfaces(
+                clean_surface(),
+                lower(body_text),
+                same,
+                Some(same),
+                vec![clean_surface(), unique_symbol_root.clone()],
+            )),
+            AdmissionVerdict::Reject(RejectReason::UniqueSymbol),
+        );
+
+        // An EMPTY root raw-fact vector for a recognized same-file carve-out is
+        // a pairing failure — conservatively REJECT, never best-effort admit.
+        assert_eq!(
+            admit_source_contributor(&carve_out_contributor_with_root_surfaces(
+                clean_surface(),
+                lower(body_text),
+                same,
+                Some(same),
+                Vec::new(),
+            )),
+            AdmissionVerdict::Reject(RejectReason::SourceUnresolvedOrCyclic),
+        );
+
+        // POSITIVE control: the same shape with a CLEAN root admits.
+        assert_eq!(
+            admit_source_contributor(&carve_out_contributor(
+                clean_surface(),
+                lower(body_text),
+                same,
+                Some(same),
+            )),
+            AdmissionVerdict::Admit
+        );
+    }
+
+    // Other root raw-fact rejects discriminate by their own reason: a computed /
+    // non-static root member key.
+    let mut computed_key_root = clean_surface();
+    computed_key_root.raw_member_keys = vec![RawKey::Computed];
+    assert_eq!(
+        admit_source_contributor(&carve_out_contributor_with_root_surfaces(
+            clean_surface(),
+            lower("keyof KeySource"),
+            same,
+            Some(same),
+            vec![computed_key_root],
+        )),
+        AdmissionVerdict::Reject(RejectReason::NonStaticKey),
+    );
+}
+
+#[test]
+fn scaffold_hover_keyof_still_rejected() {
+    // The drift fence for the distributive-identity capture strategy: if a
+    // future pinned-tsgo bump re-prints `keyof X` THROUGH the scaffold,
+    // extraction yields a keyof-rooted RHS and the hover-side reject fires
+    // loudly at generation — the row re-defers honestly, never a silent wrong
+    // snapshot. The reject is RETAINED, not relaxed, under the scaffold
+    // strategy's own carve-out walk.
+    assert_eq!(
+        admit_hover_text("keyof KeySource"),
+        AdmissionVerdict::Reject(RejectReason::DeferredConstruct("keyof"))
+    );
+
+    // Under the FULL two-sided combiner for a scaffold-class (keyof carve-out)
+    // row: the source side admits, but the keyof-printing hover still rejects.
+    let keyof_walk = resolved_walk_of(lower("keyof KeySource"));
+    assert_eq!(
+        admit_query("keyof KeySource", &keyof_walk, ProjectionModeKind::Expanded),
+        AdmissionVerdict::Reject(RejectReason::DeferredConstruct("keyof"))
+    );
+    // The self-index family keeps its hover-side operator reject too.
+    let self_index_walk = resolved_walk_of(lower("Surface[keyof Surface]"));
+    assert_eq!(
+        admit_query(
+            "Surface[keyof Surface]",
+            &self_index_walk,
+            ProjectionModeKind::Expanded
+        ),
         AdmissionVerdict::Reject(RejectReason::DeferredConstruct("indexed-access"))
     );
 }

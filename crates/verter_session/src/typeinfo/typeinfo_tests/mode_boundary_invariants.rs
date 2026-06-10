@@ -23,13 +23,18 @@
 //! 5. `keyof T` for `T = Foo & { a: 1 }` across a re-export chain
 //!    must enumerate keys from both intersection arms.
 //!
-//! All 5 are currently TDD-red. The bounded-audit-counter discriminator
+//! Contracts 1–4 are currently TDD-red (contract 3's correctness half
+//! passes; its depth bound is the live failure). Contract 5 is LIFTED:
+//! its body is the registry-keyed oracle row proven against the
+//! checked-in tsgo snapshot. The bounded-audit-counter discriminator
 //! avoids relying on resolver-internal shape choices: when the rules
 //! are followed, the per-request `hops` / `expansions` /
 //! `depth_high_water` stay small regardless of chain depth.
 
+use super::oracle;
 use super::support::*;
 use verter_audit::RequestKindPayload;
+use verter_session_oracle_macro::oracle_row;
 
 const MODE_BOUNDARY_CHAIN: &str = include_str!("fixtures/mode_boundary_chain.ts");
 const MODE_BOUNDARY_REEXPORT_PRINCIPAL: &str =
@@ -135,7 +140,7 @@ fn type_resolution_payload(
 //
 // TS7 emission: `keyof LargeRecord_11` = `"id" | "tag" | "parent" | "payload"`.
 #[test]
-#[ignore = "verter currently returns `Unknown { raw: \"semanticMiss\" }` for `Expanded(LargeKeys_11)` at the 12-level scale (payload: hops=3, expansions=1, depth=1) — the resolver aborts before producing the keyspace. The tsgo-audit probe on the 500-level fixture showed a different failure mode at scale: hops=2503, expansions=1002, depth=501, recursion_limit_reached=true. Both modes violate the /type-resolution SKILL.md contract: Expanded `keyof T` on an object literal/interface must emit the literal-union of T's member names. The correct implementation only needs T's SHALLOW member-name surface — member bodies (`parent: Pick<LargeRecord_N-1, ...>`, `payload: { value: LargeValue_N-1 }`) must not enter the keyspace enumeration. Suspect call sites for the at-scale chain-walk regression: enumerate.rs:169 and evaluate.rs:176 (`DeclPlaceholder -> Instantiate { body_mode: Expanded }` shortcut) plus lower.rs:596 (object lowering propagates caller mode). Keep as the future keyof-bounded-on-deep-chain contract."]
+#[ignore = "the CORRECTNESS half now passes: `Expanded(LargeKeys_11)` resolves the exact literal key union `\"id\" | \"parent\" | \"payload\" | \"tag\"` (and `recursion_limit_reached` stays false, expansions=13 <= 16). The live failure is the depth BOUNDEDNESS assert: depth_high_water=12 (expansions=13, hops=40) against the near-shallow bound <= 8 — the keyspace enumeration still descends one level per chain link instead of stopping at the outer object's SHALLOW member-name surface. The /type-resolution SKILL.md contract is that member bodies (`parent: Pick<LargeRecord_N-1, ...>`, `payload: { value: LargeValue_N-1 }`) must not contribute depth to the OUTER keyof. Keep as the future keyof-bounded-on-deep-chain contract; this row also carries non-`TypeExpr` audit-payload assertions, so a lift would be an OracleAndGuard row with a registered live prover, not a bare oracle row."]
 fn mode_boundary_keyof_deep_chain_is_bounded_in_expanded() {
     let host = make_host_with_footprint();
     upsert_chain(&host);
@@ -442,29 +447,17 @@ fn mode_boundary_reexport_chain_resolves_imported_alias() {
 // enumeration must follow the re-export chain to the terminal body —
 // not stop at an unresolved Ref.
 //
-// Observed divergence from tsgo: `WantedKeys = keyof WantedType`
-// currently returns `unknown` (because `Foo` was unresolved); TS7
-// emits `"a" | "b"`.
-//
-// TS7 emission verified via IsExactly probe:
-//   IsExactly<WantedKeys, "a" | "b"> = true
+// LIFTED: `WantedKeys = keyof WantedType` (with `WantedType = Foo & { a: 1 }`
+// and `Foo` reached via the 7-hop re-export chain) resolves the expanded
+// literal key union `"a" | "b"`. The lifted body is the registry-keyed
+// `oracle::run_row` shared-driver call the `#[oracle_row]` macro synthesizes:
+// it resolves Verter's `Expanded` projection over the real 9-file workspace
+// and compares it against the checked-in tsgo snapshot, captured through the
+// distributive-identity probe scaffold (applied uniformly to the keyof
+// carve-out family). The DAG-terminal producer is
+// `IndexedAccessUnionDistribution` (block `U2.INDEXED_ACCESS`); the measured
+// dispatch trace is `[ResolveDecl, Instantiate, KeyOf, ProjectPath]`, proven
+// live by `lifted_row_mechanism_trace_matches_manifest`.
+#[oracle_row]
 #[test]
-#[ignore = "verter currently returns `unknown` for `keyof WantedType` where `WantedType = Foo & { a: 1 }` and `Foo` is reached via a 7-hop re-export chain (observed divergence from tsgo: keyspace enumeration cannot proceed past the unresolved `Ref { name: \"Foo\" }`). The /type-resolution SKILL.md contract is that `keyof (A & B)` enumerates the union of keys from both arms after fully resolving each arm — re-export chains must transit cleanly to the terminal body. Keep as the future keyof-across-reexport-chain contract."]
-fn mode_boundary_keyof_across_reexport_chain_resolves_all_keys() {
-    let host = make_host_with_footprint();
-    upsert_reexport_chain(&host);
-
-    let (expr, _record) = resolve_with_mode(
-        &host,
-        REEXPORT_PRINCIPAL_FILE,
-        "WantedKeys",
-        ProjectionMode::Expanded,
-    );
-
-    // TS7: WantedKeys = "a" | "b". Discriminates against the current
-    // `Unknown { raw: "semanticMiss" }` emission (where keyspace
-    // enumeration aborts because Foo remained an unresolved Ref) AND
-    // against any future implementation that yields an incorrect key
-    // set.
-    assert_literal_union(&expr, &["a", "b"]);
-}
+fn mode_boundary_keyof_across_reexport_chain_resolves_all_keys() {}

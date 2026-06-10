@@ -10,8 +10,8 @@ use verter_type_expr::{PrimitiveName, TypeExpr};
 use super::super::identity;
 use super::super::normalize::ProjectionModeKind;
 use super::super::query_specs::{
-    HostProjectSpec, HostSetupKindSpec, OracleValueKindSpec, ProjectionModeSpec, QueryHelperSpec,
-    QuerySpec, SourceLocatorSpec, SymbolSpace, WorkspaceFileSpec,
+    HostProjectSpec, HostSetupKindSpec, OracleValueKindSpec, ProbeRhsSpec, ProjectionModeSpec,
+    QueryHelperSpec, QuerySpec, SourceLocatorSpec, SymbolSpace, WorkspaceFileSpec,
 };
 use super::super::snapshot::{decode_strict, EnvFileEntry};
 use super::{
@@ -49,6 +49,7 @@ fn sample_spec(row_file: &'static str, row_function: &'static str, ordinal: u16)
             symbol: SYMBOL,
             type_args: &[],
             projection_mode: ProjectionModeSpec::Shallow,
+            probe_rhs: ProbeRhsSpec::Bare,
         },
         source_locator: SourceLocatorSpec {
             reference_canonical: FIXTURE_PATH,
@@ -181,6 +182,7 @@ fn type_argument_values_decodes_or_rejects() {
         symbol: SYMBOL,
         type_args: ARGS,
         projection_mode: ProjectionModeSpec::Shallow,
+        probe_rhs: ProbeRhsSpec::Bare,
     };
     let values = type_argument_values(&helper).expect("printable arg decodes");
     assert_eq!(values.len(), 1);
@@ -191,6 +193,7 @@ fn type_argument_values_decodes_or_rejects() {
         symbol: SYMBOL,
         type_args: BAD,
         projection_mode: ProjectionModeSpec::Shallow,
+        probe_rhs: ProbeRhsSpec::Bare,
     };
     assert!(matches!(
         type_argument_values(&bad_helper),
@@ -256,6 +259,7 @@ fn synthetic_snapshot(spec: &QuerySpec) -> Value {
             "symbol_or_expression": SYMBOL,
             "type_arguments": [],
             "projection_mode": "Shallow",
+            "probe_rhs_kind": "bare",
             "host_project": {
                 "project_root": "/",
                 "workspace_root": "/",
@@ -268,6 +272,7 @@ fn synthetic_snapshot(spec: &QuerySpec) -> Value {
         "raw_capture": {
             "probe_name": "__oracle_probe__0",
             "probe_header": "type __oracle_probe__0 = Foo;",
+            "probe_scaffold": null,
             "hover_contents": "```typescript\ntype __oracle_probe__0 = number;\n```"
         },
         "source_admission_digest": {

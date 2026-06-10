@@ -160,7 +160,11 @@ fn typeinfo_manifest_files_are_byte_equal_to_regenerated_generator_output() {
 /// plus the U2 IndexedAccess-reduction lifts (which also move
 /// `wide_deep_projected_token` from `U2.INDEXED_ACCESS` to `U2.MAPPED_TEMPLATE`)
 /// the generated counts are 2 / 13 / 40 / 19 with 8 lifted (2 at
-/// QUERY_VALUE_DOMAIN, 2 at INDEXED_ACCESS, 4 at MAPPED_TEMPLATE) and 354 ignored.
+/// QUERY_VALUE_DOMAIN, 2 at INDEXED_ACCESS, 4 at MAPPED_TEMPLATE) and 354 ignored;
+/// after the three keyof-expansion lifts (which also move
+/// `mode_boundary_keyof_across_reexport_chain` from `U10.RESULT_DB` to
+/// `U2.INDEXED_ACCESS`) the counts are 2 / 14 / 40 / 19 with 11 lifted (2 at
+/// QUERY_VALUE_DOMAIN, 5 at INDEXED_ACCESS, 4 at MAPPED_TEMPLATE) and 351 ignored.
 /// Each assertion is pinned to the exact committed lift partition — so reverting
 /// (or mis-counting) any lift's manifest re-partition breaks this test.
 #[test]
@@ -180,10 +184,12 @@ fn manifest_block_counts_reflect_lifts() {
     );
     assert_eq!(
         count("block_id: TypeInfoParityBlockId::U2IndexedAccess,"),
-        13,
-        "U2.INDEXED_ACCESS must own 13 rows after the 2 publication rows moved to \
-         U2.QUERY_VALUE_DOMAIN (it owned 16 before) and `wide_deep_projected_token` \
-         moved to U2.MAPPED_TEMPLATE on the IndexedAccess-reduction lift (14 → 13)",
+        14,
+        "U2.INDEXED_ACCESS must own 14 rows after the 2 publication rows moved to \
+         U2.QUERY_VALUE_DOMAIN, `wide_deep_projected_token` moved to \
+         U2.MAPPED_TEMPLATE on the IndexedAccess-reduction lift, and \
+         `mode_boundary_keyof_across_reexport_chain` moved IN from U10.RESULT_DB \
+         on the keyof-expansion lift (13 → 14)",
     );
     assert_eq!(
         count("block_id: TypeInfoParityBlockId::U2Utilities,"),
@@ -202,11 +208,11 @@ fn manifest_block_counts_reflect_lifts() {
     // Lifted-status counts.
     assert_eq!(
         count("status: IgnoreStatus::Lifted {"),
-        8,
-        "exactly 8 IgnoredTestRows must carry `status: Lifted` (2 index-signature \
+        11,
+        "exactly 11 IgnoredTestRows must carry `status: Lifted` (2 index-signature \
          publication + 2 built-in modifier-utility + 2 terminal indexed-access \
          projections + 1 wide/deep literal-union projection + 1 U2.MAPPED_TEMPLATE \
-         `-?` optional-remover lift)",
+         `-?` optional-remover + 3 keyof-expansion carve-out lifts)",
     );
     assert_eq!(
         count(
@@ -218,9 +224,11 @@ fn manifest_block_counts_reflect_lifts() {
     );
     assert_eq!(
         count("status: IgnoreStatus::Lifted { block_id: TypeInfoParityBlockId::U2IndexedAccess }"),
-        2,
-        "both terminal indexed-access projection lifts (typescript_rules + deep_path) \
-         must record their lifting block as U2.INDEXED_ACCESS",
+        5,
+        "the 2 terminal indexed-access projection lifts (typescript_rules + deep_path) \
+         plus the 3 keyof-expansion lifts (typescript_rules keyof + mode_boundary \
+         re-export keyof + union_key_access keyof-self) must record their lifting \
+         block as U2.INDEXED_ACCESS",
     );
     assert_eq!(
         count("status: IgnoreStatus::Lifted { block_id: TypeInfoParityBlockId::U2MappedTemplate }"),
@@ -230,10 +238,10 @@ fn manifest_block_counts_reflect_lifts() {
          lift must record their lifting block as U2.MAPPED_TEMPLATE",
     );
 
-    // Total ignored (status: Ignored) rows after 8 lifts.
+    // Total ignored (status: Ignored) rows after 11 lifts.
     assert_eq!(
         count("status: IgnoreStatus::Ignored"),
-        354,
-        "exactly 354 IgnoredTestRows must remain `Ignored` (362 total − 8 lifted)",
+        351,
+        "exactly 351 IgnoredTestRows must remain `Ignored` (362 total − 11 lifted)",
     );
 }

@@ -27,10 +27,10 @@
 //!    (`snapshot::assemble_snapshot_document`) and write it.
 //!
 //! [`run_oracle_gen`] is the single `pub` entry the `src/bin/oracle_gen` binary
-//! invokes. It walks the oracle-query-spec registry (the 8 lifted rows — two
+//! invokes. It walks the oracle-query-spec registry (the 11 lifted rows — two
 //! index-signature publications + two built-in modifier utilities + three U2
 //! IndexedAccess-reduction carve-outs + the mapped-modifier `-?` carve-out at
-//! U2.MAPPED_TEMPLATE) and writes one
+//! U2.MAPPED_TEMPLATE + three keyof-expansion carve-outs) and writes one
 //! snapshot per spec. The per-spec pipeline ([`generate_snapshot`]) is also
 //! exercised end-to-end against the pinned tsgo over a SYNTHETIC spec by
 //! `gen_tests::oracle_gen_is_idempotent`.
@@ -58,13 +58,13 @@ use crate::VerterHost;
 use super::admission::{self, AdmissionVerdict, SourceContributor, SourceWalkResult};
 use super::hover_extract;
 use super::identity::{
-    self, HostProject, HostSetupKind, OracleValueKind, PinnedEnv, QueryHelperKind,
+    self, HostProject, HostSetupKind, OracleValueKind, PinnedEnv, ProbeRhsKind, QueryHelperKind,
     SnapshotIdentity, WorkspaceFileRef,
 };
 use super::normalize::{self, ProjectionModeKind};
 use super::probe;
 use super::query_specs::{
-    HostSetupKindSpec, ProjectionModeSpec, QueryHelperSpec, QuerySpec, SymbolSpace,
+    HostSetupKindSpec, ProbeRhsSpec, ProjectionModeSpec, QueryHelperSpec, QuerySpec, SymbolSpace,
     COMPILER_OPTIONS_HASH, CURRENT_ENV_CORPUS_ID, ORACLE_QUERY_SPECS,
 };
 use super::snapshot::{self, ProbeLocator};
@@ -169,7 +169,7 @@ impl GenConfig {
 }
 
 /// Generate + write every registry snapshot, returning the count written (one
-/// per `ORACLE_QUERY_SPECS` entry — the 8 lifted rows). The per-spec body
+/// per `ORACLE_QUERY_SPECS` entry — the 11 lifted rows). The per-spec body
 /// ([`generate_snapshot`]) is additionally exercised against real tsgo by the
 /// idempotence test.
 pub fn run_oracle_gen() -> Result<usize, GenError> {
@@ -220,17 +220,21 @@ pub(crate) async fn generate_snapshot(
     // (1) The probe — same-file append for the two append-model helpers.
     let synth = synthesize_probe(spec)?;
 
-    // (2) Drive tsgo over the corpus-seeded sandbox + the probe.
+    // (2) The source side — walk the real fixture declaration through the shared
+    //     resolver, restricted to the provably-single-contributor class — and
+    //     CROSS-CHECK the declared capture strategy against the live carve-out
+    //     classification BEFORE driving tsgo or assembling anything: a spec
+    //     cannot claim the keyof scaffold for a non-keyof row.
+    let source_walk = source_side_walk(spec);
+    cross_check_probe_strategy(spec, &source_walk)?;
+
+    // (3) Drive tsgo over the corpus-seeded sandbox + the probe.
     let hover_contents = drive_hover(config, spec, &synth).await?;
 
-    // (3) Extract the probe RHS from the markdown hover.
+    // (4) Extract the probe RHS from the markdown hover.
     let probe_name = probe::probe_name(spec.query_ordinal);
     let hover_rhs = hover_extract::extract_probe_rhs(&hover_contents, &probe_name)
         .map_err(|e| GenError::HoverExtract(format!("{e:?}")))?;
-
-    // (4) The source side — walk the real fixture declaration through the shared
-    //     resolver, restricted to the provably-single-contributor class.
-    let source_walk = source_side_walk(spec);
 
     // (5) Two-sided admission (default-REJECT) + single-contributor restriction.
     let mode = projection_mode_of(spec);
@@ -264,6 +268,7 @@ pub(crate) async fn generate_snapshot(
     let raw_capture = json!({
         "probe_name": probe_name,
         "probe_header": probe::probe_header(spec.query_ordinal, &synth.rhs),
+        "probe_scaffold": synth.scaffold,
         "hover_contents": hover_contents,
     });
     let source_admission_digest = build_source_digest(spec, contributors)?;
@@ -290,6 +295,11 @@ struct Synthesized {
     source: String,
     /// The probe RHS as written into the header (for `raw_capture.probe_header`).
     rhs: String,
+    /// The scaffold helper declaration emitted before the probe line
+    /// (`DistributiveIdentity` only; `None` for the bare strategy). Recorded as
+    /// `raw_capture.probe_scaffold` so the offline audit re-derives the FULL
+    /// synthesized probe text from version + spec.
+    scaffold: Option<String>,
     /// The byte offset of the probe NAME in `source` (the hover request point).
     probe_name_offset: usize,
 }
@@ -297,31 +307,57 @@ struct Synthesized {
 /// Synthesize the fixed, versioned probe per `query_helper_kind` (§Q2). The
 /// append-model helpers (`ResolveExpr` / `ShallowSurfaceExpr`) clone the primary
 /// file and append `type __oracle_probe__N = <rhs>;` so the probe resolves in the
-/// same scope Verter did. `EvaluateExpr` (the scratch + `eval_source`-prelude
-/// model) is not yet wired — a loud rejection.
+/// same scope Verter did. A `DistributiveIdentity` strategy additionally emits
+/// the per-query identity helper immediately before the probe line and wraps the
+/// symbol (`__oracle_probe_dist__N<Symbol>`); it requires EMPTY `type_args`
+/// (the parameterized printer is its own deferred spike). `EvaluateExpr` (the
+/// scratch + `eval_source`-prelude model) is not yet wired — a loud rejection.
 fn synthesize_probe(spec: &QuerySpec) -> Result<Synthesized, GenError> {
     let primary_source = workspace_file_source(spec, spec.primary_canonical)
         .ok_or_else(|| GenError::MissingPrimaryFile(spec.primary_canonical.to_string()))?;
-    let rhs = match &spec.query_helper {
+    let (rhs, scaffold) = match &spec.query_helper {
         QueryHelperSpec::ResolveExpr {
-            symbol, type_args, ..
-        } => {
-            // `resolve_expr_probe_rhs` takes `&[String]`; the registry carries
-            // `&[&str]`. A non-empty set defers (parameterized probe-RHS printer
-            // spike, §Q2) — a loud rejection from the helper, not a guess.
-            let owned: Vec<String> = type_args.iter().map(|s| (*s).to_string()).collect();
-            probe::resolve_expr_probe_rhs(symbol, &owned)
-                .map_err(|e| GenError::HoverExtract(format!("probe RHS synthesis: {e:?}")))?
-        }
-        QueryHelperSpec::ShallowSurfaceExpr { symbol } => (*symbol).to_string(),
+            symbol,
+            type_args,
+            probe_rhs,
+            ..
+        } => match probe_rhs {
+            ProbeRhsSpec::Bare => {
+                // `resolve_expr_probe_rhs` takes `&[String]`; the registry carries
+                // `&[&str]`. A non-empty set defers (parameterized probe-RHS printer
+                // spike, §Q2) — a loud rejection from the helper, not a guess.
+                let owned: Vec<String> = type_args.iter().map(|s| (*s).to_string()).collect();
+                let rhs = probe::resolve_expr_probe_rhs(symbol, &owned)
+                    .map_err(|e| GenError::HoverExtract(format!("probe RHS synthesis: {e:?}")))?;
+                (rhs, None)
+            }
+            ProbeRhsSpec::DistributiveIdentity => {
+                if !type_args.is_empty() {
+                    return Err(GenError::HoverExtract(
+                        "probe RHS synthesis: DistributiveIdentity requires empty type_args \
+                         (the parameterized printer is its own deferred spike)"
+                            .to_string(),
+                    ));
+                }
+                let scaffold = probe::distributive_identity_scaffold(spec.query_ordinal, symbol);
+                (scaffold.rhs, Some(scaffold.helper_decl))
+            }
+        },
+        QueryHelperSpec::ShallowSurfaceExpr { symbol } => ((*symbol).to_string(), None),
         QueryHelperSpec::EvaluateExpr { .. } => {
             return Err(GenError::UnsupportedHelperKind("EvaluateExpr"))
         }
     };
-    let appended = probe::append_probe(primary_source, spec.query_ordinal, &rhs);
+    let appended = probe::append_probe_with_scaffold(
+        primary_source,
+        spec.query_ordinal,
+        &rhs,
+        scaffold.as_deref(),
+    );
     Ok(Synthesized {
         source: appended.source,
         rhs,
+        scaffold,
         probe_name_offset: appended.probe_name_offset,
     })
 }
@@ -449,6 +485,54 @@ fn seed_corpus(corpus_root: &Path, dest: &Path) -> Result<(), GenError> {
     walk(corpus_root, "", dest)
 }
 
+/// The generator capture-strategy cross-check (§Q2): the DECLARED `probe_rhs`
+/// strategy must agree with the LIVE source-walk carve-out classification.
+/// `DistributiveIdentity` is admissible ONLY when (a) the query's projection
+/// mode is `Expanded` AND (b) the walk resolved EXACTLY ONE contributor whose
+/// body classifies into the keyof carve-out family (`KeyofBareRef` /
+/// `KeyofSelfIndex` — the scaffold is applied UNIFORMLY to the family, never
+/// branched on predicted tsgo display behavior). Any mismatch is a loud
+/// [`GenError::Rejected`]. A `Bare` declaration is never constrained here —
+/// under-delivery (a bare probe whose hover echoes `keyof …`) is caught by the
+/// retained hover-side `KeyOf` reject, while THIS gate prevents over-claiming.
+fn cross_check_probe_strategy(
+    spec: &QuerySpec,
+    source_walk: &SourceWalkResult,
+) -> Result<(), GenError> {
+    let QueryHelperSpec::ResolveExpr {
+        probe_rhs: ProbeRhsSpec::DistributiveIdentity,
+        projection_mode,
+        ..
+    } = &spec.query_helper
+    else {
+        return Ok(());
+    };
+    let reject = |why: &str| {
+        Err(GenError::Rejected(format!(
+            "{}::{}: declared DistributiveIdentity strategy does not match the live \
+             classification: {why}",
+            spec.row_file, spec.row_function
+        )))
+    };
+    if *projection_mode != ProjectionModeSpec::Expanded {
+        return reject("projection mode is not Expanded");
+    }
+    let SourceWalkResult::Resolved { contributors } = source_walk else {
+        return reject("source walk did not resolve");
+    };
+    let [contributor] = contributors.as_slice() else {
+        return reject("source walk is not single-contributor");
+    };
+    match admission::classify_source_root(&contributor.lowered_body) {
+        admission::SourceRootShape::KeyofBareRef | admission::SourceRootShape::KeyofSelfIndex => {
+            Ok(())
+        }
+        other => reject(&format!(
+            "source root classifies as {other:?}, not the keyof carve-out family"
+        )),
+    }
+}
+
 /// Build a standalone `VerterHost` from the spec's workspace files and walk the
 /// queried symbol's source-side declaration graph through the shared resolver
 /// (`resolve_source_declarations`). This is the SAME construction the consumption
@@ -485,6 +569,7 @@ fn preflight_reduces_clean(spec: &QuerySpec) -> Result<(), GenError> {
             symbol,
             type_args,
             projection_mode,
+            ..
         } => {
             if !type_args.is_empty() {
                 // A parameterized query needs the versioned type-argument printer;
@@ -808,6 +893,7 @@ fn build_identity(spec: &QuerySpec) -> SnapshotIdentity {
         symbol_or_expression,
         type_arguments,
         projection_mode: projection_mode_of(spec),
+        probe_rhs_kind: probe_rhs_kind_of(spec),
         host_project: HostProject {
             project_root: spec.host_project.project_root.to_string(),
             workspace_root: spec.host_project.workspace_root.to_string(),
@@ -815,6 +901,20 @@ fn build_identity(spec: &QuerySpec) -> SnapshotIdentity {
             host_setup_kind: host_setup_kind(spec.host_project.host_setup_kind),
         },
         oracle_value_kind: OracleValueKind::StructuredTypeExpr,
+    }
+}
+
+/// The spec's declared capture strategy mapped onto the identity axis (only
+/// `ResolveExpr` can carry a non-`Bare` one).
+fn probe_rhs_kind_of(spec: &QuerySpec) -> ProbeRhsKind {
+    match &spec.query_helper {
+        QueryHelperSpec::ResolveExpr { probe_rhs, .. } => match probe_rhs {
+            ProbeRhsSpec::Bare => ProbeRhsKind::Bare,
+            ProbeRhsSpec::DistributiveIdentity => ProbeRhsKind::DistributiveIdentity,
+        },
+        QueryHelperSpec::ShallowSurfaceExpr { .. } | QueryHelperSpec::EvaluateExpr { .. } => {
+            ProbeRhsKind::Bare
+        }
     }
 }
 

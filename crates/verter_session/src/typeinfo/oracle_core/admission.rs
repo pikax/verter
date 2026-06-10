@@ -114,6 +114,17 @@ pub(crate) struct SourceContributor {
     /// cross-file / unresolved root falls through to the generic predicate,
     /// which rejects the bare operator.
     pub(crate) carve_out_root_def: Option<String>,
+    /// For a carve-out-shaped body whose root `Ref` resolved, the parse-time
+    /// `RawSourceSurface` records of the ROOT declaration itself (every merged
+    /// contributor of the root symbol in its defining file) — stamped by
+    /// [`super::source_walk`]. The root-operand raw-fact admission checks
+    /// these for EVERY carve-out shape: a `unique symbol` / computed /
+    /// non-static-key root rejects loudly (its keyspace is not faithfully
+    /// representable, so neither is any projection over it). Empty for a
+    /// non-carve-out body or an unresolved root; an EMPTY vector for an
+    /// otherwise-admissible same-file carve-out is a pairing failure and
+    /// REJECTS conservatively.
+    pub(crate) carve_out_root_surfaces: Vec<RawSourceSurface>,
 }
 
 /// The result of resolving a `SourceLocator` to its defining contributor(s).
@@ -210,6 +221,12 @@ pub(crate) enum RejectReason {
     /// source kept as a bare `Ref` (tsgo display artefact — §Q2
     /// `shallow_hover_expansion_rejected`).
     ShallowHoverExpansion,
+    /// The capture-kind postcondition for a `KeyofBareRef`-shaped row: the
+    /// admitted hover value must be a MATERIALIZED PROPERTY-KEY value
+    /// (string/number literal unions, `string`, `number`). The carried name is
+    /// the offending non-key construct (e.g. a boolean arm a future tsgo could
+    /// print where a key union was expected).
+    KeyDomainViolation(&'static str),
 }
 
 // ===========================================================================
@@ -319,21 +336,25 @@ pub(crate) fn admit_raw_surface(raw: &RawSourceSurface) -> AdmissionVerdict {
 //
 // `admit_type_expr` rejects `KeyOf` / `IndexedAccess` UNIVERSALLY — on the hover
 // side, on the oracle-VALUE side, and at every NESTED position. The source-root
-// carve-out admits exactly TWO operator-bodied shapes, and ONLY when they form
-// the ROOT of a queried source DECLARATION body (never nested, never a hover,
-// never an oracle value):
+// carve-out admits exactly the operator-bodied shapes enumerated by
+// [`SourceRootShape`], and ONLY when they form the ROOT of a queried source
+// DECLARATION body (never nested, never a hover, never an oracle value):
 //
-//   1. `keyof Root`            — `Root` a bare unqualified same-file `Ref`,
-//                                EMPTY type args.
-//   2. `Root["a"]["b"]…`       — `Root` a bare unqualified same-file `Ref`,
-//                                EMPTY type args, EVERY index segment a STRING
-//                                LITERAL.
+//   - `keyof Root`            — `Root` a bare unqualified same-file `Ref`,
+//                               EMPTY type args (`KeyofBareRef`).
+//   - `Root["a"]["b"]…`       — `Root` a bare unqualified same-file `Ref`,
+//                               EMPTY type args, EVERY index segment a STRING
+//                               LITERAL (`StringLiteralIndexChain`).
+//   - `Root[keyof Root]`      — BOTH refs the SAME bare unqualified same-file
+//                               `Ref`, EMPTY type args (`KeyofSelfIndex` — the
+//                               self-index value-union projection).
 //
 // The carve-out is gated by THREE independent checks, none sufficient alone:
 //
-//   (a) STRUCTURE (here, offline-testable): the body is one of the two shapes
-//       above with a bare, UNQUALIFIED `Ref` root and (shape 2) string-literal
-//       segments — `classify_source_root` / `is_bare_unqualified_ref`.
+//   (a) STRUCTURE (here, offline-testable): the body classifies into one of the
+//       carve-out shapes above with a bare, UNQUALIFIED `Ref` root and (for an
+//       index chain) string-literal segments — `classify_source_root` /
+//       `is_bare_unqualified_ref`.
 //   (b) SAME-FILE root identity (`admit_source_root`): the root `Ref` must
 //       PROVABLY resolve to a declaration in the SAME file as the contributor.
 //       This is NOT approximated structurally — the source walk resolves the
@@ -344,10 +365,11 @@ pub(crate) fn admit_raw_surface(raw: &RawSourceSurface) -> AdmissionVerdict {
 //       `keyof Root` / `Root["x"]` root — so without this gate an imported root
 //       would slip through; the gate closes that hole.)
 //   (c) RESOLVER PREFLIGHT (`gen::preflight_reduces_clean`): Verter's own
-//       resolver must reduce the query to a clean, operator-free value (a
-//       string-literal key union for shape 1, a named-member-resolved result
-//       for shape 2). The generator runs this before a snapshot is written so a
-//       tsgo snapshot can never mask an unresolved indexed/mapped shell.
+//       resolver must reduce the query to a clean, operator-free value passing
+//       the SAME positive allowlist the oracle VALUE must clear
+//       (`admit_type_expr`). The generator runs this before a snapshot is
+//       written so a tsgo snapshot can never mask an unresolved indexed/mapped
+//       shell.
 //
 // A non-carve-out body falls through to `admit_type_expr` VERBATIM, so every
 // previously-rejected source body still rejects identically.
@@ -361,26 +383,45 @@ pub(crate) enum SourceRootShape {
     /// `Root["a"]["b"]…` — a string-literal index chain bottoming out at a bare
     /// unqualified `Ref` with empty type args.
     StringLiteralIndexChain,
+    /// `Root[keyof Root]` — BOTH refs the SAME bare unqualified `Ref` with
+    /// empty type args (the self-index value-union projection).
+    KeyofSelfIndex,
     /// Not a carve-out root — the generic predicate decides.
     NotCarveOut,
 }
 
-/// Classify a contributor's lowered body against the two source-ROOT carve-out
+/// Classify a contributor's lowered body against the source-ROOT carve-out
 /// shapes — PURE structure, no resolution. `Root` must be a bare, UNQUALIFIED
 /// `Ref` with EMPTY type args (a `Ref` carrying type args — e.g.
-/// `NonNullable<Foo>` — or a qualified name is NOT a carve-out root); every index
-/// segment of shape 2 must be a STRING LITERAL (a numeric / `symbol` / union /
-/// `keyof` segment is NOT). This recognises the SHAPE only — the SAME-FILE root
-/// identity is enforced separately by [`admit_source_root`].
+/// `NonNullable<Foo>` — or a qualified name is NOT a carve-out root); every
+/// segment of an index chain must be a STRING LITERAL (a numeric / `symbol` /
+/// union / non-self `keyof` segment is NOT). This recognises the SHAPE only —
+/// the SAME-FILE root identity is enforced separately by [`admit_source_root`].
 #[allow(dead_code)]
 pub(crate) fn classify_source_root(body: &TypeExpr) -> SourceRootShape {
     match body {
         TypeExpr::KeyOf(inner) if is_bare_unqualified_ref(inner) => SourceRootShape::KeyofBareRef,
+        TypeExpr::IndexedAccess { object, index }
+            if keyof_self_index_root(object, index).is_some() =>
+        {
+            SourceRootShape::KeyofSelfIndex
+        }
         TypeExpr::IndexedAccess { .. } if is_string_literal_index_chain(body) => {
             SourceRootShape::StringLiteralIndexChain
         }
         _ => SourceRootShape::NotCarveOut,
     }
+}
+
+/// The shared root NAME of a `Root[keyof Root]` self-index — `Some(name)` ONLY
+/// when the object AND the keyof operand are bare, unqualified, empty-type-arg
+/// `Ref`s naming the SAME root.
+fn keyof_self_index_root<'a>(object: &'a TypeExpr, index: &TypeExpr) -> Option<&'a str> {
+    let object_root = bare_unqualified_ref_name(object)?;
+    let TypeExpr::KeyOf(operand) = index else {
+        return None;
+    };
+    (bare_unqualified_ref_name(operand) == Some(object_root)).then_some(object_root)
 }
 
 /// The source-ROOT admission entry: ADMIT a recognised carve-out root ONLY when
@@ -399,9 +440,29 @@ pub(crate) fn classify_source_root(body: &TypeExpr) -> SourceRootShape {
 pub(crate) fn admit_source_root(contributor: &SourceContributor) -> AdmissionVerdict {
     let body = &contributor.lowered_body;
     match classify_source_root(body) {
-        SourceRootShape::KeyofBareRef | SourceRootShape::StringLiteralIndexChain => {
+        SourceRootShape::KeyofBareRef
+        | SourceRootShape::StringLiteralIndexChain
+        | SourceRootShape::KeyofSelfIndex => {
             match contributor.carve_out_root_def.as_deref() {
-                Some(root_def) if root_def == contributor.def_canonical => AdmissionVerdict::Admit,
+                Some(root_def) if root_def == contributor.def_canonical => {
+                    // Root-operand raw-fact admission (every carve-out shape):
+                    // the same-file ROOT declaration's parse-time raw facts
+                    // must be clean — a `unique symbol` / computed /
+                    // non-static-key root's keyspace is not faithfully
+                    // representable, so its keyof / chain / self-index
+                    // projection rejects loudly. An EMPTY root-fact vector is
+                    // a pairing failure: conservatively REJECT.
+                    if contributor.carve_out_root_surfaces.is_empty() {
+                        return AdmissionVerdict::Reject(RejectReason::SourceUnresolvedOrCyclic);
+                    }
+                    for root_raw in &contributor.carve_out_root_surfaces {
+                        let v = admit_raw_surface(root_raw);
+                        if !v.is_admit() {
+                            return v;
+                        }
+                    }
+                    AdmissionVerdict::Admit
+                }
                 // Imported / cross-file / unresolved root → NOT a same-file
                 // carve-out. Fall through to the generic predicate, which
                 // rejects the bare `keyof` / indexed-access operator.
@@ -421,6 +482,12 @@ pub(crate) fn admit_source_root(contributor: &SourceContributor) -> AdmissionVer
 pub(crate) fn carve_out_root_ref_name(body: &TypeExpr) -> Option<&str> {
     match body {
         TypeExpr::KeyOf(inner) => bare_unqualified_ref_name(inner),
+        // The self-index shape: `Root[keyof Root]` names ONE shared root.
+        TypeExpr::IndexedAccess { object, index }
+            if keyof_self_index_root(object, index).is_some() =>
+        {
+            keyof_self_index_root(object, index)
+        }
         TypeExpr::IndexedAccess { .. } => {
             let mut cur = body;
             loop {
@@ -941,6 +1008,23 @@ pub(crate) fn admit_query(
     if !hover.is_admit() {
         return hover;
     }
+    // Capture-kind postcondition, scoped PER CARVE-OUT SHAPE: a
+    // `KeyofBareRef`-shaped row's admitted hover must be a MATERIALIZED
+    // PROPERTY-KEY value (string/number literal unions, `string`, `number`).
+    // Ordinary admission admits booleans / objects / `symbol`, so without
+    // this gate a future tsgo could print a non-key surface where a key
+    // union was expected and the snapshot would silently record it.
+    // `KeyofSelfIndex` rows project a VALUE union — ordinary admission only.
+    if source_walk_has_keyof_bare_ref(source_walk) {
+        let lowered = match lower_hover_rhs(hover_rhs) {
+            Some(expr) => expr,
+            None => return AdmissionVerdict::Reject(RejectReason::HoverUnparsable),
+        };
+        let key_domain = admit_keyof_key_domain_value(&lowered);
+        if !key_domain.is_admit() {
+            return key_domain;
+        }
+    }
     if matches!(
         mode,
         ProjectionModeKind::Shallow | ProjectionModeKind::Navigate
@@ -949,6 +1033,53 @@ pub(crate) fn admit_query(
         return AdmissionVerdict::Reject(RejectReason::ShallowHoverExpansion);
     }
     AdmissionVerdict::Admit
+}
+
+/// Whether the resolved source walk carries a `KeyofBareRef`-shaped
+/// contributor (the carve-out shape whose capture is a KEY DOMAIN).
+fn source_walk_has_keyof_bare_ref(source_walk: &SourceWalkResult) -> bool {
+    let SourceWalkResult::Resolved { contributors } = source_walk else {
+        return false;
+    };
+    contributors
+        .iter()
+        .any(|c| classify_source_root(&c.lowered_body) == SourceRootShape::KeyofBareRef)
+}
+
+/// The capture-kind postcondition predicate for a keyof KEY-DOMAIN capture:
+/// ADMIT only materialized property-key values — string/number LITERALS,
+/// unions of them, and the `string` / `number` key primitives. Everything
+/// else (boolean / null / undefined / `symbol` / objects / arrays / refs)
+/// REJECTS with the named non-key construct. `unique symbol` / qualified
+/// arms are already rejected by ordinary admission; this gate is the
+/// key-domain-specific tightening on top of it.
+#[allow(dead_code)]
+pub(crate) fn admit_keyof_key_domain_value(expr: &TypeExpr) -> AdmissionVerdict {
+    match expr {
+        TypeExpr::Literal(LiteralValue::String(_)) | TypeExpr::Literal(LiteralValue::Number(_)) => {
+            AdmissionVerdict::Admit
+        }
+        TypeExpr::Literal(_) => {
+            AdmissionVerdict::Reject(RejectReason::KeyDomainViolation("non-key-literal"))
+        }
+        TypeExpr::Primitive(PrimitiveName::String) | TypeExpr::Primitive(PrimitiveName::Number) => {
+            AdmissionVerdict::Admit
+        }
+        TypeExpr::Primitive(_) => {
+            AdmissionVerdict::Reject(RejectReason::KeyDomainViolation("non-key-primitive"))
+        }
+        TypeExpr::Union(arms) => {
+            for arm in arms.iter() {
+                let v = admit_keyof_key_domain_value(arm);
+                if !v.is_admit() {
+                    return v;
+                }
+            }
+            AdmissionVerdict::Admit
+        }
+        TypeExpr::Parenthesized(inner) => admit_keyof_key_domain_value(inner),
+        _ => AdmissionVerdict::Reject(RejectReason::KeyDomainViolation("non-key-construct")),
+    }
 }
 
 /// Whether, in a shallow mode, the SOURCE kept the queried symbol as a bare

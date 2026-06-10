@@ -37,9 +37,10 @@ use verter_type_expr::type_expr_from_json;
 
 use super::identity::{
     derive_snapshot_id, projection_mode_from_tag, projection_mode_tag, HostProject, HostSetupKind,
-    OracleValueKind, PinnedEnv, QueryHelperKind, SnapshotIdentity, WorkspaceFileRef,
+    OracleValueKind, PinnedEnv, ProbeRhsKind, QueryHelperKind, SnapshotIdentity, WorkspaceFileRef,
 };
 use super::normalize::canonical_json_string;
+use super::probe;
 
 /// The closed set of `oracle_value_kind` discriminants this schema version
 /// understands. Adding a kind is a CLOSED-tagged schema change that MUST bump
@@ -67,8 +68,14 @@ pub(crate) enum SnapshotDecodeError {
     /// `identity` did not strictly decode to the kind-specific shape.
     Identity(String),
     /// A stored enum tag (`query_helper_kind` / `projection_mode` /
-    /// `host_setup_kind`) was not a recognized discriminant.
+    /// `host_setup_kind` / `probe_rhs_kind`) was not a recognized discriminant.
     BadTag(String),
+    /// The `identity.probe_rhs_kind` / `raw_capture.probe_scaffold` /
+    /// `raw_capture.probe_header` triple is inconsistent: a
+    /// `distributive_identity` snapshot must record EXACTLY the versioned
+    /// scaffold synthesis (helper decl + wrapped header RHS, a pure function of
+    /// the query ordinal + symbol), and a `bare` snapshot must record none.
+    ScaffoldInconsistent(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -131,6 +138,11 @@ pub(crate) struct EnvFileEntry {
 pub(crate) struct RawCapture {
     pub(crate) probe_name: String,
     pub(crate) probe_header: String,
+    /// The scaffold helper declaration the probe RHS was wrapped in
+    /// (`distributive_identity` captures only; `null` for `bare`). Re-derivable
+    /// offline from `probe_synthesis_version` + the query ordinal — the strict
+    /// decoder re-checks it.
+    pub(crate) probe_scaffold: Option<String>,
     pub(crate) hover_contents: String,
 }
 
@@ -194,6 +206,7 @@ pub(crate) struct StructuredTypeExprIdentity {
     pub(crate) symbol_or_expression: String,
     pub(crate) type_arguments: Vec<Value>,
     pub(crate) projection_mode: String,
+    pub(crate) probe_rhs_kind: String,
     pub(crate) host_project: HostProjectDto,
     pub(crate) probe_locator: ProbeLocatorDto,
 }
@@ -246,12 +259,67 @@ pub(crate) fn decode_strict(json: &Value) -> Result<OracleSnapshot, SnapshotDeco
     }
 
     // Kind-specific identity strict decode + tag validation.
-    let _identity = decode_identity(&snapshot.oracle_value_kind, &snapshot.identity)?;
+    let identity = decode_identity(&snapshot.oracle_value_kind, &snapshot.identity)?;
+
+    // Capture-strategy consistency: the recorded scaffold + probe header must
+    // be EXACTLY the versioned synthesis for the declared `probe_rhs_kind`.
+    validate_probe_scaffold(&snapshot, &identity)?;
 
     // oracle_value strict TypeExpr decode + lossless round-trip.
     decode_oracle_value_strict(&snapshot.oracle_value)?;
 
     Ok(snapshot)
+}
+
+/// The cross-field capture-strategy rail: a `distributive_identity` snapshot
+/// records EXACTLY the versioned scaffold (helper decl re-derived from the
+/// query ordinal) and the WRAPPED probe header (re-derived from ordinal +
+/// symbol); a `bare` snapshot records NO scaffold. Both directions reject —
+/// so a stale, tampered, or strategy-mislabelled capture fails strict decode
+/// instead of half-validating.
+fn validate_probe_scaffold(
+    snapshot: &OracleSnapshot,
+    identity: &StructuredTypeExprIdentity,
+) -> Result<(), SnapshotDecodeError> {
+    let kind = ProbeRhsKind::from_tag(&identity.probe_rhs_kind)
+        .ok_or_else(|| SnapshotDecodeError::BadTag(identity.probe_rhs_kind.clone()))?;
+    let ordinal = snapshot.row_ref.query_ordinal;
+    match kind {
+        ProbeRhsKind::Bare => {
+            if let Some(stray) = &snapshot.raw_capture.probe_scaffold {
+                return Err(SnapshotDecodeError::ScaffoldInconsistent(format!(
+                    "bare capture carries a stray probe_scaffold: {stray}"
+                )));
+            }
+        }
+        ProbeRhsKind::DistributiveIdentity => {
+            let expected =
+                probe::distributive_identity_scaffold(ordinal, &identity.symbol_or_expression);
+            match &snapshot.raw_capture.probe_scaffold {
+                None => {
+                    return Err(SnapshotDecodeError::ScaffoldInconsistent(
+                        "distributive_identity capture records no probe_scaffold".to_string(),
+                    ));
+                }
+                Some(stored) if *stored != expected.helper_decl => {
+                    return Err(SnapshotDecodeError::ScaffoldInconsistent(format!(
+                        "stored probe_scaffold `{stored}` != versioned synthesis \
+                         `{}`",
+                        expected.helper_decl
+                    )));
+                }
+                Some(_) => {}
+            }
+            let expected_header = probe::probe_header(ordinal, &expected.rhs);
+            if snapshot.raw_capture.probe_header != expected_header {
+                return Err(SnapshotDecodeError::ScaffoldInconsistent(format!(
+                    "stored probe_header `{}` != wrapped synthesis `{expected_header}`",
+                    snapshot.raw_capture.probe_header
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Strictly decode the kind-specific `identity` shape. Only
@@ -277,6 +345,8 @@ pub(crate) fn decode_identity(
         .ok_or_else(|| SnapshotDecodeError::BadTag(dto.query_helper_kind.clone()))?;
     projection_mode_from_tag(&dto.projection_mode)
         .ok_or_else(|| SnapshotDecodeError::BadTag(dto.projection_mode.clone()))?;
+    ProbeRhsKind::from_tag(&dto.probe_rhs_kind)
+        .ok_or_else(|| SnapshotDecodeError::BadTag(dto.probe_rhs_kind.clone()))?;
     HostSetupKind::from_tag(&dto.host_project.host_setup_kind)
         .ok_or_else(|| SnapshotDecodeError::BadTag(dto.host_project.host_setup_kind.clone()))?;
 
@@ -347,6 +417,7 @@ pub(crate) fn render_identity_json(identity: &SnapshotIdentity, probe: &ProbeLoc
         "symbol_or_expression": identity.symbol_or_expression,
         "type_arguments": identity.type_arguments,
         "projection_mode": projection_mode_tag(identity.projection_mode),
+        "probe_rhs_kind": identity.probe_rhs_kind.tag(),
         "host_project": {
             "project_root": identity.host_project.project_root,
             "workspace_root": identity.host_project.workspace_root,
@@ -428,6 +499,8 @@ pub(crate) fn redrive_snapshot_id(
         .ok_or_else(|| SnapshotDecodeError::BadTag(dto.query_helper_kind.clone()))?;
     let mode = projection_mode_from_tag(&dto.projection_mode)
         .ok_or_else(|| SnapshotDecodeError::BadTag(dto.projection_mode.clone()))?;
+    let probe_rhs_kind = ProbeRhsKind::from_tag(&dto.probe_rhs_kind)
+        .ok_or_else(|| SnapshotDecodeError::BadTag(dto.probe_rhs_kind.clone()))?;
     let host_kind = HostSetupKind::from_tag(&dto.host_project.host_setup_kind)
         .ok_or_else(|| SnapshotDecodeError::BadTag(dto.host_project.host_setup_kind.clone()))?;
     let value_kind = OracleValueKind::from_tag(&snapshot.oracle_value_kind)
@@ -450,6 +523,7 @@ pub(crate) fn redrive_snapshot_id(
         symbol_or_expression: dto.symbol_or_expression.clone(),
         type_arguments: dto.type_arguments.clone(),
         projection_mode: mode,
+        probe_rhs_kind,
         host_project: HostProject {
             project_root: dto.host_project.project_root.clone(),
             workspace_root: dto.host_project.workspace_root.clone(),

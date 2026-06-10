@@ -35,15 +35,18 @@ pub(crate) const TSGO_VERSION: &str = "7.0.0-dev.20260526.1";
 
 /// Version of THIS snapshot FILE SHAPE (field set + per-kind `identity` shape).
 /// Bumped on any schema-field change AND whenever a new `oracle_value_kind` is
-/// added (a new kind carries a different required `identity` shape).
+/// added (a new kind carries a different required `identity` shape). v2 added
+/// `identity.probe_rhs_kind` + `raw_capture.probe_scaffold` (the capture-
+/// strategy axis).
 #[allow(dead_code)]
-pub(crate) const ORACLE_SCHEMA_VERSION: u32 = 1;
+pub(crate) const ORACLE_SCHEMA_VERSION: u32 = 2;
 
 /// Version of the PROBE-SYNTHESIS + hover-driver + hover-extraction +
 /// admissibility algorithm. Distinct from `normalizer_version`. Enters
-/// `snapshot_id`.
+/// `snapshot_id`. v2 added the distributive-identity probe-RHS kind (the
+/// keyof-expansion scaffold).
 #[allow(dead_code)]
-pub(crate) const PROBE_SYNTHESIS_VERSION: u32 = 1;
+pub(crate) const PROBE_SYNTHESIS_VERSION: u32 = 2;
 
 // NOTE — `compiler_options_hash` and `CURRENT_ENV_CORPUS_ID` are NOT pinned here.
 // They are GENERATION-derived: `compiler_options_hash` hashes the EFFECTIVE
@@ -107,6 +110,43 @@ impl QueryHelperKind {
             "ResolveExpr" => Some(Self::ResolveExpr),
             "ShallowSurfaceExpr" => Some(Self::ShallowSurfaceExpr),
             "EvaluateExpr" => Some(Self::EvaluateExpr),
+            _ => None,
+        }
+    }
+}
+
+/// The probe-RHS capture strategy: HOW the generator synthesized the probe RHS
+/// the snapshot's hover was captured over. A VALUE-AFFECTING `snapshot_id` axis
+/// — the harness never leans on the distributive-identity theorem to claim two
+/// capture paths are the same cache key.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProbeRhsKind {
+    /// The bare-symbol RHS (`type __oracle_probe__N = Symbol;`).
+    Bare,
+    /// The distributive-identity scaffold: an inlined per-query helper
+    /// `type __oracle_probe_dist__N<T> = T extends never ? never : T;` plus
+    /// the wrapped RHS `__oracle_probe_dist__N<Symbol>` — forces tsgo to print
+    /// the expanded member union of its own keyof enumeration instead of
+    /// echoing the written `keyof <operand>` display origin.
+    DistributiveIdentity,
+}
+
+impl ProbeRhsKind {
+    pub(crate) fn tag(self) -> &'static str {
+        match self {
+            Self::Bare => "bare",
+            Self::DistributiveIdentity => "distributive_identity",
+        }
+    }
+
+    /// Inverse of [`tag`] for the strict snapshot decoder's redrive path. An
+    /// unknown capture-strategy tag is `None` (closed set).
+    #[allow(dead_code)]
+    pub(crate) fn from_tag(tag: &str) -> Option<Self> {
+        match tag {
+            "bare" => Some(Self::Bare),
+            "distributive_identity" => Some(Self::DistributiveIdentity),
             _ => None,
         }
     }
@@ -224,6 +264,9 @@ pub(crate) struct SnapshotIdentity {
     /// distinguishes `Box<string>` from `Box<number>`).
     pub(crate) type_arguments: Vec<Value>,
     pub(crate) projection_mode: ProjectionModeKind,
+    /// The capture strategy the probe RHS was synthesized under (§Q2 keyof-
+    /// expansion scaffold) — a value-affecting axis since `snapshot_id` v2.
+    pub(crate) probe_rhs_kind: ProbeRhsKind,
     pub(crate) host_project: HostProject,
     pub(crate) oracle_value_kind: OracleValueKind,
 }
@@ -255,8 +298,9 @@ pub(crate) fn projection_mode_from_tag(tag: &str) -> Option<ProjectionModeKind> 
 // ---------------------------------------------------------------------------
 
 /// Domain-separation tag for the `snapshot_id` hash input. A change to the field
-/// set or ordering is a schema change and would bump this tag.
-const SNAPSHOT_ID_DOMAIN_TAG: &[u8] = b"verter.oracle.snapshot_id.v1";
+/// set or ordering is a schema change and bumps this tag (v2 added the
+/// `probe_rhs_kind` field).
+pub(crate) const SNAPSHOT_ID_DOMAIN_TAG: &[u8] = b"verter.oracle.snapshot_id.v2";
 
 /// Derive the deterministic `snapshot_id` (the filename stem) from the
 /// registry-derivable `identity` + the pinned env. The id is `"u_"` + the FULL
@@ -286,6 +330,7 @@ pub(crate) fn derive_snapshot_id(identity: &SnapshotIdentity, env: &PinnedEnv) -
     lp_str(&mut buf, &identity.symbol_or_expression);
     lp_str(&mut buf, &type_args_json(&identity.type_arguments));
     lp_str(&mut buf, projection_mode_tag(identity.projection_mode));
+    lp_str(&mut buf, identity.probe_rhs_kind.tag());
     lp_str(
         &mut buf,
         &canonical_json_string(&identity.host_project.to_canonical_json()),

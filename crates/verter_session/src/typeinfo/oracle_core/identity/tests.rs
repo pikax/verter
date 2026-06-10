@@ -7,7 +7,8 @@ use serde_json::json;
 use super::super::normalize::ProjectionModeKind;
 use super::{
     blake3_tagged, canonical_content, content_hash, derive_snapshot_id, HostProject, HostSetupKind,
-    OracleValueKind, PinnedEnv, QueryHelperKind, SnapshotIdentity, WorkspaceFileRef,
+    OracleValueKind, PinnedEnv, ProbeRhsKind, QueryHelperKind, SnapshotIdentity, WorkspaceFileRef,
+    ORACLE_SCHEMA_VERSION, PROBE_SYNTHESIS_VERSION, SNAPSHOT_ID_DOMAIN_TAG,
 };
 
 fn base_env() -> PinnedEnv {
@@ -35,6 +36,7 @@ fn base_identity() -> SnapshotIdentity {
         symbol_or_expression: "ComposedProps".to_string(),
         type_arguments: vec![],
         projection_mode: ProjectionModeKind::Shallow,
+        probe_rhs_kind: ProbeRhsKind::Bare,
         host_project: HostProject {
             project_root: "/".to_string(),
             workspace_root: "/".to_string(),
@@ -43,6 +45,60 @@ fn base_identity() -> SnapshotIdentity {
         },
         oracle_value_kind: OracleValueKind::StructuredTypeExpr,
     }
+}
+
+// =========================================================================
+// snapshot_id_v2_includes_probe_rhs_kind
+// =========================================================================
+
+#[test]
+fn snapshot_id_v2_includes_probe_rhs_kind() {
+    let env = base_env();
+    let base = base_identity();
+    let id_bare = derive_snapshot_id(&base, &env);
+
+    // probe_rhs_kind is a VALUE-AFFECTING identity axis: the harness never
+    // leans on the identity theorem to claim two capture paths are the same
+    // cache key — a scaffolded capture derives a DIFFERENT snapshot_id.
+    let mut dist = base.clone();
+    dist.probe_rhs_kind = ProbeRhsKind::DistributiveIdentity;
+    assert_ne!(
+        id_bare,
+        derive_snapshot_id(&dist, &env),
+        "probe_rhs_kind is a snapshot_id input (bare vs distributive_identity)"
+    );
+
+    // Closed tags + the strict-decoder redrive inverse.
+    assert_eq!(ProbeRhsKind::Bare.tag(), "bare");
+    assert_eq!(
+        ProbeRhsKind::DistributiveIdentity.tag(),
+        "distributive_identity"
+    );
+    assert_eq!(ProbeRhsKind::from_tag("bare"), Some(ProbeRhsKind::Bare));
+    assert_eq!(
+        ProbeRhsKind::from_tag("distributive_identity"),
+        Some(ProbeRhsKind::DistributiveIdentity)
+    );
+    assert_eq!(
+        ProbeRhsKind::from_tag("mapped_identity"),
+        None,
+        "an unknown capture-strategy tag is a closed-set decode failure"
+    );
+
+    // The field-set change bumped the domain tag (the documented rule) and the
+    // file-shape + probe-synthesis versions.
+    assert_eq!(
+        SNAPSHOT_ID_DOMAIN_TAG, b"verter.oracle.snapshot_id.v2",
+        "the snapshot_id field-set change bumps the domain-separation tag to v2"
+    );
+    assert_eq!(
+        ORACLE_SCHEMA_VERSION, 2,
+        "raw_capture.probe_scaffold + identity.probe_rhs_kind are a schema-shape change"
+    );
+    assert_eq!(
+        PROBE_SYNTHESIS_VERSION, 2,
+        "the scaffold RHS kind is a probe-synthesis algorithm change"
+    );
 }
 
 // =========================================================================

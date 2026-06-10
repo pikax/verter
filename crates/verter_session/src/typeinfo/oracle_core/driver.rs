@@ -23,10 +23,11 @@
 //!    snapshot's stored (already-normalized) `oracle_value` under the same
 //!    normalization. NO tsgo at consumption time.
 //!
-//! The registry seats the 8 lifted rows (the two index-signature
+//! The registry seats the 11 lifted rows (the two index-signature
 //! publication queries + the two built-in modifier-utility queries + the three
 //! U2 IndexedAccess-reduction carve-out queries + the mapped-modifier `-?`
-//! carve-out query at U2.MAPPED_TEMPLATE), so `run_row`
+//! carve-out query at U2.MAPPED_TEMPLATE + the three keyof-expansion carve-out
+//! queries), so `run_row`
 //! IS invoked at runtime by those rows' `oracle::run_row` bodies. Its pure
 //! sub-functions are additionally exercised directly by discriminating unit
 //! tests; the orchestrator is the real path every lifted row rides.
@@ -38,13 +39,13 @@ use serde_json::Value;
 use verter_type_expr::{type_expr_from_json, TypeExpr};
 
 use super::identity::{
-    self, HostProject, HostSetupKind, OracleValueKind, PinnedEnv, QueryHelperKind,
+    self, HostProject, HostSetupKind, OracleValueKind, PinnedEnv, ProbeRhsKind, QueryHelperKind,
     SnapshotIdentity, WorkspaceFileRef,
 };
 use super::normalize::{self, ProjectionModeKind};
 use super::query_specs::{
-    HostProjectSpec, HostSetupKindSpec, OracleValueKindSpec, ProjectionModeSpec, QueryHelperSpec,
-    QuerySpec, COMPILER_OPTIONS_HASH, CURRENT_ENV_CORPUS_ID, ORACLE_QUERY_SPECS,
+    HostProjectSpec, HostSetupKindSpec, OracleValueKindSpec, ProbeRhsSpec, ProjectionModeSpec,
+    QueryHelperSpec, QuerySpec, COMPILER_OPTIONS_HASH, CURRENT_ENV_CORPUS_ID, ORACLE_QUERY_SPECS,
 };
 use super::snapshot::{self, OracleSnapshot};
 
@@ -176,6 +177,21 @@ fn map_resolver_mode(mode: ProjectionModeSpec) -> crate::semantic_query::Project
     }
 }
 
+/// The entry's declared capture strategy mapped onto the identity axis. Only
+/// `ResolveExpr` can carry a non-`Bare` strategy; the other helpers are always
+/// bare-RHS by construction.
+fn probe_rhs_kind_of(helper: &QueryHelperSpec) -> ProbeRhsKind {
+    match helper {
+        QueryHelperSpec::ResolveExpr { probe_rhs, .. } => match probe_rhs {
+            ProbeRhsSpec::Bare => ProbeRhsKind::Bare,
+            ProbeRhsSpec::DistributiveIdentity => ProbeRhsKind::DistributiveIdentity,
+        },
+        QueryHelperSpec::ShallowSurfaceExpr { .. } | QueryHelperSpec::EvaluateExpr { .. } => {
+            ProbeRhsKind::Bare
+        }
+    }
+}
+
 fn map_host_setup(kind: HostSetupKindSpec) -> HostSetupKind {
     match kind {
         HostSetupKindSpec::Standalone => HostSetupKind::Standalone,
@@ -281,6 +297,7 @@ pub(crate) fn identity_from_spec(spec: &QuerySpec) -> Result<SnapshotIdentity, D
         symbol_or_expression: symbol_or_expression(&spec.query_helper),
         type_arguments: type_argument_values(&spec.query_helper)?,
         projection_mode: map_mode_kind(mode_of(&spec.query_helper)),
+        probe_rhs_kind: probe_rhs_kind_of(&spec.query_helper),
         host_project: map_host_project(&spec.host_project),
         oracle_value_kind,
     })
@@ -543,6 +560,7 @@ fn run_helper(spec: &QuerySpec) -> Result<TypeExpr, DriverError> {
             symbol,
             type_args,
             projection_mode,
+            ..
         } => {
             let type_arg_exprs: Vec<Arc<TypeExpr>> = type_args
                 .iter()

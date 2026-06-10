@@ -1347,6 +1347,65 @@ LIFTED_ROW_OVERRIDES: dict[tuple[str, str], dict[str, object]] = {
             "checked-in tsgo oracle snapshot via oracle::run_row"
         ),
     },
+    # ── Keyof-expansion carve-out lifts (distributive-identity capture). The
+    #    execution-true tag sets below are the REAL dispatched-query masks
+    #    measured via `resolve_named_symbol_with_audit` + `decode_dispatch_mask`
+    #    (Expanded), confirmed by the keystone guard
+    #    `lifted_row_mechanism_trace_matches_manifest`. ──
+    #
+    # `typescript_rules_keyof_materializes_literal_key_union` +
+    # `mode_boundary_keyof_across_reexport_chain_resolves_all_keys` both reduce
+    # `keyof Root` to the expanded literal key union. The measured trace is
+    # `[ResolveDecl, Instantiate, KeyOf, ProjectPath]`: `ResolveDecl` +
+    # `Instantiate` (→ `QueryValueDomainFoundation`, non-owning) plus the
+    # terminal `KeyOf` and the `ProjectPath` sub-dispatch (both →
+    # `IndexedAccessUnionDistribution`, the OWNING producer at
+    # `U2.INDEXED_ACCESS`).
+    ("typescript_rules.rs", "typescript_rules_keyof_materializes_literal_key_union"): {
+        "mech": "IndexedAccessUnionDistribution",
+        "proof": "ProofRequirement::Ts7Oracle(OracleId::IndexedAccess)",
+        "semantic_queries": ["ResolveDecl", "Instantiate", "KeyOf", "ProjectPath"],
+        "consumed_mechanisms": ["QueryValueDomainFoundation"],
+        "unblocker": (
+            "lifted by U2.INDEXED_ACCESS: `KeyOfRules = keyof KeySource` materializes "
+            "the expanded literal key union `'count' | 'id' | 'nested'`, proven against "
+            "the checked-in tsgo oracle snapshot (captured through the "
+            "distributive-identity probe scaffold) via oracle::run_row"
+        ),
+    },
+    ("mode_boundary_invariants.rs", "mode_boundary_keyof_across_reexport_chain_resolves_all_keys"): {
+        "mech": "IndexedAccessUnionDistribution",
+        "proof": "ProofRequirement::Ts7Oracle(OracleId::IndexedAccess)",
+        "semantic_queries": ["ResolveDecl", "Instantiate", "KeyOf", "ProjectPath"],
+        "consumed_mechanisms": ["QueryValueDomainFoundation"],
+        "unblocker": (
+            "lifted by U2.INDEXED_ACCESS: `WantedKeys = keyof WantedType` (with "
+            "`WantedType = Foo & { a: 1 }`, `Foo` reached via the 7-hop re-export "
+            "chain) resolves the expanded literal key union `'a' | 'b'` over the real "
+            "9-file workspace, proven against the checked-in tsgo oracle snapshot "
+            "(distributive-identity probe scaffold) via oracle::run_row"
+        ),
+    },
+    # `union_key_access_keyof_self_projects_full_value_union` reduces the
+    # `Root[keyof Root]` self-index to the member value union. The measured
+    # trace is `[ResolveDecl, Instantiate, IndexedAccess, KeyOf, NormalizeUnion]`:
+    # `ResolveDecl`/`Instantiate`/`NormalizeUnion` (→
+    # `QueryValueDomainFoundation`, non-owning) plus the terminal
+    # `IndexedAccess` + `KeyOf` (→ `IndexedAccessUnionDistribution`, the OWNING
+    # producer at `U2.INDEXED_ACCESS`).
+    ("union_key_access.rs", "union_key_access_keyof_self_projects_full_value_union"): {
+        "mech": "IndexedAccessUnionDistribution",
+        "proof": "ProofRequirement::Ts7Oracle(OracleId::IndexedAccess)",
+        "semantic_queries": ["ResolveDecl", "Instantiate", "IndexedAccess", "KeyOf", "NormalizeUnion"],
+        "consumed_mechanisms": ["QueryValueDomainFoundation"],
+        "unblocker": (
+            "lifted by U2.INDEXED_ACCESS: `EveryMember = Surface[keyof Surface]` "
+            "projects the full member value union "
+            "`string | number | boolean | null` (the KeyofSelfIndex source-root "
+            "carve-out), proven against the checked-in tsgo oracle snapshot "
+            "(distributive-identity probe scaffold) via oracle::run_row"
+        ),
+    },
 }
 
 

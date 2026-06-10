@@ -10,7 +10,7 @@
 //!
 //! It drives the pinned tsgo, applies the two-sided positive-allowlist admission,
 //! and writes the checked-in snapshots — NEVER from a `#[test]`. It walks the
-//! oracle-query registry (the 8 lifted rows) and writes one snapshot per spec;
+//! oracle-query registry (the 11 lifted rows) and writes one snapshot per spec;
 //! the per-spec body is the same one the `oracle_gen_is_idempotent` gated test
 //! exercises against real tsgo.
 

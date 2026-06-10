@@ -54,6 +54,7 @@ fn synthetic_spec() -> QuerySpec {
             symbol: "GenProbe",
             type_args: &[],
             projection_mode: ProjectionModeSpec::Expanded,
+            probe_rhs: ProbeRhsSpec::Bare,
         },
         source_locator: super::super::query_specs::SourceLocatorSpec {
             reference_canonical: "/fixtures/gen_probe.ts",
@@ -196,6 +197,7 @@ async fn oracle_gen_rejects_non_allowlisted_construct() {
         symbol: "HasMethod",
         type_args: &[],
         projection_mode: ProjectionModeSpec::Expanded,
+        probe_rhs: ProbeRhsSpec::Bare,
     };
     spec.source_locator = super::super::query_specs::SourceLocatorSpec {
         reference_canonical: "/fixtures/has_method.ts",
@@ -257,6 +259,7 @@ fn preflight_spec(symbol: &'static str) -> QuerySpec {
             symbol,
             type_args: &[],
             projection_mode: ProjectionModeSpec::Expanded,
+            probe_rhs: ProbeRhsSpec::Bare,
         },
         source_locator: super::super::query_specs::SourceLocatorSpec {
             reference_canonical: "/fixtures/preflight_keyof.ts",
@@ -333,4 +336,129 @@ fn preflight_rejects_an_unclean_reduction() {
         }
         other => panic!("an unresolvable symbol must reject as PreflightUnclean, got {other:?}"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Generator capture-strategy cross-check — the DECLARED `probe_rhs` strategy
+// must agree with the LIVE source-walk carve-out classification BEFORE any
+// assembly: `DistributiveIdentity` is admissible ONLY for an Expanded-mode
+// query whose single contributor classifies into the keyof carve-out family
+// (`KeyofBareRef` / `KeyofSelfIndex`). These guards run Verter ONLY (no tsgo).
+// ---------------------------------------------------------------------------
+
+/// The preflight fixture extended with a self-index alias (the KeyofSelfIndex
+/// family member) — used only by the strategy cross-check guards.
+const STRATEGY_FIXTURE: &str = "export interface PreflightKeys { a: string; b: number; }\nexport type PreflightKeyof = keyof PreflightKeys;\nexport type PreflightSelfIndex = PreflightKeys[keyof PreflightKeys];\nexport interface PreflightNestedRoot { nested: { value: string } }\nexport type PreflightIndexed = PreflightNestedRoot[\"nested\"][\"value\"];\nexport type PreflightPlain = { id: number };\n";
+
+const STRATEGY_FILES: &[super::super::query_specs::WorkspaceFileSpec] =
+    &[super::super::query_specs::WorkspaceFileSpec {
+        path: "/fixtures/strategy_cross_check.ts",
+        source: STRATEGY_FIXTURE,
+    }];
+
+/// A `ResolveExpr` spec over the strategy fixture with an explicit strategy +
+/// mode.
+fn strategy_spec(
+    symbol: &'static str,
+    projection_mode: ProjectionModeSpec,
+    probe_rhs: ProbeRhsSpec,
+) -> QuerySpec {
+    QuerySpec {
+        row_file: "strategy_synthetic.rs",
+        row_function: "strategy_probe",
+        query_ordinal: 0,
+        oracle_family: "strategy_cross_check",
+        workspace_files: STRATEGY_FILES,
+        primary_canonical: "/fixtures/strategy_cross_check.ts",
+        host_project: super::super::query_specs::HostProjectSpec {
+            project_root: "/",
+            workspace_root: "/",
+            tsconfig_path: "/oracle.tsconfig.json",
+            host_setup_kind: super::super::query_specs::HostSetupKindSpec::Standalone,
+        },
+        query_helper: QueryHelperSpec::ResolveExpr {
+            symbol,
+            type_args: &[],
+            projection_mode,
+            probe_rhs,
+        },
+        source_locator: super::super::query_specs::SourceLocatorSpec {
+            reference_canonical: "/fixtures/strategy_cross_check.ts",
+            reference_name: symbol,
+            symbol_space: SymbolSpace::Type,
+        },
+        oracle_value_kind: super::super::query_specs::OracleValueKindSpec::StructuredTypeExpr,
+    }
+}
+
+/// Run the cross-check over the spec's REAL source walk.
+fn cross_check(spec: &QuerySpec) -> Result<(), GenError> {
+    let walk = source_side_walk(spec);
+    cross_check_probe_strategy(spec, &walk)
+}
+
+#[test]
+fn distributive_identity_only_for_expanded_keyof_carveout() {
+    use super::super::query_specs::ProbeRhsSpec::{Bare, DistributiveIdentity};
+    use ProjectionModeSpec::{Expanded, Navigate};
+
+    // POSITIVE: the scaffold strategy on an Expanded keyof carve-out row
+    // (KeyofBareRef family) passes the cross-check.
+    assert!(
+        cross_check(&strategy_spec(
+            "PreflightKeyof",
+            Expanded,
+            DistributiveIdentity
+        ))
+        .is_ok(),
+        "DistributiveIdentity on an Expanded keyof carve-out row must pass"
+    );
+    // POSITIVE: the KeyofSelfIndex family member passes too — the scaffold is
+    // applied UNIFORMLY to the admitted keyof carve-out family.
+    assert!(
+        cross_check(&strategy_spec(
+            "PreflightSelfIndex",
+            Expanded,
+            DistributiveIdentity
+        ))
+        .is_ok(),
+        "DistributiveIdentity on an Expanded Root[keyof Root] row must pass"
+    );
+
+    // NEGATIVE (discriminating): the scaffold strategy on a NON-keyof
+    // carve-out row (a string-literal index chain) is an over-claim — REJECT.
+    assert!(
+        matches!(
+            cross_check(&strategy_spec(
+                "PreflightIndexed",
+                Expanded,
+                DistributiveIdentity
+            )),
+            Err(GenError::Rejected(_))
+        ),
+        "DistributiveIdentity on a string-literal-chain row must reject"
+    );
+    // NEGATIVE: a plain (non-carve-out) object alias claiming the scaffold.
+    assert!(matches!(
+        cross_check(&strategy_spec(
+            "PreflightPlain",
+            Expanded,
+            DistributiveIdentity
+        )),
+        Err(GenError::Rejected(_))
+    ));
+    // NEGATIVE: the scaffold strategy outside Expanded mode.
+    assert!(matches!(
+        cross_check(&strategy_spec(
+            "PreflightKeyof",
+            Navigate,
+            DistributiveIdentity
+        )),
+        Err(GenError::Rejected(_))
+    ));
+
+    // CONTROL: `Bare` is never constrained by the cross-check (under-delivery
+    // is caught by the existing hover-side gates, not here).
+    assert!(cross_check(&strategy_spec("PreflightPlain", Expanded, Bare)).is_ok());
+    assert!(cross_check(&strategy_spec("PreflightKeyof", Expanded, Bare)).is_ok());
 }

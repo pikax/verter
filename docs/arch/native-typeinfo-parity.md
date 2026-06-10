@@ -2951,7 +2951,7 @@ fixes the single owning block. The per-block counts (summing to 362) are:
 |---|---:|---|---:|
 | `U2.RELATION_INFER` | 20 | `U6.NARROW_*` (8 sub-blocks, below) | 104 |
 | `U2.UTILITIES` | 40 | `U6.PREDICATE_ASSERTION` | 3 |
-| `U2.INDEXED_ACCESS` | 13 | `U6.CALL_RESOLVE` | 21 |
+| `U2.INDEXED_ACCESS` | 14 | `U6.CALL_RESOLVE` | 21 |
 | `U2.MAPPED_TEMPLATE` | 19 | `U6.CONTEXTUAL_CALLBACK` | 15 |
 | `U2.QUERY_VALUE_DOMAIN` | 2 | `U6.VALUE_INFERENCE` | 1 |
 | `U2.CLASS_SURFACES` | 52 | `U6.ASYNC_GENERATOR` | 1 |
@@ -2959,7 +2959,7 @@ fixes the single owning block. The per-block counts (summing to 362) are:
 | `U2.MODULE_AUGMENTATION` | 8 | `U6.LOOP_CLOSURE` | 3 |
 | `U2.JSX_FOUNDATIONS` | 9 | `U3.CACHE_FACT_MODEL` | 3 |
 | `U6.FLOW_RETURN_SUBSTRATE` | 7 | `U11.PUBLIC_RELATION_SESSION` | 9 |
-| `U10.RESULT_DB` | 13 | `U15.FINAL_LIFT` | 5 |
+| `U10.RESULT_DB` | 12 | `U15.FINAL_LIFT` | 5 |
 | `U14.MACRO_ADAPTER` | 1 | | |
 
 Sum = 362 (the `U6.NARROW_*` bucket contributes its 104 rows as the sum of the eight
@@ -3078,13 +3078,14 @@ The complete partition (each entry `file::function — substrate`):
 - `variadic_tuples.rs::variadic_tuple_tail_of_sample_resolves_to_remaining_tuple` — `TupleFeatures`
 - `variadic_tuples.rs::variadic_tuple_variadic_function_with_explicit_type_args_concatenates_tuples` — `TupleFeatures`
 
-**`U2.INDEXED_ACCESS`** (13 rows):
+**`U2.INDEXED_ACCESS`** (14 rows):
 
 - `deep_path.rs::deep_path_projection_resolves_terminal_without_losing_shape` — `PathProjection`
 - `index_signatures.rs::index_signatures_dual_numeric_key_returns_numeric_signature_value` — `IndexSignatures`
 - `index_signatures.rs::index_signatures_dual_string_key_returns_string_signature_value` — `IndexSignatures`
 - `index_signatures.rs::index_signatures_numeric_lookup_returns_signature_value` — `IndexSignatures`
 - `index_signatures.rs::index_signatures_symbol_lookup_returns_signature_value` — `IndexSignatures`
+- `mode_boundary_invariants.rs::mode_boundary_keyof_across_reexport_chain_resolves_all_keys` — `ModeBoundary`
 - `typescript_rules.rs::typescript_rules_indexed_access_reduces_terminal_property` — `TypeScriptRules`
 - `typescript_rules.rs::typescript_rules_keyof_materializes_literal_key_union` — `TypeScriptRules`
 - `typescript_rules.rs::typescript_rules_tuple_rest_element_resolves_array_element_type` — `TypeScriptRules`
@@ -3419,7 +3420,7 @@ The complete partition (each entry `file::function — substrate`):
 - `cross_file.rs::cross_file_projected_extra_resolves_number_terminal` — `CrossFileResolution`
 - `cross_file.rs::cross_file_projected_item_resolves_local_extension` — `CrossFileResolution`
 
-**`U10.RESULT_DB`** (13 rows):
+**`U10.RESULT_DB`** (12 rows):
 
 - `demand_boundary.rs::demand_boundary_projection_into_selected_alias_loads_needed_but_not_unused` — `DemandBoundary`
 - `demand_boundary.rs::demand_boundary_terminal_projection_resolves_value_without_unused_branch` — `DemandBoundary`
@@ -3430,7 +3431,6 @@ The complete partition (each entry `file::function — substrate`):
 - `expansion_boundaries.rs::expansion_omit_does_not_load_excluded_import` — `ExpansionBoundaries`
 - `expansion_boundaries.rs::expansion_pick_does_not_load_unpicked_imports` — `ExpansionBoundaries`
 - `mode_boundary_invariants.rs::mode_boundary_identity_does_not_materialize_alias_body` — `ModeBoundary`
-- `mode_boundary_invariants.rs::mode_boundary_keyof_across_reexport_chain_resolves_all_keys` — `ModeBoundary`
 - `mode_boundary_invariants.rs::mode_boundary_keyof_deep_chain_is_bounded_in_expanded` — `ModeBoundary`
 - `mode_boundary_invariants.rs::mode_boundary_reexport_chain_resolves_imported_alias` — `ModeBoundary`
 - `mode_boundary_invariants.rs::mode_boundary_shallow_does_not_expand_member_bodies` — `ModeBoundary`

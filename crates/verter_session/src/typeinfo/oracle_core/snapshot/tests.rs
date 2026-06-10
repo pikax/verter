@@ -12,10 +12,11 @@ use verter_type_expr::{ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName, 
 
 use super::super::identity::{
     content_hash, derive_snapshot_id, HostProject, HostSetupKind, OracleValueKind, PinnedEnv,
-    QueryHelperKind, SnapshotIdentity, WorkspaceFileRef, ORACLE_SCHEMA_VERSION,
+    ProbeRhsKind, QueryHelperKind, SnapshotIdentity, WorkspaceFileRef, ORACLE_SCHEMA_VERSION,
     PROBE_SYNTHESIS_VERSION, TSGO_VERSION,
 };
 use super::super::normalize::{canonical_json_string, ProjectionModeKind, NORMALIZER_VERSION};
+use super::super::probe::distributive_identity_scaffold;
 use super::{
     assemble_snapshot_document, decode_identity, decode_oracle_value_strict, decode_strict,
     redrive_snapshot_id, render_identity_json, ProbeLocator, SnapshotDecodeError,
@@ -63,6 +64,7 @@ fn identity() -> SnapshotIdentity {
         symbol_or_expression: SYMBOL.to_string(),
         type_arguments: vec![],
         projection_mode: ProjectionModeKind::Shallow,
+        probe_rhs_kind: ProbeRhsKind::Bare,
         host_project: HostProject {
             project_root: "/".to_string(),
             workspace_root: "/".to_string(),
@@ -125,6 +127,7 @@ fn valid_snapshot() -> Value {
             "symbol_or_expression": SYMBOL,
             "type_arguments": [],
             "projection_mode": "Shallow",
+            "probe_rhs_kind": "bare",
             "host_project": {
                 "project_root": "/",
                 "workspace_root": "/",
@@ -137,6 +140,7 @@ fn valid_snapshot() -> Value {
         "raw_capture": {
             "probe_name": "__oracle_probe__0",
             "probe_header": "type __oracle_probe__0 = ComposedProps;",
+            "probe_scaffold": null,
             "hover_contents": "```typescript\ntype __oracle_probe__0 = {\n    id: number;\n}\n```"
         },
         "source_admission_digest": {
@@ -389,10 +393,105 @@ fn identity_is_kind_specific_schema_bumped() {
         Err(SnapshotDecodeError::BadTag(_))
     ));
 
-    // The known-kinds set size is tied to the schema version: a new kind MUST
-    // bump ORACLE_SCHEMA_VERSION. At schema v1 there is exactly one kind.
+    // The known-kinds set size stays tied to the schema version: a new kind
+    // MUST bump ORACLE_SCHEMA_VERSION. There is still exactly one kind; schema
+    // v2 is the FIELD-SET change (`identity.probe_rhs_kind` +
+    // `raw_capture.probe_scaffold`), not a kind addition.
     assert_eq!(KNOWN_VALUE_KINDS.len(), 1);
-    assert_eq!(ORACLE_SCHEMA_VERSION, 1);
+    assert_eq!(ORACLE_SCHEMA_VERSION, 2);
+}
+
+// -- probe_scaffold_recorded_and_rederivable --------------------------------
+
+/// A fully-valid DISTRIBUTIVE-IDENTITY snapshot: `identity.probe_rhs_kind` is
+/// `"distributive_identity"`, `raw_capture` records the versioned helper decl
+/// as `probe_scaffold`, and the probe header carries the WRAPPED RHS.
+fn valid_dist_snapshot() -> Value {
+    let mut id = identity();
+    id.probe_rhs_kind = ProbeRhsKind::DistributiveIdentity;
+    let env = pinned_env();
+    let snapshot_id = derive_snapshot_id(&id, &env);
+    let scaffold = distributive_identity_scaffold(0, SYMBOL);
+
+    let mut snap = valid_snapshot();
+    snap["snapshot_id"] = json!(snapshot_id);
+    snap["identity"]["probe_rhs_kind"] = json!("distributive_identity");
+    snap["raw_capture"]["probe_scaffold"] = json!(scaffold.helper_decl);
+    snap["raw_capture"]["probe_header"] =
+        json!(format!("type __oracle_probe__0 = {};", scaffold.rhs));
+    snap
+}
+
+#[test]
+fn probe_scaffold_recorded_and_rederivable() {
+    // (a) A BARE snapshot records `probe_scaffold: null` and decodes strictly.
+    let bare = decode_strict(&valid_snapshot()).expect("bare snapshot decodes");
+    assert_eq!(
+        bare.raw_capture.probe_scaffold, None,
+        "a bare capture records no scaffold"
+    );
+
+    // (b) A DISTRIBUTIVE-IDENTITY snapshot records the helper decl, decodes
+    //     strictly, and the stored scaffold is RE-DERIVABLE from version + spec
+    //     (a pure function of the query ordinal — the offline audit needs no
+    //     tsgo and no stored secret).
+    let dist = valid_dist_snapshot();
+    let decoded = decode_strict(&dist).expect("distributive-identity snapshot decodes");
+    let expected = distributive_identity_scaffold(0, SYMBOL);
+    assert_eq!(
+        decoded.raw_capture.probe_scaffold.as_deref(),
+        Some(expected.helper_decl.as_str()),
+        "the recorded scaffold equals the versioned synthesis"
+    );
+
+    // (c) Cross-field strictness: a `distributive_identity` snapshot MISSING
+    //     its scaffold fails decode…
+    let mut missing = valid_dist_snapshot();
+    missing["raw_capture"]["probe_scaffold"] = json!(null);
+    assert!(
+        matches!(
+            decode_strict(&missing),
+            Err(SnapshotDecodeError::ScaffoldInconsistent(_))
+        ),
+        "a distributive_identity snapshot without a recorded scaffold must FAIL"
+    );
+
+    //     …a BARE snapshot CARRYING a scaffold fails decode…
+    let mut stray = valid_snapshot();
+    stray["raw_capture"]["probe_scaffold"] =
+        json!("type __oracle_probe_dist__0<T> = T extends never ? never : T;");
+    assert!(
+        matches!(
+            decode_strict(&stray),
+            Err(SnapshotDecodeError::ScaffoldInconsistent(_))
+        ),
+        "a bare snapshot carrying a stray scaffold must FAIL"
+    );
+
+    //     …and a TAMPERED scaffold (not the versioned synthesis for the
+    //     ordinal) fails the re-derivation check.
+    let mut tampered = valid_dist_snapshot();
+    tampered["raw_capture"]["probe_scaffold"] =
+        json!("type __oracle_probe_dist__9<T> = T extends never ? never : T;");
+    assert!(
+        matches!(
+            decode_strict(&tampered),
+            Err(SnapshotDecodeError::ScaffoldInconsistent(_))
+        ),
+        "a scaffold that is not the versioned synthesis for the ordinal must FAIL"
+    );
+
+    //     The WRAPPED probe header is re-checked too: a dist snapshot whose
+    //     header carries the BARE rhs is inconsistent.
+    let mut bare_header = valid_dist_snapshot();
+    bare_header["raw_capture"]["probe_header"] = json!("type __oracle_probe__0 = ComposedProps;");
+    assert!(
+        matches!(
+            decode_strict(&bare_header),
+            Err(SnapshotDecodeError::ScaffoldInconsistent(_))
+        ),
+        "a distributive_identity snapshot with a bare probe header must FAIL"
+    );
 }
 
 // -- snapshot_id_redrives_from_identity (snapshot-backed form) -------------

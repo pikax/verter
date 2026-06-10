@@ -198,25 +198,42 @@ fn walk<C: ResolverContext>(
             });
         }
         // Source-ROOT carve-out SAME-FILE binding: for a carve-out-shaped body
-        // (`keyof Root` / `Root["a"]["b"]…`) resolve the root `Ref` through the
-        // SHARED resolver edges (TYPE space — the root is always a type) and
-        // stamp the file it defines in. The admission gate admits the operator
-        // body ONLY when this equals `def_canonical`. The transitive walk above
-        // follows `typeof` referents ONLY — it does NOT chase a `keyof` / index
-        // root — so this targeted resolution is what proves same-file. A root
-        // that does not bind stamps `None` and the gate rejects the operator.
-        let carve_out_root_def = super::admission::carve_out_root_ref_name(&lowered_body)
+        // (`keyof Root` / `Root["a"]["b"]…` / `Root[keyof Root]`) resolve the
+        // root `Ref` through the SHARED resolver edges (TYPE space — the root
+        // is always a type) and stamp the file it defines in PLUS the root
+        // declaration's OWN parse-time raw-fact records (every merged
+        // contributor). The admission gate admits the operator body ONLY when
+        // the stamp equals `def_canonical` AND every root raw surface walks
+        // the allowlist clean. The transitive walk above follows `typeof`
+        // referents ONLY — it does NOT chase a `keyof` / index root — so this
+        // targeted resolution is what proves same-file. A root that does not
+        // bind stamps `None` and the gate rejects the operator.
+        let carve_out_root = super::admission::carve_out_root_ref_name(&lowered_body)
             .map(str::to_string)
             .and_then(|root_name| {
                 resolve_defining(ctx, &def_canonical, &root_name, SymbolSpace::Type)
-                    .map(|(canonical, _)| canonical)
             });
+        let (carve_out_root_def, carve_out_root_surfaces) = match carve_out_root {
+            Some((root_canonical, root_name)) => {
+                let surfaces = ctx
+                    .external_type_analysis(&root_canonical)
+                    .map(|analysis| {
+                        analysis
+                            .raw_source_surfaces_for(&root_name, SymbolSpace::Type)
+                            .to_vec()
+                    })
+                    .unwrap_or_default();
+                (Some(root_canonical), surfaces)
+            }
+            None => (None, Vec::new()),
+        };
         acc.push(SourceContributor {
             ordinal: ordinal as u16,
             def_canonical: def_canonical.clone(),
             raw_surface: raw_surface.clone(),
             lowered_body,
             carve_out_root_def,
+            carve_out_root_surfaces,
         });
     }
 

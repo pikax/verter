@@ -736,7 +736,7 @@ The snapshot id is ALSO stored inside the JSON (so a misplaced file is detectabl
 | `row_ref` | object | `{ row_file, row_function, query_ordinal }` — the registry key (§Q4) this snapshot serves. `row_file` is the BARE filename (e.g. `"utility_composition.rs"`, fact 5). This row-ref is PART of `snapshot_id` (one file per `(row, query)`); it is duplicated in the JSON for drift detection but the registry is the source of truth. |
 | `identity` | object | The value-affecting query identity, a **closed tagged shape keyed by `oracle_value_kind`**. For `structured_type_expr` the required axes are the `TypeExpr`-projection axes below. A future `relation_verdict` kind carries a DIFFERENT required axis set (source / target / relation / policy / inference-context) — kinds are a closed tagged schema, not an additive bag of optional fields, so adding one bumps `oracle_schema_version`. Re-derivable from the registry + fixture content; carried for inspection + drift detection. |
 | `oracle_value` | object | The captured, NORMALIZED oracle answer — a `TypeExpr::to_json_value()` document (the internally-tagged `"kind"`/`"properties"`/`"memberKind"` codec, fact 2). **Single-spec reframing (no schema change):** this is specifically the **`ts_compat`** oracle — the recompute-gated tsgo answer, bug included, the recorded `TsCompat` value. The **correct** value for a divergence row lives in a SEPARATE review-gated correction overlay (`ts-compat-two-mode-model.md` §3), never as a second field here; injecting a non-tsgo-regenerable `correct` value would break this artifact's "regenerate → byte-identical" guarantee. |
-| `raw_capture` | object (REQUIRED) | The verbatim un-normalized tsgo hover response plus the probe header: `{ probe_name, probe_header, hover_contents }`. **MANDATORY in every snapshot** — it is what lets the default (tsgo-free) guards AUDIT the wrong-hover fence offline: `probe_header_names_target` re-checks that `raw_capture.hover_contents` contains a `type __oracle_probe__N = …` header naming exactly `raw_capture.probe_name`, without re-running tsgo. Never compared against Verter's `TypeExpr` / asserted as the parity value (the parity compare is on `oracle_value` only); it is the offline audit + regeneration record. |
+| `raw_capture` | object (REQUIRED) | The verbatim un-normalized tsgo hover response plus the probe header and the capture-strategy scaffold: `{ probe_name, probe_header, probe_scaffold, hover_contents }`. `probe_scaffold` is the distributive-identity helper declaration the probe RHS was wrapped in (`distributive_identity` captures only; `null` for `bare`) — a pure function of `probe_synthesis_version` + the query ordinal, re-derived and re-checked by the strict decoder together with the WRAPPED probe header (`probe_scaffold_recorded_and_rederivable`, §4). **MANDATORY in every snapshot** — it is what lets the default (tsgo-free) guards AUDIT the wrong-hover fence offline: `probe_header_names_target` re-checks that `raw_capture.hover_contents` contains a `type __oracle_probe__N = …` header naming exactly `raw_capture.probe_name`, without re-running tsgo. Never compared against Verter's `TypeExpr` / asserted as the parity value (the parity compare is on `oracle_value` only); it is the offline audit + regeneration record. |
 | `source_admission_digest` | object (REQUIRED) | The recorded GENERATION-TIME source-side admission record, MANDATORY in every snapshot: an ORDERED, KEYED `contributors` vector the §Q2 source-side walk (`resolve_source_declarations`, across import chains + merged contributors + transitive `typeof`/`ReturnType` hops) resolved — EACH entry a `{ contributor_ordinal, decl_span, decl_canonical, name, symbol_space, decl_kind, raw_surface, lowered_body, verdict }` record carrying that contributor's STABLE identity (`contributor_ordinal` = the 0-based source/binder position in the merge group, `decl_span` = the stable decl id — together disambiguating same-`(canonical,name,symbol_space)` merged peers), a verbatim copy of its retained parse-time `RawSourceSurface` raw-fact record (`raw_member_keys`, `member_kinds`, `member_visibility`, `unique_symbol_ops`, `abstract_ctor`, `type_param_modifiers`, `this_type_or_param`, `value_const_assertion`, `overload_signatures`, `tuple_element_shape`, `utility_referent_names`, `transitive_referents`), a verbatim copy of its already-lowered `lowered_body` `TypeExpr` (the non-erased rejectable variants the raw facts do not carry), and that contributor's ADMIT/REJECT `verdict` — plus the final two-sided admission verdict, AND the PROVENANCE TIE — the `source_locator` it walked from + the content hashes of every source declaration file it observed (the same `{path, content_hash}` recipe `workspace_files` uses). `raw_capture` stores only the HOVER, so `raw_capture_matches_oracle_value` can re-run the HOVER-side admission + lowering offline but CANNOT re-run the SOURCE-side contributor NAVIGATION (binding/import/merge/transitive-`typeof` resolution needs the live resolver, a generation-time step). The digest closes that offline asymmetry NOT by self-checking its own recorded data (circular — a hand-edited digest that omits a rejected fact would still self-agree) but by re-deriving the raw facts + lowered body FROM CURRENT SOURCE: because `RawSourceSurface` is a PARSE-TIME artifact (captured by shallow parsing, NOT type resolution) and the lowered body is the deterministic `lower_ts_type` of the parsed decl, the offline tsgo-free + resolver-free gate CAN, for EACH recorded contributor, take that file's CURRENT source — resolved BY CANONICAL PATH through the total canonical-path→source mapping. The SOURCE-BYTE AUTHORITY is the REGISTRY: a leading-slash `/fixtures/...` / `/workspace/...` row-or-workspace file's source is the matching `workspace_files` entry's UPSERTED SOURCE BYTES in the row's registry entry (§Q4 — the registry carries `{ path, source }`, the bytes the test upserts); the snapshot's `identity.workspace_files` carries only `{ path, content_hash }`, so the gate re-parses the REGISTRY source for that canonical path and VERIFIES it against the snapshot's stored `content_hash` for the same path (a mismatch FAILS — the registry bytes must hash to the snapshot's recorded hash). A vendored corpus file's source IS on-disk under `oracle_env/<env_corpus_id>/` (verified against the corpus's recorded hash the same way). The gate then RE-PARSEs the resolved source, RE-CAPTUREs the `RawSourceSurface` raw facts AND RE-LOWERs the body for the recorded contributor identified by `(decl_span, contributor_ordinal, name, symbol_space, decl_kind)`, and COMPAREs the freshly-captured `(raw_surface, lowered_body)` pair to the digest's recorded pair (catching a within-file fact OMISSION or TAMPER in EITHER half of EITHER merged peer), then RE-RUNs the CURRENT-version source-side positive allowlist over the freshly-captured pair (so a snapshot admitted under an OLDER allowlist version a later version would REJECT now FAILS — allowlist-version drift is caught, not trusted). The gate then asserts: the digest's `source_locator` EQUALS the registry entry's `source_locator`; each recorded `{path, content_hash}` EQUALS the hash of the CURRENT registry-`workspace_files` SOURCE (or vendored-corpus on-disk content) for that canonical path (a post-capture source edit to ANY recorded contributor — which re-keys the registry bytes' hash away from the snapshot's stored hash — invalidates the snapshot); for each recorded contributor (keyed by `(decl_span, contributor_ordinal)`) the freshly RE-PARSED+RE-LOWERED pair EQUALS the recorded one AND the re-run current-allowlist verdict over it is ADMIT; and the final verdict is ADMIT (matching the snapshot's existence). **Honest residual (moot for the admitted set):** the only thing this offline gate canNOT reproduce is the contributor-set MEMBERSHIP — WHICH files / which merged peers are contributors is established by GENERATION-TIME import/merge/transitive navigation through the live resolver, which is not offline-reproducible (see §Q5 cross-reference). This residual is MOOT for the admitted set, because initial admission is RESTRICTED to PROVABLY SINGLE-CONTRIBUTOR rows (§Scope — single-file, no import / merge / augmentation / transitive `typeof`/`ReturnType` hop, so the contributor set is trivially `{the one decl}` and fully offline-verifiable); any row whose source-side walk reaches >1 contributor or crosses a file/merge/augmentation/transitive hop is DEFAULT-REJECTED and deferred to the named offline contributor-set-membership-revalidation spike (§4). The gate therefore catches (a) any within-file fact omission/tamper in a RECORDED contributor (re-parse + re-lower + compare, per `(ordinal, decl_span)`), and (b) any content change to a recorded contributor (via the per-contributor content-hash gate — for the admitted single-contributor set, a content edit changes the one recorded file's hash and misses the warm read). It does NOT re-NAVIGATE to discover a contributor the digest never recorded; full re-navigation is a generation-time step, deferred for multi-contributor rows. It is an AUDIT/validation record, never re-asserted as the parity value and never an `oracle_value` / `snapshot_id` input. Validated by `source_admission_digest_consistent`. |
 
 `identity` for the `structured_type_expr` kind carries every value-affecting input so
@@ -751,6 +751,7 @@ required axes; these are the `structured_type_expr` axes specifically.)
 | `symbol_or_expression` | The symbol resolved (`ResolveExpr` / `ShallowSurfaceExpr`) OR the expression string (`EvaluateExpr`, e.g. `typeof f`). |
 | `type_arguments` | The canonicalized `TypeExpr`-JSON of each type arg (`ResolveExpr` only; distinguishes `Box<string>` from `Box<number>`). |
 | `projection_mode` | `Shallow` / `Navigate` / `Expanded` / `Skeleton` (`ResolveExpr` / `EvaluateExpr`; `ShallowSurfaceExpr` is always empty-path `Shallow`). |
+| `probe_rhs_kind` | `bare` / `distributive_identity` — the capture strategy the probe RHS was synthesized under (§Q2 keyof-expansion scaffold). A VALUE-AFFECTING axis: the harness never leans on the identity theorem to claim two capture paths are the same key, so a scaffolded capture derives a DIFFERENT `snapshot_id` than a bare one. |
 | `host_project` | The host/project setup axes: `{ project_root, workspace_root, tsconfig_path, host_setup_kind }`. `host_setup_kind` is a closed enum: **`standalone`** (the DEFAULT — `make_host_with_footprint()` = `VerterHost::new_standalone`, fact 9, `support.rs:89`; no project root / no tsconfig, so `project_root`/`workspace_root`/`tsconfig_path` reference the generator's canonical synthetic root + `oracle.tsconfig.json`), **`workspace_footprint`** (the ~9-row minority — `make_host_with_workspace_files_footprint`, `support.rs:97`; `/workspace`, `/workspace`, `/workspace/tsconfig.json`), and the DEFERRED package-backed / custom-host kind (`make_package_host_with_workspace`, `cache_invalidation.rs:344`, §Scope). The hover answer depends on these (a different workspace root, tsconfig path, or host kind resolves differently), so they enter `identity` AND `snapshot_id`. |
 | `probe_locator` | The synthesized probe's name + offset used for the hover capture (§Q2) — INSPECTION/debug only. It is DERIVABLE from `probe_synthesis_version` + the query (the probe is fixed + versioned, §Q2), so it is NOT a direct `snapshot_id` input; `probe_synthesis_version` is what enters the id. |
 
@@ -842,9 +843,9 @@ shared decoder. For a fixture
 
 ```json
 {
-  "oracle_schema_version": 1,
+  "oracle_schema_version": 2,
   "normalizer_version": 1,
-  "probe_synthesis_version": 1,
+  "probe_synthesis_version": 2,
   "tsgo_version": "7.0.0-dev.20260526.1",
   "compiler_options_hash": "sha256:9f1c0e7b…",
   "env_corpus_id": "blake3:2b9d61fa…",
@@ -886,7 +887,8 @@ shared decoder. For a fixture
       "tsconfig_path": "/oracle.tsconfig.json",
       "host_setup_kind": "standalone"
     },
-    "probe_locator": { "probe_name": "__oracle_probe__0", "offset": 412 }
+    "probe_locator": { "probe_name": "__oracle_probe__0", "offset": 412 },
+    "probe_rhs_kind": "bare"
   },
   "oracle_value": {
     "kind": "object",
@@ -905,6 +907,7 @@ shared decoder. For a fixture
   "raw_capture": {
     "probe_name": "__oracle_probe__0",
     "probe_header": "type __oracle_probe__0 = ComposedProps;",
+    "probe_scaffold": null,
     "hover_contents": "```typescript\ntype __oracle_probe__0 = {\n    id: number;\n    label: string;\n    tag?: \"a\" | \"b\";\n}\n```"
   },
   "source_admission_digest": {
@@ -1176,6 +1179,135 @@ scratch model. This is the `probe_binds_to_registry_target` guard.
    returns no range, this header check is the ONLY fence that the captured text is for
    the intended target — it rejects a wrong-position or empty hover that would
    otherwise produce false parity.
+
+#### Expanded-mode keyof-expansion probe — the distributive-identity scaffold
+
+**The capture strategy is an EXPLICIT, versioned probe-RHS kind (`probe_rhs_kind`:
+`bare` | `distributive_identity`), declared on the registry spec and entering
+`snapshot_id`.** A plain (bare) hover on a probe whose RHS reduces to
+`keyof <named interface>` cannot capture the expanded key union, ever: tsgo's union
+display-origin tracking re-prints the WRITTEN operator form
+(`type __oracle_probe__N = keyof KeySource`), and the hover-side `KeyOf` reject
+correctly refuses it. The `distributive_identity` strategy instead synthesizes a
+TWO-declaration probe:
+
+```ts
+type __oracle_probe_dist__<N><T> = T extends never ? never : T;
+type __oracle_probe__<N> = __oracle_probe_dist__<N><Symbol>;
+```
+
+Hovering `__oracle_probe__<N>` makes tsgo print the EXPANDED member union
+(`"count" | "id" | "nested"`) — the distributive conditional forces tsgo to
+enumerate the members of its own computed `keyof` union and reassemble them into a
+fresh union that carries no `keyof` display origin. Everything downstream of
+extraction is unchanged: the hover is still exactly one probe-alias declaration
+(the extraction grammar parses it as-is) and a literal-string union was always on
+the positive allowlist.
+
+**The identity theorem (the one trust step).** `T extends never ? never : T` is a
+universal type-level identity: distribution maps each union member `M` through
+`M extends never ? never : M = M` (no inhabited type extends `never`); the empty
+union (`T = never`) distributes to `never` (still the identity); `any` / `unknown`
+are identities under this conditional too. No member is added, removed, or
+rewritten — the union members tsgo prints are exactly the members of tsgo's own
+keyof enumeration, enumerated by tsgo's own distribution machinery. The harness
+fabricates nothing; the transform only severs the display-origin pointer. The
+captured value is therefore genuinely tsgo-derived at record time. The helper is
+INLINED (not lib `Exclude<T, never>`) so the probe semantics are pinned by
+`probe_synthesis_version` alone, with no coupling to the vendored lib's utility
+definitions. The helper name is ordinal-keyed (`__oracle_probe_dist__<N>`), the
+same collision class as `__oracle_probe__<N>` and covered by the same
+zero-new-diagnostics / probe-binding check.
+
+**Empirical basis (pinned tsgo `7.0.0-dev.20260526.1`, empty client caps,
+plaintext hover; every probe deterministic — byte-identical across fresh
+processes).** Bare hover on `keyof KeySource` echoes `keyof KeySource`; the
+scaffold prints `"count" | "id" | "nested"`. Alias-intersection operands
+(`keyof (Foo & { a: 1 })` across a 7-hop re-export chain), `keyof typeof Enum`,
+and `T[keyof T]` operands expand even bare; `keyof {}` prints `never` (rejected
+by the `NeverKeyword` backstop); a `[k: string]` index-signature operand prints
+`string | number` (admissible primitives). Alternatives evaluated and REJECTED:
+
+| Alternative | Verdict |
+| --- | --- |
+| Mapped-indexed identity `{ [K in keyof T]-?: K }[keyof T]` | WORKS, rejected: routes the value through mapped-type + `-?` + indexed-access machinery (a larger tsgo trust surface) and is keyed off the OPERAND rather than wrapping the row's bare symbol. |
+| lib `Exclude<T, never>` | WORKS identically, rejected: couples the probe semantics to the vendored lib's utility definitions instead of `probe_synthesis_version` alone. |
+| Inline `X extends infer K ? K extends K ? K : never : never` | FAILS: tsgo short-circuits the trivially-true `K extends K` and preserves the display origin. The conditional must perform a genuine member-wise check (`extends never`). |
+| tsgo's non-standard `verbosityLevel` hover param | FAILS for this purpose: levels 1–3 expand the keyof OPERAND (`keyof { id: string; … }`), never the keyof itself — a display-layer alias inliner whose multi-line output also breaks the strict single-alias extraction grammar. |
+| Completion at a key-typed position | Never: a ranked, filtered, `isIncomplete`-able UX surface, not a closed type grammar; the harness would assemble the union itself (weaker provenance than tsgo printing it), and the completion set conflates literal-type suggestions with other in-scope entries. |
+
+**Uniform-per-family rule.** The scaffold is applied UNIFORMLY to every admitted
+keyof carve-out row (`KeyofBareRef` AND `KeyofSelfIndex`), including operand shapes
+that happen to expand bare — branching the probe form on PREDICTED tsgo display
+behavior would be an unsound display heuristic. The scaffold is an identity
+everywhere, harmless where unneeded, and deterministic.
+
+**Fail-closed ladder.** If a future pinned-tsgo bump re-prints `keyof X` THROUGH
+the scaffold, extraction yields a `keyof`-rooted RHS and the RETAINED hover-side
+`KeyOf` reject (`RejectReason::DeferredConstruct("keyof")`) fails generation loudly
+— the row re-defers honestly, never a silent wrong snapshot. Truncated huge key
+unions hit the `TruncationMarker` backstop; `keyof {}` → `never` hits the
+`NeverKeyword` backstop; a key union tsgo prints with a non-key arm hits the
+capture-kind postcondition (below). Every edge degrades to a loud
+`GenError::Rejected`, never a fabricated value. Pinned by
+`scaffold_hover_keyof_still_rejected` and
+`keyof_expansion_scaffold_is_deterministic_and_versioned` (§4).
+
+#### Source-root carve-out admission (keyof / index-chain / self-index family)
+
+`admit_type_expr` rejects `KeyOf` / `IndexedAccess` UNIVERSALLY — on the hover
+side, on the oracle-VALUE side, and at every NESTED position. The source-ROOT
+carve-out admits exactly THREE operator-bodied shapes, and ONLY when they form the
+ROOT of a queried source DECLARATION body (never nested, never a hover, never an
+oracle value):
+
+1. `keyof Root` (`KeyofBareRef`) — `Root` a bare unqualified same-file `Ref`,
+   EMPTY type args;
+2. `Root["a"]["b"]…` (`StringLiteralIndexChain`) — same root discipline, EVERY
+   index segment a STRING LITERAL;
+3. `Root[keyof Root]` (`KeyofSelfIndex`) — BOTH refs the SAME bare unqualified
+   same-file root (the self-index value-union projection).
+
+Each shape is gated by THREE independent checks, none sufficient alone:
+
+- **(a) STRUCTURE** (`classify_source_root` / `carve_out_root_ref_name`) — pure
+  shape recognition; a qualified / type-arg-carrying / different-root /
+  nested-position operator is NOT a carve-out;
+- **(b) SAME-FILE root identity** (`admit_source_root`) — the source walk resolves
+  the root `Ref` through the shared resolver and stamps
+  `SourceContributor::carve_out_root_def`; admission requires it to equal the
+  contributor's defining file. An imported / cross-file / unresolved root falls
+  through to the generic predicate, which rejects the bare operator;
+- **(c) RESOLVER PREFLIGHT** (`preflight_reduces_clean`) — Verter's own resolver
+  must reduce the query to a clean, operator-free value before any snapshot is
+  written, so a tsgo snapshot can never mask an unresolved operator shell.
+
+**Root-operand raw-fact admission (every carve-out shape).** The same-file ROOT
+declaration's own parse-time `RawSourceSurface` records (every merged contributor,
+stamped by the source walk as `carve_out_root_surfaces`) are admission-checked:
+a `unique symbol` / computed / non-static-key root rejects loudly — its keyspace is
+not faithfully representable, so neither is any keyof / chain / self-index
+projection over it. An EMPTY root-fact vector for an otherwise-admissible
+same-file carve-out is a pairing failure and REJECTS conservatively.
+
+**Capture-kind postcondition, scoped PER CARVE-OUT SHAPE.** After ordinary hover
+admission, a `KeyofBareRef`-shaped row's captured value must be a MATERIALIZED
+PROPERTY-KEY value: string/number literal unions, `string`, `number`. Ordinary
+admission admits booleans / objects / `symbol`, so without this gate a future tsgo
+could print a non-key surface where a key union was expected and the snapshot would
+silently record it (`RejectReason::KeyDomainViolation`). `KeyofSelfIndex` rows
+project a VALUE union (boolean / null arms are legitimate) and take ordinary
+admission only.
+
+**Generator capture-strategy cross-check.** The DECLARED `probe_rhs` strategy must
+agree with the LIVE source-walk classification BEFORE tsgo is driven:
+`DistributiveIdentity` is admissible ONLY for an Expanded-mode, EMPTY-`type_args`,
+single-contributor query whose body classifies into the keyof carve-out family
+(`KeyofBareRef` / `KeyofSelfIndex`); any mismatch is a loud `GenError::Rejected`.
+A `Bare` declaration is never constrained by the cross-check — under-delivery (a
+bare probe whose hover echoes `keyof …`) is caught by the retained hover-side
+`KeyOf` reject, while the cross-check prevents over-claiming. Pinned by
+`distributive_identity_only_for_expanded_keyof_carveout` (§4).
 
 **Hover-driver config (PINNED, versioned by `probe_synthesis_version`).** The hover TEXT
 is the oracle source, so anything that changes HOW tsgo formats that text is a
@@ -2800,8 +2932,13 @@ coverage is true **by construction**.
      guard must exist AND the prover records WHAT it must prove;
    - `query_helper_kind` — a **CLOSED enum** naming which `support.rs` helper produces
      the in-process `TypeExpr`, with kind-specific payload:
-     - `ResolveExpr { symbol, type_args, projection_mode }` — drives `resolve_expr`
-       (`support.rs:132`);
+     - `ResolveExpr { symbol, type_args, projection_mode, probe_rhs }` — drives
+       `resolve_expr` (`support.rs:132`). `probe_rhs` is the DECLARED capture
+       strategy (`ProbeRhsSpec::Bare` | `ProbeRhsSpec::DistributiveIdentity`, §Q2
+       keyof-expansion scaffold) — registry DATA the generator cross-checks
+       against the live source-walk carve-out classification, never inference;
+       only `ResolveExpr` can carry a non-`Bare` strategy (the other helpers are
+       bare-RHS by construction);
      - `ShallowSurfaceExpr { symbol }` — drives `shallow_surface_expr`
        (`support.rs:160`; = `ResolveDecl` + empty-path `Shallow` `ProjectPath`, always
        `Shallow`);
@@ -3171,7 +3308,8 @@ coverage is true **by construction**.
    each field is encoded as `u32-LE byte-length || field-bytes` (length-prefixed
    canonical-JSON for structured fields, raw UTF-8 for strings, fixed-width LE for
    integers), concatenated in the FIXED order below under a leading domain-separation
-   tag `b"verter.oracle.snapshot_id.v1"`. Length-prefixing prevents any two distinct
+   tag `b"verter.oracle.snapshot_id.v2"` (v2 added the `probe_rhs_kind` field — the
+   documented rule: a field-set change bumps the tag). Length-prefixing prevents any two distinct
    field tuples from producing the same byte stream (loose concatenation /
    `0x00`-separation is ambiguous when a field can itself contain the separator). The
    ordering and field set are fixed; a change to either is a schema change. The id is
@@ -3182,7 +3320,7 @@ coverage is true **by construction**.
 
    ```
    snapshot_id = "u_" + hex( blake3(   // FULL 32-byte / 256-bit digest, not truncated
-           DOMAIN_TAG            ||   // b"verter.oracle.snapshot_id.v1"
+           DOMAIN_TAG            ||   // b"verter.oracle.snapshot_id.v2"
            lp(row_file)          ||   // bare filename, e.g. "apparent_types.rs"
            lp(row_function)      ||
            lp(query_ordinal)     ||   // the row-ref — one file per (row,query)
@@ -3192,6 +3330,7 @@ coverage is true **by construction**.
            lp(symbol_or_expression) ||
            lp(canonical_type_args)  ||   // normalized TypeExpr-JSON of each arg
            lp(projection_mode)   ||
+           lp(probe_rhs_kind)    ||   // bare | distributive_identity (the capture strategy)
            lp(host_project)      ||   // {project_root, workspace_root, tsconfig_path, host_setup_kind}
            lp(oracle_value_kind) ||   // structured_type_expr (future: relation_verdict …)
            lp(normalizer_version)     ||
@@ -4240,6 +4379,14 @@ carries a named guard here.
 | `enum_member_refs_rejected` | An enum-member-typed query (`Color.Red`, `Status.Idle`, `Direction.Up`; alias `type ColorRed = Color.Red`, `fixtures/enums.ts:21,26`; branded contracts `enums.rs:18,39`) is DEFAULT-REJECTED — `TypeExpr` has no enum-member carrier (`lib.rs:128`), so an enum-member `Ref` is not on the positive ADMIT list. Discriminating: an enum-member capture must be rejected, a plain literal/object accepted. |
 | `shallow_hover_expansion_rejected` | In `Shallow` / `Navigate` mode, a hover that EXPANDS a userland alias instead of printing its name is REJECTED/deferred (symmetric to the Expanded-mode unexpanded-`Ref` reject) — Verter correctly keeps the `Ref`. Discriminating: a shallow-mode capture where tsgo printed the expanded object must be rejected; one that printed the alias name accepted. |
 | `probe_form_is_deterministic_and_versioned` | The probe is ALWAYS placed in the query's own resolution environment — same-file append into `primary_canonical` for `ResolveExpr` / `ShallowSurfaceExpr`, scratch-file + `eval_source` prelude for `EvaluateExpr` — with deterministic naming `__oracle_probe__<query_ordinal>`, versioned by `probe_synthesis_version` (in `snapshot_id`); the locator is derivable from version+query without tsgo. The `Expanded`-mode probe form is admissible only after the spike fixes + versions it. |
+| `keyof_expansion_scaffold_is_deterministic_and_versioned` | The distributive-identity scaffold (`distributive_identity_scaffold`) is a PURE function of `(query_ordinal, symbol)`: deterministic, ordinal-keyed helper name (`__oracle_probe_dist__<N>`), symbol-keyed wrapped RHS, the pinned helper body `T extends never ? never : T`, versioned by `probe_synthesis_version` (= 2, the version that introduced the kind); the scaffolded append emits the helper line immediately before the probe line with `probe_name_offset` semantics unchanged (the hover lands on the probe alias NAME), and a `None` scaffold is the bare path verbatim. Discriminating: two ordinals must produce distinct helper names; a changed symbol must change only the wrapped RHS. |
+| `scaffold_hover_keyof_still_rejected` | The hover-side `KeyOf` reject (`RejectReason::DeferredConstruct("keyof")`) is RETAINED under the scaffold strategy — it is the drift fence: a future tsgo that re-prints `keyof X` THROUGH the scaffold fails generation loudly (the row re-defers honestly), never a silent wrong snapshot. Discriminating: a `keyof`-printing hover under the full two-sided combiner for a keyof carve-out walk REJECTS; the self-index family's hover-side operator reject holds too. |
+| `distributive_identity_only_for_expanded_keyof_carveout` | The generator capture-strategy cross-check: a spec declaring `DistributiveIdentity` is admissible ONLY when the projection mode is `Expanded` AND the live source walk resolves EXACTLY ONE contributor whose body classifies into the keyof carve-out family (`KeyofBareRef` / `KeyofSelfIndex`); any mismatch (a string-literal chain, a plain alias, a non-Expanded mode) is a loud `GenError::Rejected`. `Bare` is never constrained here. Discriminating: the scaffold strategy over `PreflightIndexed` (a chain) and over a plain object alias must both reject; over a keyof / self-index row it must pass. |
+| `keyof_capture_kind_postcondition_requires_property_key_value` | The per-shape capture-kind postcondition: under a `KeyofBareRef`-shaped source walk, the admitted hover value must be a MATERIALIZED PROPERTY-KEY value (string/number literal unions, `string`, `number`); a boolean-/object-/`symbol`-/null-bearing hover REJECTS with `KeyDomainViolation` (ordinary admission ADMITS those constructs, so only this gate can catch them). `KeyofSelfIndex` rows take ordinary admission only (the full member VALUE union, incl. boolean/null, admits); non-carve-out rows are untouched. |
+| `keyof_self_index_source_root_carve_out` | `Root[keyof Root]` (BOTH refs the SAME bare unqualified same-file root) classifies as `SourceRootShape::KeyofSelfIndex` and admits under the three-gate discipline; a different-root lookup (`Root[keyof Other]`), a type-arg-carrying or qualified root, a nested position, an imported root, and an unbound root all reject. |
+| `carve_out_root_raw_facts_admission_checked_for_every_shape` | EVERY carve-out shape's same-file ROOT declaration raw facts (`carve_out_root_surfaces`, stamped live by the source walk) are admission-checked: a `unique symbol` root rejects `UniqueSymbol` (live fixture proof: `source_root_carve_out_rejects_unique_symbol_root`), a computed-key root rejects `NonStaticKey`, a MERGED root rejects if ANY contributor is dirty, and an EMPTY root-fact vector for an otherwise-admissible same-file carve-out rejects conservatively (`SourceUnresolvedOrCyclic`). Positive control: a clean root admits. |
+| `probe_scaffold_recorded_and_rederivable` | `raw_capture.probe_scaffold` strictly decodes and is RE-DERIVABLE offline from `probe_synthesis_version` + the query ordinal: a `distributive_identity` snapshot must record EXACTLY the versioned helper decl AND the WRAPPED probe header; a missing, stray (on a `bare` capture), tampered, or bare-headered scaffold fails strict decode (`SnapshotDecodeError::ScaffoldInconsistent`). |
+| `snapshot_id_v2_includes_probe_rhs_kind` | `probe_rhs_kind` is a VALUE-AFFECTING `snapshot_id` axis (a bare vs scaffolded capture of the same query derives DISTINCT ids — the harness never leans on the identity theorem for cache-key identity); the tags are the closed set `bare` / `distributive_identity` with a strict-decoder `from_tag` inverse; the field-set change bumped the domain tag to `verter.oracle.snapshot_id.v2`, `ORACLE_SCHEMA_VERSION` to 2, and `PROBE_SYNTHESIS_VERSION` to 2. |
 | `probe_binds_to_registry_target` | The generator verifies the appended probe's RHS binds to the registry's intended declaration (`(primary_canonical, symbol)` / `source_locator`), not a shadow/ambient, via a tsgo definition/diagnostic check (zero new diagnostics + the probe symbol's definition lands on the intended decl); a mismatch FAILS generation. Discriminating: a same-name shadow/ambient that the probe would bind to instead must FAIL generation. |
 | `anti_shadow_needs_proven_binding_primitive` | The anti-shadow half of `probe_binds_to_registry_target` rests on a binding-identity primitive (`textDocument/definition` or a versioned equivalent) NOT YET VERIFIED at the pinned tsgo (§4 spike). NO row that NEEDS the anti-shadow check (any symbol that is not PROVABLY un-shadowable) is admissible until the spike PROVES a concrete primitive at `7.0.0-dev.20260526.1`. The ONLY rows admissible WITHOUT it are PROVABLY UN-SHADOWABLE: a UNIQUE TOP-LEVEL name in a SINGLE-FILE standalone fixture with NO ambient-corpus contribution for that name (no augmentation, no same-named import/reexport, no second declaration on the resolution path). Discriminating: a multi-file / imported / merged / corpus-co-named symbol is BLOCKED (stays `Ignored`) absent the proven primitive; a single-file unique-top-level-name symbol is admissible via the vacuous-binding + zero-new-diagnostics path. |
 | `strict_lowering_drop_counter` | `lower_ts_type` is instrumented so any `filter_map`-dropped member/param (`oxc/lib.rs:99`; `type_expr_json.rs:72,336`) increments a drop count; a non-zero count REJECTS the capture (belt-and-suspenders on the AST walk). |
@@ -4616,3 +4763,21 @@ block; it is generator-side work (feature-gated), never part of the default gate
    cost of hermeticity + closure: the alternative (live `node_modules`) is non-hermetic
    and not offline-re-enumerable. The single shared canonical corpus for all
    standalone-host rows keeps the duplicated weight to ONE copy, not one per row.
+
+9. **tsgo union display-origin coupling (the keyof-expansion scaffold).** The
+   distributive-identity capture relies on tsgo NOT propagating union
+   display-origin through distributive conditional instantiation — unspecified
+   display behavior a future tsgo may change. Mitigation is structural and in
+   place: the tsgo version is pinned into `snapshot_id`; a regression at
+   regeneration time prints `keyof …`, which the RETAINED hover-side `KeyOf`
+   reject turns into a loud `GenError::Rejected` — the row re-defers honestly,
+   never a silent mis-snapshot, so the residual risk is regeneration friction,
+   not corruption. The soundness argument additionally leans on the
+   `T extends never ? never : T ≡ T` identity theorem (core TS
+   conditional-distribution semantics, not a display accident — §Q2); keeping
+   `probe_rhs_kind` in `snapshot_id` ensures the scaffolded capture path is
+   never conflated with bare capture. Documented edge fail-closures (not
+   defects): `keyof {}` → `never` (`NeverKeyword` reject — empty-key rows stay
+   unliftable until a never-policy exists); symbol / `unique symbol` keys →
+   qualified-name / non-static / key-domain rejects; very large key unions →
+   `TruncationMarker` reject.

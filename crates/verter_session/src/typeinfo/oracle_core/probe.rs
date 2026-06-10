@@ -19,9 +19,50 @@
 /// The fixed probe-symbol prefix. The full name is `__oracle_probe__<ordinal>`.
 pub(crate) const PROBE_PREFIX: &str = "__oracle_probe__";
 
+/// The fixed distributive-identity HELPER prefix. The full helper name is
+/// `__oracle_probe_dist__<ordinal>` — ordinal-keyed like the probe itself, so
+/// two queries synthesized into the same environment never collide.
+pub(crate) const PROBE_DIST_PREFIX: &str = "__oracle_probe_dist__";
+
 /// The deterministic probe symbol name for a query ordinal.
 pub(crate) fn probe_name(ordinal: u16) -> String {
     format!("{PROBE_PREFIX}{ordinal}")
+}
+
+/// The deterministic distributive-identity helper name for a query ordinal.
+pub(crate) fn dist_helper_name(ordinal: u16) -> String {
+    format!("{PROBE_DIST_PREFIX}{ordinal}")
+}
+
+/// The synthesized distributive-identity scaffold: the helper declaration plus
+/// the wrapped probe RHS.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Scaffold {
+    /// `type __oracle_probe_dist__<N><T> = T extends never ? never : T;`
+    pub(crate) helper_decl: String,
+    /// `__oracle_probe_dist__<N><symbol>`
+    pub(crate) rhs: String,
+}
+
+/// The distributive-identity probe scaffold (the `ProbeRhsKind::
+/// DistributiveIdentity` capture strategy) — a PURE function of
+/// `(ordinal, symbol)`, versioned by `PROBE_SYNTHESIS_VERSION`.
+///
+/// `T extends never ? never : T` is a universal type-level identity:
+/// distribution maps each union member `M` through `M extends never ? never :
+/// M = M` (no inhabited type extends `never`); the empty union distributes to
+/// `never` (still the identity); `any`/`unknown` are identities under it too.
+/// Hovering the wrapped probe makes tsgo print the EXPANDED member union of
+/// its own `keyof` enumeration — the conditional only severs the union
+/// display-origin pointer that makes a plain hover re-print `keyof <operand>`.
+/// The helper is INLINED (not lib `Exclude<T, never>`) so the probe semantics
+/// are pinned by `PROBE_SYNTHESIS_VERSION` alone, with no lib coupling.
+pub(crate) fn distributive_identity_scaffold(ordinal: u16, symbol: &str) -> Scaffold {
+    let helper = dist_helper_name(ordinal);
+    Scaffold {
+        helper_decl: format!("type {helper}<T> = T extends never ? never : T;"),
+        rhs: format!("{helper}<{symbol}>"),
+    }
 }
 
 /// Why a probe RHS cannot be synthesized for the currently-admissible set —
@@ -77,9 +118,27 @@ pub(crate) struct SynthesizedProbe {
 /// by the probe header on its own line, so the probe never merges into a
 /// trailing token of `base`.
 pub(crate) fn append_probe(base: &str, ordinal: u16, rhs: &str) -> SynthesizedProbe {
-    let mut source = String::with_capacity(base.len() + rhs.len() + 32);
+    append_probe_with_scaffold(base, ordinal, rhs, None)
+}
+
+/// [`append_probe`] with an optional scaffold helper declaration emitted on its
+/// own line IMMEDIATELY BEFORE the probe line. `probe_name_offset` semantics are
+/// unchanged: it points at the probe alias NAME (the hover position), never at
+/// the helper. A `None` scaffold is the bare path verbatim.
+pub(crate) fn append_probe_with_scaffold(
+    base: &str,
+    ordinal: u16,
+    rhs: &str,
+    scaffold_decl: Option<&str>,
+) -> SynthesizedProbe {
+    let scaffold_len = scaffold_decl.map(str::len).unwrap_or(0);
+    let mut source = String::with_capacity(base.len() + rhs.len() + scaffold_len + 40);
     source.push_str(base);
     if !source.is_empty() && !source.ends_with('\n') {
+        source.push('\n');
+    }
+    if let Some(decl) = scaffold_decl {
+        source.push_str(decl);
         source.push('\n');
     }
     const TYPE_KW: &str = "type ";

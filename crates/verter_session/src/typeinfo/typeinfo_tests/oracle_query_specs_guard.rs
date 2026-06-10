@@ -3,16 +3,22 @@
 //! registry `include!`-compiles WITHOUT the unit-test `support` module
 //! (`oracle_query_specs_is_pure_data`); this src-side half proves the structural
 //! well-formedness validation is genuinely discriminating, with SYNTHETIC specs.
-//! The real table seats the 8 lifted rows (two index-signature publication
+//! The real table seats the 11 lifted rows (two index-signature publication
 //! queries + two built-in modifier-utility queries + three U2
 //! IndexedAccess-reduction carve-out queries + the mapped-modifier `-?`
-//! carve-out query at U2.MAPPED_TEMPLATE).
+//! carve-out query at U2.MAPPED_TEMPLATE + three keyof-expansion carve-out
+//! queries).
 
 use super::oracle::query_specs::{
-    registry_well_formed, HostProjectSpec, HostSetupKindSpec, OracleValueKindSpec,
+    registry_well_formed, HostProjectSpec, HostSetupKindSpec, OracleValueKindSpec, ProbeRhsSpec,
     ProjectionModeSpec, QueryHelperSpec, QuerySpec, RegistryError, SourceLocatorSpec, SymbolSpace,
-    DEEP_PATH_SOURCE, INDEX_SIGNATURES_SOURCE, MAPPED_MODIFIERS_SOURCE, ORACLE_QUERY_SPECS,
-    TYPESCRIPT_RULES_SOURCE, UTILITY_EDGE_SOURCE, WIDE_DEEP_SOURCE,
+    DEEP_PATH_SOURCE, INDEX_SIGNATURES_SOURCE, MAPPED_MODIFIERS_SOURCE,
+    MODE_BOUNDARY_REEXPORT_BARREL_SOURCE, MODE_BOUNDARY_REEXPORT_LEAF_SOURCE,
+    MODE_BOUNDARY_REEXPORT_LINK_1_SOURCE, MODE_BOUNDARY_REEXPORT_LINK_2_SOURCE,
+    MODE_BOUNDARY_REEXPORT_LINK_3_SOURCE, MODE_BOUNDARY_REEXPORT_LINK_4_SOURCE,
+    MODE_BOUNDARY_REEXPORT_LINK_5_SOURCE, MODE_BOUNDARY_REEXPORT_LINK_6_SOURCE,
+    MODE_BOUNDARY_REEXPORT_PRINCIPAL_SOURCE, ORACLE_QUERY_SPECS, TYPESCRIPT_RULES_SOURCE,
+    UNION_KEY_ACCESS_SOURCE, UTILITY_EDGE_SOURCE, WIDE_DEEP_SOURCE,
 };
 
 /// The registry inlines each fixture's source bytes (`INDEX_SIGNATURES_SOURCE` /
@@ -63,6 +69,66 @@ fn inlined_registry_source_is_byte_identical_to_fixture_files() {
         "MAPPED_MODIFIERS_SOURCE (inlined in the registry) drifted from \
          fixtures/mapped_modifiers.ts (read by the sibling #[ignore]d tests)",
     );
+    assert_eq!(
+        UNION_KEY_ACCESS_SOURCE,
+        include_str!("fixtures/union_key_access.ts"),
+        "UNION_KEY_ACCESS_SOURCE (inlined in the registry) drifted from \
+         fixtures/union_key_access.ts (read by the sibling #[ignore]d tests)",
+    );
+    assert_eq!(
+        MODE_BOUNDARY_REEXPORT_PRINCIPAL_SOURCE,
+        include_str!("fixtures/mode_boundary_reexport_principal.ts"),
+        "MODE_BOUNDARY_REEXPORT_PRINCIPAL_SOURCE (inlined in the registry) drifted from \
+         fixtures/mode_boundary_reexport_principal.ts (read by the sibling #[ignore]d tests)",
+    );
+    assert_eq!(
+        MODE_BOUNDARY_REEXPORT_LINK_1_SOURCE,
+        include_str!("fixtures/mode_boundary_reexport_link_1.ts"),
+        "MODE_BOUNDARY_REEXPORT_LINK_1_SOURCE (inlined in the registry) drifted from \
+         fixtures/mode_boundary_reexport_link_1.ts (read by the sibling #[ignore]d tests)",
+    );
+    assert_eq!(
+        MODE_BOUNDARY_REEXPORT_LINK_2_SOURCE,
+        include_str!("fixtures/mode_boundary_reexport_link_2.ts"),
+        "MODE_BOUNDARY_REEXPORT_LINK_2_SOURCE (inlined in the registry) drifted from \
+         fixtures/mode_boundary_reexport_link_2.ts (read by the sibling #[ignore]d tests)",
+    );
+    assert_eq!(
+        MODE_BOUNDARY_REEXPORT_LINK_3_SOURCE,
+        include_str!("fixtures/mode_boundary_reexport_link_3.ts"),
+        "MODE_BOUNDARY_REEXPORT_LINK_3_SOURCE (inlined in the registry) drifted from \
+         fixtures/mode_boundary_reexport_link_3.ts (read by the sibling #[ignore]d tests)",
+    );
+    assert_eq!(
+        MODE_BOUNDARY_REEXPORT_LINK_4_SOURCE,
+        include_str!("fixtures/mode_boundary_reexport_link_4.ts"),
+        "MODE_BOUNDARY_REEXPORT_LINK_4_SOURCE (inlined in the registry) drifted from \
+         fixtures/mode_boundary_reexport_link_4.ts (read by the sibling #[ignore]d tests)",
+    );
+    assert_eq!(
+        MODE_BOUNDARY_REEXPORT_LINK_5_SOURCE,
+        include_str!("fixtures/mode_boundary_reexport_link_5.ts"),
+        "MODE_BOUNDARY_REEXPORT_LINK_5_SOURCE (inlined in the registry) drifted from \
+         fixtures/mode_boundary_reexport_link_5.ts (read by the sibling #[ignore]d tests)",
+    );
+    assert_eq!(
+        MODE_BOUNDARY_REEXPORT_LINK_6_SOURCE,
+        include_str!("fixtures/mode_boundary_reexport_link_6.ts"),
+        "MODE_BOUNDARY_REEXPORT_LINK_6_SOURCE (inlined in the registry) drifted from \
+         fixtures/mode_boundary_reexport_link_6.ts (read by the sibling #[ignore]d tests)",
+    );
+    assert_eq!(
+        MODE_BOUNDARY_REEXPORT_BARREL_SOURCE,
+        include_str!("fixtures/mode_boundary_reexport_barrel.ts"),
+        "MODE_BOUNDARY_REEXPORT_BARREL_SOURCE (inlined in the registry) drifted from \
+         fixtures/mode_boundary_reexport_barrel.ts (read by the sibling #[ignore]d tests)",
+    );
+    assert_eq!(
+        MODE_BOUNDARY_REEXPORT_LEAF_SOURCE,
+        include_str!("fixtures/mode_boundary_reexport_leaf.ts"),
+        "MODE_BOUNDARY_REEXPORT_LEAF_SOURCE (inlined in the registry) drifted from \
+         fixtures/mode_boundary_reexport_leaf.ts (read by the sibling #[ignore]d tests)",
+    );
 }
 
 /// A synthetic well-formed spec with a tweakable `oracle_family` + `query_ordinal`.
@@ -84,6 +150,7 @@ fn spec(row_function: &'static str, query_ordinal: u16, oracle_family: &'static 
             symbol: "Foo",
             type_args: &[],
             projection_mode: ProjectionModeSpec::Shallow,
+            probe_rhs: ProbeRhsSpec::Bare,
         },
         source_locator: SourceLocatorSpec {
             reference_canonical: "/fixtures/synthetic.ts",
@@ -151,6 +218,21 @@ fn oracle_query_specs_registry_holds_the_lifted_rows_and_is_well_formed() {
             (
                 "mapped_modifiers.rs",
                 "mapped_modifier_minus_optional_strips_optional_and_undefined",
+                0
+            ),
+            (
+                "typescript_rules.rs",
+                "typescript_rules_keyof_materializes_literal_key_union",
+                0
+            ),
+            (
+                "mode_boundary_invariants.rs",
+                "mode_boundary_keyof_across_reexport_chain_resolves_all_keys",
+                0
+            ),
+            (
+                "union_key_access.rs",
+                "union_key_access_keyof_self_projects_full_value_union",
                 0
             ),
         ],

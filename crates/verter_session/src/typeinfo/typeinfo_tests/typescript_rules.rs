@@ -211,23 +211,20 @@ fn typescript_rules_union_and_intersection_object_contributions() {
     assert_query_mode(&intersection_record, ProjectionModeTag::Expanded);
 }
 
+// LIFTED: `KeyOfRules = keyof KeySource` materializes the expanded literal key
+// union `"count" | "id" | "nested"`. The lifted body is the registry-keyed
+// `oracle::run_row` shared-driver call the `#[oracle_row]` macro synthesizes:
+// it resolves Verter's `Expanded` projection and compares it against the
+// checked-in tsgo snapshot, captured through the DISTRIBUTIVE-IDENTITY probe
+// scaffold (a bare hover would echo `keyof KeySource`; the scaffold severs the
+// union display-origin so tsgo prints its own keyof enumeration). The
+// DAG-terminal producer is `IndexedAccessUnionDistribution` (block
+// `U2.INDEXED_ACCESS`); the measured dispatch trace is
+// `[ResolveDecl, Instantiate, KeyOf, ProjectPath]`, proven live by
+// `lifted_row_mechanism_trace_matches_manifest`.
+#[oracle_row]
 #[test]
-#[ignore = "tsgo hover cannot surface the expanded keyof literal-union ground truth; needs a future non-hover/keyof-expansion oracle-capture model"]
-fn typescript_rules_keyof_materializes_literal_key_union() {
-    let host = make_host_with_footprint();
-    upsert_ts(&host, "/fixtures/typescript-rules.ts", TYPESCRIPT_RULES);
-
-    let (expr, record) = resolve_expr(
-        &host,
-        "/fixtures/typescript-rules.ts",
-        "KeyOfRules",
-        &[],
-        ProjectionMode::Expanded,
-    );
-
-    assert_literal_union(&expr, &["count", "id", "nested"]);
-    assert_query_mode(&record, ProjectionModeTag::Expanded);
-}
+fn typescript_rules_keyof_materializes_literal_key_union() {}
 
 // LIFTED: `IndexedRules = KeySource["nested"]["value"]` reduces the multi-hop
 // indexed-access chain to its terminal `string`. The lifted body is the

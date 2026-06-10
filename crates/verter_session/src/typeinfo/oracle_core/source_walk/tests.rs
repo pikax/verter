@@ -498,3 +498,75 @@ fn source_root_carve_out_rejects_unbound_root() {
         "an unbound carve-out root rejects"
     );
 }
+
+/// Same-file `Root[keyof Root]` (the KeyofSelfIndex carve-out) — the live walk
+/// resolves the shared root, stamps it same-file, and captures the root
+/// declaration's OWN raw-fact records, so the contributor ADMITs.
+#[test]
+fn source_root_carve_out_admits_same_file_keyof_self_index() {
+    let host = make_host();
+    let canonical = "/fixtures/carveout_self_index_same.ts";
+    upsert(
+        &host,
+        canonical,
+        "export type Surface = { alpha: number; beta: string; gamma: boolean; delta: null };\n\
+         export type EveryMember = Surface[keyof Surface];\n",
+    );
+    host.ensure_indexed_ready(canonical).expect("indexed");
+
+    let result = walk(&host, &type_locator(canonical, "EveryMember"));
+    let contributors = match &result {
+        SourceWalkResult::Resolved { contributors } => contributors,
+        other => panic!("expected Resolved, got {other:?}"),
+    };
+    assert_eq!(contributors.len(), 1);
+    assert_eq!(
+        contributors[0].carve_out_root_def.as_deref(),
+        Some(canonical),
+        "the live stamp must resolve the shared self-index root same-file"
+    );
+    assert_eq!(
+        contributors[0].carve_out_root_surfaces.len(),
+        1,
+        "the live walk must capture the ROOT declaration's raw-fact record"
+    );
+    assert_eq!(
+        admit_source_walk(&result),
+        AdmissionVerdict::Admit,
+        "a same-file self-index carve-out over a clean root is admitted"
+    );
+}
+
+/// The root-operand raw-fact admission, LIVE: a keyof carve-out whose
+/// same-file ROOT declaration carries a `unique symbol` member REJECTS at the
+/// walk+admission stage (the generation preflight/admission path) — the
+/// erased-construct fence applies to the ROOT, not only the alias itself.
+#[test]
+fn source_root_carve_out_rejects_unique_symbol_root() {
+    let host = make_host();
+    let canonical = "/fixtures/carveout_unique_symbol_root.ts";
+    upsert(
+        &host,
+        canonical,
+        "export interface Branded { tag: unique symbol; id: string }\n\
+         export type BrandedKeys = keyof Branded;\n",
+    );
+    host.ensure_indexed_ready(canonical).expect("indexed");
+
+    let result = walk(&host, &type_locator(canonical, "BrandedKeys"));
+    let contributors = match &result {
+        SourceWalkResult::Resolved { contributors } => contributors,
+        other => panic!("expected Resolved, got {other:?}"),
+    };
+    // The alias's own raw surface is clean and the root stamps same-file…
+    assert_eq!(
+        contributors[0].carve_out_root_def.as_deref(),
+        Some(canonical)
+    );
+    // …but the ROOT raw facts carry the unique-symbol op, so admission rejects.
+    assert_eq!(
+        admit_source_walk(&result),
+        AdmissionVerdict::Reject(RejectReason::UniqueSymbol),
+        "a unique-symbol-bearing keyof ROOT must reject at generation admission"
+    );
+}

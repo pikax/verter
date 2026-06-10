@@ -21,11 +21,13 @@
 // cleanly into the `tests/` guard — an inner doc comment is illegal in an
 // `include!`d position.)
 //
-// The registry seats the 8 lifted rows (the two index-signature
+// The registry seats the 11 lifted rows (the two index-signature
 // publication queries + the two built-in modifier-utility queries + the three
 // U2 IndexedAccess-reduction carve-out queries + the mapped-modifier `-?`
-// carve-out query at U2.MAPPED_TEMPLATE). The types + validation are
-// additionally exercised with synthetic specs by the discriminating guards.
+// carve-out query at U2.MAPPED_TEMPLATE + the three keyof-expansion carve-out
+// queries captured through the distributive-identity scaffold). The types +
+// validation are additionally exercised with synthetic specs by the
+// discriminating guards.
 
 /// The content id of the CURRENT closed vendored oracle-env corpus — the
 /// pinned-env constant the registry + every guard read to derive a
@@ -118,6 +120,23 @@ pub(crate) struct SourceLocatorSpec {
     pub(crate) symbol_space: SymbolSpace,
 }
 
+/// The probe-RHS capture strategy the generator synthesizes for the query —
+/// the registry's declared capture-strategy axis (§Q2 keyof-expansion
+/// scaffold). `Bare` is the default bare-symbol RHS; `DistributiveIdentity`
+/// wraps the symbol in the inlined per-query identity helper
+/// `type __oracle_probe_dist__N<T> = T extends never ? never : T;` so tsgo
+/// prints the EXPANDED member union instead of echoing the written
+/// `keyof <operand>` display origin. The generator CROSS-CHECKS the declared
+/// strategy against the live source-walk carve-out classification —
+/// `DistributiveIdentity` is admissible ONLY for Expanded-mode keyof
+/// carve-out rows (`KeyofBareRef` / `KeyofSelfIndex`).
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProbeRhsSpec {
+    Bare,
+    DistributiveIdentity,
+}
+
 /// Which `support.rs` helper produces the in-process `TypeExpr`, with its
 /// kind-specific payload (§Q4). The `*Expr` suffix mirrors the design-mandated
 /// helper names; the shared suffix is intentional, not a naming smell.
@@ -127,10 +146,13 @@ pub(crate) enum QueryHelperSpec {
     /// `resolve_expr(host, canonical, symbol, type_args, mode)`. `type_args` is
     /// the canonical `TypeExpr`-JSON of each argument (empty for the common
     /// non-generic case; non-empty rows are deferred until the printer spike).
+    /// `probe_rhs` is the declared capture strategy (only `ResolveExpr` can
+    /// carry a non-`Bare` one).
     ResolveExpr {
         symbol: &'static str,
         type_args: &'static [&'static str],
         projection_mode: ProjectionModeSpec,
+        probe_rhs: ProbeRhsSpec,
     },
     /// `shallow_surface_expr(host, canonical, symbol)` — always empty-path
     /// `Shallow`.
@@ -234,6 +256,7 @@ const fn index_signature_publication_spec(
             symbol,
             type_args: &[],
             projection_mode: ProjectionModeSpec::Expanded,
+            probe_rhs: ProbeRhsSpec::Bare,
         },
         source_locator: SourceLocatorSpec {
             reference_canonical: "/fixtures/index_signatures.ts",
@@ -301,6 +324,7 @@ const fn utility_edge_modifier_spec(row_function: &'static str, symbol: &'static
             symbol,
             type_args: &[],
             projection_mode: ProjectionModeSpec::Expanded,
+            probe_rhs: ProbeRhsSpec::Bare,
         },
         source_locator: SourceLocatorSpec {
             reference_canonical: "/fixtures/utility_edge.ts",
@@ -678,6 +702,7 @@ const fn carve_out_spec(
             symbol,
             type_args: &[],
             projection_mode: ProjectionModeSpec::Expanded,
+            probe_rhs: ProbeRhsSpec::Bare,
         },
         source_locator: SourceLocatorSpec {
             reference_canonical: primary_canonical,
@@ -812,6 +837,181 @@ export type CapitalizeKeys<T> = {
 export type CapitalizedResult = CapitalizeKeys<{ alpha: number; beta: string }>;
 "#;
 
+// The vendored source bytes of the `union_key_access` + `mode_boundary`
+// re-export-chain fixtures (the registry is the source-byte authority).
+// Inlined verbatim (PURE owned `&'static str`); the guard
+// `inlined_registry_source_is_byte_identical_to_fixture_files` asserts
+// byte-identity with the corresponding `fixtures/*.ts` files.
+
+#[allow(dead_code)]
+pub(crate) const UNION_KEY_ACCESS_SOURCE: &str = r#"// @ai-generated - Synthetic indexed-access-with-union-key typeinfo fixture.
+
+export type Surface = {
+  alpha: number;
+  beta: string;
+  gamma: boolean;
+  delta: null;
+};
+
+export type AlphaBeta = Surface["alpha" | "beta"];
+export type EveryMember = Surface[keyof Surface];
+
+// Pick-style equivalent: Pick<Surface, "alpha" | "beta"> = { alpha; beta }.
+export type PickAlphaBeta = Pick<Surface, "alpha" | "beta">;
+"#;
+
+#[allow(dead_code)]
+pub(crate) const MODE_BOUNDARY_REEXPORT_PRINCIPAL_SOURCE: &str = r#"// @ai-generated - principal consumer of the 6-hop re-export chain.
+// Imports `Foo` whose final definition (`{ b: 1 }`) lives 7 hops away in
+// `mode_boundary_reexport_leaf.ts`. Mirrors the tsgo-audit benchmark
+// re-export-chain shape.
+//
+// TS7 emission verified against tsgo 7.0.0-dev.20260523.1:
+//   type WantedType = Foo & { a: 1 }
+//   = { b: 1; } & { a: 1; } (structurally equivalent to `{ a: 1; b: 1 }`)
+//   type WantedKeys = keyof WantedType
+//   = "a" | "b"
+import { Foo } from "./mode_boundary_reexport_link_1";
+
+export type WantedType = Foo & { a: 1 };
+export type WantedKeys = keyof WantedType;
+"#;
+
+#[allow(dead_code)]
+pub(crate) const MODE_BOUNDARY_REEXPORT_LINK_1_SOURCE: &str = r#"// @ai-generated - hop 1 of the mode_boundary re-export chain (closest
+// to the principal consumer).
+export { Foo } from "./mode_boundary_reexport_link_2";
+"#;
+
+#[allow(dead_code)]
+pub(crate) const MODE_BOUNDARY_REEXPORT_LINK_2_SOURCE: &str = r#"// @ai-generated - hop 2 of the mode_boundary re-export chain.
+export { Foo } from "./mode_boundary_reexport_link_3";
+"#;
+
+#[allow(dead_code)]
+pub(crate) const MODE_BOUNDARY_REEXPORT_LINK_3_SOURCE: &str = r#"// @ai-generated - hop 3 of the mode_boundary re-export chain.
+export { Foo } from "./mode_boundary_reexport_link_4";
+"#;
+
+#[allow(dead_code)]
+pub(crate) const MODE_BOUNDARY_REEXPORT_LINK_4_SOURCE: &str = r#"// @ai-generated - hop 4 of the mode_boundary re-export chain.
+export { Foo } from "./mode_boundary_reexport_link_5";
+"#;
+
+#[allow(dead_code)]
+pub(crate) const MODE_BOUNDARY_REEXPORT_LINK_5_SOURCE: &str = r#"// @ai-generated - hop 5 of the mode_boundary re-export chain.
+export { Foo } from "./mode_boundary_reexport_link_6";
+"#;
+
+#[allow(dead_code)]
+pub(crate) const MODE_BOUNDARY_REEXPORT_LINK_6_SOURCE: &str = r#"// @ai-generated - hop 6 of the mode_boundary re-export chain (uses
+// `export *` to test wildcard barrel propagation).
+export * from "./mode_boundary_reexport_barrel";
+"#;
+
+#[allow(dead_code)]
+pub(crate) const MODE_BOUNDARY_REEXPORT_BARREL_SOURCE: &str = r#"// @ai-generated - barrel hop of the mode_boundary re-export chain.
+export { Foo } from "./mode_boundary_reexport_leaf";
+"#;
+
+#[allow(dead_code)]
+pub(crate) const MODE_BOUNDARY_REEXPORT_LEAF_SOURCE: &str = r#"// @ai-generated - terminal leaf of the mode_boundary re-export chain.
+export type Foo = { b: 1 };
+"#;
+
+/// The workspace-file set the `union_key_access.rs` keyof-self-index row
+/// upserts.
+#[allow(dead_code)]
+const UNION_KEY_ACCESS_FILES: &[WorkspaceFileSpec] = &[WorkspaceFileSpec {
+    path: "/fixtures/union_key_access.ts",
+    source: UNION_KEY_ACCESS_SOURCE,
+}];
+
+/// The 9-file workspace the `mode_boundary_invariants.rs` re-export keyof row
+/// upserts: the principal consumer + the 6 link hops + the barrel + the leaf
+/// (`Foo`'s terminal `{ b: 1 }` body lives 7 hops away).
+#[allow(dead_code)]
+const MODE_BOUNDARY_REEXPORT_FILES: &[WorkspaceFileSpec] = &[
+    WorkspaceFileSpec {
+        path: "/fixtures/mode_boundary_reexport_principal.ts",
+        source: MODE_BOUNDARY_REEXPORT_PRINCIPAL_SOURCE,
+    },
+    WorkspaceFileSpec {
+        path: "/fixtures/mode_boundary_reexport_link_1.ts",
+        source: MODE_BOUNDARY_REEXPORT_LINK_1_SOURCE,
+    },
+    WorkspaceFileSpec {
+        path: "/fixtures/mode_boundary_reexport_link_2.ts",
+        source: MODE_BOUNDARY_REEXPORT_LINK_2_SOURCE,
+    },
+    WorkspaceFileSpec {
+        path: "/fixtures/mode_boundary_reexport_link_3.ts",
+        source: MODE_BOUNDARY_REEXPORT_LINK_3_SOURCE,
+    },
+    WorkspaceFileSpec {
+        path: "/fixtures/mode_boundary_reexport_link_4.ts",
+        source: MODE_BOUNDARY_REEXPORT_LINK_4_SOURCE,
+    },
+    WorkspaceFileSpec {
+        path: "/fixtures/mode_boundary_reexport_link_5.ts",
+        source: MODE_BOUNDARY_REEXPORT_LINK_5_SOURCE,
+    },
+    WorkspaceFileSpec {
+        path: "/fixtures/mode_boundary_reexport_link_6.ts",
+        source: MODE_BOUNDARY_REEXPORT_LINK_6_SOURCE,
+    },
+    WorkspaceFileSpec {
+        path: "/fixtures/mode_boundary_reexport_barrel.ts",
+        source: MODE_BOUNDARY_REEXPORT_BARREL_SOURCE,
+    },
+    WorkspaceFileSpec {
+        path: "/fixtures/mode_boundary_reexport_leaf.ts",
+        source: MODE_BOUNDARY_REEXPORT_LEAF_SOURCE,
+    },
+];
+
+/// One `ResolveExpr`/`Expanded`/`DistributiveIdentity` query spec for a keyof
+/// carve-out row (`keyof Root` / `Root[keyof Root]`). The shared resolver
+/// reduces the keyof family root to its terminal (literal key union / member
+/// value union); tsgo captures the SAME expansion through the
+/// distributive-identity probe scaffold — applied UNIFORMLY to the admitted
+/// keyof carve-out family, never branched on predicted display behavior.
+const fn keyof_carve_out_spec(
+    row_file: &'static str,
+    row_function: &'static str,
+    oracle_family: &'static str,
+    workspace_files: &'static [WorkspaceFileSpec],
+    primary_canonical: &'static str,
+    symbol: &'static str,
+) -> QuerySpec {
+    QuerySpec {
+        row_file,
+        row_function,
+        query_ordinal: 0,
+        oracle_family,
+        workspace_files,
+        primary_canonical,
+        host_project: HostProjectSpec {
+            project_root: "/",
+            workspace_root: "/",
+            tsconfig_path: "/oracle.tsconfig.json",
+            host_setup_kind: HostSetupKindSpec::Standalone,
+        },
+        query_helper: QueryHelperSpec::ResolveExpr {
+            symbol,
+            type_args: &[],
+            projection_mode: ProjectionModeSpec::Expanded,
+            probe_rhs: ProbeRhsSpec::DistributiveIdentity,
+        },
+        source_locator: SourceLocatorSpec {
+            reference_canonical: primary_canonical,
+            reference_name: symbol,
+            symbol_space: SymbolSpace::Type,
+        },
+        oracle_value_kind: OracleValueKindSpec::StructuredTypeExpr,
+    }
+}
+
 /// The workspace-file set the `mapped_modifiers.rs` `-?` row upserts.
 #[allow(dead_code)]
 const MAPPED_MODIFIERS_FILES: &[WorkspaceFileSpec] = &[WorkspaceFileSpec {
@@ -820,9 +1020,11 @@ const MAPPED_MODIFIERS_FILES: &[WorkspaceFileSpec] = &[WorkspaceFileSpec {
 }];
 
 /// The closed registry table. Holds the lifted rows — the two index-signature
-/// publication queries, the two built-in modifier-utility queries, and the
+/// publication queries, the two built-in modifier-utility queries, the
 /// three U2 IndexedAccess-reduction carve-out queries (two terminal indexed-access
-/// projections + one wide/deep literal-union projection)
+/// projections + one wide/deep literal-union projection), the mapped-modifier
+/// `-?` query, and the three keyof-expansion carve-out queries captured through
+/// the distributive-identity scaffold
 /// (`docs/arch/ts-compat-two-mode-model.md`, `docs/arch/u0-oracle-harness-design.md`).
 #[allow(dead_code)]
 pub(crate) const ORACLE_QUERY_SPECS: &[QuerySpec] = &[
@@ -873,6 +1075,30 @@ pub(crate) const ORACLE_QUERY_SPECS: &[QuerySpec] = &[
         MAPPED_MODIFIERS_FILES,
         "/fixtures/mapped_modifiers.ts",
         "RemoveOptionalResult",
+    ),
+    keyof_carve_out_spec(
+        "typescript_rules.rs",
+        "typescript_rules_keyof_materializes_literal_key_union",
+        "typescript_rules",
+        TYPESCRIPT_RULES_FILES,
+        "/fixtures/typescript-rules.ts",
+        "KeyOfRules",
+    ),
+    keyof_carve_out_spec(
+        "mode_boundary_invariants.rs",
+        "mode_boundary_keyof_across_reexport_chain_resolves_all_keys",
+        "mode_boundary_invariants",
+        MODE_BOUNDARY_REEXPORT_FILES,
+        "/fixtures/mode_boundary_reexport_principal.ts",
+        "WantedKeys",
+    ),
+    keyof_carve_out_spec(
+        "union_key_access.rs",
+        "union_key_access_keyof_self_projects_full_value_union",
+        "union_key_access",
+        UNION_KEY_ACCESS_FILES,
+        "/fixtures/union_key_access.ts",
+        "EveryMember",
     ),
 ];
 

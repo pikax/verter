@@ -3,7 +3,9 @@
 //! TDD-red tests for `T["a" | "b"]` and `T[keyof T]`, plus the
 //! `Pick<T, "a" | "b">` companion.
 
+use super::oracle;
 use super::support::*;
+use verter_session_oracle_macro::oracle_row;
 
 const UNION_KEY_ACCESS: &str = include_str!("fixtures/union_key_access.ts");
 
@@ -41,36 +43,20 @@ fn union_key_access_two_key_union_projects_member_type_union() {
     assert_query_mode(&record, ProjectionModeTag::Expanded);
 }
 
+// LIFTED: `EveryMember = Surface[keyof Surface]` projects every member type
+// into the value union `string | number | boolean | null`. The lifted body is
+// the registry-keyed `oracle::run_row` shared-driver call the `#[oracle_row]`
+// macro synthesizes: it resolves Verter's `Expanded` projection and compares
+// it against the checked-in tsgo snapshot (the `KeyofSelfIndex` source-root
+// carve-out; captured through the distributive-identity scaffold, applied
+// uniformly to the keyof carve-out family). The DAG-terminal producer is
+// `IndexedAccessUnionDistribution` (block `U2.INDEXED_ACCESS`); the measured
+// dispatch trace is
+// `[ResolveDecl, Instantiate, IndexedAccess, KeyOf, NormalizeUnion]`, proven
+// live by `lifted_row_mechanism_trace_matches_manifest`.
+#[oracle_row]
 #[test]
-#[ignore = "the U2 IndexedAccess-reduction bridge has landed (operator-bodied alias reduction in resolve_named_symbol); the remaining blocker is `T[keyof T]` value-union — reducing keyof-self indexed access to the structural value-type union of all members"]
-fn union_key_access_keyof_self_projects_full_value_union() {
-    // TS7 contract: `Surface[keyof Surface]` projects every member type into
-    // a union: `number | string | boolean | null`.
-    let host = make_host_with_footprint();
-    upsert(&host);
-
-    let (expr, record) = resolve_expr(
-        &host,
-        "/fixtures/union_key_access.ts",
-        "EveryMember",
-        &[],
-        ProjectionMode::Expanded,
-    );
-
-    assert_union_contains_primitive(&expr, PrimitiveName::Number);
-    assert_union_contains_primitive(&expr, PrimitiveName::String);
-    assert_union_contains_primitive(&expr, PrimitiveName::Boolean);
-    assert_union_contains_primitive(&expr, PrimitiveName::Null);
-    let TypeExpr::Union(types) = &expr else {
-        panic!("expected union, got {expr:?}");
-    };
-    assert_eq!(
-        types.len(),
-        4,
-        "expected exactly four arms (number, string, boolean, null), got {types:?}"
-    );
-    assert_query_mode(&record, ProjectionModeTag::Expanded);
-}
+fn union_key_access_keyof_self_projects_full_value_union() {}
 
 #[test]
 fn union_key_access_pick_companion_publishes_selected_subset() {
