@@ -62,8 +62,9 @@ authority via the standard subplan header (below). The no-orphan-documents targe
 `U0`/`U2`/`U3`/`U6`/`U8`/`U10`–`U15` blocks — and every subplan links back to the
 unified plan and to this parent architecture. The unified plan no longer carries a
 stale `/tmp` coverage path; the flow-return coverage detail lives in
-`native-flow-return.md`, the §10.4 row-exact coverage table (the U0-FINISH-B generated
-artifact), and the §10.4.1 row→block_id partition (its hand-authored input). That index was a
+`native-flow-return.md`, the §10.4 row-exact coverage table (the `U13`/`U15`-gated generated
+residual — NOT built; it did not land with U0-FINISH-B), and the §10.4.1 row→block_id
+partition (the landed hand-authored input the manifest generator parses). That index was a
 DELIVERABLE owned by the unified-plan integration step (see "Cross-reference /
 doc-update obligations") and is now **done**.
 
@@ -842,7 +843,9 @@ the SHARED program-analysis env context covering env + substitution. The flow /
 contextual demand axis is NOT folded into this shared context — it lives as a
 PER-VARIANT key field so neither variant carries the other's dead axis:
 `FlowNarrowingAt` carries `flow: FlowNarrowingKey`, `ContextualTypeAt` carries
-`contextual: ContextualTypingKey` (design §417/418 demand-axes column). The shared
+`contextual: ContextualTypingKey` (the locked `u2-query-value-domain-design.md` §2.2
+per-key identity table — the "Allowed demand axes" column on the `FlowNarrowingAt` /
+`ContextualTypeAt` rows). The shared
 `substitution` axis stays on the context (both variants depend on it):
 
 ```rust
@@ -906,7 +909,9 @@ named R21/R6-clean `*Context` struct or inline split-env/projection context), (3
 value domain (the `SemanticQueryValue` arm), (4) cross-context guard, and (5)
 admission / budget behavior. The table is generated from the canonical key list by a
 dedicated `cargo run` generator and checked in (same generated-not-hand-maintained
-discipline as the oracle rows, the proof registry, and the row-test wrapper).
+discipline as the checked-in oracle snapshots; the §10.3 proof registry itself landed
+HAND-AUTHORED pure data — the locked design superseded its generated shape — see the
+§10.3 landed-shape note).
 
 | Variant | Lifecycle | Context shape | Value domain | Cross-context guard | Admission / budget |
 |---|---|---|---|---|---|
@@ -1040,7 +1045,8 @@ The presets are a closed convenience surface; a demand that does not fit a prese
 constructs a `(ProjectionDemand, EvalPolicy)` point directly rather than adding a
 sixth mode rung.
 
-**Cache satisfaction / backfill is by LATTICE RELATION, not enum ordering.** A cached
+**Cache satisfaction / backfill is by RECORDED MATERIALISED POINT under the lattice
+relation, not enum ordering.** A cached
 entry's `satisfied_projection` is the `(ProjectionDemand, EvalPolicy)` point it
 actually materialised. A warm hit is served only when the cached point **dominates**
 (in the lattice partial order: a broader-or-equal demand under a compatible policy)
@@ -1055,9 +1061,16 @@ than "below" them. Guards:
 **`query_modes_are_presets_over_projection_demand_eval_policy`** (each of the five
 names resolves to exactly its `(ProjectionDemand, EvalPolicy)` preset; no mode name is
 a primary key dimension on any cache),
-**`cache_satisfaction_is_demand_lattice_not_enum_order`** (a warm hit / backfill is
-decided by the lattice dominance relation, not by mode-enum ordering; two incomparable
-demand points never satisfy each other), and
+the LANDED materialized-point satisfaction pair
+**`cache_satisfaction_is_materialized_point_not_nominal_demand`** +
+**`backfill_writes_only_recorded_materialized_points`** (a warm hit / backfill is
+decided by a RECORDED materialised `(path, point)` the compute actually produced
+dominating the request at the same path — the lattice is the algebra inside
+`cached_satisfies`, never mode-enum ordering and never a nominal-demand oracle; two
+incomparable demand points never satisfy each other; the formerly-planned
+`cache_satisfaction_is_demand_lattice_not_enum_order` is RETIRED in the landed pair's
+favor, its published-boundary residual landing at U10 as
+`result_db_published_boundary_serves_only_recorded_materialized_points`), and
 **`skeleton_is_typeparamshells_plus_carrier_stop_not_special_mode`** (the `Skeleton`
 preset is exactly `generic_open = TypeParamShells` + `carrier_stop`, with no
 special-cased semantic branch keyed on a `Skeleton` mode tag).
@@ -2586,17 +2599,26 @@ is created. Both tables live in this one module.
 > own block maps (`emit_block_rows`, `BLOCK_TO_REQUIRED_GUARDS`, `BLOCK_VERIFICATION_LABELS`,
 > the prereq/mechanism maps), NOT from §10.4.1. `--check` regenerates all three files
 > (`typeinfo_ignored_test_manifest_rows.rs`, `typeinfo_additional_proof_rows.rs`,
-> `typeinfo_parity_blocks.rs`) from these inputs and byte-compares. What remains for the oracle/proof
-> gate (U0-FINISH-B, NOT yet built) is the executable proof registry, the row-test wrapper,
-> the reverse `cargo run` coverage-table generator, the §10.4 row-exact
-> capability→mechanism→proof coverage GATE (the registry + checking guards that DEFINE
-> completeness), and the TS7 oracle harness (the `ProofRequirement::Ts7Oracle` snapshots).
-> The §10.4.1 partition itself is NOT the unbuilt part.
+> `typeinfo_parity_blocks.rs`) from these inputs and byte-compares. The U0-FINISH-B
+> oracle/proof substrate is LANDED (built per the LOCKED
+> `docs/arch/u0-oracle-harness-design.md`): the executable proof registry
+> (`oracle_query_specs.rs` — hand-authored pure data per that design, not a generated
+> file), the lifted-row test wrappers (lifted bodies call the shared `oracle_core`
+> driver over their registry entries), and the TS7 oracle harness (the `oracle_gen`
+> snapshot generator + the checked-in `ProofRequirement::Ts7Oracle` snapshots). What
+> remains unbuilt is the §10.4 row-exact capability→mechanism→proof coverage table —
+> the reverse `cargo run` coverage-table generator and its checking guards
+> (`capability_rows_map_to_expected_query_fact_mechanisms` /
+> `every_manifest_row_has_non_placeholder_mechanism_and_executable_proof`), today
+> forward-declared required-guard NAMES on the generated `U13.PROJECTION` /
+> `U15.FINAL_LIFT` block-contract rows with no implementing test — they gate at those
+> blocks' landing. The §10.4.1 partition itself landed with U0-FINISH-A.
 
 ### 10.1 Two SEPARATE tables: the binding 362 vs additional coverage
 
-The binding manifest total is EXACTLY 362 test-site rows (post-lift: 355 `Ignored` +
-7 `Lifted`). Full-parity coverage adds a
+The binding manifest total is EXACTLY 362 test-site rows (the `Ignored`/`Lifted` split
+is DERIVED from the live `IgnoreStatus` column, never frozen in this doc).
+Full-parity coverage adds a
 CLOSED set of exactly 7 coverage-only `AdditionalProofRow`s = the 6 JSX no-new-key
 submatrix rows (owned by `U2.JSX_FOUNDATIONS`) + the 1 mapped companion
 `mapped_modifier_minus_optional_preserves_explicit_undefined_on_required_property`
@@ -2604,9 +2626,10 @@ submatrix rows (owned by `U2.JSX_FOUNDATIONS`) + the 1 mapped companion
 incoherent if the binding 362 and the additional fixtures share ONE table and ONE
 `EXPECTED_TOTAL_IGNORED_COUNT` — additional rows would either break the exact 362
 count/bijection or be untracked. The ledger therefore SPLITS into two tables:
-`IgnoredTestRow` holds EXACTLY 362 test-site rows total (count-guarded at 362) — post-lift
-355 carry `status: Ignored` (bijective with the live source `#[ignore]`s) and 7 carry
-`status: Lifted` (no live `#[ignore]`, oracle-backed) — and a SEPARATE coverage-only `AdditionalProofRow`
+`IgnoredTestRow` holds EXACTLY 362 test-site rows total (count-guarded at 362) — each row
+carries `status: Ignored` (bijective with the live source `#[ignore]`s) or
+`status: Lifted` (no live `#[ignore]`, oracle-backed); the split is derived from the live
+manifest, never frozen here — and a SEPARATE coverage-only `AdditionalProofRow`
 table holds EXACTLY the 7 closed coverage rows above. `AdditionalProofRow`s are EXCLUDED
 from the ignored-count + bijection guards (they are not source-`#[ignore]` test sites, so
 they neither add to `EXPECTED_TOTAL_IGNORED_COUNT` nor participate in the bijection) BUT
@@ -2617,7 +2640,7 @@ existing ignored row stays in that `IgnoredTestRow` (it is not duplicated); only
 genuinely NEW fixtures above are `AdditionalProofRow`s.
 
 ```rust
-struct IgnoredTestRow {              // EXACTLY 362 test-site rows total (count-guarded): 355 Ignored (bijective with source #[ignore]s) + 7 Lifted; 13 fields
+struct IgnoredTestRow {              // EXACTLY 362 test-site rows total (count-guarded); the Ignored (bijective with source #[ignore]s) / Lifted split is derived from IgnoreStatus, never frozen; 13 fields
     file: &'static str,
     function: &'static str,
     substrate: TargetSubstrate,
@@ -2677,21 +2700,28 @@ count-consistent, and CI runs the full workspace gate against the branch's `Lift
 ### 10.2 `ProofRequirement` — every row resolves to an executable proof
 
 > **State note:** the `ProofRequirement` enum + the `proof` field on every row ARE built
-> (carried on the live `IgnoredTestRow` / `AdditionalProofRow`). The proof-resolution GATE
-> described in §10.2–§10.4 — the generated oracle snapshots, the generated proof registry,
-> the generated row-test wrapper, and the guards `every_oracle_id_resolves_to_checked_in_snapshot`
-> / `every_guard_or_row_proof_resolves_to_default_suite_test` / `lifted_row_executes_declared_proof`
-> / `every_manifest_row_has_non_placeholder_mechanism_and_executable_proof` /
-> `capability_rows_map_to_expected_query_fact_mechanisms` /
-> `block_rows_cannot_lift_without_complete_coverage` — is the U0-FINISH-B design and is NOT
-> yet built: NONE of these six guards has an implementing test on this tree. Four of them
-> (`every_oracle_id_resolves_to_checked_in_snapshot`,
-> `every_guard_or_row_proof_resolves_to_default_suite_test`, `lifted_row_executes_declared_proof`,
-> `block_rows_cannot_lift_without_complete_coverage`) are NOT referenced by any
-> `BlockContractRow.required_guards`. The other two — `capability_rows_map_to_expected_query_fact_mechanisms`
-> (on `U13.PROJECTION` + `U15.FINAL_LIFT`) and `every_manifest_row_has_non_placeholder_mechanism_and_executable_proof`
-> (on `U15.FINAL_LIFT`) — appear in `required_guards` as forward-declared guard NAMES only, with
-> no implementing test yet. §10.2–§10.4 describe their intended behavior, not the current tree.
+> (carried on the live `IgnoredTestRow` / `AdditionalProofRow`), and the §10.2–§10.3
+> proof-resolution substrate is LANDED (U0-FINISH-B, per the LOCKED
+> `docs/arch/u0-oracle-harness-design.md`): the checked-in oracle snapshots, the proof
+> registry (`oracle_query_specs.rs` — hand-authored pure data; the locked design
+> superseded the "generated registry" shape), and the lifted-row driver wrappers,
+> guarded by the landed suite (`registry_entries_bind_to_their_snapshots_and_lifted_rows`,
+> `registry_snapshot_fidelity_engine_is_discriminating`,
+> `lifted_row_audit_query_mode_matches_spec`, `lifted_row_mechanism_trace_matches_manifest`,
+> `lifted_row_trace_engine_is_discriminating`). Those landed guards carry the lifted-row
+> semantics the originally-planned `every_oracle_id_resolves_to_checked_in_snapshot` /
+> `lifted_row_executes_declared_proof` names described — scoped to LIFTED rows per that
+> design's decision; the original names have no test fn of their own and are not
+> referenced by any `BlockContractRow.required_guards`. The §10.4 ALL-ROW coverage GATE
+> is NOT built: NONE of `capability_rows_map_to_expected_query_fact_mechanisms`,
+> `every_manifest_row_has_non_placeholder_mechanism_and_executable_proof`,
+> `every_guard_or_row_proof_resolves_to_default_suite_test`, or
+> `block_rows_cannot_lift_without_complete_coverage` has an implementing test on this
+> tree. The first two appear in `required_guards` as forward-declared guard NAMES only
+> (`capability_rows_map_to_expected_query_fact_mechanisms` on `U13.PROJECTION` +
+> `U15.FINAL_LIFT`; `every_manifest_row_has_non_placeholder_mechanism_and_executable_proof`
+> on `U15.FINAL_LIFT`) and gate at those blocks' landing; the latter two are referenced
+> in prose only. §10.4 describes the gate's intended behavior, not the current tree.
 
 Every row in BOTH tables carries `proof: ProofRequirement`, not a mandatory per-row
 TS-oracle plus a mandatory per-row negative guard. A mandatory per-row TS-oracle is
@@ -2717,9 +2747,13 @@ consumes" mechanical:
   `StructuralGuard` / `NegativeGuard` / `OracleAndGuard` row) and every `RowTestGuard`
   resolves to a test that runs in the DEFAULT suite (not feature-gated, not ignored).
 - **`lifted_row_executes_declared_proof`** — every `Lifted` row's test actually CONSUMES
-  its declared `ProofRequirement`, enforced STATICALLY through the generated row-test
-  wrapper (below): every `Lifted` row is represented by exactly one generated wrapper
-  invocation that binds the row to its declared `ProofRequirement` and executes the exact
+  its declared `ProofRequirement`, enforced STATICALLY through the §10.3
+  proof-consumption rail (below; landed under U0-FINISH-B as the locked design's
+  registry-bound driver-calling row bodies — see the §10.3 landed-shape note): every
+  `Lifted` row is represented by exactly one generated wrapper
+  invocation (in the landed shape, the registry-keyed driver call the `#[oracle_row]`
+  proc-macro synthesizes as the row's own `#[test]` body — not a codegen-registry wrapper
+  file) that binds the row to its declared `ProofRequirement` and executes the exact
   oracle/guard/row proof inside that row's own test, and no `Lifted` row is backed by an
   ad-hoc hand-written `#[test]` outside the wrapper. It does NOT depend on observing tokens
   recorded by other row tests at runtime: default Rust tests run independently and
@@ -2727,6 +2761,18 @@ consumes" mechanical:
   consumption a static, per-row, generation-time-checked property.
 
 ### 10.3 Proof-consumption mechanism (generated wrapper, not runtime aggregation)
+
+> **LANDED SHAPE (U0-FINISH-B).** This mechanism landed in the LOCKED
+> `u0-oracle-harness-design.md`'s superseding shape: a HAND-AUTHORED pure-data registry
+> (`oracle_query_specs.rs`) whose lifted row bodies call the shared `oracle_core` driver
+> directly — no generated registry file and no codegen'd wrapper macro. The static
+> binding/consumption property below is enforced by the landed guard suite
+> (`registry_entries_bind_to_their_snapshots_and_lifted_rows`, the
+> `registry_snapshot_fidelity_*` / `lifted_row_*` guards). The bullets below state the
+> original generated-artifact prescription and remain the rail's REQUIREMENTS; where
+> they say "generated", the landed hand-authored substrate satisfies them in the locked
+> design's shape (the generated checked-in artifacts on this rail are the oracle
+> snapshots, produced by the gated `oracle_gen` `cargo run` generator).
 
 The consumption guard is mechanical only with a concrete artifact tying each row's own
 test back to its declared `ProofRequirement`, statically checkable. The mechanism is a
@@ -2757,8 +2803,10 @@ aggregation:
 
 The proof guards prove a row's declared proof EXISTS, RUNS, and is CONSUMED — but NOT that
 the row is wired to the architecture MECHANISM intended to lift it. To make 362-row
-full-parity completeness MECHANICAL, the U0-FINISH-B design is a row-exact coverage table
-(GENERATED FROM and CHECKED against the manifest — NOT yet built; today the built artifact is
+full-parity completeness MECHANICAL, the design is a row-exact coverage table
+(GENERATED FROM and CHECKED against the manifest — NOT yet built; it is the one §10
+deliverable that survived U0-FINISH-B's landing as a residual, forward-declared on the
+`U13.PROJECTION` / `U15.FINAL_LIFT` block-contract rows; today the built artifact is
 the §10.4.1 hand-authored partition the Python generator reads) that maps EVERY manifest row
 through its full mechanism chain:
 
@@ -2790,8 +2838,9 @@ row (file::function)
   §10.4.1; each subplan's `Exact test rows lifted` list is the per-block slice of that
   partition. (The one-coverage-row-per-manifest-row coverage table that maps every row's
   `mechanism_id` and fails generation on a placeholder is the reverse `cargo run`
-  coverage-table generator — a table generated FROM the manifest, in the same discipline as
-  the oracle rows / proof registry / row-test wrapper — a `U0-FINISH-B` deliverable that is
+  coverage-table generator — a table generated FROM the manifest, in the same
+  generated-artifact discipline as the checked-in oracle snapshots — the one §10
+  deliverable that did NOT land with U0-FINISH-B (the `U13`/`U15`-gated residual) and is
   NOT yet built; today the manifest's `block_id` column is generated FROM §10.4.1, not the
   other way around.)
 - **Completeness is DEFINED by this table over the 362 `IgnoredTestRow`s PLUS every
@@ -2801,13 +2850,16 @@ row (file::function)
   the guard REJECTS as a placeholder (an unimplemented / `todo` / `unknown` mechanism — a
   genuine gap), or (b) a genuinely NEW fixture not among the 362, handled by the SEPARATE
   `AdditionalProofRow` table. There is no third "we think it's covered" state.
-- **Gate: a block's rows cannot flip to `Lifted` until their coverage is complete +
-  non-placeholder.** The coverage table is a CI PRECONDITION on every block branch: the
-  branch may transition its rows `Ignored → Lifted` (and strip their source `#[ignore]`s)
-  only when every one of its rows has a non-placeholder `mechanism_id`, an executable
-  `ProofRequirement`, and a `semantic_queries`/facts mapping consistent with its capability.
-  The coverage guard runs in the full CI gate, so a branch that flips rows to `Lifted`
-  without complete coverage fails CI and cannot merge.
+- **Gate: complete + non-placeholder coverage, enforced from the `U13.PROJECTION` /
+  `U15.FINAL_LIFT` landings onward.** Once the coverage table lands, it is a CI
+  precondition on every subsequent block branch: the branch may transition its rows
+  `Ignored → Lifted` (and strip their source `#[ignore]`s) only when every one of its
+  rows has a non-placeholder `mechanism_id`, an executable `ProofRequirement`, and a
+  `semantic_queries`/facts mapping consistent with its capability; the coverage guard
+  then runs in the full CI gate, so a branch that flips rows to `Lifted` without
+  complete coverage fails CI and cannot merge. Rows lifted BEFORE the table lands ride
+  the landed §10.3 proof rail + the manifest guard suite and are covered retroactively
+  by the same all-row guards (see the close of this section).
 
 Two guards make this mechanical:
 
@@ -2830,15 +2882,18 @@ Two guards make this mechanical:
   inconsistent with its capability FAILS.
 
 The gate is enforced by **`block_rows_cannot_lift_without_complete_coverage`** (in the
-coverage guard set): the guard FAILS — and so fails CI on the block's branch, blocking the
-merge — for any block whose rows are flipped `Lifted` while their coverage is not complete +
-non-placeholder.
+coverage guard set — an unbuilt prose-only forward declaration that lands WITH the §10.4
+coverage gate): once landed, the guard FAILS — and so fails CI on the block's branch,
+blocking the merge — for any block whose rows are flipped `Lifted` while their coverage is
+not complete + non-placeholder.
 
 This closes the completeness class: 362-row full parity is not probed by sampling — it is the
 mechanical property "the generated coverage table is complete and non-placeholder over every
-manifest row in both tables, each mapped to the expected capability mechanism, before any
-block's rows lift" — while the binding 362 total stays a separate, exact count/bijection over
-the `IgnoredTestRow` table alone.
+manifest row in both tables, each mapped to the expected capability mechanism" — enforced
+from the `U13.PROJECTION` / `U15.FINAL_LIFT` gates onward (the table is the gated unbuilt
+residual; rows lifted before it lands are gated by the landed §10.3 proof rail and are
+covered retroactively by the same all-row guards when the table lands) — while the binding
+362 total stays a separate, exact count/bijection over the `IgnoredTestRow` table alone.
 
 ### 10.4.1 The authoritative U0 row → `block_id` partition (all 362 rows)
 
@@ -2878,7 +2933,8 @@ the two must agree row-for-row. The row-exact completeness GATE that will additi
 enforce this in-suite — `capability_rows_map_to_expected_query_fact_mechanisms` (each row's
 owning block matches its capability's expected mechanism), the bijection/count guards
 (§10.5), and `every_manifest_row_has_non_placeholder_mechanism_and_executable_proof` — is NOT
-yet built (U0-FINISH-B): `capability_rows_map_to_expected_query_fact_mechanisms` and
+yet built (the residual that survived U0-FINISH-B's landing, gated at `U13`/`U15`):
+`capability_rows_map_to_expected_query_fact_mechanisms` and
 `every_manifest_row_has_non_placeholder_mechanism_and_executable_proof` appear as
 forward-declared guard NAMES in `BlockContractRow.required_guards` (on `U13.PROJECTION` /
 `U15.FINAL_LIFT`) but have no implementing test on this tree; today the built check is the
@@ -2942,8 +2998,8 @@ The complete partition (each entry `file::function — substrate`):
 <!-- BEGIN U0 row→block coverage table (362 rows). [Marker name is a fixed parse contract
      consumed by scripts/gen-typeinfo-ignore-manifest.py parse_partition — do NOT rename.
      This region is §10.4.1: the HAND-AUTHORED row→block_id PARTITION (the generator INPUT),
-     NOT the distinct §10.4 row-exact coverage table, which is a U0-FINISH-B artifact generated
-     FROM the manifest.] HAND-AUTHORED authoritative source for the
+     NOT the distinct §10.4 row-exact coverage table, which is the U13/U15-gated generated
+     residual (NOT built; generated FROM the manifest when it lands).] HAND-AUTHORED authoritative source for the
      row→block_id PARTITION ONLY: the manifest generator (scripts/gen-typeinfo-ignore-manifest.py)
      READS this partition (parse_partition) to assign each IgnoredTestRow's block_id and EMITS
      crates/verter_session/tests/manifest_data/typeinfo_ignored_test_manifest_rows.rs. The
@@ -3407,7 +3463,8 @@ The complete partition (each entry `file::function — substrate`):
 ### 10.5 The exact-362 count and bijection
 
 `EXPECTED_TOTAL_IGNORED_COUNT` is ALWAYS exactly `count(IgnoredTestRow where status ==
-Ignored)`; it is 355 after the 7 lifts (362 rows total − 7 `Lifted`). It is NOT a frozen
+Ignored)` — DERIVED from the live row states (362 rows total − the live `Lifted` count;
+this doc never restates the split as a frozen number). It is NOT a frozen
 constant that lags the row states — it is the
 live count of `Ignored` `IgnoredTestRow`s, and the block branch that changes how many are
 `Ignored` updates it IN THE SAME BRANCH (and so in the same squash-merge) so the count guard
@@ -3417,16 +3474,15 @@ never observes a disagreement in any committed state. The count and bijection ar
 exactly equal `IgnoredTestRow`s with `status == Ignored`, and that set must also exactly equal
 `EXPECTED_TOTAL_IGNORED_COUNT`.
 
-> **Realized lifted-lifecycle state (7 rows lifted):** the `IgnoredTestRow` table holds 362 rows
-> total, of which 7 carry `status: IgnoreStatus::Lifted { block_id }` (the two index-signature
-> publication rows at `U2.QUERY_VALUE_DOMAIN` + the two built-in modifier-utility rows + the
-> wide/deep literal-union projection at `U2.MAPPED_TEMPLATE` + the two terminal indexed-access
-> projections at `U2.INDEXED_ACCESS`) and 355 carry `status: IgnoreStatus::Ignored`. The generator
-> emits each row's status (it unions live `#[ignore]` discovery with the lifted-row overrides); the
-> count guard pins the live-ignore count at 355. The lifted-row GENERATION + validation path — a
-> lifted row drops its `#[ignore]`, its status becomes `Lifted { block_id }`, and its body becomes
-> the registry-keyed `oracle::run_row` driver call proven against a checked-in tsgo snapshot — is
-> exercised by those seven lifts. The accounting below is the contract every further lift honours.
+> **Realized lifted-lifecycle state:** the `IgnoredTestRow` table holds 362 rows total; which
+> rows carry `status: IgnoreStatus::Lifted { block_id }` vs `Ignored` is DERIVED from the live
+> manifest (`manifest_data/typeinfo_ignored_test_manifest_rows.rs`) — this doc does not freeze
+> the split. The generator emits each row's status (it unions live `#[ignore]` discovery with
+> the lifted-row overrides); the count guard pins the live-ignore count at the derived
+> `count(status == Ignored)`. The lifted-row GENERATION + validation path — a lifted row drops
+> its `#[ignore]`, its status becomes `Lifted { block_id }`, and its body becomes the
+> registry-keyed `oracle::run_row` driver call proven against a checked-in tsgo snapshot — is
+> exercised by the landed lifts. The accounting below is the contract every further lift honours.
 
 The accounting is a single coupled edit on the block's branch:
 
@@ -3508,8 +3564,10 @@ block's branch:
   gate); `cargo clippy --workspace -- -D warnings`; `cargo fmt --all --check`.
   **JavaScript:** `pnpm test`; `pnpm install --frozen-lockfile`;
 - the coverage / proof gates (§10.4 — `every_manifest_row_has_non_placeholder_mechanism_and_executable_proof`,
-  `capability_rows_map_to_expected_query_fact_mechanisms`, `block_rows_cannot_lift_without_complete_coverage`,
-  the proof-registry / row-test-wrapper guards, the count + bijection guards §10.5);
+  `capability_rows_map_to_expected_query_fact_mechanisms`, `block_rows_cannot_lift_without_complete_coverage`
+  — these all-row coverage guards join the gate from the `U13.PROJECTION` / `U15.FINAL_LIFT`
+  landings onward; the landed §10.3 proof-registry / row-test-wrapper guards, the count +
+  bijection guards §10.5);
 - the required guards for the block (its `TYPEINFO_PARITY_BLOCKS.required_guards` + the
   Critical-rule guards (R6) for any new `(CRITICAL)` rule it introduces); and
 - the block-DAG / consumed-mechanism guard
@@ -3517,8 +3575,8 @@ block's branch:
 
 Because CI runs the FULL workspace gate against the branch's `Lifted` state (the block's
 `#[ignore]`s already removed on the branch), the lifted tests execute under the gate. A branch
-that flips rows `Lifted` without complete coverage, or whose lifted tests fail, or whose required
-guards fail, has RED CI and cannot merge. Green CI is necessary; the three-reviewer LAND (§11.3)
+that flips rows `Lifted` without complete coverage (once the §10.4 coverage gate has landed),
+or whose lifted tests fail, or whose required guards fail, has RED CI and cannot merge. Green CI is necessary; the three-reviewer LAND (§11.3)
 is the additional human/agent precondition.
 
 ### 11.3 Three-reviewer LAND (branch-protection accept gate)
@@ -3665,7 +3723,8 @@ prereq derivation (§14) read.
 
 The landing protocol is pinned by:
 `block_rows_cannot_lift_without_complete_coverage` (§10.4 — a branch flipping rows `Lifted`
-without complete coverage fails CI),
+without complete coverage fails CI; joins the gate when the §10.4 coverage gate lands at
+U13/U15),
 `landed_typeinfo_blocks_have_required_guards` (a landed block's required / Critical-rule guards
 are present and passing — the §11.5 done-predicate part 3),
 `no_vacuous_parent_u_block_landing` (§11.9),
@@ -4032,11 +4091,11 @@ The real un-ignore sets must be **row-exact in the manifest**, not inferred from
 - **Finished in U14/U15:** `basic.rs`, `menu_like.rs`, `message_list_like.rs`, `table_like.rs`.
 
 The guarantee over the 362 rows is the composition of: the two-table ledger (§10) with the exact-362 count + bijection (§10.5);
-the U0 row-exact capability→mechanism→proof coverage table (§10.4) that DEFINES completeness mechanically; the per-row executable
-`ProofRequirement` with the generated proof registry + row-test wrapper (§10.2, §10.3); the git/CI landing protocol (§11) —
+the U0 row-exact capability→mechanism→proof coverage table (§10.4 — the U13/U15-gated residual) that DEFINES completeness mechanically; the per-row executable
+`ProofRequirement` with the proof registry + row-test rail (§10.2, §10.3 — landed under U0-FINISH-B in the locked design's hand-authored shape); the git/CI landing protocol (§11) —
 branch per block → green CI (full Rust+JS gate + coverage/proof/required/DAG guards) → three-reviewer LAND → squash-merge with
 the `Typeinfo-Block:` trailer; the no-skip guarantee (§12); and the git/manifest-driven, parallel-safe resume protocol (§14). A
-block lifts only its exact manifest rows, its rows can flip `Lifted` only after its coverage is complete + non-placeholder, and
+block lifts only its exact manifest rows, its row-lift is gated by the landed §10.3 proof rail + the manifest guard suite (the §10.4 coverage gate enforces complete + non-placeholder coverage from the `U13.PROJECTION` / `U15.FINAL_LIFT` landings onward, retroactively over all rows), and
 it reaches `Lifted` + merged trailer only after a green CI gate over the exact branch content + the three-reviewer LAND — so the
 362-row parity is mechanically tracked from `Ignored` to `Lifted`, never skipped and never vacuously satisfied.
 
@@ -4148,7 +4207,11 @@ design-intent names for keys whose closure guards land alongside their reducers:
 ## Query keys — projection-demand / eval-policy lattice (query modes, §2.10)
 
 - `query_modes_are_presets_over_projection_demand_eval_policy`
-- `cache_satisfaction_is_demand_lattice_not_enum_order`
+- `cache_satisfaction_is_materialized_point_not_nominal_demand` (landed; supersedes the
+  retired planned `cache_satisfaction_is_demand_lattice_not_enum_order`)
+- `backfill_writes_only_recorded_materialized_points` (landed)
+- `result_db_published_boundary_serves_only_recorded_materialized_points` (the U10
+  published-boundary residual)
 - `skeleton_is_typeparamshells_plus_carrier_stop_not_special_mode`
 
 ## Flow — flow graph + demand planner + cycle
@@ -4237,12 +4300,22 @@ design-intent names for keys whose closure guards land alongside their reducers:
 
 ## Manifest ledger — proof + coverage
 
-- `every_oracle_id_resolves_to_checked_in_snapshot`
-- `every_guard_or_row_proof_resolves_to_default_suite_test`
-- `lifted_row_executes_declared_proof`
-- `every_manifest_row_has_non_placeholder_mechanism_and_executable_proof`
-- `capability_rows_map_to_expected_query_fact_mechanisms`
-- `block_rows_cannot_lift_without_complete_coverage` (a branch flipping rows `Lifted` without complete coverage fails CI)
+- `every_oracle_id_resolves_to_checked_in_snapshot` (LANDED in lifted-row-scoped form
+  under the locked `u0-oracle-harness-design.md` guard names:
+  `registry_entries_bind_to_their_snapshots_and_lifted_rows` +
+  `registry_snapshot_fidelity_engine_is_discriminating`; no test fn carries the
+  original name)
+- `every_guard_or_row_proof_resolves_to_default_suite_test` (NOT LANDED — prose-only
+  forward declaration, no implementing test, not in any `required_guards`)
+- `lifted_row_executes_declared_proof` (LANDED in lifted-row-scoped form under the
+  locked design's guard names: `lifted_row_mechanism_trace_matches_manifest` +
+  `lifted_row_audit_query_mode_matches_spec` + `lifted_row_trace_engine_is_discriminating`;
+  no test fn carries the original name)
+- `every_manifest_row_has_non_placeholder_mechanism_and_executable_proof` (NOT LANDED —
+  forward-declared in `required_guards` on `U15.FINAL_LIFT` only; gates at that landing)
+- `capability_rows_map_to_expected_query_fact_mechanisms` (NOT LANDED — forward-declared
+  in `required_guards` on `U13.PROJECTION` + `U15.FINAL_LIFT`; gates at those landings)
+- `block_rows_cannot_lift_without_complete_coverage` (a branch flipping rows `Lifted` without complete coverage fails CI — NOT LANDED; prose-only forward declaration, lands with the §10.4 coverage gate)
 - `ignored_test_row_table_holds_exactly_362_rows`
 - `additional_proof_row_table_holds_exactly_7_rows`
 - `semantic_query_name_mirror_matches_live_tag_set` (the `SemanticQueryName` mirror tracks the live `SemanticQueryKeyTag::ALL` variant set; carried in `U0.MANIFEST_SUBSTRATE`'s `BlockContractRow.required_guards` alongside the universal DAG guard, the two count guards `ignored_test_row_table_holds_exactly_362_rows` / `additional_proof_row_table_holds_exactly_7_rows`, and the three sibling FINISH-A structural guards `every_block_contract_row_carries_required_guards` / `typeinfo_manifest_files_are_byte_equal_to_regenerated_generator_output` / `key_owning_block_owner_mapping_is_pinned_closed_set` — the U0-FINISH-B proof/coverage guards are NOT in U0's `required_guards`)
@@ -4280,21 +4353,27 @@ landing/accept/rollback boundary those guards used to police.
 - **Pin the `@typescript/native-preview` npm dependency — DONE (U0-FINISH-A).** `package.json` + `pnpm-lock.yaml` pin the
   `@typescript/native-preview` npm dependency to `7.0.0-dev.20260526.1`; the floating `"latest"` range was removed and the
   lockfile resolves identically. `"latest"` was not a durable oracle contract, so the npm dependency is now pinned to the exact
-  oracle version. End-to-end oracle-TOOLCHAIN enforcement — CI prewarm + runtime tsgo-binary-version enforcement and the
-  `tsgo`-forbidden / default-test guard — remains U0-FINISH-B (the oracle execution path does not yet honor the pin).
-- **The oracle row generator** (deterministic `OracleId`, checked-in normalized snapshots, feature/env-gated regeneration) is a
-  required deliverable — U0-FINISH-B; the `tsgo`-execution-forbidden guard for runtime/default tests is a required deliverable —
-  U0-FINISH-B.
+  oracle version. End-to-end oracle-TOOLCHAIN enforcement — CI prewarm + runtime tsgo-version identity
+  (`oracle_core::identity::TSGO_VERSION` pinned on every snapshot) and the `tsgo`-forbidden / default-test guard — DONE
+  (U0-FINISH-B): the pin is enforced on the CONSUMPTION path (hermetic checked-in snapshots, tsgo-forbidden default
+  tests, version-stamped snapshot identity); the gated REGENERATION path's binary discovery stays version-agnostic (no
+  spawn-time assert — the honest residual).
+- **The oracle row generator** (deterministic `OracleId`, checked-in normalized snapshots, feature/env-gated regeneration) —
+  DONE (U0-FINISH-B: the `oracle_gen` `cargo run` generator + the checked-in snapshots); the `tsgo`-execution-forbidden guard
+  for runtime/default tests — DONE (U0-FINISH-B: `oracle_tsgo_forbidden.rs`).
 - **The git/CI landing protocol** (§11) is the required execution-framework deliverable: the per-block branch discipline, the CI
   gate (the full Rust+JS workspace gate + the coverage/proof/required/DAG guards), the branch-protection three-reviewer LAND
   required approval, and the squash-merge `Typeinfo-Block:` trailer convention. There is NO tracked `.cutover-state.typeinfo_parity`
   namespace, NO two-namespace TOML schema, NO namespaced xtask, and NO crash-recovery machinery to deliver (§13) — git history +
   branch protection + `git revert` are the transaction log / accept gate / rollback.
-- **The generated artifacts** — the `SemanticQueryKeySpec` table (§2.9, owned by `U2.QUERY_VALUE_DOMAIN`), the proof registry +
-  typed row-test wrapper (§10.3), and the U0 row-exact coverage table (§10.4) — are each to be produced by a dedicated `cargo run`
-  generator and checked in (generated, not hand-maintained). NONE of these is built on the current tree: they are U0-FINISH-B
-  deliverables (the `SemanticQueryKeySpec` table lands with `U2.QUERY_VALUE_DOMAIN`), consistent with the not-yet-built state noted
-  at §10.2 / §10.4. U0-FINISH-A landed only the manifest ledger + DAG + the hand-authored §10.4.1 row→`block_id` partition input.
+- **The generated artifacts** — current per-artifact state: the `SemanticQueryKeySpec` table (§2.9) IS built (landed with
+  `U2.QUERY_VALUE_DOMAIN`: the `gen-query-key-spec` `cargo run` generator + the checked-in `query_key_spec_table.txt`). The §10.3
+  proof registry + row-test wrappers ARE built (U0-FINISH-B), in the LOCKED `u0-oracle-harness-design.md` shape — a hand-authored
+  pure-data registry (`oracle_query_specs.rs`) whose lifted bodies call the shared `oracle_core` driver, not a generated registry
+  file; the generated checked-in artifacts on that rail are the oracle snapshots (the `oracle_gen` `cargo run` generator). The U0
+  row-exact coverage table (§10.4) is NOT built — the residual that survived U0-FINISH-B's landing, forward-declared on the
+  `U13.PROJECTION` / `U15.FINAL_LIFT` block-contract rows (§10.2 / §10.4). U0-FINISH-A landed the manifest ledger + DAG + the
+  hand-authored §10.4.1 row→`block_id` partition input.
 
 # Cross-reference / doc-update obligations
 
@@ -4320,7 +4399,7 @@ unified-plan edits are applied directly in `semantic-db-overhaul-unified-remaini
   - **(b) Replace the "no-op 4-field-schema confirm" U0 entry with the extended two-table ledger — DONE.** The unified plan's U0
     entry now describes the extended ledger this architecture requires: the two-table ledger (`IgnoredTestRow` extended schema +
     the separate coverage-only `AdditionalProofRow` table — §10.1), `IgnoreStatus` (binary `Ignored` / `Lifted`),
-    `ProofRequirement`, the proof registry + row-test wrapper, the §10.4 row-exact coverage table (generated from the §10.4.1 row→block_id partition), and the git/CI
+    `ProofRequirement`, the proof registry + row-test rail, the §10.4 row-exact coverage table (the U13/U15-gated residual, generated from the manifest — whose `block_id` column the generator parses from the hand-authored §10.4.1 partition), and the git/CI
     landing protocol (§§11–14) — branch per block → green CI → three-reviewer LAND → squash-merge with the `Typeinfo-Block:`
     trailer (no tracked `.cutover-state.typeinfo_parity` cursor; git=log, branch-protection=accept, revert=rollback).
   - **(c) Require ALL 362 `IgnoredTestRow`s lifted in U15 + the §9 terminal checklist (not a majority/fraction) — DONE.** The
@@ -4380,8 +4459,9 @@ unified-plan edits are applied directly in `semantic-db-overhaul-unified-remaini
   across object excess properties, readonly arrays, and contextual literal widening is oracle-pinned before lift.
 - **Manifest proof model:** `proof: ProofRequirement` per row, not a mandatory per-row TS oracle plus per-row negative guard.
   Non-TS-oracle rows use `StructuralGuard` / `NegativeGuard` / `RowTestGuard`. No `NotTsOracleApplicable` escape hatch; every row
-  resolves to an executable proof, and every `Lifted` row's own test consumes its declared proof via the generated row-test
-  wrapper (not runtime cross-test token aggregation, which is unsound under unordered Rust tests).
+  resolves to an executable proof, and every `Lifted` row's own test consumes its declared proof via the §10.3
+  proof-consumption rail (landed shape: the registry-bound driver-calling row body; not runtime cross-test token
+  aggregation, which is unsound under unordered Rust tests).
 - **Performance:** every hot reducer carries a typed budget (`RelationBudget`, `KeyspaceBudget`, apparent-type member-demand
   index, `CallResolutionBudget`, `FlowSliceBudget`) with `BudgetExceeded` non-admission, plus recursion-storm controls; each
   non-`FlowReturn` budget carries a named three-layer non-admission guard matching the `FlowReturn` rule.

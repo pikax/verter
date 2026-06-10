@@ -3,7 +3,7 @@
 Parent architecture: docs/arch/native-typeinfo-parity.md
 Sequencing authority: docs/arch/semantic-db-overhaul-unified-remaining-plan.md
 Owning U-block(s): U3, U8, U10, U11, U12, U13
-Prerequisites: U0 (the manifest / ledger / coverage substrate that gates every block's row-lift via the CI coverage gate — `docs/arch/native-typeinfo-parity-u2-reducers.md::U0.MANIFEST_SUBSTRATE`); U2 (the whole reducer + typed-value-domain + `SemanticQueryKeySpec` parent — `docs/arch/native-typeinfo-parity-u2-reducers.md`); U6 (the demand-sliced flow / call solver — `docs/arch/native-flow-return.md`). U1 / U4 / U5 (the persistent cache-runtime node substrate, the scheduler DAG, the artifact-store rehoming) are non-parity prerequisites depended upon, not owned here.
+Prerequisites: U0 (the manifest / ledger / coverage substrate that gates every block's row-lift via the manifest guard suite, with the §10.4 coverage gate enforcing at `U13.PROJECTION` / `U15.FINAL_LIFT` — `docs/arch/native-typeinfo-parity-u2-reducers.md::U0.MANIFEST_SUBSTRATE`); U2 (the whole reducer + typed-value-domain + `SemanticQueryKeySpec` parent — `docs/arch/native-typeinfo-parity-u2-reducers.md`); U6 (the demand-sliced flow / call solver — `docs/arch/native-flow-return.md`). U1 / U4 / U5 (the persistent cache-runtime node substrate, the scheduler DAG, the artifact-store rehoming) are non-parity prerequisites depended upon, not owned here.
 Consumers: U14 / U15 (framework adapters, integrations, final lift — `docs/arch/native-typeinfo-parity-adapters-final-lift.md`) consume the exporter (U12), the published `GraphTypeNode` projection (U13), the public relation / session surfaces (U11), and the wire payload (U8). The LSP, MCP, unplugin, playground, and `@verter/component-meta` host-backed consumers read the U12 exporter + U13 projection + U11 session surfaces.
 Progress ledger: crates/verter_session/tests/typeinfo_ignored_test_manifest.rs
 
@@ -69,8 +69,10 @@ parent and are referenced by section number.
 Every block contract uses the parent's per-block contract template (PART 2 §9).
 "Done" for any block is the parent's done predicate (PART 2 §11.5 / §11.7 — its
 `Typeinfo-Block:` trailer merged + rows `Lifted` + required guards present); a
-block's rows may flip `Lifted` only after their coverage is complete and
-non-placeholder (PART 2 §10.4); landing is the git/CI protocol — branch per block →
+block's row-lift is gated by the manifest guard suite + the landed §10.3 proof
+rail, with the §10.4 coverage gate (complete + non-placeholder coverage)
+enforcing from the `U13.PROJECTION` / `U15.FINAL_LIFT` landings onward and
+covering earlier-lifted rows retroactively (PART 2 §10.4); landing is the git/CI protocol — branch per block →
 green CI → three-reviewer LAND → squash-merge with the `Typeinfo-Block:` trailer
 (PART 2 §§11–14). None of that machinery is re-specified here.
 
@@ -176,7 +178,7 @@ Verification commands:
 - `cargo test --package verter_audit --test request_kind_payload_parity` (additive audit envelope).
 - `cargo test --package verter_session --test g_type typeinfo_request_validation` (closed schema-version + exhaustive structured-expression).
 - Regenerate the TS bindings via the workspace `buf` + `oxfmt` binaries before the freshness test.
-- The full workspace gate (the CI gate — the complete Rust **AND** JavaScript gate, green only when BOTH pass; PART 2 §11.2): `cargo test --workspace --tests`; `cargo clippy --workspace -- -D warnings`; `cargo fmt --all --check`; `pnpm test`; `pnpm install --frozen-lockfile`.
+- The full workspace gate (the CI gate — the complete Rust **AND** JavaScript gate, green only when BOTH pass; PART 2 §11.2): `cargo nextest run --workspace` + `cargo test -p verter_session --tests` (the canonical Rust pair — bare `cargo test --workspace --tests` silently skips the verter_session integration suite and is NOT the gate); `cargo clippy --workspace -- -D warnings`; `cargo fmt --all --check`; `pnpm test`; `pnpm install --frozen-lockfile`.
 - `node scripts/gen-corpus-audit-tests.mjs` (idempotent; audit-record schema/fixtures changed).
 - Commit cadence / review gate: PARENT-UNIFORM — the uniform discipline for EVERY block in this subplan (parent PART 2 §11.11 / §11.12), stated once and not restated per block: each block lands as ONE squashed commit (WIP series during the work, no per-commit gate) after the three-reviewer LAND verdict (1 Claude Code + 2 codex).
 
@@ -256,7 +258,7 @@ Exit acceptance:
 
 Verification commands:
 - `cargo test --package verter_session` cross-file / route / budget / cache-discipline tests (`semantic_query_memo`, `cache_schema`, `owner_import_surface`).
-- `cargo test --package verter_session --test typeinfo_ignored_test_manifest` (coverage gate for this block's rows).
+- `cargo test --package verter_session --test typeinfo_ignored_test_manifest` (manifest guard suite for this block's rows).
 - The block's lifted-row proofs via the generated wrapper (or `cargo test … -- --ignored` before the branch strips the `#[ignore]`s).
 - Full workspace gate (as U8); `node scripts/gen-corpus-audit-tests.mjs` if audit fixtures change.
 
@@ -279,7 +281,7 @@ Subplan: docs/arch/native-typeinfo-parity-cache-export-session.md
 Prerequisites: U3.CACHE_FACT_MODEL, U8.WIRE_SURFACE_CLOSURE, U2 (parent), U6 (parent).
 Blocked until: U3.CACHE_FACT_MODEL done (the result DB admits through U3's typed-admission rail) and U8.WIRE_SURFACE_CLOSURE done (the result DB caches the closed `TypeInfoGraphPayload` shape). The exporter (U12) and session surfaces (U11) read this DB; the mode/demand/expansion EXACTNESS gating it owns runs against the U2 reducer substrate.
 
-Context: The final typeinfo-graph result needs a query-identity final-result cache — `TypeInfoGraphResultDb` — that hands out immutable `Arc<TypeInfoGraphPayload>` values, validates the entry's `ReadSetSignature.facts` against the live `StoreView` on every warm hit, and admits cold cacheable nodes through singleflight (mirroring the existing `ComponentMetaResultDb` / `MaterializeStructureDb` / `RefCycleResultDb` discipline — the project-global cache final state, the fact-based cache architecture). Its query-identity key excludes content/version hashes and `fact_dep_signature` (R6) and includes `lib_env_hash` (the cached value depends on lib data — PART 1 cache rules). Beyond the DB, U10 owns the mode / demand / expansion-boundary EXACTNESS gating over the U2 reducers, stated over the **`ProjectionDemand` / `EvalPolicy` demand lattice** (PART 1 §2.10) of which the five mode names are public presets. The preset contract must hold exactly: `Identity` (`alias_preservation = Keep`) returns the alias declaration identity, not its body / not a miss; `Shallow` (`member_demand = SetOnly`, `operator_reduction = Leave`) exposes one shell level without recursive member-body expansion (operator carriers like `Pick<…>` stay `Ref` / unevaluated); `Expanded` (`member_demand = SetPlusBody` on the terminal hop) `keyof T` emits the member-name literal-union from T's SHALLOW surface without entering member bodies; `Navigate` runs the intermediate hops; `Skeleton` is exactly the `generic_open = TypeParamShells` + carrier-stop preset (not a special mode); re-export chains transit every intermediate hop without leaving unresolved `Ref` shells. The demand / expansion boundary must be path-precise (`Pick` does not load unpicked imports, `Omit` does not load the excluded import, inline / local / imported projection expands only the terminal path without sibling materialization). Cache satisfaction / backfill is by the demand-lattice **dominance relation** (PART 1 §2.10) — a cached demand point serves a warm hit only when it dominates the request, a broader result backfills only the narrower points it actually materialised, and two incomparable points (e.g. `Skeleton` / `TypeParamShells` vs a bound expansion) never satisfy each other — NOT by mode-enum ordering. These rows' coverage `block_id` is U10 — the U2 reducers must satisfy them, but the EXACTNESS gating is owned here (`docs/arch/native-typeinfo-parity-u2-reducers.md` → "Row-level-split capabilities"). This block exists now because the result DB caches what the exporter publishes, and the mode/demand exactness is the gate that confirms the U2 reducers are path-precise at the published boundary.
+Context: The final typeinfo-graph result needs a query-identity final-result cache — `TypeInfoGraphResultDb` — that hands out immutable `Arc<TypeInfoGraphPayload>` values, validates the entry's `ReadSetSignature.facts` against the live `StoreView` on every warm hit, and admits cold cacheable nodes through singleflight (mirroring the existing `ComponentMetaResultDb` / `MaterializeStructureDb` / `RefCycleResultDb` discipline — the project-global cache final state, the fact-based cache architecture). Its query-identity key excludes content/version hashes and `fact_dep_signature` (R6) and includes `lib_env_hash` (the cached value depends on lib data — PART 1 cache rules). Beyond the DB, U10 owns the mode / demand / expansion-boundary EXACTNESS gating over the U2 reducers, stated over the **`ProjectionDemand` / `EvalPolicy` demand lattice** (PART 1 §2.10) of which the five mode names are public presets. The preset contract must hold exactly: `Identity` (`alias_preservation = Keep`) returns the alias declaration identity, not its body / not a miss; `Shallow` (`member_demand = SetOnly`, `operator_reduction = Leave`) exposes one shell level without recursive member-body expansion (operator carriers like `Pick<…>` stay `Ref` / unevaluated); `Expanded` (`member_demand = SetPlusBody` on the terminal hop) `keyof T` emits the member-name literal-union from T's SHALLOW surface without entering member bodies; `Navigate` runs the intermediate hops; `Skeleton` is exactly the `generic_open = TypeParamShells` + carrier-stop preset (not a special mode); re-export chains transit every intermediate hop without leaving unresolved `Ref` shells. The demand / expansion boundary must be path-precise (`Pick` does not load unpicked imports, `Omit` does not load the excluded import, inline / local / imported projection expands only the terminal path without sibling materialization). Cache satisfaction / backfill is by the LANDED materialized-point model (PART 1 §2.10): a warm hit requires a RECORDED materialised `(path, point)` — the candidate's `MemoEntry.satisfied_projection` set, what the compute actually produced — to dominate the request at the same path (`cached_satisfies(MemoEntry.satisfied_projection, requested_point_for_key(key))`); a broader result backfills only the recorded materialized points it actually produced; two incomparable points (e.g. `Skeleton` / `TypeParamShells` vs a bound expansion) never satisfy each other; the demand lattice is the algebra INSIDE that check — never a nominal-demand oracle, never mode-enum ordering. These rows' coverage `block_id` is U10 — the U2 reducers must satisfy them, but the EXACTNESS gating is owned here (`docs/arch/native-typeinfo-parity-u2-reducers.md` → "Row-level-split capabilities"). This block exists now because the result DB caches what the exporter publishes, and the mode/demand exactness is the gate that confirms the U2 reducers are path-precise at the published boundary.
 
 Changes (exact files / functions):
 - `crates/verter_session/src/project_type_store.rs` — add `TypeInfoGraphResultDb` to the `ProjectTypeStore` membership (the single project-global store accessed via `.project_type_store()`), keyed by query identity (R6: content-free query-identity + the five-dimension env split incl. `lib_env_hash`), storing immutable `Arc<TypeInfoGraphPayload>` candidates in the multi-candidate `FamilySlots` substrate (per-family adaptive cap via `candidate_cap()`; invalid-first/LRU-by-valid-hit eviction under the global memory ceiling — U3.CACHE_FACT_MODEL) with per-candidate `ReadSetSignature.facts` + `validated_at_generation`; warm reads validate the fact signature against the live `StoreView` before return; cold cacheable nodes singleflight; in-flight joiners validate the winner against their own view. Overlay-only results never populate this base/persistent result DB (session-scoped values stay session-scoped — `persistent_caches_never_admit_overlay_only_results`).
@@ -323,9 +325,9 @@ Exact test rows lifted:
 
 (13 rows: 5 `mode_boundary_invariants.rs` + 6 `expansion_boundaries.rs` + 2 `demand_boundary.rs` projection-exactness rows. These are mode / demand / expansion-EXACTNESS rows: the U2 reducers EXERCISE them — the U2 reducers are path-precise and member-demand aware — but their exactness gating `block_id` is this U10 block, not a U2 block, per `docs/arch/native-typeinfo-parity-u2-reducers.md` → "Row-level-split capabilities". The third `demand_boundary.rs` row, whose mechanism is the footprint-attachment pipeline — `demand_boundary_barrel_resolution_does_not_load_unrequested_reexport` — is owned by U11.PUBLIC_RELATION_SESSION. §10.4.1 assigns each manifest row to exactly one `block_id`.)
 
-Required new guards: this block lands the demand-lattice satisfaction guard **`cache_satisfaction_is_demand_lattice_not_enum_order`** (a warm hit / backfill on `TypeInfoGraphResultDb` and the gated reducer caches is decided by the `ProjectionDemand` / `EvalPolicy` lattice dominance relation — PART 1 §2.10 — not by mode-enum ordering; two incomparable demand points never satisfy each other). The two demand-lattice DEFINITION guards **`query_modes_are_presets_over_projection_demand_eval_policy`** and **`skeleton_is_typeparamshells_plus_carrier_stop_not_special_mode`** land where the lattice + presets are defined (U2.QUERY_VALUE_DOMAIN, parent §2.10); this block depends on them and must not regress them. The mode-boundary EXACTNESS otherwise implements the existing Macro-Type-Traversal mode contract and the Component-Meta Shallow-By-Default Rule, pinned by their existing traversal / projector guards (`/type-resolution` mode-contract guards; `crates/verter_session/src/meta_tests.rs` shallow-by-default negative tests) — this block must not regress them. The result-DB admission rides on the U3 typed-admission + `ReadSetSignature` validity rail and the U3-landed multi-candidate-substrate guards — `cache_candidate_cap_is_per_family_not_uniform`, `family_eviction_prefers_invalid_then_lru_valid_hit`, `cache_keys_cover_ts_jsx_moduleresolution_decorator_lib_dimensions`, `instantiation_depth_policy_in_identity_and_facts`, `persistent_caches_never_admit_overlay_only_results` — which this block exercises through `TypeInfoGraphResultDb` (it must not regress them; no new admission guard lands here). Stated explicitly per the template.
+Required new guards: the LANDED materialized-point satisfaction pair **`cache_satisfaction_is_materialized_point_not_nominal_demand`** + **`backfill_writes_only_recorded_materialized_points`** (`crates/verter_session/src/semantic_query_memo/tests.rs`, registered in `critical_rules_have_guards.rs`) stays green and is exercised through `TypeInfoGraphResultDb`, and this block lands the ONE net-new published-boundary exactness guard **`result_db_published_boundary_serves_only_recorded_materialized_points`** (a warm hit / backfill on `TypeInfoGraphResultDb` and the gated reducer caches is decided by a RECORDED materialised `(path, point)` dominating the request at the same path — PART 1 §2.10; the demand lattice is the algebra inside `cached_satisfies`, never mode-enum ordering and never a nominal-demand oracle; two incomparable demand points never satisfy each other; the result-DB boundary serves only recorded materialized points). The new guard COMPOSES with — never shadows or weakens — the landed pair; the formerly-planned `cache_satisfaction_is_demand_lattice_not_enum_order` is RETIRED (written as planned it would reintroduce a WEAKER nominal-lattice satisfaction rail under a new name). The two demand-lattice DEFINITION guards **`query_modes_are_presets_over_projection_demand_eval_policy`** and **`skeleton_is_typeparamshells_plus_carrier_stop_not_special_mode`** land where the lattice + presets are defined (U2.QUERY_VALUE_DOMAIN, parent §2.10); this block depends on them and must not regress them. The mode-boundary EXACTNESS otherwise implements the existing Macro-Type-Traversal mode contract and the Component-Meta Shallow-By-Default Rule, pinned by their existing traversal / projector guards (`/type-resolution` mode-contract guards; `crates/verter_session/src/meta_tests.rs` shallow-by-default negative tests) — this block must not regress them. The result-DB admission rides on the U3 typed-admission + `ReadSetSignature` validity rail and the U3-landed multi-candidate-substrate guards — `cache_candidate_cap_is_per_family_not_uniform`, `family_eviction_prefers_invalid_then_lru_valid_hit`, `cache_keys_cover_ts_jsx_moduleresolution_decorator_lib_dimensions`, `instantiation_depth_policy_in_identity_and_facts`, `persistent_caches_never_admit_overlay_only_results` — which this block exercises through `TypeInfoGraphResultDb` (it must not regress them; no new admission guard lands here). Stated explicitly per the template.
 
-Critical-rule guards: implements the parent's `(CRITICAL)` query-modes-as-demand-lattice-presets rule (PART 1 §2.10) — pinned here by `cache_satisfaction_is_demand_lattice_not_enum_order` (with `query_modes_are_presets_over_projection_demand_eval_policy` / `skeleton_is_typeparamshells_plus_carrier_stop_not_special_mode` landed at U2.QUERY_VALUE_DOMAIN) — plus the existing Macro-Type-Traversal mode contract, the Component-Meta Shallow-By-Default Rule, and the fact-based-cache result-DB discipline. The result DB's `ReadSetSignature.facts` warm-read validation must satisfy the existing cache-validity guards.
+Critical-rule guards: implements the parent's `(CRITICAL)` query-modes-as-demand-lattice-presets rule (PART 1 §2.10) — pinned here by the LANDED materialized-point pair `cache_satisfaction_is_materialized_point_not_nominal_demand` / `backfill_writes_only_recorded_materialized_points` plus the net-new `result_db_published_boundary_serves_only_recorded_materialized_points` (with `query_modes_are_presets_over_projection_demand_eval_policy` / `skeleton_is_typeparamshells_plus_carrier_stop_not_special_mode` landed at U2.QUERY_VALUE_DOMAIN) — plus the existing Macro-Type-Traversal mode contract, the Component-Meta Shallow-By-Default Rule, and the fact-based-cache result-DB discipline. The result DB's `ReadSetSignature.facts` warm-read validation must satisfy the existing cache-validity guards.
 
 Proof requirement: per-row — the `ModeBoundary` rows are `OracleAndGuard` (a TS7 oracle pin on the resolved mode shape paired with a structural non-materialization assertion that member bodies / sibling branches do not enter the keyspace / object shape); the `ExpansionBoundaries` / `DemandBoundary` rows are `OracleAndGuard` pairing the oracle terminal-projection result with a structural assertion that the unpicked / excluded / unselected branch is NOT loaded (path-precision). Consumed by each row's generated wrapper.
 
@@ -333,12 +335,12 @@ Exit acceptance:
 - All five `mode_boundary_invariants.rs` rows, all six `expansion_boundaries.rs` rows, and the two `demand_boundary.rs` projection-exactness rows lift and pass.
 - The five mode presets hold exactly over the `ProjectionDemand` / `EvalPolicy` lattice (parent §2.10): `Identity` returns the alias declaration identity (not body / not miss); `Shallow` exposes one shell level (operator carriers stay `Ref`); `Expanded` `keyof` is bounded to the shallow member-name surface; `Navigate` runs the intermediate hops; `Skeleton` is the `generic_open = TypeParamShells` + carrier-stop preset (not a special mode); re-export chains transit cleanly; `keyof (A & B)` enumerates both arms.
 - `Pick` / `Omit` / inline / local / imported projection is path-precise (no unpicked / excluded / unselected branch loaded).
-- Warm-hit / backfill on the result DB and the gated reducer caches is decided by the demand-lattice dominance relation, not by mode-enum order; two incomparable demand points never satisfy each other (`cache_satisfaction_is_demand_lattice_not_enum_order`).
+- Warm-hit / backfill on the result DB and the gated reducer caches is decided by the landed materialized-point rail — a RECORDED materialised `(path, point)` dominating the request at the same path, never nominal demand and never mode-enum order; two incomparable demand points never satisfy each other (`cache_satisfaction_is_materialized_point_not_nominal_demand`, `backfill_writes_only_recorded_materialized_points`, `result_db_published_boundary_serves_only_recorded_materialized_points`).
 - `TypeInfoGraphResultDb` hands out immutable `Arc<TypeInfoGraphPayload>`, validates `ReadSetSignature.facts` on warm hits, singleflights cold admission, and excludes content/version hashes + `fact_dep_signature` from its key (R6).
 
 Verification commands:
 - `cargo test --package verter_session` mode-boundary / expansion / demand / result-DB tests (`project_type_store`, `cache_schema`, the typeinfo mode-boundary tests).
-- `cargo test --package verter_session --test typeinfo_ignored_test_manifest` (coverage gate).
+- `cargo test --package verter_session --test typeinfo_ignored_test_manifest` (manifest guard suite).
 - The block's lifted-row proofs via the generated wrapper.
 - Full workspace gate (as U8).
 
@@ -414,7 +416,7 @@ Exit acceptance:
 
 Verification commands:
 - `cargo test --package verter_session` footprint / cache-invalidation / demand-boundary / relation-payload tests; the audit-contract guards (`typeinfo_audit_contract_guards`).
-- `cargo test --package verter_session --test typeinfo_ignored_test_manifest` (coverage gate).
+- `cargo test --package verter_session --test typeinfo_ignored_test_manifest` (manifest guard suite).
 - The block's lifted-row proofs via the generated wrapper.
 - Full workspace gate (as U8); `node scripts/gen-corpus-audit-tests.mjs` (audit footprint fixtures changed).
 
@@ -473,7 +475,7 @@ Exit acceptance:
 Verification commands:
 - `cargo test --package verter_session` typeinfo surface / raise / evaluate tests; the wire-surface guards (`typeinfo_wire_surface_guards`, `typeinfo_graph_contract_guards`).
 - `cargo test --package verter_protocol --test typeinfo_proto_roundtrip` (the exporter's payload round-trips).
-- `cargo test --package verter_session --test typeinfo_ignored_test_manifest` (coverage gate — the exporter enables the U13 published-surface rows).
+- `cargo test --package verter_session --test typeinfo_ignored_test_manifest` (manifest guard suite — the exporter enables the U13 published-surface rows).
 - Full workspace gate (as U8).
 
 Docs updated: keep the recovered-doc §8 exporter `TypeNode::ModuleAugmentation` DTO wording as a live `GraphTypeNode` augmentation arm (relocation rejected — no `DeclarationAnalysisGraph` side surface); keep the `/type-cache-architecture` exporter / payload notes current.
@@ -531,7 +533,7 @@ Exit acceptance:
 Verification commands:
 - `cargo test --package verter_session` published-surface tests; `cargo test --package verter_audit --test published_surface_constants_match_ts_port` (Rust/TS published-surface parity).
 - `pnpm vitest --run packages/component-meta/tests/no-rawtype-reads.spec.ts` and the `@verter/component-meta` type-graph / native-projection / compat checker+schema spec suites.
-- `cargo test --package verter_session --test typeinfo_ignored_test_manifest` (coverage gate).
+- `cargo test --package verter_session --test typeinfo_ignored_test_manifest` (manifest guard suite).
 - The block's lifted-row proofs via the generated wrapper.
 - Full workspace gate (as U8) PLUS `pnpm test` (the TS projection is exercised).
 
@@ -586,10 +588,13 @@ so the binding 362 `IgnoredTestRow` total stays exact (Capability Map; PART 2
   block's `Exact test rows lifted` is explicitly `none`, and §10.4.1 maps no row to
   them.
 
-In every case the parent's §10.4.1 partition (the generated coverage table, PART 2
-§10.4) is the authority: each row maps to exactly one `block_id` via its
-`mechanism_id`, and `capability_rows_map_to_expected_query_fact_mechanisms` asserts
-the mapping is consistent with the capability. The binding 362 total stays exact.
+In every case the parent's hand-authored §10.4.1 row→block_id partition (PART 2
+§10.4.1 — the manifest generator's input, DISTINCT from the §10.4 generated coverage
+table, the U13/U15-gated unbuilt residual) is the authority: each row maps to exactly
+one `block_id`, and the U13/U15-gated coverage guard
+`capability_rows_map_to_expected_query_fact_mechanisms` will assert the mapping is
+consistent with each row's capability and `mechanism_id` when it lands. The binding
+362 total stays exact.
 
 ---
 
@@ -597,7 +602,7 @@ the mapping is consistent with the capability. The binding 362 total stays exact
 
 Every block runs the full workspace gate as its CI gate (PART 2 §§11.2, 14) — the
 complete Rust **AND** JavaScript gate, green only when BOTH pass:
-`cargo test --workspace --tests`, `cargo clippy --workspace -- -D warnings`,
+`cargo nextest run --workspace` + `cargo test -p verter_session --tests` (the canonical Rust pair — bare `cargo test --workspace --tests` silently skips the verter_session integration suite and is NOT the gate), `cargo clippy --workspace -- -D warnings`,
 `cargo fmt --all --check`, `pnpm test` (U13 in particular exercises the TS
 projection), and `pnpm install --frozen-lockfile`. A block reaches `Lifted` + a
 merged `Typeinfo-Block:` trailer only after green CI over the branch content AND the
@@ -613,8 +618,9 @@ every block in this subplan — and the whole U2 / U6 parents — are done.
 The whole-subplan parity guarantee is the parent's composition (Capability Map →
 "The guarantee over the 362 rows"): the two-table ledger with the exact-362 count +
 bijection (PART 2 §§10.1, 10.5); the U0 row-exact coverage table that DEFINES
-completeness (PART 2 §10.4); the per-row executable `ProofRequirement` with the
-generated proof registry + row-test wrapper (PART 2 §§10.2–10.3); the git/CI landing
+completeness (PART 2 §10.4 — the U13/U15-gated residual); the per-row executable
+`ProofRequirement` with the proof registry + row-test rail (PART 2 §§10.2–10.3 —
+landed under U0-FINISH-B in the locked design's hand-authored shape); the git/CI landing
 protocol (PART 2 §11); the no-skip guarantee (PART 2 §12); and the git/manifest-driven,
 parallel-safe resume protocol (PART 2 §14). U0 builds the ledger/coverage substrate;
 the U3 / U8 / U10 / U11 / U12 / U13 blocks lift their exact manifest rows through it,

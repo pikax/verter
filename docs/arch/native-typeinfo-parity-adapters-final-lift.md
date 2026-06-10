@@ -3,7 +3,7 @@
 Parent architecture: docs/arch/native-typeinfo-parity.md
 Sequencing authority: docs/arch/semantic-db-overhaul-unified-remaining-plan.md
 Owning U-block(s): U14, U15
-Prerequisites: U0 (the manifest / ledger / coverage substrate that gates every block's row-lift via the CI coverage gate — `docs/arch/native-typeinfo-parity-u2-reducers.md::U0.MANIFEST_SUBSTRATE`); U2 (the whole reducer + typed-value-domain + `SemanticQueryKeySpec` parent, including `U2.JSX_FOUNDATIONS` which owns the nine `jsx.rs` JSX rows — `docs/arch/native-typeinfo-parity-u2-reducers.md`); U6 (the demand-sliced flow / call solver — `docs/arch/native-flow-return.md`); U8 (the wire-surface closure), U10 (the result DB + mode/demand exactness), U11 (the public relation / session surfaces), U13 (the published `GraphTypeNode` + TS `TypeDescriptor` projection — `docs/arch/native-typeinfo-parity-cache-export-session.md`). U1 / U4 / U5 (the persistent cache-runtime node substrate, the scheduler DAG, the artifact-store rehoming) are non-parity prerequisites depended upon, not owned here.
+Prerequisites: U0 (the manifest / ledger / coverage substrate that gates every block's row-lift via the manifest guard suite, with the §10.4 coverage gate enforcing at `U13.PROJECTION` / `U15.FINAL_LIFT` — `docs/arch/native-typeinfo-parity-u2-reducers.md::U0.MANIFEST_SUBSTRATE`); U2 (the whole reducer + typed-value-domain + `SemanticQueryKeySpec` parent, including `U2.JSX_FOUNDATIONS` which owns the nine `jsx.rs` JSX rows — `docs/arch/native-typeinfo-parity-u2-reducers.md`); U6 (the demand-sliced flow / call solver — `docs/arch/native-flow-return.md`); U8 (the wire-surface closure), U10 (the result DB + mode/demand exactness), U11 (the public relation / session surfaces), U13 (the published `GraphTypeNode` + TS `TypeDescriptor` projection — `docs/arch/native-typeinfo-parity-cache-export-session.md`). U1 / U4 / U5 (the persistent cache-runtime node substrate, the scheduler DAG, the artifact-store rehoming) are non-parity prerequisites depended upon, not owned here.
 Consumers: the LSP (hover → graph+display, completion → framework surface), MCP (`typeinfo.*` / `component-meta.*` tools), `@verter/component-meta` (native + compat), unplugin, and the playground type explorer — every host-backed consumer reads the U13 published projection + the U14 framework-surface adapter. U15 is terminal: it has no downstream parity consumer; it is the final-lift block the whole parity effort converges on.
 Progress ledger: crates/verter_session/tests/typeinfo_ignored_test_manifest.rs
 
@@ -50,8 +50,10 @@ by section number.
 Every block contract uses the parent's per-block contract template (PART 2 §9).
 "Done" for any block is the parent's done predicate (PART 2 §11.5 / §11.7 — its
 `Typeinfo-Block:` trailer merged + rows `Lifted` + required guards present); a
-block's rows may flip `Lifted` only after their coverage is complete and
-non-placeholder (PART 2 §10.4); landing is the git/CI protocol — branch per block →
+block's row-lift is gated by the manifest guard suite + the landed §10.3 proof
+rail, with the §10.4 coverage gate (complete + non-placeholder coverage)
+enforcing from the `U13.PROJECTION` / `U15.FINAL_LIFT` landings onward and
+covering earlier-lifted rows retroactively (PART 2 §10.4); landing is the git/CI protocol — branch per block →
 green CI → three-reviewer LAND → squash-merge with the `Typeinfo-Block:` trailer
 (PART 2 §§11–14). None of that machinery is re-specified here.
 
@@ -102,9 +104,13 @@ total stays exact:
 
 These two blocks therefore lift exactly **6** `IgnoredTestRow`s combined
 (`MacroResolution` 1 + `CompositeSurfaces` 5). In every case the parent's §10.4.1
-partition (the generated coverage table, PART 2 §10.4) is the authority: each row
+partition (the HAND-AUTHORED row→`block_id` map the generator parses — distinct from
+the PART 2 §10.4 row-exact coverage table, which is not yet built and is
+forward-declared on the `U13.PROJECTION` / `U15.FINAL_LIFT` block-contract rows) is
+the authority: each row
 maps to exactly one `block_id` via its `mechanism_id`, and
-`capability_rows_map_to_expected_query_fact_mechanisms` asserts the mapping is
+`capability_rows_map_to_expected_query_fact_mechanisms` (gated at the `U13`/`U15`
+landings) asserts the mapping is
 consistent with the capability. The binding 362 total stays exact.
 
 ---
@@ -147,7 +153,7 @@ SemanticQueryKey/facts touched: no NEW key; the adapter READS the published `Typ
 Exact test rows lifted (capability `MacroResolution`, `basic.rs`):
 - basic.rs::component_like_slot_payload_extracts_parameters_from_nested_slot_property
 
-(The nine `jsx.rs` `JsxResolution` rows and the six JSX no-new-key submatrix `AdditionalProofRow`s are owned by `docs/arch/native-typeinfo-parity-u2-reducers.md::U2.JSX_FOUNDATIONS`, NOT this block — U14 consumes JSX component resolution as a published foundation but lifts no `JsxResolution` row. The generated coverage table — PART 2 §10.4 — assigns each row to exactly one `block_id`; no `JsxResolution` row is double-counted here.)
+(The nine `jsx.rs` `JsxResolution` rows and the six JSX no-new-key submatrix `AdditionalProofRow`s are owned by `docs/arch/native-typeinfo-parity-u2-reducers.md::U2.JSX_FOUNDATIONS`, NOT this block — U14 consumes JSX component resolution as a published foundation but lifts no `JsxResolution` row. The hand-authored parent §10.4.1 row→block_id partition assigns each row to exactly one `block_id` (the §10.4 generated coverage table — the U13/U15-gated unbuilt residual — is checked against it when it lands); no `JsxResolution` row is double-counted here.)
 
 Required new guards (PART 1 §8; the Component-Meta Native vs Compat Rule):
 - `component_meta_is_thin_framework_adapter_no_second_resolver` — asserts `@verter/component-meta` is a thin `FrameworkSurfacePayload` adapter with no second resolver / expander (cache-owned type recovery only); the framework surface is a structural projection of the published payload, not a re-resolution path.
@@ -155,7 +161,7 @@ Required new guards (PART 1 §8; the Component-Meta Native vs Compat Rule):
 
 Critical-rule guards: this block implements the parent's `(CRITICAL)` Component-Meta Native vs Compat Rule, the Macro-Type-Traversal Rule, and the Typed-IR-Only Resolver Rule (the framework adapter projects the published typed surface structurally; the compat layer recovers no meaning from display strings; macro resolution is one shared path). The thin-adapter + no-rawtype-reads + structural-classification guards are these rules' R6 guards: the `@verter/component-meta` no-rawtype-reads contract (`packages/component-meta/tests/no-rawtype-reads.spec.ts`), the published-surface parity (`crates/verter_audit/tests/published_surface_constants_match_ts_port.rs`), and the architecture-guard list for the typed-IR-only pipeline. This block must not regress them. Any new `(CRITICAL)` framework-adapter rule text added to docs registers its guard here in the same change.
 
-Proof requirement: per-row — the `MacroResolution` row is `Ts7Oracle` (the exact TS judgement of the resolved `Parameters<NonNullable<T['slot']>>[0]` slot-payload type) paired with the structural assertion that the terminal slot-payload resolves through the shared reductions without a `semanticMiss` (`OracleAndGuard`). Consumed by the row's generated row-test wrapper (PART 2 §10.3). The four mismatch-case regression tests are `StructuralGuard`-class (legacy-fails / rebuilt-passes), and the thin-adapter / no-rawtype contract is pinned by the existing no-rawtype-reads + published-surface-parity tests.
+Proof requirement: per-row — the `MacroResolution` row is `Ts7Oracle` (the exact TS judgement of the resolved `Parameters<NonNullable<T['slot']>>[0]` slot-payload type) paired with the structural assertion that the terminal slot-payload resolves through the shared reductions without a `semanticMiss` (`OracleAndGuard`). Consumed by the row's §10.3 proof-consumption rail (PART 2 §10.3; landed shape: the registry-bound driver-calling row body). The four mismatch-case regression tests are `StructuralGuard`-class (legacy-fails / rebuilt-passes), and the thin-adapter / no-rawtype contract is pinned by the existing no-rawtype-reads + published-surface-parity tests.
 
 Exit acceptance:
 - The `MacroResolution` row lifts and passes on the normal `lib*.d.ts` corpus; `Parameters<NonNullable<T['slot']>>[0]` resolves the terminal slot-payload precisely (no `semanticMiss`).
@@ -166,9 +172,9 @@ Verification commands:
 - `cargo test --package verter_session` typeinfo surface / framework-surface / slot-payload tests.
 - `pnpm vitest --run packages/component-meta/tests/no-rawtype-reads.spec.ts` and the `@verter/component-meta` native-projection / framework-adapter / compat checker+schema spec suites (incl. the four mismatch-case regression specs).
 - `cargo test --package verter_audit --test published_surface_constants_match_ts_port` (Rust/TS published-surface parity).
-- `cargo test --package verter_session --test typeinfo_ignored_test_manifest` (coverage gate for this block's row).
+- `cargo test --package verter_session --test typeinfo_ignored_test_manifest` (manifest guard suite for this block's row).
 - The block's lifted-row proof via the generated wrapper (or `cargo test … -- --ignored` before the branch strips the `#[ignore]`s).
-- The full workspace gate (the CI gate — the complete Rust **AND** JavaScript gate, green only when BOTH pass; PART 2 §11.2): `cargo test --workspace --tests`; `cargo clippy --workspace -- -D warnings`; `cargo fmt --all --check`; `pnpm test`; `pnpm install --frozen-lockfile`.
+- The full workspace gate (the CI gate — the complete Rust **AND** JavaScript gate, green only when BOTH pass; PART 2 §11.2): `cargo nextest run --workspace` + `cargo test -p verter_session --tests` (the canonical Rust pair — bare `cargo test --workspace --tests` silently skips the verter_session integration suite and is NOT the gate); `cargo clippy --workspace -- -D warnings`; `cargo fmt --all --check`; `pnpm test`; `pnpm install --frozen-lockfile`.
 - `node scripts/gen-corpus-audit-tests.mjs` (idempotent; if audit-record schema/fixtures change).
 - Commit cadence / review gate: PARENT-UNIFORM — the uniform discipline for EVERY block in this subplan (parent PART 2 §11.11 / §11.12), stated once and not restated per block: each block lands as ONE squashed commit (WIP series during the work, no per-commit gate) after the three-reviewer LAND verdict (1 Claude Code + 2 codex).
 
@@ -225,7 +231,7 @@ Exact test rows lifted (capability `CompositeSurfaces`, `menu_like.rs` / `messag
 - message_list_like.rs::message_list_like_slot_remaps_payload_with_message_context
 - table_like.rs::table_like_dynamic_slot_projection_uses_template_literal_keys
 
-(These five `CompositeSurfaces` rows are the ONLY `IgnoredTestRow`s this block lifts. The `MacroResolution` row is owned by U14; the nine `jsx.rs` `JsxResolution` rows are owned by `U2.JSX_FOUNDATIONS`; every other substrate's rows are owned by their respective U-block. U15's lift over the FULL manifest is the terminal-acceptance assertion that every other block has already lifted its rows — see "Exact test rows lifted (terminal)" below — not a re-claim of those rows. The generated coverage table — PART 2 §10.4 — assigns each row to exactly one `block_id`.)
+(These five `CompositeSurfaces` rows are the ONLY `IgnoredTestRow`s this block lifts. The `MacroResolution` row is owned by U14; the nine `jsx.rs` `JsxResolution` rows are owned by `U2.JSX_FOUNDATIONS`; every other substrate's rows are owned by their respective U-block. U15's lift over the FULL manifest is the terminal-acceptance assertion that every other block has already lifted its rows — see "Exact test rows lifted (terminal)" below — not a re-claim of those rows. The hand-authored parent §10.4.1 row→block_id partition assigns each row to exactly one `block_id` (the §10.4 generated coverage table — the U13/U15-gated unbuilt residual — is checked against it when it lands).)
 
 Exact test rows lifted (terminal — the whole-manifest acceptance, NOT a re-claim):
 - The terminal-acceptance assertion over the live ledger asserts every one of the 362 `IgnoredTestRow`s carries `status == Lifted` (no `Ignored`) once every owning block has landed (its `Typeinfo-Block:` trailer merged) — `basic.rs` (U14) + every U2 / U6 / U3 / U10 / U11 substrate row + the five `CompositeSurfaces` rows (this block). The ONLY source `#[ignore]`s permitted to remain are the Svelte/React STOP-gate files (`svelte_adapter_stop_gate.rs` / `react_adapter_stop_gate.rs`), which are explicit out-of-scope gates and are NOT `IgnoredTestRow`s in the 362. This is the mechanical "done" of the whole parity effort, not an additional row claim.
@@ -240,7 +246,7 @@ Required new guards (PART 2 §§10.5, 11.7, 11.9, 12; the Capability Map → "th
 
 Critical-rule guards: this block implements the parent's `(CRITICAL)` one-resolver rule (the integration / composite / final-lift surface routes through the one engine; the integration layer is never a second resolver), the Component-Meta Native vs Compat Rule (the composite surfaces project through the U14 thin adapter), and the Testing-Hermeticity rule (vendored bench corpora only). The STOP-gate + bench-schema + hermeticity + terminal-acceptance guards above are these rules' R6 guards. If this block lands any new `(CRITICAL)` STOP-gate / terminal-acceptance rule text in docs, it registers the corresponding guard here in the same change.
 
-Proof requirement: per-row — the five `CompositeSurfaces` rows are `OracleAndGuard` (a TS7 oracle pin on each resolved end-to-end surface shape paired with a structural assertion that the surface resolves through the shared reductions + the U14 adapter without a composite-specific resolver). Consumed by each row's generated row-test wrapper (PART 2 §10.3). The terminal-acceptance assertions (`all_typeinfo_parity_rows_lifted_except_stop_gates`, the STOP-gate guards, the bench-schema guard, the hermeticity guard) are `StructuralGuard`-class default-suite tests; the whole-manifest count + bijection + coverage guards are the carried-forward `StructuralGuard`-class guards over the live ledger.
+Proof requirement: per-row — the five `CompositeSurfaces` rows are `OracleAndGuard` (a TS7 oracle pin on each resolved end-to-end surface shape paired with a structural assertion that the surface resolves through the shared reductions + the U14 adapter without a composite-specific resolver). Consumed by each row's §10.3 proof-consumption rail (PART 2 §10.3; landed shape: the registry-bound driver-calling row body). The terminal-acceptance assertions (`all_typeinfo_parity_rows_lifted_except_stop_gates`, the STOP-gate guards, the bench-schema guard, the hermeticity guard) are `StructuralGuard`-class default-suite tests; the whole-manifest count + bijection + coverage guards are the carried-forward `StructuralGuard`-class guards over the live ledger.
 
 Exit acceptance:
 - All five `CompositeSurfaces` rows lift and pass on the normal `lib*.d.ts` corpus; each composite surface resolves end-to-end through the shared U2 reducers + U6 solver + the U14 adapter (no composite-specific resolver).
@@ -255,7 +261,7 @@ Verification commands:
 - `pnpm vitest --run` the `@verter/component-meta` integration / schema specs and the LSP / MCP integration specs; the VS Code E2E suite for hover/completion (`/e2e-vscode-testing`).
 - `pnpm run build:native && pnpm run build:lsp:release && pnpm run build:mcp:release` for the bench/integration release builds (benchmarks only); the vendored cm corpus benches (`component_meta_cold` / `_warm`); the PART 1 §6.2 performance-contract benches (the Verter-vs-TS/tsgo fixtures + the per-family fallback-bound benches — perf-regression-gated, family fallback counts under bound).
 - The five lifted-row proofs via the generated wrapper (or `cargo test … -- --ignored` before the branch strips the `#[ignore]`s).
-- The full workspace gate (the CI gate — the complete Rust **AND** JavaScript gate, green only when BOTH pass; PART 2 §11.2): `cargo test --workspace --tests`; `cargo clippy --workspace -- -D warnings`; `cargo fmt --all --check`; `pnpm test`; `pnpm install --frozen-lockfile`.
+- The full workspace gate (the CI gate — the complete Rust **AND** JavaScript gate, green only when BOTH pass; PART 2 §11.2): `cargo nextest run --workspace` + `cargo test -p verter_session --tests` (the canonical Rust pair — bare `cargo test --workspace --tests` silently skips the verter_session integration suite and is NOT the gate); `cargo clippy --workspace -- -D warnings`; `cargo fmt --all --check`; `pnpm test`; `pnpm install --frozen-lockfile`.
 - `node scripts/gen-corpus-audit-tests.mjs` (idempotent; audit fixtures change with the integrations).
 - Commit cadence / review gate: PARENT-UNIFORM — the uniform discipline for EVERY block in this subplan (parent PART 2 §11.11 / §11.12), stated once and not restated per block: each block (including this terminal block) lands as ONE squashed commit (WIP series during the work, no per-commit gate) after the three-reviewer LAND verdict (1 Claude Code + 2 codex).
 
@@ -322,7 +328,9 @@ named guard. The parity effort is complete iff ALL hold:
    git/CI landing protocol: green CI (PART 2 §11.2) AND the three-reviewer LAND
    verdict (1 Claude Code + 2 codex; PART 2 §11.12), its WIP series squash-merged to
    ONE target-branch commit (PART 2 §§11.4, 11.11). The CI gate is the complete Rust
-   **AND** JavaScript gate, green only when BOTH pass: `cargo test --workspace --tests`,
+   **AND** JavaScript gate, green only when BOTH pass: `cargo nextest run --workspace` + `cargo test -p verter_session --tests`
+   (the canonical Rust pair — bare `cargo test --workspace --tests` silently skips the
+   verter_session integration suite and is NOT the gate),
    `cargo clippy --workspace -- -D warnings`, `cargo fmt --all --check`, `pnpm test`,
    and `pnpm install --frozen-lockfile` all green, with the bench corpora vendored
    (`external_corpus_paths_not_present_outside_gated_tests`) and the typed bench
@@ -333,8 +341,9 @@ named guard. The parity effort is complete iff ALL hold:
 This is the composition the Capability Map names as "the guarantee over the 362
 rows": the two-table ledger with the exact-362 count + bijection (PART 2 §10.5);
 the U0 row-exact capability→mechanism→proof coverage table that DEFINES completeness
-(PART 2 §10.4); the per-row executable `ProofRequirement` with the generated proof
-registry + row-test wrapper (PART 2 §§10.2–10.3); the git/CI landing protocol (PART 2
+(PART 2 §10.4 — the U13/U15-gated residual); the per-row executable `ProofRequirement`
+with the proof registry + row-test rail (PART 2 §§10.2–10.3 — landed under U0-FINISH-B
+in the locked design's hand-authored shape); the git/CI landing protocol (PART 2
 §11); the no-skip guarantee (PART 2 §12); and the git/manifest-driven, parallel-safe
 resume protocol (PART 2 §14). When all five checks hold, the 362-row
 parity is mechanically tracked from `Ignored` to `Lifted`, never skipped and never

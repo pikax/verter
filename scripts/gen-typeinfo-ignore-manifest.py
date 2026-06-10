@@ -472,7 +472,7 @@ BLOCK_TO_REQUIRED_GUARDS: dict[str, list[str]] = {
         "typeinfo_manifest_files_are_byte_equal_to_regenerated_generator_output",
         "key_owning_block_owner_mapping_is_pinned_closed_set",
     ],
-    # U2.QUERY_VALUE_DOMAIN (u2-reducers.md §220): the section enumerates a
+    # U2.QUERY_VALUE_DOMAIN (u2-reducers.md → U2.QUERY_VALUE_DOMAIN block, "Required new guards"): the section enumerates a
     # large guard list, mostly via ellipsized prefixes (`resolve_merged_…`)
     # that are not verbatim-copyable identifiers; the fully-named verbatim
     # guards are transcribed below (the demand-lattice definition pair, the
@@ -516,7 +516,7 @@ BLOCK_TO_REQUIRED_GUARDS: dict[str, list[str]] = {
         "framework_surface_payload_graph_payload_is_additive_not_retyped",
         "all_public_semantic_type_graph_embeddings_are_payload_wrapped",
     ],
-    # U12.EXPORTER (cache-export-session.md §462): no NEW guard of its own —
+    # U12.EXPORTER (cache-export-session.md → U12.EXPORTER block, "Required new guards"): no NEW guard of its own —
     # the doc names the five U8 wire-purity guards the exporter rides on and
     # must keep green (they assert the exporter's OUTPUT shape).
     "U12Exporter": [
@@ -527,7 +527,7 @@ BLOCK_TO_REQUIRED_GUARDS: dict[str, list[str]] = {
         "typeinfo_relate_payload_exposes_relation_proof_without_graph_type_node",
         "all_public_semantic_type_graph_embeddings_are_payload_wrapped",
     ],
-    # U13.PROJECTION (cache-export-session.md §520): no NEW guard of its own;
+    # U13.PROJECTION (cache-export-session.md → U13.PROJECTION block, "Required new guards"): no NEW guard of its own;
     # the doc names only TS-test paths (no-rawtype-reads.spec.ts, published-
     # surface parity), not snake_case manifest guard identifiers, so the
     # block's existing `capability_rows_map_to_expected_query_fact_mechanisms`
@@ -580,11 +580,17 @@ BLOCK_TO_REQUIRED_GUARDS: dict[str, list[str]] = {
         _DAG,
         "resolve_enum_do_not_warm_hit",
     ],
-    # U2.MODULE_AUGMENTATION (u2-reducers.md §788): the seven enumerated
-    # guards plus `node_taxonomy_complete` (the landed taxonomy guard the
-    # "NO wire-relocation guard" bullet pins on kinds 21–25). The phantom
+    # U2.MODULE_AUGMENTATION (u2-reducers.md, the U2.MODULE_AUGMENTATION
+    # block's required-guards list): the enumerated guards plus
+    # `node_taxonomy_complete` (the landed taxonomy guard the "NO
+    # wire-relocation guard" bullet pins on kinds 21–25). The phantom
     # `module_augmentation_is_public_graph_state` is excluded (the doc states
-    # it does not exist in `crates/`).
+    # it does not exist in `crates/`). The retired fail-closed deliverable
+    # `session_overlay_augmentation_fails_closed_until_implemented` is
+    # replaced by the three LANDED overlay-aware augmentation guards: the
+    # index is overlay-aware (`AugmentationTargetKey.population`), so a
+    # session view gets a real stitched answer — a fail-closed guard would
+    # regress landed behavior.
     "U2ModuleAugmentation": [
         _DAG,
         "global_augmentation_query_has_declaration_analysis_identity",
@@ -593,10 +599,12 @@ BLOCK_TO_REQUIRED_GUARDS: dict[str, list[str]] = {
         "augmentation_keys_return_declaration_analysis_value",
         "declaration_augmentation_doc_wire_query_placement_match",
         "declaration_merge_records_binder_overload_augmentation_order_as_facts",
-        "session_overlay_augmentation_fails_closed_until_implemented",
+        "session_overlay_augmenter_isolated_from_base_index",
+        "effective_export_set_session_view_stitches_overlay_augmenter",
+        "no_effective_export_set_base_only_session_assert",
         "node_taxonomy_complete",
     ],
-    # U2.JSX_FOUNDATIONS (u2-reducers.md §854): only three of the nine names
+    # U2.JSX_FOUNDATIONS (u2-reducers.md → U2.JSX_FOUNDATIONS block, "Required new guards"): only three of the nine names
     # in the bullet list are guards; the other six (`jsx_*_via_ambient_…`,
     # `jsx_*_via_existing_resolution`, `jsx_element_class_check_*`) are
     # AdditionalProofRow (`RowTestGuard`) row names in
@@ -639,7 +647,7 @@ BLOCK_TO_REQUIRED_GUARDS: dict[str, list[str]] = {
         "predicate_signature_without_body_audits_signature_only_outcome",
         "predicate_assertion_effect_is_signature_metadata_not_published_type_node",
     ],
-    # U6.CALL_RESOLVE (native-flow-return.md §978): the six enumerated guards.
+    # U6.CALL_RESOLVE (native-flow-return.md → U6.CALL_RESOLVE block, "Required new guards"): the six enumerated guards.
     "U6CallResolve": [
         _DAG,
         "call_resolution_budget_exceeded_admits_nothing",
@@ -666,7 +674,7 @@ BLOCK_TO_REQUIRED_GUARDS: dict[str, list[str]] = {
         "lib_env_hash_drives_generator_return_resolution",
         "async_return_wraps_in_promise_via_builtin_utility",
     ],
-    # U6.CROSS_FILE (native-flow-return.md §1218): the three enumerated guards
+    # U6.CROSS_FILE (native-flow-return.md → U6.CROSS_FILE block, "Required new guards"): the three enumerated guards
     # plus the two inherited flow-cycle-sentinel guards the Critical-rule line
     # names as this block's R6 guards.
     "U6CrossFile": [
@@ -677,7 +685,7 @@ BLOCK_TO_REQUIRED_GUARDS: dict[str, list[str]] = {
         "flow_cycle_sentinel_is_never_admitted_as_cache_entry",
         "flow_cycle_sentinel_does_not_hide_real_base_return_contributor",
     ],
-    # U6.LOOP_CLOSURE (native-flow-return.md §1276): the four enumerated
+    # U6.LOOP_CLOSURE (native-flow-return.md → U6.LOOP_CLOSURE block, "Required new guards"): the four enumerated
     # guards plus `flow_policy_differentiates_cache_candidates` (landed in
     # U6.FLOW_RETURN_SUBSTRATE, exercised + pinned here per the Critical-rule
     # line).
@@ -703,13 +711,21 @@ BLOCK_TO_REQUIRED_GUARDS: dict[str, list[str]] = {
         "persistent_caches_never_admit_overlay_only_results",
         "architecture_minimizes_fallback_entry_not_fallback_cost",
     ],
-    # U10.RESULT_DB (cache-export-session.md §326): the doc states this block
-    # LANDS exactly one new guard; the demand-lattice definition pair and the
-    # U3 multi-candidate-substrate guards are explicitly "land elsewhere /
-    # exercised here, not re-owned" and are excluded.
+    # U10.RESULT_DB (cache-export-session.md → U10.RESULT_DB block, "Required
+    # new guards"): the LANDED materialized-point satisfaction pair stays green
+    # and is exercised through `TypeInfoGraphResultDb`, plus the ONE net-new
+    # published-boundary exactness guard the block lands (it COMPOSES with the
+    # landed pair; the formerly-planned
+    # `cache_satisfaction_is_demand_lattice_not_enum_order` is RETIRED — written
+    # as planned it would reintroduce a weaker nominal-lattice satisfaction
+    # rail). The demand-lattice definition pair and the U3
+    # multi-candidate-substrate guards land elsewhere / are exercised here, not
+    # re-owned, and are excluded.
     "U10ResultDb": [
         _DAG,
-        "cache_satisfaction_is_demand_lattice_not_enum_order",
+        "cache_satisfaction_is_materialized_point_not_nominal_demand",
+        "backfill_writes_only_recorded_materialized_points",
+        "result_db_published_boundary_serves_only_recorded_materialized_points",
     ],
     "U11PublicRelationSession": [
         _DAG,
@@ -721,9 +737,9 @@ BLOCK_TO_REQUIRED_GUARDS: dict[str, list[str]] = {
         _DAG,
         "component_meta_is_thin_framework_adapter_no_second_resolver",
     ],
-    # U15.FINAL_LIFT (adapters-final-lift.md §233): the five enumerated new
+    # U15.FINAL_LIFT (adapters-final-lift.md → U15.FINAL_LIFT block, "Required new guards"): the five enumerated new
     # guards plus the six carried-forward terminal guards the doc names as
-    # kept green at acceptance. The §237 exercised-not-owned perf guards
+    # kept green at acceptance. The same block's exercised-not-owned perf guards
     # (`flow_graph_build_…`, `cache_key_axes_…`, `relation_negative_…`) are
     # excluded.
     "U15FinalLift": [

@@ -219,8 +219,8 @@ These are load-bearing and were confirmed by reading source:
    `ContextualTyping`, `ValueInference`, `JsxResolution`, `ModuleAugmentation`,
    `CompositeSurface`. The proof enum is
    `ProofRequirement::Ts7Oracle(OracleId)` / `OracleAndGuard { oracle, guard }`
-   (`:427` / `:430`). The row schema `IgnoredTestRow`
-   (`typeinfo_ignored_test_manifest.rs:537`) has **13 fields** — 12 manifest columns
+   (in `typeinfo_ignored_test_manifest.rs`). The row schema `IgnoredTestRow`
+   (same file) has **13 fields** — 12 manifest columns
    plus the `status` lifecycle field. The columns relevant here are
    `file: &'static str`, `function: &'static str`,
    `semantic_queries: &'static [SemanticQueryName]`, `proof: ProofRequirement`, and
@@ -234,9 +234,10 @@ These are load-bearing and were confirmed by reading source:
    `original_body_tokens` body-hash fields, and is added to `IgnoredTestRow` only when that
    layer lands. `status` is the separate lifecycle field the regenerator substitutes on
    lift.)
-   **`IgnoredTestRow.file` is a BARE filename** (`"apparent_types.rs"`,
-   `manifest_data/typeinfo_ignored_test_manifest_rows.rs:11`), matching the live
-   discovery key `path.file_name()` (`:796`/`:902`/`:1012`); the row→query join key reuses that
+   **`IgnoredTestRow.file` is a BARE filename** (`"apparent_types.rs"`, see
+   `manifest_data/typeinfo_ignored_test_manifest_rows.rs`), matching the live
+   discovery key `path.file_name()` (the manifest discovery walk's join key, used at
+   each of its call sites); the row→query join key reuses that
    exact bare-filename form. Critically, **the row carries NO executable query
    spec** — the actual `(canonical, symbol, type_args, mode)` payloads live today in
    the test body, and **one row can issue N queries** (e.g. `conditional_infer.rs`
@@ -510,8 +511,8 @@ per-family budget model. Those families are explicitly NOT lifted by this harnes
 
 **Out of scope — legitimate `any` / `never` answers (deferred class).** A few
 oracle rows have a genuine top/bottom answer: `Parameters<any>` / `InstanceType<any>`
-(`typeinfo_ignored_test_manifest_rows.rs:340,343`), `Awaited<never>` /
-`NonNullable<never>` (`:347` + siblings) resolve to a real `any` / `never`. The §Q2
+(in `typeinfo_ignored_test_manifest_rows.rs`), `Awaited<never>` /
+`NonNullable<never>` (+ sibling rows) resolve to a real `any` / `never`. The §Q2
 backstop REJECTS `any` always and `never` outside a genuine closed empty union, so a
 `TypeExpr` snapshot for these would either false-reject or require weakening the
 backstop ad hoc. These rows are therefore **permanently INELIGIBLE for this hover
@@ -2357,8 +2358,8 @@ guaranteed by step 0:
    worked example is the index-signature parameter name: `{ [key: string]: T }`
    and `{ [x: string]: T }` are the SAME TS type, but `IndexSignature.key_name` differs
    (`lib.rs:711/714`, emitted at `type_expr_json.rs:482`; OXC preserves the source name
-   verbatim at `oxc/lib.rs:488`) — and index-signature rows exist (manifest rows ~:138,
-   fixture `index_signatures.ts`).
+   verbatim at `oxc/lib.rs:488`) — and index-signature rows exist (the
+   `index_signatures.rs` manifest rows, fixture `index_signatures.ts`).
 
    **The default-safe posture (symmetric to the admission allowlist).** The admission
    allowlist (§Q2) is default-REJECT; the NORMALIZATION axis is given the SAME default
@@ -2681,7 +2682,7 @@ coverage is true **by construction**.
      the original body).
 
      **The `GuardId` enum is EXTENDED with obligation-proving variants.** The existing
-     `GuardId` (`typeinfo_ignored_test_manifest.rs:356`) carries only the six legacy
+     `GuardId` (in `typeinfo_ignored_test_manifest.rs`) carries only the six legacy
      structural-guard variants (`ModeBoundaryExactness`, `ExpansionBoundaryPrecision`,
      `DemandBoundaryPrecision`, `CacheInvalidationRoute`, `AuditFootprintAttachment`,
      `CrossFileRouteFact`) — none of which is a generic obligation prover. The obligation
@@ -2937,7 +2938,7 @@ coverage is true **by construction**.
    Because `file!()` yields a path (e.g.
    `crates/verter_session/src/typeinfo/typeinfo_tests/apparent_types.rs`) but
    `IgnoredTestRow.file` and the registry key are the BARE filename (manifest discovery
-   uses `path.file_name()`, `:796`/`:902`/`:1012`), the driver
+   uses `path.file_name()`), the driver
    **basename-normalizes `file!()` via `Path::file_name()`** before the registry lookup.
    It then reads the row's entries, runs the helper named by `query_helper_kind`, builds
    each snapshot path from the entry's `oracle_family` + re-derived `snapshot_id`, loads
@@ -2953,9 +2954,9 @@ coverage is true **by construction**.
    **`oracle_query_ordinals: u16`** (the number of oracle queries the row declares it
    issues). The manifest table is SCRIPT-GENERATED — both tables and every per-column
    value are produced by `scripts/gen-typeinfo-ignore-manifest.py`
-   (`typeinfo_ignored_test_manifest.rs:20`) and emitted into the `include!`'d
+   (stated in `typeinfo_ignored_test_manifest.rs`'s header) and emitted into the `include!`'d
    `manifest_data/typeinfo_ignored_test_manifest_rows.rs` data file
-   (`typeinfo_ignored_test_manifest.rs:557`); the guards only diff/fail, never write.
+   (consumed by `typeinfo_ignored_test_manifest.rs`); the guards only diff/fail, never write.
    So `oracle_query_ordinals` is declared as an INPUT to that manifest generator's
    row-spec source — the SAME place each row is declared, sourced INDEPENDENTLY of
    `oracle_query_specs.rs`. If it were derived FROM the registry it would not be an
@@ -3366,8 +3367,10 @@ hover).
 Justification against Verter's per-block-lift / demand-driven discipline:
 
 - The project is explicitly **per-block-lift / demand-driven** (CLAUDE.md Build
-  Philosophy; the manifest's current state is 355 `Ignored` + 7 `Lifted` = 362 total
-  — the first seven rows are seated, the remainder lift block-by-block). Snapshots
+  Philosophy; the manifest's `Ignored`/`Lifted` split is DERIVED live from row status —
+  `count(Ignored) + count(Lifted)` always summing to the binding 362 total. It was
+  355 + 7 at this design's landing; the `Ignored` count keeps falling as rows lift
+  block-by-block). Snapshots
   are a rescope-gate deliverable produced block-by-block (§6.3 — "the oracle grows
   … rather than landing as one monolith"). Requiring all snapshots NOW would force
   generating oracle answers for rows whose lifting mechanism does not yet exist —
@@ -3539,10 +3542,11 @@ Justification against Verter's per-block-lift / demand-driven discipline:
   guards." The realized set is THREE distinct kinds of work, all now in the tree: (1) the
   regenerator's SOURCE MODEL was redesigned (it now carries `LIFTED_ROW_OVERRIDES` and
   emits each row's `status`), (2) the `ignored_test_row_table_holds_exactly_362_rows`
-  count-table guard was reconciled (total `.len() == 362`, live-ignore count `== 358`),
+  count-table guard was reconciled (total `.len() == 362`, live-ignore count
+  `== 362 - lifted_count` — 358 at that landing; it keeps falling as lifts accrue),
   and (3) THREE all-row-sensitive manifest guards were status-filtered. There are FOUR
   all-row-sensitive manifest guards in total, but only THREE needed edits — the fourth
-  (the `EXPECTED_TOTAL_IGNORED_COUNT` COUNT guard, `:595`) was ALREADY status-filtered via
+  (the `EXPECTED_TOTAL_IGNORED_COUNT` COUNT guard) was ALREADY status-filtered via
   `count_ignored_rows`. The set below records what landed:
 
   1. **The regenerator source-model redesign (a `Lifted` row SURVIVES
@@ -3561,9 +3565,9 @@ Justification against Verter's per-block-lift / demand-driven discipline:
        the generator previously scraped from the `#[ignore]` site, yet downstream guards
        still read those columns on EVERY row (status-independent). In particular
        `every_manifest_row_has_non_empty_unblocker`
-       (`typeinfo_ignored_test_manifest.rs:852`) iterates ALL rows and asserts each has a
+       (in `typeinfo_ignored_test_manifest.rs`) iterates ALL rows and asserts each has a
        non-empty `unblocker`, and the generator today sources `unblocker` from the live
-       `#[ignore = "…"]` text (`:1096`) — which is removed on lift. The retained-lift
+       `#[ignore = "…"]` text — which is removed on lift. The retained-lift
        metadata therefore stores the COMPLETE `IgnoredTestRow` payload so the regenerated
        table reproduces the lifted row VERBATIM, only with `status: Lifted { block_id }`
        substituted. The retained schema is the FULL 13-column `IgnoredTestRow` record. The
@@ -3603,7 +3607,7 @@ Justification against Verter's per-block-lift / demand-driven discipline:
        (replaced by a per-row status derived from `(file, function) ∈ LIFTED_ROW_OVERRIDES`)
        and never from a re-scrape of the removed `#[ignore]` text. Because the retained-lift
        metadata supplies a NON-EMPTY `unblocker` for every lifted row,
-       `every_manifest_row_has_non_empty_unblocker` (`:852`) STILL APPLIES to `Lifted` rows
+       `every_manifest_row_has_non_empty_unblocker` STILL APPLIES to `Lifted` rows
        unchanged and is NOT status-filtered — the retained-lift metadata is what keeps the
        all-rows `unblocker` invariant satisfiable after lift. The retained record carries
        all 13 `IgnoredTestRow` columns with a non-empty `unblocker` and a `proof` of
@@ -3638,10 +3642,9 @@ Justification against Verter's per-block-lift / demand-driven discipline:
        count of `Ignored` rows DECREASES as lifts accrue; the TOTAL row count stays 362.
 
   2. **The `ignored_test_row_table_holds_exactly_362_rows` count-table guard
-     reconciliation (`:1155`).** This guard asserts BOTH
-     `EXPECTED_IGNORE_MANIFEST.len() == 362` (the RAW table length, `:1157`) AND
-     `EXPECTED_TOTAL_IGNORED_COUNT == 362` (the status-filtered `Ignored` count,
-     `:1171`). With the regenerator redesign above, the raw `.len()` STAYS 362 (a lifted
+     reconciliation.** This guard asserts BOTH
+     `EXPECTED_IGNORE_MANIFEST.len() == 362` (the RAW table length) AND
+     `EXPECTED_TOTAL_IGNORED_COUNT == 362` (the status-filtered `Ignored` count). With the regenerator redesign above, the raw `.len()` STAYS 362 (a lifted
      row remains in the table as a `Lifted` row), so the FIRST assertion holds unchanged
      — this is the architectural reason the regenerator must retain lifted rows rather
      than drop them. But the SECOND assertion (`EXPECTED_TOTAL_IGNORED_COUNT == 362`)
@@ -3657,20 +3660,20 @@ Justification against Verter's per-block-lift / demand-driven discipline:
   3. **THREE of the FOUR all-row-sensitive manifest guards must be status-filtered (the
      fourth is already filtered).** Of the four all-row-sensitive manifest guards, the
      COUNT guard `EXPECTED_TOTAL_IGNORED_COUNT = count_ignored_rows(EXPECTED_IGNORE_MANIFEST)`
-     (`:595`) is ALREADY correctly status-filtered — `count_ignored_rows` counts only
-     `status == IgnoreStatus::Ignored` rows (`:566-575`/`:561`), so it decrements
+     is ALREADY correctly status-filtered — `count_ignored_rows` counts only
+     `status == IgnoreStatus::Ignored` rows, so it decrements
      automatically and needs NO edit. The other THREE all-row-sensitive guards DO need
      the lift update:
-     - `manifest_length_matches_documented_total` (`:989`) asserts
+     - `manifest_length_matches_documented_total` asserts
        `EXPECTED_IGNORE_MANIFEST.len() == EXPECTED_TOTAL_IGNORED_COUNT` — the raw
        `.len()` (362, all rows) vs the status-filtered `Ignored` count (< 362 after a
        lift). The equality breaks; it must compare the status-filtered `Ignored` count
        on BOTH sides (count `Ignored` rows in the table == `EXPECTED_TOTAL_IGNORED_COUNT`).
-     - `every_manifest_row_corresponds_to_a_live_ignored_test` (the orphan check, `:828`)
+     - `every_manifest_row_corresponds_to_a_live_ignored_test` (the orphan check)
        iterates EVERY row and treats a row WITHOUT a live `#[ignore]` as an ORPHAN — a
        `Lifted` row (whose `#[ignore]` was removed) would falsely register as an orphan
        unless `Lifted` rows are EXCLUDED from the orphan iteration.
-     - `per_file_ignored_test_counts_match_manifest` (`:1018`) asserts a PER-FILE
+     - `per_file_ignored_test_counts_match_manifest` asserts a PER-FILE
        partition where the expected per-file count tallies EVERY row regardless of
        status — a lifted row whose `#[ignore]` was removed no longer has a live
        `#[ignore]` to count, so the partition must be built over `status == Ignored`
@@ -3682,7 +3685,7 @@ Justification against Verter's per-block-lift / demand-driven discipline:
   `ignored_test_row_table_holds_exactly_362_rows` so the total stays 362 while the
   `Ignored` count is `362 - lifted_count`; and (c) status-filtering the THREE
   all-row-sensitive guards (length, orphan, per-file partition) over `status == Ignored`
-  rows. The status-filtered COUNT guard (`:595`) needs no edit. This is a hard
+  rows. The status-filtered COUNT guard needs no edit. This is a hard
   implementation prerequisite, not optional cleanup. The earlier "only THREE guards"
   framing was INACCURATE — the regenerator source-model and the 362-table guard also
   require changes, and the prerequisite set above is the complete, accurate list.
@@ -4008,7 +4011,7 @@ snapshot validated against itself).
 
 20. **`any` / `never` answers and package-backed / custom-host rows are deferred
     classes.** Rows with a genuine `any` / `never` answer (`Parameters<any>`,
-    `Awaited<never>`, …, `typeinfo_ignored_test_manifest_rows.rs:340,343,347`) are
+    `Awaited<never>`, …, see `typeinfo_ignored_test_manifest_rows.rs`) are
     permanently INELIGIBLE for this hover harness (the backstop rejects `any` always /
     `never` mostly; they stay strict, not weakened). Package-backed / custom-host rows
     (`make_package_host_with_workspace`, `cache_invalidation.rs:344`) are ineligible
@@ -4208,7 +4211,7 @@ carries a named guard here.
 | `snapshot_loading_is_runtime_fs` | The lift driver loads snapshots via runtime `std::fs::read` from `concat!(env!("CARGO_MANIFEST_DIR"), "/src/typeinfo/typeinfo_tests/oracle_snapshots/", oracle_family, "/", snapshot_id, ".json")` — the full `src/typeinfo/typeinfo_tests/` infix is present (not the bare `CARGO_MANIFEST_DIR` + `oracle_snapshots/` that resolves to the wrong dir); no `include_str!` / `include_bytes!` / `include_dir!` / generated include table appears in the consumption path. |
 | `oracle_env_hash_pins_resolved_file_set` | The snapshot STORES an `oracle_env_hash` content-hashing the CLOSED VENDORED SHARED corpus tsgo consulted (vendored ambient + lib + package `.d.ts` + manifests + project metadata, spanning resolve/type/lib/project dims — the SHARED ambient/lib/package/tsconfig corpus ONLY; per-row workspace files are a distinct domain in `identity.workspace_files`, not in this hash), validated on read by recomputing it from `oracle_env_files.files` against on-disk content; a `compiler_options_hash` match alone does NOT validate a snapshot. The per-snapshot `oracle_env_hash` is NOT a `snapshot_id` input (the STABLE `env_corpus_id` is — the filename stays registry-derivable). Discriminating: a vendored ambient/lib/package `.d.ts` or manifest change with unchanged compiler options must recompute a different `oracle_env_hash` and invalidate the snapshot. |
 | `registry_in_src_carries_oracle_family` | The oracle-query-spec registry lives at `src/typeinfo/typeinfo_tests/oracle_query_specs.rs` (reachable by the lifted unit tests), the `tests/` guard consumes the SAME table via a shared crate-internal path, and every entry carries an `oracle_family`. |
-| `oracle_driver_basenames_file_macro` | The shared registry driver basename-normalizes `file!()` via `Path::file_name()` before the registry lookup, matching the bare-filename `IgnoredTestRow.file` / registry key (manifest discovery uses `path.file_name()`, `:796`/`:902`/`:1012`). |
+| `oracle_driver_basenames_file_macro` | The shared registry driver basename-normalizes `file!()` via `Path::file_name()` before the registry lookup, matching the bare-filename `IgnoredTestRow.file` / registry key (manifest discovery uses `path.file_name()`). |
 | `lifted_body_is_self_keyed_macro` | Every lifted oracle row carries the `#[oracle_row]` ATTRIBUTE proc-macro (from the `verter_session_oracle_macro` dev-dependency crate), which reads the test fn's OWN `ItemFn` identifier (`sig.ident`) and synthesizes the `oracle::run_row(file!(), "<sig.ident>")` body — NOT a hand-typed string literal, and NOT a no-arg `oracle_row!()` declarative macro (a body-position declarative macro cannot see the enclosing fn name, so it is infeasible). The guard source-walks every `#[test]` fn in `src/typeinfo/typeinfo_tests/` that reaches the oracle driver and asserts (a) the fn carries the `#[oracle_row]` attribute and has NO hand-written `oracle::run_row(file!(), "…")` string-keyed body, AND (b) the key the attribute synthesizes (the attributed fn's own `sig.ident`) EQUALS the enclosing fn's identifier — so each lifted fn invokes EXACTLY its own `(file, function)` registry key. Discriminating: a fn that hand-writes `oracle::run_row(file!(), "bar_test")` (a mistyped/copy-pasted key naming another row) instead of carrying `#[oracle_row]` FAILS — without the attribute it would silently validate `bar_test`'s snapshots while every coverage/biconditional/count guard still passed (the wrong key is itself a real, fully-covered registry entry). |
 | `identity_is_kind_specific_schema_bumped` | `identity` is a closed tagged shape keyed by `oracle_value_kind`; the `structured_type_expr` required axes are present, and the schema-version constant is bumped in lockstep with any new `oracle_value_kind` discriminant. |
 | `snapshot_env_pin_matches_workspace` | Every snapshot's `tsgo_version == 7.0.0-dev.20260526.1`, `oracle_schema_version` == current, `normalizer_version` == current, `probe_synthesis_version` == current, `compiler_options_hash` == the oracle tsconfig effective-config hash, `env_corpus_id` == the closed vendored-corpus content id, and `oracle_env_hash` == the recomputed vendored-corpus hash (after corpus set-equality re-enumeration). |
@@ -4245,12 +4248,12 @@ carries a named guard here.
 | `non_admissible_query_not_lifted_via_hover` | No registry query that fails pre-lowering/whitelist/drop-counter/backstop admissibility is marked `Lifted` with a `structured_type_expr` snapshot; it stays `Ignored` until a future oracle kind exists. |
 | `parity_claim_is_structural_type_expr` | The harness compares normalized `TypeExpr` (Verter projection vs hover-lowered) — NOT full TS nominal/semantic identity. A nominal construct `TypeExpr` cannot carry (enum-member brand, `unique symbol`, private/protected brand, `this`-type, `const`/variance type-param, abstract-ctor) is out of scope for hover sourcing and DEFAULT-REJECTED; a legitimate structural divergence on such a construct is DEFERRED, never force-fit. |
 | `default_reject_is_the_rule` | The construct gate is a CLOSED POSITIVE ALLOWLIST; the enumerated REJECT entries are ILLUSTRATIVE. ANY construct not on the positive ADMIT list (named or unnamed) is rejected by default. Discriminating: an un-enumerated lossy construct introduced into a fixture is rejected without a new reject-list entry — the gate's soundness does not depend on enumerating it. |
-| `deferred_classes_not_lifted_via_hover` | Rows with a genuine `any`/`never` answer (`Parameters<any>` / `Awaited<never>` …, `typeinfo_ignored_test_manifest_rows.rs:340,343,347`), `workspace_footprint` rows (per-host project config, deferred to the `workspace_footprint` env-pin spike, §4), and package-backed / custom-host rows (`make_package_host_with_workspace`, `cache_invalidation.rs:344`) are NOT lifted via this hover harness; the deferred host classes re-enter only once the named env-pin spike pins their per-host env + full consulted corpus (§Scope), NOT automatically; the backstop's `any`/`never` reject stays strict and is not weakened for them. |
+| `deferred_classes_not_lifted_via_hover` | Rows with a genuine `any`/`never` answer (`Parameters<any>` / `Awaited<never>` …, see `typeinfo_ignored_test_manifest_rows.rs`), `workspace_footprint` rows (per-host project config, deferred to the `workspace_footprint` env-pin spike, §4), and package-backed / custom-host rows (`make_package_host_with_workspace`, `cache_invalidation.rs:344`) are NOT lifted via this hover harness; the deferred host classes re-enter only once the named env-pin spike pins their per-host env + full consulted corpus (§Scope), NOT automatically; the backstop's `any`/`never` reject stays strict and is not weakened for them. |
 | `raw_capture_present_for_audit` | Every snapshot stores `raw_capture` (`{ probe_name, probe_header, hover_contents }`); `probe_header_names_target` audits the wrong-hover fence offline from it without re-running tsgo. Discriminating: a snapshot missing `raw_capture` FAILS the guard. |
 | `expanded_probe_form_validated` | An `Expanded`-mode query is admissible only after the spike has validated a concrete lossless `Expanded`-probe form for its construct class; un-validated `Expanded` classes stay `Ignored`. |
 | `skeleton_probe_form_validated` | A `Skeleton`-mode query is admissible only after the spike has validated a concrete lossless `Skeleton`-probe form for its construct class — one that elicits tsgo's `TypeParameter`/`Infer` shell printing for unbound generics so Conditional branches do not collapse to `never`; un-validated `Skeleton` classes stay `Ignored` (default-REJECT, mirroring `Expanded`). Discriminating: a `Skeleton`-mode row whose construct class has no spike-validated probe form must stay `Ignored`/rejected; one in a spike-validated class is admissible. |
-| First-lift PREREQUISITE set: regenerator source-model + the 362-table guard + THREE all-row-sensitive guards (the COUNT guard `:595` is already status-filtered) | The COMPLETE, accurate prerequisite set for the first `Ignored → Lifted` row, all landing in the SAME block (§Q5): **(1) Regenerator source-model redesign** — under the original all-`Ignored` model `scripts/gen-typeinfo-ignore-manifest.py` built rows ONLY from live `#[ignore]` discovery, hardcoded `status: IgnoreStatus::Ignored`, and asserted exactly 362 built, so a `Lifted` row (no live `#[ignore]`) would VANISH on regeneration. The generator now UNIONS live discovery with a retained `Lifted`-row ledger (`LIFTED_ROW_OVERRIDES`), sources `status` FROM the ledger (not a hardcoded constant), asserts the two sets are disjoint, and asserts the TOTAL union is 362 (the `Ignored` count falls as lifts accrue; the total stays 362). **(2) `ignored_test_row_table_holds_exactly_362_rows` (`:1155`) reconciliation** — it asserts BOTH `EXPECTED_IGNORE_MANIFEST.len() == 362` (raw total — STAYS 362 because a `Lifted` row remains in the table) AND the status-filtered live-ignore count, now `EXPECTED_TOTAL_IGNORED_COUNT == 362 - lifted_count` (= 358 after the 4 lifts). **(3) THREE all-row-sensitive guards status-filtered** — `manifest_length_matches_documented_total` (`:989`, raw `.len()` vs status-filtered count), `every_manifest_row_corresponds_to_a_live_ignored_test` (the orphan-on-no-`#[ignore]` check, `:828`), `per_file_ignored_test_counts_match_manifest` (the per-file partition, `:1018`) all over `status == Ignored` rows only (a `Lifted` row carries NO live `#[ignore]` by design). The status-filtered COUNT guard `EXPECTED_TOTAL_IGNORED_COUNT = count_ignored_rows(…)` (`:595`/`:561`/`:566-575`) needed NO edit. This landed with the first lift; the "only THREE guards" framing was inaccurate. |
-| `lifted_row_overrides_retain_full_record` | The retained-lift metadata map (`LIFTED_ROW_OVERRIDES`) stores the FULL `IgnoredTestRow` payload per lifted row — the 12 data columns (`file`, `function`, `block_id`, `semantic_queries`, `proof`, `substrate`, `capability`, `organ`, `owning_u_block`, `mechanism_id`, `consumed_mechanisms`, `unblocker`) plus `status` (the 13th field) — so the regenerated table reproduces the lifted row VERBATIM with only `status: Lifted { block_id }` substituted, since live `#[ignore]` discovery can no longer supply ANY column once the `#[ignore]` is removed. Asserts every retained-lift record has a NON-EMPTY `unblocker` (so `every_manifest_row_has_non_empty_unblocker` at `:852` STILL holds on lifted rows, unchanged + un-status-filtered — the retained-lift metadata is its source) and a `proof` of `Ts7Oracle(_)` / `OracleAndGuard{..}` (a divergence row is an `OracleAndGuard` whose `guard` is the `DivergenceCorrection` prover). An independent non-`TypeExpr` obligation is expressed by the `OracleAndGuard` proof shape + its registered live prover — there is NO stored `non_typeexpr_obligations` ledger set (the round-2 full-record obligation ledger was retired). Discriminating: a retained-lift record that drops `unblocker` (or any column the all-rows manifest guards read), or demotes a footprint/audit/divergence row to bare `Ts7Oracle`, FAILS; a regenerated lifted row whose columns differ from the retained-lift record FAILS. (When the deferred §Q4 `oracle_query_ordinals` per-row-count field lands it will ride on this same retained-lift metadata, as will the deferred `migration_fingerprint` / `original_body_tokens` body-hash fidelity layer when wired — §Q4. Neither is a currently-stored column.) |
+| First-lift PREREQUISITE set: regenerator source-model + the 362-table guard + THREE all-row-sensitive guards (the `count_ignored_rows` COUNT guard is already status-filtered) | The COMPLETE, accurate prerequisite set for the first `Ignored → Lifted` row, all landing in the SAME block (§Q5): **(1) Regenerator source-model redesign** — under the original all-`Ignored` model `scripts/gen-typeinfo-ignore-manifest.py` built rows ONLY from live `#[ignore]` discovery, hardcoded `status: IgnoreStatus::Ignored`, and asserted exactly 362 built, so a `Lifted` row (no live `#[ignore]`) would VANISH on regeneration. The generator now UNIONS live discovery with a retained `Lifted`-row ledger (`LIFTED_ROW_OVERRIDES`), sources `status` FROM the ledger (not a hardcoded constant), asserts the two sets are disjoint, and asserts the TOTAL union is 362 (the `Ignored` count falls as lifts accrue; the total stays 362). **(2) `ignored_test_row_table_holds_exactly_362_rows` reconciliation** — it asserts BOTH `EXPECTED_IGNORE_MANIFEST.len() == 362` (raw total — STAYS 362 because a `Lifted` row remains in the table) AND the status-filtered live-ignore count, now `EXPECTED_TOTAL_IGNORED_COUNT == 362 - lifted_count` (358 at the first-lift landing's 4 lifts; the derived count keeps falling as lifts accrue). **(3) THREE all-row-sensitive guards status-filtered** — `manifest_length_matches_documented_total` (raw `.len()` vs status-filtered count), `every_manifest_row_corresponds_to_a_live_ignored_test` (the orphan-on-no-`#[ignore]` check), `per_file_ignored_test_counts_match_manifest` (the per-file partition) all over `status == Ignored` rows only (a `Lifted` row carries NO live `#[ignore]` by design). The status-filtered COUNT guard `EXPECTED_TOTAL_IGNORED_COUNT = count_ignored_rows(…)` needed NO edit. This landed with the first lift; the "only THREE guards" framing was inaccurate. |
+| `lifted_row_overrides_retain_full_record` | The retained-lift metadata map (`LIFTED_ROW_OVERRIDES`) stores the FULL `IgnoredTestRow` payload per lifted row — the 12 data columns (`file`, `function`, `block_id`, `semantic_queries`, `proof`, `substrate`, `capability`, `organ`, `owning_u_block`, `mechanism_id`, `consumed_mechanisms`, `unblocker`) plus `status` (the 13th field) — so the regenerated table reproduces the lifted row VERBATIM with only `status: Lifted { block_id }` substituted, since live `#[ignore]` discovery can no longer supply ANY column once the `#[ignore]` is removed. Asserts every retained-lift record has a NON-EMPTY `unblocker` (so the `every_manifest_row_has_non_empty_unblocker` guard STILL holds on lifted rows, unchanged + un-status-filtered — the retained-lift metadata is its source) and a `proof` of `Ts7Oracle(_)` / `OracleAndGuard{..}` (a divergence row is an `OracleAndGuard` whose `guard` is the `DivergenceCorrection` prover). An independent non-`TypeExpr` obligation is expressed by the `OracleAndGuard` proof shape + its registered live prover — there is NO stored `non_typeexpr_obligations` ledger set (the round-2 full-record obligation ledger was retired). Discriminating: a retained-lift record that drops `unblocker` (or any column the all-rows manifest guards read), or demotes a footprint/audit/divergence row to bare `Ts7Oracle`, FAILS; a regenerated lifted row whose columns differ from the retained-lift record FAILS. (When the deferred §Q4 `oracle_query_ordinals` per-row-count field lands it will ride on this same retained-lift metadata, as will the deferred `migration_fingerprint` / `original_body_tokens` body-hash fidelity layer when wired — §Q4. Neither is a currently-stored column.) |
 | `lifted_row_block_id_matches_status` | The retained-lift record's `block_id` field (the row's own `block_id` manifest column, one of the 13 `IgnoredTestRow` columns) and the `IgnoreStatus::Lifted { block_id }` status-payload `block_id` the regenerated row carries are INTENTIONALLY the SAME value — the lifting block IS the row's block, recorded once. The regenerator emits `status: IgnoreStatus::Lifted { block_id: rec.block_id }`, so they cannot drift in a single regeneration; this guard asserts the equality on every lifted row in the table (the emitted row's `status` payload `block_id` EQUALS the row's `block_id` column). Discriminating: a regenerated `Lifted` row whose `status` payload `block_id` differs from its `block_id` manifest column FAILS — proving the two are one value, not two independently-maintained fields that could disagree. |
 | Per-row lift tests (added per block) | Each lifted oracle query runs the single-spec resolver ONCE and asserts against recorded data (`ts-compat-two-mode-model.md` §7), NOT a per-mode re-run or a family-key comparison; corrections bind at `(row, query_ordinal)` granularity, so a row may MIX the two cases below: **(a) ordinary query (no correction)** — `resolver(query) == normalized oracle_value` (the recorded `TsCompat`/tsgo value, which here equals the correct value); **(b) corrected query** (a correction overlay exists for that `query_ordinal`) — `resolver(query) == correction.correct_value` (the `Correct` value), while that query's `snapshot.oracle_value` is the recorded `TsCompat` value and must differ. Both keep the explicit negative assertions (no `Unknown`, no `any`/`never` where a concrete type is expected). |
 
@@ -4591,15 +4594,16 @@ block; it is generator-side work (feature-gated), never part of the default gate
    exactly 362 built — so a `Lifted` row would VANISH on the next regeneration. The
    regenerator now UNIONS live discovery with a retained `Lifted`-row ledger
    (`LIFTED_ROW_OVERRIDES`), sources `status` from the ledger, and keeps the TOTAL union at
-   362. The `ignored_test_row_table_holds_exactly_362_rows` guard (`:1155`) was reconciled —
+   362. The `ignored_test_row_table_holds_exactly_362_rows` guard was reconciled —
    its raw `.len() == 362` STAYS true (a `Lifted` row stays in the table) while its
-   live-ignore assertion is now `EXPECTED_TOTAL_IGNORED_COUNT == 362 - lifted_count` (= 358).
+   live-ignore assertion is now `EXPECTED_TOTAL_IGNORED_COUNT == 362 - lifted_count` (358
+   at that landing; the derived count keeps falling as lifts accrue).
    Of the four guards in `crates/verter_session/tests/typeinfo_ignored_test_manifest.rs`,
-   the COUNT guard `EXPECTED_TOTAL_IGNORED_COUNT = count_ignored_rows(…)` (`:595`,
-   `:561`/`:566-575`) was ALREADY status-filtered; the other THREE all-row-sensitive guards
-   (`manifest_length_matches_documented_total` `:989`,
-   `every_manifest_row_corresponds_to_a_live_ignored_test` `:828`,
-   `per_file_ignored_test_counts_match_manifest` `:1018`) are status-filtered over
+   the COUNT guard `EXPECTED_TOTAL_IGNORED_COUNT = count_ignored_rows(…)` was ALREADY
+   status-filtered; the other THREE all-row-sensitive guards
+   (`manifest_length_matches_documented_total`,
+   `every_manifest_row_corresponds_to_a_live_ignored_test`,
+   `per_file_ignored_test_counts_match_manifest`) are status-filtered over
    `status == Ignored` rows. All of this — regenerator redesign + 362-table-guard
    reconciliation + the three guard edits — landed with the first lift; it is recorded in
    full in §Q5 and the Verification table. The earlier "only THREE guards" framing was inaccurate.

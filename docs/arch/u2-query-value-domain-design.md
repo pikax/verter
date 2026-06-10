@@ -1042,9 +1042,12 @@ N/M numbers are set at the U0/U2.RELATION_INFER rescope sessions.
 - **U6** — adds `FlowReturn` / `ResolveCall` enum variants + spec rows + `SemanticQueryValue::
   {FlowReturn, ResolvedCall}` arms (additive; reuses the slot-identity SHAPE finalized here);
   `ContextualTypeAt`/`FlowNarrowingAt` behavior; `ThisType<T>` contextual binding.
-- **U10.RESULT_DB** — lands the demand-lattice EXACTNESS publish gate
-  (`cache_satisfaction_is_demand_lattice_not_enum_order`); this gate's multi-candidate dominance
-  must keep it green.
+- **U10.RESULT_DB** — lands the published-boundary EXACTNESS publish gate
+  (`result_db_published_boundary_serves_only_recorded_materialized_points`, composing with the
+  landed `cache_satisfaction_is_materialized_point_not_nominal_demand` /
+  `backfill_writes_only_recorded_materialized_points` pair of §3.4 — the formerly-planned
+  `cache_satisfaction_is_demand_lattice_not_enum_order` is RETIRED); this gate's multi-candidate
+  dominance must keep the landed pair green.
 - **U13** — published projection re-projects display (§14.4) from the cached typed value.
 
 ---
@@ -1073,7 +1076,7 @@ rule below, not an optional follow-up.
 | Proposed rule | One-line | Proposed guard |
 |---|---|---|
 | **Typed value-domain (one key → one value domain)** | every `SemanticQueryKey` maps to exactly one `SemanticQueryValue` arm; no non-type-value smuggled into `GraphTypeNode` | `every_semantic_query_key_maps_to_exactly_one_value_domain` (+ `no_non_type_value_smuggled_into_graph_type_node`) |
-| **Demand-lattice presets** | the five mode names are presets over `(ProjectionDemand, EvalPolicy)`; satisfaction/backfill by lattice dominance/meet, not enum order; `Skeleton` = `TypeParamShells`+carrier-stop (incomparable regime) | `query_modes_are_presets_over_projection_demand_eval_policy` + `skeleton_is_typeparamshells_plus_carrier_stop_not_special_mode` (+ `cache_satisfaction_is_demand_lattice_not_enum_order` at U10) |
+| **Demand-lattice presets** | the five mode names are presets over `(ProjectionDemand, EvalPolicy)`; satisfaction/backfill by recorded materialized points (the lattice is the algebra inside `cached_satisfies` — §3.4), never enum order; `Skeleton` = `TypeParamShells`+carrier-stop (incomparable regime) | `query_modes_are_presets_over_projection_demand_eval_policy` + `skeleton_is_typeparamshells_plus_carrier_stop_not_special_mode` (+ the landed `cache_satisfaction_is_materialized_point_not_nominal_demand` / `backfill_writes_only_recorded_materialized_points` pair; the published-boundary residual `result_db_published_boundary_serves_only_recorded_materialized_points` at U10) |
 | **Canonical display is projection, not stored/re-parsed string** | display is computed at publish from the cached typed value; `display_needs` is display-only and never drives resolution | `canonical_display_is_projection_not_stored_string` + `display_needs_is_display_only_never_drives_resolution` |
 | **Error-tolerance ReturnOnly non-admission** | a result over torn/broken input or a torn read is `ReturnOnly`; a fact-rooted error (missing-dep) is cacheable | `error_tolerance_broken_input_is_returnonly_fact_rooted_error_is_cacheable` |
 | **Module-resolution keys on resolve_env** | a module-resolution result keys on `resolve_env_hash` (+ `project_identity`), the dimension folding moduleResolution/exports-conditions/paths/symlink-policy | `module_resolution_keys_on_resolve_env_not_type_or_lib` |

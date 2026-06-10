@@ -1,7 +1,7 @@
 # U6 — Flow narrowing + Call resolution + Contextual typing (LOCKED design)
 
 > Block: `U6` (Native Flow Return) — the RESCOPE-GATE-REQUIRED design
-> (`docs/arch/semantic-db-overhaul-unified-remaining-plan.md` §2290 "U6 — Native Flow Return (B11)"). This is a
+> (`docs/arch/semantic-db-overhaul-unified-remaining-plan.md`, the "U6 — Native Flow Return (B11)" block). This is a
 > **PLAN block / DESIGN GATE**: it LOCKS the airtight mechanisms for the U6 flow/call/narrowing/contextual
 > engines and the implementation mini-DAG; it does **not** build the engines. Implementation is sequenced AFTER
 > the U2 value-domain spine + the U2.RELATION_INFER substrate via the U6 sub-blocks
@@ -61,8 +61,8 @@ their query kinds.
 ### 0.1 What the current code does wrong (the thing being deleted)
 
 Today the return-type "inference" is a lightweight OXC scanner
-(`crates/verter_semantic/src/analysis/type_eval_build.rs` — `infer_return_type`:1119, `collect_return_types`:1138,
-`infer_expression_type`:1167, `extract_object_literal_as_type`:1041, `append_spread_array_element_types`:1307)
+(`crates/verter_semantic/src/analysis/type_eval_build.rs` — `infer_return_type`, `collect_return_types`,
+`infer_expression_type`, `extract_object_literal_as_type`, `append_spread_array_element_types`)
 that walks `Statement::ReturnStatement` directly off the parse tree (holding an arena borrow), only descends into
 `BlockStatement`/`IfStatement`, treats every identifier as `TypeOf(path)` without resolving against the
 parameter/local environment, and unions returns naively. It is **not** callable from `execute_cooperative`, never
@@ -452,7 +452,7 @@ EXERCISED here (owned at U2.RELATION_INFER) and must not be regressed.
 | Invariant | U6 conformance |
 |---|---|
 | ONE resolver | flow/call/narrowing/contextual are nodes of the single `SemanticGraphStore` dispatch; `ResolveCall` is a shared key, not a body-solver helper; callee resolution is typed-IR. |
-| typed-IR-only | the OXC scanner (`infer_return_type` et al., LIVE at `type_eval_build.rs:1119`) is DELETED in U6.FLOW_RETURN_SUBSTRATE; no source-slicing / regex / `parse_type_annotation` at query time. |
+| typed-IR-only | the OXC scanner (`infer_return_type` et al., LIVE in `type_eval_build.rs`) is DELETED in U6.FLOW_RETURN_SUBSTRATE; no source-slicing / regex / `parse_type_annotation` at query time. |
 | `ProgramAnalysisGraph`, never `GraphTypeNode` | flow/narrowing/predicate/contextual facts publish through `ProgramAnalysisGraph` (qvd §2.2); predicate/assertion carriers are `SignatureEffect` metadata, never a published return-type node. |
 | R21 five split env hashes | `FlowReturnContext` / `ResolveCallContext` / `RelationContext` / `ProgramAnalysisContext` carry `R T L J` (+ `P` where the producer reads parse-env) split, never a bundled `project_config_hash`. |
 | R6 version-rooting on the value | the `FlowReturn` / `ResolveCall` query-identity keys carry NO `flow_body_stable_hash` / `parse_stable_hash` / `fact_dep_signature`; the body hash rides the content-addressed `FlowSliceHashNode` artifact node + the `FlowSlice` fact's `FactVersionRef::ProgramAnalysis` (the documented two-family split — content-addressed artifact caches DO carry the body hash, query-identity caches do NOT). No violation. |
@@ -568,7 +568,7 @@ against the current tree.
   U6 sub-block**, landing WITH the variant it tests.
 - **The grep/structural guards are RED-now** (`legacy_return_scanner_removed` /
   `flow_solver_never_slices_source_text` / `no_flow_slot_in_published_type_surface` assert the absence of code
-  LIVE at `type_eval_build.rs:1119`, or the presence of a `flow` module that does not exist yet). They go green
+  LIVE in `type_eval_build.rs` (`infer_return_type` et al.), or the presence of a `flow` module that does not exist yet). They go green
   only when U6.FLOW_RETURN_SUBSTRATE lands. Deferred, owned by U6.FLOW_RETURN_SUBSTRATE.
 - **No NEW `(CRITICAL)` rule text is minted by U6 into `CLAUDE.md` / a `.claude/skills/*/SKILL.md` at this
   gate.** The U6 block contracts CITE the parent's existing `(CRITICAL)` demand-sliced-flow / one-resolver /

@@ -1,6 +1,6 @@
 # U2.RELATION_INFER — Relation-cache substrate + coinductive dispatch (LOCKED design)
 
-> Block: `U2.RELATION_INFER` (`docs/arch/semantic-db-overhaul-unified-remaining-plan.md` §1583–1708, the
+> Block: `U2.RELATION_INFER` (`docs/arch/semantic-db-overhaul-unified-remaining-plan.md`, the
 > `U2.RELATION_INFER` gate). Design gate deliverable — design #1 (relation-caching category) + design #2
 > (coinductive cycle discharge) together, as ONE coupled problem, plus the inference-session admission
 > tightening (#3), relation-proof acceptance (#5/A.9), and the second-engine forbiddances.
@@ -93,9 +93,9 @@ Decision 5. Concretely:
 1. The relation memo key was once a **bare pair** `{ source, target }` — not a sound cache identity, since
    the same pair relates differently under a different `RelationKind`, excess/variance `RelationPolicy`,
    source freshness, inference setup, or env/substitution, all colliding on one memo slot. **Corrected:** the
-   landed `RelateMemoKey` (`semantic_query.rs:2682`) carries the full identity (source/target/`RelationKind`/
+   landed `RelateMemoKey` (in `semantic_query.rs`) carries the full identity (source/target/`RelationKind`/
    `RelationPolicy`/`FreshnessKey`/`Option<InferenceContextKey>`/`RelationContext`), and
-   `SemanticQueryKey::Relate` (`:2875`) mirrors it.
+   `SemanticQueryKey::Relate` (same file) mirrors it.
 2. `RELATION_IN_FLIGHT` is a **process-global** (`thread_local!`) cycle guard with
    `enter_/exit_relation_guard`, returning `RelationResult::Unknown` on re-entry. **Still present** on the
    current tree (now keyed on the full `RelateMemoKey`); the `relate_nodes(source, target)` entry point and
@@ -103,11 +103,13 @@ Decision 5. Concretely:
 3. The cold path **MEMOIZES the transient `RelationResult::Unknown` sentinel** — a genuinely-recursive
    `interface A { next: A }` vs `interface B { next: B }` is mis-decided `Unknown` and that sentinel is cached
    as a warm, fact-validated, persistent entry (the relation analogue of admitting a flow-cycle sentinel).
-   **Partially addressed:** the PUBLIC value-domain `RelationOutcome` (`semantic_query.rs:1841`) already has no
+   **Partially addressed:** the PUBLIC value-domain `RelationOutcome` (in `semantic_query.rs`) already has no
    `Unknown` arm (the value-domain-shape block landed that — a deferred / undischarged relation has no public
    `SemanticQueryValue::Relation` form). But the INTERNAL transient `RelationResult::Unknown` **is still
    memoized on the current tree**: `relate_nodes` admits every `RelationResult`, `Unknown` included, into the
-   relation memo via `insert_relation` (`relation.rs:214`); cyclic re-entry (`relation.rs:184`) and budget
+   relation memo via `SemanticGraphStore::insert_relation` (the memo-admission call in
+   `project_semantic_dispatch/relation.rs`); cyclic re-entry (the `RELATION_IN_FLIGHT` /
+   `enter_relation_guard` re-entry arm in the same file) and budget
    exhaustion both yield `Unknown`, and that result IS warm-cached (the test
    `relation_unknown_is_cached_with_fence_not_recomputed_on_repeated_cycle` pins "Unknown must cache exactly
    once per pair"). The `Unknown` → `ReturnOnly` (never-warm-admit) cutover is the structural deletion later RI
@@ -250,7 +252,8 @@ struct CheckerTransaction {                          // §4.2 — the per-root c
   one stack so the per-engine cycle spaces can never diverge. **At U2 only `Relate` is WIRED onto it** (plus
   the `Instantiate{args:[], context.projection_reduction.mode=Skeleton}` BFS it subsumes). The `ResolveCall` /
   `FlowReturn` engines — their enum variants, spec rows, AND behavior — land WHOLE at **U6**
-  (native-typeinfo-parity.md:507 / qvd:942-948); those two variants are **NOT pre-registered at U2** (the
+  (the parity §2.3 added-key table / qvd "Rescope of later phases" — the U6 entry); those two
+  variants are **NOT pre-registered at U2** (the
   standing `semantic_query_key_spec_table_equals_enum` meta-guard would reject any U2 tree that referenced
   them). The `ContextualTypeAt` / `FlowNarrowingAt` variants + spec rows ARE already registered at U2 as
   **non-producing shells** (`execute → Error(Miss)`); only their flow / contextual behavior and reentry-wiring
@@ -351,8 +354,8 @@ requires the relevant enclosing session(s) to reach `CompletedDeterministic`, so
          identity — a negative member never defers *merely* because the SCC is mixed.
        - But on the VERDICT-dependency axis the negative member's published fact set is its **transitive
          consumed-verdict closure** (below), which MAY include a binding sibling's verdict. That binding sibling's
-         SCC-close verdict is **PROVISIONAL** until its session reaches `CompletedDeterministic` (§3.3; parent
-         §4.2:1413–1415 RE-MEASURES across fixation iterations), so it can later FLIP to `Assignable` (⇒ this
+         SCC-close verdict is **PROVISIONAL** until its session reaches `CompletedDeterministic` (§3.3; the
+         parent §4.2 re-measurement rule RE-MEASURES across fixation iterations), so it can later FLIP to `Assignable` (⇒ this
          member should be `Assignable`) or `Abandon` (⇒ the sibling never validly produced the verdict this member
          consumed). In BOTH cases the content-fact rail CANNOT catch it — inference convergence is NOT a content
          edit, so this member's `ReadSetSignature.facts` (even the transitive consumed-verdict closure including the
@@ -371,7 +374,7 @@ requires the relevant enclosing session(s) to reach `CompletedDeterministic`, so
      `Abandon`s — exactly as the positive batch already does. A binding `NotAssignable` member always records its
      negative verdict + fact-set into the enclosing session's `SessionAdmissionLedger` at SCC-close and publishes
      only at session-close (§2.3 step 4). **Do NOT instead defend this by asserting a binding member's verdict is
-     final-and-monotone at SCC-close** — parent §4.2:1413–1415 re-measurement + §3.3 "setup still mutating"
+     final-and-monotone at SCC-close** — the parent §4.2 re-measurement rule + §3.3 "setup still mutating"
      contradict that; the deferral GATE is the sound fix, not a monotonicity invariant.
      **Each negative member publishes with the SAME
      fact-set rule as positive members — NOT a per-member fact set:** a member that is `NotAssignable` SOLELY
@@ -391,7 +394,7 @@ requires the relevant enclosing session(s) to reach `CompletedDeterministic`, so
 4. **(R-a) Batched admission, split by SCC composition and close sign.** SCC-close and inference-session
    completion are **two independent convergence axes**: a binding member's relation SCC can close (relation
    recursion converges) while its enclosing `InferenceSession` is still `InProgress` (the session's fixation
-   fixed-point loop continues after that relation pass — §2.2, parent §4.2:1413–1415). Admission
+   fixed-point loop continues after that relation pass — §2.2, the parent §4.2 re-measurement rule). Admission
    therefore splits by SCC composition and close sign, and a binding member is **NEVER published at SCC-close**.
    A member computed under an open assumption cannot admit before the root closes — its slot stays empty until
    at least SCC-close. The per-`CheckerTransaction` `SccLedger` accumulates `(Kᵢ, per-member observed-fact set,
@@ -598,7 +601,8 @@ equality; `Relate` → §4.1 closure). The HARD RULE is uniform: only a converge
 result is cacheable; unconverged / cancelled / superseded-mid-flight / budget-exceeded ⇒ `ReturnOnly`.
 
 **At U2, only `Relate` is wired onto the substrate.** The `ResolveCall` / `FlowReturn` engines — their enum
-variants, spec rows, AND behavior — land WHOLE at **U6** (native-typeinfo-parity.md:507, qvd:942-948); those
+variants, spec rows, AND behavior — land WHOLE at **U6** (the parity §2.3 added-key table, qvd
+"Rescope of later phases" — the U6 entry); those
 two variants are NOT pre-registered at U2 (the standing `semantic_query_key_spec_table_equals_enum` meta-guard
 would reject a U2 tree referencing them). The `ContextualTypeAt` / `FlowNarrowingAt` variants + spec rows ARE
 already registered at U2 as **non-producing shells** (`execute → Error(Miss)`); only their behavior and
@@ -808,22 +812,24 @@ axis (§2.3 step 3); the VERDICT-dependency axis is gated separately by the cons
 
 **Parent value-domain guard — NAMED, OWNED, reconciled (`relate_query_value_carries_relation_proof_and_budget_state`).**
 The locked parent pins a value-domain guard `relate_query_value_carries_relation_proof_and_budget_state`
-(native-typeinfo-parity.md:1074; also referenced in native-typeinfo-parity-cache-export-session.md:402, the
-unified plan:2572, and native-typeinfo-parity-u2-reducers.md:200) asserting the public
+(the parent §3 value-domain prose + its Guards index; also referenced in the
+`native-typeinfo-parity-cache-export-session.md` U11 block's Required-new-guards list, the unified
+plan's U11 block, and the `native-typeinfo-parity-u2-reducers.md` U2.QUERY_VALUE_DOMAIN
+guards list) asserting the public
 `SemanticQueryValue::Relation(RelationPayload)` carries BOTH the relation_proof AND the budget state. This
 design satisfies it in the **folded** shape: the public `RelationPayload` carries `relation_proof:
 RelationProofId` AND the budget state — the latter typed INTO `outcome` as
 `RelationOutcome::BudgetExceeded(BudgetExceededKind)`, NOT as a separate `budget_state` field. The fold is the
 cleaner data model (single source of truth; no representable `Assignable`-with-exceeded-budget contradiction)
 and matches the parent's own value-domain prose ("the public `RelationPayload` … plus a typed `BudgetExceeded`
-non-admission", native-typeinfo-parity.md:1057; "carrying the proof + typed `BudgetExceeded`",
-native-typeinfo-parity-cache-export-session.md:402) and the qvd three-valued `display_relation`
+non-admission", the parent §3 value-domain prose; "carrying the proof + typed `BudgetExceeded`",
+the `…cache-export-session.md` U11 Required-new-guards list) and the qvd three-valued `display_relation`
 (`Assignable`/`NotAssignable`/`BudgetExceeded`). The guard's `_and_budget_state` clause is therefore satisfied
 in **intent** — the budget state IS carried, as a typed outcome arm — and a future implementer / the parent
 guard author should read the guard against the folded outcome, not a literal `budget_state` field. **Ownership:**
 the guard is owned by **U2.QUERY_VALUE_DOMAIN** (the value-domain block that ships the `Relate` value-domain
 SHAPE + the content-free `InferenceSession` projection shape, both qvd §2.2 — it may land there per the parent
-and native-typeinfo-parity-cache-export-session.md:402);
+and the `…cache-export-session.md` U11 block's Required-new-guards list);
 **RI-2 (this block) exercises and satisfies it** by EXERCISING the already-landed rich `RelationPayload`:
 POPULATING it from the relation reducer (with the `relation_proof` + the typed `BudgetExceeded` outcome), adding
 the transient `RelationComputeResult` compute-result split, and performing the wire proof-storage migration
@@ -835,7 +841,7 @@ the transient `RelationComputeResult` compute-result split, and performing the w
 The `RelationPayload` above is the PUBLIC value-domain value (`SemanticQueryValue::Relation`): its `outcome`
 is the three-valued `Assignable` | `NotAssignable` | `BudgetExceeded` that `display_relation` renders (qvd
 §display_relation). **Expressibility and warm-admissibility are DIFFERENT layers, and the locked value domain
-requires both** (native-typeinfo-parity.md:1052 "the public `RelationPayload` … plus a typed `BudgetExceeded`
+requires both** (the parent §3 value-domain prose: "the public `RelationPayload` … plus a typed `BudgetExceeded`
 non-admission … a `BudgetExceeded` relation result is `ReturnOnly`"): a `BudgetExceeded` payload is fully
 expressible and renderable, yet is `ReturnOnly` — never warm-admitted — enforced AT THE ADMISSION GATE (row
 4), NOT by deleting the variant. Only the binary `Assignable`/`NotAssignable` subset is eligible for the
@@ -871,13 +877,14 @@ while the gate keeps it ReturnOnly.
   no `SemanticQueryValue::Relation` form at all (qvd §display_relation renders only `Assignable`/`NotAssignable`/
   `BudgetExceeded` — no `Unknown`). This is the structural deletion the relation-inference work WILL perform on
   the INTERNAL `RelationResult::Unknown` cache arm — NOT yet done: on the current tree the memoized-`Unknown`
-  arm is **still present** (`relate_nodes` admits `Unknown` into the relation memo via `insert_relation` at
-  `relation.rs:214`; cycle/budget yield a warm-cached `Unknown`). Only the PUBLIC value-domain `Unknown` outcome
+  arm is **still present** (`relate_nodes` admits `Unknown` into the relation memo via
+  `SemanticGraphStore::insert_relation` in `project_semantic_dispatch/relation.rs`; cycle/budget yield a
+  warm-cached `Unknown`). Only the PUBLIC value-domain `Unknown` outcome
   is already gone.
 - **`BudgetExceeded` IS on the public value surface, but never warm.** A `RelationOutcome::BudgetExceeded`
   payload is a legitimate `SemanticQueryValue::Relation` that `display_relation` renders, yet it is `ReturnOnly`
   by the admission gate (row 4) — never warm-admitted, never backfilled, never a fact signature. Expressible
-  and non-admitted are two layers; the locked value domain (native-typeinfo-parity.md:1052, qvd
+  and non-admitted are two layers; the locked value domain (the parent §3 value-domain prose, qvd
   §display_relation) requires both.
 - **`CoinductiveCycle { keys }` carries only COMPLETED keys (produced by the session-converged re-discharge).**
   The durable proof is NOT a remap of the provisional SCC-close snapshot's `keys: S` — it is the proof the
@@ -898,7 +905,7 @@ while the gate keeps it ReturnOnly.
 - Proofs ride the **payload-side `relation_proofs` table by opaque proof id**. The END STATE keeps the proof
   **OFF the type-values surface**. NOTE the current tree does NOT yet satisfy this: `GraphTypeNode.kind`
   carries a live `GraphRelationProof relation_proof = 28` variant
-  (`crates/verter_protocol/proto/verter/v1/typeinfo.proto:208`). **RI-2 RETIRES that tag-28 arm** and
+  (the `GraphTypeNode.kind` tag-28 oneof arm in `crates/verter_protocol/proto/verter/v1/typeinfo.proto`). **RI-2 RETIRES that tag-28 arm** and
   relocates the proof to the payload-side `relation_proofs` table referenced by opaque `RelationProofId`, so
   that after RI-2 there is **NO `GraphTypeNode` relation-proof arm** on the wire. (`GraphTypeNode` is the
   wire/proto surface, not a live Rust enum.) Guards `relation_proofs_not_graph_type_nodes` +
@@ -1043,7 +1050,8 @@ Goal: `execute(Relate { source: A, target: B, relation: Assignable, … })`.
 
 **Contrast with current code:** today step 2 returns `RelationResult::Unknown` via the still-present
 in-flight cycle guard, and step 5 **caches that `Unknown`** (the memoized-`Unknown` arm is still present —
-`insert_relation` at `relation.rs:214` admits it; cycle/budget yield a warm-cached sentinel) — so a
+`SemanticGraphStore::insert_relation` in `project_semantic_dispatch/relation.rs` admits it; cycle/budget
+yield a warm-cached sentinel) — so a
 genuinely-recursive valid relation is permanently mis-decided `Unknown`. The new design routes the sentinel
 through `ReturnOnly` (deleting that cache arm) and publishes `Assignable + CoinductiveCycle`.
 
@@ -1128,7 +1136,7 @@ RI-1 ──┬── RI-2 ──────────────────
 | **RI-1** Full-identity `Relate` key | U2.QUERY_VALUE_DOMAIN | §2.7 key struct; `RelationKind`/`RelationPolicy`/`FreshnessKey`/`RelationContext`/`InferenceContextKey` types; `SemanticQueryKeySpec` row; re-key `BudgetedRelationMemo` bare→interned full identity; wire into per-family adaptive cap | `relate_key_covers_relation_kind_policy_freshness_and_context`; `relate_same_nodes_different_relation_kind_policy_or_env_do_not_warm_hit` | bare-pair `Relate` key; bare-pair `BudgetedRelationMemo` key |
 | **RI-2** `RelationPayload` value-domain + proof table + wire migration | RI-1 | The rich `RelationPayload` struct ({`outcome` ∈ `Assignable`/`NotAssignable`/`BudgetExceeded` — NO public `Unknown`, `bindings`, `relation_proof: RelationProofId`}), the four `RelationProof` shapes, and the payload-side `RelationProofTable` are ALREADY landed (value-domain block); RI-2's remaining payload work is the transient `RelationComputeResult`/`UndecidedReason` compute-result split (Decision 4) feeding that landed struct. **Wire migration (Typeinfo Wire Contract):** relocate the proof OFF `GraphTypeNode` to the payload-side `relation_proofs` table; add `reserved 28;` + `reserved "relation_proof";` at `GraphTypeNode` message scope (proto3 forbids `reserved` inside the `oneof` — neighbour of the existing `reserved 33 to 100;`); bump `SemanticTypeGraph.schema_version` | `relation_proofs_not_graph_type_nodes` (wire/proto-surface form — RED today via live tag 28, lands GREEN here); `typeinfo_relate_payload_exposes_relation_proof_without_graph_type_node`; keep `typeinfo_graph_taxonomy` + `typeinfo_proto_ts_freshness` green; exercises/satisfies the parent value-domain guard `relate_query_value_carries_relation_proof_and_budget_state` (OWNED by U2.QUERY_VALUE_DOMAIN — the upgraded payload carries the `relation_proof` + the budget state typed into `RelationOutcome::BudgetExceeded`) | the PUBLIC tri-state `enum RelationPayload { Holds, DoesNotHold, Unknown }` at the value boundary is ALREADY deleted (value-domain block — replaced by the `{Assignable, NotAssignable, BudgetExceeded}` outcome, NO public `Unknown`) — NOT a remaining RI-2 deletion. The INTERNAL transient `RelationResult` STILL carries its `Unknown` arm and STILL admits it to the relation memo on the current tree — that memo-admission deletion is RI-4's, not RI-2's. The remaining RI-2 deletion is **`GraphTypeNode.relation_proof = 28` / `GraphRelationProof` as a `kind` arm** (tag 28 reserved, name reserved, schema_version bumped) |
 | **RI-3** `CheckerReentryStack` + `RelationAssumptionStack` + `CheckerTransaction` | RI-1 | transient cold-compute frame; scoped assumption recording keyed by full identity | `relation_cycle_assumptions_are_scoped_to_full_relate_identity`; `checker_reentry_stack_substrate_built_and_relate_wired` (the shared `CheckerReentryStack` substrate is built and **only `Relate`** — plus the `Instantiate{args:[], context.projection_reduction.mode=Skeleton}` BFS it subsumes — is wired onto it as a typed view; testable at U2 with only the live variants. The full cross-engine span assertion is DEFERRED to the U6-owned `checker_reentry_graph_spans_flow_call_contextual_narrowing` — see Rescope/U6); retired-symbol: `relate_nodes(source,target)` / `RELATION_IN_FLIGHT` / `enter_/exit_relation_guard` cannot be re-introduced | `RELATION_IN_FLIGHT` thread-local; `enter_/exit_relation_guard`; bare-pair `relate_nodes` |
-| **RI-4** Coinductive SCC discharge + SCC-composition-split admission + `ReturnOnly` gate | RI-2, RI-3, RI-6 | `SccLedger`; Tarjan over assumption edges; §2.3 discharge verdict; at SCC-close publish ONLY the members whose verdict is complete then — a **pure non-binding SCC**'s members, and any **NEGATIVE** non-binding member (no `keys: S`) **whose transitive consumed-verdict closure contains no binding member** — via the batched `FamilySlots::publish` pass, and DEFER the rest (every binding member, the **POSITIVE non-binding members of a MIXED SCC** which share the binding-referencing proof, AND any **NEGATIVE** non-binding member whose consumed-verdict closure reaches a binding sibling) by handing binding members (verdict + SCC fact-set) to RI-6's per-session `SessionAdmissionLedger` and holding the deferred non-binding members on the `SccLedger`'s batch (NO binding-member, NO mixed-SCC positive, and NO binding-consuming negative publish or proof-key remap at SCC-close); the SCC-close verdict/bindings/proof recorded for a deferred member is PROVISIONAL (caller-return + deferral metadata, NEVER the published payload); the deferred batch's session-close drain is a THREE-outcome gate (§2.3 step 4) whose **published payload IS the session-converged re-discharge** — when every relevant session is `CompletedDeterministic` it re-discharges each member through the same `execute(Relate{K})` dispatch against the converged state and publishes that result ONLY when it yields a STABLE determined publishable outcome (positive ⇒ `Assignable` + complete `CoinductiveCycle` proof; negative ⇒ slotless `NotAssignable`, NO slot-fill); on a non-stable re-discharge (own-verdict flip, consumed-sibling sign-flip, or bindings change) or on `Abandon`, releases WITHOUT publish (no entry / fact signature / backfill; joiners recompute) | `relation_coinductive_scc_discharges_on_outgoing_obligations`; `relation_cycle_sentinel_is_never_warm_admitted`; admission rows 1–5,13,14; exercises `binding_relate_scc_member_admits_only_at_session_close` (owned by RI-6) for the SCC-close→ledger hand-off | the memoized `RelationResult::Unknown` admission arm — STILL present on the current tree (`relate_nodes` admits `Unknown` via `insert_relation` at `relation.rs:214`); RI-4 deletes it and its `ReturnOnly` gate is the structural guarantee it cannot re-enter |
+| **RI-4** Coinductive SCC discharge + SCC-composition-split admission + `ReturnOnly` gate | RI-2, RI-3, RI-6 | `SccLedger`; Tarjan over assumption edges; §2.3 discharge verdict; at SCC-close publish ONLY the members whose verdict is complete then — a **pure non-binding SCC**'s members, and any **NEGATIVE** non-binding member (no `keys: S`) **whose transitive consumed-verdict closure contains no binding member** — via the batched `FamilySlots::publish` pass, and DEFER the rest (every binding member, the **POSITIVE non-binding members of a MIXED SCC** which share the binding-referencing proof, AND any **NEGATIVE** non-binding member whose consumed-verdict closure reaches a binding sibling) by handing binding members (verdict + SCC fact-set) to RI-6's per-session `SessionAdmissionLedger` and holding the deferred non-binding members on the `SccLedger`'s batch (NO binding-member, NO mixed-SCC positive, and NO binding-consuming negative publish or proof-key remap at SCC-close); the SCC-close verdict/bindings/proof recorded for a deferred member is PROVISIONAL (caller-return + deferral metadata, NEVER the published payload); the deferred batch's session-close drain is a THREE-outcome gate (§2.3 step 4) whose **published payload IS the session-converged re-discharge** — when every relevant session is `CompletedDeterministic` it re-discharges each member through the same `execute(Relate{K})` dispatch against the converged state and publishes that result ONLY when it yields a STABLE determined publishable outcome (positive ⇒ `Assignable` + complete `CoinductiveCycle` proof; negative ⇒ slotless `NotAssignable`, NO slot-fill); on a non-stable re-discharge (own-verdict flip, consumed-sibling sign-flip, or bindings change) or on `Abandon`, releases WITHOUT publish (no entry / fact signature / backfill; joiners recompute) | `relation_coinductive_scc_discharges_on_outgoing_obligations`; `relation_cycle_sentinel_is_never_warm_admitted`; admission rows 1–5,13,14; exercises `binding_relate_scc_member_admits_only_at_session_close` (owned by RI-6) for the SCC-close→ledger hand-off | the memoized `RelationResult::Unknown` admission arm — STILL present on the current tree (`relate_nodes` admits `Unknown` via `SemanticGraphStore::insert_relation` in `project_semantic_dispatch/relation.rs`); RI-4 deletes it and its `ReturnOnly` gate is the structural guarantee it cannot re-enter |
 | **RI-5** Fast-reject prefilter + memo locality | RI-1 | O(tag) structural discriminators before structural relate; interned-id locality layout | `relation_negative_and_unknown_paths_are_fast` (bench) | — |
 | **RI-6** `InferenceSession`/`SessionStack` + candidate combination + generated `InferenceContextKey` + completed-deterministic admission + `SessionAdmissionLedger` | RI-3 | §4.2 session substrate; closed `InferencePriority` ladder + combination rules; generated fingerprint (R-b); binding-`Relate` `ReturnOnly`-until-complete (R-c); the per-session `SessionAdmissionLedger` (on `CheckerTransaction`, keyed by transient `SessionId`) — populated by RI-4's `SccLedger` with the PROVISIONAL SCC-close snapshot (caller-return + deferral metadata, NEVER published verbatim) and DRAINED at session-close through a THREE-outcome gate whose **published payload IS the session-converged re-discharge**: when every relevant session is `CompletedDeterministic` it re-discharges each deferred member through the same `execute(Relate{K})` dispatch against the converged state (final bindings, final own verdict, final consumed-sibling verdicts), publishing that result ONLY when it is a STABLE determined publishable outcome — each deferred **POSITIVE** member as `Assignable` + a `CoinductiveCycle` proof referencing only completed keys (the re-keying intrinsic to the re-discharge, no separate remap), each deferred **NEGATIVE** member as a slotless `NotAssignable` with NO slot-fill; on a non-stable re-discharge (own-verdict flip, consumed-sibling sign-flip, or bindings change), OR on `Abandoned`, it drops the whole deferred batch to `ReturnOnly` and **releases the held singleflight registration WITHOUT publish** (no entry / fact signature / backfill), so any concurrent joiner recomputes | `inference_runs_in_checker_transaction_not_per_surface_matcher`; `only_completed_deterministic_sessions_are_admitted`; `inference_candidate_combination_matches_priority_and_variance`; `relate_same_nodes_different_inference_context_do_not_warm_hit`; `inference_context_key_projects_every_session_setup_axis` (R-b); `binding_relate_scc_member_admits_only_at_session_close` (deferred binding-member admission — RED-today, lands TDD-first here) | any standalone / per-surface inference matcher |
 | **RI-7** Reverse-mapped inference pass + per-property freshness spread-taint | RI-6 | relation-owned session pass for homomorphic-mapped recovery; per-property freshness/taint algorithm | `reverse_mapped_inference_is_relation_owned_in_session`; `freshness_tracks_per_property_spread_taint` | any private reverse-mapping matcher |
@@ -1159,7 +1167,7 @@ three binding constraints:
 2. The wire/proto guard `relation_proofs_not_graph_type_nodes` (asserting the relation proof is NOT a
    `GraphTypeNode.kind` arm) is **RED-discriminating TODAY**: the current tree carries a live
    `GraphRelationProof relation_proof = 28` variant on `GraphTypeNode.kind`
-   (`crates/verter_protocol/proto/verter/v1/typeinfo.proto:208`), so the guard would FAIL on the current tree
+   (the `GraphTypeNode.kind` tag-28 oneof arm in `crates/verter_protocol/proto/verter/v1/typeinfo.proto`), so the guard would FAIL on the current tree
    and could not land at this green gate. It is deferred to RI-2 **because it is a RED test** (it would break
    the green `cargo nextest run --workspace` gate until RI-2's tag-28 retirement + wire migration lands), NOT
    because it is a non-discriminating stub — the earlier "stub guard" justification was wrong (`GraphTypeNode`
@@ -1265,7 +1273,7 @@ The deferred-guard→owner registry (the mini-DAG table) is the gate's landable 
 - **U6** consumes the shared `CheckerReentryStack` substrate RI-3 builds (RI-8 reuses; RI-8 wires no
   `Relate`), and **routes** the
   `FlowReturn`/`ResolveCall`/`ContextualTypeAt`/`FlowNarrowingAt` engines onto it (those variants + spec rows +
-  behavior land at U6 per native-typeinfo-parity.md:507 / qvd:942-948 — RI-3 wires only `Relate`; RI-8 wires
+  behavior land at U6 per the parity §2.3 added-key table / qvd "Rescope of later phases" — RI-3 wires only `Relate`; RI-8 wires
   nothing onto the substrate). The flow
   depth-sentinel retires here too (it depends on the U6 `FlowReturn` view of `reentry_stack`). The
   contextual-callback iterative generic inference loop is the session's fixation fixed-point. **U6 OWNS the

@@ -62,6 +62,23 @@ The foundation those documents build on is
 `docs/arch/semantic-type-graph-plan-recovered.md` (graph / wire / cache
 foundation).
 
+### Design-gate output docs (indexed here)
+
+The locked outputs of the rescope / design gates (§3.2). Each is the DESIGN
+authority for its block — block contracts cite these instead of re-demanding
+the gate; row/lift STATUS still derives from the §1.1 authorities.
+
+| File | Owns | Owning block(s) |
+|---|---|---|
+| `docs/arch/u2-query-value-domain-design.md` | `U2.QUERY_VALUE_DOMAIN` design-gate LOCK — the typed value-domain shape, the `ProjectionDemand` / `EvalPolicy` demand lattice, the §18 broken-input taint / `admit_decision` model, the FORK-B / FORK-C ownership locks (#18 producers + #21 module-resolution impl → U0) | U0, U2 |
+| `docs/arch/u2-relation-infer-design.md` | `U2.RELATION_INFER` locked design — `Relate` decided PERSISTENT (full-identity query-identity cache with the enumerated A.2 proof obligations), coinductive-SCC discharge, the RI-1..RI-10 implementation mini-DAG | U2 |
+| `docs/arch/u6-flow-call-resolution-design.md` | U6 locked design — flow / call resolution over the U2/RI substrate, the cross-engine recursion + termination model, the narrowing join algebra | U6 |
+| `docs/arch/u0-oracle-harness-design.md` | U0-FINISH-B oracle-harness design (LOCKED; the landed harness substrate — `ProofRequirement` registry, registry-bound driver-calling lifted row bodies, `oracle_core` driver — implements it) | U0 |
+| `docs/arch/ts-compat-two-mode-model.md` | Oracle SEMANTICS authority — single-spec resolver (correct-by-default, no compat mode, no spec dimension on any cache key); TS-compat divergence = classified, review-gated DATA (tsgo snapshot + correction overlay + divergence registry) | U0; §3.4 |
+| `docs/arch/u7-scheduler-submit-dag-decision.md` | U7 rescope-gate decision (LOCKED: DEFER — the multi-node `submit_dag` envelope held un-built; re-gate terms at U9) | U7, U9 |
+| `docs/arch/u9-session-bridge-design.md` | U9 locked design — NO session bridge; single-node cache-node lowering into `SchedulerDag::submit`; the B7a leaf-primitive deletions | U9 |
+| `docs/arch/b3-carry-forwards.md` | B3-review P3 carry-forward items (tracked follow-ups; detail reference, NOT a status or sequencing authority) | — |
+
 ### Stage5 cutover doc set (indexed here)
 
 The Stage5+6 compiler-macro cutover (port `verter_compiler` macro lowering off the
@@ -164,7 +181,9 @@ demand-dependency graph, not a temporal phase:
    The layer-1 facts are NOT "somewhere inside `IndexedReady`" and they are NOT produced by `N0`: they
    are a **first-class, named substrate — `BinderIdentityFacts`** — **produced FROM `IndexedReady`** by
    `verter_semantic::analysis` and **CONSUMED BY the `U2` reducers BEFORE those reducers run** (it is a
-   `U2`-tier *prerequisite* substrate, not a `U2` reducer output and not an `N0` projection). It is
+   `U2`-tier *prerequisite* substrate, not a `U2` reducer output and not an `N0` projection). Its
+   production has an explicit OWNER block: the **`U2.BINDER_IDENTITY_FACTS`** pre-reducer substrate
+   sub-block (§4, the U2 block) — family-A production does not fall between gates. It is
    **demand-produced — NOT an eager whole-program binder pass** (the demand-driven core invariant and the
    one-engine rule forbid a second eager symbol authority). Producer vs carrier are distinct:
    `IndexedReady` holds the raw shallow symbol inventory + raw per-file provenance; `BinderIdentityFacts`
@@ -211,7 +230,7 @@ demand-dependency graph, not a temporal phase:
        over-key per R21);
      - **ambient / module-augmentation-target completeness:** `project_identity + resolve_env_hash +
        lib_env_hash + target + contributor_set_fingerprint` (mirroring the live
-       `AugmentationTargetKey { project_identity, resolve_env_hash, lib_env_hash, target }` isolation —
+       `AugmentationTargetKey { project_identity, resolve_env_hash, lib_env_hash, population, target }` isolation —
        ambient/augmentation completeness IS specifier-resolution-sensitive, so it carries
        `resolve_env_hash`).
 
@@ -320,19 +339,28 @@ fixture** the moment its substrate lands (per §3.2(e) — the guard appears the
    id** (cosmetic-edit invariant), not a positional ordinal — the guard asserts that stability (gate: the
    context-sensitive `SemanticQueryKey` finalization, `U2`).
 
-**Session / overlay augmentation FAIL-CLOSED (registered STOP / degradation gate).** A base-only
-`augmentation_index` (the landed `FileArtifactStore::augmentation_index` keyed by
-`AugmentationTargetKey { project_identity, resolve_env_hash, lib_env_hash, target }`) is acceptable
-ONLY as an INTERMEDIATE. It is NOT the final full-replacement architecture: session / overlay-aware
-augmentation facts (an unsaved-buffer or overlay edit that adds/removes a `declare module` / `declare
-global` contributor) must EITHER be implemented OR EXPLICITLY FAIL CLOSED until they are — a session
-augmentation query against a base-only index returns a typed degraded/`ReturnOnly` result, never a
-silently-stale base-only answer presented as authoritative (a silent base-only answer is a correctness
-compromise, not a degradation). Guard deliverable (per §0.5.7, gate: `U2.MODULE_AUGMENTATION`):
-`session_overlay_augmentation_fails_closed_until_implemented` — asserts a session/overlay augmentation
-query over a base-only index degrades typed / `ReturnOnly` and never publishes a base-only result as a
-session-authoritative warm entry. This composes with the broken-code recovery contract (§0.5.3) and the
-overlay-results-do-not-populate-base-caches Cache-Architecture rule.
+**Session / overlay augmentation is OVERLAY-AWARE (LANDED — the acceptance bar is the landed guard
+trio, not a fail-closed gate).** The augmentation index is overlay-aware:
+`FileArtifactStore::augmentation_index` is keyed by `AugmentationTargetKey { project_identity,
+resolve_env_hash, lib_env_hash, population, target }`, where `population: AugmentationPopulation
+{Base, Session(overlay-set fingerprint)}` keeps a session overlay's augmenters in a `Session` slot
+(overlay ∪ base) distinct from `Base`. A session / overlay augmentation query (an unsaved-buffer or
+overlay edit that adds/removes a `declare module` / `declare global` contributor) receives a REAL
+stitched overlay-aware answer — NOT a fail-closed degradation and NOT a silently-stale base-only
+answer; overlay augmenters never poison the base index and never cross sessions, and there is NO
+base-only `session.is_none()` assert on this surface (CLAUDE.md §Declaration Augmentation is the
+current-state authority). The landed acceptance bar is the guard trio
+`session_overlay_augmenter_isolated_from_base_index` +
+`effective_export_set_session_view_stitches_overlay_augmenter` +
+`no_effective_export_set_base_only_session_assert` (registered under the Declaration Augmentation row
+of `crates/verter_session/tests/g_misc0/critical_rules_have_guards.rs`). The formerly-planned
+`session_overlay_augmentation_fails_closed_until_implemented` deliverable is RETIRED: its either/or
+contract ("implemented OR fail closed until implemented") was discharged on the IMPLEMENTED arm, so
+writing the fail-closed guard now would REGRESS landed behavior (a session view gets a stitched
+answer, not `ReturnOnly`); it must not be reintroduced in any block's guard list or in the generated
+block-contract table. This composes with the broken-code recovery contract (§0.5.3) and the
+overlay-results-do-not-populate-base-caches Cache-Architecture rule (the query-identity
+`EffectiveExportSetScope` stays content-free; overlay content identity is validated on the VALUE).
 
 ### 0.5.2 The Native Emit Boundary (B.9 — DECIDED, codex + claude converged)
 
@@ -446,7 +474,26 @@ and the language service**:
 foundation/LS surface has a declared, tested degradation path; no surface hard-fails on broken
 input and no nav surface escalates to type resolution to recover.
 
-### 0.5.4 The foundation / language-service / emit blocks (named contracts)
+#### 0.5.3.1 The engine fault-containment contract (B.13 sibling — a CROSS-BOUNDARY invariant)
+
+Broken INPUT (§0.5.3) and a broken ENGINE STEP are distinct failure classes; this names the
+second as an invariant of admission-rule rank. **A reducer panic mid-
+`ProjectSemanticDispatch::execute`, lock poisoning, or a partial unwind NEVER publishes memo /
+cache entries, NEVER leaves in-flight or shared state poisoned (waiters are released, in-flight
+slots and recursion stacks are unwound by RAII, no torn provisional value is observable), and is
+CONVERTED to a typed degraded host result at EVERY public-API boundary** (host batch APIs, the
+`_with_audit` entry points, NAPI/WASM FFI, the LSP handlers) — a panic is a degraded typed
+answer to the caller, never a wedged engine and never a warm cache entry. The mechanical seams
+already exist on the live tree (the semantic-query memo's in-flight panic guard + recursion-stack
+RAII, `catch_unwind` at the host batch coordinator / scheduler execution / NAPI boundaries); this
+contract PROMOTES them from per-seam implementation detail to one named cross-boundary invariant
+so no new boundary (U10 result DB, U11 session surfaces, U12 exporter, the §0.5 LS blocks) ships
+without it.
+
+**Planned guard (named deliverable per §0.5.7, registered at the `B.13` gate):**
+`engine_fault_containment_panic_never_admits_never_poisons_degrades_typed` — a discriminating
+fixture panics inside a cold build and asserts: no cache entry was admitted, concurrent waiters
+complete (no deadlock / poisoned lock), and the public boundary returns a typed degraded result.
 
 Each block below carries a short contract — **scope / deps / sequence-position / required
 deletions (if any) / named-guard deliverable** — matching the per-item rows of the integration
@@ -530,7 +577,7 @@ each pair is stated ONCE here.
   resolution** — `resolve_env` / this block; the module-specifier `resolve_env` NEVER includes
   `types`/`typeRoots`. **(b) ambient package inclusion / global type-acquisition corpus** — `lib_env`
   / `B.4` (the ambient inclusion-set / global corpus). **(c) `@types` package discovery + `typeRoots`
-  walk** — this block owns the resolution MECHANICS (path-finding; the line-302 fixture tests it), but
+  walk** — this block owns the resolution MECHANICS (path-finding; the `typeRoots` discriminating fixture in the Sequence list above tests it), but
   the cached RESULT is keyed by `lib_env` (it selects WHICH corpus, not WHERE a specifier points),
   feeding `B.4`. This is the `resolve_env` = WHERE / `lib_env` = WHICH split working as designed.
 - **Guards (already in the #21 design):** `module_resolution_keys_on_resolve_env_not_type_or_lib`
@@ -548,7 +595,9 @@ each pair is stated ONCE here.
   input) + `U0.RESOLVER_CORE` (the resolver feeds stdlib's shared ambient corpus), matching the
   §3.1.3 dep-map / §0.5.6 order `B.1 → U0.RESOLVER_CORE → B.4`. The R21 `lib_env` scoping rule is
   the authority for WHICH caches include `lib_env_hash` — do not redefine it.
-- **Sequence:** `U0`-tier, before `U2` (every reducer's LibIntrinsic facts consume it).
+- **Sequence:** `U0`-tier; gates the lib-fact-CONSUMING reducers (the
+  `LibIntrinsic`-reading `U2` sub-blocks consume it) — NOT the landed
+  `SemanticQueryKey` spine / value-domain layer (per-edge gating, §0.5.6).
 - **Required deletions:** none (formalizes the live `IntrinsicRegistry` + `lib_env_hash` semantics).
 - **Guards:** `lib_authority_pinned_ts_version_single_owner` (reuses the existing SDK audit guard) +
   `ambient_global_and_lib_corpus_have_completeness_facts` (§0.5.1 family-B guard, owned at this gate —
@@ -826,7 +875,7 @@ code-actions.
 This reproduces the integration map's sequencing diagram, threaded coherently with §3.1.3:
 
 ```
-FOUNDATION (pre-U0 / U0-tier, before U2):
+FOUNDATION (U0-tier; PER-EDGE gating — see the rule below this diagram):
   Ownership statement (B.15, §0.5.1) + ledger #19 boundary ─┐  (frames everything)
   B.1 Program Model ─► U0.RESOLVER_CORE (A.5/B.2, #21) ─► B.4 Stdlib/Intrinsics Authority
   B.13 Broken-Code/Recovery (global contract; U0-owned producers)
@@ -835,7 +884,8 @@ FOUNDATION (pre-U0 / U0-tier, before U2):
 
 → U0 → U1 → U2 (CONVERGENCE GATE) → [existing U3..U15 / S5.B* / G.P*]
        │  BinderIdentityFacts (§0.5.1 layer 1) — demand-produced FROM IndexedReady,
-       │  CONSUMED BY the U2 reducers BEFORE they run (NOT eager, NOT N0-owned)
+       │  CONSUMED BY the U2 reducers BEFORE they run (NOT eager, NOT N0-owned;
+       │  production OWNED by the U2.BINDER_IDENTITY_FACTS substrate sub-block)
 
 AFTER U2:            N0.NAV_LOCATION_INDEX (~G.P3) — pure projection over BinderIdentityFacts
   A.3/#20 strict matrix + B.12 config matrix  → produced AT the U2.RELATION_INFER gate
@@ -855,7 +905,17 @@ TERMINAL:
   B.14 Replacement Acceptance Gates (§10; fenced from §9)
 ```
 
-### 0.5.7 New-rule guards are NAMED deliverables here, NOT added to `CLAUDE.md`/skills now
+**Foundation gating is PER-EDGE, not a blanket phase prerequisite.** The arrows above are
+the real edges: `B.1` gates `U0.RESOLVER_CORE` + `B.4` (config / program derivation
+consumers), `U0.RESOLVER_CORE` gates the `#21` resolution-semantics fixtures and feeds
+`B.4`'s ambient corpus, and `B.4` gates the lib-fact-CONSUMING reducers (the
+`LibIntrinsic`-reading `U2` sub-blocks). NO foundation block retroactively gates
+already-landed work: the `U2` `SemanticQueryKey` spine, the value-domain layer, and the
+`U0` manifest / oracle substrate landed with zero foundation blocks built — consistent
+with this graph, because those artifacts consume no foundation edge. A block that
+consumes resolver / lib / global / binder facts names the EXACT foundation edge it
+requires in its own contract; "foundation before `U0`/`U2`" as a blanket phase rule is
+RETIRED.
 
 Every guard named in §0.5 is a **block/gate deliverable**, committed together with its
 `CRITICAL_RULE_GUARDS` registry entry at the owning block's gate→implementation boundary (per
@@ -867,7 +927,49 @@ map carries each block's land-time owning-doc updates.
 
 ---
 
-## 1. Landed-context preamble
+## 1. Status authority index
+
+This section is an index of authorities, not a hand-maintained block-status ledger.
+It must not copy current status words such as LANDED / NOT-STARTED / PARTLY-LANDED.
+At every block entry, derive state from the authority of record at current `HEAD`.
+If this plan and an authority disagree, the authority wins and this plan is stale.
+
+### 1.1 Typeinfo parity authorities
+
+| Scope | Authority of record | Derivation / gate |
+|---|---|---|
+| `TypeInfoParityBlockId` DAG (per-block prereqs, consumed mechanisms, `required_guards`, `verification_labels`) | `crates/verter_session/tests/manifest_data/typeinfo_parity_blocks.rs`, generated by `scripts/gen-typeinfo-ignore-manifest.py` | Block contracts derive from the generator, never from §1 prose; the generated table is the sole writer's output (`--check` freshness). |
+| `IgnoredTestRow` manifest (per-row lift state) | generated `crates/verter_session/tests/manifest_data/typeinfo_ignored_test_manifest_rows.rs` + the consuming `crates/verter_session/tests/typeinfo_ignored_test_manifest.rs` | The 362 TOTAL is guard-pinned (`ignored_test_row_table_holds_exactly_362_rows`); the ignored/lifted split is DERIVED from `IgnoreStatus` and the live `#[ignore]` bijection. This doc never freezes today's ignored or lifted count. |
+| `AdditionalProofRow` table | generated `crates/verter_session/tests/manifest_data/typeinfo_additional_proof_rows.rs` | Closed proof-only table (`additional_proof_row_table_holds_exactly_7_rows`); never counted as ignored rows. |
+| Landing evidence | squash-merge commits carrying the `Typeinfo-Block: <block-id>` trailer | A typeinfo block is landed iff its trailer commit exists AND its rows are `Lifted` AND its `required_guards` pass. No tracked cursor, no hand status. |
+
+### 1.2 Non-typeinfo authorities
+
+| Block range | Authority of record today | Rule |
+|---|---|---|
+| U1 / U4 / U5 (cache-runtime scheduler / cache work) | the live tree + this plan's U1/U4/U5 block contracts (§4 — each names the symbols/tests whose presence is checked at HEAD) | `docs/arch/cache-runtime-overhaul-plan.md` is NOT a status authority: its own header SELF-SUPERSEDES to this plan (citing it for status would be circular) — it remains detail/historical reference only, and its scheduler-DAG portions are additionally superseded by the locked `u7-scheduler-submit-dag-decision.md` / `u9-session-bridge-design.md`. |
+| U7 | `docs/arch/u7-scheduler-submit-dag-decision.md` | The locked DEFER decision doc is the authority. |
+| U9 | `docs/arch/u9-session-bridge-design.md` | The locked design doc is the authority. |
+| S5.B1–S5.B12 | `docs/arch/stage5-cutover-plan.md` | — |
+| G.P1–G.P6/7 | `docs/arch/goto-definition-overhaul-plan.md` | The architecture-decision / review-findings docs are detail references, NOT status authorities. |
+| Foundation / replacement blocks (`B.*`, `N0`/`N1`, `U0.RESOLVER_CORE`, native-checker) | this plan's owning §0.5 text, plus each block's named locked design doc once its gate produces one | — |
+
+Do not copy status values into this table. If an owning doc has a `Status:` header,
+cite the doc; do not duplicate the value. Locked design-gate OUTPUT docs for typeinfo
+blocks (e.g. `u2-relation-infer-design.md`, `u6-flow-call-resolution-design.md`,
+`u0-oracle-harness-design.md`, `u2-query-value-domain-design.md`) are indexed in the §0
+doc map — they are DESIGN authorities; row/lift status still derives from §1.1.
+
+### 1.3 Regeneration and verification
+
+- `python3 scripts/gen-typeinfo-ignore-manifest.py --check` (alias
+  `pnpm gen:typeinfo-manifest:check`) — generated-table freshness.
+- `pnpm gen:typeinfo-manifest` when manifest source data changes (the generator is
+  the SOLE writer of the `manifest_data/` files; the Rust tests only diff and fail).
+- `cargo nextest run --workspace` + `cargo test -p verter_session --tests` — the
+  canonical gate pair (§7).
+
+### 1.4 Branch / tip binding rule (orientation, non-authoritative)
 
 **Branch:** `refactor/semantic-db-overhaul`. This plan does NOT pin a "current tip"
 SHA — the branch advances under a concurrent workstream, so any named SHA goes stale
@@ -883,9 +985,14 @@ RE-DERIVED at each block's entry gate against the then-current `HEAD` (per the e
 re-home rule, §3.1.4), never pinned to a frozen SHA (see "Known-failure baseline"
 below).
 
-### What is LANDED
+### 1.5 Landed-substrate reference (historical waypoints — orientation only, NOT a status authority)
 
-**Cache-runtime / scheduler track — Blocks 1–6 FULLY LANDED, B7a/b/c landed:**
+This subsection is a write-time record of WHAT the earlier blocks delivered (the
+substrate names and shapes the remaining blocks build on). It is orientation, not a
+status ledger: per the §1 rule, current state derives from the §1.1 / §1.2 authorities
+at `HEAD`, and on any disagreement this record is the stale party.
+
+**Cache-runtime / scheduler track — Blocks 1–6 + B7a/b/c (delivered substrate):**
 
 - **B1** — `WorldSnapshot` request-identity type (never enters a cache key) +
   plan-vocabulary guard (H19 `no_phase_archaeology_in_production_code`).
@@ -922,8 +1029,8 @@ below).
   (HostCpuPool=External, SchedulerCpuPool=CpuWorker, SchedulerIoPool=IoWorker).
   `IoPool` / `IoHandle` / blocking `execute` DELETED.
 
-**Semantic-type-graph track — A0a CONTRACT substrate LANDED on a pre-existing
-`SemanticGraphStore` foundation:**
+**Semantic-type-graph track — A0a CONTRACT substrate (delivered on a pre-existing
+`SemanticGraphStore` foundation):**
 
 - The **`SemanticGraphStore` / `ProjectSemanticDispatch` / `Relate`-memo**
   foundation and the **five query modes** (`Identity` / `Navigate` / `Shallow` /
@@ -945,7 +1052,7 @@ below).
   reshaped from 9× `exactness_*: u32` scalar fields to one
   `exactness_counts: BTreeMap<ExactnessTag, u32>` map field.
 
-### Known-failure baseline (recorded at the B7c land; re-derived at implementation)
+### 1.6 Known-failure baseline (recorded at the B7c land; re-derived at implementation)
 
 The recorded historical baseline is the **long-standing 8-failure cluster recorded
 at the B7c land (`b36e0835`)** — all long-standing and **OUT OF SCOPE for this
@@ -967,6 +1074,14 @@ at each block's entry gate at the then-current tip** (the separate later effort)
 treats the cluster above as the recorded starting set to reconcile against, not a
 frozen count to assert at any specific commit.
 
+**Named owner of the carried cluster:** `U3.CACHE_FACT_MODEL` (the canonical
+fact-signature model block) owns reconciling any residual `fact_dep_signature`-era
+failure in this cluster; the per-block entry-gate baseline re-derivation (§3.1.4) is
+the detection rail. The named test fns exist on the live tree
+(`tests/fact_matrix/compile_tier_*.rs`, `tests/g_family/family_a_fact_validation.rs`,
+`tests/g_misc0/materialiser_observes_or_dies.rs`); whether any currently fails is
+re-derived at the entry gate, never asserted here.
+
 Plus one **environment-only** non-failure: `typeinfo_ts_bindings_*` fails in a
 `node_modules`-less worktree (it regenerates TS bindings via the workspace `buf`
 binary) and **PASSES on the main checkout with `node_modules` present** /
@@ -974,47 +1089,6 @@ post-`pnpm install`. It is not a code failure.
 
 Every block's verification expects ZERO NEW failures over the baseline re-derived at
 that block's entry gate (at the then-current tip), not a count frozen to an old commit.
-
-### Block status ledger
-
-Status derived from the landed-context above + git evidence on
-`refactor/semantic-db-overhaul`; re-derive at each block's entry gate (per the binding
-rule above, no frozen SHA is pinned). `RESCOPE-GATE-PENDING` = the block's deep design
-is produced at its rescope session (§3.2) before it implements.
-
-| Block | Status | Note |
-|---|---|---|
-| X0 | LANDED | the §3.1 cross-plan integration + doc-set index is present |
-| G.P1 | LANDED | typed `PositionMapper` coords (`verter_span`) |
-| G.P2 | LANDED | `EmitOp` IDE-emit substrate; `resolve_prefixed_expr` retired |
-| G.P3 | NOT-STARTED | `SfcComponentAnchor` on `IndexedReady`; 0 src hits; ← U2 |
-| G.P4 | NOT-STARTED | `CompileSnapshotId`; 0 src hits; ← U3 |
-| G.P5 | NOT-STARTED | `navigation::definition` engine; 0 src hits; ← G.P4 |
-| G.P6/7 | NOT-STARTED | route all nav surfaces + delete legacy arbitration; ← G.P5 |
-| S5.B1 | LANDED | `parse_checker_text_to_type_expr` deleted (in RETIRED list) |
-| S5.B3 | LANDED | `ResolvedMacroSurfaces` DTO present (`compile/macro_dto.rs`) |
-| S5.B4 | LANDED | `runtime_constructors_from_type_expr` (`typeinfo/adapters/vue/runtime_ctor.rs`) |
-| S5.B5 | RESCOPE-GATE-PENDING | macro-surface gate; `resolve_macro_surfaces_for` not wired; compat matrix is a gate deliverable; ← U2 |
-| S5.B6–B12 | NOT-STARTED | consumer switch + parser-spans-only + legacy `resolve_type/` deletion; ← S5.B5 |
-| U0 | PARTLY-LANDED (U0-FINISH-A done) | `AuditedResult` carrier + the two-table 13-column ledger (362 `IgnoredTestRow`s + closed 7-row `AdditionalProofRow`) + `TYPEINFO_PARITY_BLOCKS` DAG (per-block `required_guards`/`verification_labels`) + the `SemanticQueryName`⇔live-tag mirror + the pinned `@typescript/native-preview` oracle toolchain are LANDED under U0-FINISH-A. REMAINING (U0-FINISH-B): the per-row executable `ProofRequirement` registry + typed row-test wrapper, the row-exact capability→mechanism→proof coverage GATE that DEFINES completeness, the TS7 oracle harness, and the host-API wiring |
-| U1 | LANDED | `TaskKind` split + `CacheNode` + executor surface + `try_submit_cpu` CPU dispatch + wired `CacheNode` routing (`dispatch_ready_job_to_executor` → `execute_cache_node`) + discriminating tests all landed; the remaining host-side cache-node materializer / `execute_cache_node` override is U7/U9 session-bridge scope |
-| U2.QUERY_VALUE_DOMAIN | NOT-STARTED | the typed `SemanticQueryValue` value-domain layer (convergence gate) |
-| U2.RELATION_INFER | RESCOPE-GATE-PENDING | the relation/inference/variance core; ← U2.QUERY_VALUE_DOMAIN |
-| U2 (other reducers) | NOT-STARTED | indexed/mapped/utilities/class/enums/module-aug/JSX sub-blocks |
-| U3 | NOT-STARTED | canonical fact-signature model; ← U8 + U2 + U6 |
-| U4 | NOT-STARTED | persistent (B9); ← U2 |
-| U5 | NOT-STARTED | mem/audit (B10); ← B2, best ≥ U2 |
-| U6 | RESCOPE-GATE-PENDING | cross-engine flow-return recursion; ← U2.RELATION_INFER |
-| U7 | DEFERRED-TO-U9 | scheduler `submit_dag` envelope deferred (multi-node DAG held un-built); substrate + leaf primitives KEPT; gap closed at U9 via single-node lowering into existing `SchedulerDag::submit`. See `docs/arch/u7-scheduler-submit-dag-decision.md`; ← U1 |
-| U8 | NOT-STARTED | wire-surface closure; ← U6 + S5.B12 |
-| U9 | DESIGN-LOCKED | scheduler cache-node lowering (B7f); ← U1 (CacheNode substrate + executor surface) + B7a (leaf primitives) — NOT a built `submit_dag` envelope (U7 deferred). NO session bridge / registry / `DedupeHook` / `CpuConcurrencySemaphore` (no consumer; `DedupeHook` unbuildable under R6). Scope = finish+harden the cache-node DAG edge (success release + net-new failure propagation + cycle guard, test-only `StageExecutor` proof) + DELETE 4 dead B7a leaf primitives per U7 §6; core arm under a hard deletion re-gate. See `docs/arch/u9-session-bridge-design.md` |
-| U10 | NOT-STARTED | result DB; ← U3 + U8 |
-| U11 | NOT-STARTED | public relation/session; ← U12 |
-| U12 | NOT-STARTED | exporter; ← U10 |
-| U13 | NOT-STARTED | projection; ← U12 |
-| U14 | NOT-STARTED | Vue adapter; ← U13 + U11 |
-| U15 | NOT-STARTED | integration/bench/final lift; ← all code blocks |
-| native-checker | RESCOPE-GATE-PENDING | sibling/future diagnostics layer (out of 362 scope); own rescope gate |
 
 ---
 
@@ -1031,7 +1105,7 @@ on every block; do not relitigate or resurrect superseded items.
 singleflight / fact-validation substrate**, specifically:
 
 - `cooperative_admit_with_post_publish` (`cache_runtime/singleflight.rs`)
-- `InflightTable` (`cache_runtime/singleflight.rs:213`)
+- `InflightTable` (`cache_runtime/singleflight.rs`)
 - `BoundedCandidateMap` (`bounded_query_retention`)
 - `FactReadSet::finalise` → `FactReadSetFinalise`
 - `SignatureAdmission` (via `SignatureAdmission::from_finalise`)
@@ -1096,10 +1170,12 @@ PARALLEL to the remaining scheduler work (U1/U7/U9).
   (guards `type_node_contains_only_type_values` +
   `program_analysis_graph_gated_by_projection_required`). A0a's proto currently
   encodes the `GraphFlowNarrowing` / `GraphContextualType` arms INSIDE
-  `GraphTypeNode` (`typeinfo.proto:206-207`) — the OLD placement. **U8 performs the
+  `GraphTypeNode` (the `flow_narrowing` (26) / `contextual_type` (27) oneof arms in
+  `crates/verter_protocol/proto/verter/v1/typeinfo.proto`) — the OLD placement. **U8 performs the
   wire move** (re-home the two arms under `ProgramAnalysisGraph`, `reserved` the
   vacated `GraphTypeNode` tags 26/27, bump `SemanticTypeGraph.schema_version`) and
-  produces the `TypeInfoGraphPayload { graph, program_analysis }` shape. Do NOT
+  produces the `program_analysis` half of the `TypeInfoGraphPayload` shape (the
+  full 5-field literal lives in the U8 block contract). Do NOT
   keep the A0a inside-`GraphTypeNode` placement.
 - **The legacy `evaluate_type_expression.rs` scratch-file evaluator is NOT a
   sanctioned 2nd `parse_type_annotation` exception.** It is the text-evaluator
@@ -1107,6 +1183,33 @@ PARALLEL to the remaining scheduler work (U1/U7/U9).
   request-decode/dispatch home (`resolve_named_symbol.rs`) that obsoletes the
   text-evaluator is U12 itself (U11 DEPENDS on U12, so U12 cannot gate its own
   deletion on U11). §11 of the semantic-graph plan confirms no 2nd exception.
+
+### 2.3 Deliberate architecture bets (LABELED — keep, each with its permanent acceptance bar)
+
+These four positions are intentional bets, not oversights. Each is KEPT, stays
+LABELED as a bet, and carries the acceptance bar it is permanently held to — do
+not relitigate them block-by-block, and do not silently treat them as defects:
+
+1. **Persistent `Relate`** (beyond-tsc: tsc's relation cache is per-check
+   transient). LOCKED at `docs/arch/u2-relation-infer-design.md` (Decision 1):
+   persistent, cross-request, fact-validated; transient comparison stacks never
+   enter the key; SCC-batched admission. **Acceptance bar:** the six enumerated
+   A.2 proof obligations (§3.2.1 #1) — every one provably in the identity or
+   provably irrelevant; an unproven obligation routes `ReturnOnly`.
+2. **Whole-file `FileWholeHash` self-roots** (sound-conservative: a same-file
+   edit invalidates every decl in the file). **Acceptance bar:** strict self-root
+   validation stays the same-canonical-edit rail; per-decl rooting via
+   `parse_stable_hash` / `flow_body_stable_hash` is a legitimate LATER precision
+   lift, not a defect to fix now.
+3. **`project_identity` on package-backed decl slots** (forfeits cross-project
+   warm sharing for poisoning-safety; the sound-first default). **Acceptance
+   bar:** any future cross-project sharing proposal must prove isolation
+   equivalence; until then, do not relitigate.
+4. **The `U8 ← {U6, S5.B12}` serialization** (the whole wire/result/export stack
+   waits on both extreme blocks + the Stage5 chain rather than being built around
+   the doomed sidecar). **Acceptance bar:** it is THE named critical path (§3.5)
+   — session/review capacity follows it; carving U8 forward around the sidecar is
+   rejected.
 
 ---
 
@@ -1139,7 +1242,7 @@ after the one convergence gate.
    U6 (B11 flow-return) ──► depends U2,U4    U3.CACHE_FACT_MODEL ──► U8       │
    U7 (B7e submit_dag)  ──► depends U1          (+U2,U6; after wire closure)  │
      (submit_dag DEFERRED-to-U9)            U10 (result DB)  ──► U3 + U8      │
-   U9 (B7f session bridge)──► depends U1+B7a U12 (exporter)   ──► U10         │
+   U9 (B7f cache-node lowering)─► dep U1+B7a U12 (exporter)   ──► U10         │
         │                                    U11 (relation/session) ──► U12   │
         │                                    U13 (projection) ──► U12         │
         │                                    U14 (Vue adapter)  ──► U13 + U11 │
@@ -1293,7 +1396,7 @@ code, exactly as §8's intentional-divergence note governs the typeinfo blocks).
 X0  re-home + docs index  (this integration itself — §3.1; FRAMES the foundation box below)
        │
        ▼
-FOUNDATION (framed at X0, sequenced pre-U0 / U0-tier — see §0.5.6; impl lands AFTER X0, before U0):
+FOUNDATION (framed at X0; PER-EDGE gating per §0.5.6 — each edge gates its NAMED consumer, never a blanket before-U0 / before-U2 phase):
    Ownership statement (B.15) + ledger #19 boundary  (frames everything)
    B.1 Program Model → U0.RESOLVER_CORE (A.5/B.2, #21) → B.4 Stdlib/Intrinsics Authority
    B.13 Broken-Code/Recovery (global; U0-owned producers)   B.9 Emit Boundary (at §Scope)
@@ -1304,7 +1407,8 @@ parallel-safe early:   G.P1 → G.P2   ∥   S5.B1   ∥   U0   ∥   U1
        ▼
 U2  = CONVERGENCE GATE  (finalizes ResolveMacroPayload identity + the slot-identity shape)
        │   (BinderIdentityFacts §0.5.1 layer 1 — demand-produced FROM IndexedReady, CONSUMED BY
-       │    the U2 reducers BEFORE they run; pre-U2 prerequisite, NOT eager, NOT N0-owned)
+       │    the U2 reducers BEFORE they run; pre-U2 prerequisite, NOT eager, NOT N0-owned;
+       │    production OWNED by the U2.BINDER_IDENTITY_FACTS substrate sub-block)
        │   (A.3/#20 strict matrix + B.12 config matrix produced AT the U2.RELATION_INFER gate)
        ├──────────────────────────── after U2 ────────────────────────────┐
        │                                                                    │
@@ -1355,15 +1459,20 @@ edges:
 ACYCLIC).** These ADD the new-block edges; the typeinfo + `S5.*` + `G.*` edges above are
 unchanged:
 
-- **Foundation cluster precedes `U0`/`U2`:** `U0.RESOLVER_CORE ← B.1`,
+- **Foundation edges (PER-EDGE, not a blanket phase — §0.5.6):** `U0.RESOLVER_CORE ← B.1`,
   `B.4 ← {B.1, U0.RESOLVER_CORE}` (the resolver feeds stdlib's shared ambient corpus, so
   stdlib depends on the resolver + program model — §0.5.6 order
-  `B.1 → U0.RESOLVER_CORE → B.4`). The ownership statement
-  (`B.15`), `B.13` (broken-code/recovery producers, `U0`-owned), and the `B.9` emit
-  boundary are foundation statements that gate `U0` and carry no incoming edge.
+  `B.1 → U0.RESOLVER_CORE → B.4`); `B.4` in turn gates only the lib-fact-CONSUMING
+  reducers (the `LibIntrinsic`-reading `U2` sub-blocks), never the landed key spine /
+  value-domain layer or the `U0` manifest substrate. The ownership statement (`B.15`)
+  and the `B.9` emit boundary are framing decisions with no incoming edge; `B.13`'s
+  broken-input taint PRODUCERS are `U0`-owned work items (FORK-B) — an edge into `U0`'s
+  remaining scope, not a retroactive gate over its landed substrate.
 - **`BinderIdentityFacts → U2`** (§0.5.1 layer 1): the named pre-`U2` binder-identity substrate is
   demand-produced FROM `IndexedReady` and CONSUMED BY the `U2` reducers before they run — a `U2`-tier
-  prerequisite, NOT a `U2` output and NOT `N0`-owned. The edge runs `BinderIdentityFacts → U2`, never
+  prerequisite, NOT a `U2` output and NOT `N0`-owned; its production is OWNED by the
+  `U2.BINDER_IDENTITY_FACTS` substrate sub-block (§4, the U2 block). The edge runs
+  `BinderIdentityFacts → U2`, never
   `N0 → U2` (guards `binder_identity_facts_are_pre_u2_and_not_n0_owned`,
   `u2_queries_do_not_read_n0_navigation_indexes`). It is demand-produced, not an eager pass, so it adds
   no second symbol authority and no eager-binder edge.
@@ -1498,7 +1607,7 @@ session produces:
   new `(CRITICAL)` rule is committed together with its REGISTERED guard — a guard name
   plus a `CRITICAL_RULE_GUARDS` registry entry — at this gate→implementation boundary,
   so `every_critical_rule_in_docs_has_registered_guard`
-  (`crates/verter_session/tests/critical_rules_have_guards.rs`) is satisfied the moment
+  (`crates/verter_session/tests/g_misc0/critical_rules_have_guards.rs`) is satisfied the moment
   the rule appears; the guard's DISCRIMINATING test then lands with the phase's FIRST
   implementation block (the rule + a registered guard appear in the same change, and the
   test goes green as that first block lands).
@@ -1528,34 +1637,39 @@ pre-design of a known-hard phase.
 one-line "deep design produced at its rescope session (depends on `<prior>`)" note;
 effort weights in §3.3):
 
-- **`U2.RELATION_INFER`** — the relation / assignability + inference-session +
-  measured-variance core (TS's hardest subsystem). Rescope gate **after the U2
-  foundation (`U2.QUERY_VALUE_DOMAIN`) lands**. Design depth: the assignability
-  algorithm + the recursion-id / `isDeeplyNestedType`-style **termination proof**
-  (non-convergence never yields a WARM admission) + the inference
-  candidate-accumulation / priority / fixation / contextual-callback-loop /
-  reverse-mapped algorithm + the marker-probe variance iteration. (Parent
-  `native-typeinfo-parity.md` §§4.0–4.2 already seeds this core — the marker-probe
-  fixed-point, the coinductive-SCC assumption protocol, the `CheckerTransaction` /
-  `InferenceSession` substrate; the rescope gate hardens that seed to
-  executable-pseudocode depth + the oracle baseline, it does not start from zero.)
-- **`U6`** (the cross-engine cycle / termination:
-  `FlowReturn` ↔ `ResolveCall` ↔ narrowing ↔ `ContextualTypeAt`, the
-  `CheckerReentryGraph`, and flow narrowing as a dataflow fixed-point). Rescope gate
-  **after `U2.RELATION_INFER`**. Design depth: runtime SCC detection +
-  provisional-result-during-discharge + a stability decision + **fail-closed on
-  non-convergence**; the narrowing **JOIN ALGEBRA** for conflicting predicates + the
-  loop fixed-point. **The 8 `U6.NARROW_*` sub-blocks re-cast as 1 hard
-  lattice-substrate block + 7 cheap additions** (front-load the hard one — see the U6
-  block contract).
+- **`U2.RELATION_INFER` — its rescope gate has RUN; the output is DESIGN-LOCKED at
+  `docs/arch/u2-relation-infer-design.md`.** The relation / assignability +
+  inference-session + measured-variance core (TS's hardest subsystem). The gate's
+  deliverables — the assignability algorithm + the recursion-id /
+  `isDeeplyNestedType`-style **termination proof** (non-convergence never yields a
+  WARM admission), the inference candidate-accumulation / priority / fixation /
+  contextual-callback-loop / reverse-mapped algorithm, the marker-probe variance
+  iteration, the PERSISTENT-`Relate` decision with the enumerated A.2 proof
+  obligations, and the RI-1..RI-10 implementation mini-DAG — are owned by that
+  locked design; the plan cites it as authority instead of re-demanding the gate.
+  (Parent `native-typeinfo-parity.md` §§4.0–4.2 seeded the core; the locked design
+  hardened it.)
+- **`U6` — its rescope gate has RUN; the output is DESIGN-LOCKED at
+  `docs/arch/u6-flow-call-resolution-design.md`.** The cross-engine cycle /
+  termination: `FlowReturn` ↔ `ResolveCall` ↔ narrowing ↔ `ContextualTypeAt`, the
+  `CheckerReentryGraph`, and flow narrowing as a dataflow fixed-point. The gate's
+  deliverables — runtime SCC detection + provisional-result-during-discharge + a
+  stability decision + **fail-closed on non-convergence**, the narrowing **JOIN
+  ALGEBRA** for conflicting predicates, the loop fixed-point, and the **8
+  `U6.NARROW_*` sub-blocks re-cast as 1 hard lattice-substrate block + 7 cheap
+  additions** — are owned by that locked design (it consumes the U2/RI substrate);
+  the plan cites it as authority instead of re-demanding the gate.
 - **The native checker** (`docs/arch/native-checker.md`) — the sibling/future
   diagnostics layer. **RESCOPE-GATE-REQUIRED before its `Check*` queries implement**
   (it is out of the 362-row parity scope, but its `Check*` algorithm-depth design is
   produced at its own rescope session).
-- **`U7`** (the scheduler cache-node DAG, `submit_dag`) — **RESCOPE-GATE-REQUIRED with
-  an explicit "justify against MEASURED workload or CUT" question**: a model-checked
-  DAG for an I/O-bound LSP already served by singleflight is an over-engineering risk.
-  The rescope gate must either justify the DAG against a measured workload or cut it.
+- **`U7`** (the scheduler cache-node DAG, `submit_dag`) — **its rescope gate has RUN;
+  the output is LOCKED at `docs/arch/u7-scheduler-submit-dag-decision.md`: DEFER.**
+  The gate's "justify against MEASURED workload or CUT" question resolved to deferral —
+  the multi-node envelope is held un-built (a model-checked DAG for an I/O-bound LSP
+  already served by singleflight is an over-engineering risk), with a narrow re-gate
+  at U9 (proven atomic-admission correctness need OR a measured graph-scoped
+  completion/cancellation need; default absent that = permanent CUT).
 - **`S5.B5`** (the shared macro-surface gate) — **RESCOPE-GATE-REQUIRED**: its
   normalizer **compatibility matrix** is a rescope-gate deliverable — the full
   valid-empty-vs-unresolved / visibility / defaults / `native_props` / public-surface
@@ -1593,9 +1707,11 @@ phase that happens to need it last.
   - **#1 — Relation-caching category (the deepest gap).** Decide EXPLICITLY whether
     `Relate` is a **TRANSIENT intra-check relation cache** (keyed on the type-id pair +
     relation-kind, like tsc's per-check relation cache) or a **PERSISTENT cross-request
-    cache**. **The current plan folds `Relate` into the persistent fact-validated
-    query-identity cache; that folding is FLAGGED PROVISIONAL pending this gate's
-    decision.** If the gate confirms persistent, it MUST PROVE the cache identity fully
+    cache**. **RESOLVED — the gate ran and LOCKED `Relate` as PERSISTENT
+    (`docs/arch/u2-relation-infer-design.md`, Decision 1: a persistent, cross-request,
+    fact-validated query-identity cache keyed by the full relation identity); the A.2
+    proof obligations below remain the PERMANENT acceptance bar that decision is held
+    to.** If the gate confirms persistent, it MUST PROVE the cache identity fully
     captures the live comparison stack + the in-flight inference context (the
     `InferenceContextKey` fingerprint must be complete) — otherwise the choice is
     unsoundness (a warm hit reuses a relation decided under different assumptions) or a
@@ -1719,7 +1835,20 @@ phase that happens to need it last.
     the join / meet, the dominance + backfill rules, the satisfaction relation PROVEN,
     with worked examples for the important pairs (`Identity` / `Navigate` / `Shallow` /
     `Expanded` / `Skeleton`, path projection, carrier stops, generic-open) — the full
-    lattice algebra, NOT just the five presets.
+    lattice algebra, NOT just the five presets. **Satisfaction authority (LANDED — do
+    not weaken):** the lattice is the demand/identity ALGEBRA only. Cache satisfaction
+    is decided by the landed materialized-point model — a warm hit requires a RECORDED
+    materialised `(path, point)` the compute actually produced to dominate the request
+    at the same path (`cached_satisfies(MemoEntry.satisfied_projection,
+    requested_point_for_key(key))`), NEVER nominal lattice dominance over the
+    candidate's nominal slot/mode (nominal dominance is exactly the model that produced
+    the removed lattice-unsound `Shallow → Navigate` backfill), and backfill clones only
+    recorded materialized points. The gate's formalization COMPOSES with — never shadows
+    or weakens — the landed guards
+    `cache_satisfaction_is_materialized_point_not_nominal_demand` +
+    `backfill_writes_only_recorded_materialized_points`
+    (`crates/verter_session/src/semantic_query_memo/tests.rs`, registered in
+    `critical_rules_have_guards.rs`; documented live in CLAUDE.md §Cache Architecture).
   - **Tabular `SemanticQueryKey → SemanticQueryValue → wire-projection`** (codex). Per
     key: identity fields, env-hash dimensions, value domain, fact domains read / written,
     allowed demand dimensions, cache family, producer, projection target.
@@ -1756,11 +1885,14 @@ phase that happens to need it last.
     control flow beyond the demanded slices, and does NOT perform checker error-recovery.
     Pairs with **#19** (reason-to-exist / authority boundary) — together they fix what
     native OWNS versus what it DEFERS to the running TS.
-- **`U7` gate — #6 Parsimony pass.** Justify the custom DAG scheduler (deficit / credit
-  lanes, model-checked liveness) + the persistent on-disk cache against the MEASURED
-  I/O-bound LSP workload, or CUT them — concentrate sophistication in the resolver + the
-  cache. (Same justify-or-cut question already on the `U7` tag; #6 binds it to a measured
-  workload.)
+- **`U7` gate — #6 Parsimony pass (the DAG half RUN — locked DEFER).** The custom DAG
+  scheduler half (deficit / credit lanes, model-checked liveness) was judged at the U7
+  rescope gate and LOCKED at `docs/arch/u7-scheduler-submit-dag-decision.md`: DEFER —
+  envelope held un-built, re-gated for JUSTIFY at U9 only, default permanent CUT. The
+  persistent on-disk cache half was NOT ruled on by that decision doc and remains a
+  LIVE justify-or-cut obligation — it attaches to `U4` (B9 persistent, the block that
+  builds it) at entry: justify against the MEASURED I/O-bound LSP workload, or CUT —
+  concentrate sophistication in the resolver + the cache.
 - **Architecture-wide (substrate deliverable, stated once):**
   - **#7 — One unified soundness statement (BLOCKING the `U3` + `U10` gates; A.4).** Define
     ONCE what "**a warm hit is valid**" means uniformly across EVERY query family + fact
@@ -1774,6 +1906,18 @@ phase that happens to need it last.
     - **Candidate guard:** `unified_warm_hit_validity_statement_is_single_rail` — one
       soundness rail (`ReadSetSignature.facts` validation) is the sole warm-hit-validity
       authority; no family carries a private validity oracle.
+  - **#7b — One unified determinism statement (stated ONCE, beside #7).** Same canonical
+    inputs + the five split env dimensions ⇒ an IDENTICAL wire payload, independent of
+    thread schedule, singleflight winner, AND cache temperature (cold compute ≡ warm
+    hit). The `tsgo`-oracle snapshot comparison (the oracle driver fails loudly on any
+    divergence), the checked-in `TypeExpr` snapshots, and the multi-candidate
+    `FamilySlots` model all silently PRESUPPOSE this property — a schedule- or
+    temperature-dependent payload would make every one of them flaky by construction —
+    so it is written as one explicit statement rather than left implicit. BLOCKING
+    alongside #7 at the `U3` + `U10` gates (the same gates that own warm-hit validity).
+    - **Candidate guard:** `wire_payload_deterministic_across_schedule_and_cache_temperature`
+      — a discriminating fixture runs the same request cold, warm, and under concurrent
+      racing requesters and asserts byte-identical wire payloads.
   - **#8 — The differential `tsgo`-parity oracle as a DESIGNED structural surface** (tie
     to §3.4). Divergence from the oracle is observable BY CONSTRUCTION (a structural
     surface the engine emits), not ONLY via an external test harness.
@@ -1841,9 +1985,43 @@ results, and gate on a **per-family divergence budget**.
 - **Per-family parity-coverage target shape:** "N TS-conformance cases per reducer
   family; divergence budget M per family" (each hard phase's rescope gate names its own
   concrete N / M for its families against the pinned `tsgo`).
+- **Divergence semantics are owned by `docs/arch/ts-compat-two-mode-model.md` (LOCKED).**
+  The resolver is single-spec — correct-by-default, no bug-for-bug compat mode, no spec
+  dimension on any cache key. A Verter↔`tsgo` divergence is therefore CLASSIFIED,
+  review-gated DATA, not a raw count: the `tsgo` snapshot records the `TsCompat` value,
+  the review-gated correction overlay records the `Correct` value, and the checked-in
+  divergence registry carries the classification. The per-family budget M gates the
+  UNCLASSIFIED residue; a divergence classified into the registry (a conceded TS bug
+  with its correction overlay) is review-gated data, not budget consumption.
 - This is **distinct from** the §6.2 / U15 Verter-vs-`tsgo` PERFORMANCE benches (those
   gate cost-shape / fallback-count; this gates semantic agreement). Both run the same
   pinned `tsgo`.
+
+## 3.5 The critical path (NAMED — session/review capacity follows it)
+
+The dependency map concentrates the whole semantic-graph lane behind two EXTREME
+blocks and the full Stage5 chain. That serialization is DELIBERATE and sound (never
+build the wire/result/export stack around the doomed sidecar — §3.1.1), but it must
+be named so orchestration, session sizing, and review capacity follow it instead of
+discovering it:
+
+```
+U2.QUERY_VALUE_DOMAIN → U2.RELATION_INFER (EXTREME) → U6 (EXTREME) ─┐
+U2 ─► S5.B5 → S5.B6/B7/B8 → S5.B9 → S5.B10 → S5.B11 → S5.B12 ───────┤  (joins at U8)
+                                                                     ▼
+                       U8 → U3 → U10 → U12 → {U11, U13} → U14 → U15
+                                  └─► goto tail: G.P4 → G.P5 → G.P6/7
+```
+
+**THE critical path** is `U2.RELATION_INFER → U6 → U8 → U3 → U10 → U12 → {U11, U13} →
+U14 → U15`, with the Stage5 arm `U2 → S5.B5 → … → S5.B12` joining at the hard gate
+`U8 ← {U6, S5.B12}` (§3.1.1/§3.1.3) and the goto tail hanging off `G.P4 ← U3`. Every
+block after U8 is serialized behind BOTH extreme blocks AND the full Stage5 chain —
+so the orchestrator schedules its strongest sessions, deepest reviews, and earliest
+rescope effort on `U2.RELATION_INFER`, `U6`, and the S5 chain, and treats slack
+elsewhere (U1/U4/U5/U9, G.P1/G.P2, the foundation blocks) as genuinely parallel
+capacity, not path work. The `U8 ← {U6, S5.B12}` serialization is a kept, labeled
+bet (§2.3) — do not relitigate it; do name it when sequencing.
 
 ---
 
@@ -1852,7 +2030,8 @@ results, and gate on a **per-family divergence budget**.
 Drive ONE block at a time: implement → triple review (independent reviewer +
 codex) → per-block fix cycle until clean → land. Each block uses the template:
 **ID / source track / scope / deps / parallelism / risk / required deletions /
-guards**. Sequence is faithful to §A; do not reorder.
+guards**. Sequence is faithful to the binding merge-decision backlog order this
+plan transcribes (§2); do not reorder.
 
 ---
 
@@ -1873,7 +2052,7 @@ guards**. Sequence is faithful to §A; do not reorder.
 
 ---
 
-### U0 — Finish Typeinfo Contract Gaps  **(NEXT primary block)**
+### U0 — Finish Typeinfo Contract Gaps  **(U0-FINISH-A + U0-FINISH-B substrate landed — current state derives from §1.1)**
 
 - **Source track:** semantic-graph (R-0a).
 - **Parity docs:** parent `docs/arch/native-typeinfo-parity.md` (manifest ledger
@@ -1887,21 +2066,27 @@ guards**. Sequence is faithful to §A; do not reorder.
     `verter_protocol`: it is generic over `T`/`E`, which protobuf cannot express,
     and embeds the audit-substrate `RequestAuditRecord`, so it rides the ts-rs
     export rather than forcing a dependency inversion. `packages/typeinfo` imports
-    the generated TS type; there is no hand-written mirror. REMAINING: wire the
-    host entry-points that hand it back (the `AuditedResult` host API that U6's
-    flow surface and the typeinfo result blocks consume).
+    the generated TS type; there is no hand-written mirror. The host-API wiring is
+    LANDED on the live tree: `AuditedResult` is consumed across the five host audit
+    surfaces (`host_compile_audit.rs`, `host_analyze_audit.rs`,
+    `host_resolve_type_audit.rs`, `host_mcp_audit.rs`, `component_meta_host.rs`)
+    plus the typeinfo entry points; any residual unwired entry-point edge is
+    derived from the §1.1 authorities at `HEAD`, not asserted here.
   - **Unignore-manifest — EXTEND the A0a-landed manifest into the two-table
     ledger end-state, do NOT create a second one.** A0a already landed the manifest
     as a Rust test, not a doc:
     `crates/verter_session/tests/typeinfo_ignored_test_manifest.rs` +
-    `tests/manifest_data/typeinfo_ignored_test_manifest_rows.rs` (362 rows,
-    `EXPECTED_TOTAL_IGNORED_COUNT = 362`), with ~10 backing guards. U0 keeps that
+    `tests/manifest_data/typeinfo_ignored_test_manifest_rows.rs` (362 TOTAL rows;
+    `EXPECTED_TOTAL_IGNORED_COUNT` is DERIVED from the rows' `IgnoreStatus`, never
+    a frozen constant), with the backing guards. U0 keeps that
     same in-repo `.rs` test as the single ledger (there is no separate
     `typeinfo_tests_unignore_plan.md` doc and no second manifest at a competing
     path) and EXTENDS it to the **two-table ledger** the parent architecture
     requires (`native-typeinfo-parity.md` §10):
-    - **`IgnoredTestRow`** holds EXACTLY the 362 ignored test-site rows — count-guarded
-      at 362 and bijective with the source `#[ignore]`s — with the extended row schema
+    - **`IgnoredTestRow`** holds EXACTLY the 362 test-site rows — TOTAL count-guarded
+      at 362; the `Ignored` rows are bijective with the source `#[ignore]`s and the
+      ignored count is DERIVED (a `Lifted` row carries no live `#[ignore]`) — with the
+      extended row schema
       (`substrate: TargetSubstrate`, `capability`, `organ`, `owning_u_block`,
       `block_id`, `semantic_queries`, `proof: ProofRequirement`, `status: IgnoreStatus`,
       `unblocker`).
@@ -1917,10 +2102,22 @@ guards**. Sequence is faithful to §A; do not reorder.
       lifecycle — BINARY, with no tracked in-flight `Verifying` / lease state (the
       "in-flight, not-yet-landed" state of a block is simply its unmerged branch;
       branch/CI is the only acceptance transaction — `native-typeinfo-parity.md`
-      §10.1 / §11.1). `ProofRequirement` + the GENERATED proof registry + the row-test
+      §10.1 / §11.1). `ProofRequirement` + the proof registry + the row-test
       wrapper make "every row resolves to an executable proof its own test consumes"
       mechanical; the U0 row-exact capability→mechanism→proof coverage table
-      (`native-typeinfo-parity.md` §10.4 / §10.4.1) DEFINES completeness.
+      (`native-typeinfo-parity.md` §10.4) DEFINES completeness — the §10.4
+      table itself is the unbuilt residual forward-declared on the `U13.PROJECTION` /
+      `U15.FINAL_LIFT` block-contract rows (only §10.4.1's hand-authored partition is
+      landed). On the live
+      tree the proof substrate is LANDED per the locked `u0-oracle-harness-design.md`: the
+      per-row `ProofRequirement` registry (`Ts7Oracle(OracleId)` / `StructuralGuard` /
+      `NegativeGuard` / `OracleAndGuard` / `RowTestGuard`), the registry-bound
+      driver-calling lifted row bodies (the locked design's superseding shape of the
+      §10.3 row-test wrapper), and the shared TS7 oracle driver
+      (`crates/verter_session/src/typeinfo/oracle_core/driver.rs::run_row`, with the
+      oracle registry, snapshot bindings, and the lifted-row trace / fidelity guards).
+      Rows lift on the manifest schedule; per-row lift state derives from §1.1, never
+      from this prose.
     Do NOT migrate to a competing `target_phase` / `target_substrate` / `unblocked_by`
     schema at a different path — the landed `substrate` / `unblocker` columns are
     preserved and extended in place. See `native-typeinfo-parity.md` §10 for the full
@@ -1945,7 +2142,10 @@ guards**. Sequence is faithful to §A; do not reorder.
     under the reconciled schema (they are not net-new; they extend in place).
   - Adopt / verify the landed A0a wire naming (`GraphTypeNode` /
     `TypeInfoGraphRequest`) as canonical (§2.2).
-- **Deps:** A0a (landed). No cross-track dep.
+- **Deps:** A0a (landed). No cross-track dep. (The §0.5 foundation cluster does NOT
+  gate this block: per the §0.5.6 per-edge rule, `B.1` / `U0.RESOLVER_CORE` / `B.4`
+  gate their NAMED consumers; `U0.MANIFEST_SUBSTRATE` consumes no foundation edge —
+  which is why its substrate landed with zero foundation blocks built.)
 - **Parallelism:** Runs beside U1 (B7d) only. U2 DEPENDS on U0 and starts only
   after U0 lands (U2 is the convergence gate).
 - **Risk:** small-medium (the `AuditedResult` host-API wiring over the
@@ -1960,7 +2160,8 @@ guards**. Sequence is faithful to §A; do not reorder.
   / `ProofRequirement` in place (preserving the landed `substrate` / `unblocker`
   columns; do NOT migrate to a competing `target_phase` / `target_substrate` /
   `unblocked_by` schema). The `AuditedResult` carrier already exists in
-  `verter_audit`; only its host-API wiring remains.
+  `verter_audit`, and its host-API wiring is landed across the five host audit
+  surfaces (see Scope above).
 - **Guards (the exhaustive Phase-0a remaining set per §R-0a / §8.0 / §A.23 — no
   silent "subset + etc."):**
   - **Dependency / projection:** `dependency_direction_one_way` (the typeinfo
@@ -2022,15 +2223,21 @@ guards**. Sequence is faithful to §A; do not reorder.
   `Artifact` + `CacheNode { cache_id, key_hash }`), the dropped `Copy/Eq/Hash`
   (it derives `Clone, PartialEq, Debug`), `TargetStage`, and the
   `StageExecutor::as_any` + `execute_cache_node` trait surface are ALL LANDED
-  (`crates/verter_scheduler/src/stage.rs:60`, `executor.rs:122`/`:138`). CPU
-  dispatch lands as `try_submit_cpu` (`scheduler.rs:4143`), and `CacheNode`
+  (`crates/verter_scheduler/src/stage.rs`, `executor.rs`). CPU
+  dispatch lands as `try_submit_cpu` (`scheduler.rs`), and `CacheNode`
   routing is wired through the single router `dispatch_ready_job` →
-  `dispatch_ready_job_to_executor` (`scheduler.rs:181`) → `execute_cache_node`,
+  `dispatch_ready_job_to_executor` (`scheduler.rs`) → `execute_cache_node`,
   with discriminating tests covering route / permit-release / failure / panic /
   success outcomes. The only REMAINING work is the host-side cache-node
   materializer that overrides `execute_cache_node` (its default impl returns a
-  "not implemented" `StageError`) — that override is U7/U9 session-bridge scope,
-  not U1. The `task_kind_for_ready_job` adapter is
+  "not implemented" `StageError`) — that override is NOT U1's, and it is NOT
+  owned by any current block: the locked U9 design
+  (`docs/arch/u9-session-bridge-design.md`) builds NO production materializer
+  (U9 ships only a test-only `StageExecutor` proof) and U7 is locked DEFER, so
+  the override exists only if the U9 core re-gate (`u9-session-bridge-design.md`
+  §7) produces a committed production submitter; absent that, the
+  `WorkNodeIdentity::CacheNode` arm is DELETED at that re-gate. There is no
+  session-bridge block. The `task_kind_for_ready_job` adapter is
   ALREADY GONE; the surviving `unreachable!()` in `admit_work` (`scheduler.rs`)
   is the correct end-state (`Parse` is intrinsic to the source stage and
   `CacheNode` is admitted into the DAG directly by the cache layer, never
@@ -2058,6 +2265,8 @@ guards**. Sequence is faithful to §A; do not reorder.
   `docs/arch/native-typeinfo-parity-u2-reducers.md` (the U2 reducer / relation /
   utility / indexed / mapped / template / class / enum / module / JSX blocks).
 - **Sub-block decomposition (per the child's block graph).** U2 lands as the
+  pre-reducer SUBSTRATE sub-block **`U2.BINDER_IDENTITY_FACTS`** (the §0.5.1
+  family-A producer — contract in the next bullet), the
   foundation block **`U2.QUERY_VALUE_DOMAIN`** (the typed `SemanticQueryValue`
   value-domain layer + the five landed spine keys of the parent's seven-variant
   spine — the two augmentation spine keys `ResolveMergedDeclaration` /
@@ -2069,19 +2278,43 @@ guards**. Sequence is faithful to §A; do not reorder.
   reducer **`U2.RELATION_INFER`** (the `Relate` engine + coinductive-SCC discharge +
   relation-owned `InferBind`; the `CheckerTransaction` + `InferenceSession` +
   `InferenceInfo` substrate the `InferenceContextKey` fingerprints lands HERE, not in
-  the value-domain block) — **RESCOPE-GATE-REQUIRED (effort weight EXTREME, §3.3):
-  deep design produced at its rescope session (depends on `U2.QUERY_VALUE_DOMAIN`).**
+  the value-domain block) — **DESIGN-LOCKED (effort weight EXTREME, §3.3): its
+  rescope gate has RUN and the output is `docs/arch/u2-relation-infer-design.md`.**
   The assignability + inference-session + measured-variance algorithm (the whole TS
   checker core), the `isDeeplyNestedType`-style termination proof (non-convergence
-  never WARM-admits), and the per-family `tsgo`-oracle baseline are produced at the
-  gate, not asserted in this index; parent §§4.0–4.2 seed it (marker-probe
-  fixed-point + coinductive SCC + the session substrate). The
-  "route-through-`Relate`" phrasing elsewhere is the one-engine WIRING constraint,
-  NOT this phase's algorithm. — and the parallel reducer sub-blocks `U2.INDEXED_ACCESS`,
+  never WARM-admits), the PERSISTENT-`Relate` decision with the A.2 proof
+  obligations, the RI-1..RI-10 implementation mini-DAG, and the per-family
+  `tsgo`-oracle baseline are owned by that locked design, not asserted in this
+  index; parent §§4.0–4.2 seeded it (marker-probe fixed-point + coinductive SCC +
+  the session substrate). The "route-through-`Relate`" phrasing elsewhere is the
+  one-engine WIRING constraint, NOT this phase's algorithm. — and the parallel
+  reducer sub-blocks `U2.INDEXED_ACCESS`,
   `U2.MAPPED_TEMPLATE`, `U2.UTILITIES`, `U2.CLASS_SURFACES`, `U2.ENUMS`,
   `U2.MODULE_AUGMENTATION`, `U2.JSX_FOUNDATIONS`. The parent U2 token is the
   aggregate over every sub-block. The child doc owns the per-sub-block contracts;
   this index lists the names only.
+- **`U2.BINDER_IDENTITY_FACTS` (pre-reducer SUBSTRATE sub-block — the explicit
+  production owner of §0.5.1 family A; resolves the binder-ownership gap):** build
+  the layer-1 `BinderIdentityFacts` family-A artifact — lexical-scope identity
+  (stable structural scope ids), the env-free `DeclarationSlotSeed` facts, and the
+  per-file declaration-merge / augmentation CONTRIBUTOR-ORDER provenance — FROM
+  `IndexedReady` in `verter_semantic::analysis`, demand-produced (never an eager
+  whole-program binder pass), keyed `(canonical, parse_stable_hash, parse_env_hash)`
+  per §0.5.1. It is a `U2`-tier PREREQUISITE substrate the reducer sub-blocks
+  consume BEFORE they run — not a reducer output, not `N0`-owned. Family B (the
+  corpus-scoped completeness store) stays `B.4`-owned
+  (`ambient_global_and_lib_corpus_have_completeness_facts` gates at `B.4`).
+  **Acceptance bar: the §0.5.1 binder-contract guards gated on this substrate** —
+  `binder_identity_facts_are_pre_u2_and_not_n0_owned`,
+  `declaration_slots_are_stable_symbol_space_scoped_facts` (with the U2
+  slot-identity finalization), and
+  `negative_name_lookup_requires_recorded_completeness_or_returnonly` (shared with
+  `N0`) — composing with the U2-gate guards
+  (`u2_queries_do_not_read_n0_navigation_indexes`,
+  `binder_scope_id_enters_context_sensitive_query_identity`) and the
+  `U2.MODULE_AUGMENTATION`-gate guard
+  (`merge_order_and_augmentation_contributor_order_are_fact_validated`), each
+  registered at its owning gate per §0.5.7.
 - **Scope (ONE clean cutover — no migrate-twice):**
   0. Land the typed **`SemanticQueryValue`** value-domain layer over the one shared
      dispatch/admission substrate (`{ TypeNode, ProgramAnalysis, DeclarationAnalysis,
@@ -2092,10 +2325,13 @@ guards**. Sequence is faithful to §A; do not reorder.
      `EvalPolicy` **demand lattice** as the PRIMARY demand + cache-identity dimension,
      with the five mode names (`Identity` / `Navigate` / `Shallow` / `Expanded` /
      `Skeleton`) as public presets over it (`Skeleton` = `generic_open =
-     TypeParamShells` + carrier-stop, not a special mode) and cache satisfaction by
-     the lattice dominance relation, NOT mode-enum order (parent §2.10). The
-     satisfaction-relation EXACTNESS gating lands in U10; the lattice DEFINITION
-     lands here.
+     TypeParamShells` + carrier-stop, not a special mode), with cache satisfaction
+     decided by the LANDED materialized-point model: a warm hit requires a RECORDED
+     materialised `(path, point)` the compute actually produced to dominate the
+     request via `cached_satisfies` — the lattice is the demand/identity ALGEBRA
+     inside that check, never mode-enum order and never a nominal-demand authority
+     (parent §2.10). The published-boundary satisfaction EXACTNESS gating lands in
+     U10 ON TOP of the landed model; the lattice DEFINITION lands here.
   1. Finalize the **`SemanticQueryKey` identity SHAPE once** (the slot-identity
      model for every variant): existing `Instantiate { base }` /
      `ResolveMacroPayload { owner }` moved from the (now-deleted) intermediate
@@ -2123,7 +2359,7 @@ guards**. Sequence is faithful to §A; do not reorder.
      `ResolveDeclarationAugmentation` query keys AND the formal augmentation parity
      rows — which resolve to the in-process `SemanticQueryValue::DeclarationAnalysis`
      value domain — land together later in `U2.MODULE_AUGMENTATION`
-     (`native-typeinfo-parity-u2-reducers.md` §746); the rows do NOT lift without
+     (`native-typeinfo-parity-u2-reducers.md`, the `U2.MODULE_AUGMENTATION` block); the rows do NOT lift without
      that new key. Every variant routes through
      `ProjectSemanticDispatch::execute` (the one-engine rule). This finalizes the
      identity SHAPE — later ADDITIVE variants land in that same slot-identity shape
@@ -2213,11 +2449,14 @@ guards**. Sequence is faithful to §A; do not reorder.
   — order is `ReadSetSignature`-validated over recorded provenance, never re-derived
   from raw `IndexedReady`); `binder_scope_id_enters_context_sensitive_query_identity`
   (a scope-dependent query carries `binder_scope_id` in its `SemanticQueryKey` identity
-  — a semantic discriminator, NOT a content/version hash, R6-consistent); and
-  `session_overlay_augmentation_fails_closed_until_implemented` (a session/overlay
-  augmentation query over the base-only `augmentation_index` degrades typed /
-  `ReturnOnly` and never publishes a base-only result as a session-authoritative warm
-  entry — §0.5.1 fail-closed gate).
+  — a semantic discriminator, NOT a content/version hash, R6-consistent); and the
+  LANDED overlay-aware augmentation guards kept green:
+  `session_overlay_augmenter_isolated_from_base_index`,
+  `effective_export_set_session_view_stitches_overlay_augmenter`,
+  `no_effective_export_set_base_only_session_assert` (the augmentation index is
+  overlay-aware via `AugmentationTargetKey.population` — §0.5.1; the retired
+  fail-closed deliverable `session_overlay_augmentation_fails_closed_until_implemented`
+  must NOT be reintroduced).
 
 ---
 
@@ -2333,8 +2572,9 @@ guards**. Sequence is faithful to §A; do not reorder.
 - **Parity docs:** child `docs/arch/native-flow-return.md` (the U6 flow chapter —
   the demand-sliced `ReturnPathPeeker` two-frontier model + the flow IR), under
   parent `docs/arch/native-typeinfo-parity.md`. The flow-return coverage detail
-  lives in this in-repo doc and the parent's coverage table (§10.4 / §10.4.1), never
-  a scratch/temp artifact.
+  lives in this in-repo doc and the parent's coverage sections (the landed
+  hand-authored §10.4.1 partition; the §10.4 generated table is the U13/U15-gated
+  residual), never a scratch/temp artifact.
 - **Scope:** The demand-sliced flow architecture is documented at
   `docs/arch/native-flow-return.md` (parent §5 owns the cross-cutting contract). The
   keystone sub-block `U6.FLOW_RETURN_SUBSTRATE` lands the four artifacts: the
@@ -2376,16 +2616,16 @@ guards**. Sequence is faithful to §A; do not reorder.
   (reserved-not-built; the native-checker sibling consumes them later).
 - **Deps:** U2 + U4.
 - **Parallelism:** Cache-runtime lane; beside the semantic-graph lane.
-- **RESCOPE-GATE-REQUIRED (effort weight EXTREME, §3.3): deep design produced at its
-  rescope session (depends on `U2.RELATION_INFER`).** The cross-engine
-  cycle/termination — `FlowReturn` ↔ `ResolveCall` ↔ narrowing ↔ `ContextualTypeAt`,
-  the `CheckerReentryGraph`, and flow narrowing as a dataflow fixed-point — is
-  designed at the gate to executable-pseudocode depth: runtime SCC detection +
-  provisional-result-during-discharge + a stability decision + **fail-closed on
-  non-convergence**, the narrowing JOIN ALGEBRA, the loop fixed-point, and the
-  per-family `tsgo`-oracle baseline. The block contract below names the artifacts /
-  guards; the recursion algorithm + its termination proof are the gate's deliverable,
-  not asserted here.
+- **DESIGN-LOCKED (effort weight EXTREME, §3.3): its rescope gate has RUN and the
+  output is `docs/arch/u6-flow-call-resolution-design.md`** (consumes the U2/RI
+  substrate). The cross-engine cycle/termination — `FlowReturn` ↔ `ResolveCall` ↔
+  narrowing ↔ `ContextualTypeAt`, the `CheckerReentryGraph`, and flow narrowing as
+  a dataflow fixed-point — is designed there to executable-pseudocode depth: runtime
+  SCC detection + provisional-result-during-discharge + a stability decision +
+  **fail-closed on non-convergence**, the narrowing JOIN ALGEBRA, the loop
+  fixed-point, and the per-family `tsgo`-oracle baseline. The block contract below
+  names the artifacts / guards; the recursion algorithm + its termination proof are
+  owned by that locked design, not asserted here.
 - **Risk:** large — adds the `FunctionFlowGraph` + the `FlowReturn` / `ResolveCall`
   query nodes + the slice cache-runtime nodes.
 - **Required deletions:** the legacy `type_eval_build.rs` lightweight return scanner
@@ -2411,7 +2651,8 @@ guards**. Sequence is faithful to §A; do not reorder.
 > **un-built**: the hard scheduling core is already landed in `SchedulerDag::submit`, a
 > cache→cache result edge is expressible at the raw `SchedulerDag` layer via
 > `DepKey::CacheNode` + single-node `submit()` (the production scheduler *dispatch* path
-> still asserts cache nodes are terminal — `scheduler.rs:237`/`249`/`263`/`4793` — so the
+> still asserts cache nodes are terminal — the `scheduler.rs` terminal-cache dispatch
+> asserts — so the
 > edge is not yet live end-to-end), and the biggest workload (`TypeInfoGraphResultDb`) is
 > permanently singleflight-bound (§2.1). The landed cache-node substrate + B7a leaf
 > primitives are KEPT (U9 machinery). U9 closes the `execute_cache_node` reachability gap
@@ -2436,13 +2677,15 @@ guards**. Sequence is faithful to §A; do not reorder.
 - **Parallelism:** Can run parallel AFTER U1, alongside the U4/U5/U6
   cache-runtime work and the entire semantic-graph lane (U8/U3+; the typeinfo DB
   does NOT ride `submit_dag` per §2.1).
-- **RESCOPE-GATE-REQUIRED (effort weight HIGH / justify-or-cut, §3.3): deep design
-  produced at its rescope session (depends on U1).** The gate must **justify the
-  cache-node DAG against a MEASURED workload, or CUT it** — a model-checked DAG for
+- **Rescope gate: RUN (effort weight HIGH / justify-or-cut, §3.3) — verdict LOCKED at
+  `docs/arch/u7-scheduler-submit-dag-decision.md`: DEFER.** The gate asked whether the
+  cache-node DAG is justified against a MEASURED workload — a model-checked DAG for
   an I/O-bound LSP already served by singleflight is an over-engineering risk (the
   typeinfo DB explicitly does NOT ride `submit_dag` per §2.1, narrowing the workload
-  that would justify it). The block contract below stands only if the rescope gate
-  confirms the workload; otherwise the gate re-scopes/cuts it.
+  that would justify it) — and answered DEFER: the envelope is held un-built, re-gated
+  for JUSTIFY at U9 only, default permanent CUT. The block contract above and below is
+  the scope sketch the U9 re-gate would resurrect IF it ever passes; it is not
+  scheduled work.
 - **Risk:** **very large / highest scheduler risk.** #1 stated risk: do NOT create
   a second readiness/accounting system beside `SchedulerDag` (no `ArrayQueue`, no
   `DagAdmissionBudget`, no parallel `DedupKey`). `WorkNodeIdentity` is THE dedupe
@@ -2468,14 +2711,21 @@ guards**. Sequence is faithful to §A; do not reorder.
   the child doc owns the full block contract; it is cited, not restated.
 - **Scope (whole-surface wire-purity end-state, NOT the exporter):** reconcile the
   ENTIRE public proto surface with the moved-concept end-state under the Typeinfo Wire
-  Contract. Introduce `TypeInfoGraphPayload { graph, program_analysis,
-  declaration_surfaces, diagnostics, diagnostic_directives, relation_proofs }`, the
-  sibling `ProgramAnalysisGraph { flow_narrowings, contextual_types }` and
-  `DeclarationAnalysisGraph { module_augmentations, global_augmentations }`, the
+  Contract. Introduce `TypeInfoGraphPayload { graph, program_analysis, diagnostics,
+  diagnostic_directives, relation_proofs }` and the
+  sibling `ProgramAnalysisGraph { flow_narrowings, contextual_types }`, plus the
   `RelationPayload` + payload-side `relation_proofs` proof table; retire-and-`reserved`
   every relocated/retired `GraphTypeNode` arm (flow-narrowing 26 / contextual-type 27 /
-  relation-proof 28 / module-augmentation 23 / global-augmentation 25), the
-  `SemanticTypeGraph.diagnostics` (9) and `GraphTypeParameter.no_infer` (9) fields;
+  relation-proof 28), the
+  `SemanticTypeGraph.diagnostics` (9) and `GraphTypeParameter.no_infer` (9) fields.
+  Module / global augmentation are NOT relocated and NOT retired: they REMAIN the live
+  `GraphTypeNode` arms `module_augmentation` (23) / `global_augmentation` (25) — the
+  proposed `DeclarationAnalysisGraph { module_augmentations, global_augmentations }`
+  wire message (and its `declaration_surfaces` payload field) was REJECTED. Decision of
+  record: `native-typeinfo-parity-u2-reducers.md` → `U2.MODULE_AUGMENTATION` ("NO wire
+  change") + the `/type-resolution` skill → "Merge/augmentation WIRE domain"; the live
+  proto carries the arms and `typeinfo_graph_contract_guards.rs` pins them as live
+  taxonomy members;
   migrate every public `SemanticTypeGraph` embedding (`TypeInfoGraphResponse.graph`,
   `FrameworkSurfacePayload.graph`) additively to a `TypeInfoGraphPayload` carrier at a
   fresh tag; bump `SemanticTypeGraph.schema_version`; extend
@@ -2492,20 +2742,36 @@ guards**. Sequence is faithful to §A; do not reorder.
   block — including U3 — depends on); runs beside the cache-runtime lane (U1/U4–U7/U9).
 - **Risk:** large (whole-proto closure + a schema_version bump + byte-equal TS
   regeneration); mechanical once the moved-concept homes are fixed.
-- **Required deletions:** the relocated `GraphTypeNode` arms (26/27/28/23/25),
+- **Required deletions:** the relocated `GraphTypeNode` arms (26/27/28 — NOT the
+  augmentation arms 23/25, which stay live; the `DeclarationAnalysisGraph` relocation
+  was rejected),
   `SemanticTypeGraph.diagnostics` (9), `GraphTypeParameter.no_infer` (9) — retired +
   `reserved`, never reused; the `SemanticTypeGraph graph = 1` / `FrameworkSurfacePayload.graph = 4`
   server-populated embeddings (retired/`reserved` or downgrade-only, replaced by fresh
   `TypeInfoGraphPayload` carriers). No field number is reused.
-- **Guards:** `graph_type_node_oneof_contains_only_type_value_arms`,
-  `no_non_type_value_smuggled_into_graph_type_node`,
-  `typeinfo_wire_surface_has_no_retired_concept_fields`,
+- **Guards:** `node_taxonomy_complete` (the LANDED single enumerating assertion that
+  pins the EXACT 32-arm `GraphTypeNode` `oneof kind` set, INCLUDING the live
+  augmentation arms 23/25 — never flagging them for retirement, per the locked
+  rejection in `native-typeinfo-parity-u2-reducers.md` → `U2.MODULE_AUGMENTATION`; the
+  earlier-planned split/denylist guards
+  `graph_type_node_oneof_contains_only_type_value_arms` /
+  `graph_type_node_allowlist_arms_have_type_value_classification` /
+  `typeinfo_wire_surface_has_no_retired_concept_fields` were NOT landed — they do not
+  exist in `crates/` — and are subsumed by it),
+  `no_non_type_value_smuggled_into_graph_type_node` (classifies the merge/augmentation
+  kinds 21–25 as legitimate value-bearing arms),
   `flow_contextual_facts_not_graph_type_nodes`,
-  `program_analysis_graph_exposes_flow_contextual_queries`, `relation_proofs_not_graph_type_nodes`,
+  `program_analysis_graph_exposes_flow_contextual_queries`,
+  `flow_contextual_doc_and_wire_placement_match_program_analysis_graph`,
+  `relation_proofs_not_graph_type_nodes`,
+  `typeinfo_relate_payload_exposes_relation_proof_without_graph_type_node`,
   `no_infer_not_type_parameter_metadata`, `diagnostics_only_on_typeinfo_graph_payload`,
-  `all_public_semantic_type_graph_embeddings_are_payload_wrapped`; plus the four
-  wire-contract guards (proto/TS oneof parity, byte-equal TS freshness, audit parity,
-  request validation).
+  `typeinfo_graph_response_payload_arm_is_additive_not_retyped`,
+  `framework_surface_payload_graph_payload_is_additive_not_retyped`,
+  `all_public_semantic_type_graph_embeddings_are_payload_wrapped` (the generated U8
+  block-contract row in `gen-typeinfo-ignore-manifest.py` carries this exact set); plus
+  the four wire-contract guards (proto/TS oneof parity, byte-equal TS freshness, audit
+  parity, request validation).
 
 ---
 
@@ -2523,7 +2789,7 @@ bridge.
   (`cancel()` records `FailedDepRecord` under `DepKey::CacheNode` + persistent `terminal_dep_failures`) + a
   cache-arm pre-execute `DependencyFailed` short-circuit (the file-stage chokepoints are `unreachable!()` for
   `CacheNode`); a net-new bounded cache-edge cycle guard at the submit chokepoint; relax the
-  `scheduler.rs:4793` forbid for the cache path ONLY. Proven by a discriminating test-only `StageExecutor`
+  `scheduler.rs` forbid for the cache path ONLY. Proven by a discriminating test-only `StageExecutor`
   (release / failure-propagate / cycle-reject). (b) DELETE the dead B7a leaf primitives (below). NO session
   bridge, NO registry, NO `DedupeHook`, NO `CpuConcurrencySemaphore` wiring, NO host back-edge, NO production
   materializer, NO H20 session edge. Update `.claude/skills/{scheduler,host-session}/SKILL.md`.
@@ -2570,8 +2836,17 @@ bridge.
     `Expanded` `keyof T` is bounded to T's shallow member-name surface; `Navigate` runs
     the intermediate hops; `Skeleton` is the `TypeParamShells` + carrier-stop preset.
     `Pick`/`Omit`/inline/local/imported projection is path-precise (no unpicked/excluded/
-    unselected branch loaded). Cache satisfaction/backfill is by the demand-lattice
-    dominance relation, NOT mode-enum order.
+    unselected branch loaded). Cache satisfaction/backfill is by the LANDED
+    materialized-point model: a warm hit requires a RECORDED materialised `(path, point)`
+    (the candidate's `MemoEntry.satisfied_projection` set — what the compute actually
+    produced) to dominate the request at the same path
+    (`cached_satisfies(MemoEntry.satisfied_projection, requested_point_for_key(key))`),
+    and backfill clones only recorded materialized points — the demand lattice is the
+    algebra INSIDE that check, never the satisfaction authority, never mode-enum order,
+    and never a nominal-demand oracle. U10's residual satisfaction work is the
+    published-boundary EXACTNESS gating over this landed rail (confirming the U2
+    reducers are path-precise at the result-DB boundary), NOT a re-implementation or
+    replacement of the satisfaction model.
 - **Deps:** U3 (the typed-admission + `ReadSetSignature` validity rail this DB admits
   through) + U8 (the closed `TypeInfoGraphPayload` shape it caches) + U2/U6 parents
   (the reducers + flow solver it gates). **Per §2.1: built on the singleflight
@@ -2585,7 +2860,16 @@ bridge.
   alias body / reduces a `Pick<…>` member body / walks member bodies into the keyspace;
   any eager sibling materialization during projection. Do NOT resurrect
   `finalise_signature_or_empty` — build on `FactReadSet::finalise` + `SignatureAdmission`.
-- **Guards:** `cache_satisfaction_is_demand_lattice_not_enum_order` (lands here); the
+- **Guards:** the LANDED satisfaction guards kept green and exercised through
+  `TypeInfoGraphResultDb`: `cache_satisfaction_is_materialized_point_not_nominal_demand`
+  + `backfill_writes_only_recorded_materialized_points` (the formerly-planned
+  `cache_satisfaction_is_demand_lattice_not_enum_order` is RETIRED — written as planned
+  it would reintroduce a WEAKER nominal-lattice satisfaction rail under a new name);
+  plus the NET-NEW published-boundary exactness guard
+  `result_db_published_boundary_serves_only_recorded_materialized_points` (named here;
+  mirrored verbatim in the generated U10 block-contract row alongside the landed pair),
+  which COMPOSES with (never shadows or weakens) the landed pair by asserting the
+  result-DB boundary serves only recorded materialized points; the
   U3 multi-candidate-substrate guards exercised through `TypeInfoGraphResultDb`
   (`cache_candidate_cap_is_per_family_not_uniform`, `family_eviction_prefers_invalid_then_lru_valid_hit`,
   `persistent_caches_never_admit_overlay_only_results` — must not regress); the
@@ -2665,7 +2949,9 @@ bridge.
   evaluate_type_expression,resolve_named_symbol}.rs` — project the engine's typed
   `SemanticQueryValue` results into the closed `TypeInfoGraphPayload`: type values onto
   the closed `GraphTypeNode` type-value allowlist, flow/contextual facts onto
-  `ProgramAnalysisGraph`, declaration/environment facts onto `DeclarationAnalysisGraph`,
+  `ProgramAnalysisGraph`, declaration/environment (`DeclarationAnalysis`) facts onto the
+  live augmentation `GraphTypeNode` arms 23/25 on `graph` (no `DeclarationAnalysisGraph`
+  side surface — the relocation was rejected; see the U8 block),
   diagnostics onto their side tables, relation proofs onto the payload-side
   `relation_proofs` table by opaque proof id, and the `RelationPayload` for public
   `relate`. No non-type value is materialised as a `GraphTypeNode` arm; the exporter does
@@ -2689,8 +2975,11 @@ bridge.
 - **Risk:** large (wide lowering table); mechanical once U2 is correct (the exporter is a
   thin projection).
 - **Required deletions (one clean cutover, with their replacements):**
-  - Any exporter path that emits flow / contextual / relation-proof / module-or-global
-    augmentation facts as `GraphTypeNode` arms (relocated to the payload side tables).
+  - Any exporter path that emits flow / contextual / relation-proof facts as
+    `GraphTypeNode` arms (relocated to the payload side tables). Module / global
+    augmentation facts are NOT in this deletion: they stay on the live augmentation
+    `GraphTypeNode` arms 23/25 (the `DeclarationAnalysisGraph` relocation was rejected
+    — see the U8 block).
   - Any exporter path that re-resolves a type at projection time (the one-resolver rule).
   - The legacy scratch text-evaluator (`typeinfo/{evaluate_type_expression,
     scratch_cache}.rs`) once `StructuredTypeExpression` dispatch (U12) lands — the
@@ -2963,8 +3252,8 @@ The typeinfo result DB (built in U10) admits through the cache-runtime
 **singleflight / fact-validation substrate**, which is already landed:
 
 - `cooperative_admit_with_post_publish` (`cache_runtime/singleflight.rs`)
-- `InflightTable` (`cache_runtime/singleflight.rs:213`); the canonical
-  `MAX_INFLIGHT_RETRIES = 3` lives in `semantic_query_memo/inflight.rs:226`
+- `InflightTable` (`cache_runtime/singleflight.rs`); the canonical
+  `MAX_INFLIGHT_RETRIES = 3` lives in `semantic_query_memo/inflight.rs`
 - `BoundedCandidateMap` + `GlobalRetentionBudget` (`bounded_query_retention`)
 - `FactReadSet::finalise` → `SignatureAdmission`
 - `HostStoreView` for warm-hit revalidation
@@ -2990,16 +3279,21 @@ workspace suite, not a scoped subset.
 ```bash
 # Rust
 cargo check --workspace --tests
-cargo clippy --workspace --tests -- -D warnings
+cargo clippy --workspace -- -D warnings
 cargo fmt --all -- --check
 
-# Focused scheduler / session (every block that touches them)
-cargo test -p verter_scheduler --tests
-cargo test -p verter_session  --tests            # covers all integration binaries
-                                                  # in one run (consolidated harness)
+# CANONICAL Rust gate — the CLAUDE.md pair (completeness + shared-process surface)
+cargo nextest run --workspace --no-fail-fast     # authoritative completeness gate — runs
+                                                  # every workspace test target INCLUDING
+                                                  # the ~25 verter_session integration
+                                                  # binaries; --no-fail-fast so one early
+                                                  # failure cannot mask downstream ones
+cargo test -p verter_session --tests              # shared-process verter_session surface
+                                                  # (one run covers all binaries since the
+                                                  # `mod harness;` consolidation)
 
-# Full workspace (the authoritative gate)
-cargo test --workspace --tests --no-fail-fast
+# Focused scheduler (every block that touches it)
+cargo test -p verter_scheduler --tests
 
 # TS + full build (gates wasm cfg-gating that --tests cannot catch)
 pnpm install --frozen-lockfile
@@ -3009,12 +3303,16 @@ pnpm build                                        # native → lsp → wasm → 
 
 **Gate-method notes (banked from prior landings):**
 
-- `cargo test --workspace --tests` historically SKIPS the consolidated
-  `verter_session` integration binaries; the reliable session gate is
-  `cargo test -p verter_session --tests` (one run covers all binaries since the
-  `mod harness;` consolidation).
-- `cargo nextest run` is NOT a substitute — it false-fails `verter_audit` ts-rs
-  `export_bindings_*` (parallel writes to the shared `audit.generated.ts`).
+- **CLAUDE.md is the gate-method authority; this plan defers to it.** The
+  canonical Rust gate is the PAIR above (`cargo nextest run --workspace` +
+  `cargo test -p verter_session --tests`). Bare `cargo test --workspace --tests`
+  SILENTLY SKIPS the consolidated `verter_session` integration binaries
+  (feature unification drops them from the workspace test set) and MUST NOT be
+  the sole gate. Any real, reproducible environment-specific caveat against
+  nextest must be recorded in CLAUDE.md / the `/testing` skill (the
+  current-state authorities), never carried as a silent fork in this plan.
+- Default `cargo nextest run` is fail-fast; gate with `--no-fail-fast` so a
+  single early failure cannot cancel the run and hide downstream failures.
 - `pnpm build` is a required gate: the wasm `cfg`-gating breaks have surfaced
   ONLY under `build:wasm`, never under `cargo --tests`.
 - Trust-but-verify: re-run the full gate independently of any sub-agent's
@@ -3046,15 +3344,18 @@ discriminating regression test in the same change (R6 meta-guard).
 **Intentional current-state-authority divergence (NOT pre-edited).** `CLAUDE.md`
 (the Cache Architecture (CRITICAL) rule) and the `/type-cache-architecture` skill
 currently describe the LIVE uniform `FAMILY_SLOT_CANDIDATE_CAP = 4` + FIFO eviction
-model, and the `/type-resolution` skill currently treats the five query modes as the
-primary cache/mode model (the mode-rank model). These describe the code as it exists
-TODAY and are deliberately NOT pre-edited by this plan — making the current-state
-authority docs describe unbuilt state would make them lie about the live code. They are
-updated to the per-family-adaptive `candidate_cap()` + invalid-first/LRU-by-valid-hit
-eviction + global memory ceiling (U3) and to the `ProjectionDemand` / `EvalPolicy`
-demand-lattice with the modes as presets (U2.QUERY_VALUE_DOMAIN / U10) by the owning
-blocks' `Docs updated` steps WHEN those blocks land. The divergence is therefore an
-intentional, tracked deliverable, not an oversight.
+model. That is the one live intentional divergence from this plan's end-state: it
+describes the code as it exists TODAY and is deliberately NOT pre-edited — making the
+current-state authority docs describe unbuilt state would make them lie about the live
+code. It is updated to the per-family-adaptive `candidate_cap()` +
+invalid-first/LRU-by-valid-hit eviction + global memory ceiling by U3's `Docs updated`
+step WHEN U3 lands. The divergence is therefore an intentional, tracked deliverable,
+not an oversight. (The query-mode / satisfaction model is NOT a divergence: `CLAUDE.md`
+and the `/type-resolution` skill already document the landed materialized-point
+satisfaction — recorded `(path, point)` dominance via `cached_satisfies`, with the
+demand lattice as the algebra and the five modes as presets. The
+`U2.QUERY_VALUE_DOMAIN` / U10 `Docs updated` steps REFINE that text; there is no live
+"mode-rank model" left to replace.)
 
 | Block | Primary docs to update |
 |---|---|
@@ -3066,9 +3367,9 @@ intentional, tracked deliverable, not an oversight.
 | **U5** | `/type-cache-architecture` (memory policy, metrics); `/audit-infrastructure` (`StructuredAuditEvent::CacheNode*`). |
 | **U6** | `docs/arch/native-flow-return.md` (moved here in U6); `/type-resolution` (`FlowReturn` query node); `/compiler-codegen` if flow lowering surfaces. |
 | **U7** | `docs/arch/u7-scheduler-submit-dag-decision.md` (the DEFER decision — multi-node `submit_dag` envelope held un-built). **No `/scheduler` envelope-symbol docs** (`CacheNodeDag` / `submit_dag` / `KeyedJob` / `DagHandle`) are written unless the envelope is re-gated AND built at U9; the deferred-substrate skill refresh rides U1/U9. |
-| **U8** | `/type-cache-architecture` (wire-payload notes — `TypeInfoGraphPayload` / `ProgramAnalysisGraph` / `DeclarationAnalysisGraph` placement); `Typeinfo Wire Contract` rule pointers; amend `docs/arch/semantic-type-graph-plan-recovered.md` stale wire wording. |
-| **U9** | `/scheduler` + `/host-session` SKILL (session bridge, `CpuConcurrencySemaphore` wiring, `execute_cache_node`). |
-| **U10** | `/type-resolution` (`TypeInfoGraphResultDb`, `CompletionFence`; **the Query Mode Contract → the `ProjectionDemand` / `EvalPolicy` demand-lattice with the five modes as presets + the demand-lattice dominance satisfaction relation, replacing the mode-rank/enum-order model**) + `/type-cache-architecture` (result-DB membership on `ProjectTypeStore`). The `U2.QUERY_VALUE_DOMAIN` block lands the demand-lattice DEFINITION; U10 lands the satisfaction relation and updates the skill's mode-contract text. |
+| **U8** | `/type-cache-architecture` (wire-payload notes — `TypeInfoGraphPayload` / `ProgramAnalysisGraph` placement; module/global augmentation stays on the `GraphTypeNode` arms 23/25 — no `DeclarationAnalysisGraph`, relocation rejected); `Typeinfo Wire Contract` rule pointers; amend `docs/arch/semantic-type-graph-plan-recovered.md` stale wire wording. |
+| **U9** | `/scheduler` SKILL (cache-node lowering via single-node `SchedulerDag::submit`, the lifted terminal-cache dispatch asserts, `execute_cache_node`, the B7a leaf-primitive deletions — NO session bridge, NO `CpuConcurrencySemaphore` wiring, per the DESIGN-LOCKED `docs/arch/u9-session-bridge-design.md`); `/host-session` only if a host-visible surface changes. |
+| **U10** | `/type-resolution` (`TypeInfoGraphResultDb`, `CompletionFence`; **the Query Mode Contract → the `ProjectionDemand` / `EvalPolicy` demand-lattice with the five modes as presets — the lattice as the demand/identity ALGEBRA inside the landed materialized-point satisfaction (`cached_satisfies` over recorded materialised `(path, point)`s), which CLAUDE.md and the skill already document; U10 REFINES that text, it does not replace the satisfaction authority**) + `/type-cache-architecture` (result-DB membership on `ProjectTypeStore`). The `U2.QUERY_VALUE_DOMAIN` block lands the demand-lattice DEFINITION; U10 lands the published-boundary exactness gating over the landed satisfaction rail and updates the skill's mode-contract text. |
 | **U11** | `/type-resolution` (public `relate` → `RelationPayload`, `_with_audit`, the session surface); `/audit-infrastructure` (3-branch emission, footprint-attachment pipeline, footprint cell, nested records); `/component-meta` if the public relation surface contract changes. |
 | **U12** | `/type-resolution` (the exporter + lowering table; the exporter is a thin projection, not a resolver); `/architecture` (FFI surface); `/type-cache-architecture` exporter/payload notes; legacy-deletion notes in the owning skills. |
 | **U13** | `/component-meta` (native-vs-compat, the structural `TypeDescriptor` projection) + `/architecture` (projections); `/type-resolution` (typed-schema-contract notes); `@verter/type-ir` schema docs; `docs/` API pages. |
@@ -3101,7 +3402,7 @@ pointer to this doc but are otherwise unchanged (historical/detail reference).
 The unified effort is "done" when ALL of the following hold:
 
 - [ ] **U0–U15 all landed** (each implement → triple review → clean re-review →
-  land), in §A order, with the U2 convergence gate landed before any
+  land), in the §4 backlog order, with the U2 convergence gate landed before any
   graph-execution block (U8+).
 - [ ] **One `SemanticQueryKey` identity shape** (slot-identity) finalized in U2 with
   the five landed U2 spine variants (the two augmentation spine variants
@@ -3117,16 +3418,24 @@ The unified effort is "done" when ALL of the following hold:
   family's admission cites that single statement
   (`unified_warm_hit_validity_statement_is_single_rail` green); no family carries a private
   validity oracle. BLOCKS the U3 + U10 gates from counting as passed.
+- [ ] **Unified determinism statement** (ledger #7b) written ONCE beside it: same inputs +
+  the five split env dims ⇒ identical wire payload, independent of thread schedule,
+  singleflight winner, and cache temperature (cold ≡ warm);
+  `wire_payload_deterministic_across_schedule_and_cache_temperature` green.
 - [ ] **`TypeInfoGraphResultDb`** admits through the singleflight / fact-validation
   substrate (NOT `submit_dag`), with warm-exact-only admission, the canonical
   3-retry fence, no second retry constant, and zero-alloc warm hits.
-- [ ] **Scheduler** has the TaskKind split (U1) and the landed cache-node substrate +
-  B7a leaf primitives under one admission path with no second readiness/ledger
-  structure. The multi-node `submit_dag` cache-node DAG envelope (U7) is **DEFERRED to
-  U9 / default permanent CUT** (`docs/arch/u7-scheduler-submit-dag-decision.md`) — this
-  checklist does NOT require it built; U9 closes the cache-node reachability gap via
-  single-node lowering into the existing `SchedulerDag::submit` and wires the
-  session bridge (`CpuConcurrencySemaphore`); `dag_arch_guards` and the B7b guards green.
+- [ ] **Scheduler** has the TaskKind split (U1) and the landed cache-node substrate
+  under one admission path with no second readiness/ledger structure. The multi-node
+  `submit_dag` cache-node DAG envelope (U7) is **DEFERRED to U9 / default permanent
+  CUT** (`docs/arch/u7-scheduler-submit-dag-decision.md`) — this checklist does NOT
+  require it built; U9 closes the cache-node reachability gap via single-node lowering
+  into the existing `SchedulerDag::submit` with NO session bridge and NO
+  `CpuConcurrencySemaphore` wiring (the dead B7a leaf primitives —
+  `DedupeHook` / `SubmissionResult` / `CpuConcurrencySemaphore` /
+  `CpuConcurrencyPermit` / the rich `CancellationToken` — are in U9's Required
+  deletions, per the DESIGN-LOCKED `docs/arch/u9-session-bridge-design.md`);
+  `dag_arch_guards` and the B7b guards green.
 - [ ] **Typeinfo session** exposes the 8 `_with_audit` methods + public `relate()`,
   validate-before-execute, with cold/warm/degraded audit + footprint cell + nested
   records using `exactness_counts: BTreeMap`; every request response echoes the
@@ -3251,6 +3560,7 @@ The full-replacement effort is "done" when ALL of the following hold:
   rule from the §0.5 blocks has a registered R6 guard;
   `ownership_boundaries_no_typescript_side_path`,
   `broken_code_recovery_contract_global_every_surface_degrades`,
+  `engine_fault_containment_panic_never_admits_never_poisons_degrades_typed`,
   `program_model_is_single_project_authority_keys_through_project_identity`,
   `lib_authority_pinned_ts_version_single_owner`,
   `binder_identity_facts_are_pre_u2_and_not_n0_owned`,
@@ -3261,7 +3571,9 @@ The full-replacement effort is "done" when ALL of the following hold:
   `ambient_global_and_lib_corpus_have_completeness_facts`,
   `negative_name_lookup_requires_recorded_completeness_or_returnonly`,
   `binder_scope_id_enters_context_sensitive_query_identity`,
-  `session_overlay_augmentation_fails_closed_until_implemented`,
+  `session_overlay_augmenter_isolated_from_base_index`,
+  `effective_export_set_session_view_stitches_overlay_augmenter`,
+  `no_effective_export_set_base_only_session_assert`,
   `nav_location_index_runs_zero_typed_ir_dispatch`,
   `native_navigation_replaces_ts_navigation_backend`,
   `native_binder_surfaces_replace_ts_aux_nav_paths`,

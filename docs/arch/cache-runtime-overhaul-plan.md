@@ -139,7 +139,7 @@ rules):**
   (Block 2).
 
 **New plan-level rules introduced by this overhaul** (all registered in
-`crates/verter_session/tests/critical_rules_have_guards.rs::every_critical_rule_in_docs_has_registered_guard`
+`crates/verter_session/tests/g_misc0/critical_rules_have_guards.rs::every_critical_rule_in_docs_has_registered_guard`
 in the same block that introduces them):
 
 - `H15` typed `CacheAdmission<V>` gate (Block 2 — `Cacheable(V)` holds
@@ -612,7 +612,8 @@ None inside this block.
 ```
 cargo test --package verter_session world_snapshot --tests --verbose
 cargo test --package verter_session architecture_guards::guard7 --tests --verbose
-cargo test --workspace --tests --verbose
+cargo nextest run --workspace
+cargo test -p verter_session --tests
 cargo clippy --workspace -- -D warnings
 cargo fmt --all
 pnpm install --frozen-lockfile
@@ -831,7 +832,8 @@ to read the canonical `cache_runtime/singleflight.rs` path.
 ```
 cargo test --package verter_session cache_runtime --tests --verbose
 cargo test --package verter_session cooperative --tests --verbose   # asserts the legacy name resolves nowhere
-cargo test --workspace --tests --verbose
+cargo nextest run --workspace
+cargo test -p verter_session --tests
 cargo clippy --workspace -- -D warnings
 cargo fmt --all
 pnpm install --frozen-lockfile
@@ -1021,7 +1023,8 @@ NOT broadcast or shared to joiners.
 ```
 cargo test --package verter_session compile_fact_emission --tests --verbose
 cargo test --package verter_session signature_admission --tests --verbose
-cargo test --workspace --tests --verbose
+cargo nextest run --workspace
+cargo test -p verter_session --tests
 cargo clippy --workspace -- -D warnings
 cargo fmt --all
 pnpm install --frozen-lockfile
@@ -1308,7 +1311,8 @@ cargo test --package verter_session file_artifact_store --tests --verbose
 cargo test --package verter_session route_db --tests --verbose
 cargo test --package verter_session component_meta --tests --verbose
 cargo test --package verter_session semantic_query --tests --verbose
-cargo test --workspace --tests --verbose
+cargo nextest run --workspace
+cargo test -p verter_session --tests
 cargo clippy --workspace -- -D warnings
 cargo fmt --all
 pnpm install --frozen-lockfile
@@ -1594,7 +1598,8 @@ Plumbing:
 cargo test --package verter_session compile_mode --tests --verbose
 cargo test --package verter_napi compile_mode --tests --verbose
 pnpm --filter @verter/native test
-cargo test --workspace --tests --verbose
+cargo nextest run --workspace
+cargo test -p verter_session --tests
 cargo clippy --workspace -- -D warnings
 cargo fmt --all
 pnpm install --frozen-lockfile
@@ -1892,7 +1897,8 @@ scheduler-side admission runs at the pool's default concurrency.
 ```
 cargo test --package verter_session host_compile --tests --verbose
 cargo test --package verter_session compile_many --tests --verbose
-cargo test --workspace --tests --verbose
+cargo nextest run --workspace
+cargo test -p verter_session --tests
 cargo clippy --workspace -- -D warnings
 cargo fmt --all
 pnpm install --frozen-lockfile
@@ -3986,7 +3992,8 @@ Pre-existing Block 7 deletions:
 cargo test --package verter_scheduler --tests --verbose
 cargo test --package verter_scheduler --features test-support --tests --verbose
 cargo test --package verter_session host_compile --tests --verbose
-cargo test --workspace --tests --verbose
+cargo nextest run --workspace
+cargo test -p verter_session --tests
 cargo clippy --workspace -- -D warnings
 cargo fmt --all
 pnpm install --frozen-lockfile
@@ -4444,7 +4451,8 @@ binding rehoming spec for the realized inventory.
 cargo test --package verter_session host_lifecycle --tests --verbose
 cargo test --package verter_session project_type_store --tests --verbose
 cargo test --package verter_session semantic_query --tests --verbose
-cargo test --workspace --tests --verbose
+cargo nextest run --workspace
+cargo test -p verter_session --tests
 cargo clippy --workspace -- -D warnings
 cargo fmt --all
 pnpm install --frozen-lockfile
@@ -4677,7 +4685,8 @@ File creation:
 
 ```
 cargo test --package verter_session persistent --tests --verbose
-cargo test --workspace --tests --verbose
+cargo nextest run --workspace
+cargo test -p verter_session --tests
 cargo clippy --workspace -- -D warnings
 cargo fmt --all
 pnpm install --frozen-lockfile
@@ -5023,7 +5032,8 @@ cargo test --package verter_session memory_policy --tests --verbose
 cargo test --package verter_audit --tests --verbose
 cargo test --package verter_session cache_node_audit_alloc --tests --verbose
 cargo test --package verter_session audit_byte_budget --features external-corpus --tests --verbose
-cargo test --workspace --tests --verbose
+cargo nextest run --workspace
+cargo test -p verter_session --tests
 cargo clippy --workspace -- -D warnings
 cargo fmt --all
 pnpm install --frozen-lockfile
@@ -5361,7 +5371,8 @@ Per-file changes:
 ```
 cargo test --package verter_session flow_return --tests --verbose
 cargo test --package verter_semantic flow --tests --verbose
-cargo test --workspace --tests --verbose
+cargo nextest run --workspace
+cargo test -p verter_session --tests
 cargo clippy --workspace -- -D warnings
 cargo fmt --all
 pnpm install --frozen-lockfile
@@ -5583,7 +5594,8 @@ pnpm --filter @verter/benchmark exec tsx packages/benchmark/src/cache-runtime-be
 pnpm --filter @verter/benchmark exec tsx packages/benchmark/src/apple-to-apple.ts
 cargo run --package verter_bench --example profile_host --release --features hotpath
 cargo run --package verter_bench --example profile_cache_runtime --release --features hotpath
-cargo test --workspace --tests --verbose
+cargo nextest run --workspace
+cargo test -p verter_session --tests
 cargo clippy --workspace -- -D warnings
 cargo fmt --all
 pnpm install --frozen-lockfile
@@ -5703,7 +5715,8 @@ per-block work. The list below is the cross-block end-of-change
 verification the implementer runs after every block lands:
 
 ```bash
-cargo test --workspace --tests --verbose
+cargo nextest run --workspace
+cargo test -p verter_session --tests
 cargo clippy --workspace -- -D warnings
 cargo fmt --all
 pnpm install --frozen-lockfile
@@ -5712,7 +5725,8 @@ pnpm install --frozen-lockfile
 After all blocks land, run the full workspace + native + benches:
 
 ```bash
-cargo test --workspace --tests --verbose
+cargo nextest run --workspace
+cargo test -p verter_session --tests
 pnpm test
 pnpm run build:native
 pnpm run build:ts

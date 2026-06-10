@@ -597,7 +597,8 @@ docs for the full asymmetry."
 ```powershell
 cargo fmt --all -- --check
 cargo clippy --workspace --tests -- -D warnings
-cargo test --workspace --tests --verbose 2>&1 | Tee-Object -FilePath tmp/test-output.txt
+cargo nextest run --workspace 2>&1 | Tee-Object -FilePath tmp/test-output.txt
+cargo test -p verter_session --tests 2>&1 | Tee-Object -Append -FilePath tmp/test-output.txt
 ```
 
 All workspace tests must pass. Pre-rehoming baseline at this
@@ -609,7 +610,7 @@ unchanged.
 ### Architecture-guard gate
 
 ```powershell
-cargo test --workspace --tests --verbose -- architecture_guards
+cargo test -p verter_session --test architecture_guards
 ```
 
 Specifically:
@@ -668,7 +669,8 @@ Push-Location $hermeticWt
 if (Test-Path .integration-tests/repos/nuxt-ui) {
     Remove-Item -Recurse -Force .integration-tests/repos/nuxt-ui
 }
-cargo test --workspace --tests --verbose 2>&1 | Tee-Object -FilePath ../../verter/tmp/test-output-hermetic.txt
+cargo nextest run --workspace 2>&1 | Tee-Object -FilePath ../../verter/tmp/test-output-hermetic.txt
+cargo test -p verter_session --tests 2>&1 | Tee-Object -Append -FilePath ../../verter/tmp/test-output-hermetic.txt
 ```
 
 Per CLAUDE.md "Testing-Hermeticity (MANDATORY)": tests run without

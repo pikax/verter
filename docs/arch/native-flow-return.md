@@ -42,8 +42,10 @@ wire-purity closure; those live in the parent and are referenced by section numb
 Every block contract uses the parent's per-block contract template (PART 2 §9).
 "Done" for any block is the parent's done predicate (PART 2 §11.5 / §11.7 — its
 `Typeinfo-Block:` trailer merged + rows `Lifted` + required guards present); a
-block's rows may flip `Lifted` only after their coverage is complete and
-non-placeholder (PART 2 §10.4); landing is the git/CI protocol — branch per block →
+block's row-lift is gated by the manifest guard suite + the landed §10.3 proof
+rail, with the §10.4 coverage gate (complete + non-placeholder coverage)
+enforcing from the `U13.PROJECTION` / `U15.FINAL_LIFT` landings onward and
+covering earlier-lifted rows retroactively (PART 2 §10.4); landing is the git/CI protocol — branch per block →
 green CI → three-reviewer LAND → squash-merge with the `Typeinfo-Block:` trailer
 (PART 2 §§11–14). None of that machinery is re-specified here.
 
@@ -551,16 +553,16 @@ Required new guards (parent §5, §6):
 
 Critical-rule guards: this block implements the parent's `(CRITICAL)` demand-sliced-flow (the per-function `FunctionFlowGraph` + the graph demand planner, two-frontier rule as edge classes) / one-resolver / Typed-IR-Only / Shallow-By-Default rules; the Required-new-guards above (including the three flow-graph guards `function_flow_graph_built_once_per_function_skeleton` / `flow_slice_is_graph_reachability_not_procedural_walk` / `flow_graph_effect_edges_stay_live_past_value_writes`) are their R6 guards. Supporting guards landing alongside: `flow_slice_ir_detaches_from_oxc_arena` (`FlowSliceIR: Send + Sync + 'static`; no transitive `&'arena T` / `oxc_allocator::Box<'arena, T>` field), `flow_return_value_lifetime_independent_of_oxc_arena`, `substitution_env_canonical_hash_is_order_independent`, `flow_return_warm_validation_runs_facts` (a warm read revalidates `ReadSetSignature.facts` — extended to verify the `FlowSlice` fact is recorded whenever the solver entered a function body), `every_unknown_fallback_has_audit_event`, `no_eager_body_expansion_in_meta_projection` (`Pick<ReturnType<typeof f>, "selected">` materialises only `selected`; no second dispatch for the unselected sibling), and `no_caching_of_partial_or_budget_exceeded_results`. Any new `(CRITICAL)` rule text added to docs in this change registers its guard here in the same change.
 
-Proof requirement: structural guards (the seven above + the supporting set) plus per-row — the `value_inference_*` rows are TS7-oracle-pinned (`Ts7Oracle`) where the outcome is an exact TS shape (the const-object expansion, the return-union, the arrow-body shapes), and `OracleAndGuard` where a row also pins a non-materialization / branch property (`value_inference_flow_variables_narrow_return_value_by_branch` pairs an oracle with the substrate branch-join assertion). Each row's declared proof is consumed by its generated row-test wrapper (PART 2 §10.3). The discriminating property: the substrate widens a literal return to its primitive (BL01-class) while preserving `as const` (BL09-class), and `ReturnType<typeof myType>['b']` loads only `b`.
+Proof requirement: structural guards (the seven above + the supporting set) plus per-row — the `value_inference_*` rows are TS7-oracle-pinned (`Ts7Oracle`) where the outcome is an exact TS shape (the const-object expansion, the return-union, the arrow-body shapes), and `OracleAndGuard` where a row also pins a non-materialization / branch property (`value_inference_flow_variables_narrow_return_value_by_branch` pairs an oracle with the substrate branch-join assertion). Each row's declared proof is consumed by its §10.3 proof-consumption rail (PART 2 §10.3; landed shape: the registry-bound driver-calling row body). The discriminating property: the substrate widens a literal return to its primitive (BL01-class) while preserving `as const` (BL09-class), and `ReturnType<typeof myType>['b']` loads only `b`.
 
 Exit acceptance: all 7 `value_inference.rs` rows lift and pass on the normal `lib*.d.ts` corpus; the `FunctionFlowGraph` is built once per function from the skeleton (no per-query rebuild, no build-time type lowering); the demand slice is graph reachability over it (the planner does not re-run a procedural walk) with effect edges staying live past value writes; `FlowReturn` routes through the one dispatch; the slice hash precedes the lookup; an over-budget slice is non-admitted at all three layers; the published surface carries no `FlowSlot`; `ReturnType<typeof myType>['b']` produces no `Mytype` fact; cold and warm calls obey the cold-vs-warm audit contract (warm hits emit no `FlowReturnStarted` and allocate no audit payload without an accumulator).
 
 Verification commands:
 - `cargo test --package verter_session flow_return` and the value-inference tests.
-- `cargo test --package verter_session --test typeinfo_ignored_test_manifest` (coverage gate for this block's rows).
+- `cargo test --package verter_session --test typeinfo_ignored_test_manifest` (manifest guard suite for this block's rows).
 - The block's lifted-row proofs via the generated wrapper (or `-- --ignored` before the branch strips the `#[ignore]`s).
 - `node scripts/gen-corpus-audit-tests.mjs` (idempotent; the audit-record schema gains the `FlowReturnInference` kind / payload + the new structured events).
-- The full workspace gate (the CI gate — the complete Rust **AND** JavaScript gate, green only when BOTH pass; PART 2 §11.2): `cargo test --workspace --tests`; `cargo clippy --workspace -- -D warnings`; `cargo fmt --all --check`; `pnpm test`; `pnpm install --frozen-lockfile`.
+- The full workspace gate (the CI gate — the complete Rust **AND** JavaScript gate, green only when BOTH pass; PART 2 §11.2): `cargo nextest run --workspace` + `cargo test -p verter_session --tests` (the canonical Rust pair — bare `cargo test --workspace --tests` silently skips the verter_session integration suite and is NOT the gate); `cargo clippy --workspace -- -D warnings`; `cargo fmt --all --check`; `pnpm test`; `pnpm install --frozen-lockfile`.
 - Commit cadence / review gate: PARENT-UNIFORM — the uniform discipline for EVERY block in this subplan (parent PART 2 §11.11 / §11.12), stated once and not restated per block: each block lands as ONE squashed commit (WIP series during the work, no per-commit gate) after the three-reviewer LAND verdict (1 Claude Code + 2 codex).
 
 Docs updated: update the `/type-resolution` skill's flow-return notes (the per-function `FunctionFlowGraph` + the `ReturnPathPeeker` graph demand planner with the two-frontier rule as typed edge classes, `FunctionBodySkeleton` / `FlowSliceIR`, the `SemanticQueryKey::FlowReturn` query + `satisfied_projection` lattice-relation cache identity, the `FlowSlice` fact, `FlowSliceBudget` non-admission); update the `/audit-infrastructure` skill for the new `RequestKind::FlowReturnInference` + the cold-path structured events + the `AuditedResult` host API; reaffirm the Component-Meta Shallow-By-Default `ReturnType<typeof callee>` projector admission in `/component-meta`.
@@ -620,7 +622,7 @@ Shared proof requirement: per-row — every `narrow_*` and `substitution_types_s
 
 Shared docs updated: update the `/type-resolution` skill's flow-narrowing notes (the typed branch-fact lattice on `FlowFrame`, the eight `FlowFrame` narrowing ops, switch per-arm join + discriminated-union arm correlation, narrowing-of-types routed through `Relate`, flow-narrowing-of-generic substitutions); reaffirm in `/type-cache-architecture` that narrowing facts live in `ProgramAnalysisGraph`, never as published `GraphTypeNode` arms.
 
-Shared verification commands (each sub-block runs these scoped to its mechanism's tests): `cargo test --package verter_session` narrowing tests (`narrow_*`, `flow_invalidations`); `cargo test --package verter_session --test typeinfo_ignored_test_manifest` (coverage gate); the sub-block's lifted-row proofs via the generated wrapper; the full workspace gate (as U6.FLOW_RETURN_SUBSTRATE).
+Shared verification commands (each sub-block runs these scoped to its mechanism's tests): `cargo test --package verter_session` narrowing tests (`narrow_*`, `flow_invalidations`); `cargo test --package verter_session --test typeinfo_ignored_test_manifest` (manifest guard suite); the sub-block's lifted-row proofs via the generated wrapper; the full workspace gate (as U6.FLOW_RETURN_SUBSTRATE).
 
 Shared re-entry notes: idempotent. The narrowing lattice composes on the substrate `FlowFrame` — do not add a second narrowing path. If a sub-block is partial, the manifest shows which of its `narrow_*` / `flow_invalidations` / `substitution_types` rows remain `#[ignore]`.
 
@@ -900,7 +902,7 @@ Exact test rows lifted (capability `FlowNarrowing` assertion-effect row — `flo
 - substitution_types.rs::substitution_types_sb09_asserts_x_is_string_on_generic
 - substitution_types.rs::substitution_types_sb10_x_is_t_predicate_on_generic
 
-(3 rows. The `flow_invalidations_fi08_asserts_narrows_dotted_member_path` row (substrate `FlowNarrowing`) exercises the assertion effect on a dotted member path; its dominant mechanism is this block's assertion-effect-on-dotted-path engine, so its owning `block_id` is U6.PREDICATE_ASSERTION (§10.4.1) even though its substrate is `FlowNarrowing`. It consumes the already-live narrowing frame the `U6.NARROW_*` sub-blocks produce (specifically `U6.NARROW_INVALIDATION`'s frame, where its sibling `flow_invalidations` rows live) — those sub-blocks are this block's declared prerequisites, so there is no cycle: U6.PREDICATE_ASSERTION depends on the narrowing sub-blocks, not the reverse. The non-generic predicate / assertion catalog rows in `flow_return_catalog.rs` / `flow_return_edge_catalog.rs` (`pa*`) are un-ignored as the catalog macros convert; the coverage table assigns each manifest `pa*` row to this block by mechanism. This block owns the two generic-predicate `substitution_types_sb09/sb10` manifest rows plus the `fi08` assertion-effect row directly.)
+(3 rows. The `flow_invalidations_fi08_asserts_narrows_dotted_member_path` row (substrate `FlowNarrowing`) exercises the assertion effect on a dotted member path; its dominant mechanism is this block's assertion-effect-on-dotted-path engine, so its owning `block_id` is U6.PREDICATE_ASSERTION (§10.4.1) even though its substrate is `FlowNarrowing`. It consumes the already-live narrowing frame the `U6.NARROW_*` sub-blocks produce (specifically `U6.NARROW_INVALIDATION`'s frame, where its sibling `flow_invalidations` rows live) — those sub-blocks are this block's declared prerequisites, so there is no cycle: U6.PREDICATE_ASSERTION depends on the narrowing sub-blocks, not the reverse. The non-generic predicate / assertion catalog rows in `flow_return_catalog.rs` / `flow_return_edge_catalog.rs` (`pa*`) are un-ignored as the catalog macros convert; the §10.4.1 partition assigns each manifest `pa*` row to this block by mechanism. This block owns the two generic-predicate `substitution_types_sb09/sb10` manifest rows plus the `fi08` assertion-effect row directly.)
 
 Required new guards (parent §5):
 - `predicate_signature_without_body_audits_signature_only_outcome` — a declared (signature-only) predicate applied at the call site applies the signature fact and emits `PredicateEffectApplied` even though no body was lowered; the result carries `degraded_reason: None`.
@@ -914,7 +916,7 @@ Exit acceptance: all three rows (`substitution_types_sb09/sb10` + `flow_invalida
 
 Verification commands:
 - `cargo test --package verter_session` predicate / assertion tests + the `substitution_types` flow rows.
-- `cargo test --package verter_session --test typeinfo_ignored_test_manifest` (coverage gate).
+- `cargo test --package verter_session --test typeinfo_ignored_test_manifest` (manifest guard suite).
 - The block's lifted-row proofs via the generated wrapper.
 - Full workspace gate (as U6.FLOW_RETURN_SUBSTRATE).
 
@@ -979,7 +981,7 @@ Exact test rows lifted (capability `CallResolution` flow / generic-inference / `
 - function_advanced.rs::function_advanced_overload_generic_first_widens_t_to_string_for_string_argument
 - function_advanced.rs::function_advanced_constrained_generic_infers_literal_under_as_const
 
-(19 rows. This block owns the genuine call-expression rows: the flow / generic-inference rows whose mechanism is the `ResolveCall` dispatch + recursive `FlowReturn`, the overload-SELECTION call rows (`call_resolution_optional_overload_picks_*`, `call_resolution_specific_literal_argument_*`, `function_advanced_overload_call_picks_matching_signature_return` — first-applicable candidate selection AT THE CALL SITE, consuming U2.CLASS_SURFACES's ordered overload SHAPE), and the two `const_type_param_*` call rows (the TS7 `<const T>` modifier applied while inferring `T` from a call-site array argument). The `call_resolution_contextual_callback_return_picks_first_overload` row lifts in U6.CONTEXTUAL_CALLBACK (its mechanism is the nested-callback contextual-typing frame). The overload-SHAPE / abstract-constructor / hybrid-signature / prototype-extraction `call_resolution.rs` + `function_advanced.rs` rows — `call_resolution_abstract_constructor_instance_type_projects_class_shape`, `function_advanced_return_type_of_overloaded_function_uses_last_overload`, `function_advanced_constructor_parameters_*`, `function_advanced_instance_type_*`, the four `function_advanced_call_construct_hybrid_*`, `function_advanced_class_method_prototype_extraction_*` — lift in U2.CLASS_SURFACES because their mechanism is `ResolveOverloadSet` / `ResolveClassSurface` SHAPE, NOT call dispatch. The `U2.CLASS_SURFACES` prerequisite of this block is SHAPE-only (see Blocked until). The coverage table assigns each row to exactly one `block_id`; no row is double-counted.)
+(19 rows. This block owns the genuine call-expression rows: the flow / generic-inference rows whose mechanism is the `ResolveCall` dispatch + recursive `FlowReturn`, the overload-SELECTION call rows (`call_resolution_optional_overload_picks_*`, `call_resolution_specific_literal_argument_*`, `function_advanced_overload_call_picks_matching_signature_return` — first-applicable candidate selection AT THE CALL SITE, consuming U2.CLASS_SURFACES's ordered overload SHAPE), and the two `const_type_param_*` call rows (the TS7 `<const T>` modifier applied while inferring `T` from a call-site array argument). The `call_resolution_contextual_callback_return_picks_first_overload` row lifts in U6.CONTEXTUAL_CALLBACK (its mechanism is the nested-callback contextual-typing frame). The overload-SHAPE / abstract-constructor / hybrid-signature / prototype-extraction `call_resolution.rs` + `function_advanced.rs` rows — `call_resolution_abstract_constructor_instance_type_projects_class_shape`, `function_advanced_return_type_of_overloaded_function_uses_last_overload`, `function_advanced_constructor_parameters_*`, `function_advanced_instance_type_*`, the four `function_advanced_call_construct_hybrid_*`, `function_advanced_class_method_prototype_extraction_*` — lift in U2.CLASS_SURFACES because their mechanism is `ResolveOverloadSet` / `ResolveClassSurface` SHAPE, NOT call dispatch. The `U2.CLASS_SURFACES` prerequisite of this block is SHAPE-only (see Blocked until). The hand-authored parent §10.4.1 row→block_id partition assigns each row to exactly one `block_id`; no row is double-counted.)
 
 Required new guards (parent §2.4, §4.2, §6):
 - `call_resolution_budget_exceeded_admits_nothing` — `CallResolutionBudget` `BudgetExceeded` admits no resolved-call result, no overload-candidate / inference-binding intermediate, no fact signature / backfill, and no degraded exact-cache entry (the three-layer rule).
@@ -997,7 +999,7 @@ Exit acceptance: all 19 rows above lift and pass; callee resolution is typed-IR 
 
 Verification commands:
 - `cargo test --package verter_session` call-resolution tests + the flow `function_advanced` rows.
-- `cargo test --package verter_session --test typeinfo_ignored_test_manifest` (coverage gate).
+- `cargo test --package verter_session --test typeinfo_ignored_test_manifest` (manifest guard suite).
 - The block's lifted-row proofs via the generated wrapper.
 - Full workspace gate (as U6.FLOW_RETURN_SUBSTRATE).
 
@@ -1067,7 +1069,7 @@ Exit acceptance: all 15 rows above lift and pass; callback parameters are pre-bo
 
 Verification commands:
 - `cargo test --package verter_session` contextual-typing tests + the higher-order flow catalog rows.
-- `cargo test --package verter_session --test typeinfo_ignored_test_manifest` (coverage gate).
+- `cargo test --package verter_session --test typeinfo_ignored_test_manifest` (manifest guard suite).
 - The block's lifted-row proofs via the generated wrapper.
 - Full workspace gate (as U6.FLOW_RETURN_SUBSTRATE).
 
@@ -1107,7 +1109,7 @@ SemanticQueryKey/facts touched: `FlowReturn` (value domain `FlowReturn(Arc<FlowR
 Exact test rows lifted (capability `ModernTsFeatures` flow subset — `satisfies` on the return path under flow context — `modern_ts_features.rs`):
 - modern_ts_features.rs::satisfies_widens_inner_value_to_primitive_without_as_const
 
-(1 row. The `satisfies_array_literal_widens_to_primitive_array` and `variance_annotation_*` / `import_attribute_*` rows lift in U2 — `satisfies` lands with U2.RELATION_INFER (relation + contextual validation) and U2.CLASS_SURFACES (the widening helper) per the U2-reducers subplan's row-level-split note; this block exercises the `satisfies` widening on the flow return path for the single `satisfies_widens_inner_value_to_primitive_without_as_const` row whose mechanism is flow-return-driven value widening. The object / spread / `as const` / mapped / conditional return catalog rows in `flow_return_catalog.rs` / `flow_return_edge_catalog.rs` (`ob*`) and the parity `tp*` object rows are un-ignored as the catalog macros convert; the coverage table assigns each `ob*` / `tp*` manifest row to this block (or U6.CROSS_FILE for cross-file object returns, or U6.LOOP_CLOSURE for `tp08` try / finally) by mechanism. The `value_inference.rs` const-object / nested-shape rows are owned by U6.FLOW_RETURN_SUBSTRATE.)
+(1 row. The `satisfies_array_literal_widens_to_primitive_array` and `variance_annotation_*` / `import_attribute_*` rows lift in U2 — `satisfies` lands with U2.RELATION_INFER (relation + contextual validation) and U2.CLASS_SURFACES (the widening helper) per the U2-reducers subplan's row-level-split note; this block exercises the `satisfies` widening on the flow return path for the single `satisfies_widens_inner_value_to_primitive_without_as_const` row whose mechanism is flow-return-driven value widening. The object / spread / `as const` / mapped / conditional return catalog rows in `flow_return_catalog.rs` / `flow_return_edge_catalog.rs` (`ob*`) and the parity `tp*` object rows are un-ignored as the catalog macros convert; the §10.4.1 partition assigns each `ob*` / `tp*` manifest row to this block (or U6.CROSS_FILE for cross-file object returns, or U6.LOOP_CLOSURE for `tp08` try / finally) by mechanism. The `value_inference.rs` const-object / nested-shape rows are owned by U6.FLOW_RETURN_SUBSTRATE.)
 
 Required new guards (parent §§4.2, 4.4, 5):
 - `satisfies_does_not_widen_returned_value` — `E satisfies T` on the return path keeps the inferred source type of `E`, not `T`; the source member set is preserved where TS preserves it (oracle-pinned against `tsgo 7.0.0-dev.20260526.1`).
@@ -1122,7 +1124,7 @@ Exit acceptance: the `satisfies_widens_inner_value_to_primitive_without_as_const
 
 Verification commands:
 - `cargo test --package verter_session` value-inference / object-return / `satisfies` tests.
-- `cargo test --package verter_session --test typeinfo_ignored_test_manifest` (coverage gate).
+- `cargo test --package verter_session --test typeinfo_ignored_test_manifest` (manifest guard suite).
 - The block's lifted-row proofs via the generated wrapper.
 - Full workspace gate (as U6.FLOW_RETURN_SUBSTRATE).
 
@@ -1161,7 +1163,7 @@ SemanticQueryKey/facts touched: `FlowReturn` (value domain `FlowReturn(Arc<FlowR
 Exact test rows lifted (capability `ModernTsFeatures` flow / await subset, `modern_ts_features.rs`):
 - modern_ts_features.rs::await_using_simulated_return_type_resolves_to_primitive
 
-(1 row. The async / generator catalog rows in `flow_return_catalog.rs` / `flow_return_edge_catalog.rs` (`bl07`/`bl08`/`bl11`/`bl17`/`bl21`/`bl22`) and the parity `tp04` for-await async-generator row are un-ignored as the catalog macros convert; the coverage table assigns each async / generator manifest row to this block by mechanism. This block owns the `await_using_simulated_return_type_resolves_to_primitive` manifest row directly, whose mechanism is the `await` / `Awaited` carrier under the U6 flow / await path per the U2-reducers row-level-split note.)
+(1 row. The async / generator catalog rows in `flow_return_catalog.rs` / `flow_return_edge_catalog.rs` (`bl07`/`bl08`/`bl11`/`bl17`/`bl21`/`bl22`) and the parity `tp04` for-await async-generator row are un-ignored as the catalog macros convert; the §10.4.1 partition assigns each async / generator manifest row to this block by mechanism. This block owns the `await_using_simulated_return_type_resolves_to_primitive` manifest row directly, whose mechanism is the `await` / `Awaited` carrier under the U6 flow / await path per the U2-reducers row-level-split note.)
 
 Required new guards (parent §5):
 - `lib_env_hash_drives_generator_return_resolution` — `Generator` from a non-default lib gives a different `lib_env_hash` on the `FlowReturn` key (the intrinsic is read from lib declarations, not synthesised by text).
@@ -1175,7 +1177,7 @@ Exit acceptance: the `await_using_simulated_return_type_resolves_to_primitive` r
 
 Verification commands:
 - `cargo test --package verter_session` async / generator / await tests.
-- `cargo test --package verter_session --test typeinfo_ignored_test_manifest` (coverage gate).
+- `cargo test --package verter_session --test typeinfo_ignored_test_manifest` (manifest guard suite).
 - The block's lifted-row proofs via the generated wrapper.
 - Full workspace gate (as U6.FLOW_RETURN_SUBSTRATE).
 
@@ -1192,7 +1194,7 @@ Parent U-block: U6
 Subplan: docs/arch/native-flow-return.md
 
 Prerequisites: U6.VALUE_INFERENCE, U6.CALL_RESOLVE.
-Blocked until: both prerequisites done (cross-file factories return object literals — U6.VALUE_INFERENCE — and call into other files — U6.CALL_RESOLVE). Cross-file flow capabilities are jointly owned with U3 (the route / import-demand fact substrate); the coverage table assigns each cross-file manifest row to exactly one of U3 / U6 by mechanism.
+Blocked until: both prerequisites done (cross-file factories return object literals — U6.VALUE_INFERENCE — and call into other files — U6.CALL_RESOLVE). Cross-file flow capabilities are jointly owned with U3 (the route / import-demand fact substrate); the §10.4.1 partition assigns each cross-file manifest row to exactly one of U3 / U6 by mechanism.
 
 Context: Every cross-file value-symbol lookup (callee in another file, predicate from a barrel, namespace-imported value call) routes through `crates/verter_session/src/resolver_core` — no bespoke walker (the Canonical Dependency Cache Rule + the one-resolver rule). The value / type symbol-space split keeps `import { x }` value space separate from `import type { x }`. Cross-file cycle sentinels: re-entry on the FULL normalized `FlowReturnContext + ReturnProjectionDemand + FlowInputContext` within one resolution stack emits a flow cycle sentinel and returns the conservative fixed-point via non-admission. The `xf*` flow-return catalog rows characterize imported-value-function expansion, barrel-route recording before the selected leaf, namespace-import value calls, the value / type namespace split, and cross-file recursive-return termination. This block exists now because cross-file factories are the highest-value real-world pattern (a `useX()` composable or a `createProps` factory imported across files) and they need the substrate, value-inference, and call-resolution blocks beneath them.
 
@@ -1234,7 +1236,7 @@ Exit acceptance: all 6 rows above lift and pass on the normal `lib*.d.ts` corpus
 
 Verification commands:
 - `cargo test --package verter_session` cross-file flow tests (the `flow_return_catalog` `xf*` rows).
-- `cargo test --package verter_session --test typeinfo_ignored_test_manifest` (coverage gate + the U3/U6 split assignment confirming the three `cross_file.rs` rows belong to U3).
+- `cargo test --package verter_session --test typeinfo_ignored_test_manifest` (manifest guard suite + the U3/U6 split assignment confirming the three `cross_file.rs` rows belong to U3).
 - The block's lifted-row proofs via the generated wrapper.
 - Full workspace gate (as U6.FLOW_RETURN_SUBSTRATE).
 
@@ -1293,7 +1295,7 @@ Exit acceptance: the three `flow_invalidations` rows lift and pass; the loop fix
 
 Verification commands:
 - `cargo test --package verter_session` loop / closure / control-flow tests (`flow_invalidations` `fi03`/`fi06`/`fi07`, the `cf*` / `bl15` catalog rows).
-- `cargo test --package verter_session --test typeinfo_ignored_test_manifest` (coverage gate + the single-block assignment of the shared `flow_invalidations` rows).
+- `cargo test --package verter_session --test typeinfo_ignored_test_manifest` (manifest guard suite + the single-block assignment of the shared `flow_invalidations` rows).
 - The block's lifted-row proofs via the generated wrapper.
 - Full workspace gate (as U6.FLOW_RETURN_SUBSTRATE).
 
@@ -1332,8 +1334,10 @@ The authoritative fixtures and harnesses live in the repo (versioned with the
 code, cannot drift from the harness). The manifest
 (`crates/verter_session/tests/typeinfo_ignored_test_manifest.rs`) is the row-exact
 authority; the per-block "Exact test rows lifted" lists above are the U6 row
-assignment, and the generated coverage table (PART 2 §10.4) maps every row to
-exactly one `block_id` by `mechanism_id`.
+assignment, and the hand-authored parent §10.4.1 row→block_id partition maps every
+row to exactly one `block_id` (the §10.4 generated coverage table — the U13/U15-gated
+unbuilt residual — will cross-check each row's `mechanism_id` against it when it
+lands).
 
 - `crates/verter_session/src/typeinfo/typeinfo_tests/flow_return_catalog.rs` (+
   `.../fixtures/flow_return_catalog.ts`) — primary BL / LR / CN / PA / CG / HO / OB
@@ -1369,7 +1373,7 @@ exactly one `block_id` by `mechanism_id`.
 
 Every block runs the full workspace gate as its CI gate (PART 2 §§11.2, 14) — the
 complete Rust **AND** JavaScript gate, green only when BOTH pass:
-`cargo test --workspace --tests`, `cargo clippy --workspace -- -D warnings`,
+`cargo nextest run --workspace` + `cargo test -p verter_session --tests` (the canonical Rust pair — bare `cargo test --workspace --tests` silently skips the verter_session integration suite and is NOT the gate), `cargo clippy --workspace -- -D warnings`,
 `cargo fmt --all --check`, `pnpm test`, and `pnpm install --frozen-lockfile`; plus
 `node scripts/gen-corpus-audit-tests.mjs` (the audit-record schema gains the
 `FlowReturnInference` kind / payload + the new structured events) and, where the
@@ -1389,8 +1393,9 @@ through `ProgramAnalysisGraph`, and U11 surfaces the audit footprint through the
 The whole-subplan parity guarantee is the parent's composition (Capability Map →
 "the guarantee over the 362 rows"): the two-table ledger with the exact-362 count +
 bijection (PART 2 §§10.1, 10.5); the U0 row-exact coverage table that DEFINES
-completeness (PART 2 §10.4); the per-row executable `ProofRequirement` with the
-generated proof registry + row-test wrapper (PART 2 §§10.2–10.3); the git/CI landing
+completeness (PART 2 §10.4 — the U13/U15-gated residual); the per-row executable
+`ProofRequirement` with the proof registry + row-test rail (PART 2 §§10.2–10.3 —
+landed under U0-FINISH-B in the locked design's hand-authored shape); the git/CI landing
 protocol (PART 2 §11); the no-skip guarantee (PART 2 §12); and the git/manifest-driven,
 parallel-safe resume protocol (PART 2 §14). U0 builds the ledger/coverage substrate;
 the U6 blocks lift their exact manifest rows through it, landing each via its own

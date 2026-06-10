@@ -164,7 +164,8 @@ Rust unit tests in `position_map.rs` `#[cfg(test)]` (the existing `build_source_
 
 ### Verification
 ```
-cargo test --workspace --tests --verbose 2>&1 | tee /tmp/p1.txt
+cargo nextest run --workspace 2>&1 | tee /tmp/p1.txt
+cargo test -p verter_session --tests 2>&1 | tee -a /tmp/p1.txt
 cargo clippy --fix --allow-dirty --allow-staged --workspace -- -D warnings
 cargo fmt --all
 ```
@@ -262,7 +263,8 @@ E2E (Phase 2 portion of `definition.test.ts`): the **Rust source-map** assertion
 
 ### Verification
 ```
-cargo test --workspace --tests --verbose 2>&1 | tee /tmp/p2.txt
+cargo nextest run --workspace 2>&1 | tee /tmp/p2.txt
+cargo test -p verter_session --tests 2>&1 | tee -a /tmp/p2.txt
 cargo clippy --fix --allow-dirty --allow-staged --workspace -- -D warnings
 cargo fmt --all
 pnpm build:native   # IDE codegen feeds the LSP/e2e
@@ -346,7 +348,8 @@ Rust unit tests (new `crates/verter_session/src/host_manage/sfc_anchor_tests.rs`
 
 ### Verification
 ```
-cargo test --workspace --tests --verbose 2>&1 | tee /tmp/p3.txt
+cargo nextest run --workspace 2>&1 | tee /tmp/p3.txt
+cargo test -p verter_session --tests 2>&1 | tee -a /tmp/p3.txt
 cargo clippy --fix --allow-dirty --allow-staged --workspace -- -D warnings
 cargo fmt --all
 ```
@@ -436,7 +439,8 @@ Rust integration tests in `crates/verter_session` (`VerterHost::new_standalone` 
 
 ### Verification
 ```
-cargo test --workspace --tests --verbose 2>&1 | tee /tmp/p4.txt
+cargo nextest run --workspace 2>&1 | tee /tmp/p4.txt
+cargo test -p verter_session --tests 2>&1 | tee -a /tmp/p4.txt
 cargo clippy --fix --allow-dirty --allow-staged --workspace -- -D warnings
 cargo fmt --all
 ```
@@ -613,7 +617,8 @@ pub enum DefinitionSymbolKind { /* LSP-free symbol kind enum */ }
 
 ### Verification
 ```
-cargo test --workspace --tests --verbose 2>&1 | tee /tmp/p5.txt
+cargo nextest run --workspace 2>&1 | tee /tmp/p5.txt
+cargo test -p verter_session --tests 2>&1 | tee -a /tmp/p5.txt
 cargo clippy --fix --allow-dirty --allow-staged --workspace -- -D warnings
 cargo fmt --all
 pnpm build:native && pnpm build:lsp
@@ -696,7 +701,8 @@ Expected: green; definition navigation lands on exact targets across all per-tar
 
 ### Verification
 ```
-cargo test --workspace --tests --verbose 2>&1 | tee /tmp/p67.txt
+cargo nextest run --workspace 2>&1 | tee /tmp/p67.txt
+cargo test -p verter_session --tests 2>&1 | tee -a /tmp/p67.txt
 cargo clippy --fix --allow-dirty --allow-staged --workspace -- -D warnings
 cargo fmt --all
 pnpm install --frozen-lockfile

@@ -2,7 +2,7 @@
 
 > **Status (2026-06-02):** Remaining work from this plan is now tracked in [`semantic-db-overhaul-unified-remaining-plan.md`](./semantic-db-overhaul-unified-remaining-plan.md), which merges + sequences the remaining items of this plan with the other track. Drive new work from the unified plan; this file remains as historical/detail reference.
 
-> **SUPERSEDED — typeinfo parity ledger (2026-06-03):** This document is historical / foundation reference for the typeinfo semantic-graph design. The authoritative typeinfo parity ledger is the **362-row `block_id` partition in [`native-typeinfo-parity.md`](./native-typeinfo-parity.md) §10.4.1** (the row-exact capability→mechanism→proof coverage table), backed by the two-table ledger at `crates/verter_session/tests/typeinfo_ignored_test_manifest.rs` (362 `IgnoredTestRow`s + the separate `AdditionalProofRow` coverage table; `IgnoreStatus { Ignored, Lifted { block_id } }`; binding total exactly 362). The stale unignore-manifest wording in this file (the `typeinfo_tests_unignore_plan.md` doc-manifest with `(file, fn_name, target_phase, unblocked_by)` columns and the "384 tests" lift schedule) describes a SUPERSEDED schema — the live ledger is the in-repo `.rs` manifest, never a competing `.md` doc, and the binding count is the parser-derived 362, not 384 (384 was the raw `#[ignore]` line count). Read §3.0/§8 here for design intent only; take the ledger schema, the count, and the per-block partition from `native-typeinfo-parity.md` §10 / §10.4.1.
+> **SUPERSEDED — typeinfo parity ledger (2026-06-03):** This document is historical / foundation reference for the typeinfo semantic-graph design. The authoritative typeinfo parity ledger is the **362-row `block_id` partition in [`native-typeinfo-parity.md`](./native-typeinfo-parity.md) §10.4.1** (the hand-authored row→`block_id` partition — authoritative ONLY for each row's `block_id`; the row-exact capability→mechanism→proof coverage table is the DISTINCT §10.4 generated artifact, the U13/U15-gated unbuilt residual), backed by the two-table ledger at `crates/verter_session/tests/typeinfo_ignored_test_manifest.rs` (362 `IgnoredTestRow`s + the separate `AdditionalProofRow` coverage table; `IgnoreStatus { Ignored, Lifted { block_id } }`; binding total exactly 362). The stale unignore-manifest wording in this file (the `typeinfo_tests_unignore_plan.md` doc-manifest with `(file, fn_name, target_phase, unblocked_by)` columns and the "384 tests" lift schedule) describes a SUPERSEDED schema — the live ledger is the in-repo `.rs` manifest, never a competing `.md` doc, and the binding count is the parser-derived 362, not 384 (384 was the raw `#[ignore]` line count). Read §3.0/§8 here for design intent only; take the ledger schema, the count, and the per-block partition from `native-typeinfo-parity.md` §10 / §10.4.1.
 
 # Verter TypeInfo Semantic Graph Plan — Revision 17
 
@@ -124,7 +124,7 @@ Cache keys NEVER include `fact_dep_signature` or content / version hashes for qu
 
 ### 2.5 Publication Fence (CompletionFence)
 
-Every top-level live-host result — `resolveSymbolGraph`, `evaluateTypeExpressionGraph`, `projectPathGraph`, `relate`, `getFrameworkSurfaces` — publishes through the new `CompletionFence` adapter (added in Phase 0b/1 at `crates/verter_session/src/typeinfo/completion_fence.rs`; see §0.6). The adapter wraps the existing `InflightTable` substrate at `crates/verter_session/src/semantic_query_memo/inflight.rs` (the `MAX_INFLIGHT_RETRIES: usize = 3` constant at line 226 is the canonical retry budget; the adapter does NOT introduce a second retry constant). Its public shape:
+Every top-level live-host result — `resolveSymbolGraph`, `evaluateTypeExpressionGraph`, `projectPathGraph`, `relate`, `getFrameworkSurfaces` — publishes through the new `CompletionFence` adapter (added in Phase 0b/1 at `crates/verter_session/src/typeinfo/completion_fence.rs`; see §0.6). The adapter wraps the existing `InflightTable` substrate at `crates/verter_session/src/semantic_query_memo/inflight.rs` (the `MAX_INFLIGHT_RETRIES: usize = 3` constant in that file is the canonical retry budget; the adapter does NOT introduce a second retry constant). Its public shape:
 
 ```rust
 // crates/verter_session/src/typeinfo/completion_fence.rs (NEW in Phase 0b/1)
@@ -212,7 +212,7 @@ A type's role is determined by which framework macro consumed it (Vue: `definePr
 
 ### 2.14 Relation Engine Is Public
 
-The relation query is a public typeinfo query whose value is `SemanticQueryValue::Relation(RelationPayload)` (Decision 4; see `u2-query-value-domain-design.md:417-425`). `RelationPayload` carries `outcome: RelationOutcome` (`Assignable` / `NotAssignable` / `BudgetExceeded` — NEVER `Unknown`), `bindings: Arc<[InferBinding]>` (the `infer` captures a binding-producing relation surfaces), and `relation_proof: RelationProofId` (an opaque index into the off-surface payload-side proof table). Every consumer that needs "is X assignable to Y?" reads this value; no projection re-implements assignability, narrowing, or subtyping locally.
+The relation query is a public typeinfo query whose value is `SemanticQueryValue::Relation(RelationPayload)` (`u2-relation-infer-design.md` §"Decision 4 — Relation-proof acceptance (`RelationPayload`)"; the value shape rides the `Relate` row of `u2-query-value-domain-design.md` §2.2 "Per-key identity table"). `RelationPayload` carries `outcome: RelationOutcome` (`Assignable` / `NotAssignable` / `BudgetExceeded` — NEVER `Unknown`), `bindings: Arc<[InferBinding]>` (the `infer` captures a binding-producing relation surfaces), and `relation_proof: RelationProofId` (an opaque index into the off-surface payload-side proof table). Every consumer that needs "is X assignable to Y?" reads this value; no projection re-implements assignability, narrowing, or subtyping locally.
 
 The transient `RelationResult` tri-state (`Assignable { bindings } | NotAssignable | Unknown`) is the INTERNAL relation-engine result threaded through `relate_nodes` / the relation memo and the deferred reducer plumbing; it is NOT the public value. The public surface collapses the undecidable `Unknown` into the engine's internal control flow and publishes only the three decidable outcomes through `RelationPayload`.
 
@@ -312,7 +312,7 @@ Every `Opaque` / degraded result carries a closed enum naming the precondition t
 - `CyclePrecondition { AliasCycleEntry | RecursiveBackEdge | RelationCycleEntry }`
 - `RelationUnknownReason { UnboundTypeParameter | UnresolvedConditional | CycleEntry }`
 
-**Exhaustive `BudgetDomain → BudgetKind` mapping** (from the real `BudgetDomain` at `crates/verter_session/src/resolver_core/shallow_file_state.rs:238`):
+**Exhaustive `BudgetDomain → BudgetKind` mapping** (from the real `BudgetDomain` — `pub enum BudgetDomain` in `crates/verter_session/src/resolver_core/shallow_file_state.rs`):
 
 | Native `BudgetDomain` (6 variants) | Wire `BudgetKind` |
 |---|---|
@@ -1223,7 +1223,7 @@ The host-side `verter_semantic::facts::registry::InternedName` remains a separat
 
 `verter_session::semantic_query::QueryError` is the authoritative producer-side error enum (`Miss | UnsupportedIntrinsic { name } | BudgetExceeded(BudgetExceededFailure) | UnstableState { attempts } | AliasCycle { chain } | RecursiveRef { name } | Other(Arc<str>) | DeclPlaceholder { canonical_id, name, whole_hash }`).
 
-The real `BudgetExceededFailure` at `crates/verter_session/src/resolver_core/shallow_file_state.rs:225` carries `{ domain: BudgetDomain, limit: usize, actual: u64, context: String }` — NO `detail_name` field exists. The lowering preserves all four fields losslessly.
+The real `BudgetExceededFailure` (`pub struct BudgetExceededFailure` in `crates/verter_session/src/resolver_core/shallow_file_state.rs`) carries `{ domain: BudgetDomain, limit: usize, actual: u64, context: String }` — NO `detail_name` field exists. The lowering preserves all four fields losslessly.
 
 The wire `QueryErrorDto` is a lossless mirror:
 
@@ -1445,7 +1445,7 @@ Guard: `r21_lib_env_hash_inclusion` enumerates every cache layer above and asser
 
 ### 4.3 Concurrent Cold-Collapse Design
 
-Concurrent identical typeinfo graph requests dispatch into one cold compute via `cooperative_admit_with_post_publish` (existing helper at `crates/verter_session/src/cooperative_admission.rs:896`). The real signature carries 10 arguments — `TypeInfoGraphResultDb::get_or_compute` binds every callback:
+Concurrent identical typeinfo graph requests dispatch into one cold compute via `cooperative_admit_with_post_publish` (existing helper — `crates/verter_session/src/cache_runtime/singleflight.rs::cooperative_admit_with_post_publish`). The real signature carries 10 arguments — `TypeInfoGraphResultDb::get_or_compute` binds every callback:
 
 ```rust
 pub fn get_or_compute(
@@ -1976,7 +1976,7 @@ Each phase has: changes, legacy deletions, documentation updates, verification, 
 
 ### 8.0 CRITICAL_RULE_GUARDS Registry Plan
 
-Every new `(CRITICAL)` section introduced by this plan in CLAUDE.md or `.claude/skills/*/SKILL.md` is registered in `crates/verter_session/tests/critical_rules_have_guards.rs::CRITICAL_RULE_GUARDS` as part of the phase that introduces the rule. The meta-guard `every_critical_rule_in_docs_has_registered_guard` walks both files and asserts every CRITICAL section has at least one registered guard name; the inverse meta-guard `every_critical_rule_guard_entry_still_exists` asserts every registered name still resolves to a real `#[test]` function or integration-test filename.
+Every new `(CRITICAL)` section introduced by this plan in CLAUDE.md or `.claude/skills/*/SKILL.md` is registered in `crates/verter_session/tests/g_misc0/critical_rules_have_guards.rs::CRITICAL_RULE_GUARDS` as part of the phase that introduces the rule. The meta-guard `every_critical_rule_in_docs_has_registered_guard` walks both files and asserts every CRITICAL section has at least one registered guard name; the inverse meta-guard `every_registry_guard_name_resolves_to_a_known_test` asserts every registered name still resolves to a real `#[test]` function or integration-test filename.
 
 Registry entries added by this plan (phase that adds them in parens):
 
@@ -2106,13 +2106,14 @@ Specifically:
 **Verification:**
 
 ```bash
-cargo test --workspace --tests --verbose
+cargo nextest run --workspace
+cargo test -p verter_session --tests
 cargo clippy --workspace -- -D warnings
 cargo fmt --all -- --check
 pnpm vitest --run packages/typeinfo packages/component-meta
 ```
 
-Expected: every guard listed above passes; pre-existing tests unchanged; `cargo test architecture_guards` shows ≥27 new tests passing.
+Expected: every guard listed above passes; pre-existing tests unchanged; `cargo test -p verter_session --test architecture_guards` shows ≥27 new tests passing.
 
 ### 8.2 Phase 0b/1 — Native Graph Exporter + Real Bodies
 
@@ -2185,7 +2186,7 @@ Expected: every guard listed above passes; pre-existing tests unchanged; `cargo 
 **Legacy deletions:**
 
 1. Delete `crates/verter_protocol/src/graph/builder.rs::GraphNode` and the surrounding `GraphBuilder` / `GraphConditionalFrame` / `GraphTupleElement` / `GraphObjectMember` / `GraphFunctionParam` types — they are replaced wholesale by the new `verter_protocol::typeinfo::graph::TypeNode`. Every call site in `crates/verter_protocol/src/component_meta.rs` (the lowering pass for component metadata) is migrated to consume the new `TypeNode` taxonomy in the same diff. The component-meta payload's `TypeGraph` proto message keeps its existing identity; only its node-shape lowering is rewritten.
-2. Delete `crates/verter_protocol/src/graph/schema/*` legacy proto re-exports referenced from `crates/verter_protocol/src/graph/mod.rs:7`.
+2. Delete `crates/verter_protocol/src/graph/schema/*` legacy proto re-exports referenced from `crates/verter_protocol/src/graph/mod.rs` (the `pub use schema::*;` re-export).
 3. Delete the legacy `crates/verter_protocol/proto/verter/v1/typeinfo.proto` 94-line schema — replaced by §3.0. Field numbers 1–5 of `EvaluateTypeExpressionRequestDto` are reserved permanently.
 4. Delete `crates/verter_session/src/typeinfo/{evaluate_type_expression.rs, raise.rs, resolve_named_symbol.rs, scratch_cache.rs, symbol_inventory.rs, types.rs, tests.rs}` legacy stubs that the prior text-based evaluator carried. The `typeinfo_tests/` directory is preserved (lifted per §8.x).
 
@@ -2202,7 +2203,8 @@ Expected: every guard listed above passes; pre-existing tests unchanged; `cargo 
 
 ```bash
 cargo test --package verter_session --test typeinfo_graph_exporter --verbose
-cargo test --workspace --tests --verbose
+cargo nextest run --workspace
+cargo test -p verter_session --tests
 cargo test --package verter_audit --tests
 node scripts/gen-corpus-audit-tests.mjs
 ```
@@ -2218,7 +2220,7 @@ Fixtures in `crates/verter_session/tests/typeinfo_graph_fixtures/` cover: `popov
 3. Add TypeScript decoder at `packages/typeinfo/src/decode.ts` — pure mechanical proto-to-DTO walker.
 4. Add `packages/typeinfo/src/session.ts` `TypeInfoSession` implementation: wraps the native bindings, decodes the wire format, returns typed `TypeInfoGraphPayload`. The session API is the §5.2 contract — every request type has `context` + `displayPolicy` + `closure` as REQUIRED fields.
 5. Add `packages/types/audit.generated.ts` regenerated via `ts_rs` — adds `RequestKindPayload::TypeInfoGraph`, `KindBit::TypeInfoGraph`, `StructuredAuditEvent::TypeInfoGraphPublished`.
-6. Extend the existing `crates/verter_session/tests/architecture_guards.rs::wave_3_entry_points_propagate_tls` function (line 7641) with typeinfo entry-point drivers verifying TLS observer propagation. (No new file — the function is inside `architecture_guards.rs`.)
+6. Extend the existing `crates/verter_session/tests/architecture_guards.rs::wave_3_entry_points_propagate_tls` function with typeinfo entry-point drivers verifying TLS observer propagation. (No new file — the function is inside `architecture_guards.rs`.)
 
 **Legacy deletions:**
 
@@ -2238,7 +2240,8 @@ Fixtures in `crates/verter_session/tests/typeinfo_graph_fixtures/` cover: `popov
 pnpm vitest --run packages/typeinfo packages/types
 cargo test --package verter_napi --tests
 cargo test --package verter_wasm --tests
-cargo test --workspace --tests --verbose
+cargo nextest run --workspace
+cargo test -p verter_session --tests
 ```
 
 Expected: wire round-trip tests pass for every node kind; TS decoder rejects malformed payloads with `TypeInfoRequestError::UnknownSchemaVersion` / `MalformedPayload`; audit record carries `RequestKindPayload::TypeInfoGraph` for every entry-point; TLS observer propagation test passes.
@@ -2286,7 +2289,8 @@ Expected: wire round-trip tests pass for every node kind; TS decoder rejects mal
 
 ```bash
 pnpm vitest --run packages/typeinfo
-cargo test --workspace --tests --verbose
+cargo nextest run --workspace
+cargo test -p verter_session --tests
 ```
 
 ### 8.5 Phase 4 — Typeinfo Projections
@@ -2312,7 +2316,8 @@ cargo test --workspace --tests --verbose
 
 ```bash
 pnpm vitest --run packages/typeinfo packages/component-meta
-cargo test --workspace --tests --verbose
+cargo nextest run --workspace
+cargo test -p verter_session --tests
 ```
 
 ### 8.6 Phase 5 — Vue Framework Surface Adapter
@@ -2340,7 +2345,8 @@ cargo test --workspace --tests --verbose
 
 ```bash
 pnpm vitest --run packages/component-meta
-cargo test --workspace --tests --verbose
+cargo nextest run --workspace
+cargo test -p verter_session --tests
 node scripts/gen-corpus-audit-tests.mjs
 pnpm test:e2e:vscode
 ```
@@ -2369,7 +2375,7 @@ pnpm test:e2e:vscode
 
 **Changes:**
 
-1. Run every architecture guard from Phases 0a–7 in a single `cargo test --workspace --tests --verbose` + `pnpm test` invocation.
+1. Run every architecture guard from Phases 0a–7 in one `cargo nextest run --workspace` + `cargo test -p verter_session --tests` + `pnpm test` gate (the canonical Rust pair — bare `cargo test --workspace --tests` silently skips the verter_session integration suite).
 2. Add the acceptance suite from the prior draft (Phase 8 acceptance table).
 3. Final `find` over the repository asserts zero matches for the forbidden patterns:
 
@@ -2381,7 +2387,8 @@ find crates packages -type f \( -name '*.ts' -o -name '*.rs' \) | xargs grep -l 
 **Verification:**
 
 ```bash
-cargo test --workspace --tests --verbose
+cargo nextest run --workspace
+cargo test -p verter_session --tests
 pnpm vitest --run
 pnpm test
 cargo clippy --workspace -- -D warnings
@@ -2531,7 +2538,7 @@ Every public typeinfo entry-point opens a `RequestAuditRecord` with `RequestKind
 | `crates/verter_audit/src/structured_event.rs` | Add `StructuredAuditEvent::TypeInfoGraphPublished { layer: &'static str, audit: TypeInfoGraphPayloadAudit }` and `StructuredAuditEvent::TypeInfoGraphDegraded { layer: &'static str, audit: TypeInfoGraphPayloadAudit, reason: DegradationReasonTag }`. The warm-hit path emits no structured event (only `emit_counter(CounterKind::CacheHit, "typeinfo_graph")`); see §10.1. |
 | `crates/verter_session/src/component_meta_audit/footprint_miner.rs` | Add a new `TypeInfoGraphFootprintCell` struct (fields: `snapshot_node_count: u32`, `snapshot_edge_count: u32`, `exactness_summary: ExactnessSummary`, `merged_decl_count: u32`, `augmentation_count: u32`, `overload_signature_count: u32`) and a new `FootprintAccumulator.typeinfo_graph_cells: SmallVec<[TypeInfoGraphFootprintCell; 4]>` field. The contribution function is `fn contribute_typeinfo_graph(record: &TypeInfoGraphPayloadAudit) -> TypeInfoGraphFootprintCell`. The miner does not switch on `RequestKind` — it receives an already-typed `TypeInfoGraphPayloadAudit` from the record observer. |
 | `packages/types/audit.generated.ts` | Regenerated via `ts-rs`. |
-| `crates/verter_session/tests/architecture_guards.rs::wave_3_entry_points_propagate_tls` (function at line 7641 inside `architecture_guards.rs`) | Extend with typeinfo entry-point drivers verifying TLS observer propagation. There is NO sibling `wave_3_entry_points_propagate_tls.rs` file — the function lives inside `architecture_guards.rs`. |
+| `crates/verter_session/tests/architecture_guards.rs::wave_3_entry_points_propagate_tls` (function inside `architecture_guards.rs`) | Extend with typeinfo entry-point drivers verifying TLS observer propagation. There is NO sibling `wave_3_entry_points_propagate_tls.rs` file — the function lives inside `architecture_guards.rs`. |
 
 > SUPERSEDED: the nine `exactness_*: u32` scalar fields below are replaced by one `exactness_counts: BTreeMap<ExactnessTag, u32>` map field (reconcile-#5 / CF-2; unified plan §2.2). This applies to every `TypeInfoGraphPayloadAudit` listing in this doc.
 
@@ -2818,30 +2825,30 @@ The plan refers to types and functions whose names must match the actual codebas
 | Plan-side reference | Actual codebase symbol | Location |
 |---|---|---|
 | `CompletionFence::publish_with_retry` | `CompletionFence::publish_with_retry` (NEW in Phase 0b/1) at `crates/verter_session/src/typeinfo/completion_fence.rs` — wraps the existing `InflightTable` substrate; consumes the existing `MAX_INFLIGHT_RETRIES = 3` constant. No second retry constant is introduced. The plan-revision-3 path `crates/verter_session/src/host_resolve/completion_fence.rs` does NOT exist; the adapter lands at the new path. | `crates/verter_session/src/typeinfo/completion_fence.rs` (NEW) |
-| `MAX_INFLIGHT_RETRIES` | `MAX_INFLIGHT_RETRIES: usize = 3` constant (existing) | `crates/verter_session/src/semantic_query_memo/inflight.rs:226` |
-| `ResolverContext::fact_read_set.snapshot()` | `ResolverContext::with_fact_tracer(|| ...) -> (T, FactReadSet)` then `FactReadSet::finalise() -> FactReadSetFinalise`, lifted into a cache admission via `crate::cache_runtime::SignatureAdmission::from_finalise(finalise)` and into a path-precise read signature via `crate::fact_signature_helpers::ReadSetSignature::new(facts)` | `crates/verter_session/src/resolver_core/resolver_context.rs`, `crates/verter_session/src/resolver_core/fact_read_set.rs:171`, `crates/verter_session/src/cache_runtime/node.rs:95` |
+| `MAX_INFLIGHT_RETRIES` | `MAX_INFLIGHT_RETRIES: usize = 3` constant (existing) | `crates/verter_session/src/semantic_query_memo/inflight.rs` (`MAX_INFLIGHT_RETRIES`) |
+| `ResolverContext::fact_read_set.snapshot()` | `ResolverContext::with_fact_tracer(|| ...) -> (T, FactReadSet)` then `FactReadSet::finalise() -> FactReadSetFinalise`, lifted into a cache admission via `crate::cache_runtime::SignatureAdmission::from_finalise(finalise)` and into a path-precise read signature via `crate::fact_signature_helpers::ReadSetSignature::new(facts)` | `crates/verter_session/src/resolver_core/resolver_context.rs`, `crates/verter_session/src/resolver_core/fact_read_set.rs` (`FactReadSet::finalise`), `crates/verter_session/src/cache_runtime/node.rs` (`SignatureAdmission::from_finalise`) |
 | `validate_fact_signature_with_self_roots` | `crate::fact_signature_helpers::validate_fact_signature_with_self_roots` | existing helper at `crates/verter_session/src/fact_signature_helpers.rs` |
 | `SemanticGraphStore::execute_cooperative` | `ProjectSemanticDispatch::execute` (the project-wide dispatch entrypoint) | `crates/verter_session/src/semantic_query_memo/*` |
-| `cooperative_admit_with_post_publish` | `crate::cache_runtime::singleflight::cooperative_admit_with_post_publish` | `crates/verter_session/src/cache_runtime/singleflight.rs:852` |
+| `cooperative_admit_with_post_publish` | `crate::cache_runtime::singleflight::cooperative_admit_with_post_publish` | `crates/verter_session/src/cache_runtime/singleflight.rs` (`pub fn cooperative_admit_with_post_publish`) |
 | `BoundedCandidateMap` | `verter_session::bounded_query_retention::BoundedCandidateMap` | existing |
 | `GlobalRetentionBudget` | `verter_session::bounded_query_retention::GlobalRetentionBudget` | existing |
-| `OriginEdgeKind` (semantic side, 9 variants) | `verter_session::semantic_query::OriginEdgeKind` | `crates/verter_session/src/semantic_query.rs:826` |
-| `OriginEdgeKind` (audit side, 10 variants incl. `SharedLoadReuse`) | `verter_audit::origin_graph::OriginEdgeKind` | `crates/verter_audit/src/origin_graph.rs:193` |
-| `QueryError` (producer side) | `verter_session::semantic_query::QueryError` (variants: `Miss`, `UnsupportedIntrinsic`, `BudgetExceeded(BudgetExceededFailure)`, `UnstableState`, `AliasCycle`, `RecursiveRef`, `Other(Arc<str>)`, `DeclPlaceholder { canonical_id, name, whole_hash }`) | `crates/verter_session/src/semantic_query.rs:991` |
-| `BudgetExceededFailure` | existing type with fields `{ domain: BudgetDomain, limit: usize, actual: u64, context: String }` — there is NO `detail_name` field. The plan-revision-3 reference to `failure.detail_name` was incorrect; the lossless lowering uses `failure.context`. | `crates/verter_session/src/resolver_core/shallow_file_state.rs:225` |
-| `BudgetDomain` | existing enum, 6 variants (`LocalClosure`, `Frontier`, `BuilderExpansion`, `SolverResolveSteps`, `SolverArenaNodes`, `SolverInstantiationDepth`) | `crates/verter_session/src/resolver_core/shallow_file_state.rs:238` |
-| `cooperative_admit_with_post_publish` real arity | 10 args: `(map, inflight, key, validate, compute, project, revalidate_after_compute, removal_cleanup, post_publish, publish_fence: Option<&parking_lot::RwLock<()>>)` returning `Option<V>` | `crates/verter_session/src/cache_runtime/singleflight.rs:852` |
-| `wave_3_entry_points_propagate_tls` | a function (line 7641) inside an existing file, NOT a separate file at `tests/wave_3_entry_points_propagate_tls.rs` | `crates/verter_session/tests/architecture_guards.rs:7641` |
-| `CRITICAL_RULE_GUARDS` | `const CRITICAL_RULE_GUARDS: &[(&str, &[&str])]` | `crates/verter_session/tests/critical_rules_have_guards.rs:78` |
-| Meta-guard `every_critical_rule_in_docs_has_registered_guard` | existing | `crates/verter_session/tests/critical_rules_have_guards.rs:368` |
+| `OriginEdgeKind` (semantic side, 9 variants) | `verter_session::semantic_query::OriginEdgeKind` | `crates/verter_session/src/semantic_query.rs` (`pub enum OriginEdgeKind`) |
+| `OriginEdgeKind` (audit side, 10 variants incl. `SharedLoadReuse`) | `verter_audit::origin_graph::OriginEdgeKind` | `crates/verter_audit/src/origin_graph.rs` (`pub enum OriginEdgeKind`) |
+| `QueryError` (producer side) | `verter_session::semantic_query::QueryError` (variants: `Miss`, `UnsupportedIntrinsic`, `BudgetExceeded(BudgetExceededFailure)`, `UnstableState`, `AliasCycle`, `RecursiveRef`, `Other(Arc<str>)`, `DeclPlaceholder { canonical_id, name, whole_hash }`) | `crates/verter_session/src/semantic_query.rs` (`pub enum QueryError`) |
+| `BudgetExceededFailure` | existing type with fields `{ domain: BudgetDomain, limit: usize, actual: u64, context: String }` — there is NO `detail_name` field. The plan-revision-3 reference to `failure.detail_name` was incorrect; the lossless lowering uses `failure.context`. | `crates/verter_session/src/resolver_core/shallow_file_state.rs` (`pub struct BudgetExceededFailure`) |
+| `BudgetDomain` | existing enum, 6 variants (`LocalClosure`, `Frontier`, `BuilderExpansion`, `SolverResolveSteps`, `SolverArenaNodes`, `SolverInstantiationDepth`) | `crates/verter_session/src/resolver_core/shallow_file_state.rs` (`pub enum BudgetDomain`) |
+| `cooperative_admit_with_post_publish` real arity | 10 args: `(map, inflight, key, validate, compute, project, revalidate_after_compute, removal_cleanup, post_publish, publish_fence: Option<&parking_lot::RwLock<()>>)` returning `Option<V>` | `crates/verter_session/src/cache_runtime/singleflight.rs` (`pub fn cooperative_admit_with_post_publish`) |
+| `wave_3_entry_points_propagate_tls` | a function inside an existing file, NOT a separate file at `tests/wave_3_entry_points_propagate_tls.rs` | `crates/verter_session/tests/architecture_guards.rs` (`fn wave_3_entry_points_propagate_tls`) |
+| `CRITICAL_RULE_GUARDS` | `const CRITICAL_RULE_GUARDS: &[(&str, &[&str])]` | `crates/verter_session/tests/g_misc0/critical_rules_have_guards.rs` (`CRITICAL_RULE_GUARDS`) |
+| Meta-guard `every_critical_rule_in_docs_has_registered_guard` | existing | `crates/verter_session/tests/g_misc0/critical_rules_have_guards.rs` (`fn every_critical_rule_in_docs_has_registered_guard`) |
 | `IntrinsicRegistry::lookup` | existing | per CLAUDE.md |
 | `FileArtifactStore::augmentation_index` | existing inverse-lookup keyed by `AugmentationTargetKey` | per CLAUDE.md |
 | `MemberShapeCacheDb` | retired; replaced by `ShapeCacheDb` — the per-member graph-native materialiser cache is now a slot inside `ShapeCacheDb` indexed by `ShapeSubject::SemanticNode` and built via `ShapeCacheKey::semantic_node_whole(scope, semantic_node_id, mode)`. `ProjectTypeStore` owns the unified `shape_cache_db: ShapeCacheDb`. The static guard at `crates/verter_session/tests/block_6i_static_guards.rs::shape_cache_db_replaces_split_caches` asserts `pub struct MemberShapeCacheDb` MUST NOT exist anywhere in the tree. | `crates/verter_session/src/component_meta_caches.rs` (`pub struct ShapeCacheDb`, `pub enum ShapeSubject`, `ShapeCacheKey::semantic_node_whole`) |
 | `MemberSemanticFactStore`, `MemberDisplayFactStore` | existing | per CLAUDE.md |
-| `with_fact_tracer` helper | `ResolverContext::with_fact_tracer<F, R>(&self, f: F) -> (R, FactReadSet)` | `crates/verter_session/src/resolver_core/resolver_context.rs:1265` |
-| `finalise_signature_or_empty` | retired (it collapsed Overflow into Empty, which is a correctness-class defect); replaced by the explicit two-step `FactReadSet::finalise() -> FactReadSetFinalise` (`Ok(facts)` / `Overflow`) plus `crate::cache_runtime::SignatureAdmission::from_finalise(finalise)` for cache admission (Overflow routes through the non-cacheable arm, distinct from Empty). The `compile_fact_emission` module retains the helper-side surface; cache producers use `SignatureAdmission::from_finalise`. Compile-cache producers go through `crate::compile_fact_emission` directly. | `crates/verter_session/src/resolver_core/fact_read_set.rs:171`, `crates/verter_session/src/cache_runtime/node.rs:95`, `crates/verter_session/src/compile_fact_emission.rs` |
+| `with_fact_tracer` helper | `ResolverContext::with_fact_tracer<F, R>(&self, f: F) -> (R, FactReadSet)` | `crates/verter_session/src/resolver_core/resolver_context.rs` (`ResolverContext::with_fact_tracer`) |
+| `finalise_signature_or_empty` | retired (it collapsed Overflow into Empty, which is a correctness-class defect); replaced by the explicit two-step `FactReadSet::finalise() -> FactReadSetFinalise` (`Ok(facts)` / `Overflow`) plus `crate::cache_runtime::SignatureAdmission::from_finalise(finalise)` for cache admission (Overflow routes through the non-cacheable arm, distinct from Empty). The `compile_fact_emission` module retains the helper-side surface; cache producers use `SignatureAdmission::from_finalise`. Compile-cache producers go through `crate::compile_fact_emission` directly. | `crates/verter_session/src/resolver_core/fact_read_set.rs` (`FactReadSet::finalise`), `crates/verter_session/src/cache_runtime/node.rs` (`SignatureAdmission::from_finalise`), `crates/verter_session/src/compile_fact_emission.rs` |
 | `ReadSetSignature` | existing — carries `facts: ...` field | `crates/verter_session/src/`... |
-| `host_resolve/virtual_file_pipeline.rs` reference pattern (`with_fact_tracer` + `SignatureAdmission::from_finalise(fact_read_set.finalise())`) | the canonical usage pattern other entry-points follow | `crates/verter_session/src/host_resolve/virtual_file_pipeline.rs:1066` |
+| `host_resolve/virtual_file_pipeline.rs` reference pattern (`with_fact_tracer` + `SignatureAdmission::from_finalise(fact_read_set.finalise())`) | the canonical usage pattern other entry-points follow | `crates/verter_session/src/host_resolve/virtual_file_pipeline.rs` (the `with_fact_tracer` + `SignatureAdmission::from_finalise` callsite) |
 | `RetentionGate` | existing on every project-scoped query DB | per CLAUDE.md |
 | `HostAuditRuntime` | existing | per CLAUDE.md |
 | `RequestAuditRecord` | existing | per `/audit-infrastructure` skill |
@@ -2921,7 +2928,7 @@ pub enum GetOrComputeOutcome<V> {
 
 Cold path calls `self.completion_fence.publish_with_retry(build, revalidate)` (the struct field is `completion_fence: CompletionFence`, NOT `publication_fence`). The cooperative substrate routes through `cooperative_admit_with_post_publish` with `ComputeAdmission::Cacheable | WarmHit | ReturnOnly { value, error } | Failed`. Degraded recovery uses store-backed `degraded_store.peek_exact_only_partial(&key, request, &error)` (defined in §4.1.2). No `AtomicU8 cold_outcome_flag`, no `last_degraded_error()`, no `degraded_partial_from_fence` helper.
 
-The fact-signature path in §10.1: `let (outcome, fact_read_set) = ctx.with_fact_tracer(|| db.get_or_compute(slot_key, &request)); let admission = SignatureAdmission::from_finalise(fact_read_set.finalise());`. Per `crates/verter_session/src/host_resolve/virtual_file_pipeline.rs:1066`.
+The fact-signature path in §10.1: `let (outcome, fact_read_set) = ctx.with_fact_tracer(|| db.get_or_compute(slot_key, &request)); let admission = SignatureAdmission::from_finalise(fact_read_set.finalise());`. Per the `with_fact_tracer` + `SignatureAdmission::from_finalise` pattern in `crates/verter_session/src/host_resolve/virtual_file_pipeline.rs`.
 
 ### A.4 TypeInfoRequestError — Unified Closed Union
 
@@ -3474,8 +3481,8 @@ Per R9 — drop the side-channel `audit_tag: "SchemaSkewMiss"` string; use the t
 
 ### A.18 §0.5 / §0.6 Disposition Rows — Visibility / Phase / Drift
 
-- `crates/verter_session/src/semantic_query_memo/inflight.rs:226` → EXTEND visibility of `MAX_INFLIGHT_RETRIES` from `pub(super) const` to `pub(crate) const` so the new `TypeInfoSession`-owned `CompletionFence` adapter at `crates/verter_session/src/typeinfo/completion_fence.rs` can consume the canonical constant. Guard `completion_fence_uses_max_inflight_retries_constant` requires this visibility. Phase 0b/1.
-- `crates/verter_session/src/.../semantic_query.rs:833` (line drift from R4 cite: was `:826`) — `with_fact_tracer` pattern unchanged.
+- `crates/verter_session/src/semantic_query_memo/inflight.rs` (`MAX_INFLIGHT_RETRIES`) → EXTEND visibility of `MAX_INFLIGHT_RETRIES` from `pub(super) const` to `pub(crate) const` so the new `TypeInfoSession`-owned `CompletionFence` adapter at `crates/verter_session/src/typeinfo/completion_fence.rs` can consume the canonical constant. Guard `completion_fence_uses_max_inflight_retries_constant` requires this visibility. Phase 0b/1.
+- The `with_fact_tracer` pattern is unchanged — `ResolverContext::with_fact_tracer` in `crates/verter_session/src/resolver_core/resolver_context.rs` (the prior raw line cites here — an R4 `:826`, later re-cited `:833` — drifted; anchored by symbol).
 
 ### A.19 §7 Projections — Cycle Row Consumes Resolved Payload (No Native Call)
 
@@ -3488,7 +3495,7 @@ Normative mapping tables live IN §7 (R10 C5) — references to a non-existent "
 
 ### A.20 Phase Plan — Phase 4 Deletes Descriptor Bridge
 
-Per R5 C1 Option A — `descriptor-to-native.ts` / `native-to-descriptor.ts` are deleted in Phase 4. Phase 3 implements `@verter/typeinfo/projections/type-descriptor` BEFORE migrating consumers; Phase 4 deletes the legacy bridge files. R3 CL3 phase mis-cite at §8.4 line 2058 ("Phase 2") → "Phase 4". §8.1 Phase 0a step 9 adds:
+Per R5 C1 Option A — `descriptor-to-native.ts` / `native-to-descriptor.ts` are deleted in Phase 4. Phase 3 implements `@verter/typeinfo/projections/type-descriptor` BEFORE migrating consumers; Phase 4 deletes the legacy bridge files. R3 CL3 phase mis-cite in §8.4's bridge-deletion parenthetical ("deleted in Phase 2 per §0.5.5") → "Phase 4". §8.1 Phase 0a step 9 adds:
 
 ```
 9. Add crates/verter_audit/src/structured_event.rs:
@@ -3497,7 +3504,7 @@ Per R5 C1 Option A — `descriptor-to-native.ts` / `native-to-descriptor.ts` are
    - pub enum DegradationReasonTag { BudgetExceeded, UnstableState, Unsupported, Miss, Partial, Cycle, SchemaSkewMiss }
 ```
 
-`RetentionGate` field type at §4.1.1 → `parking_lot::RwLock<()>` (matching `component_meta_caches.rs:2714` pattern).
+`RetentionGate` field type at §4.1.1 → `parking_lot::RwLock<()>` (matching the `publish_fence(&self) -> Option<&parking_lot::RwLock<()>>` / `retention_gate()` pattern in `crates/verter_session/src/component_meta_caches.rs`).
 
 §8.2 step 2b (R11 C2): proto `Signature` adds `SignatureOrigin origin` and `ParameterVariancePolicy parameter_variance_policy` (closed proto enum types, NOT `uint32`).
 
