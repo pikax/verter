@@ -812,7 +812,7 @@ impl VerterLanguageServer {
         // Sort descending by request_id so the newest records lead the
         // response — the underlying store does not promise iteration
         // order, so we impose one here for client predictability.
-        collected.sort_by(|a, b| b.request_id.cmp(&a.request_id));
+        collected.sort_by_key(|record| std::cmp::Reverse(record.request_id));
         collected.truncate(limit);
 
         Ok(collected

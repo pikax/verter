@@ -1256,7 +1256,7 @@ impl FileArtifactStore {
             }
             // Sort by content_hash for deterministic order; we drop
             // from the front (older / lower-numbered variants).
-            keys.sort_by(|a, b| a.content_hash.cmp(&b.content_hash));
+            keys.sort_by_key(|key| key.content_hash);
             let drop_count = keys.len() - retention;
             drop_keys.extend(keys.into_iter().take(drop_count));
         }

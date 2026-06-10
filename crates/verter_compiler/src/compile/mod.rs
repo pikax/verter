@@ -189,17 +189,15 @@ fn validate_imported_macro_type(
                 );
             }
         }
-        "defineEmits" => {
-            if type_params.resolved.emits.is_empty() {
-                push_invalid_macro_type_diagnostic(
-                    diagnostics,
-                    format!(
-                        "defineEmits() type argument '{}' must resolve to emit call signatures or a named-tuple emits object.",
-                        type_text
-                    ),
-                    type_params,
-                );
-            }
+        "defineEmits" if type_params.resolved.emits.is_empty() => {
+            push_invalid_macro_type_diagnostic(
+                diagnostics,
+                format!(
+                    "defineEmits() type argument '{}' must resolve to emit call signatures or a named-tuple emits object.",
+                    type_text
+                ),
+                type_params,
+            );
         }
         _ => {}
     }

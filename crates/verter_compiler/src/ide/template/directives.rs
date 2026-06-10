@@ -672,7 +672,7 @@ fn resolve_v_for_iterable(
                 }
             }
             // Apply in reverse order to maintain correct positions
-            patches.sort_by(|a, b| b.0.cmp(&a.0));
+            patches.sort_by_key(|patch| std::cmp::Reverse(patch.0));
             for (offset, prefix, suffix) in patches {
                 let name_len = {
                     result[offset..]

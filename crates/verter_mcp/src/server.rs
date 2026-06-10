@@ -1628,7 +1628,7 @@ impl VerterMcpServer {
             total_bindings += analysis.bindings.len();
         }
 
-        quality_scores.sort_by(|a, b| a.1.cmp(&b.1));
+        quality_scores.sort_by_key(|score| score.1);
         let avg_score = if quality_scores.is_empty() {
             0
         } else {

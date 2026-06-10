@@ -166,27 +166,25 @@ pub fn process_script_setup<'alloc>(
             ScriptItem::Macro(mac) => {
                 process_macro_item(mac, content_start, content_str, ctx, &mut macro_state);
             }
-            ScriptItem::Async(async_item) => {
-                // Transform `await <arg>` → _withAsyncContext wrapper.
-                // Vue wraps each top-level await to preserve component instance context.
-                if async_item.kind == AsyncKind::AwaitExpression {
-                    if let Some(arg_span) = &async_item.arg_span {
-                        let abs_start = content_start + async_item.span.start;
-                        let abs_arg_start = content_start + arg_span.start;
-                        let abs_end = content_start + async_item.span.end;
-                        let arg_text = &ctx.source[abs_arg_start as usize..abs_end as usize];
+            // Transform `await <arg>` → _withAsyncContext wrapper.
+            // Vue wraps each top-level await to preserve component instance context.
+            ScriptItem::Async(async_item) if async_item.kind == AsyncKind::AwaitExpression => {
+                if let Some(arg_span) = &async_item.arg_span {
+                    let abs_start = content_start + async_item.span.start;
+                    let abs_arg_start = content_start + arg_span.start;
+                    let abs_end = content_start + async_item.span.end;
+                    let arg_text = &ctx.source[abs_arg_start as usize..abs_end as usize];
 
-                        // Replace `await <arg>` with a parenthesised comma-expression:
-                        // (([__temp,__restore] = _withAsyncContext(() => <arg>)),
-                        //   __temp = await __temp, __restore(), __temp)
-                        // The outer parens are critical — without them a `const x = ...`
-                        // initializer would break at the first comma.
-                        let replacement = format!(
-                            "(([__temp,__restore] = _withAsyncContext(() => {})), __temp = await __temp, __restore(), __temp)",
-                            arg_text
-                        );
-                        ctx.out.overwrite(abs_start, abs_end, &replacement);
-                    }
+                    // Replace `await <arg>` with a parenthesised comma-expression:
+                    // (([__temp,__restore] = _withAsyncContext(() => <arg>)),
+                    //   __temp = await __temp, __restore(), __temp)
+                    // The outer parens are critical — without them a `const x = ...`
+                    // initializer would break at the first comma.
+                    let replacement = format!(
+                        "(([__temp,__restore] = _withAsyncContext(() => {})), __temp = await __temp, __restore(), __temp)",
+                        arg_text
+                    );
+                    ctx.out.overwrite(abs_start, abs_end, &replacement);
                 }
             }
             _ => {}

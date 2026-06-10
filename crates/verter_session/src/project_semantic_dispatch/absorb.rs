@@ -216,12 +216,10 @@ impl ProjectSemanticDispatch<'_> {
                 Some((SpecialKind::Any, _)) => has_any = true,
                 Some((SpecialKind::Never, _)) => has_never = true,
                 Some((SpecialKind::Unknown, _)) => has_unknown = true,
-                Some((SpecialKind::Error, id)) => {
-                    if error_node.is_none() {
-                        error_node = Some(id);
-                    }
+                Some((SpecialKind::Error, id)) if error_node.is_none() => {
+                    error_node = Some(id);
                 }
-                None => {}
+                Some((SpecialKind::Error, _)) | None => {}
             }
         }
         // Error dominates so the error CARRIER is never hidden.

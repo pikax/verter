@@ -365,7 +365,7 @@ pub(crate) fn rewrite_non_vue_source_with_resolver(
         })
         .collect();
 
-    replacements.sort_by(|left, right| right.0.cmp(&left.0));
+    replacements.sort_by_key(|replacement| std::cmp::Reverse(replacement.0));
     for (start, end, replacement) in replacements {
         rewritten.replace_range(start..end, &replacement);
     }

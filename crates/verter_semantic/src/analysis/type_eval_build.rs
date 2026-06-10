@@ -669,56 +669,54 @@ fn extract_class(decl: &Class<'_>, source: &str, env: &mut EvalEnv) {
                     }
                 }
             }
-            ClassElement::MethodDefinition(method) => {
-                if !method.r#static {
-                    if method.kind == MethodDefinitionKind::Constructor {
-                        // The constructor is NOT an instance surface member; it
-                        // feeds the VALUE-side `ConstructSignature` (for
-                        // `typeof ClassName` / `InstanceType`). Its value-side
-                        // extraction is unchanged by the visibility flip — a
-                        // non-public constructor still does not contribute a
-                        // call signature to the consuming surface.
-                        if matches!(method.accessibility, None | Some(TSAccessibility::Public)) {
-                            ctor_sig = Some(extract_function_signature(&method.value, source));
-                            ctor_fn_spans = FunctionSpans {
-                                signature: Some(method.span.into()),
-                                return_type: method
-                                    .value
-                                    .return_type
-                                    .as_ref()
-                                    .map(|rt| rt.type_annotation.span().into()),
-                            };
-                        }
-                    } else if let Some(method_name) = property_key_name(&method.key) {
-                        // Record every NON-static instance method with its
-                        // declared accessibility (no longer an exclusion).
-                        let func = extract_function_signature(&method.value, source);
-                        let fn_spans = FunctionSpans {
-                            signature: Some(method.value.span.into()),
+            ClassElement::MethodDefinition(method) if !method.r#static => {
+                if method.kind == MethodDefinitionKind::Constructor {
+                    // The constructor is NOT an instance surface member; it
+                    // feeds the VALUE-side `ConstructSignature` (for
+                    // `typeof ClassName` / `InstanceType`). Its value-side
+                    // extraction is unchanged by the visibility flip — a
+                    // non-public constructor still does not contribute a
+                    // call signature to the consuming surface.
+                    if matches!(method.accessibility, None | Some(TSAccessibility::Public)) {
+                        ctor_sig = Some(extract_function_signature(&method.value, source));
+                        ctor_fn_spans = FunctionSpans {
+                            signature: Some(method.span.into()),
                             return_type: method
                                 .value
                                 .return_type
                                 .as_ref()
                                 .map(|rt| rt.type_annotation.span().into()),
                         };
-                        let member_spans = MemberSpans {
-                            declaration: Some(method.span.into()),
-                            name: Some(method.key.span().into()),
-                            type_annotation: None,
-                        };
-                        members.push(ObjectMember::Method(MethodSignature::with_visibility(
-                            method_name,
-                            FunctionExpr::with_spans(
-                                func.parameters,
-                                func.return_type.map(Arc::new),
-                                func.type_parameters,
-                                fn_spans,
-                            ),
-                            method.optional,
-                            visibility_from_ts_accessibility(method.accessibility),
-                            member_spans,
-                        )));
                     }
+                } else if let Some(method_name) = property_key_name(&method.key) {
+                    // Record every NON-static instance method with its
+                    // declared accessibility (no longer an exclusion).
+                    let func = extract_function_signature(&method.value, source);
+                    let fn_spans = FunctionSpans {
+                        signature: Some(method.value.span.into()),
+                        return_type: method
+                            .value
+                            .return_type
+                            .as_ref()
+                            .map(|rt| rt.type_annotation.span().into()),
+                    };
+                    let member_spans = MemberSpans {
+                        declaration: Some(method.span.into()),
+                        name: Some(method.key.span().into()),
+                        type_annotation: None,
+                    };
+                    members.push(ObjectMember::Method(MethodSignature::with_visibility(
+                        method_name,
+                        FunctionExpr::with_spans(
+                            func.parameters,
+                            func.return_type.map(Arc::new),
+                            func.type_parameters,
+                            fn_spans,
+                        ),
+                        method.optional,
+                        visibility_from_ts_accessibility(method.accessibility),
+                        member_spans,
+                    )));
                 }
             }
             _ => {}
