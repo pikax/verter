@@ -49,7 +49,7 @@ use verter_compiler::utils::oxc::vue::raw_surface::{
     TupleElementShape,
 };
 use verter_type_runtime::tsgo::ipc::{find_tsgo_binary, TsgoTypeProvider};
-use verter_type_runtime::TypeProvider;
+use verter_type_runtime::{path_to_file_uri_string, TypeProvider};
 
 use crate::resolver_core::{CanonicalCompletionOverlay, HostResolverContext};
 use crate::types::{FileKind, HostConfig, UpsertRequest};
@@ -75,9 +75,10 @@ use super::source_walk::{resolve_source_declarations, SourceLocator};
 /// `snapshot_loading_is_runtime_fs` guard pins on the READ side); generation
 /// WRITES into the SAME on-disk tree.
 const SNAPSHOT_TREE_INFIX: &str = "src/typeinfo/typeinfo_tests/oracle_snapshots";
-/// The vendored-corpus-root infix. MIRRORS the consumption driver's
-/// `ORACLE_ENV_INFIX`.
-const ORACLE_ENV_INFIX: &str = "src/typeinfo/typeinfo_tests/oracle_env";
+// The vendored-corpus-root infix + the on-disk dir-name mapping are owned by
+// `identity` (`identity::ORACLE_ENV_INFIX` / `identity::env_corpus_dir_name`),
+// shared with the consumption driver; generation WRITES into the SAME tree
+// the driver reads.
 
 /// The domain-separation tag for the `oracle_env_hash` digest (§Q1). MUST equal
 /// the consumption driver's `recompute_oracle_env_hash` tag — the generation side
@@ -137,7 +138,8 @@ pub enum GenError {
 /// The generation config: where the vendored corpus lives, where snapshots are
 /// written, and the pinned env that enters every `snapshot_id`.
 pub(crate) struct GenConfig {
-    /// The vendored env-corpus root (`oracle_env/<env_corpus_id>/`).
+    /// The vendored env-corpus root
+    /// (`oracle_env/<env_corpus_dir_name(env_corpus_id)>/`).
     pub(crate) corpus_root: PathBuf,
     /// The snapshot output tree (`oracle_snapshots/`).
     pub(crate) snapshot_root: PathBuf,
@@ -160,8 +162,8 @@ impl GenConfig {
         };
         GenConfig {
             corpus_root: Path::new(manifest_dir)
-                .join(ORACLE_ENV_INFIX)
-                .join(&env.env_corpus_id),
+                .join(identity::ORACLE_ENV_INFIX)
+                .join(identity::env_corpus_dir_name(&env.env_corpus_id)),
             snapshot_root: Path::new(manifest_dir).join(SNAPSHOT_TREE_INFIX),
             env,
         }
@@ -415,8 +417,9 @@ async fn drive_hover(
     }
     let primary_abs = sandbox.path().join(primary_rel);
 
-    // (c) Spawn the tsgo LSP and open every program file.
-    let root_uri = format!("file://{}", sandbox.path().display());
+    // (c) Spawn the tsgo LSP and open every program file. The root URI goes
+    // through the shared Windows-safe builder (drive letters, backslashes).
+    let root_uri = path_to_file_uri_string(&sandbox.path().to_string_lossy());
     let provider = match tokio::time::timeout(
         Duration::from_secs(30),
         TsgoTypeProvider::spawn(&tsgo_bin, &root_uri),

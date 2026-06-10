@@ -51,12 +51,11 @@ pub(crate) const PROBE_SYNTHESIS_VERSION: u32 = 2;
 // NOTE — `compiler_options_hash` and `CURRENT_ENV_CORPUS_ID` are NOT pinned here.
 // They are GENERATION-derived: `compiler_options_hash` hashes the EFFECTIVE
 // committed `oracle.tsconfig.json`, and `env_corpus_id` is the content id of the
-// vendored `oracle_env/<env_corpus_id>/` corpus. Both are computed and committed
-// by the snapshot generator when the corpus is first vendored (see the
-// module-level handoff). Until then no real snapshot exists, so no real
-// `snapshot_id` is computed on the consumption path; the derivation below is a
-// pure function over an explicit `PinnedEnv` so it is fully exercised by the
-// guards with synthetic env values.
+// vendored corpus at `oracle_env/<env_corpus_dir_name(env_corpus_id)>/`. Both
+// are computed and committed by the snapshot generator whenever a corpus is
+// (re-)vendored, and live in the query-spec registry. The derivation below is
+// a pure function over an explicit `PinnedEnv` so it is fully exercised by
+// the guards with synthetic env values.
 
 /// The pinned env + algorithm versions that enter every `snapshot_id`.
 ///
@@ -72,6 +71,33 @@ pub(crate) struct PinnedEnv {
     pub(crate) probe_synthesis_version: u32,
     pub(crate) compiler_options_hash: String,
     pub(crate) env_corpus_id: String,
+}
+
+// ---------------------------------------------------------------------------
+// On-disk corpus path boundary (shared by the consumption driver + generator)
+// ---------------------------------------------------------------------------
+
+/// The corpus-root infix from `CARGO_MANIFEST_DIR` (= `crates/verter_session/`)
+/// to the vendored env corpus (`oracle_env/<dir>/`). Single owner — the
+/// consumption driver and the `oracle-gen` generator both join through this
+/// constant (this module is visible to both cfg contexts; `driver` is
+/// `#[cfg(test)]`, `gen` is `#[cfg(feature = "oracle-gen")]`).
+#[allow(dead_code)]
+pub(crate) const ORACLE_ENV_INFIX: &str = "src/typeinfo/typeinfo_tests/oracle_env";
+
+/// Map a LOGICAL tagged-digest env-corpus id (`blake3:<hex>` / `sha256:<hex>`)
+/// to its NTFS-safe ON-DISK directory name by replacing `:` with `-`
+/// (`blake3:c6c4… → blake3-c6c4…`). `:` is illegal in an NTFS path component,
+/// so the raw id cannot be a tracked directory name on Windows; the logical
+/// id encoding itself is pinned and unchanged — it stays `blake3:<hex>` in
+/// snapshot JSON, `env_corpus_id` pins, and `snapshot_id` derivation. The
+/// mapping is injective (the algo tag is `[a-z0-9]+` and hex digits contain
+/// no `-`, so the FIRST `-` in a dir name is always the mapped separator);
+/// the reverse mapping — replace the first `-` with `:` — is documented here
+/// but deliberately unimplemented, since nothing reads ids back off disk.
+#[allow(dead_code)]
+pub(crate) fn env_corpus_dir_name(id: &str) -> String {
+    id.replace(':', "-")
 }
 
 // ---------------------------------------------------------------------------

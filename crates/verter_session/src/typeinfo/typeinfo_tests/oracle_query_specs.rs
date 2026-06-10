@@ -31,17 +31,22 @@
 
 /// The content id of the CURRENT closed vendored oracle-env corpus — the
 /// pinned-env constant the registry + every guard read to derive a
-/// `snapshot_id` and locate `oracle_env/<env_corpus_id>/` WITHOUT opening a
-/// snapshot (§Q4). It is EMPTY until the snapshot generator first vendors the
-/// corpus and pins it; while empty no real snapshot exists, so
-/// no real `snapshot_id` is derived on the consumption path.
+/// `snapshot_id` and locate the corpus dir
+/// (`oracle_env/<env_corpus_dir_name(env_corpus_id)>/`) WITHOUT opening a
+/// snapshot (§Q4). Pinned by the snapshot generator when the corpus is
+/// (re-)vendored — `gen::compute_env_corpus_id`, a BLAKE3 domain-separated
+/// digest over the canonical-path-sorted corpus listing. The harness guards
+/// assert the derived corpus root exists on disk (with its
+/// `oracle.tsconfig.json`) and its dir name stays path-portable.
 #[allow(dead_code)]
 pub(crate) const CURRENT_ENV_CORPUS_ID: &str =
     "blake3:c6c4bda7c5c5106e873a66c7da516f6a0545492e280dfb9e964f833ed0e8d8f7";
 
-/// Stable hash of the EFFECTIVE canonical `oracle.tsconfig.json` (§Q2 "Env
-/// pinning"). EMPTY until the snapshot generator vendors the canonical config
-/// and computes it.
+/// Stable hash of the EFFECTIVE canonical `oracle.tsconfig.json` vendored in
+/// the corpus (§Q2 "Env pinning") — `identity::content_hash` over the
+/// canonicalized config content. Pinned by the snapshot generator alongside
+/// `CURRENT_ENV_CORPUS_ID` when the corpus is (re-)vendored; enters every
+/// `snapshot_id` through `PinnedEnv`.
 #[allow(dead_code)]
 pub(crate) const COMPILER_OPTIONS_HASH: &str =
     "sha256:f062f067510fb7c74440a69b64c0d8281f24f39a9785997d32352049e2519643";

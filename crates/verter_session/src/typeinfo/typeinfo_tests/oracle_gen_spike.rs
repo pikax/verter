@@ -47,7 +47,7 @@
 use std::time::Duration;
 
 use verter_type_runtime::tsgo::ipc::{find_tsgo_binary, TsgoTypeProvider};
-use verter_type_runtime::TypeProvider;
+use verter_type_runtime::{path_to_file_uri_string, TypeProvider};
 
 use super::oracle::admission::{AdmissionVerdict, RejectReason};
 use super::oracle::normalize::ProjectionModeKind;
@@ -103,7 +103,9 @@ async fn spawn_with(
             primary = Some(p.to_string_lossy().into_owned());
         }
     }
-    let root_uri = format!("file://{}", dir.path().display());
+    // The root URI goes through the shared Windows-safe builder (drive
+    // letters, backslashes).
+    let root_uri = path_to_file_uri_string(&dir.path().to_string_lossy());
 
     let provider = match tokio::time::timeout(
         Duration::from_secs(30),

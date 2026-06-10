@@ -55,9 +55,10 @@ use super::snapshot::{self, OracleSnapshot};
 /// `crates/verter_session/oracle_snapshots/`, the wrong place (§Q1).
 pub(crate) const SNAPSHOT_TREE_INFIX: &str = "src/typeinfo/typeinfo_tests/oracle_snapshots";
 
-/// The corpus-root infix from `CARGO_MANIFEST_DIR` to the vendored env corpus
-/// (`oracle_env/<env_corpus_id>/`). The driver re-enumerates this on read.
-pub(crate) const ORACLE_ENV_INFIX: &str = "src/typeinfo/typeinfo_tests/oracle_env";
+// The corpus-root infix + the on-disk dir-name mapping are owned by
+// `identity` (`identity::ORACLE_ENV_INFIX` / `identity::env_corpus_dir_name`),
+// shared with the `oracle-gen` generator. The driver re-enumerates the corpus
+// root on read.
 
 /// Why the driver could not validate a `(row, query)` against its snapshot. The
 /// pure sub-functions return this for testability; [`run_row`] turns any error
@@ -323,12 +324,14 @@ pub(crate) fn snapshot_abs_path(family: &str, snapshot_id: &str) -> PathBuf {
 }
 
 /// The ABSOLUTE on-disk vendored-corpus root for the CURRENT corpus
-/// (`oracle_env/<env_corpus_id>/`), rooted at `CARGO_MANIFEST_DIR`.
+/// (`oracle_env/<dir>/`, where `<dir>` = `env_corpus_dir_name(env_corpus_id)`
+/// — the NTFS-safe path-boundary mapping of the logical id), rooted at
+/// `CARGO_MANIFEST_DIR`.
 #[allow(dead_code)]
 pub(crate) fn corpus_root(env_corpus_id: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join(ORACLE_ENV_INFIX)
-        .join(env_corpus_id)
+        .join(identity::ORACLE_ENV_INFIX)
+        .join(identity::env_corpus_dir_name(env_corpus_id))
 }
 
 /// Validate the snapshot's stored env-pins / `snapshot_id` / `row_ref` against

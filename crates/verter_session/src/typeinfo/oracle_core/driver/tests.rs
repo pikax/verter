@@ -380,10 +380,12 @@ fn validate_env_corpus_catches_membership_and_content_drift() {
 
 #[test]
 fn corpus_root_is_manifest_rooted() {
+    // The final component is `env_corpus_dir_name(id)`, not the raw id —
+    // the `:` tag separator maps to `-` at the path boundary.
     let p = corpus_root("blake3:abc");
     let s = p.to_string_lossy();
     assert!(
-        s.ends_with("src/typeinfo/typeinfo_tests/oracle_env/blake3:abc"),
+        s.ends_with("src/typeinfo/typeinfo_tests/oracle_env/blake3-abc"),
         "{s}"
     );
 }
@@ -418,5 +420,20 @@ fn run_row_panics_when_no_registry_entries() {
     super::run_row(
         "crates/verter_session/src/typeinfo/typeinfo_tests/nonexistent.rs",
         "no_such_row",
+    );
+}
+
+#[test]
+fn corpus_root_of_current_env_corpus_exists_on_disk() {
+    let root = corpus_root(super::super::query_specs::CURRENT_ENV_CORPUS_ID);
+    assert!(
+        root.is_dir(),
+        "vendored corpus root must exist on disk: {}",
+        root.display()
+    );
+    assert!(
+        root.join("oracle.tsconfig.json").is_file(),
+        "vendored corpus must contain oracle.tsconfig.json: {}",
+        root.display()
     );
 }

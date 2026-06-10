@@ -6,9 +6,10 @@ use serde_json::json;
 
 use super::super::normalize::ProjectionModeKind;
 use super::{
-    blake3_tagged, canonical_content, content_hash, derive_snapshot_id, HostProject, HostSetupKind,
-    OracleValueKind, PinnedEnv, ProbeRhsKind, QueryHelperKind, SnapshotIdentity, WorkspaceFileRef,
-    ORACLE_SCHEMA_VERSION, PROBE_SYNTHESIS_VERSION, SNAPSHOT_ID_DOMAIN_TAG,
+    blake3_tagged, canonical_content, content_hash, derive_snapshot_id, env_corpus_dir_name,
+    HostProject, HostSetupKind, OracleValueKind, PinnedEnv, ProbeRhsKind, QueryHelperKind,
+    SnapshotIdentity, WorkspaceFileRef, ORACLE_SCHEMA_VERSION, PROBE_SYNTHESIS_VERSION,
+    SNAPSHOT_ID_DOMAIN_TAG,
 };
 
 fn base_env() -> PinnedEnv {
@@ -336,5 +337,36 @@ fn canonical_encoding_is_pinned() {
     assert_eq!(
         canonical, r#"{"a":[3,2,1],"b":1,"c":{"y":1,"z":0}}"#,
         "canonical JSON sorts keys, stays compact, preserves array order"
+    );
+}
+
+// -- env_corpus_dir_name (the on-disk path boundary) ------------------------
+
+#[test]
+fn env_corpus_dir_name_maps_tag_separator_to_hyphen() {
+    assert_eq!(
+        env_corpus_dir_name("blake3:cafef00d"),
+        "blake3-cafef00d",
+        "the logical tag separator `:` maps to `-` at the path boundary"
+    );
+    assert_eq!(env_corpus_dir_name("sha256:00ff"), "sha256-00ff");
+}
+
+#[test]
+fn env_corpus_dir_name_of_current_corpus_is_ntfs_safe() {
+    let dir = env_corpus_dir_name(super::super::query_specs::CURRENT_ENV_CORPUS_ID);
+    let illegal = |b: u8| {
+        matches!(
+            b,
+            b'<' | b'>' | b':' | b'"' | b'|' | b'?' | b'*' | b'\\' | b'/'
+        ) || b < 0x20
+    };
+    assert!(
+        !dir.bytes().any(illegal),
+        "on-disk corpus dir name must contain no NTFS-illegal byte: {dir}"
+    );
+    assert!(
+        !dir.ends_with('.') && !dir.ends_with(' '),
+        "no trailing dot/space: {dir}"
     );
 }
