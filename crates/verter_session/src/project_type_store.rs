@@ -153,9 +153,9 @@ pub struct IndexedReady {
     /// so every OXC-produced span is SFC-absolute by construction. For a
     /// non-SFC file this equals the raw source verbatim.
     pub eval_source: Arc<str>,
-    /// Cached parsed SFC payload when the canonical file is a Vue SFC.
-    /// Other file kinds carry `None`.
-    pub cached_parse: Option<Arc<verter_compiler::parser::types::ParsedSfc>>,
+    /// Framework-neutral parse artifact when the canonical file is a
+    /// framework carrier. Plain scripts carry `None`.
+    pub framework_parse: Option<Arc<verter_language::FrameworkParseArtifact>>,
     /// Script-level analysis snapshot (imports/exports/macros/bindings/etc.).
     /// Always present after materialization.
     pub script_analysis: Option<Arc<verter_semantic::analysis::ScriptAnalysisSnapshot>>,
@@ -210,7 +210,7 @@ impl IndexedReady {
             edge_generation: 0,
             raw_source: Arc::from(""),
             eval_source: Arc::from(""),
-            cached_parse: None,
+            framework_parse: None,
             script_analysis: None,
             export_signatures: None,
             snapshot: Arc::new(crate::types::FileAnalysisSnapshot::default()),
@@ -529,8 +529,9 @@ pub struct RouteOwnedShallowEntry {
     /// every OXC-produced span is SFC-absolute. For a non-SFC file this equals
     /// the raw source verbatim.
     pub eval_source: Arc<str>,
-    /// Cached parsed SFC payload when the canonical file is a Vue SFC.
-    pub cached_parse: Option<Arc<verter_compiler::parser::types::ParsedSfc>>,
+    /// Framework-neutral parse artifact when the canonical file is a
+    /// framework carrier.
+    pub framework_parse: Option<Arc<verter_language::FrameworkParseArtifact>>,
     /// File-level analysis snapshot consumed by component-meta / linter
     /// pipelines (the F7 "raw_snapshot" half).
     pub snapshot: Arc<crate::types::FileAnalysisSnapshot>,
@@ -573,7 +574,7 @@ impl RouteOwnedShallowEntry {
             project_generation: 0,
             raw_source: Arc::from(""),
             eval_source: Arc::from(""),
-            cached_parse: None,
+            framework_parse: None,
             snapshot: Arc::new(crate::types::FileAnalysisSnapshot::default()),
             external_type_analysis: analysis,
             shallow_state: Arc::new(shallow),
@@ -805,7 +806,7 @@ impl RouteOwnedShallowDb {
             project_generation: 0,
             raw_source: Arc::from(""),
             eval_source: Arc::from(""),
-            cached_parse: None,
+            framework_parse: None,
             snapshot: Arc::new(crate::types::FileAnalysisSnapshot::default()),
             external_type_analysis: analysis,
             shallow_state: Arc::new(shallow),
@@ -2878,7 +2879,7 @@ mod tests {
                 edge_generation: 0,
                 raw_source: Arc::from(""),
                 eval_source: Arc::from(""),
-                cached_parse: None,
+                framework_parse: None,
                 script_analysis: None,
                 export_signatures: None,
                 snapshot: Arc::new(crate::types::FileAnalysisSnapshot::default()),
@@ -2938,7 +2939,7 @@ mod tests {
                 edge_generation: 0,
                 raw_source: Arc::from(""),
                 eval_source: Arc::from(""),
-                cached_parse: None,
+                framework_parse: None,
                 script_analysis: None,
                 export_signatures: None,
                 snapshot: Arc::new(crate::types::FileAnalysisSnapshot::default()),

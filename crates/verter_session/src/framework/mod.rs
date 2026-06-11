@@ -10,6 +10,7 @@
 //! classification reaches them exclusively through session-implemented
 //! trait objects (the scheduler `SourceLoader` impl).
 
+pub mod ctx;
 pub mod language_classifier;
 pub mod project_capabilities;
 

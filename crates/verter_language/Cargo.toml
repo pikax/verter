@@ -11,3 +11,4 @@ keywords = ["vue", "compiler", "language", "classification"]
 categories = ["compilers"]
 
 [dependencies]
+verter_span = { path = "../verter_span", version = "0.0.1-beta.1" }

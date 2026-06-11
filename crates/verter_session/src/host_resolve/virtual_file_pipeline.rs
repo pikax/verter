@@ -906,7 +906,7 @@ impl VerterHost {
                     script_imports: efs.script_analysis.imports.clone(),
                     script_macros: efs.script_analysis.macros.clone(),
                     script_bindings: efs.script_analysis.bindings.clone(),
-                    cached_parse: efs.cached_parse,
+                    framework_parse: efs.framework_parse,
                     style_v_bind_vars: style_analyses
                         .iter()
                         .flat_map(|sa| {
@@ -1799,12 +1799,16 @@ impl VerterHost {
             && profile.delimiters.is_none()
             && profile.custom_elements.is_none();
 
-        let compiled = if can_use_cache {
-            if let Some(ref cached) = snapshot.cached_parse {
-                compile_from_parsed(&merged_source, cached, &core_opts, &verter_opts, &alloc)
-            } else {
-                compile_sfc(&merged_source, &core_opts, &verter_opts, &alloc)
-            }
+        let cached = if can_use_cache {
+            snapshot
+                .framework_parse
+                .as_deref()
+                .and_then(crate::typeinfo::adapters::vue::vue_parse)
+        } else {
+            None
+        };
+        let compiled = if let Some(cached) = cached {
+            compile_from_parsed(&merged_source, cached, &core_opts, &verter_opts, &alloc)
         } else {
             compile_sfc(&merged_source, &core_opts, &verter_opts, &alloc)
         };

@@ -1477,7 +1477,7 @@ impl VerterHost {
             // the scheduler — the canonical way to materialize a file. If
             // the scheduler still misses after `ensure_loaded`, return None
             // (file doesn't exist in the workspace).
-            let (raw_source, cached_parse, whole_hash, snapshot) = {
+            let (raw_source, framework_parse, whole_hash, snapshot) = {
                 let state = match self.effective_file_state(canonical_id, None) {
                     Some(state) => state,
                     None => {
@@ -1508,12 +1508,12 @@ impl VerterHost {
                         self.build_snapshot_from_source_state(
                             canonical_id,
                             &state.source,
-                            state.cached_parse.as_deref(),
+                            state.framework_parse.as_deref(),
                         )
                     };
                 (
                     state.source,
-                    state.cached_parse,
+                    state.framework_parse,
                     state.whole_hash,
                     Arc::new(snapshot),
                 )
@@ -1521,7 +1521,7 @@ impl VerterHost {
 
             let eval_source = Arc::<str>::from(Self::build_eval_script_source(
                 raw_source.as_ref(),
-                cached_parse.as_deref(),
+                framework_parse.as_deref(),
             ));
             let declaration_file = canonical_id.ends_with(".d.ts")
                 || canonical_id.ends_with(".d.mts")
@@ -1693,8 +1693,7 @@ impl VerterHost {
             let external_type_analysis = self.build_external_type_analysis(
                 canonical_id,
                 whole_hash,
-                raw_source.as_ref(),
-                cached_parse.as_deref(),
+                framework_parse.as_deref(),
                 &eval_source,
             );
 
@@ -1820,7 +1819,7 @@ impl VerterHost {
                 edge_generation,
                 raw_source: Arc::clone(&raw_source),
                 eval_source: Arc::clone(&eval_source),
-                cached_parse,
+                framework_parse,
                 script_analysis,
                 export_signatures,
                 snapshot,
@@ -1945,8 +1944,7 @@ impl VerterHost {
         let canonical_id_for_source_type = normalized_canonical_id.as_ref();
         let source_type = self.imported_eval_source_type_for(
             canonical_id_for_source_type,
-            inputs.raw_source.as_ref(),
-            inputs.cached_parse.as_deref(),
+            inputs.framework_parse.as_deref(),
         );
         let Some(type_context) = self.cached_type_resolution_context_entry(
             canonical_id_for_source_type,

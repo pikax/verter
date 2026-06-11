@@ -84,7 +84,7 @@ impl VerterHost {
                 return Some(cached_env);
             }
         }
-        let (raw_source, cached_parse, whole_hash) =
+        let (raw_source, framework_parse, whole_hash) =
             self.current_eval_state(resolved_canonical_id.as_str())?;
         if let Some(cached_env) = self
             .clone_cached_eval_env_arc(canonical_id, whole_hash)
@@ -120,14 +120,14 @@ impl VerterHost {
             .unwrap_or_else(|| {
                 Arc::<str>::from(Self::build_eval_script_source(
                     raw_source.as_ref(),
-                    cached_parse.as_deref(),
+                    framework_parse.as_deref(),
                 ))
             });
         let (cached_env, _) = self.build_eval_env_and_external_type_analysis(
             resolved_canonical_id.as_str(),
             whole_hash,
             raw_source.as_ref(),
-            cached_parse.as_deref(),
+            framework_parse.as_deref(),
             &eval_source,
         );
         component_meta_trace_custom!(
@@ -285,20 +285,19 @@ impl VerterHost {
         &self,
         canonical: &str,
         source: &Arc<str>,
-        cached_parse: Option<&verter_compiler::parser::types::ParsedSfc>,
+        framework_parse: Option<&verter_language::FrameworkParseArtifact>,
     ) -> FileAnalysisSnapshot {
-        if canonical.ends_with(".vue") {
-            if let Some(parsed) = cached_parse {
-                component_meta_trace_custom!(
-                    "build_snapshot_from_cached_parse",
-                    format!("owner={} bytes={}", canonical, source.len()),
-                );
-                let parse = crate::parse::build_vue_snapshot_from_parsed(
-                    canonical,
-                    source.as_ref(),
-                    self.config.effective_scope(),
-                    parsed,
-                );
+        if let Some(artifact) = framework_parse {
+            component_meta_trace_custom!(
+                "build_snapshot_from_parse_artifact",
+                format!("owner={} bytes={}", canonical, source.len()),
+            );
+            if let Some(parse) = crate::parse::build_vue_snapshot_from_artifact(
+                canonical,
+                source.as_ref(),
+                self.config.effective_scope(),
+                artifact,
+            ) {
                 component_meta_trace_custom!(
                     "parse_vue_snapshot_cached_result",
                     format!(
@@ -320,15 +319,15 @@ impl VerterHost {
         &self,
         canonical: &str,
         source: &Arc<str>,
-        cached_parse: Option<&verter_compiler::parser::types::ParsedSfc>,
+        framework_parse: Option<&verter_language::FrameworkParseArtifact>,
         whole_hash: Hash16,
     ) -> FileAnalysisSnapshot {
-        if cached_parse.is_some() {
-            return self.build_snapshot_from_source_state(canonical, source, cached_parse);
+        if framework_parse.is_some() {
+            return self.build_snapshot_from_source_state(canonical, source, framework_parse);
         }
 
         let eval_source = Arc::<str>::from(Self::build_eval_script_source(source.as_ref(), None));
-        let source_type = self.imported_eval_source_type_for(canonical, source.as_ref(), None);
+        let source_type = self.imported_eval_source_type_for(canonical, None);
         let parsed_eval_program =
             self.cached_parsed_eval_program_entry(canonical, whole_hash, &eval_source, source_type);
         if parsed_eval_program.parse_failed {
@@ -374,7 +373,7 @@ impl VerterHost {
         canonical_id: &str,
     ) -> Option<(
         Arc<str>,
-        Option<Arc<verter_compiler::parser::types::ParsedSfc>>,
+        Option<Arc<verter_language::FrameworkParseArtifact>>,
         Hash16,
     )> {
         if canonical_id.is_empty() {
@@ -392,7 +391,7 @@ impl VerterHost {
         canonical_id: &str,
     ) -> Option<(
         Arc<str>,
-        Option<Arc<verter_compiler::parser::types::ParsedSfc>>,
+        Option<Arc<verter_language::FrameworkParseArtifact>>,
         Hash16,
     )> {
         component_meta_trace_custom!("current_eval_state", format!("owner={}", canonical_id),);
@@ -415,7 +414,7 @@ impl VerterHost {
         if let Some(facts) = cached_facts {
             return Some((
                 Arc::clone(&facts.raw_source),
-                facts.cached_parse.clone(),
+                facts.framework_parse.clone(),
                 facts.whole_hash,
             ));
         }
@@ -424,14 +423,14 @@ impl VerterHost {
         // yet materialized into `FileArtifactStore`. The scheduler is the sole
         // source authority; on miss, call `ensure_loaded` once.
         if let Some(state) = self.effective_file_state(canonical_id, None) {
-            return Some((state.source, state.cached_parse, state.whole_hash));
+            return Some((state.source, state.framework_parse, state.whole_hash));
         }
         if !canonical_id.is_empty()
             && !is_raw_import_specifier_id(canonical_id)
             && self.ensure_loaded(canonical_id)
         {
             if let Some(state) = self.effective_file_state(canonical_id, None) {
-                return Some((state.source, state.cached_parse, state.whole_hash));
+                return Some((state.source, state.framework_parse, state.whole_hash));
             }
         }
         None
@@ -539,8 +538,8 @@ impl VerterHost {
     ) -> Option<ComputedEvaluatedTypes> {
         let eval_source = owner_eval_source.map(str::to_string).or_else(|| {
             self.current_eval_state(canonical)
-                .map(|(source, cached_parse, _)| {
-                    Self::build_eval_script_source(&source, cached_parse.as_deref())
+                .map(|(source, framework_parse, _)| {
+                    Self::build_eval_script_source(&source, framework_parse.as_deref())
                 })
         })?;
         self.compute_evaluated_types_from_owner_context_with_ctx(

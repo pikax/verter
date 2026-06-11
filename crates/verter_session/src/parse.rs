@@ -101,11 +101,30 @@ pub(crate) fn parse_vue_snapshot(
     canonical_id: &str,
     source: &str,
     analysis_scope: verter_semantic::analysis::AnalysisScope,
-) -> (ParseSnapshot, ParsedSfc) {
-    let parsed = parse_sfc(source, None, None);
+) -> (ParseSnapshot, Arc<verter_language::FrameworkParseArtifact>) {
+    let parsed = Arc::new(parse_sfc(source, None, None));
     let snapshot = build_vue_snapshot_from_parsed(canonical_id, source, analysis_scope, &parsed);
+    let artifact = verter_compiler::framework_common::vue_bridge::build_vue_parse_artifact(
+        source,
+        parsed,
+        crate::file_artifact_store::LEGACY_PARSER_VERSION,
+    );
 
-    (snapshot, parsed)
+    (snapshot, artifact)
+}
+
+/// Parse Vue SFC source straight into the framework-neutral parse
+/// artifact (the route-owned cold-parse producer's entry — no
+/// `ParseSnapshot` is needed there).
+pub(crate) fn build_vue_parse_artifact_from_source(
+    source: &str,
+) -> Arc<verter_language::FrameworkParseArtifact> {
+    let parsed = Arc::new(parse_sfc(source, None, None));
+    verter_compiler::framework_common::vue_bridge::build_vue_parse_artifact(
+        source,
+        parsed,
+        crate::file_artifact_store::LEGACY_PARSER_VERSION,
+    )
 }
 
 pub(crate) fn non_sfc_source_type(canonical_id: &str) -> SourceType {
@@ -125,24 +144,40 @@ pub(crate) fn non_sfc_source_type(canonical_id: &str) -> SourceType {
 /// [`crate::host_executor::HostSourceData::source_type`] so cache-key callers
 /// can read the authoritative value via
 /// [`crate::VerterHost::authoritative_source_type_for`] instead of recomputing
-/// from `(canonical_id, raw_source, cached_parse)` — a pair that is unstable
-/// when `cached_parse` is dropped mid-resolution.
+/// from `(canonical_id, raw_source, framework_parse)` — a pair that is
+/// unstable when `framework_parse` is dropped mid-resolution.
 ///
-/// Dispatches on the file's resolved [`FileLanguage`] row: the Vue
-/// carrier reads its `<script lang>` from the parsed SFC; plain scripts
-/// derive from the canonical path.
+/// Dispatches on the file's resolved [`FileLanguage`](verter_language::FileLanguage)
+/// row: framework carriers read the neutral
+/// `FrameworkParseCommon.script_regions[].source_type` their producer
+/// populated at parse time (UNIFORMLY — no per-carrier downcast); plain
+/// scripts derive from the canonical path.
 pub(crate) fn imported_eval_source_type(
     file_language: &verter_language::FileLanguage,
     canonical_id: &str,
-    raw_source: &str,
-    cached_parse: Option<&ParsedSfc>,
+    framework_parse: Option<&verter_language::FrameworkParseArtifact>,
 ) -> SourceType {
-    if file_language.is_vue() {
-        cached_parse
-            .map(|parsed| sfc_script_source_type(parsed, raw_source))
+    if file_language.is_framework_carrier() {
+        framework_parse
+            .and_then(|artifact| artifact.common.script_regions.first())
+            .map(|region| oxc_source_type_from_neutral(region.source_type))
             .unwrap_or_else(SourceType::ts)
     } else {
         non_sfc_source_type(canonical_id)
+    }
+}
+
+/// Map the neutral [`verter_language::ScriptSourceType`] dialect onto
+/// the OXC [`SourceType`] the parser pipeline consumes.
+pub(crate) fn oxc_source_type_from_neutral(
+    source_type: verter_language::ScriptSourceType,
+) -> SourceType {
+    match source_type {
+        verter_language::ScriptSourceType::Ts => SourceType::ts(),
+        verter_language::ScriptSourceType::Tsx => SourceType::tsx(),
+        verter_language::ScriptSourceType::Js => SourceType::script(),
+        verter_language::ScriptSourceType::Jsx => SourceType::jsx(),
+        verter_language::ScriptSourceType::Dts => SourceType::d_ts(),
     }
 }
 
@@ -679,20 +714,13 @@ fn catch_analysis_panic<T: Default>(
     }
 }
 
-pub(crate) fn sfc_script_source_type(parsed: &ParsedSfc, source: &str) -> SourceType {
-    let lang = [parsed.script(), parsed.script_setup()]
-        .into_iter()
-        .flatten()
-        .find_map(|script| {
-            find_attr(&extract_attrs(&script.attributes, source), "lang").filter(|v| v != "true")
-        });
-
-    match lang.as_deref().map(|value| value.to_ascii_lowercase()) {
-        Some(lang) if lang == "tsx" => SourceType::tsx(),
-        Some(lang) if lang == "jsx" => SourceType::jsx(),
-        Some(lang) if lang == "js" => SourceType::script(),
-        _ => SourceType::ts(),
-    }
+/// The SFC's OXC source type, resolved from `<script lang>` through the
+/// Vue carrier producer's resolver (the one `<script lang>` authority —
+/// the same data the producer stamps onto `ScriptRegion.source_type`).
+fn vue_oxc_source_type(parsed: &ParsedSfc, source: &str) -> SourceType {
+    oxc_source_type_from_neutral(
+        verter_compiler::framework_common::vue_bridge::vue_script_source_type(parsed, source),
+    )
 }
 
 /// Build script analysis from an already-parsed SFC.
@@ -720,7 +748,7 @@ fn build_script_analysis_from_parsed_with_diagnostic(
             None,
         );
     };
-    let source_type = sfc_script_source_type(parsed, source);
+    let source_type = vue_oxc_source_type(parsed, source);
     let alloc = Allocator::new();
     catch_analysis_panic(
         "script analysis",
@@ -742,7 +770,7 @@ fn build_export_signatures_from_parsed_with_diagnostic(
         return (Vec::new(), None);
     };
 
-    let source_type = sfc_script_source_type(parsed, source);
+    let source_type = vue_oxc_source_type(parsed, source);
     let alloc = Allocator::new();
     catch_analysis_panic(
         "export signature analysis",
@@ -757,8 +785,10 @@ fn build_export_signatures_from_parsed_with_diagnostic(
 pub(crate) fn build_script_analysis_from_source(
     source: &str,
 ) -> verter_semantic::analysis::ScriptAnalysisSnapshot {
-    let parsed = parse_sfc(source, None, None);
-    build_script_analysis_from_parsed(&parsed, source)
+    // On-demand Vue re-parse routes through the Vue carrier producer so
+    // the artifact stays the one post-parse representation.
+    let artifact = build_vue_parse_artifact_from_source(source);
+    build_script_analysis_for_artifact(Some(&artifact), source)
 }
 
 pub(crate) fn build_script_analysis_from_parsed(
@@ -775,8 +805,10 @@ pub(crate) fn build_style_analyses_from_source(
     source: &str,
     canonical_id: &str,
 ) -> Vec<verter_semantic::analysis::StyleBlockAnalysis> {
-    let parsed = parse_sfc(source, None, None);
-    build_style_analyses_from_parsed(&parsed, source, canonical_id)
+    // On-demand Vue re-parse routes through the Vue carrier producer so
+    // the artifact stays the one post-parse representation.
+    let artifact = build_vue_parse_artifact_from_source(source);
+    build_style_analyses_for_artifact(Some(&artifact), source, canonical_id)
 }
 
 pub(crate) fn build_style_analyses_from_parsed(
@@ -789,6 +821,112 @@ pub(crate) fn build_style_analyses_from_parsed(
         .iter()
         .map(|style| build_single_style_analysis(style, source, canonical_id))
         .collect()
+}
+
+/// Artifact-facing script-analysis builder: reuse the carrier parse
+/// when the neutral artifact opens through the blessed Vue accessor,
+/// else re-parse from source.
+pub(crate) fn build_script_analysis_for_artifact(
+    framework_parse: Option<&verter_language::FrameworkParseArtifact>,
+    source: &str,
+) -> verter_semantic::analysis::ScriptAnalysisSnapshot {
+    match framework_parse.and_then(crate::typeinfo::adapters::vue::vue_parse) {
+        Some(parsed) => build_script_analysis_from_parsed(parsed, source),
+        None => build_script_analysis_from_source(source),
+    }
+}
+
+/// Artifact-facing style-analysis builder (see
+/// [`build_script_analysis_for_artifact`]).
+pub(crate) fn build_style_analyses_for_artifact(
+    framework_parse: Option<&verter_language::FrameworkParseArtifact>,
+    source: &str,
+    canonical_id: &str,
+) -> Vec<verter_semantic::analysis::StyleBlockAnalysis> {
+    match framework_parse.and_then(crate::typeinfo::adapters::vue::vue_parse) {
+        Some(parsed) => build_style_analyses_from_parsed(parsed, source, canonical_id),
+        None => build_style_analyses_from_source(source, canonical_id),
+    }
+}
+
+/// Artifact-facing Vue snapshot builder: `Some(snapshot)` when the
+/// neutral artifact carries a Vue parse (opened through the blessed
+/// accessor), `None` otherwise.
+pub(crate) fn build_vue_snapshot_from_artifact(
+    canonical_id: &str,
+    source: &str,
+    analysis_scope: verter_semantic::analysis::AnalysisScope,
+    framework_parse: &verter_language::FrameworkParseArtifact,
+) -> Option<ParseSnapshot> {
+    let parsed = crate::typeinfo::adapters::vue::vue_parse(framework_parse)?;
+    Some(build_vue_snapshot_from_parsed(
+        canonical_id,
+        source,
+        analysis_scope,
+        parsed,
+    ))
+}
+
+/// The Vue template-data compile half shared by
+/// `build_template_analysis` / `compute_template_analysis_if_missing`
+/// (relocated behind the Vue bridge so `host_manage/**` stays free of
+/// `ParsedSfc` / `parse_sfc`).
+///
+/// Parses `compile_source` (re-using the artifact's carrier parse when
+/// `reuse_carrier_parse` is set and the artifact opens as Vue), runs
+/// the META-target compile, and returns the extracted raw template
+/// data. `None` on structural compile errors (type-resolution errors —
+/// `XInvalidMacroType` / `XMissingMacroType` — do not block template
+/// extraction) or when no template data was produced.
+pub(crate) fn compile_vue_template_data(
+    canonical_id: &str,
+    compile_source: &str,
+    framework_parse: Option<&verter_language::FrameworkParseArtifact>,
+    reuse_carrier_parse: bool,
+) -> Option<verter_compiler::compile::RawTemplateData> {
+    let cached = if reuse_carrier_parse {
+        framework_parse.and_then(crate::typeinfo::adapters::vue::vue_parse)
+    } else {
+        None
+    };
+    let parsed = match cached {
+        Some(parsed) => std::borrow::Cow::Borrowed(parsed.as_ref()),
+        None => std::borrow::Cow::Owned(parse_sfc(compile_source, None, None)),
+    };
+
+    let alloc = Allocator::new();
+    let options = verter_compiler::compile::CodegenOptions {
+        target: verter_compiler::compile::CompileTarget::META,
+        filename: Some(canonical_id.to_string()),
+        ..verter_compiler::compile::CodegenOptions::default()
+    };
+    let verter_opts = verter_compiler::compile::VerterCompileOptions {
+        extract_template_data: true,
+        ..verter_compiler::compile::VerterCompileOptions::default()
+    };
+    let compiled = verter_compiler::compile::compile_from_parsed(
+        compile_source,
+        &parsed,
+        &options,
+        &verter_opts,
+        &alloc,
+    );
+
+    // Bail on structural compile errors that would invalidate template
+    // data; skip type-resolution errors since template slot extraction
+    // does not depend on type resolution.
+    let has_structural_errors = compiled.errors.iter().any(|d| {
+        matches!(
+            d.severity,
+            verter_compiler::compile::CompileDiagnosticSeverity::Error,
+        ) && !d.code.starts_with("XInvalidMacroType")
+            && !d.code.starts_with("XMissingMacroType")
+    });
+    if has_structural_errors {
+        return None;
+    }
+
+    compiled.template_data
 }
 
 pub(crate) fn build_non_sfc_snapshot_from_program(

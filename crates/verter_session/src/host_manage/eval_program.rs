@@ -53,14 +53,16 @@ impl VerterHost {
 
         let mut bindings = rustc_hash::FxHashMap::default();
 
-        let Some((raw_source, cached_parse, _)) = self.current_eval_state(canonical_id) else {
+        let Some((raw_source, framework_parse, _)) = self.current_eval_state(canonical_id) else {
             return bindings;
         };
 
-        for (idx, param) in
-            Self::sfc_script_setup_type_params(raw_source.as_ref(), cached_parse.as_deref())
-                .into_iter()
-                .enumerate()
+        for (idx, param) in crate::host_resolve::sfc_script_setup_type_params(
+            raw_source.as_ref(),
+            framework_parse.as_deref(),
+        )
+        .into_iter()
+        .enumerate()
         {
             bindings.insert(
                 param.name.clone(),
@@ -79,36 +81,6 @@ impl VerterHost {
         bindings
     }
 
-    pub(crate) fn sfc_script_setup_type_params(
-        source: &str,
-        cached_parse: Option<&verter_compiler::parser::types::ParsedSfc>,
-    ) -> Vec<verter_type_expr::TypeParam> {
-        let Some(setup) = cached_parse.and_then(|parsed| parsed.script_setup()) else {
-            return Vec::new();
-        };
-        let Some(generic_span) = setup.generic else {
-            return Vec::new();
-        };
-        let clause = source[generic_span.start as usize..generic_span.end as usize].trim();
-        if clause.is_empty() {
-            return Vec::new();
-        }
-        verter_semantic::analysis::type_eval_build::parse_type_parameter_clause(clause)
-    }
-
-    fn apply_sfc_script_setup_type_params(
-        env: &mut verter_semantic::analysis::type_eval::EvalEnv,
-        source: &str,
-        cached_parse: Option<&verter_compiler::parser::types::ParsedSfc>,
-    ) {
-        for param in Self::sfc_script_setup_type_params(source, cached_parse) {
-            env.type_bindings.insert(
-                param.name.clone(),
-                Arc::new(verter_type_expr::TypeExpr::type_parameter(param)),
-            );
-        }
-    }
-
     /// Central caller for the `IndexedReady.eval_source` body.
     ///
     /// For a `.vue` SFC this returns the **position-preserving** script-only
@@ -119,9 +91,10 @@ impl VerterHost {
     /// offsets are already file-absolute).
     pub(crate) fn build_eval_script_source(
         source: &str,
-        cached_parse: Option<&verter_compiler::parser::types::ParsedSfc>,
+        framework_parse: Option<&verter_language::FrameworkParseArtifact>,
     ) -> String {
-        crate::host_resolve::extract_vue_script_content(source, cached_parse)
+        let parsed = framework_parse.and_then(crate::typeinfo::adapters::vue::vue_parse);
+        crate::host_resolve::extract_vue_script_content(source, parsed.map(Arc::as_ref))
             .unwrap_or_else(|| source.to_string())
     }
 
@@ -134,8 +107,7 @@ impl VerterHost {
     pub(super) fn imported_eval_source_type_for(
         &self,
         canonical_id: &str,
-        raw_source: &str,
-        cached_parse: Option<&verter_compiler::parser::types::ParsedSfc>,
+        framework_parse: Option<&verter_language::FrameworkParseArtifact>,
     ) -> oxc_span::SourceType {
         {
             if let Some(st) = self.authoritative_source_type_for(canonical_id) {
@@ -145,8 +117,7 @@ impl VerterHost {
         crate::parse::imported_eval_source_type(
             &self.language_classifier.classify(canonical_id),
             canonical_id,
-            raw_source,
-            cached_parse,
+            framework_parse,
         )
     }
 
@@ -554,8 +525,7 @@ impl VerterHost {
                     .materialize_overlay_indexed_ready_with_view(identity.raw_overlay_owner(), view)
                 {
                     return Some(ExternalTypeResolutionInputs {
-                        raw_source: Arc::clone(&indexed.raw_source),
-                        cached_parse: indexed.cached_parse.clone(),
+                        framework_parse: indexed.framework_parse.clone(),
                         whole_hash: indexed.whole_hash,
                         eval_source: Arc::clone(&indexed.eval_source),
                         analysis: Arc::clone(&indexed.external_type_analysis),
@@ -589,8 +559,7 @@ impl VerterHost {
             .or_else(|| self.artifact_current_indexed(canonical_id));
         if let Some(facts) = cached_facts {
             let inputs = ExternalTypeResolutionInputs {
-                raw_source: Arc::clone(&facts.raw_source),
-                cached_parse: facts.cached_parse.clone(),
+                framework_parse: facts.framework_parse.clone(),
                 whole_hash: facts.whole_hash,
                 eval_source: Arc::clone(&facts.eval_source),
                 analysis: Arc::clone(&facts.external_type_analysis),
@@ -608,8 +577,7 @@ impl VerterHost {
         // `cached_external_type_analysis_entry` mutex cache is gone.
         let entry = self.ensure_route_owned_shallow_entry(canonical_id)?;
         let inputs = ExternalTypeResolutionInputs {
-            raw_source: Arc::clone(&entry.raw_source),
-            cached_parse: entry.cached_parse.clone(),
+            framework_parse: entry.framework_parse.clone(),
             whole_hash: entry.whole_hash,
             eval_source: Arc::clone(&entry.eval_source),
             analysis: Arc::clone(&entry.external_type_analysis),
@@ -663,15 +631,14 @@ impl VerterHost {
         &self,
         canonical_id: &str,
         whole_hash: Hash16,
-        raw_source: &str,
-        cached_parse: Option<&verter_compiler::parser::types::ParsedSfc>,
+        framework_parse: Option<&verter_language::FrameworkParseArtifact>,
         eval_source: &Arc<str>,
     ) -> Arc<verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource> {
         let parsed_eval_program = self.cached_parsed_eval_program_entry(
             canonical_id,
             whole_hash,
             eval_source,
-            self.imported_eval_source_type_for(canonical_id, raw_source, cached_parse),
+            self.imported_eval_source_type_for(canonical_id, framework_parse),
         );
         if parsed_eval_program.parse_failed {
             return Arc::new(
@@ -697,7 +664,7 @@ impl VerterHost {
         canonical_id: &str,
         whole_hash: Hash16,
         raw_source: &str,
-        cached_parse: Option<&verter_compiler::parser::types::ParsedSfc>,
+        framework_parse: Option<&verter_language::FrameworkParseArtifact>,
         eval_source: &Arc<str>,
     ) -> (
         Arc<verter_semantic::analysis::type_eval::EvalEnv>,
@@ -707,13 +674,17 @@ impl VerterHost {
             canonical_id,
             whole_hash,
             eval_source,
-            self.imported_eval_source_type_for(canonical_id, raw_source, cached_parse),
+            self.imported_eval_source_type_for(canonical_id, framework_parse),
         );
         if parsed_eval_program.parse_failed {
             let mut env = verter_semantic::analysis::type_eval_build::parse_and_build_env(
                 eval_source.as_ref(),
             );
-            Self::apply_sfc_script_setup_type_params(&mut env, raw_source, cached_parse);
+            crate::host_resolve::apply_sfc_script_setup_type_params(
+                &mut env,
+                raw_source,
+                framework_parse,
+            );
             return (
                 Arc::new(env),
                 Arc::new(
@@ -728,7 +699,11 @@ impl VerterHost {
             program,
             eval_source.as_ref(),
         );
-        Self::apply_sfc_script_setup_type_params(&mut env, raw_source, cached_parse);
+        crate::host_resolve::apply_sfc_script_setup_type_params(
+            &mut env,
+            raw_source,
+            framework_parse,
+        );
         (
             Arc::new(env),
             Arc::new(

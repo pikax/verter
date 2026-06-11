@@ -112,7 +112,7 @@ impl VerterHost {
     /// Override-aware file state for a profile.
     ///
     /// When a content override exists for `profile`, returns the override's
-    /// synthetic source, meta, script_analysis, and cached_parse. Otherwise
+    /// synthetic source, meta, script_analysis, and framework_parse. Otherwise
     /// returns raw scheduler data. Returns `None` if file not in scheduler.
     pub(crate) fn effective_file_state(
         &self,
@@ -131,7 +131,7 @@ impl VerterHost {
                         source: ovr.source.clone(),
                         meta: ovr.parse.meta.clone(),
                         script_analysis: ovr.parse.script_analysis.clone(),
-                        cached_parse: ovr.cached_parse.clone(),
+                        framework_parse: ovr.framework_parse.clone(),
                         whole_hash: ovr.parse.whole_hash,
                     });
                 }
@@ -142,7 +142,7 @@ impl VerterHost {
             source: snap.source.clone(),
             meta: hd.parse.meta.clone(),
             script_analysis: hd.parse.script_analysis.clone(),
-            cached_parse: hd.cached_parse.clone(),
+            framework_parse: hd.framework_parse.clone(),
             whole_hash: hd.parse.whole_hash,
         })
     }

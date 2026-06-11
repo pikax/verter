@@ -4363,7 +4363,7 @@ const SETUP_MARKER = 2;
 }
 
 #[test]
-fn extract_vue_script_content_without_cached_parse_matches_cached() {
+fn extract_vue_script_content_without_parsed_sfc_matches_cached() {
     let source = r#"<script lang="ts">
 const COMPANION = 1;
 </script>

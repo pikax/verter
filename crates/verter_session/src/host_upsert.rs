@@ -1238,7 +1238,7 @@ impl VerterHost {
             );
             let synthetic_arc: Arc<str> = Arc::from(synthetic_source.as_str());
 
-            let (new_snapshot, new_parsed) =
+            let (new_snapshot, new_artifact) =
                 parse_vue_snapshot(&canonical, &synthetic_source, self.config.effective_scope());
 
             let layer = ContentOverrideLayer {
@@ -1254,7 +1254,7 @@ impl VerterHost {
                     ContentOverrideWithParse {
                         layer: layer.clone(),
                         parse: new_snapshot.clone(),
-                        cached_parse: Some(Arc::new(new_parsed)),
+                        framework_parse: Some(new_artifact),
                         source: synthetic_arc,
                     },
                 );

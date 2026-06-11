@@ -51,7 +51,7 @@ impl VerterHost {
         &self,
         canonical: &str,
         source: &Arc<str>,
-        cached_parse: Option<Arc<verter_compiler::parser::types::ParsedSfc>>,
+        framework_parse: Option<Arc<verter_language::FrameworkParseArtifact>>,
         src_blocks: &[crate::SrcBlockInfo],
         external_requests: &[crate::ExternalSourceRequest],
         imports: &[verter_semantic::analysis::AnalyzedImport],
@@ -86,55 +86,12 @@ impl VerterHost {
             std::borrow::Cow::Borrowed(source.as_ref())
         };
 
-        let parsed = if src_blocks.is_empty() {
-            cached_parse
-                .as_deref()
-                .map(std::borrow::Cow::Borrowed)
-                .unwrap_or_else(|| {
-                    std::borrow::Cow::Owned(verter_compiler::compile::parse_sfc(
-                        &merged_source,
-                        None,
-                        None,
-                    ))
-                })
-        } else {
-            std::borrow::Cow::Owned(verter_compiler::compile::parse_sfc(
-                &merged_source,
-                None,
-                None,
-            ))
-        };
-
-        let alloc = oxc_allocator::Allocator::new();
-        let options = verter_compiler::compile::CodegenOptions {
-            target: verter_compiler::compile::CompileTarget::META,
-            filename: Some(canonical.to_string()),
-            ..verter_compiler::compile::CodegenOptions::default()
-        };
-        let verter_opts = verter_compiler::compile::VerterCompileOptions {
-            extract_template_data: true,
-            ..verter_compiler::compile::VerterCompileOptions::default()
-        };
-        let compiled = verter_compiler::compile::compile_from_parsed(
+        let raw = crate::parse::compile_vue_template_data(
+            canonical,
             &merged_source,
-            &parsed,
-            &options,
-            &verter_opts,
-            &alloc,
-        );
-
-        let has_structural_errors = compiled.errors.iter().any(|d| {
-            matches!(
-                d.severity,
-                verter_compiler::compile::CompileDiagnosticSeverity::Error,
-            ) && !d.code.starts_with("XInvalidMacroType")
-                && !d.code.starts_with("XMissingMacroType")
-        });
-        if has_structural_errors {
-            return None;
-        }
-
-        let raw = compiled.template_data?;
+            framework_parse.as_deref(),
+            src_blocks.is_empty(),
+        )?;
         let (imports, unions, props_name) =
             crate::host_resolve::template_converter_inputs(imports, macros, bindings);
         Some(Arc::new(crate::template_convert::convert_raw_to_analysis(
@@ -164,7 +121,7 @@ impl VerterHost {
             return;
         }
 
-        let (source, cached_parse, src_blocks, external_requests) = {
+        let (source, framework_parse, src_blocks, external_requests) = {
             use crate::host_executor::HostSourceData;
             if let Some(snap) = self.scheduler.try_get_source(canonical) {
                 let Some(hd) = snap.downcast_data::<HostSourceData>() else {
@@ -175,7 +132,7 @@ impl VerterHost {
                 }
                 (
                     snap.source.clone(),
-                    hd.cached_parse.clone(),
+                    hd.framework_parse.clone(),
                     hd.parse.src_blocks.clone(),
                     hd.parse.external_requests.clone(),
                 )
@@ -183,14 +140,14 @@ impl VerterHost {
                 let Some(source) = self.read_analysis_source(canonical) else {
                     return;
                 };
-                let (parse, parsed) = crate::parse::parse_vue_snapshot(
+                let (parse, artifact) = crate::parse::parse_vue_snapshot(
                     canonical,
                     &source,
                     self.config.effective_scope(),
                 );
                 (
                     source,
-                    Some(Arc::new(parsed)),
+                    Some(artifact),
                     parse.src_blocks,
                     parse.external_requests,
                 )
@@ -229,61 +186,18 @@ impl VerterHost {
             std::borrow::Cow::Borrowed(source.as_ref())
         };
 
-        // Parse SFC (reuse cached parse when no external src)
-        let parsed = if src_blocks.is_empty() {
-            cached_parse
-                .as_deref()
-                .map(std::borrow::Cow::Borrowed)
-                .unwrap_or_else(|| {
-                    std::borrow::Cow::Owned(verter_compiler::compile::parse_sfc(
-                        &merged_source,
-                        None,
-                        None,
-                    ))
-                })
-        } else {
-            std::borrow::Cow::Owned(verter_compiler::compile::parse_sfc(
-                &merged_source,
-                None,
-                None,
-            ))
-        };
-
-        // Compile with META target â€” script codegen + template data, no JS/TSX output
-        let alloc = oxc_allocator::Allocator::new();
-        let options = verter_compiler::compile::CodegenOptions {
-            target: verter_compiler::compile::CompileTarget::META,
-            filename: Some(canonical.to_string()),
-            ..verter_compiler::compile::CodegenOptions::default()
-        };
-        let verter_opts = verter_compiler::compile::VerterCompileOptions {
-            extract_template_data: true,
-            ..verter_compiler::compile::VerterCompileOptions::default()
-        };
-        let compiled = verter_compiler::compile::compile_from_parsed(
+        // Compile with META target (script codegen + template data, no
+        // JS/TSX output) through the Vue-bridge compile half, re-using
+        // the carrier parse when no external src merged the source.
+        let raw = crate::parse::compile_vue_template_data(
+            canonical,
             &merged_source,
-            &parsed,
-            &options,
-            &verter_opts,
-            &alloc,
+            framework_parse.as_deref(),
+            src_blocks.is_empty(),
         );
 
-        // Bail on structural compile errors that would invalidate template data.
-        // Skip type-resolution errors (XInvalidMacroType, XMissingMacroType) since
-        // template slot extraction doesn't depend on type resolution.
-        let has_structural_errors = compiled.errors.iter().any(|d| {
-            matches!(
-                d.severity,
-                verter_compiler::compile::CompileDiagnosticSeverity::Error,
-            ) && !d.code.starts_with("XInvalidMacroType")
-                && !d.code.starts_with("XMissingMacroType")
-        });
-        if has_structural_errors {
-            return;
-        }
-
         // Convert RawTemplateData â†’ TemplateAnalysisSnapshot using existing converter
-        if let Some(raw) = compiled.template_data {
+        if let Some(raw) = raw {
             // Build converter inputs from snapshot (already computed, not stale entry)
             let imports: Vec<(String, String)> = snapshot
                 .imports
@@ -385,7 +299,7 @@ impl VerterHost {
             let hd = source_snap.downcast_data::<HostSourceData>()?;
             let file_language = hd.file_language.clone();
             let source = source_snap.source.clone();
-            let cached_parse = hd.cached_parse.clone();
+            let framework_parse = hd.framework_parse.clone();
 
             let scope = self.config.effective_scope();
             if file_language.is_vue()
@@ -419,24 +333,19 @@ impl VerterHost {
                 drop(source_snap);
 
                 let mut script_analysis = if !scope.needs_script_analysis() {
-                    if let Some(parsed) = cached_parse.as_deref() {
-                        crate::parse::build_script_analysis_from_parsed(parsed, &source)
-                    } else {
-                        crate::parse::build_script_analysis_from_source(&source)
-                    }
+                    crate::parse::build_script_analysis_for_artifact(
+                        framework_parse.as_deref(),
+                        &source,
+                    )
                 } else {
                     stored_script
                 };
                 let style_analyses = if !scope.needs_style_analysis() {
-                    if let Some(parsed) = cached_parse.as_deref() {
-                        Arc::new(crate::parse::build_style_analyses_from_parsed(
-                            parsed, &source, canonical,
-                        ))
-                    } else {
-                        Arc::new(crate::parse::build_style_analyses_from_source(
-                            &source, canonical,
-                        ))
-                    }
+                    Arc::new(crate::parse::build_style_analyses_for_artifact(
+                        framework_parse.as_deref(),
+                        &source,
+                        canonical,
+                    ))
                 } else {
                     stored_styles
                 };
@@ -1772,7 +1681,7 @@ impl VerterHost {
         self.build_template_analysis(
             canonical,
             &override_with_parse.source,
-            override_with_parse.cached_parse.clone(),
+            override_with_parse.framework_parse.clone(),
             &override_with_parse.parse.src_blocks,
             &override_with_parse.parse.external_requests,
             &override_with_parse.parse.script_analysis.imports,

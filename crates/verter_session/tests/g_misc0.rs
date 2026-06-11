@@ -58,6 +58,8 @@ mod env_hash_isolation;
 mod env_hashes_swap_atomically_on_snapshot_bump;
 #[path = "g_misc0/eviction_policy.rs"]
 mod eviction_policy;
+#[path = "g_misc0/framework_carrier_confinement.rs"]
+mod framework_carrier_confinement;
 #[path = "g_misc0/getcomponentmeta_fallthrough_audit_cleanliness.rs"]
 mod getcomponentmeta_fallthrough_audit_cleanliness;
 #[path = "g_misc0/golden_semantic_dump.rs"]

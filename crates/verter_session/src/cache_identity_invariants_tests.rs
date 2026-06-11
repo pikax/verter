@@ -592,7 +592,7 @@ fn route_owned_shallow_invalidated_by_content_hash_only() {
         project_generation: entry1.project_generation,
         raw_source: Arc::clone(&entry1.raw_source),
         eval_source: Arc::clone(&entry1.eval_source),
-        cached_parse: entry1.cached_parse.clone(),
+        framework_parse: entry1.framework_parse.clone(),
         snapshot: Arc::clone(&entry1.snapshot),
         external_type_analysis: Arc::clone(&entry1.external_type_analysis),
         shallow_state: Arc::clone(&entry1.shallow_state),
@@ -759,7 +759,7 @@ fn route_owned_shallow_tiered_gate_invalidates_on_workspace_generation_bump() {
         project_generation: host.project_type_store().current_project_generation(),
         raw_source: Arc::from(""),
         eval_source: Arc::from(""),
-        cached_parse: None,
+        framework_parse: None,
         snapshot: Arc::new(crate::types::FileAnalysisSnapshot::default()),
         external_type_analysis: Arc::new(
             verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(),
@@ -796,7 +796,7 @@ fn route_owned_shallow_tiered_gate_invalidates_on_workspace_generation_bump() {
         project_generation: host.project_type_store().current_project_generation(),
         raw_source: Arc::from(""),
         eval_source: Arc::from(""),
-        cached_parse: None,
+        framework_parse: None,
         snapshot: Arc::new(crate::types::FileAnalysisSnapshot::default()),
         external_type_analysis: Arc::new(
             verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(),

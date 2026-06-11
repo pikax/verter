@@ -153,6 +153,11 @@ impl VerterHost {
         // subsequent host constructions.
         crate::request_context::install_clear_tls_hook();
 
+        // Receive the Vue adapter's carrier registration proof (the
+        // `.vue` `LanguageRegistry` carrier-row token, D-ba) at host
+        // construction; the blessed `vue_parse()` accessor reuses it.
+        crate::typeinfo::adapters::vue::receive_vue_carrier_token();
+
         // Thread the host's configured `resolve_extensions` into the
         // workspace at construction so reverse-dep stem stripping
         // honours the host policy from the start.

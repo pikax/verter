@@ -153,13 +153,13 @@ impl VerterHost {
         canonical_id: &str,
     ) -> Option<(
         Arc<str>,
-        Option<Arc<verter_compiler::parser::types::ParsedSfc>>,
+        Option<Arc<verter_language::FrameworkParseArtifact>>,
         Hash16,
     )> {
         let entry = self.ensure_route_owned_shallow_entry(canonical_id)?;
         Some((
             Arc::clone(&entry.raw_source),
-            entry.cached_parse.clone(),
+            entry.framework_parse.clone(),
             entry.whole_hash,
         ))
     }
@@ -300,18 +300,20 @@ impl VerterHost {
                     return Err(());
                 }
 
-                // STEP 6 — cold parse + analysis.
-                let cached_parse = canonical_id.ends_with(".vue").then(|| {
-                    Arc::new(verter_compiler::compile::parse_sfc(&raw_source, None, None))
-                });
+                // STEP 6 — cold parse + analysis. The cold parse routes
+                // through the Vue carrier producer (wrapping into the
+                // framework-neutral artifact at parse time).
+                let framework_parse = canonical_id
+                    .ends_with(".vue")
+                    .then(|| crate::parse::build_vue_parse_artifact_from_source(&raw_source));
                 let eval_source = Arc::<str>::from(Self::build_eval_script_source(
                     raw_source.as_ref(),
-                    cached_parse.as_deref(),
+                    framework_parse.as_deref(),
                 ));
                 let snapshot = Arc::new(self.build_route_owned_snapshot_from_source_state(
                     canonical_id,
                     &raw_source,
-                    cached_parse.as_deref(),
+                    framework_parse.as_deref(),
                     whole_hash,
                 ));
                 let (eval_env, external_type_analysis) = self
@@ -319,7 +321,7 @@ impl VerterHost {
                         canonical_id,
                         whole_hash,
                         raw_source.as_ref(),
-                        cached_parse.as_deref(),
+                        framework_parse.as_deref(),
                         &eval_source,
                     );
                 // Canonicalize the `export *` wildcard edges through the SAME
@@ -381,7 +383,7 @@ impl VerterHost {
                     project_generation,
                     raw_source: Arc::clone(&raw_source),
                     eval_source,
-                    cached_parse,
+                    framework_parse,
                     snapshot,
                     external_type_analysis,
                     shallow_state,
@@ -679,15 +681,15 @@ impl VerterHost {
                 if self.store_view_allows_current_whole_hash(dep_canonical, state.whole_hash) {
                     let eval_source = Arc::<str>::from(Self::build_eval_script_source(
                         state.source.as_ref(),
-                        state.cached_parse.as_deref(),
+                        state.framework_parse.as_deref(),
                     ));
                     component_meta_trace_custom!(
                         "read_dep_source_for_type_resolution_result",
                         format!(
-                            "owner={} source=effective-file-state bytes={} has_cached_parse={} whole_hash={:?}",
+                            "owner={} source=effective-file-state bytes={} has_parse_artifact={} whole_hash={:?}",
                             dep_canonical,
                             eval_source.len(),
-                            state.cached_parse.is_some(),
+                            state.framework_parse.is_some(),
                             state.whole_hash,
                         ),
                     );
@@ -700,10 +702,10 @@ impl VerterHost {
         component_meta_trace_custom!(
             "read_dep_source_for_type_resolution_result",
             format!(
-                "owner={} source=module-facts bytes={} has_cached_parse={} whole_hash={:?}",
+                "owner={} source=module-facts bytes={} has_parse_artifact={} whole_hash={:?}",
                 dep_canonical,
                 eval_source.len(),
-                facts.cached_parse.is_some(),
+                facts.framework_parse.is_some(),
                 facts.whole_hash,
             )
         );

@@ -82,7 +82,7 @@ fn empty_input() -> CompileInput {
         script_imports: Vec::new(),
         script_macros: Vec::new(),
         script_bindings: Vec::new(),
-        cached_parse: None,
+        framework_parse: None,
         style_v_bind_vars: Vec::new(),
     }
 }

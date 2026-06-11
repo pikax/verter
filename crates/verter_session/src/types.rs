@@ -1827,8 +1827,9 @@ pub(crate) struct CompileInput {
     /// Local/exported bindings from the effective script analysis.
     /// Used when converting template compiler metadata into host analysis.
     pub(crate) script_bindings: Vec<verter_semantic::analysis::AnalyzedBinding>,
-    /// Cached parsed SFC from upsert, reused during compilation to avoid re-parsing.
-    pub(crate) cached_parse: Option<Arc<verter_compiler::parser::types::ParsedSfc>>,
+    /// Framework-neutral parse artifact from upsert, reused during
+    /// compilation to avoid re-parsing.
+    pub(crate) framework_parse: Option<Arc<verter_language::FrameworkParseArtifact>>,
     /// Binding names referenced in style `v-bind()` expressions.
     /// Extracted from `FileEntry.style_analyses` at cache-miss time.
     pub(crate) style_v_bind_vars: Vec<String>,
@@ -2086,7 +2087,7 @@ pub(crate) struct EffectiveFileState {
     /// scheduler (or the content override) holds. Reading it is a refcount
     /// bump; consumers that need an owned copy call `.as_ref().clone()`.
     pub(crate) script_analysis: std::sync::Arc<verter_semantic::analysis::ScriptAnalysisSnapshot>,
-    pub(crate) cached_parse: Option<std::sync::Arc<verter_compiler::parser::types::ParsedSfc>>,
+    pub(crate) framework_parse: Option<std::sync::Arc<verter_language::FrameworkParseArtifact>>,
     pub(crate) whole_hash: Hash16,
 }
 
@@ -2100,7 +2101,7 @@ pub(crate) struct EffectiveFileState {
 pub(crate) struct ContentOverrideWithParse {
     pub(crate) layer: ContentOverrideLayer,
     pub(crate) parse: ParseSnapshot,
-    pub(crate) cached_parse: Option<Arc<verter_compiler::parser::types::ParsedSfc>>,
+    pub(crate) framework_parse: Option<Arc<verter_language::FrameworkParseArtifact>>,
     pub(crate) source: Arc<str>,
 }
 
@@ -2402,7 +2403,7 @@ pub struct MetaProvenance {
     pub dep_resolution_calls: std::sync::atomic::AtomicU64,
     pub imported_macro_declaration_builds: std::sync::atomic::AtomicU64,
     pub route_owned_snapshot_cache_hits: std::sync::atomic::AtomicU64,
-    pub route_owned_snapshot_cached_parse_hits: std::sync::atomic::AtomicU64,
+    pub route_owned_snapshot_parse_artifact_hits: std::sync::atomic::AtomicU64,
 
     // ── Contention instrumentation ──────────────────────────────────────
     /// `VerterHost::ensure_loaded` invocation count.
@@ -2525,7 +2526,7 @@ impl Default for MetaProvenance {
             dep_resolution_calls: std::sync::atomic::AtomicU64::new(0),
             imported_macro_declaration_builds: std::sync::atomic::AtomicU64::new(0),
             route_owned_snapshot_cache_hits: std::sync::atomic::AtomicU64::new(0),
-            route_owned_snapshot_cached_parse_hits: std::sync::atomic::AtomicU64::new(0),
+            route_owned_snapshot_parse_artifact_hits: std::sync::atomic::AtomicU64::new(0),
             ensure_loaded_calls: std::sync::atomic::AtomicU64::new(0),
             ensure_loaded_wait_ns: std::sync::atomic::AtomicU64::new(0),
             ensure_loaded_work_ns: std::sync::atomic::AtomicU64::new(0),
@@ -2671,8 +2672,8 @@ impl std::fmt::Debug for MetaProvenance {
                 &self.route_owned_snapshot_cache_hits.load(Relaxed),
             )
             .field(
-                "route_owned_snapshot_cached_parse_hits",
-                &self.route_owned_snapshot_cached_parse_hits.load(Relaxed),
+                "route_owned_snapshot_parse_artifact_hits",
+                &self.route_owned_snapshot_parse_artifact_hits.load(Relaxed),
             )
             .field(
                 "ensure_loaded_calls",
@@ -2781,8 +2782,8 @@ impl MetaProvenance {
             dep_resolution_calls: self.dep_resolution_calls.load(Relaxed),
             imported_macro_declaration_builds: self.imported_macro_declaration_builds.load(Relaxed),
             route_owned_snapshot_cache_hits: self.route_owned_snapshot_cache_hits.load(Relaxed),
-            route_owned_snapshot_cached_parse_hits: self
-                .route_owned_snapshot_cached_parse_hits
+            route_owned_snapshot_parse_artifact_hits: self
+                .route_owned_snapshot_parse_artifact_hits
                 .load(Relaxed),
             ensure_loaded_calls: self.ensure_loaded_calls.load(Relaxed),
             ensure_loaded_wait_ns: self.ensure_loaded_wait_ns.load(Relaxed),
@@ -2870,7 +2871,7 @@ impl MetaProvenance {
         self.dep_resolution_calls.store(0, Relaxed);
         self.imported_macro_declaration_builds.store(0, Relaxed);
         self.route_owned_snapshot_cache_hits.store(0, Relaxed);
-        self.route_owned_snapshot_cached_parse_hits
+        self.route_owned_snapshot_parse_artifact_hits
             .store(0, Relaxed);
         self.ensure_loaded_calls.store(0, Relaxed);
         self.ensure_loaded_wait_ns.store(0, Relaxed);
@@ -3008,7 +3009,7 @@ pub struct MetaProvenanceSnapshot {
     pub dep_resolution_calls: u64,
     pub imported_macro_declaration_builds: u64,
     pub route_owned_snapshot_cache_hits: u64,
-    pub route_owned_snapshot_cached_parse_hits: u64,
+    pub route_owned_snapshot_parse_artifact_hits: u64,
     /// Contention instrumentation counters surfaced through the
     /// host's `MetaProvenance`.
     pub ensure_loaded_calls: u64,

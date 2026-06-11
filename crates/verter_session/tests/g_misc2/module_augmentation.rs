@@ -74,7 +74,7 @@ fn build_indexed_with_source(raw: &str) -> Arc<IndexedReady> {
         edge_generation: 0,
         raw_source: Arc::from(raw),
         eval_source: Arc::from(""),
-        cached_parse: None,
+        framework_parse: None,
         script_analysis: None,
         export_signatures: None,
         snapshot: Arc::new(verter_session::FileAnalysisSnapshot::default()),

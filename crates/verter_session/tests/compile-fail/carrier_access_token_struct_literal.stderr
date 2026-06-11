@@ -1,0 +1,9 @@
+error[E0451]: fields `adapter_id` and `_private` of struct `CarrierAccessToken` are private
+ --> tests/compile-fail/carrier_access_token_struct_literal.rs:8:9
+  |
+7 |     let _token = verter_language::CarrierAccessToken {
+  |                  ----------------------------------- in this type
+8 |         adapter_id: verter_language::FrameworkAdapterId::new("forged"),
+  |         ^^^^^^^^^^ private field
+9 |         _private: (),
+  |         ^^^^^^^^ private field

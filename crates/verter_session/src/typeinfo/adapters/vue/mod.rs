@@ -20,11 +20,13 @@
 //!   `AnalyzedPropField` / `AnalyzedEmitField` / `AnalyzedSlotField` DTOs from
 //!   the typeinfo surface + macro-analyzer facts.
 
+pub mod parse_access;
 pub mod public_type;
 pub mod runtime_ctor;
 pub mod store;
 pub mod surface;
 
+pub(crate) use parse_access::{receive_vue_carrier_token, vue_parse};
 pub use surface::VueMacroSurface;
 // The three macro-surface normalizers are consumed inside `surface.rs` itself
 // (the `vue_macro_dtos_with_ctx` DTO core) and, via this re-export, by the

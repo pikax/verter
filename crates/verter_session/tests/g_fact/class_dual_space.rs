@@ -51,7 +51,7 @@ fn indexed_from_source(source: &str) -> Arc<IndexedReady> {
         edge_generation: 0,
         raw_source: Arc::from(source),
         eval_source: Arc::from(source),
-        cached_parse: None,
+        framework_parse: None,
         script_analysis: None,
         export_signatures: None,
         snapshot: Arc::new(verter_session::FileAnalysisSnapshot::default()),

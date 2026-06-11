@@ -66,7 +66,10 @@ pub(crate) use test_guards::{
     forbid_route_frontier_for_tests, route_frontier_forbidden_for_current_thread,
     RouteFrontierGuard,
 };
-pub(crate) use vue_script_extract::{extract_vue_script_content, template_converter_inputs};
+pub(crate) use vue_script_extract::{
+    apply_sfc_script_setup_type_params, extract_vue_script_content, populate_sfc_blocks_sidecar,
+    sfc_script_setup_type_params, template_converter_inputs,
+};
 
 // Test-only knob: arm the compile-tier producer's fact-injection slot.
 // Re-exported through the parent module so `crate::for_tests` can

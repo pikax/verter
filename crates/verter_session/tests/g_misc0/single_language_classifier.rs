@@ -57,7 +57,6 @@ const CARRIER_LITERAL_ALLOWLIST: &[&str] = &[
     // shrink as each surface moves behind the Vue carrier accessors).
     "crates/verter_session/src/host_manage.rs",
     "crates/verter_session/src/host_manage/analysis_io.rs",
-    "crates/verter_session/src/host_manage/component_meta_extract.rs",
     "crates/verter_session/src/host_manage/eval_env.rs",
     "crates/verter_session/src/host_manage/prepared_decl.rs",
     "crates/verter_session/src/host_resolve/frontier_engine.rs",

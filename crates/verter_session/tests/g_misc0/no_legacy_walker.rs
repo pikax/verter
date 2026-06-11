@@ -221,6 +221,18 @@ const RETIRED_SYMBOLS: &[&str] = &[
     "ExportGraphFileKind",
     "ffi_file_kind_to_host",
     "is_vue_file",
+    // Framework parse-artifact carrier substrate (D-af): every production
+    // `cached_parse` carrier field — `IndexedReady`,
+    // `RouteOwnedShallowEntry`, `HostSourceData`, `CompileInput`,
+    // `EffectiveFileState`, `ContentOverrideWithParse`,
+    // `ExternalTypeResolutionInputs` — plus the producer/threading
+    // locals and the `route_owned_snapshot_cached_parse_hits`
+    // provenance-counter family are renamed/replaced by the
+    // framework-neutral `framework_parse:
+    // Option<Arc<FrameworkParseArtifact>>` payload. Re-introducing
+    // the token would revive a Vue-typed parse carrier on the
+    // neutral session surface.
+    "cached_parse",
     // String-resolver eradication: the typed-IR-only
     // resolver rule deletes every hand-rolled type-text splitter,
     // source-slicing helper, `parse_type_annotation` reparse fallback,

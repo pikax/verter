@@ -28,6 +28,8 @@ pub mod strip_types;
 
 pub mod compile;
 
+pub mod framework_common;
+
 #[cfg(feature = "bench")]
 pub mod script;
 #[cfg(not(feature = "bench"))]

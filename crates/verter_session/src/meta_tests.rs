@@ -16830,7 +16830,7 @@ const props = defineProps<ButtonProps>()
 /// `fill_missing_component_meta_prop_descriptions_from_imported_roots` to
 /// run.
 #[test]
-fn imported_jsdoc_enrichment_uses_cached_parse_and_does_not_reparse_source() {
+fn imported_jsdoc_enrichment_uses_parse_artifact_and_does_not_reparse_source() {
     let project = make_project();
     project
         .upsert_base(

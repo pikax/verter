@@ -778,7 +778,7 @@ impl VerterHost {
                 .unwrap_or(0.0);
             let owner_eval_source = VerterHost::build_eval_script_source(
                 &facts.raw_source,
-                facts.cached_parse.as_deref(),
+                facts.framework_parse.as_deref(),
             );
             let direct_import_started = audit_enabled.then(Instant::now);
             let direct_dependency_candidates =
@@ -3069,21 +3069,21 @@ impl VerterHost {
                 return Some(snapshot);
             }
 
-            if let Some((raw_source, cached_parse, whole_hash)) =
+            if let Some((raw_source, framework_parse, whole_hash)) =
                 self.cached_route_owned_eval_state(canonical)
             {
                 if !self.store_view_allows_current_whole_hash(canonical, whole_hash) {
                     return None;
                 }
-                if cached_parse.is_some() {
+                if framework_parse.is_some() {
                     self.provenance
-                        .route_owned_snapshot_cached_parse_hits
+                        .route_owned_snapshot_parse_artifact_hits
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
                 let mut snapshot = self.build_snapshot_from_source_state(
                     canonical,
                     &raw_source,
-                    cached_parse.as_deref(),
+                    framework_parse.as_deref(),
                 );
                 self.resolve_snapshot_imports(canonical, &mut snapshot);
                 self.enrich_destructured_bindings(&mut snapshot);

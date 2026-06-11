@@ -4,6 +4,7 @@ use std::sync::OnceLock;
 
 use crate::ids::CapabilityId;
 use crate::language::{FileLanguage, ScriptSourceType};
+use crate::parse_artifact::CarrierAccessToken;
 
 /// A project-gated candidate classification.
 ///
@@ -60,6 +61,35 @@ impl LanguageRow {
             classification: RowClassification::Gated(candidate),
         }
     }
+
+    /// A framework CARRIER row. The SOLE [`CarrierAccessToken`] minting
+    /// point (D-ba): the row's token is minted here, during carrier-row
+    /// construction, and returned exactly ONCE to the
+    /// registry-construction caller as the carrier row's registration
+    /// proof. Consumers (adapter descriptors, the session's blessed
+    /// `vue_parse()` accessor) RECEIVE that token; none constructs one.
+    ///
+    /// Crate-private: carrier rows are static built-in registration
+    /// data owned by this crate. Keeping the minting row constructor
+    /// out of the public API means downstream crates cannot mint a
+    /// token for an ARBITRARY adapter id — the public receipt channel
+    /// ([`LanguageRegistry::__built_in_with_carrier_tokens`]) hands out
+    /// proofs only for the fixed built-in carrier rows.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `language` is not a framework carrier — carrier rows
+    /// are static built-in registration data, so a non-carrier language
+    /// here is a programming error, not an input condition.
+    pub(crate) fn carrier(extension: &str, language: FileLanguage) -> (Self, CarrierAccessToken) {
+        let adapter_id = language
+            .adapter_id()
+            .cloned()
+            .filter(|_| language.is_framework_carrier())
+            .expect("LanguageRow::carrier requires a framework CARRIER language");
+        let token = crate::parse_artifact::mint_carrier_access_token(adapter_id);
+        (Self::fixed(extension, language), token)
+    }
 }
 
 /// Result of pure static classification.
@@ -112,11 +142,37 @@ impl LanguageRegistry {
     }
 
     /// The built-in rows: the TS/JS script family plus the `.vue` and
-    /// `.svelte` framework carriers.
+    /// `.svelte` framework carriers. Carrier registration proofs are
+    /// dropped; the blessed adapter receipt sites use the hidden
+    /// [`Self::__built_in_with_carrier_tokens`] channel.
     pub fn built_in() -> Self {
-        Self::new(vec![
-            LanguageRow::fixed("vue", FileLanguage::vue()),
-            LanguageRow::fixed("svelte", FileLanguage::svelte()),
+        Self::__built_in_with_carrier_tokens().0
+    }
+
+    /// The built-in rows plus the carrier rows' registration proofs
+    /// ([`CarrierAccessToken`]s, one per carrier row, in row order).
+    ///
+    /// The tokens are minted during carrier-row construction
+    /// ([`LanguageRow::carrier`]) and returned exactly once, here, to
+    /// the registry-construction caller. The host receives its adapter
+    /// tokens through this channel at host construction; there is no
+    /// by-id token lookup and no arbitrary-id mint channel.
+    ///
+    /// Hidden, not `pub(crate)`: the sanctioned receipt site lives in
+    /// `verter_session` (the Vue adapter's `vue_parse()` accessor), so
+    /// the channel must cross the crate seam — a literal `pub(crate)`
+    /// cannot compile there. Carrier privacy is public-hidden +
+    /// token-gated + statically guarded: the
+    /// `carrier_access_token_minted_only_in_verter_language` guard
+    /// confines every call site of this channel to the blessed receipt
+    /// allowlist, exactly like the `__carrier_downcast_*` helpers.
+    #[doc(hidden)]
+    pub fn __built_in_with_carrier_tokens() -> (Self, Vec<CarrierAccessToken>) {
+        let (vue_row, vue_token) = LanguageRow::carrier("vue", FileLanguage::vue());
+        let (svelte_row, svelte_token) = LanguageRow::carrier("svelte", FileLanguage::svelte());
+        let registry = Self::new(vec![
+            vue_row,
+            svelte_row,
             LanguageRow::fixed("d.ts", FileLanguage::script(ScriptSourceType::Dts)),
             LanguageRow::fixed("d.mts", FileLanguage::script(ScriptSourceType::Dts)),
             LanguageRow::fixed("d.cts", FileLanguage::script(ScriptSourceType::Dts)),
@@ -128,7 +184,8 @@ impl LanguageRegistry {
             LanguageRow::fixed("mjs", FileLanguage::script(ScriptSourceType::Js)),
             LanguageRow::fixed("cjs", FileLanguage::script(ScriptSourceType::Js)),
             LanguageRow::fixed("jsx", FileLanguage::script(ScriptSourceType::Jsx)),
-        ])
+        ]);
+        (registry, vec![vue_token, svelte_token])
     }
 
     /// The process-wide built-in registry.

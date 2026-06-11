@@ -4208,7 +4208,7 @@ fn route_owned_entry_with_whole_hash(
         project_generation: host.project_type_store().current_project_generation(),
         raw_source: Arc::from(""),
         eval_source: Arc::from(""),
-        cached_parse: None,
+        framework_parse: None,
         snapshot: Arc::new(crate::types::FileAnalysisSnapshot::default()),
         external_type_analysis: Arc::clone(&analysis),
         shallow_state: Arc::new(crate::resolver_core::shallow_file_state::ShallowFileState {

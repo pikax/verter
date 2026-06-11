@@ -630,3 +630,7 @@ impl std::fmt::Debug for VerterHost {
 #[cfg(test)]
 #[path = "lib_tests.rs"]
 mod lib_tests;
+
+#[cfg(test)]
+#[path = "framework_parse_characterization_tests.rs"]
+mod framework_parse_characterization_tests;

@@ -305,10 +305,10 @@ fn mutate_lazy_analysis_source(host: &VerterHost) {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn clear_cached_parse(host: &VerterHost) {
+fn clear_framework_parse(host: &VerterHost) {
     let mut files = crate::shared::write_lock(&host.files);
     let entry = files.get_mut("App.vue").expect("App.vue should exist");
-    entry.cached_parse = None;
+    entry.framework_parse = None;
 }
 
 // Legacy trace-line formatting tests 5 ( clean-cut rule). `format_component_meta_trace_line`,
@@ -317,7 +317,7 @@ fn clear_cached_parse(host: &VerterHost) {
 // in `component_meta_audit/structured_event.rs`.
 
 #[test]
-fn build_eval_script_source_without_cached_parse_still_extracts_script_blocks() {
+fn build_eval_script_source_without_parse_artifact_still_extracts_script_blocks() {
     let source = r#"<script lang="ts">
 interface Props {
   label: string
@@ -1737,7 +1737,7 @@ fn store_view_route_owned_imported_seed_reuses_cached_source_for_snapshot_and_en
 }
 
 #[test]
-fn route_owned_imported_vue_snapshot_reuses_cached_parse() {
+fn route_owned_imported_vue_snapshot_reuses_parse_artifact() {
     let ws = Arc::new(CountingWorkspace::new());
     let canonical_id = "/workspace/node_modules/pkg/dist/Button.vue";
     ws.inject_file(
@@ -1784,7 +1784,7 @@ const props = defineProps<{ label: string }>()
         "route-owned imported Vue snapshots should reuse cached raw snapshot state instead of rebuilding from source",
     );
     assert_eq!(
-        provenance.route_owned_snapshot_cached_parse_hits, 0,
+        provenance.route_owned_snapshot_parse_artifact_hits, 0,
         "route-owned imported Vue snapshots should no longer fall back to rebuilding from the cached parsed SFC",
     );
 }
@@ -1828,7 +1828,7 @@ fn route_owned_imported_non_sfc_snapshot_reuses_cached_snapshot_state() {
         "route-owned imported declaration snapshots should reuse cached raw snapshot state instead of rebuilding from source"
     );
     assert_eq!(
-        provenance.route_owned_snapshot_cached_parse_hits, 0,
+        provenance.route_owned_snapshot_parse_artifact_hits, 0,
         "non-SFC route-owned snapshots should not need the cached SFC parse fallback"
     );
 }
@@ -2092,8 +2092,8 @@ const answer: string = '42'
         "the promoted dependency cache entry should keep the extracted type-resolution source",
     );
     assert!(
-        promoted.cached_parse.is_some(),
-        "the promoted Vue dependency cache entry should retain the cached SFC parse",
+        promoted.framework_parse.is_some(),
+        "the promoted Vue dependency cache entry should retain the carrier parse artifact",
     );
     // In the new IndexedReady model, ensure_indexed_ready eagerly builds a
     // full snapshot, so we just verify the facts are present and well-formed.
@@ -2142,7 +2142,7 @@ export interface Props extends Base {
     );
     // In IndexedReady, snapshot is Arc<FileAnalysisSnapshot> (non-optional).
     assert!(
-        first.cached_parse.is_some(),
+        first.framework_parse.is_some(),
         "cached Vue imported dependency entry should retain parse state",
     );
     assert!(
@@ -2950,13 +2950,13 @@ fn get_analysis_missing_file_unresolved() {
 }
 
 #[test]
-fn get_analysis_uses_cached_parse_for_lazy_analysis() {
+fn get_analysis_uses_parse_artifact_for_lazy_analysis() {
     let host = make_lazy_host();
     upsert_vue(&host, "App.vue", LAZY_ANALYSIS_SFC);
 
     // On the scheduler path, source is immutable in the scheduler snapshot,
     // so mutating host.files has no effect. The scheduler path reads from
-    // HostSourceData.cached_parse directly. We just verify get_analysis()
+    // HostSourceData.framework_parse directly. We just verify get_analysis()
     // returns correct lazy-recomputed data with AnalysisLevel::None.
     #[cfg(target_arch = "wasm32")]
     mutate_lazy_analysis_source(&host);
@@ -2990,15 +2990,15 @@ fn get_analysis_uses_cached_parse_for_lazy_analysis() {
 }
 
 #[test]
-fn get_analysis_falls_back_when_cached_parse_missing() {
+fn get_analysis_falls_back_when_parse_artifact_missing() {
     let host = make_lazy_host();
     upsert_vue(&host, "App.vue", LAZY_ANALYSIS_SFC);
 
-    // On the scheduler path, cached_parse is immutable in HostSourceData
+    // On the scheduler path, framework_parse is immutable in HostSourceData
     // and always present for Vue SFCs. The scheduler path handles both
-    // cached_parse present and absent cases. We just verify correctness.
+    // artifact present and absent cases. We just verify correctness.
     #[cfg(target_arch = "wasm32")]
-    clear_cached_parse(&host);
+    clear_framework_parse(&host);
 
     let analysis = host.get_analysis("App.vue").unwrap();
 
@@ -5672,7 +5672,7 @@ fn route_owned_edge_gate_stales_wildcard_entry_after_dependency_set_change() {
             project_generation,
             raw_source: Arc::from(""),
             eval_source: Arc::from(""),
-            cached_parse: None,
+            framework_parse: None,
             snapshot: Arc::new(crate::types::FileAnalysisSnapshot::default()),
             external_type_analysis: Arc::clone(&analysis),
             shallow_state: Arc::new(ShallowFileState {
@@ -11485,9 +11485,9 @@ defineProps<SharedProps>()
 fn source_type_is_stable_across_callsites_for_same_canonical() {
     // Single-authority invariant for `source_type`:
     //
-    // A regression that returned `SourceType::ts()` when `cached_parse: None`
-    // but `sfc_script_source_type(parsed, raw_source)` when
-    // `cached_parse: Some(parsed)` would diverge for a `lang="tsx"` SFC —
+    // A regression that returned `SourceType::ts()` when `framework_parse: None`
+    // but the carrier `<script lang>` resolution when
+    // `framework_parse: Some(artifact)` would diverge for a `lang="tsx"` SFC —
     // different cache slots for the same `(canonical, whole_hash)`.
     //
     // The scheduler computes `source_type` once at `execute_source` time with
@@ -11511,7 +11511,7 @@ export type Props = { render: typeof Button }
         .expect("source data should be HostSourceData");
 
     // HostSourceData carries the authoritative source_type — computed once at parse time
-    // using the full parsed SFC, not reconstructed from raw_source + optional cached_parse.
+    // using the full parse artifact, not reconstructed from raw_source + optional artifact.
     assert!(
         hd.source_type.is_jsx(),
         "HostSourceData.source_type should be tsx (JSX-bearing) for lang=tsx SFC, got {:?}",

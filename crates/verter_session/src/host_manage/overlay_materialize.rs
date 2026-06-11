@@ -351,17 +351,17 @@ impl VerterHost {
         // candidate is published as a multi-candidate sibling of the
         // base via `insert_artifacts`.
         let raw_source: Arc<str> = Arc::clone(&overlay_source);
-        let cached_parse: Option<Arc<verter_compiler::parser::types::ParsedSfc>> = None;
+        let framework_parse: Option<Arc<verter_language::FrameworkParseArtifact>> = None;
         let whole_hash = overlay_whole_hash;
         let snapshot = Arc::new(self.build_snapshot_from_source_state(
             analysis_canonical_id,
             &raw_source,
-            cached_parse.as_deref(),
+            framework_parse.as_deref(),
         ));
 
         let eval_source = Arc::<str>::from(Self::build_eval_script_source(
             raw_source.as_ref(),
-            cached_parse.as_deref(),
+            framework_parse.as_deref(),
         ));
         let declaration_file = analysis_canonical_id.ends_with(".d.ts")
             || analysis_canonical_id.ends_with(".d.mts")
@@ -489,8 +489,7 @@ impl VerterHost {
         let external_type_analysis = self.build_external_type_analysis(
             analysis_canonical_id,
             whole_hash,
-            raw_source.as_ref(),
-            cached_parse.as_deref(),
+            framework_parse.as_deref(),
             &eval_source,
         );
 
@@ -570,7 +569,7 @@ impl VerterHost {
             edge_generation,
             raw_source: Arc::clone(&raw_source),
             eval_source: Arc::clone(&eval_source),
-            cached_parse,
+            framework_parse,
             script_analysis,
             export_signatures,
             snapshot,

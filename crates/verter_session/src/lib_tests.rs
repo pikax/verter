@@ -2990,7 +2990,7 @@ mod phase1_structural_tests {
     use crate::types::{DependencyState, DerivedRawState, ProfileState};
 
     #[test]
-    fn test_source_data_has_cached_parse() {
+    fn test_source_data_has_framework_parse() {
         let host = VerterHost::new_standalone(HostConfig::default());
         let _ = upsert_vue(
             &host,
@@ -3008,13 +3008,13 @@ mod phase1_structural_tests {
             .downcast_data::<HostSourceData>()
             .expect("should be HostSourceData");
         assert!(
-            hd.cached_parse.is_some(),
-            "Vue SFC should have cached_parse"
+            hd.framework_parse.is_some(),
+            "Vue SFC should carry the framework parse artifact"
         );
     }
 
     #[test]
-    fn test_source_data_non_sfc_no_cached_parse() {
+    fn test_source_data_non_sfc_no_framework_parse() {
         let host = VerterHost::new_standalone(HostConfig::default());
         let _ = host
             .upsert(UpsertRequest {
@@ -3035,8 +3035,8 @@ mod phase1_structural_tests {
             .downcast_data::<HostSourceData>()
             .expect("should be HostSourceData");
         assert!(
-            hd.cached_parse.is_none(),
-            "Non-SFC should NOT have cached_parse"
+            hd.framework_parse.is_none(),
+            "Non-SFC should NOT carry a framework parse artifact"
         );
     }
 
@@ -3222,7 +3222,7 @@ mod upsert_compile_cache_tests {
 
         // HostSourceData must be populated
         let hd = snap.downcast_data::<HostSourceData>().unwrap();
-        assert!(hd.cached_parse.is_some());
+        assert!(hd.framework_parse.is_some());
         assert_eq!(hd.file_language, FileLanguage::vue());
     }
 
@@ -3304,7 +3304,7 @@ mod upsert_compile_cache_tests {
                         script: None,
                     },
                     parse: crate::parse::parse_non_sfc_snapshot("/src/App.vue", ""),
-                    cached_parse: None,
+                    framework_parse: None,
                     source: Arc::from(""),
                 },
             );

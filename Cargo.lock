@@ -3825,6 +3825,7 @@ dependencies = [
  "sha2",
  "smallvec",
  "verter_audit",
+ "verter_language",
  "verter_parser",
  "verter_span",
  "web-time",
@@ -3861,6 +3862,9 @@ dependencies = [
 [[package]]
 name = "verter_language"
 version = "0.0.1-beta.1"
+dependencies = [
+ "verter_span",
+]
 
 [[package]]
 name = "verter_lsp"

@@ -66,7 +66,6 @@ pub(crate) use self::component_meta_extract::{
 // `meta_tests.rs` via the `crate::host_manage::*` path. Gated `#[cfg(test)]`
 // so the non-test build surface stays minimal.
 #[cfg(test)]
-pub(crate) use self::component_meta_extract::populate_sfc_blocks_sidecar;
 
 /// Resolve a relative import specifier to a canonical ID.
 ///
@@ -436,8 +435,7 @@ impl verter_compiler::utils::oxc::vue::named_type_keys::NamedTypeCache
 
 #[derive(Clone, Debug)]
 pub(crate) struct ExternalTypeResolutionInputs {
-    pub(crate) raw_source: Arc<str>,
-    pub(crate) cached_parse: Option<Arc<verter_compiler::parser::types::ParsedSfc>>,
+    pub(crate) framework_parse: Option<Arc<verter_language::FrameworkParseArtifact>>,
     pub(crate) whole_hash: Hash16,
     pub(crate) eval_source: Arc<str>,
     pub(crate) analysis:

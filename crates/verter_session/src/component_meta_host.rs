@@ -771,7 +771,7 @@ fn extract_component_meta_from_resolved_with_evaluated(
     }
 
     crate::host_manage::populate_public_instance_sidecar(&mut meta);
-    crate::host_manage::populate_sfc_blocks_sidecar(host, canonical_id, &mut meta);
+    crate::host_resolve::populate_sfc_blocks_sidecar(host, canonical_id, &mut meta);
     meta
 }
 
