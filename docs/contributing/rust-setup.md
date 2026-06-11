@@ -9,14 +9,15 @@ Guide for setting up Rust development for Verter.
 ## Prerequisites
 
 - **Rust stable toolchain** via [rustup](https://rustup.rs/)
-- **wasm-pack** for WASM builds: `cargo install wasm-pack`
+- **WASM target** for browser builds: `rustup target add wasm32-unknown-unknown`
+- **wasm-bindgen CLI** for WASM glue generation: `cargo install wasm-bindgen-cli --version 0.2.122 --locked`
 
 Verify your installation:
 
 ```bash
 rustc --version
 cargo --version
-wasm-pack --version   # only needed for WASM builds
+wasm-bindgen --version   # only needed for WASM builds
 ```
 
 ## Project Structure
@@ -78,8 +79,9 @@ cargo build -p verter_lsp
 # Build LSP binary (release, optimized)
 cargo build --release -p verter_lsp
 
-# Build WASM (via wasm-pack)
-wasm-pack build crates/verter_wasm --target web
+# Build WASM (raw cargo build plus wasm-bindgen glue; `pnpm run build:wasm` adds a wasm-opt pass)
+cargo build --release -p verter_wasm --target wasm32-unknown-unknown
+wasm-bindgen --target web --out-dir packages/wasm/wasm --out-name verter_wasm target/wasm32-unknown-unknown/release/verter_wasm.wasm
 ```
 
 ### Quick Rebuild for Native Bindings

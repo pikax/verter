@@ -289,9 +289,9 @@ Install the Verter VS Code extension from the marketplace (coming soon).
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source "$HOME/.cargo/env"
 
-# 2. Add WASM target and install wasm-pack
+# 2. Add WASM target and install wasm-bindgen CLI
 rustup target add wasm32-unknown-unknown
-cargo install wasm-pack
+cargo install wasm-bindgen-cli --version 0.2.122 --locked
 
 # 3. Install pnpm (if not already installed, requires Node.js 18+)
 corepack enable
@@ -314,8 +314,8 @@ pnpm package
 - **Node.js** 18+
 - **pnpm** 10+
 - **Rust** toolchain (for building native/WASM bindings) — install via [rustup](https://rustup.rs/)
-- **wasm-pack** (for WASM builds) — `cargo install wasm-pack`
 - **wasm32 target** — `rustup target add wasm32-unknown-unknown`
+- **wasm-bindgen CLI** (for WASM builds) — `cargo install wasm-bindgen-cli --version 0.2.122 --locked`
 
 ### Commands
 

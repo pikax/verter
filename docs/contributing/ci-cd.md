@@ -89,7 +89,7 @@ validate
 
 Triggered on push to `main` when `crates/**`, `packages/wasm/**`, or `packages/playground/**` change.
 
-1. Builds WASM via `wasm-pack`
+1. Builds WASM via `cargo build --target wasm32-unknown-unknown`, `wasm-bindgen`, and a `wasm-opt` size pass
 2. Smoke tests the WASM binary
 3. Uploads commit-specific WASM assets to the `nightly` GitHub Release
 4. Updates `nightly-manifest.json` (keeps last 50 commits)

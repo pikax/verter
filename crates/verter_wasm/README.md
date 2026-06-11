@@ -109,12 +109,17 @@ All types use `#[serde(rename_all = "camelCase")]` for JavaScript-friendly field
 ### Prerequisites
 
 - Rust toolchain (stable)
-- [`wasm-pack`](https://rustwasm.github.io/wasm-pack/)
+- `wasm32-unknown-unknown` target (`rustup target add wasm32-unknown-unknown`)
+- `wasm-bindgen` CLI (`cargo install wasm-bindgen-cli --version 0.2.122 --locked`)
 
 ### Building the WASM Module
 
 ```bash
-wasm-pack build --target web --out-dir ../../packages/wasm/wasm
+cargo build --release -p verter_wasm --target wasm32-unknown-unknown
+wasm-bindgen --target web --out-dir ../../packages/wasm/wasm --out-name verter_wasm ../../target/wasm32-unknown-unknown/release/verter_wasm.wasm
+
+# Optional size-optimization pass (run by `pnpm run build:wasm` via the `binaryen` npm package):
+wasm-opt -Os ../../packages/wasm/wasm/verter_wasm_bg.wasm -o ../../packages/wasm/wasm/verter_wasm_bg.wasm
 ```
 
 Or from the repository root:
@@ -135,7 +140,7 @@ opt-level = "s"   # Optimize for size
 lto = true         # Link-time optimization
 ```
 
-These settings trade a small amount of runtime performance for a significantly smaller `.wasm` file, which is critical for browser loading times.
+These settings trade a small amount of runtime performance for a significantly smaller `.wasm` file, which is critical for browser loading times. The `pnpm run build:wasm` pipeline then runs a Binaryen `wasm-opt -Os` pass for additional size reduction (replacing the optimization step `wasm-pack` used to perform automatically).
 
 ## Testing
 
@@ -143,8 +148,8 @@ These settings trade a small amount of runtime performance for a significantly s
 # Rust unit tests
 cargo test --package verter_wasm
 
-# wasm-bindgen integration tests (requires wasm-pack)
-wasm-pack test --headless --chrome --firefox
+# wasm-bindgen integration tests
+CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner cargo test --target wasm32-unknown-unknown --package verter_wasm
 ```
 
 ## Dependencies
