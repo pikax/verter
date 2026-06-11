@@ -226,7 +226,7 @@ fn classify_file_non_vue() {
     );
     assert_eq!(
         ws.classify_file("d:/project/src/utils.js"),
-        FileLanguage::script(ScriptSourceType::Js)
+        FileLanguage::script(ScriptSourceType::js())
     );
     // Negative: .vue should never classify as a plain script.
     assert!(ws

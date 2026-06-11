@@ -4,6 +4,30 @@ use std::sync::Arc;
 
 use crate::ids::{FrameworkAdapterId, LanguageId};
 
+/// Module grammar of a JavaScript dialect (closed set, mirroring OXC's
+/// own `ModuleKind` extension model).
+///
+/// `import` / `export` are MODULE-ONLY syntax: collapsing every
+/// JavaScript file onto one module kind either rejects module `.js` /
+/// `.mjs` dependencies (classic-script grammar) or mislabels CommonJS
+/// `.cjs` files (module grammar), so the neutral descriptor carries the
+/// kind explicitly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum JsModuleKind {
+    /// Module-or-script, decided by the presence of ESM syntax after
+    /// parse (`.js`, `.jsx`).
+    Unambiguous,
+    /// Always an ES module (`.mjs`).
+    Module,
+    /// CommonJS (`.cjs`).
+    CommonJs,
+    /// Always a classic script — no `import`/`export`. No registry row
+    /// produces this; it exists for carrier regions whose producer
+    /// resolves a classic-script dialect (the Vue `<script lang="js">`
+    /// mapping).
+    Script,
+}
+
 /// Source dialect of a plain script file (closed set).
 ///
 /// This is descriptor data on [`FileLanguage::Script`]: it records what
@@ -15,12 +39,36 @@ pub enum ScriptSourceType {
     Ts,
     /// TypeScript with JSX (`.tsx`).
     Tsx,
-    /// JavaScript (`.js`, `.mjs`, `.cjs`).
-    Js,
-    /// JavaScript with JSX (`.jsx`).
-    Jsx,
+    /// JavaScript (`.js`, `.mjs`, `.cjs`), with its module kind.
+    Js(JsModuleKind),
+    /// JavaScript with JSX (`.jsx`), with its module kind.
+    Jsx(JsModuleKind),
     /// TypeScript declaration file (`.d.ts`, `.d.mts`, `.d.cts`).
     Dts,
+}
+
+impl ScriptSourceType {
+    /// The `.js` dialect: JavaScript, module-or-script decided by ESM
+    /// syntax (OXC's extension model for `js`).
+    pub const fn js() -> Self {
+        Self::Js(JsModuleKind::Unambiguous)
+    }
+
+    /// The `.mjs` dialect: JavaScript, always an ES module.
+    pub const fn mjs() -> Self {
+        Self::Js(JsModuleKind::Module)
+    }
+
+    /// The `.cjs` dialect: JavaScript, CommonJS.
+    pub const fn cjs() -> Self {
+        Self::Js(JsModuleKind::CommonJs)
+    }
+
+    /// The `.jsx` dialect: JavaScript with JSX, module-or-script
+    /// decided by ESM syntax (OXC's extension model for `jsx`).
+    pub const fn jsx() -> Self {
+        Self::Jsx(JsModuleKind::Unambiguous)
+    }
 }
 
 /// The single open language descriptor every Verter crate routes files

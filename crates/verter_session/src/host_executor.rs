@@ -183,11 +183,8 @@ impl StageExecutor for HostStageExecutor {
                 self.config.effective_scope(),
             );
             let parse_duration_ms = parse_start.elapsed().as_secs_f64() * 1000.0;
-            let source_type = imported_eval_source_type(
-                &file_language,
-                canonical_id,
-                Some(framework_parse.as_ref()),
-            );
+            let source_type =
+                imported_eval_source_type(&file_language, Some(framework_parse.as_ref()));
             SourceSnapshot {
                 source: content,
                 whole_hash: parse_snapshot.whole_hash,
@@ -202,9 +199,10 @@ impl StageExecutor for HostStageExecutor {
                 }),
             }
         } else {
-            let parse_snapshot = crate::parse::parse_non_sfc_snapshot(canonical_id, &content);
+            let parse_snapshot =
+                crate::parse::parse_non_sfc_snapshot(canonical_id, &content, &file_language);
             let parse_duration_ms = parse_start.elapsed().as_secs_f64() * 1000.0;
-            let source_type = imported_eval_source_type(&file_language, canonical_id, None);
+            let source_type = imported_eval_source_type(&file_language, None);
             SourceSnapshot {
                 source: content,
                 whole_hash: parse_snapshot.whole_hash,

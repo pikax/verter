@@ -106,6 +106,8 @@ mod origin_graph_consumer_contract;
 mod overlay_prepared_decl_no_base_cache_pollution;
 #[path = "g_misc0/phase_d_materializations_lane_wired.rs"]
 mod phase_d_materializations_lane_wired;
+#[path = "g_misc0/plain_script_dialect_from_file_language.rs"]
+mod plain_script_dialect_from_file_language;
 #[path = "g_misc0/r20_admission_refuses_empty_signature.rs"]
 mod r20_admission_refuses_empty_signature;
 #[path = "g_misc0/relative_path_session_parity.rs"]

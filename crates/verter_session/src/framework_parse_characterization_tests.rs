@@ -133,7 +133,7 @@ fn vue_source_type_matrix_is_stable() {
         );
     }
 
-    // Plain scripts derive from the canonical path, not parse data.
+    // Plain scripts derive from their classified `FileLanguage` row.
     upsert_script(
         &host,
         "plain.ts",

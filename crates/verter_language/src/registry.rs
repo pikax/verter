@@ -180,10 +180,10 @@ impl LanguageRegistry {
             LanguageRow::fixed("mts", FileLanguage::script(ScriptSourceType::Ts)),
             LanguageRow::fixed("cts", FileLanguage::script(ScriptSourceType::Ts)),
             LanguageRow::fixed("tsx", FileLanguage::script(ScriptSourceType::Tsx)),
-            LanguageRow::fixed("js", FileLanguage::script(ScriptSourceType::Js)),
-            LanguageRow::fixed("mjs", FileLanguage::script(ScriptSourceType::Js)),
-            LanguageRow::fixed("cjs", FileLanguage::script(ScriptSourceType::Js)),
-            LanguageRow::fixed("jsx", FileLanguage::script(ScriptSourceType::Jsx)),
+            LanguageRow::fixed("js", FileLanguage::script(ScriptSourceType::js())),
+            LanguageRow::fixed("mjs", FileLanguage::script(ScriptSourceType::mjs())),
+            LanguageRow::fixed("cjs", FileLanguage::script(ScriptSourceType::cjs())),
+            LanguageRow::fixed("jsx", FileLanguage::script(ScriptSourceType::jsx())),
         ]);
         (registry, vec![vue_token, svelte_token])
     }
@@ -264,19 +264,19 @@ mod tests {
         );
         assert_eq!(
             resolved("/src/a.js"),
-            FileLanguage::script(ScriptSourceType::Js)
+            FileLanguage::script(ScriptSourceType::js())
         );
         assert_eq!(
             resolved("/src/a.mjs"),
-            FileLanguage::script(ScriptSourceType::Js)
+            FileLanguage::script(ScriptSourceType::mjs())
         );
         assert_eq!(
             resolved("/src/a.cjs"),
-            FileLanguage::script(ScriptSourceType::Js)
+            FileLanguage::script(ScriptSourceType::cjs())
         );
         assert_eq!(
             resolved("/src/a.jsx"),
-            FileLanguage::script(ScriptSourceType::Jsx)
+            FileLanguage::script(ScriptSourceType::jsx())
         );
         assert_eq!(
             resolved("/src/a.d.ts"),

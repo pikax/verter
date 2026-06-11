@@ -1226,7 +1226,7 @@ fn provider_script_language_skips_framework_carriers() {
     assert_eq!(
         provider_script_language(&host, "/x/a.js"),
         Some(verter_session::FileLanguage::script(
-            verter_session::ScriptSourceType::Js
+            verter_session::ScriptSourceType::js()
         ))
     );
     // Unknown extensions keep the plain-script fallback.

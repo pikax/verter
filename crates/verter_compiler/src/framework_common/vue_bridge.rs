@@ -18,8 +18,8 @@ use std::sync::Arc;
 
 use verter_language::{
     CarrierParse, ExternalLink, ExternalLinkKind, FrameworkAdapterId, FrameworkParseArtifact,
-    FrameworkParseCommon, LanguageId, ScriptRegion, ScriptRegionKind, ScriptSourceType,
-    StyleRegion, TemplateRegion,
+    FrameworkParseCommon, JsModuleKind, LanguageId, ScriptRegion, ScriptRegionKind,
+    ScriptSourceType, StyleRegion, TemplateRegion,
 };
 use verter_span::Span;
 
@@ -98,10 +98,16 @@ pub fn vue_script_source_type(parsed: &ParsedSfc, source: &str) -> ScriptSourceT
                 .filter(|v| v != "true")
         });
 
+    // The JS module kinds pin the historical Vue carrier dialects:
+    // `lang="js"` resolves the classic-script grammar
+    // (`JsModuleKind::Script`) and `lang="jsx"` the module grammar
+    // (`JsModuleKind::Module`) — the exact OXC `SourceType`s
+    // (`script()` / `jsx()`) the Vue parse pipeline has always
+    // computed for these rows.
     match lang.as_deref().map(|value| value.to_ascii_lowercase()) {
         Some(lang) if lang == "tsx" => ScriptSourceType::Tsx,
-        Some(lang) if lang == "jsx" => ScriptSourceType::Jsx,
-        Some(lang) if lang == "js" => ScriptSourceType::Js,
+        Some(lang) if lang == "jsx" => ScriptSourceType::Jsx(JsModuleKind::Module),
+        Some(lang) if lang == "js" => ScriptSourceType::Js(JsModuleKind::Script),
         _ => ScriptSourceType::Ts,
     }
 }
@@ -246,8 +252,14 @@ mod tests {
             ("<script lang=\"ts\">a</script>", ScriptSourceType::Ts),
             ("<script lang=\"tsx\">a</script>", ScriptSourceType::Tsx),
             ("<script lang=\"TSX\">a</script>", ScriptSourceType::Tsx),
-            ("<script lang=\"jsx\">a</script>", ScriptSourceType::Jsx),
-            ("<script lang=\"js\">a</script>", ScriptSourceType::Js),
+            (
+                "<script lang=\"jsx\">a</script>",
+                ScriptSourceType::Jsx(JsModuleKind::Module),
+            ),
+            (
+                "<script lang=\"js\">a</script>",
+                ScriptSourceType::Js(JsModuleKind::Script),
+            ),
             ("<script lang=\"coffee\">a</script>", ScriptSourceType::Ts),
             ("<script lang>a</script>", ScriptSourceType::Ts),
             ("<script>a</script>", ScriptSourceType::Ts),

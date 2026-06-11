@@ -127,15 +127,22 @@ pub(crate) fn build_vue_parse_artifact_from_source(
     )
 }
 
-pub(crate) fn non_sfc_source_type(canonical_id: &str) -> SourceType {
-    if canonical_id.ends_with(".d.ts")
-        || canonical_id.ends_with(".d.mts")
-        || canonical_id.ends_with(".d.cts")
-    {
-        SourceType::d_ts()
-    } else {
-        SourceType::ts()
-    }
+/// The OXC [`SourceType`] of a plain (non-carrier) script file,
+/// derived from its classified [`FileLanguage`](verter_language::FileLanguage)
+/// row — the language registry is the SOLE plain-script dialect
+/// authority (`.d.ts`-family detection included: the registry `Dts`
+/// rows own it; session parse code never re-sniffs path extensions).
+///
+/// Non-script rows (a framework carrier or template reaching a plain
+/// parse path, an unclassifiable input) fall back to the registry's
+/// own unknown-extension routing: TypeScript.
+pub(crate) fn plain_script_source_type(
+    file_language: &verter_language::FileLanguage,
+) -> SourceType {
+    file_language
+        .script_source_type()
+        .map(oxc_source_type_from_neutral)
+        .unwrap_or_else(SourceType::ts)
 }
 
 /// Pure source-type computation for an imported eval target.
@@ -151,10 +158,10 @@ pub(crate) fn non_sfc_source_type(canonical_id: &str) -> SourceType {
 /// row: framework carriers read the neutral
 /// `FrameworkParseCommon.script_regions[].source_type` their producer
 /// populated at parse time (UNIFORMLY — no per-carrier downcast); plain
-/// scripts derive from the canonical path.
+/// scripts derive from the row's classified dialect
+/// ([`plain_script_source_type`]).
 pub(crate) fn imported_eval_source_type(
     file_language: &verter_language::FileLanguage,
-    canonical_id: &str,
     framework_parse: Option<&verter_language::FrameworkParseArtifact>,
 ) -> SourceType {
     if file_language.is_framework_carrier() {
@@ -163,21 +170,38 @@ pub(crate) fn imported_eval_source_type(
             .map(|region| oxc_source_type_from_neutral(region.source_type))
             .unwrap_or_else(SourceType::ts)
     } else {
-        non_sfc_source_type(canonical_id)
+        plain_script_source_type(file_language)
     }
 }
 
 /// Map the neutral [`verter_language::ScriptSourceType`] dialect onto
 /// the OXC [`SourceType`] the parser pipeline consumes.
+///
+/// JavaScript dialects carry their [`verter_language::JsModuleKind`]
+/// through to OXC's module kind: `import`/`export` are module-only
+/// syntax, so the kind decides whether module `.js`/`.mjs` content
+/// parses (Unambiguous/Module), CommonJS stays CommonJS (`.cjs`), and
+/// the Vue carrier's classic-script `lang="js"` row keeps its
+/// historical `SourceType::script()`.
 pub(crate) fn oxc_source_type_from_neutral(
     source_type: verter_language::ScriptSourceType,
 ) -> SourceType {
     match source_type {
         verter_language::ScriptSourceType::Ts => SourceType::ts(),
         verter_language::ScriptSourceType::Tsx => SourceType::tsx(),
-        verter_language::ScriptSourceType::Js => SourceType::script(),
-        verter_language::ScriptSourceType::Jsx => SourceType::jsx(),
+        verter_language::ScriptSourceType::Js(kind) => oxc_js_base(kind),
+        verter_language::ScriptSourceType::Jsx(kind) => oxc_js_base(kind).with_jsx(true),
         verter_language::ScriptSourceType::Dts => SourceType::d_ts(),
+    }
+}
+
+/// The JavaScript [`SourceType`] for a neutral module kind.
+fn oxc_js_base(kind: verter_language::JsModuleKind) -> SourceType {
+    match kind {
+        verter_language::JsModuleKind::Unambiguous => SourceType::unambiguous(),
+        verter_language::JsModuleKind::Module => SourceType::mjs(),
+        verter_language::JsModuleKind::CommonJs => SourceType::cjs(),
+        verter_language::JsModuleKind::Script => SourceType::script(),
     }
 }
 
@@ -973,8 +997,12 @@ pub(crate) fn build_non_sfc_snapshot_from_program(
     }
 }
 
-pub(crate) fn parse_non_sfc_snapshot(canonical_id: &str, source: &str) -> ParseSnapshot {
-    let source_type = non_sfc_source_type(canonical_id);
+pub(crate) fn parse_non_sfc_snapshot(
+    canonical_id: &str,
+    source: &str,
+    file_language: &verter_language::FileLanguage,
+) -> ParseSnapshot {
+    let source_type = plain_script_source_type(file_language);
     let alloc = Allocator::new();
     let parser = Parser::new(&alloc, source, source_type).with_options(ParseOptions {
         parse_regular_expression: false,
@@ -1004,6 +1032,128 @@ pub(crate) fn parse_non_sfc_snapshot(canonical_id: &str, source: &str) -> ParseS
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The statically classified registry row for a path — tests
+    /// thread it exactly like production call sites thread the
+    /// host-resolved row.
+    fn classified(id: &str) -> verter_language::FileLanguage {
+        verter_language::LanguageRegistry::global()
+            .classify_static(id)
+            .static_resolution()
+    }
+
+    /// Runtime half of the `plain_script_dialect_from_file_language`
+    /// guard: the neutral-dialect → OXC `SourceType` mapping, pinned
+    /// EXHAUSTIVELY over the `ScriptSourceType` vocabulary (every
+    /// variant × every `JsModuleKind`).
+    #[test]
+    fn neutral_dialect_to_oxc_source_type_parity_matrix_is_exhaustive() {
+        use verter_language::{JsModuleKind, ScriptSourceType};
+
+        let matrix: &[(ScriptSourceType, SourceType)] = &[
+            (ScriptSourceType::Ts, SourceType::ts()),
+            (ScriptSourceType::Tsx, SourceType::tsx()),
+            (ScriptSourceType::Dts, SourceType::d_ts()),
+            (
+                ScriptSourceType::Js(JsModuleKind::Unambiguous),
+                SourceType::unambiguous(),
+            ),
+            (
+                ScriptSourceType::Js(JsModuleKind::Module),
+                SourceType::mjs(),
+            ),
+            (
+                ScriptSourceType::Js(JsModuleKind::CommonJs),
+                SourceType::cjs(),
+            ),
+            (
+                ScriptSourceType::Js(JsModuleKind::Script),
+                SourceType::script(),
+            ),
+            (
+                ScriptSourceType::Jsx(JsModuleKind::Unambiguous),
+                SourceType::unambiguous().with_jsx(true),
+            ),
+            (
+                ScriptSourceType::Jsx(JsModuleKind::Module),
+                SourceType::jsx(),
+            ),
+            (
+                ScriptSourceType::Jsx(JsModuleKind::CommonJs),
+                SourceType::cjs().with_jsx(true),
+            ),
+            (
+                ScriptSourceType::Jsx(JsModuleKind::Script),
+                SourceType::script().with_jsx(true),
+            ),
+        ];
+        for (neutral, expected) in matrix {
+            assert_eq!(
+                oxc_source_type_from_neutral(*neutral),
+                *expected,
+                "dialect parity drifted for {neutral:?}"
+            );
+        }
+
+        // Exhaustiveness pin: every `ScriptSourceType` discriminant and
+        // every `JsModuleKind` appears in the matrix above. A new
+        // variant fails this match (and the compiler walks the author
+        // back here to extend the matrix).
+        let covered = |st: &ScriptSourceType| match st {
+            ScriptSourceType::Ts
+            | ScriptSourceType::Tsx
+            | ScriptSourceType::Dts
+            | ScriptSourceType::Js(
+                JsModuleKind::Unambiguous
+                | JsModuleKind::Module
+                | JsModuleKind::CommonJs
+                | JsModuleKind::Script,
+            )
+            | ScriptSourceType::Jsx(
+                JsModuleKind::Unambiguous
+                | JsModuleKind::Module
+                | JsModuleKind::CommonJs
+                | JsModuleKind::Script,
+            ) => true,
+        };
+        assert!(matrix.iter().all(|(neutral, _)| covered(neutral)));
+        assert_eq!(matrix.len(), 11, "matrix must cover the full vocabulary");
+    }
+
+    /// Plain-script source types derive from the classified row — the
+    /// registry rows map straight onto their parse dialects, and
+    /// non-script rows (carriers) fall back to TypeScript.
+    #[test]
+    fn plain_script_source_type_derives_from_the_classified_row() {
+        let cases: &[(&str, SourceType)] = &[
+            ("/x/a.ts", SourceType::ts()),
+            ("/x/a.mts", SourceType::ts()),
+            ("/x/a.cts", SourceType::ts()),
+            ("/x/a.tsx", SourceType::tsx()),
+            ("/x/a.js", SourceType::unambiguous()),
+            ("/x/a.mjs", SourceType::mjs()),
+            ("/x/a.cjs", SourceType::cjs()),
+            ("/x/a.jsx", SourceType::unambiguous().with_jsx(true)),
+            ("/x/a.d.ts", SourceType::d_ts()),
+            ("/x/a.d.mts", SourceType::d_ts()),
+            ("/x/a.d.cts", SourceType::d_ts()),
+            // Unknown extensions route as TypeScript scripts.
+            ("/x/a.weird", SourceType::ts()),
+        ];
+        for (id, expected) in cases {
+            assert_eq!(
+                plain_script_source_type(&classified(id)),
+                *expected,
+                "plain-script dialect drifted for {id}"
+            );
+        }
+        // A carrier row reaching the plain-script derivation falls
+        // back to TypeScript (no script dialect on the row).
+        assert_eq!(
+            plain_script_source_type(&verter_language::FileLanguage::vue()),
+            SourceType::ts()
+        );
+    }
     use smallvec::SmallVec;
     use verter_compiler::types::NodeProp;
     use verter_semantic::analysis::AnalysisScope;
@@ -1434,8 +1584,8 @@ const isOpen = computed(() => props.visible)
     /// @ai-generated - Non-SFC whole_hash differs per content
     #[test]
     fn parse_non_sfc_whole_hash_differs() {
-        let a = parse_non_sfc_snapshot("a.ts", "export const x = 1");
-        let b = parse_non_sfc_snapshot("b.ts", "export const y = 2");
+        let a = parse_non_sfc_snapshot("a.ts", "export const x = 1", &classified("a.ts"));
+        let b = parse_non_sfc_snapshot("b.ts", "export const y = 2", &classified("b.ts"));
         assert_ne!(a.whole_hash, b.whole_hash);
     }
 
@@ -1443,8 +1593,8 @@ const isOpen = computed(() => props.visible)
     /// can detect when an imported .ts file changes.
     #[test]
     fn parse_non_sfc_semantic_hash_content_dependent() {
-        let a = parse_non_sfc_snapshot("a.ts", "export const x = 1");
-        let b = parse_non_sfc_snapshot("b.ts", "export const y = 2");
+        let a = parse_non_sfc_snapshot("a.ts", "export const x = 1", &classified("a.ts"));
+        let b = parse_non_sfc_snapshot("b.ts", "export const y = 2", &classified("b.ts"));
         assert_ne!(
             a.semantic_hash, b.semantic_hash,
             "different non-SFC content must produce different semantic hashes"
@@ -1454,8 +1604,8 @@ const isOpen = computed(() => props.visible)
     /// @ai-generated - Non-SFC semantic_hash is deterministic
     #[test]
     fn parse_non_sfc_semantic_hash_deterministic() {
-        let a = parse_non_sfc_snapshot("a.ts", "export const x = 1");
-        let b = parse_non_sfc_snapshot("a.ts", "export const x = 1");
+        let a = parse_non_sfc_snapshot("a.ts", "export const x = 1", &classified("a.ts"));
+        let b = parse_non_sfc_snapshot("a.ts", "export const x = 1", &classified("a.ts"));
         assert_eq!(a.semantic_hash, b.semantic_hash);
     }
 
@@ -1530,7 +1680,7 @@ const isOpen = computed(() => props.visible)
     /// @ai-generated - Non-SFC has no blocks
     #[test]
     fn parse_non_sfc_no_blocks() {
-        let snap = parse_non_sfc_snapshot("helper.ts", "const x = 1");
+        let snap = parse_non_sfc_snapshot("helper.ts", "const x = 1", &classified("helper.ts"));
         assert!(!snap.meta.has_script);
         assert!(!snap.meta.has_template);
         assert_eq!(snap.descriptor.script_count, 0);
@@ -1809,6 +1959,7 @@ export type VNodeRef = string | Ref | ((ref: Element | null, refs: Record<string
         let snapshot = parse_non_sfc_snapshot(
             "node_modules/@vue/runtime-core/dist/runtime-core.d.ts",
             dts_content,
+            &classified("node_modules/@vue/runtime-core/dist/runtime-core.d.ts"),
         );
         // Verify no panic diagnostics were emitted
         assert!(
@@ -1827,7 +1978,7 @@ const count = ref(0)
 provide('counter', count)
 onMounted(() => { console.log('mounted') })
 "#;
-        let snap = parse_non_sfc_snapshot("composable.ts", source);
+        let snap = parse_non_sfc_snapshot("composable.ts", source, &classified("composable.ts"));
         let analysis = &snap.script_analysis;
         // Positive: VUE_API_USAGE should detect provide() and onMounted() calls
         assert!(
@@ -1870,7 +2021,7 @@ onMounted(() => { console.log('mounted') })
         // All .d.ts extension variants should use the correct SourceType
         let content = "export declare const foo: string;";
         for id in &["types.d.ts", "index.d.mts", "utils.d.cts"] {
-            let snapshot = parse_non_sfc_snapshot(id, content);
+            let snapshot = parse_non_sfc_snapshot(id, content, &classified(id));
             assert!(
                 snapshot.parse_diagnostics.diagnostics.is_empty(),
                 "{id} should parse without diagnostics"

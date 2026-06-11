@@ -289,7 +289,16 @@ impl FileArtifactKey {
 /// post-parse artifact's spans are SFC-absolute rather than compact-relative.
 /// The bump evicts any pre-existing compact-layout artifact so a stale entry
 /// cannot serve eval-relative spans after the change.
-pub const LEGACY_PARSER_VERSION: u32 = 2;
+///
+/// Bumped 2 → 3: plain (non-carrier) scripts parse under their
+/// classified `FileLanguage` dialect (`.tsx` → TSX, `.jsx` → JSX,
+/// `.js`/`.mjs`/`.cjs` → JavaScript with their module kinds) instead of
+/// uniformly under plain TypeScript. The key already carries
+/// `file_language_id`, but the parsed VALUE under unchanged keys
+/// changes — a parser-behavior change is exactly what this dimension
+/// owns, so the bump evicts every artifact parsed under the old
+/// uniform-TS dialect.
+pub const LEGACY_PARSER_VERSION: u32 = 3;
 
 /// `parse_env_hash` sentinel used by the canonical-keyed legacy surface
 /// before later stages plumb the real env hash through every call site.

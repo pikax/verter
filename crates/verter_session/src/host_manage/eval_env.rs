@@ -249,7 +249,8 @@ impl VerterHost {
             "build_snapshot_from_source",
             format!("owner={} bytes={}", canonical, source.len()),
         );
-        if canonical.ends_with(".vue") {
+        let file_language = self.language_classifier.classify(canonical);
+        if file_language.is_vue() {
             component_meta_trace_custom!("parse_vue_snapshot", format!("owner={canonical}"));
             let (parse, _) =
                 crate::parse::parse_vue_snapshot(canonical, source, self.config.effective_scope());
@@ -266,7 +267,7 @@ impl VerterHost {
             Self::build_snapshot_from_parse(parse)
         } else {
             component_meta_trace_custom!("parse_non_sfc_snapshot", format!("owner={canonical}"));
-            let parse = crate::parse::parse_non_sfc_snapshot(canonical, source);
+            let parse = crate::parse::parse_non_sfc_snapshot(canonical, source, &file_language);
             component_meta_trace_custom!(
                 "parse_non_sfc_snapshot_result",
                 format!(

@@ -966,7 +966,7 @@ mod tests {
         // a `.js` path resolves the JS script row.
         assert_eq!(
             registry.document_file_language("javascript", "/x/a.js"),
-            FileLanguage::script(verter_session::ScriptSourceType::Js)
+            FileLanguage::script(verter_session::ScriptSourceType::js())
         );
         // A `.svelte` path resolves its framework carrier row — never
         // the Vue row, never a plain script.

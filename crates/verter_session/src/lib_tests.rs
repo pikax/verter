@@ -3303,7 +3303,13 @@ mod upsert_compile_cache_tests {
                         template: None,
                         script: None,
                     },
-                    parse: crate::parse::parse_non_sfc_snapshot("/src/App.vue", ""),
+                    parse: crate::parse::parse_non_sfc_snapshot(
+                        "/src/App.vue",
+                        "",
+                        &verter_language::LanguageRegistry::global()
+                            .classify_static("/src/App.vue")
+                            .static_resolution(),
+                    ),
                     framework_parse: None,
                     source: Arc::from(""),
                 },

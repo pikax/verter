@@ -116,7 +116,6 @@ impl VerterHost {
         }
         crate::parse::imported_eval_source_type(
             &self.language_classifier.classify(canonical_id),
-            canonical_id,
             framework_parse,
         )
     }

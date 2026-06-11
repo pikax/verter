@@ -634,3 +634,7 @@ mod lib_tests;
 #[cfg(test)]
 #[path = "framework_parse_characterization_tests.rs"]
 mod framework_parse_characterization_tests;
+
+#[cfg(test)]
+#[path = "plain_script_dialect_tests.rs"]
+mod plain_script_dialect_tests;
