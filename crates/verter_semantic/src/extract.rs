@@ -165,9 +165,15 @@ fn extract_model_from_macro(mac: &AnalyzedMacro, models: &mut Vec<ModelFact>) {
 
 fn extract_expose_from_macro(mac: &AnalyzedMacro, expose: &mut Vec<ExposeFact>) {
     for field in &mac.expose_fields {
+        // `expose_fields` holds the analyzer's object-literal fields, which
+        // always carry an SFC-absolute key span; a field without one has no
+        // SFC declaration site to report, so it contributes no fact.
+        let Some(span) = field.span else {
+            continue;
+        };
         expose.push(ExposeFact {
             name: field.name.clone(),
-            span: field.span,
+            span,
         });
     }
 }
@@ -648,11 +654,19 @@ mod tests {
             expose_fields: vec![
                 AnalyzedExposeField {
                     name: "open".to_string(),
-                    span: Span::new(10, 14),
+                    span: Some(Span::new(10, 14)),
+                    type_expr: None,
+                    type_expr_scope: None,
+                    description: None,
+                    tags: Vec::new(),
                 },
                 AnalyzedExposeField {
                     name: "close".to_string(),
-                    span: Span::new(16, 21),
+                    span: Some(Span::new(16, 21)),
+                    type_expr: None,
+                    type_expr_scope: None,
+                    description: None,
+                    tags: Vec::new(),
                 },
             ],
             ..make_props_macro(vec![])

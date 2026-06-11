@@ -19,16 +19,15 @@
 //!    bytes byte-identical to scalar-payload bytes for the same component.
 
 use super::*;
-use crate::resolver_store::{dump_from_host_call_sites, reset_from_host_call_sites};
 use crate::types::HostConfig;
 use crate::VerterHost;
 use std::sync::Arc;
 
 fn test_scheduler_config() -> verter_scheduler::scheduler::SchedulerConfig {
     // Single CPU thread: the batch fan-out runs on the calling thread, so
-    // the process-wide `from_host` call-site table is not perturbed by
-    // rayon worker threads and the sweep counter reflects only this
-    // batch's work.
+    // the PER-THREAD coherent-sweep counter (`warm_batch_payload_sweeps_
+    // stay_o1`) reflects only this batch's sweeps. The per-HOST counters
+    // the other tests measure are thread-agnostic and do not need this.
     verter_scheduler::scheduler::SchedulerConfig {
         cpu_threads: 1,
         ..verter_scheduler::scheduler::SchedulerConfig::default()
@@ -93,43 +92,35 @@ fn encode_counts(
     .into_bytes()
 }
 
-/// Sum of every per-call-site `from_host` count in the process-wide table.
-fn total_from_host_calls() -> u64 {
-    dump_from_host_call_sites().iter().map(|(_, n)| n).sum()
-}
-
-/// The `from_host` call-site table and the coherent-build-sweep counter are
-/// process-GLOBAL. Tests in this module both MEASURE those counters (after a
-/// `reset_*`) and POLLUTE them (every component-meta resolution calls
-/// `from_host`). Run concurrently, one test's `from_host` calls can land in
-/// another's reset→measure window and inflate its observed count past the
-/// O(1) bound. Each test holds this guard for its whole body so the
-/// measurement windows are mutually exclusive within the binary. (The guard
-/// is poison-tolerant: a panicking test still releases a usable lock so a
-/// single failure does not cascade.)
-fn measurement_guard() -> std::sync::MutexGuard<'static, ()> {
-    static GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    GUARD
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
 /// (1) The warm-batch read collapse: a WARM batch of N components performs
 /// O(1) `from_host` calls, NOT O(N).
 ///
+/// HERMETIC MEASUREMENT (per-host counter): the count is read from
+/// `host.provenance().store_view_from_host_reads`, a PER-`VerterHost`
+/// counter bumped in the `HostStoreView::from_host_read` chokepoint (NOT
+/// the process-global per-call-site attribution table). `make_project`
+/// builds a fresh host, so a CONCURRENT test reading store views on a
+/// DIFFERENT host can never inflate this test's reset→measure window —
+/// the prior process-global measurement was a shared-process-run flake
+/// source (`cargo test -p verter_session --tests`).
+///
 /// Discrimination: WITHOUT the per-batch fixed view each per-job closure
-/// calls `resolver_store_view_read()` (→ `from_host`) at least TWICE — the
-/// payload warm probe and the extraction-context cold-seed — so a warm
-/// batch of N performs ~2N `from_host` calls. This test asserts the warm
-/// batch's `from_host` delta is STRICTLY LESS THAN N (in fact ~O(1)).
+/// calls `resolver_store_view_read()` (→ `from_host_read`, which bumps
+/// this host's counter unconditionally) at least TWICE — the payload warm
+/// probe and the extraction-context cold-seed — so a warm batch of N
+/// performs ~2N `from_host` calls ON THIS HOST. This test asserts the
+/// warm batch's per-host delta is STRICTLY LESS THAN N (in fact ~O(1)).
 /// Against a per-job-read tree the delta is ≥ N, so the `< N` assertion
 /// FAILS; with the per-batch capture the single
 /// `capture_batch_fixed_view` read dominates and the delta is a small
-/// constant.
+/// constant. The companion `>= 1` assertion proves the counter is LIVE
+/// (the warm capture's read was counted), so a dead/unwired counter
+/// cannot trivially satisfy the `< N` bound with 0.
 #[test]
 fn warm_batch_payload_from_host_calls_are_o1_not_per_item() {
-    let _guard = measurement_guard();
+    use std::sync::atomic::Ordering::Relaxed;
     let project = make_project();
+    let host = project.host();
     const N: usize = 12;
     let ids = build_components(&project, N);
     let session = project.open_session_batch().expect("batch session");
@@ -144,17 +135,26 @@ fn warm_batch_payload_from_host_calls_are_o1_not_per_item() {
         "every cold slot resolves to a payload",
     );
 
-    // WARM pass: measure `from_host` calls in isolation.
-    reset_from_host_call_sites();
+    // WARM pass: measure this host's `from_host` reads in isolation.
+    host.provenance()
+        .store_view_from_host_reads
+        .store(0, Relaxed);
     let warm = session
         .get_component_meta_batch_payloads(&ids, encode_counts)
         .expect("warm batch dispatch");
-    let warm_from_host = total_from_host_calls();
+    let warm_from_host = host.provenance().store_view_from_host_reads.load(Relaxed);
 
     assert_eq!(warm.len(), N);
     assert!(
         warm.iter().all(|slot| slot.is_some()),
         "every warm slot still resolves to a payload",
+    );
+    assert!(
+        warm_from_host >= 1,
+        "the warm batch MUST perform at least one real `from_host` read on \
+         this host (the per-batch fixed-view capture), so a dead counter \
+         cannot trivially satisfy the O(1) bound below; observed \
+         {warm_from_host}",
     );
     // The discriminating bound: O(1), well under N. A per-job-read path is
     // ~2N.
@@ -162,8 +162,8 @@ fn warm_batch_payload_from_host_calls_are_o1_not_per_item() {
         warm_from_host < N as u64,
         "a warm batch of N={N} must perform O(1) `from_host` calls (the one \
          per-batch fixed-view capture), NOT ≥2 per item. Observed \
-         {warm_from_host} `from_host` calls — a per-job-read path is ~2N={} \
-         (per-job warm-probe + extraction cold-seed reads).",
+         {warm_from_host} `from_host` calls on this host — a per-job-read \
+         path is ~2N={} (per-job warm-probe + extraction cold-seed reads).",
         2 * N,
     );
 }
@@ -177,7 +177,6 @@ fn warm_batch_payload_from_host_calls_are_o1_not_per_item() {
 /// re-read+rebuilt the base view per item would drive this O(N).
 #[test]
 fn warm_batch_payload_sweeps_stay_o1() {
-    let _guard = measurement_guard();
     let project = make_project();
     const N: usize = 12;
     let ids = build_components(&project, N);
@@ -231,7 +230,6 @@ fn warm_batch_payload_sweeps_stay_o1() {
 /// a tree. The corroborating arm proves the value is still returned.
 #[test]
 fn fixed_view_fence_blocks_stale_promotion_under_midbatch_token_move() {
-    let _guard = measurement_guard();
     let project = make_project();
     let ids = build_components(&project, 1);
     let canonical = ids[0].as_str();
@@ -300,7 +298,6 @@ fn fixed_view_fence_blocks_stale_promotion_under_midbatch_token_move() {
 /// the fence in (3) is not blanket-suppressing promotion.
 #[test]
 fn fixed_view_promotes_both_caches_when_token_unchanged() {
-    let _guard = measurement_guard();
     let project = make_project();
     let ids = build_components(&project, 1);
     let canonical = ids[0].as_str();
@@ -346,7 +343,6 @@ fn fixed_view_promotes_both_caches_when_token_unchanged() {
 /// capture vs per-item), never the OUTPUTS.
 #[test]
 fn batch_payload_equals_scalar_payload() {
-    let _guard = measurement_guard();
     const N: usize = 5;
 
     // Scalar path on its own project (fresh caches) — one call per id.
@@ -391,16 +387,26 @@ fn batch_payload_equals_scalar_payload() {
 /// on the SAME fixed-view fast path as the payload batch (no dual path): a
 /// WARM analysis batch of N performs O(1) `from_host` calls, NOT O(N).
 ///
+/// HERMETIC MEASUREMENT (per-host counter): reads
+/// `host.provenance().store_view_from_host_reads` — see test (1) for why
+/// the per-host counter is immune to concurrent tests' store-view traffic
+/// by construction (the process-global table race fired in the
+/// shared-process `cargo test -p verter_session --tests` gate).
+///
 /// Discrimination: the analysis path's per-job `get_component_meta_via_view`
 /// previously took its own store-view reads (the warm probe + the
-/// cold-seed fence) AND ran `prewarm_view_overlays` per job. Lifting the
-/// pre-warm + capture once and threading one fixed view collapses the warm
-/// reads to O(1); a per-job-read analysis path is ≥ N. The `< N` bound
-/// FAILS against such a path.
+/// cold-seed fence) AND ran `prewarm_view_overlays` per job — every one
+/// of which enters `from_host_read` on THIS host and bumps the counter.
+/// Lifting the pre-warm + capture once and threading one fixed view
+/// collapses the warm reads to O(1); a per-job-read analysis path is ≥ N.
+/// The `< N` bound FAILS against such a path. The companion `>= 1`
+/// assertion proves the counter is LIVE, so a dead/unwired counter cannot
+/// trivially satisfy the bound with 0.
 #[test]
 fn warm_analysis_batch_from_host_calls_are_o1_not_per_item() {
-    let _guard = measurement_guard();
+    use std::sync::atomic::Ordering::Relaxed;
     let project = make_project();
+    let host = project.host();
     const N: usize = 12;
     let ids = build_components(&project, N);
     let session = project.open_session_batch().expect("batch session");
@@ -416,11 +422,13 @@ fn warm_analysis_batch_from_host_calls_are_o1_not_per_item() {
         "every cold analysis slot resolves",
     );
 
-    reset_from_host_call_sites();
+    host.provenance()
+        .store_view_from_host_reads
+        .store(0, Relaxed);
     let warm = session
         .get_component_meta_batch(&ids)
         .expect("warm analysis batch dispatch");
-    let warm_from_host = total_from_host_calls();
+    let warm_from_host = host.provenance().store_view_from_host_reads.load(Relaxed);
 
     assert_eq!(warm.len(), N);
     for slot in &warm {
@@ -436,10 +444,17 @@ fn warm_analysis_batch_from_host_calls_are_o1_not_per_item() {
         );
     }
     assert!(
+        warm_from_host >= 1,
+        "the warm analysis batch MUST perform at least one real `from_host` \
+         read on this host (the per-batch fixed-view capture), so a dead \
+         counter cannot trivially satisfy the O(1) bound below; observed \
+         {warm_from_host}",
+    );
+    assert!(
         warm_from_host < N as u64,
         "a warm ANALYSIS batch of N={N} must perform O(1) `from_host` calls \
          (the one per-batch fixed-view capture), NOT >=2 per item. Observed \
-         {warm_from_host} — a per-job-read analysis path is >= N.",
+         {warm_from_host} on this host — a per-job-read analysis path is >= N.",
     );
 }
 
@@ -454,7 +469,6 @@ fn warm_analysis_batch_from_host_calls_are_o1_not_per_item() {
 /// against a tree with no analysis-path fence the result WOULD be promoted.
 #[test]
 fn analysis_fixed_view_fence_blocks_stale_promotion() {
-    let _guard = measurement_guard();
     let project = make_project();
     let ids = build_components(&project, 1);
     let canonical = ids[0].as_str();
@@ -532,7 +546,6 @@ export interface ButtonEmits { (e: 'click', payload: number): void }
 /// tree.
 #[test]
 fn overlay_session_payload_probe_validates_against_overlaid_view_not_base() {
-    let _guard = measurement_guard();
     let project = make_project();
     let ids = build_components(&project, 1);
     let canonical = ids[0].as_str();
@@ -594,7 +607,6 @@ fn overlay_session_payload_probe_validates_against_overlaid_view_not_base() {
 /// cached payload.
 #[test]
 fn base_session_payload_probe_still_warm_hits_with_empty_overlay() {
-    let _guard = measurement_guard();
     let project = make_project();
     let ids = build_components(&project, 1);
     let canonical = ids[0].as_str();
@@ -662,11 +674,9 @@ fn base_session_payload_probe_still_warm_hits_with_empty_overlay() {
 /// CONCURRENT test calling `with_session_overlay` on a DIFFERENT host can
 /// never inflate this test's count — the prior process-global counter was a
 /// CI-flake source (any parallel overlay application landed in this test's
-/// reset→assert window). The per-host counter is immune by construction, so
-/// this test's own measurement does NOT rely on `measurement_guard()` (the
-/// guard is retained only to keep this test's incidental `from_host` /
-/// coherent-sweep traffic out of the PROCESS-GLOBAL windows the SIBLING
-/// tests in this file measure).
+/// reset→assert window). The per-host counter is immune by construction —
+/// every counter this module measures is per-host (or per-thread for the
+/// sweep test), so no cross-test serialization is needed.
 ///
 /// DISCRIMINATING ACROSS WORKER THREADS: the overlay COWs this test must
 /// observe run on the `HostBatchCoordinator`'s rayon WORKER threads (the
@@ -692,12 +702,8 @@ fn base_session_payload_probe_still_warm_hits_with_empty_overlay() {
 #[test]
 fn batch_over_overlay_session_applies_overlay_o1_not_per_job() {
     use std::sync::atomic::Ordering::Relaxed;
-    // The per-host overlay-COW counter makes THIS test's measurement
-    // hermetic (see the doc comment). `measurement_guard()` is held only to
-    // protect the SIBLING tests' process-global `from_host` / coherent-sweep
-    // measurement windows from this test's incidental traffic — not because
-    // this test's own `session_overlay_cows` reads need serialization.
-    let _guard = measurement_guard();
+    // The per-host overlay-COW counter makes this test's measurement
+    // hermetic (see the doc comment) — no cross-test serialization needed.
     let project = make_project();
     let host = project.host();
     const N: usize = 12;
@@ -799,7 +805,6 @@ fn batch_over_overlay_session_applies_overlay_o1_not_per_job() {
 /// plain-literal sibling completes within the same budget.
 #[test]
 fn batch_partial_returned_never_admitted_while_complete_sibling_warms() {
-    let _guard = measurement_guard();
     use crate::types::AnalysisLevel;
 
     const HELPER_TS: &str = r#"
@@ -1006,7 +1011,6 @@ fn encode_full_surface(
 /// shared `Arc`.
 #[test]
 fn effective_file_state_shares_script_analysis_arc_across_reads() {
-    let _guard = measurement_guard();
     let project = make_project();
     // A single cross-file owner is enough: the invariant under test is per
     // file (one canonical, one parse generation). The owner imports `./types`
@@ -1077,7 +1081,6 @@ fn effective_file_state_shares_script_analysis_arc_across_reads() {
 /// behaviour, never the resolved data.
 #[test]
 fn arc_shared_snapshot_preserves_full_meta_surface_bytes() {
-    let _guard = measurement_guard();
     let project = make_project();
     const N: usize = 4;
     let ids = build_components(&project, N);
@@ -1141,10 +1144,9 @@ fn arc_shared_snapshot_preserves_full_meta_surface_bytes() {
 /// `host.provenance().overlay_set_fingerprint_full_computations`, a
 /// PER-`VerterHost` counter (NOT a process-global static). `make_project`
 /// builds a fresh host, so a CONCURRENT test fingerprinting a DIFFERENT
-/// host can never inflate this test's count. This test's own measurement
-/// therefore does NOT rely on `measurement_guard()` — the guard is held
-/// only to keep this test's incidental `from_host` traffic out of the
-/// PROCESS-GLOBAL windows the sibling tests in this file measure.
+/// host can never inflate this test's count — every counter this module
+/// measures is per-host (or per-thread for the sweep test), so no
+/// cross-test serialization is needed.
 ///
 /// DISCRIMINATING ACROSS WORKER THREADS: the `fingerprint()` reads run on
 /// the `HostBatchCoordinator`'s rayon WORKER threads (`cache_key` /
@@ -1166,11 +1168,9 @@ fn arc_shared_snapshot_preserves_full_meta_surface_bytes() {
 #[test]
 fn batch_over_overlay_session_computes_fingerprint_o1_not_per_job() {
     use std::sync::atomic::Ordering::Relaxed;
-    // The per-host fingerprint-computation counter makes THIS test's
-    // measurement hermetic (see the doc comment). `measurement_guard()`
-    // is held only to protect the SIBLING tests' process-global
-    // measurement windows from this test's incidental traffic.
-    let _guard = measurement_guard();
+    // The per-host fingerprint-computation counter makes this test's
+    // measurement hermetic (see the doc comment) — no cross-test
+    // serialization needed.
     let project = make_project();
     let host = project.host();
     const N: usize = 12;
@@ -1294,7 +1294,6 @@ fn batch_over_overlay_session_computes_fingerprint_o1_not_per_job() {
 #[test]
 fn analysis_only_overlay_read_never_computes_fingerprint() {
     use std::sync::atomic::Ordering::Relaxed;
-    let _guard = measurement_guard();
     let project = make_project();
     let host = project.host();
     const N: usize = 4;

@@ -155,6 +155,98 @@ describe("mapPropMeta", () => {
     expect(result.default).toBe('"single"');
   });
 
+  it("unescapes single-quoted source escapes when normalizing string defaults", () => {
+    const prop: PropMeta = {
+      name: "label",
+      type: union([primitive("string"), primitive("undefined")]),
+      required: false,
+      hasDefault: true,
+      // Source text `'it\'s'` — the escaped quote must decode, not survive
+      // as a retained backslash (`"it\'s"` is not even valid JSON escaping).
+      default: "'it\\'s'",
+      rawType: "string | undefined",
+    };
+
+    expect(mapPropMeta(prop).default).toBe('"it\'s"');
+  });
+
+  it("re-escapes decoded escape sequences losslessly in normalized string defaults", () => {
+    const prop: PropMeta = {
+      name: "label",
+      type: union([primitive("string"), primitive("undefined")]),
+      required: false,
+      hasDefault: true,
+      // Source text `'line\nbreak'`: the \n is a newline escape, which must
+      // round-trip as the JSON newline escape — not the letter n, and not a
+      // doubled backslash.
+      default: "'line\\nbreak'",
+      rawType: "string | undefined",
+    };
+
+    expect(mapPropMeta(prop).default).toBe('"line\\nbreak"');
+  });
+
+  it("drops line continuations (backslash + line terminator) from string defaults", () => {
+    // A backslash followed by a line terminator is a JS LINE CONTINUATION:
+    // it contributes NO character to the string value ('a\<LF>b' === "ab").
+    // CRLF after a backslash is ONE continuation, not two.
+    const cases: Array<[string, string]> = [
+      ["'a\\\nb'", '"ab"'], // \ + LF
+      ["'a\\\rb'", '"ab"'], // \ + CR
+      ["'a\\\r\nb'", '"ab"'], // \ + CRLF
+      ["'a\\\u2028b'", '"ab"'], // \ + LINE SEPARATOR
+      ["'a\\\u2029b'", '"ab"'], // \ + PARAGRAPH SEPARATOR
+    ];
+    for (const [source, expected] of cases) {
+      const prop: PropMeta = {
+        name: "label",
+        type: union([primitive("string"), primitive("undefined")]),
+        required: false,
+        hasDefault: true,
+        default: source,
+        rawType: "string | undefined",
+      };
+      expect(mapPropMeta(prop).default).toBe(expected);
+    }
+  });
+
+  it("decodes out-of-range \\u{...} code points to U+FFFD instead of throwing", () => {
+    // \u{110000} exceeds the Unicode maximum (0x10FFFF); String.fromCodePoint
+    // throws RangeError on it. Unreachable through parse-valid source, but the
+    // decoder must stay total: decode to the replacement character.
+    const prop: PropMeta = {
+      name: "label",
+      type: union([primitive("string"), primitive("undefined")]),
+      required: false,
+      hasDefault: true,
+      default: "'bad\\u{110000}'",
+      rawType: "string | undefined",
+    };
+    expect(mapPropMeta(prop).default).toBe('"bad\uFFFD"');
+  });
+
+  it("keeps non-string and already-double-quoted defaults byte-unchanged", () => {
+    const numeric: PropMeta = {
+      name: "count",
+      type: union([primitive("number"), primitive("undefined")]),
+      required: false,
+      hasDefault: true,
+      default: "42",
+      rawType: "number | undefined",
+    };
+    expect(mapPropMeta(numeric).default).toBe("42");
+
+    const doubleQuoted: PropMeta = {
+      name: "label",
+      type: union([primitive("string"), primitive("undefined")]),
+      required: false,
+      hasDefault: true,
+      default: '"double"',
+      rawType: "string | undefined",
+    };
+    expect(mapPropMeta(doubleQuoted).default).toBe('"double"');
+  });
+
   it("keeps top-level undefined in optional prop display text", () => {
     const prop: PropMeta = {
       name: "modelValue",
@@ -986,6 +1078,30 @@ describe("mapExposedMeta", () => {
     expect(result.name).toBe("focus");
     expect(result.description).toBe("Focus the input");
     expect(result.type).toBe("() => void");
+  });
+
+  it("forwards exposed JSDoc tags instead of hardcoding an empty list", () => {
+    const exposed: ExposedMeta = {
+      name: "focus",
+      type: unknown("() => void"),
+      description: "Focus the input",
+      tags: [{ name: "internal" }, { name: "since", text: "1.2.0" }],
+    };
+
+    const result = mapExposedMeta(exposed);
+
+    expect(result.tags).toStrictEqual([{ name: "internal" }, { name: "since", text: "1.2.0" }]);
+    // A tag without text omits the key entirely (no `text: undefined`).
+    expect("text" in result.tags[0]).toBe(false);
+  });
+
+  it("keeps tags empty when the exposed member declares none", () => {
+    const exposed: ExposedMeta = {
+      name: "blur",
+      type: unknown("() => void"),
+    };
+
+    expect(mapExposedMeta(exposed).tags).toEqual([]);
   });
 
   // @ai-generated - Verifies exposed member schemas can expand shared registry refs.

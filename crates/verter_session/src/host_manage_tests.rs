@@ -2444,7 +2444,6 @@ import Child from './Child.vue'
             resolved_type_registry: &[],
             evaluated_types: None,
             file_path: "/src/App.vue",
-            canonical_source: None,
         },
     );
     let env = host
@@ -4087,7 +4086,7 @@ fn resolved_macro_by_type<'a>(
 }
 
 /// Resolve the typeinfo macro-surface DTOs for a resolved macro entry. The
-/// published props/emits/slots surface is owned SOLELY by the typeinfo
+/// published props/emits/slots/exposed surface is owned SOLELY by the typeinfo
 /// macro-surface authority (`vue_macro_dtos`), keyed on the admitted macro
 /// index; `ResolvedMacroMeta` supplies only the index + kind for provenance.
 fn macro_dtos_for_resolved(

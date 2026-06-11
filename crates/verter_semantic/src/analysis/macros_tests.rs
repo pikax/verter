@@ -1124,9 +1124,67 @@ fn with_defaults_extracts_default_values() {
         "should extract 2 default values"
     );
     let foo_val = wd.default_values.iter().find(|d| d.key == "foo").unwrap();
-    assert_eq!(foo_val.value, "hello", "string default should strip quotes");
+    assert_eq!(
+        foo_val.value, "'hello'",
+        "string default should keep the verbatim source quoting"
+    );
     let baz_val = wd.default_values.iter().find(|d| d.key == "baz").unwrap();
     assert_eq!(baz_val.value, "true");
+}
+
+#[test]
+fn with_defaults_string_defaults_preserve_verbatim_source_quoting() {
+    let code = r#"withDefaults(defineProps<{ o?: string, d?: string }>(), { o: 'vertical', d: "horizontal" })"#;
+    let macros = parse_macros(code);
+    let wd = macros
+        .iter()
+        .find(|m| m.kind == AnalyzedMacroKind::WithDefaults)
+        .unwrap();
+    let o = wd.default_values.iter().find(|d| d.key == "o").unwrap();
+    assert_eq!(
+        o.value, "'vertical'",
+        "single-quoted string default must keep its verbatim source text"
+    );
+    assert_ne!(
+        o.value, "vertical",
+        "inner-value extraction (quote stripping) must not run"
+    );
+    let d = wd.default_values.iter().find(|d| d.key == "d").unwrap();
+    assert_eq!(
+        d.value, "\"horizontal\"",
+        "double-quoted string default must keep its verbatim source text"
+    );
+}
+
+#[test]
+fn with_defaults_non_string_defaults_stay_byte_identical() {
+    let code = r#"withDefaults(defineProps<{ n?: number, b?: boolean, f?: () => object, o?: object }>(), { n: 42, b: false, f: () => ({ a: 1 }), o: { x: 'y' } })"#;
+    let macros = parse_macros(code);
+    let wd = macros
+        .iter()
+        .find(|m| m.kind == AnalyzedMacroKind::WithDefaults)
+        .unwrap();
+    let by_key = |k: &str| {
+        wd.default_values
+            .iter()
+            .find(|d| d.key == k)
+            .unwrap_or_else(|| panic!("default for {k}"))
+            .value
+            .as_str()
+    };
+    assert_eq!(by_key("n"), "42");
+    assert_eq!(by_key("b"), "false");
+    assert_eq!(by_key("f"), "() => ({ a: 1 })");
+    assert_eq!(by_key("o"), "{ x: 'y' }");
+    // No quoting layer is added around non-string defaults.
+    assert!(
+        !by_key("n").starts_with('\'') && !by_key("n").starts_with('"'),
+        "numeric default must not gain a quoting layer"
+    );
+    assert!(
+        !by_key("f").starts_with('\'') && !by_key("f").starts_with('"'),
+        "function default must not gain a quoting layer"
+    );
 }
 
 // =========================================================================
@@ -1145,6 +1203,32 @@ fn define_expose_extracts_fields() {
     assert_eq!(de.expose_fields[0].name, "foo");
     assert_eq!(de.expose_fields[1].name, "bar");
     assert_eq!(de.expose_fields[2].name, "baz");
+}
+
+#[test]
+fn define_expose_captures_leading_jsdoc() {
+    let code = "defineExpose({\n  /**\n   * The live counter.\n   * @internal\n   */\n  count,\n  plain,\n})";
+    let macros = parse_macros(code);
+    let de = macros
+        .iter()
+        .find(|m| m.kind == AnalyzedMacroKind::DefineExpose)
+        .unwrap();
+    let count = de
+        .expose_fields
+        .iter()
+        .find(|field| field.name == "count")
+        .unwrap();
+    assert_eq!(count.description.as_deref(), Some("The live counter."));
+    assert_eq!(count.tags.len(), 1);
+    assert_eq!(count.tags[0].name, "internal");
+    // Negative: an undocumented field captures nothing.
+    let plain = de
+        .expose_fields
+        .iter()
+        .find(|field| field.name == "plain")
+        .unwrap();
+    assert!(plain.description.is_none());
+    assert!(plain.tags.is_empty());
 }
 
 #[test]
@@ -1659,7 +1743,7 @@ fn runtime_define_props_extracts_type_and_default() {
         .iter()
         .find(|d| d.key == "message")
         .unwrap();
-    assert_eq!(msg_default.value, "Hello from JS");
+    assert_eq!(msg_default.value, "'Hello from JS'");
 
     let act_default = dp
         .default_values

@@ -9715,6 +9715,229 @@ fn k_only_remapped_mapped_alias_closes_on_prepared_decl_route() {
     }
 }
 
+/// Key-remapped mapped members judge declaration-site inheritance PER
+/// PRODUCED NAME: a produced member inherits the matched source member's
+/// `spans` + `declaration_origin` ONLY when its produced name is
+/// identical to the source key. A true rename (`as `x-${K}``) publishes
+/// a name no source declaration declares — inheriting the source's
+/// spans/origin would be a false declaration-site claim (the typeinfo
+/// JSDoc enrichment anchors on those spans, so the renamed member would
+/// fabricate the source member's docs). Identity remaps (`as K`) and the
+/// verbatim arm of a one-to-many remap (`as K | `x-${K}``) ARE the
+/// source declaration's name-preserving image and keep it; the renamed
+/// sibling arm of the same remap severs. Modifier inheritance
+/// (optional / readonly / visibility) is untouched by the rename.
+///
+/// **Discriminating.** Pre-fix, `build_mapped_type` inherited
+/// spans/origin from the source member matched by the ORIGINAL key for
+/// EVERY produced name — the `x-foo` severing assertions below fail on
+/// that implementation. The homomorphic baseline proves the harness
+/// carries non-default spans, so the severing assertions discriminate
+/// on the remap rule, not on a span-less fixture.
+#[test]
+fn mapped_key_remap_inherits_declaration_site_only_for_identity_produced_names() {
+    use crate::semantic_query::{
+        DeclIdentity, HashValue, InstantiateContext, ResolvedDeclSlotIdentity,
+    };
+    use verter_type_expr::MemberSpans;
+
+    let host = host();
+    upsert_ts(
+        &host,
+        "/remap_origin.ts",
+        "export interface Src { readonly foo?: string }\n\
+         export type Renamed<T> = { [K in keyof T as `x-${K}`]: T[K] };\n\
+         export type IdentityRemap<T> = { [K in keyof T as K]: T[K] };\n\
+         export type Fanout<T> = { [K in keyof T as K | `x-${K}`]: T[K] };\n\
+         export type Homomorphic<T> = { [K in keyof T]: T[K] };",
+    );
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let src_ref = graph.intern_node(SemanticNodeData::DeclRef {
+        identity: DeclIdentity {
+            canonical_id: Arc::from("/remap_origin.ts"),
+            whole_hash: HashValue::default(),
+            decl_name: Arc::from("Src"),
+        },
+    });
+    let instantiate =
+        |alias: &str| match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
+            base: ResolvedDeclSlotIdentity::type_slot_unscoped(
+                Arc::from("/remap_origin.ts"),
+                Arc::from(alias),
+            ),
+            args: Arc::from(vec![src_ref].into_boxed_slice()),
+            context: InstantiateContext::new(
+                ProjectionReductionContext::published(ProjectionMode::Expanded),
+                Default::default(),
+            ),
+        }) {
+            QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
+            other => panic!("{alias}<Src> must materialise, got {other:?}"),
+        };
+
+    // Harness baseline: the homomorphic (no-`as`) production inherits the
+    // source declaration site verbatim.
+    let homo = require_object_surface(&graph, instantiate("Homomorphic"), "Homomorphic<Src>");
+    let homo_foo = surface_get_member(&homo, "foo");
+    assert_ne!(
+        homo_foo.spans,
+        MemberSpans::default(),
+        "homomorphic production must inherit the source member's NON-default \
+         spans — a default here means the fixture carries no spans and the \
+         severing assertions below cannot discriminate",
+    );
+    assert_eq!(
+        homo_foo.declaration_origin.as_deref(),
+        Some("/remap_origin.ts"),
+        "homomorphic production must inherit the source declaration origin",
+    );
+    let source_spans = homo_foo.spans;
+
+    // Identity remap (`as K`): the produced name equals the source key —
+    // the member IS the source declaration's image and keeps its site.
+    let identity =
+        require_object_surface(&graph, instantiate("IdentityRemap"), "IdentityRemap<Src>");
+    let identity_foo = surface_get_member(&identity, "foo");
+    assert_eq!(
+        identity_foo.spans, source_spans,
+        "`as K` identity remap must keep the source member's spans",
+    );
+    assert_eq!(
+        identity_foo.declaration_origin.as_deref(),
+        Some("/remap_origin.ts"),
+        "`as K` identity remap must keep the source declaration origin",
+    );
+
+    // True rename (`as `x-${K}``): the produced name `x-foo` is declared
+    // by NO source declaration — both spans and origin sever.
+    let renamed = require_object_surface(&graph, instantiate("Renamed"), "Renamed<Src>");
+    let renamed_member = surface_get_member(&renamed, "x-foo");
+    assert_eq!(
+        renamed_member.spans,
+        MemberSpans::default(),
+        "a key-remapped member must NOT inherit the source member's spans — \
+         `x-foo` is not declared at `foo`'s declaration site",
+    );
+    assert_eq!(
+        renamed_member.declaration_origin, None,
+        "a key-remapped member must NOT inherit the source declaration origin",
+    );
+    // Over-sever guard: modifier inheritance survives the rename — the
+    // remap severs the declaration-site CLAIM, not the member semantics.
+    assert!(
+        renamed_member.optional,
+        "renamed member must still inherit `optional` from the source member",
+    );
+    assert!(
+        renamed_member.readonly,
+        "renamed member must still inherit `readonly` from the source member",
+    );
+
+    // One-to-many remap (`as K | `x-${K}``): each produced arm is judged
+    // independently — the verbatim `foo` arm inherits, the renamed
+    // `x-foo` arm severs.
+    let fanout = require_object_surface(&graph, instantiate("Fanout"), "Fanout<Src>");
+    let fanout_foo = surface_get_member(&fanout, "foo");
+    assert_eq!(
+        fanout_foo.spans, source_spans,
+        "the verbatim arm of a one-to-many remap must keep the source spans",
+    );
+    assert_eq!(
+        fanout_foo.declaration_origin.as_deref(),
+        Some("/remap_origin.ts"),
+        "the verbatim arm of a one-to-many remap must keep the source origin",
+    );
+    let fanout_renamed = surface_get_member(&fanout, "x-foo");
+    assert_eq!(
+        fanout_renamed.spans,
+        MemberSpans::default(),
+        "the renamed arm of a one-to-many remap must sever the source spans",
+    );
+    assert_eq!(
+        fanout_renamed.declaration_origin, None,
+        "the renamed arm of a one-to-many remap must sever the source origin",
+    );
+}
+
+/// A one-to-many key remap with a NON-FINITE arm (`as K | string`) must
+/// fail the WHOLE mapped type closed into the deferred `Mapped` carrier
+/// — never a torn partial surface that publishes the finite identity
+/// arm (`foo`) while silently dropping the non-finite `string` arm.
+/// The remap union evaluates per arm: the `K` arm is a finite string
+/// literal under each iteration key, but the `string` arm is no finite
+/// key set, so `classify_remap_outcome` taints the whole remap to
+/// `DeferCarrier` and `build_mapped_type` returns the `Mapped` shell.
+///
+/// Coverage-completion: expected-pass on the current tree (the outcome
+/// was previously asserted only compositionally through open-mapped
+/// carrier tests). Discriminates against a per-arm classifier that
+/// emits the finite arms and silently drops the non-finite arm — that
+/// implementation enumerates `foo` into an Object and FAILS the
+/// Mapped-carrier match below.
+#[test]
+fn one_to_many_remap_with_non_finite_arm_fails_closed_to_mapped_carrier() {
+    use crate::semantic_query::{
+        DeclIdentity, HashValue, InstantiateContext, ResolvedDeclSlotIdentity,
+    };
+
+    let host = host();
+    upsert_ts(
+        &host,
+        "/remap_non_finite.ts",
+        "export interface Src { foo?: string }\n\
+         export type NonFiniteFanout<T> = { [K in keyof T as K | string]: T[K] };",
+    );
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let src_ref = graph.intern_node(SemanticNodeData::DeclRef {
+        identity: DeclIdentity {
+            canonical_id: Arc::from("/remap_non_finite.ts"),
+            whole_hash: HashValue::default(),
+            decl_name: Arc::from("Src"),
+        },
+    });
+    let value = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
+        base: ResolvedDeclSlotIdentity::type_slot_unscoped(
+            Arc::from("/remap_non_finite.ts"),
+            Arc::from("NonFiniteFanout"),
+        ),
+        args: Arc::from(vec![src_ref].into_boxed_slice()),
+        context: InstantiateContext::new(
+            ProjectionReductionContext::published(ProjectionMode::Expanded),
+            Default::default(),
+        ),
+    }) {
+        QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
+        other => panic!("NonFiniteFanout<Src> must resolve, got {other:?}"),
+    };
+
+    let data = graph.node_data(value).expect("mapped result data");
+    match data.as_ref() {
+        SemanticNodeData::Mapped { .. } => {}
+        SemanticNodeData::Object(view) => panic!(
+            "a one-to-many remap with a non-finite arm (`as K | string`) must fail \
+             closed to the deferred Mapped carrier, but the keys were ENUMERATED \
+             into an Object with {} member(s) — a torn partial surface that \
+             publishes the finite identity arm and silently drops the `string` arm",
+            view.members.len()
+        ),
+        other => panic!("expected the deferred Mapped carrier, got {other:?}"),
+    }
+    // No torn partial member surface: the deferred carrier carries NO
+    // per-member `ProjectMember` edges — the per-key produced loop never
+    // published `foo`.
+    assert!(
+        graph
+            .origins_of_kind(value, OriginEdgeKind::ProjectMember)
+            .is_empty(),
+        "the deferred Mapped carrier must NOT carry per-member ProjectMember edges \
+         (no partial member surface behind the carrier)"
+    );
+}
+
 /// Builtin OBJECT-FILTER key-domain semantics for NESTED builtin
 /// `InstantiationRef`s on the dispatch-predicate route: a `__builtin__`
 /// base has no prepared decl, so without family-aware handling a closed

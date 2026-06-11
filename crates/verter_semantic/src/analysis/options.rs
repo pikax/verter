@@ -8,7 +8,7 @@ use oxc_ast::Comment;
 use oxc_span::GetSpan;
 use verter_span::Span;
 
-use crate::analysis::macros::extract_jsdoc_for;
+use crate::analysis::macros::{default_value_source_text, extract_jsdoc_for};
 use crate::analysis::types::{
     AnalyzedEmitField, AnalyzedOptionsApi, AnalyzedOptionsComponent, AnalyzedOptionsField,
     AnalyzedOptionsProp,
@@ -220,7 +220,7 @@ fn extract_options_props(
                                 }
                                 "default" => {
                                     has_default = true;
-                                    default_value = extract_default_value(&sp.value, source);
+                                    default_value = default_value_source_text(&sp.value, source);
                                 }
                                 _ => {}
                             }
@@ -604,35 +604,6 @@ fn unwrap_parens<'a>(expr: &'a Expression<'a>) -> &'a Expression<'a> {
     match expr {
         Expression::ParenthesizedExpression(p) => unwrap_parens(&p.expression),
         _ => expr,
-    }
-}
-
-/// Extract default value source text from a property value expression.
-/// For string literals, extracts the inner value (strips quotes) to match Volar.
-fn extract_default_value(expr: &Expression<'_>, source: &str) -> Option<String> {
-    match expr {
-        Expression::StringLiteral(s) => Some(s.value.to_string()),
-        Expression::NumericLiteral(n) => {
-            let start = n.span.start as usize;
-            let end = n.span.end as usize;
-            if end <= source.len() {
-                Some(source[start..end].to_string())
-            } else {
-                None
-            }
-        }
-        Expression::BooleanLiteral(b) => Some(if b.value { "true" } else { "false" }.to_string()),
-        Expression::NullLiteral(_) => Some("null".to_string()),
-        // For functions/arrows/objects, extract source text
-        _ => {
-            let start = expr.span().start as usize;
-            let end = expr.span().end as usize;
-            if end <= source.len() {
-                Some(source[start..end].to_string())
-            } else {
-                None
-            }
-        }
     }
 }
 

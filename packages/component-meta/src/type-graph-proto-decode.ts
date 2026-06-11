@@ -632,6 +632,10 @@ function decodeOptionalPublicInstance(
       ),
       ...maybe("rawType", graph.getStringMaybe(Number(member.rawTypeId ?? 0))),
       ...maybe("description", graph.getStringMaybe(Number(member.descriptionId ?? 0))),
+      ...maybeArray(
+        "tags",
+        decodeJsdocTags((member.tags as ProtoRecord[] | undefined) ?? [], graph),
+      ),
     })),
   };
 }
@@ -859,6 +863,10 @@ function decodeExposed(exposed: ProtoRecord, graph: DecodedTypeGraph): Record<st
       decodeOptionalExpansionMetadata(exposed.typeExpansion as ProtoRecord | undefined, graph),
     ),
     ...maybe("description", graph.getStringMaybe(Number(exposed.descriptionId ?? 0))),
+    ...maybeArray(
+      "tags",
+      decodeJsdocTags((exposed.tags as ProtoRecord[] | undefined) ?? [], graph),
+    ),
   };
 }
 

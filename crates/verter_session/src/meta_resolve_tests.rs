@@ -28,8 +28,8 @@ fn provenance(project: &MetaProject) -> crate::types::MetaProvenanceSnapshot {
 
 /// Resolve the typeinfo macro-surface DTOs for the `resolved_macros` entries
 /// matching `kind`, mirroring the production `component_meta_resolved_macros`
-/// path: the published props/emits/slots surface is owned SOLELY by the
-/// typeinfo macro-surface authority (`vue_macro_dtos`), keyed on the admitted
+/// path: the published props/emits/slots/exposed surface is owned SOLELY by
+/// the typeinfo macro-surface authority (`vue_macro_dtos`), keyed on the admitted
 /// macro index; `resolved_macros` supplies only the index + kind. Entries are
 /// deduplicated by macro index (multiple `ResolvedMacroMeta` per index are
 /// gating/provenance facts, not distinct field authorities).
@@ -692,8 +692,8 @@ defineProps<Props>()
     assert_eq!(state.mode, ProjectionMode::Identity);
 
     // `ProjectionMode::Identity`: resolved_macros should carry identity info but
-    // NOT trigger expansion. The published props/emits/slots surface is owned by
-    // the typeinfo path (`vue_macro_dtos`), which is mode-INDEPENDENT, so "no
+    // NOT trigger expansion. The published props/emits/slots/exposed surface is
+    // owned by the typeinfo path (`vue_macro_dtos`), which is mode-INDEPENDENT, so "no
     // expanded props" is no longer expressible as an empty macro-surface; the
     // mode gate is owned by `evaluated_types` / `resolved_type_registry` below.
     assert!(
@@ -743,7 +743,7 @@ defineProps<Props>()
     assert_eq!(state.mode, ProjectionMode::Expanded);
 
     // `ProjectionMode::Expanded`: materialized props (sourced from the typeinfo
-    // macro-surface authority, the SOLE props/emits/slots owner).
+    // macro-surface authority, the SOLE props/emits/slots/exposed owner).
     let prop_names = prop_names_from_resolved(project.host(), "/App.vue", &state);
     assert!(
         prop_names.contains(&"a".to_string()),
@@ -811,7 +811,7 @@ defineProps<Props>()
     // The two modes produce DISTINCT resolved-meta states: the mode gate is the
     // cross-file shape materialiser, observable via `evaluated_types` (the
     // typeinfo macro-surface DTOs are mode-independent, so the published
-    // props/emits/slots surface cannot distinguish the modes — only the
+    // props/emits/slots/exposed surface cannot distinguish the modes — only the
     // expansion side-effects can).
     assert_eq!(type_state.mode, ProjectionMode::Identity);
     assert_eq!(expanded_state.mode, ProjectionMode::Expanded);
@@ -6016,7 +6016,6 @@ defineEmits<Emits>()
             resolved_type_registry: &resolved_type_registry,
             evaluated_types: fallthrough.evaluated_types.as_ref(),
             file_path: "/src/Child.vue",
-            canonical_source: None,
         },
     );
     assert!(
@@ -6123,7 +6122,6 @@ defineEmits<Emits>()
             resolved_type_registry: &resolved_type_registry,
             evaluated_types: fallthrough.evaluated_types.as_ref(),
             file_path: "/src/Child.vue",
-            canonical_source: None,
         },
     );
     assert!(

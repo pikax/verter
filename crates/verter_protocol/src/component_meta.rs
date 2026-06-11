@@ -105,6 +105,11 @@ fn component_meta_body_to_proto(
                     .as_ref()
                     .map(|metadata| expansion_metadata_to_proto(builder, metadata)),
                 description_id: builder.string_id_opt(exposed.description.as_deref()),
+                tags: exposed
+                    .tags
+                    .iter()
+                    .map(|tag| jsdoc_tag_to_proto(builder, tag))
+                    .collect(),
             })
             .collect(),
         components: meta
@@ -520,6 +525,11 @@ fn public_instance_to_proto(
                     .map(|metadata| expansion_metadata_to_proto(builder, metadata)),
                 raw_type_id: builder.string_id_opt(member.raw_type.as_deref()),
                 description_id: builder.string_id_opt(member.description.as_deref()),
+                tags: member
+                    .tags
+                    .iter()
+                    .map(|tag| jsdoc_tag_to_proto(builder, tag))
+                    .collect(),
             })
             .collect(),
     }

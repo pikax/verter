@@ -71,8 +71,8 @@ fn prop_names(snapshot: &crate::types::FileAnalysisSnapshot) -> Vec<String> {
 /// Resolved-macro prop names sourced from the SOLE typeinfo macro-surface
 /// authority (`vue_macro_dtos`, FullMetadata), keyed on each DefineProps macro
 /// index (deduped, mirroring the production producer). The resolved-state
-/// `ResolvedMacroMeta` no longer carries the published props/emits/slots
-/// surface; it supplies only the macro index + kind for provenance.
+/// `ResolvedMacroMeta` no longer carries the published props/emits/slots/
+/// exposed surface; it supplies only the macro index + kind for provenance.
 fn resolved_macro_prop_names(
     host: &VerterHost,
     owner: &str,
@@ -16822,11 +16822,10 @@ const props = defineProps<ButtonProps>()
 /// guard; this test pins the behavioural half (JSDoc descriptions
 /// propagate through imported `Omit<>`).
 ///
-/// This scenario triggers the JSDoc-enrichment fallback (not the main
-/// resolver path) by extending imported types through `Omit<>`, which leaves
-/// descriptions blank after the main resolver and forces
-/// `fill_missing_component_meta_prop_descriptions_from_imported_roots` to
-/// run.
+/// This scenario routes JSDoc through the span-borne enrichment by
+/// extending imported types through `Omit<>` — descriptions slice from the
+/// declaring file's cache-owned `IndexedReady.raw_source` via the typeinfo
+/// member spans, never a fresh parse.
 #[test]
 fn imported_jsdoc_enrichment_uses_cached_parse_and_does_not_reparse_source() {
     let project = make_project();
@@ -21574,4 +21573,1110 @@ defineSlots<{ default(props: SlotProps): any }>()
         "a private class-param member must NOT leak into published slot bindings \
          (adapter OR graph-native path); got {binding_names:?}",
     );
+}
+
+#[test]
+fn published_default_value_and_default_value_tag_keep_verbatim_source_quoting() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+withDefaults(defineProps<{ orientation?: string, count?: number, active?: boolean, items?: string[] }>(), {
+  orientation: 'vertical',
+  count: 0,
+  active: false,
+  items: () => ['a'],
+})
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/App.vue")
+        .expect("component meta resolves");
+
+    let prop = |name: &str| {
+        meta.props
+            .iter()
+            .find(|prop| prop.name == name)
+            .unwrap_or_else(|| panic!("prop {name} must be published"))
+    };
+
+    let orientation = prop("orientation");
+    assert_eq!(
+        orientation.default_value.as_deref(),
+        Some("'vertical'"),
+        "string default must publish the verbatim quoted source text"
+    );
+    assert_ne!(
+        orientation.default_value.as_deref(),
+        Some("vertical"),
+        "string default must not publish the unquoted inner value"
+    );
+    let default_tag = orientation
+        .tags
+        .iter()
+        .find(|tag| tag.name == "defaultValue")
+        .expect("synthesized @defaultValue tag must be present");
+    assert_eq!(
+        default_tag.text.as_deref(),
+        Some("'vertical'"),
+        "@defaultValue tag text must carry the verbatim quoted source text"
+    );
+
+    // Non-string defaults stay byte-identical — no quoting layer is added.
+    assert_eq!(prop("count").default_value.as_deref(), Some("0"));
+    assert_eq!(prop("active").default_value.as_deref(), Some("false"));
+    assert_eq!(prop("items").default_value.as_deref(), Some("() => ['a']"));
+    for name in ["count", "active", "items"] {
+        let value = prop(name).default_value.as_deref().unwrap();
+        assert!(
+            !value.starts_with('\'') && !value.starts_with('"'),
+            "non-string default {name} must not gain a quoting layer, got {value}"
+        );
+    }
+}
+
+#[test]
+fn cross_file_prop_jsdoc_survives_homomorphic_mapped_types() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/types.ts",
+            r#"
+export interface ImportedProps {
+  /**
+   * Visual orientation of the widget.
+   * @deprecated use layout instead
+   */
+  orientation?: string
+  /** Number of columns. */
+  columns?: number
+  plain?: boolean
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/Comp.vue",
+            r#"<script setup lang="ts">
+import type { ImportedProps } from './types'
+
+defineProps<Partial<Pick<ImportedProps, 'orientation' | 'plain'>>>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/src/Comp.vue")
+        .expect("component meta resolves");
+
+    let orientation = meta
+        .props
+        .iter()
+        .find(|prop| prop.name == "orientation")
+        .expect("orientation must surface through Partial<Pick<...>>");
+    assert_eq!(
+        orientation.description.as_deref(),
+        Some("Visual orientation of the widget."),
+        "imported member's JSDoc description must survive homomorphic mapped production"
+    );
+    let deprecated = orientation
+        .tags
+        .iter()
+        .find(|tag| tag.name == "deprecated")
+        .expect("imported member's @deprecated tag must survive homomorphic mapped production");
+    assert_eq!(deprecated.text.as_deref(), Some("use layout instead"));
+
+    // Negative: an undocumented member publishes NO description and NO tags
+    // (no fabrication).
+    let plain = meta
+        .props
+        .iter()
+        .find(|prop| prop.name == "plain")
+        .expect("plain must surface through Partial<Pick<...>>");
+    assert_eq!(
+        plain.description.as_deref(),
+        None,
+        "undocumented member must not gain a fabricated description"
+    );
+    assert!(
+        plain.tags.is_empty(),
+        "undocumented member must not gain fabricated tags, got {:?}",
+        plain.tags
+    );
+}
+
+/// Key-remapped mapped props judge JSDoc inheritance PER PRODUCED NAME on
+/// the published (Shallow) surface: a true rename (`as `x-${K}``)
+/// publishes a name no source declaration declares and severs the
+/// declaration site, so NO description and NO tags are fabricated for it;
+/// an identity remap (`as K`) IS the source declaration's name-preserving
+/// image and keeps the doc. Modifier inheritance (the `?` optionality)
+/// survives the rename.
+///
+/// Discriminating: pre-fix the Shallow mapped synthesiser inherited the
+/// source member's spans + declaration_origin for every produced name, so
+/// `x-orientation` published `orientation`'s doc and @deprecated tag — the
+/// severing assertions below fail on that implementation.
+#[test]
+fn key_remapped_mapped_prop_does_not_inherit_source_jsdoc() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/remap.ts",
+            r#"
+export interface SourceProps {
+  /**
+   * Visual orientation of the widget.
+   * @deprecated use layout instead
+   */
+  orientation?: string
+}
+export type RenamedProps<T> = { [K in keyof T as `x-${K}`]: T[K] }
+export type IdentityProps<T> = { [K in keyof T as K]: T[K] }
+export type FanoutProps<T> = { [K in keyof T as K | `x-${K}`]: T[K] }
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/Renamed.vue",
+            r#"<script setup lang="ts">
+import type { SourceProps, RenamedProps } from './remap'
+
+defineProps<RenamedProps<SourceProps>>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/Identity.vue",
+            r#"<script setup lang="ts">
+import type { SourceProps, IdentityProps } from './remap'
+
+defineProps<IdentityProps<SourceProps>>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let renamed_meta = project
+        .host()
+        .get_component_meta("/src/Renamed.vue")
+        .expect("component meta resolves");
+
+    // Renamed arm: `x-orientation` is declared by NO source declaration —
+    // no description, no tags (negative: nothing fabricated from the
+    // source member's declaration site).
+    let renamed = renamed_meta
+        .props
+        .iter()
+        .find(|prop| prop.name == "x-orientation")
+        .expect("the renamed remap arm must surface");
+    assert_eq!(
+        renamed.description.as_deref(),
+        None,
+        "a key-remapped prop must NOT inherit the source member's JSDoc \
+         description — its produced name has no source declaration site"
+    );
+    assert!(
+        renamed.tags.is_empty(),
+        "a key-remapped prop must NOT inherit the source member's tags, got {:?}",
+        renamed.tags
+    );
+    // Over-sever guard: modifier parity survives the rename — the source
+    // member's `?` still makes the renamed prop optional.
+    assert!(
+        !renamed.required,
+        "the renamed arm must still inherit optionality from the source member"
+    );
+
+    // Identity remap (`as K`): the produced name equals the source key —
+    // the declaration site is real and the doc publishes (guards against
+    // an over-broad "any `as` clause severs" implementation).
+    let identity_meta = project
+        .host()
+        .get_component_meta("/src/Identity.vue")
+        .expect("component meta resolves");
+    let orientation = identity_meta
+        .props
+        .iter()
+        .find(|prop| prop.name == "orientation")
+        .expect("the identity remap arm must surface");
+    assert_eq!(
+        orientation.description.as_deref(),
+        Some("Visual orientation of the widget."),
+        "an `as K` identity remap must keep the source JSDoc"
+    );
+    assert!(
+        orientation.tags.iter().any(|tag| tag.name == "deprecated"),
+        "an `as K` identity remap must keep the source @deprecated tag, got {:?}",
+        orientation.tags
+    );
+    assert!(
+        !orientation.required,
+        "the identity arm must still inherit optionality from the source member"
+    );
+
+    // One-to-many remap (`as K | `x-${K}``): each produced arm is judged
+    // independently — the verbatim `orientation` arm keeps the doc, the
+    // renamed `x-orientation` arm severs it.
+    project
+        .upsert_base(
+            "/src/Fanout.vue",
+            r#"<script setup lang="ts">
+import type { SourceProps, FanoutProps } from './remap'
+
+defineProps<FanoutProps<SourceProps>>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    let fanout_meta = project
+        .host()
+        .get_component_meta("/src/Fanout.vue")
+        .expect("component meta resolves");
+    let fanout_verbatim = fanout_meta
+        .props
+        .iter()
+        .find(|prop| prop.name == "orientation")
+        .expect("the verbatim arm of a one-to-many remap must surface");
+    assert_eq!(
+        fanout_verbatim.description.as_deref(),
+        Some("Visual orientation of the widget."),
+        "the verbatim arm of a one-to-many remap must keep the source JSDoc"
+    );
+    let fanout_renamed = fanout_meta
+        .props
+        .iter()
+        .find(|prop| prop.name == "x-orientation")
+        .expect("the renamed arm of a one-to-many remap must surface");
+    assert_eq!(
+        fanout_renamed.description.as_deref(),
+        None,
+        "the renamed arm of a one-to-many remap must NOT inherit the source JSDoc"
+    );
+    assert!(
+        fanout_renamed.tags.is_empty(),
+        "the renamed arm of a one-to-many remap must NOT inherit tags, got {:?}",
+        fanout_renamed.tags
+    );
+}
+
+#[test]
+fn cross_file_call_signature_emit_jsdoc_publishes() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/emits.ts",
+            r#"
+export interface WidgetEmits {
+  /**
+   * Fires when the value changes.
+   * @deprecated listen to input instead
+   */
+  (e: 'change', value: string): void
+  /** Fires on focus. */
+  (e: 'focus'): void
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/Widget.vue",
+            r#"<script setup lang="ts">
+import type { WidgetEmits } from './emits'
+
+defineEmits<WidgetEmits>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/src/Widget.vue")
+        .expect("component meta resolves");
+
+    let change = meta
+        .events
+        .iter()
+        .find(|event| event.name == "change")
+        .expect("change event must surface");
+    assert_eq!(
+        change.description.as_deref(),
+        Some("Fires when the value changes."),
+        "imported call-signature emit's JSDoc description must publish"
+    );
+    let deprecated = change
+        .tags
+        .iter()
+        .find(|tag| tag.name == "deprecated")
+        .expect("imported call-signature emit's @deprecated tag must publish");
+    assert_eq!(deprecated.text.as_deref(), Some("listen to input instead"));
+
+    let focus = meta
+        .events
+        .iter()
+        .find(|event| event.name == "focus")
+        .expect("focus event must surface");
+    assert_eq!(focus.description.as_deref(), Some("Fires on focus."));
+}
+
+#[test]
+fn cross_file_property_style_emit_jsdoc_publishes() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/emits.ts",
+            r#"
+export interface PanelEmits {
+  /** Fires when the panel toggles. */
+  toggle: [open: boolean]
+  close: []
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/Panel.vue",
+            r#"<script setup lang="ts">
+import type { PanelEmits } from './emits'
+
+defineEmits<PanelEmits>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/src/Panel.vue")
+        .expect("component meta resolves");
+
+    let toggle = meta
+        .events
+        .iter()
+        .find(|event| event.name == "toggle")
+        .expect("toggle event must surface");
+    assert_eq!(
+        toggle.description.as_deref(),
+        Some("Fires when the panel toggles."),
+        "imported property-style emit's JSDoc description must publish"
+    );
+
+    // Negative: an undocumented event publishes NO description and NO
+    // fabricated tags (the synthesized @defaultValue rail is props-only).
+    let close = meta
+        .events
+        .iter()
+        .find(|event| event.name == "close")
+        .expect("close event must surface");
+    assert_eq!(
+        close.description.as_deref(),
+        None,
+        "undocumented event must not gain a fabricated description"
+    );
+    assert!(
+        close.tags.is_empty(),
+        "undocumented event must not gain fabricated tags, got {:?}",
+        close.tags
+    );
+}
+
+#[test]
+fn cross_file_slot_jsdoc_publishes() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/slots.ts",
+            r#"
+export interface CardSlots {
+  /** Main card body content. */
+  default(props: { item: string }): any
+  footer?(props: {}): any
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/Card.vue",
+            r#"<script setup lang="ts">
+import type { CardSlots } from './slots'
+
+defineSlots<CardSlots>()
+</script>
+<template><div><slot /></div></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/src/Card.vue")
+        .expect("component meta resolves");
+
+    let default_slot = meta
+        .slots
+        .iter()
+        .find(|slot| slot.name == "default")
+        .expect("default slot must surface");
+    assert_eq!(
+        default_slot.description.as_deref(),
+        Some("Main card body content."),
+        "imported slot's JSDoc description must publish"
+    );
+
+    // Negative: an undocumented slot publishes NO description.
+    let footer = meta
+        .slots
+        .iter()
+        .find(|slot| slot.name == "footer")
+        .expect("footer slot must surface");
+    assert_eq!(
+        footer.description.as_deref(),
+        None,
+        "undocumented slot must not gain a fabricated description"
+    );
+}
+
+#[test]
+fn same_file_local_interface_prop_jsdoc_publishes_without_text_scan() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script lang="ts">
+export interface Inner {
+  /** Doc for foo */
+  foo: string
+  /** Doc for bar.
+   * @deprecated use baz
+   */
+  bar?: number
+}
+</script>
+<script setup lang="ts">
+defineProps<Inner>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project.host().get_component_meta("/App.vue").expect("meta");
+
+    let foo = meta
+        .props
+        .iter()
+        .find(|prop| prop.name == "foo")
+        .expect("foo must surface");
+    assert_eq!(foo.description.as_deref(), Some("Doc for foo"));
+
+    let bar = meta
+        .props
+        .iter()
+        .find(|prop| prop.name == "bar")
+        .expect("bar must surface");
+    assert_eq!(bar.description.as_deref(), Some("Doc for bar."));
+    let deprecated = bar
+        .tags
+        .iter()
+        .find(|tag| tag.name == "deprecated")
+        .expect("@deprecated tag must publish");
+    assert_eq!(deprecated.text.as_deref(), Some("use baz"));
+}
+
+#[test]
+fn define_expose_object_literal_jsdoc_publishes() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import { ref, computed } from 'vue'
+
+const count = ref(0)
+const label = computed(() => `n=${count.value}`)
+
+defineExpose({
+  /**
+   * The live counter value.
+   * @internal
+   */
+  count,
+  label,
+})
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project.host().get_component_meta("/App.vue").expect("meta");
+
+    let count = meta
+        .exposed
+        .iter()
+        .find(|exposed| exposed.name == "count")
+        .expect("count must be exposed");
+    assert_eq!(
+        count.description.as_deref(),
+        Some("The live counter value."),
+        "object-literal defineExpose member's JSDoc description must publish"
+    );
+    let internal = count
+        .tags
+        .iter()
+        .find(|tag| tag.name == "internal")
+        .expect("@internal tag must publish on the exposed member");
+    assert_eq!(internal.text.as_deref(), None);
+
+    // Negative: an undocumented exposed member publishes NO description and
+    // NO tags (no fabrication).
+    let label = meta
+        .exposed
+        .iter()
+        .find(|exposed| exposed.name == "label")
+        .expect("label must be exposed");
+    assert_eq!(label.description.as_deref(), None);
+    assert!(label.tags.is_empty(), "got {:?}", label.tags);
+}
+
+#[test]
+fn define_expose_type_argument_only_publishes_members_with_docs() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/api.ts",
+            r#"
+export interface PanelApi {
+  /**
+   * Open the panel.
+   * @public
+   */
+  open(): void
+  close(): void
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/Panel.vue",
+            r#"<script setup lang="ts">
+import type { PanelApi } from './api'
+
+defineExpose<PanelApi>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/src/Panel.vue")
+        .expect("component meta resolves");
+
+    let open = meta
+        .exposed
+        .iter()
+        .find(|exposed| exposed.name == "open")
+        .expect("type-argument-only defineExpose must publish its surface members");
+    assert_eq!(
+        open.description.as_deref(),
+        Some("Open the panel."),
+        "type-argument member's JSDoc must publish without an object literal"
+    );
+    assert!(
+        open.tags.iter().any(|tag| tag.name == "public"),
+        "type-argument member's @public tag must publish, got {:?}",
+        open.tags
+    );
+    assert!(
+        !matches!(open.type_expr, TypeExpr::Unknown { .. }),
+        "surface member publishes its surface type, not an Unknown fallback: {:?}",
+        open.type_expr
+    );
+
+    // Negative: an undocumented exposed member publishes nothing fabricated.
+    let close = meta
+        .exposed
+        .iter()
+        .find(|exposed| exposed.name == "close")
+        .expect("undocumented type-argument member must still publish");
+    assert_eq!(close.description.as_deref(), None);
+    assert!(close.tags.is_empty(), "got {:?}", close.tags);
+
+    // The public-instance sidecar derives from the exposed surface, so the
+    // type-argument-only members surface there too.
+    let sidecar = meta
+        .public_instance
+        .as_ref()
+        .expect("exposed members imply a public-instance sidecar");
+    let sidecar_open = sidecar
+        .members
+        .iter()
+        .find(|member| member.name == "open")
+        .expect("sidecar must carry the exposed member");
+    assert_eq!(
+        sidecar_open.kind,
+        verter_semantic::analysis::component_meta::PublicInstanceMemberKind::Exposed
+    );
+    assert_eq!(sidecar_open.description.as_deref(), Some("Open the panel."));
+}
+
+#[test]
+fn define_expose_owner_local_type_argument_publishes_members_with_docs() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/Input.vue",
+            r#"<script setup lang="ts">
+interface LocalApi {
+  /**
+   * Focus the input.
+   * @public
+   */
+  focus(): void
+  blur(): void
+}
+
+defineExpose<LocalApi>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/src/Input.vue")
+        .expect("component meta resolves");
+
+    let focus = meta
+        .exposed
+        .iter()
+        .find(|exposed| exposed.name == "focus")
+        .expect("owner-local type-argument defineExpose must publish its surface members");
+    assert_eq!(
+        focus.description.as_deref(),
+        Some("Focus the input."),
+        "owner-local type-argument member's JSDoc must publish without an object literal"
+    );
+    assert!(
+        focus.tags.iter().any(|tag| tag.name == "public"),
+        "owner-local type-argument member's @public tag must publish, got {:?}",
+        focus.tags
+    );
+    assert!(
+        !matches!(focus.type_expr, TypeExpr::Unknown { .. }),
+        "surface member publishes its surface type, not an Unknown fallback: {:?}",
+        focus.type_expr
+    );
+
+    // Negative: an undocumented exposed member publishes nothing fabricated.
+    let blur = meta
+        .exposed
+        .iter()
+        .find(|exposed| exposed.name == "blur")
+        .expect("undocumented owner-local type-argument member must still publish");
+    assert_eq!(blur.description.as_deref(), None);
+    assert!(blur.tags.is_empty(), "got {:?}", blur.tags);
+
+    // The public-instance sidecar derives from the exposed surface, so the
+    // owner-local type-argument members surface there too.
+    let sidecar = meta
+        .public_instance
+        .as_ref()
+        .expect("exposed members imply a public-instance sidecar");
+    let sidecar_focus = sidecar
+        .members
+        .iter()
+        .find(|member| member.name == "focus")
+        .expect("sidecar must carry the exposed member");
+    assert_eq!(
+        sidecar_focus.kind,
+        verter_semantic::analysis::component_meta::PublicInstanceMemberKind::Exposed
+    );
+    assert_eq!(
+        sidecar_focus.description.as_deref(),
+        Some("Focus the input.")
+    );
+}
+
+#[test]
+fn define_expose_owner_local_type_argument_with_imported_heritage_publishes() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/base.ts",
+            r#"
+export interface BaseApi {
+  /**
+   * Reset the control.
+   */
+  reset(): void
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/Control.vue",
+            r#"<script setup lang="ts">
+import type { BaseApi } from './base'
+
+interface LocalApi extends BaseApi {
+  /**
+   * Focus the control.
+   * @public
+   */
+  focus(): void
+}
+
+defineExpose<LocalApi>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/src/Control.vue")
+        .expect("component meta resolves");
+
+    let focus = meta
+        .exposed
+        .iter()
+        .find(|exposed| exposed.name == "focus")
+        .expect("owner-local heritage-bearing defineExpose must publish its own-body members");
+    assert_eq!(focus.description.as_deref(), Some("Focus the control."));
+    assert!(
+        focus.tags.iter().any(|tag| tag.name == "public"),
+        "own-body member's @public tag must publish, got {:?}",
+        focus.tags
+    );
+
+    let reset = meta
+        .exposed
+        .iter()
+        .find(|exposed| exposed.name == "reset")
+        .expect("heritage member from the imported base must publish");
+    assert_eq!(reset.description.as_deref(), Some("Reset the control."));
+}
+
+#[test]
+fn define_expose_owner_local_mixed_literal_and_type_argument_publishes_union() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/Field.vue",
+            r#"<script setup lang="ts">
+interface LocalApi {
+  /**
+   * Select the whole value.
+   * @public
+   */
+  selectAll(): void
+  /**
+   * Type-argument doc for focus.
+   */
+  focus(): void
+  clear(): void
+}
+
+const focus = () => {}
+defineExpose<LocalApi>({
+  /**
+   * Focus the field.
+   */
+  focus,
+})
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/src/Field.vue")
+        .expect("component meta resolves");
+
+    // Object-literal member: its OWN leading JSDoc wins over the overlapping
+    // type-argument member's doc (first-wins pairing).
+    let focus = meta
+        .exposed
+        .iter()
+        .find(|exposed| exposed.name == "focus")
+        .expect("object-literal member must be exposed");
+    assert_eq!(
+        focus.description.as_deref(),
+        Some("Focus the field."),
+        "literal member's own JSDoc must win over the type-argument member's doc"
+    );
+
+    // Type-argument-only member: publishes with its span-sliced doc + tag even
+    // though an object literal is present alongside the owner-local type
+    // argument (the mixed form rides the same owner-local discovery rail).
+    let select_all = meta
+        .exposed
+        .iter()
+        .find(|exposed| exposed.name == "selectAll")
+        .expect("mixed owner-local defineExpose must publish its type-argument-only members");
+    assert_eq!(
+        select_all.description.as_deref(),
+        Some("Select the whole value."),
+        "type-argument-only member's JSDoc must publish in the mixed local form"
+    );
+    assert!(
+        select_all.tags.iter().any(|tag| tag.name == "public"),
+        "type-argument-only member's @public tag must publish, got {:?}",
+        select_all.tags
+    );
+    assert!(
+        !matches!(select_all.type_expr, TypeExpr::Unknown { .. }),
+        "surface member publishes its surface type, not an Unknown fallback: {:?}",
+        select_all.type_expr
+    );
+
+    // Negative: an undocumented type-argument-only member publishes nothing
+    // fabricated.
+    let clear = meta
+        .exposed
+        .iter()
+        .find(|exposed| exposed.name == "clear")
+        .expect("undocumented type-argument-only member must still publish");
+    assert_eq!(clear.description.as_deref(), None);
+    assert!(clear.tags.is_empty(), "got {:?}", clear.tags);
+
+    // The public-instance sidecar derives from the exposed surface: both the
+    // literal member and the type-argument-only member surface there.
+    let sidecar = meta
+        .public_instance
+        .as_ref()
+        .expect("exposed members imply a public-instance sidecar");
+    let sidecar_select_all = sidecar
+        .members
+        .iter()
+        .find(|member| member.name == "selectAll")
+        .expect("sidecar must carry the type-argument-only exposed member");
+    assert_eq!(
+        sidecar_select_all.kind,
+        verter_semantic::analysis::component_meta::PublicInstanceMemberKind::Exposed
+    );
+    assert_eq!(
+        sidecar_select_all.description.as_deref(),
+        Some("Select the whole value.")
+    );
+    let sidecar_focus = sidecar
+        .members
+        .iter()
+        .find(|member| member.name == "focus")
+        .expect("sidecar must carry the literal exposed member");
+    assert_eq!(
+        sidecar_focus.kind,
+        verter_semantic::analysis::component_meta::PublicInstanceMemberKind::Exposed
+    );
+}
+
+/// Entrance-matrix completion: mixed-IMPORTED `defineExpose<ImportedApi>({
+/// ... })` — an imported type argument alongside an object literal. Mirrors
+/// the mixed-local test above with the interface moved cross-file: the
+/// literal member's own leading JSDoc wins on name overlap (first-wins
+/// pairing), the imported type-argument-only member publishes its doc +
+/// tag, an undocumented type-only member publishes nothing fabricated, and
+/// the public-instance sidecar derives coherently from the union.
+#[test]
+fn define_expose_imported_mixed_literal_and_type_argument_publishes_union() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/imported_api.ts",
+            r#"
+export interface ImportedApi {
+  /**
+   * Select the whole value.
+   * @public
+   */
+  selectAll(): void
+  /**
+   * Type-argument doc for focus.
+   */
+  focus(): void
+  clear(): void
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/Field.vue",
+            r#"<script setup lang="ts">
+import type { ImportedApi } from './imported_api'
+
+const focus = () => {}
+defineExpose<ImportedApi>({
+  /**
+   * Focus the field.
+   */
+  focus,
+})
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/src/Field.vue")
+        .expect("component meta resolves");
+
+    // Object-literal member: its OWN leading JSDoc wins over the overlapping
+    // imported type-argument member's doc (first-wins pairing).
+    let focus = meta
+        .exposed
+        .iter()
+        .find(|exposed| exposed.name == "focus")
+        .expect("object-literal member must be exposed");
+    assert_eq!(
+        focus.description.as_deref(),
+        Some("Focus the field."),
+        "literal member's own JSDoc must win over the imported type-argument \
+         member's doc"
+    );
+
+    // Imported type-argument-only member: publishes with its doc + tag even
+    // though an object literal is present alongside the imported type
+    // argument.
+    let select_all = meta
+        .exposed
+        .iter()
+        .find(|exposed| exposed.name == "selectAll")
+        .expect("mixed imported defineExpose must publish its type-argument-only members");
+    assert_eq!(
+        select_all.description.as_deref(),
+        Some("Select the whole value."),
+        "imported type-argument-only member's JSDoc must publish in the mixed \
+         imported form"
+    );
+    assert!(
+        select_all.tags.iter().any(|tag| tag.name == "public"),
+        "imported type-argument-only member's @public tag must publish, got {:?}",
+        select_all.tags
+    );
+    assert!(
+        !matches!(select_all.type_expr, TypeExpr::Unknown { .. }),
+        "surface member publishes its surface type, not an Unknown fallback: {:?}",
+        select_all.type_expr
+    );
+
+    // Negative: an undocumented imported type-argument-only member publishes
+    // nothing fabricated.
+    let clear = meta
+        .exposed
+        .iter()
+        .find(|exposed| exposed.name == "clear")
+        .expect("undocumented type-argument-only member must still publish");
+    assert_eq!(clear.description.as_deref(), None);
+    assert!(clear.tags.is_empty(), "got {:?}", clear.tags);
+
+    // The public-instance sidecar derives from the exposed surface: both the
+    // literal member and the imported type-argument-only member surface there.
+    let sidecar = meta
+        .public_instance
+        .as_ref()
+        .expect("exposed members imply a public-instance sidecar");
+    let sidecar_select_all = sidecar
+        .members
+        .iter()
+        .find(|member| member.name == "selectAll")
+        .expect("sidecar must carry the imported type-argument-only exposed member");
+    assert_eq!(
+        sidecar_select_all.kind,
+        verter_semantic::analysis::component_meta::PublicInstanceMemberKind::Exposed
+    );
+    assert_eq!(
+        sidecar_select_all.description.as_deref(),
+        Some("Select the whole value.")
+    );
+    let sidecar_focus = sidecar
+        .members
+        .iter()
+        .find(|member| member.name == "focus")
+        .expect("sidecar must carry the literal exposed member");
+    assert_eq!(
+        sidecar_focus.kind,
+        verter_semantic::analysis::component_meta::PublicInstanceMemberKind::Exposed
+    );
+}
+
+#[test]
+fn define_expose_type_argument_jsdoc_publishes_cross_file() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/api.ts",
+            r#"
+export interface WidgetApi {
+  /**
+   * Focus the widget.
+   * @public
+   */
+  focus(): void
+  blur(): void
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/Widget.vue",
+            r#"<script setup lang="ts">
+import type { WidgetApi } from './api'
+
+const focus = () => {}
+const blur = () => {}
+defineExpose<WidgetApi>({ focus, blur })
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/src/Widget.vue")
+        .expect("component meta resolves");
+
+    let focus = meta
+        .exposed
+        .iter()
+        .find(|exposed| exposed.name == "focus")
+        .expect("focus must be exposed");
+    assert_eq!(
+        focus.description.as_deref(),
+        Some("Focus the widget."),
+        "imported type-argument member's JSDoc must publish on the exposed member"
+    );
+    assert!(
+        focus.tags.iter().any(|tag| tag.name == "public"),
+        "imported type-argument member's @public tag must publish, got {:?}",
+        focus.tags
+    );
+
+    // Negative: an undocumented exposed member publishes nothing.
+    let blur = meta
+        .exposed
+        .iter()
+        .find(|exposed| exposed.name == "blur")
+        .expect("blur must be exposed");
+    assert_eq!(blur.description.as_deref(), None);
+    assert!(blur.tags.is_empty(), "got {:?}", blur.tags);
 }

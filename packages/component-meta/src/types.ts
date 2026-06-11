@@ -219,6 +219,8 @@ export interface ExposedMeta {
   typeExpansion?: TypeExpansionMeta;
   /** JSDoc description from the leading `/** ... *​/` comment. */
   description?: string;
+  /** JSDoc tags from the same leading block. */
+  tags?: JsdocTag[];
 }
 
 /** Host-derived public-instance surface. */
@@ -243,6 +245,8 @@ export interface PublicInstanceMemberMeta {
   rawType?: string;
   /** JSDoc description carried onto the public member, when available. */
   description?: string;
+  /** JSDoc tags carried onto the public member, when available. */
+  tags?: JsdocTag[];
 }
 
 /** Parsed SFC root block metadata. */

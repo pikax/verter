@@ -53,12 +53,12 @@ pub struct ResolvedTypeRegistryMeta {
 /// Resolved per-macro metadata: declaration identity, authority/provenance
 /// gating, and the native-only `native_props` carrier.
 ///
-/// The published props/emits/slots surface is NOT carried here. Those derive
-/// solely from the typeinfo macro-surface path
+/// The published props/emits/slots/exposed surface is NOT carried here. Those
+/// derive solely from the typeinfo macro-surface path
 /// ([`crate::VerterHost::vue_macro_dtos`]); [`component_meta_resolved_macros`]
-/// sources `ResolvedMacroInput.{props,emits,slots}` from that path keyed on the
-/// admitted macro index. `ResolvedMacroMeta` exists to (1) gate which
-/// macro indices contribute (the `surface_is_authoritative` /
+/// sources `ResolvedMacroInput.{props,emits,slots,exposed}` from that path
+/// keyed on the admitted macro index. `ResolvedMacroMeta` exists to (1) gate
+/// which macro indices contribute (the `surface_is_authoritative` /
 /// `type_references` filter consumed by the materialiser and the
 /// `component_meta_resolved_macros` adapter), (2) carry declaration identity +
 /// JSDoc for the registry seed, and (3) carry `native_props` (the
@@ -123,13 +123,13 @@ pub enum ComponentMetaResolutionPurpose {
 
 /// Build the [`verter_semantic::analysis::component_meta::ResolvedMacroInput`]
 /// set the `verter_semantic` component-meta extractor consumes, sourcing the
-/// props/emits/slots from the SOLE typeinfo macro-surface authority
+/// props/emits/slots/exposed from the SOLE typeinfo macro-surface authority
 /// (`vue_macro_dtos`, reached through the resolver-context seam).
 ///
 /// `resolved_macros` is consulted ONLY for gating + provenance: an entry
 /// contributes iff its macro index survives the `raw_macro_surface_is_authoritative`
-/// filter (a `defineExpose` with no fields stays authoritative and is excluded;
-/// every other macro kind passes). The field DATA comes from `vue_macro_dtos`,
+/// filter (an object-literal-only `defineExpose` with fields stays
+/// authoritative and is excluded; every other macro kind passes). The field DATA comes from `vue_macro_dtos`,
 /// keyed on `(owner, macro_index, kind)` — the same key the materialiser's
 /// `synthesize_*_from_known_surface` path already uses. Because `vue_macro_dtos`
 /// returns ONE bundle per macro index, admitted indices are DEDUPLICATED here:
@@ -183,6 +183,7 @@ pub(crate) fn component_meta_resolved_macros(
                 props: dtos.props.clone(),
                 emits: dtos.emits.clone(),
                 slots: dtos.slots.clone(),
+                exposed: dtos.exposed.clone(),
             },
         );
     }
@@ -254,11 +255,11 @@ pub trait ComponentMetaResolverHost: DeclarationMetadataResolver {
     ///
     /// This is the authority gate for the cold resolver's owner-local arm: it
     /// pushes an authoritative [`ResolvedMacroMeta`] entry for the root iff
-    /// this returns `true`. The published props/emits/slots surface itself is
-    /// NOT projected here — it is owned by the typeinfo macro-surface path
-    /// (`vue_macro_dtos`); this method only signals "does this owner-local root
-    /// have a real surface to gate on", folding the prior emptiness check that
-    /// inspected the projected props/emits/slots.
+    /// this returns `true`. The published props/emits/slots/exposed surface
+    /// itself is NOT projected here — it is owned by the typeinfo macro-surface
+    /// path (`vue_macro_dtos`); this method only signals "does this owner-local
+    /// root have a real surface to gate on", folding the prior emptiness check
+    /// that inspected the projected props/emits/slots/exposed.
     fn owner_local_macro_root_has_surface(
         &self,
         _owner_canonical: &str,
@@ -350,7 +351,11 @@ fn raw_macro_surface_is_authoritative(mac: &AnalyzedMacro) -> bool {
         | AnalyzedMacroKind::DefineModel => false,
         AnalyzedMacroKind::DefineEmits => false,
         AnalyzedMacroKind::DefineSlots => false,
-        AnalyzedMacroKind::DefineExpose => !mac.expose_fields.is_empty(),
+        // A type-based `defineExpose<T>({ ... })` carries doc supply on the
+        // type-argument surface (span-sliced JSDoc), so the raw object-literal
+        // field list alone is not authoritative; without a type argument the
+        // analyzer's field list is the whole truth.
+        AnalyzedMacroKind::DefineExpose => !mac.is_type_based && !mac.expose_fields.is_empty(),
         AnalyzedMacroKind::DefineOptions => false,
     }
 }

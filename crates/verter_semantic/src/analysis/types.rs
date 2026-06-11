@@ -1255,8 +1255,32 @@ pub struct AnalyzedOptionsComponent {
 pub struct AnalyzedExposeField {
     /// Field name as declared (e.g., `"foo"` from `defineExpose({ foo })`).
     pub name: String,
-    /// SFC-absolute byte span of the field key.
-    pub span: Span,
+    /// SFC-absolute byte span of the field key. `Some` only for fields the
+    /// analyzer extracted from the SFC's own object-literal argument; `None`
+    /// for fields normalized from a `defineExpose<T>()` type-argument
+    /// surface, whose members live in their declaration file (their JSDoc
+    /// arrives pre-sliced on `description`/`tags`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub span: Option<Span>,
+    /// Lowered typed form of the exposed member's type. Populated by the
+    /// producer that resolved the member's type surface (the typeinfo macro
+    /// DTO normalizer raising the `defineExpose<T>()` surface member value);
+    /// `None` for analyzer object-literal fields, whose type comes from
+    /// binding / evaluation lookups downstream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub type_expr: Option<TypeExpr>,
+    /// Scope of `type_expr`: canonical_id of the file whose parse produced
+    /// the typed expression. Pairing invariant:
+    /// `type_expr.is_some() <=> type_expr_scope.is_some()`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub type_expr_scope: Option<TypeExprScope>,
+    /// JSDoc description from the leading `/** ... */` block on the field
+    /// key, captured at extraction exactly like runtime prop fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// JSDoc tags from the same leading block.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<JsdocTag>,
 }
 
 /// How a prop type was resolved.

@@ -3843,9 +3843,32 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     .map_or(verter_type_expr::MemberVisibility::Public, |sm| {
                         sm.visibility
                     });
-                (value, optional, readonly, visibility)
+                // The matched source member's declaration site — whether a
+                // produced member inherits it is judged PER PRODUCED NAME
+                // inside the loop below (mirrors the Expanded path in
+                // `build.rs`).
+                let source_spans = source_member.map(|sm| sm.spans).unwrap_or_default();
+                let source_declaration_origin =
+                    source_member.and_then(|sm| sm.declaration_origin.clone());
+                (
+                    value,
+                    optional,
+                    readonly,
+                    visibility,
+                    source_member.is_some(),
+                    source_spans,
+                    source_declaration_origin,
+                )
             };
-            let (value, optional, readonly, visibility) = member;
+            let (
+                value,
+                optional,
+                readonly,
+                visibility,
+                has_source_member,
+                source_spans,
+                source_declaration_origin,
+            ) = member;
             // Per-key produced name(s): apply `name_remap` through the same
             // shared outcome classifier so `as <expr>` clauses fold identically
             // to the Expanded path. `Drop` filters the key; `Keys` emits one
@@ -3866,7 +3889,9 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             for produced_name in produced_names {
                 // Duplicate produced names UNION their per-K values —
                 // same fold as `build_mapped_type` (pinned tsgo, probe12:
-                // `{ [K in 1 | "1"]: K }` = `{ 1: 1 | "1" }`).
+                // `{ [K in 1 | "1"]: K }` = `{ 1: 1 | "1" }`). The first
+                // production keeps the member slot (position, modifiers,
+                // and declaration site).
                 if let Some(existing) = members.iter_mut().find(|m| m.name == produced_name) {
                     if existing.value != value {
                         existing.value = self.graph().intern_node(SemanticNodeData::Union(
@@ -3875,6 +3900,13 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     }
                     continue;
                 }
+                // Rationale on `build::mapped_produced_name_inherits_declaration_site`
+                // — the one shared predicate both rails judge inheritance with.
+                let inherits_declaration_site = has_source_member
+                    && crate::project_semantic_dispatch::build::mapped_produced_name_inherits_declaration_site(
+                        produced_name.as_ref(),
+                        name.as_ref(),
+                    );
                 members.push(ShallowSurfaceMember {
                     name: produced_name,
                     value,
@@ -3900,10 +3932,16 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     // never an interface/class heritage overlay — `Authored`
                     // (it never shadows / is shadowed).
                     merge_role: crate::semantic_query::MemberMergeRole::Authored,
-                    // Mapped-produced member: synthesized from a key domain,
-                    // no single source declaration site — no spans, no file.
-                    spans: verter_type_expr::MemberSpans::default(),
-                    declaration_origin: None,
+                    spans: if inherits_declaration_site {
+                        source_spans
+                    } else {
+                        verter_type_expr::MemberSpans::default()
+                    },
+                    declaration_origin: if inherits_declaration_site {
+                        source_declaration_origin.clone()
+                    } else {
+                        None
+                    },
                 });
             }
         }

@@ -15083,8 +15083,8 @@ mod single_resolution_engine_guards {
     #[test]
     fn no_new_from_eager_meta_production_site() {
         // The eager macro-surface rail (`ResolvedMacroSurface::from_eager_meta`)
-        // is DELETED — production resolves props/emits/slots through the typeinfo
-        // Vue surface (`VerterHost::vue_macro_dtos`). `from_eager_meta` must not
+        // is DELETED — production resolves props/emits/slots/exposed through the
+        // typeinfo Vue surface (`VerterHost::vue_macro_dtos`). `from_eager_meta` must not
         // appear ANYWHERE (production source OR the wider `crates/*/src/**` tree
         // the production collector scans); the seam constructor and its lazy arm
         // are gone. A revival at any site fails this gate.
@@ -15258,7 +15258,7 @@ mod single_resolution_engine_guards {
         ),
         (
             "crates/verter_session/src/resolver_core/surface_projector.rs",
-            8,
+            6,
         ),
         (
             "crates/verter_session/src/resolver_core/symbol_resolver.rs",

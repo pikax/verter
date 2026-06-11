@@ -9,8 +9,8 @@
 //! The surface projector is
 //! responsible for ONLY the native-only `native_props` carrier (the
 //! private/protected class-member visibility surface). The published
-//! props/emits/slots surface is owned by the typeinfo macro-surface path
-//! (`vue_macro_dtos` → `props/emits/slots_from_typeinfo_surface`); its
+//! props/emits/slots/exposed surface is owned by the typeinfo macro-surface path
+//! (`vue_macro_dtos` → `props/emits/slots/exposed_from_typeinfo_surface`); its
 //! behaviour is characterized in
 //! `typeinfo/typeinfo_tests/vue_adapter.rs` and the component-meta e2e
 //! suites, NOT here. These tests pin the `native_props` projection.

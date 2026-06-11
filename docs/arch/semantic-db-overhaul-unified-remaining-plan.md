@@ -2052,7 +2052,7 @@ plan transcribes (§2); do not reorder.
 
 ---
 
-### XP — nuxt-ui component-meta parity gaps (tracked, not yet scheduled)
+### XP — nuxt-ui component-meta parity gaps (XP.2 + XP.3 LANDED on `mom/meta-xp23`; XP.1 tracked, not yet scheduled)
 
 Three CURRENT-pipeline component-meta parity defects, observed as typecheck
 divergences against the `vue-component-meta` baseline on the real nuxt-ui corpus.
@@ -2137,7 +2137,34 @@ baseline-divergent at volume.
   names which open-or-unknown predicate fired (budget vs unresolved-hop) and
   lands a discriminating regression at that scale/shape.
 
-#### XP.2 — Per-member JSDoc loss across the cross-file publication path (severity 2)
+#### XP.2 — Per-member JSDoc loss across the cross-file publication path (severity 2)  **(LANDED — branch `mom/meta-xp23`)**
+
+- **Landed state:** JSDoc rides the materialised member span-borne for ALL kinds,
+  exactly per the fix direction below. Mechanism: (a) homomorphic mapped
+  production threads the matched source member's `spans` + `declaration_origin`
+  through (`project_semantic_dispatch/build.rs`, `walk.rs`) so cross-file docs
+  survive `Partial`/`Pick`-class production; (b) emit doc supply was VERIFIED
+  as already owned by the pre-existing DTO rail (call-signature,
+  property-style, and generic-instantiated emits) and is now LOCKED by
+  coverage fixtures — no emit-pairing production change was needed (the
+  evaluator-only branch has no doc carrier, so name-pairing there is dead
+  code); (c) the SFC
+  name-scan text fallback is deleted; (d) exposed members gain real doc supply
+  (object-literal leading-JSDoc capture on `AnalyzedExposeField` + the enriched
+  surface spans for `defineExpose<T>()`; the published exposed surface is the
+  UNION of the object-literal fields and the type-argument surface members,
+  so a type-argument-only `defineExpose<T>()` publishes its members with
+  their docs and raised surface types) and the named shape change landed:
+  `ExposedAnalysis`/`ExposedMeta.tags` end-to-end (proto `ExposedMeta` field 5
+  + `PublicInstanceMemberMeta` field 7, appended — additive);
+  (e) the post-hoc name-keyed prop-only repair
+  (`fill_missing_component_meta_prop_descriptions_from_imported_roots` + its
+  barrel/heritage BFS helpers) is DELETED — span supply is the sole doc path,
+  with the six tests that previously rode the repair green through the primary
+  path. Hermetic discriminators in `macros_tests.rs` / `meta_tests.rs` /
+  compat specs. HONEST RESIDUAL: external-corpus (nuxt-ui) re-verification of
+  the 224/154 families is unavailable in-env (corpus not checked out) and
+  remains gated follow-up evidence.
 
 - **Defect:** 224 of the 253 description mismatches in the baseline diff are
   verter publishing an EMPTY description where the source member carries a doc
@@ -2181,7 +2208,18 @@ baseline-divergent at volume.
   `crates/verter_semantic/src/analysis/component_meta.rs:232`) — adding it is
   in scope only as a named shape change.
 
-#### XP.3 — Default-value quoting divergence (severity 3)
+#### XP.3 — Default-value quoting divergence (severity 3)  **(LANDED — branch `mom/meta-xp23`)**
+
+- **Landed state:** the producer returns the verbatim source slice for string
+  literals through the one shared helper `default_value_source_text`
+  (`verter_semantic::analysis::macros`), used by BOTH the macro and Options API
+  extractors (the two divergent extractors are unified); the compat
+  `looksLikeStringCompatibleType` string-ness-inference branch is deleted;
+  `evaluateDefault`'s lossless quote-STYLE normalization is kept per the
+  acceptance note below. Hermetic discriminators flipped and landed
+  (`macros_tests.rs`, `options_tests.rs`, compat specs, end-to-end meta test).
+  HONEST RESIDUAL: the 81-row reconciliation against the real nuxt-ui baseline
+  is unavailable in-env (corpus not checked out) — gated follow-up evidence.
 
 - **Defect:** 81 of the 111 default-value mismatches in the baseline diff are
   quoting-only — verter prints `vertical` where the baseline prints `"vertical"`.
@@ -3522,6 +3560,27 @@ present).
 in the chain and is now stable (fixed at `27c25a7a`); treat any recurrence under
 pathological oversubscription as a known load-flake, not a new regression, and
 confirm 3/3 in isolation.
+
+**JS known-failure debt — 29 pre-existing component-meta/native-eval specs.**
+A 29-name set of `packages/component-meta` native-eval/checker specs is red at
+the METAXP merge-base `4beb6d067` (verified by a like-for-like full-suite
+base-vs-tip run, 2026-06-10: failing-name sets byte-identical, zero tip-only
+names). Pre-existing display/compat parity gaps (raw-type preference, registry
+materialisation, indexed-access helpers, native-payload sidecar surfaces) —
+tracked debt, NOT part of XP.2/XP.3 and not a METAXP regression. Treat these
+29 names as the JS baseline until a dedicated parity block lifts them; any
+NEW failing name on a block tip is a real regression.
+
+**Exposed-surface debt (XP.2 follow-ups, terse).**
+
+- `ExposedAnalysis` lacks a scope carrier for its `type_expr` (asymmetric with
+  props' `shallow_type_expr_scope`) — an unanchored-`Ref` trap if a future
+  consumer demand-walks a published exposed type. Fix at the producer: carry
+  the scope alongside the expr, mirroring the props pair.
+- Literal-overlap expose members (`defineExpose<T>({ a })`): the object-literal
+  field's binding/eval type takes precedence and ignores the available raised
+  `resolved_field.type_expr` even when binding/eval yields `Unknown { raw }` —
+  the surface-raised type should backstop an unknown literal-side type.
 
 ---
 

@@ -1703,6 +1703,13 @@ impl HostStoreView {
     #[track_caller]
     pub(crate) fn from_host_read(host: &VerterHost) -> StoreViewRead {
         record_from_host_call(Location::caller());
+        // Per-host measurement rail: hermetic counterpart of the
+        // process-global per-call-site attribution table above. O(1)-read
+        // batch regressions measure THIS counter so concurrent tests on
+        // other hosts can never pollute their reset→measure window.
+        host.provenance()
+            .store_view_from_host_reads
+            .fetch_add(1, Ordering::Relaxed);
         #[cfg(test)]
         HOST_STORE_VIEW_FROM_HOST_BUILDS.with(|c| c.set(c.get().saturating_add(1)));
         if let Some(ctx) = crate::request_context::current_request_context() {

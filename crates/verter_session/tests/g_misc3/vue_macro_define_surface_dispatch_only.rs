@@ -24,8 +24,9 @@
 //! semantics of `owner_local_macro_root_has_surface` after it is moved
 //! off the walker bridge onto dispatch/typeinfo: props/model/slots true
 //! on a non-empty member surface; emits true for property OR
-//! call-signature event surfaces; empty roots false; expose/options
-//! false.
+//! call-signature event surfaces; expose true on a non-empty
+//! named-property surface (type-based `defineExpose` routes through
+//! owner-local roots); empty roots false; options false.
 
 #![allow(clippy::too_many_lines, dead_code, unused_imports)]
 
@@ -439,8 +440,8 @@ fn dispatch_only_imported_mapped_slots_define_shape_and_bindings() {
 // ─────────────────────────────────────────────────────────────────────
 // 5. Owner-local macro-root authority gate — typeinfo/dispatch surface.
 //    props/model/slots true on non-empty surface; emits true for
-//    property OR call-signature surfaces; empty false; expose/options
-//    false.
+//    property OR call-signature surfaces; expose true on a non-empty
+//    named-property surface; empty false; options false.
 // ─────────────────────────────────────────────────────────────────────
 
 const AUTHORITY_PROPS_VUE: &str = r#"<script setup lang="ts">
@@ -501,7 +502,10 @@ fn owner_local_macro_root_authority_uses_typeinfo_surface() {
     // the OBSERVABLE consequence: the public define_* mirror (the same
     // dispatch surface the gate now queries) is non-empty for the
     // non-empty cases and empty for the empty case. expose/options have
-    // no define_* mirror (the gate returns false for them by contract).
+    // no define_* mirror; the gate admits a type-based defineExpose via
+    // a non-empty named-property surface (published to `exposed` only)
+    // and returns false for defineOptions — neither ever publishes
+    // props/events, which is what the expose/options blocks below pin.
 
     // props — non-empty surface.
     {
@@ -593,8 +597,10 @@ fn owner_local_macro_root_authority_uses_typeinfo_surface() {
         );
     }
 
-    // expose — the macro-root authority gate returns false for
-    // defineExpose. A component with ONLY defineExpose publishes no
+    // expose — defineExpose publishes only the exposed surface (the
+    // authority gate admits a type-based expose root via a non-empty
+    // named-property surface; this object-literal form carries its own
+    // direct surface). A component with ONLY defineExpose publishes no
     // props/events from it.
     {
         let host = harness::build_hermetic_host_with_lib(
@@ -604,8 +610,8 @@ fn owner_local_macro_root_authority_uses_typeinfo_surface() {
         let meta = host.get_component_meta("/AuthorityExpose.vue").unwrap();
         assert!(
             meta.props.is_empty() && meta.events.is_empty(),
-            "the macro-root authority gate returns FALSE for \
-             defineExpose; no props/events may be published from it. Got \
+            "defineExpose publishes only the exposed surface; no \
+             props/events may be published from it. Got \
              props={:?} events={:?}",
             meta.props
                 .iter()

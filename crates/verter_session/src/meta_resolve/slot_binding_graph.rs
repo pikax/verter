@@ -1126,7 +1126,7 @@ pub(crate) fn compute_bindings_via_graph(
 
 /// Resolve a `.vue` macro's normalized component-meta DTOs through the shared
 /// typeinfo Vue surface path (`vue_macro_dtos_with_ctx`, FullMetadata) — the
-/// SOLE props/emits/slots authority.
+/// SOLE props/emits/slots/exposed authority.
 ///
 /// `owner_canonical` is the SFC the macro CALL lives in; `macro_index` indexes
 /// that SFC's `FileAnalysisSnapshot::macros`. The host-cached, request-validated
@@ -1134,7 +1134,8 @@ pub(crate) fn compute_bindings_via_graph(
 /// aware) snapshot, so `root_identity` here is only a hint (the real key is
 /// validated inside). The returned bundle populates exactly the field matching
 /// `macro_kind` (`props` for `DefineProps` / `DefineModel`, `emits` for
-/// `DefineEmits`, `slots` for `DefineSlots`); the others stay empty.
+/// `DefineEmits`, `slots` for `DefineSlots`, `exposed` for `DefineExpose`);
+/// the others stay empty.
 ///
 /// EVERY view-sensitive read flows through `ctx`: routing through
 /// `vue_macro_dtos_with_ctx` (NOT the base-view `VerterHost::vue_macro_dtos`)

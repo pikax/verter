@@ -26,7 +26,8 @@ struct TestHost {
     // Owner-local roots that project to a NON-EMPTY prepared surface. The
     // cold resolver gates the owner-local
     // authority entry on a boolean ("does this root have a surface?") via
-    // `owner_local_macro_root_has_surface`; the published props/emits/slots
+    // `owner_local_macro_root_has_surface` (covering `DefineExpose` alongside
+    // the other macro kinds); the published props/emits/slots/exposed
     // surface itself is owned by the typeinfo path. This set mirrors that
     // gate: a root present here returns `true`.
     owner_local_roots_with_surface: BTreeSet<String>,

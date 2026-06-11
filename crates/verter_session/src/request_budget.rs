@@ -41,7 +41,7 @@ use std::sync::Arc;
 /// **Semantic contract on exhaustion**: a request that trips the cap
 /// returns a *partial* `ComponentMeta` with the same structural
 /// invariants as a complete one (well-formed `props` / `emits` /
-/// `slots` lists, opaque sentinels for unresolved members) — NOT a
+/// `slots` / `exposed` lists, opaque sentinels for unresolved members) — NOT a
 /// malformed payload. The dispatch return carries
 /// `cache_suppress=true`, which propagates through the
 /// reducer/materializer pipeline (see

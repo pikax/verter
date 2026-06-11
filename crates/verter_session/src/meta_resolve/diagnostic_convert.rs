@@ -84,8 +84,8 @@ pub(crate) fn shallow_to_expansion(diag: &ShallowDiagnostic) -> ExpansionDiagnos
 /// Project a slice of `ShallowDiagnostic` instances into a
 /// `MacroExpansionDiagnostics` envelope tagged with the macro index
 /// they apply to. The `macro_kind` discriminates props / emits /
-/// slots so the consumer-side renderer can route the diagnostics to
-/// the right surface; `exactness` and `execution_status` summarise
+/// slots / exposed so the consumer-side renderer can route the
+/// diagnostics to the right surface; `exactness` and `execution_status` summarise
 /// whether the walker completed normally (Completed + ExactConcrete)
 /// or surfaced an incomplete result (Interrupted + Incomplete) via
 /// the `cache_suppress` aggregation.

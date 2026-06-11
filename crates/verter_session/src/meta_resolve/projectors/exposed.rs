@@ -2,8 +2,9 @@
 //!
 //! `defineExpose` always takes an object expression argument (or no
 //! argument). The exposed surface is computed by the parser's
-//! [`extract_exposed_from_macro`] from `mac.expose_fields` plus
-//! follow-on binding lookups in `input.bindings`. The dispatch path
+//! [`extract_exposed_from_macro`] as the union of `mac.expose_fields`
+//! (with follow-on binding lookups in `input.bindings`) and the
+//! resolved type-argument surface members. The dispatch path
 //! through `ResolveMacroPayload { kind: DefineExpose }` is documented
 //! as 0 args → Miss, else type_args[0] unchanged — so the projector
 //! mostly mirrors what the parser already provides, but routes

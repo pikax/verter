@@ -18,7 +18,6 @@ fn empty_input(macros: &[AnalyzedMacro]) -> ComponentMetaInput<'_> {
         store_usages: &[],
         evaluated_types: None,
         file_path: "/App.vue",
-        canonical_source: None,
     }
 }
 
@@ -347,12 +346,14 @@ fn resolved_macro_projection_merges_all_entries_for_one_macro_index() {
             props: vec![make_prop("x", Some("string"), false)],
             emits: Vec::new(),
             slots: Vec::new(),
+            exposed: Vec::new(),
         },
         crate::analysis::component_meta::ResolvedMacroInput {
             macro_index: 0,
             props: vec![make_prop("y", Some("number"), true)],
             emits: Vec::new(),
             slots: Vec::new(),
+            exposed: Vec::new(),
         },
     ];
 
@@ -393,12 +394,14 @@ fn resolved_macro_projection_merges_duplicate_prop_metadata() {
             props: vec![sparse],
             emits: Vec::new(),
             slots: Vec::new(),
+            exposed: Vec::new(),
         },
         crate::analysis::component_meta::ResolvedMacroInput {
             macro_index: 0,
             props: vec![rich],
             emits: Vec::new(),
             slots: Vec::new(),
+            exposed: Vec::new(),
         },
     ];
 
@@ -548,6 +551,7 @@ fn define_emits_eval_supplements_local_tuple_property_events() {
     }];
     let resolved_macros = vec![crate::analysis::component_meta::ResolvedMacroInput {
         macro_index: 0,
+        exposed: Vec::new(),
         props: Vec::new(),
         emits: vec![
             crate::analysis::types::AnalyzedEmitField {
@@ -677,6 +681,7 @@ fn define_emits_eval_does_not_resurrect_omitted_imported_events() {
     }];
     let resolved_macros = vec![crate::analysis::component_meta::ResolvedMacroInput {
         macro_index: 0,
+        exposed: Vec::new(),
         props: Vec::new(),
         emits: vec![
             crate::analysis::types::AnalyzedEmitField {
@@ -1878,6 +1883,7 @@ fn suspicious_partial_identifier_props_fall_back_to_source_any() {
         props: vec![imported],
         emits: Vec::new(),
         slots: Vec::new(),
+        exposed: Vec::new(),
     }];
     let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
         props: vec![crate::analysis::type_expand::ExpandedField {
@@ -2576,6 +2582,7 @@ fn resolved_slots_merge_local_details_and_append_new_slots() {
     }];
     let resolved_macros = vec![ResolvedMacroInput {
         macro_index: 0,
+        exposed: Vec::new(),
         props: Vec::new(),
         emits: Vec::new(),
         slots: vec![
@@ -2879,7 +2886,11 @@ fn extracts_exposed_from_define_expose() {
         kind: AnalyzedMacroKind::DefineExpose,
         expose_fields: vec![AnalyzedExposeField {
             name: "focus".to_string(),
-            span: verter_span::Span::default(),
+            span: Some(verter_span::Span::new(0, 5)),
+            type_expr: None,
+            type_expr_scope: None,
+            description: None,
+            tags: Vec::new(),
         }],
         ..make_define_props(vec![])
     }];
@@ -2902,6 +2913,7 @@ fn resolved_macros_supply_imported_metadata_without_snapshot_mutation() {
         props: resolved_fields,
         emits: Vec::new(),
         slots: Vec::new(),
+        exposed: Vec::new(),
     }];
 
     let mut input = empty_input(&macros);
@@ -2934,6 +2946,7 @@ fn resolved_macros_merge_with_local_prop_fields_for_mixed_type_sources() {
         props: vec![make_prop("importedOnly", Some("number"), true)],
         emits: Vec::new(),
         slots: Vec::new(),
+        exposed: Vec::new(),
     }];
 
     let mut input = empty_input(&macros);
@@ -3012,7 +3025,6 @@ fn options_api_props_used_when_no_composition_props() {
         store_usages: &[],
         evaluated_types: None,
         file_path: "/App.vue",
-        canonical_source: None,
     };
 
     let result = extract_component_meta(input);
@@ -3064,7 +3076,6 @@ fn options_api_prop_type_annotation_is_preserved() {
         store_usages: &[],
         evaluated_types: None,
         file_path: "/App.vue",
-        canonical_source: None,
     };
 
     let result = extract_component_meta(input);
@@ -4745,140 +4756,16 @@ fn synthesizes_default_value_tag_for_runtime_define_props() {
 }
 
 // ---------------------------------------------------------------------------
-// Expanded-only props inherit JSDoc by name from canonical_source
+// Evaluator-only props publish no fabricated JSDoc
 // ---------------------------------------------------------------------------
 
+// Doc text rides the span-borne member supply only (analyzer fields or the
+// span-sliced macro DTO surface). An evaluator-only member has no source
+// field, so it publishes NO description and NO tags — re-adding a name-based
+// text recovery (the retired `canonical_source` scan) would fabricate docs
+// here and fail this test's no-fabrication contract.
 #[test]
-fn expanded_props_without_source_field_inherit_jsdoc_from_canonical_source() {
-    // Macro has no prop_fields; expansion produced two props "foo" and "bar".
-    // canonical_source carries JSDoc for both — extractor should populate
-    // description/tags by property name.
-    let macros = vec![make_define_props(Vec::new())];
-    let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
-        define_props: vec![crate::analysis::type_expand::ExpandedMacroProps {
-            macro_index: 0,
-            result: crate::analysis::type_expand::ExpansionResult::exact(
-                crate::analysis::type_expand::ExpandedObjectShape {
-                    properties: vec![
-                        crate::analysis::type_expand::ExpandedProperty {
-                            name: "foo".to_string(),
-                            ty: TypeExpr::Primitive(PrimitiveName::String),
-                            optional: false,
-                            readonly: false,
-                            visibility: verter_type_expr::MemberVisibility::Public,
-                            declared_in_macro_type_arg: false,
-                        },
-                        crate::analysis::type_expand::ExpandedProperty {
-                            name: "bar".to_string(),
-                            ty: TypeExpr::Primitive(PrimitiveName::Number),
-                            optional: true,
-                            readonly: false,
-                            visibility: verter_type_expr::MemberVisibility::Public,
-                            declared_in_macro_type_arg: false,
-                        },
-                    ],
-                    index_signatures: Vec::new(),
-                    call_signatures: Vec::new(),
-                },
-            ),
-        }],
-        ..crate::analysis::type_expand::ExpandedComponentTypes::default()
-    };
-    let source = "interface Inner {\n    /** Doc for foo */\n    foo: string;\n    /** Doc for bar.\n     * @deprecated use baz\n     */\n    bar?: number;\n}\n";
-
-    let mut input = empty_input(&macros);
-    input.evaluated_types = Some(&evaluated);
-    input.canonical_source = Some(source);
-
-    let result = extract_component_meta(input);
-
-    let foo = result
-        .props
-        .iter()
-        .find(|p| p.name == "foo")
-        .expect("foo should be present");
-    assert_eq!(
-        foo.description.as_deref(),
-        Some("Doc for foo"),
-        "expanded-only prop foo should inherit JSDoc description from source"
-    );
-
-    let bar = result
-        .props
-        .iter()
-        .find(|p| p.name == "bar")
-        .expect("bar should be present");
-    assert_eq!(bar.description.as_deref(), Some("Doc for bar."));
-    assert!(
-        bar.tags.iter().any(|t| t.name == "deprecated"),
-        "expanded-only prop bar should inherit @deprecated tag"
-    );
-}
-
-#[test]
-fn expanded_only_props_in_third_branch_inherit_jsdoc_from_canonical_source() {
-    // Third-branch path: prop_fields contains "x" but expansion adds "y" too.
-    // The first branch only fires when eval_fields is non-empty AND the macro is
-    // type-based; here we drive the third branch by giving prop_fields one entry
-    // and an empty define_props expansion plus a non-empty `props` extension.
-    //
-    // Simpler reproduction: provide prop_fields = [x] and define_props expansion
-    // with both x and y. The first branch fires and iterates eval_fields; since
-    // y has no source_field, that triggers the same loss point. Use that to
-    // assert the helper kicks in.
-    let macros = vec![make_define_props(vec![make_prop(
-        "x",
-        Some("string"),
-        false,
-    )])];
-    let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
-        define_props: vec![crate::analysis::type_expand::ExpandedMacroProps {
-            macro_index: 0,
-            result: crate::analysis::type_expand::ExpansionResult::exact(
-                crate::analysis::type_expand::ExpandedObjectShape {
-                    properties: vec![
-                        crate::analysis::type_expand::ExpandedProperty {
-                            name: "x".to_string(),
-                            ty: TypeExpr::Primitive(PrimitiveName::String),
-                            optional: false,
-                            readonly: false,
-                            visibility: verter_type_expr::MemberVisibility::Public,
-                            declared_in_macro_type_arg: false,
-                        },
-                        crate::analysis::type_expand::ExpandedProperty {
-                            name: "y".to_string(),
-                            ty: TypeExpr::Primitive(PrimitiveName::Number),
-                            optional: false,
-                            readonly: false,
-                            visibility: verter_type_expr::MemberVisibility::Public,
-                            declared_in_macro_type_arg: false,
-                        },
-                    ],
-                    index_signatures: Vec::new(),
-                    call_signatures: Vec::new(),
-                },
-            ),
-        }],
-        ..crate::analysis::type_expand::ExpandedComponentTypes::default()
-    };
-    let source = "interface Spread {\n    x: string;\n    /** Doc for y */\n    y: number;\n}\n";
-
-    let mut input = empty_input(&macros);
-    input.evaluated_types = Some(&evaluated);
-    input.canonical_source = Some(source);
-
-    let result = extract_component_meta(input);
-
-    let y = result.props.iter().find(|p| p.name == "y").expect("y");
-    assert_eq!(
-        y.description.as_deref(),
-        Some("Doc for y"),
-        "expanded-only prop y should inherit JSDoc description from canonical_source"
-    );
-}
-
-#[test]
-fn expanded_only_props_without_canonical_source_have_no_jsdoc() {
+fn evaluator_only_props_publish_no_fabricated_jsdoc() {
     let macros = vec![make_define_props(Vec::new())];
     let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
         define_props: vec![crate::analysis::type_expand::ExpandedMacroProps {
@@ -4903,11 +4790,13 @@ fn expanded_only_props_without_canonical_source_have_no_jsdoc() {
 
     let mut input = empty_input(&macros);
     input.evaluated_types = Some(&evaluated);
-    // canonical_source intentionally None
 
     let result = extract_component_meta(input);
 
     let foo = result.props.iter().find(|p| p.name == "foo").unwrap();
-    assert!(foo.description.is_none(), "no source — no description");
-    assert!(foo.tags.is_empty(), "no source — no tags");
+    assert!(
+        foo.description.is_none(),
+        "no source field — no description"
+    );
+    assert!(foo.tags.is_empty(), "no source field — no tags");
 }

@@ -292,8 +292,8 @@ const RETIRED_SYMBOLS: &[&str] = &[
     "run_dependent_cascade",
     "register_facts_for_new_content_without_eviction",
     // The eager/lazy macro-surface bridge +
-    // its readers are DELETED. Production resolves props/emits/slots through the
-    // typeinfo Vue surface (`VerterHost::vue_macro_dtos`). Re-introducing any of
+    // its readers are DELETED. Production resolves props/emits/slots/exposed
+    // through the typeinfo Vue surface (`VerterHost::vue_macro_dtos`). Re-introducing any of
     // these names at a production site would revive the deleted eager rail or
     // its lossy reader.
     "ImportedMacroSurface",

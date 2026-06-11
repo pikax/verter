@@ -333,6 +333,7 @@ message ExposedMeta {
   uint32 type_node_id = 2;
   ExpansionMetadata type_expansion = 3;
   uint32 description_id = 4;
+  repeated JsdocTag tags = 5;
 }
 
 message PublicInstanceMeta {
@@ -347,6 +348,7 @@ message PublicInstanceMemberMeta {
   ExpansionMetadata type_expansion = 4;
   uint32 raw_type_id = 5;
   uint32 description_id = 6;
+  repeated JsdocTag tags = 7;
 }
 
 message SfcBlocksMeta {

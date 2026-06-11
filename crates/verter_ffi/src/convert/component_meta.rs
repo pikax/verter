@@ -115,6 +115,7 @@ pub fn component_meta_analysis_to_ffi_with_resolution(
                 r#type: e.type_expr,
                 type_expansion: e.type_expansion.map(expansion_metadata_to_ffi),
                 description: e.description,
+                tags: e.tags.into_iter().map(jsdoc_to_ffi).collect(),
             })
             .collect(),
         public_instance: analysis
@@ -131,6 +132,7 @@ pub fn component_meta_analysis_to_ffi_with_resolution(
                         type_expansion: member.type_expansion.map(expansion_metadata_to_ffi),
                         raw_type: member.raw_type,
                         description: member.description,
+                        tags: member.tags.into_iter().map(jsdoc_to_ffi).collect(),
                     })
                     .collect(),
             }),

@@ -15,7 +15,8 @@
 //!
 //! Compile output for a Vue SFC depends on EACH macro type
 //! dependency the script analysis recorded — `defineProps<T>()` /
-//! `defineEmits<U>()` / `defineSlots<S>()` references. Observing
+//! `defineEmits<U>()` / `defineSlots<S>()` / `defineExpose<E>()`
+//! references. Observing
 //! `FileWholeHash` for those deps would over-invalidate on cosmetic
 //! edits and silently re-roll on adding unrelated sibling members.
 //! Path-precise observation emits one `Export(type_name)` (the

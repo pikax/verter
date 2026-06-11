@@ -10,7 +10,7 @@
 //!
 //! 1. the macro's normalized DTOs
 //!    ([`crate::typeinfo::adapters::vue::surface::vue_macro_dtos_with_ctx`] —
-//!    the SOLE props/emits/slots member authority, resolved through the active
+//!    the SOLE props/emits/slots/exposed member authority, resolved through the active
 //!    `ResolverContext` so overlay sessions read overlay content), and
 //! 2. the flat `evaluated_types.props` / `evaluated_types.emits` fields that
 //!    [`super::project_evaluated_types`] already projected through the shared

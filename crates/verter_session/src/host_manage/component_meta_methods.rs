@@ -85,8 +85,10 @@ impl VerterHost {
     ///
     /// - `Type`: resolves symbol identity, canonical location, and attached JSDoc
     ///   without materializing expanded shapes.
-    /// - `Expanded`: resolves the same way, then materializes props/emits/slots,
-    ///   populates the type registry, and computes evaluated types.
+    /// - `Expanded`: resolves the same way, then materializes
+    ///   props/emits/slots/exposed (type-based `DefineExpose` rides the same
+    ///   DTO/resolved-input path), populates the type registry, and computes
+    ///   evaluated types.
     pub fn resolve_component_meta(
         &self,
         canonical_or_alias: &str,

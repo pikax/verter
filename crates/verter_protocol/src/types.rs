@@ -678,6 +678,8 @@ pub struct FfiExposedMeta {
     pub type_expansion: Option<FfiExpansionMetadata>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<FfiJsdocTag>,
 }
 
 #[derive(Serialize, Clone)]
@@ -699,6 +701,8 @@ pub struct FfiPublicInstanceMemberMeta {
     pub raw_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<FfiJsdocTag>,
 }
 
 #[derive(Serialize, Clone)]

@@ -315,7 +315,19 @@ fn props_default_value_string() {
     let opts = snap.options_api.unwrap();
     assert_eq!(opts.props.len(), 1);
     assert!(opts.props[0].has_default);
-    assert_eq!(opts.props[0].default_value.as_deref(), Some("Hello"));
+    assert_eq!(opts.props[0].default_value.as_deref(), Some("'Hello'"));
+}
+
+#[test]
+fn props_default_value_string_double_quoted_stays_verbatim() {
+    let snap = analyze(r#"export default { props: { message: { type: String, default: "Hi" } } }"#);
+    let opts = snap.options_api.unwrap();
+    assert_eq!(opts.props[0].default_value.as_deref(), Some("\"Hi\""));
+    assert_ne!(
+        opts.props[0].default_value.as_deref(),
+        Some("Hi"),
+        "inner-value extraction (quote stripping) must not run"
+    );
 }
 
 #[test]

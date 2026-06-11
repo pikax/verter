@@ -1465,7 +1465,8 @@ impl VerterHost {
     ///
     /// Unlike [`get_ide`](Self::get_ide), this does NOT require a prior
     /// [`get_virtual_file`](Self::get_virtual_file) call. It performs
-    /// macro-only extraction (OXC parse â†’ defineProps/Emits/Model/Options)
+    /// macro-only extraction (OXC parse â†’
+    /// defineProps/Emits/Slots/Model/Expose/Options)
     /// and generates a `ComponentPublicInstance`-based declaration.
     ///
     /// Returns `None` if the file is not in the host or not a Vue SFC.

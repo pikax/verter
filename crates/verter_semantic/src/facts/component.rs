@@ -1,9 +1,10 @@
-//! Component surface facts — declared and accepted props, events, slots, models.
+//! Component surface facts — declared and accepted props, events, slots,
+//! models, and exposed members.
 //!
 //! These facts represent the component's public API surface as understood
 //! by the semantic engine. They are derived from script analysis macros
-//! (defineProps, defineEmits, defineSlots, defineModel) and cross-file
-//! type resolution.
+//! (defineProps, defineEmits, defineSlots, defineModel, defineExpose) and
+//! cross-file type resolution.
 
 use serde::{Deserialize, Serialize};
 use verter_span::Span;

@@ -278,8 +278,15 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
                 verter_semantic::analysis::AnalyzedMacroKind::DefineSlots => {
                     mac.slot_fields.is_empty()
                 }
-                verter_semantic::analysis::AnalyzedMacroKind::DefineExpose
-                | verter_semantic::analysis::AnalyzedMacroKind::DefineOptions => false,
+                // `expose_fields` holds only the object-literal fields and
+                // never the type-argument surface, so EVERY type-based
+                // `defineExpose<LocalApi>(...)` — bare or with an object
+                // literal alongside — lacks a direct local surface and must
+                // discover its owner-local root. Presence gate on the type
+                // argument (mirrors `raw_macro_surface_is_authoritative`),
+                // not on the literal's absence.
+                verter_semantic::analysis::AnalyzedMacroKind::DefineExpose => mac.is_type_based,
+                verter_semantic::analysis::AnalyzedMacroKind::DefineOptions => false,
             }
         }
 
@@ -353,8 +360,13 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
                     verter_semantic::analysis::AnalyzedMacroKind::DefineEmits => {
                         !shape.properties.is_empty() || !shape.call_signatures.is_empty()
                     }
-                    verter_semantic::analysis::AnalyzedMacroKind::DefineExpose
-                    | verter_semantic::analysis::AnalyzedMacroKind::DefineOptions => false,
+                    // The exposed surface publishes named members only
+                    // (`exposed_from_typeinfo_surface`), so the presence
+                    // gate is the named-property surface.
+                    verter_semantic::analysis::AnalyzedMacroKind::DefineExpose => {
+                        !shape.properties.is_empty()
+                    }
+                    verter_semantic::analysis::AnalyzedMacroKind::DefineOptions => false,
                 })
             })
             .map(str::to_string)
@@ -369,9 +381,9 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
     ) -> bool {
         // Authority gate for the cold resolver's owner-local arm: does the
         // owner-local type `root_name` resolve to a non-empty macro surface?
-        // The actual props/emits/slots are NOT materialised here — they are
-        // owned by the typeinfo macro-surface path (`vue_macro_dtos`); this is
-        // purely a presence gate.
+        // The actual props/emits/slots/exposed are NOT materialised here —
+        // they are owned by the typeinfo macro-surface path (`vue_macro_dtos`);
+        // this is purely a presence gate.
         //
         // Resolution routes through the SOLE query-time resolver: the root name
         // lowers to a bare `TypeExpr::Ref` and projects through
@@ -406,8 +418,13 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
             verter_semantic::analysis::AnalyzedMacroKind::DefineEmits => {
                 !shape.properties.is_empty() || !shape.call_signatures.is_empty()
             }
-            verter_semantic::analysis::AnalyzedMacroKind::DefineExpose
-            | verter_semantic::analysis::AnalyzedMacroKind::DefineOptions => false,
+            // The exposed surface publishes named members only
+            // (`exposed_from_typeinfo_surface`), so the presence gate is the
+            // named-property surface.
+            verter_semantic::analysis::AnalyzedMacroKind::DefineExpose => {
+                !shape.properties.is_empty()
+            }
+            verter_semantic::analysis::AnalyzedMacroKind::DefineOptions => false,
         }
     }
 

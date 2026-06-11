@@ -332,7 +332,7 @@ function buildCompatPropertyMeta(
     type,
     required: prop.required,
     global: false,
-    default: normalizeDefaultForCompat(prop.type, evaluateDefault(prop.default)),
+    default: evaluateDefault(prop.default),
     tags: overrides?.tags ?? normalizeCompatTags(prop.tags),
     schema,
   };
@@ -356,7 +356,7 @@ function buildCompatAnyPropMeta(prop: PropMeta): PropertyMeta | undefined {
     type: "any",
     required: prop.required,
     global: false,
-    default: normalizeDefaultForCompat(prop.type, evaluateDefault(prop.default)),
+    default: evaluateDefault(prop.default),
     tags: (prop.tags ?? []).map((t) => ({
       name: t.name,
       ...(t.text != null && { text: t.text }),
@@ -422,7 +422,7 @@ function buildCompatBooleanishPropMeta(prop: PropMeta): PropertyMeta | undefined
     type,
     required: prop.required,
     global: false,
-    default: normalizeDefaultForCompat(prop.type, evaluateDefault(prop.default)),
+    default: evaluateDefault(prop.default),
     tags: normalizeCompatTags(prop.tags),
     schema: {
       kind: "enum",
@@ -1176,70 +1176,6 @@ function looksLikeIndexedAccessType(t: TypeDescriptor): boolean {
   return stripped.kind === "indexedAccess";
 }
 
-function normalizeDefaultForCompat(
-  descriptor: TypeDescriptor,
-  value: string | undefined,
-): string | undefined {
-  if (value === undefined) return undefined;
-  const trimmed = value.trim();
-  if (
-    trimmed === "" ||
-    trimmed === "null" ||
-    trimmed === "undefined" ||
-    trimmed === "true" ||
-    trimmed === "false" ||
-    /^-?\d+(\.\d+)?$/.test(trimmed) ||
-    trimmed.startsWith('"') ||
-    trimmed.startsWith("'") ||
-    trimmed.startsWith("{") ||
-    trimmed.startsWith("[") ||
-    trimmed.startsWith("(")
-  ) {
-    return value;
-  }
-  if (looksLikeStringCompatibleType(descriptor)) {
-    return JSON.stringify(trimmed);
-  }
-  return value;
-}
-
-/**
- * Structural test: does `t` accept a string value?
- *
- * Walks the descriptor recursively over union/intersection arms (the
- * structural equivalents of `|` / `&` text splitting). Returns true when any
- * reachable arm is `primitive("any")` / `primitive("string")`, a string-valued
- * `literal`, or an `enum` carrying any string-valued member. Object /
- * function / array / tuple / ref / indexedAccess / recursiveRef / typeParameter
- * arms do not qualify — the gate concerns the prop's top-level value shape, not
- * the shapes of nested fields.
- */
-function looksLikeStringCompatibleType(t: TypeDescriptor): boolean {
-  switch (t.kind) {
-    case "primitive":
-      return t.name === "any" || t.name === "string";
-    case "literal":
-      return typeof t.value === "string";
-    case "union":
-      return t.types.some(looksLikeStringCompatibleType);
-    case "intersection":
-      return t.types.some(looksLikeStringCompatibleType);
-    case "enum":
-      return t.members.some((member) => typeof member.value === "string");
-    case "unknown":
-      // The bridge emits `UnknownType` with `rawType` carrying the only
-      // structural signal available when the type-graph could not deepen the
-      // node. That `rawType` is INTERNAL to the descriptor (the typed-IR's
-      // self-describing fallback), distinct from the prop-level display
-      // passthrough `PropMeta.rawType`. Read it here to preserve string-
-      // compatibility detection for runtime-constructor props whose Rust
-      // analysis surfaces `unknown("string")` instead of `primitive("string")`.
-      return t.rawType === "string" || t.rawType === "any";
-    default:
-      return false;
-  }
-}
-
 function typeDescriptorToCompatDisplay(
   descriptor: TypeDescriptor,
   typeRegistry?: Map<string, TypeDescriptor>,
@@ -1443,11 +1379,67 @@ function evaluateDefault(val: string | undefined): string | undefined {
   // Arrow function returning array literal: () => ['a', 'b']
   const arrowArrMatch = val.match(/^\(\)\s*=>\s*(\[.*\])$/);
   if (arrowArrMatch) return arrowArrMatch[1];
-  const stringLiteralMatch = val.match(/^'([^'\\]*(?:\\.[^'\\]*)*)'$/);
+  // `[\s\S]` (not `.`): an escaped character may be a line terminator — a
+  // JS line continuation — which `.` does not match.
+  const stringLiteralMatch = val.match(/^'([^'\\]*(?:\\[\s\S][^'\\]*)*)'$/);
   if (stringLiteralMatch) {
-    return JSON.stringify(stringLiteralMatch[1]);
+    return JSON.stringify(decodeSingleQuotedEscapes(stringLiteralMatch[1]));
   }
   return val;
+}
+
+/**
+ * Decode JS string-literal escape sequences in the inner text of a
+ * single-quoted source literal, so `JSON.stringify` re-escapes the decoded
+ * VALUE (`'it\'s'` → `"it's"`, `'line\nbreak'` → `"line\nbreak"`) instead of
+ * double-escaping the source backslashes. Unrecognized escapes follow JS
+ * semantics: `\c` decodes to `c`. A backslash followed by a line terminator
+ * (LF, CR, CRLF, U+2028, U+2029) is a line continuation contributing NO
+ * character; CRLF after the backslash is one continuation, not two.
+ */
+function decodeSingleQuotedEscapes(inner: string): string {
+  return inner.replace(
+    /\\(u\{[0-9a-fA-F]+\}|u[0-9a-fA-F]{4}|x[0-9a-fA-F]{2}|\r\n|[\s\S])/g,
+    (_, esc: string) => {
+      switch (esc[0]) {
+        case "n":
+          return "\n";
+        case "t":
+          return "\t";
+        case "r":
+          return "\r";
+        case "b":
+          return "\b";
+        case "f":
+          return "\f";
+        case "v":
+          return "\v";
+        case "0":
+          return "\0";
+        case "x":
+          return String.fromCharCode(Number.parseInt(esc.slice(1), 16));
+        case "u": {
+          if (esc[1] === "{") {
+            const codePoint = Number.parseInt(esc.slice(2, -1), 16);
+            // `String.fromCodePoint` throws RangeError above the Unicode
+            // maximum; unreachable through parse-valid source, but the
+            // decoder stays total: decode to the replacement character.
+            return codePoint > 0x10ffff ? "\uFFFD" : String.fromCodePoint(codePoint);
+          }
+          return String.fromCharCode(Number.parseInt(esc.slice(1), 16));
+        }
+        // Line continuations: the escaped terminator contributes nothing.
+        // `\r` consumes a following LF via the `\r\n` alternation above.
+        case "\n":
+        case "\r":
+        case "\u2028":
+        case "\u2029":
+          return "";
+        default:
+          return esc;
+      }
+    },
+  );
 }
 
 function buildSlotBindingsType(slot: SlotMeta, typeRegistry?: Map<string, TypeDescriptor>): string {
@@ -1744,7 +1736,7 @@ export function mapExposedMeta(
     type: typeDescriptorToString(exposed.type),
     required: false,
     global: false,
-    tags: [],
+    tags: normalizeCompatTags(exposed.tags),
     schema: typeDescriptorToSchema(exposed.type, options, typeRegistry),
   };
 }

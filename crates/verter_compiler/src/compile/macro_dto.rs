@@ -673,9 +673,9 @@ pub struct MacroSlotDto {
 /// `type_annotation`, `visibility`, and the span (`span_start` / `span_end`) —
 /// onto the `@verter/component-meta` `nativeProps` surface.
 ///
-/// Unlike [`MacroPropDto`] (the published props/emits/slots surface), this
+/// Unlike [`MacroPropDto`] (the published props member surface), this
 /// carrier exists solely for the native `nativeProps` consumer, which the
-/// published surface does not cover: it preserves private/protected member
+/// published surfaces do not cover: it preserves private/protected member
 /// visibility and the member's source span.
 ///
 /// - `name` — the member name.

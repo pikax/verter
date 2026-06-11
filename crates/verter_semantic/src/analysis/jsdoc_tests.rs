@@ -3,40 +3,8 @@
 //! Extracted to a sibling file (the established `*_tests.rs` pattern) to keep
 //! `jsdoc.rs` under the `no_oversize_files` architecture guard's line target.
 
-use super::{
-    extract_jsdoc_for_property_name, extract_jsdoc_near_offset, parse_jsdoc_tag_type_payload,
-};
+use super::{extract_jsdoc_near_offset, parse_jsdoc_tag_type_payload};
 use verter_type_expr::{PrimitiveName, TypeExpr};
-
-// P2-4: the name-based textual fallback must accept a definite-assignment
-// (`name!:`) field. This is the NON-authority matcher (the structural
-// name-span attach is preferred), but a name-based fallback
-// (`jsdoc_for_expanded_prop`, synthetic-member lookup) must not REJECT a
-// class `/** doc */ foo!: string` field. Pre-fix the matcher accepted
-// `name` → `?` → `:`/`(` but not `!`, so this returned `None`.
-#[test]
-fn extract_jsdoc_for_property_name_accepts_definite_assignment_field() {
-    let source = "class C {\n  /** the definite field */\n  foo!: string;\n}\n";
-    let (description, _tags) = extract_jsdoc_for_property_name(source, "foo");
-    assert_eq!(
-        description.as_deref(),
-        Some("the definite field"),
-        "a definite-assignment field `foo!: string` must match the name-based fallback; a \
-         `None` proves the matcher still rejects `!:`"
-    );
-}
-
-// Negative control: a definite-assignment field with NO leading JSDoc must
-// still return empty (the `!:` acceptance must not fabricate a description).
-#[test]
-fn extract_jsdoc_for_property_name_definite_assignment_without_doc_is_empty() {
-    let source = "class C {\n  bare!: boolean;\n}\n";
-    let (description, tags) = extract_jsdoc_for_property_name(source, "bare");
-    assert!(
-        description.is_none() && tags.is_empty(),
-        "an undocumented `bare!: boolean` field must yield no JSDoc; got {description:?}"
-    );
-}
 
 #[test]
 fn collect_jsdoc_typedefs_lowers_braced_typedef_to_alias_body() {
@@ -581,69 +549,4 @@ fn parse_jsdoc_single_line_unchanged() {
     let raw = "/** Simple description. */";
     let (description, _) = super::parse_jsdoc(raw);
     assert_eq!(description.as_deref(), Some("Simple description."));
-}
-
-#[test]
-fn extract_in_range_scopes_to_declaring_declaration_span() {
-    use super::extract_jsdoc_for_property_name_in_range;
-    // Two declarations declare `base` with DIFFERENT JSDoc. A file-wide
-    // search would return the FIRST (`Decoy.base`); scoping to the SECOND
-    // declaration's byte range must return the second declaration's JSDoc.
-    let source = "interface Decoy {\n  /** DECOY base doc */\n  base: string\n}\n\
-                  interface BaseProps {\n  /** correct base doc */\n  base: number\n}";
-    // Whole-file search returns the first textual match (the decoy).
-    let (whole, _) = super::extract_jsdoc_for_property_name(source, "base");
-    assert_eq!(
-        whole.as_deref(),
-        Some("DECOY base doc"),
-        "whole-file search returns the first textual `base:` (the decoy) — \
-         this is exactly the bug span-scoping fixes",
-    );
-    // Scope to the second declaration's span: returns the correct doc.
-    let second_start = source
-        .find("interface BaseProps")
-        .expect("BaseProps declaration present");
-    let (scoped, _) =
-        extract_jsdoc_for_property_name_in_range(source, "base", second_start, source.len());
-    assert_eq!(
-        scoped.as_deref(),
-        Some("correct base doc"),
-        "scoping the search to BaseProps's span MUST return BaseProps's JSDoc, \
-         NOT the file-first Decoy match",
-    );
-}
-
-#[test]
-fn extract_in_range_matches_method_style_members() {
-    use super::extract_jsdoc_for_property_name_in_range;
-    // A method-style member (`default(props): any`) declares leading JSDoc.
-    // The matcher must accept the `name(` form (not only `name:`).
-    let source =
-        "interface Slots {\n  /** the default slot */\n  default(props: { x: string }): any\n}";
-    let (desc, _) = extract_jsdoc_for_property_name_in_range(source, "default", 0, source.len());
-    assert_eq!(
-        desc.as_deref(),
-        Some("the default slot"),
-        "method-style member `default(props): any` MUST get its leading JSDoc \
-         (the matcher accepts `name(`)",
-    );
-}
-
-#[test]
-fn extract_in_range_empty_or_inverted_range_yields_none() {
-    use super::extract_jsdoc_for_property_name_in_range;
-    let source = "interface X {\n  /** doc */\n  foo: number\n}";
-    // Inverted range.
-    let (desc, tags) = extract_jsdoc_for_property_name_in_range(source, "foo", 30, 10);
-    assert!(
-        desc.is_none() && tags.is_empty(),
-        "inverted range yields none"
-    );
-    // Range that excludes the `foo:` declaration site (only the header).
-    let header_end = source.find('{').expect("brace") + 1;
-    let (desc2, tags2) = extract_jsdoc_for_property_name_in_range(source, "foo", 0, header_end);
-    assert!(
-        desc2.is_none() && tags2.is_empty(),
-        "a range that excludes the member declaration site yields none",
-    );
 }

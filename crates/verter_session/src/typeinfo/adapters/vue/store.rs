@@ -29,7 +29,8 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use verter_semantic::analysis::type_expand::ExpandedIndexSignature;
 use verter_semantic::analysis::types::{
-    AnalyzedEmitField, AnalyzedMacroKind, AnalyzedPropField, AnalyzedSlotField, Hash16,
+    AnalyzedEmitField, AnalyzedExposeField, AnalyzedMacroKind, AnalyzedPropField,
+    AnalyzedSlotField, Hash16,
 };
 
 use crate::fact_signature_helpers::ReadSetSignature;
@@ -87,11 +88,12 @@ impl VueMacroDtoKey {
 
 /// The normalized component-meta DTOs extracted from ONE `.vue` macro surface.
 ///
-/// Exactly one of `props` / `emits` / `slots` is populated for a given macro
-/// kind (a `DefineProps` / `WithDefaults` / `DefineModel` macro contributes
-/// `props`; `DefineEmits` contributes `emits`; `DefineSlots` contributes
-/// `slots`). All fields are fully owned + immutable — safe for a host-owned
-/// `Send + Sync` cache and stable across graph-generation flips.
+/// Exactly one of `props` / `emits` / `slots` / `exposed` is populated for a
+/// given macro kind (a `DefineProps` / `WithDefaults` / `DefineModel` macro
+/// contributes `props`; `DefineEmits` contributes `emits`; `DefineSlots`
+/// contributes `slots`; `DefineExpose` contributes `exposed`). All fields are
+/// fully owned + immutable — safe for a host-owned `Send + Sync` cache and
+/// stable across graph-generation flips.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct VueMacroDtos {
     /// Prop fields (`DefineProps` / `WithDefaults` / `DefineModel`).
@@ -105,8 +107,8 @@ pub struct VueMacroDtos {
     /// `properties + index signatures` per the props-surface rule, so the
     /// normalizer captures the surface's index signatures (key/value types
     /// raised through the active `ResolverContext`) here for
-    /// `define_props_shape` to publish. Empty for emits / slots and for a props
-    /// surface with no index signature.
+    /// `define_props_shape` to publish. Empty for emits / slots / exposed and
+    /// for a props surface with no index signature.
     pub prop_index_signatures: Vec<ExpandedIndexSignature>,
     /// Index signatures on the emits macro's type-argument surface
     /// (`defineEmits<{ [event: string]: [v: number] }>()`). The emits object is
@@ -114,8 +116,18 @@ pub struct VueMacroDtos {
     /// surface has no named events but still carries its index signature, which
     /// `define_emits_shape` publishes (the retired materialiser surfaced it, so
     /// dropping it on the dispatch path was a regression). Empty for props /
-    /// slots and for an emits surface with no index signature.
+    /// slots / exposed and for an emits surface with no index signature.
     pub emit_index_signatures: Vec<ExpandedIndexSignature>,
+    /// Exposed fields (`DefineExpose` with a type argument — imported OR
+    /// owner-local): one field per named public surface member, carrying the
+    /// member's raised `type_expr` / `type_expr_scope` pair, its JSDoc sliced
+    /// from the enriched typeinfo spans, and `span: None` (the member's spans
+    /// index its declaration file, not the SFC). These are PUBLISHED:
+    /// `extract_exposed_from_macro` emits the union of the analyzer's
+    /// object-literal `expose_fields` (which win on name overlap) and these
+    /// surface members, and the public-instance sidecar derives from that
+    /// union.
+    pub exposed: Vec<AnalyzedExposeField>,
 }
 
 /// A cached [`VueMacroDtos`] bundle plus the cross-file dependency facts the

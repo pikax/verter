@@ -1,9 +1,11 @@
 #![deny(missing_docs)]
-//! The `.vue` FullMetadata macro surface + the prop / emit / slot normalizers.
+//! The `.vue` FullMetadata macro surface + the prop / emit / slot / expose
+//! normalizers.
 //!
 //! [`resolve_vue_macro_surface`] resolves ONE `.vue` macro's type-argument
 //! surface (`defineProps<T>()` / `defineEmits<E>()` / `defineSlots<S>()` /
-//! `withDefaults(defineProps<T>(), …)`) to the span-rich [`VueMacroSurface`]
+//! `defineExpose<T>()` / `withDefaults(defineProps<T>(), …)`) to the span-rich
+//! [`VueMacroSurface`]
 //! at [`TypeInfoQueryLevel::FullMetadata`]. The surface is sourced through the
 //! SHARED typeinfo surface path — the macro type-argument is lowered through
 //! the shared lowering dispatch and projected by the SAME empty-path `Shallow`
@@ -11,12 +13,14 @@
 //! NEVER read from `surface_view_from_base_node` — the macro surface routes
 //! through the one shared surface path, not a parallel reader.
 //!
-//! The three normalizers ([`props_from_typeinfo_surface`] /
-//! [`emits_from_typeinfo_surface`] / [`slots_from_typeinfo_surface`]) consume a
+//! The four normalizers ([`props_from_typeinfo_surface`] /
+//! [`emits_from_typeinfo_surface`] / [`slots_from_typeinfo_surface`] /
+//! [`exposed_from_typeinfo_surface`]) consume a
 //! [`crate::typeinfo::surface::TypeInfoSurface`] (member `value` +
 //! spans + origin + flags + JSDoc spans) plus the macro-analyzer facts and
 //! produce the FINAL component-meta DTOs (`AnalyzedPropField` /
-//! `AnalyzedEmitField` / `AnalyzedSlotField`). They reproduce the eager rail's
+//! `AnalyzedEmitField` / `AnalyzedSlotField` / `AnalyzedExposeField`). They
+//! reproduce the eager rail's
 //! behavior (the `ImportedMacroSurface::LazyImported` arm +
 //! `surface_projector`) member-for-member, sourcing every semantic decision
 //! from the typeinfo surface:
@@ -37,9 +41,14 @@
 //! - **slots** — function-like members only (non-function members filtered);
 //!   the first-parameter object's properties become the slot bindings; the
 //!   function return type becomes the slot return.
+//! - **exposed** — one field per PUBLIC named member of the `defineExpose<T>()`
+//!   type argument, carrying the member value raised to a `TypeExpr` (scoped to
+//!   its value-node file like props) and JSDoc sliced from the surface spans;
+//!   downstream `extract_exposed_from_macro` publishes the union of these
+//!   surface members and the object-literal argument fields.
 //!
-//! Fallthrough / root-inheritance + expose / options are SEPARATE subsystems
-//! fed by analyzer facts — out of scope here.
+//! Fallthrough / root-inheritance + options are SEPARATE subsystems fed by
+//! analyzer facts — out of scope here.
 
 use std::sync::Arc;
 
@@ -263,7 +272,7 @@ impl VerterHost {
 
         // Provenance per macro axis. Props request the macro-T own-body
         // provenance on the terminal surface synthesis so the author-declared
-        // members are flagged; emits / slots are structural
+        // members are flagged; emits / slots / exposed are structural
         // (`declared_in_macro_type_arg` is a props-axis concern). The terminal
         // `MacroTypeArgOwnBody` synthesis restamps `declared_in_macro_type_arg =
         // true` for EXACTLY the declaration's own-body direct members — it reads
@@ -278,7 +287,7 @@ impl VerterHost {
         // Only `DefineProps` reaches here as a props macro: `WithDefaults` is
         // never `is_type_based` (it bailed at the guard above) and `DefineModel`
         // returned its empty surface above. `DefineProps` requests the macro-T
-        // own-body provenance; emits / slots are structural.
+        // own-body provenance; emits / slots / exposed are structural.
         let terminal_context = match request.macro_kind {
             AnalyzedMacroKind::DefineProps => ProjectionReductionContext::macro_object_surface(
                 ProjectionMode::Shallow,
@@ -544,6 +553,43 @@ fn signature_jsdoc_from_spans(
     )
 }
 
+/// Normalize a `defineExpose<T>()` macro surface into [`AnalyzedExposeField`]s:
+/// one field per named public member, carrying the member's surface type
+/// raised through the active `ctx` (overlay-aware, scoped to its value-node
+/// file like props) and its JSDoc sliced from the enriched typeinfo spans.
+/// The field's `span` is `None`: the surface member's spans index its
+/// declaration file, not the SFC, so there is no SFC-absolute key span to
+/// report. Downstream, `extract_exposed_from_macro` publishes the union of
+/// the object-literal fields and these surface members.
+#[must_use]
+pub(crate) fn exposed_from_typeinfo_surface(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    macro_surface: &VueMacroSurface,
+) -> Vec<verter_semantic::analysis::types::AnalyzedExposeField> {
+    let host = ctx.host_for_fact_tracer_install();
+    macro_surface
+        .surface
+        .members
+        .iter()
+        .filter(|member| member.visibility.is_public())
+        .map(|member| {
+            let (description, tags) = member_jsdoc_from_spans(host, member);
+            let type_expr = raise_member_value(ctx, member);
+            let type_expr_scope = type_expr
+                .as_ref()
+                .map(|_| macro_surface.member_expr_scope(host, member));
+            verter_semantic::analysis::types::AnalyzedExposeField {
+                name: member.name.as_ref().to_string(),
+                span: None,
+                type_expr,
+                type_expr_scope,
+                description,
+                tags,
+            }
+        })
+        .collect()
+}
+
 /// Raise a member's value node to a [`TypeExpr`] through the shared structural
 /// raiser bound to the ACTIVE `ctx` (`ctx.dispatch()`), so an overlay session
 /// raises against overlay content rather than a fresh base host view. `None`
@@ -702,16 +748,20 @@ pub(crate) fn vue_macro_dtos_with_ctx(
                     slots: slots_from_typeinfo_surface(ctx, &macro_surface),
                     ..VueMacroDtos::default()
                 },
+                AnalyzedMacroKind::DefineExpose => VueMacroDtos {
+                    exposed: exposed_from_typeinfo_surface(ctx, &macro_surface),
+                    ..VueMacroDtos::default()
+                },
                 // `WithDefaults` is not a props-surface source on this path: the
                 // outer `withDefaults` macro carries no type argument (it is not
                 // `is_type_based`), so `resolve_vue_macro_surface_with_ctx`
                 // returns `None` for it and this arm is unreachable. The props
                 // come from the SEPARATELY-routed inner `DefineProps` macro.
-                // Options / expose are separate subsystems. None of these
-                // contribute a DTO bundle.
-                AnalyzedMacroKind::WithDefaults
-                | AnalyzedMacroKind::DefineOptions
-                | AnalyzedMacroKind::DefineExpose => VueMacroDtos::default(),
+                // Options is a separate subsystem and contributes no DTO
+                // bundle.
+                AnalyzedMacroKind::WithDefaults | AnalyzedMacroKind::DefineOptions => {
+                    VueMacroDtos::default()
+                }
             },
             None => VueMacroDtos::default(),
         }

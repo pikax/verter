@@ -725,7 +725,6 @@ fn extract_component_meta_from_resolved_with_evaluated(
     );
     let resolved_type_registry =
         resolver_component_meta_type_registry(&resolved.resolved_type_registry);
-    let canonical_source = host.read_analysis_source(canonical_id);
     let input = verter_semantic::analysis::component_meta::ComponentMetaInput {
         macros: &resolved.snapshot.macros,
         bindings: &resolved.snapshot.bindings,
@@ -742,7 +741,6 @@ fn extract_component_meta_from_resolved_with_evaluated(
         resolved_type_registry: &resolved_type_registry,
         evaluated_types,
         file_path: canonical_id,
-        canonical_source: canonical_source.as_deref(),
     };
 
     let mut meta = verter_semantic::analysis::component_meta::extract_component_meta(input);

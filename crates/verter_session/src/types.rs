@@ -2355,6 +2355,24 @@ pub struct MetaProvenance {
     /// `batch_over_overlay_session_computes_fingerprint_o1_not_per_job`
     /// gates against.
     pub overlay_set_fingerprint_full_computations: std::sync::atomic::AtomicU64,
+    /// Count of [`crate::resolver_store::HostStoreView::from_host_read`]
+    /// entries against THIS host — every store-view read a warm-cache
+    /// validator or batch capture performs, whether the manager serves it
+    /// as a cheap token-stable `Arc` clone or a full sweep.
+    ///
+    /// PER-HOST (not process-global): `from_host_read` already carries the
+    /// `&VerterHost` it reads, and every rayon worker in a host batch reads
+    /// through the SAME host, so this counter observes worker-side per-job
+    /// reads while staying immune to other hosts' (other tests')
+    /// store-view traffic. A warm component-meta batch of N must collapse
+    /// onto O(1) reads (the single per-batch fixed-view capture); a
+    /// per-job-read path drives it ≥ N — the regressions
+    /// `warm_batch_payload_from_host_calls_are_o1_not_per_item` /
+    /// `warm_analysis_batch_from_host_calls_are_o1_not_per_item` gate
+    /// against. The process-global per-call-site table
+    /// (`dump_from_host_call_sites`) remains the bench-side ATTRIBUTION
+    /// diagnostic; this counter is the hermetic per-host MEASUREMENT.
+    pub store_view_from_host_reads: std::sync::atomic::AtomicU64,
     /// `ComponentMetaResultDb::get_with_view` warm-hit count. Bumped
     /// once per call that returns `Some(entry)` after the entry's
     /// `fact_dep_signature` validates under the supplied
@@ -2532,6 +2550,7 @@ impl Default for MetaProvenance {
             payload_encodes: std::sync::atomic::AtomicU64::new(0),
             session_overlay_cows: std::sync::atomic::AtomicU64::new(0),
             overlay_set_fingerprint_full_computations: std::sync::atomic::AtomicU64::new(0),
+            store_view_from_host_reads: std::sync::atomic::AtomicU64::new(0),
             component_meta_result_cache_hits: std::sync::atomic::AtomicU64::new(0),
             component_meta_result_cache_misses: std::sync::atomic::AtomicU64::new(0),
             slot_binding_graph_fact_tracer_emissions: std::sync::atomic::AtomicU64::new(0),
@@ -2671,6 +2690,10 @@ impl std::fmt::Debug for MetaProvenance {
                 &self.overlay_set_fingerprint_full_computations.load(Relaxed),
             )
             .field(
+                "store_view_from_host_reads",
+                &self.store_view_from_host_reads.load(Relaxed),
+            )
+            .field(
                 "indexed_ready_scheduler_snapshot_reuse",
                 &self.indexed_ready_scheduler_snapshot_reuse.load(Relaxed),
             )
@@ -2778,6 +2801,7 @@ impl MetaProvenance {
             overlay_set_fingerprint_full_computations: self
                 .overlay_set_fingerprint_full_computations
                 .load(Relaxed),
+            store_view_from_host_reads: self.store_view_from_host_reads.load(Relaxed),
             component_meta_result_cache_hits: self.component_meta_result_cache_hits.load(Relaxed),
             component_meta_result_cache_misses: self
                 .component_meta_result_cache_misses
@@ -2874,6 +2898,7 @@ impl MetaProvenance {
         self.session_overlay_cows.store(0, Relaxed);
         self.overlay_set_fingerprint_full_computations
             .store(0, Relaxed);
+        self.store_view_from_host_reads.store(0, Relaxed);
         self.component_meta_result_cache_hits.store(0, Relaxed);
         self.component_meta_result_cache_misses.store(0, Relaxed);
         self.slot_binding_graph_fact_tracer_emissions
@@ -2990,6 +3015,12 @@ pub struct MetaProvenanceSnapshot {
     /// worker-side reads in a batch while staying isolated from other
     /// hosts' fingerprinting.
     pub overlay_set_fingerprint_full_computations: u64,
+    /// [`crate::resolver_store::HostStoreView::from_host_read`] entries
+    /// against this host — every store-view read (manager `Arc`-clone hit
+    /// or full sweep alike). Per-host, so it observes worker-side per-job
+    /// reads in a batch while staying isolated from other hosts'
+    /// store-view traffic.
+    pub store_view_from_host_reads: u64,
     pub component_meta_result_cache_hits: u64,
     pub component_meta_result_cache_misses: u64,
     /// Per-call count of `observe_fact_signature` fan-outs emitted

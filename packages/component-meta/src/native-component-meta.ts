@@ -108,6 +108,7 @@ export interface NativeExposedMeta {
   type: NativeTypeExprLike;
   typeExpansion?: NativeExpansionMetadata;
   description?: string;
+  tags?: NativeJsdocTag[];
 }
 
 export interface NativePublicInstanceMeta {
@@ -122,6 +123,7 @@ export interface NativePublicInstanceMemberMeta {
   typeExpansion?: NativeExpansionMetadata;
   rawType?: string;
   description?: string;
+  tags?: NativeJsdocTag[];
 }
 
 export interface NativeSfcBlocksMeta {
@@ -592,6 +594,7 @@ export function nativeComponentMetaToComponentMeta(meta: NativeComponentMetaResu
       type: typeExprToDescriptor(exposed.type, nativeRegistry),
       ...(exposed.typeExpansion !== undefined ? { typeExpansion: exposed.typeExpansion } : {}),
       ...(exposed.description !== undefined ? { description: exposed.description } : {}),
+      ...(exposed.tags?.length ? { tags: exposed.tags } : {}),
     })),
     ...(meta.publicInstance !== undefined
       ? {
@@ -606,6 +609,7 @@ export function nativeComponentMetaToComponentMeta(meta: NativeComponentMetaResu
                 : {}),
               ...(member.rawType !== undefined ? { rawType: member.rawType } : {}),
               ...(member.description !== undefined ? { description: member.description } : {}),
+              ...(member.tags?.length ? { tags: member.tags } : {}),
             })),
           },
         }

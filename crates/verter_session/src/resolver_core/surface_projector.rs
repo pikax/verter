@@ -1,6 +1,4 @@
-use verter_compiler::utils::oxc::vue::resolve_type::{
-    AnalyzedExternalTypeSource, ResolvedElements, ResolvedMemberVisibility,
-};
+use verter_compiler::utils::oxc::vue::resolve_type::{ResolvedElements, ResolvedMemberVisibility};
 use verter_semantic::analysis::types::AnalyzedMacroKind;
 use verter_type_expr::TypeExpr;
 
@@ -19,9 +17,10 @@ pub struct ResolvedNativeProp {
 /// (`native_props`) projected from the eager OXC [`ResolvedElements`] for an
 /// imported macro type. This is the SOLE responsibility of the surface
 /// projector: the published
-/// props/emits/slots surface is owned exclusively by the typeinfo macro-surface
-/// path ([`crate::VerterHost::vue_macro_dtos`] → the
-/// `props/emits/slots_from_typeinfo_surface` normalizers). `native_props` has a
+/// props/emits/slots/exposed surface is owned exclusively by the typeinfo
+/// macro-surface path ([`crate::VerterHost::vue_macro_dtos`] → the
+/// `props/emits/slots/exposed_from_typeinfo_surface` normalizers).
+/// `native_props` has a
 /// real FFI/proto/JS consumer (`@verter/component-meta` `nativeProps`) that the
 /// typeinfo surface does NOT cover, so it stays here as a native-only carrier.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -42,7 +41,7 @@ pub fn project_macro_surfaces(
 ///
 /// This projector is responsible for ONLY
 /// `native_props` (the private/protected class-member visibility surface). The
-/// published props/emits/slots are owned exclusively by the typeinfo
+/// published props/emits/slots/exposed are owned exclusively by the typeinfo
 /// macro-surface path; `source`, `owner_canonical`, and `macro_kind` no longer
 /// participate in the projection and are retained on the signature for the
 /// existing caller ([`project_macro_surfaces`], reached from
@@ -57,71 +56,6 @@ pub fn project_macro_surfaces_with_owner(
     ProjectedMacroSurfaces {
         native_props: collect_native_props(elements),
     }
-}
-
-/// When a type is not locally defined in a file (e.g., barrel re-export),
-/// find its import source specifiers and imported name so the caller can follow
-/// the import chain. Handles `import { T } from '...'; export { T };`,
-/// `export { T } from '...'`, and `export * from '...'` patterns.
-///
-/// Reads the cache-owned shallow analysis ([`AnalyzedExternalTypeSource`], held
-/// on the file's [`crate::resolver_core::ShallowFileState`]); it NEVER allocates
-/// a fresh OXC arena or reparses the dependency. The barrel-discovery overlay
-/// fetches the shallow state once per canonical via
-/// [`crate::VerterHost::shallow_file_state`] and passes the cache-owned analysis
-/// here.
-///
-/// Returns all candidates. For direct/named re-exports returns one entry.
-/// For `export *` wildcards returns one entry per wildcard source.
-pub fn find_type_import_sources_in_analysis(
-    analysis: &AnalyzedExternalTypeSource,
-    type_name: &str,
-) -> Vec<(String, String)> {
-    // Check direct re-export: `export { T } from '...'`
-    if let Some((specifier, imported_name)) = analysis.direct_reexport_target(type_name) {
-        return vec![(specifier.to_string(), imported_name.to_string())];
-    }
-
-    // Check import+export pattern: `import { T } from '...'; export { T };`
-    let local_name = analysis
-        .local_export_symbol_target(type_name)
-        .unwrap_or(type_name);
-    if let Some((specifier, imported_name)) = analysis.local_import_symbol_target(local_name) {
-        return vec![(specifier.to_string(), imported_name.to_string())];
-    }
-
-    // Return all wildcard re-export sources as candidates
-    analysis
-        .wildcard_reexport_sources()
-        .iter()
-        .map(|specifier| (specifier.clone(), type_name.to_string()))
-        .collect()
-}
-
-/// Given a file's cache-owned shallow analysis and a locally-defined type name,
-/// return the imported type dependencies that the type transitively references
-/// through its heritage chain (extends, intersection, etc.).
-///
-/// Reads the cache-owned shallow analysis ([`AnalyzedExternalTypeSource`]); it
-/// NEVER reparses. Each entry is `(import_specifier, imported_name)` — e.g.,
-/// `("vue-router", "RouterLinkProps")` for a type that extends an imported
-/// interface.
-pub fn find_heritage_type_imports_in_analysis(
-    analysis: &AnalyzedExternalTypeSource,
-    type_name: &str,
-) -> Vec<(String, String)> {
-    let required_import_names = analysis.required_import_names(type_name);
-
-    required_import_names
-        .into_iter()
-        .filter_map(|name| {
-            analysis
-                .local_import_symbol_target(&name)
-                .map(|(specifier, imported_name)| {
-                    (specifier.to_string(), imported_name.to_string())
-                })
-        })
-        .collect()
 }
 
 /// Render a `TypeExpr` to a display string for `AnalyzedSlotFieldBinding`

@@ -3,8 +3,8 @@
  *
  * The legacy compat layer's `looksLike*` helpers (`looksLikeBareTypeReference`,
  * `looksLikeIndexedAccessType`, `looksLikeSlotsHelperRawType`,
- * `looksLikeUiHelperRawType`, `looksLikeStringCompatibleType`) ran regex / substring
- * checks against `prop.rawType` text.
+ * `looksLikeUiHelperRawType`) ran regex / substring checks against
+ * `prop.rawType` text.
  *
  * Every helper now switches on `TypeDescriptor.kind`. These tests would
  * FAIL against the legacy tree because they construct `PropMeta` /
@@ -265,62 +265,49 @@ describe("shape-detection heuristics switch on TypeDescriptor.kind (not prop.raw
     });
   });
 
-  describe("looksLikeStringCompatibleType (used by normalizeDefaultForCompat)", () => {
-    it("JSON.stringify-wraps default value when descriptor accepts string, regardless of rawType decoy", () => {
-      // Descriptor: union of string literals + undefined — accepts strings.
+  describe("default value passthrough (no descriptor-driven stringification)", () => {
+    it("does not infer string-ness from the descriptor: bare text passes through unmodified", () => {
+      // The native producer publishes string defaults with their verbatim
+      // source quoting (`'red'`), so a BARE unquoted default is by definition
+      // not a string literal. The retired compat heuristic re-inferred
+      // string-ness from the descriptor and JSON.stringify-wrapped it; the
+      // value must now pass through untouched even when the descriptor
+      // accepts strings.
       const prop = makeProp({
         name: "color",
         type: union([literal("red"), literal("green"), literal("blue"), primitive("undefined")]),
-        // Decoy rawType: the legacy regex looked for `"`/`string` substring —
-        // we set rawType to something that DOES contain those (preserving the
-        // legacy default behaviour), but the structural decision must NOT
-        // depend on rawType.
         rawType: "MyColorType",
         required: false,
         default: "red",
       });
       const result = mapPropMeta(prop);
-      // Descriptor walk identifies string-literal arms →
-      // string-compatible → default value `red` JSON.stringify-wrapped to `"red"`.
+      expect(result.default).toBe("red");
+    });
+
+    it("normalizes producer-quoted single-quote defaults to JSON quote STYLE only (lossless)", () => {
+      // `evaluateDefault` may rewrite `'red'` → `"red"` (quote style, value
+      // preserved); that is the ONLY transform left on the default path.
+      const prop = makeProp({
+        name: "color",
+        type: union([literal("red"), literal("green"), primitive("undefined")]),
+        rawType: "MyColorType",
+        required: false,
+        default: "'red'",
+      });
+      const result = mapPropMeta(prop);
       expect(result.default).toBe('"red"');
     });
 
-    it("declines string-stringify when descriptor is purely numeric, even if rawType text contains 'string'", () => {
-      // Descriptor: pure number primitive — NOT string-compatible.
+    it("passes non-string defaults through unmodified regardless of descriptor shape", () => {
       const prop = makeProp({
         name: "count",
         type: primitive("number"),
-        // Decoy rawType: contains the substring 'string'. The legacy
-        // text-based helper would have returned true and wrapped a non-numeric
-        // default. The descriptor walk returns false.
         rawType: "Stringish",
         required: false,
-        default: "foo",
+        default: "42",
       });
       const result = mapPropMeta(prop);
-      // Descriptor identifies number-only → string-stringify
-      // declines → default value `foo` passes through unmodified.
-      expect(result.default).toBe("foo");
-    });
-
-    it("recognises (string & {}) brand-intersection arm as string-compatible structurally", () => {
-      // Descriptor: union including `string & {}` brand intersection.
-      const prop = makeProp({
-        name: "value",
-        type: union([
-          literal("a"),
-          literal("b"),
-          intersection([primitive("string"), { kind: "object", properties: [] }]),
-        ]),
-        // Decoy rawType: text that does NOT contain '(string & {})' literally.
-        rawType: "MyBrand",
-        required: true,
-        default: "custom",
-      });
-      const result = mapPropMeta(prop);
-      // Descriptor identifies string-literal arm → string-compatible
-      // → default wrapped as JSON string.
-      expect(result.default).toBe('"custom"');
+      expect(result.default).toBe("42");
     });
   });
 });

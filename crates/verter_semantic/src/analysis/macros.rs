@@ -1604,7 +1604,7 @@ fn try_extract_macro(
             };
 
             let expose_fields = if kind == AnalyzedMacroKind::DefineExpose {
-                extract_expose_fields(call)
+                extract_expose_fields(call, comments, source)
             } else {
                 Vec::new()
             };
@@ -1993,7 +1993,8 @@ fn extract_prop_fields_from_runtime(
                                 }
                             }
                             "default" => {
-                                let val_text = extract_default_value_text(&sp.value, source);
+                                let val_text = default_value_source_text(&sp.value, source)
+                                    .unwrap_or_default();
                                 default_keys.push(key_name.clone());
                                 default_values.push(AnalyzedDefaultValue {
                                     key: key_name.clone(),
@@ -2364,7 +2365,7 @@ fn extract_with_defaults_values(
                     PropertyKey::StringLiteral(lit) => Some(lit.value.to_string()),
                     _ => None,
                 }?;
-                let value = extract_default_value_text(&p.value, source);
+                let value = default_value_source_text(&p.value, source).unwrap_or_default();
                 Some(AnalyzedDefaultValue {
                     key,
                     value,
@@ -2377,38 +2378,32 @@ fn extract_with_defaults_values(
         .collect()
 }
 
-/// Extract default value source text. For string literals, extracts the inner value.
-fn extract_default_value_text(expr: &Expression<'_>, source: &str) -> String {
-    match expr {
-        Expression::StringLiteral(s) => s.value.to_string(),
-        Expression::NumericLiteral(_)
-        | Expression::BooleanLiteral(_)
-        | Expression::NullLiteral(_) => {
-            let start = expr.span().start as usize;
-            let end = expr.span().end as usize;
-            if end <= source.len() {
-                source[start..end].to_string()
-            } else {
-                String::new()
-            }
-        }
-        _ => {
-            let start = expr.span().start as usize;
-            let end = expr.span().end as usize;
-            if end <= source.len() {
-                source[start..end].to_string()
-            } else {
-                String::new()
-            }
-        }
-    }
+/// Extract the verbatim source text of a default-value expression.
+///
+/// Every expression kind — including string literals — yields the exact
+/// source slice (`default: 'vertical'` publishes `'vertical'`, quotes
+/// included), so display layers never re-infer quoting from the surrounding
+/// type. Shared by the script-setup macro analyzer and the Options-API
+/// analyzer; returns `None` when the span is out of range.
+pub(crate) fn default_value_source_text(expr: &Expression<'_>, source: &str) -> Option<String> {
+    let span = expr.span();
+    source
+        .get(span.start as usize..span.end as usize)
+        .map(str::to_string)
 }
 
-/// Extract exposed field names from `defineExpose({ foo, bar })`.
+/// Extract exposed field names and their leading JSDoc from
+/// `defineExpose({ foo, bar })`.
 ///
 /// Only parses object literal arguments. Identifier args (e.g., `defineExpose(myObj)`)
-/// return empty since we can't resolve the value statically.
-fn extract_expose_fields(call: &CallExpression<'_>) -> Vec<AnalyzedExposeField> {
+/// return empty since we can't resolve the value statically. Each field's
+/// leading `/** ... */` block is captured at the field key span, exactly like
+/// runtime prop fields.
+fn extract_expose_fields(
+    call: &CallExpression<'_>,
+    comments: &[Comment],
+    source: &str,
+) -> Vec<AnalyzedExposeField> {
     let Some(first_arg) = call.arguments.first() else {
         return Vec::new();
     };
@@ -2424,9 +2419,14 @@ fn extract_expose_fields(call: &CallExpression<'_>) -> Vec<AnalyzedExposeField> 
                     PropertyKey::StringLiteral(lit) => Some(lit.value.to_string()),
                     _ => None,
                 };
+                let (description, tags) = extract_jsdoc_for(comments, p.key.span().start, source);
                 key_name.map(|name| AnalyzedExposeField {
                     name,
-                    span: p.key.span().into(),
+                    span: Some(p.key.span().into()),
+                    type_expr: None,
+                    type_expr_scope: None,
+                    description,
+                    tags,
                 })
             } else {
                 None

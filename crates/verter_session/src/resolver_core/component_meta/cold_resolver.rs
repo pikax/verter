@@ -251,9 +251,9 @@ where
             });
         if let Some(elements) = imported_elements {
             // Project the native-only surface (`native_props`) from the
-            // resolved `ResolvedElements`. The published props/emits/slots
-            // surface is NOT projected here — it is owned by the typeinfo
-            // macro-surface path (`vue_macro_dtos`), which
+            // resolved `ResolvedElements`. The published props/emits/slots/
+            // exposed surface is NOT projected here — it is owned by the
+            // typeinfo macro-surface path (`vue_macro_dtos`), which
             // `component_meta_resolved_macros` consults at the session
             // boundary. The registry root is seeded SHALLOW
             // (`TypeExpr::named`): consumers re-resolve the named root on
@@ -380,14 +380,15 @@ where
                         | AnalyzedMacroKind::DefineModel
                         | AnalyzedMacroKind::DefineSlots
                         | AnalyzedMacroKind::DefineEmits
+                        | AnalyzedMacroKind::DefineExpose
                 );
 
             // Seed the direct macro-local root into the registry. The
             // owner-local authority entry (pushed below, gated on
             // `host.owner_local_macro_root_has_surface`) marks the macro as
             // owner-local-authoritative for the materialiser; the published
-            // props/emits/slots surface itself is sourced from the typeinfo
-            // path keyed on macro_index.
+            // props/emits/slots/exposed surface itself is sourced from the
+            // typeinfo path keyed on macro_index.
             for (resolved_index, resolved) in mac.resolved_local_types.iter().enumerate() {
                 if !is_direct_local_macro_type_reference(
                     mac,
@@ -459,9 +460,9 @@ where
                 {
                     // Gate on the owner-local root having a non-empty prepared
                     // surface (folds the prior emptiness check that inspected
-                    // the projected props/emits/slots). The published
-                    // props/emits/slots surface itself is owned by the typeinfo
-                    // path; here we only decide whether to push an
+                    // the projected props/emits/slots/exposed). The published
+                    // props/emits/slots/exposed surface itself is owned by the
+                    // typeinfo path; here we only decide whether to push an
                     // authoritative entry for this root.
                     if !host.owner_local_macro_root_has_surface(
                         owner_canonical,

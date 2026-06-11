@@ -12,9 +12,9 @@
 //! - Conversion to transport-facing DTOs happens via `verter_protocol` and its adapter layers
 
 use crate::analysis::types::{
-    AnalysisFlags, AnalyzedBinding, AnalyzedEmitField, AnalyzedImport, AnalyzedMacro,
-    AnalyzedMacroKind, AnalyzedOptionsApi, AnalyzedPropField, AnalyzedSlotField, ImportBindingKind,
-    JsdocTag, StoreUsage, VueApiCallSite,
+    AnalysisFlags, AnalyzedBinding, AnalyzedEmitField, AnalyzedExposeField, AnalyzedImport,
+    AnalyzedMacro, AnalyzedMacroKind, AnalyzedOptionsApi, AnalyzedPropField, AnalyzedSlotField,
+    ImportBindingKind, JsdocTag, StoreUsage, VueApiCallSite,
 };
 use verter_type_expr::{PrimitiveName, TypeExpr, TypeExprScope};
 
@@ -56,6 +56,9 @@ pub struct ResolvedMacroInput {
     pub emits: Vec<AnalyzedEmitField>,
     /// Host-resolved slots for the macro.
     pub slots: Vec<AnalyzedSlotField>,
+    /// Host-resolved exposed fields for the macro (`defineExpose<T>()`
+    /// type-argument surface members with their span-sliced JSDoc).
+    pub exposed: Vec<AnalyzedExposeField>,
 }
 
 pub struct ComponentMetaInput<'a> {
@@ -72,11 +75,6 @@ pub struct ComponentMetaInput<'a> {
     pub resolved_type_registry: &'a [ResolvedTypeAnalysis],
     pub evaluated_types: Option<&'a crate::analysis::type_expand::ExpandedComponentTypes>,
     pub file_path: &'a str,
-    /// Source text of `file_path` used as a name-based JSDoc fallback for
-    /// expanded-only props (those produced by type expansion that do not
-    /// appear in `prop_fields` or any `resolved_macros` projection). The
-    /// extractor stays host-independent: it never reads files itself.
-    pub canonical_source: Option<&'a str>,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -234,6 +232,8 @@ pub struct ExposedAnalysis {
     pub type_expr: TypeExpr,
     pub type_expansion: Option<crate::analysis::type_expand::ExpansionMetadata>,
     pub description: Option<String>,
+    /// JSDoc tags from the exposed member's leading `/** ... */` block.
+    pub tags: Vec<JsdocTag>,
 }
 
 /// Host-populated public-instance sidecar exposed by the official API.
@@ -252,6 +252,8 @@ pub struct PublicInstanceMemberAnalysis {
     pub type_expansion: Option<crate::analysis::type_expand::ExpansionMetadata>,
     pub raw_type: Option<String>,
     pub description: Option<String>,
+    /// JSDoc tags carried onto the public member from its source surface.
+    pub tags: Vec<JsdocTag>,
 }
 
 /// Host-populated SFC root block metadata exposed by the official API.
@@ -1217,7 +1219,6 @@ pub fn extract_component_meta(input: ComponentMetaInput<'_>) -> ComponentMetaAna
                     &default_keys,
                     &default_values,
                     evaluated_types,
-                    input.canonical_source,
                     &mut props,
                 );
             }
@@ -1234,7 +1235,13 @@ pub fn extract_component_meta(input: ComponentMetaInput<'_>) -> ComponentMetaAna
                 extract_model_from_macro(mac, &prop_fields, evaluated_types, &mut models);
             }
             AnalyzedMacroKind::DefineExpose => {
-                extract_exposed_from_macro(mac, input.bindings, evaluated_types, &mut exposed);
+                extract_exposed_from_macro(
+                    mac,
+                    resolved_macro.as_ref(),
+                    input.bindings,
+                    evaluated_types,
+                    &mut exposed,
+                );
             }
             AnalyzedMacroKind::WithDefaults | AnalyzedMacroKind::DefineOptions => {
                 // Handled above (default_keys) or flags
@@ -1406,7 +1413,6 @@ fn extract_props_from_macro(
     default_keys: &std::collections::HashSet<&str>,
     default_values: &std::collections::HashMap<&str, &str>,
     evaluated: Option<&crate::analysis::type_expand::ExpandedComponentTypes>,
-    canonical_source: Option<&str>,
     out: &mut Vec<PropAnalysis>,
 ) {
     if let Some(eval_fields) = expanded_define_props_fields(evaluated, macro_index) {
@@ -1444,8 +1450,13 @@ fn extract_props_from_macro(
                     type_expansion.as_ref(),
                 );
 
-                let (description, tags) =
-                    jsdoc_for_expanded_prop(source_field, canonical_source, field.name.as_str());
+                // JSDoc rides the span-borne supply: the source field (analyzer
+                // same-file extraction or the span-sliced macro DTO surface)
+                // carries the description/tags; an expansion-only member with
+                // no source field publishes none.
+                let (description, tags) = source_field
+                    .map(|field| (field.description.clone(), field.tags.clone()))
+                    .unwrap_or_default();
 
                 out.push(PropAnalysis {
                     name: field.name.clone(),
@@ -1571,13 +1582,11 @@ fn extract_props_from_macro(
                 type_expansion.as_ref(),
             );
 
-            let (description, tags) =
-                jsdoc_for_expanded_prop(None, canonical_source, field.name.as_str());
-
-            // No source field reachable from this branch (`source_field`
-            // was None in `jsdoc_for_expanded_prop`); the chosen raw_type
-            // came from the evaluator's textual rendering, which has no
-            // typed companion.
+            // No source field reachable from this branch, so no JSDoc supply:
+            // doc text rides the span-borne member supply only — an
+            // evaluator-only member publishes no description and no tags. The
+            // chosen raw_type came from the evaluator's textual rendering,
+            // which has no typed companion.
             out.push(PropAnalysis {
                 name: field.name.clone(),
                 type_expr,
@@ -1587,8 +1596,8 @@ fn extract_props_from_macro(
                 required: !field.optional && !has_default,
                 has_default,
                 default_value,
-                description,
-                tags,
+                description: None,
+                tags: Vec::new(),
                 // Evaluator-only branch: name was not present in
                 // `prop_fields`, so the analyzer did not observe the
                 // author writing it on the macro T body. `declared = false`.
@@ -1596,25 +1605,6 @@ fn extract_props_from_macro(
             });
         }
     }
-}
-
-/// JSDoc lookup for an expanded prop. Uses the source field's JSDoc when the
-/// expansion mirrors a declared prop, otherwise falls back to a name-based
-/// lookup in the canonical source. When neither is available, returns empty.
-fn jsdoc_for_expanded_prop(
-    source_field: Option<&AnalyzedPropField>,
-    canonical_source: Option<&str>,
-    prop_name: &str,
-) -> (Option<String>, Vec<JsdocTag>) {
-    if let Some(field) = source_field {
-        if field.description.is_some() || !field.tags.is_empty() {
-            return (field.description.clone(), field.tags.clone());
-        }
-    }
-    if let Some(source) = canonical_source {
-        return crate::analysis::jsdoc::extract_jsdoc_for_property_name(source, prop_name);
-    }
-    (None, Vec::new())
 }
 
 fn expanded_define_props_fields(
@@ -1718,6 +1708,7 @@ fn merged_resolved_macro_input(
     let mut seen_props = rustc_hash::FxHashSet::default();
     let mut seen_emits = rustc_hash::FxHashSet::default();
     let mut seen_slots = rustc_hash::FxHashSet::default();
+    let mut seen_exposed = rustc_hash::FxHashSet::default();
 
     for resolved in resolved_macros
         .iter()
@@ -1728,6 +1719,7 @@ fn merged_resolved_macro_input(
             props: Vec::new(),
             emits: Vec::new(),
             slots: Vec::new(),
+            exposed: Vec::new(),
         });
 
         for prop in &resolved.props {
@@ -1745,6 +1737,11 @@ fn merged_resolved_macro_input(
         for slot in &resolved.slots {
             if seen_slots.insert(slot.name.clone()) {
                 entry.slots.push(slot.clone());
+            }
+        }
+        for exposed in &resolved.exposed {
+            if seen_exposed.insert(exposed.name.clone()) {
+                entry.exposed.push(exposed.clone());
             }
         }
     }
@@ -3285,12 +3282,33 @@ fn type_text_contains_undefined(text: &str) -> bool {
 
 fn extract_exposed_from_macro(
     mac: &AnalyzedMacro,
+    resolved: Option<&ResolvedMacroInput>,
     bindings: &[AnalyzedBinding],
     evaluated: Option<&crate::analysis::type_expand::ExpandedComponentTypes>,
     out: &mut Vec<ExposedAnalysis>,
 ) {
     for field in &mac.expose_fields {
         let type_expr = resolve_exposed_type(&field.name, bindings, evaluated);
+        // Docs pair by name: the object-literal field's own leading JSDoc
+        // wins; a `defineExpose<T>({ ... })` member without one inherits the
+        // type-argument surface member's span-sliced JSDoc.
+        let resolved_field = resolved.and_then(|resolved| {
+            resolved
+                .exposed
+                .iter()
+                .find(|candidate| candidate.name == field.name)
+        });
+        let description = field
+            .description
+            .clone()
+            .or_else(|| resolved_field.and_then(|candidate| candidate.description.clone()));
+        let tags = if field.tags.is_empty() {
+            resolved_field
+                .map(|candidate| candidate.tags.clone())
+                .unwrap_or_default()
+        } else {
+            field.tags.clone()
+        };
         out.push(ExposedAnalysis {
             name: field.name.clone(),
             type_expr,
@@ -3300,7 +3318,37 @@ fn extract_exposed_from_macro(
                     .find(|binding| binding.name == field.name)
                     .map(field_expansion_metadata)
             }),
-            description: None,
+            description,
+            tags,
+        });
+    }
+    // `defineExpose<T>()` surface members with no object-literal counterpart
+    // publish from the resolved type-argument surface, in surface order,
+    // carrying their span-sliced docs and their raised surface type. The
+    // object-literal loop above already consumed the name-paired entries, so
+    // this appends only the type-argument-only members.
+    let Some(resolved) = resolved else {
+        return;
+    };
+    for candidate in &resolved.exposed {
+        if mac.expose_fields.iter().any(|f| f.name == candidate.name) {
+            continue;
+        }
+        let type_expr = candidate
+            .type_expr
+            .clone()
+            .unwrap_or_else(|| resolve_exposed_type(&candidate.name, bindings, evaluated));
+        out.push(ExposedAnalysis {
+            name: candidate.name.clone(),
+            type_expr,
+            type_expansion: evaluated.and_then(|eval| {
+                eval.bindings
+                    .iter()
+                    .find(|binding| binding.name == candidate.name)
+                    .map(field_expansion_metadata)
+            }),
+            description: candidate.description.clone(),
+            tags: candidate.tags.clone(),
         });
     }
 }

@@ -224,27 +224,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // builder falls back to the global augmentation inventory).
         let has_global_augmentation = shallow.has_global_augmentation(key.name.as_ref());
 
-        if !(has_type_symbol
-            || has_value_symbol
-            || has_export
-            || has_import_local
-            || has_global_augmentation)
-        {
-            // Wildcard re-export fall-through. A `export * from './base'`
-            // barrel carries no direct symbol / named export for `BaseW` —
-            // it is reachable only THROUGH the wildcard chain. When the
-            // requested name is absent from every direct map BUT the file
-            // declares `export *` sources, follow the export graph (the
-            // shared route resolver already implements
-            // direct > aliased > wildcard precedence) to the defining
-            // `(canonical, name)` and resolve THAT declaration. This makes
-            // `ResolveDecl` carrier-complete for wildcard-barrel heritage
-            // (`interface Props extends BaseW` where `BaseW` is reached via
-            // `export *`), parity with the eager OXC rail which already
-            // follows the wildcard through the route frontier. Named
-            // re-exports (`export { X } from`) populate `exports` directly
-            // and never reach this fall-through.
-            if shallow.has_wildcard_reexports() {
+        // A name DECLARED in this file (type / value symbol, or a
+        // `declare global` contribution) resolves here. A name that is
+        // only re-exported / imported through this file resolves at its
+        // DEFINING file instead — see the fall-through below.
+        let has_local_declaration = has_type_symbol || has_value_symbol || has_global_augmentation;
+
+        if !has_local_declaration {
+            // Re-export fall-through. A barrel reaches the declaration via
+            // `export * from './base'` (no direct symbol / named export),
+            // `export { X } from './base'`, or `import { X } ...; export
+            // { X }`. In every shape the declaration is authored elsewhere:
+            // follow the export graph (the shared route resolver already
+            // implements direct > aliased > wildcard precedence) to the
+            // defining `(canonical, name)` and resolve THAT declaration, so
+            // the declaration's scope — and every member's
+            // `declaration_origin`, which anchors typeinfo JSDoc enrichment
+            // — labels the file the author wrote it in, not the barrel hop.
+            if has_export || has_import_local || shallow.has_wildcard_reexports() {
                 if let Some((target_canonical, target_name)) =
                     self.ctx.resolve_named_type_export_target(
                         key.scope.canonical_id.as_ref(),
@@ -262,10 +259,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             name: Arc::from(target_name.as_str()),
                         };
                         // Re-root the barrel-resolved entry on BOTH the
-                        // barrel file (whose wildcard source list selected
-                        // the target) AND the resolved declaration's own
+                        // barrel file (whose export surface selected the
+                        // target) AND the resolved declaration's own
                         // self-roots, so a content edit to EITHER the
-                        // barrel's `export *` clause or the defining file
+                        // barrel's re-export clause or the defining file
                         // misses the warm read.
                         let inner = self.build_resolve_decl(&resolved_key);
                         let barrel_root = (Arc::clone(&key.scope.canonical_id), observed_hash);
@@ -280,7 +277,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
                 }
             }
-            return (QueryResult::Error(QueryError::Miss), empty_signature()).into();
+            if !(has_export || has_import_local) {
+                return (QueryResult::Error(QueryError::Miss), empty_signature()).into();
+            }
+            // The export graph could not resolve the defining site (e.g. an
+            // unresolvable specifier): fall through to the legacy
+            // placeholder scoped to this file, whose prepared-declaration
+            // builder follows the import lazily.
         }
 
         // Record the declaration's origin scope in the sidecar so
@@ -4740,9 +4743,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // SAME property, each contributing its own kind (pinned
                 // tsgo, probe12: `{ [K in 1 | "1"]: K }` = `{ 1: 1 | "1" }`
                 // — both first-wins and last-wins were falsified). The
-                // first production keeps the member slot (position and
-                // modifiers); later same-name productions fold their
-                // value into a Union arm.
+                // first production keeps the member slot (position,
+                // modifiers, and declaration site); later same-name
+                // productions fold their value into a Union arm.
                 if let Some(existing) = produced.iter_mut().find(|m| m.name == produced_name) {
                     if existing.value != value {
                         existing.value = graph.intern_node(SemanticNodeData::Union(Arc::from(
@@ -4752,6 +4755,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     project_member_edges.push((value, produced_name));
                     continue;
                 }
+                // Rationale on [`mapped_produced_name_inherits_declaration_site`]
+                // — the one shared predicate both rails judge inheritance with.
+                let identity_source = source_member.filter(|_| {
+                    mapped_produced_name_inherits_declaration_site(
+                        produced_name.as_ref(),
+                        name.as_ref(),
+                    )
+                });
                 // SAFETY: mapped-type member synthesis (e.g.,
                 // `Partial<T>` / `Required<T>` / `{ [K in S]: V }`).
                 // Members reach the surface via the mapped construction,
@@ -4780,10 +4791,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     // construction, never an interface/class heritage overlay —
                     // `Authored` (they do not participate in own-body shadowing).
                     merge_role: crate::semantic_query::MemberMergeRole::Authored,
-                    // Mapped-produced member: synthesized from a key domain, no
-                    // single source declaration site — no spans, no declaration file.
-                    spans: verter_type_expr::MemberSpans::default(),
-                    declaration_origin: None,
+                    spans: identity_source.map(|m| m.spans).unwrap_or_default(),
+                    declaration_origin: identity_source.and_then(|m| m.declaration_origin.clone()),
                 });
                 project_member_edges.push((value, produced_name));
             }
@@ -5299,7 +5308,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             self.substitute_semantic_type_param(remap_node, mapper.parameter_node, key_literal);
         let evaluated_remap =
             self.evaluate_deferred_semantic_node_with_context(substituted_remap, context);
-        self.classify_remap_outcome(evaluated_remap)
+        self.classify_remap_outcome(evaluated_remap, context)
     }
 
     /// Classify an evaluated key-remap node into a [`MappedKeyRemapOutcome`].
@@ -5307,8 +5316,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// Keys (numeric literals under their canonical `js_number_to_string`
     /// names), anything else (broad `string`, an unresolved shell, a
     /// non-key-capable shape — boolean / bigint literals are not property
-    /// keys) ⇒ DeferCarrier (fail closed). Recurses through union arms.
-    fn classify_remap_outcome(&self, node: SemanticNodeId) -> MappedKeyRemapOutcome {
+    /// keys) ⇒ DeferCarrier (fail closed). Recurses through union arms,
+    /// evaluating each arm through the shared deferred-node evaluator first:
+    /// the root evaluation folds a bare template remap, but a one-to-many
+    /// union remap (`as K | `x-${K}``) reaches here with its substituted arm
+    /// shells unfolded — each arm gets the same evaluation demand the root
+    /// already received.
+    fn classify_remap_outcome(
+        &self,
+        node: SemanticNodeId,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> MappedKeyRemapOutcome {
         match self.graph().node_data(node).as_deref() {
             Some(SemanticNodeData::Literal(LiteralValue::String(text))) => {
                 MappedKeyRemapOutcome::Keys(vec![Arc::from(text.as_str())])
@@ -5321,7 +5339,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let members = Arc::clone(members);
                 let mut keys: Vec<Arc<str>> = Vec::new();
                 for member in members.iter() {
-                    match self.classify_remap_outcome(*member) {
+                    let evaluated =
+                        self.evaluate_deferred_semantic_node_with_context(*member, context);
+                    match self.classify_remap_outcome(evaluated, context) {
                         MappedKeyRemapOutcome::Keys(ks) => keys.extend(ks),
                         // A `never` arm contributes no key (filtered);
                         // anything non-finite taints the whole remap.
@@ -6797,4 +6817,31 @@ pub(super) enum MappedKeyRemapOutcome {
 pub(super) enum NormalizedTupleShape {
     Tuple(Vec<crate::semantic_query::TupleElement>),
     Array(SemanticNodeId),
+}
+
+/// Whether a mapped-type produced member inherits the matched source member's
+/// declaration site (spans + `declaration_origin`).
+///
+/// Declaration-site inheritance is judged PER PRODUCED NAME: a produced member
+/// inherits the matched source member's spans + `declaration_origin` ONLY when
+/// its produced name is identical to the source key — the homomorphic /
+/// name-preserving image (no-`as` Partial / Required / Readonly, `as K`
+/// identity, the verbatim arm of a one-to-many remap). TypeScript preserves
+/// JSDoc through that image, and the typeinfo JSDoc enrichment anchors on
+/// these spans. A key-remapped arm (a true `as` rename, including renamed arms
+/// of a one-to-many remap) publishes a name no source declaration declares —
+/// inheriting the source's spans/origin would be a false declaration-site
+/// claim, so both sever (default spans, no origin). Optional / readonly /
+/// visibility / value selection stay sourced from the matched source member
+/// regardless: the rename severs the declaration-site claim, not the member
+/// semantics.
+///
+/// Both rails — the Expanded build ([`ProjectSemanticDispatch::build_mapped_type`])
+/// and the Shallow walker's `synthesise_mapped_surface` — judge inheritance
+/// through this one predicate so they can never drift.
+pub(super) fn mapped_produced_name_inherits_declaration_site(
+    produced_name: &str,
+    source_key: &str,
+) -> bool {
+    produced_name == source_key
 }
