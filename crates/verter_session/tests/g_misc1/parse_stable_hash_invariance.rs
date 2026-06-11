@@ -23,8 +23,10 @@ use verter_session::parse_stable_hash::compute_parse_stable_hash;
 use verter_session::project_type_store::IndexedReady;
 
 fn empty_external(
-) -> Arc<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource> {
-    Arc::new(verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default())
+) -> Arc<verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource> {
+    Arc::new(
+        verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(),
+    )
 }
 
 fn build_indexed(

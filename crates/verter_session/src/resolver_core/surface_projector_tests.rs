@@ -16,7 +16,7 @@
 //! suites, NOT here. These tests pin the `native_props` projection.
 
 use super::surface_projector::*;
-use verter_compiler::utils::oxc::vue::resolve_type::{
+use verter_compiler::utils::oxc::script::type_surface::{
     ResolvedElements, ResolvedMemberVisibility, ResolvedProp,
 };
 use verter_semantic::analysis::types::AnalyzedMacroKind;

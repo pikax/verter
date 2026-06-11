@@ -41,8 +41,9 @@ pub struct ScriptCodeGenOptions<'a> {
     /// CSS v-bind vars from style codegen (for `_useCssVars` injection).
     pub css_v_binds: &'a [VBindVar],
     /// Pre-resolved external types for cross-file type resolution.
-    pub external_types:
-        Option<rustc_hash::FxHashMap<String, crate::utils::oxc::vue::ResolvedElements>>,
+    pub external_types: Option<
+        rustc_hash::FxHashMap<String, crate::utils::oxc::script::type_surface::ResolvedElements>,
+    >,
     /// Set of identifiers used in the template (from AST-based expression
     /// binding extraction + component tag names). `SetupImport` bindings are
     /// only included in `__returned__` when their name appears in this set.

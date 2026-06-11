@@ -590,7 +590,7 @@ pub(crate) fn prepared_type_decl_build_count_for_tests() -> usize {
 mod tests {
     use std::sync::Arc;
 
-    use verter_compiler::utils::oxc::vue::resolve_type::{
+    use verter_compiler::utils::oxc::script::type_surface::{
         analyze_external_type_source, AnalyzedExternalTypeSource,
     };
     use verter_semantic::analysis::type_eval::ValueDeclKind;

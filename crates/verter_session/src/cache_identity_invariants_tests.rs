@@ -762,7 +762,7 @@ fn route_owned_shallow_tiered_gate_invalidates_on_workspace_generation_bump() {
         cached_parse: None,
         snapshot: Arc::new(crate::types::FileAnalysisSnapshot::default()),
         external_type_analysis: Arc::new(
-            verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default(),
+            verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(),
         ),
         shallow_state: Arc::new(crate::resolver_core::shallow_file_state::ShallowFileState {
             whole_hash: [0u8; 16],
@@ -775,7 +775,7 @@ fn route_owned_shallow_tiered_gate_invalidates_on_workspace_generation_bump() {
             augmentation_scopes: Default::default(),
             augmentation_value_scopes: Default::default(),
             analysis: Arc::new(
-                verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default(
+                verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(
                 ),
             ),
         }),
@@ -799,7 +799,7 @@ fn route_owned_shallow_tiered_gate_invalidates_on_workspace_generation_bump() {
         cached_parse: None,
         snapshot: Arc::new(crate::types::FileAnalysisSnapshot::default()),
         external_type_analysis: Arc::new(
-            verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default(),
+            verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(),
         ),
         shallow_state: Arc::new(crate::resolver_core::shallow_file_state::ShallowFileState {
             whole_hash: [0u8; 16],
@@ -812,7 +812,7 @@ fn route_owned_shallow_tiered_gate_invalidates_on_workspace_generation_bump() {
             augmentation_scopes: Default::default(),
             augmentation_value_scopes: Default::default(),
             analysis: Arc::new(
-                verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default(
+                verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(
                 ),
             ),
         }),

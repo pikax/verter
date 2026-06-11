@@ -301,7 +301,7 @@ fn mint_distinct_node(
     graph: &crate::semantic_query_memo::SemanticGraphStore,
 ) -> crate::semantic_query::SemanticNodeId {
     use crate::semantic_query::SemanticNodeData;
-    use verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements;
+    use verter_compiler::utils::oxc::script::type_surface::ResolvedElements;
     graph.intern_node(SemanticNodeData::VueMacroElements(Arc::new(
         ResolvedElements::default(),
     )))

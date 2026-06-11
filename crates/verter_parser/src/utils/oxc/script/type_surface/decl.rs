@@ -41,7 +41,7 @@ pub(super) fn inferred_root_runtime_type_for_companion(
     if !companion.root_runtime_types.is_empty() {
         return companion.root_runtime_types.clone();
     }
-    if !companion.props.is_empty() || !companion.emits.is_empty() {
+    if !companion.props.is_empty() || !companion.call_signatures.is_empty() {
         return vec![RuntimeType::Object];
     }
     if companion.has_call_signature {
@@ -602,7 +602,9 @@ pub(super) fn apply_named_type_heritage_edge_with_ctx_ref<'ctx, 'a: 'ctx>(
                 false,
             ) {
                 result.props.extend(resolved.props.iter().cloned());
-                result.emits.extend(resolved.emits.iter().cloned());
+                result
+                    .call_signatures
+                    .extend(resolved.call_signatures.iter().cloned());
                 if resolved.has_call_signature {
                     result.has_call_signature = true;
                 }
@@ -776,7 +778,9 @@ pub(super) fn resolve_interface_with_extends_ctx<'ctx, 'a: 'ctx>(
         // cached `false` already matches.
         else if let Some(companion) = ctx.companion_types.get(base_name.as_str()) {
             result.props.extend(companion.props.iter().cloned());
-            result.emits.extend(companion.emits.iter().cloned());
+            result
+                .call_signatures
+                .extend(companion.call_signatures.iter().cloned());
             if companion.has_call_signature {
                 result.has_call_signature = true;
             }
@@ -880,7 +884,9 @@ pub(super) fn resolve_interface_with_extends_ctx_ref<'ctx, 'a: 'ctx>(
             recursion_guard,
         ) {
             result.props.extend(resolved.props.iter().cloned());
-            result.emits.extend(resolved.emits.iter().cloned());
+            result
+                .call_signatures
+                .extend(resolved.call_signatures.iter().cloned());
             if resolved.has_call_signature {
                 result.has_call_signature = true;
             }
@@ -898,7 +904,7 @@ pub(super) fn resolve_interface_with_extends_ctx_ref<'ctx, 'a: 'ctx>(
                 current_name,
                 recursion_guard.len(),
                 result.props.len(),
-                result.emits.len()
+                result.call_signatures.len()
             ),
         );
     }
@@ -933,9 +939,9 @@ pub(super) fn try_resolve_heritage_utility_type<'ctx, 'a: 'ctx>(
             inner
                 .props
                 .retain(|p| p.key_name.as_ref().is_some_and(|n| keys.contains(n)));
-            inner.emits.retain(|e| keys.contains(&e.name));
+            inner.call_signatures.retain(|e| keys.contains(&e.name));
             result.props.extend(inner.props);
-            result.emits.extend(inner.emits);
+            result.call_signatures.extend(inner.call_signatures);
             true
         }
         "Omit" if type_args.params.len() >= 2 => {
@@ -951,9 +957,9 @@ pub(super) fn try_resolve_heritage_utility_type<'ctx, 'a: 'ctx>(
             inner
                 .props
                 .retain(|p| p.key_name.as_ref().is_none_or(|n| !keys.contains(n)));
-            inner.emits.retain(|e| !keys.contains(&e.name));
+            inner.call_signatures.retain(|e| !keys.contains(&e.name));
             result.props.extend(inner.props);
-            result.emits.extend(inner.emits);
+            result.call_signatures.extend(inner.call_signatures);
             true
         }
         "Partial" | "Required" | "Readonly" if !type_args.params.is_empty() => {
@@ -975,7 +981,7 @@ pub(super) fn try_resolve_heritage_utility_type<'ctx, 'a: 'ctx>(
                 }
             }
             result.props.extend(inner.props);
-            result.emits.extend(inner.emits);
+            result.call_signatures.extend(inner.call_signatures);
             true
         }
         "Record" if type_args.params.len() >= 2 => {
@@ -1105,7 +1111,9 @@ pub(super) fn resolve_named_class_heritage_target<'ctx, 'a: 'ctx>(
         recursion_guard,
     ) {
         result.props.extend(resolved.props.iter().cloned());
-        result.emits.extend(resolved.emits.iter().cloned());
+        result
+            .call_signatures
+            .extend(resolved.call_signatures.iter().cloned());
         if resolved.has_call_signature {
             result.has_call_signature = true;
         }
@@ -1517,7 +1525,9 @@ pub(super) fn resolve_type_elements_inner_with_ctx_guarded<'ctx, 'a: 'ctx>(
                 } else {
                     result.props.extend(companion.props.iter().cloned());
                 }
-                result.emits.extend(companion.emits.iter().cloned());
+                result
+                    .call_signatures
+                    .extend(companion.call_signatures.iter().cloned());
                 if companion.has_call_signature {
                     result.has_call_signature = true;
                 }
@@ -1547,9 +1557,9 @@ pub(super) fn resolve_type_elements_inner_with_ctx_guarded<'ctx, 'a: 'ctx>(
                         inner
                             .props
                             .retain(|p| p.key_name.as_ref().is_none_or(|n| !keys.contains(n)));
-                        inner.emits.retain(|e| !keys.contains(&e.name));
+                        inner.call_signatures.retain(|e| !keys.contains(&e.name));
                         result.props.extend(inner.props);
-                        result.emits.extend(inner.emits);
+                        result.call_signatures.extend(inner.call_signatures);
                         if inner.has_call_signature {
                             result.has_call_signature = true;
                         }
@@ -1570,9 +1580,9 @@ pub(super) fn resolve_type_elements_inner_with_ctx_guarded<'ctx, 'a: 'ctx>(
                         inner
                             .props
                             .retain(|p| p.key_name.as_ref().is_some_and(|n| keys.contains(n)));
-                        inner.emits.retain(|e| keys.contains(&e.name));
+                        inner.call_signatures.retain(|e| keys.contains(&e.name));
                         result.props.extend(inner.props);
-                        result.emits.extend(inner.emits);
+                        result.call_signatures.extend(inner.call_signatures);
                         if inner.has_call_signature {
                             result.has_call_signature = true;
                         }
@@ -1615,7 +1625,9 @@ pub(super) fn resolve_type_elements_inner_with_ctx_guarded<'ctx, 'a: 'ctx>(
                 let type_name = ident.name.as_str();
                 if let Some(companion) = ctx.companion_types.get(type_name) {
                     result.props.extend(companion.props.iter().cloned());
-                    result.emits.extend(companion.emits.iter().cloned());
+                    result
+                        .call_signatures
+                        .extend(companion.call_signatures.iter().cloned());
                     if companion.has_call_signature {
                         result.has_call_signature = true;
                     }
@@ -1754,7 +1766,9 @@ pub(super) fn resolve_type_elements_inner_with_ctx_ref_guarded<'ctx, 'a: 'ctx>(
                 &mut guard,
             ) {
                 result.props.extend(resolved.props.iter().cloned());
-                result.emits.extend(resolved.emits.iter().cloned());
+                result
+                    .call_signatures
+                    .extend(resolved.call_signatures.iter().cloned());
                 if resolved.has_call_signature {
                     result.has_call_signature = true;
                 }
@@ -1794,9 +1808,9 @@ pub(super) fn resolve_type_elements_inner_with_ctx_ref_guarded<'ctx, 'a: 'ctx>(
                         inner
                             .props
                             .retain(|p| p.key_name.as_ref().is_none_or(|n| !keys.contains(n)));
-                        inner.emits.retain(|e| !keys.contains(&e.name));
+                        inner.call_signatures.retain(|e| !keys.contains(&e.name));
                         result.props.extend(inner.props);
-                        result.emits.extend(inner.emits);
+                        result.call_signatures.extend(inner.call_signatures);
                         if inner.has_call_signature {
                             result.has_call_signature = true;
                         }
@@ -1814,9 +1828,9 @@ pub(super) fn resolve_type_elements_inner_with_ctx_ref_guarded<'ctx, 'a: 'ctx>(
                         inner
                             .props
                             .retain(|p| p.key_name.as_ref().is_some_and(|n| keys.contains(n)));
-                        inner.emits.retain(|e| keys.contains(&e.name));
+                        inner.call_signatures.retain(|e| keys.contains(&e.name));
                         result.props.extend(inner.props);
-                        result.emits.extend(inner.emits);
+                        result.call_signatures.extend(inner.call_signatures);
                         if inner.has_call_signature {
                             result.has_call_signature = true;
                         }
@@ -1845,7 +1859,9 @@ pub(super) fn resolve_type_elements_inner_with_ctx_ref_guarded<'ctx, 'a: 'ctx>(
                 let type_name = ident.name.as_str();
                 if let Some(companion) = ctx.companion_types.get(type_name) {
                     result.props.extend(companion.props.iter().cloned());
-                    result.emits.extend(companion.emits.iter().cloned());
+                    result
+                        .call_signatures
+                        .extend(companion.call_signatures.iter().cloned());
                     if companion.has_call_signature {
                         result.has_call_signature = true;
                     }

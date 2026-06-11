@@ -1440,8 +1440,8 @@ fn repeated_asks_do_not_grow_memo() {
 #[test]
 fn resolved_named_type_dispatch_returns_value_after_insert() {
     use crate::semantic_query::HostResolvedNamedTypeKey;
-    use verter_compiler::utils::oxc::vue::resolve_type::cache_keys::ResolvedNamedTypeCacheKey;
-    use verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements;
+    use verter_compiler::utils::oxc::script::type_surface::ResolvedElements;
+    use verter_compiler::utils::oxc::vue::named_type_keys::ResolvedNamedTypeCacheKey;
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -1640,7 +1640,7 @@ fn dispatch_host_adapter_routes_per_base_scope() {
     // Exempt nodes (VueMacroElements) route to `Global` because
     // the sidecar has no entry for them — the fallback is `Global`
     // so every base has a well-defined routing decision.
-    use verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements;
+    use verter_compiler::utils::oxc::script::type_surface::ResolvedElements;
     let vue_id = graph.intern_node(SemanticNodeData::VueMacroElements(Arc::new(
         ResolvedElements::default(),
     )));

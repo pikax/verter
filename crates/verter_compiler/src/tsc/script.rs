@@ -45,11 +45,12 @@ use crate::diagnostics::{SyntaxPluginContext, SyntaxPluginOptions};
 use crate::parser::Syntax;
 use crate::template::code_gen::binding::BindingType;
 use crate::tokenizer::byte::tokenize_sfc;
-use crate::utils::oxc::vue::resolve_type::ResolvedProp;
+use crate::utils::oxc::script::type_surface::{
+    extract_companion_types, ResolvedCallPayloadForm, ResolvedElements, ResolvedProp, RuntimeType,
+};
 use crate::utils::oxc::vue::{
-    extract_companion_types, parse_script, parse_script_with_companion, DefaultExportType,
-    ImportSpecifierKind, MacroArrayArg, MacroObjectArg, MacroTypeParams, ResolvedElements,
-    ResolvedEmitSignature, RuntimeType, ScriptItem, ScriptMacro, ScriptMode,
+    parse_script, parse_script_with_companion, DefaultExportType, ImportSpecifierKind,
+    MacroArrayArg, MacroObjectArg, MacroTypeParams, ScriptItem, ScriptMacro, ScriptMode,
 };
 
 /// Macro stub declarations shared between `generate_code` (when expose entries
@@ -584,7 +585,7 @@ fn bind_external_emits(
     resolved: &ResolvedElements,
     type_span: Option<Span>,
 ) {
-    for emit in &resolved.emits {
+    for emit in &resolved.call_signatures {
         state.emits_names.push(emit.name.clone());
         let payload = resolved_emit_payload(&emit.signature);
         // External emits map back to the defineEmits<T>() type span, mirroring
@@ -1509,7 +1510,7 @@ fn process_emits<'a>(
         let type_text = content_str[tp.type_span.start as usize..tp.type_span.end as usize].trim();
         type_usage_tracker.mark_type_text(type_text);
 
-        for emit in &tp.resolved.emits {
+        for emit in &tp.resolved.call_signatures {
             state.emits_names.push(emit.name.clone());
             let payload = resolved_emit_payload(&emit.signature);
             mark_emit_payload_types(type_usage_tracker, &payload);
@@ -1562,12 +1563,12 @@ fn process_emits<'a>(
     }
 }
 
-fn resolved_emit_payload(signature: &ResolvedEmitSignature) -> EmitPayload {
+fn resolved_emit_payload(signature: &ResolvedCallPayloadForm) -> EmitPayload {
     match signature {
-        ResolvedEmitSignature::Call { params_text } => EmitPayload::Call {
+        ResolvedCallPayloadForm::Call { params_text } => EmitPayload::Call {
             params_text: params_text.clone(),
         },
-        ResolvedEmitSignature::Tuple { tuple_text } => EmitPayload::Tuple {
+        ResolvedCallPayloadForm::Tuple { tuple_text } => EmitPayload::Tuple {
             tuple_text: tuple_text.clone(),
         },
     }

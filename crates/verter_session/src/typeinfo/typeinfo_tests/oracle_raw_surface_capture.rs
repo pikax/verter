@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use verter_compiler::utils::oxc::vue::raw_surface::{RawKey, RawMemberKind, SymbolSpace};
+use verter_compiler::utils::oxc::script::raw_surface::{RawKey, RawMemberKind, SymbolSpace};
 
 use crate::types::{HostConfig, UpsertRequest};
 use crate::VerterHost;

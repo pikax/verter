@@ -739,7 +739,7 @@ fn extract_class(decl: &Class<'_>, source: &str, env: &mut EvalEnv) {
     // carried only its own members and the cross-file heritage was dropped
     // by every body-driven surface reader (the eager OXC rail folds class
     // heritage separately via `resolve_class_with_heritage_ctx_ref` in
-    // `verter_parser`'s `utils/oxc/vue/script/resolve_type/decl.rs`; this
+    // `verter_parser`'s `utils/oxc/script/type_surface/decl.rs`; this
     // is the typed-IR producer parity).
     let own_body = TypeExpr::Object(Arc::new(ObjectExpr {
         properties: members,

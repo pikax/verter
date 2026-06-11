@@ -1431,8 +1431,8 @@ fn derived_semantic_query_records_project_generation_anchor_slice11() {
 #[test]
 fn evict_canonical_drops_resolved_named_types_for_that_canonical_only() {
     use crate::semantic_query::HostResolvedNamedTypeKey;
-    use verter_compiler::utils::oxc::vue::resolve_type::cache_keys::ResolvedNamedTypeCacheKey;
-    use verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements;
+    use verter_compiler::utils::oxc::script::type_surface::ResolvedElements;
+    use verter_compiler::utils::oxc::vue::named_type_keys::ResolvedNamedTypeCacheKey;
 
     let host = host();
     let store = host.project_type_store();
@@ -1479,8 +1479,8 @@ fn evict_canonical_drops_resolved_named_types_for_that_canonical_only() {
 #[test]
 fn bump_project_generation_clears_resolved_named_types() {
     use crate::semantic_query::HostResolvedNamedTypeKey;
-    use verter_compiler::utils::oxc::vue::resolve_type::cache_keys::ResolvedNamedTypeCacheKey;
-    use verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements;
+    use verter_compiler::utils::oxc::script::type_surface::ResolvedElements;
+    use verter_compiler::utils::oxc::vue::named_type_keys::ResolvedNamedTypeCacheKey;
 
     let host = host();
     let store = host.project_type_store();

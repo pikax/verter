@@ -1,4 +1,5 @@
-//! External (cross-file) type resolution for Vue compiler macros.
+//! External-source type-surface capture: resolving a named type against a
+//! single pre-supplied dependency source.
 //!
 //! Resolves a type symbol referenced in one file from another file's source by
 //! parsing the dependency file, building a type resolution context against it,
@@ -39,7 +40,7 @@ use super::{
     resolve_interface_with_extends_ctx_ref, resolve_named_local_type_with_ctx_ref,
     resolve_value_declaration_type, ResolvedElements, RuntimeType, TypeResolutionContext,
 };
-use crate::utils::oxc::vue::script::raw_surface::{
+use crate::utils::oxc::script::raw_surface::{
     capture_statement_surfaces, merge_overload_groups, RawSourceSurface, SymbolSpace,
 };
 
@@ -1817,7 +1818,7 @@ fn finalize_external_resolution_with_offset(
         prop.map_local = false;
         prop.span_is_absolute = false;
     }
-    for emit in &mut resolved.emits {
+    for emit in &mut resolved.call_signatures {
         emit.span = Span::new(
             emit.span.start.saturating_add(span_offset),
             emit.span.end.saturating_add(span_offset),
@@ -1873,11 +1874,15 @@ pub fn hash_resolved_type(resolved: &ResolvedElements, source: &[u8]) -> [u8; 16
     }
 
     // Hash emits sorted by name
-    let mut emits: Vec<&str> = resolved.emits.iter().map(|e| e.name.as_str()).collect();
-    emits.sort();
+    let mut call_signatures: Vec<&str> = resolved
+        .call_signatures
+        .iter()
+        .map(|e| e.name.as_str())
+        .collect();
+    call_signatures.sort();
 
-    hasher.update((emits.len() as u32).to_le_bytes());
-    for name in &emits {
+    hasher.update((call_signatures.len() as u32).to_le_bytes());
+    for name in &call_signatures {
         hasher.update(name.as_bytes());
     }
 

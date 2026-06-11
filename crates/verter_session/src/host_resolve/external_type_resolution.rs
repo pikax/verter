@@ -56,7 +56,7 @@ impl VerterHost {
         profile_hash: Option<u64>,
         depth: usize,
     ) -> Result<
-        Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>,
+        Option<verter_compiler::utils::oxc::script::type_surface::ResolvedElements>,
         crate::types::ExternalTypeResolveError,
     > {
         // Test-only wrapper: construct a bare-host ctx so tightened tests
@@ -106,7 +106,7 @@ impl VerterHost {
         depth: usize,
         view: Option<&dyn crate::session_view::SessionView>,
     ) -> Result<
-        Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>,
+        Option<verter_compiler::utils::oxc::script::type_surface::ResolvedElements>,
         crate::types::ExternalTypeResolveError,
     > {
         component_meta_trace_custom!(
@@ -450,7 +450,7 @@ impl VerterHost {
         String,
         String,
         String,
-        verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements,
+        verter_compiler::utils::oxc::script::type_surface::ResolvedElements,
     )> {
         let dep_canonical = self.resolve_loaded_dependency_canonical(
             owner_canonical,
@@ -690,7 +690,7 @@ impl VerterHost {
         tracked_deps: &mut std::collections::BTreeSet<String>,
         resolution_deps: &mut std::collections::BTreeSet<String>,
         cache: &mut ExternalTypeCache,
-    ) -> Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements> {
+    ) -> Option<verter_compiler::utils::oxc::script::type_surface::ResolvedElements> {
         crate::resolver_core::with_bare_host_ctx_for_test(self, |ctx| {
             self.resolve_component_meta_macro_elements_with_view(
                 ctx,
@@ -720,7 +720,7 @@ impl VerterHost {
         resolution_deps: &mut std::collections::BTreeSet<String>,
         cache: &mut ExternalTypeCache,
         view: Option<&dyn crate::session_view::SessionView>,
-    ) -> Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements> {
+    ) -> Option<verter_compiler::utils::oxc::script::type_surface::ResolvedElements> {
         self.resolve_component_meta_macro_elements_target_with_view(
             ctx,
             owner_canonical,
@@ -793,7 +793,7 @@ impl VerterHost {
         dep_canonical: &str,
         type_name: &str,
         kind: verter_workspace::ResolveRequestKind,
-        resolved: Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>,
+        resolved: Option<verter_compiler::utils::oxc::script::type_surface::ResolvedElements>,
         tracked_deps: Vec<String>,
         view: Option<&dyn crate::session_view::SessionView>,
     ) {

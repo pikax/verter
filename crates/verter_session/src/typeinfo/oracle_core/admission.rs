@@ -45,7 +45,7 @@
 //!
 //! The LIVE producers of the surfaces this predicate consumes now exist: the
 //! parse-time `RawSourceSurface` capture (in
-//! `verter_compiler::utils::oxc::vue::raw_surface`) fills the raw facts off the
+//! `verter_compiler::utils::oxc::script::raw_surface`) fills the raw facts off the
 //! OXC parse tree, and [`super::source_walk::resolve_source_declarations`]
 //! binds a `SourceLocator` through the shared resolver to the
 //! `SourceWalkResult` of contributors this gate walks. The predicate's sub-fns
@@ -75,7 +75,7 @@ use verter_type_expr::{LiteralValue, MemberVisibility, ObjectMember, PrimitiveNa
 // the live `resolve_source_declarations` path feeds this gate without a second
 // type. The admission VERDICT model (`SourceContributor` / `SourceWalkResult` /
 // `AdmissionVerdict` / `RejectReason`) is admission-specific and stays here.
-use verter_compiler::utils::oxc::vue::raw_surface::{
+use verter_compiler::utils::oxc::script::raw_surface::{
     RawKey, RawMemberKind, RawSourceSurface, TupleElementShape,
 };
 

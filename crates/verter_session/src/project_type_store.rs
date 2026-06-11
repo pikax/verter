@@ -166,7 +166,7 @@ pub struct IndexedReady {
     pub snapshot: Arc<crate::types::FileAnalysisSnapshot>,
     /// Cached external-type analysis used by the shared type resolver.
     pub external_type_analysis:
-        Arc<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource>,
+        Arc<verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource>,
     /// Mirror of `script_analysis.flags & DECLARES_INTERFACE_APP_CONFIG`
     /// projected onto `IndexedReady` so the
     /// `AppConfigNoOverrideProofDb` production producer can short-circuit
@@ -186,7 +186,8 @@ impl IndexedReady {
     pub fn new_for_test(whole_hash: Hash16) -> Self {
         use rustc_hash::{FxHashMap, FxHashSet};
         let analysis = Arc::new(
-            verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default(),
+            verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(
+            ),
         );
         let shallow = crate::resolver_core::shallow_file_state::ShallowFileState {
             whole_hash,
@@ -536,7 +537,7 @@ pub struct RouteOwnedShallowEntry {
     /// Cached external-type analysis used by the shared type resolver
     /// (the F6 half, retired from `host_manage::ExternalTypeAnalysisCacheEntry`).
     pub external_type_analysis:
-        Arc<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource>,
+        Arc<verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource>,
     /// Shallow file state — symbol/import/export inventory consumed by
     /// route resolution and frontier traversal.
     pub shallow_state: Arc<crate::resolver_core::shallow_file_state::ShallowFileState>,
@@ -551,7 +552,8 @@ impl RouteOwnedShallowEntry {
     pub fn test_stub(_canonical_id: Arc<str>) -> Self {
         use rustc_hash::{FxHashMap, FxHashSet};
         let analysis = Arc::new(
-            verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default(),
+            verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(
+            ),
         );
         let shallow = crate::resolver_core::shallow_file_state::ShallowFileState {
             whole_hash: [0u8; 16],
@@ -782,7 +784,8 @@ impl RouteOwnedShallowDb {
         use rustc_hash::{FxHashMap, FxHashSet};
         let canonical: Arc<str> = Arc::from(marker);
         let analysis = Arc::new(
-            verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default(),
+            verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(
+            ),
         );
         let shallow = crate::resolver_core::shallow_file_state::ShallowFileState {
             whole_hash: [0u8; 16],
@@ -2849,7 +2852,8 @@ mod tests {
         let hash_v1 = [1u8; 16];
         let hash_v2 = [2u8; 16];
         let analysis = Arc::new(
-            verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default(),
+            verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(
+            ),
         );
         let shallow = Arc::new(crate::resolver_core::shallow_file_state::ShallowFileState {
             whole_hash: hash_v1,
@@ -2879,7 +2883,7 @@ mod tests {
                 export_signatures: None,
                 snapshot: Arc::new(crate::types::FileAnalysisSnapshot::default()),
                 external_type_analysis: Arc::new(
-                    verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default(),
+                    verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(),
                 ),
                 declares_interface_app_config: false,
             }),
@@ -2908,7 +2912,8 @@ mod tests {
     fn indexed_counters_reflect_insertions_and_replacements() {
         let store = ProjectTypeStore::new();
         let analysis = Arc::new(
-            verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default(),
+            verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(
+            ),
         );
         let mk_indexed = |hash: Hash16| {
             Arc::new(IndexedReady {

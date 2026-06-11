@@ -2754,7 +2754,7 @@ fn step8_route_hash_pure_content_derived() {
     use verter_semantic::analysis::Hash16;
 
     let analysis = Arc::new(
-        verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default(),
+        verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(),
     );
     let state = ShallowFileState {
         whole_hash: Hash16::default(),

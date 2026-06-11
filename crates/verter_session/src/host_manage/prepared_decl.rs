@@ -1176,7 +1176,7 @@ impl VerterHost {
     pub(crate) fn external_type_analysis(
         &self,
         canonical_id: &str,
-    ) -> Option<Arc<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource>>
+    ) -> Option<Arc<verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource>>
     {
         component_meta_trace_custom!(
             "external_type_analysis",
@@ -1233,7 +1233,7 @@ impl VerterHost {
         &self,
         canonical_id: &str,
         view: Option<&dyn crate::session_view::SessionView>,
-    ) -> Option<Arc<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource>>
+    ) -> Option<Arc<verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource>>
     {
         component_meta_trace_custom!(
             "external_type_analysis_with_view",
@@ -1906,9 +1906,9 @@ impl VerterHost {
         type_name: &str,
         imported_companions: &rustc_hash::FxHashMap<
             String,
-            verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements,
+            verter_compiler::utils::oxc::script::type_surface::ResolvedElements,
         >,
-    ) -> Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements> {
+    ) -> Option<verter_compiler::utils::oxc::script::type_surface::ResolvedElements> {
         self.resolve_external_type_from_indexed_ready_with_view(
             dep_canonical,
             type_name,
@@ -1929,10 +1929,10 @@ impl VerterHost {
         type_name: &str,
         imported_companions: &rustc_hash::FxHashMap<
             String,
-            verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements,
+            verter_compiler::utils::oxc::script::type_surface::ResolvedElements,
         >,
         view: Option<&dyn crate::session_view::SessionView>,
-    ) -> Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements> {
+    ) -> Option<verter_compiler::utils::oxc::script::type_surface::ResolvedElements> {
         component_meta_trace_custom!(
             "resolve_external_type_from_indexed_ready",
             format!(
@@ -1967,7 +1967,7 @@ impl VerterHost {
         };
         let program = type_context.borrow_owner().borrow_dependent();
         let base_ctx = type_context.borrow_dependent();
-        let resolved = verter_compiler::utils::oxc::vue::resolve_type::resolve_external_type_in_context_with_analyzed_symbol_companion_and_canonical(
+        let resolved = verter_compiler::utils::oxc::script::type_surface::resolve_external_type_in_context_with_analyzed_symbol_companion_and_canonical(
             type_name,
             program,
             type_context.borrow_owner().source_bytes(),

@@ -711,7 +711,8 @@ mod tests {
     fn augmentations_for(src: &str) -> Vec<ModuleAugmentationFact> {
         let env = verter_semantic::analysis::type_eval_build::parse_and_build_env(src);
         let analysis = Arc::new(
-            verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default(),
+            verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(
+            ),
         );
         let state = ShallowFileState::from_analysis(Hash16::default(), analysis, Some(&env));
         collect_augmentations(&state)

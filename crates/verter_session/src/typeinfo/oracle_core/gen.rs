@@ -44,7 +44,7 @@ use oxc_ast::ast::Statement;
 use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType};
 use serde_json::{json, Value};
-use verter_compiler::utils::oxc::vue::raw_surface::{
+use verter_compiler::utils::oxc::script::raw_surface::{
     RawDeclKind, RawKey, RawMemberKind, RawSourceSurface, SymbolSpace as RawSymbolSpace,
     TupleElementShape,
 };

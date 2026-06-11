@@ -17,7 +17,7 @@ use std::sync::Arc;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::route_demand::RouteDemand;
-use verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource;
+use verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource;
 use verter_semantic::analysis::type_eval::{
     FunctionSignature, TypeDeclBody, TypeDeclKind, ValueDeclKind,
 };
@@ -2130,8 +2130,8 @@ fn collect_type_refs(expr: &TypeExpr, out: &mut Vec<String>) {
 /// Classify a symbol's structural dependencies into local vs external.
 fn classify_deps(
     symbol_name: &str,
-    analysis: &verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource,
-    sym: &verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSymbol,
+    analysis: &verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource,
+    sym: &verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSymbol,
     import_locals: &FxHashSet<String>,
     import_targets: &FxHashMap<String, ImportTarget>,
 ) -> (Vec<String>, Vec<ExternalSymbolRef>) {
@@ -2337,7 +2337,7 @@ mod tests {
     fn make_analysis(source: &str) -> Arc<AnalyzedExternalTypeSource> {
         let alloc = oxc_allocator::Allocator::new();
         Arc::new(
-            verter_compiler::utils::oxc::vue::resolve_type::analyze_external_type_source(
+            verter_compiler::utils::oxc::script::type_surface::analyze_external_type_source(
                 source, &alloc,
             ),
         )

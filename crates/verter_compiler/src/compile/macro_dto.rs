@@ -4,7 +4,7 @@
 //! resolved Vue SFC macro surface (`defineProps` / `defineEmits` / `defineSlots`
 //! / `defineExpose` / `defineOptions`, plus `withDefaults`). They carry an owned
 //! equivalent of everything the `verter_compiler` codegen paths read today from
-//! the parser's `ResolvedElements` / `ResolvedProp` / `ResolvedEmit` /
+//! the parser's `ResolvedElements` / `ResolvedProp` / `ResolvedNamedCallSignature` /
 //! `RuntimeType`:
 //!
 //! - the VDOM/runtime script path ([`crate::script::macros`]) — runtime props
@@ -36,13 +36,13 @@
 //! route through in place of the parser's `ResolvedElements`.
 
 /// Runtime constructor kind inferred for a macro prop's type, mirroring the
-/// parser's `RuntimeType` (`verter_parser::utils::oxc::vue::RuntimeType`) on the
+/// parser's `RuntimeType` (`verter_parser::utils::oxc::script::type_surface::RuntimeType`) on the
 /// type-argument inference path (`infer_runtime_type`).
 ///
 /// The compiler's VDOM/runtime path turns these into the JS constructor value
 /// of a runtime prop declaration (`{ type: String }`, `{ type: [String, Number] }`).
 /// The full variant set is verified against the parser's
-/// `resolve_type/infer.rs`: every `RuntimeType` the inference path can emit has a
+/// `type_surface/infer.rs`: every `RuntimeType` the inference path can emit has a
 /// 1:1 counterpart here.
 ///
 /// `BuiltIn(name)` carries the constructor identifier for recognised built-in
@@ -97,7 +97,7 @@ impl RuntimeCtorKind {
 
 /// Visibility of a macro prop that originated from a class member, mirroring the
 /// parser's `ResolvedMemberVisibility` (`Public` / `Protected` / `Private`) and
-/// the OXC `TSAccessibility` mapping in `resolve_type/decl.rs`.
+/// the OXC `TSAccessibility` mapping in `type_surface/decl.rs`.
 ///
 /// Interface / type-literal members are always [`MacroVisibility::Public`]. This
 /// is the field the `native_props` FFI carrier
@@ -578,7 +578,7 @@ pub struct MacroPropDto {
 }
 
 /// The resolved payload shape of a single `defineEmits` event, mirroring the
-/// parser's `ResolvedEmitSignature` (call-signature params vs shorthand tuple).
+/// parser's `ResolvedCallPayloadForm` (call-signature params vs shorthand tuple).
 ///
 /// The IDE/TSX path renders the handler / `$emit` overload from this payload;
 /// the text is preserved so cross-file imports inline the exact payload type.
@@ -588,23 +588,23 @@ pub enum MacroEmitPayload {
     None,
     /// Call-signature payload — the parameter list text *after* the leading
     /// event-name parameter (`(e: 'change', id: number): void` → `id: number`).
-    /// Mirrors `ResolvedEmitSignature::Call { params_text }`.
+    /// Mirrors `ResolvedCallPayloadForm::Call { params_text }`.
     Call { params_ts: String },
     /// Shorthand tuple payload, including the surrounding `[...]`
     /// (`{ change: [id: number] }` → `[id: number]`). Mirrors
-    /// `ResolvedEmitSignature::Tuple { tuple_text }`.
+    /// `ResolvedCallPayloadForm::Tuple { tuple_text }`.
     Tuple { tuple_ts: String },
 }
 
 /// A single resolved emit event on the `defineEmits` surface.
 ///
 /// Carries the owned equivalent of every field the compiler reads from
-/// `ResolvedEmit`:
+/// `ResolvedNamedCallSignature`:
 ///
-/// - `name` — `ResolvedEmit.name`; the runtime path emits it into the emits
+/// - `name` — `ResolvedNamedCallSignature.name`; the runtime path emits it into the emits
 ///   array (`["change", ...]`), the TSX path keys the emit overload on it.
 /// - `payload` — the resolved payload shape ([`MacroEmitPayload`]) derived from
-///   `ResolvedEmit.signature`.
+///   `ResolvedNamedCallSignature.signature`.
 /// - `payload_ts` — the flat rendered payload text the TSX path consumes
 ///   directly (the inner text of `payload`, or empty for [`MacroEmitPayload::None`]).
 ///   Kept as a convenience field so consumers that only need the text do not
@@ -619,7 +619,7 @@ pub enum MacroEmitPayload {
 ///   context.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MacroEmitDto {
-    /// Event name. Mirrors `ResolvedEmit.name`.
+    /// Event name. Mirrors `ResolvedNamedCallSignature.name`.
     pub name: String,
     /// Resolved payload shape (call params vs tuple vs none).
     pub payload: MacroEmitPayload,

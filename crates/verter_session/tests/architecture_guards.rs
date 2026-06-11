@@ -3923,7 +3923,7 @@ mod foundations_guards {
             "crates/verter_workspace/src/ambient_parse.rs",
             "crates/verter_workspace/src/intrinsic_library.rs",
             "crates/verter_workspace/src/resolver.rs",
-            "crates/verter_parser/src/utils/oxc/vue/script/resolve_type/mod.rs",
+            "crates/verter_parser/src/utils/oxc/script/type_surface/mod.rs",
             "crates/verter_scheduler/src/source_loader.rs",
             "crates/verter_tsc/src/checker.rs",
             "crates/verter_tsc/src/reporter.rs",
@@ -4549,7 +4549,7 @@ mod foundations_guards {
         // HostSeverity, FileAnalysisSnapshot, ...) — universally used.
         "pub use types::*",
         // verter_lsp::features::hover_provenance
-        "pub use verter_compiler::utils::oxc::vue::resolve_type::ResolvedMemberVisibility",
+        "pub use verter_compiler::utils::oxc::script::type_surface::ResolvedMemberVisibility",
         // verter_lsp::background_init,
         // verter_type_runtime::tsserver::ipc, verter_type_runtime::tsgo::ipc
         "pub use verter_compiler::VERTER_TYPES_STANDALONE_DTS",
@@ -4709,9 +4709,9 @@ mod foundations_guards {
             "crates/verter_parser/src/parser/mod.rs",
             "crates/verter_parser/src/tokenizer/byte.rs",
             "crates/verter_parser/src/utils/oxc/bindings/helpers.rs",
-            "crates/verter_parser/src/utils/oxc/vue/script/resolve_type/mod.rs",
-            "crates/verter_parser/src/utils/oxc/vue/script/resolve_type/external.rs",
-            "crates/verter_parser/src/utils/oxc/vue/script/resolve_type/decl.rs",
+            "crates/verter_parser/src/utils/oxc/script/type_surface/mod.rs",
+            "crates/verter_parser/src/utils/oxc/script/type_surface/external.rs",
+            "crates/verter_parser/src/utils/oxc/script/type_surface/decl.rs",
             "crates/verter_parser/src/utils/oxc/vue/script/setup.rs",
             "crates/verter_parser/src/utils/oxc/vue/script/usage.rs",
             "crates/verter_protocol/src/component_meta.rs",
@@ -7308,7 +7308,7 @@ mod foundations_guards {
             "MCP baseline output — reads/writes JSON snapshots for regression diffing of MCP tool responses; not semantic state.",
         ),
         (
-            "crates/verter_parser/src/utils/oxc/vue/script/resolve_type/mod.rs",
+            "crates/verter_parser/src/utils/oxc/script/type_surface/mod.rs",
             "diagnostic trace logger gated behind a debug flag (`OpenOptions::new().append(true)` to a per-process trace file); not on the resolution hot path.",
         ),
         (
@@ -8710,7 +8710,7 @@ fn macro_impacting_constructs_fail_lowering_not_silent_skip() {
 // | W5* | Path                                                        |
 // |-----|-------------------------------------------------------------|
 // | W5a | crates/verter_session/src/semantic_query_memo               |
-// | W5b | crates/verter_parser/src/utils/oxc/vue/script/resolve_type  |
+// | W5b | crates/verter_parser/src/utils/oxc/script/type_surface  |
 // | W5c | crates/verter_session/src/host_resolve                      |
 // | W5d | crates/verter_session/src/resolver_core/component_meta      |
 // | W5e | crates/verter_ffi/src/convert                               |
@@ -8860,7 +8860,7 @@ mod w5f_test_archaeology {
 
 const TIER_2_SPLIT_TARGETS: &[&str] = &[
     "crates/verter_session/src/semantic_query_memo",
-    "crates/verter_parser/src/utils/oxc/vue/script/resolve_type",
+    "crates/verter_parser/src/utils/oxc/script/type_surface",
     "crates/verter_session/src/host_resolve",
     "crates/verter_session/src/resolver_core/component_meta",
     "crates/verter_ffi/src/convert",
@@ -13770,8 +13770,8 @@ fn walk_dir_collect_rs_and_ts(dir: &std::path::Path, cb: &mut dyn FnMut(&std::pa
 //
 // Verter must have exactly ONE type-resolution engine: the canonical
 // typed-IR dispatch `SemanticQueryKey -> ProjectSemanticDispatch::execute
-// -> SemanticGraphStore`. The redundant eager OXC `resolve_type` engine
-// (`crates/verter_parser/src/utils/oxc/vue/script/resolve_type/`) plus its
+// -> SemanticGraphStore`. The redundant eager OXC `type_surface` engine
+// (`crates/verter_parser/src/utils/oxc/script/type_surface/`) plus its
 // query-time rail (prepared-surface walker, eager macro-surface producer,
 // `ResolvedElements` output type) is being DELETED across the consolidation
 // stages.
@@ -13793,7 +13793,7 @@ fn walk_dir_collect_rs_and_ts(dir: &std::path::Path, cb: &mut dyn FnMut(&std::pa
 //   * `from_eager_meta` and the duplicate `read_surface_members` DEFINITIONS
 //     are few and the exact site matters — line-precise `(file, line,
 //     pattern)` tuples (matching `typed_ir_resolver_guards`).
-//   * `resolve_type::`, `ResolvedElements`, and `PreparedSurfaceProjection`
+//   * `type_surface::`, `ResolvedElements`, and `PreparedSurfaceProjection`
 //     are pervasive WITHIN their owning modules but must not spread to NEW
 //     files — file-level allowlists (matching `GET_ANY_ALLOWLIST` /
 //     `no_std_fs_outside_native_fs_or_allow_list`). A new production *file*
@@ -14202,9 +14202,9 @@ mod single_resolution_engine_guards {
     /// `PreparedSurfaceProjection` enum is also matched at identifier boundary
     /// (it has no embedding identifier today, but boundary matching keeps a
     /// hypothetical `PreparedSurfaceProjectionV2` from satisfying a stale
-    /// entry). The only NON-identifier token is `resolve_type`, which is a
-    /// module path segment handled by `scan_resolve_type_module_target_counts`
-    /// (it must match `resolve_type::`, `use …::resolve_type as rt`, etc.).
+    /// entry). The only NON-identifier token is `type_surface`, which is a
+    /// module path segment handled by `scan_type_surface_module_target_counts`
+    /// (it must match `type_surface::`, `use …::type_surface as rt`, etc.).
     fn line_contains_identifier(line: &str, needle: &str) -> bool {
         let bytes = line.as_bytes();
         let nb = needle.as_bytes();
@@ -14257,25 +14257,25 @@ mod single_resolution_engine_guards {
         count
     }
 
-    /// Count of `resolve_type` occurrences that act as a MODULE PATH SEGMENT in
+    /// Count of `type_surface` occurrences that act as a MODULE PATH SEGMENT in
     /// the (already preprocessed) source. This catches every architecturally
     /// meaningful use of the doomed OXC engine module — not just the
-    /// `resolve_type::` call/path fragment, but also ALIASED and grouped/bare
+    /// `type_surface::` call/path fragment, but also ALIASED and grouped/bare
     /// `use` imports that contain no `::` after the segment:
     ///
-    ///   * `resolve_type::foo` / `…::resolve_type::{…}`  (path / call / glob)
-    ///   * `use …::resolve_type as rt;`                  (ALIASED import — the
+    ///   * `type_surface::foo` / `…::type_surface::{…}`  (path / call / glob)
+    ///   * `use …::type_surface as rt;`                  (ALIASED import — the
     ///     evasion the substring guard missed)
-    ///   * `use …::{resolve_type, …};` / `use …::resolve_type;`  (bare import)
-    ///   * `pub mod resolve_type;`                       (module declaration)
+    ///   * `use …::{type_surface, …};` / `use …::type_surface;`  (bare import)
+    ///   * `pub mod type_surface;`                       (module declaration)
     ///
-    /// Concretely: an identifier-boundary `resolve_type` whose next non-space
+    /// Concretely: an identifier-boundary `type_surface` whose next non-space
     /// token is `::`, `;`, `,`, `}`, or `as` (the path-segment / use-target
-    /// terminators). A trailing identifier char (`resolve_type_dependency…`)
+    /// terminators). A trailing identifier char (`type_surface_dependency…`)
     /// is excluded by the identifier-boundary check.
-    fn count_resolve_type_module_targets(src: &str) -> usize {
+    fn count_type_surface_module_targets(src: &str) -> usize {
         let bytes = src.as_bytes();
-        let nb = b"resolve_type";
+        let nb = b"type_surface";
         let n = nb.len();
         let is_ident_char = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
         let mut count = 0usize;
@@ -14311,48 +14311,48 @@ mod single_resolution_engine_guards {
         count
     }
 
-    /// Collect the set of symbols a file imports FROM the doomed `resolve_type`
+    /// Collect the set of symbols a file imports FROM the doomed `type_surface`
     /// engine module via `use` / `pub use` declarations, so their bare call /
     /// use sites can be counted as ACTUAL engine usage (not just the
-    /// `resolve_type::` path token of the import line).
+    /// `type_surface::` path token of the import line).
     ///
     /// This closes the in-file import-then-call hole the path-token-only ledger
     /// missed: a file that already imports `analyze_external_type_program` can
     /// add MORE bare `analyze_external_type_program(…)` calls without changing
-    /// its `resolve_type` token count. By deriving the imported-symbol set from
+    /// its `type_surface` token count. By deriving the imported-symbol set from
     /// each file's OWN `use` statements (rather than a hand-maintained global
     /// API list) the counter is structural and self-updating: it reflects
     /// exactly what each file imports from the engine.
     ///
     /// Handles every `use` shape that targets the module:
-    ///   * `use …::resolve_type::SYMBOL;`                  → {SYMBOL}
-    ///   * `use …::resolve_type::SYMBOL as ALIAS;`         → {ALIAS}
-    ///   * `use …::resolve_type::{A, B, C as D};`          → {A, B, D}
+    ///   * `use …::type_surface::SYMBOL;`                  → {SYMBOL}
+    ///   * `use …::type_surface::SYMBOL as ALIAS;`         → {ALIAS}
+    ///   * `use …::type_surface::{A, B, C as D};`          → {A, B, D}
     ///     (grouped, possibly spanning multiple lines)
-    ///   * `use …::resolve_type as M;`                     → {M}  (module alias —
+    ///   * `use …::type_surface as M;`                     → {M}  (module alias —
     ///     subsequent `M::foo()` calls are then counted as engine use)
-    ///   * `use …::resolve_type;` / `use …::{resolve_type};`  → {}  (bare module
-    ///     import — adds no callable symbol; later `resolve_type::foo` uses are
+    ///   * `use …::type_surface;` / `use …::{type_surface};`  → {}  (bare module
+    ///     import — adds no callable symbol; later `type_surface::foo` uses are
     ///     already path tokens)
     ///
     /// **Scope boundary (intentional, do NOT chase further):** this closes the
     /// IN-FILE import-then-call class only. A cross-file re-export under a NEW
-    /// name (`pub use …resolve_type::a as b;` in file X, then bare `b()` in a
+    /// name (`pub use …type_surface::a as b;` in file X, then bare `b()` in a
     /// DIFFERENT file Y) is out of scope: the re-exporting file X is already
-    /// caught by its own `resolve_type` path token, and after the consolidation
+    /// caught by its own `type_surface` path token, and after the consolidation
     /// deletes the engine (Stages 5/6) the compiler catches any dangling
-    /// reference in Y. A re-export under the SAME name (`pub use resolve_type::
+    /// reference in Y. A re-export under the SAME name (`pub use type_surface::
     /// {ResolvedElements};`) likewise needs no symbol-use counting in the
     /// re-exporting file — the `use` line is stripped before the symbol-use pass
-    /// (see `count_resolve_type_engine_use`), so re-export bindings are never
+    /// (see `count_type_surface_engine_use`), so re-export bindings are never
     /// double-counted against the path token of the `use` line.
     ///
     /// The argument must already be `preprocess`ed (comments + `#[cfg(test)]`
     /// bodies erased).
-    fn collect_resolve_type_imported_symbols(src: &str) -> BTreeSet<String> {
+    fn collect_type_surface_imported_symbols(src: &str) -> BTreeSet<String> {
         let mut out: BTreeSet<String> = BTreeSet::new();
         let bytes = src.as_bytes();
-        let nb = b"resolve_type";
+        let nb = b"type_surface";
         let n = nb.len();
         let is_ident_char = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
         let mut i = 0usize;
@@ -14362,11 +14362,11 @@ mod single_resolution_engine_guards {
                 let after_idx = i + n;
                 let after_ok = after_idx == bytes.len() || !is_ident_char(bytes[after_idx]);
                 if before_ok && after_ok {
-                    // Only treat a `resolve_type` segment that is part of a `use`
+                    // Only treat a `type_surface` segment that is part of a `use`
                     // declaration as an import. Walk back over the path segments
                     // (`ident ::` / `::`) and intervening whitespace to the start
                     // of the statement and require a `use` keyword there.
-                    if resolve_type_segment_is_in_use_stmt(bytes, i) {
+                    if type_surface_segment_is_in_use_stmt(bytes, i) {
                         // Skip whitespace after the segment to find what follows.
                         let mut k = after_idx;
                         while k < bytes.len()
@@ -14376,17 +14376,17 @@ mod single_resolution_engine_guards {
                         }
                         let rest = &src[k..];
                         if rest.starts_with("::") {
-                            // `use …::resolve_type::<tail>` — tail is a single
+                            // `use …::type_surface::<tail>` — tail is a single
                             // symbol, a `SYMBOL as ALIAS`, or a `{ group }`.
                             collect_use_tail_symbols(&src[k + 2..], &mut out);
                         } else if rest.starts_with("as ") || rest.starts_with("as\n") {
-                            // `use …::resolve_type as M;` — module alias M.
+                            // `use …::type_surface as M;` — module alias M.
                             let after_as = &src[k + 2..];
                             if let Some(name) = first_ident(after_as) {
                                 out.insert(name);
                             }
                         }
-                        // `use …::resolve_type;` / `…::{resolve_type, …}` (bare
+                        // `use …::type_surface;` / `…::{type_surface, …}` (bare
                         // module import) contributes no callable symbol.
                     }
                     i = after_idx;
@@ -14441,39 +14441,39 @@ mod single_resolution_engine_guards {
         spans
     }
 
-    /// True iff the `resolve_type` segment at byte index `seg` lies inside a
+    /// True iff the `type_surface` segment at byte index `seg` lies inside a
     /// `use` / `pub use` declaration. This is decided structurally — by whether
     /// `seg` falls within a `use`-statement span (see `use_statement_spans`) —
     /// rather than by reverse-engineering the path prefix. That makes it robust
     /// to EVERY use-tree grouping/nesting form, including ones where the byte
-    /// immediately to the left of `resolve_type` is NOT `::` / an identifier:
+    /// immediately to the left of `type_surface` is NOT `::` / an identifier:
     ///
-    ///   * leading group:    `use a::{resolve_type::X};`          (`{` to the left)
-    ///   * sibling group:    `use a::{b::Y, resolve_type::X};`    (`, ` to the left)
-    ///   * deep nesting:     `use a::{b::{resolve_type::X}};`
-    ///   * mid-group alias:  `use a::{resolve_type::X as Z, b};`
-    ///   * `as` module alias inside a group: `use a::{resolve_type as rt};`
+    ///   * leading group:    `use a::{type_surface::X};`          (`{` to the left)
+    ///   * sibling group:    `use a::{b::Y, type_surface::X};`    (`, ` to the left)
+    ///   * deep nesting:     `use a::{b::{type_surface::X}};`
+    ///   * mid-group alias:  `use a::{type_surface::X as Z, b};`
+    ///   * `as` module alias inside a group: `use a::{type_surface as rt};`
     ///   * multi-line trees and `pub use`.
     ///
     /// **Glob imports are OUT OF SCOPE (intentional, do NOT chase).** A
-    /// `use …::resolve_type::*;` binds the module's entire export set under
+    /// `use …::type_surface::*;` binds the module's entire export set under
     /// unknown local names; a per-file parser cannot enumerate those names
     /// without the module's export list (a cross-file fact this single-file scan
     /// deliberately does not load). Bare-call sites of glob-imported engine
     /// symbols are therefore not counted here. This boundary is safe: the
     /// re-exporting/glob-importing file is itself caught by its own
-    /// `resolve_type` path token, and once the consolidation deletes the engine
+    /// `type_surface` path token, and once the consolidation deletes the engine
     /// (Stages 5/6) the Rust compiler hard-errors on any dangling reference to a
     /// removed symbol. Glob / macro-generated / cross-file-re-export forms are
     /// explicitly not pursued.
-    fn resolve_type_segment_is_in_use_stmt(bytes: &[u8], seg: usize) -> bool {
+    fn type_surface_segment_is_in_use_stmt(bytes: &[u8], seg: usize) -> bool {
         use_statement_spans(bytes)
             .into_iter()
             .any(|(start, end)| seg >= start && seg < end)
     }
 
-    /// Parse the tail of a `use …::resolve_type::<tail>` declaration starting at
-    /// `tail` (the text just past the `::` after `resolve_type`). Inserts every
+    /// Parse the tail of a `use …::type_surface::<tail>` declaration starting at
+    /// `tail` (the text just past the `::` after `type_surface`). Inserts every
     /// bound symbol name (the alias for `X as Y`, else the leaf identifier) into
     /// `out`. Handles a single symbol, `SYMBOL as ALIAS`, and a `{ … }` group
     /// (which may itself nest further `::` paths — only leaf-bound names are
@@ -14622,11 +14622,11 @@ mod single_resolution_engine_guards {
     }
 
     /// Replace every `use` / `pub use` declaration that references the
-    /// `resolve_type` module with equivalent-length whitespace (newlines
+    /// `type_surface` module with equivalent-length whitespace (newlines
     /// preserved). Used so the imported-symbol-use pass in
-    /// `count_resolve_type_engine_use` does NOT count the symbol-binding
+    /// `count_type_surface_engine_use` does NOT count the symbol-binding
     /// occurrences inside the import declaration itself — those are already
-    /// represented by the `resolve_type` path token of the `use` line. Real
+    /// represented by the `type_surface` path token of the `use` line. Real
     /// call / use sites elsewhere in the file are untouched and DO count.
     ///
     /// A statement is blanked from its `use` keyword through its terminating
@@ -14635,12 +14635,12 @@ mod single_resolution_engine_guards {
     /// extents come from the shared `use_statement_spans` finder, so grouped /
     /// arbitrarily-nested / multi-line trees are blanked whole. The argument
     /// must already be `preprocess`ed.
-    fn strip_resolve_type_use_statements(src: &str) -> String {
+    fn strip_type_surface_use_statements(src: &str) -> String {
         let bytes = src.as_bytes();
         let mut out = bytes.to_vec();
         for (start, end) in use_statement_spans(bytes) {
-            // Only blank it if it references the `resolve_type` module.
-            if count_resolve_type_module_targets(&src[start..end]) > 0 {
+            // Only blank it if it references the `type_surface` module.
+            if count_type_surface_module_targets(&src[start..end]) > 0 {
                 for slot in &mut out[start..end] {
                     if *slot != b'\n' {
                         *slot = b' ';
@@ -14654,9 +14654,9 @@ mod single_resolution_engine_guards {
     /// Count BARE identifier-boundary uses of `needle` in `src` — occurrences
     /// that are NOT immediately preceded by a `::` path separator (ignoring
     /// intervening whitespace). A `::`-qualified use such as
-    /// `resolve_type::ResolvedElements` is EXCLUDED here because its
-    /// `resolve_type` segment is already tallied by
-    /// `count_resolve_type_module_targets` — counting the trailing `ResolvedElements`
+    /// `type_surface::ResolvedElements` is EXCLUDED here because its
+    /// `type_surface` segment is already tallied by
+    /// `count_type_surface_module_targets` — counting the trailing `ResolvedElements`
     /// again would double-count that single full-path site. Bare uses
     /// (`ResolvedElements`, `build_type_context(…)`, `ResolvedElements::default()`)
     /// ARE counted: those are the imported-symbol call/use sites the path-token
@@ -14677,7 +14677,7 @@ mod single_resolution_engine_guards {
                 let after_ok = i + n == bytes.len() || !is_ident_char(bytes[i + n]);
                 if before_ok && after_ok {
                     // Reject `::`-qualified occurrences (path uses already
-                    // counted as a `resolve_type` module token). Walk left over
+                    // counted as a `type_surface` module token). Walk left over
                     // whitespace; if the two chars before are `::`, skip.
                     let mut b = i;
                     while b > 0 && matches!(bytes[b - 1], b' ' | b'\n' | b'\t') {
@@ -14696,25 +14696,25 @@ mod single_resolution_engine_guards {
         count
     }
 
-    /// ACTUAL engine-use count for a file: the `resolve_type` module-path-token
+    /// ACTUAL engine-use count for a file: the `type_surface` module-path-token
     /// count PLUS the BARE use sites of every symbol the file imports from the
     /// engine (counted on the source with the importing `use` declarations
     /// blanked, so import bindings are not double-counted, and excluding
-    /// `::`-qualified uses, so a full `resolve_type::SYMBOL` path is not counted
-    /// twice — once as a `resolve_type` token and once as a `SYMBOL` use).
+    /// `::`-qualified uses, so a full `type_surface::SYMBOL` path is not counted
+    /// twice — once as a `type_surface` token and once as a `SYMBOL` use).
     ///
     /// This is the structural fix for the path-token-PROXY hole: adding a bare
     /// call to an already-imported engine function now increments the count, so
     /// the per-file ledger reflects real engine usage rather than a proxy for
-    /// the number of `resolve_type::` path tokens. The argument must already be
+    /// the number of `type_surface::` path tokens. The argument must already be
     /// `preprocess`ed.
-    fn count_resolve_type_engine_use(src: &str) -> usize {
-        let path_tokens = count_resolve_type_module_targets(src);
-        let symbols = collect_resolve_type_imported_symbols(src);
+    fn count_type_surface_engine_use(src: &str) -> usize {
+        let path_tokens = count_type_surface_module_targets(src);
+        let symbols = collect_type_surface_imported_symbols(src);
         if symbols.is_empty() {
             return path_tokens;
         }
-        let stripped = strip_resolve_type_use_statements(src);
+        let stripped = strip_type_surface_use_statements(src);
         let mut symbol_uses = 0usize;
         for sym in &symbols {
             symbol_uses += count_bare_symbol_uses(&stripped, sym);
@@ -14846,7 +14846,7 @@ mod single_resolution_engine_guards {
             msg.push_str(
                 "\nNEW production use of a doomed single-resolution-engine symbol \
                  (a brand-new file, OR a new site INSIDE an already-allowlisted \
-                 file). The redundant OXC `resolve_type` engine / prepared-surface \
+                 file). The redundant OXC `type_surface` engine / prepared-surface \
                  walker is being deleted — do NOT add new uses. Route through the \
                  canonical typed-IR dispatch (SemanticQueryKey -> \
                  ProjectSemanticDispatch::execute) instead:\n",
@@ -15041,16 +15041,16 @@ mod single_resolution_engine_guards {
         out
     }
 
-    /// File-level COUNT scan for ACTUAL `resolve_type` engine use: the module
+    /// File-level COUNT scan for ACTUAL `type_surface` engine use: the module
     /// path-token count (calls + aliased/grouped/bare imports + module
     /// declaration) PLUS the use sites of every symbol the file imports from the
-    /// engine (`count_resolve_type_engine_use`). Used by the `resolve_type`
+    /// engine (`count_type_surface_engine_use`). Used by the `type_surface`
     /// engine ledger so that BOTH an ALIASED import
-    /// (`use …::resolve_type as rt;`, which contains no `resolve_type::`
+    /// (`use …::type_surface as rt;`, which contains no `type_surface::`
     /// substring) in a new file AND a bare call to an already-imported engine
     /// function inside an existing file are caught — the latter being the
     /// path-token-proxy hole the [P2] re-review flagged.
-    fn scan_file_resolve_type_target_counts() -> Vec<(String, usize)> {
+    fn scan_file_type_surface_target_counts() -> Vec<(String, usize)> {
         let files = collect_production_rs_files();
         let mut out: Vec<(String, usize)> = Vec::new();
         for (path, rel) in &files {
@@ -15059,7 +15059,7 @@ mod single_resolution_engine_guards {
                 Err(_) => continue,
             };
             let stripped = preprocess(&src);
-            let c = count_resolve_type_engine_use(&stripped);
+            let c = count_type_surface_engine_use(&stripped);
             if c > 0 {
                 out.push((rel.clone(), c));
             }
@@ -15147,38 +15147,38 @@ mod single_resolution_engine_guards {
     }
 
     // -----------------------------------------------------------------------
-    // Guard 3: `resolve_type` module path — the OXC resolver engine module.
+    // Guard 3: `type_surface` module path — the OXC resolver engine module.
     //
-    // `resolve_type` is the eager OXC resolution engine module
-    // `verter_parser::utils::oxc::vue::script::resolve_type` (referenced as
-    // `crate::utils::oxc::vue::resolve_type::` within verter_parser /
-    // verter_compiler, and `verter_compiler::utils::oxc::vue::resolve_type::`
+    // `type_surface` is the eager OXC resolution engine module
+    // `verter_parser::utils::oxc::script::type_surface` (referenced as
+    // `crate::utils::oxc::script::type_surface::` within verter_parser /
+    // verter_compiler, and `verter_compiler::utils::oxc::script::type_surface::`
     // from verter_session). The consolidation deletes the query-time engine
     // (codex Stages 2/5/6); the lowering front-end `verter_type_expr_oxc::
     // lower_ts_type` is NOT this engine and references none of these tokens.
     //
-    // Count-based per-file ledger (`scan_file_resolve_type_target_counts` →
-    // `count_resolve_type_engine_use`). The per-file count is ACTUAL engine use:
+    // Count-based per-file ledger (`scan_file_type_surface_target_counts` →
+    // `count_type_surface_engine_use`). The per-file count is ACTUAL engine use:
     //
-    //   (a) every `resolve_type` MODULE-PATH-TOKEN — a direct `resolve_type::`
+    //   (a) every `type_surface` MODULE-PATH-TOKEN — a direct `type_surface::`
     //       path/call, a GROUPED or BARE `use` import, an ALIASED module import
-    //       (`use …::resolve_type as rt;` — the evasion a `resolve_type::`-
-    //       substring scan missed), or the `pub mod resolve_type;` declaration;
+    //       (`use …::type_surface as rt;` — the evasion a `type_surface::`-
+    //       substring scan missed), or the `pub mod type_surface;` declaration;
     //   PLUS
     //   (b) every BARE use site of a symbol the file IMPORTS from the engine
-    //       (`use …::resolve_type::{analyze_external_type_program, …};` then a
+    //       (`use …::type_surface::{analyze_external_type_program, …};` then a
     //       bare `analyze_external_type_program(…)` call). The imported-symbol
     //       set is parsed per-file from that file's own `use` statements
-    //       (`collect_resolve_type_imported_symbols`) — structural and
+    //       (`collect_type_surface_imported_symbols`) — structural and
     //       self-updating, NOT a hand-maintained global API list. Import
     //       declarations are blanked before counting (so import bindings are not
     //       double-counted), and `::`-qualified uses are excluded (so a full
-    //       `resolve_type::SYMBOL` path is not counted twice).
+    //       `type_surface::SYMBOL` path is not counted twice).
     //
     // Counting ACTUAL engine USE — not just the path-token PROXY — closes the
     // [P2] hole the re-review flagged: an already-allowlisted file that imports
     // an engine function could previously add MORE bare calls to it without
-    // moving its `resolve_type` token count, so a NEW query-time OXC engine use
+    // moving its `type_surface` token count, so a NEW query-time OXC engine use
     // slipped in while the ledger stayed green. The count now traps a brand-new
     // consumer file, a new in-file path token, AND a new in-file bare call to an
     // already-imported engine symbol; each later stage that deletes uses lowers
@@ -15187,35 +15187,52 @@ mod single_resolution_engine_guards {
     //
     // **Scope boundary:** this closes the IN-FILE import-then-call class. A
     // cross-file re-export under a NEW name is OUT of scope — the re-exporting
-    // file is caught by its own `resolve_type` path token, and after Stages 5/6
+    // file is caught by its own `type_surface` path token, and after Stages 5/6
     // delete the engine the compiler catches any dangling reference. See
-    // `collect_resolve_type_imported_symbols` for the boundary rationale.
+    // `collect_type_surface_imported_symbols` for the boundary rationale.
     //
     // The current sites span the engine itself, its
-    // `ResolvedElements`/`AnalyzedExternalTypeSource`/`cache_keys::NamedTypeCache`
-    // output + cache types, and the query-time consumers (frontier /
-    // eval-program / prepared-decl rails). Counts include imported-symbol call
-    // sites, so files that import-and-call engine functions read higher than
-    // their raw `resolve_type::` token count.
+    // `ResolvedElements`/`AnalyzedExternalTypeSource` output types, and the
+    // query-time consumers (frontier / eval-program / prepared-decl rails).
+    // Counts include imported-symbol call sites, so files that
+    // import-and-call engine functions read higher than their raw
+    // `type_surface::` token count.
     // -----------------------------------------------------------------------
-    const RESOLVE_TYPE_PATH_FILE_ALLOWLIST: &[(&str, usize)] = &[
-        ("crates/verter_compiler/src/script/macros.rs", 3),
-        ("crates/verter_compiler/src/tsc/script.rs", 3),
+    // Ledger note: consumer imports reach the engine only through its
+    // explicit module path (`utils::oxc::script::type_surface::…`) — no
+    // vue-glob re-export spelling (`utils::oxc::vue::{ResolvedElements, …}`)
+    // exists to hide engine-symbol imports from the imported-symbol counter,
+    // so compiler consumers (`compile/mod.rs`, `tsc/script.rs`, …) are fully
+    // counted. The Vue cache-key identity module
+    // (`vue/script/named_type_keys.rs`) is Vue semantics, not the engine —
+    // its consumers carry no engine tokens of their own (decision row D-l in
+    // `docs/arch/multi-framework-adapters-plan.md`).
+    const TYPE_SURFACE_PATH_FILE_ALLOWLIST: &[(&str, usize)] = &[
+        ("crates/verter_compiler/src/compile/mod.rs", 4),
+        ("crates/verter_compiler/src/compile/types.rs", 1),
+        ("crates/verter_compiler/src/script/macros.rs", 5),
+        ("crates/verter_compiler/src/script/mod.rs", 1),
+        ("crates/verter_compiler/src/tsc/script.rs", 35),
+        ("crates/verter_parser/src/utils/oxc/script/mod.rs", 1),
         (
             "crates/verter_parser/src/utils/oxc/vue/script/bindings.rs",
             9,
         ),
         ("crates/verter_parser/src/utils/oxc/vue/script/macros.rs", 4),
-        ("crates/verter_parser/src/utils/oxc/vue/script/mod.rs", 4),
+        ("crates/verter_parser/src/utils/oxc/vue/script/mod.rs", 3),
+        (
+            "crates/verter_parser/src/utils/oxc/vue/script/named_type_keys.rs",
+            4,
+        ),
         (
             "crates/verter_parser/src/utils/oxc/vue/script/options.rs",
             3,
         ),
         ("crates/verter_parser/src/utils/oxc/vue/script/setup.rs", 21),
-        ("crates/verter_session/src/host_manage/eval_program.rs", 8),
+        ("crates/verter_session/src/host_manage/eval_program.rs", 7),
         ("crates/verter_session/src/host_manage/jsdoc_resolve.rs", 4),
         ("crates/verter_session/src/host_manage/prepared_decl.rs", 7),
-        ("crates/verter_session/src/host_manage.rs", 6),
+        ("crates/verter_session/src/host_manage.rs", 3),
         (
             "crates/verter_session/src/host_resolve/external_macro_collector.rs",
             1,
@@ -15275,18 +15292,18 @@ mod single_resolution_engine_guards {
             "crates/verter_session/src/resolver_core/symbol_resolver.rs",
             3,
         ),
-        ("crates/verter_session/src/semantic_query.rs", 2),
+        ("crates/verter_session/src/semantic_query.rs", 1),
         ("crates/verter_session/src/semantic_query_memo/mod.rs", 2),
         ("crates/verter_session/src/types.rs", 1),
     ];
 
     #[test]
-    fn no_new_resolve_type_engine_path_production_file() {
-        let actual = scan_file_resolve_type_target_counts();
+    fn no_new_type_surface_engine_path_production_file() {
+        let actual = scan_file_type_surface_target_counts();
         assert_exact_file_count_allowlist_match(
-            "no_new_resolve_type_engine_path_production_file",
+            "no_new_type_surface_engine_path_production_file",
             &actual,
-            RESOLVE_TYPE_PATH_FILE_ALLOWLIST,
+            TYPE_SURFACE_PATH_FILE_ALLOWLIST,
         );
     }
 
@@ -15294,7 +15311,7 @@ mod single_resolution_engine_guards {
     // Guard 4: `ResolvedElements` — the OXC engine's output type.
     //
     // `ResolvedElements` (defined at
-    // `verter_parser/src/utils/oxc/vue/script/resolve_type/mod.rs`) is the
+    // `verter_parser/src/utils/oxc/script/type_surface/mod.rs`) is the
     // eager OXC resolver's resolved props/emits/slots/native output struct. It
     // is the second engine's result type and is deleted with the engine (codex
     // Stages 2/5). `lower_ts_type` produces `TypeExpr`, never `ResolvedElements`,
@@ -15325,24 +15342,28 @@ mod single_resolution_engine_guards {
         ("crates/verter_parser/src/utils/oxc/vue/script/macros.rs", 2),
         ("crates/verter_parser/src/utils/oxc/vue/script/mod.rs", 2),
         (
-            "crates/verter_parser/src/utils/oxc/vue/script/resolve_type/decl.rs",
-            28,
-        ),
-        (
-            "crates/verter_parser/src/utils/oxc/vue/script/resolve_type/elements.rs",
+            "crates/verter_parser/src/utils/oxc/vue/script/named_type_keys.rs",
             3,
         ),
         (
-            "crates/verter_parser/src/utils/oxc/vue/script/resolve_type/external.rs",
+            "crates/verter_parser/src/utils/oxc/script/type_surface/decl.rs",
+            28,
+        ),
+        (
+            "crates/verter_parser/src/utils/oxc/script/type_surface/elements.rs",
+            3,
+        ),
+        (
+            "crates/verter_parser/src/utils/oxc/script/type_surface/external.rs",
             25,
         ),
         (
-            "crates/verter_parser/src/utils/oxc/vue/script/resolve_type/infer.rs",
+            "crates/verter_parser/src/utils/oxc/script/type_surface/infer.rs",
             5,
         ),
         (
-            "crates/verter_parser/src/utils/oxc/vue/script/resolve_type/mod.rs",
-            23,
+            "crates/verter_parser/src/utils/oxc/script/type_surface/mod.rs",
+            20,
         ),
         ("crates/verter_parser/src/utils/oxc/vue/script/setup.rs", 1),
         ("crates/verter_session/src/host_manage/jsdoc_resolve.rs", 1),
@@ -15448,7 +15469,7 @@ mod single_resolution_engine_guards {
     // — proving SITE-level discrimination, not merely new-file discrimination —
     // and exercise the scanners against the live tree to prove identifier-
     // boundary matching (`ResolvedElements` vs `ResolvedElementsOwned`) and
-    // aliased-import detection (`use …::resolve_type as rt`).
+    // aliased-import detection (`use …::type_surface as rt`).
     // =======================================================================
 
     /// Helper: returns `true` iff `f` panicked (i.e. the guard reported a
@@ -15517,7 +15538,7 @@ mod single_resolution_engine_guards {
         // PERSISTS past the stage that owns it). A file-NAME-set guard would
         // stay green here; the count ledger MUST fire. This is the precise
         // cutover-growth hole the review flagged.
-        let mut grew: Vec<(String, usize)> = RESOLVE_TYPE_PATH_FILE_ALLOWLIST
+        let mut grew: Vec<(String, usize)> = TYPE_SURFACE_PATH_FILE_ALLOWLIST
             .iter()
             .map(|(f, c)| (f.to_string(), *c))
             .collect();
@@ -15534,7 +15555,7 @@ mod single_resolution_engine_guards {
             guard_reports_violation(|| assert_exact_file_count_allowlist_match(
                 "discriminator",
                 &grew,
-                RESOLVE_TYPE_PATH_FILE_ALLOWLIST,
+                TYPE_SURFACE_PATH_FILE_ALLOWLIST,
             )),
             "count guard must FAIL when an already-allowlisted file's observed \
              count EXCEEDS its allowlisted count (a NEW in-file site) — \
@@ -15635,49 +15656,49 @@ mod single_resolution_engine_guards {
     }
 
     #[test]
-    fn resolve_type_guard_detects_aliased_module_import() {
+    fn type_surface_guard_detects_aliased_module_import() {
         // PROOF for the [P1] aliased-import fix. A new production file doing
-        // `use …::resolve_type as rt;` contains NO `resolve_type::` substring,
+        // `use …::type_surface as rt;` contains NO `type_surface::` substring,
         // so the old substring scan stayed green. The module-target counter
         // MUST count it.
         assert_eq!(
-            count_resolve_type_module_targets(
-                "use verter_compiler::utils::oxc::vue::resolve_type as rt;\nfn f() { rt::go(); }"
+            count_type_surface_module_targets(
+                "use verter_compiler::utils::oxc::script::type_surface as rt;\nfn f() { rt::go(); }"
             ),
             1,
-            "aliased import `use …::resolve_type as rt;` must be counted (the \
+            "aliased import `use …::type_surface as rt;` must be counted (the \
              evasion the substring guard missed). The `rt::go()` call is NOT a \
-             `resolve_type` reference, so the count is exactly 1"
+             `type_surface` reference, so the count is exactly 1"
         );
         // A grouped/bare import is also a target.
         assert_eq!(
-            count_resolve_type_module_targets("use crate::a::resolve_type;"),
+            count_type_surface_module_targets("use crate::a::type_surface;"),
             1,
-            "bare `use …::resolve_type;` import must be counted"
+            "bare `use …::type_surface;` import must be counted"
         );
         assert_eq!(
-            count_resolve_type_module_targets("use crate::a::{resolve_type, other};"),
+            count_type_surface_module_targets("use crate::a::{type_surface, other};"),
             1,
-            "grouped `use …::{{resolve_type, …}};` import must be counted"
+            "grouped `use …::{{type_surface, …}};` import must be counted"
         );
         // A direct path/call is a target.
         assert_eq!(
-            count_resolve_type_module_targets("let _ = resolve_type::ResolvedElements::default();"),
+            count_type_surface_module_targets("let _ = type_surface::ResolvedElements::default();"),
             1,
-            "direct `resolve_type::` path must be counted"
+            "direct `type_surface::` path must be counted"
         );
-        // The longer identifier `resolve_type_dependency_canonical` is NOT a
+        // The longer identifier `type_surface_dependency_canonical` is NOT a
         // module target (identifier-boundary rejects it).
         assert_eq!(
-            count_resolve_type_module_targets("self.resolve_type_dependency_canonical(id);"),
+            count_type_surface_module_targets("self.type_surface_dependency_canonical(id);"),
             0,
-            "the distinct identifier `resolve_type_dependency_canonical` must \
-             NOT be counted as a `resolve_type` module target"
+            "the distinct identifier `type_surface_dependency_canonical` must \
+             NOT be counted as a `type_surface` module target"
         );
 
         // End-to-end: planting an aliased import as a NEW file's count fires
         // the count guard.
-        let mut planted: Vec<(String, usize)> = RESOLVE_TYPE_PATH_FILE_ALLOWLIST
+        let mut planted: Vec<(String, usize)> = TYPE_SURFACE_PATH_FILE_ALLOWLIST
             .iter()
             .map(|(f, c)| (f.to_string(), *c))
             .collect();
@@ -15689,47 +15710,47 @@ mod single_resolution_engine_guards {
             guard_reports_violation(|| assert_exact_file_count_allowlist_match(
                 "discriminator",
                 &planted,
-                RESOLVE_TYPE_PATH_FILE_ALLOWLIST,
+                TYPE_SURFACE_PATH_FILE_ALLOWLIST,
             )),
-            "count guard must FAIL when a NEW file imports the `resolve_type` \
+            "count guard must FAIL when a NEW file imports the `type_surface` \
              module (even aliased) — closing the aliased-import evasion"
         );
     }
 
     #[test]
-    fn resolve_type_engine_use_counts_imported_symbol_calls_not_just_path_tokens() {
+    fn type_surface_engine_use_counts_imported_symbol_calls_not_just_path_tokens() {
         // MANDATORY [P2] #1 discriminator. The hole: an already-allowlisted file
         // that IMPORTS an engine function can add MORE bare calls to it without
-        // moving its `resolve_type` PATH-TOKEN count, so a NEW query-time OXC
+        // moving its `type_surface` PATH-TOKEN count, so a NEW query-time OXC
         // engine use slips in while the path-token ledger stays green. This test
         // plants exactly that and proves the NEW engine-use counter fires where
         // the OLD path-token-only counter would NOT.
 
         // A file that imports an engine function and calls it ONCE.
         let one_call = "\
-use verter_compiler::utils::oxc::vue::resolve_type::analyze_external_type_program;\n\
+use verter_compiler::utils::oxc::script::type_surface::analyze_external_type_program;\n\
 pub fn run(p: &Program) {\n\
     let _ = analyze_external_type_program(p);\n\
 }\n";
         // A file IDENTICAL except it adds a SECOND bare call to the same
         // already-imported engine function (the exact in-file-growth evasion).
         let two_calls = "\
-use verter_compiler::utils::oxc::vue::resolve_type::analyze_external_type_program;\n\
+use verter_compiler::utils::oxc::script::type_surface::analyze_external_type_program;\n\
 pub fn run(p: &Program) {\n\
     let _ = analyze_external_type_program(p);\n\
     let _ = analyze_external_type_program(p);\n\
 }\n";
 
         // OLD path-token-only counter: BLIND to the added call. The import line
-        // is the ONLY `resolve_type` token in either file, so BOTH count 1 — the
+        // is the ONLY `type_surface` token in either file, so BOTH count 1 — the
         // added bare call is invisible. This is the proxy the review flagged.
         assert_eq!(
-            count_resolve_type_module_targets(&preprocess(one_call)),
+            count_type_surface_module_targets(&preprocess(one_call)),
             1,
-            "old path-token counter sees only the `use …::resolve_type::…` import"
+            "old path-token counter sees only the `use …::type_surface::…` import"
         );
         assert_eq!(
-            count_resolve_type_module_targets(&preprocess(two_calls)),
+            count_type_surface_module_targets(&preprocess(two_calls)),
             1,
             "PROOF the hole is real: the OLD path-token-only counter is INVARIANT \
              under adding a second bare call to an already-imported engine \
@@ -15741,13 +15762,13 @@ pub fn run(p: &Program) {\n\
         // bare call site, so it RISES with the added call. This is what makes the
         // ledger reflect ACTUAL engine use rather than the path-token proxy.
         assert_eq!(
-            count_resolve_type_engine_use(&preprocess(one_call)),
+            count_type_surface_engine_use(&preprocess(one_call)),
             2,
             "new counter = 1 path token + 1 bare `analyze_external_type_program` \
              call"
         );
         assert_eq!(
-            count_resolve_type_engine_use(&preprocess(two_calls)),
+            count_type_surface_engine_use(&preprocess(two_calls)),
             3,
             "new counter RISES to 3 (1 path token + 2 bare calls) when the second \
              call is added — exercising the NEW imported-symbol-use counting, \
@@ -15760,7 +15781,7 @@ pub fn run(p: &Program) {\n\
         // already calls it (twice); under the path-token proxy a third call would
         // not move its count. Simulate the observed count rising by 1 above its
         // allowlisted value and assert the comparison fails.
-        let mut grew: Vec<(String, usize)> = RESOLVE_TYPE_PATH_FILE_ALLOWLIST
+        let mut grew: Vec<(String, usize)> = TYPE_SURFACE_PATH_FILE_ALLOWLIST
             .iter()
             .map(|(f, c)| (f.to_string(), *c))
             .collect();
@@ -15775,7 +15796,7 @@ pub fn run(p: &Program) {\n\
             guard_reports_violation(|| assert_exact_file_count_allowlist_match(
                 "discriminator",
                 &grew,
-                RESOLVE_TYPE_PATH_FILE_ALLOWLIST,
+                TYPE_SURFACE_PATH_FILE_ALLOWLIST,
             )),
             "ledger must FAIL when {target}'s engine-use count rises by one bare \
              call to an already-imported engine function ({bumped}) — the \
@@ -15783,12 +15804,12 @@ pub fn run(p: &Program) {\n\
         );
 
         // And confirm the LIVE tree actually exercises this path: the file's
-        // engine-use count must EXCEED its raw `resolve_type` path-token count
+        // engine-use count must EXCEED its raw `type_surface` path-token count
         // (i.e. the imported-symbol bare-call counting genuinely contributes on
         // real source, not just on synthetic strings).
         let src = preprocess(&super::read_workspace_file(target));
-        let path_only = count_resolve_type_module_targets(&src);
-        let engine_use = count_resolve_type_engine_use(&src);
+        let path_only = count_type_surface_module_targets(&src);
+        let engine_use = count_type_surface_engine_use(&src);
         assert!(
             engine_use > path_only,
             "{target}: live engine-use count ({engine_use}) must exceed the raw \
@@ -15796,7 +15817,7 @@ pub fn run(p: &Program) {\n\
              (e.g. the two `format_runtime_types(…)` sites) are counted by the \
              NEW logic on the real tree, not merely the path tokens"
         );
-        let syms = collect_resolve_type_imported_symbols(&src);
+        let syms = collect_type_surface_imported_symbols(&src);
         assert!(
             syms.contains("format_runtime_types"),
             "{target} must import `format_runtime_types` from the engine for this \
@@ -15805,51 +15826,51 @@ pub fn run(p: &Program) {\n\
     }
 
     #[test]
-    fn resolve_type_imported_symbol_parser_handles_use_shapes() {
+    fn type_surface_imported_symbol_parser_handles_use_shapes() {
         // Unit-level proof that the per-file import parser
-        // (`collect_resolve_type_imported_symbols`) derives the right symbol set
+        // (`collect_type_surface_imported_symbols`) derives the right symbol set
         // for every `use` shape — this is the structural mechanism that makes the
         // engine-use counter self-updating rather than a hand-maintained list.
 
         // Single symbol.
-        let s = collect_resolve_type_imported_symbols(&preprocess(
-            "use crate::a::resolve_type::analyze_external_type_program;",
+        let s = collect_type_surface_imported_symbols(&preprocess(
+            "use crate::a::type_surface::analyze_external_type_program;",
         ));
         assert_eq!(s.len(), 1);
         assert!(s.contains("analyze_external_type_program"));
 
         // Symbol with alias → the ALIAS is the local name that gets called.
-        let s = collect_resolve_type_imported_symbols(&preprocess(
-            "use crate::a::resolve_type::ResolvedElements as RE;",
+        let s = collect_type_surface_imported_symbols(&preprocess(
+            "use crate::a::type_surface::ResolvedElements as RE;",
         ));
         assert!(s.contains("RE") && !s.contains("ResolvedElements"));
 
         // Grouped (possibly multi-line) with a mid-group alias.
-        let s = collect_resolve_type_imported_symbols(&preprocess(
-            "use super::resolve_type::{\n    build_type_context, ResolvedElements as RE,\n    RuntimeType,\n};",
+        let s = collect_type_surface_imported_symbols(&preprocess(
+            "use super::type_surface::{\n    build_type_context, ResolvedElements as RE,\n    RuntimeType,\n};",
         ));
         assert!(s.contains("build_type_context"));
         assert!(s.contains("RE") && !s.contains("ResolvedElements"));
         assert!(s.contains("RuntimeType"));
 
-        // NESTED use-tree: the `resolve_type` segment is itself INSIDE an
+        // NESTED use-tree: the `type_surface` segment is itself INSIDE an
         // enclosing `{ … }` group, so the byte BEFORE it is `{` (not `::` or an
         // identifier). The parser must still recognise it as a use-tree segment
-        // and collect the leaf bound under `resolve_type::{ … }`. (This is the
+        // and collect the leaf bound under `type_surface::{ … }`. (This is the
         // [P2] form the left-walk predicate previously rejected.)
-        let s = collect_resolve_type_imported_symbols(&preprocess(
-            "use verter_compiler::utils::oxc::vue::{resolve_type::{analyze_external_type_program}};",
+        let s = collect_type_surface_imported_symbols(&preprocess(
+            "use verter_compiler::utils::oxc::vue::{type_surface::{analyze_external_type_program}};",
         ));
         assert!(
             s.contains("analyze_external_type_program"),
-            "nested `…::{{resolve_type::{{SYMBOL}}}}` must bind SYMBOL"
+            "nested `…::{{type_surface::{{SYMBOL}}}}` must bind SYMBOL"
         );
 
         // Nested with SIBLING items in the enclosing group, mid-group alias, and
-        // a deeper sub-group — every leaf bound under `resolve_type` is collected,
+        // a deeper sub-group — every leaf bound under `type_surface` is collected,
         // siblings from OTHER modules are ignored.
-        let s = collect_resolve_type_imported_symbols(&preprocess(
-            "use crate::a::{\n    other::Thing,\n    resolve_type::{build_type_context, ResolvedElements as RE, sub::{RuntimeType}},\n    more::Else,\n};",
+        let s = collect_type_surface_imported_symbols(&preprocess(
+            "use crate::a::{\n    other::Thing,\n    type_surface::{build_type_context, ResolvedElements as RE, sub::{RuntimeType}},\n    more::Else,\n};",
         ));
         assert!(s.contains("build_type_context"));
         assert!(s.contains("RE") && !s.contains("ResolvedElements"));
@@ -15859,10 +15880,10 @@ pub fn run(p: &Program) {\n\
             "sibling-module leaves must NOT be attributed to the engine"
         );
 
-        // Nested form reached via `resolve_type as M` inside an enclosing group —
+        // Nested form reached via `type_surface as M` inside an enclosing group —
         // the module alias is bound (its later `M::foo` calls then count).
-        let s = collect_resolve_type_imported_symbols(&preprocess(
-            "use crate::a::{resolve_type as rt, other::Thing};",
+        let s = collect_type_surface_imported_symbols(&preprocess(
+            "use crate::a::{type_surface as rt, other::Thing};",
         ));
         assert!(
             s.contains("rt") && !s.contains("Thing"),
@@ -15870,39 +15891,39 @@ pub fn run(p: &Program) {\n\
         );
 
         // `pub use` with the engine segment nested inside an enclosing group.
-        let s = collect_resolve_type_imported_symbols(&preprocess(
-            "pub use crate::a::{resolve_type::ResolvedEmit};",
+        let s = collect_type_surface_imported_symbols(&preprocess(
+            "pub use crate::a::{type_surface::ResolvedNamedCallSignature};",
         ));
-        assert!(s.contains("ResolvedEmit"));
+        assert!(s.contains("ResolvedNamedCallSignature"));
 
-        // Nested BARE module import (`…::{resolve_type}`) inside an enclosing
-        // group binds NO callable symbol — later `resolve_type::foo` uses are
+        // Nested BARE module import (`…::{type_surface}`) inside an enclosing
+        // group binds NO callable symbol — later `type_surface::foo` uses are
         // path tokens, already tallied by the module-target counter.
-        let s = collect_resolve_type_imported_symbols(&preprocess(
-            "use crate::a::{resolve_type, other::Thing};",
+        let s = collect_type_surface_imported_symbols(&preprocess(
+            "use crate::a::{type_surface, other::Thing};",
         ));
         assert!(
             s.is_empty(),
-            "nested bare `…::{{resolve_type}}` binds no callable symbol"
+            "nested bare `…::{{type_surface}}` binds no callable symbol"
         );
 
         // Module alias → the alias name (its `M::foo` uses are then counted).
-        let s = collect_resolve_type_imported_symbols(&preprocess(
-            "use verter_compiler::utils::oxc::vue::resolve_type as rt;",
+        let s = collect_type_surface_imported_symbols(&preprocess(
+            "use verter_compiler::utils::oxc::script::type_surface as rt;",
         ));
         assert!(s.contains("rt") && s.len() == 1);
 
-        // Bare module import binds NO callable symbol (later `resolve_type::foo`
+        // Bare module import binds NO callable symbol (later `type_surface::foo`
         // uses are path tokens, not imported-symbol uses).
-        let s = collect_resolve_type_imported_symbols(&preprocess("use crate::a::resolve_type;"));
+        let s = collect_type_surface_imported_symbols(&preprocess("use crate::a::type_surface;"));
         assert!(s.is_empty());
-        let s = collect_resolve_type_imported_symbols(&preprocess(
-            "use crate::a::{resolve_type, other};",
+        let s = collect_type_surface_imported_symbols(&preprocess(
+            "use crate::a::{type_surface, other};",
         ));
         assert!(s.is_empty());
 
-        // A `use` that does NOT reference resolve_type contributes nothing.
-        let s = collect_resolve_type_imported_symbols(&preprocess(
+        // A `use` that does NOT reference type_surface contributes nothing.
+        let s = collect_type_surface_imported_symbols(&preprocess(
             "use crate::a::other_module::Thing;",
         ));
         assert!(s.is_empty());
@@ -15910,8 +15931,8 @@ pub fn run(p: &Program) {\n\
         // The import declaration itself is blanked before the symbol-use pass, so
         // the bound names in the `use` line are NOT counted as uses.
         let src =
-            preprocess("use crate::a::resolve_type::analyze_external_type_program;\nfn f() {}\n");
-        let stripped = strip_resolve_type_use_statements(&src);
+            preprocess("use crate::a::type_surface::analyze_external_type_program;\nfn f() {}\n");
+        let stripped = strip_type_surface_use_statements(&src);
         assert_eq!(
             count_bare_symbol_uses(&stripped, "analyze_external_type_program"),
             0,
@@ -15920,15 +15941,15 @@ pub fn run(p: &Program) {\n\
         );
 
         // `::`-qualified use is excluded from bare-symbol counting (it is already
-        // a `resolve_type` path token), preventing a double count.
+        // a `type_surface` path token), preventing a double count.
         assert_eq!(
             count_bare_symbol_uses(
-                "let _: resolve_type::ResolvedElements = x;",
+                "let _: type_surface::ResolvedElements = x;",
                 "ResolvedElements"
             ),
             0,
-            "a `resolve_type::ResolvedElements` path use must NOT be counted as a \
-             bare symbol use (the `resolve_type` token already tallies it)"
+            "a `type_surface::ResolvedElements` path use must NOT be counted as a \
+             bare symbol use (the `type_surface` token already tallies it)"
         );
         assert_eq!(
             count_bare_symbol_uses("let _: ResolvedElements = x;", "ResolvedElements"),
@@ -15942,9 +15963,9 @@ pub fn run(p: &Program) {\n\
     fn nested_use_tree_engine_import_is_parsed_and_counted() {
         // MANDATORY [P2] discriminator for the nested-use-tree parsing gap.
         //
-        // A `resolve_type` segment nested INSIDE an enclosing `{ … }` group has
+        // A `type_surface` segment nested INSIDE an enclosing `{ … }` group has
         // `{` (or `, ` after a sibling) immediately to its left, not `::` / an
-        // identifier. The OLD `resolve_type_segment_is_in_use_stmt` predicate
+        // identifier. The OLD `type_surface_segment_is_in_use_stmt` predicate
         // walked left over only `::` separators and identifier segments and bailed
         // (returned `false`) the instant it met `{` / `,`. So the nested import
         // was NEVER recorded as a bound symbol, and extra BARE calls to that
@@ -15954,7 +15975,7 @@ pub fn run(p: &Program) {\n\
 
         // The exact form codex flagged: engine module nested one level deep.
         let nested_src = "\
-use verter_compiler::utils::oxc::vue::{resolve_type::{analyze_external_type_program}};\n\
+use verter_compiler::utils::oxc::vue::{type_surface::{analyze_external_type_program}};\n\
 pub fn run(p: &Program) {\n\
     let _ = analyze_external_type_program(p);\n\
 }\n";
@@ -15962,7 +15983,7 @@ pub fn run(p: &Program) {\n\
         // --- Prove the OLD logic MISSED this (the bug is real, the fix exercised).
         // Inline replica of the pre-fix left-walk predicate: walk left over only
         // `::` and identifier path segments, requiring a `use` keyword before any
-        // other token. On the nested form the char before `resolve_type` is `{`,
+        // other token. On the nested form the char before `type_surface` is `{`,
         // so this returns `false` and the symbol is never collected.
         fn old_segment_is_in_use_stmt(bytes: &[u8], seg: usize) -> bool {
             let is_ident_char = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
@@ -15999,45 +16020,45 @@ pub fn run(p: &Program) {\n\
         }
         let pp = preprocess(nested_src);
         let seg = pp
-            .find("resolve_type")
-            .expect("fixture contains a `resolve_type` segment");
+            .find("type_surface")
+            .expect("fixture contains a `type_surface` segment");
         assert!(
             !old_segment_is_in_use_stmt(pp.as_bytes(), seg),
             "PRECONDITION (proves the bug): the OLD left-walk predicate REJECTS a \
-             `resolve_type` segment nested inside an enclosing `{{ … }}` group — \
+             `type_surface` segment nested inside an enclosing `{{ … }}` group — \
              so pre-fix the nested import bound NO symbol and bare calls were \
              invisible to the ledger"
         );
 
         // --- Prove the NEW logic collects the nested import.
-        let syms = collect_resolve_type_imported_symbols(&pp);
+        let syms = collect_type_surface_imported_symbols(&pp);
         assert!(
             syms.contains("analyze_external_type_program"),
             "the NEW parser MUST bind the engine symbol imported via a nested \
-             use-tree (`…::{{resolve_type::{{SYMBOL}}}}`)"
+             use-tree (`…::{{type_surface::{{SYMBOL}}}}`)"
         );
 
         // --- Prove the ledger actually FIRES on the nested-import file: an extra
         // bare call to the already-imported engine function must raise the count.
         let two_calls = "\
-use verter_compiler::utils::oxc::vue::{resolve_type::{analyze_external_type_program}};\n\
+use verter_compiler::utils::oxc::vue::{type_surface::{analyze_external_type_program}};\n\
 pub fn run(p: &Program) {\n\
     let _ = analyze_external_type_program(p);\n\
     let _ = analyze_external_type_program(p);\n\
 }\n";
-        // The module-path token count is INVARIANT (one `resolve_type::` token in
+        // The module-path token count is INVARIANT (one `type_surface::` token in
         // both) — proving the path-token proxy is blind here, exactly as in the
         // non-nested discriminator above.
         assert_eq!(
-            count_resolve_type_module_targets(&preprocess(nested_src)),
-            count_resolve_type_module_targets(&preprocess(two_calls)),
+            count_type_surface_module_targets(&preprocess(nested_src)),
+            count_type_surface_module_targets(&preprocess(two_calls)),
             "path-token proxy is invariant under the added bare call (both have a \
-             single nested `resolve_type::` token)"
+             single nested `type_surface::` token)"
         );
         // The engine-use ledger RISES with the added bare call — only possible
         // because the NEW parser bound the nested import.
-        let one = count_resolve_type_engine_use(&pp);
-        let two = count_resolve_type_engine_use(&preprocess(two_calls));
+        let one = count_type_surface_engine_use(&pp);
+        let two = count_type_surface_engine_use(&preprocess(two_calls));
         assert_eq!(
             one, 2,
             "nested-import file with ONE call: 1 path token + 1 bare call"
@@ -16110,7 +16131,7 @@ pub fn run(p: &Program) {\n\
     fn test_only_prefix_alone_does_not_exempt_a_rogue_file() {
         // MANDATORY [P2] #2 discriminator. The OLD exemption skipped ANY
         // `src/**/test_only_*.rs` file by NAME PREFIX. That is a hole: a future
-        // PRODUCTION module named `test_only_foo.rs` could add `resolve_type` /
+        // PRODUCTION module named `test_only_foo.rs` could add `type_surface` /
         // `ResolvedElements` uses and be omitted from every ledger, even though
         // the `test_only_module_is_only_consumed_by_test_files` guard never
         // proved THAT file to be a probe. The exemption is now an explicit
@@ -16160,7 +16181,7 @@ pub fn run(p: &Program) {\n\
         // Sanity: a hypothetical world where the rogue file existed and held a
         // forbidden token. Because `is_test_or_probe_file` returns false for it,
         // `collect_production_rs_files` WOULD include it (it is walked like any
-        // `src/**` file), so its `resolve_type` / `ResolvedElements` count would
+        // `src/**` file), so its `type_surface` / `ResolvedElements` count would
         // enter the ledger and trip the unallowlisted-file trap. We assert the
         // gating predicate (the only thing that decides inclusion) admits it.
         assert!(

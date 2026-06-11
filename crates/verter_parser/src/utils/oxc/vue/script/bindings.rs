@@ -3,16 +3,26 @@
 //! Extracts binding metadata from the OXC AST to determine the correct
 //! accessor prefix/suffix for template expressions. This follows Vue's
 //! official compiler classification (see `BindingTypes` in `@vue/compiler-core`).
+//!
+//! The generic statement/pattern/import binding INVENTORY lives in the
+//! framework-neutral [`crate::utils::oxc::script::bindings`] module; this
+//! module owns only the Vue classification layer (macro awareness,
+//! reactivity sniffing, `BindingType` mapping) and delegates the inventory
+//! walks to the neutral module.
 
 use oxc_ast::ast::{
-    BindingPattern, CallExpression, Expression, ImportDeclaration, ImportDeclarationSpecifier,
-    ObjectPropertyKind, PropertyKey, Statement, TSTypeParameterInstantiation, VariableDeclaration,
-    VariableDeclarationKind,
+    BindingPattern, CallExpression, Expression, ImportDeclaration, ObjectPropertyKind, PropertyKey,
+    Statement, TSTypeParameterInstantiation, VariableDeclaration, VariableDeclarationKind,
 };
 
-use super::resolve_type::{
+use crate::utils::oxc::script::bindings::{
+    callee_identifier_name, collect_import_binding_spans, collect_pattern_binding_spans,
+    declaration_binding_span,
+};
+use crate::utils::oxc::script::type_surface::{
     build_type_context, resolve_type_elements_with_ctx_ref, TypeResolutionContext,
 };
+
 use super::shared::ScriptParseContext;
 use crate::common::Span;
 use crate::types::BindingType;
@@ -56,19 +66,14 @@ fn classify_statement<'a>(
         Statement::ExpressionStatement(expr_stmt) => {
             classify_expression_statement(&expr_stmt.expression, entries, ctx, type_ctx);
         }
-        Statement::FunctionDeclaration(func) => {
-            if let Some(id) = &func.id {
-                entries.push((Span::from(id.span), BindingType::SetupConst));
+        // Function / class / enum declarations all bind a runtime value;
+        // the neutral inventory yields the identifier span.
+        Statement::FunctionDeclaration(_)
+        | Statement::ClassDeclaration(_)
+        | Statement::TSEnumDeclaration(_) => {
+            if let Some(span) = declaration_binding_span(stmt) {
+                entries.push((span, BindingType::SetupConst));
             }
-        }
-        Statement::ClassDeclaration(class) => {
-            if let Some(id) = &class.id {
-                entries.push((Span::from(id.span), BindingType::SetupConst));
-            }
-        }
-        Statement::TSEnumDeclaration(e) => {
-            // Enums have a runtime JS representation
-            entries.push((Span::from(e.id.span), BindingType::SetupConst));
         }
         // TypeScript-only declarations — no runtime binding
         Statement::TSTypeAliasDeclaration(_) | Statement::TSInterfaceDeclaration(_) => {}
@@ -185,7 +190,7 @@ fn can_never_be_ref<'a>(expr: &Expression<'a>) -> bool {
 
 /// Classify a call expression in a const initializer.
 fn classify_call_expression<'a>(call: &CallExpression<'a>) -> BindingType {
-    let callee_name = get_callee_name(&call.callee);
+    let callee_name = callee_identifier_name(&call.callee);
 
     match callee_name.as_deref() {
         Some("ref" | "computed" | "shallowRef" | "toRef" | "customRef" | "defineModel") => {
@@ -197,20 +202,12 @@ fn classify_call_expression<'a>(call: &CallExpression<'a>) -> BindingType {
     }
 }
 
-/// Get the callee name from a call expression (simple identifiers only).
-fn get_callee_name<'a>(callee: &Expression<'a>) -> Option<String> {
-    match callee {
-        Expression::Identifier(ident) => Some(ident.name.to_string()),
-        _ => None,
-    }
-}
-
 /// Check if an expression is a `defineProps()` or `withDefaults()` call.
 fn is_define_props_call<'a>(expr: &Expression<'a>) -> bool {
     match expr {
         Expression::CallExpression(call) => {
             matches!(
-                get_callee_name(&call.callee).as_deref(),
+                callee_identifier_name(&call.callee).as_deref(),
                 Some("defineProps" | "withDefaults")
             )
         }
@@ -246,36 +243,17 @@ fn extract_destructured_props<'a>(
     }
 }
 
-/// Extract binding names from a pattern and classify them.
+/// Extract binding names from a pattern and classify them all as
+/// `binding_type` (the neutral inventory walks the pattern; this layer
+/// only attaches the Vue classification).
 fn extract_pattern_bindings<'a>(
     pattern: &BindingPattern<'a>,
     binding_type: BindingType,
     entries: &mut Vec<(Span, BindingType)>,
 ) {
-    match pattern {
-        BindingPattern::BindingIdentifier(ident) => {
-            entries.push((Span::from(ident.span), binding_type));
-        }
-        BindingPattern::ObjectPattern(obj) => {
-            for prop in &obj.properties {
-                extract_pattern_bindings(&prop.value, binding_type, entries);
-            }
-            if let Some(rest) = &obj.rest {
-                extract_pattern_bindings(&rest.argument, binding_type, entries);
-            }
-        }
-        BindingPattern::ArrayPattern(arr) => {
-            for elem in arr.elements.iter().flatten() {
-                extract_pattern_bindings(elem, binding_type, entries);
-            }
-            if let Some(rest) = &arr.rest {
-                extract_pattern_bindings(&rest.argument, binding_type, entries);
-            }
-        }
-        BindingPattern::AssignmentPattern(assign) => {
-            extract_pattern_bindings(&assign.left, binding_type, entries);
-        }
-    }
+    let mut spans = Vec::new();
+    collect_pattern_binding_spans(pattern, &mut spans);
+    entries.extend(spans.into_iter().map(|span| (span, binding_type)));
 }
 
 /// Classify standalone expression statements (e.g., `defineProps<{msg: string}>()`).
@@ -286,7 +264,7 @@ fn classify_expression_statement<'a>(
     type_ctx: &TypeResolutionContext<'a, 'a>,
 ) {
     if let Expression::CallExpression(call) = expr {
-        let callee_name = get_callee_name(&call.callee);
+        let callee_name = callee_identifier_name(&call.callee);
         match callee_name.as_deref() {
             Some("defineProps") => {
                 extract_props_from_define_props(call, entries, ctx, type_ctx);
@@ -314,7 +292,7 @@ fn extract_individual_props_from_expr<'a>(
     type_ctx: &TypeResolutionContext<'a, 'a>,
 ) {
     if let Expression::CallExpression(call) = expr {
-        let callee_name = get_callee_name(&call.callee);
+        let callee_name = callee_identifier_name(&call.callee);
         match callee_name.as_deref() {
             Some("defineProps") => {
                 extract_props_from_define_props(call, entries, ctx, type_ctx);
@@ -423,37 +401,21 @@ fn extract_props_from_runtime_arg<'a>(
 
 /// Classify import declarations.
 ///
-/// Type-only imports (`import type { ... }`) and per-specifier type imports
-/// (`import { type Foo }`) are skipped — they have no runtime binding.
+/// The neutral inventory yields the runtime binding spans (type-only
+/// imports and per-specifier type imports bind nothing); every runtime
+/// import binding classifies as `SetupImport`.
 fn classify_import<'a>(
     import: &ImportDeclaration<'a>,
     entries: &mut Vec<(Span, BindingType)>,
     _ctx: &ScriptParseContext<'a>,
 ) {
-    // Skip entire type-only imports: `import type { ... } from '...'`
-    if import.import_kind.is_type() {
-        return;
-    }
-
-    if let Some(specifiers) = &import.specifiers {
-        for spec in specifiers {
-            match spec {
-                ImportDeclarationSpecifier::ImportSpecifier(s) => {
-                    // Skip per-specifier type imports: `import { type Foo } from '...'`
-                    if s.import_kind.is_type() {
-                        continue;
-                    }
-                    entries.push((Span::from(s.local.span), BindingType::SetupImport));
-                }
-                ImportDeclarationSpecifier::ImportDefaultSpecifier(s) => {
-                    entries.push((Span::from(s.local.span), BindingType::SetupImport));
-                }
-                ImportDeclarationSpecifier::ImportNamespaceSpecifier(s) => {
-                    entries.push((Span::from(s.local.span), BindingType::SetupImport));
-                }
-            }
-        }
-    }
+    let mut spans = Vec::new();
+    collect_import_binding_spans(import, &mut spans);
+    entries.extend(
+        spans
+            .into_iter()
+            .map(|span| (span, BindingType::SetupImport)),
+    );
 }
 
 #[cfg(test)]

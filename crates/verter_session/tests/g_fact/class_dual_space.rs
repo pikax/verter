@@ -22,7 +22,7 @@
 
 use std::sync::Arc;
 
-use verter_compiler::utils::oxc::vue::resolve_type::analyze_external_type_source;
+use verter_compiler::utils::oxc::script::type_surface::analyze_external_type_source;
 use verter_semantic::analysis::type_eval_build::parse_and_build_env;
 use verter_semantic::facts::{FactKey, SymbolSpace};
 use verter_session::fact_emission::emit_parse_facts;
@@ -39,7 +39,7 @@ fn indexed_from_source(source: &str) -> Arc<IndexedReady> {
     let shallow = ShallowFileState::from_analysis([0u8; 16], analysis, Some(&env));
 
     let empty_external = Arc::new(
-        verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default(),
+        verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(),
     );
 
     Arc::new(IndexedReady {

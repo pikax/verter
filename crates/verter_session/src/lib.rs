@@ -333,7 +333,7 @@ pub use resolver_store::{
 // so the batch regression gate measures only its own host's overlay COWs.
 
 // Re-export for the LSP: standalone @verter/types .d.ts content.
-pub use verter_compiler::utils::oxc::vue::resolve_type::ResolvedMemberVisibility;
+pub use verter_compiler::utils::oxc::script::type_surface::ResolvedMemberVisibility;
 pub use verter_compiler::VERTER_TYPES_STANDALONE_DTS;
 
 // Re-export CompileTarget so downstream crates (LSP, MCP, FFI) can use it

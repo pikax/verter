@@ -4223,10 +4223,13 @@ fn type_import_reexport_prefers_declaration_companion_over_runtime_js() {
         .expect("external type resolution should produce a result");
 
     assert!(
-        resolved.emits.iter().any(|emit| emit.name == "openChange"),
+        resolved
+            .call_signatures
+            .iter()
+            .any(|emit| emit.name == "openChange"),
         "emit entries should resolve from the declaration companion: {:?}",
         resolved
-            .emits
+            .call_signatures
             .iter()
             .map(|emit| emit.name.clone())
             .collect::<Vec<_>>()

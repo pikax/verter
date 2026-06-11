@@ -1435,11 +1435,12 @@ withDefaults(defineProps<{
 fn make_external_types(
     type_name: &str,
     dep_source: &str,
-) -> rustc_hash::FxHashMap<String, crate::utils::oxc::vue::ResolvedElements> {
+) -> rustc_hash::FxHashMap<String, crate::utils::oxc::script::type_surface::ResolvedElements> {
     let alloc = oxc_allocator::Allocator::default();
-    let resolved =
-        crate::utils::oxc::vue::resolve_type::resolve_external_type(type_name, dep_source, &alloc)
-            .expect("failed to resolve external type");
+    let resolved = crate::utils::oxc::script::type_surface::resolve_external_type(
+        type_name, dep_source, &alloc,
+    )
+    .expect("failed to resolve external type");
     let mut map = rustc_hash::FxHashMap::default();
     map.insert(type_name.to_string(), resolved);
     map

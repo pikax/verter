@@ -56,7 +56,7 @@ fn resolve_type(
     owner: &str,
     import_source: &str,
     type_name: &str,
-) -> Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements> {
+) -> Option<verter_compiler::utils::oxc::script::type_surface::ResolvedElements> {
     let mut tracked = BTreeSet::new();
     let mut resolution = BTreeSet::new();
     let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();

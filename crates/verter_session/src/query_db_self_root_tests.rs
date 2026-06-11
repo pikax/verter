@@ -4200,7 +4200,7 @@ fn route_owned_entry_with_whole_hash(
 ) -> crate::project_type_store::RouteOwnedShallowEntry {
     use rustc_hash::{FxHashMap, FxHashSet};
     let analysis = Arc::new(
-        verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default(),
+        verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(),
     );
     crate::project_type_store::RouteOwnedShallowEntry {
         whole_hash,

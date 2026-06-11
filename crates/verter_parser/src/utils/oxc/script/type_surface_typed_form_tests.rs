@@ -1,7 +1,7 @@
 //! Discriminating regression tests for the typed-form sidecar contract.
 //!
 //! These tests pin the contract that every `ResolvedProp` and
-//! `ResolvedEmit` whose annotation is observable via OXC has a populated
+//! `ResolvedNamedCallSignature` whose annotation is observable via OXC has a populated
 //! `type_expr` (the lowered annotation) AND a paired `type_expr_scope`
 //! (the canonical_id of the file whose parse produced the typed
 //! expression). A regression that drops `type_expr` population (so it
@@ -23,9 +23,9 @@ use oxc_parser::Parser;
 use oxc_span::SourceType;
 use verter_type_expr::{LiteralValue, TypeExpr, TypeExprScope};
 
-use super::resolve_type::{
+use super::type_surface::{
     build_type_context, resolve_external_type_with_canonical, resolve_type_elements_with_ctx_ref,
-    ResolvedElements, ResolvedEmitSignature,
+    ResolvedCallPayloadForm, ResolvedElements,
 };
 
 /// Parse an SFC-script-style fragment, build a `TypeResolutionContext`
@@ -326,10 +326,10 @@ fn emit_tuple_payload_lowers_with_paired_scope() {
     let owner = "/virtual/emit-tuple.vue";
     let resolved = resolve_local_typed(source, owner);
 
-    assert_eq!(resolved.emits.len(), 1);
-    let change = &resolved.emits[0];
+    assert_eq!(resolved.call_signatures.len(), 1);
+    let change = &resolved.call_signatures[0];
     assert_eq!(change.name, "change");
-    matches!(change.signature, ResolvedEmitSignature::Tuple { .. });
+    matches!(change.signature, ResolvedCallPayloadForm::Tuple { .. });
 
     let type_expr = change
         .type_expr

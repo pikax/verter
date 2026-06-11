@@ -3,7 +3,7 @@
 //! Maps a semantic [`TypeExpr`] to the set of Vue runtime prop constructor
 //! kinds ([`RuntimeCtorKind`]) — the typed-IR analogue of the parser's
 //! OXC-AST walker `infer_runtime_type`
-//! (`verter_parser::utils::oxc::vue::script::resolve_type::infer`). It drives
+//! (`verter_parser::utils::oxc::script::type_surface::infer`). It drives
 //! the runtime `{ type: ... }` value of a `defineProps<T>()`-derived prop
 //! declaration on the VDOM/runtime codegen path.
 //!

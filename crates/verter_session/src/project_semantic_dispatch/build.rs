@@ -5600,7 +5600,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// Hot-path reads go through
     /// [`SemanticGraphStore::get_resolved_named_type`](crate::semantic_query_memo::SemanticGraphStore::get_resolved_named_type)
     /// directly from the parser's
-    /// [`NamedTypeCache`](verter_compiler::utils::oxc::vue::resolve_type::cache_keys::NamedTypeCache)
+    /// [`NamedTypeCache`](verter_compiler::utils::oxc::vue::named_type_keys::NamedTypeCache)
     /// adapter — the formal `execute` path stays available as an entry
     /// point for callers that want to check presence through the shared
     /// query API but must not be relied on in the refcount-only hot

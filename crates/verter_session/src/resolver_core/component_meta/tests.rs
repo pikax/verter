@@ -1,8 +1,9 @@
 use super::*;
 use crate::resolver_core::declaration_metadata::ResolvedExportTarget;
 use std::collections::BTreeMap;
-use verter_compiler::utils::oxc::vue::resolve_type::{
-    ResolvedEmit, ResolvedEmitSignature, ResolvedMemberVisibility, ResolvedProp, RuntimeType,
+use verter_compiler::utils::oxc::script::type_surface::{
+    ResolvedCallPayloadForm, ResolvedMemberVisibility, ResolvedNamedCallSignature, ResolvedProp,
+    RuntimeType,
 };
 use verter_semantic::analysis::type_eval::DeclarationId;
 use verter_semantic::analysis::types::{
@@ -292,11 +293,11 @@ impl ComponentMetaResolverHost for CombinedSurfaceTestHost {
                     type_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
                     declared_in_macro_type_arg: false,
                 }],
-                emits: vec![ResolvedEmit {
+                call_signatures: vec![ResolvedNamedCallSignature {
                     span: Span::new(0, 24),
                     name: "save".to_string(),
                     name_span: None,
-                    signature: ResolvedEmitSignature::Tuple {
+                    signature: ResolvedCallPayloadForm::Tuple {
                         tuple_text: "[value: string]".to_string(),
                     },
                     map_local: false,

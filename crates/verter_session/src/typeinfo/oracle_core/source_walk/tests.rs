@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use verter_compiler::utils::oxc::vue::raw_surface::SymbolSpace;
+use verter_compiler::utils::oxc::script::raw_surface::SymbolSpace;
 
 use crate::resolver_core::{CanonicalCompletionOverlay, HostResolverContext};
 use crate::types::{HostConfig, UpsertRequest};

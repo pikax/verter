@@ -1452,7 +1452,7 @@ pub struct SurfaceMember {
     /// Whether this member was explicitly declared in the macro's type
     /// argument's own body (vs reached via heritage / Omit / intersection
     /// from an external source). See
-    /// [`verter_compiler::utils::oxc::vue::resolve_type::ResolvedProp::declared_in_macro_type_arg`]
+    /// [`verter_compiler::utils::oxc::script::type_surface::ResolvedProp::declared_in_macro_type_arg`]
     /// for the structural definition. Propagated through the prepared-surface
     /// walker and `surface_member_to_expanded_field`.
     pub declared_in_macro_type_arg: bool,
@@ -3558,7 +3558,7 @@ pub enum SemanticQueryKey {
     /// directly so the parser's named-type cache stays refcount-only. The
     /// formal [`SemanticQueryApi::execute`] entry point returns
     /// [`QueryError::Miss`] when the key has not been written (writes come
-    /// from the [`NamedTypeCache`](verter_compiler::utils::oxc::vue::resolve_type::cache_keys::NamedTypeCache)
+    /// from the [`NamedTypeCache`](verter_compiler::utils::oxc::vue::named_type_keys::NamedTypeCache)
     /// adapter side, not from `execute`).
     ///
     /// Wrapping the key in `Arc` keeps equality / hashing cheap because the
@@ -4359,7 +4359,7 @@ pub enum SemanticNodeData {
     },
     /// Pragmatic carrier for Vue macro resolution artifacts (spans, text,
     /// prop/emit metadata) produced by the parser's cross-file type resolver
-    /// via the [`NamedTypeCache`](verter_compiler::utils::oxc::vue::resolve_type::cache_keys::NamedTypeCache)
+    /// via the [`NamedTypeCache`](verter_compiler::utils::oxc::vue::named_type_keys::NamedTypeCache)
     /// trait.
     ///
     /// This variant is an **interim** shape: Vue codegen consumers (props /
@@ -4371,7 +4371,7 @@ pub enum SemanticNodeData {
     /// whole-hash-scoped (see
     /// [`HostResolvedNamedTypeKey`]), so reads are self-validating within
     /// one project generation.
-    VueMacroElements(Arc<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>),
+    VueMacroElements(Arc<verter_compiler::utils::oxc::script::type_surface::ResolvedElements>),
     // §5.6 Function shape.
     ///
     /// Classes / interfaces lower to `SemanticNodeData::Object` with heritage
@@ -4851,8 +4851,7 @@ pub struct HostResolvedNamedTypeKey {
     pub lib_env_hash: HashValue,
     /// `project_identity` (`J`).
     pub project_identity: u32,
-    pub inner:
-        verter_compiler::utils::oxc::vue::resolve_type::cache_keys::ResolvedNamedTypeCacheKey,
+    pub inner: verter_compiler::utils::oxc::vue::named_type_keys::ResolvedNamedTypeCacheKey,
 }
 
 // ──────────────────────────────────────────────────────────────────────────

@@ -189,7 +189,7 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             // Codebase" (no separate heading).
             "no_new_from_eager_meta_production_site",
             "no_new_duplicate_read_surface_members_definition",
-            "no_new_resolve_type_engine_path_production_file",
+            "no_new_type_surface_engine_path_production_file",
             "no_new_resolved_elements_production_file",
             "no_new_prepared_surface_projection_production_file",
         ],

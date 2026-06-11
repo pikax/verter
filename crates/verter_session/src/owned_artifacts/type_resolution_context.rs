@@ -1,5 +1,5 @@
 //! `OwnedTypeResolutionContext` — owned, `Send + Sync + 'static` mirror
-//! of `verter_parser::utils::oxc::vue::script::resolve_type::TypeResolutionContext`.
+//! of `verter_parser::utils::oxc::script::type_surface::TypeResolutionContext`.
 //!
 //! ## Tier 1A authority (D18 + D45 + D65)
 //!
@@ -348,7 +348,7 @@ impl SpanArena {
 // ─────────────────────────────────────────────────────────────────────
 
 /// Owned, `Send + Sync + 'static` mirror of
-/// `verter_parser::utils::oxc::vue::script::resolve_type::TypeResolutionContext`
+/// `verter_parser::utils::oxc::script::type_surface::TypeResolutionContext`
 /// minus borrowed AST pointers (D18 + D45 + D65). Stored in the
 /// `TypeResolutionContextDb` (introduced empty in 1A; populated in
 /// 1C-α).

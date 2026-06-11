@@ -62,8 +62,10 @@ fn fixture(name: &str) -> String {
 }
 
 fn empty_external(
-) -> Arc<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource> {
-    Arc::new(verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default())
+) -> Arc<verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource> {
+    Arc::new(
+        verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(),
+    )
 }
 
 fn build_indexed_with_source(raw: &str, whole_hash: [u8; 16]) -> Arc<IndexedReady> {

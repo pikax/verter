@@ -11,11 +11,12 @@ use rustc_hash::FxHashMap;
 fn make_external_types(
     type_name: &str,
     dep_source: &str,
-) -> FxHashMap<String, crate::utils::oxc::vue::ResolvedElements> {
+) -> FxHashMap<String, crate::utils::oxc::script::type_surface::ResolvedElements> {
     let alloc = Allocator::default();
-    let resolved =
-        crate::utils::oxc::vue::resolve_type::resolve_external_type(type_name, dep_source, &alloc)
-            .expect("failed to resolve external type");
+    let resolved = crate::utils::oxc::script::type_surface::resolve_external_type(
+        type_name, dep_source, &alloc,
+    )
+    .expect("failed to resolve external type");
     let mut map = FxHashMap::default();
     map.insert(type_name.to_string(), resolved);
     map

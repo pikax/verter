@@ -15,7 +15,7 @@ use super::*;
 // imported here at the consumer rather than left as an unused parent import in
 // the non-test (`oracle-gen`) build.
 use crate::typeinfo::oracle_core::normalize::ProjectionModeKind;
-use verter_compiler::utils::oxc::vue::raw_surface::{
+use verter_compiler::utils::oxc::script::raw_surface::{
     OverloadSignature, RawDeclKind, TypeParamModifiers, UniqueSymbolOp,
 };
 

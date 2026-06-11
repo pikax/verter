@@ -1503,11 +1503,11 @@ export interface Emits extends BaseEmits {
 "#;
     let mut companion_types = rustc_hash::FxHashMap::default();
     let mut base = ResolvedElements::default();
-    base.emits.push(ResolvedEmit {
+    base.call_signatures.push(ResolvedNamedCallSignature {
         span: Span::new(0, 0),
         name: "submit".to_string(),
         name_span: None,
-        signature: ResolvedEmitSignature::Call {
+        signature: ResolvedCallPayloadForm::Call {
             params_text: "payload: string".to_string(),
         },
         map_local: false,
@@ -1520,12 +1520,18 @@ export interface Emits extends BaseEmits {
     let resolved =
         resolve_external_type_with_companion("Emits", dep, &companion_types, &alloc).unwrap();
     assert_eq!(
-        resolved.emits.len(),
+        resolved.call_signatures.len(),
         2,
         "Emits should include imported and local emits entries"
     );
-    assert!(resolved.emits.iter().any(|emit| emit.name == "submit"));
-    assert!(resolved.emits.iter().any(|emit| emit.name == "confirm"));
+    assert!(resolved
+        .call_signatures
+        .iter()
+        .any(|emit| emit.name == "submit"));
+    assert!(resolved
+        .call_signatures
+        .iter()
+        .any(|emit| emit.name == "confirm"));
 }
 
 #[test]
@@ -1545,8 +1551,12 @@ export interface AccordionRootEmits {
     )
     .expect("interface emits shape should resolve");
 
-    assert_eq!(resolved.emits.len(), 1, "expected one resolved emit");
-    assert_eq!(resolved.emits[0].name, "openChange");
+    assert_eq!(
+        resolved.call_signatures.len(),
+        1,
+        "expected one resolved emit"
+    );
+    assert_eq!(resolved.call_signatures[0].name, "openChange");
 }
 
 /// @ai-generated - extract_companion_types handles interface extends
@@ -2797,14 +2807,23 @@ type Test = Omit<BaseEmits, 'entryFocus'>
         "No unresolved diagnostics: {diagnostics:?}"
     );
     assert_eq!(
-        resolved.emits.len(),
+        resolved.call_signatures.len(),
         2,
         "Should have 2 emits after omitting entryFocus"
     );
-    assert!(resolved.emits.iter().any(|e| e.name == "escapeKeyDown"));
-    assert!(resolved.emits.iter().any(|e| e.name == "closeAutoFocus"));
+    assert!(resolved
+        .call_signatures
+        .iter()
+        .any(|e| e.name == "escapeKeyDown"));
+    assert!(resolved
+        .call_signatures
+        .iter()
+        .any(|e| e.name == "closeAutoFocus"));
     assert!(
-        !resolved.emits.iter().any(|e| e.name == "entryFocus"),
+        !resolved
+            .call_signatures
+            .iter()
+            .any(|e| e.name == "entryFocus"),
         "entryFocus must be omitted"
     );
 }
@@ -2823,11 +2842,23 @@ type Test = Omit<BaseEmits, 'entryFocus' | 'openAutoFocus'>
 "#;
     let (resolved, diagnostics) = resolve_with_ctx(source);
     assert!(diagnostics.is_empty(), "No diagnostics: {diagnostics:?}");
-    assert_eq!(resolved.emits.len(), 2);
-    assert!(resolved.emits.iter().any(|e| e.name == "escapeKeyDown"));
-    assert!(resolved.emits.iter().any(|e| e.name == "closeAutoFocus"));
-    assert!(!resolved.emits.iter().any(|e| e.name == "entryFocus"));
-    assert!(!resolved.emits.iter().any(|e| e.name == "openAutoFocus"));
+    assert_eq!(resolved.call_signatures.len(), 2);
+    assert!(resolved
+        .call_signatures
+        .iter()
+        .any(|e| e.name == "escapeKeyDown"));
+    assert!(resolved
+        .call_signatures
+        .iter()
+        .any(|e| e.name == "closeAutoFocus"));
+    assert!(!resolved
+        .call_signatures
+        .iter()
+        .any(|e| e.name == "entryFocus"));
+    assert!(!resolved
+        .call_signatures
+        .iter()
+        .any(|e| e.name == "openAutoFocus"));
 }
 
 #[test]
@@ -2865,8 +2896,8 @@ type Test = Pick<BaseEmits, 'escapeKeyDown'>
 "#;
     let (resolved, diagnostics) = resolve_with_ctx(source);
     assert!(diagnostics.is_empty(), "No diagnostics: {diagnostics:?}");
-    assert_eq!(resolved.emits.len(), 1);
-    assert_eq!(resolved.emits[0].name, "escapeKeyDown");
+    assert_eq!(resolved.call_signatures.len(), 1);
+    assert_eq!(resolved.call_signatures[0].name, "escapeKeyDown");
 }
 
 #[test]
@@ -2918,28 +2949,44 @@ type Test = DropdownMenuContentEmits
     // Should have: escapeKeyDown, pointerDownOutside, closeAutoFocus
     // Should NOT have: entryFocus, openAutoFocus, update:currentTabStopId
     assert_eq!(
-        resolved.emits.len(),
+        resolved.call_signatures.len(),
         3,
         "emits: {:?}",
-        resolved.emits.iter().map(|e| &e.name).collect::<Vec<_>>()
+        resolved
+            .call_signatures
+            .iter()
+            .map(|e| &e.name)
+            .collect::<Vec<_>>()
     );
-    assert!(resolved.emits.iter().any(|e| e.name == "escapeKeyDown"));
     assert!(resolved
-        .emits
+        .call_signatures
+        .iter()
+        .any(|e| e.name == "escapeKeyDown"));
+    assert!(resolved
+        .call_signatures
         .iter()
         .any(|e| e.name == "pointerDownOutside"));
-    assert!(resolved.emits.iter().any(|e| e.name == "closeAutoFocus"));
+    assert!(resolved
+        .call_signatures
+        .iter()
+        .any(|e| e.name == "closeAutoFocus"));
     assert!(
-        !resolved.emits.iter().any(|e| e.name == "entryFocus"),
+        !resolved
+            .call_signatures
+            .iter()
+            .any(|e| e.name == "entryFocus"),
         "entryFocus must be omitted"
     );
     assert!(
-        !resolved.emits.iter().any(|e| e.name == "openAutoFocus"),
+        !resolved
+            .call_signatures
+            .iter()
+            .any(|e| e.name == "openAutoFocus"),
         "openAutoFocus must be omitted"
     );
     assert!(
         !resolved
-            .emits
+            .call_signatures
             .iter()
             .any(|e| e.name == "update:currentTabStopId"),
         "update:currentTabStopId must be omitted"
@@ -2958,9 +3005,12 @@ type BaseEmits = {
 export type Emits = Omit<BaseEmits, 'entryFocus'>
 "#;
     let resolved = resolve_external_type("Emits", dep, &alloc).unwrap();
-    assert_eq!(resolved.emits.len(), 1);
-    assert_eq!(resolved.emits[0].name, "escapeKeyDown");
-    assert!(!resolved.emits.iter().any(|e| e.name == "entryFocus"));
+    assert_eq!(resolved.call_signatures.len(), 1);
+    assert_eq!(resolved.call_signatures[0].name, "escapeKeyDown");
+    assert!(!resolved
+        .call_signatures
+        .iter()
+        .any(|e| e.name == "entryFocus"));
 }
 
 #[test]
@@ -3855,11 +3905,11 @@ fn companion_extends_omit_preserves_inherited_emits() {
         "closeAutoFocus",
         "entryFocus",
     ] {
-        base_emits.emits.push(ResolvedEmit {
+        base_emits.call_signatures.push(ResolvedNamedCallSignature {
             span: Span::new(0, 0),
             name: name.to_string(),
             name_span: None,
-            signature: ResolvedEmitSignature::Call {
+            signature: ResolvedCallPayloadForm::Call {
                 params_text: "event: Event".to_string(),
             },
             map_local: false,
@@ -3888,7 +3938,11 @@ export interface ContextMenuContentEmits extends MenuContentEmits {}
     )
     .expect("should resolve ContextMenuContentEmits");
 
-    let emit_names: Vec<&str> = resolved.emits.iter().map(|e| e.name.as_str()).collect();
+    let emit_names: Vec<&str> = resolved
+        .call_signatures
+        .iter()
+        .map(|e| e.name.as_str())
+        .collect();
 
     // Assert+: inherited events surviving Omit
     assert!(
@@ -3924,7 +3978,7 @@ export interface ContextMenuContentEmits extends MenuContentEmits {}
 
     // Assert: exactly 5 events
     assert_eq!(
-        resolved.emits.len(),
+        resolved.call_signatures.len(),
         5,
         "should have exactly 5 events after Omit, got: {emit_names:?}"
     );
@@ -4124,7 +4178,7 @@ fn parser_syntactic_depth_limit_records_structured_failure_shape() {
 #[test]
 fn resolved_elements_supports_deep_partial_eq() {
     // Prerequisite for the `parser_cache_audit` feature: `PartialEq`
-    // on `ResolvedElements`, `ResolvedProp`, and `ResolvedEmit` must
+    // on `ResolvedElements`, `ResolvedProp`, and `ResolvedNamedCallSignature` must
     // be structural so cache-hit / recomputed-slow-path equality can
     // be asserted.
     let (resolved_a, _) =
@@ -4418,7 +4472,7 @@ fn declared_in_macro_type_arg_companion_at_heritage_descent_flips_to_false() {
 }
 
 /// Discriminating producer-side test for the `extract_companion_types`
-/// behavior at `resolve_type/mod.rs`: the producer resolves every
+/// behavior at `type_surface/mod.rs`: the producer resolves every
 /// companion type with `from_root_body = true` so own-body literal
 /// members are emitted with `declared_in_macro_type_arg = true`
 /// directly out of the producer, while the heritage-descent boundary

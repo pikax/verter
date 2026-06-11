@@ -5655,7 +5655,8 @@ fn route_owned_edge_gate_stales_wildcard_entry_after_dependency_set_change() {
     // ONLY whether the shallow surface carries a wildcard reexport.
     let build_entry = |wildcard: bool| {
         let analysis = Arc::new(
-            verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default(),
+            verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(
+            ),
         );
         let wildcard_reexports = if wildcard {
             vec![WildcardReexport {
@@ -5834,7 +5835,8 @@ fn edge_currency_oracle_stales_wildcard_surface_after_generation_advance() {
 
     let make_surface = |wildcard: bool| {
         let analysis = Arc::new(
-            verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default(),
+            verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(
+            ),
         );
         ShallowFileState {
             whole_hash: [7u8; 16],

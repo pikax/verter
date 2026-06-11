@@ -133,13 +133,13 @@ impl crate::resolver_core::DeclarationMetadataResolver for HostComponentMetaReso
         let analysis = self.ctx.external_type_analysis(canonical_source)?;
         let symbol = analysis.local_type_symbol(resolved_name)?;
         let kind = match symbol.kind {
-            verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSymbolKind::TypeAlias => {
+            verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSymbolKind::TypeAlias => {
                 crate::resolver_core::ResolvedDeclarationKind::TypeAlias
             }
-            verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSymbolKind::Interface => {
+            verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSymbolKind::Interface => {
                 crate::resolver_core::ResolvedDeclarationKind::Interface
             }
-            verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSymbolKind::Class => {
+            verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSymbolKind::Class => {
                 crate::resolver_core::ResolvedDeclarationKind::Class
             }
         };
@@ -420,7 +420,7 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
         resolution_deps: &mut std::collections::BTreeSet<String>,
         cache: &mut crate::resolver_core::ExternalTypeBodyCache,
         visiting: &mut rustc_hash::FxHashSet<(String, String)>,
-    ) -> Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements> {
+    ) -> Option<verter_compiler::utils::oxc::script::type_surface::ResolvedElements> {
         let _ = visiting;
         // Route through the view-aware variant so the resolved-type cache
         // slot, dep-source reads, and the route-frontier closure observe

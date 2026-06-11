@@ -465,9 +465,7 @@ impl VerterHost {
         let env = self.host_view_env_hashes_for(canonical_id);
         let project_identity = self.host_view_project_identity_for(canonical_id).fold_u32();
         let adapter: std::sync::Arc<
-            dyn verter_compiler::utils::oxc::vue::resolve_type::cache_keys::NamedTypeCache
-                + Send
-                + Sync,
+            dyn verter_compiler::utils::oxc::vue::named_type_keys::NamedTypeCache + Send + Sync,
         > = std::sync::Arc::new(HostNamedTypeCacheAdapter {
             graph,
             canonical_id: Arc::<str>::from(canonical_id),
@@ -482,7 +480,7 @@ impl VerterHost {
             Rc::clone(&parsed_eval_program.program),
             |parsed_program| {
                 let program = parsed_program.borrow_dependent();
-                let mut ctx = verter_compiler::utils::oxc::vue::resolve_type::build_type_context(
+                let mut ctx = verter_compiler::utils::oxc::script::type_surface::build_type_context(
                     program,
                     parsed_program.source_bytes(),
                     0,
@@ -668,7 +666,7 @@ impl VerterHost {
         raw_source: &str,
         cached_parse: Option<&verter_compiler::parser::types::ParsedSfc>,
         eval_source: &Arc<str>,
-    ) -> Arc<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource> {
+    ) -> Arc<verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource> {
         let parsed_eval_program = self.cached_parsed_eval_program_entry(
             canonical_id,
             whole_hash,
@@ -677,14 +675,16 @@ impl VerterHost {
         );
         if parsed_eval_program.parse_failed {
             return Arc::new(
-                verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default(
+                verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(
                 ),
             );
         }
 
         let program = parsed_eval_program.program.borrow_dependent();
         let mut analyzed =
-            verter_compiler::utils::oxc::vue::resolve_type::analyze_external_type_program(program);
+            verter_compiler::utils::oxc::script::type_surface::analyze_external_type_program(
+                program,
+            );
         // Oracle harness: stamp the owning canonical onto the
         // parse-time `RawSourceSurface` records so the `(canonical, name,
         // symbol_space)` contributor identity is complete on the artifact.
@@ -701,7 +701,7 @@ impl VerterHost {
         eval_source: &Arc<str>,
     ) -> (
         Arc<verter_semantic::analysis::type_eval::EvalEnv>,
-        Arc<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource>,
+        Arc<verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource>,
     ) {
         let parsed_eval_program = self.cached_parsed_eval_program_entry(
             canonical_id,
@@ -717,7 +717,7 @@ impl VerterHost {
             return (
                 Arc::new(env),
                 Arc::new(
-                    verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default(
+                    verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(
                     ),
                 ),
             );
@@ -732,7 +732,7 @@ impl VerterHost {
         (
             Arc::new(env),
             Arc::new(
-                verter_compiler::utils::oxc::vue::resolve_type::analyze_external_type_program(
+                verter_compiler::utils::oxc::script::type_surface::analyze_external_type_program(
                     program,
                 ),
             ),

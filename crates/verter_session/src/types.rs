@@ -2184,7 +2184,7 @@ pub(crate) struct ResolvedTypeCacheKey {
 /// A resolved external type entry in the host-level cache.
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedTypeCacheEntry {
-    pub resolved: Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>,
+    pub resolved: Option<verter_compiler::utils::oxc::script::type_surface::ResolvedElements>,
     /// Canonical IDs traversed during resolution. Replayed into the caller's
     /// `tracked_deps` on cache hit so the eval path knows which sources to read.
     pub tracked_deps: Vec<String>,

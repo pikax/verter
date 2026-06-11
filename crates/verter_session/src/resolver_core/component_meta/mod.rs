@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use rustc_hash::FxHashSet;
-use verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements;
+use verter_compiler::utils::oxc::script::type_surface::ResolvedElements;
 use verter_semantic::analysis::component_meta::ResolvedTypeAnalysis;
 use verter_semantic::analysis::types::{
     AnalyzedImport, AnalyzedMacro, AnalyzedMacroKind, MacroTypeDep,

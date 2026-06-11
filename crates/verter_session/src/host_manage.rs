@@ -341,7 +341,7 @@ pub(in crate::host_manage) struct ParsedEvalProgramCacheEntry {
 // 1C-α migrates to the typed `OwnedTypeResolutionContext` cache.
 
 /// Thin adapter that implements
-/// [`verter_compiler::utils::oxc::vue::resolve_type::cache_keys::NamedTypeCache`]
+/// [`verter_compiler::utils::oxc::vue::named_type_keys::NamedTypeCache`]
 /// on top of the project-global
 /// [`SemanticGraphStore`](crate::semantic_query_memo::SemanticGraphStore)
 /// via [`HostResolvedNamedTypeKey`](crate::project_type_store::HostResolvedNamedTypeKey).
@@ -388,13 +388,13 @@ pub(in crate::host_manage) struct HostNamedTypeCacheAdapter {
     pub(in crate::host_manage) named_type_generation: u64,
 }
 
-impl verter_compiler::utils::oxc::vue::resolve_type::cache_keys::NamedTypeCache
+impl verter_compiler::utils::oxc::vue::named_type_keys::NamedTypeCache
     for HostNamedTypeCacheAdapter
 {
     fn get(
         &self,
-        key: &verter_compiler::utils::oxc::vue::resolve_type::cache_keys::ResolvedNamedTypeCacheKey,
-    ) -> Option<std::sync::Arc<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>>
+        key: &verter_compiler::utils::oxc::vue::named_type_keys::ResolvedNamedTypeCacheKey,
+    ) -> Option<std::sync::Arc<verter_compiler::utils::oxc::script::type_surface::ResolvedElements>>
     {
         // `canonical_id` is `Arc<str>` — clone is a refcount bump, no alloc.
         // `inner` still clones `Box<[u8]>` for `name` (cache-key shape
@@ -414,8 +414,8 @@ impl verter_compiler::utils::oxc::vue::resolve_type::cache_keys::NamedTypeCache
 
     fn insert(
         &self,
-        key: verter_compiler::utils::oxc::vue::resolve_type::cache_keys::ResolvedNamedTypeCacheKey,
-        value: std::sync::Arc<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>,
+        key: verter_compiler::utils::oxc::vue::named_type_keys::ResolvedNamedTypeCacheKey,
+        value: std::sync::Arc<verter_compiler::utils::oxc::script::type_surface::ResolvedElements>,
     ) {
         let host_key = crate::project_type_store::HostResolvedNamedTypeKey {
             canonical_id: Arc::clone(&self.canonical_id),
@@ -441,7 +441,7 @@ pub(crate) struct ExternalTypeResolutionInputs {
     pub(crate) whole_hash: Hash16,
     pub(crate) eval_source: Arc<str>,
     pub(crate) analysis:
-        Arc<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource>,
+        Arc<verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource>,
     pub(crate) analysis_cache_hit: bool,
 }
 

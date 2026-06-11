@@ -86,6 +86,8 @@ mod materialiser_observes_or_dies;
 mod mcp_audit_e2e;
 #[path = "g_misc0/mcp_audit_tls_propagation.rs"]
 mod mcp_audit_tls_propagation;
+#[path = "g_misc0/neutral_script_analysis_not_under_vue_path.rs"]
+mod neutral_script_analysis_not_under_vue_path;
 #[path = "g_misc0/no_accumulate_dispatch_dep_signature_outside_helpers.rs"]
 mod no_accumulate_dispatch_dep_signature_outside_helpers;
 #[path = "g_misc0/no_default_env_hashes_in_production.rs"]

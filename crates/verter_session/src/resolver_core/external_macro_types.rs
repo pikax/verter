@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use rustc_hash::FxHashMap;
-use verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements;
+use verter_compiler::utils::oxc::script::type_surface::ResolvedElements;
 use verter_semantic::analysis::{AnalyzedImport, MacroTypeDep};
 use verter_span::Span;
 
@@ -99,7 +99,7 @@ mod tests {
         collect_external_macro_types, ExternalMacroTypeCollectorHost, ExternalMacroTypeDiagnostic,
     };
     use std::collections::{BTreeMap, BTreeSet};
-    use verter_compiler::utils::oxc::vue::resolve_type::{ResolvedElements, RuntimeType};
+    use verter_compiler::utils::oxc::script::type_surface::{ResolvedElements, RuntimeType};
     use verter_semantic::analysis::{AnalyzedImport, MacroTypeDep};
     use verter_span::Span;
 
@@ -145,7 +145,7 @@ mod tests {
     fn empty_elements() -> ResolvedElements {
         ResolvedElements {
             props: Vec::new(),
-            emits: Vec::new(),
+            call_signatures: Vec::new(),
             has_call_signature: false,
             root_runtime_types: vec![RuntimeType::Object],
         }

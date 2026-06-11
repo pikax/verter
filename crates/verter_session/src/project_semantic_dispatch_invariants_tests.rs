@@ -2614,7 +2614,7 @@ fn indexed_access_open_skips_counter_retired() {
 /// `actual`, and termination without stack overflow.
 #[test]
 fn budget_exceeded_returns_structured_failure_not_applied_stub() {
-    use verter_parser::utils::oxc::vue::{
+    use verter_parser::utils::oxc::script::type_surface::{
         resolve_type_elements_with_ctx, take_last_resolution_budget_exceeded,
         PARSER_SYNTACTIC_DEPTH_LIMIT,
     };
@@ -2649,8 +2649,11 @@ fn budget_exceeded_returns_structured_failure_not_applied_stub() {
         _ => None,
     });
     let test_alias = stmt.expect("Test alias must parse");
-    let mut ctx =
-        verter_parser::utils::oxc::vue::build_type_context(&ret.program, source.as_bytes(), 0);
+    let mut ctx = verter_parser::utils::oxc::script::type_surface::build_type_context(
+        &ret.program,
+        source.as_bytes(),
+        0,
+    );
     let _resolved = resolve_type_elements_with_ctx(&test_alias.type_annotation, 0, &mut ctx, true);
 
     let record = take_last_resolution_budget_exceeded()
@@ -2907,9 +2910,9 @@ fn type_query_engine_removal_migrates_vue_macro_parsing_to_host_named_type_cache
     // The adapter implements the NamedTypeCache trait from verter_compiler's
     // resolve_type cache_keys module.
     assert!(
-        host_manage_src.contains(
-            "impl verter_compiler::utils::oxc::vue::resolve_type::cache_keys::NamedTypeCache"
-        ) || host_manage_src.contains("NamedTypeCache for HostNamedTypeCacheAdapter"),
+        host_manage_src
+            .contains("impl verter_compiler::utils::oxc::vue::named_type_keys::NamedTypeCache")
+            || host_manage_src.contains("NamedTypeCache for HostNamedTypeCacheAdapter"),
         "HostNamedTypeCacheAdapter must implement NamedTypeCache for parser integration"
     );
 }

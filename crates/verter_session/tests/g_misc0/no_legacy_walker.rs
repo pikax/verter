@@ -442,6 +442,14 @@ const RETIRED_SYMBOLS: &[&str] = &[
     // Re-introducing it would resurrect a consumer-local
     // second-resolution path beside the shared resolver.
     "select_imported_materialization_scope",
+    // "Emit" is Vue semantics, not a neutral script-surface concept.
+    // The neutral type-surface element types carry the neutral names
+    // `ResolvedNamedCallSignature` / `ResolvedCallPayloadForm`
+    // (`verter_parser::utils::oxc::script::type_surface`); the retired
+    // Vue-flavoured names must not reappear on the neutral surface or
+    // as aliases beside it.
+    "ResolvedEmit",
+    "ResolvedEmitSignature",
 ];
 
 /// File names whose presence at the head of the path should make us

@@ -104,8 +104,8 @@ pub(super) fn lower_call_signature_payload(
 
 use super::{
     get_type_reference_name, infer_runtime_type, resolve_type_elements_with_ctx_ref,
-    ResolvedElements, ResolvedEmit, ResolvedEmitSignature, ResolvedMemberVisibility, ResolvedProp,
-    RuntimeType, TypeResolutionContext,
+    ResolvedCallPayloadForm, ResolvedElements, ResolvedMemberVisibility,
+    ResolvedNamedCallSignature, ResolvedProp, RuntimeType, TypeResolutionContext,
 };
 
 /// Resolve members from a type literal's members array.
@@ -123,7 +123,7 @@ pub(super) fn resolve_type_literal_members(
                 // Check if this is a shorthand emit: { change: [id: number] }
                 // Properties with tuple/array type values are treated as emits
                 if let Some(emit) = resolve_property_as_emit(prop, base_offset, source) {
-                    result.emits.push(emit);
+                    result.call_signatures.push(emit);
                 } else if let Some(resolved) =
                     resolve_property_signature(prop, base_offset, source, from_root_body)
                 {
@@ -141,7 +141,7 @@ pub(super) fn resolve_type_literal_members(
                 result.has_call_signature = true;
                 // Extract emit from call signature: (e: 'change', id: number): void
                 if let Some(emit) = resolve_call_signature_as_emit(call_sig, base_offset, source) {
-                    result.emits.push(emit);
+                    result.call_signatures.push(emit);
                 }
             }
             _ => {}
@@ -318,7 +318,7 @@ pub(super) fn resolve_property_as_emit(
     prop: &TSPropertySignature,
     base_offset: u32,
     source: &[u8],
-) -> Option<ResolvedEmit> {
+) -> Option<ResolvedNamedCallSignature> {
     // Get the property key as the event name
     let name = get_property_key_name(&prop.key)?;
     let key_span = get_property_key_span(&prop.key, base_offset)?;
@@ -334,14 +334,14 @@ pub(super) fn resolve_property_as_emit(
                 ann.type_annotation.span().end,
             )?;
             let type_expr = lower_ts_type_from_bytes(&ann.type_annotation, source);
-            return Some(ResolvedEmit {
+            return Some(ResolvedNamedCallSignature {
                 span: Span {
                     start: prop.span.start + base_offset,
                     end: prop.span.end + base_offset,
                 },
                 name,
                 name_span: Some(key_span),
-                signature: ResolvedEmitSignature::Tuple { tuple_text },
+                signature: ResolvedCallPayloadForm::Tuple { tuple_text },
                 map_local: true,
                 span_is_absolute: base_offset != 0,
                 type_expr: Some(type_expr),
@@ -360,7 +360,7 @@ pub(super) fn resolve_call_signature_as_emit(
     call_sig: &TSCallSignatureDeclaration,
     base_offset: u32,
     source: &[u8],
-) -> Option<ResolvedEmit> {
+) -> Option<ResolvedNamedCallSignature> {
     // Get the first parameter - should be like `e: 'eventName'`
     let first_param = call_sig.params.items.first()?;
 
@@ -392,7 +392,7 @@ pub(super) fn resolve_call_signature_as_emit(
             // payload). The first param (e: 'eventName') is the event-name
             // selector; consumers reading `type_expr` want the payload shape.
             let type_expr = lower_call_signature_payload(call_sig, source);
-            return Some(ResolvedEmit {
+            return Some(ResolvedNamedCallSignature {
                 span: Span {
                     start: call_sig.span.start + base_offset,
                     end: call_sig.span.end + base_offset,
@@ -402,7 +402,7 @@ pub(super) fn resolve_call_signature_as_emit(
                     start: s.span.start + base_offset,
                     end: s.span.end + base_offset,
                 }),
-                signature: ResolvedEmitSignature::Call { params_text },
+                signature: ResolvedCallPayloadForm::Call { params_text },
                 map_local: true,
                 span_is_absolute: base_offset != 0,
                 type_expr: Some(type_expr),

@@ -135,7 +135,7 @@ fn intern_dedups_structural_values_across_contexts() {
 /// exemption in `push_impl` short-circuits the dedup index.
 #[test]
 fn intern_does_not_dedup_vue_macro_elements_identity_carrier() {
-    use verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements;
+    use verter_compiler::utils::oxc::script::type_surface::ResolvedElements;
     let store = SemanticGraphStore::new();
     let payload = Arc::new(ResolvedElements::default());
     let a = store.intern_node(SemanticNodeData::VueMacroElements(Arc::clone(&payload)));
@@ -3464,8 +3464,8 @@ fn cross_thread_joiner_waits_on_winner_publish() {
 // ──────────────────────────────────────────────────────────────────
 
 use crate::semantic_query::HostResolvedNamedTypeKey;
-use verter_compiler::utils::oxc::vue::resolve_type::cache_keys::ResolvedNamedTypeCacheKey;
-use verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements;
+use verter_compiler::utils::oxc::script::type_surface::ResolvedElements;
+use verter_compiler::utils::oxc::vue::named_type_keys::ResolvedNamedTypeCacheKey;
 
 fn make_key(canonical: &str, whole_hash: [u8; 16], name: &str) -> HostResolvedNamedTypeKey {
     HostResolvedNamedTypeKey {
@@ -4736,7 +4736,7 @@ fn panic_in_cold_build_does_not_leak_in_flight_stats_counter() {
 #[test]
 fn resolved_named_type_refcount_path_unchanged_after_family_rewrite() {
     let host = ctx_host();
-    use verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements;
+    use verter_compiler::utils::oxc::script::type_surface::ResolvedElements;
 
     let store = SemanticGraphStore::new();
     let key = make_key("/w/named.ts", [9u8; 16], "Foo");
@@ -4886,7 +4886,7 @@ fn node_scope_returns_origin_not_reader_scope() {
 /// `Some(Global)`.
 #[test]
 fn vue_macro_elements_nodes_do_not_populate_node_scope_sidecar() {
-    use verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements;
+    use verter_compiler::utils::oxc::script::type_surface::ResolvedElements;
 
     let store = SemanticGraphStore::new();
     let payload = Arc::new(ResolvedElements::default());
@@ -8645,8 +8645,8 @@ mod env_scoped_key_identity_guards {
     fn resolved_named_type_key_identity_is_env_scoped() {
         use super::super::SemanticGraphStore;
         use crate::semantic_query::HostResolvedNamedTypeKey;
-        use verter_compiler::utils::oxc::vue::resolve_type::cache_keys::ResolvedNamedTypeCacheKey;
-        use verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements;
+        use verter_compiler::utils::oxc::script::type_surface::ResolvedElements;
+        use verter_compiler::utils::oxc::vue::named_type_keys::ResolvedNamedTypeCacheKey;
 
         let inner = |name: &str| ResolvedNamedTypeCacheKey {
             name: name.as_bytes().to_vec().into_boxed_slice(),

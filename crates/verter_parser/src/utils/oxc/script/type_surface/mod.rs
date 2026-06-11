@@ -1,17 +1,27 @@
-//! Cross-file type resolution for Vue compiler macros.
+//! Framework-neutral local type-surface capture over OXC script ASTs.
 //!
-//! Resolves TypeScript type annotations used as type parameters in Vue macros
-//! (`defineProps<T>()`, `defineEmits<T>()`, `defineSlots<T>()`) into structured
-//! [`ResolvedElements`] that drive runtime props/emits code generation.
+//! Lowers TypeScript type annotations that appear in a single script program
+//! into structured, owned [`ResolvedElements`] surfaces: object members,
+//! named call signatures, heritage closures, and runtime-type inference.
+//! This is local OXC-to-owned script surface capture — NO host-backed query
+//! resolution and NO cross-file semantic engine. Query-time type resolution
+//! is owned exclusively by the shared typed-IR dispatch in `verter_session`;
+//! this module only captures what the current program's source declares.
 //!
-//! When `T` is defined inline (e.g. `defineProps<{ title: string }>()`), resolution
-//! stays local. When `T` extends or references types from other files, the host
-//! must pre-resolve those external types and pass them in via
-//! [`VerterCompileOptions::external_types`](crate::VerterCompileOptions). The
-//! resolved data is merged into [`TypeResolutionContext::companion_types`] so that
-//! lookups for imported type names can fall back to pre-resolved definitions.
+//! When a referenced type lives in another file, the HOST pre-resolves it and
+//! passes the result in via
+//! [`VerterCompileOptions::external_types`](crate::VerterCompileOptions); the
+//! pre-resolved data is merged into [`TypeResolutionContext::companion_types`]
+//! so lookups for imported type names fall back to those owned surfaces —
+//! the module itself never loads or walks other files.
 //!
-//! Based on Vue's `resolveType.ts` implementation.
+//! One deliberate Vue-owned dependency: the named-type memo seam
+//! (`TypeResolutionContext::named_type_cache`) is typed by the
+//! `NamedTypeCache` trait and cache-key identities owned by
+//! `crate::utils::oxc::vue::script::named_type_keys` — that cache identity
+//! backs the host's Vue resolved-named-type identity and is Vue semantics,
+//! not part of this neutral surface capture (decision row D-l in
+//! `docs/arch/multi-framework-adapters-plan.md`).
 
 #![allow(dead_code)]
 
@@ -58,90 +68,6 @@ fn component_meta_core_trace_event(name: &'static str, detail: impl AsRef<str>) 
         .open(path)
     {
         let _ = writeln!(file, "core_event name={} {}", name, detail.as_ref());
-    }
-}
-
-/// Find the first TSType from a call expression's type parameters at the given span.
-///
-/// This walks the program AST to find a CallExpression whose span matches,
-/// then extracts the first type parameter.
-pub fn find_macro_type_param<'a>(
-    program: &'a Program<'a>,
-    macro_span: Span,
-) -> Option<&'a TSType<'a>> {
-    for stmt in &program.body {
-        if let Some(ts_type) = find_call_type_param_in_statement(stmt, macro_span) {
-            return Some(ts_type);
-        }
-    }
-    None
-}
-
-fn find_call_type_param_in_statement<'a>(
-    stmt: &'a Statement<'a>,
-    target: Span,
-) -> Option<&'a TSType<'a>> {
-    match stmt {
-        Statement::ExpressionStatement(expr_stmt) => {
-            find_call_type_param_in_expr(&expr_stmt.expression, target)
-        }
-        Statement::VariableDeclaration(var_decl) => {
-            for decl in &var_decl.declarations {
-                if let Some(init) = &decl.init {
-                    if let Some(ts_type) = find_call_type_param_in_expr(init, target) {
-                        return Some(ts_type);
-                    }
-                }
-            }
-            None
-        }
-        _ => None,
-    }
-}
-
-fn find_call_type_param_in_expr<'a>(
-    expr: &'a Expression<'a>,
-    target: Span,
-) -> Option<&'a TSType<'a>> {
-    match expr {
-        Expression::CallExpression(call) => {
-            // Check if this is our target call
-            if call.span.start == target.start && call.span.end == target.end {
-                if let Some(type_args) = &call.type_arguments {
-                    return type_args.params.first();
-                }
-            }
-            // Check nested calls in arguments
-            for arg in &call.arguments {
-                if let Argument::SpreadElement(spread) = arg {
-                    if let Some(ts_type) = find_call_type_param_in_expr(&spread.argument, target) {
-                        return Some(ts_type);
-                    }
-                } else if let Some(expr) = arg.as_expression() {
-                    if let Some(ts_type) = find_call_type_param_in_expr(expr, target) {
-                        return Some(ts_type);
-                    }
-                }
-            }
-            // Check callee if it's an expression
-            find_call_type_param_in_expr(&call.callee, target)
-        }
-        Expression::ParenthesizedExpression(paren) => {
-            find_call_type_param_in_expr(&paren.expression, target)
-        }
-        Expression::SequenceExpression(seq) => {
-            for expr in &seq.expressions {
-                if let Some(ts_type) = find_call_type_param_in_expr(expr, target) {
-                    return Some(ts_type);
-                }
-            }
-            None
-        }
-        Expression::ConditionalExpression(cond) => {
-            find_call_type_param_in_expr(&cond.consequent, target)
-                .or_else(|| find_call_type_param_in_expr(&cond.alternate, target))
-        }
-        _ => None,
     }
 }
 
@@ -288,7 +214,7 @@ pub struct ResolvedProp {
 /// Supports both call signature style `{ (e: 'change', id: number): void }`
 /// and shorthand style `{ change: [id: number] }`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ResolvedEmitSignature {
+pub enum ResolvedCallPayloadForm {
     /// Call signature payload params after the event name parameter.
     /// Empty string means the event carries no extra payload.
     Call { params_text: String },
@@ -297,7 +223,7 @@ pub enum ResolvedEmitSignature {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResolvedEmit {
+pub struct ResolvedNamedCallSignature {
     /// Span of the entire emit signature
     pub span: Span,
     /// The event name (extracted from first parameter literal or property key)
@@ -306,7 +232,7 @@ pub struct ResolvedEmit {
     pub name_span: Option<Span>,
     /// The resolved payload signature, preserved as text so consumers can
     /// inline exact handler / `$emit` types even for cross-file imports.
-    pub signature: ResolvedEmitSignature,
+    pub signature: ResolvedCallPayloadForm,
     /// Whether this span points into the current SFC source and can be used
     /// directly for local source maps.
     pub map_local: bool,
@@ -364,8 +290,10 @@ pub struct BlockedType {
 pub struct ResolvedElements {
     /// Resolved properties from the type
     pub props: Vec<ResolvedProp>,
-    /// Resolved emit events from call signatures or shorthand properties
-    pub emits: Vec<ResolvedEmit>,
+    /// Named call signatures: call-signature members (and function-typed
+    /// shorthand properties) whose first parameter is a string-literal
+    /// discriminant naming the signature.
+    pub call_signatures: Vec<ResolvedNamedCallSignature>,
     /// Whether this type has call signatures (is callable)
     pub has_call_signature: bool,
     /// Runtime type inferred from the root type annotation being resolved.
@@ -408,14 +336,14 @@ impl ResolvedElements {
                 prop.type_expr_scope = Some(scope.clone());
             }
         }
-        for emit in &mut self.emits {
+        for emit in &mut self.call_signatures {
             if emit.type_expr.is_some() && emit.type_expr_scope.is_none() {
                 emit.type_expr_scope = Some(scope.clone());
             }
         }
     }
 
-    /// Assert that every `ResolvedProp` and `ResolvedEmit` satisfies the typed
+    /// Assert that every `ResolvedProp` and `ResolvedNamedCallSignature` satisfies the typed
     /// form pairing invariant:
     /// - `type_expr.is_some() <=> type_expr_scope.is_some()`, and
     /// - `type_expr.is_some()` whenever `type_span.is_some() || type_text.is_some()`
@@ -445,10 +373,10 @@ impl ResolvedElements {
                 ));
             }
         }
-        for emit in &self.emits {
+        for emit in &self.call_signatures {
             if emit.type_expr.is_some() != emit.type_expr_scope.is_some() {
                 violators.push(format!(
-                    "ResolvedEmit `{}`: type_expr/type_expr_scope pairing violated (type_expr.is_some()={}, type_expr_scope.is_some()={})",
+                    "ResolvedNamedCallSignature `{}`: type_expr/type_expr_scope pairing violated (type_expr.is_some()={}, type_expr_scope.is_some()={})",
                     emit.name,
                     emit.type_expr.is_some(),
                     emit.type_expr_scope.is_some(),
@@ -601,7 +529,7 @@ pub struct TypeResolutionContext<'ctx, 'a: 'ctx> {
     /// Optional canonical_id of the file whose source is being resolved by
     /// this context. When set, the lowering producer sites in
     /// `elements.rs` / `decl.rs` populate `ResolvedProp.type_expr_scope` /
-    /// `ResolvedEmit.type_expr_scope` with this value, completing the
+    /// `ResolvedNamedCallSignature.type_expr_scope` with this value, completing the
     /// pairing invariant
     /// (`type_expr.is_some() <=> type_expr_scope.is_some()`) at construction
     /// time. When `None`, construction sites leave `type_expr_scope` as
@@ -745,64 +673,9 @@ pub struct InterfaceResolutionEntry<'ctx, 'a: 'ctx> {
     pub type_params: Option<&'ctx TSTypeParameterDeclaration<'a>>,
 }
 
-/// Public cache-key module exposing the types and trait that host-owned caches
-/// (e.g. `VerterHost::host_owned_resolved_named_types`) use to memoize resolved
-/// named types across requests within one workspace generation.
-///
-/// The underlying key is the exact tuple `(name, surface, base_offset,
-/// companion_cache_key, type_param_bindings)` that the in-crate resolver already
-/// used for per-context memoization — promoted to a host-shared identity, with
-/// additional `(canonical_id, whole_hash)` scoping provided by the adapter.
-pub mod cache_keys {
-    use super::{BlockedTypeSurface, ResolvedElements};
-    use std::sync::Arc;
-
-    /// Cache key for a fully-resolved named local symbol.
-    ///
-    /// Note: `companion_cache_key` and `type_param_bindings` are `Arc<[…]>` so
-    /// child contexts produced by `instantiate_type_params_ctx` share the same
-    /// underlying slice without deep-cloning.
-    ///
-    /// `from_root_body` is part of the key because resolving the same
-    /// named type from different positions (macro-T own-body vs heritage
-    /// descent) yields structurally different `ResolvedElements` — each
-    /// resolved prop carries a `declared_in_macro_type_arg` fact whose
-    /// value depends on the caller's `from_root_body` position. Without
-    /// this dimension a single cache slot would erroneously serve both
-    /// positions (the "cache-incomplete" risk).
-    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-    pub struct ResolvedNamedTypeCacheKey {
-        pub name: Box<[u8]>,
-        pub surface: Option<BlockedTypeSurface>,
-        pub base_offset: u32,
-        pub from_root_body: bool,
-        pub companion_cache_key: Arc<[Box<[u8]>]>,
-        pub type_param_bindings: Arc<[ResolvedTypeParamBindingCacheKey]>,
-    }
-
-    /// Stable identity for a generic parameter binding — matches the semantic
-    /// identity used by `type_param_bindings_cache_key` inside the resolver.
-    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-    pub struct ResolvedTypeParamBindingCacheKey {
-        pub name: Box<[u8]>,
-        pub bound: Box<[u8]>,
-    }
-
-    /// Injected cache handle. Implementations must be `Send + Sync` so a single
-    /// adapter instance can be cloned into child contexts and shared across
-    /// concurrent resolver threads.
-    ///
-    /// Contract: `get` is read-only and must not mutate the cache. `insert`
-    /// overwrites any prior entry under the same key (the resolver never asks
-    /// for reconciliation; two callers computing the same key must produce
-    /// structurally equal results).
-    pub trait NamedTypeCache: std::fmt::Debug + Send + Sync {
-        fn get(&self, key: &ResolvedNamedTypeCacheKey) -> Option<Arc<ResolvedElements>>;
-        fn insert(&self, key: ResolvedNamedTypeCacheKey, value: Arc<ResolvedElements>);
-    }
-}
-
-pub use cache_keys::{NamedTypeCache, ResolvedNamedTypeCacheKey, ResolvedTypeParamBindingCacheKey};
+use crate::utils::oxc::vue::named_type_keys::{
+    self as cache_keys, ResolvedTypeParamBindingCacheKey,
+};
 
 #[derive(Debug, Clone)]
 enum NamedTypeResolutionPlan<'ctx, 'a: 'ctx> {
@@ -825,14 +698,16 @@ struct ClassResolutionPlan<'ctx, 'a: 'ctx> {
 #[derive(Debug, Clone)]
 struct ShallowResolvedElements {
     props: Arc<[ResolvedProp]>,
-    emits: Arc<[ResolvedEmit]>,
+    call_signatures: Arc<[ResolvedNamedCallSignature]>,
     has_call_signature: bool,
 }
 
 impl ShallowResolvedElements {
     fn apply_to(&self, result: &mut ResolvedElements) {
         result.props.extend(self.props.iter().cloned());
-        result.emits.extend(self.emits.iter().cloned());
+        result
+            .call_signatures
+            .extend(self.call_signatures.iter().cloned());
         if self.has_call_signature {
             result.has_call_signature = true;
         }
@@ -843,7 +718,7 @@ impl From<ResolvedElements> for ShallowResolvedElements {
     fn from(value: ResolvedElements) -> Self {
         Self {
             props: Arc::from(value.props.into_boxed_slice()),
-            emits: Arc::from(value.emits.into_boxed_slice()),
+            call_signatures: Arc::from(value.call_signatures.into_boxed_slice()),
             has_call_signature: value.has_call_signature,
         }
     }
@@ -1901,5 +1776,5 @@ pub use external::{
 };
 
 #[cfg(test)]
-#[path = "../resolve_type_tests.rs"]
-mod resolve_type_tests;
+#[path = "../type_surface_tests.rs"]
+mod type_surface_tests;
