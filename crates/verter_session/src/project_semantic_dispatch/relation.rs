@@ -651,8 +651,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// and each matching member value is assignable to V.
     ///
     /// Key-type shapes handled:
-    /// - `Literal(String(name))` — single required key.
-    /// - `Union([Literal(String), ...])` — every literal key required.
+    /// - `Literal(String(name))` / `Literal(Number(n))` — single
+    ///   required key (numeric literals under their canonical
+    ///   `js_number_to_string` name).
+    /// - `Union([Literal(String | Number), ...])` — every literal key
+    ///   required.
     /// - `Primitive(String)` / `Primitive(Number)` — every source
     ///   member's value must be assignable to V.
     ///
@@ -670,8 +673,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
             Some(d) => d,
             None => return RelationResult::Unknown,
         };
+        // Literal keys are required under their canonical JS property
+        // names — numeric literals through the single
+        // `js_number_to_string` canonicalizer (pinned tsgo, probe16
+        // e1/e4: `{ 1: string } extends Record<1, string>`,
+        // `{ "1e+21": string } extends Record<1e21, string>`).
         let required_keys: Vec<Arc<str>> = match &*key_data {
             SemanticNodeData::Literal(LiteralValue::String(s)) => vec![Arc::from(s.as_str())],
+            SemanticNodeData::Literal(LiteralValue::Number(n)) => {
+                vec![Arc::from(super::build::js_number_to_string(*n).as_str())]
+            }
             SemanticNodeData::Union(members) => {
                 let members = Arc::clone(members);
                 drop(key_data);
@@ -680,6 +691,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     match graph.node_data(*member).as_deref() {
                         Some(SemanticNodeData::Literal(LiteralValue::String(s))) => {
                             keys.push(Arc::from(s.as_str()));
+                        }
+                        Some(SemanticNodeData::Literal(LiteralValue::Number(n))) => {
+                            keys.push(Arc::from(super::build::js_number_to_string(*n).as_str()));
                         }
                         _ => return RelationResult::Unknown,
                     }

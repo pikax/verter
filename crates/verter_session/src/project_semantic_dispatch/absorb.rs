@@ -39,7 +39,8 @@ use std::sync::Arc;
 
 use crate::project_semantic_dispatch::walk::QueryBuildOutput;
 use crate::semantic_query::{
-    IndexKey, PathSegment, PrimitiveKind, QueryError, QueryResult, SemanticNodeData, SemanticNodeId,
+    IndexKey, IndexSignature, PathSegment, PrimitiveKind, QueryError, QueryResult,
+    SemanticNodeData, SemanticNodeId, SurfaceMember, SurfaceView,
 };
 
 use super::ProjectSemanticDispatch;
@@ -120,6 +121,35 @@ impl ProjectSemanticDispatch<'_> {
     fn empty_object(&self) -> SemanticNodeId {
         self.graph()
             .intern_node(SemanticNodeData::Object(super::walk::empty_surface_view()))
+    }
+
+    /// An object surface holding ONLY `[x: K]: any` index signatures, one per
+    /// requested key primitive, in the given order. `[String]` is the
+    /// materialised `Partial<any>` / `Required<any>` surface
+    /// (`{ [x: string]: any }`); `[String, Number, Symbol]` is the
+    /// `Omit<any, K-literal>` surface. Cheap interning only — no resolver
+    /// work — so it stays inside the absorb-table discipline.
+    pub(super) fn any_index_signature_object(&self, keys: &[PrimitiveKind]) -> SemanticNodeId {
+        let any = self.primitive_node(PrimitiveKind::Any);
+        let index_signatures: Vec<IndexSignature> = keys
+            .iter()
+            .map(|kind| IndexSignature {
+                key_type: self.primitive_node(*kind),
+                value_type: any,
+                readonly: false,
+                spans: verter_type_expr::IndexSignatureSpans::default(),
+                declaration_origin: None,
+            })
+            .collect();
+        let surface = SurfaceView {
+            members: Arc::from(Vec::<SurfaceMember>::new().into_boxed_slice()),
+            call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            index_signatures: Arc::from(index_signatures.into_boxed_slice()),
+            keyspace: None,
+            has_index_signature: true,
+        };
+        self.graph().intern_node(SemanticNodeData::Object(surface))
     }
 
     /// Wrap an absorbed result node into a `QueryBuildOutput` rooted on the
@@ -384,6 +414,81 @@ impl ProjectSemanticDispatch<'_> {
             // (3) distributive naked-`never` ⇒ `never` (empty distribution).
             (SpecialKind::Never, _) if distributive => {
                 Some(self.absorbed_output(self.primitive_node(PrimitiveKind::Never), roots))
+            }
+            _ => None,
+        }
+    }
+
+    // ── Builtin-utility degenerate operands ──────────────────────────────
+    /// §22-style absorption table for the native builtin-utility arms:
+    /// DIRECT lattice-extreme operands short-circuit the utility before any
+    /// signature walk, keyspace enumeration, mapped dispatch, or per-arm
+    /// relation runs. One shared table — every native arm in
+    /// `build_builtin_utility` consults it first, so the degenerate rows
+    /// stay relation-free and identical across utilities.
+    ///
+    /// Rows (TS7 semantics over the checked SOURCE operand, argument 0):
+    ///
+    /// - `ReturnType<any>` / `InstanceType<any>` ⇒ `any`; over `never` ⇒
+    ///   `never` (distribution over the bottom type collapses).
+    /// - `Parameters<any>` / `ConstructorParameters<any>` ⇒ `unknown[]` —
+    ///   the inferred rest-tuple slot of the `(...args: any) => any`
+    ///   constraint (the well-known trap: NOT `any`, NOT `never`); over
+    ///   `never` ⇒ `never`.
+    /// - `Partial<any>` / `Required<any>` ⇒ `{ [x: string]: any }` — the
+    ///   MATERIALISED homomorphic-over-`any` surface (pinned tsgo: the
+    ///   surface carries the lone string index signature;
+    ///   `Partial<any>[symbol]` is an error). NOT `any` — "homomorphic
+    ///   mapped application over `any` is `any`" is empirically false
+    ///   against the pinned tsgo oracle. (`keyof` of tsgo's UNMATERIALISED
+    ///   mapped carrier still reports `string | number | symbol`; this
+    ///   reduced surface publishes the materialised shape, so its `keyof`
+    ///   is `string | number` — an accepted carrier-level divergence.)
+    /// - `Pick<any, K>` / `Omit<any, K>` have NO row here: the result
+    ///   depends on the KEY argument, so the any-source materialisation
+    ///   lives in the structural arms (`build_builtin_utility`) AFTER key
+    ///   enumeration — `Pick<any, "x">` = `{ x: any }` (closed surface),
+    ///   `Omit<any, "x">` = `{ [x: string]: any; [x: number]: any;
+    ///   [x: symbol]: any }`; a non-enumerable key argument keeps the
+    ///   honest deferred shell.
+    /// - `Extract<any, U>` / `Exclude<any, U>` ⇒ `any` — distribution over
+    ///   `any` contributes both branches, merging to `any`. Absorbing here
+    ///   keeps the row relation-free (the per-arm `relate_nodes` loop never
+    ///   runs for a degenerate source).
+    ///
+    /// `error` carriers and every non-extreme operand return `None` — the
+    /// utility's structural arm (and its deferred `Opaque` shell semantics)
+    /// stays authoritative. `peek_special` follows transparent `Alias`
+    /// redirects, bounded by [`ALIAS_PEEK_HOPS`].
+    pub(crate) fn absorb_builtin_utility_degenerate(
+        &self,
+        name: &str,
+        args: &[SemanticNodeId],
+    ) -> Option<SemanticNodeId> {
+        let source = *args.first()?;
+        let (kind, _) = self.peek_special(source)?;
+        match (name, args.len(), kind) {
+            ("ReturnType" | "InstanceType", 1, SpecialKind::Any) => {
+                Some(self.primitive_node(PrimitiveKind::Any))
+            }
+            ("ReturnType" | "InstanceType", 1, SpecialKind::Never) => {
+                Some(self.primitive_node(PrimitiveKind::Never))
+            }
+            ("Parameters" | "ConstructorParameters", 1, SpecialKind::Any) => {
+                let element = self.primitive_node(PrimitiveKind::Unknown);
+                Some(self.graph().intern_node(SemanticNodeData::Array {
+                    element,
+                    readonly: false,
+                }))
+            }
+            ("Parameters" | "ConstructorParameters", 1, SpecialKind::Never) => {
+                Some(self.primitive_node(PrimitiveKind::Never))
+            }
+            ("Partial" | "Required", 1, SpecialKind::Any) => {
+                Some(self.any_index_signature_object(&[PrimitiveKind::String]))
+            }
+            ("Extract" | "Exclude", 2, SpecialKind::Any) => {
+                Some(self.primitive_node(PrimitiveKind::Any))
             }
             _ => None,
         }

@@ -429,17 +429,20 @@ enum WalkFrame {
 /// can be interned into `LiteralValue::Number(f64)` without any
 /// further conversion.
 ///
-/// G4.4 convention: every `IndexKey::Number` producer (source
-/// lowering at `lower::shallow_lower_type_expr`, node normalisation
-/// at `evaluate::normalized_index_key_node`, generic substitution
-/// at `substitute::substitute_index_key_with_change_tracking`)
-/// stores the truncated integer value of the numeric literal as
-/// `i64`. This is the single shared convention across the pipeline
-/// — recovery here is a direct `i64 → f64` cast, symmetric with
-/// the raise at `raise::raise_index_key_to_type_expr`. Non-integer
-/// numeric indices (`Foo[1.5]`) cannot round-trip exactly through
-/// `i64` and remain as `IndexKey::TypeNode` references rather than
-/// entering this fast path.
+/// G4.4 convention (bounded): every `IndexKey::Number` producer
+/// (source lowering at `lower::shallow_lower_type_expr`, node
+/// normalisation at `evaluate::normalized_index_key_node`, generic
+/// substitution at `substitute::substitute_index_key_with_change_tracking`)
+/// folds through the single `build::integer_convention_index_key`
+/// predicate: a literal is admitted ONLY when the i64's `Display` IS
+/// its canonical `js_number_to_string` spelling, which also forces
+/// integer == source f64 exactly. Recovery here is therefore an
+/// EXACT `i64 → f64` cast, symmetric with the raise at
+/// `raise::raise_index_key_to_type_expr`. Numeric indices outside
+/// the bound (`Foo[1.5]`, `Foo[1e21]`, big integers whose shortest
+/// round-trip diverges from their exact digits) remain as
+/// `IndexKey::TypeNode` references rather than entering this fast
+/// path.
 ///
 /// G4.5 completion: the `IndexKey::TypeNode(_)` consumer arm in the
 /// Mapped narrowing path inspects the resolved node's data and
@@ -461,6 +464,29 @@ enum LiteralKey {
 /// Emits per-hop origin edges (`ProjectMember`, `ProjectIndex`,
 /// `AliasResolve`, `ConditionalSelect`) as the walker descends. The
 /// caller emits the whole-path `ProjectPath` edge after the walk finishes.
+/// Numeric demand a pending path segment places on a tuple / array
+/// base: a concrete integer position or the broad `number` key.
+#[derive(Debug, Clone, Copy)]
+enum NumericIndexDemand {
+    Position(usize),
+    BroadNumber,
+}
+
+/// Whether a string key is a CANONICAL non-negative integer key —
+/// TS's numeric-key coercion rule `String(Number(s)) === s` restricted
+/// to the integer positions a tuple can hold: nonempty, ASCII digits
+/// only, and no leading zero unless the key is exactly `"0"`. `"01"`,
+/// `"+1"`, `"1.0"`, `" 1"` all fail.
+fn is_canonical_index_digits(key: &str) -> bool {
+    let bytes = key.as_bytes();
+    match bytes {
+        [] => false,
+        [b'0'] => true,
+        [b'0', ..] => false,
+        _ => bytes.iter().all(|byte| byte.is_ascii_digit()),
+    }
+}
+
 pub(super) struct PathWalker<'a, 'b> {
     dispatch: &'a ProjectSemanticDispatch<'b>,
     /// The walker carries the full [`ProjectionReductionContext`]
@@ -873,6 +899,141 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         read.value
     }
 
+    /// Classify a pending path segment as a numeric tuple/array demand:
+    /// a concrete integer position (`T[0]`, `T['1']`, `T[index-node
+    /// normalising to an integer literal]`) or the broad `number` key
+    /// (`T[number]`). Returns `None` for every non-numeric segment —
+    /// member names, string keys, negative / fractional positions, and
+    /// symbolic index nodes that do not settle to a numeric domain.
+    fn classify_numeric_index_segment(&self, segment: &PathSegment) -> Option<NumericIndexDemand> {
+        let key = match segment {
+            PathSegment::Index(IndexKey::Number(n)) => IndexKey::Number(*n),
+            PathSegment::Index(IndexKey::String(s)) => IndexKey::String(Arc::clone(s)),
+            PathSegment::Index(IndexKey::TypeNode(node)) => {
+                self.dispatch.normalized_index_key_node(*node)
+            }
+            PathSegment::Member(_) => return None,
+        };
+        match key {
+            IndexKey::Number(n) => usize::try_from(n.get())
+                .ok()
+                .map(NumericIndexDemand::Position),
+            // TS coerces only CANONICAL numeric string keys
+            // (`String(Number(s)) === s`): `T["0"]` projects position 0,
+            // but `T["01"]` / `T["+1"]` / `T["1.0"]` are NOT numeric keys.
+            // `parse::<usize>()` alone accepts "+1" and leading zeros, so
+            // gate on the canonical digit shape first.
+            IndexKey::String(s) => {
+                if !is_canonical_index_digits(&s) {
+                    return None;
+                }
+                s.parse::<usize>().ok().map(NumericIndexDemand::Position)
+            }
+            IndexKey::TypeNode(resolved) => match self.graph().node_data(resolved).as_deref() {
+                Some(SemanticNodeData::Primitive(crate::semantic_query::PrimitiveKind::Number)) => {
+                    Some(NumericIndexDemand::BroadNumber)
+                }
+                _ => None,
+            },
+        }
+    }
+
+    /// Project a numeric demand into a tuple's element set.
+    ///
+    /// - `Position(i)`: element `i`'s value type; an optional slot widens
+    ///   to `value | undefined`; the label never flows (only
+    ///   `element.value` is returned). On a rest-bearing tuple, fixed
+    ///   positions STRICTLY BEFORE the rest start resolve exactly (tsgo:
+    ///   `[string, ...number[]][0]` = `string`); positions AT/AFTER the
+    ///   rest start have suffix-dependent arithmetic this walker does not
+    ///   guess → `None` (honest miss). Out-of-range → `None`.
+    /// - `BroadNumber`: the renormalised union of every element's
+    ///   contribution — optional slots add `undefined`, a rest element
+    ///   contributes its array ELEMENT type (an unresolved rest carrier
+    ///   aborts: partial unions would silently drop information). An
+    ///   empty tuple's `[number]` projection collapses to `never` via the
+    ///   shared union intern.
+    fn project_tuple_index(
+        &self,
+        elements: &[crate::semantic_query::TupleElement],
+        demand: NumericIndexDemand,
+    ) -> Option<SemanticNodeId> {
+        use crate::semantic_query::PrimitiveKind;
+        match demand {
+            NumericIndexDemand::Position(position) => {
+                if let Some(rest_start) = elements.iter().position(|element| element.rest) {
+                    if position >= rest_start {
+                        return None;
+                    }
+                }
+                let element = elements.get(position)?;
+                if element.optional {
+                    let mut arms: Vec<SemanticNodeId> = Vec::with_capacity(2);
+                    self.push_union_flattened(&mut arms, element.value);
+                    arms.push(
+                        self.graph()
+                            .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined)),
+                    );
+                    Some(
+                        self.dispatch
+                            .intern_normalized_union_or_intersection(&arms, true),
+                    )
+                } else {
+                    Some(element.value)
+                }
+            }
+            NumericIndexDemand::BroadNumber => {
+                let mut arms: Vec<SemanticNodeId> = Vec::with_capacity(elements.len() + 1);
+                for element in elements {
+                    if element.rest {
+                        arms.push(self.rest_element_item_type(element.value)?);
+                    } else {
+                        self.push_union_flattened(&mut arms, element.value);
+                        if element.optional {
+                            arms.push(self.graph().intern_node(SemanticNodeData::Primitive(
+                                PrimitiveKind::Undefined,
+                            )));
+                        }
+                    }
+                }
+                Some(
+                    self.dispatch
+                        .intern_normalized_union_or_intersection(&arms, true),
+                )
+            }
+        }
+    }
+
+    /// Collect `node` into `arms`, splicing one level of `Union`
+    /// membership so slot types that are ALREADY widened unions
+    /// (`boolean | undefined` from an optional `Parameters` slot) merge
+    /// flat with the projection's own contributions instead of nesting.
+    fn push_union_flattened(&self, arms: &mut Vec<SemanticNodeId>, node: SemanticNodeId) {
+        match self.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::Union(members)) => arms.extend(members.iter().copied()),
+            _ => arms.push(node),
+        }
+    }
+
+    /// The per-item type a rest tuple element contributes to a
+    /// `[number]` projection: the element type of its array value
+    /// (through transparent aliases). A rest value that is not a settled
+    /// array — an open carrier, a generic — returns `None` so the caller
+    /// aborts rather than dropping the contribution.
+    fn rest_element_item_type(&self, value: SemanticNodeId) -> Option<SemanticNodeId> {
+        let mut current = value;
+        // Transparent Alias unwrap, mirroring peek_special's redirect budget.
+        // bounded-loop: at most 8 transparent Alias hops.
+        for _ in 0..8 {
+            match self.graph().node_data(current).as_deref() {
+                Some(SemanticNodeData::Alias(target)) => current = *target,
+                Some(SemanticNodeData::Array { element, .. }) => return Some(*element),
+                _ => return None,
+            }
+        }
+        None
+    }
+
     /// Extract the declaration identity `(canonical_id, name)` from a
     /// node that carries one. Only `DeclAnchor` does today — Alias and
     /// other structural variants return `None`, which means they do not
@@ -1013,14 +1174,37 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     let needle = match segment {
                         PathSegment::Member(name) => name.as_ref().to_string(),
                         PathSegment::Index(IndexKey::String(s)) => s.as_ref().to_string(),
+                        // Correct by construction: every producer folds
+                        // to `IndexKey::Number` ONLY when the i64's
+                        // `Display` IS the canonical `js_number_to_string`
+                        // spelling (`build::integer_convention_index_key`),
+                        // so rendering the needle with `i64::to_string`
+                        // is exactly the published member name.
                         PathSegment::Index(IndexKey::Number(n)) => n.to_string(),
                         PathSegment::Index(IndexKey::TypeNode(node)) => {
                             match self.dispatch.normalized_index_key_node(*node) {
                                 IndexKey::String(text) => text.as_ref().to_string(),
                                 IndexKey::Number(number) => number.to_string(),
-                                IndexKey::TypeNode(_) => {
-                                    results.push(self.opaque_miss());
-                                    return;
+                                IndexKey::TypeNode(resolved) => {
+                                    // G4.5 recovery: numeric literals outside
+                                    // the i64 integer convention (`Foo[1.5]`,
+                                    // `Foo[1e21]`, `Foo[1e-7]`) stay
+                                    // `TypeNode` by the producer convention,
+                                    // yet their members publish under the
+                                    // canonical `js_number_to_string` name —
+                                    // the projection must use the same single
+                                    // canonicalizer to reach them.
+                                    match self.graph().node_data(resolved).as_deref() {
+                                        Some(SemanticNodeData::Literal(
+                                            crate::semantic_query::LiteralValue::Number(n),
+                                        )) => {
+                                            crate::project_semantic_dispatch::build::js_number_to_string(*n)
+                                        }
+                                        _ => {
+                                            results.push(self.opaque_miss());
+                                            return;
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1243,13 +1427,19 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 SemanticNodeData::Mapped { source, mapper } => {
                     // Operator-level Mapped narrowing: when the walker
                     // has a literal key segment and the mapper has no
-                    // name remap, substitute K = Literal(name) into
-                    // `mapper.value_expr` and evaluate it directly,
+                    // name remap, close the selected key directly
                     // rather than dispatching whole-surface MappedType
                     // resolution (which would enumerate every key in
-                    // the source surface and substitute value_expr
-                    // per-key — path-imprecise: produces sibling key
-                    // contributions the caller never requested).
+                    // the source surface and materialise per-key —
+                    // path-imprecise: produces sibling key
+                    // contributions the caller never requested). The
+                    // per-key value splits by mapper kind: an Identity
+                    // mapper dispatches `source[K]` through the shared
+                    // `IndexedAccess` query (its `value_expr` may be
+                    // the builtin utilities' lazy `Opaque(Miss)`
+                    // placeholder — never substituted into); a
+                    // Computed mapper substitutes K = Literal(name)
+                    // into `mapper.value_expr` and evaluates it.
                     //
                     // The narrowing requires:
                     // 1. A remaining segment we can convert to a
@@ -1305,20 +1495,31 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                                 // (`lower::shallow_lower_type_expr`,
                                 // `evaluate::normalized_index_key_node`,
                                 // `substitute::substitute_index_key_with_change_tracking`)
-                                // stores the truncated integer value of
-                                // the numeric literal as `i64`. Recover
-                                // the f64 via a direct integer→float
-                                // cast — symmetric with
+                                // folds through the bounded
+                                // `build::integer_convention_index_key`
+                                // predicate, which admits an integer
+                                // only when it equals its source f64
+                                // exactly. The integer→float cast here
+                                // is therefore VALUE- and
+                                // CANONICAL-NAME-exact: the recovered
+                                // f64 compares equal to the original
+                                // literal and spells the same canonical
+                                // `js_number_to_string` name (the one
+                                // admitted two-bit-pattern value, -0.0,
+                                // recovers as +0.0 — same value, same
+                                // name "0") — symmetric with
                                 // `raise::raise_index_key_to_type_expr`'s
                                 // `*number as f64` raise.
                                 //
-                                // Non-integer numeric indices (`Foo[1.5]`)
-                                // never reach this arm — the producer-side
-                                // `fract() == 0.0` admission guards
-                                // route them through `IndexKey::TypeNode`
-                                // instead, preserving full f64 precision
-                                // via the SemanticNodeId reference.
-                                (Some(LiteralKey::Number(*n as f64)), false)
+                                // Numeric indices outside the bound
+                                // (`Foo[1.5]`, `Foo[1e21]`, big integers
+                                // with divergent shortest-round-trip
+                                // spellings) never reach this arm — the
+                                // producer predicate routes them through
+                                // `IndexKey::TypeNode` instead,
+                                // preserving full f64 precision via the
+                                // SemanticNodeId reference.
+                                (Some(LiteralKey::Number(n.get() as f64)), false)
                             }
                             Some(PathSegment::Index(IndexKey::TypeNode(node))) => {
                                 match self.dispatch.normalized_index_key_node(*node) {
@@ -1327,25 +1528,28 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                                     }
                                     IndexKey::Number(number) => {
                                         // `normalized_index_key_node`
-                                        // stores the truncated integer
-                                        // value (`*number as i64` of a
-                                        // `LiteralValue::Number` whose
-                                        // `fract()` is 0), not the
+                                        // folds through the bounded
+                                        // `integer_convention_index_key`
+                                        // predicate (integer == source
+                                        // f64 exactly), not the
                                         // bit-pattern. Recover the f64
                                         // by direct integer→float cast.
-                                        (Some(LiteralKey::Number(number as f64)), false)
+                                        (Some(LiteralKey::Number(number.get() as f64)), false)
                                     }
                                     IndexKey::TypeNode(resolved) => {
                                         // G4.5: `normalized_index_key_node`
                                         // returns `IndexKey::Number(i64)`
-                                        // ONLY when the resolved node is a
-                                        // numeric literal whose `fract()`
-                                        // is 0 AND it round-trips through
-                                        // `i64`. Non-integer literals
-                                        // (`Foo[1.5]`) and out-of-i64-range
-                                        // numeric literals fall through to
-                                        // this `TypeNode(_)` arm, even
-                                        // though they ARE concrete numeric
+                                        // ONLY when the integer's `Display`
+                                        // IS the literal's canonical
+                                        // `js_number_to_string` spelling.
+                                        // Non-integer literals (`Foo[1.5]`),
+                                        // exponent-regime literals, and
+                                        // integral literals with divergent
+                                        // shortest-round-trip spellings
+                                        // (`Foo[4611686018427387904]`)
+                                        // fall through to this
+                                        // `TypeNode(_)` arm, even though
+                                        // they ARE concrete numeric
                                         // literals at the graph level.
                                         //
                                         // Recover the f64 literal directly
@@ -1412,23 +1616,19 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         // indices coerce to their string form, so
                         // `{ '1': X }[1]` matches member `"1"`).
                         //
-                        // Numeric-to-string rendering for the integer
-                        // fast path (`n.fract() == 0.0`) avoids the
-                        // f64 default `Display` impl emitting `"1"` as
-                        // `"1"` vs `"1.0"` ambiguity by formatting via
-                        // i64 truncation; non-integer numerics fall
-                        // back to the default `Display`.
+                        // The numeric needle is the canonical
+                        // `js_number_to_string` spelling — the SAME
+                        // single canonicalizer the key-domain
+                        // enumeration and the non-emitting membership
+                        // predicate publish/compare with. The f64
+                        // `Display` form diverges in both exponent
+                        // regimes (`1e21` vs `"1e+21"`, `0.0000001` vs
+                        // `"1e-7"`) and would miss members published
+                        // under their canonical names.
                         let needle_text: String = match key {
                             LiteralKey::String(s) => s.as_ref().to_string(),
                             LiteralKey::Number(n) => {
-                                if n.fract() == 0.0
-                                    && *n >= i64::MIN as f64
-                                    && *n <= i64::MAX as f64
-                                {
-                                    (*n as i64).to_string()
-                                } else {
-                                    n.to_string()
-                                }
+                                crate::project_semantic_dispatch::build::js_number_to_string(*n)
                             }
                         };
                         let needle: &str = needle_text.as_str();
@@ -1510,33 +1710,68 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         let key_arg = self
                             .graph()
                             .intern_node(SemanticNodeData::Literal(key_literal_value));
-                        // Route through the shared
-                        // `materialize_selected_key_mapped_value_with_node`
-                        // substrate. The node-keyed entry preserves
-                        // String / Number literal kind through
-                        // substitution (G4 soundness — `M[1]` keeps
-                        // `K = Literal::Number(1)`). The helper does
-                        // substitute → evaluate → Instantiate →
-                        // **trailing Conditional reduction**: the
-                        // last step drives the body's `Conditional`
-                        // dispatch through the nested-infer arm so
-                        // per-key narrowing closes generic-helper
-                        // conditionals (`ExtendSlotWithPlan<TPlan, K>`-style)
-                        // to the realized `Function` instead of
-                        // leaving a Conditional carrier shell. The
-                        // Opaque-fallback contract (substituted
-                        // carrier on stall) is preserved inside the
-                        // helper so the free mapper binder is never
-                        // leaked.
-                        let value = self
-                            .dispatch
-                            .materialize_selected_key_mapped_value_with_node(
-                                mapper,
-                                key_arg,
-                                crate::semantic_query::ProjectionReductionContext::published(
-                                    self.mode(),
-                                ),
-                            );
+                        // An Identity mapper's per-key value IS
+                        // `source[K]` by definition — dispatch it
+                        // through the shared `IndexedAccess` query
+                        // rather than substituting into
+                        // `mapper.value_expr`. A builtin utility's
+                        // Identity mapper carries the lazy
+                        // `Opaque(Miss)` value placeholder (the build
+                        // fast-path reads source member values and
+                        // never the placeholder); substituting into
+                        // that placeholder forges `Opaque(Miss)` at
+                        // the projection terminal for an EXISTING,
+                        // admitted member — indistinguishable from
+                        // the walker's key-absent sentinel, which is
+                        // exactly what the union-index distribution's
+                        // per-arm abort rule classifies on. The
+                        // sentinel discipline this preserves:
+                        // `Opaque(Miss)` at a per-key terminal
+                        // uniquely means absent/unresolvable.
+                        let value =
+                            if matches!(mapper.kind, crate::semantic_query::MapperKind::Identity) {
+                                let source = *source;
+                                match self.execute_read_folding_partial(
+                                    SemanticQueryKey::IndexedAccess {
+                                        base: source,
+                                        index: IndexKey::TypeNode(key_arg),
+                                        mode: self.mode(),
+                                    },
+                                ) {
+                                    QueryResult::Value(id) => id,
+                                    _ => {
+                                        results.push(self.opaque_miss());
+                                        return;
+                                    }
+                                }
+                            } else {
+                                // Route through the shared
+                                // `materialize_selected_key_mapped_value_with_node`
+                                // substrate. The node-keyed entry preserves
+                                // String / Number literal kind through
+                                // substitution (G4 soundness — `M[1]` keeps
+                                // `K = Literal::Number(1)`). The helper does
+                                // substitute → evaluate → Instantiate →
+                                // **trailing Conditional reduction**: the
+                                // last step drives the body's `Conditional`
+                                // dispatch through the nested-infer arm so
+                                // per-key narrowing closes generic-helper
+                                // conditionals (`ExtendSlotWithPlan<TPlan, K>`-style)
+                                // to the realized `Function` instead of
+                                // leaving a Conditional carrier shell. The
+                                // Opaque-fallback contract (substituted
+                                // carrier on stall) is preserved inside the
+                                // helper so the free mapper binder is never
+                                // leaked.
+                                self.dispatch
+                                    .materialize_selected_key_mapped_value_with_node(
+                                    mapper,
+                                    key_arg,
+                                    crate::semantic_query::ProjectionReductionContext::published(
+                                        self.mode(),
+                                    ),
+                                )
+                            };
                         // Emit the per-key edge mirroring
                         // `build_mapped_type`'s ProjectMember edge so
                         // downstream origin-graph consumers see the
@@ -1861,19 +2096,93 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     }
                     current = resolved;
                 }
+                SemanticNodeData::Tuple { elements, .. } => {
+                    // Tuple slot projection. A literal integer position
+                    // projects element `i`'s VALUE type — the label is
+                    // dropped by construction (only `element.value`
+                    // flows), and an optional slot widens to
+                    // `value | undefined` (the slot type TS reports for
+                    // optional tuple elements). The broad `number` key
+                    // projects the union of every element's contribution
+                    // (optional slots contribute `undefined`, a rest
+                    // element contributes its array ELEMENT type). On a
+                    // rest-bearing tuple, fixed positions BEFORE the rest
+                    // start resolve exactly; positions at/after the rest
+                    // start miss conservatively (suffix-dependent
+                    // arithmetic is never guessed).
+                    let elements = elements.clone();
+                    drop(data);
+                    let projected = self
+                        .classify_numeric_index_segment(segment)
+                        .and_then(|demand| self.project_tuple_index(&elements, demand));
+                    match projected {
+                        Some(value) => {
+                            let meta = match segment {
+                                PathSegment::Index(ix) => OriginMeta::Index(ix.clone()),
+                                PathSegment::Member(name) => OriginMeta::ProjectedMember {
+                                    name: Arc::clone(name),
+                                    provenance: verter_audit::MemberEdgeProvenance::PathProjection,
+                                },
+                            };
+                            self.graph().record_origin_edge(
+                                value,
+                                OriginEdgeKind::ProjectIndex,
+                                Arc::from(vec![current].into_boxed_slice()),
+                                meta,
+                                Arc::clone(self.fence),
+                            );
+                            current = value;
+                            index += 1;
+                            self.intermediate_nodes.push(Some(current));
+                        }
+                        None => {
+                            results.push(self.opaque_miss());
+                            return;
+                        }
+                    }
+                }
+                SemanticNodeData::Array { element, .. } => {
+                    // Array indexed access: any numeric demand — a
+                    // literal position or the broad `number` key —
+                    // projects the element type.
+                    let element = *element;
+                    drop(data);
+                    match self.classify_numeric_index_segment(segment) {
+                        Some(_) => {
+                            let meta = match segment {
+                                PathSegment::Index(ix) => OriginMeta::Index(ix.clone()),
+                                PathSegment::Member(name) => OriginMeta::ProjectedMember {
+                                    name: Arc::clone(name),
+                                    provenance: verter_audit::MemberEdgeProvenance::PathProjection,
+                                },
+                            };
+                            self.graph().record_origin_edge(
+                                element,
+                                OriginEdgeKind::ProjectIndex,
+                                Arc::from(vec![current].into_boxed_slice()),
+                                meta,
+                                Arc::clone(self.fence),
+                            );
+                            current = element;
+                            index += 1;
+                            self.intermediate_nodes.push(Some(current));
+                        }
+                        None => {
+                            results.push(self.opaque_miss());
+                            return;
+                        }
+                    }
+                }
                 SemanticNodeData::Primitive(_)
                 | SemanticNodeData::Literal(_)
                 | SemanticNodeData::Opaque(_)
                 | SemanticNodeData::VueMacroElements(_)
-                | SemanticNodeData::Array { .. }
-                | SemanticNodeData::Tuple { .. }
                 | SemanticNodeData::TemplateLiteral { .. }
                 | SemanticNodeData::TypeParam { .. }
                 | SemanticNodeData::Infer { .. }
                 | SemanticNodeData::Function { .. } => {
                     // Can't descend further through generic path-walk —
-                    // Array indexed-access, Tuple slot projection, and
-                    // template-literal relation matching are their own
+                    // template-literal relation matching is its own
                     // path-walker semantic work. The shell carriers exist
                     // so the graph publishes these shapes first-class;
                     // deeper projection is not yet wired. Return
@@ -3217,11 +3526,17 @@ impl<'a, 'b> PathWalker<'a, 'b> {
     /// **Per-key Mapped substitution at the Shallow walker.**
     ///
     /// For each string-literal key that the dispatched `KeyOf(source)`
-    /// or the direct `key_space` exposes, substitute the mapper binder
+    /// or the direct `key_space` exposes: an `Identity` mapper's
+    /// per-key value is `source[K]` by definition — read from the
+    /// captured source `SurfaceMember` when available, otherwise
+    /// dispatched through the shared `IndexedAccess` query (never a
+    /// substitution into `mapper.value_expr`, which for builtin
+    /// Identity utilities is the lazy `Opaque(Miss)` placeholder). A
+    /// `Computed` mapper substitutes the binder
     /// (`mapper.parameter_node`) with the key literal in
-    /// `mapper.value_expr`, then materialise the substituted node only
+    /// `mapper.value_expr`, then materialises the substituted node only
     /// enough to close the selected key via the shared
-    /// [`ProjectSemanticDispatch::materialize_mapped_member_value_for_key`]
+    /// [`ProjectSemanticDispatch::materialize_selected_key_mapped_value`]
     /// helper. The materialisation runs under
     /// `structural_transit_with_mode(Navigate)`: nested `KeyOf` /
     /// `MappedType` operators carrier-stop via
@@ -3298,7 +3613,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         // `build_mapped_type` uses (`enumerate.rs`); routing the
         // Shallow synthesiser through it keeps the two paths
         // structurally aligned.
-        let mut keys: Vec<Arc<str>> = Vec::new();
+        let mut keys: Vec<crate::project_semantic_dispatch::enumerate::KeyDomainKey> = Vec::new();
         let collected = collect_literal_keys(self.graph(), mapper.key_space, &mut keys);
         // Optional source-member surface — populated only when the new
         // `mapped_surface_source_members_for_projection` helper resolves
@@ -3323,7 +3638,11 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             // dispatch.
             keys.clear();
             match self.dispatch.key_names_from_base_node(source) {
-                Some(enumerated) => keys = enumerated,
+                Some(enumerated) => {
+                    keys = crate::project_semantic_dispatch::enumerate::KeyDomainKey::from_names(
+                        enumerated,
+                    )
+                }
                 None => {
                     // Transit-Shallow Publication: the source is a `DeclRef` /
                     // `InstantiationRef` carrier under
@@ -3350,7 +3669,10 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                             if source_is_partial {
                                 self.result_is_partial = true;
                             }
-                            keys = members.iter().map(|m| Arc::clone(&m.name)).collect();
+                            keys =
+                                crate::project_semantic_dispatch::enumerate::KeyDomainKey::from_names(
+                                    members.iter().map(|m| Arc::clone(&m.name)).collect(),
+                                );
                             source_members = Some(members);
                         }
                         None => return None,
@@ -3427,7 +3749,8 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             None
         };
         let mut members: Vec<ShallowSurfaceMember> = Vec::with_capacity(keys.len());
-        for name in keys.into_iter() {
+        for key in keys.into_iter() {
+            let name = Arc::clone(&key.name);
             let member = {
                 let source_member = source_members
                     .as_ref()
@@ -3454,8 +3777,24 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     }
                 };
                 // Identity fast path — use source_member.value
-                // verbatim. Computed path — substitute the binder
-                // and materialise through the **Selected-Key Transit
+                // verbatim when the source enumeration captured a
+                // `SurfaceMember` list. When it did not (keys came
+                // from `key_names_from_base_node` / the literal key
+                // space), the Identity per-key value is STILL
+                // `source[K]` by definition — dispatch it through the
+                // shared `IndexedAccess` query, never a substitution
+                // into `mapper.value_expr`: a builtin utility's
+                // Identity mapper carries the lazy `Opaque(Miss)`
+                // placeholder there, and substituting into it would
+                // publish every EXISTING member with a forged-Miss
+                // value on the empty-path Shallow surface
+                // (indistinguishable from the key-absent sentinel).
+                // An access the shared query cannot close stays the
+                // ADDRESSABLE deferred `IndexedAccess` carrier —
+                // consumers re-dispatch on demand; `Opaque(Miss)`
+                // never enters a published member value here.
+                // Computed path — substitute the binder and
+                // materialise through the **Selected-Key Transit
                 // Realization** substrate. The selected-key helper
                 // extends the per-key materialiser with an explicit
                 // trailing Conditional reduction: when the mapper
@@ -3469,12 +3808,34 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 // match would fail at the publication boundary.
                 let value = if let (Some(sm), true) = (source_member, value_is_identity) {
                     sm.value
+                } else if value_is_identity {
+                    let key_node = self
+                        .graph()
+                        .intern_node(SemanticNodeData::Literal(key.literal.clone()));
+                    match self.execute_read_folding_partial(SemanticQueryKey::IndexedAccess {
+                        base: source,
+                        index: IndexKey::TypeNode(key_node),
+                        mode: ProjectionMode::Navigate,
+                    }) {
+                        QueryResult::Value(id)
+                            if !matches!(
+                                self.graph().node_data(id).as_deref(),
+                                Some(SemanticNodeData::Opaque(_))
+                            ) =>
+                        {
+                            id
+                        }
+                        _ => self.graph().intern_node(SemanticNodeData::IndexedAccess {
+                            object: source,
+                            index: IndexKey::TypeNode(key_node),
+                        }),
+                    }
                 } else if let Some(shared) = shared_value {
                     shared
                 } else {
                     self.dispatch.materialize_selected_key_mapped_value(
                         mapper,
-                        name.as_ref(),
+                        &key.literal,
                         materialise_context,
                     )
                 };
@@ -3492,7 +3853,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             // (the Shallow walker carrier-stops so the caller keeps the carrier).
             let produced_names = match self.dispatch.mapped_member_name_remap_outcome(
                 mapper,
-                &name,
+                &key,
                 materialise_context,
             ) {
                 crate::project_semantic_dispatch::build::MappedKeyRemapOutcome::Keep(n) => vec![n],
@@ -3503,6 +3864,17 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 }
             };
             for produced_name in produced_names {
+                // Duplicate produced names UNION their per-K values —
+                // same fold as `build_mapped_type` (pinned tsgo, probe12:
+                // `{ [K in 1 | "1"]: K }` = `{ 1: 1 | "1" }`).
+                if let Some(existing) = members.iter_mut().find(|m| m.name == produced_name) {
+                    if existing.value != value {
+                        existing.value = self.graph().intern_node(SemanticNodeData::Union(
+                            Arc::from(vec![existing.value, value].into_boxed_slice()),
+                        ));
+                    }
+                    continue;
+                }
                 members.push(ShallowSurfaceMember {
                     name: produced_name,
                     value,
@@ -4347,7 +4719,7 @@ pub(crate) fn empty_surface_view() -> SurfaceView {
 fn collect_literal_keys(
     graph: &SemanticGraphStore,
     node: SemanticNodeId,
-    out: &mut Vec<Arc<str>>,
+    out: &mut Vec<crate::project_semantic_dispatch::enumerate::KeyDomainKey>,
 ) -> bool {
     let data = match graph.node_data(node) {
         Some(d) => d,
@@ -4355,7 +4727,24 @@ fn collect_literal_keys(
     };
     match &*data {
         SemanticNodeData::Literal(crate::semantic_query::LiteralValue::String(s)) => {
-            out.push(Arc::from(s.as_str()));
+            out.push(crate::project_semantic_dispatch::enumerate::KeyDomainKey {
+                name: Arc::from(s.as_str()),
+                literal: crate::semantic_query::LiteralValue::String(s.clone()),
+            });
+            true
+        }
+        // Numeric-literal keys publish as the canonical JS numeric string
+        // while the substitution literal keeps the NUMERIC kind — same
+        // contract as the shared `key_literals_from_keyspace_node`
+        // enumeration (pinned tsgo, probe12: `{ [K in 1]: K }` = `{ 1: 1 }`).
+        // Boolean / bigint literals stay non-enumerable via the catch-all.
+        SemanticNodeData::Literal(crate::semantic_query::LiteralValue::Number(n)) => {
+            out.push(crate::project_semantic_dispatch::enumerate::KeyDomainKey {
+                name: Arc::from(
+                    crate::project_semantic_dispatch::build::js_number_to_string(*n).as_str(),
+                ),
+                literal: crate::semantic_query::LiteralValue::Number(*n),
+            });
             true
         }
         SemanticNodeData::Union(arms) => {

@@ -136,12 +136,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
             Some(SemanticNodeData::Literal(LiteralValue::String(text))) => {
                 IndexKey::String(Arc::from(text.as_str()))
             }
-            Some(SemanticNodeData::Literal(LiteralValue::Number(number)))
-                if number.fract() == 0.0
-                    && *number >= i64::MIN as f64
-                    && *number <= i64::MAX as f64 =>
-            {
-                IndexKey::Number(*number as i64)
+            Some(SemanticNodeData::Literal(LiteralValue::Number(number))) => {
+                // Bounded integer-convention fold: `IndexKey::Number`
+                // admits ONLY literals whose i64 `Display` IS the
+                // canonical `js_number_to_string` spelling (the single
+                // shared producer predicate —
+                // `build::integer_convention_index_key`). Everything
+                // else stays `TypeNode` for the walker's G4.5
+                // canonical-needle recovery.
+                match super::build::integer_convention_index_key(*number) {
+                    Some(integer) => IndexKey::Number(integer),
+                    None => IndexKey::TypeNode(resolved),
+                }
             }
             Some(SemanticNodeData::Alias(target)) => self.normalized_index_key_node(*target),
             _ => IndexKey::TypeNode(resolved),

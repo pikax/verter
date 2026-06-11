@@ -1267,11 +1267,14 @@ defineProps<{
 // G4.5 — Mapped narrowing recovers NON-INTEGER numeric path segments
 // via `IndexKey::TypeNode` literal inspection.
 //
-// G4.4 unified `IndexKey::Number` on the integer-i64 convention with a
-// `fract() == 0.0 && i64-range` admission guard. Producers (source
-// lowering, `normalized_index_key_node`, generic substitution) emit
-// `IndexKey::TypeNode` for non-integer numeric literals (e.g. `1.5`)
-// because they cannot round-trip through `i64`.
+// G4.4 unified `IndexKey::Number` on the integer-i64 convention,
+// bounded by the shared `build::integer_convention_index_key`
+// predicate (fold iff the i64 `Display` IS the canonical
+// `js_number_to_string` spelling). Producers (source lowering,
+// `normalized_index_key_node`, generic substitution) emit
+// `IndexKey::TypeNode` for every numeric literal outside the bound —
+// non-integer literals (`1.5`), exponent-regime literals, and big
+// integers with divergent shortest-round-trip spellings.
 //
 // This guards a soundness gap: the Mapped narrowing path in
 // `walk.rs` only constructs a numeric `LiteralKey` from
@@ -1315,8 +1318,8 @@ import type { NumberIdentity } from './types'
 
 defineProps<{
   // Non-integer numeric literal index (1.5). The producer emits
-  // `IndexKey::TypeNode(node)` because 1.5 fails the
-  // `fract() == 0.0` admission. Pre-G4.5, Mapped narrowing
+  // `IndexKey::TypeNode(node)` because 1.5 fails the bounded
+  // integer-convention admission. Pre-G4.5, Mapped narrowing
   // dropped this case to a deferred shell. Post-G4.5, the
   // walker recovers the f64 literal from the resolved
   // `Literal(Number(1.5))` and substitutes K = 1.5.
@@ -1347,8 +1350,8 @@ defineProps<{
         "guard G4.5: NumberIdentity[1.5] MUST publish the numeric literal 1.5. \
          Absence indicates the Mapped narrowing fell back to a deferred shell \
          for the non-integer numeric path segment — the producer emitted \
-         `IndexKey::TypeNode(node)` (because 1.5 fails the `fract() == 0.0` \
-         admission), and the walker's `IndexKey::TypeNode(_)` arm dropped \
+         `IndexKey::TypeNode(node)` (because 1.5 fails the bounded \
+         integer-convention admission), and the walker's `IndexKey::TypeNode(_)` arm dropped \
          the literal recovery. type_expr: {:#?}",
         prop.type_expr,
     );

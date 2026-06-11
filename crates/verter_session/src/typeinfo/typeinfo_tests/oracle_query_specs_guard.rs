@@ -3,11 +3,11 @@
 //! registry `include!`-compiles WITHOUT the unit-test `support` module
 //! (`oracle_query_specs_is_pure_data`); this src-side half proves the structural
 //! well-formedness validation is genuinely discriminating, with SYNTHETIC specs.
-//! The real table seats the 11 lifted rows (two index-signature publication
+//! The real table seats the 19 lifted rows (two index-signature publication
 //! queries + two built-in modifier-utility queries + three U2
 //! IndexedAccess-reduction carve-out queries + the mapped-modifier `-?`
 //! carve-out query at U2.MAPPED_TEMPLATE + three keyof-expansion carve-out
-//! queries).
+//! queries + eight U2.UTILITIES reducer queries).
 
 use super::oracle::query_specs::{
     registry_well_formed, HostProjectSpec, HostSetupKindSpec, OracleValueKindSpec, ProbeRhsSpec,
@@ -18,7 +18,8 @@ use super::oracle::query_specs::{
     MODE_BOUNDARY_REEXPORT_LINK_3_SOURCE, MODE_BOUNDARY_REEXPORT_LINK_4_SOURCE,
     MODE_BOUNDARY_REEXPORT_LINK_5_SOURCE, MODE_BOUNDARY_REEXPORT_LINK_6_SOURCE,
     MODE_BOUNDARY_REEXPORT_PRINCIPAL_SOURCE, ORACLE_QUERY_SPECS, TYPESCRIPT_RULES_SOURCE,
-    UNION_KEY_ACCESS_SOURCE, UTILITY_EDGE_SOURCE, WIDE_DEEP_SOURCE,
+    UNION_KEY_ACCESS_SOURCE, UTILITY_COMPOSITION_SOURCE, UTILITY_EDGE_SOURCE,
+    UTILITY_TOP_BOTTOM_SOURCE, VARIADIC_TUPLES_SOURCE, WIDE_DEEP_SOURCE,
 };
 
 /// The registry inlines each fixture's source bytes (`INDEX_SIGNATURES_SOURCE` /
@@ -129,6 +130,24 @@ fn inlined_registry_source_is_byte_identical_to_fixture_files() {
         "MODE_BOUNDARY_REEXPORT_LEAF_SOURCE (inlined in the registry) drifted from \
          fixtures/mode_boundary_reexport_leaf.ts (read by the sibling #[ignore]d tests)",
     );
+    assert_eq!(
+        UTILITY_TOP_BOTTOM_SOURCE,
+        include_str!("fixtures/utility_top_bottom.ts"),
+        "UTILITY_TOP_BOTTOM_SOURCE (inlined in the registry) drifted from \
+         fixtures/utility_top_bottom.ts (read by the sibling #[ignore]d tests)",
+    );
+    assert_eq!(
+        VARIADIC_TUPLES_SOURCE,
+        include_str!("fixtures/variadic_tuples.ts"),
+        "VARIADIC_TUPLES_SOURCE (inlined in the registry) drifted from \
+         fixtures/variadic_tuples.ts (read by the sibling #[ignore]d tests)",
+    );
+    assert_eq!(
+        UTILITY_COMPOSITION_SOURCE,
+        include_str!("fixtures/utility_composition.ts"),
+        "UTILITY_COMPOSITION_SOURCE (inlined in the registry) drifted from \
+         fixtures/utility_composition.ts (read by the sibling #[ignore]d tests)",
+    );
 }
 
 /// A synthetic well-formed spec with a tweakable `oracle_family` + `query_ordinal`.
@@ -163,15 +182,16 @@ fn spec(row_function: &'static str, query_ordinal: u16, oracle_family: &'static 
 
 #[test]
 fn oracle_query_specs_registry_holds_the_lifted_rows_and_is_well_formed() {
-    // The lifts seat the two index-signature publication queries, the two
-    // built-in modifier-utility queries, the three U2 IndexedAccess-reduction
-    // carve-out queries, and the U2.MAPPED_TEMPLATE `-?` optional-remover query;
-    // the table is well-formed (non-empty `oracle_family`, contiguous ordinals).
+    // The lifts seat 19 queries: the two index-signature publication
+    // queries, the two built-in modifier-utility queries, the three U2
+    // IndexedAccess-reduction carve-out queries, the U2.MAPPED_TEMPLATE
+    // `-?` optional-remover query, the three keyof-expansion carve-out
+    // queries, and the eight U2.UTILITIES lifts (the five Awaited rows,
+    // the two NonNullable rows, and the variadic concat row); the table
+    // is well-formed (non-empty `oracle_family`, contiguous ordinals).
     assert_eq!(registry_well_formed(ORACLE_QUERY_SPECS), Ok(()));
 
-    // The seated set is EXACTLY the two index-signature publication rows + the
-    // two built-in modifier-utility rows + the three IndexedAccess-reduction
-    // carve-out rows + the `-?` optional-remover row, one query each. A stray
+    // The seated set is EXACTLY those 19 rows, one query each. A stray
     // addition / removal FAILS here (discriminating).
     let seated: Vec<(&str, &str, u16)> = ORACLE_QUERY_SPECS
         .iter()
@@ -233,6 +253,46 @@ fn oracle_query_specs_registry_holds_the_lifted_rows_and_is_well_formed() {
             (
                 "union_key_access.rs",
                 "union_key_access_keyof_self_projects_full_value_union",
+                0
+            ),
+            (
+                "utility_top_bottom.rs",
+                "utility_top_bottom_utb17_awaited_null_is_null",
+                0
+            ),
+            (
+                "utility_top_bottom.rs",
+                "utility_top_bottom_utb18_awaited_undefined_is_undefined",
+                0
+            ),
+            (
+                "utility_top_bottom.rs",
+                "utility_top_bottom_utb19_awaited_nested_promise_is_inner_primitive",
+                0
+            ),
+            (
+                "typescript_rules.rs",
+                "typescript_rules_awaited_recursively_unwraps_promises",
+                0
+            ),
+            (
+                "utility_edge.rs",
+                "utility_edge_non_nullable_strips_null_and_undefined",
+                0
+            ),
+            (
+                "variadic_tuples.rs",
+                "variadic_tuple_concat_alias_produces_joined_literal_tuple",
+                0
+            ),
+            (
+                "utility_top_bottom.rs",
+                "utility_top_bottom_utb21_non_nullable_unknown_is_empty_object",
+                0
+            ),
+            (
+                "utility_top_bottom.rs",
+                "utility_top_bottom_utb15_awaited_unknown_is_unknown",
                 0
             ),
         ],

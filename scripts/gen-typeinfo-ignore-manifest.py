@@ -1216,6 +1216,97 @@ def proof_for_capability(cap: str) -> str:
 #    consumed (no `Relate`/`Conditional` dispatch), which holds precisely because
 #    `Instantiate` is owned by `U2.QUERY_VALUE_DOMAIN`, not `U2.RELATION_INFER`.
 LIFTED_ROW_OVERRIDES: dict[tuple[str, str], dict[str, object]] = {
+    ("utility_top_bottom.rs", "utility_top_bottom_utb15_awaited_unknown_is_unknown"): {
+        "mech": "QueryValueDomainFoundation",
+        "proof": "ProofRequirement::Ts7Oracle(OracleId::UtilityComposition)",
+        "semantic_queries": ["ResolveDecl", "Instantiate"],
+        "consumed_mechanisms": [],
+        "unblocker": (
+            "lifted by U2.UTILITIES: `Awaited<unknown>` reduces to `unknown` (no "
+            "thenable branch matches; the final conditional fallthrough returns T) "
+            "through the shared builtin-utility dispatch, proven against the "
+            "checked-in tsgo oracle snapshot via oracle::run_row"
+        ),
+    },
+    ("utility_top_bottom.rs", "utility_top_bottom_utb17_awaited_null_is_null"): {
+        "mech": "QueryValueDomainFoundation",
+        "proof": "ProofRequirement::Ts7Oracle(OracleId::UtilityComposition)",
+        "semantic_queries": ["ResolveDecl", "Instantiate"],
+        "consumed_mechanisms": [],
+        "unblocker": (
+            "lifted by U2.UTILITIES: `Awaited<null>` preserves `null` via the first "
+            "conditional clause (T extends null | undefined ? T : ...), proven "
+            "against the checked-in tsgo oracle snapshot via oracle::run_row"
+        ),
+    },
+    ("utility_top_bottom.rs", "utility_top_bottom_utb18_awaited_undefined_is_undefined"): {
+        "mech": "QueryValueDomainFoundation",
+        "proof": "ProofRequirement::Ts7Oracle(OracleId::UtilityComposition)",
+        "semantic_queries": ["ResolveDecl", "Instantiate"],
+        "consumed_mechanisms": [],
+        "unblocker": (
+            "lifted by U2.UTILITIES: `Awaited<undefined>` preserves `undefined` via "
+            "the first conditional clause (the nullish short-circuit), proven "
+            "against the checked-in tsgo oracle snapshot via oracle::run_row"
+        ),
+    },
+    ("utility_top_bottom.rs", "utility_top_bottom_utb19_awaited_nested_promise_is_inner_primitive"): {
+        "mech": "QueryValueDomainFoundation",
+        "proof": "ProofRequirement::Ts7Oracle(OracleId::UtilityComposition)",
+        "semantic_queries": ["ResolveDecl", "Instantiate"],
+        "consumed_mechanisms": [],
+        "unblocker": (
+            "lifted by U2.UTILITIES: `Awaited<Promise<Promise<string>>>` recursively "
+            "unwraps the registry-classified Promise carriers to `string`, proven "
+            "against the checked-in tsgo oracle snapshot via oracle::run_row"
+        ),
+    },
+    ("utility_top_bottom.rs", "utility_top_bottom_utb21_non_nullable_unknown_is_empty_object"): {
+        "mech": "QueryValueDomainFoundation",
+        "proof": "ProofRequirement::Ts7Oracle(OracleId::UtilityComposition)",
+        "semantic_queries": ["ResolveDecl", "Instantiate"],
+        "consumed_mechanisms": [],
+        "unblocker": (
+            "lifted by U2.UTILITIES: `NonNullable<unknown>` collapses to the empty "
+            "object base (`unknown & {}` = `{}` — NOT unknown, NOT never), proven "
+            "against the checked-in tsgo oracle snapshot via oracle::run_row"
+        ),
+    },
+    ("typescript_rules.rs", "typescript_rules_awaited_recursively_unwraps_promises"): {
+        "mech": "QueryValueDomainFoundation",
+        "proof": "ProofRequirement::Ts7Oracle(OracleId::UtilityComposition)",
+        "semantic_queries": ["ResolveDecl", "Instantiate"],
+        "consumed_mechanisms": [],
+        "unblocker": (
+            "lifted by U2.UTILITIES: `Awaited<Promise<Promise<{ done: true }>>>` "
+            "recursively unwraps the registry-classified Promise carriers to the "
+            "fulfilled object payload, proven against the checked-in tsgo oracle "
+            "snapshot via oracle::run_row"
+        ),
+    },
+    ("utility_edge.rs", "utility_edge_non_nullable_strips_null_and_undefined"): {
+        "mech": "QueryValueDomainFoundation",
+        "proof": "ProofRequirement::Ts7Oracle(OracleId::UtilityComposition)",
+        "semantic_queries": ["ResolveDecl", "Instantiate"],
+        "consumed_mechanisms": [],
+        "unblocker": (
+            "lifted by U2.UTILITIES: `NonNullable<string | null | undefined>` filters "
+            "the settled union nullish arms to the bare `string` primitive, "
+            "proven against the checked-in tsgo oracle snapshot via oracle::run_row"
+        ),
+    },
+    ("variadic_tuples.rs", "variadic_tuple_concat_alias_produces_joined_literal_tuple"): {
+        "mech": "QueryValueDomainFoundation",
+        "proof": "ProofRequirement::Ts7Oracle(OracleId::TupleProjection)",
+        "semantic_queries": ["ResolveDecl", "Instantiate"],
+        "consumed_mechanisms": [],
+        "unblocker": (
+            "lifted by U2.UTILITIES: `Concat<[1, 2], [3, 4]>` splices the `[...A, ...B]` "
+            "variadic spread into `[1, 2, 3, 4]` via the normalize-on-intern spread "
+            "rule, proven against the checked-in tsgo oracle snapshot via "
+            "oracle::run_row"
+        ),
+    },
     ("mapped_modifiers.rs", "mapped_modifier_minus_optional_strips_optional_and_undefined"): {
         "mech": "MappedTemplateRemap",
         "proof": "ProofRequirement::Ts7Oracle(OracleId::MappedTemplate)",

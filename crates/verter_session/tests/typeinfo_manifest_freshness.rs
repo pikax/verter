@@ -178,9 +178,12 @@ fn manifest_block_counts_reflect_lifts() {
     // Per-block generated row counts (the honest override distribution).
     assert_eq!(
         count("block_id: TypeInfoParityBlockId::U2QueryValueDomain,"),
-        2,
-        "U2.QUERY_VALUE_DOMAIN must own exactly the 2 lifted index-signature \
-         publication rows (it was a 0-row substrate block before the lift)",
+        10,
+        "U2.QUERY_VALUE_DOMAIN must own 10 rows: the 2 lifted index-signature \
+         publication rows (it was a 0-row substrate block before that lift) plus \
+         the 8 U2.UTILITIES reducer rows whose measured trace terminates at \
+         {{ResolveDecl, Instantiate}} (five Awaited rows, two NonNullable rows, \
+         and the variadic-spread Concat row)",
     );
     assert_eq!(
         count("block_id: TypeInfoParityBlockId::U2IndexedAccess,"),
@@ -193,9 +196,10 @@ fn manifest_block_counts_reflect_lifts() {
     );
     assert_eq!(
         count("block_id: TypeInfoParityBlockId::U2Utilities,"),
-        40,
-        "U2.UTILITIES must own 40 rows after the 2 built-in modifier-utility rows \
-         moved to U2.MAPPED_TEMPLATE (it owned 42 before the re-partition)",
+        32,
+        "U2.UTILITIES must own 32 rows after the 2 built-in modifier-utility rows \
+         moved to U2.MAPPED_TEMPLATE (42 → 40) and the 8 utility-reducer lifts \
+         moved to their measured production block U2.QUERY_VALUE_DOMAIN (40 → 32)",
     );
     assert_eq!(
         count("block_id: TypeInfoParityBlockId::U2MappedTemplate,"),
@@ -208,19 +212,20 @@ fn manifest_block_counts_reflect_lifts() {
     // Lifted-status counts.
     assert_eq!(
         count("status: IgnoreStatus::Lifted {"),
-        11,
-        "exactly 11 IgnoredTestRows must carry `status: Lifted` (2 index-signature \
+        19,
+        "exactly 19 IgnoredTestRows must carry `status: Lifted` (2 index-signature \
          publication + 2 built-in modifier-utility + 2 terminal indexed-access \
          projections + 1 wide/deep literal-union projection + 1 U2.MAPPED_TEMPLATE \
-         `-?` optional-remover + 3 keyof-expansion carve-out lifts)",
+         `-?` optional-remover + 3 keyof-expansion carve-out lifts + 8 U2.UTILITIES \
+         reducer lifts at U2.QUERY_VALUE_DOMAIN)",
     );
     assert_eq!(
         count(
             "status: IgnoreStatus::Lifted { block_id: TypeInfoParityBlockId::U2QueryValueDomain }"
         ),
-        2,
-        "both index-signature lifts must record their lifting block as \
-         U2.QUERY_VALUE_DOMAIN",
+        10,
+        "the 2 index-signature lifts plus the 8 utility-reducer lifts must record \
+         their lifting block as U2.QUERY_VALUE_DOMAIN",
     );
     assert_eq!(
         count("status: IgnoreStatus::Lifted { block_id: TypeInfoParityBlockId::U2IndexedAccess }"),
@@ -238,10 +243,10 @@ fn manifest_block_counts_reflect_lifts() {
          lift must record their lifting block as U2.MAPPED_TEMPLATE",
     );
 
-    // Total ignored (status: Ignored) rows after 11 lifts.
+    // Total ignored (status: Ignored) rows after 19 lifts.
     assert_eq!(
         count("status: IgnoreStatus::Ignored"),
-        351,
-        "exactly 351 IgnoredTestRows must remain `Ignored` (362 total − 11 lifted)",
+        343,
+        "exactly 343 IgnoredTestRows must remain `Ignored` (362 total − 19 lifted)",
     );
 }

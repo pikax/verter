@@ -19,10 +19,10 @@ use super::{
 };
 use crate::semantic_query::demand::{Demand, MaterializedPoint, MaterializedSet, ProjectionPath};
 use crate::semantic_query::{
-    BranchSelection, DepSignature, HostResolvedNamedTypeKey, IndexSignature, LiteralValue,
-    NodeScopeId, OriginEdgeKind, OriginMeta, PathSegment, PrimitiveKind, ProjectionMode,
-    QueryError, QueryResult, ReductionDemand, ResolveDeclKey, SemanticNodeData, SemanticNodeId,
-    SemanticQueryKey, SurfaceMember, SurfaceView, ValueRootKey,
+    BranchSelection, DepSignature, HostResolvedNamedTypeKey, IndexKey, IndexSignature,
+    LiteralValue, NodeScopeId, OriginEdgeKind, OriginMeta, PathSegment, PrimitiveKind,
+    ProjectionMode, QueryError, QueryResult, ReductionDemand, ResolveDeclKey, SemanticNodeData,
+    SemanticNodeId, SemanticQueryKey, SurfaceMember, SurfaceView, ValueRootKey,
 };
 
 /// Result of a cross-file declaration-augmentation stitch
@@ -84,34 +84,15 @@ fn literal_value_template_text(value: &LiteralValue) -> String {
     }
 }
 
-/// JS `Number`→string for a finite-or-special `f64` literal, matching the
-/// string TS produces when interpolating a numeric literal into a
-/// template-literal type. Rust's `f64` `Display` matches JS only across the
-/// common integer / decimal range component-template literals actually hit
-/// (`1.0`→`"1"`, `1.5`→`"1.5"`); the special cases below align `-0`→`"0"`, the
-/// infinities and `NaN` to their JS spellings. Two exponent-notation regimes
-/// are NOT modelled — JS switches to exponent form for large magnitudes
-/// (`|x| ≥ 1e21`) and for small magnitudes (`|x| < 1e-6`, e.g. `1e-7`→`"1e-7"`
-/// where `f64` `Display` yields `"0.0000001"`); such literals do not appear in
-/// component template types.
-fn js_number_to_string(number: f64) -> String {
-    if number.is_nan() {
-        return "NaN".to_string();
-    }
-    if number.is_infinite() {
-        return if number > 0.0 {
-            "Infinity"
-        } else {
-            "-Infinity"
-        }
-        .to_string();
-    }
-    // `-0.0 == 0.0` is true, so this collapses negative zero to `"0"` like JS.
-    if number == 0.0 {
-        return "0".to_string();
-    }
-    format!("{number}")
-}
+// The canonical numeric-spelling cluster (`js_number_to_string`, the
+// `integer_convention_index_key` admission fold, the ECMA-262 even
+// tie-break) lives in `crate::semantic_query::index_key` — the module
+// that OWNS the `IndexKey::Number` payload (`CanonicalIndexInt`,
+// private field, blessed constructors only). Re-exported here because
+// the dispatch submodules are its main consumers.
+pub(super) use crate::semantic_query::index_key::{
+    integer_convention_index_key, js_number_to_string,
+};
 
 /// Encode a [`ProjectionReductionContext`] as a compact u32 bit
 /// pattern used in the mapped-member-materialization
@@ -2548,11 +2529,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         };
 
         // Mapper-based utilities route through `SemanticQueryKey::MappedType`.
-        // The mapper's `value_expr` is a placeholder `T[K]` identity — the
-        // real evaluator would substitute K across T's member types, but
-        // the shell-level result (with per-member modifiers applied)
-        // matches the userland mapped type's shell, which is what
-        // equivalence tests assert.
+        // The mapper's `value_expr` is an `Opaque(Miss)` shell marker, never
+        // a substitution target: these mappers classify as
+        // `MapperKind::Identity`, and every Identity per-key producer reads
+        // the matching source member's value directly or dispatches
+        // `source[K]` through the shared `IndexedAccess` query.
         let mapper_for = |opt: OptionalityMod, ro: ReadonlyMod, source: SemanticNodeId| {
             // Thread the outer instantiation's context so a builtin
             // utility called under `StructuralTransit` (e.g.
@@ -2572,12 +2553,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 QueryResult::Value(node) => node,
                 _ => self.opaque(QueryError::Miss),
             };
-            // Value placeholder: the shell does not eagerly lower per-key
-            // substitutions into the value expression. A caller that
-            // projects `Partial<T>['x']` walks the ProjectPath into the
-            // produced member (which has `value = Miss` under the lazy
-            // rule) and the follow-up hop dispatches back through the
-            // path walker.
+            // Shell marker only — no per-key producer reads an Identity
+            // mapper's `value_expr`. `build_mapped_type` reuses a matching
+            // source member's value directly; a key without a projectable
+            // source member dispatches `source[K]` through the shared
+            // `IndexedAccess` query, publishing the addressable deferred
+            // `IndexedAccess` carrier when the access cannot close.
             let value_expr = self.opaque(QueryError::Miss);
             // Synthesise a TypeParam binder node for the utility
             // mapper's `K`: the param_index is the
@@ -2629,6 +2610,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 kind: crate::semantic_query::MapperKind::Identity,
             }
         };
+
+        // Degenerate-operand short-circuit (shared §22-style table in
+        // `absorb.rs`). A DIRECT lattice-extreme source operand resolves the
+        // utility before any signature walk / keyspace enumeration / mapped
+        // dispatch / per-arm relation runs — `ReturnType<any>` is `any`
+        // without consulting call signatures, `Exclude<any, U>` is `any`
+        // without entering the relation loop. Non-degenerate operands fall
+        // through to the structural arms below unchanged.
+        if let Some(absorbed) = self.absorb_builtin_utility_degenerate(name, args.as_ref()) {
+            record_utility_edges(absorbed);
+            return (QueryResult::Value(absorbed), fence, false);
+        }
 
         match name {
             // ---- Mapper-based utilities ----
@@ -2819,7 +2812,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // still see an `Instantiate` edge anchored to the utility
             // identity.
             "ReturnType" if args.len() == 1 => {
-                if let Some(function_node) = self.resolve_call_signature_function(args[0]) {
+                // Demand-point source resolution: a decl-placeholder /
+                // alias-shell / `DeclRef` carrier argument
+                // (`ReturnType<Handler>` where `Handler` is a
+                // function-type alias) settles to its canonical Function
+                // carrier before the signature walk.
+                let source_resolved = self.resolve_signature_source_carrier(args[0], context);
+                if let Some(function_node) = self.resolve_call_signature_function(source_resolved) {
                     if let Some(SemanticNodeData::Function { return_type, .. }) =
                         self.graph().node_data(function_node).as_deref()
                     {
@@ -2833,7 +2832,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 (QueryResult::Value(result), fence, false)
             }
             "Parameters" if args.len() == 1 => {
-                if let Some(function_node) = self.resolve_call_signature_function(args[0]) {
+                // Demand-point source resolution — see ReturnType.
+                let source_resolved = self.resolve_signature_source_carrier(args[0], context);
+                if let Some(function_node) = self.resolve_call_signature_function(source_resolved) {
                     if let Some(tuple_id) = self.intern_function_params_tuple(function_node) {
                         record_utility_edges(tuple_id);
                         return (QueryResult::Value(tuple_id), fence, false);
@@ -2844,7 +2845,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 (QueryResult::Value(result), fence, false)
             }
             "ConstructorParameters" if args.len() == 1 => {
-                if let Some(function_node) = self.resolve_construct_signature_function(args[0]) {
+                // Demand-point source resolution — see ReturnType.
+                let source_resolved = self.resolve_signature_source_carrier(args[0], context);
+                if let Some(function_node) =
+                    self.resolve_construct_signature_function(source_resolved)
+                {
                     if let Some(tuple_id) = self.intern_function_params_tuple(function_node) {
                         record_utility_edges(tuple_id);
                         return (QueryResult::Value(tuple_id), fence, false);
@@ -2855,7 +2860,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 (QueryResult::Value(result), fence, false)
             }
             "InstanceType" if args.len() == 1 => {
-                if let Some(function_node) = self.resolve_construct_signature_function(args[0]) {
+                // Demand-point source resolution — see ReturnType.
+                let source_resolved = self.resolve_signature_source_carrier(args[0], context);
+                if let Some(function_node) =
+                    self.resolve_construct_signature_function(source_resolved)
+                {
                     if let Some(SemanticNodeData::Function { return_type, .. }) =
                         self.graph().node_data(function_node).as_deref()
                     {
@@ -2908,6 +2917,53 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // `StructuralTransit(Shallow)`).
                 let source_resolved =
                     self.evaluate_deferred_semantic_node_with_context(source, context);
+                // `Pick<any, K>` (pinned tsgo): a CLOSED surface holding
+                // exactly the enumerated keys, each `any` and required —
+                // `Pick<any, "x">` = `{ x: any }`, `Pick<any, never>` = `{}`.
+                // Materialised AFTER key enumeration because the result
+                // depends on K (a non-enumerable K already deferred above);
+                // the source-side `any` check sits here, not in the absorb
+                // table, for the same reason.
+                if matches!(
+                    self.peek_special(source_resolved),
+                    Some((super::absorb::SpecialKind::Any, _))
+                ) {
+                    let any_node = graph.intern_node(SemanticNodeData::Primitive(
+                        crate::semantic_query::PrimitiveKind::Any,
+                    ));
+                    let members: Vec<SurfaceMember> = pick_names
+                        .iter()
+                        .map(|name| SurfaceMember {
+                            name: Arc::clone(name),
+                            value: any_node,
+                            optional: false,
+                            readonly: false,
+                            is_method: false,
+                            visibility: verter_type_expr::MemberVisibility::Public,
+                            // Synthetic mapped-produced members: no single
+                            // source declaration site.
+                            spans: verter_type_expr::MemberSpans::default(),
+                            declaration_origin: None,
+                            declared_in_macro_type_arg: false,
+                            merge_role: crate::semantic_query::MemberMergeRole::Authored,
+                        })
+                        .collect();
+                    let result_surface = SurfaceView {
+                        members: Arc::from(members.into_boxed_slice()),
+                        call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                        construct_signatures: Arc::from(
+                            Vec::<SemanticNodeId>::new().into_boxed_slice(),
+                        ),
+                        index_signatures: Arc::from(
+                            Vec::<IndexSignature>::new().into_boxed_slice(),
+                        ),
+                        keyspace: None,
+                        has_index_signature: false,
+                    };
+                    let result = graph.intern_node(SemanticNodeData::Object(result_surface));
+                    record_utility_edges(result);
+                    return (QueryResult::Value(result), fence, false);
+                }
                 let surface = match self.object_filter_source_surface(source_resolved) {
                     Some(view) => view,
                     None => {
@@ -2963,6 +3019,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // resolution (see Pick comment above for chain).
                 let source_resolved =
                     self.evaluate_deferred_semantic_node_with_context(source, context);
+                // `Omit<any, K-literals>` (pinned tsgo): the index-signature
+                // surface `{ [x: string]: any; [x: number]: any;
+                // [x: symbol]: any }`, independent of WHICH literal keys are
+                // omitted (excluding finite literals from the broad key
+                // domain removes nothing). A non-enumerable K (e.g.
+                // `Omit<any, string>`, whose tsgo result drops the string
+                // signature) already deferred above.
+                if matches!(
+                    self.peek_special(source_resolved),
+                    Some((super::absorb::SpecialKind::Any, _))
+                ) {
+                    let result = self.any_index_signature_object(&[
+                        crate::semantic_query::PrimitiveKind::String,
+                        crate::semantic_query::PrimitiveKind::Number,
+                        crate::semantic_query::PrimitiveKind::Symbol,
+                    ]);
+                    record_utility_edges(result);
+                    return (QueryResult::Value(result), fence, false);
+                }
                 let surface = match self.object_filter_source_surface(source_resolved) {
                     Some(view) => view,
                     None => {
@@ -3106,7 +3181,31 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // member's function shape).
             "NonNullable" if args.len() == 1 => {
                 use crate::semantic_query::PrimitiveKind;
-                let arg = args[0];
+                // Context-propagating deferred resolution (see Pick comment
+                // above for the chain): an alias / indexed-access shell
+                // operand (`NonNullable<T["items"]>`) settles to its
+                // canonical shape before the nullish filter; a genuinely
+                // unsettled operand returns its carrier and keeps the
+                // deferred shell below.
+                let arg = self.evaluate_deferred_semantic_node_with_context(args[0], context);
+                // `NonNullable<T>` is `T & {}`: `unknown & {}` collapses to
+                // the empty-object base (the trap row — NOT `unknown`, NOT
+                // `never`). `any`/`never` pass through the settled arms
+                // below (`any & {}` = `any`; distribution over `never`
+                // collapses).
+                if matches!(
+                    self.peek_special(arg),
+                    Some((
+                        crate::project_semantic_dispatch::absorb::SpecialKind::Unknown,
+                        _
+                    ))
+                ) {
+                    let result = graph.intern_node(SemanticNodeData::Object(
+                        crate::project_semantic_dispatch::walk::empty_surface_view(),
+                    ));
+                    record_utility_edges(result);
+                    return (QueryResult::Value(result), fence, false);
+                }
                 let nullish = |id: SemanticNodeId| {
                     matches!(
                         graph.node_data(id).as_deref(),
@@ -3125,6 +3224,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 | SemanticNodeData::Intersection(_)
                                 | SemanticNodeData::TemplateLiteral { .. }
                                 | SemanticNodeData::Primitive(_)
+                                | SemanticNodeData::Array { .. }
+                                | SemanticNodeData::Tuple { .. }
                         )
                     ) && !nullish(id)
                 };
@@ -3155,16 +3256,236 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 (QueryResult::Value(result), fence, false)
             }
 
+            // ---- Promise utility ----
+            // `Awaited<T>` recursively unwraps `Promise<...>` carriers
+            // (recognised by registry lookup on the carrier's declaration
+            // identity), preserves nullish inputs (the first conditional
+            // clause `T extends null | undefined ? T : ...`), distributes
+            // over unions, and passes settled non-thenables through. See
+            // [`Self::reduce_awaited`] for the full per-shape contract and
+            // the structural-thenable scope boundary.
+            "Awaited" if args.len() == 1 => {
+                let result = self.reduce_awaited(args[0], context, 0);
+                record_utility_edges(result);
+                (QueryResult::Value(result), fence, false)
+            }
+
             // ---- Deferred utilities ----
-            // `Awaited` requires recursive promise unwrapping; unknown
-            // / not-yet-implemented utilities emit an `Opaque(Miss)`
-            // shell anchored to the instantiate identity so the origin
-            // walk remains coherent.
+            // Unknown / not-yet-implemented utilities emit an
+            // `Opaque(Miss)` shell anchored to the instantiate identity so
+            // the origin walk remains coherent.
             _ => {
                 let result = self.opaque(QueryError::Miss);
                 record_utility_edges(result);
                 (QueryResult::Value(result), fence, false)
             }
+        }
+    }
+
+    /// Demand-point carrier resolution for a function-signature utility's
+    /// SOURCE argument (`ReturnType<F>` / `Parameters<F>` /
+    /// `ConstructorParameters<C>` / `InstanceType<C>`).
+    ///
+    /// The deferred-shell evaluator deliberately leaves `DeclRef` /
+    /// `InstantiationRef` carriers symbolic (intermediate indexed-access
+    /// hops must stay carrier-shaped), but a signature utility IS a
+    /// demand point: its argument's call/construct surface must settle
+    /// before the signature walk can read it. Mirrors the keyspace
+    /// enumerator's carrier demand point
+    /// (`key_names_from_keyspace_node`): resolve the carrier through the
+    /// shared `Instantiate` dispatch under the CALLER's context (a
+    /// structural-transit caller carrier-stops as usual), then re-settle
+    /// deferred shells. Bounded carrier-chain unwrap; an unresolvable
+    /// carrier returns itself so the utility falls through to its
+    /// deferred `Opaque(Miss)` shell.
+    fn resolve_signature_source_carrier(
+        &self,
+        node: SemanticNodeId,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> SemanticNodeId {
+        let mut current = self.evaluate_deferred_semantic_node_with_context(node, context);
+        // Carrier chains are short (alias → DeclRef → instantiated body);
+        // 8 hops mirrors the alias-peek budget.
+        // bounded-loop: at most 8 carrier-resolution hops.
+        for _ in 0..8 {
+            let (slot, inst_args, owner_canonical) = match self
+                .graph()
+                .node_data(current)
+                .as_deref()
+            {
+                Some(SemanticNodeData::DeclRef { identity }) => (
+                    self.type_slot_for(
+                        Arc::clone(&identity.canonical_id),
+                        Arc::clone(&identity.decl_name),
+                    ),
+                    Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                    Arc::clone(&identity.canonical_id),
+                ),
+                Some(SemanticNodeData::InstantiationRef { base, args }) => (
+                    self.type_slot_for(Arc::clone(&base.canonical_id), Arc::clone(&base.decl_name)),
+                    Arc::clone(args),
+                    Arc::clone(&base.canonical_id),
+                ),
+                _ => return current,
+            };
+            let read = self.execute_read(SemanticQueryKey::Instantiate {
+                base: slot,
+                args: inst_args,
+                context: self.instantiate_context_for(&owner_canonical, context),
+            });
+            // A2 signal-split: fold a genuinely-incomplete carrier resolve.
+            crate::request_context::observe_component_meta_read_suppress(&read);
+            let next = match read.value {
+                QueryResult::Value(id) => id,
+                _ => return current,
+            };
+            if next == current {
+                return current;
+            }
+            current = self.evaluate_deferred_semantic_node_with_context(next, context);
+        }
+        current
+    }
+
+    /// Registry classification: `name` is the global lib `Promise` type
+    /// (`IntrinsicRegistry` → [`IntrinsicImpl::PromiseGlobal`](crate::intrinsic_registry::IntrinsicImpl::PromiseGlobal)).
+    /// The registry lookup is the lib-decl-identity rail — resolver code
+    /// never matches the name string directly.
+    pub(super) fn is_promise_global_name(&self, name: &str) -> bool {
+        matches!(
+            self.ctx
+                .project_type_store()
+                .intrinsic_registry()
+                .lookup(name),
+            crate::intrinsic_registry::IntrinsicLookup::Found(
+                crate::intrinsic_registry::IntrinsicImpl::PromiseGlobal
+            )
+        )
+    }
+
+    /// Whether `identity` is the builtin-sentinel `Promise` carrier
+    /// identity the lowering fast path interns for an unshadowed global
+    /// `Promise<...>` reference.
+    fn is_promise_global_identity(&self, identity: &crate::semantic_query::DeclIdentity) -> bool {
+        identity.canonical_id.as_ref() == "__builtin__"
+            && self.is_promise_global_name(identity.decl_name.as_ref())
+    }
+
+    /// `Awaited<T>` reduction over a SETTLED operand.
+    ///
+    /// Mirrors the lib conditional chain
+    /// `T extends null | undefined ? T :
+    ///  T extends object & { then(...): any } ? ... Awaited<V> ... : T`:
+    ///
+    /// - lattice extremes: `any` ⇒ `any`, `never` ⇒ `never`, `unknown` ⇒
+    ///   `unknown` (no thenable branch matches; the final fallthrough
+    ///   returns `T`); an `error` carrier dominates and passes through.
+    /// - `null` / `undefined` pass through (the first conditional clause).
+    /// - a union distributes per arm and renormalises; any undecidable arm
+    ///   defers the whole reduction (partial distribution would silently
+    ///   drop information).
+    /// - a `Promise<V>` carrier — the builtin-sentinel `InstantiationRef`
+    ///   whose declaration identity the registry classifies as
+    ///   `PromiseGlobal` — recursively unwraps `V`, bounded by
+    ///   [`AWAITED_UNWRAP_BUDGET`](Self::reduce_awaited) (budget exhaustion
+    ///   defers to the `Opaque(Miss)` shell, never a wrong answer).
+    /// - settled non-thenables (primitives, literals, template literals,
+    ///   functions, tuples, arrays, objects WITHOUT a `then` member) pass
+    ///   through unchanged.
+    ///
+    /// **Structural thenables are out of scope.** TS unwraps any object
+    /// whose callable `then` member matches the awaited protocol; no
+    /// corpus row requires that, so an Object surface that carries a
+    /// `then` member (and every other unsettled shape — type params,
+    /// conditionals, intersections, opaque carriers) keeps the deferred
+    /// `Opaque(Miss)` shell rather than risking a wrong passthrough.
+    fn reduce_awaited(
+        &self,
+        node: SemanticNodeId,
+        context: crate::semantic_query::ProjectionReductionContext,
+        depth: u32,
+    ) -> SemanticNodeId {
+        use crate::project_semantic_dispatch::absorb::SpecialKind;
+        use crate::semantic_query::PrimitiveKind;
+
+        /// Nested `Promise<Promise<...>>` unwrap ceiling. Real-world
+        /// nesting is shallow (2–3 levels); the bound is a runaway fuse
+        /// for adversarial self-referential carriers. Exhaustion defers.
+        const AWAITED_UNWRAP_BUDGET: u32 = 32;
+
+        if depth >= AWAITED_UNWRAP_BUDGET {
+            return self.opaque(QueryError::Miss);
+        }
+        let resolved = self.evaluate_deferred_semantic_node_with_context(node, context);
+        if let Some((kind, special)) = self.peek_special(resolved) {
+            return match kind {
+                // `any` / `never` / `unknown` and the dominating error
+                // carrier all return the resolved operand verbatim.
+                SpecialKind::Any
+                | SpecialKind::Never
+                | SpecialKind::Unknown
+                | SpecialKind::Error => special,
+            };
+        }
+        let Some(data) = self.graph().node_data(resolved) else {
+            return self.opaque(QueryError::Miss);
+        };
+        match data.as_ref() {
+            // Nullish passthrough — the first conditional clause.
+            SemanticNodeData::Primitive(PrimitiveKind::Null | PrimitiveKind::Undefined) => resolved,
+            // Settled non-thenable passthrough.
+            SemanticNodeData::Primitive(_)
+            | SemanticNodeData::Literal(_)
+            | SemanticNodeData::TemplateLiteral { .. }
+            | SemanticNodeData::Function { .. }
+            | SemanticNodeData::Tuple { .. }
+            | SemanticNodeData::Array { .. } => resolved,
+            // An object surface unwraps only when it provably carries NO
+            // `then` member — a `then`-bearing surface may be a structural
+            // thenable (out of scope), so it defers instead of passing
+            // through a wrong answer.
+            SemanticNodeData::Object(surface) => {
+                if surface
+                    .members
+                    .iter()
+                    .any(|member| member.name.as_ref() == "then")
+                {
+                    self.opaque(QueryError::Miss)
+                } else {
+                    resolved
+                }
+            }
+            // Union distribution: every arm must reduce; renormalise the
+            // results through the shared union intern.
+            SemanticNodeData::Union(members) => {
+                let members = members.clone();
+                drop(data);
+                let mut reduced: Vec<SemanticNodeId> = Vec::with_capacity(members.len());
+                for member in members.iter() {
+                    let arm = self.reduce_awaited(*member, context, depth + 1);
+                    if matches!(
+                        self.graph().node_data(arm).as_deref(),
+                        Some(SemanticNodeData::Opaque(QueryError::Miss))
+                    ) {
+                        return self.opaque(QueryError::Miss);
+                    }
+                    reduced.push(arm);
+                }
+                self.intern_normalized_union_or_intersection(&reduced, true)
+            }
+            // `Promise<V>` carrier — registry-recognised declaration
+            // identity — recursively unwraps its payload.
+            SemanticNodeData::InstantiationRef { base, args }
+                if args.len() == 1 && self.is_promise_global_identity(base) =>
+            {
+                let payload = args[0];
+                drop(data);
+                self.reduce_awaited(payload, context, depth + 1)
+            }
+            // Everything else (type params, infer shells, conditionals,
+            // intersections, mapped carriers, opaque shells, decl refs the
+            // evaluator could not settle) keeps the deferred shell.
+            _ => self.opaque(QueryError::Miss),
         }
     }
 
@@ -3226,6 +3547,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
         let data = self.graph().node_data(node)?;
         match &*data {
+            // A bare constructor type (`new (...) => R`) lowers through
+            // the SAME canonical `Function` carrier as a call signature
+            // (the constructor-vs-function distinction is consumed
+            // before query-time dispatch — see the `ConstructorType`
+            // lowering arm), so a direct `Function` node IS the
+            // construct signature here.
+            SemanticNodeData::Function { .. } => Some(node),
             SemanticNodeData::Alias(target) => {
                 self.resolve_construct_signature_function_inner(*target, visited)
             }
@@ -3238,6 +3566,150 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             _ => None,
         }
+    }
+
+    // (See `NormalizedTupleShape` at module scope below the impl block.)
+
+    /// Spread-normalise a tuple's element list (the shared
+    /// normalize-on-intern rule for every tuple intern site that can
+    /// receive substituted / signature-derived elements):
+    ///
+    /// 1. **Variadic splice** — a `rest: true` element whose value is a
+    ///    settled `Tuple` (through transparent aliases) splices that
+    ///    tuple's elements in place, preserving the inner labels /
+    ///    optional / rest markers. This is what makes a userland
+    ///    `Concat<A, B> = [...A, ...B]` concatenate once `A` / `B`
+    ///    substitute to concrete tuples — no utility name special-casing.
+    ///    Splicing recurses into the spliced elements under a small depth
+    ///    budget (nested `[...[...T]]` shapes); budget exhaustion keeps
+    ///    the element verbatim.
+    /// 2. **Non-trailing optional reconciliation** — an `optional` marker
+    ///    followed anywhere later by a REQUIRED (non-optional, non-rest)
+    ///    element converts to a REQUIRED `T | undefined` slot.
+    ///    Optional-before-required is unrepresentable TS (TS1257); the
+    ///    pinned tsgo materialises `[...[a?: number], string]` as
+    ///    `[number | undefined, string]` (length 2). A trailing optional
+    ///    run — including one followed only by a rest tail, which IS
+    ///    legal (`[a?: number, ...boolean[]]`) — keeps its `?`.
+    /// 3. **Sole-rest collapse** — a tuple consisting SOLELY of one
+    ///    rest-of-array element IS that array (`[...E[]]` ≡ `E[]`,
+    ///    the `(...args: E[])` parameters surface). The collapsed
+    ///    array's `readonly` mirrors the OUTER tuple (`readonly`
+    ///    parameter — pinned tsgo: `readonly [...number[]]` ≡
+    ///    `readonly number[]`; `[...(readonly number[])]` ≡ MUTABLE
+    ///    `number[]`), never the inner array's flag.
+    ///
+    /// A rest element whose value is open / unresolved (a generic, a
+    /// carrier, anything not a settled tuple/array) is preserved
+    /// verbatim — normalization never forces materialisation.
+    pub(super) fn normalize_tuple_spread(
+        &self,
+        elements: &[crate::semantic_query::TupleElement],
+        readonly: bool,
+    ) -> NormalizedTupleShape {
+        let mut out: Vec<crate::semantic_query::TupleElement> = Vec::with_capacity(elements.len());
+        self.splice_tuple_elements(elements, &mut out, 0);
+        // Non-trailing optional reconciliation (reverse scan: a slot's
+        // conversion depends only on LATER elements; a converted slot is
+        // itself required and forces conversion of earlier optionals).
+        let mut required_follows = false;
+        for index in (0..out.len()).rev() {
+            if out[index].optional && required_follows {
+                let undefined_node = self.graph().intern_node(SemanticNodeData::Primitive(
+                    crate::semantic_query::PrimitiveKind::Undefined,
+                ));
+                let widened = self.intern_normalized_union_or_intersection(
+                    &[out[index].value, undefined_node],
+                    /* is_union */ true,
+                );
+                out[index].value = widened;
+                out[index].optional = false;
+            }
+            if !out[index].optional && !out[index].rest {
+                required_follows = true;
+            }
+        }
+        if out.len() == 1 && out[0].rest {
+            if let Some(array_node) = self.settled_node_through_aliases(out[0].value, |data| {
+                matches!(data, SemanticNodeData::Array { .. })
+            }) {
+                if let Some(SemanticNodeData::Array {
+                    element,
+                    readonly: inner_readonly,
+                }) = self.graph().node_data(array_node).as_deref()
+                {
+                    // The collapsed array's readonly mirrors the OUTER
+                    // tuple; reuse the inner node only when the flags
+                    // already agree. The replacement intern preserves the
+                    // inner node's origin scope so `ProjectPath`
+                    // self-rooting over the collapsed base still records
+                    // the origin file's `(canonical, whole_hash)` root.
+                    if *inner_readonly == readonly {
+                        return NormalizedTupleShape::Array(array_node);
+                    }
+                    let element = *element;
+                    return NormalizedTupleShape::Array(self.graph().intern_preserving_scope(
+                        array_node,
+                        SemanticNodeData::Array { element, readonly },
+                    ));
+                }
+            }
+        }
+        NormalizedTupleShape::Tuple(out)
+    }
+
+    /// Recursive splice body for [`Self::normalize_tuple_spread`].
+    fn splice_tuple_elements(
+        &self,
+        elements: &[crate::semantic_query::TupleElement],
+        out: &mut Vec<crate::semantic_query::TupleElement>,
+        depth: u32,
+    ) {
+        /// Nested `[...[...T]]` splice ceiling — real-world nesting is
+        /// 1–2 levels; the bound is a runaway fuse.
+        const SPLICE_DEPTH_BUDGET: u32 = 8;
+        for element in elements {
+            if element.rest && depth < SPLICE_DEPTH_BUDGET {
+                let inner_tuple = self.settled_node_through_aliases(element.value, |data| {
+                    matches!(data, SemanticNodeData::Tuple { .. })
+                });
+                if let Some(tuple_node) = inner_tuple {
+                    if let Some(SemanticNodeData::Tuple {
+                        elements: inner, ..
+                    }) = self.graph().node_data(tuple_node).as_deref()
+                    {
+                        let inner = Arc::clone(inner);
+                        self.splice_tuple_elements(&inner, out, depth + 1);
+                        continue;
+                    }
+                }
+            }
+            out.push(element.clone());
+        }
+    }
+
+    /// Unwrap transparent `Alias` hops (bounded) and return the settled
+    /// node iff its data matches `predicate`. `None` for open /
+    /// unresolved carriers — callers preserve those verbatim.
+    fn settled_node_through_aliases(
+        &self,
+        node: SemanticNodeId,
+        predicate: impl Fn(&SemanticNodeData) -> bool,
+    ) -> Option<SemanticNodeId> {
+        let mut current = node;
+        // bounded-loop: at most 8 transparent Alias hops.
+        for _ in 0..8 {
+            let data = self.graph().node_data(current)?;
+            match &*data {
+                SemanticNodeData::Alias(target) => {
+                    let next = *target;
+                    drop(data);
+                    current = next;
+                }
+                other => return predicate(other).then_some(current),
+            }
+        }
+        None
     }
 
     /// Build a tuple node whose elements are the function's parameter
@@ -3256,20 +3728,42 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let SemanticNodeData::Function { params, .. } = &*data else {
             return None;
         };
-        let elements: Arc<[TupleElement]> = params
+        let params = Arc::clone(params);
+        drop(data);
+        let elements: Vec<TupleElement> = params
             .iter()
             .map(|param| TupleElement {
                 label: param.name.as_ref().map(Arc::clone),
-                value: param.ty,
+                // An optional parameter's tuple SLOT type is
+                // `T | undefined` (TS widens the optional slot), while the
+                // `optional` marker below keeps the `?` surface flag —
+                // both are part of the published `Parameters<F>` shape.
+                value: if param.optional {
+                    let undefined = self.graph().intern_node(SemanticNodeData::Primitive(
+                        crate::semantic_query::PrimitiveKind::Undefined,
+                    ));
+                    self.intern_normalized_union_or_intersection(&[param.ty, undefined], true)
+                } else {
+                    param.ty
+                },
                 optional: param.optional,
                 rest: param.rest,
             })
-            .collect::<Vec<_>>()
-            .into();
-        Some(self.graph().intern_node(SemanticNodeData::Tuple {
-            elements,
-            readonly: false,
-        }))
+            .collect();
+        // Normalize-on-intern: a `(...args: E[])` signature's sole rest
+        // slot collapses to `E[]`; concrete rest-of-tuple slots splice.
+        // The Parameters tuple is mutable.
+        Some(
+            match self.normalize_tuple_spread(&elements, /* readonly */ false) {
+                NormalizedTupleShape::Array(array_node) => array_node,
+                NormalizedTupleShape::Tuple(elements) => {
+                    self.graph().intern_node(SemanticNodeData::Tuple {
+                        elements: elements.into(),
+                        readonly: false,
+                    })
+                }
+            },
+        )
     }
 
     // Declaration identity is carried directly by
@@ -3307,9 +3801,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
         for &member in members.iter() {
             // Each arm MUST be a concrete literal key; a non-literal arm
             // aborts the distribution (the union is not a finite key set).
+            // A NUMERIC-literal arm outside the bounded integer
+            // convention (`Obj[1.5 | 1e21]`, big integers with divergent
+            // shortest-round-trip spellings) stays `TypeNode` by the
+            // producer predicate yet IS a concrete key — keep it as the
+            // `TypeNode` index so the per-arm `IndexedAccess` dispatch
+            // recovers its canonical `js_number_to_string` needle
+            // through the same G4.5 path as a single-key access.
             let member_index = match self.normalized_index_key_node(member) {
                 key @ (IndexKey::String(_) | IndexKey::Number(_)) => key,
-                IndexKey::TypeNode(_) => return None,
+                IndexKey::TypeNode(resolved) => match self.graph().node_data(resolved).as_deref() {
+                    Some(SemanticNodeData::Literal(LiteralValue::Number(_))) => {
+                        IndexKey::TypeNode(resolved)
+                    }
+                    _ => return None,
+                },
             };
             let read = self.execute_read(SemanticQueryKey::IndexedAccess {
                 base,
@@ -3320,7 +3826,47 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 any_partial = true;
             }
             match read.value {
-                QueryResult::Value(id) => projected.push(id),
+                // An arm whose KEY is absent aborts the distribution —
+                // the walker reports an absent member as the
+                // `Opaque(Miss)` sentinel, and tsgo ERRORS on
+                // `Obj[1.5 | 2.5]` when an arm has no member, so
+                // fabricating a partial union of the arms that DID
+                // resolve would be unsound. Falling through to the path
+                // walker keeps the honest single-needle miss. An arm
+                // whose key EXISTS but whose VALUE is an opaque carrier
+                // (a deferred `DeclPlaceholder` shell, an unresolved
+                // declaration) is NOT a miss: the per-arm read returns
+                // the member's stored value verbatim — exactly what the
+                // single-key `Obj['b']` access publishes — so the
+                // carrier contributes to the union (per-arm single-key
+                // consistency; carrier-preserving shallow-by-default).
+                //
+                // This classification is sound only under the sentinel
+                // discipline that `Opaque(Miss)` never surfaces as an
+                // EXISTING member's per-arm terminal: existing members
+                // project as real value nodes or addressable carriers
+                // (`DeclPlaceholder`, `DeclRef`, `InstantiationRef`,
+                // `Mapped`, deferred `IndexedAccess`). Every per-key
+                // producer that could forge `Opaque(Miss)` for an
+                // existing key by substituting into a builtin Identity
+                // utility's lazy `value_expr` placeholder dispatches
+                // `source[K]` through the shared `IndexedAccess` query
+                // instead — the PathWalker's Mapped narrowing (guard:
+                // `identity_utility_mapped_carrier_projects_existing_members_not_miss`),
+                // the Shallow walker's `synthesise_mapped_surface` (guard:
+                // `identity_utility_shallow_empty_path_surface_publishes_source_member_values_not_miss`),
+                // and `build_mapped_type`'s per-key value selection (guard:
+                // `identity_mapped_build_without_projectable_source_publishes_addressable_carrier_not_miss`).
+                QueryResult::Value(id)
+                    if !matches!(
+                        self.graph().node_data(id).as_deref(),
+                        Some(SemanticNodeData::Opaque(
+                            crate::semantic_query::QueryError::Miss
+                        ))
+                    ) =>
+                {
+                    projected.push(id)
+                }
                 _ => return None,
             }
         }
@@ -3755,27 +4301,49 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///
     /// For a mapped type `{ [K in key_space]: value_expr }` with
     /// optional / readonly modifiers (stored on the `MapperKey` and
-    /// participating in the cache key), apply lazily:
+    /// participating in the cache key):
     ///
-    /// 1. Resolve the key space through `SemanticQueryKey::KeyOf` (or
-    ///    use the explicit `MapperKey::key_space` if a caller passes a
-    ///    pre-computed key union).
-    /// 2. For each discovered key, reserve a member slot in the result
-    ///    shell. Member optionality / readonly derive from the mapper's
-    ///    modifiers (`Add` → always on, `Remove` → always off, `Keep` →
-    ///    inherit from the source if available, else default off).
-    /// 3. Member values are lazy: they are interned as opaque
-    ///    placeholders because the full `K → key` substitution over
-    ///    `value_expr` requires solver-scale `TypeExpr` lowering handled
-    ///    by the userland-equivalence path. Callers projecting into a
-    ///    produced member follow the ProjectPath sub-query route into the
-    ///    keyspace + value expression.
-    /// 4. Emit `Normalize` edges from the mapped result to each
-    ///    contributing key. Emit one `ProjectMember` edge per produced
-    ///    member sourcing `[source, key]` with `OriginMeta::ProjectedMember`
-    ///    (provenance `MemberEdgeProvenance::MappedKeyEnumerated`)
-    ///    carrying the produced name (post-remap if `name_remap` is
-    ///    set).
+    /// 1. Carrier-stops run first: outside a publication demand
+    ///    (`may_reduce_operator(context)` is false), or when the
+    ///    produced surface still depends on an unbound OUTER generic
+    ///    (`mapped_type_is_open_or_unknown` — the route/mode-independent
+    ///    L1 Shallow-By-Default rule), return the deferred
+    ///    `SemanticNodeData::Mapped { source, mapper }` carrier with one
+    ///    `Normalize` edge over the contribution set.
+    /// 2. Enumerate the key domain: the source's projected member names
+    ///    when the source surfaces an Object (synthetic-name keyspaces
+    ///    reroute through the keyspace node's literals), else the
+    ///    keyspace node's literal union. Neither enumerable → the
+    ///    deferred `Mapped` carrier again.
+    /// 3. For each key, reserve a member slot. Member optionality /
+    ///    readonly derive from the mapper's modifiers (`Add` → always
+    ///    on, `Remove` → always off, `Keep` → inherit from the source
+    ///    if available, else default off).
+    /// 4. Member values dispatch on `mapper.kind`. An `Identity` mapper
+    ///    (the canonical `{ [K in keyof T]: T[K] }` behind `Partial` /
+    ///    `Required` / `Readonly`) reuses the matching source member's
+    ///    value directly; a key without a projectable source member
+    ///    dispatches `source[K]` through the shared `IndexedAccess`
+    ///    query, publishing the ADDRESSABLE deferred `IndexedAccess`
+    ///    carrier when the access cannot close — never the builtin
+    ///    mapper's `Opaque(Miss)` `value_expr` shell marker. A
+    ///    `Computed` mapper substitutes the binder and evaluates via
+    ///    [`Self::materialize_mapped_member_value_for_key`]
+    ///    (K-independent value bodies hoist one shared evaluation above
+    ///    the loop), falling back to the substituted carrier on `Opaque`
+    ///    so the free binder never leaks onto the published surface.
+    /// 5. Apply the `as`-clause `name_remap` per key via
+    ///    [`Self::mapped_member_name_remap_outcome`]: `Drop` filters the
+    ///    key; duplicate produced names union their per-key values;
+    ///    `DeferCarrier` fails the whole mapped type closed back to the
+    ///    deferred `Mapped` carrier.
+    /// 6. Emit one `Normalize` edge from the mapped result over the full
+    ///    contribution set (`[source, key_space, value_expr,
+    ///    name_remap?]`) and one `ProjectMember` edge per produced
+    ///    member value sourcing `[source, key_space]` with
+    ///    `OriginMeta::ProjectedMember` (provenance
+    ///    `MemberEdgeProvenance::MappedKeyEnumerated`) carrying the
+    ///    produced name (post-remap if `name_remap` is set).
     ///
     /// The `mapper: MapperKey` participates in the `SemanticQueryKey`
     /// hash so different modifier / value-expression combinations
@@ -3911,17 +4479,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .source_members_for_published_projection(source)
             .unwrap_or_default();
         mapped_is_partial |= source_members_partial;
-        let key_names: Vec<Arc<str>> = if !source_members.is_empty() {
+        let source_member_keys = |members: &[SurfaceMember]| {
+            super::enumerate::KeyDomainKey::from_names(
+                members.iter().map(|m| Arc::clone(&m.name)).collect(),
+            )
+        };
+        let keys: Vec<super::enumerate::KeyDomainKey> = if !source_members.is_empty() {
             if self.uses_synthetic_mapped_key_names(&source_members) {
-                match self.key_names_from_keyspace_node(mapper.key_space) {
-                    Some(names) => names,
-                    None => source_members.iter().map(|m| Arc::clone(&m.name)).collect(),
+                match self.key_literals_from_keyspace_node(mapper.key_space) {
+                    Some(keys) => keys,
+                    None => source_member_keys(&source_members),
                 }
             } else {
-                source_members.iter().map(|m| Arc::clone(&m.name)).collect()
+                source_member_keys(&source_members)
             }
-        } else if let Some(names) = self.key_names_from_keyspace_node(mapper.key_space) {
-            names
+        } else if let Some(keys) = self.key_literals_from_keyspace_node(mapper.key_space) {
+            keys
         } else {
             // Change M: `KeyEnumeration::Unresolvable`. Neither the
             // source surface nor the key space enumerate to concrete names.
@@ -4059,13 +4632,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
         } else {
             None
         };
-        let mut produced: Vec<SurfaceMember> = Vec::with_capacity(key_names.len());
+        let mut produced: Vec<SurfaceMember> = Vec::with_capacity(keys.len());
         let mut project_member_edges: Vec<(SemanticNodeId, Arc<str>)> = Vec::new();
         // A key whose `as` remap fails closed (`DeferCarrier`) taints the whole
         // mapped type: it returns the deferred `Mapped` carrier rather than a
         // torn surface (set inside the loop, checked after).
         let mut remap_defers = false;
-        for name in &key_names {
+        for key in &keys {
+            let name = &key.name;
             let source_member = source_members.iter().find(|m| &m.name == name);
             let optional = match mapper.optionality {
                 crate::semantic_query::OptionalityMod::Add => true,
@@ -4083,9 +4657,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
             };
             // Value selection branches:
             //
-            // - `source_members` matches this key AND `value_expr` IS
-            //   structurally `T[K]` → use the member value directly
+            // - `source_members` matches this key AND `mapper.kind` is
+            //   `Identity` → use the member value directly
             //   (Partial/Required/Readonly-style mapped types).
+            // - `mapper.kind` is `Identity` but the source surface did
+            //   NOT project a matching member (non-Object source whose
+            //   key space still enumerated, synthetic-name keyspace
+            //   reroute) → the per-key value is STILL `source[K]` by
+            //   definition: dispatch the shared `IndexedAccess` query,
+            //   never a substitution into `mapper.value_expr` — the
+            //   builtin Identity mapper carries the lazy `Opaque(Miss)`
+            //   placeholder there, and substituting into it forges
+            //   `Opaque(Miss)` as an EXISTING member's published value.
+            //   An access the query cannot close publishes the
+            //   ADDRESSABLE deferred `IndexedAccess` carrier instead.
             // - `value_expr` does NOT reference `mapper.parameter_node`
             //   → reuse `shared_value` (the once-per-mapped-type
             //   evaluation hoisted above the loop). Both correctness
@@ -4093,8 +4678,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             //   identical surface member value the per-K materialiser
             //   would produce.
             // - Otherwise (`value_expr` is not `T[K]` and IS K-dependent,
-            //   or the source has no matching member) → defer to the
-            //   shared per-key materialiser
+            //   or a Computed mapper's source has no matching member) →
+            //   defer to the shared per-key materialiser
             //   [`Self::materialize_mapped_member_value_for_key`].
             //   That helper substitutes the binder, evaluates under the
             //   caller's `context` (publication callers reify; transit
@@ -4106,18 +4691,41 @@ impl<'a> ProjectSemanticDispatch<'a> {
             //   paths converge on identical per-key semantics.
             let value = if let (Some(source_member), true) = (source_member, value_is_identity) {
                 source_member.value
+            } else if value_is_identity {
+                let key_node = graph.intern_node(SemanticNodeData::Literal(key.literal.clone()));
+                let read = self.execute_read(SemanticQueryKey::IndexedAccess {
+                    base: source,
+                    index: IndexKey::TypeNode(key_node),
+                    mode: ProjectionMode::Navigate,
+                });
+                if read.result_is_partial {
+                    mapped_is_partial = true;
+                }
+                match read.value {
+                    QueryResult::Value(id)
+                        if !matches!(
+                            graph.node_data(id).as_deref(),
+                            Some(SemanticNodeData::Opaque(_))
+                        ) =>
+                    {
+                        id
+                    }
+                    _ => graph.intern_node(SemanticNodeData::IndexedAccess {
+                        object: source,
+                        index: IndexKey::TypeNode(key_node),
+                    }),
+                }
             } else if let Some(shared) = shared_value {
                 shared
             } else {
-                self.materialize_mapped_member_value_for_key(mapper, name.as_ref(), context)
+                self.materialize_mapped_member_value_for_key(mapper, &key.literal, context)
             };
             // Apply `name_remap` (the `as <expr>` clause) via the shared
             // [`Self::mapped_member_name_remap_outcome`] classifier — same
             // substitution + context-aware evaluation the Shallow walker uses.
             // `Drop` filters the key, `Keys` emits one member per produced
             // name, `DeferCarrier` fails the whole mapped type closed.
-            let produced_names = match self.mapped_member_name_remap_outcome(mapper, name, context)
-            {
+            let produced_names = match self.mapped_member_name_remap_outcome(mapper, key, context) {
                 MappedKeyRemapOutcome::Keep(n) => vec![n],
                 MappedKeyRemapOutcome::Keys(ns) => ns,
                 MappedKeyRemapOutcome::Drop => continue,
@@ -4127,6 +4735,23 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
             };
             for produced_name in produced_names {
+                // Duplicate produced names UNION their per-K values: the
+                // numeric key `1` and the string key `"1"` address the
+                // SAME property, each contributing its own kind (pinned
+                // tsgo, probe12: `{ [K in 1 | "1"]: K }` = `{ 1: 1 | "1" }`
+                // — both first-wins and last-wins were falsified). The
+                // first production keeps the member slot (position and
+                // modifiers); later same-name productions fold their
+                // value into a Union arm.
+                if let Some(existing) = produced.iter_mut().find(|m| m.name == produced_name) {
+                    if existing.value != value {
+                        existing.value = graph.intern_node(SemanticNodeData::Union(Arc::from(
+                            vec![existing.value, value].into_boxed_slice(),
+                        )));
+                    }
+                    project_member_edges.push((value, produced_name));
+                    continue;
+                }
                 // SAFETY: mapped-type member synthesis (e.g.,
                 // `Partial<T>` / `Required<T>` / `{ [K in S]: V }`).
                 // Members reach the surface via the mapped construction,
@@ -4239,7 +4864,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// synthesis at the macro publication boundary).
     ///
     /// Substitutes the mapper binder (`mapper.parameter_node`) with the
-    /// enumerated `key_name` literal inside `mapper.value_expr`, then
+    /// enumerated key's ORIGINAL literal (kind-preserving: a numeric
+    /// keyspace member substitutes `Literal::Number`, never its
+    /// stringified member name — pinned tsgo, probe12:
+    /// `{ [K in 1]: K }` = `{ 1: 1 }`) inside `mapper.value_expr`, then
     /// materialises the substituted node only enough to close the
     /// selected key under the caller's `context`:
     ///
@@ -4271,15 +4899,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
     pub(super) fn materialize_mapped_member_value_for_key(
         &self,
         mapper: &crate::semantic_query::MapperKey,
-        key_name: &str,
+        key_literal: &LiteralValue,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> SemanticNodeId {
         self.graph().record_mapped_per_k_materialization();
         let key_arg = self
             .graph()
-            .intern_node(SemanticNodeData::Literal(LiteralValue::String(
-                key_name.to_string(),
-            )));
+            .intern_node(SemanticNodeData::Literal(key_literal.clone()));
         // Instrumentation — classify this per-K call as
         // unique or repeated based on the identity tuple a typed
         // mapped-member materialization cache would key on. The
@@ -4388,14 +5014,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
     pub(super) fn materialize_selected_key_mapped_value(
         &self,
         mapper: &crate::semantic_query::MapperKey,
-        key_name: &str,
+        key_literal: &LiteralValue,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> SemanticNodeId {
         let key_arg = self
             .graph()
-            .intern_node(SemanticNodeData::Literal(LiteralValue::String(
-                key_name.to_string(),
-            )));
+            .intern_node(SemanticNodeData::Literal(key_literal.clone()));
         self.materialize_selected_key_mapped_value_with_node(mapper, key_arg, context)
     }
 
@@ -4643,9 +5267,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///
     /// - no remap clause ⇒ [`MappedKeyRemapOutcome::Keep`] (the iteration key);
     /// - `never` ⇒ [`MappedKeyRemapOutcome::Drop`] (the key is filtered out);
-    /// - a finite string `Literal` ⇒ [`MappedKeyRemapOutcome::Keys`] with that
-    ///   one key; a finite union of string literals ⇒ those keys;
-    /// - an unresolved / non-finite / non-string remap ⇒
+    /// - a finite string OR numeric `Literal` ⇒ [`MappedKeyRemapOutcome::Keys`]
+    ///   with that one key (a numeric literal publishes under its canonical
+    ///   `js_number_to_string` name — pinned tsgo, probe16: `{ [K in 1 as K]:
+    ///   K }` = `{ 1: 1 }`, `{ [K in 1e21 as K]: K }` = `{ "1e+21": 1e21 }`);
+    ///   a finite union of such literals ⇒ those keys;
+    /// - an unresolved / non-finite / non-key-capable remap ⇒
     ///   [`MappedKeyRemapOutcome::DeferCarrier`] — the mapped type FAILS CLOSED
     ///   to its deferred carrier (it NEVER falls back to the original key,
     ///   which would publish a wrong surface).
@@ -4655,17 +5282,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
     pub(super) fn mapped_member_name_remap_outcome(
         &self,
         mapper: &crate::semantic_query::MapperKey,
-        key_name: &Arc<str>,
+        key: &super::enumerate::KeyDomainKey,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> MappedKeyRemapOutcome {
         let Some(remap_node) = mapper.name_remap else {
-            return MappedKeyRemapOutcome::Keep(Arc::clone(key_name));
+            return MappedKeyRemapOutcome::Keep(Arc::clone(&key.name));
         };
-        let key_literal =
-            self.graph()
-                .intern_node(SemanticNodeData::Literal(LiteralValue::String(
-                    key_name.as_ref().to_string(),
-                )));
+        // Kind-preserving substitution: the `as` clause sees the key's
+        // ORIGINAL literal (probe12: `{ [K in 1 as K extends number ?
+        // "n" : "s"]: K }` = `{ n: 1 }` — a stringified K would select
+        // the wrong branch).
+        let key_literal = self
+            .graph()
+            .intern_node(SemanticNodeData::Literal(key.literal.clone()));
         let substituted_remap =
             self.substitute_semantic_type_param(remap_node, mapper.parameter_node, key_literal);
         let evaluated_remap =
@@ -4674,13 +5303,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
     }
 
     /// Classify an evaluated key-remap node into a [`MappedKeyRemapOutcome`].
-    /// `never` ⇒ Drop, a string literal / finite union of string literals ⇒
-    /// Keys, anything else (broad `string`, an unresolved shell, a non-string
-    /// shape) ⇒ DeferCarrier (fail closed). Recurses through union arms.
+    /// `never` ⇒ Drop, a string / numeric literal or a finite union of them ⇒
+    /// Keys (numeric literals under their canonical `js_number_to_string`
+    /// names), anything else (broad `string`, an unresolved shell, a
+    /// non-key-capable shape — boolean / bigint literals are not property
+    /// keys) ⇒ DeferCarrier (fail closed). Recurses through union arms.
     fn classify_remap_outcome(&self, node: SemanticNodeId) -> MappedKeyRemapOutcome {
         match self.graph().node_data(node).as_deref() {
             Some(SemanticNodeData::Literal(LiteralValue::String(text))) => {
                 MappedKeyRemapOutcome::Keys(vec![Arc::from(text.as_str())])
+            }
+            Some(SemanticNodeData::Literal(LiteralValue::Number(number))) => {
+                MappedKeyRemapOutcome::Keys(vec![Arc::from(js_number_to_string(*number).as_str())])
             }
             Some(SemanticNodeData::Primitive(PrimitiveKind::Never)) => MappedKeyRemapOutcome::Drop,
             Some(SemanticNodeData::Union(members)) => {
@@ -6154,4 +6788,13 @@ pub(super) enum MappedKeyRemapOutcome {
     /// The remap is unresolved / non-finite / non-string — the mapped type
     /// FAILS CLOSED to its deferred carrier (never the original key).
     DeferCarrier,
+}
+
+/// The result of [`ProjectSemanticDispatch::normalize_tuple_spread`]: either a
+/// (possibly spliced) element list that interns as a `Tuple`, or the array
+/// node a sole rest-of-array tuple collapses to (`[...E[]]` ≡ `E[]`).
+#[derive(Debug, Clone)]
+pub(super) enum NormalizedTupleShape {
+    Tuple(Vec<crate::semantic_query::TupleElement>),
+    Array(SemanticNodeId),
 }

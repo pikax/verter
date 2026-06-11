@@ -48,6 +48,16 @@ pub enum IntrinsicImpl {
     /// intrinsics without the resolver noticing, so we document its
     /// existence here even when the implementation is a thin passthrough.
     BuiltinIteratorReturn,
+    /// `Promise<T>` — the global lib-declared promise type. NOT a
+    /// `= intrinsic` alias: this is the registry's one global-TYPE
+    /// carve-out so promise identity is decided by registry lookup on the
+    /// resolved declaration name (the same lib-decl-identity rail the
+    /// intrinsics use) instead of a name-string match inside the
+    /// resolver. The lowering fast path interns an `InstantiationRef`
+    /// carrier for an unshadowed `Promise<...>` reference, and the
+    /// `Awaited` reducer arm consults this entry to recognise the
+    /// carrier's declaration identity before unwrapping.
+    PromiseGlobal,
 }
 
 impl IntrinsicImpl {
@@ -72,6 +82,9 @@ impl IntrinsicImpl {
             Self::UncapitalizeString => Some(BuiltinUtility::Uncapitalize),
             Self::NoInfer => Some(BuiltinUtility::NoInfer),
             Self::BuiltinIteratorReturn => None,
+            // `Promise` is a global lib TYPE, not a utility — it never
+            // routes onto a solver utility arm.
+            Self::PromiseGlobal => None,
         }
     }
 }
@@ -116,6 +129,7 @@ impl IntrinsicRegistry {
             "BuiltinIteratorReturn",
             IntrinsicImpl::BuiltinIteratorReturn,
         );
+        reg.register("Promise", IntrinsicImpl::PromiseGlobal);
         reg
     }
 

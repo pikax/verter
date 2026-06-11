@@ -67,6 +67,13 @@ pub mod display;
 /// generator-is-sole-writer contract.
 pub mod query_key_spec;
 
+/// The [`IndexKey::Number`] payload domain: the proof-carrying
+/// [`CanonicalIndexInt`] newtype (private field; construction only via
+/// the module's two blessed constructors) plus the canonical ECMA-262
+/// `Number::toString` spelling ([`index_key::js_number_to_string`]) the
+/// admission predicate is defined against.
+pub mod index_key;
+
 /// The §18.2 cache-admission decision for an error-tolerant semantic result:
 /// [`admit_decision`](admit::admit_decision) maps a result's
 /// [`ResultTaint`] + its [`ReadSetSignature`](crate::fact_signature_helpers::ReadSetSignature)
@@ -74,6 +81,8 @@ pub mod query_key_spec;
 /// gating `Warm` on the presence of the rooting FACT — never on the taint
 /// enum class as a proxy.
 pub mod admit;
+pub use index_key::CanonicalIndexInt;
+
 pub use demand::{
     apply_mask, backfill_points, cached_satisfies, demand_at_hop, relevant_demand_axes,
     AliasPreservation, AxisMask, CarrierStopPolicy, Demand, DemandAxis, DisplayFacet, DisplayNeeds,
@@ -772,10 +781,18 @@ pub struct MapperKey {
 
 /// Indexed-access key operand. Mirrors the three TypeScript forms:
 /// `T[K]` where `K` is a literal string, a literal number, or another type.
+///
+/// The `Number` payload is the proof-carrying [`CanonicalIndexInt`]:
+/// construction routes through the [`index_key`] module's two blessed
+/// constructors (the f64-checked
+/// [`index_key::integer_convention_index_key`] fold or the
+/// `Display`-checked [`CanonicalIndexInt::from_canonical_i64`]), so an
+/// unbounded `IndexKey::Number(n as i64)` cannot compile. Numbers the
+/// convention rejects stay [`IndexKey::TypeNode`] (G4.5 recovery).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum IndexKey {
     String(Arc<str>),
-    Number(i64),
+    Number(CanonicalIndexInt),
     TypeNode(SemanticNodeId),
 }
 

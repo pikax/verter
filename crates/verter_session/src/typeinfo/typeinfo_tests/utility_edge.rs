@@ -17,7 +17,7 @@ fn upsert(host: &crate::VerterHost) {
 }
 
 #[test]
-#[ignore = "typeinfo currently does not reduce `Pick<T, never>` to the empty object; keep as the future Pick-never edge contract"]
+#[ignore = "reducer resolves this correctly (covered by the non-ignored `utility_edge_object_filter_keyspace_reducer_regression`); NOT oracle-liftable — the `never` key argument in the declared source is outside the oracle's source-side positive allowlist (NeverKeyword). Lift pending an oracle admission extension for degenerate keyword arguments"]
 fn utility_edge_pick_never_yields_empty_object() {
     // TS7 contract: `Pick<Base, never>` = `{}`. The mapped form is
     // `{ [K in never]: Base[K] }` which has no members.
@@ -61,7 +61,7 @@ fn utility_edge_omit_never_yields_input_shape() {
 }
 
 #[test]
-#[ignore = "typeinfo currently does not reduce `Omit<T, keyof T>` to the empty object; keep as the future Omit-all edge contract"]
+#[ignore = "reducer resolves this correctly (covered by the non-ignored `utility_edge_object_filter_keyspace_reducer_regression`); NOT oracle-liftable — generation was attempted and measured Reject(DeferredConstruct(keyof)) on the `keyof Base` key argument. Lift pending an oracle source-walk carve-out for keyof key arguments"]
 fn utility_edge_omit_all_keys_yields_empty_object() {
     // TS7 contract: `Omit<Base, keyof Base>` removes every declared member,
     // leaving `{}`.
@@ -82,7 +82,7 @@ fn utility_edge_omit_all_keys_yields_empty_object() {
 }
 
 #[test]
-#[ignore = "typeinfo currently does not reduce `Pick<T, keyof T>` to the input shape; keep as the future Pick-all identity contract"]
+#[ignore = "reducer resolves this correctly (covered by the non-ignored `utility_edge_object_filter_keyspace_reducer_regression`); NOT oracle-liftable — generation was attempted and measured Reject(DeferredConstruct(keyof)) on the `keyof Base` key argument. Lift pending an oracle source-walk carve-out for keyof key arguments"]
 fn utility_edge_pick_all_keys_yields_input_shape() {
     // TS7 contract: `Pick<Base, keyof Base>` = `Base`.
     let host = make_host_with_footprint();
@@ -121,23 +121,63 @@ fn utility_edge_required_strips_optional_markers() {}
 #[test]
 fn utility_edge_readonly_required_composes_modifiers() {}
 
+// LIFTED: `NonNullable<string | null | undefined>` = `string` — the settled
+// union filters its nullish arms and the lone survivor collapses to the bare
+// primitive. The lifted body is the registry-keyed `oracle::run_row`
+// shared-driver call comparing Verter's `Expanded` projection against the
+// checked-in tsgo snapshot.
+#[oracle_row]
 #[test]
-#[ignore = "typeinfo currently does not reduce `NonNullable<string | null | undefined>` to the bare primitive; keep as the future NonNullable nullable-primitive contract"]
-fn utility_edge_non_nullable_strips_null_and_undefined() {
-    // TS7 contract: `NonNullable<string | null | undefined>` = `string`.
+fn utility_edge_non_nullable_strips_null_and_undefined() {}
+
+/// Non-ignored reducer regression for the three keyspace-domain object-filter
+/// rows (`PickNever` / `OmitAll` / `PickAll`): `Pick<Base, never>` and
+/// `Omit<Base, keyof Base>` reduce to the representable empty object and
+/// `Pick<Base, keyof Base>` reproduces the input shape. The sibling
+/// `#[ignore]`d rows stay manifest rows — their `keyof` / `never` source
+/// constructs are outside the oracle's positive allowlist — so this active
+/// regression carries the reducer proof.
+#[test]
+fn utility_edge_object_filter_keyspace_reducer_regression() {
     let host = make_host_with_footprint();
     upsert(&host);
 
-    let (expr, record) = resolve_expr(
+    let (pick_never, _) = resolve_expr(
         &host,
         "/fixtures/utility_edge.ts",
-        "NonNullablePrim",
+        "PickNever",
         &[],
         ProjectionMode::Expanded,
     );
+    let props = object_props(&pick_never);
+    assert!(
+        props.is_empty(),
+        "Pick<Base, never> must be empty, got {props:?}"
+    );
 
-    assert_primitive(&expr, PrimitiveName::String);
-    assert_query_mode(&record, ProjectionModeTag::Expanded);
+    let (omit_all, _) = resolve_expr(
+        &host,
+        "/fixtures/utility_edge.ts",
+        "OmitAll",
+        &[],
+        ProjectionMode::Expanded,
+    );
+    let props = object_props(&omit_all);
+    assert!(
+        props.is_empty(),
+        "Omit<Base, keyof Base> must be empty, got {props:?}"
+    );
+
+    let (pick_all, _) = resolve_expr(
+        &host,
+        "/fixtures/utility_edge.ts",
+        "PickAll",
+        &[],
+        ProjectionMode::Expanded,
+    );
+    let props = object_props(&pick_all);
+    assert_eq!(prop_names(&props), vec!["a", "b", "c"]);
+    assert_primitive(&props["a"].ty, PrimitiveName::Number);
 }
 
 #[test]

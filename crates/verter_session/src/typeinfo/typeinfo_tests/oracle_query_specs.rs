@@ -21,13 +21,14 @@
 // cleanly into the `tests/` guard — an inner doc comment is illegal in an
 // `include!`d position.)
 //
-// The registry seats the 11 lifted rows (the two index-signature
+// The registry seats the 19 lifted rows (the two index-signature
 // publication queries + the two built-in modifier-utility queries + the three
 // U2 IndexedAccess-reduction carve-out queries + the mapped-modifier `-?`
 // carve-out query at U2.MAPPED_TEMPLATE + the three keyof-expansion carve-out
-// queries captured through the distributive-identity scaffold). The types +
-// validation are additionally exercised with synthetic specs by the
-// discriminating guards.
+// queries captured through the distributive-identity scaffold + the eight
+// U2.UTILITIES reducer queries: five Awaited rows, two NonNullable rows, and
+// the variadic-spread Concat row). The types + validation are additionally
+// exercised with synthetic specs by the discriminating guards.
 
 /// The content id of the CURRENT closed vendored oracle-env corpus — the
 /// pinned-env constant the registry + every guard read to derive a
@@ -1024,12 +1025,239 @@ const MAPPED_MODIFIERS_FILES: &[WorkspaceFileSpec] = &[WorkspaceFileSpec {
     source: MAPPED_MODIFIERS_SOURCE,
 }];
 
-/// The closed registry table. Holds the lifted rows — the two index-signature
-/// publication queries, the two built-in modifier-utility queries, the
-/// three U2 IndexedAccess-reduction carve-out queries (two terminal indexed-access
-/// projections + one wide/deep literal-union projection), the mapped-modifier
-/// `-?` query, and the three keyof-expansion carve-out queries captured through
-/// the distributive-identity scaffold
+/// Vendored source bytes of `/fixtures/utility_top_bottom.ts` (the registry is the
+/// source-byte authority). Inlined verbatim (PURE owned `&'static str`); the
+/// guard `inlined_registry_source_is_byte_identical_to_fixture_files` asserts
+/// byte-identity with `fixtures/utility_top_bottom.ts`.
+#[allow(dead_code)]
+pub(crate) const UTILITY_TOP_BOTTOM_SOURCE: &str = r#"// @ai-generated - Synthetic top/bottom-type utility fixture.
+//
+// Codifies TS7's behaviour for built-in utilities applied to top/bottom
+// inputs (`any` / `unknown` / `never` / `null` / `undefined` / `void`).
+// These are the "catches you when regular objects pass but degenerate
+// inputs blow up" cases for the resolver's utility dispatch.
+//
+// Each alias is consumed through a corresponding Rust test in
+// `utility_top_bottom.rs`.
+
+// ============================================================
+// ReturnType matrix
+// ============================================================
+
+// TS7: `any` (the conditional distributes over `any`, both branches
+// contribute, and the merged result collapses to `any`).
+export type Utb01ReturnTypeOfAny = ReturnType<any>;
+
+// TS7: never (cannot extract a return from a bottom-typed callable)
+export type Utb02ReturnTypeOfNever = ReturnType<never>;
+
+// TS7: any
+export type Utb03ReturnTypeAnyArrow = ReturnType<() => any>;
+
+// TS7: never
+export type Utb04ReturnTypeNeverArrow = ReturnType<() => never>;
+
+// TS7: unknown
+export type Utb05ReturnTypeUnknownArrow = ReturnType<() => unknown>;
+
+// TS7: void
+export type Utb06ReturnTypeVoidArrow = ReturnType<() => void>;
+
+// ============================================================
+// Parameters matrix
+// ============================================================
+
+// TS7: `unknown[]` — when T is `any`, the inferred `infer P` resolves
+// against the constraint `(...args: any) => any`, yielding `unknown[]`
+// (NOT `any` and NOT `never`). This is one of the trap cases.
+export type Utb07ParametersOfAny = Parameters<any>;
+
+// TS7: never
+export type Utb08ParametersOfNever = Parameters<never>;
+
+// TS7: [x: any]
+export type Utb09ParametersAnyArg = Parameters<(x: any) => void>;
+
+// TS7: [x: never]
+export type Utb10ParametersNeverArg = Parameters<(x: never) => void>;
+
+// ============================================================
+// ConstructorParameters / InstanceType
+// ============================================================
+
+// TS7: `unknown[]` — like `Parameters<any>`, `ConstructorParameters<any>`
+// reduces to the constraint's inferred tuple = `unknown[]`.
+export type Utb11ConstructorParametersAny = ConstructorParameters<any>;
+
+// TS7: any
+export type Utb12InstanceTypeAny = InstanceType<any>;
+
+// TS7: any[]
+export type Utb13ConstructorParametersAnyCtor = ConstructorParameters<new (...args: any[]) => any>;
+
+// ============================================================
+// Awaited matrix
+// ============================================================
+
+// TS7: any
+export type Utb14AwaitedAny = Awaited<any>;
+
+// TS7: unknown
+export type Utb15AwaitedUnknown = Awaited<unknown>;
+
+// TS7: never
+export type Utb16AwaitedNever = Awaited<never>;
+
+// TS7: null
+export type Utb17AwaitedNull = Awaited<null>;
+
+// TS7: undefined
+export type Utb18AwaitedUndefined = Awaited<undefined>;
+
+// TS7: string (Awaited recursively unwraps nested Promises)
+export type Utb19AwaitedNestedPromise = Awaited<Promise<Promise<string>>>;
+
+// ============================================================
+// NonNullable matrix
+// ============================================================
+
+// TS7: any
+export type Utb20NonNullableAny = NonNullable<any>;
+
+// TS7: {} (NonNullable<unknown> reduces to the empty-object base)
+export type Utb21NonNullableUnknown = NonNullable<unknown>;
+
+// TS7: never
+export type Utb22NonNullableNever = NonNullable<never>;
+
+// TS7: never (every constituent of the input is null or undefined)
+export type Utb23NonNullableNullableOnly = NonNullable<null | undefined>;
+
+// ============================================================
+// Extract / Exclude matrix
+// ============================================================
+
+// TS7: any
+export type Utb24ExtractAnyAgainstString = Extract<any, string>;
+
+// TS7: any
+export type Utb25ExcludeAnyAgainstString = Exclude<any, string>;
+
+// TS7: never (distributing over `never` collapses)
+export type Utb26ExtractNeverAgainstString = Extract<never, string>;
+
+// TS7: never
+export type Utb27ExcludeNeverAgainstString = Exclude<never, string>;
+
+// TS7: never (`unknown extends string` is false, so `T extends U ? T : never`
+// collapses to `never`).
+export type Utb28ExtractUnknownAgainstString = Extract<unknown, string>;
+
+// TS7: unknown
+export type Utb29ExcludeUnknownAgainstString = Exclude<unknown, string>;
+"#;
+
+/// The workspace-file set the `utility_top_bottom.rs` rows upsert.
+#[allow(dead_code)]
+const UTILITY_TOP_BOTTOM_FILES: &[WorkspaceFileSpec] = &[WorkspaceFileSpec {
+    path: "/fixtures/utility_top_bottom.ts",
+    source: UTILITY_TOP_BOTTOM_SOURCE,
+}];
+
+/// Vendored source bytes of `/fixtures/variadic_tuples.ts` (the registry is the
+/// source-byte authority). Inlined verbatim (PURE owned `&'static str`); the
+/// guard `inlined_registry_source_is_byte_identical_to_fixture_files` asserts
+/// byte-identity with `fixtures/variadic_tuples.ts`.
+#[allow(dead_code)]
+pub(crate) const VARIADIC_TUPLES_SOURCE: &str = r#"// @ai-generated - Synthetic variadic-tuple typeinfo fixture.
+
+export type Head<T extends readonly unknown[]> = T extends readonly [infer H, ...unknown[]]
+  ? H
+  : never;
+export type Tail<T extends readonly unknown[]> = T extends readonly [unknown, ...infer R] ? R : [];
+export type Last<T extends readonly unknown[]> = T extends readonly [...unknown[], infer L]
+  ? L
+  : never;
+export type Init<T extends readonly unknown[]> = T extends readonly [...infer I, unknown] ? I : [];
+export type Concat<A extends readonly unknown[], B extends readonly unknown[]> = [...A, ...B];
+
+export type SampleTuple = [1, 2, 3];
+
+export type HeadOfSample = Head<SampleTuple>;
+export type TailOfSample = Tail<SampleTuple>;
+export type LastOfSample = Last<SampleTuple>;
+export type InitOfSample = Init<SampleTuple>;
+export type ConcatPair = Concat<[1, 2], [3, 4]>;
+
+// Variadic in a function signature
+export declare function variadic<A extends readonly unknown[], B extends readonly unknown[]>(
+  a: [...A],
+  b: [...B],
+): [...A, ...B];
+
+export type VariadicCallResult = ReturnType<typeof variadic<[1, 2], [3, 4]>>;
+"#;
+
+/// The workspace-file set the `variadic_tuples.rs` rows upsert.
+#[allow(dead_code)]
+const VARIADIC_TUPLES_FILES: &[WorkspaceFileSpec] = &[WorkspaceFileSpec {
+    path: "/fixtures/variadic_tuples.ts",
+    source: VARIADIC_TUPLES_SOURCE,
+}];
+
+/// Vendored source bytes of `/fixtures/utility-composition.ts` (the registry is the
+/// source-byte authority). Inlined verbatim (PURE owned `&'static str`); the
+/// guard `inlined_registry_source_is_byte_identical_to_fixture_files` asserts
+/// byte-identity with `fixtures/utility_composition.ts`.
+#[allow(dead_code)]
+pub(crate) const UTILITY_COMPOSITION_SOURCE: &str = r#"// @ai-generated - Synthetic utility-composition typeinfo fixture.
+
+export interface UtilitySource {
+  id: string;
+  label?: string;
+  tone?: "neutral" | "accent" | "danger";
+  mode: "view" | "edit" | "debug";
+  internal?: {
+    trace: boolean;
+    sink: (event: string) => void;
+  };
+  payload?: {
+    count?: number;
+    tags?: string[];
+  };
+}
+
+export type RequiredIdentity = Required<Pick<UtilitySource, "id" | "label">>;
+export type PublicPartial = Partial<Omit<UtilitySource, "internal">>;
+export type VisibleMode = Extract<UtilitySource["mode"], "view" | "edit">;
+export type RuntimeMode = Exclude<UtilitySource["mode"], "debug">;
+export type UtilityCombinationSurface = RequiredIdentity &
+  PublicPartial & {
+    visibleMode: VisibleMode;
+    runtimeMode: RuntimeMode;
+  };
+
+export type DeepUtilityPayload = Required<
+  Pick<NonNullable<UtilitySource["payload"]>, "count" | "tags">
+>;
+
+export type DeepUtilityConfig = Required<
+  Pick<Partial<Omit<UtilitySource, "internal">>, "mode" | "payload">
+> & {
+  mode: Extract<UtilitySource["mode"], "view" | "edit">;
+  tone: Exclude<NonNullable<UtilitySource["tone"]>, "danger">;
+  payload: DeepUtilityPayload;
+};
+"#;
+
+/// The closed registry table. Holds the 19 lifted rows — the two
+/// index-signature publication queries, the two built-in modifier-utility
+/// queries, the three U2 IndexedAccess-reduction carve-out queries (two
+/// terminal indexed-access projections + one wide/deep literal-union
+/// projection), the mapped-modifier `-?` query, the three keyof-expansion
+/// carve-out queries captured through the distributive-identity scaffold,
+/// and the eight U2.UTILITIES reducer queries (five Awaited rows, two
+/// NonNullable rows, and the variadic-spread Concat row)
 /// (`docs/arch/ts-compat-two-mode-model.md`, `docs/arch/u0-oracle-harness-design.md`).
 #[allow(dead_code)]
 pub(crate) const ORACLE_QUERY_SPECS: &[QuerySpec] = &[
@@ -1104,6 +1332,70 @@ pub(crate) const ORACLE_QUERY_SPECS: &[QuerySpec] = &[
         UNION_KEY_ACCESS_FILES,
         "/fixtures/union_key_access.ts",
         "EveryMember",
+    ),
+    carve_out_spec(
+        "utility_top_bottom.rs",
+        "utility_top_bottom_utb17_awaited_null_is_null",
+        "utility_top_bottom",
+        UTILITY_TOP_BOTTOM_FILES,
+        "/fixtures/utility_top_bottom.ts",
+        "Utb17AwaitedNull",
+    ),
+    carve_out_spec(
+        "utility_top_bottom.rs",
+        "utility_top_bottom_utb18_awaited_undefined_is_undefined",
+        "utility_top_bottom",
+        UTILITY_TOP_BOTTOM_FILES,
+        "/fixtures/utility_top_bottom.ts",
+        "Utb18AwaitedUndefined",
+    ),
+    carve_out_spec(
+        "utility_top_bottom.rs",
+        "utility_top_bottom_utb19_awaited_nested_promise_is_inner_primitive",
+        "utility_top_bottom",
+        UTILITY_TOP_BOTTOM_FILES,
+        "/fixtures/utility_top_bottom.ts",
+        "Utb19AwaitedNestedPromise",
+    ),
+    carve_out_spec(
+        "typescript_rules.rs",
+        "typescript_rules_awaited_recursively_unwraps_promises",
+        "typescript_rules",
+        TYPESCRIPT_RULES_FILES,
+        "/fixtures/typescript-rules.ts",
+        "AwaitedRules",
+    ),
+    carve_out_spec(
+        "utility_edge.rs",
+        "utility_edge_non_nullable_strips_null_and_undefined",
+        "utility_edge",
+        UTILITY_EDGE_FILES,
+        "/fixtures/utility_edge.ts",
+        "NonNullablePrim",
+    ),
+    carve_out_spec(
+        "variadic_tuples.rs",
+        "variadic_tuple_concat_alias_produces_joined_literal_tuple",
+        "variadic_tuples",
+        VARIADIC_TUPLES_FILES,
+        "/fixtures/variadic_tuples.ts",
+        "ConcatPair",
+    ),
+    carve_out_spec(
+        "utility_top_bottom.rs",
+        "utility_top_bottom_utb21_non_nullable_unknown_is_empty_object",
+        "utility_top_bottom",
+        UTILITY_TOP_BOTTOM_FILES,
+        "/fixtures/utility_top_bottom.ts",
+        "Utb21NonNullableUnknown",
+    ),
+    carve_out_spec(
+        "utility_top_bottom.rs",
+        "utility_top_bottom_utb15_awaited_unknown_is_unknown",
+        "utility_top_bottom",
+        UTILITY_TOP_BOTTOM_FILES,
+        "/fixtures/utility_top_bottom.ts",
+        "Utb15AwaitedUnknown",
     ),
 ];
 

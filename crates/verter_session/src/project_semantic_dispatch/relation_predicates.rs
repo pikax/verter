@@ -300,9 +300,11 @@ pub(super) fn index_domains_overlap(
         SemanticNodeData::Literal(LiteralValue::String(name)) => {
             index_signature_applies_to_property(graph, source_key, name)
         }
-        SemanticNodeData::Literal(LiteralValue::Number(n)) => {
-            index_signature_applies_to_property(graph, source_key, &format_numeric_property(*n))
-        }
+        SemanticNodeData::Literal(LiteralValue::Number(n)) => index_signature_applies_to_property(
+            graph,
+            source_key,
+            &super::build::js_number_to_string(*n),
+        ),
         SemanticNodeData::Union(members) => {
             let members = Arc::clone(members);
             drop(target_data);
@@ -324,10 +326,12 @@ pub(super) fn index_signature_applies_to_property(
     };
     match &*data {
         SemanticNodeData::Primitive(PrimitiveKind::String | PrimitiveKind::Any) => true,
-        SemanticNodeData::Primitive(PrimitiveKind::Number) => property_name.parse::<u64>().is_ok(),
+        SemanticNodeData::Primitive(PrimitiveKind::Number) => {
+            is_numeric_literal_name(property_name)
+        }
         SemanticNodeData::Literal(LiteralValue::String(name)) => name == property_name,
         SemanticNodeData::Literal(LiteralValue::Number(n)) => {
-            format_numeric_property(*n) == property_name
+            super::build::js_number_to_string(*n) == property_name
         }
         SemanticNodeData::Union(members) => {
             let members = Arc::clone(members);
@@ -340,12 +344,18 @@ pub(super) fn index_signature_applies_to_property(
     }
 }
 
-pub(super) fn format_numeric_property(value: f64) -> String {
-    if value.fract() == 0.0 {
-        format!("{value:.0}")
-    } else {
-        value.to_string()
-    }
+/// TS numeric-literal-name rule for a `[n: number]` index signature:
+/// a property name is numeric iff it round-trips through the JS number
+/// canonicalizer — `String(Number(name)) === name` (pinned tsgo,
+/// probe16 d1–d13: `"1.5"` / `"1e+21"` / `"-1"` / `"NaN"` /
+/// `"Infinity"` are numeric names; `"01"` / `"1e21"` / `" 1"` / `"-0"`
+/// are not). Routed through the single `js_number_to_string`
+/// canonicalizer — never an integer-only parse, never a second
+/// formatting path.
+fn is_numeric_literal_name(property_name: &str) -> bool {
+    property_name
+        .parse::<f64>()
+        .is_ok_and(|value| super::build::js_number_to_string(value) == property_name)
 }
 
 /// Relate two [`SemanticNodeData::Function`] shells. Parameter variance

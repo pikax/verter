@@ -8333,7 +8333,9 @@ mod node_predicates_tests {
         });
         let indexed = graph.intern_node(SemanticNodeData::IndexedAccess {
             object: foo_ref,
-            index: IndexKey::Number(0),
+            index: IndexKey::Number(
+                crate::semantic_query::CanonicalIndexInt::from_canonical_i64(0).expect("canonical"),
+            ),
         });
 
         assert!(

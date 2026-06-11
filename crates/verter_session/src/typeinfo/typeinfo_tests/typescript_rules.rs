@@ -380,24 +380,14 @@ fn typescript_rules_typeof_const_nested_value_resolves_literal() {
     assert_query_mode(&record, ProjectionModeTag::Expanded);
 }
 
+// LIFTED: `Awaited<Promise<Promise<{ done: true }>>>` = `{ done: true }` —
+// the recursive `Awaited<V>` branch unwraps the registry-classified
+// `Promise` carriers down to the fulfilled object payload. The lifted body
+// is the registry-keyed `oracle::run_row` shared-driver call comparing
+// Verter's `Expanded` projection against the checked-in tsgo snapshot.
+#[oracle_row]
 #[test]
-#[ignore = "typeinfo currently does not recursively unwrap Awaited<Promise<...>> to its fulfilled object type; keep as the future Awaited utility contract"]
-fn typescript_rules_awaited_recursively_unwraps_promises() {
-    let host = make_host_with_footprint();
-    upsert_ts(&host, "/fixtures/typescript-rules.ts", TYPESCRIPT_RULES);
-
-    let (expr, record) = resolve_expr(
-        &host,
-        "/fixtures/typescript-rules.ts",
-        "AwaitedRules",
-        &[],
-        ProjectionMode::Expanded,
-    );
-
-    let props = object_props(&expr);
-    assert_boolean_literal(&props["done"].ty, true);
-    assert_query_mode(&record, ProjectionModeTag::Expanded);
-}
+fn typescript_rules_awaited_recursively_unwraps_promises() {}
 
 #[test]
 #[ignore = "reducer resolves this correctly (covered by the non-ignored `template_intrinsic_reducer_evaluates_union` regression); NOT oracle-liftable — the SOURCE body is a template-literal construct that the oracle §Q2 positive-allowlist rejects (Reject(DeferredConstruct(\"template-literal\"))). Lift pending an oracle admission + hover-grammar extension for template-literal source roots"]

@@ -3007,10 +3007,18 @@ The complete partition (each entry `file::function — substrate`):
      DAG (typeinfo_parity_blocks.rs) come from the generator's own Python maps, NOT from this
      partition. Edit block_id assignments HERE, then regenerate. -->
 
-**`U2.QUERY_VALUE_DOMAIN`** (2 rows):
+**`U2.QUERY_VALUE_DOMAIN`** (10 rows):
 
 - `index_signatures.rs::index_signatures_numeric_index_publishes_signature` — `IndexSignatures`
 - `index_signatures.rs::index_signatures_symbol_index_publishes_signature` — `IndexSignatures`
+- `typescript_rules.rs::typescript_rules_awaited_recursively_unwraps_promises` — `TypeScriptRules`
+- `utility_edge.rs::utility_edge_non_nullable_strips_null_and_undefined` — `UtilityComposition`
+- `utility_top_bottom.rs::utility_top_bottom_utb15_awaited_unknown_is_unknown` — `UtilityComposition`
+- `utility_top_bottom.rs::utility_top_bottom_utb17_awaited_null_is_null` — `UtilityComposition`
+- `utility_top_bottom.rs::utility_top_bottom_utb18_awaited_undefined_is_undefined` — `UtilityComposition`
+- `utility_top_bottom.rs::utility_top_bottom_utb19_awaited_nested_promise_is_inner_primitive` — `UtilityComposition`
+- `utility_top_bottom.rs::utility_top_bottom_utb21_non_nullable_unknown_is_empty_object` — `UtilityComposition`
+- `variadic_tuples.rs::variadic_tuple_concat_alias_produces_joined_literal_tuple` — `TupleFeatures`
 
 **`U2.RELATION_INFER`** (20 rows):
 
@@ -3035,7 +3043,7 @@ The complete partition (each entry `file::function — substrate`):
 - `relation_semantics.rs::relation_readonly_property_assignable_to_mutable` — `RelationSemantics`
 - `typescript_rules.rs::typescript_rules_distributive_conditional_expands_each_union_arm` — `TypeScriptRules`
 
-**`U2.UTILITIES`** (40 rows):
+**`U2.UTILITIES`** (32 rows):
 
 - `indexed_utilities.rs::direct_parameters_payload_extracts_function_argument` — `UtilityComposition`
 - `indexed_utilities.rs::direct_parameters_second_extracts_number_argument` — `UtilityComposition`
@@ -3046,10 +3054,8 @@ The complete partition (each entry `file::function — substrate`):
 - `tuple_labels.rs::tuple_labels_numeric_position_access_drops_label` — `TupleFeatures`
 - `tuple_labels.rs::tuple_labels_numeric_position_access_on_optional_slot_carries_undefined` — `TupleFeatures`
 - `tuple_labels.rs::tuple_labels_parameters_preserves_named_labels_and_optional_marker` — `TupleFeatures`
-- `typescript_rules.rs::typescript_rules_awaited_recursively_unwraps_promises` — `TypeScriptRules`
 - `utility_composition.rs::utility_composition_resolves_deep_intersection_config` — `UtilityComposition`
 - `utility_composition.rs::utility_composition_resolves_required_pick_over_nested_nonnullable_payload` — `UtilityComposition`
-- `utility_edge.rs::utility_edge_non_nullable_strips_null_and_undefined` — `UtilityComposition`
 - `utility_edge.rs::utility_edge_omit_all_keys_yields_empty_object` — `UtilityComposition`
 - `utility_edge.rs::utility_edge_pick_all_keys_yields_input_shape` — `UtilityComposition`
 - `utility_edge.rs::utility_edge_pick_never_yields_empty_object` — `UtilityComposition`
@@ -3061,17 +3067,11 @@ The complete partition (each entry `file::function — substrate`):
 - `utility_top_bottom.rs::utility_top_bottom_utb12_instance_type_any_is_any` — `UtilityComposition`
 - `utility_top_bottom.rs::utility_top_bottom_utb13_constructor_parameters_any_ctor_is_any_array` — `UtilityComposition`
 - `utility_top_bottom.rs::utility_top_bottom_utb14_awaited_any_is_any` — `UtilityComposition`
-- `utility_top_bottom.rs::utility_top_bottom_utb15_awaited_unknown_is_unknown` — `UtilityComposition`
 - `utility_top_bottom.rs::utility_top_bottom_utb16_awaited_never_is_never` — `UtilityComposition`
-- `utility_top_bottom.rs::utility_top_bottom_utb17_awaited_null_is_null` — `UtilityComposition`
-- `utility_top_bottom.rs::utility_top_bottom_utb18_awaited_undefined_is_undefined` — `UtilityComposition`
-- `utility_top_bottom.rs::utility_top_bottom_utb19_awaited_nested_promise_is_inner_primitive` — `UtilityComposition`
 - `utility_top_bottom.rs::utility_top_bottom_utb20_non_nullable_any_is_any` — `UtilityComposition`
-- `utility_top_bottom.rs::utility_top_bottom_utb21_non_nullable_unknown_is_empty_object` — `UtilityComposition`
 - `utility_top_bottom.rs::utility_top_bottom_utb22_non_nullable_never_is_never` — `UtilityComposition`
 - `utility_top_bottom.rs::utility_top_bottom_utb23_non_nullable_null_undefined_is_never` — `UtilityComposition`
 - `utility_top_bottom.rs::utility_top_bottom_utb25_exclude_any_against_string_is_any` — `UtilityComposition`
-- `variadic_tuples.rs::variadic_tuple_concat_alias_produces_joined_literal_tuple` — `TupleFeatures`
 - `variadic_tuples.rs::variadic_tuple_head_of_sample_resolves_to_first_literal` — `TupleFeatures`
 - `variadic_tuples.rs::variadic_tuple_init_of_sample_resolves_to_prefix_tuple` — `TupleFeatures`
 - `variadic_tuples.rs::variadic_tuple_last_of_sample_resolves_to_terminal_literal` — `TupleFeatures`

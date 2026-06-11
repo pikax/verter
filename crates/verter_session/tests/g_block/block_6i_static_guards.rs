@@ -21,6 +21,108 @@ fn read_workspace_file(rel: &str) -> String {
     fs::read_to_string(workspace_root().join(rel)).unwrap_or_else(|e| panic!("read {rel}: {e}"))
 }
 
+/// Strip line comments, (nested) block comments, and string/char
+/// literal CONTENTS from Rust source so structural guards scan code
+/// tokens only — a mention inside a comment or a string cannot
+/// satisfy (or trip) a token assertion.
+fn strip_comments_and_strings(src: &str) -> String {
+    let bytes = src.as_bytes();
+    let n = bytes.len();
+    let mut out = String::with_capacity(n);
+    let mut i = 0usize;
+    while i < n {
+        let c = bytes[i];
+        // Raw string: r"..." / r#"..."# / r##"..."## — drop contents.
+        if c == b'r' {
+            let mut j = i + 1;
+            let mut hashes = 0usize;
+            while j < n && bytes[j] == b'#' {
+                hashes += 1;
+                j += 1;
+            }
+            if j < n && bytes[j] == b'"' {
+                out.push_str("\"\"");
+                let close: Vec<u8> = std::iter::once(b'"')
+                    .chain(std::iter::repeat_n(b'#', hashes))
+                    .collect();
+                let mut k = j + 1;
+                while k + close.len() <= n && &bytes[k..k + close.len()] != close.as_slice() {
+                    k += 1;
+                }
+                i = (k + close.len()).min(n);
+                continue;
+            }
+        }
+        // String literal — drop contents, keep empty quotes.
+        if c == b'"' {
+            out.push_str("\"\"");
+            let mut k = i + 1;
+            while k < n {
+                if bytes[k] == b'\\' && k + 1 < n {
+                    k += 2;
+                    continue;
+                }
+                if bytes[k] == b'"' {
+                    k += 1;
+                    break;
+                }
+                k += 1;
+            }
+            i = k;
+            continue;
+        }
+        // Char literal ('x' / '\x') — distinguish from lifetimes
+        // ('a in `&'a str` has no closing quote at the expected spot).
+        if c == b'\'' {
+            let close = if i + 2 < n && bytes[i + 1] == b'\\' {
+                let mut k = i + 2;
+                while k < n && bytes[k] != b'\'' && k - i < 8 {
+                    k += 1;
+                }
+                (k < n && bytes[k] == b'\'').then_some(k)
+            } else if i + 2 < n && bytes[i + 2] == b'\'' && bytes[i + 1] != b'\'' {
+                Some(i + 2)
+            } else {
+                None
+            };
+            if let Some(k) = close {
+                out.push_str("' '");
+                i = k + 1;
+                continue;
+            }
+        }
+        // Line comment.
+        if c == b'/' && i + 1 < n && bytes[i + 1] == b'/' {
+            while i < n && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        // Block comment — Rust block comments nest.
+        if c == b'/' && i + 1 < n && bytes[i + 1] == b'*' {
+            let mut depth = 1usize;
+            let mut k = i + 2;
+            while k + 1 < n && depth > 0 {
+                if bytes[k] == b'/' && bytes[k + 1] == b'*' {
+                    depth += 1;
+                    k += 2;
+                } else if bytes[k] == b'*' && bytes[k + 1] == b'/' {
+                    depth -= 1;
+                    k += 2;
+                } else {
+                    k += 1;
+                }
+            }
+            out.push(' ');
+            i = if depth == 0 { k } else { n };
+            continue;
+        }
+        out.push(c as char);
+        i += 1;
+    }
+    out
+}
+
 // ---------------------------------------------------------------------------
 // Guard A.1 — `collect_component_meta_registry_refs` accepts a
 //             `ProjectionCursor` parameter.
@@ -302,99 +404,153 @@ fn pathwalker_does_not_resolve_mapped_through_build_mapped_type() {
     );
 }
 
-/// G4.4 static guard — `IndexKey::Number` convention must remain
-/// unified across producers and consumers.
+/// G4.4 — the `IndexKey::Number` bounded integer convention is
+/// enforced at the LANGUAGE level, not by a textual classifier.
 ///
-/// Pre-G4.4, `lower::shallow_lower_type_expr` stored numeric
-/// literals in `IndexKey::Number(i64)` using the bit-pattern
-/// convention (`n.to_bits() as i64`), while every other producer
-/// (`evaluate::normalized_index_key_node`,
-/// `substitute::substitute_index_key_with_change_tracking`) used
-/// the integer convention (`*number as i64`). The asymmetry was a
-/// latent soundness gap — a substitution-produced
-/// `IndexKey::Number(1)` would be mis-decoded by the walker's
-/// bit-pattern recovery (`f64::from_bits(1u64)` = 5e-324) instead
-/// of 1.0.
+/// History: pre-G4.4, producers disagreed on the payload encoding
+/// (bit-pattern vs integer convention) — a latent mis-decode class.
+/// G4.4 unified on the integer convention with the canonical-spelling
+/// bound (`js_number_to_string(v) == (v as i64).to_string()`), and a
+/// textual classifier swept every `IndexKey::Number` construction for
+/// conformance. The classifier kept losing its discrimination claim to
+/// structural evasions (hoisted casts, same-statement predicate
+/// laundering, textual identity-copies), so the invariant moved INTO
+/// the type system: `IndexKey::Number` carries the proof-carrying
+/// [`verter_session::semantic_query::CanonicalIndexInt`] newtype whose
+/// field is PRIVATE to `semantic_query::index_key`. The only ways to
+/// construct one are the module's two blessed constructors — the
+/// f64-checked fold `integer_convention_index_key` and the
+/// `Display`-checked `CanonicalIndexInt::from_canonical_i64` — so a raw
+/// `IndexKey::Number(n as i64)` anywhere else in the workspace is a
+/// COMPILE ERROR. The directory-wide textual sweep is obsolete; rustc
+/// is the sweep.
 ///
-/// G4.4 unifies on the integer convention. This guard pins the
-/// invariant by:
-///   1. Verifying `lower.rs` does NOT use `n.to_bits()` in its
-///      `IndexKey::Number` construction.
-///   2. Verifying `walk.rs`'s `Index(Number)` arm does NOT use
-///      `f64::from_bits` to decode.
-///
-/// Any reversion to the bit-pattern convention at either site
-/// would trip this guard.
+/// What still earns a textual pin (the residual assertions below):
+/// 1. the payload TYPE stays the newtype — reverting the variant to
+///    `Number(i64)` would compile and silently reopen every lane;
+/// 2. the owning module keeps the field private and its constructor
+///    inventory closed — a `From<i64>`/`Deserialize`/`new` impl or a
+///    `pub` field qualifier would reopen an unchecked construction
+///    lane without touching any consumer file;
+/// 3. the walker's `Index(Number)` value recovery stays on the integer
+///    convention (`.get() as f64`), never `f64::from_bits` — the
+///    pre-G4.4 bit-pattern consumer is a VALUE question the type
+///    system cannot see.
 #[test]
-fn index_key_number_convention_is_unified_integer() {
-    let lower_src =
-        read_workspace_file("crates/verter_session/src/project_semantic_dispatch/lower.rs");
+fn index_key_number_convention_is_type_enforced() {
+    // (1) Payload pin.
+    let semantic_query = strip_comments_and_strings(&read_workspace_file(
+        "crates/verter_session/src/semantic_query.rs",
+    ));
+    assert!(
+        semantic_query.contains("Number(CanonicalIndexInt)"),
+        "G4.4 guard: `IndexKey::Number` must carry the proof-carrying \
+         `CanonicalIndexInt` payload — the private-field newtype is what makes \
+         unbounded construction a compile error."
+    );
+    assert!(
+        !semantic_query.contains("Number(i64)"),
+        "G4.4 guard: `IndexKey::Number(i64)` is the retired raw payload — \
+         reverting it reopens every unbounded-construction lane the newtype \
+         closed."
+    );
+
+    // (2) Owning-module privacy + closed constructor inventory.
+    let owner = strip_comments_and_strings(&read_workspace_file(
+        "crates/verter_session/src/semantic_query/index_key.rs",
+    ));
+    assert!(
+        owner.contains("pub struct CanonicalIndexInt(i64);"),
+        "G4.4 guard: `CanonicalIndexInt`'s field must stay PRIVATE (tuple \
+         field with no `pub` qualifier) — privacy is the enforcement \
+         mechanism."
+    );
+    assert!(
+        owner.contains("pub fn from_canonical_i64")
+            && owner.contains("pub(crate) fn integer_convention_index_key"),
+        "G4.4 guard: the two blessed constructors (`integer_convention_index_key`, \
+         `from_canonical_i64`) must exist in the owning module."
+    );
+    // Exactly two raw tuple-construction tokens: the struct declaration
+    // and the fold's single `CanonicalIndexInt(candidate)`. A third is a
+    // new construction site that must be reviewed (and blessed) HERE.
+    assert_eq!(
+        owner.matches("CanonicalIndexInt(").count(),
+        2,
+        "G4.4 guard: the owning module must construct `CanonicalIndexInt` \
+         exactly once (plus the struct declaration) — found a new raw \
+         construction site."
+    );
+    assert_eq!(
+        owner.matches("Self(").count(),
+        0,
+        "G4.4 guard: no `Self(..)` construction — keep every construction on \
+         the named, countable `CanonicalIndexInt(..)` token."
+    );
+    // No alternate construction lanes: conversion traits and serde
+    // deserialization would mint values without entering a blessed
+    // constructor.
+    for forbidden in ["impl From<", "impl TryFrom<", "Deserialize", "fn new("] {
+        assert!(
+            !owner.contains(forbidden),
+            "G4.4 guard: `{forbidden}` in the owning module would reopen an \
+             unchecked construction lane around the blessed constructors."
+        );
+    }
+
+    // (3) Consumer-side decode convention — EVERY walk.rs site that
+    // produces a `LiteralKey::Number` recovers the value by integer
+    // cast, never the pre-G4.4 bit-pattern decode. Both `Index(Number)`
+    // decode arms (the direct-payload arm and the
+    // `normalized_index_key_node` re-dispatch arm) must hold the
+    // convention; pinning only the first window would let the second
+    // revert silently.
     let walk_src =
         read_workspace_file("crates/verter_session/src/project_semantic_dispatch/walk.rs");
-
-    // Producer side — lower.rs MUST NOT call `to_bits()` adjacent
-    // to any `IndexKey::Number(...)` constructor. We scan the
-    // entire file for the pattern; the file owns one
-    // `IndexKey::Number` constructor (in the indexed-access
-    // lowering arm) and any future call site must follow the
-    // unified integer convention.
-    //
-    // The check is structural: assert that no `IndexKey::Number(`
-    // call site contains a `.to_bits()` invocation within its
-    // immediate expression context. We approximate "immediate
-    // expression context" with a 80-char window around the
-    // constructor (the constructor body is a single expression).
-    let mut search_start = 0usize;
-    let needle = "IndexKey::Number(";
-    let mut found_any = false;
-    while let Some(idx) = lower_src[search_start..].find(needle) {
-        let abs = search_start + idx;
-        let hi = (abs + needle.len() + 80).min(lower_src.len());
-        let local = &lower_src[abs..hi];
-        assert!(
-            !local.contains("to_bits()"),
-            "G4.4 guard: lower.rs MUST NOT store `n.to_bits() as i64` in \
-             `IndexKey::Number` — that is the pre-G4.4 bit-pattern convention. \
-             Use the integer convention (`*n as i64`) gated by \
-             `n.fract() == 0.0 && i64 range` so the convention matches \
-             `evaluate::normalized_index_key_node`, \
-             `substitute::substitute_index_key_with_change_tracking`, and \
-             `raise::raise_index_key_to_type_expr`. (offset {abs}, snippet: {local})"
-        );
-        found_any = true;
-        search_start = abs + needle.len();
-    }
-    assert!(
-        found_any,
-        "G4.4 guard anchor: lower.rs must contain at least one `IndexKey::Number(` \
-         constructor (the indexed-access literal-number lowering arm)"
-    );
-
-    // Consumer side — walk.rs `Index(Number)` arm that produces a
-    // `LiteralKey::Number`. There are multiple `IndexKey::Number(n)`
-    // patterns in walk.rs (e.g. the needle-text rendering arm uses
-    // `n.to_string()`); the discriminating one for G4.4 is the
-    // Mapped-narrowing literal-key arm that produces
-    // `LiteralKey::Number`. Anchor on `LiteralKey::Number(` to land
-    // in the right region.
     let walk_anchor = "LiteralKey::Number(";
-    let walk_window_start = walk_src.find(walk_anchor).expect(
-        "G4.4 guard anchor: walk.rs must construct a `LiteralKey::Number(...)` in the \
-         Mapped-narrowing literal-key arm",
-    );
-    // 200 chars is enough to capture the constructor call's payload
-    // expression. Backtrack 100 chars so the assertion also catches
-    // a regression that fences `LiteralKey::Number(` from a
-    // `from_bits` line above it.
-    let window_lo = walk_window_start.saturating_sub(100);
-    let window_hi = walk_window_start.saturating_add(200).min(walk_src.len());
-    let walk_window = &walk_src[window_lo..window_hi];
+    let clamp_to_char_boundary = |src: &str, mut idx: usize| {
+        while !src.is_char_boundary(idx) {
+            idx -= 1;
+        }
+        idx
+    };
+    let walk_windows: Vec<&str> = walk_src
+        .match_indices(walk_anchor)
+        .map(|(start, _)| {
+            let lo = clamp_to_char_boundary(&walk_src, start.saturating_sub(100));
+            let hi =
+                clamp_to_char_boundary(&walk_src, start.saturating_add(200).min(walk_src.len()));
+            &walk_src[lo..hi]
+        })
+        .collect();
     assert!(
-        !walk_window.contains("f64::from_bits"),
-        "G4.4 guard: walk.rs's `LiteralKey::Number(...)` constructor MUST NOT decode via \
-         `f64::from_bits` — that is the pre-G4.4 bit-pattern consumer. Use the integer-\
-         convention recovery (`*n as f64`) to match the unified producer convention. \
-         (window: {walk_window})"
+        !walk_windows.is_empty(),
+        "G4.4 guard anchor: walk.rs must construct a `LiteralKey::Number(...)` in the \
+         Mapped-narrowing literal-key arms"
+    );
+    for walk_window in &walk_windows {
+        assert!(
+            !walk_window.contains("f64::from_bits"),
+            "G4.4 guard: no walk.rs `LiteralKey::Number(...)` constructor may decode via \
+             `f64::from_bits` — that is the pre-G4.4 bit-pattern consumer. Use the integer-\
+             convention recovery (`.get() as f64`) to match the producer convention. \
+             (window: {walk_window})"
+        );
+    }
+    // Exactly two of the constructors are `CanonicalIndexInt` DECODE
+    // sites (the third copies an already-recovered f64 literal out of a
+    // resolved `Literal` node); both must recover via the
+    // integer-convention cast. A drop below two is a from_bits-style
+    // revert (or a deleted decode arm); above two is a new decode site
+    // that must be reviewed here.
+    assert_eq!(
+        walk_windows
+            .iter()
+            .filter(|w| w.contains(".get() as f64"))
+            .count(),
+        2,
+        "G4.4 guard: walk.rs must hold exactly two `CanonicalIndexInt` decode sites \
+         recovering via the integer-convention `.get() as f64` cast."
     );
 }
 

@@ -294,8 +294,27 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     .iter()
                     .filter_map(|member| self.raise_node_to_type_expr_inner(*member, active))
                     .filter(|arm| !matches!(arm, TypeExpr::Unknown { raw } if raw == SEMANTIC_OBJECT_SURFACE))
+                    // `{} & X ≡ X` — the representable empty object (the
+                    // Object arm below raises empty surfaces first-class)
+                    // is equally vacuous inside an intersection. Known
+                    // divergence: for a NULLISH X the pinned tsgo reduces
+                    // `{} & null` / `{} & undefined` to `never`, while this
+                    // projection-boundary filter collapses them to the
+                    // nullish arm. The correct home for that reduction is
+                    // the semantic intersection reducer, not this raise
+                    // boundary — tracked as debt, predating the first-class
+                    // empty-object raise (the retired sentinel filter
+                    // collapsed the same way).
+                    .filter(|arm| !matches!(arm, TypeExpr::Object(object) if object.properties.is_empty()))
                     .collect();
-                if arms.len() == 1 {
+                if arms.is_empty() {
+                    // Every arm was vacuous (`{} & {}`): fall back to the
+                    // representable empty object — a zero-arm
+                    // `Intersection([])` is not a publishable shape.
+                    TypeExpr::Object(std::sync::Arc::new(verter_type_expr::ObjectExpr {
+                        properties: Vec::new(),
+                    }))
+                } else if arms.len() == 1 {
                     arms.pop().unwrap()
                 } else {
                     TypeExpr::Intersection(std::sync::Arc::from(arms.into_boxed_slice()))
@@ -330,12 +349,34 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     readonly: *readonly,
                 }
             }
-            SemanticNodeData::Object(surface) => projected_surface_to_type_expr(
-                &surface_view_to_projected_surface(self.ctx, surface),
-            )
-            .unwrap_or(TypeExpr::Unknown {
-                raw: SEMANTIC_OBJECT_SURFACE.to_string(),
-            }),
+            SemanticNodeData::Object(surface) => {
+                // A genuinely EMPTY surface (no members, no signatures, no
+                // index signature) is the representable empty object `{}`
+                // — `Pick<T, never>`, `Omit<T, keyof T>`,
+                // `NonNullable<unknown>` all reduce to it. Raise it as a
+                // zero-property `TypeExpr::Object` instead of the
+                // `SEMANTIC_OBJECT_SURFACE` sentinel (the sentinel marks a
+                // surface the projection cannot REPRESENT, which an empty
+                // object is not). The intersection vacuous-arm rule above
+                // drops empty-object arms the same way it drops the
+                // sentinel, so `{} & X ≡ X` is preserved.
+                if surface.members.is_empty()
+                    && surface.call_signatures.is_empty()
+                    && surface.construct_signatures.is_empty()
+                    && !surface.has_index_signature
+                {
+                    TypeExpr::Object(std::sync::Arc::new(verter_type_expr::ObjectExpr {
+                        properties: Vec::new(),
+                    }))
+                } else {
+                    projected_surface_to_type_expr(&surface_view_to_projected_surface(
+                        self.ctx, surface,
+                    ))
+                    .unwrap_or(TypeExpr::Unknown {
+                        raw: SEMANTIC_OBJECT_SURFACE.to_string(),
+                    })
+                }
+            }
             SemanticNodeData::MergedDecl { contributors } => {
                 // Peer-merge the same-name interface contributors into one
                 // surface (member union + ordered method overload groups) and
@@ -595,7 +636,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) -> Option<TypeExpr> {
         Some(match index {
             IndexKey::String(text) => TypeExpr::string_literal(text.as_ref()),
-            IndexKey::Number(number) => TypeExpr::number_literal(*number as f64),
+            IndexKey::Number(number) => TypeExpr::number_literal(number.get() as f64),
             IndexKey::TypeNode(node) => self.raise_node_to_type_expr_inner(*node, active)?,
         })
     }
@@ -4303,7 +4344,9 @@ mod tests {
         let object = graph.intern_node(SemanticNodeData::Primitive(SemanticPrimitiveKind::Unknown));
         let indexed = graph.intern_node(SemanticNodeData::IndexedAccess {
             object,
-            index: IndexKey::Number(7),
+            index: IndexKey::Number(
+                crate::semantic_query::CanonicalIndexInt::from_canonical_i64(7).expect("canonical"),
+            ),
         });
 
         let dispatch = ProjectSemanticDispatch::new(&host);
@@ -4319,6 +4362,39 @@ mod tests {
             TypeExpr::number_literal(7.0),
             "numeric index keys should serialize as number literals",
         );
+    }
+
+    /// An intersection whose EVERY arm is vacuous (`{} & {}`) must fall
+    /// back to the representable empty object `{}` — never publish a
+    /// zero-arm `TypeExpr::Intersection([])`.
+    #[test]
+    fn raise_all_vacuous_intersection_falls_back_to_empty_object() {
+        let host = VerterHost::new_standalone(Default::default());
+        let graph = Arc::clone(host.project_type_store().semantic_graph());
+        let empty_a = graph.intern_node(SemanticNodeData::Object(
+            crate::project_semantic_dispatch::walk::empty_surface_view(),
+        ));
+        let intersection = graph.intern_node(SemanticNodeData::Intersection(Arc::from(
+            vec![empty_a, empty_a].into_boxed_slice(),
+        )));
+
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let expr = dispatch
+            .raise_node_to_type_expr(intersection)
+            .expect("intersection must raise");
+
+        match &expr {
+            TypeExpr::Object(object) => {
+                assert!(
+                    object.properties.is_empty(),
+                    "all-vacuous intersection must raise as the EMPTY object"
+                );
+            }
+            TypeExpr::Intersection(arms) => {
+                panic!("zero/filtered-arm Intersection must not publish (got {arms:?})")
+            }
+            other => panic!("expected empty Object, got {other:?}"),
+        }
     }
 
     #[test]

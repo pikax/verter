@@ -6,6 +6,15 @@ use crate::semantic_query::{
 };
 use crate::{CompileErrorPolicy, FileKind, HostConfig, UpsertRequest, VerterHost};
 
+/// Test-side `IndexKey::Number` constructor. The payload field is
+/// private (proof-carrying `CanonicalIndexInt`), so fixtures route
+/// through the `Display`-checked blessed constructor.
+fn num_key(value: i64) -> crate::semantic_query::IndexKey {
+    crate::semantic_query::IndexKey::Number(
+        crate::semantic_query::CanonicalIndexInt::from_canonical_i64(value).expect("canonical"),
+    )
+}
+
 fn host() -> VerterHost {
     VerterHost::new_standalone(HostConfig {
         dev_mode: false,
@@ -4574,9 +4583,11 @@ fn partial_produces_structurally_equivalent_mapped_shape_to_userland() {
 
 /// Utilities whose reduction is not handled for the given operand
 /// shape (single-argument Pick/Omit/Extract/Exclude, function
-/// utilities over a non-callable object, recursive `Awaited`) return
-/// `Opaque(Miss)` shells anchored to the utility identity with an
-/// `Instantiate` edge so origin walks remain coherent.
+/// utilities over a non-callable object) return `Opaque(Miss)` shells
+/// anchored to the utility identity with an `Instantiate` edge so
+/// origin walks remain coherent. (`Awaited` over a settled
+/// non-thenable object is a PASSTHROUGH, not a deferral — covered by
+/// `awaited_passes_through_settled_non_thenables` below.)
 #[test]
 fn deferred_utilities_return_opaque_miss_with_instantiate_edge() {
     let host = host();
@@ -4596,7 +4607,6 @@ fn deferred_utilities_return_opaque_miss_with_instantiate_edge() {
         "Parameters",
         "ConstructorParameters",
         "InstanceType",
-        "Awaited",
     ] {
         let anchor = utility_identity(&graph, name);
         let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
@@ -4626,12 +4636,2465 @@ fn deferred_utilities_return_opaque_miss_with_instantiate_edge() {
     }
 }
 
+/// Shared helper: dispatch `Instantiate` for a builtin utility over `args`
+/// in `Published(Expanded)` and return the produced value node.
+fn instantiate_utility(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    graph: &Arc<crate::semantic_query_memo::SemanticGraphStore>,
+    name: &str,
+    args: &[SemanticNodeId],
+) -> SemanticNodeId {
+    let anchor = utility_identity(graph, name);
+    match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
+        base: anchor,
+        args: Arc::from(args.to_vec().into_boxed_slice()),
+        context: crate::semantic_query::InstantiateContext::new(
+            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
+            Default::default(),
+        ),
+    }) {
+        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+        other => panic!("expected Value for {name}, got {other:?}"),
+    }
+}
+
+fn assert_node_primitive(
+    graph: &Arc<crate::semantic_query_memo::SemanticGraphStore>,
+    node: SemanticNodeId,
+    expected: PrimitiveKind,
+    label: &str,
+) {
+    let data = graph.node_data(node).expect("node data");
+    assert!(
+        matches!(&*data, SemanticNodeData::Primitive(kind) if *kind == expected),
+        "{label}: expected Primitive({expected:?}), got {data:?}"
+    );
+}
+
+/// `ReturnType` / `InstanceType` over the lattice extremes short-circuit
+/// through the shared degenerate-operand table: `any` absorbs to `any`,
+/// `never` to `never` — no call/construct-signature walk runs.
+#[test]
+fn return_type_and_instance_type_absorb_any_and_never() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let any = primitive(&graph, PrimitiveKind::Any);
+    let never = primitive(&graph, PrimitiveKind::Never);
+
+    for name in ["ReturnType", "InstanceType"] {
+        let from_any = instantiate_utility(&dispatch, &graph, name, &[any]);
+        assert_node_primitive(&graph, from_any, PrimitiveKind::Any, name);
+        let from_never = instantiate_utility(&dispatch, &graph, name, &[never]);
+        assert_node_primitive(&graph, from_never, PrimitiveKind::Never, name);
+        // The absorbed result still records the Instantiate origin edge.
+        assert!(
+            !graph
+                .origins_of_kind(from_any, OriginEdgeKind::Instantiate)
+                .is_empty(),
+            "{name} degenerate absorption must record the Instantiate edge"
+        );
+    }
+}
+
+/// `Parameters<any>` / `ConstructorParameters<any>` reduce to the inferred
+/// rest-tuple slot `unknown[]` (the well-known TS trap: NOT `any`, NOT
+/// `never`); `Parameters<never>` / `ConstructorParameters<never>` collapse
+/// to `never` (distribution over the bottom type).
+#[test]
+fn parameters_utilities_absorb_any_to_unknown_array_and_never_to_never() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let any = primitive(&graph, PrimitiveKind::Any);
+    let never = primitive(&graph, PrimitiveKind::Never);
+
+    for name in ["Parameters", "ConstructorParameters"] {
+        let from_any = instantiate_utility(&dispatch, &graph, name, &[any]);
+        let data = graph.node_data(from_any).expect("node data");
+        match &*data {
+            SemanticNodeData::Array { element, readonly } => {
+                assert!(!readonly, "{name}<any> must produce a mutable array");
+                assert_node_primitive(&graph, *element, PrimitiveKind::Unknown, name);
+            }
+            other => panic!("{name}<any> must produce unknown[], got {other:?}"),
+        }
+        let from_never = instantiate_utility(&dispatch, &graph, name, &[never]);
+        assert_node_primitive(&graph, from_never, PrimitiveKind::Never, name);
+    }
+}
+
+/// `Pick` / `Omit` / `Partial` / `Required` over an `any` SOURCE materialise
+/// the tsgo-verified shapes (pinned tsgo 7.0.0-dev.20260526.1) — NOT `any`:
+///
+/// - `Partial<any>` / `Required<any>` = `{ [x: string]: any }` (the
+///   materialised homomorphic-over-`any` surface).
+/// - `Pick<any, "x">` = `{ x: any }` — a CLOSED surface holding exactly the
+///   requested keys; `Pick<any, never>` = `{}`.
+/// - `Omit<any, "x">` = `{ [x: string]: any; [x: number]: any;
+///   [x: symbol]: any }` — the full index-signature surface, independent of
+///   which literal keys are omitted.
+/// - NUMERIC-literal keys are legal keyspace members (probe10):
+///   `Pick<any, 1>` = `{ 1: any }` whose member NAME is the canonical JS
+///   numeric string (`{ 1: any }` ≡ `{ "1": any }`); `Pick<any, "a" | 1>`
+///   enumerates the mixed union; `Pick<any, 1.5>` = `{ "1.5": any }`;
+///   `Omit<any, 1>` is the same 3-signature index surface.
+/// - A NON-enumerable key argument (`Pick<any, string>` / `Omit<any, string>`)
+///   keeps the honest deferred `Opaque` shell — never a guessed answer.
+#[test]
+fn object_filter_and_mapper_utilities_over_any_materialize_tsgo_shapes() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let any = primitive(&graph, PrimitiveKind::Any);
+    let key_x = graph.intern_node(SemanticNodeData::Literal(
+        crate::semantic_query::LiteralValue::String("x".to_string()),
+    ));
+    let key_y = graph.intern_node(SemanticNodeData::Literal(
+        crate::semantic_query::LiteralValue::String("y".to_string()),
+    ));
+    let keys_xy = graph.intern_node(SemanticNodeData::Union(Arc::from(
+        vec![key_x, key_y].into_boxed_slice(),
+    )));
+    let never = primitive(&graph, PrimitiveKind::Never);
+    let broad_string = primitive(&graph, PrimitiveKind::String);
+
+    let assert_string_index_any = |node: SemanticNodeId, label: &str| {
+        let data = graph.node_data(node).expect("node data");
+        match &*data {
+            SemanticNodeData::Object(surface) => {
+                assert!(surface.members.is_empty(), "{label}: no named members");
+                assert!(surface.call_signatures.is_empty(), "{label}: no call sigs");
+                assert!(
+                    surface.construct_signatures.is_empty(),
+                    "{label}: no construct sigs"
+                );
+                assert_eq!(
+                    surface.index_signatures.len(),
+                    1,
+                    "{label}: exactly the string index signature"
+                );
+                let sig = &surface.index_signatures[0];
+                assert_node_primitive(&graph, sig.key_type, PrimitiveKind::String, label);
+                assert_node_primitive(&graph, sig.value_type, PrimitiveKind::Any, label);
+                assert!(!sig.readonly, "{label}: index signature is not readonly");
+                assert!(surface.has_index_signature, "{label}: has_index_signature");
+            }
+            other => panic!("{label}: expected `{{ [x: string]: any }}` surface, got {other:?}"),
+        }
+    };
+
+    for name in ["Partial", "Required"] {
+        let result = instantiate_utility(&dispatch, &graph, name, &[any]);
+        assert_string_index_any(result, name);
+    }
+
+    // Pick<any, "x"> = { x: any } — closed, required, no index signatures.
+    let picked = instantiate_utility(&dispatch, &graph, "Pick", &[any, key_x]);
+    match graph.node_data(picked).as_deref() {
+        Some(SemanticNodeData::Object(surface)) => {
+            assert_eq!(surface.members.len(), 1, "Pick<any, \"x\">: one member");
+            let member = &surface.members[0];
+            assert_eq!(member.name.as_ref(), "x");
+            assert!(!member.optional, "Pick<any, \"x\">: member is required");
+            assert_node_primitive(&graph, member.value, PrimitiveKind::Any, "Pick<any, \"x\">");
+            assert!(
+                surface.index_signatures.is_empty() && !surface.has_index_signature,
+                "Pick<any, \"x\">: closed surface, no index signatures"
+            );
+        }
+        other => panic!("Pick<any, \"x\"> must be `{{ x: any }}`, got {other:?}"),
+    }
+
+    // Pick<any, "x" | "y"> = { x: any; y: any }.
+    let picked_union = instantiate_utility(&dispatch, &graph, "Pick", &[any, keys_xy]);
+    match graph.node_data(picked_union).as_deref() {
+        Some(SemanticNodeData::Object(surface)) => {
+            let mut names: Vec<&str> = surface.members.iter().map(|m| m.name.as_ref()).collect();
+            names.sort_unstable();
+            assert_eq!(names, ["x", "y"], "Pick<any, \"x\" | \"y\">: both keys");
+        }
+        other => panic!("Pick<any, \"x\" | \"y\"> must be a two-member surface, got {other:?}"),
+    }
+
+    // Pick<any, never> = {}.
+    let picked_never = instantiate_utility(&dispatch, &graph, "Pick", &[any, never]);
+    match graph.node_data(picked_never).as_deref() {
+        Some(SemanticNodeData::Object(surface)) => {
+            assert!(
+                surface.members.is_empty(),
+                "Pick<any, never>: empty surface"
+            );
+            assert!(
+                !surface.has_index_signature,
+                "Pick<any, never>: no index sig"
+            );
+        }
+        other => panic!("Pick<any, never> must be `{{}}`, got {other:?}"),
+    }
+
+    // Omit<any, "x"> = { [x: string]: any; [x: number]: any; [x: symbol]: any }.
+    let omitted = instantiate_utility(&dispatch, &graph, "Omit", &[any, key_x]);
+    match graph.node_data(omitted).as_deref() {
+        Some(SemanticNodeData::Object(surface)) => {
+            assert!(
+                surface.members.is_empty(),
+                "Omit<any, \"x\">: no named members"
+            );
+            assert_eq!(
+                surface.index_signatures.len(),
+                3,
+                "Omit<any, \"x\">: string + number + symbol index signatures"
+            );
+            for (sig, expected_key) in surface.index_signatures.iter().zip([
+                PrimitiveKind::String,
+                PrimitiveKind::Number,
+                PrimitiveKind::Symbol,
+            ]) {
+                assert_node_primitive(&graph, sig.key_type, expected_key, "Omit<any, \"x\">");
+                assert_node_primitive(
+                    &graph,
+                    sig.value_type,
+                    PrimitiveKind::Any,
+                    "Omit<any, \"x\">",
+                );
+            }
+            assert!(
+                surface.has_index_signature,
+                "Omit<any, \"x\">: has_index_signature"
+            );
+        }
+        other => panic!("Omit<any, \"x\"> must be the index-signature surface, got {other:?}"),
+    }
+
+    // Pick<any, 1> = { 1: any } — the member NAME is the canonical JS
+    // numeric string (probe10: Eq<Pick<any, 1>, { "1": any }> = true).
+    let key_1 = graph.intern_node(SemanticNodeData::Literal(
+        crate::semantic_query::LiteralValue::Number(1.0),
+    ));
+    let picked_num = instantiate_utility(&dispatch, &graph, "Pick", &[any, key_1]);
+    match graph.node_data(picked_num).as_deref() {
+        Some(SemanticNodeData::Object(surface)) => {
+            assert_eq!(surface.members.len(), 1, "Pick<any, 1>: one member");
+            let member = &surface.members[0];
+            assert_eq!(
+                member.name.as_ref(),
+                "1",
+                "Pick<any, 1>: member name is the canonical numeric string"
+            );
+            assert!(!member.optional, "Pick<any, 1>: member is required");
+            assert_node_primitive(&graph, member.value, PrimitiveKind::Any, "Pick<any, 1>");
+            assert!(
+                surface.index_signatures.is_empty() && !surface.has_index_signature,
+                "Pick<any, 1>: closed surface, no index signatures"
+            );
+        }
+        other => panic!("Pick<any, 1> must be `{{ 1: any }}`, got {other:?}"),
+    }
+
+    // Pick<any, "x" | 1> = { x: any; 1: any } — mixed literal union.
+    let keys_x_or_1 = graph.intern_node(SemanticNodeData::Union(Arc::from(
+        vec![key_x, key_1].into_boxed_slice(),
+    )));
+    let picked_mixed = instantiate_utility(&dispatch, &graph, "Pick", &[any, keys_x_or_1]);
+    match graph.node_data(picked_mixed).as_deref() {
+        Some(SemanticNodeData::Object(surface)) => {
+            let mut names: Vec<&str> = surface.members.iter().map(|m| m.name.as_ref()).collect();
+            names.sort_unstable();
+            assert_eq!(names, ["1", "x"], "Pick<any, \"x\" | 1>: both keys");
+        }
+        other => panic!("Pick<any, \"x\" | 1> must be a two-member surface, got {other:?}"),
+    }
+
+    // Pick<any, 1.5> = { "1.5": any } — fractional literal canonical form.
+    let key_frac = graph.intern_node(SemanticNodeData::Literal(
+        crate::semantic_query::LiteralValue::Number(1.5),
+    ));
+    let picked_frac = instantiate_utility(&dispatch, &graph, "Pick", &[any, key_frac]);
+    match graph.node_data(picked_frac).as_deref() {
+        Some(SemanticNodeData::Object(surface)) => {
+            assert_eq!(surface.members.len(), 1, "Pick<any, 1.5>: one member");
+            assert_eq!(
+                surface.members[0].name.as_ref(),
+                "1.5",
+                "Pick<any, 1.5>: canonical numeric string name"
+            );
+        }
+        other => panic!("Pick<any, 1.5> must be `{{ \"1.5\": any }}`, got {other:?}"),
+    }
+
+    // Omit<any, 1> = the same 3-signature index surface as Omit<any, "x">.
+    let omitted_num = instantiate_utility(&dispatch, &graph, "Omit", &[any, key_1]);
+    match graph.node_data(omitted_num).as_deref() {
+        Some(SemanticNodeData::Object(surface)) => {
+            assert!(surface.members.is_empty(), "Omit<any, 1>: no named members");
+            assert_eq!(
+                surface.index_signatures.len(),
+                3,
+                "Omit<any, 1>: string + number + symbol index signatures"
+            );
+        }
+        other => panic!("Omit<any, 1> must be the index-signature surface, got {other:?}"),
+    }
+
+    // Non-enumerable key argument: honest deferred shell, never a guess.
+    for name in ["Pick", "Omit"] {
+        let deferred = instantiate_utility(&dispatch, &graph, name, &[any, broad_string]);
+        let data = graph.node_data(deferred).expect("node data");
+        assert!(
+            matches!(&*data, SemanticNodeData::Opaque(_)),
+            "{name}<any, string> must keep the deferred shell, got {data:?}"
+        );
+    }
+}
+
+/// Numeric-literal keys enumerate through the SHARED key enumeration
+/// (`key_names_from_keyspace_node`) for every consumer, not just the
+/// any-source arm (pinned tsgo, probe10):
+///
+/// - Closed-source `Pick<{ a: string; 1: number }, "a" | 1>` keeps both
+///   members; `Omit<{ a: string; 1: number }, 1>` keeps only `a` — the
+///   numeric key matches the source member's canonical numeric string name.
+/// - A CLOSED numeric mapped key space (`{ [K in 1 | "a"]: V }`)
+///   materialises members named by canonical numeric strings, not the
+///   deferred `Mapped` shell.
+#[test]
+fn numeric_literal_keys_enumerate_for_closed_pick_omit_and_mapped() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let string_node = primitive(&graph, PrimitiveKind::String);
+    let number_node = primitive(&graph, PrimitiveKind::Number);
+    // `{ a: string; 1: number }` — the numeric key is stored as its
+    // canonical numeric string member name.
+    let source = simple_object(&graph, &[("a", string_node), ("1", number_node)]);
+    let key_a = graph.intern_node(SemanticNodeData::Literal(
+        crate::semantic_query::LiteralValue::String("a".to_string()),
+    ));
+    let key_1 = graph.intern_node(SemanticNodeData::Literal(
+        crate::semantic_query::LiteralValue::Number(1.0),
+    ));
+    let keys_a_or_1 = graph.intern_node(SemanticNodeData::Union(Arc::from(
+        vec![key_a, key_1].into_boxed_slice(),
+    )));
+
+    // Pick<{ a: string; 1: number }, "a" | 1> = the full source surface.
+    let picked = instantiate_utility(&dispatch, &graph, "Pick", &[source, keys_a_or_1]);
+    match graph.node_data(picked).as_deref() {
+        Some(SemanticNodeData::Object(surface)) => {
+            let mut names: Vec<&str> = surface.members.iter().map(|m| m.name.as_ref()).collect();
+            names.sort_unstable();
+            assert_eq!(names, ["1", "a"], "closed Pick: numeric + string keys");
+        }
+        other => panic!("closed Pick must keep both members, got {other:?}"),
+    }
+
+    // Omit<{ a: string; 1: number }, 1> = { a: string }.
+    let omitted = instantiate_utility(&dispatch, &graph, "Omit", &[source, key_1]);
+    match graph.node_data(omitted).as_deref() {
+        Some(SemanticNodeData::Object(surface)) => {
+            assert_eq!(surface.members.len(), 1, "closed Omit: one member left");
+            assert_eq!(
+                surface.members[0].name.as_ref(),
+                "a",
+                "closed Omit: the numeric key was omitted"
+            );
+        }
+        other => panic!("closed Omit must keep only `a`, got {other:?}"),
+    }
+
+    // `{ [K in 1 | "a"]: string }` = { 1: string; a: string } — the
+    // closed numeric key space enumerates through the same shared path
+    // (probe10: Eq<{ [K in 1 | "a"]: string }, { 1: string; a: string }>).
+    let empty_source = simple_object(&graph, &[]);
+    let mapper = MapperKey {
+        parameter_node: graph.intern_node(SemanticNodeData::TypeParam {
+            decl: crate::semantic_query::DeclIdentity::synthetic("K"),
+            param_index: 0,
+            constraint: None,
+            default: None,
+            display_name: Arc::from("K"),
+        }),
+        key_space: keys_a_or_1,
+        value_expr: string_node,
+        optionality: OptionalityMod::Keep,
+        readonly: ReadonlyMod::Keep,
+        name_remap: None,
+        kind: crate::semantic_query::MapperKind::Computed,
+    };
+    let mapped = match dispatch.execute_type_node(SemanticQueryKey::MappedType {
+        source: empty_source,
+        mapper,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Expanded,
+        ),
+    }) {
+        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+        other => panic!("expected mapped Value, got {other:?}"),
+    };
+    match graph.node_data(mapped).as_deref() {
+        Some(SemanticNodeData::Object(surface)) => {
+            let mut names: Vec<&str> = surface.members.iter().map(|m| m.name.as_ref()).collect();
+            names.sort_unstable();
+            assert_eq!(
+                names,
+                ["1", "a"],
+                "closed numeric mapped key space materialises canonical names"
+            );
+            for member in surface.members.iter() {
+                assert_node_primitive(&graph, member.value, PrimitiveKind::String, "mapped value");
+            }
+        }
+        other => panic!("closed numeric mapped key space must materialise, got {other:?}"),
+    }
+}
+
+/// K-dependent mapped VALUES keep the key literal's KIND (pinned tsgo,
+/// probe12):
+///
+/// - `{ [K in 1]: K }` = `{ 1: 1 }` — the substituted K is the NUMERIC
+///   literal `1`, never the stringified member name `"1"`.
+/// - `{ [K in 1 | "a"]: K }` = `{ 1: 1; a: "a" }` — each member's value
+///   keeps ITS key's kind.
+/// - `{ [K in 1]: [K] }` = `{ 1: [1] }` — the kind survives inside a
+///   compound substituted value.
+/// - `{ [K in 1 | "1"]: K }` = `{ 1: 1 | "1" }` — duplicate produced
+///   names UNION their per-K values (probe12 falsified both first-wins
+///   and last-wins).
+/// - `{ [K in 1 as K extends number ? "n" : "s"]: K }` = `{ n: 1 }` —
+///   the `as` remap substitution sees the numeric kind too.
+#[test]
+fn mapped_k_dependent_values_keep_key_literal_kind() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let empty_source = simple_object(&graph, &[]);
+    let key_param = || {
+        graph.intern_node(SemanticNodeData::TypeParam {
+            decl: crate::semantic_query::DeclIdentity::synthetic("K"),
+            param_index: 0,
+            constraint: None,
+            default: None,
+            display_name: Arc::from("K"),
+        })
+    };
+    let key_1 = graph.intern_node(SemanticNodeData::Literal(
+        crate::semantic_query::LiteralValue::Number(1.0),
+    ));
+    let key_a = graph.intern_node(SemanticNodeData::Literal(
+        crate::semantic_query::LiteralValue::String("a".to_string()),
+    ));
+    let key_1_str = graph.intern_node(SemanticNodeData::Literal(
+        crate::semantic_query::LiteralValue::String("1".to_string()),
+    ));
+    let expanded =
+        crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded);
+    let mapper_over = |key_space: SemanticNodeId,
+                       parameter_node: SemanticNodeId,
+                       value_expr: SemanticNodeId,
+                       name_remap: Option<SemanticNodeId>| MapperKey {
+        parameter_node,
+        key_space,
+        value_expr,
+        optionality: OptionalityMod::Keep,
+        readonly: ReadonlyMod::Keep,
+        name_remap,
+        kind: crate::semantic_query::MapperKind::Computed,
+    };
+    let build_mapped =
+        |mapper: MapperKey| match dispatch.execute_type_node(SemanticQueryKey::MappedType {
+            source: empty_source,
+            mapper,
+            context: expanded,
+        }) {
+            QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+            other => panic!("expected mapped Value, got {other:?}"),
+        };
+    let assert_numeric_literal = |node: SemanticNodeId, expected: f64, label: &str| {
+        let data = graph.node_data(node).expect("value node");
+        match &*data {
+            SemanticNodeData::Literal(crate::semantic_query::LiteralValue::Number(n)) => {
+                assert_eq!(*n, expected, "{label}: numeric literal value");
+            }
+            other => panic!("{label}: value must be the NUMERIC literal {expected}, got {other:?}"),
+        }
+    };
+    let assert_string_literal = |node: SemanticNodeId, expected: &str, label: &str| {
+        let data = graph.node_data(node).expect("value node");
+        match &*data {
+            SemanticNodeData::Literal(crate::semantic_query::LiteralValue::String(s)) => {
+                assert_eq!(s.as_str(), expected, "{label}: string literal value");
+            }
+            other => {
+                panic!("{label}: value must be the STRING literal {expected:?}, got {other:?}")
+            }
+        }
+    };
+
+    // `{ [K in 1]: K }` = `{ 1: 1 }`.
+    let param = key_param();
+    let mapped = build_mapped(mapper_over(key_1, param, param, None));
+    match graph.node_data(mapped).as_deref() {
+        Some(SemanticNodeData::Object(surface)) => {
+            assert_eq!(surface.members.len(), 1, "{{ [K in 1]: K }}: one member");
+            assert_eq!(surface.members[0].name.as_ref(), "1");
+            assert_numeric_literal(surface.members[0].value, 1.0, "{ [K in 1]: K }");
+        }
+        other => panic!("{{ [K in 1]: K }} must materialise, got {other:?}"),
+    }
+
+    // `{ [K in 1 | "a"]: K }` = `{ 1: 1; a: "a" }`.
+    let keys_1_or_a = graph.intern_node(SemanticNodeData::Union(Arc::from(
+        vec![key_1, key_a].into_boxed_slice(),
+    )));
+    let param = key_param();
+    let mapped = build_mapped(mapper_over(keys_1_or_a, param, param, None));
+    match graph.node_data(mapped).as_deref() {
+        Some(SemanticNodeData::Object(surface)) => {
+            assert_eq!(surface.members.len(), 2, "mixed union: two members");
+            let by_name = |n: &str| {
+                surface
+                    .members
+                    .iter()
+                    .find(|m| m.name.as_ref() == n)
+                    .unwrap_or_else(|| panic!("mixed union: member {n} missing"))
+            };
+            assert_numeric_literal(by_name("1").value, 1.0, "mixed union member 1");
+            assert_string_literal(by_name("a").value, "a", "mixed union member a");
+        }
+        other => panic!("mixed-kind mapped union must materialise, got {other:?}"),
+    }
+
+    // `{ [K in 1]: [K] }` = `{ 1: [1] }`.
+    let param = key_param();
+    let tuple_of_k = graph.intern_node(SemanticNodeData::Tuple {
+        elements: Arc::from(
+            vec![crate::semantic_query::TupleElement {
+                label: None,
+                value: param,
+                optional: false,
+                rest: false,
+            }]
+            .into_boxed_slice(),
+        ),
+        readonly: false,
+    });
+    let mapped = build_mapped(mapper_over(key_1, param, tuple_of_k, None));
+    match graph.node_data(mapped).as_deref() {
+        Some(SemanticNodeData::Object(surface)) => {
+            assert_eq!(surface.members.len(), 1, "{{ [K in 1]: [K] }}: one member");
+            let value_data = graph.node_data(surface.members[0].value).expect("tuple");
+            match &*value_data {
+                SemanticNodeData::Tuple { elements, .. } => {
+                    assert_eq!(elements.len(), 1, "tuple value: one element");
+                    assert_numeric_literal(elements[0].value, 1.0, "{ [K in 1]: [K] } element");
+                }
+                other => panic!("{{ [K in 1]: [K] }}: value must be a tuple, got {other:?}"),
+            }
+        }
+        other => panic!("{{ [K in 1]: [K] }} must materialise, got {other:?}"),
+    }
+
+    // `{ [K in 1 | "1"]: K }` = `{ 1: 1 | "1" }` — duplicate produced names
+    // UNION their per-K values.
+    let keys_dup = graph.intern_node(SemanticNodeData::Union(Arc::from(
+        vec![key_1, key_1_str].into_boxed_slice(),
+    )));
+    let param = key_param();
+    let mapped = build_mapped(mapper_over(keys_dup, param, param, None));
+    match graph.node_data(mapped).as_deref() {
+        Some(SemanticNodeData::Object(surface)) => {
+            assert_eq!(surface.members.len(), 1, "dup-name union: ONE member");
+            assert_eq!(surface.members[0].name.as_ref(), "1");
+            let value_data = graph.node_data(surface.members[0].value).expect("value");
+            match &*value_data {
+                SemanticNodeData::Union(arms) => {
+                    assert_eq!(arms.len(), 2, "dup-name union: two value arms");
+                    let mut has_num = false;
+                    let mut has_str = false;
+                    for arm in arms.iter() {
+                        match graph.node_data(*arm).as_deref() {
+                            Some(SemanticNodeData::Literal(
+                                crate::semantic_query::LiteralValue::Number(n),
+                            )) if *n == 1.0 => has_num = true,
+                            Some(SemanticNodeData::Literal(
+                                crate::semantic_query::LiteralValue::String(s),
+                            )) if s == "1" => has_str = true,
+                            other => panic!("dup-name union: unexpected arm {other:?}"),
+                        }
+                    }
+                    assert!(has_num && has_str, "dup-name union: 1 | \"1\" arms");
+                }
+                other => panic!("dup-name union value must be 1 | \"1\", got {other:?}"),
+            }
+        }
+        other => panic!("dup-name mapped union must materialise, got {other:?}"),
+    }
+
+    // `{ [K in 1 as K extends number ? "n" : "s"]: K }` = `{ n: 1 }` — the
+    // remap substitution sees the numeric kind.
+    let param = key_param();
+    let remap = graph.intern_node(SemanticNodeData::Conditional {
+        check: param,
+        extends: primitive(&graph, PrimitiveKind::Number),
+        true_branch_ref: graph.intern_node(SemanticNodeData::Literal(
+            crate::semantic_query::LiteralValue::String("n".to_string()),
+        )),
+        false_branch_ref: graph.intern_node(SemanticNodeData::Literal(
+            crate::semantic_query::LiteralValue::String("s".to_string()),
+        )),
+        distributive: true,
+    });
+    let mapped = build_mapped(mapper_over(key_1, param, param, Some(remap)));
+    match graph.node_data(mapped).as_deref() {
+        Some(SemanticNodeData::Object(surface)) => {
+            assert_eq!(surface.members.len(), 1, "kind-sensitive remap: one member");
+            assert_eq!(
+                surface.members[0].name.as_ref(),
+                "n",
+                "kind-sensitive remap: numeric K selects the \"n\" branch"
+            );
+            assert_numeric_literal(surface.members[0].value, 1.0, "kind-sensitive remap value");
+        }
+        other => panic!("kind-sensitive remap must materialise {{ n: 1 }}, got {other:?}"),
+    }
+
+    // Shallow-walker alignment: an empty-path Shallow projection over the
+    // deferred `Mapped` carrier synthesises the same kind-faithful surface.
+    let param = key_param();
+    let mapped_carrier = graph.intern_node(SemanticNodeData::Mapped {
+        source: empty_source,
+        mapper: mapper_over(keys_1_or_a, param, param, None),
+    });
+    let shallow =
+        crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Shallow);
+    let result = match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
+        base: mapped_carrier,
+        path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+        context: shallow,
+    }) {
+        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+        other => panic!("expected Shallow ProjectPath Value, got {other:?}"),
+    };
+    match graph.node_data(result).as_deref() {
+        Some(SemanticNodeData::Object(surface)) => {
+            let by_name = |n: &str| {
+                surface
+                    .members
+                    .iter()
+                    .find(|m| m.name.as_ref() == n)
+                    .unwrap_or_else(|| panic!("shallow mixed union: member {n} missing"))
+            };
+            assert_numeric_literal(by_name("1").value, 1.0, "shallow mixed union member 1");
+            assert_string_literal(by_name("a").value, "a", "shallow mixed union member a");
+        }
+        other => {
+            panic!("Shallow walker must synthesise the mixed-kind mapped surface, got {other:?}")
+        }
+    }
+}
+
+/// `js_number_to_string` implements the exact ECMA-262 `Number::toString`
+/// (radix 10) layout — including BOTH exponent-notation regimes (pinned
+/// tsgo, probe13): large magnitudes (`|x| >= 1e21`) format as `de+E`,
+/// small magnitudes (`|x| < 1e-6`) as `de-E`; the boundaries stay
+/// positional. A numeric-literal key in those regimes publishes the JS
+/// spelling as its member name — never the Rust `Display` positional
+/// form.
+#[test]
+fn js_numeric_names_use_exact_js_exponent_spellings() {
+    use super::build::js_number_to_string;
+
+    // Large-magnitude exponent regime (probe13).
+    assert_eq!(js_number_to_string(1e21), "1e+21");
+    assert_eq!(js_number_to_string(1e22), "1e+22");
+    assert_eq!(js_number_to_string(1.5e21), "1.5e+21");
+    assert_eq!(js_number_to_string(-1e21), "-1e+21");
+    assert_eq!(js_number_to_string(1e100), "1e+100");
+    assert_eq!(js_number_to_string(1.23456789e23), "1.23456789e+23");
+    assert_eq!(js_number_to_string(f64::MAX), "1.7976931348623157e+308");
+    // Boundary just BELOW the large regime: positional.
+    assert_eq!(js_number_to_string(1e20), "100000000000000000000");
+
+    // Small-magnitude exponent regime (probe13).
+    assert_eq!(js_number_to_string(1e-7), "1e-7");
+    assert_eq!(js_number_to_string(5e-7), "5e-7");
+    assert_eq!(js_number_to_string(1.2e-7), "1.2e-7");
+    assert_eq!(js_number_to_string(-5e-7), "-5e-7");
+    assert_eq!(js_number_to_string(5e-324), "5e-324");
+    // Boundary just ABOVE the small regime: positional.
+    assert_eq!(js_number_to_string(1e-6), "0.000001");
+    assert_eq!(js_number_to_string(0.000_001_2), "0.0000012");
+
+    // Equidistant shortest-representation ties pick the EVEN digit
+    // string per ECMA-262 (pinned tsgo, probe14) — Rust's formatter
+    // alone yields the odd `…13` / `…3` forms here.
+    assert_eq!(
+        js_number_to_string(161647069304469.12),
+        "161647069304469.12"
+    );
+    assert_eq!(
+        js_number_to_string(-161647069304469.12),
+        "-161647069304469.12"
+    );
+    assert_eq!(js_number_to_string(742274313866273.2), "742274313866273.2");
+    assert_eq!(
+        js_number_to_string(2177296589709441.2),
+        "2177296589709441.2"
+    );
+
+    // Common-range behavior is unchanged.
+    assert_eq!(js_number_to_string(1.0), "1");
+    assert_eq!(js_number_to_string(1.5), "1.5");
+    assert_eq!(js_number_to_string(-1.5), "-1.5");
+    assert_eq!(js_number_to_string(100.0), "100");
+    assert_eq!(js_number_to_string(0.0), "0");
+    assert_eq!(js_number_to_string(-0.0), "0");
+    assert_eq!(js_number_to_string(f64::NAN), "NaN");
+    assert_eq!(js_number_to_string(f64::INFINITY), "Infinity");
+    assert_eq!(js_number_to_string(f64::NEG_INFINITY), "-Infinity");
+
+    // Publication surface: `Pick<any, 1e21>` = `{ "1e+21": any }` — the
+    // member NAME is the JS exponent spelling, never the positional
+    // Rust `Display` form (probe13: e1 / e1_not_positional).
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let any = primitive(&graph, PrimitiveKind::Any);
+    let key_large = graph.intern_node(SemanticNodeData::Literal(
+        crate::semantic_query::LiteralValue::Number(1e21),
+    ));
+    let picked = instantiate_utility(&dispatch, &graph, "Pick", &[any, key_large]);
+    match graph.node_data(picked).as_deref() {
+        Some(SemanticNodeData::Object(surface)) => {
+            assert_eq!(surface.members.len(), 1, "Pick<any, 1e21>: one member");
+            assert_eq!(
+                surface.members[0].name.as_ref(),
+                "1e+21",
+                "Pick<any, 1e21>: member name is the JS exponent spelling"
+            );
+            assert_ne!(
+                surface.members[0].name.as_ref(),
+                "1000000000000000000000",
+                "Pick<any, 1e21>: positional Display form is forbidden"
+            );
+        }
+        other => panic!("Pick<any, 1e21> must be `{{ \"1e+21\": any }}`, got {other:?}"),
+    }
+
+    // Small-regime key on the publication surface too.
+    let key_small = graph.intern_node(SemanticNodeData::Literal(
+        crate::semantic_query::LiteralValue::Number(1e-7),
+    ));
+    let picked = instantiate_utility(&dispatch, &graph, "Pick", &[any, key_small]);
+    match graph.node_data(picked).as_deref() {
+        Some(SemanticNodeData::Object(surface)) => {
+            assert_eq!(surface.members.len(), 1, "Pick<any, 1e-7>: one member");
+            assert_eq!(
+                surface.members[0].name.as_ref(),
+                "1e-7",
+                "Pick<any, 1e-7>: member name is the JS exponent spelling"
+            );
+        }
+        other => panic!("Pick<any, 1e-7> must be `{{ \"1e-7\": any }}`, got {other:?}"),
+    }
+}
+
+/// The bounded producer predicate for the `IndexKey::Number(i64)`
+/// integer convention: fold iff the i64 `Display` IS the canonical
+/// `js_number_to_string` spelling. The entire integral `|v| <= 2^53`
+/// domain folds; divergent-spelling big integers (probe18: 2^62),
+/// the f64→i64 saturation edge (probe19: 2^63 — including the exact
+/// `i64::MAX as f64` boundary the old range guard admitted), and
+/// every non-integral / non-finite literal stay `TypeNode`.
+#[test]
+fn integer_convention_fold_is_bounded_by_canonical_display() {
+    use super::build::integer_convention_index_key;
+    use crate::semantic_query::CanonicalIndexInt;
+
+    // Safe domain — folds, and the folded i64 equals the literal.
+    for value in [
+        0.0,
+        1.0,
+        -1.0,
+        3.0,
+        42.0,
+        -1024.0,
+        9_007_199_254_740_992.0,  // 2^53
+        -9_007_199_254_740_992.0, // -2^53
+    ] {
+        assert_eq!(
+            integer_convention_index_key(value).map(CanonicalIndexInt::get),
+            Some(value as i64),
+            "{value} is inside the bounded integer convention"
+        );
+    }
+    // `-0.0` folds to 0: its canonical JS spelling is "0".
+    assert_eq!(
+        integer_convention_index_key(-0.0).map(CanonicalIndexInt::get),
+        Some(0)
+    );
+    // Above 2^53 a value folds ONLY when its exact digits ARE the
+    // shortest-round-trip spelling — that equality is itself the
+    // soundness condition consumers rely on.
+    assert_eq!(
+        integer_convention_index_key(9_007_199_254_740_994.0).map(CanonicalIndexInt::get),
+        Some(9_007_199_254_740_994),
+        "2^53 + 2: exact digits are the shortest spelling — folds"
+    );
+
+    // Rejected: integral, in i64 range, but the canonical spelling
+    // diverges from the exact digits (probe18: 2^62 spells
+    // "4611686018427388000", not "4611686018427387904").
+    assert_eq!(
+        integer_convention_index_key(4_611_686_018_427_387_904.0),
+        None,
+        "2^62 must stay TypeNode — i64 Display is not the canonical name"
+    );
+    // Rejected: the saturation edge. `9223372036854775808.0` (2^63)
+    // equals `i64::MAX as f64`, so the retired `<= i64::MAX as f64`
+    // range guard ADMITTED it while the saturating cast produced the
+    // DIFFERENT integer `i64::MAX` (probe19).
+    assert_eq!(
+        integer_convention_index_key(9_223_372_036_854_775_808.0),
+        None,
+        "2^63 must stay TypeNode — the saturating cast corrupts the value"
+    );
+    // Rejected: `i64::MIN as f64` (-2^63) is exactly representable and
+    // casts losslessly, but its canonical spelling is the
+    // shortest-round-trip "-9223372036854776000".
+    assert_eq!(
+        integer_convention_index_key(-9_223_372_036_854_775_808.0),
+        None,
+        "-2^63 must stay TypeNode — i64 Display is not the canonical name"
+    );
+    // Rejected: non-integral and non-finite literals.
+    for value in [
+        1.5,
+        -0.5,
+        1e21,
+        1e-7,
+        f64::NAN,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+    ] {
+        assert_eq!(
+            integer_convention_index_key(value),
+            None,
+            "{value} is outside the integer convention"
+        );
+    }
+}
+
+/// Indexed projection reaches members published under canonical JS
+/// numeric names even when the index literal does NOT fit the
+/// `IndexKey::Number(i64)` integer convention (pinned tsgo, probe16
+/// a1–a4: `{ "1e+21": string }[1e21]` = `string`, `{ "1e-7": number
+/// }[1e-7]` = `number`, `{ "1.5": boolean }[1.5]` = `boolean`,
+/// `{ "-0.5": undefined }[-0.5]` = `undefined`). Such literals ride
+/// `IndexKey::TypeNode` per the producer convention; the walker must
+/// recover the canonical needle via `js_number_to_string`, never via
+/// the Rust `Display` form.
+#[test]
+fn indexed_projection_reaches_canonical_numeric_member_names() {
+    use crate::semantic_query::IndexKey;
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let string_node = primitive(&graph, PrimitiveKind::String);
+    let number_node = primitive(&graph, PrimitiveKind::Number);
+    let boolean_node = primitive(&graph, PrimitiveKind::Boolean);
+    let undefined_node = primitive(&graph, PrimitiveKind::Undefined);
+    let source = simple_object(
+        &graph,
+        &[
+            ("1e+21", string_node),
+            ("1e-7", number_node),
+            ("1.5", boolean_node),
+            ("-0.5", undefined_node),
+        ],
+    );
+    let project_by_number = |value: f64| -> SemanticNodeId {
+        let lit = graph.intern_node(SemanticNodeData::Literal(
+            crate::semantic_query::LiteralValue::Number(value),
+        ));
+        match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
+            base: source,
+            path: Arc::from(vec![PathSegment::Index(IndexKey::TypeNode(lit))].into_boxed_slice()),
+            context: ProjectionReductionContext::published(ProjectionMode::Expanded),
+        }) {
+            QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+            other => panic!("expected projected Value for index {value}, got {other:?}"),
+        }
+    };
+
+    assert_eq!(
+        project_by_number(1e21),
+        string_node,
+        "[1e21] must reach the member published as \"1e+21\""
+    );
+    assert_eq!(
+        project_by_number(1e-7),
+        number_node,
+        "[1e-7] must reach the member published as \"1e-7\""
+    );
+    assert_eq!(
+        project_by_number(1.5),
+        boolean_node,
+        "[1.5] must reach the member published as \"1.5\""
+    );
+    assert_eq!(
+        project_by_number(-0.5),
+        undefined_node,
+        "[-0.5] must reach the member published as \"-0.5\""
+    );
+
+    // Negative: a numeric key with no member under its canonical name
+    // still misses.
+    let miss = project_by_number(2.5);
+    assert!(
+        matches!(
+            graph.node_data(miss).as_deref(),
+            Some(SemanticNodeData::Opaque(_))
+        ),
+        "[2.5] has no canonical member — must stay an Opaque miss"
+    );
+
+    // Negative: the NON-canonical string spelling is a different
+    // property name (probe16 A8: `{ "1e+21": string }["1e21"]` errors).
+    let non_canonical = match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
+        base: source,
+        path: Arc::from(
+            vec![PathSegment::Index(IndexKey::String(Arc::from("1e21")))].into_boxed_slice(),
+        ),
+        context: ProjectionReductionContext::published(ProjectionMode::Expanded),
+    }) {
+        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+        other => panic!("expected Value for the non-canonical lookup, got {other:?}"),
+    };
+    assert!(
+        matches!(
+            graph.node_data(non_canonical).as_deref(),
+            Some(SemanticNodeData::Opaque(_))
+        ),
+        "[\"1e21\"] is not the property \"1e+21\" — must stay an Opaque miss"
+    );
+}
+
+/// The cited FIX4 reprojection inconsistency: a member a utility
+/// publishes under its canonical numeric name must be projectable back
+/// by the SAME numeric-literal key (pinned tsgo, probe16 a5/a6:
+/// `Pick<any, 1e21>[1e21]` = `any`). A published member that cannot be
+/// projected back by its own key is an inconsistency, not a defer.
+#[test]
+fn pick_surface_reprojects_by_its_own_numeric_key() {
+    use crate::semantic_query::IndexKey;
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let any = primitive(&graph, PrimitiveKind::Any);
+    let key_large = graph.intern_node(SemanticNodeData::Literal(
+        crate::semantic_query::LiteralValue::Number(1e21),
+    ));
+    let picked = instantiate_utility(&dispatch, &graph, "Pick", &[any, key_large]);
+    let reprojected = match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
+        base: picked,
+        path: Arc::from(vec![PathSegment::Index(IndexKey::TypeNode(key_large))].into_boxed_slice()),
+        context: ProjectionReductionContext::published(ProjectionMode::Expanded),
+    }) {
+        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+        other => panic!("expected reprojected Value, got {other:?}"),
+    };
+    assert_node_primitive(
+        &graph,
+        reprojected,
+        PrimitiveKind::Any,
+        "Pick<any, 1e21>[1e21]",
+    );
+}
+
+/// Mapped narrowing admits keys whose canonical names live outside the
+/// `IndexKey::Number(i64)` convention (pinned tsgo, probe16 b1/b2:
+/// `{ [K in 1e21]: K }[1e21]` = `1e21`, `{ [K in 1e-7]: K }[1e-7]` =
+/// `1e-7`). The admission needle must be the `js_number_to_string`
+/// spelling — the f64 `Display` form ("1e21" / "0.0000001") never
+/// matches the published key-domain name.
+#[test]
+fn mapped_narrowing_admits_exponent_range_numeric_keys() {
+    use crate::semantic_query::IndexKey;
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let empty_source = simple_object(&graph, &[]);
+    let narrow = |key_value: f64| -> SemanticNodeId {
+        let key_space = graph.intern_node(SemanticNodeData::Literal(
+            crate::semantic_query::LiteralValue::Number(key_value),
+        ));
+        let param = graph.intern_node(SemanticNodeData::TypeParam {
+            decl: crate::semantic_query::DeclIdentity::synthetic("K"),
+            param_index: 0,
+            constraint: None,
+            default: None,
+            display_name: Arc::from("K"),
+        });
+        let mapped = graph.intern_node(SemanticNodeData::Mapped {
+            source: empty_source,
+            mapper: MapperKey {
+                parameter_node: param,
+                key_space,
+                value_expr: param,
+                optionality: OptionalityMod::Keep,
+                readonly: ReadonlyMod::Keep,
+                name_remap: None,
+                kind: crate::semantic_query::MapperKind::Computed,
+            },
+        });
+        match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
+            base: mapped,
+            path: Arc::from(
+                vec![PathSegment::Index(IndexKey::TypeNode(key_space))].into_boxed_slice(),
+            ),
+            context: ProjectionReductionContext::published(ProjectionMode::Expanded),
+        }) {
+            QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+            other => panic!("expected narrowed Value for key {key_value}, got {other:?}"),
+        }
+    };
+    let assert_numeric_literal = |node: SemanticNodeId, expected: f64, label: &str| {
+        let data = graph.node_data(node).expect("value node");
+        match &*data {
+            SemanticNodeData::Literal(crate::semantic_query::LiteralValue::Number(n)) => {
+                assert_eq!(*n, expected, "{label}: numeric literal value");
+            }
+            other => panic!("{label}: value must be the NUMERIC literal {expected}, got {other:?}"),
+        }
+    };
+    assert_numeric_literal(narrow(1e21), 1e21, "{ [K in 1e21]: K }[1e21]");
+    assert_numeric_literal(narrow(1e-7), 1e-7, "{ [K in 1e-7]: K }[1e-7]");
+    assert_numeric_literal(narrow(1.5), 1.5, "{ [K in 1.5]: K }[1.5]");
+}
+
+/// Key remap (`as`) results may be NUMERIC literals; they publish under
+/// the canonical JS numeric name instead of failing closed to the
+/// deferred carrier (pinned tsgo, probe16 c1–c8: `{ [K in 1 as K]: K }`
+/// = `{ 1: 1 }`, `{ [K in 1 | "a" as K]: K }` = `{ 1: 1; a: "a" }`,
+/// `{ [K in 1e21 as K]: K }` = `{ "1e+21": 1e21 }`, `{ [K in "a" as 1]:
+/// K }` = `{ 1: "a" }`).
+#[test]
+fn key_remap_publishes_numeric_literal_keys() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let empty_source = simple_object(&graph, &[]);
+    let key_param = || {
+        graph.intern_node(SemanticNodeData::TypeParam {
+            decl: crate::semantic_query::DeclIdentity::synthetic("K"),
+            param_index: 0,
+            constraint: None,
+            default: None,
+            display_name: Arc::from("K"),
+        })
+    };
+    let number_literal = |value: f64| {
+        graph.intern_node(SemanticNodeData::Literal(
+            crate::semantic_query::LiteralValue::Number(value),
+        ))
+    };
+    let build_mapped = |key_space: SemanticNodeId,
+                        param: SemanticNodeId,
+                        name_remap: Option<SemanticNodeId>|
+     -> SemanticNodeId {
+        match dispatch.execute_type_node(SemanticQueryKey::MappedType {
+            source: empty_source,
+            mapper: MapperKey {
+                parameter_node: param,
+                key_space,
+                value_expr: param,
+                optionality: OptionalityMod::Keep,
+                readonly: ReadonlyMod::Keep,
+                name_remap,
+                kind: crate::semantic_query::MapperKind::Computed,
+            },
+            context: ProjectionReductionContext::published(ProjectionMode::Expanded),
+        }) {
+            QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+            other => panic!("expected mapped Value, got {other:?}"),
+        }
+    };
+    let assert_numeric_literal = |node: SemanticNodeId, expected: f64, label: &str| {
+        let data = graph.node_data(node).expect("value node");
+        match &*data {
+            SemanticNodeData::Literal(crate::semantic_query::LiteralValue::Number(n)) => {
+                assert_eq!(*n, expected, "{label}: numeric literal value");
+            }
+            other => panic!("{label}: value must be the NUMERIC literal {expected}, got {other:?}"),
+        }
+    };
+
+    // `{ [K in 1 as K]: K }` = `{ 1: 1 }` — identity remap over a
+    // numeric key publishes, it does not fail closed.
+    let param = key_param();
+    let mapped = build_mapped(number_literal(1.0), param, Some(param));
+    match graph.node_data(mapped).as_deref() {
+        Some(SemanticNodeData::Object(surface)) => {
+            assert_eq!(
+                surface.members.len(),
+                1,
+                "{{ [K in 1 as K]: K }}: one member"
+            );
+            assert_eq!(surface.members[0].name.as_ref(), "1");
+            assert_numeric_literal(surface.members[0].value, 1.0, "{ [K in 1 as K]: K }");
+        }
+        other => panic!("{{ [K in 1 as K]: K }} must publish {{ 1: 1 }}, got {other:?}"),
+    }
+
+    // `{ [K in 1 | "a" as K]: K }` = `{ 1: 1; a: "a" }` — mixed-kind
+    // union; the numeric arm publishes alongside the string arm.
+    let key_a = graph.intern_node(SemanticNodeData::Literal(
+        crate::semantic_query::LiteralValue::String("a".to_string()),
+    ));
+    let keys_1_or_a = graph.intern_node(SemanticNodeData::Union(Arc::from(
+        vec![number_literal(1.0), key_a].into_boxed_slice(),
+    )));
+    let param = key_param();
+    let mapped = build_mapped(keys_1_or_a, param, Some(param));
+    match graph.node_data(mapped).as_deref() {
+        Some(SemanticNodeData::Object(surface)) => {
+            let mut names: Vec<&str> = surface.members.iter().map(|m| m.name.as_ref()).collect();
+            names.sort_unstable();
+            assert_eq!(names, ["1", "a"], "mixed-kind remap union: both members");
+        }
+        other => panic!("{{ [K in 1 | \"a\" as K]: K }} must publish, got {other:?}"),
+    }
+
+    // `{ [K in 1e21 as K]: K }` = `{ "1e+21": 1e21 }` — the remapped
+    // numeric key publishes under the canonical exponent spelling.
+    let param = key_param();
+    let mapped = build_mapped(number_literal(1e21), param, Some(param));
+    match graph.node_data(mapped).as_deref() {
+        Some(SemanticNodeData::Object(surface)) => {
+            assert_eq!(surface.members.len(), 1, "exponent remap: one member");
+            assert_eq!(
+                surface.members[0].name.as_ref(),
+                "1e+21",
+                "exponent remap publishes the canonical JS spelling"
+            );
+            assert_numeric_literal(surface.members[0].value, 1e21, "{ [K in 1e21 as K]: K }");
+        }
+        other => panic!("{{ [K in 1e21 as K]: K }} must publish, got {other:?}"),
+    }
+
+    // `{ [K in "a" as 1]: K }` = `{ 1: "a" }` — a remap to a CONSTANT
+    // numeric literal.
+    let param = key_param();
+    let mapped = build_mapped(key_a, param, Some(number_literal(1.0)));
+    match graph.node_data(mapped).as_deref() {
+        Some(SemanticNodeData::Object(surface)) => {
+            assert_eq!(
+                surface.members.len(),
+                1,
+                "constant numeric remap: one member"
+            );
+            assert_eq!(surface.members[0].name.as_ref(), "1");
+            match graph.node_data(surface.members[0].value).as_deref() {
+                Some(SemanticNodeData::Literal(crate::semantic_query::LiteralValue::String(s))) => {
+                    assert_eq!(s, "a", "constant numeric remap keeps the K value")
+                }
+                other => panic!("constant numeric remap value must be \"a\", got {other:?}"),
+            }
+        }
+        other => panic!("{{ [K in \"a\" as 1]: K }} must publish {{ 1: \"a\" }}, got {other:?}"),
+    }
+
+    // Negative: a remap producing a NON-key-capable shape (broad
+    // `number`) still fails closed to the deferred carrier.
+    let param = key_param();
+    let broad_number = primitive(&graph, PrimitiveKind::Number);
+    let mapped = build_mapped(number_literal(1.0), param, Some(broad_number));
+    assert!(
+        matches!(
+            graph.node_data(mapped).as_deref(),
+            Some(SemanticNodeData::Mapped { .. })
+        ),
+        "a broad-`number` remap result must stay the deferred carrier"
+    );
+}
+
+/// `[n: number]` index-signature applicability uses the TS numeric
+/// literal name rule — `String(Number(name)) === name` — i.e. the
+/// `js_number_to_string` round-trip, NOT an integer-only parse (pinned
+/// tsgo, probe16 d1–d15: "1.5" / "1e+21" / "-1" / "NaN" / "Infinity"
+/// ARE constrained by a number index signature; "01" / "1e21" / " 1" /
+/// "-0" / "x" are NOT).
+#[test]
+fn number_index_signature_applies_to_canonical_numeric_names() {
+    use super::relation_predicates::index_signature_applies_to_property;
+
+    let host = host();
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let number_key = primitive(&graph, PrimitiveKind::Number);
+
+    for name in [
+        "1",
+        "1.5",
+        "1e+21",
+        "1e-7",
+        "-1",
+        "NaN",
+        "Infinity",
+        "-Infinity",
+    ] {
+        assert!(
+            index_signature_applies_to_property(&graph, number_key, name),
+            "number index signature must apply to the canonical numeric name {name:?}"
+        );
+    }
+    for name in ["01", "1e21", " 1", "+1", "-0", "1.0", "0.0000001", "x", ""] {
+        assert!(
+            !index_signature_applies_to_property(&graph, number_key, name),
+            "number index signature must NOT apply to the non-canonical name {name:?}"
+        );
+    }
+
+    // A numeric-LITERAL key type applies exactly to its own canonical
+    // name — including the exponent regimes.
+    for (value, canonical, wrong) in [
+        (1.5, "1.5", "1.50"),
+        (1e21, "1e+21", "1000000000000000000000"),
+        (1e-7, "1e-7", "0.0000001"),
+    ] {
+        let literal_key = graph.intern_node(SemanticNodeData::Literal(
+            crate::semantic_query::LiteralValue::Number(value),
+        ));
+        assert!(
+            index_signature_applies_to_property(&graph, literal_key, canonical),
+            "literal key {value} must apply to its canonical name {canonical:?}"
+        );
+        assert!(
+            !index_signature_applies_to_property(&graph, literal_key, wrong),
+            "literal key {value} must NOT apply to the non-canonical spelling {wrong:?}"
+        );
+    }
+}
+
+/// Indexed projection by an INTEGRAL numeric literal beyond 2^53 uses
+/// the canonical `js_number_to_string` spelling, never the exact-digit
+/// `i64` rendering (pinned tsgo, probe18 G1–G4: the f64 literal
+/// `4611686018427387904` (2^62) publishes and projects as
+/// `"4611686018427388000"`; probe19 S1–S5: `9223372036854775808`
+/// (2^63 — one ULP above `i64::MAX`, where a saturating f64→i64 cast
+/// yields a DIFFERENT integer) publishes and projects as
+/// `"9223372036854776000"`). The exact-digit and saturated spellings
+/// are NOT property names.
+#[test]
+fn indexed_projection_uses_canonical_js_names_beyond_2_pow_53() {
+    use crate::semantic_query::IndexKey;
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let string_node = primitive(&graph, PrimitiveKind::String);
+    let number_node = primitive(&graph, PrimitiveKind::Number);
+    let boolean_node = primitive(&graph, PrimitiveKind::Boolean);
+    let source = simple_object(
+        &graph,
+        &[
+            // canonical spelling of the f64 2^62 (probe18)
+            ("4611686018427388000", string_node),
+            // canonical spelling of the f64 2^63 (probe19)
+            ("9223372036854776000", number_node),
+            // safe-domain regression anchors
+            ("3", boolean_node),
+            ("9007199254740992", string_node),
+        ],
+    );
+    let project_by_number = |value: f64| -> SemanticNodeId {
+        let lit = graph.intern_node(SemanticNodeData::Literal(
+            crate::semantic_query::LiteralValue::Number(value),
+        ));
+        match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
+            base: source,
+            path: Arc::from(vec![PathSegment::Index(IndexKey::TypeNode(lit))].into_boxed_slice()),
+            context: ProjectionReductionContext::published(ProjectionMode::Expanded),
+        }) {
+            QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+            other => panic!("expected projected Value for index {value}, got {other:?}"),
+        }
+    };
+
+    // probe18 G3: `{ "4611686018427388000": string }[4611686018427387904]`
+    // = `string`.
+    assert_eq!(
+        project_by_number(4_611_686_018_427_387_904.0),
+        string_node,
+        "[2^62] must reach the member published as \"4611686018427388000\""
+    );
+    // probe19 S3: `{ "9223372036854776000": number }[9223372036854775808]`
+    // = `number` — the saturating-cast edge.
+    assert_eq!(
+        project_by_number(9_223_372_036_854_775_808.0),
+        number_node,
+        "[2^63] must reach the member published as \"9223372036854776000\""
+    );
+    // Safe-domain regression: integer keys within 2^53 keep folding and
+    // projecting through the `IndexKey::Number` fast path.
+    assert_eq!(
+        project_by_number(3.0),
+        boolean_node,
+        "[3] must keep projecting through the integer-convention fast path"
+    );
+    assert_eq!(
+        project_by_number(9_007_199_254_740_992.0),
+        string_node,
+        "[2^53] must keep projecting (canonical spelling IS the exact integer)"
+    );
+
+    // Negatives — non-canonical spellings are DIFFERENT property names
+    // (probe18 G4, probe19 S4/S5).
+    let project_by_string = |name: &str| -> SemanticNodeId {
+        match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
+            base: source,
+            path: Arc::from(
+                vec![PathSegment::Index(IndexKey::String(Arc::from(name)))].into_boxed_slice(),
+            ),
+            context: ProjectionReductionContext::published(ProjectionMode::Expanded),
+        }) {
+            QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+            other => panic!("expected Value for string key {name:?}, got {other:?}"),
+        }
+    };
+    for wrong in [
+        // exact-digit spelling of 2^62 — not the canonical name
+        "4611686018427387904",
+        // exact-digit spelling of 2^63 — not the canonical name
+        "9223372036854775808",
+        // SATURATED `i64::MAX` spelling — names nothing
+        "9223372036854775807",
+    ] {
+        let miss = project_by_string(wrong);
+        assert!(
+            matches!(
+                graph.node_data(miss).as_deref(),
+                Some(SemanticNodeData::Opaque(_))
+            ),
+            "[{wrong:?}] is not a canonical property name — must stay an Opaque miss"
+        );
+    }
+}
+
+/// A utility surface keyed by a big-integer literal reprojects by its
+/// own key (probe18 G1/G2 analogue of
+/// [`pick_surface_reprojects_by_its_own_numeric_key`]): `Pick<any,
+/// 4611686018427387904>` publishes `{ "4611686018427388000": any }`
+/// AND `Pick<any, 4611686018427387904>[4611686018427387904]` = `any`.
+#[test]
+fn pick_surface_reprojects_by_big_integer_key() {
+    use crate::semantic_query::IndexKey;
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let any = primitive(&graph, PrimitiveKind::Any);
+    let key_big = graph.intern_node(SemanticNodeData::Literal(
+        crate::semantic_query::LiteralValue::Number(4_611_686_018_427_387_904.0),
+    ));
+    let picked = instantiate_utility(&dispatch, &graph, "Pick", &[any, key_big]);
+    match graph.node_data(picked).as_deref() {
+        Some(SemanticNodeData::Object(surface)) => {
+            assert_eq!(surface.members.len(), 1, "Pick<any, 2^62>: one member");
+            assert_eq!(
+                surface.members[0].name.as_ref(),
+                "4611686018427388000",
+                "Pick<any, 2^62>: member name is the canonical JS spelling"
+            );
+        }
+        other => panic!("Pick<any, 2^62> must be an Object surface, got {other:?}"),
+    }
+    let reprojected = match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
+        base: picked,
+        path: Arc::from(vec![PathSegment::Index(IndexKey::TypeNode(key_big))].into_boxed_slice()),
+        context: ProjectionReductionContext::published(ProjectionMode::Expanded),
+    }) {
+        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+        other => panic!("expected reprojected Value, got {other:?}"),
+    };
+    assert_node_primitive(
+        &graph,
+        reprojected,
+        PrimitiveKind::Any,
+        "Pick<any, 2^62>[2^62]",
+    );
+}
+
+/// Finite-union indexed access distributes over numeric-literal arms
+/// that live OUTSIDE the `IndexKey::Number` integer convention (pinned
+/// tsgo, probe20 U1–U5: `Obj[1.5 | 1e21]` = the union of both member
+/// values; mixed string|numeric unions distribute; a big-integer arm
+/// distributes; an arm with no member is an honest miss).
+#[test]
+fn union_index_distribution_projects_numeric_literal_arms() {
+    use crate::semantic_query::IndexKey;
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let string_node = primitive(&graph, PrimitiveKind::String);
+    let number_node = primitive(&graph, PrimitiveKind::Number);
+    let boolean_node = primitive(&graph, PrimitiveKind::Boolean);
+    let number_literal = |value: f64| {
+        graph.intern_node(SemanticNodeData::Literal(
+            crate::semantic_query::LiteralValue::Number(value),
+        ))
+    };
+    let project_by_union = |base: SemanticNodeId, arms: &[SemanticNodeId]| -> SemanticNodeId {
+        let union = graph.intern_node(SemanticNodeData::Union(Arc::from(
+            arms.to_vec().into_boxed_slice(),
+        )));
+        match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
+            base,
+            path: Arc::from(vec![PathSegment::Index(IndexKey::TypeNode(union))].into_boxed_slice()),
+            context: ProjectionReductionContext::published(ProjectionMode::Expanded),
+        }) {
+            QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+            other => panic!("expected distributed Value, got {other:?}"),
+        }
+    };
+    let union_member_set = |node: SemanticNodeId| -> Vec<SemanticNodeId> {
+        match graph.node_data(node).as_deref() {
+            Some(SemanticNodeData::Union(members)) => {
+                let mut m: Vec<SemanticNodeId> = members.to_vec();
+                m.sort_unstable();
+                m
+            }
+            _ => vec![node],
+        }
+    };
+
+    // probe20 U1: `{ "1.5": string; "1e+21": number }[1.5 | 1e21]`
+    // = `string | number`.
+    let obj = simple_object(&graph, &[("1.5", string_node), ("1e+21", number_node)]);
+    let mut expected = vec![string_node, number_node];
+    expected.sort_unstable();
+    assert_eq!(
+        union_member_set(project_by_union(
+            obj,
+            &[number_literal(1.5), number_literal(1e21)]
+        )),
+        expected,
+        "Obj[1.5 | 1e21] must distribute to string | number"
+    );
+
+    // probe20 U2: mixed string|numeric union distributes.
+    let mixed = simple_object(&graph, &[("a", boolean_node), ("1.5", string_node)]);
+    let key_a = graph.intern_node(SemanticNodeData::Literal(
+        crate::semantic_query::LiteralValue::String("a".to_string()),
+    ));
+    let mut expected = vec![boolean_node, string_node];
+    expected.sort_unstable();
+    assert_eq!(
+        union_member_set(project_by_union(mixed, &[key_a, number_literal(1.5)])),
+        expected,
+        "Obj[\"a\" | 1.5] must distribute to boolean | string"
+    );
+
+    // probe20 U4: a big-integer arm (2^62, canonical
+    // "4611686018427388000") distributes alongside an
+    // integer-convention arm.
+    let big = simple_object(
+        &graph,
+        &[("4611686018427388000", string_node), ("1", number_node)],
+    );
+    let mut expected = vec![string_node, number_node];
+    expected.sort_unstable();
+    assert_eq!(
+        union_member_set(project_by_union(
+            big,
+            &[
+                number_literal(4_611_686_018_427_387_904.0),
+                number_literal(1.0)
+            ]
+        )),
+        expected,
+        "Obj[4611686018427387904 | 1] must distribute to string | number"
+    );
+
+    // probe20 U5 (negative): an arm with no member under its canonical
+    // name keeps the honest miss — tsgo ERRORS on `Obj[1.5 | 2.5]`; the
+    // engine must not fabricate a partial union.
+    let miss = project_by_union(obj, &[number_literal(1.5), number_literal(2.5)]);
+    assert!(
+        matches!(
+            graph.node_data(miss).as_deref(),
+            Some(SemanticNodeData::Opaque(_))
+        ),
+        "Obj[1.5 | 2.5] with a missing arm must stay an Opaque miss"
+    );
+}
+
+/// A union-index arm whose KEY exists but whose VALUE is an opaque
+/// carrier (a deferred `DeclPlaceholder` shell — e.g. a member typed
+/// by a not-yet-materialized imported declaration) must NOT collapse
+/// the distribution to a miss. The distribution law is per-arm
+/// single-key consistency: `Obj['a' | 'b']` = `Obj['a'] | Obj['b']`,
+/// and the single-key path publishes an opaque member VALUE as the
+/// carrier itself (the walker returns `member.value` verbatim).
+/// Only a genuinely-ABSENT key — the walker's `Opaque(Miss)` — aborts
+/// the distribution: tsgo errors the whole expression when a key is
+/// missing, never merely because a key's value is unresolved.
+#[test]
+fn union_index_distribution_preserves_carrier_valued_member_arms() {
+    use crate::semantic_query::{HashValue, IndexKey, LiteralValue, QueryError};
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let string_node = primitive(&graph, PrimitiveKind::String);
+    let carrier = graph.intern_node(SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
+        canonical_id: Arc::from("/w/unresolved-import.ts"),
+        name: Arc::from("UnresolvedImport"),
+        whole_hash: HashValue::default(),
+    }));
+    let obj = simple_object(&graph, &[("a", string_node), ("b", carrier)]);
+    let string_key = |text: &str| {
+        graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+            text.to_string(),
+        )))
+    };
+    // Navigate is the carrier-preserving publication mode (publication
+    // demand is Navigate-only on the projector/registry surfaces) — the
+    // mode where the single-key opaque-member convention is observable.
+    let project = |base: SemanticNodeId, index: SemanticNodeId| -> SemanticNodeId {
+        match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
+            base,
+            path: Arc::from(vec![PathSegment::Index(IndexKey::TypeNode(index))].into_boxed_slice()),
+            context: ProjectionReductionContext::published(ProjectionMode::Navigate),
+        }) {
+            QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+            other => panic!("expected projected Value, got {other:?}"),
+        }
+    };
+    let union_of = |arms: &[SemanticNodeId]| -> SemanticNodeId {
+        graph.intern_node(SemanticNodeData::Union(Arc::from(
+            arms.to_vec().into_boxed_slice(),
+        )))
+    };
+
+    // Convention anchor: the SINGLE-KEY path publishes the opaque member
+    // value as the carrier itself — `Obj['b']` IS the carrier node.
+    let single_b = project(obj, string_key("b"));
+    assert_eq!(
+        single_b, carrier,
+        "single-key `Obj['b']` must publish the carrier-valued member verbatim"
+    );
+
+    // Distribution: `Obj['a' | 'b']` = `Obj['a'] | Obj['b']` — the
+    // carrier-valued arm contributes its carrier, exactly as the
+    // single-key path publishes it. Collapsing to an Opaque miss here
+    // reports a miss for EXISTING keys.
+    let distributed = project(obj, union_of(&[string_key("a"), string_key("b")]));
+    let mut members = match graph.node_data(distributed).as_deref() {
+        Some(SemanticNodeData::Union(members)) => members.to_vec(),
+        other => panic!(
+            "Obj['a' | 'b'] with a carrier-valued 'b' must distribute to \
+             `string | <carrier>`, got {other:?}"
+        ),
+    };
+    members.sort_unstable();
+    let mut expected = vec![string_node, carrier];
+    expected.sort_unstable();
+    assert_eq!(
+        members, expected,
+        "distributed union must contain the resolved arm AND the carrier arm"
+    );
+
+    // Negative: a genuinely-ABSENT key still aborts the distribution —
+    // the carrier-arm fix must not weaken the key-miss rule.
+    let absent = project(obj, union_of(&[string_key("b"), string_key("nope")]));
+    assert!(
+        matches!(
+            graph.node_data(absent).as_deref(),
+            Some(SemanticNodeData::Opaque(QueryError::Miss))
+        ),
+        "Obj['b' | 'nope'] with an absent key must stay an honest Opaque miss"
+    );
+}
+
+/// The Object-vs-Record relation accepts NUMERIC literal key types:
+/// the required key is the canonical JS numeric name (pinned tsgo,
+/// probe16 e1/e4/e5/e6: `{ 1: string } extends Record<1, string>`,
+/// `{ "1e+21": string } extends Record<1e21, string>`, and a missing
+/// canonical key refutes).
+#[test]
+fn object_record_relation_accepts_numeric_literal_keys() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let string_node = primitive(&graph, PrimitiveKind::String);
+    let true_branch = primitive(&graph, PrimitiveKind::Boolean);
+    let false_branch = primitive(&graph, PrimitiveKind::Undefined);
+    let empty_source = simple_object(&graph, &[]);
+    // A Record-class deferred Mapped carrier (`Record<K0, string>`):
+    // binder-independent value, no remap, Keep/Keep — the shape the
+    // relation oracle derives `RecordTargetShape::GenericKey` from.
+    let record_target = |key_space: SemanticNodeId| -> SemanticNodeId {
+        graph.intern_node(SemanticNodeData::Mapped {
+            source: empty_source,
+            mapper: MapperKey {
+                parameter_node: graph.intern_node(SemanticNodeData::TypeParam {
+                    decl: crate::semantic_query::DeclIdentity::synthetic("K"),
+                    param_index: 0,
+                    constraint: None,
+                    default: None,
+                    display_name: Arc::from("K"),
+                }),
+                key_space,
+                value_expr: string_node,
+                optionality: OptionalityMod::Keep,
+                readonly: ReadonlyMod::Keep,
+                name_remap: None,
+                kind: crate::semantic_query::MapperKind::Computed,
+            },
+        })
+    };
+    let relate = |check: SemanticNodeId, key_space: SemanticNodeId| -> SemanticNodeId {
+        match dispatch.execute_type_node(SemanticQueryKey::Conditional {
+            check,
+            extends: record_target(key_space),
+            true_branch,
+            false_branch,
+            distributive: false,
+        }) {
+            QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+            other => panic!("expected Conditional Value, got {other:?}"),
+        }
+    };
+    let number_literal = |value: f64| {
+        graph.intern_node(SemanticNodeData::Literal(
+            crate::semantic_query::LiteralValue::Number(value),
+        ))
+    };
+
+    // `{ 1: string } extends Record<1, string>` → true.
+    let source_1 = simple_object(&graph, &[("1", string_node)]);
+    assert_eq!(
+        relate(source_1, number_literal(1.0)),
+        true_branch,
+        "{{ 1: string }} extends Record<1, string> must select the true branch"
+    );
+
+    // `{ "1e+21": string } extends Record<1e21, string>` → true — the
+    // required key is the canonical exponent spelling.
+    let source_exp = simple_object(&graph, &[("1e+21", string_node)]);
+    assert_eq!(
+        relate(source_exp, number_literal(1e21)),
+        true_branch,
+        "{{ \"1e+21\": string }} extends Record<1e21, string> must select the true branch"
+    );
+
+    // `{ 2: string } extends Record<1, string>` → false — the canonical
+    // key "1" is missing.
+    let source_2 = simple_object(&graph, &[("2", string_node)]);
+    assert_eq!(
+        relate(source_2, number_literal(1.0)),
+        false_branch,
+        "{{ 2: string }} extends Record<1, string> must select the false branch"
+    );
+
+    // Mixed-kind union key: `{ 1: string; a: string } extends
+    // Record<1 | "a", string>` → true.
+    let key_a = graph.intern_node(SemanticNodeData::Literal(
+        crate::semantic_query::LiteralValue::String("a".to_string()),
+    ));
+    let keys_1_or_a = graph.intern_node(SemanticNodeData::Union(Arc::from(
+        vec![number_literal(1.0), key_a].into_boxed_slice(),
+    )));
+    let source_both = simple_object(&graph, &[("1", string_node), ("a", string_node)]);
+    assert_eq!(
+        relate(source_both, keys_1_or_a),
+        true_branch,
+        "{{ 1: string; a: string }} extends Record<1 | \"a\", string> must select the true branch"
+    );
+}
+
+/// Tuple numeric-position projection: a literal index projects the
+/// element's VALUE (the label never flows), and an optional slot widens
+/// to `value | undefined`. The broad `number` key projects the
+/// renormalised union of every element's contribution.
+#[test]
+fn project_path_tuple_numeric_index_projects_positions_and_broad_union() {
+    use crate::semantic_query::{IndexKey, TupleElement};
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let string_node = primitive(&graph, PrimitiveKind::String);
+    let boolean_node = primitive(&graph, PrimitiveKind::Boolean);
+    let tuple = graph.intern_node(SemanticNodeData::Tuple {
+        elements: Arc::from(
+            vec![
+                TupleElement {
+                    label: Some(Arc::from("name")),
+                    value: string_node,
+                    optional: false,
+                    rest: false,
+                },
+                TupleElement {
+                    label: Some(Arc::from("active")),
+                    value: boolean_node,
+                    optional: true,
+                    rest: false,
+                },
+            ]
+            .into_boxed_slice(),
+        ),
+        readonly: false,
+    });
+    let project = |index: IndexKey| -> SemanticNodeId {
+        match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
+            base: tuple,
+            path: Arc::from(vec![PathSegment::Index(index)].into_boxed_slice()),
+            context: ProjectionReductionContext::published(ProjectionMode::Expanded),
+        }) {
+            QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+            other => panic!("expected projected value, got {other:?}"),
+        }
+    };
+
+    // Position 0: required slot — the bare element value, label dropped.
+    assert_eq!(project(num_key(0)), string_node);
+
+    // Position 1: optional slot — widens to `boolean | undefined`.
+    let optional_slot = project(num_key(1));
+    match graph.node_data(optional_slot).as_deref() {
+        Some(SemanticNodeData::Union(members)) => {
+            assert_eq!(members.len(), 2, "optional slot must be a 2-arm union");
+            assert!(members.iter().any(|m| matches!(
+                graph.node_data(*m).as_deref(),
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Boolean))
+            )));
+            assert!(members.iter().any(|m| matches!(
+                graph.node_data(*m).as_deref(),
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Undefined))
+            )));
+        }
+        other => panic!("expected boolean|undefined union, got {other:?}"),
+    }
+
+    // Broad `number` key: union of every element contribution.
+    let number_node = primitive(&graph, PrimitiveKind::Number);
+    let broad = project(IndexKey::TypeNode(number_node));
+    match graph.node_data(broad).as_deref() {
+        Some(SemanticNodeData::Union(members)) => {
+            assert_eq!(
+                members.len(),
+                3,
+                "broad-number projection must union string|boolean|undefined"
+            );
+        }
+        other => panic!("expected 3-arm union, got {other:?}"),
+    }
+
+    // Out-of-range literal positions miss (TS rejects them).
+    let out_of_range = project(num_key(7));
+    assert!(
+        matches!(
+            graph.node_data(out_of_range).as_deref(),
+            Some(SemanticNodeData::Opaque(_))
+        ),
+        "out-of-range position must miss"
+    );
+}
+
+/// TS coerces only CANONICAL numeric string keys (`String(Number(s)) ===
+/// s`): `T["1"]` / `T["0"]` project tuple positions, but `T["01"]`,
+/// `T["+1"]` and `T["1.0"]` are NOT numeric keys (pinned tsgo: property
+/// errors) — they must keep the honest `Opaque` miss instead of parsing
+/// through to a position.
+#[test]
+fn project_path_tuple_string_index_requires_canonical_digits() {
+    use crate::semantic_query::{IndexKey, TupleElement};
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let string_node = primitive(&graph, PrimitiveKind::String);
+    let number_node = primitive(&graph, PrimitiveKind::Number);
+    let plain = |value: SemanticNodeId| TupleElement {
+        label: None,
+        value,
+        optional: false,
+        rest: false,
+    };
+    let tuple = graph.intern_node(SemanticNodeData::Tuple {
+        elements: Arc::from(vec![plain(string_node), plain(number_node)].into_boxed_slice()),
+        readonly: false,
+    });
+    let project = |key: &str| -> SemanticNodeId {
+        match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
+            base: tuple,
+            path: Arc::from(
+                vec![PathSegment::Index(IndexKey::String(Arc::from(key)))].into_boxed_slice(),
+            ),
+            context: ProjectionReductionContext::published(ProjectionMode::Expanded),
+        }) {
+            QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+            other => panic!("expected projected value, got {other:?}"),
+        }
+    };
+
+    // Canonical digit strings project positions.
+    assert_eq!(project("0"), string_node, "T[\"0\"] projects position 0");
+    assert_eq!(project("1"), number_node, "T[\"1\"] projects position 1");
+
+    // Non-canonical numeric strings are NOT tuple positions — honest miss.
+    for key in ["01", "+1", "1.0", "", " 1"] {
+        let miss = project(key);
+        assert!(
+            matches!(
+                graph.node_data(miss).as_deref(),
+                Some(SemanticNodeData::Opaque(_))
+            ),
+            "T[{key:?}] must keep the honest miss (non-canonical numeric key)"
+        );
+    }
+}
+
+/// Literal positions strictly BEFORE a rest element resolve exactly
+/// (pinned tsgo: `[string, ...number[]][0]` = `string`;
+/// `[string, number?, ...boolean[]][1]` = `number | undefined` — the same
+/// optional widening as a rest-free tuple). Positions AT or AFTER the rest
+/// start have suffix-dependent arithmetic this walker does not guess —
+/// they keep the honest `Opaque` miss.
+#[test]
+fn project_path_tuple_numeric_index_resolves_fixed_prefix_before_rest() {
+    use crate::semantic_query::TupleElement;
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let string_node = primitive(&graph, PrimitiveKind::String);
+    let number_node = primitive(&graph, PrimitiveKind::Number);
+    let boolean_node = primitive(&graph, PrimitiveKind::Boolean);
+    let boolean_array = graph.intern_node(SemanticNodeData::Array {
+        element: boolean_node,
+        readonly: false,
+    });
+    // `[x: string, n?: number, ...rest: boolean[]]`
+    let tuple = graph.intern_node(SemanticNodeData::Tuple {
+        elements: Arc::from(
+            vec![
+                TupleElement {
+                    label: Some(Arc::from("x")),
+                    value: string_node,
+                    optional: false,
+                    rest: false,
+                },
+                TupleElement {
+                    label: Some(Arc::from("n")),
+                    value: number_node,
+                    optional: true,
+                    rest: false,
+                },
+                TupleElement {
+                    label: Some(Arc::from("rest")),
+                    value: boolean_array,
+                    optional: false,
+                    rest: true,
+                },
+            ]
+            .into_boxed_slice(),
+        ),
+        readonly: false,
+    });
+    let project = |position: i64| -> SemanticNodeId {
+        match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
+            base: tuple,
+            path: Arc::from(vec![PathSegment::Index(num_key(position))].into_boxed_slice()),
+            context: ProjectionReductionContext::published(ProjectionMode::Expanded),
+        }) {
+            QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+            other => panic!("expected projected value, got {other:?}"),
+        }
+    };
+
+    // Position 0: fixed required slot before the rest — resolves exactly.
+    assert_eq!(
+        project(0),
+        string_node,
+        "fixed position before the rest must resolve exactly"
+    );
+
+    // Position 1: fixed optional slot before the rest — widens to
+    // `number | undefined`, same as a rest-free tuple.
+    match graph.node_data(project(1)).as_deref() {
+        Some(SemanticNodeData::Union(members)) => {
+            assert!(members.contains(&number_node));
+            assert!(members.iter().any(|m| matches!(
+                graph.node_data(*m).as_deref(),
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Undefined))
+            )));
+        }
+        other => panic!("expected number|undefined union, got {other:?}"),
+    }
+
+    // Positions AT (2) and AFTER (5) the rest start: honest Opaque miss —
+    // never a guessed suffix union.
+    for position in [2, 5] {
+        let at_or_after_rest = project(position);
+        assert!(
+            matches!(
+                graph.node_data(at_or_after_rest).as_deref(),
+                Some(SemanticNodeData::Opaque(_))
+            ),
+            "position {position} at/after the rest start must keep the honest miss"
+        );
+    }
+}
+
+/// `Parameters<F>` widens an OPTIONAL parameter's tuple slot to
+/// `T | undefined` while keeping the label and `optional` marker — the
+/// labelled-slot shape TS reports.
+#[test]
+fn parameters_tuple_widens_optional_slot_and_keeps_label() {
+    use crate::semantic_query::FunctionParam;
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let string_node = primitive(&graph, PrimitiveKind::String);
+    let boolean_node = primitive(&graph, PrimitiveKind::Boolean);
+    let void_node = primitive(&graph, PrimitiveKind::Void);
+    let function = graph.intern_node(SemanticNodeData::Function {
+        params: Arc::from(
+            vec![
+                FunctionParam {
+                    name: Some(Arc::from("name")),
+                    ty: string_node,
+                    optional: false,
+                    rest: false,
+                    span: None,
+                },
+                FunctionParam {
+                    name: Some(Arc::from("active")),
+                    ty: boolean_node,
+                    optional: true,
+                    rest: false,
+                    span: None,
+                },
+            ]
+            .into_boxed_slice(),
+        ),
+        return_type: void_node,
+        type_parameters: Arc::from(Vec::new().into_boxed_slice()),
+        signature_span: None,
+        return_type_span: None,
+    });
+
+    let result = instantiate_utility(&dispatch, &graph, "Parameters", &[function]);
+    let data = graph.node_data(result).expect("node data");
+    let SemanticNodeData::Tuple { elements, .. } = &*data else {
+        panic!("Parameters must produce a tuple, got {data:?}");
+    };
+    assert_eq!(elements.len(), 2);
+    assert_eq!(elements[0].label.as_deref(), Some("name"));
+    assert!(!elements[0].optional);
+    assert_eq!(elements[0].value, string_node, "required slot stays bare");
+    assert_eq!(elements[1].label.as_deref(), Some("active"));
+    assert!(elements[1].optional);
+    match graph.node_data(elements[1].value).as_deref() {
+        Some(SemanticNodeData::Union(members)) => {
+            assert!(members.iter().any(|m| matches!(
+                graph.node_data(*m).as_deref(),
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Undefined))
+            )));
+        }
+        other => panic!("optional slot must widen to T|undefined, got {other:?}"),
+    }
+}
+
+/// The tuple spread-normalization rule: settled rest-of-tuple elements
+/// splice in place (preserving inner markers), a SOLE rest-of-array
+/// element collapses to the array, and an OPEN rest value (an unbound
+/// `TypeParam`) is preserved verbatim — normalization never forces
+/// materialisation.
+#[test]
+fn tuple_spread_normalization_splices_collapses_and_preserves_carriers() {
+    use crate::project_semantic_dispatch::build::NormalizedTupleShape;
+    use crate::semantic_query::{LiteralValue, TupleElement};
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let lit = |n: f64| graph.intern_node(SemanticNodeData::Literal(LiteralValue::Number(n)));
+    let rest = |value: SemanticNodeId| TupleElement {
+        label: None,
+        value,
+        optional: false,
+        rest: true,
+    };
+    let plain = |value: SemanticNodeId| TupleElement {
+        label: None,
+        value,
+        optional: false,
+        rest: false,
+    };
+
+    // Settled rest-of-tuple splices, preserving the inner optional marker.
+    let inner = graph.intern_node(SemanticNodeData::Tuple {
+        elements: Arc::from(
+            vec![
+                plain(lit(2.0)),
+                TupleElement {
+                    label: Some(Arc::from("opt")),
+                    value: lit(3.0),
+                    optional: true,
+                    rest: false,
+                },
+            ]
+            .into_boxed_slice(),
+        ),
+        readonly: false,
+    });
+    match dispatch.normalize_tuple_spread(&[plain(lit(1.0)), rest(inner)], false) {
+        NormalizedTupleShape::Tuple(elements) => {
+            assert_eq!(elements.len(), 3, "spread must splice the inner tuple");
+            assert!(!elements[0].rest && !elements[1].rest && !elements[2].rest);
+            assert!(
+                elements[2].optional,
+                "inner optional marker must survive the splice"
+            );
+            assert_eq!(elements[2].label.as_deref(), Some("opt"));
+        }
+        other => panic!("expected spliced tuple, got {other:?}"),
+    }
+
+    // A sole rest-of-array element IS the array.
+    let num = primitive(&graph, PrimitiveKind::Number);
+    let array = graph.intern_node(SemanticNodeData::Array {
+        element: num,
+        readonly: false,
+    });
+    match dispatch.normalize_tuple_spread(&[rest(array)], false) {
+        NormalizedTupleShape::Array(node) => assert_eq!(node, array),
+        other => panic!("expected sole-rest array collapse, got {other:?}"),
+    }
+
+    // An OPEN rest value (unbound TypeParam) is preserved verbatim.
+    let open = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: crate::semantic_query::DeclIdentity {
+            canonical_id: Arc::from("/w/open.ts"),
+            whole_hash: crate::semantic_query::HashValue::default(),
+            decl_name: Arc::from("T"),
+        },
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("T"),
+    });
+    match dispatch.normalize_tuple_spread(&[rest(open), plain(lit(1.0))], false) {
+        NormalizedTupleShape::Tuple(elements) => {
+            assert_eq!(elements.len(), 2);
+            assert!(
+                elements[0].rest && elements[0].value == open,
+                "open rest carrier must be preserved verbatim"
+            );
+        }
+        other => panic!("expected carrier-preserving tuple, got {other:?}"),
+    }
+}
+
+/// The sole-rest collapse reconciles `readonly` from the OUTER tuple
+/// (pinned tsgo: `readonly [...number[]]` ≡ `readonly number[]`;
+/// `[...(readonly number[])]` ≡ MUTABLE `number[]`) instead of handing
+/// out the inner array node verbatim.
+#[test]
+fn tuple_sole_rest_collapse_reconciles_outer_readonly() {
+    use verter_type_expr::{PrimitiveName, TupleElement as IrTupleElement, TypeExpr};
+
+    let host = host();
+    upsert_ts(&host, "/w/types.ts", "export {}");
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let tuple_expr = |inner_readonly: bool, outer_readonly: bool| TypeExpr::Tuple {
+        elements: Arc::from(
+            vec![IrTupleElement {
+                label: None,
+                ty: TypeExpr::Array {
+                    element: Arc::new(TypeExpr::Primitive(PrimitiveName::Number)),
+                    readonly: inner_readonly,
+                },
+                optional: false,
+                rest: true,
+            }]
+            .into_boxed_slice(),
+        ),
+        readonly: outer_readonly,
+    };
+
+    // (inner array readonly, outer tuple readonly) → collapsed array
+    // readonly mirrors the OUTER tuple in every combination.
+    for (inner, outer) in [(false, true), (true, false), (false, false), (true, true)] {
+        let lowered = dispatch
+            .lower_type_expr_in_scope_with_mode(
+                "/w/types.ts",
+                &tuple_expr(inner, outer),
+                ProjectionMode::Expanded,
+            )
+            .expect("sole-rest tuple lowering succeeds");
+        match graph.node_data(lowered).as_deref() {
+            Some(SemanticNodeData::Array { element, readonly }) => {
+                assert_eq!(
+                    *readonly, outer,
+                    "collapsed array readonly must mirror the OUTER tuple \
+                     (inner={inner}, outer={outer})"
+                );
+                assert!(
+                    matches!(
+                        graph.node_data(*element).as_deref(),
+                        Some(SemanticNodeData::Primitive(PrimitiveKind::Number))
+                    ),
+                    "collapsed array must keep the inner element type"
+                );
+            }
+            other => panic!("expected sole-rest array collapse, got {other:?}"),
+        }
+    }
+}
+
+/// The sole-rest collapse's REPLACEMENT `Array` intern preserves the
+/// inner/origin node's scope (`intern_preserving_scope`), so downstream
+/// `ProjectPath` self-rooting over the collapsed base still records the
+/// origin file's `(canonical, whole_hash)` root. A scope-LESS re-intern
+/// would mint a `Global` node that cannot observe its origin file's
+/// whole-hash — a cache-validity rail hole.
+#[test]
+fn tuple_sole_rest_collapse_replacement_array_preserves_origin_scope() {
+    use crate::project_semantic_dispatch::build::NormalizedTupleShape;
+    use crate::semantic_query::TupleElement;
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let origin_scope = NodeScopeId::File {
+        canonical_id: Arc::from("/w/origin.ts"),
+        whole_hash: [7u8; 16],
+        local_scope: None,
+    };
+    let num = primitive(&graph, PrimitiveKind::Number);
+    // Inner array READONLY, outer tuple MUTABLE — the flags mismatch, so
+    // the collapse must mint a REPLACEMENT node (it cannot reuse `inner`).
+    let inner = graph.intern_node_with_scope(
+        SemanticNodeData::Array {
+            element: num,
+            readonly: true,
+        },
+        origin_scope.clone(),
+    );
+    let rest = TupleElement {
+        label: None,
+        value: inner,
+        optional: false,
+        rest: true,
+    };
+
+    let collapsed = match dispatch.normalize_tuple_spread(&[rest], false) {
+        NormalizedTupleShape::Array(node) => node,
+        other => panic!("expected sole-rest array collapse, got {other:?}"),
+    };
+    assert_ne!(
+        collapsed, inner,
+        "flag mismatch must mint a replacement node"
+    );
+    assert_eq!(
+        graph.node_scope(collapsed),
+        Some(origin_scope),
+        "replacement Array must carry the origin node's scope"
+    );
+    // The self-rooting consequence: a projection base over the collapsed
+    // node yields the origin file root (`observed_self_roots_from_nodes`
+    // reads the scope sidecar).
+    let roots = dispatch.observed_self_roots_from_nodes([collapsed]);
+    assert_eq!(
+        roots.len(),
+        1,
+        "collapsed base must yield exactly the origin file self-root"
+    );
+    assert_eq!(roots[0].0.as_ref(), "/w/origin.ts");
+    assert_eq!(roots[0].1, [7u8; 16]);
+}
+
+/// A NON-trailing spliced `optional` marker converts to a REQUIRED
+/// `T | undefined` slot (pinned tsgo: `[...[a?: number], string]` =
+/// `[number | undefined, string]`, length 2 — optional-before-required is
+/// illegal TS1257, so the splice materialises the widened required slot;
+/// `[...[a?: number, b?: string], boolean]` = `[number | undefined,
+/// string | undefined, boolean]`). Only a trailing optional run — nothing
+/// REQUIRED after it (a rest tail does not count) — keeps its `?`.
+#[test]
+fn tuple_spread_non_trailing_optional_converts_to_required_undefined_union() {
+    use crate::project_semantic_dispatch::build::NormalizedTupleShape;
+    use crate::semantic_query::TupleElement;
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let num = primitive(&graph, PrimitiveKind::Number);
+    let string_node = primitive(&graph, PrimitiveKind::String);
+    let boolean_node = primitive(&graph, PrimitiveKind::Boolean);
+    let rest = |value: SemanticNodeId| TupleElement {
+        label: None,
+        value,
+        optional: false,
+        rest: true,
+    };
+    let plain = |value: SemanticNodeId| TupleElement {
+        label: None,
+        value,
+        optional: false,
+        rest: false,
+    };
+    let optional = |label: &str, value: SemanticNodeId| TupleElement {
+        label: Some(Arc::from(label)),
+        value,
+        optional: true,
+        rest: false,
+    };
+    let assert_widened = |element: &TupleElement, base: SemanticNodeId, label: &str| {
+        assert!(
+            !element.optional,
+            "{label}: converted slot must be REQUIRED (length arithmetic)"
+        );
+        match graph.node_data(element.value).as_deref() {
+            Some(SemanticNodeData::Union(members)) => {
+                assert!(
+                    members.contains(&base),
+                    "{label}: widened slot must keep the base type"
+                );
+                assert!(
+                    members.iter().any(|m| matches!(
+                        graph.node_data(*m).as_deref(),
+                        Some(SemanticNodeData::Primitive(PrimitiveKind::Undefined))
+                    )),
+                    "{label}: widened slot must add `undefined`"
+                );
+            }
+            other => panic!("{label}: expected `T | undefined` union, got {other:?}"),
+        }
+    };
+
+    // `[...[a?: number, b?: string], boolean]` — both spliced optionals
+    // sit before a required element: convert to required `T | undefined`.
+    let inner = graph.intern_node(SemanticNodeData::Tuple {
+        elements: Arc::from(
+            vec![optional("a", num), optional("b", string_node)].into_boxed_slice(),
+        ),
+        readonly: false,
+    });
+    match dispatch.normalize_tuple_spread(&[rest(inner), plain(boolean_node)], false) {
+        NormalizedTupleShape::Tuple(elements) => {
+            assert_eq!(elements.len(), 3);
+            assert_widened(&elements[0], num, "slot 0");
+            assert_widened(&elements[1], string_node, "slot 1");
+            assert!(!elements[2].optional);
+            assert_eq!(elements[2].value, boolean_node);
+        }
+        other => panic!("expected spliced tuple, got {other:?}"),
+    }
+
+    // Trailing splice: nothing required follows — the `?` markers and the
+    // unwidened slot types survive verbatim.
+    match dispatch.normalize_tuple_spread(&[plain(boolean_node), rest(inner)], false) {
+        NormalizedTupleShape::Tuple(elements) => {
+            assert_eq!(elements.len(), 3);
+            assert!(elements[1].optional && elements[2].optional);
+            assert_eq!(elements[1].value, num, "trailing optional stays unwidened");
+            assert_eq!(elements[2].value, string_node);
+        }
+        other => panic!("expected spliced tuple, got {other:?}"),
+    }
+
+    // An optional before a REST tail (no required element after) is legal
+    // TS (`[a?: number, ...boolean[]]`) — the `?` survives.
+    let boolean_array = graph.intern_node(SemanticNodeData::Array {
+        element: boolean_node,
+        readonly: false,
+    });
+    match dispatch.normalize_tuple_spread(&[optional("a", num), rest(boolean_array)], false) {
+        NormalizedTupleShape::Tuple(elements) => {
+            assert_eq!(elements.len(), 2);
+            assert!(
+                elements[0].optional,
+                "optional before a rest tail must keep its `?`"
+            );
+            assert_eq!(elements[0].value, num);
+        }
+        other => panic!("expected tuple, got {other:?}"),
+    }
+}
+
+/// Build the builtin-sentinel `Promise<payload>` carrier identity the
+/// lowering fast path interns for an unshadowed global `Promise<...>`
+/// reference.
+fn promise_carrier(
+    graph: &Arc<crate::semantic_query_memo::SemanticGraphStore>,
+    payload: SemanticNodeId,
+) -> SemanticNodeId {
+    graph.intern_node(SemanticNodeData::InstantiationRef {
+        base: crate::semantic_query::DeclIdentity {
+            canonical_id: Arc::from("__builtin__"),
+            whole_hash: crate::semantic_query::HashValue::default(),
+            decl_name: Arc::from("Promise"),
+        },
+        args: Arc::from(vec![payload].into_boxed_slice()),
+    })
+}
+
+/// `Awaited<Promise<Promise<T>>>` recursively unwraps the registry-
+/// recognised `Promise` carriers down to the settled payload.
+#[test]
+fn awaited_unwraps_nested_promise_carriers() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let string_node = primitive(&graph, PrimitiveKind::String);
+    let nested = promise_carrier(&graph, promise_carrier(&graph, string_node));
+
+    let result = instantiate_utility(&dispatch, &graph, "Awaited", &[nested]);
+    assert_node_primitive(&graph, result, PrimitiveKind::String, "Awaited");
+}
+
+/// `Awaited` over settled non-thenables (nullish primitives, plain
+/// objects WITHOUT a `then` member, literals) passes the operand
+/// through unchanged — the final conditional fallthrough returns `T`.
+#[test]
+fn awaited_passes_through_settled_non_thenables() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let null_node = primitive(&graph, PrimitiveKind::Null);
+    assert_eq!(
+        instantiate_utility(&dispatch, &graph, "Awaited", &[null_node]),
+        null_node,
+        "Awaited<null> must preserve null"
+    );
+
+    let num = primitive(&graph, PrimitiveKind::Number);
+    let object = simple_object(&graph, &[("a", num)]);
+    assert_eq!(
+        instantiate_utility(&dispatch, &graph, "Awaited", &[object]),
+        object,
+        "Awaited over a then-free object must pass through"
+    );
+}
+
+/// `Awaited<Promise<A> | B>` distributes over the union and
+/// renormalises: each arm reduces independently.
+#[test]
+fn awaited_distributes_over_union_arms() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let string_node = primitive(&graph, PrimitiveKind::String);
+    let num = primitive(&graph, PrimitiveKind::Number);
+    let union = graph.intern_node(SemanticNodeData::Union(Arc::from(
+        vec![promise_carrier(&graph, string_node), num].into_boxed_slice(),
+    )));
+
+    let result = instantiate_utility(&dispatch, &graph, "Awaited", &[union]);
+    let data = graph.node_data(result).expect("node data");
+    match &*data {
+        SemanticNodeData::Union(members) => {
+            let mut kinds: Vec<PrimitiveKind> = members
+                .iter()
+                .filter_map(|m| match graph.node_data(*m).as_deref() {
+                    Some(SemanticNodeData::Primitive(kind)) => Some(*kind),
+                    _ => None,
+                })
+                .collect();
+            kinds.sort_by_key(|k| format!("{k:?}"));
+            assert_eq!(
+                kinds,
+                vec![PrimitiveKind::Number, PrimitiveKind::String],
+                "Awaited must unwrap the Promise arm and keep the settled arm"
+            );
+        }
+        other => panic!("expected union, got {other:?}"),
+    }
+}
+
+/// `Awaited` over the lattice extremes: `any` ⇒ `any` (distribution over
+/// `any`), `never` ⇒ `never` (empty distribution), `unknown` ⇒ `unknown`
+/// (the final fallthrough returns `T`).
+#[test]
+fn awaited_absorbs_lattice_extremes() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    for kind in [
+        PrimitiveKind::Any,
+        PrimitiveKind::Never,
+        PrimitiveKind::Unknown,
+    ] {
+        let arg = primitive(&graph, kind);
+        let result = instantiate_utility(&dispatch, &graph, "Awaited", &[arg]);
+        assert_node_primitive(&graph, result, kind, "Awaited lattice extreme");
+    }
+}
+
+/// An object surface that CARRIES a `then` member may be a structural
+/// thenable — out of scope for the carrier-identity unwrap — so the
+/// reduction defers to the `Opaque(Miss)` shell instead of passing a
+/// potentially-wrong surface through.
+#[test]
+fn awaited_defers_then_bearing_object_surfaces() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let num = primitive(&graph, PrimitiveKind::Number);
+    let thenable = simple_object(&graph, &[("then", num)]);
+
+    let result = instantiate_utility(&dispatch, &graph, "Awaited", &[thenable]);
+    let data = graph.node_data(result).expect("node data");
+    assert!(
+        matches!(&*data, SemanticNodeData::Opaque(QueryError::Miss)),
+        "then-bearing surface must defer, got {data:?}"
+    );
+}
+
+/// `Extract<any, U>` / `Exclude<any, U>` absorb to `any` BEFORE the
+/// per-arm relation loop — the degenerate row keeps the reduction
+/// relation-free (TS: distribution over `any` contributes both branches,
+/// merging to `any`).
+#[test]
+fn extract_and_exclude_absorb_any_source_to_any() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let any = primitive(&graph, PrimitiveKind::Any);
+    let string_node = primitive(&graph, PrimitiveKind::String);
+
+    for name in ["Extract", "Exclude"] {
+        let result = instantiate_utility(&dispatch, &graph, name, &[any, string_node]);
+        assert_node_primitive(&graph, result, PrimitiveKind::Any, name);
+    }
+}
+
 /// `NonNullable<T>` reduces SETTLED operands: a settled union filters
 /// its nullish arms; a settled non-nullable shape passes through;
-/// nullish primitives reduce to `never`. An UNSETTLED operand (a
-/// carrier such as an unsubstituted `TypeParam`) keeps the deferred
-/// `Opaque(Miss)` shell. Every result still records the `Instantiate`
-/// origin edge so origin walks remain coherent.
+/// nullish primitives reduce to `never`. The degenerate keyword matrix
+/// the `utility_top_bottom` utb20/utb22/utb23 defer-ledger rows cite is
+/// covered HERE (pinned tsgo): `NonNullable<any>` = `any`,
+/// `NonNullable<never>` = `never`, `NonNullable<null | undefined>` =
+/// `never`. An UNSETTLED operand (a carrier such as an unsubstituted
+/// `TypeParam`) keeps the deferred `Opaque(Miss)` shell. Every result
+/// still records the `Instantiate` origin edge so origin walks remain
+/// coherent.
 #[test]
 fn non_nullable_reduces_settled_operands() {
     let host = host();
@@ -4687,6 +7150,31 @@ fn non_nullable_reduces_settled_operands() {
         run(null_node),
         never_node,
         "NonNullable over `null` must reduce to `never`"
+    );
+
+    // Degenerate keyword matrix (the utb20/utb22/utb23 ledger rows):
+    // `NonNullable<any>` = `any` (`any & {}` = `any`).
+    let any_node = primitive(&graph, PrimitiveKind::Any);
+    assert_node_primitive(
+        &graph,
+        run(any_node),
+        PrimitiveKind::Any,
+        "NonNullable<any>",
+    );
+    // `NonNullable<never>` = `never`.
+    assert_eq!(
+        run(never_node),
+        never_node,
+        "NonNullable over `never` must reduce to `never`"
+    );
+    // `NonNullable<null | undefined>` = `never` (every arm filtered).
+    let nullish_union = graph.intern_node(SemanticNodeData::Union(Arc::from(
+        vec![null_node, undefined_node].into_boxed_slice(),
+    )));
+    assert_eq!(
+        run(nullish_union),
+        never_node,
+        "NonNullable over `null | undefined` must reduce to `never`"
     );
 
     // UNSETTLED operand (an unsubstituted TypeParam carrier) keeps the
@@ -8569,7 +11057,9 @@ fn tuple_and_array_elements_are_value_positions_on_both_routes() {
     // IS the open T (node route; the TypeExpr route descends already).
     let tuple_indexed = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: tuple_node,
-        index: IndexKey::Number(0),
+        index: IndexKey::Number(
+            crate::semantic_query::CanonicalIndexInt::from_canonical_i64(0).expect("canonical"),
+        ),
     });
     assert!(
         super::raise::utility_enumeration_domain_is_open_or_unknown(
@@ -12929,4 +15419,351 @@ fn projection_budget_counts_instantiate_and_conditional() {
         "TypeOf carries projection demand and must count toward the request work budget \
          (fail-closed backstop)"
     );
+}
+
+/// A builtin Identity utility (`Partial` / `Required` / `Readonly`)
+/// instantiated under `StructuralTransit` carrier-stops as a deferred
+/// `Mapped { source, mapper }` shell whose `mapper.value_expr` is the
+/// lazy `Opaque(Miss)` placeholder (`mapper_for` interns it; the
+/// Identity build fast-path reads source member values and never the
+/// placeholder). A later PUBLISHED walk into that interned carrier
+/// must honour the same Identity rule: the per-key value of an
+/// Identity mapper is `source[K]`, dispatched through the shared
+/// `IndexedAccess` query — NOT a substitution into the degenerate
+/// placeholder, which forges `Opaque(Miss)` for an EXISTING member
+/// and makes it indistinguishable from an absent key (the walker's
+/// key-absent sentinel). The sentinel discipline this protects:
+/// `Opaque(Miss)` at a projection terminal uniquely means
+/// absent/unresolvable, which is exactly what the union-index
+/// distribution's per-arm abort rule classifies on.
+#[test]
+fn identity_utility_mapped_carrier_projects_existing_members_not_miss() {
+    use crate::semantic_query::{IndexKey, LiteralValue, QueryError};
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let string_node = primitive(&graph, PrimitiveKind::String);
+    let num = primitive(&graph, PrimitiveKind::Number);
+    let closed = simple_object(&graph, &[("p", string_node), ("q", num)]);
+
+    // Production route: the relation-engine / deferred-shell evaluation
+    // family dispatches builtin utilities under `StructuralTransit`,
+    // where `build_mapped_type` carrier-stops before enumeration.
+    let carrier = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
+        base: utility_identity(&graph, "Partial"),
+        args: Arc::from(vec![closed].into_boxed_slice()),
+        context: crate::semantic_query::InstantiateContext::new(
+            ProjectionReductionContext::structural_transit(),
+            Default::default(),
+        ),
+    }) {
+        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+        other => panic!("transit Partial<closed> must yield a Value, got {other:?}"),
+    };
+    // Route guard: the transit result IS the deferred Mapped carrier
+    // with the Identity utility mapper — the shape under test, not an
+    // eagerly enumerated Object.
+    match graph.node_data(carrier).as_deref() {
+        Some(SemanticNodeData::Mapped { source, mapper }) => {
+            assert_eq!(*source, closed, "carrier must defer over the closed source");
+            assert!(
+                matches!(mapper.kind, crate::semantic_query::MapperKind::Identity),
+                "builtin Partial lowers to an Identity mapper"
+            );
+        }
+        other => panic!("transit Partial<closed> must carrier-stop as Mapped, got {other:?}"),
+    }
+
+    let string_key = |text: &str| {
+        graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+            text.to_string(),
+        )))
+    };
+    let project = |base: SemanticNodeId, index: SemanticNodeId| -> SemanticNodeId {
+        match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
+            base,
+            path: Arc::from(vec![PathSegment::Index(IndexKey::TypeNode(index))].into_boxed_slice()),
+            context: ProjectionReductionContext::published(ProjectionMode::Navigate),
+        }) {
+            QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+            other => panic!("expected projected Value, got {other:?}"),
+        }
+    };
+    let union_of = |arms: &[SemanticNodeId]| -> SemanticNodeId {
+        graph.intern_node(SemanticNodeData::Union(Arc::from(
+            arms.to_vec().into_boxed_slice(),
+        )))
+    };
+
+    // Single-key Identity rule: `Partial<{p: string}>` carrier walked at
+    // `['p']` is `source['p']` — the source member's value node, never
+    // the key-absent sentinel for an existing member.
+    //
+    // What this pin asserts, exactly: `Partial`'s `?` is a MEMBER
+    // modifier, not a value rewrite — the optional-modifier surface
+    // lives on the synthesised member (`optional: true`, asserted on
+    // the empty-path Shallow surface below), while the single-key
+    // VALUE projection is value-EXACT (`string`, never an injected
+    // `string | undefined` union).
+    let single_p = project(carrier, string_key("p"));
+    assert_eq!(
+        single_p,
+        string_node,
+        "Identity-utility carrier ['p'] must project the source member value, \
+         got {:?}",
+        graph.node_data(single_p)
+    );
+    assert!(
+        !matches!(
+            graph.node_data(single_p).as_deref(),
+            Some(SemanticNodeData::Union(_))
+        ),
+        "the optional modifier must not widen the projected VALUE to a union"
+    );
+    // The modifier rail the value-exact pin rides on: the same carrier's
+    // empty-path Shallow surface publishes `p` with `optional: true`.
+    let surface = match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
+        base: carrier,
+        path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+        context: ProjectionReductionContext::published(ProjectionMode::Shallow),
+    }) {
+        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+        other => panic!("expected Shallow surface Value, got {other:?}"),
+    };
+    match graph.node_data(surface).as_deref() {
+        Some(SemanticNodeData::Object(view)) => {
+            let p = view
+                .members
+                .iter()
+                .find(|m| m.name.as_ref() == "p")
+                .expect("member p on the synthesised Partial surface");
+            assert!(p.optional, "Partial pins the `?` on the member modifier");
+            assert_eq!(p.value, string_node, "modifier never rewrites the value");
+        }
+        other => panic!("Shallow surface must be an Object, got {other:?}"),
+    }
+
+    // Union-index distribution rides the same per-arm single-key reads:
+    // `Carrier['p' | 'q']` distributes to `source['p'] | source['q']`.
+    let distributed = project(carrier, union_of(&[string_key("p"), string_key("q")]));
+    let mut members = match graph.node_data(distributed).as_deref() {
+        Some(SemanticNodeData::Union(members)) => members.to_vec(),
+        other => panic!(
+            "Carrier['p' | 'q'] over existing keys must distribute to \
+             `string | number`, got {other:?}"
+        ),
+    };
+    members.sort_unstable();
+    let mut expected = vec![string_node, num];
+    expected.sort_unstable();
+    assert_eq!(
+        members, expected,
+        "distributed union must contain both existing members' source values"
+    );
+
+    // Negative: an absent key still aborts — the Identity rule must not
+    // weaken the key-absent sentinel that the distribution classifies on.
+    let absent = project(carrier, union_of(&[string_key("p"), string_key("nope")]));
+    assert!(
+        matches!(
+            graph.node_data(absent).as_deref(),
+            Some(SemanticNodeData::Opaque(QueryError::Miss))
+        ),
+        "Carrier['p' | 'nope'] with an absent key must stay an honest Opaque miss, got {:?}",
+        graph.node_data(absent)
+    );
+}
+
+/// SIBLING of `identity_utility_mapped_carrier_projects_existing_members_not_miss`,
+/// at the Shallow walker's whole-surface synthesiser. A builtin Identity
+/// utility carrier (`Partial<closed>` under `StructuralTransit`) later
+/// walked at the EMPTY path under `Published(Shallow)` synthesises the
+/// full member surface via `synthesise_mapped_surface`. When the key
+/// set enumerates through `key_names_from_base_node(source)` (an
+/// `Object` source), no `SurfaceMember` list is captured — the per-key
+/// fall-through must still honour the Identity rule (`source[K]` via
+/// the shared `IndexedAccess` query), NEVER substitute into the lazy
+/// `Opaque(Miss)` `value_expr` placeholder, which would publish every
+/// EXISTING member with a forged-Miss value on the empty-path Shallow
+/// surface.
+#[test]
+fn identity_utility_shallow_empty_path_surface_publishes_source_member_values_not_miss() {
+    use crate::semantic_query::QueryError;
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let string_node = primitive(&graph, PrimitiveKind::String);
+    let num = primitive(&graph, PrimitiveKind::Number);
+    let closed = simple_object(&graph, &[("p", string_node), ("q", num)]);
+
+    // Production route: transit Instantiate carrier-stops as the
+    // deferred Mapped shell whose Identity mapper carries the lazy
+    // placeholder.
+    let carrier = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
+        base: utility_identity(&graph, "Partial"),
+        args: Arc::from(vec![closed].into_boxed_slice()),
+        context: crate::semantic_query::InstantiateContext::new(
+            ProjectionReductionContext::structural_transit(),
+            Default::default(),
+        ),
+    }) {
+        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+        other => panic!("transit Partial<closed> must yield a Value, got {other:?}"),
+    };
+    match graph.node_data(carrier).as_deref() {
+        Some(SemanticNodeData::Mapped { source, mapper }) => {
+            assert_eq!(*source, closed, "carrier must defer over the closed source");
+            assert!(
+                matches!(mapper.kind, crate::semantic_query::MapperKind::Identity),
+                "builtin Partial lowers to an Identity mapper"
+            );
+        }
+        other => panic!("transit Partial<closed> must carrier-stop as Mapped, got {other:?}"),
+    }
+
+    // Empty-path Published(Shallow) projection — the whole-surface
+    // synthesiser route (`synthesise_mapped_surface`).
+    let surface = match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
+        base: carrier,
+        path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+        context: ProjectionReductionContext::published(ProjectionMode::Shallow),
+    }) {
+        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+        other => panic!("expected Shallow ProjectPath Value, got {other:?}"),
+    };
+    let view = match graph.node_data(surface).as_deref() {
+        Some(SemanticNodeData::Object(view)) => view.clone(),
+        other => {
+            panic!("Shallow surface over the Identity carrier must be an Object, got {other:?}")
+        }
+    };
+    assert_eq!(view.members.len(), 2, "both source keys publish");
+    let by_name = |n: &str| {
+        view.members
+            .iter()
+            .find(|m| m.name.as_ref() == n)
+            .unwrap_or_else(|| panic!("member {n} missing from the synthesised surface"))
+    };
+    for (name, expected) in [("p", string_node), ("q", num)] {
+        let member = by_name(name);
+        // Negative assertion first: the forged-Miss class — an EXISTING
+        // member published with the key-absent sentinel as its value.
+        assert!(
+            !matches!(
+                graph.node_data(member.value).as_deref(),
+                Some(SemanticNodeData::Opaque(QueryError::Miss))
+            ),
+            "member {name} must never publish the forged Opaque(Miss) placeholder"
+        );
+        assert_eq!(
+            member.value,
+            expected,
+            "Identity per-key value IS source[{name:?}] — the source member's value node, got {:?}",
+            graph.node_data(member.value)
+        );
+        assert!(
+            member.optional,
+            "Partial adds the optional modifier on {name}"
+        );
+    }
+}
+
+/// Third per-key producer, at `build_mapped_type`'s value selection: an
+/// Identity mapper whose SOURCE surface does not project to members
+/// (`source_members_for_published_projection` → `None`) while the key
+/// space still enumerates literals. The per-key fall-through must not
+/// substitute into the lazy `Opaque(Miss)` placeholder — the published
+/// member value must stay an ADDRESSABLE carrier (`source[K]` as a
+/// deferred `IndexedAccess` when the shared query cannot close it),
+/// honouring the sentinel discipline that `Opaque(Miss)` uniquely means
+/// absent/unresolvable.
+#[test]
+fn identity_mapped_build_without_projectable_source_publishes_addressable_carrier_not_miss() {
+    use crate::semantic_query::{
+        IndexKey, LiteralValue, MapperKey, OptionalityMod, QueryError, ReadonlyMod,
+    };
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    // A primitive source has no projectable member surface, so the
+    // build loop's `source_member` lookup yields `None` for every key.
+    let source = primitive(&graph, PrimitiveKind::Number);
+    let key_space = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+        "p".to_string(),
+    )));
+    let parameter_node = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: crate::semantic_query::DeclIdentity {
+            canonical_id: Arc::from("<utility>"),
+            whole_hash: crate::semantic_query::HashValue::default(),
+            decl_name: Arc::from("<utility-mapper>"),
+        },
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("K"),
+    });
+    // The builtin-utility mapper shape: lazy `Opaque(Miss)` value
+    // placeholder, `kind = Identity` (mirrors `mapper_for`).
+    let placeholder = graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss));
+    let mapper = MapperKey {
+        parameter_node,
+        key_space,
+        value_expr: placeholder,
+        optionality: OptionalityMod::Add,
+        readonly: ReadonlyMod::Keep,
+        name_remap: None,
+        kind: crate::semantic_query::MapperKind::Identity,
+    };
+
+    let result = match dispatch.execute_type_node(SemanticQueryKey::MappedType {
+        source,
+        mapper,
+        context: ProjectionReductionContext::published(ProjectionMode::Expanded),
+    }) {
+        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+        other => panic!("expected MappedType Value, got {other:?}"),
+    };
+    let view = match graph.node_data(result).as_deref() {
+        Some(SemanticNodeData::Object(view)) => view.clone(),
+        other => panic!("keyspace-enumerated mapped type must build an Object, got {other:?}"),
+    };
+    assert_eq!(view.members.len(), 1, "one enumerated key publishes");
+    let member = &view.members[0];
+    assert_eq!(member.name.as_ref(), "p");
+    // Negative assertion: never the forged placeholder.
+    assert!(
+        !matches!(
+            graph.node_data(member.value).as_deref(),
+            Some(SemanticNodeData::Opaque(QueryError::Miss))
+        ),
+        "Identity per-key value must never be the forged Opaque(Miss) placeholder, got {:?}",
+        graph.node_data(member.value)
+    );
+    // Positive shape: `source['p']` cannot close over a primitive
+    // source, so the published value is the ADDRESSABLE deferred
+    // `IndexedAccess { object: source, index: 'p' }` carrier —
+    // re-dispatchable by consumers, distinguishable from absence.
+    match graph.node_data(member.value).as_deref() {
+        Some(SemanticNodeData::IndexedAccess { object, index }) => {
+            assert_eq!(*object, source, "carrier indexes the mapped SOURCE");
+            match index {
+                IndexKey::TypeNode(idx) => {
+                    assert!(
+                        matches!(
+                            graph.node_data(*idx).as_deref(),
+                            Some(SemanticNodeData::Literal(LiteralValue::String(s))) if s == "p"
+                        ),
+                        "carrier index preserves the selected key literal"
+                    );
+                }
+                other => panic!("carrier index must be the key literal node, got {other:?}"),
+            }
+        }
+        other => panic!(
+            "unresolvable Identity per-key value must publish the deferred IndexedAccess carrier, got {other:?}"
+        ),
+    }
 }

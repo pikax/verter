@@ -17,6 +17,34 @@ use crate::semantic_query::{
 };
 use verter_semantic::facts::registry::{FactKey, InternedName, SymbolSpace};
 
+/// One enumerated key-domain member: the canonical published property
+/// NAME plus the literal VALUE substituted for the mapper binder `K`.
+///
+/// `name` is the JS property-name string (`js_number_to_string` for
+/// numeric literals); `literal` preserves the source literal KIND so
+/// K-dependent mapped values and `as` remaps substitute `1`, never
+/// `"1"` (pinned tsgo, probe12: `{ [K in 1]: K }` = `{ 1: 1 }`).
+#[derive(Clone)]
+pub(super) struct KeyDomainKey {
+    pub(super) name: Arc<str>,
+    pub(super) literal: LiteralValue,
+}
+
+impl KeyDomainKey {
+    /// Lift a name-only enumeration (surface member names, `keyof`
+    /// results) into key-domain entries. Member names are strings, so
+    /// every lifted entry carries the STRING substitution kind.
+    pub(super) fn from_names(names: Vec<Arc<str>>) -> Vec<KeyDomainKey> {
+        names
+            .into_iter()
+            .map(|name| KeyDomainKey {
+                literal: LiteralValue::String(name.as_ref().to_string()),
+                name,
+            })
+            .collect()
+    }
+}
+
 /// Worklist frame for the iterative `key_names_from_base_node`
 /// driver. `Expand` advances one node; `Combine*` reduces the top N
 /// prior results (one per arm) into the compound's key enumeration.
@@ -306,30 +334,87 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
+    /// Name-only projection of [`Self::key_literals_from_keyspace_node`]
+    /// for consumers that select or exclude members by NAME (`Pick` /
+    /// `Omit` key-set readers). Duplicate names collapse: the numeric
+    /// key `1` and the string key `"1"` address the SAME property, so a
+    /// `1 | "1"` keyspace yields ONE name.
     pub(super) fn key_names_from_keyspace_node(
         &self,
         node: SemanticNodeId,
     ) -> Option<Vec<Arc<str>>> {
+        let keys = self.key_literals_from_keyspace_node(node)?;
+        let mut names: Vec<Arc<str>> = Vec::with_capacity(keys.len());
+        let mut seen = FxHashSet::default();
+        for key in keys {
+            if seen.insert(Arc::clone(&key.name)) {
+                names.push(key.name);
+            }
+        }
+        Some(names)
+    }
+
+    /// Shared key-domain enumeration — the SOLE keyspace enumerator for
+    /// `Pick` / `Omit` key sets and mapped-type key spaces. Yields one
+    /// [`KeyDomainKey`] PER KEYSPACE LITERAL, preserving the literal's
+    /// KIND alongside the canonical published name: K-dependent mapped
+    /// values and `as` remaps substitute the ORIGINAL literal (pinned
+    /// tsgo, probe12: `{ [K in 1]: K }` = `{ 1: 1 }`, never `{ 1: "1" }`).
+    ///
+    /// Duplicate names are NOT collapsed here: the numeric key `1` and
+    /// the string key `"1"` produce the same property NAME but distinct
+    /// substitution literals, and mapped consumers UNION the per-K
+    /// values of same-name productions (probe12: `{ [K in 1 | "1"]: K }`
+    /// = `{ 1: 1 | "1" }`). Only exact `(name, literal)` duplicates
+    /// dedup (`1 | 1` is just `1`). Name-set consumers go through
+    /// [`Self::key_names_from_keyspace_node`], which collapses names.
+    pub(super) fn key_literals_from_keyspace_node(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<Vec<KeyDomainKey>> {
         let resolved = self.evaluate_deferred_semantic_node(node);
         let data = self.graph().node_data(resolved)?;
         match data.as_ref() {
-            SemanticNodeData::Literal(LiteralValue::String(name)) => {
-                Some(vec![Arc::from(name.as_str())])
-            }
+            SemanticNodeData::Literal(LiteralValue::String(name)) => Some(vec![KeyDomainKey {
+                name: Arc::from(name.as_str()),
+                literal: LiteralValue::String(name.clone()),
+            }]),
+            // Numeric-literal keys are legal keyspace members; they publish
+            // as the canonical JS numeric string (pinned tsgo, probe10:
+            // `Pick<any, 1>` = `{ 1: any }` ≡ `{ "1": any }`,
+            // `Pick<any, 1.5>` = `{ "1.5": any }`, and a numeric key picks
+            // the source member declared under that canonical name) while
+            // the substitution literal keeps the NUMERIC kind.
+            // Boolean / bigint literals are NOT valid property keys
+            // (tsgo TS2344) — they stay non-enumerable via the catch-all.
+            SemanticNodeData::Literal(LiteralValue::Number(number)) => Some(vec![KeyDomainKey {
+                name: Arc::from(super::build::js_number_to_string(*number).as_str()),
+                literal: LiteralValue::Number(*number),
+            }]),
             SemanticNodeData::Union(members) => {
-                let mut names = Vec::new();
-                let mut seen = FxHashSet::default();
+                let mut keys: Vec<KeyDomainKey> = Vec::new();
                 for member in members.iter() {
-                    for name in self.key_names_from_keyspace_node(*member)? {
-                        if seen.insert(Arc::clone(&name)) {
-                            names.push(name);
+                    for key in self.key_literals_from_keyspace_node(*member)? {
+                        let duplicate = keys
+                            .iter()
+                            .any(|k| k.name == key.name && k.literal == key.literal);
+                        if !duplicate {
+                            keys.push(key);
                         }
                     }
                 }
-                Some(names)
+                Some(keys)
             }
             SemanticNodeData::Primitive(PrimitiveKind::Never) => Some(Vec::new()),
-            SemanticNodeData::KeyOf { base } => self.key_names_from_base_node(*base),
+            // `keyof` routes through the member-name enumerator: surface
+            // member names are strings, so every enumerated key carries
+            // the STRING substitution kind. (Known model gap, recorded:
+            // tsgo keeps `keyof { 1: string }` numeric-kinded — the
+            // surface-member model stores names only, so the declared
+            // kind does not survive `keyof`.)
+            SemanticNodeData::KeyOf { base } => self
+                .key_names_from_base_node(*base)
+                .map(KeyDomainKey::from_names),
             // Unresolved alias carrier on the key-domain enumeration path. The
             // deferred-shell evaluator deliberately leaves `DeclRef` /
             // `InstantiationRef` carriers symbolic (so intermediate
@@ -359,12 +444,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 crate::request_context::observe_component_meta_read_suppress(&read);
                 let instantiated = match read.value {
                     crate::semantic_query::QueryResult::Value(id) => id,
-                    _ => return self.key_names_from_base_node(resolved),
+                    _ => {
+                        return self
+                            .key_names_from_base_node(resolved)
+                            .map(KeyDomainKey::from_names);
+                    }
                 };
                 if instantiated == resolved {
-                    return self.key_names_from_base_node(resolved);
+                    return self
+                        .key_names_from_base_node(resolved)
+                        .map(KeyDomainKey::from_names);
                 }
-                self.key_names_from_keyspace_node(instantiated)
+                self.key_literals_from_keyspace_node(instantiated)
             }
             SemanticNodeData::InstantiationRef { base, args } => {
                 let read =
@@ -385,14 +476,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 crate::request_context::observe_component_meta_read_suppress(&read);
                 let instantiated = match read.value {
                     crate::semantic_query::QueryResult::Value(id) => id,
-                    _ => return self.key_names_from_base_node(resolved),
+                    _ => {
+                        return self
+                            .key_names_from_base_node(resolved)
+                            .map(KeyDomainKey::from_names);
+                    }
                 };
                 if instantiated == resolved {
-                    return self.key_names_from_base_node(resolved);
+                    return self
+                        .key_names_from_base_node(resolved)
+                        .map(KeyDomainKey::from_names);
                 }
-                self.key_names_from_keyspace_node(instantiated)
+                self.key_literals_from_keyspace_node(instantiated)
             }
-            _ => self.key_names_from_base_node(resolved),
+            _ => self
+                .key_names_from_base_node(resolved)
+                .map(KeyDomainKey::from_names),
         }
     }
 
@@ -453,13 +552,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         match data.as_ref() {
             // A single literal: admits iff it matches.
             SemanticNodeData::Literal(LiteralValue::String(name)) => Some(name.as_str() == needle),
+            // Same canonical JS numeric string the key-domain enumeration
+            // publishes — the two key-membership surfaces must agree.
             SemanticNodeData::Literal(LiteralValue::Number(n)) => {
-                let s = if n.fract() == 0.0 && *n >= i64::MIN as f64 && *n <= i64::MAX as f64 {
-                    (*n as i64).to_string()
-                } else {
-                    n.to_string()
-                };
-                Some(s.as_str() == needle)
+                Some(super::build::js_number_to_string(*n) == needle)
             }
             // Never admits nothing.
             SemanticNodeData::Primitive(PrimitiveKind::Never) => Some(false),

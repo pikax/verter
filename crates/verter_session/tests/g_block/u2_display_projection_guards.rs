@@ -814,7 +814,10 @@ fn indexed_access_object_readonly_is_parenthesised_under_readonly_facet() {
     });
     let idx = store.intern_node(SemanticNodeData::IndexedAccess {
         object: arr,
-        index: IndexKey::Number(0),
+        index: IndexKey::Number(
+            verter_session::semantic_query::CanonicalIndexInt::from_canonical_i64(0)
+                .expect("canonical"),
+        ),
     });
     let value = SemanticQueryValue::TypeNode(idx);
 

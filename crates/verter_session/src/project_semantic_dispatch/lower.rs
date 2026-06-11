@@ -308,6 +308,51 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // BOTH lowering entry points (the materialise path's
                 // `extract_route_root_identity_node` callers consume
                 // the same `ScopeShadowing` value).
+                // Global lib-type fast path: an unshadowed `Promise<...>`
+                // reference interns a nominal `InstantiationRef` carrier in
+                // EVERY mode. `Promise` has no structural reducer arm — the
+                // carrier preserves the declaration identity + type
+                // arguments so demand points (the `Awaited` reducer arm, the
+                // raise layer's `Ref { name, args }` projection) can consume
+                // them. Classification is the registry lookup on the
+                // declaration name (`IntrinsicRegistry` → `PromiseGlobal`),
+                // not a resolver-local name match; userland shadowing wins
+                // via the same `name_resolution` / `ScopeShadowing` gates the
+                // builtin utilities use. Without the carrier the bare-name
+                // walk below misses (no lib file backs the global) and the
+                // type arguments are erased into `Opaque(Miss)`.
+                if !name_resolution.contains_key(name.as_ref())
+                    && !shadowing.is_shadowing_lib(name.as_ref())
+                    && self.is_promise_global_name(name.as_ref())
+                {
+                    let arg_ids: Vec<SemanticNodeId> = type_arguments
+                        .iter()
+                        .map(|arg| {
+                            self.shallow_lower_type_expr_with_context(
+                                arg,
+                                env,
+                                scope,
+                                name_resolution,
+                                scope_payload,
+                                shadowing,
+                                substitutions,
+                                reduction_context,
+                            )
+                        })
+                        .collect();
+                    return graph.intern_node_with_scope(
+                        SemanticNodeData::InstantiationRef {
+                            base: DeclIdentity {
+                                canonical_id: Arc::from("__builtin__"),
+                                whole_hash: HashValue::default(),
+                                decl_name: Arc::clone(name),
+                            },
+                            args: Arc::from(arg_ids.into_boxed_slice()),
+                        },
+                        scope.clone(),
+                    );
+                }
+
                 if !name_resolution.contains_key(name.as_ref())
                     && !shadowing.is_shadowing_lib(name.as_ref())
                     && verter_semantic::analysis::type_solver::builtin::BuiltinUtility::from_name(
@@ -1002,13 +1047,27 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         rest: element.rest,
                     });
                 }
-                graph.intern_node_with_scope(
-                    SemanticNodeData::Tuple {
-                        elements: Arc::from(lowered_elements.into_boxed_slice()),
-                        readonly: *readonly,
-                    },
-                    scope.clone(),
-                )
+                // Normalize-on-intern (the variadic-spread rule): when an
+                // instantiation env already substituted a rest element's
+                // binder to a concrete tuple (`[...A, ...B]` lowered with
+                // `A = [1, 2]`), the spread splices in place; a sole
+                // rest-of-array tuple collapses to the array. Open rest
+                // values (unbound generics, carriers) are preserved
+                // verbatim — decl-body lowering stays carrier-shaped.
+                match self.normalize_tuple_spread(&lowered_elements, *readonly) {
+                    crate::project_semantic_dispatch::build::NormalizedTupleShape::Array(
+                        array_node,
+                    ) => array_node,
+                    crate::project_semantic_dispatch::build::NormalizedTupleShape::Tuple(
+                        normalized,
+                    ) => graph.intern_node_with_scope(
+                        SemanticNodeData::Tuple {
+                            elements: Arc::from(normalized.into_boxed_slice()),
+                            readonly: *readonly,
+                        },
+                        scope.clone(),
+                    ),
+                }
             }
             // Template-literal shells publish verbatim — the relation
             // engine's infer-pattern support for template matching is a
@@ -1441,65 +1500,38 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // Try to reduce literal-string / literal-number indices
                 // to a `PathSegment::Index` — fall back to TypeNode for
                 // general type-expression indices.
-                let index_key = match index.as_ref() {
-                    TypeExpr::Literal(lit) => match lit {
-                        verter_type_expr::LiteralValue::String(s) => {
-                            IndexKey::String(Arc::<str>::from(s.as_str()))
-                        }
-                        verter_type_expr::LiteralValue::Number(n)
-                            if n.fract() == 0.0
-                                && *n >= i64::MIN as f64
-                                && *n <= i64::MAX as f64 =>
-                        {
-                            // G4.4: integer-convention `IndexKey::Number`.
-                            //
-                            // `IndexKey::Number` carries the truncated
-                            // integer value of the numeric literal as
-                            // `i64`. This is the single shared convention
-                            // across every producer:
-                            //
-                            //   - `lower::shallow_lower_type_expr` (this arm)
-                            //   - `evaluate::normalized_index_key_node`
-                            //     (graph node → IndexKey)
-                            //   - `substitute::substitute_index_key_with_change_tracking`
-                            //     (generic substitution rewrites the TypeNode
-                            //     form to integer-convention Number when the
-                            //     substituted node is an integer literal)
-                            //
-                            // Recovery is symmetric:
-                            //
-                            //   - `raise::raise_index_key_to_type_expr`
-                            //     (`*number as f64`)
-                            //   - `walk::PathWalker` `Index(Number)` arm
-                            //     (`*n as f64`)
-                            //
-                            // Non-integer literals (`Foo[1.5]`) and
-                            // out-of-i64 literals cannot round-trip
-                            // exactly through `i64` — they fall through
-                            // to the `TypeNode` arm below and remain as
-                            // a `SemanticNodeId` reference. Both
-                            // `evaluate::normalized_index_key_node` and
-                            // this arm share the same admission guard
-                            // (`fract() == 0.0` + i64 range), so the
-                            // convention is consistent regardless of
-                            // producer.
-                            IndexKey::Number(*n as i64)
-                        }
-                        _ => {
-                            let idx_id = self.shallow_lower_type_expr_with_context(
-                                index,
-                                env,
-                                scope,
-                                name_resolution,
-                                scope_payload,
-                                shadowing,
-                                substitutions,
-                                reduction_context,
-                            );
-                            IndexKey::TypeNode(idx_id)
-                        }
-                    },
-                    _ => {
+                //
+                // G4.4 (bounded): the numeric fold routes through the
+                // single shared producer predicate
+                // `build::integer_convention_index_key` — a literal
+                // becomes `IndexKey::Number(i)` ONLY when `i`'s
+                // `Display` IS its canonical `js_number_to_string`
+                // spelling, so consumers rendering the needle with
+                // `i64::to_string()` are correct by construction.
+                // `evaluate::normalized_index_key_node` (and through it
+                // `substitute::substitute_index_key_with_change_tracking`)
+                // applies the same predicate; recovery is the symmetric
+                // exact `as f64` raise (`raise::raise_index_key_to_type_expr`,
+                // the walker's `Index(Number)` arm). Non-integer
+                // literals (`Foo[1.5]`), exponent-regime literals
+                // (`Foo[1e21]`), and integral literals whose shortest
+                // round-trip diverges from their exact digits
+                // (`Foo[4611686018427387904]`) stay `TypeNode`, where
+                // the walker's G4.5 recovery re-derives the canonical
+                // needle from the literal node.
+                let folded_key = match index.as_ref() {
+                    TypeExpr::Literal(verter_type_expr::LiteralValue::String(s)) => {
+                        Some(IndexKey::String(Arc::<str>::from(s.as_str())))
+                    }
+                    TypeExpr::Literal(verter_type_expr::LiteralValue::Number(n)) => {
+                        crate::project_semantic_dispatch::build::integer_convention_index_key(*n)
+                            .map(IndexKey::Number)
+                    }
+                    _ => None,
+                };
+                let index_key = match folded_key {
+                    Some(key) => key,
+                    None => {
                         let idx_id = self.shallow_lower_type_expr_with_context(
                             index,
                             env,

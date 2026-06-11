@@ -1041,7 +1041,9 @@ mod tests {
         let path = [
             PathSegment::Member(Arc::from("a")),
             PathSegment::Index(IndexKey::String(Arc::from("b"))),
-            PathSegment::Index(IndexKey::Number(7)),
+            PathSegment::Index(IndexKey::Number(
+                crate::semantic_query::CanonicalIndexInt::from_canonical_i64(7).expect("canonical"),
+            )),
         ];
         state.derivation_edges_raw.push(synth_edge(
             1,

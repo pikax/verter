@@ -120,8 +120,39 @@ fn utility_composition_intersection_keeps_object_contributions() {
     assert_query_mode(&record, ProjectionModeTag::Expanded);
 }
 
+/// Non-ignored reducer regression for the deep utility-composition row:
+/// `Required<Pick<NonNullable<UtilitySource["payload"]>, "count" | "tags">>`
+/// reduces through the nested indexed-access + NonNullable + Pick + Required
+/// chain to the closed `{ count: number; tags: string[] }` payload. The
+/// sibling `#[ignore]`d row stays a manifest row — its indexed-access source
+/// construct is outside the oracle's positive allowlist — so this active
+/// regression carries the reducer proof.
 #[test]
-#[ignore = "typeinfo currently leaves Required<Pick<NonNullable<T['payload']>, ...>> behind nested utility/indexed-access shells; keep as the future deep utility composition contract"]
+fn utility_composition_deep_payload_reducer_regression() {
+    let host = make_host_with_footprint();
+    upsert_ts(
+        &host,
+        "/fixtures/utility-composition.ts",
+        UTILITY_COMPOSITION,
+    );
+
+    let (expr, _) = resolve_expr(
+        &host,
+        "/fixtures/utility-composition.ts",
+        "DeepUtilityPayload",
+        &[],
+        ProjectionMode::Expanded,
+    );
+    let props = object_props(&expr);
+    assert_eq!(prop_names(&props), vec!["count", "tags"]);
+    assert_primitive(&props["count"].ty, PrimitiveName::Number);
+    assert_array_of_primitive(&props["tags"].ty, PrimitiveName::String);
+    assert!(!props["count"].optional);
+    assert!(!props["tags"].optional);
+}
+
+#[test]
+#[ignore = "reducer resolves this correctly (covered by the non-ignored `utility_composition_deep_payload_reducer_regression`); NOT oracle-liftable — generation was attempted and measured Reject(DeferredConstruct(indexed-access)) on the indexed-access hop in the UtilitySource payload. Lift pending an oracle source-walk carve-out for utility-rooted indexed-access chains"]
 fn utility_composition_resolves_required_pick_over_nested_nonnullable_payload() {
     let host = make_host_with_footprint();
     upsert_ts(
@@ -148,7 +179,7 @@ fn utility_composition_resolves_required_pick_over_nested_nonnullable_payload() 
 }
 
 #[test]
-#[ignore = "typeinfo currently preserves alias arms in intersections instead of recursively reducing DeepUtilityConfig's utility-derived members; keep as the future deep intersection utility contract"]
+#[ignore = "reducer keeps the intersection's utility-derived member values SHALLOW (`Ref { DeepUtilityPayload }` etc.) per the Component-Meta Shallow-By-Default publication rule, and the Extract/Exclude member arms are relation-carrying per arm; NOT oracle-liftable — indexed-access + keyof source constructs are outside the oracle's positive allowlist. Lift pending the relation-oracle block plus a member-demand walk in the row"]
 fn utility_composition_resolves_deep_intersection_config() {
     let host = make_host_with_footprint();
     upsert_ts(

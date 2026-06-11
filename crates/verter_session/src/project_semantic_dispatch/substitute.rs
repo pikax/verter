@@ -345,16 +345,30 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 if !any_changed {
                     return (node, false);
                 }
-                (
-                    self.graph().intern_preserving_scope(
-                        node,
-                        SemanticNodeData::Tuple {
-                            elements: Arc::from(new_elements.into_boxed_slice()),
-                            readonly: *readonly,
-                        },
+                // Normalize-on-intern (the variadic-spread rule): a
+                // substituted `rest` element whose value settled to a
+                // concrete tuple splices in place — `[...A, ...B]` with
+                // `A = [1, 2]`, `B = [3, 4]` rebuilds as `[1, 2, 3, 4]` —
+                // and a sole rest-of-array tuple collapses to the array.
+                // Open / unresolved rest values keep their carrier
+                // verbatim (no forced materialisation).
+                match self.normalize_tuple_spread(&new_elements, *readonly) {
+                    crate::project_semantic_dispatch::build::NormalizedTupleShape::Array(
+                        array_node,
+                    ) => (array_node, true),
+                    crate::project_semantic_dispatch::build::NormalizedTupleShape::Tuple(
+                        normalized,
+                    ) => (
+                        self.graph().intern_preserving_scope(
+                            node,
+                            SemanticNodeData::Tuple {
+                                elements: Arc::from(normalized.into_boxed_slice()),
+                                readonly: *readonly,
+                            },
+                        ),
+                        true,
                     ),
-                    true,
-                )
+                }
             }
             SemanticNodeData::Object(surface) => {
                 let mut any_changed = false;
