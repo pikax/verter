@@ -278,8 +278,12 @@ jobs:
           key: ${{ runner.os }}-cargo-wasm-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-wasm-
-      - name: Install wasm-pack
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+      - name: Install wasm-bindgen CLI
+        run: |
+          if command -v wasm-bindgen >/dev/null && wasm-bindgen --version | grep -q '0.2.122'; then
+            exit 0
+          fi
+          cargo install wasm-bindgen-cli --version 0.2.122 --locked --force
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v5
         with:
@@ -310,8 +314,12 @@ jobs:
           key: ${{ runner.os }}-cargo-wasm-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-wasm-
-      - name: Install wasm-pack
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+      - name: Install wasm-bindgen CLI
+        run: |
+          if command -v wasm-bindgen >/dev/null && wasm-bindgen --version | grep -q '0.2.122'; then
+            exit 0
+          fi
+          cargo install wasm-bindgen-cli --version 0.2.122 --locked --force
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v5
         with:
