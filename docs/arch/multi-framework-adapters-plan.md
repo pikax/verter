@@ -186,6 +186,7 @@ decision (D-ac).
 | **D-bc** | **The Svelte DTO-store key remainder is `{ source: SvelteSurfaceSource }` — the CLOSED source-family discriminant `SvelteSurfaceSource { RunesProps, LegacyExportLet, Bindable, SnippetProps, LegacySlotInventory, LegacyDispatcher, InstanceExports }` (completes D-y for B8b).** The typed `Eq + Hash` adapter remainder parallel to Vue's `{ macro_index, macro_kind }`: Vue needs an index because one SFC carries several macro sites; a Svelte component has at most ONE declaration site per source family (derived from the §9 mapping: `$props()` incl. snippet-typed, legacy `export let`, `$bindable()`, legacy `<slot>` inventory, legacy `createEventDispatcher<E>`, exported instance members), so the family discriminant alone is the minimal structural remainder. Kinds composed from two families (SLOTS = snippet-typed props + legacy `<slot>` inventory) occupy two source rows merged at normalise time — each cached bundle stays single-source and collision-free. Pinned by extending the `framework_surface_store_key_structural` whole-struct destructure test with the Svelte row in B8b. | fable P3-3: B8b consumed the generic store without pinning its adapter remainder — the one adapter-designed key column was unspecified for the program's flagship vertical, inviting an ad-hoc (or digest-shaped) key at implementation time. |
 | **D-bd** | **`FileLanguage::FrameworkTemplate` rows carry NO carrier-compiler obligation; `carrier_descriptors_have_compilers` binds `carrier_language: Some(_)` descriptors only (recorded here for traceability; carried authoritatively by `docs/arch/angular-adapter-program.md`).** "Carrier-bearing" in the guard means the descriptor's singular `carrier_language` column is populated; a `FrameworkTemplate` language never populates it. A template file is OWNER-ROUTED: it is consumed by the owning component's build (the Angular TCB sidecar is produced by `crates/verter_compiler/src/angular/ide/` dispatched off the OWNING COMPONENT through the sidecar virtual-file pipeline), never independently compiled — a registered standalone template compiler would be a second entry path into template compilation. The Angular descriptor's `carrier_language` is `None` (components are real `.ts` Script files), so the guard imposes no compiler obligation on the Angular row; the extracted program's A2 re-run asserts the guard stays green across the Angular registration and that NO `CarrierCompiler` row exists for `"angular"`. REJECTED: a typed `template_language` descriptor slot — it would create a compiler-registry obligation with no dispatch consumer (nothing compiles a `FrameworkTemplate` file standalone). | fable P3-5: the Angular doc asserted "the Angular template carrier row has its registered compiler" while the descriptor field is singular `carrier_language` and `.html` is not a carrier — the obligation was unimplementable as written; the owner-routed exemption is the structurally consistent reading. |
 | **D-be** | **Generated proto TS binding freshness is repository-wide; the drifted component-meta bindings regenerate in their own post-B1 block (B1b); the clippy stable-drift and the fresh-worktree test preflight are operational dispositions, not blocks.** Verified live (M11 investigation, 2026-06-10): `packages/proto/src/gen/verter/v1/component_meta_pb.ts` (68 diff lines) + `selective_component_meta_pb.ts` (28) were committed from protoc-gen-es v2.11.0 while the workspace locks 2.12.0 (drift class: `@generated` header version + optional message fields `?: T` → `?: T \| undefined`; no descriptor change); only `typeinfo_pb.ts` carries a byte-pin (`crates/verter_protocol/tests/typeinfo_proto_ts_freshness.rs`, byte-equal against the canonical buf+oxfmt regen — verified green). B1's whole-input-dir `pnpm proto:gen` COLLIDES with the drift: its implementer would otherwise silently mix the unpinned component-meta regen into the wire commit or `git checkout --` it away — the plan was silent on which. NEW tiny block B1b (ordered after B1, NO schema change — B1 stays the program's one wire block) regenerates the two files with the locked generator AND extends the byte-equality freshness class to EVERY committed generated binding IN THE SAME CHANGE (regen-only leaves the guard gap open; pin-before-regen violates Stub Prevention) — guard `proto_ts_bindings_byte_pinned_repo_wide` (§6), swept by B12 like every §6 guard. Separately ratified dispositions: (i) the 6-finding rust-1.96 stable-clippy drift on base (5× `collapsible_match` in `verter_compiler` — compile/mod.rs:193, ide/script/detectors.rs:169, ide/template/directives.rs:675, script/process.rs:172, strip_types/typescript.rs:235; 1× `unnecessary_sort_by` in `verter_semantic` — analysis/type_eval_build.rs:673) is an ORCHESTRATOR-OWNED out-of-program base-hygiene commit — fix the findings mechanically, do NOT pin the toolchain backward, block managers never patch unrelated crates inside a block; (ii) the fresh-worktree `pnpm test` preflight is a §7 doc note (gate-operation guidance, not product code). | codex consult (xhigh, 2026-06-10, /tmp/verter-mf/m11-consult/): "ratify D-be" — Q1 shape (c) regen+pin together; Q2 new B1b ("B12 is too late; out-of-program is wrong because B1's regen already collides with the drift"); Q3 base hygiene; Q4 §7 note. |
+| **D-bf** | **Plain-script (non-carrier) parsing consumes the classified `FileLanguage` dialect; `non_sfc_source_type`'s path re-sniffing retires; the neutral `ScriptSourceType` gains module-kind fidelity for JS; `LEGACY_PARSER_VERSION` bumps.** Verified live on the post-B4 tree (1f1fb89d): `parse.rs:130-139` `non_sfc_source_type` distinguishes ONLY the `.d.ts` family vs plain `.ts`; the non-carrier branch of `imported_eval_source_type` (`parse.rs:155-168`) drops `FileLanguage::script_source_type()`, and `parse_non_sfc_snapshot` (`parse.rs:976`) does not take the row at all — so a `.tsx`/`.jsx` script dependency parses as plain TS (JSX misparses under TS grammar → `result.panicked` → the degraded empty snapshot at `parse.rs:984-999`: empty exports + script analysis) even though the registry classifies `tsx→Tsx`/`jsx→Jsx`/`js·mjs·cjs→Js` (`registry.rs:179-186`) and the resolved row reaches the call site (`host_executor.rs:154/:205/:207`); the cached authority `HostSourceData::source_type` records plain TS for these files. B4 deliberately scoped this out ("plain scripts keep `non_sfc_source_type`" — byte-identity characterization), so this is NEW work: tiny block B4b, ordered after B4 and BEFORE B5 (B5 builds on a correct parse/source-type substrate). Design: the plain-script source type derives from the `FileLanguage` row — NO extension re-sniffing in `verter_session`, `.d.ts` detection moves fully to the registry `Dts` row; `parse_non_sfc_snapshot` takes the classified row and every call site threads it (`host_executor.rs`, `host_manage/eval_env.rs`); `ScriptSourceType` gains module-kind fidelity for JS (`js` = unambiguous, `mjs` = module, `cjs` = commonjs, `jsx` = JSX) because the naive `Js → SourceType::script()` mapping would REGRESS module `.js`/`.mjs` deps that today parse under the module-grammar `ts()` (`import`/`export` are module-only syntax); `.ts` NEVER sniffs JSX (stays non-JSX TS). Cache identity: the `FileArtifactStore` key already carries `file_language_id` (`.tsx` keys as `Script{Tsx}`) but the VALUE under unchanged keys changes — a parser-behavior change, so `LEGACY_PARSER_VERSION` bumps (the key dimension that owns parser behavior); no new `ReadSetSignature` dimension. No ONE-resolver / typeinfo-core / Vue-compiler impact (session plain-script parsing only). | codex consult (xhigh, 2026-06-11, /tmp/verter-mf/dialect-threading-codex-consult.txt): "APPROVE, but not as a naive `Js -> SourceType::script()` threading change. Land it as a new small B4b … before B5, in its own commit. Do not fold it into B5 or defer it to B12. B5 should build on a correct parse/source-type substrate." |
 
 ---
 
@@ -275,6 +276,7 @@ frameworks are filed, not fixed here):
 | (retired-symbol gate additions) | B2/B4/B5 | static-grep | `cached_parse` (the token, workspace-wide in production — ALL SEVEN carrier fields of the D-af sweep are renamed/replaced, and the `route_owned_snapshot_cached_parse_hits` counter family is renamed, so the token retires cleanly), the four `FileKind` enums, `ExportGraphFileKind`, `ffi_file_kind_to_host` (B2/B4), `VueShallowMetadataStore` + `VueMacroDtoKey`-as-store-key (B5, migrated onto `FrameworkSurfaceDtoStore` per D-p) added to the `no_legacy_walker.rs`-pattern retired list |
 | (existing pins re-run) | B1+ | — | proto/TS taxonomy parity, byte-equal TS bindings, audit parity, request-validation closed-set — all green across the schema bump |
 | `proto_ts_bindings_byte_pinned_repo_wide` | B1b | test | the byte-equality freshness class in `crates/verter_protocol/tests/typeinfo_proto_ts_freshness.rs` covers EVERY committed generated binding under `packages/proto/src/gen/` (today: `typeinfo_pb.ts`, `component_meta_pb.ts`, `selective_component_meta_pb.ts`) — parameterized byte-compare of each committed file against the canonical workspace buf+oxfmt regen into a tempdir, PLUS file-inventory set-equality between the committed gen tree and the regen output (a generated-but-uncommitted or committed-but-orphaned binding fails); graceful skip when `buf` is absent mirrors the existing typeinfo pin (D-be) |
+| `plain_script_dialect_from_file_language` | B4b | static-grep + test | static half: production `verter_session` parse code contains NO `non_sfc_source_type` token (the path-sniffing function retires — retired-symbol-gate style ban) and NO extension-suffix dialect sniffing (`ends_with(".d.ts")`/`".d.mts"`/`".d.cts"`/`".tsx"`/`".jsx"` and kin) outside `verter_language` — the classified `FileLanguage` row is the sole dialect authority (D-bf); runtime half: `HostSourceData::source_type` / `authoritative_source_type_for` report the classified dialect for plain `.tsx`/`.jsx`/`.js`/`.mjs`/`.cjs`/`.d.ts` fixtures, and the dialect parity matrix (registry row → computed OXC `SourceType`) is pinned exhaustively over the `ScriptSourceType` vocabulary |
 
 **New CRITICAL rule** ("Framework Adapters Are Thin Projections (CRITICAL)") is added to CLAUDE.md
 + a new `/framework-adapters` skill in B5, registered in `CRITICAL_RULE_GUARDS` with
@@ -294,6 +296,7 @@ frameworks are filed, not fixed here):
 | B2 | `verter_language` + routing cutover | — | B1 |
 | B3 | Neutral script-analysis rehoming (FQ1) | — (scheduled after B2: same-crate file overlap) | B1 |
 | B4 | `FrameworkParseArtifact` carrier cutover (FQ2) | B2, B3 | — |
+| B4b | Plain-script source-type dialect authority (D-bf) | B2, B4 | — (lands before B5: B5 builds on a correct parse/source-type substrate) |
 | B5 | Adapter registry + framework-surface executor + Vue re-housing | B1, B2, B4 | B6 |
 | B6 | Compiler framework scaffold | B2, B4 | B5 |
 | B8a | Svelte parser + shallow + synth | B5, B6 | — |
@@ -309,7 +312,7 @@ frameworks are filed, not fixed here):
 | B9 | Astro vertical (D-v) | DEFERRED (D-ab) — same gate |
 | B10/B11 | Angular facts + surface; Angular templates + TCB sidecar (D-w) | EXTRACTED (D-ac) — full designs + own go/no-go in `docs/arch/angular-adapter-program.md` |
 
-**Critical path**: B2 → B3 → B4 → **{B5, B6}** → B8a → B8b/B8c → B12 (the whole program — with
+**Critical path**: B2 → B3 → B4 → B4b → **{B5, B6}** → B8a → B8b/B8c → B12 (the whole program — with
 React/Astro deferred and Angular extracted there are no parallel vertical lanes; B8b ∥ B8c is the
 only post-substrate parallelism). B8a requires BOTH B5 (registry rows, synth seam,
 `ScriptFactProvider` seam) and B6 (`CarrierCompiler`); B5 and B6 are mutually parallel-safe — D-n
@@ -860,6 +863,80 @@ allowlist (D-bb). No dual field, no transition shim.
 
 **Dependencies.** B2 (`FrameworkAdapterId`/`LanguageId`), B3 (lands first to avoid conflicting
 `IndexedReady` edits).
+
+---
+
+### B4b — Plain-script source-type dialect authority (D-bf)
+
+**Context.** Non-carrier (plain Script) files parse under the wrong dialect: `parse_non_sfc_snapshot`
+(`crates/verter_session/src/parse.rs:976`) derives its OXC `SourceType` from `non_sfc_source_type(canonical_id)`
+(`parse.rs:130-139`), which distinguishes ONLY the `.d.ts` family from plain `.ts` — so a `.tsx`/`.jsx`
+script dependency parses as plain TypeScript, JSX syntax misparses under TS grammar (`<div>` reads as a
+type assertion/generic), `result.panicked` fires, and the file degrades to the empty snapshot
+(`parse.rs:984-999`: empty `export_signatures`, empty `script_analysis`) — JSX-bearing dependencies lose
+their export surface. The non-carrier branch of `imported_eval_source_type` (`parse.rs:155-168`) drops
+`FileLanguage::script_source_type()` the same way, so the cached authority `HostSourceData::source_type`
+(consumed by `authoritative_source_type_for`) records plain TS for `.tsx`/`.jsx`/`.js` files. The
+`verter_language` registry already classifies the dialect (`registry.rs:179-186`: `tsx→Tsx`, `jsx→Jsx`,
+`js`/`mjs`/`cjs→Js`) and the resolved row reaches every call site (`host_executor.rs:154/:205/:207`;
+`host_manage/eval_program.rs:107-122` classifies on demand) — the substrate carries the right dialect, the
+plain-script parse path just never consumes it. B4 scoped this out by design (its byte-identity
+characterization kept "plain scripts keep `non_sfc_source_type`"). This block makes the classified
+`FileLanguage` row the SOLE plain-script dialect authority (D-bf), ordered before B5 so the
+framework-surface executor builds on a correct parse/source-type substrate.
+
+**Changes.**
+- `crates/verter_language/src/language.rs`: `ScriptSourceType` gains module-kind fidelity for JS —
+  the registry distinguishes `js` (unambiguous), `mjs` (module), `cjs` (commonjs), `jsx` (JSX),
+  mirroring OXC's own extension model. Rationale: today every plain script parses under the
+  module-grammar `SourceType::ts()`, so `import`/`export` in `.js`/`.mjs` deps parse fine; the naive
+  `Js → SourceType::script()` threading would regress them (`import`/`export` are module-only syntax).
+  `.ts` stays non-JSX TypeScript — NO content sniffing decides the dialect of a `.ts` file; ONLY `.tsx`
+  is TypeScript-with-JSX. `crates/verter_language/src/registry.rs` rows updated accordingly; the
+  carrier-side `ScriptRegion.source_type` producers (`vue_bridge`) follow the enum shape change with
+  byte-identical computed `SourceType` for every Vue fixture.
+- `crates/verter_session/src/parse.rs`: `non_sfc_source_type(canonical_id)` is RETIRED from production.
+  Its replacement derives the OXC `SourceType` from the classified `FileLanguage` row
+  (`script_source_type()` → the extended `oxc_source_type_from_neutral` mapping); `.d.ts` detection
+  moves fully to the registry `Dts` row — no `.d.ts`/`.d.mts`/`.d.cts` suffix checks remain in session
+  parsing. `parse_non_sfc_snapshot` takes the classified row as a parameter.
+- Call-site threading: `crates/verter_session/src/host_executor.rs:205` passes its existing
+  `file_language`; `crates/verter_session/src/host_manage/eval_env.rs:269` classifies through the
+  host's `language_classifier`; the non-carrier branch of `imported_eval_source_type` reads the same
+  row. `HostSourceData::source_type` stays the single cache-key authority — the fix point is the
+  producer, no second authority appears.
+- `crates/verter_session/src/file_artifact_store.rs`: `LEGACY_PARSER_VERSION` bumps. The
+  `FileArtifactStore` key already carries `file_language_id` (a `.tsx` artifact keys under
+  `Script{Tsx}`), but the parsed VALUE under unchanged keys changes — a parser-behavior change is
+  exactly what the `parser_version` key dimension owns. No new `ReadSetSignature` dimension.
+- Doc sweep: the `imported_eval_source_type` rustdoc ("plain scripts derive from the canonical path")
+  and any `/type-resolution`/`/architecture` skill text describing path-derived plain-script source
+  types update to name the `FileLanguage` row as the authority.
+
+**Legacy Deletions.** `non_sfc_source_type` (production function — path re-sniffing retires with the
+cutover; the token joins the static half of `plain_script_dialect_from_file_language`); every session-side
+extension-suffix dialect check it carried (`.d.ts`/`.d.mts`/`.d.cts` family detection in `parse.rs`).
+
+**Tests (failing first).**
+1. A `.tsx` non-SFC fixture with JSX in an exported value produces non-empty `export_signatures` and
+   does not degrade to the panicked-parse empty snapshot (RED today — parses as plain TS); `.jsx`
+   equivalent.
+2. No-regress pins: `.js` and `.mjs` fixtures with `import`/`export` keep parsing and produce their
+   import/export surfaces (the D-bf module-kind hazard pin); a `.ts` fixture using an angle-bracket
+   type assertion stays TS (not JSX); `.d.ts`/`.d.mts`/`.d.cts` fixtures still parse as declaration
+   files through the registry `Dts` row.
+3. `HostSourceData::source_type` / `authoritative_source_type_for` report the classified dialect for
+   plain `.tsx`/`.jsx`/`.js`/`.mjs`/`.cjs` fixtures (RED today: plain TS for all of them).
+4. Guard `plain_script_dialect_from_file_language` (§6): static half red against a deliberately
+   reintroduced suffix-sniff fixture in its negative self-test; green on the landed tree.
+5. Vue byte-identity spot-check rides the carrier-side enum change: `imported_eval_source_type` parity
+   matrix fixtures (`<script lang="ts"|"tsx"|none>`) compute byte-identical `SourceType` before/after.
+
+**Verification.** The gate.
+
+**Dependencies.** B2 (the `verter_language` registry rows + classification authority), B4 (the
+carrier-side `script_regions[].source_type` path this block's non-carrier half completes). Lands before
+B5 (codex directive: B5 builds on a correct parse/source-type substrate).
 
 ---
 
