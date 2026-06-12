@@ -221,7 +221,7 @@ pub enum AuditEvent {
     /// the HIGH-confidence direction.
     BuildTypeofCall,
     /// One `build_typeof` call where the value-root scope returned
-    /// `None` from `ensure_indexed_ready` (the prepared-value miss
+    /// `None` from `ensure_indexed_ready_serve` (the prepared-value miss
     /// the brief flags at `build.rs:162`).
     BuildTypeofPreparedValueMiss,
     /// Focused mapped-member materialization counters

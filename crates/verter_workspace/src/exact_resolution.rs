@@ -14,7 +14,7 @@
 //! latent defect (ambient deps silently dropped on parse re-record) was
 //! caused by exactly this kind of routing.
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::BTreeSet;
 
 use crate::path_matches_prefix;
@@ -234,6 +234,38 @@ impl EdgeStore {
         canonical_id: &str,
         resolutions: Vec<ExactResolution>,
     ) -> ExactResolutionResult {
+        // Idempotency gate (the `replace_parsed_edges` R22 shape): if the
+        // supplied snapshot is value-identical to the stored table, perform
+        // no write at all and report `changed: false` so callers can skip
+        // their invalidation cascades for steady-state re-pushes.
+        //
+        // Duplicate-key safety: the input is a Vec, so the same key can
+        // appear twice (`[A→x, A→x]`). Comparing RAW input length against
+        // the stored table would judge that input "unchanged" against
+        // `{A→x, B→y}` while a real replace drops `B→y` — count DISTINCT
+        // input keys instead.
+        if let Some(state) = self.files.get(canonical_id) {
+            let stored = &state.deps.exact_resolutions;
+            let mut distinct_keys: FxHashSet<(String, ResolvePhase, ResolveRequestKind)> =
+                FxHashSet::default();
+            let every_entry_matches = resolutions.iter().all(|resolution| {
+                let key = (
+                    resolution.specifier.clone(),
+                    resolution.phase,
+                    resolution.kind,
+                );
+                let matches = stored.get(&key) == Some(resolution);
+                distinct_keys.insert(key);
+                matches
+            });
+            if every_entry_matches && distinct_keys.len() == stored.len() {
+                return ExactResolutionResult {
+                    newly_resolved: Vec::new(),
+                    changed: false,
+                };
+            }
+        }
+
         let mut newly_resolved = Vec::new();
         let pre_existing_other_class = {
             // Snapshot pre-existing parsed/lazy/ambient/semantic so we can
@@ -268,7 +300,10 @@ impl EdgeStore {
             }
         });
 
-        ExactResolutionResult { newly_resolved }
+        ExactResolutionResult {
+            newly_resolved,
+            changed: true,
+        }
     }
 
     /// Replace `parsed_resolved` + `parsed_unresolved_relatives` +

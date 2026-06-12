@@ -18,7 +18,7 @@
 //! env-bearing content-free `ResolvedDeclSlotIdentity` slot. The slot
 //! carries the project-identity / type-env / lib-env dims and the
 //! resolve-env dim rides on `InstantiateContext`; the live whole-hash is
-//! re-sourced at value-compute via `ensure_indexed_ready`, never in the key.
+//! re-sourced at value-compute via `ensure_indexed_ready_serve`, never in the key.
 //!
 //! The surface bridge helpers thread the caller's `ResolverContext` through
 //! dispatch and compose the surviving `pub(crate)` cycle-protected dispatch

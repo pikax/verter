@@ -27,7 +27,6 @@ fn total_cache_misses(b: &CacheLayerBreakdown) -> u64 {
     b.indexed.misses
         + b.analysis.misses
         + b.owner_import.misses
-        + b.route_owned_shallow.misses
         + b.component_meta.misses
         + b.route_db.misses
         + b.ref_cycle.misses

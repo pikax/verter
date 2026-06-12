@@ -94,26 +94,32 @@ fn derived_raw_state_records_known_miss_generation() {
 }
 
 /// Gap 2 substrate: the reader (`cached_import_route_resolution`)
-/// gates known-miss resolutions on
-/// `workspace.content_generation() > recorded_at`.
+/// gates EVERY served entry — known-misses included — through the
+/// single per-entry freshness oracle
+/// (`DerivedRawState::import_route_entry_is_generation_current`),
+/// which consults the known-miss generation sidecar and treats a
+/// missing stamp as stale (fail closed).
 #[test]
 fn cached_import_route_resolution_gates_known_miss_on_generation() {
-    let source = read_file("src/host_manage/prepared_decl.rs");
+    let reader = read_file("src/host_manage/prepared_decl.rs");
     assert!(
-        source.contains("import_route_is_known_miss"),
-        "cached_import_route_resolution MUST invoke `import_route_is_known_miss` to \
-         identify cached negatives (Gap 2)."
+        reader.contains("import_route_entry_is_generation_current"),
+        "cached_import_route_resolution MUST route every served entry through \
+         the shared per-entry freshness oracle \
+         `DerivedRawState::import_route_entry_is_generation_current` (Gap 2, R3)."
+    );
+    let oracle = read_file("src/types.rs");
+    assert!(
+        oracle.contains("import_routes_known_miss_recorded_at_generation"),
+        "the per-entry freshness oracle MUST consult \
+         `import_routes_known_miss_recorded_at_generation` before reporting a \
+         known-miss as generation-current (Gap 2, R3)."
     );
     assert!(
-        source.contains("import_routes_known_miss_recorded_at_generation"),
-        "cached_import_route_resolution MUST consult \
-         `import_routes_known_miss_recorded_at_generation` before serving a cached \
-         negative (Gap 2, R3)."
-    );
-    assert!(
-        source.contains("content_generation()") && source.contains("> recorded_at"),
-        "cached_import_route_resolution MUST refuse the cached negative when \
-         `current_generation > recorded_at` (Gap 2)."
+        oracle.contains(".is_some_and(|recorded| *recorded == current_generation)"),
+        "the oracle's known-miss arm MUST be fail-closed: a missing sidecar \
+         stamp reads as stale, and a recorded stamp is current ONLY while it \
+         equals the live `content_generation` (Gap 2)."
     );
 }
 

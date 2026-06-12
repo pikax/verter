@@ -191,11 +191,11 @@ warm-read validator decides how strictly that self-root is checked:
   `context.projection_reduction.mode = ProjectionMode::Skeleton`
   (Skeleton-mode instantiation, empty args) so unbound type parameters become
   `TypeParam` shells — preserving Conditional branches that would otherwise
-  collapse to `never` for unbound generics. `route_owned_shallow` is a route-only artifact cache, not
-  a self-rooted query-identity cache; its `route_owned_entry_is_fresh` tiered
-  gate stays the route-owned cache's freshness check and
-  `current_route_surface_hash` is the single route-fact production helper
-  (current `IndexedReady` first, route-owned-shallow fallback).
+  collapse to `never` for unbound generics. `current_route_surface_hash` is the
+  single route-fact production helper: the current-content `IndexedReady`
+  artifact is the SOLE route-surface authority (no secondary route-surface
+  artifact), gated by `indexed_surface_is_current` — edge currency plus the
+  `project_generation` stamp for surfaces with cross-file edges.
 
 The own-canonical drain serving the edited file's own caches is retained only
 as a redundant fast eviction now that every query-identity cache validates its
@@ -251,7 +251,7 @@ root via `VersionedDeclIdentity` + `fact_dep_signature`. The `SemanticGraphStore
 family memo (the `Instantiate` / `ResolveMacroPayload` query nodes) instead
 roots via the candidate's `ReadSetSignature.facts` + `self_root_canonicals`,
 with the live whole-hash re-sourced at value-compute time via
-`ensure_indexed_ready` (NOT carried in the key) — see the per-key-context
+`ensure_indexed_ready_serve` (NOT carried in the key) — see the per-key-context
 detail below.
 
 **R6.** Cache keys never include `fact_dep_signature` or content / version
@@ -291,14 +291,14 @@ derived-`Hash` query-identity key (the retired content-free `DeclKey`
 query-key struct must NOT be reintroduced). The cold-build path
 (`build_instantiate`, `build_resolve_macro_payload`) re-sources the live file
 content version from
-`ResolverContext::ensure_indexed_ready(base.defining_canonical).whole_hash` at
+`ResolverContext::ensure_indexed_ready_serve(base.defining_canonical)`'s serve carrier `indexed.whole_hash` at
 value-compute time and rolls it into the published `MemoEntry`'s
 `ReadSetSignature.facts` + `self_root_canonicals` rails. The slot is U2-DERIVED
 at query-key construction via `ProjectSemanticDispatch::type_slot_for` (reads
 the live host env); test fixtures use the env-agnostic
 `ResolvedDeclSlotIdentity::type_slot_unscoped`. Non-file bases (`__builtin__`,
 empty global, `<synthetic>`) do NOT fabricate a `FileWholeHash` self-root —
-they root via `args` nodes only. A real-file base whose `ensure_indexed_ready`
+they root via `args` nodes only. A real-file base whose `ensure_indexed_ready_serve`
 returns `None` is a stale key and returns `cache_suppress = true`. Each
 `(family, slot)` in `FamilySlots` holds a candidate list capped at
 `FAMILY_SLOT_CANDIDATE_CAP = 4` (per-slot multi-candidate); two

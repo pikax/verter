@@ -83,7 +83,7 @@ fn token_advances_on_clear_compile_cache() {
 fn token_advances_on_configure_projects_project_generation() {
     let (host, _canonical) = host_with_one_file();
     let before = host.current_validation_token();
-    // `configure_projects` runs `bump_project_generation_and_evict` —
+    // `configure_projects` runs the stamp-only `bump_project_generation` —
     // the project-shape dimension of the token.
     host.configure_projects(Vec::new());
     let after = host.current_validation_token();
@@ -176,125 +176,6 @@ fn token_advances_on_lazy_indexed_artifact_publication() {
     assert_ne!(
         before, after,
         "the full reuse token MUST change after a lazy artifact publication"
-    );
-}
-
-#[test]
-fn token_advances_on_route_owned_shallow_publish() {
-    // `RouteOwnedShallowDb::publish` bumps the route-owned generation,
-    // which the token folds via `route_owned_generation`. The base view
-    // snapshots the route-owned `Route` derived-hash fallback by value,
-    // so a publish MUST advance the token or a manager-cached base view
-    // goes stale.
-    let (host, _canonical) = host_with_one_file();
-    let before = host.current_validation_token();
-    let before_route_owned = before.route_owned_generation;
-
-    let entry = Arc::new(
-        crate::project_type_store::RouteOwnedShallowEntry::test_stub(Arc::from("/proj/r.ts")),
-    );
-    host.project_type_store()
-        .route_owned_shallow()
-        .publish(Arc::from("/proj/r.ts"), entry);
-
-    let after = host.current_validation_token();
-    assert_ne!(
-        before_route_owned, after.route_owned_generation,
-        "a route-owned-shallow publish MUST advance the route_owned_generation \
-         token dimension"
-    );
-    assert_ne!(
-        before, after,
-        "the full reuse token MUST change after a route-owned-shallow publish"
-    );
-}
-
-#[test]
-fn token_advances_on_route_owned_shallow_schema_eviction() {
-    // A schema-version reconciliation sweep that drains route-owned
-    // entries through `evict_if_schema_mismatch` mutates the SAME
-    // `route_owned_shallow` derived-hash source the base view snapshots
-    // by value. It MUST advance `route_owned_generation` exactly like
-    // `publish` / `remove` / `clear_all` do — else a `HostStoreView`
-    // snapshotted before the sweep keeps validating against route-owned
-    // `Route` derived hashes the store can no longer reproduce.
-    use crate::cache_schema::{CacheSchemaVersioned, CACHE_CLUSTER_SCHEMA_VERSION};
-
-    let (host, _canonical) = host_with_one_file();
-
-    // Seed one route-owned entry so the schema sweep has a row to drain;
-    // the publish itself advances the generation, so capture the snapshot
-    // token AFTER seeding (the view a request would hold over the sweep).
-    let entry = Arc::new(
-        crate::project_type_store::RouteOwnedShallowEntry::test_stub(Arc::from("/proj/r.ts")),
-    );
-    host.project_type_store()
-        .route_owned_shallow()
-        .publish(Arc::from("/proj/r.ts"), entry);
-
-    let snapshotted = host.current_validation_token();
-    let snapshotted_route_owned = snapshotted.route_owned_generation;
-
-    // Force the schema-mismatch eviction branch on the live production
-    // store (built at `CACHE_CLUSTER_SCHEMA_VERSION`) by reconciling
-    // against a HIGHER cluster version — the exact shape of a cluster
-    // schema bump landing past the version this store was constructed
-    // under. The one seeded row is drained.
-    let evicted = host
-        .project_type_store()
-        .route_owned_shallow()
-        .evict_if_schema_mismatch(CACHE_CLUSTER_SCHEMA_VERSION + 1);
-    assert_eq!(
-        evicted, 1,
-        "the schema-mismatch sweep MUST drain the one seeded route-owned entry"
-    );
-
-    let after = host.current_validation_token();
-    assert_ne!(
-        snapshotted_route_owned, after.route_owned_generation,
-        "a route-owned-shallow schema eviction that drains entries MUST advance \
-         the route_owned_generation token dimension (else a pre-sweep snapshot \
-         keeps validating against drained route-owned derived hashes)"
-    );
-    assert_ne!(
-        snapshotted, after,
-        "the previously-snapshotted token MUST be stale after a route-owned \
-         schema eviction"
-    );
-}
-
-#[test]
-fn token_stable_on_route_owned_shallow_schema_eviction_noop() {
-    // Bump-iff-CHANGED: a schema-mismatch reconciliation that drains
-    // NOTHING (the store is already empty) must NOT advance
-    // `route_owned_generation`. Mirrors the no-op augmenter-reinsert
-    // gating — a no-op eviction is not a token-relevant mutation.
-    use crate::cache_schema::{CacheSchemaVersioned, CACHE_CLUSTER_SCHEMA_VERSION};
-
-    let (host, _canonical) = host_with_one_file();
-
-    // No route-owned entry seeded — the store is empty.
-    let before = host.current_validation_token();
-    let before_route_owned = before.route_owned_generation;
-
-    let evicted = host
-        .project_type_store()
-        .route_owned_shallow()
-        .evict_if_schema_mismatch(CACHE_CLUSTER_SCHEMA_VERSION + 1);
-    assert_eq!(
-        evicted, 0,
-        "an empty store drains nothing on schema reconciliation"
-    );
-
-    let after = host.current_validation_token();
-    assert_eq!(
-        before_route_owned, after.route_owned_generation,
-        "a no-op schema eviction (nothing drained) MUST NOT advance the \
-         route_owned_generation token dimension (bump-iff-changed)"
-    );
-    assert_eq!(
-        before, after,
-        "the token MUST stay stable across a no-op schema eviction"
     );
 }
 
@@ -1090,7 +971,7 @@ fn compat_token_lane_oracle_ignores_additive_generations() {
     // The lane oracle MUST therefore be EXACTLY as strict as the promotion
     // fence (`is_stable`), which gates on `external_supersession_fingerprint`
     // and DELIBERATELY EXCLUDES the additive `artifact_generation` /
-    // `route_owned_generation` / `load_generation`: a cold compute advances
+    // `load_generation`: a cold compute advances
     // those generations as its OWN work (publishing artifacts, loading
     // dependencies). The leader promotes a result computed while those
     // generations advanced; if the lane oracle were STRICTER than the
@@ -1281,7 +1162,12 @@ fn token_advances_on_positive_import_route_cache_write() {
     // Drive the exact positive-route point producer (the single writer of
     // `DerivedRawState.import_routes` outside the snapshot writer + the two
     // lifecycle resets).
-    host.cache_positive_import_route_result_for_tests(&canonical, "./dep", "/proj/dep.ts");
+    host.cache_positive_import_route_result_for_tests(
+        &canonical,
+        "./dep",
+        "/proj/dep.ts",
+        host.ws().content_generation(),
+    );
 
     let after = host.current_validation_token();
     assert_ne!(
@@ -1336,7 +1222,12 @@ fn idempotent_positive_route_readmit_does_not_advance_token_or_rebuild_snapshot(
     // dependency edge) — it legitimately advances the token. Warm the
     // manager cache against the post-first-admission token and pin the
     // served Arc's identity.
-    host.cache_positive_import_route_result_for_tests(&canonical, "./dep", "/proj/dep.ts");
+    host.cache_positive_import_route_result_for_tests(
+        &canonical,
+        "./dep",
+        "/proj/dep.ts",
+        host.ws().content_generation(),
+    );
     let warm = host.resolver_store_view_read().into_owned_view();
     let warm_ptr = warm.snapshot_ptr_for_tests();
     let cached_before = host
@@ -1348,7 +1239,12 @@ fn idempotent_positive_route_readmit_does_not_advance_token_or_rebuild_snapshot(
     // SECOND admission: byte-identical `(owner, specifier, resolved)` — a
     // pure re-admit of the already-stored route + already-present
     // dependency edge. This is the no-op the fix must not bump on.
-    host.cache_positive_import_route_result_for_tests(&canonical, "./dep", "/proj/dep.ts");
+    host.cache_positive_import_route_result_for_tests(
+        &canonical,
+        "./dep",
+        "/proj/dep.ts",
+        host.ws().content_generation(),
+    );
 
     let after = host.current_validation_token();
     assert_eq!(
@@ -1386,13 +1282,23 @@ fn distinct_positive_route_readmit_does_advance_token() {
     // advance the token. Proves the compare-before-insert gates on an
     // actual value change, not blanket suppression.
     let (host, canonical) = host_with_one_file();
-    host.cache_positive_import_route_result_for_tests(&canonical, "./dep", "/proj/dep.ts");
+    host.cache_positive_import_route_result_for_tests(
+        &canonical,
+        "./dep",
+        "/proj/dep.ts",
+        host.ws().content_generation(),
+    );
     let _warm = host.resolver_store_view_read().into_owned_view();
 
     let before = host.current_validation_token();
     // Same specifier, DIFFERENT resolved canonical → route map value
     // changes → genuine transition.
-    host.cache_positive_import_route_result_for_tests(&canonical, "./dep", "/proj/other.ts");
+    host.cache_positive_import_route_result_for_tests(
+        &canonical,
+        "./dep",
+        "/proj/other.ts",
+        host.ws().content_generation(),
+    );
     let after = host.current_validation_token();
 
     assert_ne!(
@@ -1418,7 +1324,12 @@ fn token_does_not_advance_on_unrelated_import_route_read() {
     let (host, canonical) = host_with_one_file();
     // Seed a positive route once (the write that legitimately advances the
     // token), then capture `before` AFTER it so the read is isolated.
-    host.cache_positive_import_route_result_for_tests(&canonical, "./dep", "/proj/dep.ts");
+    host.cache_positive_import_route_result_for_tests(
+        &canonical,
+        "./dep",
+        "/proj/dep.ts",
+        host.ws().content_generation(),
+    );
 
     let before = host.current_validation_token();
     // Pure reads of the import-route surface: snapshot the base view
@@ -2442,5 +2353,72 @@ fn content_generation_dimension_does_not_self_fence_reads() {
         !token1.externally_superseded_by(&token2),
         "a compute's own reads must NOT externally supersede its token — \
          the content_generation dimension only moves on real file-set mutations"
+    );
+}
+
+// ── schema-sweep → artifact_generation token dimension ──
+
+/// Successor to the retired route-owned-shallow schema-eviction token
+/// pin: a `FileArtifactStore` SCHEMA-MISMATCH sweep
+/// (`evict_if_schema_mismatch`) clears every artifact + the
+/// augmentation index, and MUST advance the `artifact_generation`
+/// token dimension — a manager-cached base view whose
+/// `derived_hashes` / `file_facts` were snapshotted from the
+/// pre-sweep artifacts must stop validating warm entries. A
+/// MATCHING-schema sweep is a true no-op: nothing evicted, NO token
+/// dimension moved (no over-bump). NOTE the over-bump direction that
+/// IS retained by design: a mismatch sweep on an EMPTY store still
+/// bumps — the schema identity itself diverged, and over-invalidation
+/// on that reset path is harmless.
+#[test]
+fn schema_mismatch_sweep_advances_artifact_generation_token() {
+    use crate::cache_schema::CacheSchemaVersioned;
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let canonical = "/schema_sweep/file.ts";
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: Some(canonical.to_string()),
+            input_id: canonical.to_string(),
+            source: std::sync::Arc::from("export type T = number;\n"),
+            file_kind: FileKind::from_path(canonical),
+            aliases: Vec::new(),
+        })
+        .expect("upsert");
+    host.ensure_indexed_ready(canonical)
+        .expect("artifact must materialise");
+
+    let store = host.project_type_store.indexed();
+    let schema = store.schema_version();
+
+    // No-op sweep (matching schema): nothing evicted, no token move.
+    let generation_before = store.artifact_generation();
+    let evicted = store.evict_if_schema_mismatch(schema);
+    assert_eq!(evicted, 0, "a matching-schema sweep evicts nothing");
+    assert_eq!(
+        store.artifact_generation(),
+        generation_before,
+        "a no-op schema sweep must NOT advance artifact_generation \
+         (over-bumping would churn the manager's cached base view on \
+         every startup sweep)",
+    );
+
+    // Mismatch sweep: everything evicted, token dimension advances.
+    let token_before = host.current_validation_token();
+    let evicted = store.evict_if_schema_mismatch(schema + 1);
+    assert!(
+        evicted > 0,
+        "precondition: the store held at least one artifact to evict",
+    );
+    assert!(
+        store.artifact_generation() > generation_before,
+        "a schema-mismatch sweep must advance artifact_generation — the \
+         token dimension covering the by-value snapshot fields a cached \
+         base view holds from the pre-sweep artifacts",
+    );
+    let token_after = host.current_validation_token();
+    assert_ne!(
+        token_before, token_after,
+        "the manager reuse token must move with the sweep",
     );
 }

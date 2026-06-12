@@ -146,7 +146,7 @@ pub trait SessionView: Send + Sync {
     ///
     /// Purpose: an overlay `IndexedReady` whose source bytes are
     /// identical to the base file has a content hash equal to the
-    /// base hash, so a [`crate::file_artifact_store::FileArtifactKey::legacy`]
+    /// base hash, so a [`crate::file_artifact_store::FileArtifactKey::base`]
     /// key for it would collide with the base artifact. The overlay
     /// materialiser can resolve a relative import to an overlay-only
     /// helper the base workspace cannot see, so the overlay's import
@@ -154,12 +154,12 @@ pub trait SessionView: Send + Sync {
     /// either poison base reads with session routes or silently serve
     /// the overlay base routes. Keying the overlay artifact under
     /// `overlay_scoped(canonical, hash, discriminator)` keeps it
-    /// isolated from the base (`parse_env_hash = LEGACY_PARSE_ENV_HASH`)
+    /// isolated from the base (`parse_env_hash = BASE_PARSE_ENV_HASH`)
     /// and from other sessions (distinct overlay-set fingerprints).
     ///
     /// Default returns `None` — base-only views ([`HostView`],
     /// [`HostViewRef`]) never carry overlays, so their reads stay on
-    /// the legacy key. Overlay-bearing views ([`OverlaidView`],
+    /// the base key. Overlay-bearing views ([`OverlaidView`],
     /// [`OverlaidViewRef`]) override this.
     fn overlay_artifact_discriminator(&self, _canonical: &str) -> Option<Hash16> {
         None
@@ -284,7 +284,7 @@ pub trait SessionView: Send + Sync {
 /// scheduler-authoritative `parse.whole_hash` so the producer's
 /// admission key and the view's lookup key reach the same `DashMap`
 /// slot immediately after `upsert`, without waiting for the lazy
-/// `IndexedReady` materialization through `ensure_indexed_ready`. The
+/// `IndexedReady` materialization through `ensure_indexed_ready_serve`. The
 /// source is strict — [`current_content_hash_from_scheduler`] — with
 /// no permissive `FileArtifactStore` fallback: a scan-derived stale
 /// hash would resolve a stale `ResolvedImportFacts` entry instead of
@@ -964,10 +964,10 @@ impl SessionView for OverlaidViewRef<'_> {
 ///
 /// The discriminator namespaces a session's overlay `IndexedReady`
 /// candidates away from the base artifact (always
-/// `parse_env_hash = LEGACY_PARSE_ENV_HASH`, i.e. `[0u8; 16]`) and away
+/// `parse_env_hash = BASE_PARSE_ENV_HASH`, i.e. `[0u8; 16]`) and away
 /// from other sessions (distinct overlay-set fingerprints → distinct
 /// discriminators). It MUST be non-zero so it can never alias the
-/// legacy key.
+/// base key.
 ///
 /// Layout: a fixed 8-byte namespace tag in the high half guarantees the
 /// result is non-zero even for the (precondition-excluded) `fingerprint
@@ -978,7 +978,7 @@ impl SessionView for OverlaidViewRef<'_> {
 /// artifact in this session carries in its `FileArtifactKey::parse_env_hash`
 /// dimension. The overlay-aware augmentation-index scan
 /// ([`crate::file_artifact_store::FileArtifactStore::collect_augmenter_candidates`])
-/// matches non-legacy artifacts against this value to union the session's own
+/// matches non-base artifacts against this value to union the session's own
 /// overlay augmenters with base while excluding other sessions' overlays.
 ///
 /// Returns `None` when the view carries no overlays (`fingerprint() == 0`): no

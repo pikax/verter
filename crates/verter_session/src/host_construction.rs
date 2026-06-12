@@ -147,10 +147,16 @@ impl VerterHost {
 
         let workspace_lock = Arc::new(parking_lot::RwLock::new(workspace));
 
+        // Constructed before the scheduler so the stage executor can share
+        // the host's provenance counters (`sfc_parses` is bumped on rayon
+        // workers where no capture-token TLS exists).
+        let provenance = Arc::new(crate::types::MetaProvenance::default());
+
         let scheduler = {
             let executor = Arc::new(host_executor::HostStageExecutor::new(
                 config.clone(),
                 Arc::clone(&workspace_lock),
+                Arc::clone(&provenance),
             ));
             let loader = Arc::new(WorkspaceSourceLoader(Arc::clone(&workspace_lock)));
             // Native spawns a driver thread; WASM uses sync mode
@@ -193,7 +199,6 @@ impl VerterHost {
             }
         };
 
-        let provenance = Arc::new(crate::types::MetaProvenance::default());
         let project_type_store = Arc::new(
             crate::project_type_store::ProjectTypeStore::with_provenance(Arc::clone(&provenance)),
         );
@@ -299,6 +304,26 @@ impl VerterHost {
             // again if no token is installed (the regression case).
             #[cfg(test)]
             compile_one_host_cpu_pool_token: std::sync::atomic::AtomicUsize::new(usize::MAX),
+            #[cfg(test)]
+            materialize_seam_hook: parking_lot::Mutex::new(None),
+            #[cfg(test)]
+            flight_retry_seam_hook: parking_lot::Mutex::new(None),
+            #[cfg(test)]
+            compile_publish_seam_hook: parking_lot::Mutex::new(None),
+            #[cfg(test)]
+            compile_input_seam_hook: parking_lot::Mutex::new(None),
+            #[cfg(test)]
+            edge_refresh_gate_seam_hook: parking_lot::Mutex::new(None),
+            #[cfg(test)]
+            raw_snapshot_template_join_seam_hook: parking_lot::Mutex::new(None),
+            #[cfg(test)]
+            template_persist_seam_hook: parking_lot::Mutex::new(None),
+            #[cfg(test)]
+            narrowed_scope_serve_seam_hook: parking_lot::Mutex::new(None),
+            #[cfg(test)]
+            compile_blockers_serve_seam_hook: parking_lot::Mutex::new(None),
+            #[cfg(test)]
+            parse_env_override: parking_lot::Mutex::new(None),
             typeinfo_scratch_cache: parking_lot::Mutex::new(match scratch_cache_capacity {
                 Some(cap) => crate::typeinfo::scratch_cache::ScratchCache::with_capacity(cap),
                 None => crate::typeinfo::scratch_cache::ScratchCache::with_default_capacity(),
@@ -537,7 +562,25 @@ impl VerterHost {
     /// uses [`Self::host_view_env_hashes_for`] instead so multi-project
     /// workspaces can pick the right project context.
     pub(crate) fn host_view_env_hashes(&self) -> crate::session_view::EnvHashes {
-        env_hashes_from_array(self.workspace().workspace_default_env_hash_array())
+        let env = env_hashes_from_array(self.workspace().workspace_default_env_hash_array());
+        self.apply_parse_env_override(env)
+    }
+
+    /// Test-only live parse-env override application — see the
+    /// [`Self::parse_env_override`] field docs. Identity in production
+    /// builds.
+    fn apply_parse_env_override(
+        &self,
+        env: crate::session_view::EnvHashes,
+    ) -> crate::session_view::EnvHashes {
+        #[cfg(test)]
+        if let Some(parse_env_hash) = *self.parse_env_override.lock() {
+            return crate::session_view::EnvHashes {
+                parse_env_hash,
+                ..env
+            };
+        }
+        env
     }
 
     /// Project identity (R21) attached to a [`HostStoreView`] at
@@ -567,7 +610,7 @@ impl VerterHost {
             .resolve_project_for_canonical(canonical)
             .and_then(|p| workspace.env_hash_array_for_project(p))
             .unwrap_or_else(|| workspace.workspace_default_env_hash_array());
-        env_hashes_from_array(arr)
+        self.apply_parse_env_override(env_hashes_from_array(arr))
     }
 
     /// Per-canonical project identity.
@@ -634,12 +677,13 @@ impl VerterHost {
     // ──────────────────────────────────────────────────────────────────
     // Rehomed off-store cache accessors.
     //
-    // The four off-store fields (`compile_cache`, `resolved_type_cache`,
-    // `eval_env_cache`, `semantic_db`) live on the `ProjectTypeStore`
-    // typed-DB wrappers, not on `VerterHost`. These accessors return
-    // references to the rehomed storage so call sites that previously
-    // used `host.<field>.<method>()` keep their shape via
-    // `host.<field>().<method>()`.
+    // The off-store fields (`compile_cache`, `resolved_type_cache`,
+    // `semantic_db`) live on the `ProjectTypeStore` typed-DB wrappers,
+    // not on `VerterHost`. The canonical per-file `EvalEnv` lives on
+    // `IndexedReady.eval_env` behind its narrow accessor — there is no
+    // separate host-level env cache. These accessors return
+    // references to the rehomed storage; call sites use the accessor
+    // form `host.<field>().<method>()`.
     // ──────────────────────────────────────────────────────────────────
 
     /// Reference to the profile-domain DB's underlying storage (D48 split).
@@ -719,17 +763,10 @@ impl VerterHost {
         self.project_type_store.resolved_type_cache()
     }
 
-    /// Reference to the rehomed eval-env / owned-program cache
-    /// wrapper.
-    #[must_use]
-    pub(crate) fn eval_env_cache(&self) -> &crate::project_type_store::EvalEnvCacheDb {
-        self.project_type_store.eval_env_cache()
-    }
-
     /// `MutexGuard` access to the rehomed
-    /// [`verter_semantic::db::SemanticDb`] handle. Call sites that
-    /// previously used `host.semantic_db.lock()` now use
-    /// `host.semantic_db()` and receive the same guard type.
+    /// [`verter_semantic::db::SemanticDb`] handle. Call sites lock
+    /// through `host.semantic_db()` — the accessor owns the lock
+    /// acquisition and hands out the guard.
     pub(crate) fn semantic_db(
         &self,
     ) -> parking_lot::MutexGuard<'_, verter_semantic::db::SemanticDb> {

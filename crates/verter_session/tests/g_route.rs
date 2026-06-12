@@ -12,6 +12,8 @@ mod route_db_fact_validation;
 mod route_db_get_or_resolve_route_observing_facts;
 #[path = "g_route/route_db_get_route_with_facts.rs"]
 mod route_db_get_route_with_facts;
+#[path = "g_route/route_db_unadmitted_resolve_not_burst_rendezvous.rs"]
+mod route_db_unadmitted_resolve_not_burst_rendezvous;
 #[path = "g_route/route_db_unrelated_route_edit_stays_warm.rs"]
 mod route_db_unrelated_route_edit_stays_warm;
 #[path = "g_route/route_generation_admission_guard.rs"]

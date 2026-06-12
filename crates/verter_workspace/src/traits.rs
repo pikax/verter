@@ -182,6 +182,22 @@ pub trait WorkspaceRead: Send + Sync {
         0
     }
 
+    /// The `content_generation` recorded at `canonical_id`'s most recent
+    /// per-canonical content transition (overlay write/clear, snapshot
+    /// inject/remove, disk write/copy/delete); `0` when the canonical has
+    /// never transitioned. The workspace is the sole content authority,
+    /// so this ledger is the AUTHORITATIVE per-canonical freshness rail
+    /// for consumers retaining content-derived artifacts: an artifact
+    /// built at generation `G` is provably content-fresh only while
+    /// `G >= last_content_transition_generation(canonical)`. Recorded at
+    /// the workspace mutation chokepoints, so mutators that bypass any
+    /// host-level wrapper (a direct embedder `notify_upsert`,
+    /// `write_file`, `copy_file`) are covered by construction. Default
+    /// `0` (reader-only impls never transition content).
+    fn last_content_transition_generation(&self, _canonical_id: &str) -> u64 {
+        0
+    }
+
     /// Point-in-time VFS provenance counters for observability and benchmarks.
     fn vfs_provenance_snapshot(&self) -> crate::types::VfsProvenanceSnapshot {
         crate::types::VfsProvenanceSnapshot::default()
@@ -400,6 +416,24 @@ pub trait WorkspaceAccess: WorkspaceRead {
     fn set_exact_resolutions(
         &self,
         canonical_id: &str,
+        resolutions: Vec<ExactResolution>,
+    ) -> ExactResolutionResult;
+
+    /// Record parsed edges AND re-apply bundler exact resolutions as ONE
+    /// atomic edge-store mutation. Semantics are
+    /// [`record_parsed_edges`](Self::record_parsed_edges) followed by
+    /// [`set_exact_resolutions`](Self::set_exact_resolutions), but no
+    /// intermediate state (parsed edges recorded, exacts still cleared)
+    /// is ever observable to a concurrent resolver — a two-call sequence
+    /// exposes an exacts-empty window in which a cold flight resolves
+    /// against the half-applied table and publishes a wrong-but-current
+    /// route surface with no generation moved. Required (no default) so
+    /// every impl makes an explicit atomicity decision — the same
+    /// compile-time-enforcement rationale as the other edge mutators.
+    fn record_parsed_edges_with_exact_resolutions(
+        &self,
+        canonical_id: &str,
+        edges: &[ParsedEdge],
         resolutions: Vec<ExactResolution>,
     ) -> ExactResolutionResult;
 
@@ -946,6 +980,14 @@ mod ambient_default_tests {
         fn set_exact_resolutions(
             &self,
             _id: &str,
+            _resolutions: Vec<ExactResolution>,
+        ) -> ExactResolutionResult {
+            ExactResolutionResult::default()
+        }
+        fn record_parsed_edges_with_exact_resolutions(
+            &self,
+            _id: &str,
+            _edges: &[ParsedEdge],
             _resolutions: Vec<ExactResolution>,
         ) -> ExactResolutionResult {
             ExactResolutionResult::default()

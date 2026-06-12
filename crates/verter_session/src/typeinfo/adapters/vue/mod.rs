@@ -20,6 +20,7 @@
 //!   `AnalyzedPropField` / `AnalyzedEmitField` / `AnalyzedSlotField` DTOs from
 //!   the typeinfo surface + macro-analyzer facts.
 
+mod jsdoc;
 pub mod public_type;
 pub mod runtime_ctor;
 pub mod store;

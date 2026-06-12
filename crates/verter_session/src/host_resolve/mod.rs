@@ -30,8 +30,8 @@
 //!   + component-meta macro element entry points.
 //! - [`frontier_engine`] — frontier closure, materialisation, and
 //!   named-type export route resolution (the file's main intra-SCC).
-//! - [`route_owned_shallow`] — route-only shallow cache materialiser,
-//!   prepared-decl walking, and dependency-source readers.
+//! - [`route_surface`] — route-surface facts, prepared-decl walking,
+//!   and dependency-source readers.
 //! - [`virtual_file_pipeline`] — `resolve` / `ensure_compiled` /
 //!   `get_virtual_file` / `get_ide` / `get_public_api*` / `compile_entry`.
 //! - [`vue_script_extract`] — free helpers for SFC `<script>` extraction
@@ -45,7 +45,7 @@ mod external_type_resolution;
 mod frontier_adapter;
 mod frontier_engine;
 mod frontier_helpers;
-mod route_owned_shallow;
+mod route_surface;
 mod test_guards;
 mod virtual_file_pipeline;
 mod vue_script_extract;
@@ -58,8 +58,6 @@ mod vue_script_extract;
 // through the cfg gate / sibling-path resolution.
 #[allow(unused_imports)]
 pub(crate) use frontier_adapter::HostFrontierAdapter;
-#[allow(unused_imports)]
-pub(crate) use frontier_helpers::RouteOwnedShallowStateSnapshot;
 #[cfg(test)]
 #[allow(unused_imports)]
 pub(crate) use test_guards::{

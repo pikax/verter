@@ -112,6 +112,44 @@ pub(crate) struct Engine {
     /// longest-first. `ArcSwap` so `set_default_resolve_extensions` does
     /// not stall reverse queries on the hot path.
     pub(crate) default_resolve_extensions: ArcSwap<Vec<String>>,
+
+    /// Per-canonical content-transition ledger: canonical id → the
+    /// `content_generation` recorded at its most recent content
+    /// transition (overlay write/clear, snapshot inject/remove, disk
+    /// write/copy/delete). The workspace is the sole content authority,
+    /// so this is the AUTHORITATIVE per-canonical freshness rail for
+    /// consumers retaining content-derived artifacts: an artifact built
+    /// at generation `G` for canonical `C` is provably content-fresh
+    /// only while `G >= last_content_transition_generation(C)`. Unlike a
+    /// global generation-equality clause, the ledger is per-canonical —
+    /// unrelated transitions never invalidate an untouched canonical's
+    /// retained artifacts (package reuse). Recording lives at the
+    /// workspace mutation chokepoints, so mutators that bypass any
+    /// host-level wrapper (direct embedder `notify_upsert`, `write_file`,
+    /// `copy_file`) are covered by construction. Keys are normalized
+    /// through [`crate::resolver::normalize_canonical_id`] at the
+    /// recording chokepoints AND the query, so a direct embedder passing
+    /// a non-canonical key form (backslashes, Windows drive casing)
+    /// records under the same key the gate reads.
+    ///
+    /// Growth: insert-only, bounded by the number of DISTINCT canonicals
+    /// ever mutated in this workspace instance — the same order as the
+    /// snapshot/edge stores, which key per-canonical and are also never
+    /// compacted; the ledger adds one `(String, u64)` per such canonical.
+    content_transitions: RwLock<FxHashMap<String, u64>>,
+
+    /// Per-SUBTREE content-transition ledger: directory prefix → the
+    /// `content_generation` recorded at its most recent subtree-scoped
+    /// mutation (`delete_dir_all`, a watcher `DirectoryTreeDirty`
+    /// recovery). Those mutations change an UNKNOWN member set — the
+    /// engine cannot enumerate every canonical a recursive disk delete
+    /// or an out-of-band disk change touched — so they record the
+    /// PREFIX instead; [`Self::last_content_transition_generation`]
+    /// folds in every recorded prefix that contains the queried
+    /// canonical. Same normalization and growth story as
+    /// `content_transitions` (bounded by distinct mutated directory
+    /// prefixes).
+    subtree_transitions: RwLock<FxHashMap<String, u64>>,
 }
 
 impl Engine {
@@ -130,6 +168,8 @@ impl Engine {
             published_state: ArcSwapOption::new(None),
             ambient_libs: ArcSwap::from_pointee(AmbientLibsByProject::default()),
             default_resolve_extensions: ArcSwap::from_pointee(initial_extensions),
+            content_transitions: RwLock::new(FxHashMap::default()),
+            subtree_transitions: RwLock::new(FxHashMap::default()),
         };
         // Publish an initial snapshot from the empty project graph so that
         // `published_state` is always `Some`. This ensures basic relative
@@ -166,20 +206,20 @@ impl Engine {
     /// depend on it. When the merged list actually changes, recompose +
     /// republish the env-hash tables (so RouteDb effective-export-set entries
     /// keyed on the OLD `resolve_env_hash` become unreachable) and advance
-    /// `content_generation` (so route-owned shallow freshness + known-miss
-    /// staleness checks invalidate). This mirrors the
+    /// `content_generation` (so the session-side epoch consumers — route-
+    /// surface edge currency (`indexed_surface_is_current`) and known-miss
+    /// staleness checks — invalidate). This mirrors the
     /// [`Self::set_default_resolve_extensions`] sibling resolver-config
     /// mutation [`crate::traits::WorkspaceAccess::configure_resolver`], which
     /// also republishes through `rebuild_and_publish`.
     ///
-    /// TODO(perf-wave-2): the BROADER runtime resolver-config-mutation API —
+    /// TODO(follow-up): the BROADER runtime resolver-config-mutation API —
     /// a host-level `VerterHost` setter that drives the full
-    /// `configure_projects`-style cascade on the session side (clear RouteDb
-    /// caches, route-owned shallow, bump project/store-view generation) for
-    /// resolve-config changes that are NOT extension-list changes — is
-    /// unpushed-perf-dependent and not yet wired. Closing it is a prerequisite
-    /// for WAVE-2 perf-enable; until then only the extension-list dimension
-    /// invalidates the host route memo through this path.
+    /// `configure_projects`-style cascade on the session side (clear derived
+    /// route state, reset resolver caches, bump project/store-view
+    /// generations) for resolve-config changes that are NOT extension-list
+    /// changes — is not yet wired; until then only the extension-list
+    /// dimension invalidates the host route memo through this path.
     pub(crate) fn set_default_resolve_extensions(&self, host_resolve_extensions: Vec<String>) {
         let sorted = Self::merge_extensions(&host_resolve_extensions);
         let changed = **self.default_resolve_extensions.load() != sorted;
@@ -205,6 +245,81 @@ impl Engine {
     pub(crate) fn bump_content_generation(&self) -> u64 {
         self.clear_lazy_resolution_cache();
         self.content_generation.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    /// Per-canonical content transition: bump `content_generation` AND
+    /// record the post-bump generation against `canonical_id` in the
+    /// transition ledger. EVERY per-canonical content mutator routes its
+    /// generation bump through this helper (the recording chokepoint);
+    /// `bump_content_generation` alone remains for canonical-less
+    /// mutations (config/extension changes).
+    pub(crate) fn bump_content_generation_for(&self, canonical_id: &str) -> u64 {
+        let generation = self.bump_content_generation();
+        self.content_transitions.write().insert(
+            crate::resolver::normalize_canonical_id(canonical_id),
+            generation,
+        );
+        generation
+    }
+
+    /// Record a content transition for `canonical_id` at the CURRENT
+    /// generation without bumping — for multi-canonical mutations that
+    /// bump once after recording every affected id.
+    pub(crate) fn record_content_transition(&self, canonical_id: &str) {
+        let generation = self.current_content_generation();
+        self.content_transitions.write().insert(
+            crate::resolver::normalize_canonical_id(canonical_id),
+            generation + 1,
+        );
+    }
+
+    /// Record a SUBTREE content transition for every canonical under
+    /// `prefix` (inclusive) at the current generation, without bumping —
+    /// for directory-scoped mutations whose member set the engine cannot
+    /// enumerate (`delete_dir_all`, watcher `DirectoryTreeDirty`
+    /// recovery). Callers bump once after recording, exactly like
+    /// [`Self::record_content_transition`].
+    pub(crate) fn record_subtree_content_transition(&self, prefix: &str) {
+        let generation = self.current_content_generation();
+        let mut normalized = crate::resolver::normalize_canonical_id(prefix);
+        while normalized.len() > 1 && normalized.ends_with('/') {
+            normalized.pop();
+        }
+        self.subtree_transitions
+            .write()
+            .insert(normalized, generation + 1);
+    }
+
+    /// The generation recorded at `canonical_id`'s most recent content
+    /// transition; `0` when the canonical has never transitioned. Folds
+    /// the exact per-canonical record with every recorded SUBTREE prefix
+    /// containing the canonical (a `delete_dir_all` / watcher recovery
+    /// transitions every member of the subtree).
+    pub(crate) fn last_content_transition_generation(&self, canonical_id: &str) -> u64 {
+        let canonical = crate::resolver::normalize_canonical_id(canonical_id);
+        let exact = self
+            .content_transitions
+            .read()
+            .get(&canonical)
+            .copied()
+            .unwrap_or(0);
+        let subtree = self
+            .subtree_transitions
+            .read()
+            .iter()
+            // Boundary-correct subtree containment through the shared
+            // `path_matches_prefix` chokepoint — the recorded root
+            // prefix `"/"` folds into every canonical (a raw
+            // next-byte-is-`'/'` check can never match it), while a
+            // byte-prefix sibling (`/srcx.ts` under `/src`) never
+            // matches. Recorded prefixes are normalized at
+            // [`Self::record_subtree_content_transition`]; the helper
+            // re-normalizes on read so both sides agree.
+            .filter(|(prefix, _)| crate::path_matches_prefix(canonical.as_str(), prefix))
+            .map(|(_, generation)| *generation)
+            .max()
+            .unwrap_or(0);
+        exact.max(subtree)
     }
 
     fn clear_lazy_resolution_cache(&self) {
@@ -390,11 +505,17 @@ impl Engine {
                     self.clear_lazy_resolution_cache();
                     // A directory-tree dirty (watcher recovery) is a file-set
                     // mutation: members under `prefix` may have appeared or
-                    // disappeared. Route-owned freshness and known-miss
+                    // disappeared. Route-surface edge currency
+                    // (`indexed_surface_is_current`) and known-miss
                     // staleness checks key on `content_generation`, so the
                     // batch must advance the epoch — clearing the lazy
                     // resolution cache alone leaves those downstream gates
-                    // serving the pre-recovery route surface.
+                    // serving the pre-recovery route surface. The member
+                    // set is unknown (an out-of-band disk change), so the
+                    // per-canonical ledger records the SUBTREE: any member
+                    // canonical's retained artifact stops validating as
+                    // content-fresh.
+                    self.record_subtree_content_transition(&prefix);
                     content_changed = true;
                 }
                 WorkspaceChange::ConfigChanged { canonical_id: _ } => {
@@ -406,6 +527,12 @@ impl Engine {
         }
 
         if content_changed {
+            // Per-canonical transition ledger: every arm that changed a
+            // specific file pushed it into `invalidated_files`; record each
+            // at the post-bump generation, then bump once for the batch.
+            for canonical_id in &result.invalidated_files {
+                self.record_content_transition(canonical_id);
+            }
             self.bump_content_generation();
         }
 
@@ -730,6 +857,62 @@ impl Engine {
         canonical_id: &str,
         edges: &[crate::types::ParsedEdge],
     ) {
+        let (parsed_resolved, unresolved_pairs, bare_specifiers) =
+            self.resolve_parsed_edge_inputs(reader, canonical_id, edges);
+
+        // Per R4 lifecycle: replace_parsed_edges CLEARS exact_resolved +
+        // exact_resolutions + lazy_resolved + semantic_transitive.
+        // ambient_resolved survives. Bundler must re-call
+        // set_import_dependencies after every upsert.
+        self.edges.write().replace_parsed_edges(
+            canonical_id,
+            parsed_resolved,
+            unresolved_pairs,
+            bare_specifiers,
+        );
+    }
+
+    /// Atomic variant: record parsed edges AND re-apply bundler exact
+    /// resolutions under ONE edge-store write lock, so no concurrent
+    /// resolver can observe the intermediate parsed-recorded /
+    /// exacts-cleared state. Resolution pre-work runs outside the lock
+    /// (same as `record_parsed_edges`); only the two store mutations are
+    /// fused into the critical section.
+    pub(crate) fn record_parsed_edges_with_exact_resolutions(
+        &self,
+        reader: &dyn crate::traits::WorkspaceAccess,
+        canonical_id: &str,
+        edges: &[crate::types::ParsedEdge],
+        resolutions: Vec<crate::types::ExactResolution>,
+    ) -> crate::types::ExactResolutionResult {
+        let (parsed_resolved, unresolved_pairs, bare_specifiers) =
+            self.resolve_parsed_edge_inputs(reader, canonical_id, edges);
+
+        let mut edge_store = self.edges.write();
+        edge_store.replace_parsed_edges(
+            canonical_id,
+            parsed_resolved,
+            unresolved_pairs,
+            bare_specifiers,
+        );
+        edge_store.replace_exact_resolutions(canonical_id, resolutions)
+    }
+
+    /// Shared pre-lock resolution work for the parsed-edge recorders:
+    /// eagerly resolves `Relative` / `ExternalSrc` edges via the
+    /// parsed-edge resolver (R5 bypasses `exact_resolutions`) and
+    /// classifies the rest.
+    #[allow(clippy::type_complexity)]
+    fn resolve_parsed_edge_inputs(
+        &self,
+        reader: &dyn crate::traits::WorkspaceAccess,
+        canonical_id: &str,
+        edges: &[crate::types::ParsedEdge],
+    ) -> (
+        BTreeSet<String>,
+        Vec<((String, ResolveRequestKind), String)>,
+        Vec<(String, ResolveRequestKind)>,
+    ) {
         let mut parsed_resolved: BTreeSet<String> = BTreeSet::new();
         let mut bare_specifiers: Vec<(String, ResolveRequestKind)> = Vec::new();
         let mut unresolved_pairs: Vec<((String, ResolveRequestKind), String)> = Vec::new();
@@ -776,16 +959,7 @@ impl Engine {
             }
         }
 
-        // Per R4 lifecycle: replace_parsed_edges CLEARS exact_resolved +
-        // exact_resolutions + lazy_resolved + semantic_transitive.
-        // ambient_resolved survives. Bundler must re-call
-        // set_import_dependencies after every upsert.
-        self.edges.write().replace_parsed_edges(
-            canonical_id,
-            parsed_resolved,
-            unresolved_pairs,
-            bare_specifiers,
-        );
+        (parsed_resolved, unresolved_pairs, bare_specifiers)
     }
 
     /// Query reverse deps (files that import this file). Strips the
@@ -878,13 +1052,17 @@ impl Engine {
         let changed = cas_register(
             &self.ambient_libs,
             stable_key,
-            canonical,
+            canonical.clone(),
             Arc::clone(&spec.source),
             content_hash,
             top_level_exports,
         );
         if changed {
-            self.bump_content_generation();
+            // An ambient-lib (re)registration changes the content served
+            // for that canonical — a per-canonical content transition,
+            // recorded so retained artifacts built from the previous
+            // registration stop validating as fresh.
+            self.bump_content_generation_for(&canonical);
         }
         Ok(())
     }
@@ -899,9 +1077,12 @@ impl Engine {
         use crate::ambient_lib::{cas_unregister, normalize_canonical_id};
 
         let canonical = normalize_canonical_id(canonical_id);
-        let removed = cas_unregister(&self.ambient_libs, stable_key, canonical);
+        let removed = cas_unregister(&self.ambient_libs, stable_key, canonical.clone());
         if removed {
-            self.bump_content_generation();
+            // Unregistration removes the content served for the ambient
+            // canonical — a per-canonical content transition, same as
+            // registration above.
+            self.bump_content_generation_for(&canonical);
         }
         Ok(())
     }

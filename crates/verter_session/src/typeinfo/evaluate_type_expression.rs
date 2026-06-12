@@ -331,8 +331,8 @@ fn evaluate_inner(
     // the scope publishes — including the SFC-synthesised `default`
     // for `.vue` scopes (see `vue_default_synth`).
     let scope_eval_source = host
-        .ensure_indexed_ready(&req.scope)
-        .map(|indexed| Arc::clone(&indexed.eval_source));
+        .ensure_indexed_ready_serve(&req.scope)
+        .map(|serve| Arc::clone(&serve.indexed.eval_source));
     let source = synthesise_source(
         &req.expression,
         &req.extra_imports,

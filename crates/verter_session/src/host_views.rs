@@ -119,9 +119,29 @@ impl VerterHost {
         canonical_id: &str,
         profile: Option<u64>,
     ) -> Option<EffectiveFileState> {
+        let snap = self.scheduler.try_get_source(canonical_id)?;
+        self.effective_file_state_from_snapshot(&snap, canonical_id, profile)
+    }
+
+    /// [`Self::effective_file_state`] over a CALLER-HELD source
+    /// snapshot.
+    ///
+    /// The compile pipeline reads the scheduler source exactly once
+    /// per request and derives every content-determined compile input
+    /// — the compiled bytes, the script analysis, and the
+    /// `whole_hash` that keys a `Content`-mode publish — from that
+    /// single snapshot. An independent re-read here could observe a
+    /// newer source version than the rest of the request, pairing
+    /// bytes from one content version with the key hash of another.
+    /// Returns `None` when the snapshot carries no host source data.
+    pub(crate) fn effective_file_state_from_snapshot(
+        &self,
+        snap: &Arc<verter_scheduler::node::SourceSnapshot>,
+        canonical_id: &str,
+        profile: Option<u64>,
+    ) -> Option<EffectiveFileState> {
         use crate::host_executor::HostSourceData;
 
-        let snap = self.scheduler.try_get_source(canonical_id)?;
         let hd = snap.downcast_data::<HostSourceData>()?;
 
         if let Some(profile_hash) = profile {
@@ -185,21 +205,19 @@ impl VerterHost {
         Some(raw.as_ref().clone())
     }
 
-    /// Override-aware meta for a profile.
-    ///
-    /// Applies `style_langs` overrides from `StyleOverrideWithAnalysis` to the
-    /// raw meta. Returns `None` if file not in scheduler.
-    pub(crate) fn effective_meta(
+    /// Override-aware meta projection: applies `style_langs` overrides
+    /// from `StyleOverrideWithAnalysis` over a CALLER-SUPPLIED base
+    /// meta. The compile pipeline passes the meta from its single
+    /// per-request source snapshot (see
+    /// [`Self::effective_file_state_from_snapshot`]) so the effective
+    /// meta cannot be derived from a newer source version than the
+    /// compiled bytes.
+    pub(crate) fn effective_meta_from_base(
         &self,
+        mut meta: FileMeta,
         canonical_id: &str,
         profile: Option<u64>,
-    ) -> Option<FileMeta> {
-        use crate::host_executor::HostSourceData;
-
-        let snap = self.scheduler.try_get_source(canonical_id)?;
-        let hd = snap.downcast_data::<HostSourceData>()?;
-        let mut meta = hd.parse.meta.clone();
-
+    ) -> FileMeta {
         if let Some(profile_hash) = profile {
             if let Some(cc) = self.compile_cache().get(canonical_id) {
                 if let Some(so) = cc.style_overrides.get(&profile_hash) {
@@ -214,6 +232,6 @@ impl VerterHost {
             }
         }
 
-        Some(meta)
+        meta
     }
 }

@@ -10,7 +10,7 @@
 //! [`overlay_scoped`](crate::file_artifact_store::FileArtifactKey::overlay_scoped)
 //! key — the overlay content hash plus the view's overlay-set
 //! discriminator — so it stays isolated from the base artifact (always
-//! the [`legacy`](crate::file_artifact_store::FileArtifactKey::legacy)
+//! the [`base`](crate::file_artifact_store::FileArtifactKey::base)
 //! key) and from other sessions, even when the overlay source bytes are
 //! identical to the base file.
 //!
@@ -20,7 +20,7 @@
 
 use std::sync::Arc;
 
-use crate::types::DependencyResolution;
+use crate::types::{DependencyResolution, Hash16};
 use crate::VerterHost;
 
 use super::{dep_edges_from_resolutions, is_raw_import_specifier_id, HostShallowImportResolver};
@@ -90,25 +90,92 @@ impl OverlayArtifactIdentity {
     /// identity the materialiser publishes under). When the view carries
     /// an explicit overlay-set discriminator for the raw owner the key
     /// is `overlay_scoped`; otherwise (a base-passthrough view) it is
-    /// `legacy`. Returns `None` when the view reports no current content
+    /// `base`. Returns `None` when the view reports no current content
     /// hash for the raw owner (unloaded / evicted / tombstoned).
     fn overlay_artifact_key(
         &self,
         view: &dyn crate::session_view::SessionView,
     ) -> Option<crate::file_artifact_store::FileArtifactKey> {
         let content_hash = view.content_hash_for(&self.raw_overlay_owner)?;
-        let key = match view.overlay_artifact_discriminator(&self.raw_overlay_owner) {
+        Some(self.overlay_artifact_key_for_content(view, content_hash))
+    }
+
+    /// Build the artifact key for a CALLER-SUPPLIED content hash. READ
+    /// paths use it via [`Self::overlay_artifact_key`]; the publish path
+    /// uses the gated [`Self::overlay_publish_key_for_content`] instead.
+    ///
+    /// The base arm (no overlay-set discriminator for the raw owner)
+    /// is the base-passthrough READ shape: a view with no overlay for
+    /// the owner reads — and a fully overlay-FREE view publishes —
+    /// the base artifact under its base key.
+    fn overlay_artifact_key_for_content(
+        &self,
+        view: &dyn crate::session_view::SessionView,
+        content_hash: Hash16,
+    ) -> crate::file_artifact_store::FileArtifactKey {
+        match view.overlay_artifact_discriminator(&self.raw_overlay_owner) {
             Some(discriminator) => crate::file_artifact_store::FileArtifactKey::overlay_scoped(
                 Arc::from(self.analysis_canonical.as_str()),
                 content_hash,
                 discriminator,
             ),
-            None => crate::file_artifact_store::FileArtifactKey::legacy(
+            None => crate::file_artifact_store::FileArtifactKey::base(
                 Arc::from(self.analysis_canonical.as_str()),
                 content_hash,
             ),
-        };
-        Some(key)
+        }
+    }
+
+    /// PUBLISH-side artifact key — the gated variant of
+    /// [`Self::overlay_artifact_key_for_content`].
+    ///
+    /// The overlay materialiser publishes under the hash its flight
+    /// actually built from (`indexed.whole_hash`), never a live
+    /// `content_hash_for` re-read: on the base-passthrough branch a base
+    /// upsert landing between the pre-publish fence and the key build
+    /// would otherwise re-key the OLD-content artifact under the NEW
+    /// hash's content-pinned key. The fence guarantees live == flight
+    /// when publication proceeds, so readers (which rebuild the key from
+    /// the live hash) reach the same key.
+    ///
+    /// ## The base-key publish gate
+    ///
+    /// When the view carries NO overlay-set discriminator for the raw
+    /// owner, the artifact key falls back to the BASE key
+    /// space. That fallback is sound on the publish path ONLY for an
+    /// overlay-FREE view: the materialiser's route discovery
+    /// ([`resolve_relative_overlay_candidate`]) probes
+    /// `view.content_hash_for` / `view.source` for HELPER canonicals —
+    /// not just the owner — so an owner the view does not mask can
+    /// still bake an overlay-only helper route (and a tombstoned
+    /// dependency can mask a base file out of resolution). Such an
+    /// artifact is view-influenced and must never enter the base key
+    /// space, where a base-host read would observe session route state.
+    /// Returns `None` for exactly that case — discriminator absent AND
+    /// the view carries any overlay or tombstone — and the publish site
+    /// declines (serves the artifact ReturnOnly, publishes nothing).
+    ///
+    /// Production entry points never reach the decline: every caller of
+    /// `materialize_overlay_indexed_ready_with_view` gates on
+    /// `view.overlay_content_hash_for(owner).is_some()` (or passes a
+    /// base-passthrough view with no overlays at all), and the
+    /// overlay-bearing `SessionView` impls report a discriminator
+    /// exactly when they report an overlay content hash. The gate
+    /// enforces that invariant at the write boundary instead of
+    /// trusting caller discipline.
+    fn overlay_publish_key_for_content(
+        &self,
+        view: &dyn crate::session_view::SessionView,
+        content_hash: Hash16,
+    ) -> Option<crate::file_artifact_store::FileArtifactKey> {
+        if view
+            .overlay_artifact_discriminator(&self.raw_overlay_owner)
+            .is_none()
+            && (!view.overlay_canonicals().is_empty() || !view.tombstoned_canonicals().is_empty())
+        {
+            return None;
+        }
+        Some(self.overlay_artifact_key_for_content(view, content_hash))
     }
 
     /// Read the published overlay [`FileArtifacts`](crate::file_artifact_store::FileArtifacts)
@@ -229,10 +296,16 @@ impl VerterHost {
     /// candidate is published under an
     /// [`overlay_scoped`](crate::file_artifact_store::FileArtifactKey::overlay_scoped)
     /// key so it never collides with the base artifact — see the
-    /// publish site below. A base-passthrough view (no overlay for the
-    /// canonical) yields the legacy key, which is correct: without an
-    /// overlay there is no overlay-only route discovery and the
-    /// candidate is base-equivalent.
+    /// publish site below. An overlay-FREE view (no overlays, no
+    /// tombstones — e.g. `HostView`) yields the base key and the
+    /// candidate publishes as a base artifact: with nothing masked
+    /// anywhere, every route probe reads base authority and the
+    /// candidate is base-equivalent. An overlay-BEARING view whose
+    /// overlays do not cover `canonical_id` is the dangerous middle
+    /// case — route discovery can still see overlay-only helpers for
+    /// OTHER canonicals — and the publish key gate
+    /// ([`OverlayArtifactIdentity::overlay_publish_key_for_content`])
+    /// declines the base-keyed publish for it.
     ///
     /// ## Source + content-hash authority
     ///
@@ -256,11 +329,11 @@ impl VerterHost {
     /// use the `normalized_analysis_canonical` rewrite instead (e.g. a
     /// runtime `.js` whose `.d.ts` companion is the analysis target) —
     /// see the in-body comment for the split.
-    pub(crate) fn materialize_overlay_indexed_ready_with_view(
+    pub(crate) fn materialize_overlay_indexed_ready_serve_with_view(
         &self,
         canonical_id: &str,
         view: &dyn crate::session_view::SessionView,
-    ) -> Option<Arc<crate::project_type_store::IndexedReady>> {
+    ) -> Option<crate::host_manage::prepared_decl::IndexedReadyServe> {
         // Two canonical ids are in play and MUST NOT be conflated —
         // they are carried together by [`OverlayArtifactIdentity`]:
         //
@@ -294,26 +367,9 @@ impl VerterHost {
         let identity = self.overlay_artifact_identity(canonical_id);
         let analysis_canonical_id = identity.analysis_canonical();
 
-        // Derive the overlay source + its content hash from the view —
-        // ONE authority. `content_hash_for` is the view-authoritative
-        // CURRENT content hash (overlay hash when masked, scheduler
-        // hash otherwise); `source` returns the exact bytes that hash
-        // covers. Resolving both here removes the caller-supplied-hash
-        // failure mode entirely.
-        //
-        // The view source/hash lookups are keyed by the RAW
-        // `canonical_id` — the `SessionView` overlay maps are keyed by
-        // the requested canonical, so a normalised id would miss the
-        // overlay. The overlay-set discriminator (also a raw-keyed view
-        // lookup) and the `FileArtifactKey.canonical` (the normalised
-        // analysis target) are both threaded through `identity` at the
-        // fast-path lookup and the publish below.
-        let overlay_source = view.source(canonical_id)?;
-        let overlay_whole_hash = view.content_hash_for(canonical_id)?;
-
         // Fast path: an overlay materialisation for the same content
         // hash already lives in the file-artifact store under the
-        // overlay-scoped key (or the legacy key when the bound view
+        // overlay-scoped key (or the base key when the bound view
         // carries no overlay for this canonical). Multi-candidate
         // storage keeps base and overlay candidates separate, so this
         // lookup serves only the overlay. The key is built through
@@ -332,11 +388,12 @@ impl VerterHost {
             // RE-MATERIALISES the overlay artifact from the overlay source
             // (re-resolving the edges against the live file set) — it must NOT
             // fall back to the base surface (that would be overlay-blindness).
-            if self.route_surface_is_edge_current(
-                &facts.indexed.shallow_state,
-                facts.indexed.edge_generation,
-            ) {
-                return Some(Arc::clone(&facts.indexed));
+            if self.indexed_surface_is_current(analysis_canonical_id, &facts.indexed) {
+                // A store hit IS the published current overlay surface.
+                return Some(crate::host_manage::prepared_decl::IndexedReadyServe {
+                    indexed: Arc::clone(&facts.indexed),
+                    store_published: true,
+                });
             }
         }
 
@@ -344,25 +401,238 @@ impl VerterHost {
             return None;
         }
 
-        // Cold materialisation from overlay source. The body mirrors
-        // the base `ensure_indexed_ready` materialise closure but
-        // never touches the scheduler — the overlay source is the
-        // sole content authority for this candidate, and the
-        // candidate is published as a multi-candidate sibling of the
-        // base via `insert_artifacts`.
-        let raw_source: Arc<str> = Arc::clone(&overlay_source);
-        let cached_parse: Option<Arc<verter_compiler::parser::types::ParsedSfc>> = None;
-        let whole_hash = overlay_whole_hash;
-        let snapshot = Arc::new(self.build_snapshot_from_source_state(
-            analysis_canonical_id,
-            &raw_source,
-            cached_parse.as_deref(),
-        ));
+        // Overlay singleflight (the Canonical-Dependency-Cache collapse
+        // contract): concurrent overlay requests for the SAME canonical
+        // + overlay content + overlay-set discriminator collapse onto
+        // one cold build. The lane key embeds all three identity
+        // dimensions (NUL separators cannot occur in canonical ids), so
+        // different sessions' overlays — and different overlay contents
+        // — never share a lane. These view reads are lane IDENTITY only;
+        // the flight body re-reads source/hash authoritatively under its
+        // own fence stamps.
+        let lane_hash = view.content_hash_for(canonical_id)?;
+        let lane_discriminator = view.overlay_artifact_discriminator(canonical_id);
+        let lane_key = format!(
+            "overlay\u{0}{analysis_canonical_id}\u{0}{lane_hash:02x?}\u{0}{lane_discriminator:02x?}"
+        );
+        let singleflight = &self.resolver.runtime.indexed_singleflight;
+        let token = crate::resolver_core::StoreViewCompatToken {
+            epoch: 0,
+            session: None,
+            validity_fingerprint: 0,
+        };
+        let flight_body = || -> Result<crate::project_type_store::IndexedFlightOutcome, ()> {
+            // Re-check inside the flight — another flight may have
+            // published while this claimant waited for the lane.
+            if let Some(facts) = identity.lookup_overlay_artifacts(self, view) {
+                if self.indexed_surface_is_current(analysis_canonical_id, &facts.indexed) {
+                    return Ok(crate::project_type_store::IndexedFlightOutcome {
+                        indexed: Arc::clone(&facts.indexed),
+                        published: true,
+                    });
+                }
+            }
+            self.materialize_overlay_cold(&identity, canonical_id, view)
+                .ok_or(())
+        };
+        // Bounded re-validation loop — the same contract as the base
+        // `ensure_indexed_ready_serve` retry loop: a PUBLISHED outcome is a
+        // joinable rendezvous; a FENCED outcome serves only the leader
+        // (ReturnOnly); a follower re-runs against fresh state; the
+        // bounded sustained-churn fallback carries its ReturnOnly status
+        // to the admission gates through the suppression channel.
+        const MAX_FLIGHT_ATTEMPTS: usize = 3;
+        let mut last_fenced: Option<Arc<crate::project_type_store::IndexedReady>> = None;
+        for _attempt in 0..MAX_FLIGHT_ATTEMPTS {
+            let run_result =
+                match singleflight.run_retaining(lane_key.clone(), token, flight_body, |outcome| {
+                    outcome.published
+                }) {
+                    Ok(run_result) => run_result,
+                    Err(()) => return None,
+                };
+            let outcome = (*run_result.value).clone();
+            if outcome.published {
+                return Some(crate::host_manage::prepared_decl::IndexedReadyServe {
+                    indexed: outcome.indexed,
+                    store_published: true,
+                });
+            }
+            if matches!(
+                run_result.role,
+                crate::resolver_core::SingleflightRole::Leader
+            ) {
+                // FENCED leader: its own caller may consume the result
+                // (the request pre-dates the mutation, and the leader's
+                // recorded facts match the data it computed FROM — the
+                // read-side fact rail is the stated authority), but mark
+                // admission suppression anyway as cheap defense-in-depth:
+                // an enclosing cold compute that folds this ReturnOnly
+                // artifact into a broader result must not warm shared
+                // caches with it (symmetric with the follower fallback
+                // below). The fenced consumption ALSO flows by value
+                // (the TLS chokepoint flag) so enclosing traced cold
+                // computes refuse shared-cache admission.
+                crate::request_context::mark_request_materialization_cache_suppress();
+                crate::resolver_core::resolver_context::note_fenced_serve_fan_out();
+                return Some(crate::host_manage::prepared_decl::IndexedReadyServe {
+                    indexed: outcome.indexed,
+                    store_published: false,
+                });
+            }
+            last_fenced = Some(outcome.indexed);
+        }
+        if last_fenced.is_some() {
+            crate::request_context::mark_request_materialization_cache_suppress();
+            crate::resolver_core::resolver_context::note_fenced_serve_fan_out();
+        }
+        last_fenced.map(
+            |indexed| crate::host_manage::prepared_decl::IndexedReadyServe {
+                indexed,
+                store_published: false,
+            },
+        )
+    }
 
-        let eval_source = Arc::<str>::from(Self::build_eval_script_source(
+    /// Test-only bare wrapper over
+    /// [`Self::materialize_overlay_indexed_ready_serve_with_view`] that
+    /// drops the publication status. PRODUCTION code must use the serve
+    /// variant (the carrier is the only production accessor for an
+    /// overlay `IndexedReady`).
+    #[cfg(any(test, debug_assertions))]
+    #[allow(dead_code)]
+    pub(crate) fn materialize_overlay_indexed_ready_with_view(
+        &self,
+        canonical_id: &str,
+        view: &dyn crate::session_view::SessionView,
+    ) -> Option<Arc<crate::project_type_store::IndexedReady>> {
+        self.materialize_overlay_indexed_ready_serve_with_view(canonical_id, view)
+            .map(|serve| serve.indexed)
+    }
+
+    /// The overlay cold build — runs INSIDE the overlay singleflight
+    /// flight. The body mirrors the base `ensure_indexed_ready_serve`
+    /// materialise closure but never touches the scheduler: the overlay
+    /// source is the sole content authority for this candidate, and the
+    /// candidate is published as a multi-candidate sibling of the base
+    /// via `insert_artifacts`. Generation stamps are captured BEFORE any
+    /// content read — on a base-passthrough view the source/hash reads
+    /// consult the LIVE scheduler, so a pre-stamp read would leave a
+    /// fence-invisible window in which a base mutation lands between the
+    /// content read and the stamp capture.
+    fn materialize_overlay_cold(
+        &self,
+        identity: &OverlayArtifactIdentity,
+        canonical_id: &str,
+        view: &dyn crate::session_view::SessionView,
+    ) -> Option<crate::project_type_store::IndexedFlightOutcome> {
+        let analysis_canonical_id = identity.analysis_canonical();
+        self.provenance
+            .indexed_ready_materializes
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // Flight generation stamps, captured BEFORE ANY work — content
+        // reads included: the pre-publish fence below compares against
+        // these, so every mid-flight base file-set or route-resolution
+        // mutation is detected. They are also the stamps the published
+        // artifact carries (`edge_generation` is the generation at which
+        // the wildcard/import edges are canonicalized; a later file-set
+        // change leaves the surface edge-stale for the shared oracle).
+        let flight_workspace_generation = self.ws().content_generation();
+        let flight_project_generation = self.project_type_store.current_project_generation();
+        // The R21 parse dimension the overlay parse below runs under —
+        // same value-side stamp contract as the base materialise.
+        let flight_parse_env_hash = self
+            .host_view_env_hashes_for(analysis_canonical_id)
+            .parse_env_hash;
+        #[cfg(test)]
+        self.fire_materialize_seam();
+        // Content reads — ONE authority, now fence-covered.
+        // `content_hash_for` is the view-authoritative CURRENT content
+        // hash (overlay hash when masked, scheduler hash otherwise);
+        // `source` returns the exact bytes that hash covers. Keyed by
+        // the RAW `canonical_id` — the `SessionView` overlay maps are
+        // keyed by the requested canonical, so a normalised id would
+        // miss the overlay.
+        let overlay_source = view.source(canonical_id)?;
+        let overlay_whole_hash = view.content_hash_for(canonical_id)?;
+        let raw_source: Arc<str> = Arc::clone(&overlay_source);
+        // The overlay source never carries a scheduler SFC parse; a `.vue`
+        // overlay runs `parse_sfc` once here (the legitimately separate
+        // SFC structure parser) and everything downstream reuses it.
+        // Counted via the `parse_sfc_counted` chokepoint.
+        let cached_parse: Option<Arc<verter_compiler::parser::types::ParsedSfc>> =
+            analysis_canonical_id.ends_with(".vue").then(|| {
+                Arc::new(crate::parse::parse_sfc_counted(
+                    &self.provenance,
+                    &raw_source,
+                ))
+            });
+        let whole_hash = overlay_whole_hash;
+
+        // `eval_is_extracted_script` records whether the eval source is
+        // the position-preserving extracted `.vue` script — the
+        // predicate that lets the snapshot build below walk the
+        // flight's single eval-program parse instead of re-parsing the
+        // same script bytes.
+        let (eval_source_text, eval_is_extracted_script) =
+            Self::build_eval_script_source_with_extraction(
+                raw_source.as_ref(),
+                cached_parse.as_deref(),
+            );
+        let eval_source = Arc::<str>::from(eval_source_text);
+        // Single source type + single eval-program parse — the arena
+        // stays on this flight's stack. The source type derives from the
+        // OVERLAY content (the pure derivation over `raw_source` +
+        // `cached_parse`, the exact inputs the snapshot below is built
+        // from) — NEVER from the scheduler stamp
+        // (`imported_eval_source_type_for`), which covers BASE content:
+        // an overlay flipping the script lang would parse the overlay
+        // eval source under the stale base type (fatal parse → empty
+        // env) while the snapshot reports the overlay lang — an
+        // intra-artifact divergence on the single-env artifact. On a
+        // base-passthrough view the pure derivation equals the scheduler
+        // stamp (same pure function over the same content).
+        let source_type = crate::parse::imported_eval_source_type(
+            analysis_canonical_id,
             raw_source.as_ref(),
             cached_parse.as_deref(),
-        ));
+        );
+        let parsed_eval_program =
+            self.parse_eval_program(analysis_canonical_id, whole_hash, &eval_source, source_type);
+
+        let snapshot = if analysis_canonical_id.ends_with(".vue") {
+            // The script program is the flight's eval program when the
+            // eval source IS the extracted script: the snapshot walks
+            // the SAME parse (or defaults directly on a fatal parse) —
+            // this flight performs zero additional script-program
+            // parses.
+            Arc::new(self.build_snapshot_from_source_state(
+                analysis_canonical_id,
+                &raw_source,
+                cached_parse.as_deref(),
+                Self::vue_flight_script_program(
+                    eval_is_extracted_script,
+                    parsed_eval_program.as_deref(),
+                ),
+            ))
+        } else if let Some(parsed) = parsed_eval_program.as_deref() {
+            let parse = crate::parse::build_non_sfc_snapshot_from_program(
+                analysis_canonical_id,
+                raw_source.as_ref(),
+                source_type,
+                parsed.borrow_dependent(),
+            );
+            Arc::new(Self::build_snapshot_from_parse(parse))
+        } else {
+            // Fatal (panicked) eval-program parse on a non-SFC overlay
+            // (the `.vue` arm above never reaches here). The empty
+            // snapshot is constructed directly: a re-parse would run
+            // over the same bytes under the same source type
+            // (`non_sfc_source_type` on both lanes) and is guaranteed
+            // to panic identically, producing exactly this
+            // default-empty surface.
+            Arc::new(crate::types::FileAnalysisSnapshot::default())
+        };
         let declaration_file = analysis_canonical_id.ends_with(".d.ts")
             || analysis_canonical_id.ends_with(".d.mts")
             || analysis_canonical_id.ends_with(".d.cts");
@@ -370,11 +640,25 @@ impl VerterHost {
         // Seed import routes from the host's DerivedRawState if the
         // session-side caller pre-populated them. Overlays use the
         // same `set_import_dependencies` surface as the base, so
-        // overlay-specific deps land here when explicitly set.
+        // overlay-specific deps land here when explicitly set. Same
+        // gate as the base `build_indexed_route_surface` seed — the
+        // per-entry freshness oracle: a generation-stamped
+        // host-memoized positive seeds only while its stamp matches
+        // the live `content_generation`, and a known-miss seeds only
+        // while its known-miss sidecar stamp matches — a stale entry
+        // re-resolves below instead of re-baking.
         let mut import_routes: rustc_hash::FxHashMap<String, DependencyResolution> =
             rustc_hash::FxHashMap::default();
         if let Some(cc) = self.derived_raw_cache().get(analysis_canonical_id) {
+            let live_generation = self.ws().content_generation();
             for (specifier, resolution) in cc.import_routes.iter() {
+                if !cc.import_route_entry_is_generation_current(
+                    specifier,
+                    resolution,
+                    live_generation,
+                ) {
+                    continue;
+                }
                 import_routes.insert(specifier.clone(), resolution.clone());
             }
         }
@@ -421,11 +705,11 @@ impl VerterHost {
             Option<String>,
         > = rustc_hash::FxHashMap::default();
 
-        // Generation at which this overlay artifact's wildcard/import edges are
-        // canonicalized — captured before the resolve loop so a later file-set
-        // change leaves the surface edge-stale for the shared oracle (the same
-        // contract as the base materializer).
-        let edge_generation = self.ws().content_generation();
+        // The flight stamps double as the artifact's edge/project stamps —
+        // captured at flight start so the fence window covers the whole
+        // build, parse included.
+        let edge_generation = flight_workspace_generation;
+        let project_generation = flight_project_generation;
 
         for (specifier, kind) in &required_import_sources {
             if import_routes.contains_key(specifier) {
@@ -447,8 +731,8 @@ impl VerterHost {
                 // relative companion → ESM fallback, ALL normalized identically
                 // to route traversal + known-miss revalidation. Recording the
                 // RAW `EsmImport` `source_id` here (the runtime `.js`) diverged
-                // the overlay's route facts from the base / route-owned surfaces
-                // (which record the `.d.ts` companion) — a stale serve across
+                // the overlay's route facts from the base `IndexedReady` route
+                // surface (which records the `.d.ts` companion) — a stale serve across
                 // the overlay boundary. Then the
                 // overlay-only relative candidate (overlay maps are keyed by the
                 // RAW owner). `export *` wildcard sources flow through this same
@@ -486,12 +770,12 @@ impl VerterHost {
             import_routes.insert(specifier.clone(), resolution);
         }
 
-        let external_type_analysis = self.build_external_type_analysis(
+        let (eval_env, external_type_analysis) = self.build_eval_env_and_analysis_from_program(
             analysis_canonical_id,
-            whole_hash,
             raw_source.as_ref(),
             cached_parse.as_deref(),
-            &eval_source,
+            eval_source.as_ref(),
+            parsed_eval_program.as_deref(),
         );
 
         // Re-resolve every `export *` wildcard reexport source through the
@@ -501,8 +785,8 @@ impl VerterHost {
         // `source_id` without TS-first normalization; this pass routes the
         // wildcard edge through `resolve_route_edge_canonical` (the `.d.ts`
         // companion), so the overlay wildcard `canonical_id`s agree with the
-        // base / route-owned surfaces. An unresolvable source leaves the
-        // loop-baked known-miss in place.
+        // base `IndexedReady` route surface. An unresolvable source leaves
+        // the loop-baked known-miss in place.
         for source in external_type_analysis.wildcard_reexport_sources() {
             if let Some(resolved) = self.resolve_route_edge_canonical(analysis_canonical_id, source)
             {
@@ -523,12 +807,14 @@ impl VerterHost {
         let resolver = HostShallowImportResolver {
             dep_edges: &dep_edges,
         };
+        self.provenance
+            .shallow_state_builds
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut shallow_state_inner =
             crate::resolver_core::ShallowFileState::from_analysis_with_resolver(
                 whole_hash,
                 Arc::clone(&external_type_analysis),
-                Some(eval_source.as_ref()),
-                None,
+                Some(eval_env.as_ref()),
                 &resolver,
             );
         crate::resolver_core::vue_default_synth::inject_vue_default_into_shallow_state(
@@ -568,6 +854,8 @@ impl VerterHost {
             import_route_hash,
             route_hash,
             edge_generation,
+            project_generation,
+            parse_env_hash: flight_parse_env_hash,
             raw_source: Arc::clone(&raw_source),
             eval_source: Arc::clone(&eval_source),
             cached_parse,
@@ -575,11 +863,12 @@ impl VerterHost {
             export_signatures,
             snapshot,
             external_type_analysis: Arc::clone(&external_type_analysis),
+            eval_env,
             declares_interface_app_config,
         });
 
         // Publish via the multi-candidate surface — base candidate (if
-        // any) under its own legacy key stays untouched.
+        // any) under its own base key stays untouched.
         //
         // Key selection: `identity.overlay_artifact_key` builds an
         // `overlay_scoped` key when the bound view carries an explicit
@@ -587,21 +876,27 @@ impl VerterHost {
         // occupies the `parse_env_hash` dimension and is derived from
         // the session view's overlay-set fingerprint, so the overlay
         // candidate is isolated from the base artifact (always
-        // `parse_env_hash = LEGACY_PARSE_ENV_HASH`) and from other
+        // `parse_env_hash = BASE_PARSE_ENV_HASH`) and from other
         // sessions' overlay candidates — even when the overlay source
         // bytes are identical to the base file and the content hashes
         // therefore coincide. A base-host read via `get` /
-        // `get_for_current_content` (the legacy key) never reaches an
+        // `get_for_current_content` (the base key) never reaches an
         // `overlay_scoped` entry, and a session-view read via
-        // `get_overlay_scoped` never reaches the base entry. A
-        // base-passthrough view (no overlay for this canonical) yields
-        // the legacy key, which is correct: with no overlay there is no
-        // overlay-only relative route discovery, so the candidate is
-        // base-equivalent.
+        // `get_overlay_scoped` never reaches the base entry. An
+        // overlay-FREE view (no overlays, no tombstones) yields the
+        // base key, which is correct: with nothing masked anywhere,
+        // route discovery read base authority throughout and the
+        // candidate is base-equivalent. NOTE the owner having no
+        // overlay is NOT sufficient for base-equivalence —
+        // `resolve_relative_overlay_candidate` probes the view's
+        // overlay maps for HELPER canonicals, so an unmasked owner on
+        // an overlay-bearing view can bake overlay-only routes; the
+        // publish key gate below declines the base-keyed publish for
+        // exactly that case.
         //
         // Env-hash scope at this layer: the key carries the overlay
         // discriminator inside `parse_env_hash` (overlay branch) or
-        // `LEGACY_PARSE_ENV_HASH` (base-passthrough branch). The
+        // `BASE_PARSE_ENV_HASH` (base-passthrough branch). The
         // remaining env-hash dimensions (`resolve_env_hash`,
         // `type_env_hash`, `lib_env_hash`, `project_identity`) are
         // composed by the downstream caches that read this artifact
@@ -619,9 +914,63 @@ impl VerterHost {
         // reconstructs and the key every downstream reader rebuilds
         // through the same `OverlayArtifactIdentity` helper. A later
         // call short-circuits on the cached candidate.
-        let key = identity
-            .overlay_artifact_key(view)
-            .expect("the overlay source resolved above, so the view reports a current content hash for the raw owner");
+        // PRE-PUBLISH FENCE — the same ReturnOnly contract as the base
+        // materialise and the edge refresh. A base file-set mutation
+        // (`content_generation`) or a route-resolution mutation
+        // (`project_generation`) that landed during this build means the
+        // overlay surface was resolved against superseded state: serve
+        // the artifact to the caller (its request pre-dates the
+        // mutation), publish NOTHING. The next overlay read finds no
+        // candidate (or an edge-stale one) and re-materialises against
+        // the live state. Publishing a known-superseded artifact
+        // violates the standing ReturnOnly rule.
+        //
+        // The fence→insert pair is not atomic; a mutation landing in
+        // the window leaves a stale-stamped publish. That torn insert
+        // is rejected READ-SIDE, exactly as for the base materialise:
+        // both overlay readers (the entry fast path and the in-flight
+        // re-check in `materialize_overlay_indexed_ready_with_view`)
+        // gate the `lookup_overlay_artifacts` hit on
+        // `indexed_surface_is_current`, which rejects the pre-mutation
+        // `edge_generation` / `project_generation` stamps; an overlay
+        // CONTENT change re-keys the lookup itself (the key carries the
+        // overlay content hash). The fence stays a best-effort churn
+        // reducer; correctness is read-side authoritative.
+        #[cfg(test)]
+        self.fire_materialize_seam();
+        if self.ws().content_generation() != flight_workspace_generation
+            || self.project_type_store.current_project_generation() != flight_project_generation
+        {
+            return Some(crate::project_type_store::IndexedFlightOutcome {
+                indexed,
+                published: false,
+            });
+        }
+        // Publish under the FLIGHT-CAPTURED content hash (the hash this
+        // artifact was actually built from), never a live
+        // `content_hash_for` re-read: a base upsert landing between the
+        // fence above and this key build would re-key the old-content
+        // artifact under the new hash's content-pinned key (hash-MOVED
+        // poisoning). The fence guarantees live == flight when
+        // publication proceeds, so readers rebuilding the key from the
+        // live hash reach this same key; a hash that moved post-fence
+        // was already declined ReturnOnly by the fence's
+        // `content_generation` arm.
+        //
+        // The key build is GATED (`overlay_publish_key_for_content`): an
+        // owner with no overlay discriminator on an overlay-bearing view
+        // would fall back to the BASE key while its route discovery may
+        // have baked overlay-only helper routes — a view-influenced
+        // artifact must never enter the base key space. The gate
+        // declines (serve ReturnOnly, publish nothing); production
+        // callers gate on `overlay_content_hash_for(owner)` and never
+        // reach the decline.
+        let Some(key) = identity.overlay_publish_key_for_content(view, indexed.whole_hash) else {
+            return Some(crate::project_type_store::IndexedFlightOutcome {
+                indexed,
+                published: false,
+            });
+        };
         let payload = Arc::new(crate::file_artifact_store::FileArtifacts::with_indexed(
             Arc::clone(&indexed),
         ));
@@ -630,6 +979,9 @@ impl VerterHost {
             .indexed()
             .insert_artifacts(key, payload);
 
-        Some(indexed)
+        Some(crate::project_type_store::IndexedFlightOutcome {
+            indexed,
+            published: true,
+        })
     }
 }

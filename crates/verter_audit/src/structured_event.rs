@@ -342,11 +342,10 @@ pub enum StructuredAuditEvent {
     /// to characterise path-precise invalidation.
     CacheDrainedAtUpsert {
         /// Static identifier for the cache layer being drained
-        /// (e.g. `"resolved_type_cache"`, `"eval_env_cache"`,
-        /// `"compile_slots"`, `"derived_raw_cache"`,
-        /// `"semantic_invalidate"`, `"workspace_parsed_edges"`,
-        /// `"resolver_runtime"`, `"store_view_epoch"`,
-        /// `"project_type_store"`, `"dependency_cache"`).
+        /// (e.g. `"compile_cache_overrides"`, `"compile_slots"`,
+        /// `"compile_output_pure_content"`, `"derived_raw_cache"`,
+        /// `"dependency_cache"`, `"semantic_invalidate"`,
+        /// `"workspace_parsed_edges"`, `"store_view_epoch"`).
         layer: Arc<str>,
         /// Canonical id of the file whose upsert triggered the drain.
         canonical_id: Arc<str>,

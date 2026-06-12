@@ -1,11 +1,11 @@
 //! Tests for `OwnedEvalProgram` and friends.
 //!
-//! Includes the Step 1A discriminating tests:
+//! Includes the discriminating tests:
 //! - `owned_eval_program_is_send_sync_static`
 //! - `unsupported_non_macro_construct_emits_diagnostic_not_panic`
-//! - `macro_impacting_constructs_fail_lowering_not_silent_skip` (D107)
-//! - `macro_impact_inventory_doc_committed` (D116)
-//! - `macro_impact_inventory_matches_current_resolver_baseline` (D116)
+//! - `macro_impacting_constructs_fail_lowering_not_silent_skip`
+//! - `macro_impact_inventory_doc_committed`
+//! - `macro_impact_inventory_matches_current_resolver_baseline`
 
 use super::*;
 use static_assertions::assert_impl_all;
@@ -119,9 +119,9 @@ fn macro_impacting_constructs_fail_lowering_not_silent_skip() {
         }
 
         // Discriminator: this same input MUST NOT produce a silent
-        // empty `OwnedEvalProgram`. The plan rule (D107 — "macro-
-        // impacting constructs FAIL with typed error") rejects the
-        // silent-skip behavior the pre-1A resolver had.
+        // empty `OwnedEvalProgram`. The rule "macro-impacting
+        // constructs FAIL with typed error" forbids silently
+        // skipping the construct instead.
         let silent_program = OwnedEvalProgram::empty();
         assert_eq!(
             silent_program.statements.len(),
@@ -170,14 +170,14 @@ fn macro_impact_inventory_doc_committed() {
 
 #[test]
 fn macro_impact_inventory_matches_current_resolver_baseline() {
-    // D116 — inventory's "Supported" rows MUST stay supported
-    // post-Tier-1A; the FAIL list must be a strict subset of the
-    // pre-1A resolver's existing rejection set. The discriminating
-    // claim here is that a row currently working in production is in
-    // the inventory's Supported list (negation: if Tier 1A regresses
-    // by moving a Supported pattern into FAIL, the inventory's text
-    // would still claim it works while the resolver no longer does —
-    // this test catches drift).
+    // The inventory's "Supported" rows MUST stay supported; the FAIL
+    // list must be a strict subset of the resolver's existing
+    // rejection set. The discriminating claim here is that a row
+    // currently working in production is in the inventory's Supported
+    // list (negation: if lowering regresses by moving a Supported
+    // pattern into FAIL, the inventory's text would still claim it
+    // works while the resolver no longer does — this test catches
+    // drift).
     let path = workspace_root()
         .join("crates/verter_session/src/owned_artifacts/eval_program_macro_impact_inventory.md");
     let body = std::fs::read_to_string(&path).expect("inventory readable");
@@ -202,12 +202,12 @@ fn macro_impact_inventory_matches_current_resolver_baseline() {
 
     // FAIL on Unsupported rows — must contain at least the three
     // canonical macro-impacting cases. If the inventory loses these,
-    // Tier 1A's `LoweringError` variants would be unjustified.
+    // the `LoweringError` variants would be unjustified.
     let fail_must_include = ["SpreadElement", "ConditionalExpression", "AwaitExpression"];
     for pat in fail_must_include {
         assert!(
             body.contains(pat),
-            "inventory missing FAIL pattern `{pat}` — Tier 1A LoweringError variant has no provenance"
+            "inventory missing FAIL pattern `{pat}` — LoweringError variant has no provenance"
         );
     }
 }
@@ -290,9 +290,9 @@ fn make_program_with_diagnostic_unsupported() -> OwnedEvalProgram {
     )
 }
 
-/// Stand-in for the lowering driver's behavior on a diagnostic-only
+/// Stand-in for a lowering driver's behavior on a diagnostic-only
 /// kind: returns `Ok(())` — no `LoweringError`. The point of the test
-/// is to assert the *contract*, not the (1C-α) implementation.
+/// is to assert the *contract*, not a concrete implementation.
 fn simulate_lowering_for_diagnostic_only_kind() -> Result<(), LoweringError> {
     Ok(())
 }

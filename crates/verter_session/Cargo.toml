@@ -193,6 +193,11 @@ tracing-test = "0.2.6"
 # requiring the `visit` and `parsing` features in addition to the
 # original `full`+`extra-traits` set.
 syn = { version = "2.0", features = ["full", "extra-traits", "visit", "parsing"] }
+# Route-mutator guard macro-body scan: walks proc_macro2 TokenTrees of
+# macro invocations for marker IDENTS (syn::visit does not descend into
+# macro token streams; ident-token matching keeps log-string mentions
+# from false-flagging).
+proc-macro2 = "1.0"
 quote = "1.0.45"
 
 # Generator for the SemanticQueryKeySpec table artifact (sole writer of

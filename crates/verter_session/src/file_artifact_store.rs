@@ -130,23 +130,23 @@ pub struct FileArtifactKey {
 }
 
 impl FileArtifactKey {
-    /// Legacy-shape constructor: builds a key with `parse_env_hash` zeroed
-    /// and `parser_version = LEGACY_PARSER_VERSION`. Used by the
+    /// Base-key constructor: builds a key with `parse_env_hash` zeroed
+    /// and `parser_version = CURRENT_PARSER_VERSION`. Used by the
     /// canonical-keyed legacy API surface that does not yet thread env
     /// hashes through (call sites are migrated incrementally as later
     /// stages introduce real env hashes for each entry point).
-    pub(crate) fn legacy(canonical: Arc<str>, content_hash: Hash16) -> Self {
+    pub(crate) fn base(canonical: Arc<str>, content_hash: Hash16) -> Self {
         Self {
             canonical,
             content_hash,
-            parse_env_hash: LEGACY_PARSE_ENV_HASH,
-            parser_version: LEGACY_PARSER_VERSION,
+            parse_env_hash: BASE_PARSE_ENV_HASH,
+            parser_version: CURRENT_PARSER_VERSION,
         }
     }
 
     /// Overlay-scoped constructor: builds a key whose `parse_env_hash`
     /// carries a session-overlay **discriminator** instead of the
-    /// zeroed [`LEGACY_PARSE_ENV_HASH`].
+    /// zeroed [`BASE_PARSE_ENV_HASH`].
     ///
     /// A session-view overlay materialiser
     /// ([`crate::VerterHost::materialize_overlay_indexed_ready_with_view`])
@@ -154,7 +154,7 @@ impl FileArtifactKey {
     /// base workspace cannot see — so the overlay's `IndexedReady`
     /// carries session-specific import routes. When the overlay source
     /// bytes are identical to the base file, the overlay's content hash
-    /// equals the base hash, and a [`Self::legacy`] key for the overlay
+    /// equals the base hash, and a [`Self::base`] key for the overlay
     /// would collide with the base artifact's key: a base read would
     /// observe the overlay's session routes, or the overlay read would
     /// silently get the base routes. Byte-identical overlays are the
@@ -166,10 +166,10 @@ impl FileArtifactKey {
     /// ([`crate::session_view::SessionView::overlay_artifact_discriminator`]),
     /// so two sessions with different overlay sets occupy distinct
     /// slots (R20 multi-candidate isolation) and the base artifact
-    /// (always `parse_env_hash = LEGACY_PARSE_ENV_HASH`) is never
+    /// (always `parse_env_hash = BASE_PARSE_ENV_HASH`) is never
     /// touched. The discriminator is non-zero by construction (see
     /// `overlay_artifact_discriminator`), so it can never alias the
-    /// legacy key.
+    /// base key.
     pub(crate) fn overlay_scoped(
         canonical: Arc<str>,
         content_hash: Hash16,
@@ -179,11 +179,11 @@ impl FileArtifactKey {
             canonical,
             content_hash,
             parse_env_hash: discriminator,
-            parser_version: LEGACY_PARSER_VERSION,
+            parser_version: CURRENT_PARSER_VERSION,
         }
     }
 
-    /// Test-only public shim over [`Self::legacy`].
+    /// Test-only public shim over [`Self::base`].
     ///
     /// Used by `tests/eviction_policy.rs` and similar integration
     /// tests that need to construct multiple distinct
@@ -192,17 +192,17 @@ impl FileArtifactKey {
     /// promotion-aware LRU floor. The production `pub(crate)`
     /// surface is unchanged; this `pub fn` exists only inside
     /// `#[cfg(any(test, debug_assertions))]` so production
-    /// builds carry no public exposure of the legacy constructor.
+    /// builds carry no public exposure of the base constructor.
     #[cfg(any(test, debug_assertions))]
-    pub fn legacy_for_test(canonical: Arc<str>, content_hash: Hash16) -> Self {
-        Self::legacy(canonical, content_hash)
+    pub fn base_for_test(canonical: Arc<str>, content_hash: Hash16) -> Self {
+        Self::base(canonical, content_hash)
     }
 
-    /// `true` when this key is a [`Self::legacy`]-shape key — the
-    /// base-artifact identity (`parse_env_hash == `[`LEGACY_PARSE_ENV_HASH`]
-    /// and `parser_version == `[`LEGACY_PARSER_VERSION`]).
+    /// `true` when this key is a [`Self::base`]-shape key — the
+    /// base-artifact identity (`parse_env_hash == `[`BASE_PARSE_ENV_HASH`]
+    /// and `parser_version == `[`CURRENT_PARSER_VERSION`]).
     ///
-    /// A non-legacy key carries a session-overlay **discriminator** in
+    /// A non-base key carries a session-overlay **discriminator** in
     /// the `parse_env_hash` dimension ([`Self::overlay_scoped`]) — its
     /// `IndexedReady` can hold session-specific import routes resolved
     /// against an overlay-only helper the base workspace cannot see.
@@ -223,25 +223,28 @@ impl FileArtifactKey {
     /// an eviction must drain every key for a canonical, overlay-scoped
     /// keys included.
     #[must_use]
-    pub(crate) fn is_legacy(&self) -> bool {
-        self.parse_env_hash == LEGACY_PARSE_ENV_HASH && self.parser_version == LEGACY_PARSER_VERSION
+    pub(crate) fn is_base(&self) -> bool {
+        self.parse_env_hash == BASE_PARSE_ENV_HASH && self.parser_version == CURRENT_PARSER_VERSION
     }
 }
 
-/// Parser version for legacy-shape inserts. Bumps invalidate every
-/// entry the legacy surface inserted under
-/// [`FileArtifactKey::legacy`].
+/// Parser version stamped on every store key ([`FileArtifactKey::base`]
+/// and [`FileArtifactKey::overlay_scoped`]). Bumps invalidate every
+/// entry inserted under the prior version.
 ///
 /// Bumped 1 → 2: `.vue` `eval_source` became position-preserving (script
 /// content at raw SFC byte offsets, non-script bytes blanked), so every
 /// post-parse artifact's spans are SFC-absolute rather than compact-relative.
 /// The bump evicts any pre-existing compact-layout artifact so a stale entry
 /// cannot serve eval-relative spans after the change.
-pub const LEGACY_PARSER_VERSION: u32 = 2;
+pub const CURRENT_PARSER_VERSION: u32 = 2;
 
-/// `parse_env_hash` sentinel used by the canonical-keyed legacy surface
+/// `parse_env_hash` sentinel marking a BASE artifact key
+/// ([`FileArtifactKey::base`]) — used by the canonical-keyed surface
 /// before later stages plumb the real env hash through every call site.
-pub const LEGACY_PARSE_ENV_HASH: Hash16 = [0u8; 16];
+/// An overlay-scoped key carries a non-zero session discriminator in
+/// this dimension instead, so it can never alias a base key.
+pub const BASE_PARSE_ENV_HASH: Hash16 = [0u8; 16];
 
 // ── FileFacts ──
 
@@ -416,8 +419,8 @@ pub struct AugmentationTargetKey {
 /// Population identity for an [`AugmentationTargetKey`]: which artifact set the
 /// CONTENT-ADDRESSED augmentation index was scanned over.
 ///
-/// A `Base` index scans only base ([`FileArtifactKey::is_legacy`]) artifacts; a
-/// `Session` index scans the session's overlay (non-legacy) artifacts UNIONED
+/// A `Base` index scans only base ([`FileArtifactKey::is_base`]) artifacts; a
+/// `Session` index scans the session's overlay (non-base) artifacts UNIONED
 /// with base. The `Session` discriminant carries the overlay-set CONTENT
 /// fingerprint ([`crate::session_view::SessionView::fingerprint`], derived once
 /// through [`crate::session_view::augmentation_population_for_view`]) — NOT a
@@ -577,6 +580,16 @@ impl FileArtifacts {
 ///   included defensively so a route-surface shift always bumps even though
 ///   `build` re-resolves the live `ImportRoute` hash at host level.
 /// - `facts` — snapshotted into `file_facts` (`FileFacts` is `PartialEq`).
+/// - the currency stamps (`project_generation` AND `edge_generation`, both
+///   read for any surface the complete `IndexedReady::has_cross_file_edges`
+///   authority judges edge-bearing — shallow-inventory edges and
+///   `import_routes` entries alike) — the base view gates the canonical's
+///   `Route` fact on the STORED artifact's currency
+///   (`indexed_surface_is_current`), so replacing a stamp-stale artifact
+///   with a stamp-fresh one (the edge-refresh republish) changes what a
+///   base snapshot sees even when every surface hash above is identical.
+///   A surface WITHOUT cross-file edges never consults either stamp, so a
+///   byte-identical republish of such a surface stays a literal no-op.
 ///
 /// `parse_stable_hash` and `augmentations` are NOT read by the base view's
 /// per-canonical snapshot maps (the augmentation INDEX is a separate,
@@ -589,7 +602,19 @@ impl FileArtifacts {
 fn base_snapshot_equivalent(prev: &FileArtifacts, next: &FileArtifacts) -> bool {
     let prev_indexed = &prev.indexed;
     let next_indexed = &next.indexed;
-    prev_indexed.whole_hash == next_indexed.whole_hash
+    // Stamp dimensions, gated on where the shared currency predicate
+    // actually reads them (mirrors `indexed_surface_is_current` /
+    // `route_surface_is_edge_current`): BOTH stamps are read for any
+    // surface the complete `IndexedReady::has_cross_file_edges` authority
+    // judges edge-bearing — including import-route-only surfaces whose
+    // edges the shallow component cannot see. A surface without
+    // cross-file edges never consults either stamp, so a byte-identical
+    // republish of such a surface stays a literal no-op.
+    let stamp_equivalent = !next_indexed.has_cross_file_edges()
+        || (prev_indexed.project_generation == next_indexed.project_generation
+            && prev_indexed.edge_generation == next_indexed.edge_generation);
+    stamp_equivalent
+        && prev_indexed.whole_hash == next_indexed.whole_hash
         && prev_indexed.import_route_hash == next_indexed.import_route_hash
         && prev_indexed.shallow_state.has_resolvable_surface()
             == next_indexed.shallow_state.has_resolvable_surface()
@@ -715,7 +740,7 @@ pub struct FileArtifactStore {
     /// evict / GC and every augmentation-index populate / refresh /
     /// invalidate / clear. This is the dimension the
     /// `StoreViewValidationToken` folds so a manager-cached base view is
-    /// invalidated when a lazy `ensure_indexed_ready` publication lands
+    /// invalidated when a lazy `ensure_indexed_ready_serve` publication lands
     /// after the snapshot was built (the lazy publish does NOT bump
     /// `store_view_epoch`). Without this the cached snapshot's
     /// `file_facts` / `derived_hashes` maps go stale and warm-hit
@@ -835,7 +860,7 @@ impl FileArtifactStore {
     //
     // These methods preserve the retired type's signatures so existing
     // call sites compile across the rename. They map onto the
-    // canonical-keyed legacy slot of the underlying `DashMap`.
+    // canonical-keyed base slot of the underlying `DashMap`.
     // ──────────────────────────────────────────────────────────────────
 
     /// Look up the indexed artifact for `canonical_id` if the cached
@@ -849,7 +874,7 @@ impl FileArtifactStore {
         if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
             return None;
         }
-        let key = FileArtifactKey::legacy(Arc::from(canonical_id), expected_whole_hash);
+        let key = FileArtifactKey::base(Arc::from(canonical_id), expected_whole_hash);
         let result = self
             .artifacts
             .get(&key)
@@ -882,7 +907,7 @@ impl FileArtifactStore {
     /// This is the read counterpart of the overlay materialiser's
     /// publish. A session-view-routed reader resolves an overlay
     /// candidate through here so it never collides with the base
-    /// artifact (always keyed under [`FileArtifactKey::legacy`]) — even
+    /// artifact (always keyed under [`FileArtifactKey::base`]) — even
     /// when the overlay source is byte-identical to the base and the
     /// content hashes therefore coincide. A base read using
     /// [`Self::get`] never reaches an overlay-scoped entry; an
@@ -931,7 +956,7 @@ impl FileArtifactStore {
     /// hash check.
     ///
     /// This is a base canonical-wide scan: it matches `canonical` and
-    /// filters to [`FileArtifactKey::is_legacy`] entries, so a
+    /// filters to [`FileArtifactKey::is_base`] entries, so a
     /// session-overlay artifact published under an
     /// [`FileArtifactKey::overlay_scoped`] key is never surfaced to a
     /// base reader. A session-view reader that wants its overlay
@@ -944,7 +969,7 @@ impl FileArtifactStore {
         let mut result: Option<Arc<IndexedReady>> = None;
         let mut matched_key: Option<FileArtifactKey> = None;
         for entry in self.artifacts.iter() {
-            if entry.key().canonical.as_ref() == canonical_id && entry.key().is_legacy() {
+            if entry.key().canonical.as_ref() == canonical_id && entry.key().is_base() {
                 result = Some(Arc::clone(&entry.value().indexed));
                 matched_key = Some(entry.key().clone());
                 break;
@@ -1232,9 +1257,9 @@ impl FileArtifactStore {
     /// shape (matches the legacy `FileArtifactStore` API).
     ///
     /// This is a base canonical-wide scan: it yields only
-    /// [`FileArtifactKey::is_legacy`] entries. The `(canonical,
+    /// [`FileArtifactKey::is_base`] entries. The `(canonical,
     /// indexed)` shape discards the key, so a consumer cannot tell a
-    /// base artifact from a session-overlay one — filtering to legacy
+    /// base artifact from a session-overlay one — filtering to base
     /// keys keeps the consumer (`HostStoreView::build`, which derives
     /// base `Route` / `ImportRoute` facts from `indexed`) off
     /// session-specific overlay routes. Diagnostics that need every
@@ -1244,7 +1269,7 @@ impl FileArtifactStore {
     pub fn snapshot_all(&self) -> Vec<(Arc<str>, Arc<IndexedReady>)> {
         self.artifacts
             .iter()
-            .filter(|entry| entry.key().is_legacy())
+            .filter(|entry| entry.key().is_base())
             .map(|entry| {
                 (
                     entry.key().canonical.clone(),
@@ -1271,13 +1296,13 @@ impl FileArtifactStore {
         let tick = self.access_tick.fetch_add(1, Ordering::Relaxed) + 1;
         self.last_access.insert(Arc::clone(&canonical_id), tick);
 
-        // The base-visible identity for this insert is the legacy key at
+        // The base-visible identity for this insert is the base key at
         // the NEW content hash — the exact key a base `HostStoreView`
         // snapshots for this canonical's live content (`snapshot_all` /
         // `snapshot_file_facts_into` gate on `content_hash == live
         // whole_hash`). Compute it first so a base-equivalent replace can
         // be detected BEFORE any removal and expose NO absent window for it.
-        let current_key = FileArtifactKey::legacy(Arc::clone(&canonical_id), whole_hash);
+        let current_key = FileArtifactKey::base(Arc::clone(&canonical_id), whole_hash);
         let payload = Arc::new(FileArtifacts::with_indexed(indexed));
 
         // Is the new payload base-snapshot-equivalent to what already lives
@@ -1300,11 +1325,11 @@ impl FileArtifactStore {
         // content_hash. Drain every prior version EXCEPT the current key
         // when it is base-equivalent (left in place above). Overlay-scoped
         // prior versions are base-invisible (`snapshot_all` filters to
-        // legacy keys), so draining them alone does NOT force a base-token
-        // bump. The prior BASE (legacy-key) payload — captured before
+        // base keys), so draining them alone does NOT force a base-token
+        // bump. The prior BASE (base-key) payload — captured before
         // draining — is what the bump-iff-actually-changed gate compares
         // against when the current key is NOT already present (a content
-        // change replacing a different-hash legacy entry). The drain itself
+        // change replacing a different-hash base entry). The drain itself
         // routes through the single removal chokepoint, which invalidates
         // the prior versions' augmentation-index entries — a content edit
         // that RETARGETS or DROPS an augmentation must clean the PRIOR
@@ -1324,12 +1349,12 @@ impl FileArtifactStore {
             .map(|entry| entry.key().clone())
             .collect();
         let had_prior = !prior_keys.is_empty() || current_key_is_base_equivalent;
-        // Capture the prior BASE (legacy-key) payload BEFORE draining so the
+        // Capture the prior BASE (base-key) payload BEFORE draining so the
         // bump-iff-actually-changed gate can compare it against the new
-        // payload (a content change replacing a different-hash legacy entry).
+        // payload (a content change replacing a different-hash base entry).
         let prior_base_payload: Option<Arc<FileArtifacts>> = prior_keys
             .iter()
-            .find(|k| k.is_legacy())
+            .find(|k| k.is_base())
             .and_then(|k| self.artifacts.get(k).map(|e| Arc::clone(e.value())));
         // Capture the NEW artifact's augmentations before the conditional
         // insert moves the payload, so the publish-side invalidation can
@@ -1368,8 +1393,8 @@ impl FileArtifactStore {
         // changes the canonical's base snapshot value. A base-equivalent
         // re-insert at the current key is a literal no-op (the entry was
         // left untouched) and never bumps. Otherwise: with no prior base
-        // (legacy) entry the canonical's base snapshot goes absent →
-        // present, which always bumps; a replace of a different-hash legacy
+        // (base-key) entry the canonical's base snapshot goes absent →
+        // present, which always bumps; a replace of a different-hash base
         // entry bumps unless the new payload is base-snapshot-equivalent to
         // it (R4 parity). The comparison is CONSERVATIVE: any real change to
         // a base-visible dimension still bumps (mandatory no-under-bump).
@@ -1474,7 +1499,7 @@ impl FileArtifactStore {
         let canonical: Arc<str> = Arc::from(marker);
         let indexed = Arc::new(IndexedReady::new_for_test([0u8; 16]));
         let payload = Arc::new(FileArtifacts::with_indexed(indexed));
-        let key = FileArtifactKey::legacy(canonical, [0u8; 16]);
+        let key = FileArtifactKey::base(canonical, [0u8; 16]);
         let prev = self.artifacts.insert(key, payload);
         if prev.is_none() {
             self.live_counter.fetch_add(1, Ordering::Relaxed);
@@ -1567,7 +1592,7 @@ impl FileArtifactStore {
     /// [`Self::get_artifacts_any`] (which ignores `content_hash` too).
     /// It is the read for consumers that need the **parse-domain
     /// `FileFacts` registry** for a specific observed content version:
-    /// a base artifact (keyed [`FileArtifactKey::legacy`]) and a
+    /// a base artifact (keyed [`FileArtifactKey::base`]) and a
     /// session-overlay artifact (keyed [`FileArtifactKey::overlay_scoped`])
     /// for the SAME content version carry an identical parse-fact
     /// registry, so the `parse_env_hash` discriminator is irrelevant to
@@ -1604,7 +1629,7 @@ impl FileArtifactStore {
     /// `canonical`.
     ///
     /// This is a base canonical-wide scan: it matches `canonical` and
-    /// filters to [`FileArtifactKey::is_legacy`] entries, so a
+    /// filters to [`FileArtifactKey::is_base`] entries, so a
     /// session-overlay artifact published under an
     /// [`FileArtifactKey::overlay_scoped`] key is never surfaced to a
     /// base reader (which would otherwise read the overlay's
@@ -1618,7 +1643,7 @@ impl FileArtifactStore {
             return None;
         }
         for entry in self.artifacts.iter() {
-            if entry.key().canonical.as_ref() == canonical && entry.key().is_legacy() {
+            if entry.key().canonical.as_ref() == canonical && entry.key().is_base() {
                 let matched_key = entry.key().clone();
                 let value = entry.value().clone();
                 drop(entry);
@@ -1795,7 +1820,10 @@ impl FileArtifactStore {
                 .fetch_add(removed as u64, Ordering::Relaxed);
             // Draining every version of a canonical drops by-value
             // snapshot dimensions; bump the generation so a pre-removal
-            // `HostStoreView` is token-invalidated.
+            // `HostStoreView` is token-invalidated. The per-canonical
+            // access tick goes with it (same chokepoint discipline as
+            // the reachability GC).
+            self.last_access.remove(canonical_id);
             self.bump_artifact_generation();
             // R23 typed event: each eviction emits one event so
             // downstream telemetry can attribute drain footprint
@@ -1813,6 +1841,45 @@ impl FileArtifactStore {
             }
         }
         removed
+    }
+
+    /// Drop EVERY artifact in the store — the `set_workspace` cascade
+    /// step. A workspace-authority swap orphans every artifact-only
+    /// canonical's payload (its content authority is gone) and makes a
+    /// full rebuild of scheduler-tracked artifacts the only provably
+    /// correct posture. Routed through the same removal chokepoint as
+    /// [`Self::remove_canonical`] so hit counters and the augmentation
+    /// index stay coherent, and bumps the artifact generation so a
+    /// pre-clear `HostStoreView` is token-invalidated.
+    pub fn clear_all(&self) {
+        let to_remove: Vec<FileArtifactKey> = self
+            .artifacts
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect();
+        let removed_pairs = self.evict_artifact_keys(&to_remove);
+        let removed = removed_pairs.len();
+        // Every entry is gone — drop every access-tick crumb in lockstep
+        // (the same chokepoint discipline as the reachability GC).
+        self.last_access.clear();
+        if removed > 0 {
+            self.live_counter
+                .fetch_sub(removed as u64, Ordering::Relaxed);
+            self.stale_sweeps
+                .fetch_add(removed as u64, Ordering::Relaxed);
+            self.bump_artifact_generation();
+            for (key, _payload) in &removed_pairs {
+                crate::host_manage::push_structured_event(
+                    crate::component_meta_audit::StructuredAuditEvent::FileArtifactCache {
+                        canonical_id: Arc::clone(&key.canonical),
+                        action: verter_audit::FileArtifactCacheAction::Evict,
+                        content_hash: key.content_hash,
+                        parse_env_hash: key.parse_env_hash,
+                        entry_count_after: self.artifacts.len() as u32,
+                    },
+                );
+            }
+        }
     }
 
     /// Snapshot every key, for diagnostics / reachability sweeps.
@@ -1877,7 +1944,7 @@ impl FileArtifactStore {
     /// The match step (`augmenter_matches_target`) may invoke a
     /// caller-supplied resolver that re-enters `FileArtifactStore` and
     /// inserts into `self.artifacts` (a relative `declare module "./x"`
-    /// target resolves its specifier through `ensure_indexed_ready`,
+    /// target resolves its specifier through `ensure_indexed_ready_serve`,
     /// which materialises and inserts the dependency). The DashMap
     /// shards are `std::sync::RwLock`, which is non-reentrant: a write
     /// to a shard the current thread already read-locks via an active
@@ -1889,9 +1956,9 @@ impl FileArtifactStore {
     ///
     /// Candidate selection is population-aware (overlay isolation): a base
     /// scan (`overlay_discriminator: None`) collects base
-    /// ([`FileArtifactKey::is_legacy`]) artifacts only; a session scan
+    /// ([`FileArtifactKey::is_base`]) artifacts only; a session scan
     /// (`Some(discriminator)`) collects base artifacts UNIONED with this
-    /// session's own overlay artifacts (the non-legacy key whose
+    /// session's own overlay artifacts (the non-base key whose
     /// `parse_env_hash` discriminator matches). A different session's overlay
     /// artifact carries a different discriminator and is excluded — overlay
     /// augmenters never cross sessions or poison the base index. Only
@@ -1904,16 +1971,16 @@ impl FileArtifactStore {
             .iter()
             .filter(|entry| {
                 let key = entry.key();
-                // Base population: legacy (base) artifacts only. Session
+                // Base population: base-key artifacts only. Session
                 // population: base artifacts UNIONED with the session's own
-                // overlay artifacts (the non-legacy key whose `parse_env_hash`
+                // overlay artifacts (the non-base key whose `parse_env_hash`
                 // discriminator matches this session). A DIFFERENT session's
                 // overlay artifact carries a different discriminator and is
                 // excluded — overlay augmenters never cross sessions or poison
                 // the base index.
-                key.is_legacy()
+                key.is_base()
                     || overlay_discriminator
-                        .is_some_and(|d| !key.is_legacy() && key.parse_env_hash == d)
+                        .is_some_and(|d| !key.is_base() && key.parse_env_hash == d)
             })
             .filter(|entry| !entry.value().augmentations.is_empty())
             .map(|entry| AugmenterCandidate {
@@ -1969,7 +2036,7 @@ impl FileArtifactStore {
         // Dedup by canonical so a file with multiple matching facts
         // contributes only once.
         //
-        // The scan filters to base ([`FileArtifactKey::is_legacy`])
+        // The scan filters to base ([`FileArtifactKey::is_base`])
         // artifacts: the augmentation index is keyed by a base
         // resolve-domain identity (`project_identity`,
         // `resolve_env_hash`, `lib_env_hash`) and feeds the base
@@ -2167,7 +2234,7 @@ impl FileArtifactStore {
     ///
     /// The scan reads declared [`ModuleAugmentationFact`] specifiers (the
     /// authoritative augmentation source) and filters to base
-    /// ([`FileArtifactKey::is_legacy`]) artifacts — session-overlay
+    /// ([`FileArtifactKey::is_base`]) artifacts — session-overlay
     /// artifacts carry session-divergent augmentations and must not leak
     /// into a base-domain probe set. The returned patterns are
     /// deduplicated.
@@ -2176,7 +2243,7 @@ impl FileArtifactStore {
         let mut wildcard_patterns: Vec<InternedGlobPattern> = Vec::new();
         let mut seen_patterns: rustc_hash::FxHashSet<Arc<str>> = rustc_hash::FxHashSet::default();
         for artifact_entry in self.artifacts.iter() {
-            if !artifact_entry.key().is_legacy() {
+            if !artifact_entry.key().is_base() {
                 continue;
             }
             for fact in artifact_entry.value().augmentations.iter() {

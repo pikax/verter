@@ -188,8 +188,11 @@ impl MemoryWorkspace {
     /// Inject a file into the snapshot.
     pub fn inject_file(&self, canonical_id: String, source: Arc<str>) {
         self.engine.invalidate_package_manifest(&canonical_id);
-        self.engine.snapshot.write().inject(canonical_id, source);
-        self.engine.bump_content_generation();
+        self.engine
+            .snapshot
+            .write()
+            .inject(canonical_id.clone(), source);
+        self.engine.bump_content_generation_for(&canonical_id);
     }
 
     /// Remove a file from the snapshot.
@@ -197,7 +200,7 @@ impl MemoryWorkspace {
         self.engine.invalidate_package_manifest(canonical_id);
         self.engine.snapshot.write().remove(canonical_id);
         self.engine.edges.write().remove_file(canonical_id);
-        self.engine.bump_content_generation();
+        self.engine.bump_content_generation_for(canonical_id);
     }
 
     /// Apply a batch of workspace changes.
@@ -368,6 +371,10 @@ impl crate::traits::WorkspaceRead for MemoryWorkspace {
         self.engine.current_content_generation()
     }
 
+    fn last_content_transition_generation(&self, canonical_id: &str) -> u64 {
+        self.engine.last_content_transition_generation(canonical_id)
+    }
+
     fn vfs_provenance_snapshot(&self) -> crate::types::VfsProvenanceSnapshot {
         self.engine.vfs_provenance.snapshot()
     }
@@ -533,6 +540,20 @@ impl crate::traits::WorkspaceAccess for MemoryWorkspace {
         self.engine.set_exact_resolutions(canonical_id, resolutions)
     }
 
+    fn record_parsed_edges_with_exact_resolutions(
+        &self,
+        canonical_id: &str,
+        edges: &[crate::types::ParsedEdge],
+        resolutions: Vec<crate::types::ExactResolution>,
+    ) -> crate::types::ExactResolutionResult {
+        self.engine.record_parsed_edges_with_exact_resolutions(
+            self,
+            canonical_id,
+            edges,
+            resolutions,
+        )
+    }
+
     fn replace_semantic_transitive(
         &self,
         canonical_id: &str,
@@ -559,14 +580,14 @@ impl crate::traits::WorkspaceAccess for MemoryWorkspace {
             .set(canonical_id.to_string(), source);
         if changed {
             self.engine.invalidate_package_manifest(canonical_id);
-            self.engine.bump_content_generation();
+            self.engine.bump_content_generation_for(canonical_id);
         }
     }
 
     fn notify_close(&self, canonical_id: &str) {
         self.engine.invalidate_package_manifest(canonical_id);
         self.engine.overlay.write().clear(canonical_id);
-        self.engine.bump_content_generation();
+        self.engine.bump_content_generation_for(canonical_id);
     }
 
     fn notify_delete(&self, canonical_id: &str) {
@@ -574,7 +595,7 @@ impl crate::traits::WorkspaceAccess for MemoryWorkspace {
         self.engine.overlay.write().clear(canonical_id);
         self.engine.snapshot.write().remove(canonical_id);
         self.engine.edges.write().remove_file(canonical_id);
-        self.engine.bump_content_generation();
+        self.engine.bump_content_generation_for(canonical_id);
     }
 
     fn configure_resolver(&self, projects: Vec<crate::resolver::IdeProjectConfig>) {
@@ -608,7 +629,7 @@ impl crate::traits::WorkspaceAccess for MemoryWorkspace {
             .snapshot
             .write()
             .inject(path.to_string(), Arc::from(content));
-        self.engine.bump_content_generation();
+        self.engine.bump_content_generation_for(path);
         Ok(())
     }
 
@@ -622,20 +643,19 @@ impl crate::traits::WorkspaceAccess for MemoryWorkspace {
         mark_parent_dir_dirty(&self.engine, path);
         self.engine.snapshot.write().remove(path);
         self.engine.edges.write().remove_file(path);
-        self.engine.bump_content_generation();
+        self.engine.bump_content_generation_for(path);
         Ok(())
     }
 
     fn delete_dir_all(&self, path: &str) -> Result<(), crate::error::VfsError> {
-        let prefix = if path.ends_with('/') {
-            path.to_string()
-        } else {
-            format!("{path}/")
-        };
+        // Boundary-correct, trailing-slash-normalized subtree match
+        // (also covers the exact entry): `delete_dir_all("/a/")` and
+        // `delete_dir_all("/a")` remove the same id set, and a
+        // byte-prefix sibling (`/ab.ts` under `/a`) never matches.
         let mut snapshot = self.engine.snapshot.write();
         let ids_to_remove: Vec<String> = snapshot
             .ids()
-            .filter(|id| id.starts_with(&prefix) || *id == path)
+            .filter(|id| path_matches_prefix(id, path))
             .map(|id| id.to_string())
             .collect();
         for id in &ids_to_remove {
@@ -647,8 +667,12 @@ impl crate::traits::WorkspaceAccess for MemoryWorkspace {
         for id in &ids_to_remove {
             edges.remove_file(id);
         }
+        drop(edges);
         self.engine.dir_index.write().mark_dirty_under(path);
         mark_parent_dir_dirty(&self.engine, path);
+        for id in &ids_to_remove {
+            self.engine.record_content_transition(id);
+        }
         self.engine.bump_content_generation();
         Ok(())
     }
@@ -667,7 +691,7 @@ impl crate::traits::WorkspaceAccess for MemoryWorkspace {
             .snapshot
             .write()
             .inject(dst.to_string(), content);
-        self.engine.bump_content_generation();
+        self.engine.bump_content_generation_for(dst);
         Ok(())
     }
 

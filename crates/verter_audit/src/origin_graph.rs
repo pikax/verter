@@ -423,7 +423,7 @@ pub enum MaterializationSubject {
     },
     /// Prepared-decl bundle materialization. Subject of every
     /// cold-path build inside
-    /// `materialize_prepared_decl_bundle_from_route_owned_shallow`
+    /// `materialize_prepared_decl_bundle_from_routed_shallow`
     /// and `materialize_prepared_decl_bundle` (the two cold
     /// producers of `prepared_decl_bundles`).
     ///

@@ -992,7 +992,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         // R6: Instantiate.base is the env-bearing content-free
         // `ResolvedDeclSlotIdentity` slot (built via `type_slot_for`); the
         // cold build re-sources the live whole_hash from
-        // `ensure_indexed_ready`.
+        // `ensure_indexed_ready_serve`.
         let root_canonical: std::sync::Arc<str> = std::sync::Arc::from(resolved_root.0.as_str());
         let base = dispatch.type_slot_for(
             std::sync::Arc::clone(&root_canonical),

@@ -83,22 +83,13 @@ fn build_large_indexed(decl_count: usize) -> Arc<IndexedReady> {
         augmentation_value_scopes: Default::default(),
         analysis: empty_external(),
     };
-    Arc::new(IndexedReady {
-        whole_hash: [0u8; 16],
-        shallow_state: Arc::new(shallow),
-        import_routes: Arc::new(FxHashMap::default()),
-        import_route_hash: None,
-        route_hash: None,
-        edge_generation: 0,
-        raw_source: Arc::from(""),
-        eval_source: Arc::from(""),
-        cached_parse: None,
-        script_analysis: None,
-        export_signatures: None,
-        snapshot: Arc::new(verter_session::FileAnalysisSnapshot::default()),
-        external_type_analysis: empty_external(),
-        declares_interface_app_config: false,
-    })
+    Arc::new(IndexedReady::new_for_test_with_state(
+        [0u8; 16],
+        Arc::new(shallow),
+        Arc::from(""),
+        Arc::from(""),
+        empty_external(),
+    ))
 }
 
 #[test]

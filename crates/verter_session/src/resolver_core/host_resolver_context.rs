@@ -50,7 +50,7 @@ use verter_workspace::{AmbientSymbolHit, ProjectStableKey};
 
 use crate::host_manage::ValueDeclIdentity;
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::project_type_store::{IndexedReady, ProjectTypeStore};
+use crate::project_type_store::ProjectTypeStore;
 use crate::request_context::bump_resolver_store_view_call;
 use crate::resolver_core::prepared_decl::PreparedDeclBundle;
 use crate::resolver_core::request_store_view::{CanonicalCompletionOverlay, RequestStoreView};
@@ -75,7 +75,7 @@ use crate::HostConfig;
 /// The owned [`RequestStoreView`] chains a
 /// [`CanonicalCompletionOverlay`] in front of the borrowed base view
 /// so canonicals loaded mid-request (`ensure_loaded` /
-/// `ensure_indexed_ready` successes) are promoted into the overlay and
+/// `ensure_indexed_ready_serve` successes) are promoted into the overlay and
 /// observed by the self-root fact validator on subsequent reads. The
 /// overlay lives behind an `Arc` so cooperative-admission lanes that
 /// inherit the request's context can share it.
@@ -176,7 +176,7 @@ impl<'a> HostResolverContext<'a> {
     /// Idempotently promote a newly-loaded canonical into the overlay
     /// (epoch-guarded).
     ///
-    /// Called from `ensure_loaded` / `ensure_indexed_ready` success
+    /// Called from `ensure_loaded` / `ensure_indexed_ready_serve` success
     /// paths so subsequent self-root fact validation observes the
     /// freshly-loaded canonical's current content rather than
     /// false-missing because the request-entry base view did not track
@@ -235,8 +235,11 @@ impl<'a> ResolverContext for HostResolverContext<'a> {
     }
 
     #[inline]
-    fn ensure_indexed_ready(&self, canonical_id: &str) -> Option<Arc<IndexedReady>> {
-        let result = crate::VerterHost::ensure_indexed_ready(self.inner, canonical_id);
+    fn ensure_indexed_ready_serve(
+        &self,
+        canonical_id: &str,
+    ) -> Option<crate::host_manage::prepared_decl::IndexedReadyServe> {
+        let result = crate::VerterHost::ensure_indexed_ready_serve(self.inner, canonical_id);
         if result.is_some() {
             // Eager canonical completion:
             // promote the freshly-loaded canonical's per-canonical
@@ -339,7 +342,7 @@ impl<'a> ResolverContext for HostResolverContext<'a> {
     ) -> Option<(String, String)> {
         // Route through the view-bound variant so the cached route
         // validates against the request-bound view (the carrier site
-        // at `route_owned_shallow.rs:496`).
+        // at `route_surface.rs`).
         self.inner.resolve_named_type_export_target_with_store_view(
             &self.view,
             dep_canonical,
@@ -392,8 +395,8 @@ impl<'a> ResolverContext for HostResolverContext<'a> {
     }
 
     #[inline]
-    fn route_owned_shallow_state(&self, canonical_id: &str) -> Option<Arc<ShallowFileState>> {
-        crate::VerterHost::route_owned_shallow_state(self.inner, canonical_id)
+    fn routed_shallow_state(&self, canonical_id: &str) -> Option<Arc<ShallowFileState>> {
+        crate::VerterHost::routed_shallow_state(self.inner, canonical_id)
     }
 
     #[inline]

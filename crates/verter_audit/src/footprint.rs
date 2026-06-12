@@ -551,7 +551,7 @@ pub struct ResolverHotPathCounters {
     pub substitute_mapped_type_descend: u32,
     /// Calls to `build_typeof` (the HIGH-confidence direction).
     pub build_typeof_calls: u32,
-    /// `build_typeof` calls where `ensure_indexed_ready` returned
+    /// `build_typeof` calls where `ensure_indexed_ready_serve` returned
     /// `None` (the brief's prepared-value miss site).
     pub build_typeof_prepared_value_misses: u32,
     // Mapped-member materialization counters

@@ -8,7 +8,7 @@
 //! construct [`SessionResolverContext`] over `(inner, view)` so the
 //! same trait methods become overlay-aware: the wrapper overrides
 //! `active_session_view()` to return `Some(view)` and overrides the
-//! `resolver_store_view` / `shallow_file_state` / `ensure_indexed_ready`
+//! `resolver_store_view` / `shallow_file_state` / `ensure_indexed_ready_serve`
 //! family so an overlay-bearing canonical pins against the overlay
 //! content hash, while every other method delegates to the inner
 //! [`ResolverContext`].
@@ -62,7 +62,7 @@ use crate::HostConfig;
 /// (returns `Some(view)`) and the overlay-aware overrides on
 /// [`ResolverContext::store_view`],
 /// [`ResolverContext::shallow_file_state`],
-/// [`ResolverContext::ensure_indexed_ready`], etc. Resolver-tier
+/// [`ResolverContext::ensure_indexed_ready_serve`], etc. Resolver-tier
 /// helpers that consult `active_session_view()` (or the per-method
 /// overrides above) for overlay-aware reads observe the session view
 /// via this wrapper without changing the trait surface or the call-
@@ -80,7 +80,7 @@ use crate::HostConfig;
 /// [`HostStoreView::with_session_overlay`]. Per the 6.c per-request
 /// view-hoisting rail the overlay re-rooting runs exactly once per
 /// session-bearing request, not per resolver method call. Canonicals
-/// loaded mid-request through `ensure_loaded` / `ensure_indexed_ready`
+/// loaded mid-request through `ensure_loaded` / `ensure_indexed_ready_serve`
 /// are promoted into the completion overlay so the self-root validator
 /// observes them on subsequent reads.
 pub(crate) struct SessionResolverContext<'a> {
@@ -162,7 +162,7 @@ impl<'a> SessionResolverContext<'a> {
     /// Idempotently promote a newly-loaded canonical into the overlay
     /// (epoch-guarded).
     ///
-    /// Called from `ensure_loaded` / `ensure_indexed_ready` success
+    /// Called from `ensure_loaded` / `ensure_indexed_ready_serve` success
     /// paths so subsequent self-root fact validation observes the
     /// freshly-loaded canonical's current content rather than
     /// false-missing because the request-entry base view did not track
@@ -222,13 +222,16 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
     }
 
     #[inline]
-    fn ensure_indexed_ready(&self, canonical_id: &str) -> Option<Arc<IndexedReady>> {
+    fn ensure_indexed_ready_serve(
+        &self,
+        canonical_id: &str,
+    ) -> Option<crate::host_manage::prepared_decl::IndexedReadyServe> {
         // Overlay-priority hook: the session view governs whether the
         // base host's IndexedReady is acceptable for this query. The
         // host's own ensure-loaded already covers the non-overlay
         // case; overlay-aware materialisation routes through the
         // shared helper in `host_manage::overlay_priority`.
-        let result = crate::host_manage::overlay_priority::ensure_indexed_ready_with_view(
+        let result = crate::host_manage::overlay_priority::ensure_indexed_ready_serve_with_view(
             self.inner,
             self.view,
             canonical_id,
@@ -269,7 +272,7 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
     #[inline]
     fn shallow_file_state(&self, canonical_id: &str) -> Option<Arc<ShallowFileState>> {
         // Thread `self` (the session context) as the current-content
-        // oracle so the pinned `IndexedReady` read and the route-owned
+        // oracle so the pinned `IndexedReady` read and the route-surface
         // fallback both observe the active overlay's content identity —
         // an overlay-covered dependency pins against the overlay hash,
         // not the base host's.
@@ -336,7 +339,7 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
     /// 1. An overlay-Upsert covering `canonical` →
     ///    [`SessionView::overlay_content_hash_for`] gives the overlay
     ///    content hash; the overlay `IndexedReady` is materialised /
-    ///    fetched via the overlay-priority `ensure_indexed_ready` path
+    ///    fetched via the overlay-priority `ensure_indexed_ready_serve` path
     ///    and pinned to that exact hash — **no base fallback**. If the
     ///    overlay candidate cannot be recovered at the overlay hash,
     ///    `None` (refuse admission rather than observe the base).
@@ -353,7 +356,7 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
             // Materialise / fetch the overlay candidate, then read it
             // back — no base fallback. Overlay detection
             // (`overlay_content_hash_for`) and the materialise step
-            // (`ensure_indexed_ready`) operate on the RAW `canonical`
+            // (`ensure_indexed_ready_serve`) operate on the RAW `canonical`
             // because the `SessionView` overlay maps are raw-keyed. The
             // store read then goes through `OverlayArtifactIdentity`,
             // which builds the exact key the overlay materialiser
@@ -365,7 +368,7 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
             // companion). `lookup_overlay_artifacts` stays off the base
             // artifact — a real divergence when the overlay bytes are
             // identical to the base.
-            let _ = ResolverContext::ensure_indexed_ready(self, canonical);
+            let _ = ResolverContext::ensure_indexed_ready_serve(self, canonical);
             let identity = self.inner.overlay_artifact_identity(canonical);
             let indexed = Arc::clone(
                 &identity
@@ -401,13 +404,13 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
     /// context's view carries an explicit overlay for `canonical`, the
     /// overlay `IndexedReady` was published under an `overlay_scoped`
     /// key (overlay content hash + overlay-set discriminator); a
-    /// legacy-key read would miss it, or — when the overlay bytes are
+    /// base-key read would miss it, or — when the overlay bytes are
     /// identical to the base — return the BASE artifact, whose import
     /// routes diverge from the overlay's (the overlay can resolve an
     /// overlay-only relative helper the base cannot). This override
     /// reads the overlay candidate through `get_overlay_scoped` so the
     /// content-pinned read stays on the session's own artifact; an
-    /// unmasked canonical keeps the base legacy-key read.
+    /// unmasked canonical keeps the base-key read.
     #[inline]
     fn indexed_for_current_content(&self, canonical: &str) -> Option<Arc<IndexedReady>> {
         if self.view.overlay_content_hash_for(canonical).is_some() {
@@ -434,13 +437,14 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
             // are preserved (no overlay-blindness).
             return self
                 .inner
-                .materialize_overlay_indexed_ready_with_view(canonical, self.view);
+                .materialize_overlay_indexed_ready_serve_with_view(canonical, self.view)
+                .map(|serve| serve.indexed);
         }
         if self.view.is_tombstoned(canonical) {
             return None;
         }
         // Unmasked canonical: the base host's content-pinned read
-        // (scheduler authoritative hash → legacy-key artifact).
+        // (scheduler authoritative hash → base-key artifact).
         self.inner.current_content_pinned_indexed(canonical)
     }
 
@@ -477,7 +481,7 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
     ///
     /// The chained [`CanonicalCompletionOverlay`] shadows the base view
     /// with any canonicals loaded mid-request — additive loads observed
-    /// through `ensure_loaded` / `ensure_indexed_ready` successes.
+    /// through `ensure_loaded` / `ensure_indexed_ready_serve` successes.
     /// Shadowing reads are authoritative: a mismatched overlay value
     /// rejects (no fallthrough to the base view).
     #[inline]
@@ -571,8 +575,8 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
     }
 
     #[inline]
-    fn route_owned_shallow_state(&self, canonical_id: &str) -> Option<Arc<ShallowFileState>> {
-        ResolverContext::route_owned_shallow_state(self.inner, canonical_id)
+    fn routed_shallow_state(&self, canonical_id: &str) -> Option<Arc<ShallowFileState>> {
+        ResolverContext::routed_shallow_state(self.inner, canonical_id)
     }
 
     #[inline]

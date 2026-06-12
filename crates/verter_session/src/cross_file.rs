@@ -618,10 +618,11 @@ import Child from '@/components/Child.vue'
         compile_file(&host, "/project/src/components/Child.vue");
         compile_file(&host, "/project/src/App.vue");
 
-        // Configure workspace resolver via host wrapper — sub-plan
-        // §6b.D2b reroute. LSP/unplugin route through `host.configure_projects`
-        // post-bypass-closure; the host wrapper runs the route_owned_shallow
-        // clear_all + bump_project_generation_and_evict cascade.
+        // Configure the workspace resolver via the host wrapper, as
+        // LSP/unplugin do. `host.configure_projects` clears derived
+        // route state, resets resolver caches, semantic-invalidates,
+        // bumps `project_generation` (evicting the project-shape
+        // cluster), and advances the store-view epoch.
         {
             use verter_semantic::analysis::project_resolver::*;
             host.configure_projects(vec![IdeProjectConfig {

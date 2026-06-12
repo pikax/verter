@@ -369,57 +369,45 @@ impl ShallowImportResolver for NullResolver {
 }
 
 impl ShallowFileState {
-    /// Build from an existing `AnalyzedExternalTypeSource` and export-routing data.
-    ///
-    /// This is the primary construction path: the host ensures the file is loaded
-    /// and analyzed, then builds the shallow state from that analysis.
-    ///
-    /// Uses a null resolver — canonical IDs on edges will be empty strings.
-    /// Production code should prefer `from_analysis_with_resolver`.
+    /// Test-only convenience: build from an existing
+    /// `AnalyzedExternalTypeSource` with a null resolver — canonical IDs
+    /// on cross-file edges stay empty. The production construction path
+    /// is [`Self::from_analysis_with_resolver`] (the materialise
+    /// closure supplies the resolver and the single built `EvalEnv`).
+    /// Gated `#[cfg(any(test, debug_assertions))]` — integration tests
+    /// in `tests/` compile without `cfg(test)`; release production
+    /// builds compile this edge-less constructor out.
+    #[cfg(any(test, debug_assertions))]
     pub fn from_analysis(
         whole_hash: Hash16,
         analysis: Arc<AnalyzedExternalTypeSource>,
         eval_env: Option<&verter_semantic::analysis::type_eval::EvalEnv>,
     ) -> Self {
-        Self::from_analysis_with_source(whole_hash, analysis, None, eval_env)
+        Self::from_analysis_inner(whole_hash, analysis, eval_env, &NullResolver)
     }
 
     /// Build from analysis with a resolver that canonicalizes all cross-file edges.
     ///
-    /// This is the preferred production construction path.
+    /// This is the preferred production construction path. The caller
+    /// supplies the already-built `EvalEnv` — there is NO internal parse
+    /// path here: the materialise closure's single parse/env is the only
+    /// production producer, and a hidden fallback re-parse is exactly
+    /// the duplicate-build/divergence class this builder must not own.
     pub fn from_analysis_with_resolver(
         whole_hash: Hash16,
         analysis: Arc<AnalyzedExternalTypeSource>,
-        eval_source: Option<&str>,
         eval_env: Option<&verter_semantic::analysis::type_eval::EvalEnv>,
         resolver: &dyn ShallowImportResolver,
     ) -> Self {
-        Self::from_analysis_inner(whole_hash, analysis, eval_source, eval_env, resolver)
-    }
-
-    /// Build from analysis with an optional source fallback that can populate
-    /// symbol inventories when the caller does not already have an `EvalEnv`.
-    ///
-    /// Uses a null resolver — canonical IDs on edges will be empty strings.
-    pub fn from_analysis_with_source(
-        whole_hash: Hash16,
-        analysis: Arc<AnalyzedExternalTypeSource>,
-        eval_source: Option<&str>,
-        eval_env: Option<&verter_semantic::analysis::type_eval::EvalEnv>,
-    ) -> Self {
-        Self::from_analysis_inner(whole_hash, analysis, eval_source, eval_env, &NullResolver)
+        Self::from_analysis_inner(whole_hash, analysis, eval_env, resolver)
     }
 
     fn from_analysis_inner(
         whole_hash: Hash16,
         analysis: Arc<AnalyzedExternalTypeSource>,
-        eval_source: Option<&str>,
         eval_env: Option<&verter_semantic::analysis::type_eval::EvalEnv>,
         resolver: &dyn ShallowImportResolver,
     ) -> Self {
-        let fallback_env =
-            eval_source.map(verter_semantic::analysis::type_eval_build::parse_and_build_env);
-        let eval_env = eval_env.or(fallback_env.as_ref());
         let mut exports = FxHashMap::default();
         let mut wildcard_reexports = Vec::new();
         let mut import_locals = FxHashSet::default();
@@ -715,6 +703,41 @@ impl ShallowFileState {
     /// Whether this file has any wildcard re-exports.
     pub fn has_wildcard_reexports(&self) -> bool {
         !self.wildcard_reexports.is_empty()
+    }
+
+    /// Whether the SHALLOW INVENTORY carries any cross-file edge — a
+    /// resolved import target, a wildcard reexport, a named reexport, or a
+    /// bindingless (side-effect / empty-list) import. Every such edge
+    /// bakes or implies a target `canonical_id` that depends on the
+    /// DEPENDENCY file set (not this file's own content). Bindingless
+    /// imports carry no local binding (so they never enter
+    /// `import_targets`) yet still resolve into
+    /// `IndexedReady.import_routes`; the retained analysis inventory is
+    /// the single authoritative source for them.
+    ///
+    /// This is a COMPONENT predicate, not an edge-currency authority: an
+    /// artifact can carry cross-file edges exclusively in its
+    /// `import_routes` table (the SFC external `src=` class, caller-pushed
+    /// route snapshots) that are invisible here. The complete authority is
+    /// `IndexedReady::has_cross_file_edges` (`!import_routes.is_empty() ||`
+    /// this component); the shared edge-currency oracle
+    /// (`route_surface_is_edge_current`) and the reuse gates consult ONLY
+    /// the complete authority. The legitimate component uses are the
+    /// authority's own composition and gates over data derived purely from
+    /// the shallow inventory (e.g. whether a bare shallow route-surface
+    /// hash is currency-independent).
+    pub fn has_shallow_cross_file_edges(&self) -> bool {
+        !self.import_targets.is_empty()
+            || self.has_wildcard_reexports()
+            || !self
+                .analysis
+                .extracted
+                .bindingless_import_sources
+                .is_empty()
+            || self
+                .exports
+                .values()
+                .any(|target| matches!(target, ExportTarget::Reexport { .. }))
     }
 
     /// Look up a local symbol by name.
@@ -2420,26 +2443,22 @@ mod tests {
     }
 
     #[test]
-    fn source_backed_construction_populates_symbols_without_caller_env() {
+    fn env_backed_construction_populates_symbols() {
         let source = r#"
 export interface Props { label: string }
 export const defaults: Props = { label: 'ok' }
 "#;
         let analysis = make_analysis(source);
-        let state = ShallowFileState::from_analysis_with_source(
-            Hash16::default(),
-            analysis,
-            Some(source),
-            None,
-        );
+        let env = parse_and_build_env(source);
+        let state = ShallowFileState::from_analysis(Hash16::default(), analysis, Some(&env));
 
         assert!(
             state.symbol("Props").is_some(),
-            "source-backed construction should populate type symbols without a caller-provided env"
+            "env-backed construction should populate type symbols"
         );
         let defaults = state
             .value_symbol("defaults")
-            .expect("source-backed construction should populate value symbols");
+            .expect("env-backed construction should populate value symbols");
         assert_eq!(defaults.kind, ValueDeclKind::Const);
         assert!(defaults.type_annotation.is_some());
     }
@@ -3083,7 +3102,6 @@ export interface Props { child: Foo }
         let state = ShallowFileState::from_analysis_with_resolver(
             Hash16::default(),
             analysis,
-            None,
             Some(&env),
             &TestResolver,
         );

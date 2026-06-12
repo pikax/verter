@@ -800,7 +800,7 @@ fn shape_value_and_fact_sig_for_scope(
     // scheduler reports a live scope and `observe_materialize_scope`
     // returns a tear-free observation (an upsert alone does not eagerly
     // index).
-    ctx.ensure_indexed_ready(scope_canonical)
+    ctx.ensure_indexed_ready_serve(scope_canonical)
         .expect("fixture invariant: scope IndexedReady materialises");
     let observed = ctx
         .observe_materialize_scope(scope_canonical)
@@ -981,7 +981,7 @@ fn shape_cache_db_admits_value_complete_shape_regardless_of_request_sticky() {
 /// supplied `(store_view, base_is_current)` pair and instead takes its OWN
 /// fresh base read (the pre-fix `view_bound_cold_seed` path), the compute seed
 /// and the promotion-gating seed are DIFFERENT reads. Under additive store-view
-/// churn — which advances the artifact / route-owned / load generations the
+/// churn — which advances the artifact / load generations the
 /// external-supersession fingerprint deliberately EXCLUDES — the executor
 /// snapshot can be `Current` (fingerprint unchanged, fence would promote) while
 /// the compute's separate fresh read falls back to `ReturnOnly`. The fence then

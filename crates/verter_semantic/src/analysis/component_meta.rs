@@ -456,14 +456,15 @@ pub struct ComponentMetaFlags {
     pub has_inject: bool,
     pub has_inherit_attrs_false: bool,
     pub has_store_usage: bool,
-    /// D123 (Tier 1A) — set to `true` when lowering produces a
-    /// `verter_session::owned_artifacts::eval_program::LoweringError`.
-    /// Consumers detect macro-impacting failures via this flag plus
-    /// the structured `macro_expansion_diagnostics` entry. Per D117,
-    /// the public `getComponentMeta` API still returns
-    /// `Option<ComponentMetaPayload>` (NOT `Result`); macro-impacting
-    /// lowering failures surface as a populated payload with this
-    /// flag set, so NAPI does not throw exceptions.
+    /// D123 — marks a macro-impacting lowering failure (a
+    /// `verter_session::owned_artifacts::eval_program::LoweringError`).
+    /// Currently always `false`: `extract_flags` emits the default and
+    /// no production path flips it; consumers detect macro-impacting
+    /// failures via the structured `macro_expansion_diagnostics`
+    /// entries instead. Per D117, the public `getComponentMeta` API
+    /// still returns `Option<ComponentMetaPayload>` (NOT `Result`);
+    /// macro-impacting lowering failures surface as a populated
+    /// payload, so NAPI does not throw exceptions.
     pub has_macro_failure: bool,
 }
 
@@ -3770,12 +3771,11 @@ fn extract_flags(input: &ComponentMetaInput<'_>) -> ComponentMetaFlags {
         has_inherit_attrs_false: flags.contains(AnalysisFlags::HAS_INHERIT_ATTRS_FALSE)
             || has_inherit_attrs_false,
         has_store_usage: !input.store_usages.is_empty(),
-        // D123 (Tier 1A) — `has_macro_failure` is set downstream of
-        // analysis (at lowering / parse stage) when a `LoweringError`
-        // is produced for the SFC. Analysis itself has no view of
-        // lowering failures, so the field defaults to `false` here;
-        // the parse-stage diagnostic populator (Tier 1C-α) flips it
-        // to `true` on macro-impacting failure.
+        // D123 — analysis itself has no view of lowering failures, so
+        // the field is emitted `false` here. No downstream production
+        // path flips it today; macro-impacting lowering failures are
+        // surfaced through the structured `macro_expansion_diagnostics`
+        // entries rather than this flag.
         has_macro_failure: false,
     }
 }

@@ -165,7 +165,6 @@ pub fn snapshot_cache_layers_from_tls() -> verter_audit::store::CacheLayerBreakd
         indexed: snap(&ctx.cache_counters.indexed),
         analysis: snap(&ctx.cache_counters.analysis),
         owner_import: snap(&ctx.cache_counters.owner_import),
-        route_owned_shallow: snap(&ctx.cache_counters.route_owned_shallow),
         component_meta: snap(&ctx.cache_counters.component_meta),
         route_db: snap(&ctx.cache_counters.route_db),
         ref_cycle: snap(&ctx.cache_counters.ref_cycle),

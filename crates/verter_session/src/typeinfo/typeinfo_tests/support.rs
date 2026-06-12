@@ -697,10 +697,6 @@ pub(super) fn assert_no_route_misses(record: &verter_audit::RequestAuditRecord) 
         "warm typeinfo rerun must not perform cold RouteDb work"
     );
     assert_eq!(
-        layers.route_owned_shallow.misses, 0,
-        "warm typeinfo rerun must not perform cold route-owned shallow work"
-    );
-    assert_eq!(
         layers.owner_import.misses, 0,
         "warm typeinfo rerun must not perform cold owner-import route work"
     );

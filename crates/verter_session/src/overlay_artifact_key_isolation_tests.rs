@@ -8,7 +8,7 @@
 //! hash therefore equals the base file's content hash. Before the
 //! view-aware key-isolation fix, the view-aware overlay materialiser
 //! published its `IndexedReady` candidate under
-//! `FileArtifactKey::legacy(canonical,
+//! `FileArtifactKey::base(canonical,
 //! hash)` — the *same* key the base `ensure_indexed_ready` uses. Two
 //! distinct artifacts then occupy one slot.
 //!
@@ -32,14 +32,14 @@
 //! `FileArtifactKey::overlay_scoped(canonical, hash, discriminator)` —
 //! the discriminator (derived from the session view's overlay-set
 //! fingerprint) occupies the `parse_env_hash` dimension. The base
-//! artifact keeps `parse_env_hash = LEGACY_PARSE_ENV_HASH`. A base
+//! artifact keeps `parse_env_hash = BASE_PARSE_ENV_HASH`. A base
 //! `get` / `get_for_current_content` read never reaches the overlay
 //! candidate; a session-view `get_overlay_scoped` read never reaches
 //! the base artifact.
 //!
 //! ## Discrimination property
 //!
-//! Each test FAILS against the pre-fix tree (the colliding legacy key)
+//! Each test FAILS against the pre-fix tree (the colliding base key)
 //! and PASSES against the post-fix tree. The fixtures use a
 //! byte-identical overlay (overlay hash == base hash) plus an
 //! overlay-only relative dependency so the two artifacts' import
@@ -115,17 +115,17 @@ fn byte_identical_overlay_hash_equals_base_hash_fixture_invariant() {
     assert_eq!(
         overlay_hash, base_hash,
         "fixture invariant: a byte-identical overlay must hash to the base hash — \
-         this is the precondition under which the legacy key collides",
+         this is the precondition under which the base key collides",
     );
     // And the discriminator is non-zero, so an `overlay_scoped` key can
-    // never alias the base `legacy` key (`parse_env_hash = [0u8; 16]`).
+    // never alias the base key (`parse_env_hash = [0u8; 16]`).
     let discriminator = view
         .overlay_artifact_discriminator("/owner.ts")
         .expect("an overlaid canonical has an overlay-artifact discriminator");
     assert_ne!(
         discriminator, [0u8; 16],
         "the overlay discriminator must be non-zero so the overlay-scoped key \
-         cannot alias the base legacy key",
+         cannot alias the base base key",
     );
 }
 
@@ -134,7 +134,7 @@ fn overlay_materialized_first_does_not_poison_base_artifact_routes() {
     // Order A — the overlay materialises BEFORE the base read.
     //
     // Pre-fix: the overlay artifact (with `./helper` resolved to the
-    // overlay-only `/helper.ts`) lands under `legacy(/owner.ts, hash)`.
+    // overlay-only `/helper.ts`) lands under `base(/owner.ts, hash)`.
     // A later base `ensure_indexed_ready("/owner.ts")` fast-path
     // `get(/owner.ts, hash)` returns THAT artifact — so the base read
     // observes the session's overlay-only route. Post-fix the overlay
@@ -166,7 +166,7 @@ fn overlay_materialized_first_does_not_poison_base_artifact_routes() {
          artifact whose `./helper` route resolves to the overlay-only `/helper.ts`. \
          The base workspace has no `/helper.ts`, so the base artifact's route MUST \
          stay unresolved — a resolved route means the overlay candidate collided \
-         onto the base `FileArtifactKey::legacy` slot. The overlay-scoped key \
+         onto the base `FileArtifactKey::base` slot. The overlay-scoped key \
          dimension keeps the two artifacts isolated.",
     );
 }
@@ -176,7 +176,7 @@ fn base_materialized_first_does_not_starve_overlay_artifact_routes() {
     // Order B — the base read happens BEFORE the overlay materialises.
     //
     // Pre-fix: the base artifact (with `./helper` unresolved) sits
-    // under `legacy(/owner.ts, hash)`. The overlay materialiser's
+    // under `base(/owner.ts, hash)`. The overlay materialiser's
     // fast-path `get(/owner.ts, hash)` then HITS that base artifact and
     // returns it — so the session silently loses its overlay-only
     // route. Post-fix the overlay materialiser's fast path reads the
@@ -210,7 +210,7 @@ fn base_materialized_first_does_not_starve_overlay_artifact_routes() {
          whose `./helper` route is unresolved. The session overlays `/helper.ts`, \
          so the overlay artifact's route MUST resolve to it — an unresolved route \
          means the overlay materialiser's fast path hit the base artifact under a \
-         colliding `FileArtifactKey::legacy` slot instead of materialising the \
+         colliding `FileArtifactKey::base` slot instead of materialising the \
          session's own candidate. The overlay-scoped key keeps them isolated.",
     );
 }
@@ -218,10 +218,10 @@ fn base_materialized_first_does_not_starve_overlay_artifact_routes() {
 #[test]
 fn base_and_overlay_artifacts_coexist_under_distinct_keys() {
     // After both artifacts exist, the `FileArtifactStore` must hold
-    // BOTH — the base under the legacy key and the overlay under the
+    // BOTH — the base under the base key and the overlay under the
     // overlay-scoped key — and each strict-key read must return its
     // OWN artifact. A pre-fix tree keeps exactly one entry under the
-    // shared legacy key (the second writer overwrites the first).
+    // shared base key (the second writer overwrites the first).
     let (host, base_hash) = host_with_owner();
     let view = byte_identical_overlay_view(&host);
     let overlay_hash = view
@@ -236,18 +236,18 @@ fn base_and_overlay_artifacts_coexist_under_distinct_keys() {
         .materialize_overlay_indexed_ready_with_view("/owner.ts", &view)
         .expect("overlay IndexedReady materialises");
 
-    // The base legacy-key read returns the base artifact: `./helper`
+    // The base base-key read returns the base artifact: `./helper`
     // unresolved.
-    let base_via_legacy = host
+    let base_via_base_key = host
         .project_type_store()
         .indexed()
         .get("/owner.ts", base_hash)
-        .expect("base artifact present under the legacy key");
+        .expect("base artifact present under the base key");
     assert_eq!(
-        helper_route(&base_via_legacy),
+        helper_route(&base_via_base_key),
         None,
-        "the legacy-key read MUST return the base artifact (unresolved `./helper`) — \
-         the overlay candidate must not occupy the legacy slot",
+        "the base-key read MUST return the base artifact (unresolved `./helper`) — \
+         the overlay candidate must not occupy the base slot",
     );
 
     // The overlay-scoped read returns the overlay artifact: `./helper`
@@ -266,9 +266,9 @@ fn base_and_overlay_artifacts_coexist_under_distinct_keys() {
 
     // The two artifacts are genuinely different objects.
     assert!(
-        !Arc::ptr_eq(&base_via_legacy, &overlay_via_scoped),
+        !Arc::ptr_eq(&base_via_base_key, &overlay_via_scoped),
         "the base and overlay artifacts must be distinct `IndexedReady` instances — \
-         a shared instance means the legacy and overlay-scoped keys collapsed onto \
+         a shared instance means the base and overlay-scoped keys collapsed onto \
          one slot",
     );
 }

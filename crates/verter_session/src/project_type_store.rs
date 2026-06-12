@@ -106,10 +106,10 @@ pub struct AnalysisArtifactKey {
 /// `Send + Sync` data so long-lived host-owned caches do not carry borrowed
 /// AST pointers.
 ///
-/// As of this is the single canonical post-parse artifact. The
-/// transitional `FileArtifactStore` cache that previously duplicated this
-/// payload has been retired; every consumer reads from
-/// [`FileArtifactStore`] through [`ProjectTypeStore::indexed`].
+/// `IndexedReady` is the single canonical post-parse artifact: every
+/// consumer reads it from [`FileArtifactStore`] through
+/// [`ProjectTypeStore::indexed`], and the `ensure_indexed_ready_serve`
+/// materialise closure is its single producer.
 #[derive(Debug, Clone)]
 pub struct IndexedReady {
     pub whole_hash: Hash16,
@@ -132,18 +132,45 @@ pub struct IndexedReady {
     /// `IndexedReady` is built and `route_hash` is recomputed.
     pub route_hash: Option<Hash16>,
     /// Workspace `content_generation` captured at edge-canonicalization
-    /// time — the generation at which this artifact's wildcard `export *`
-    /// edge `canonical_id`s (baked into `shallow_state.wildcard_reexports`
-    /// and `import_routes`) were resolved. Those edges depend on the
-    /// dependency file set, NOT this file's own content, so a content-pinned
-    /// `IndexedReady` whose owner content is unchanged can still hold stale
-    /// wildcard edges after a dependency appears or retargets (e.g. a `.js`
-    /// edge whose `.d.ts` companion later appears). Route-surface consumers
-    /// validate it through the shared edge-currency oracle
-    /// (`route_surface_is_edge_current`): a wildcard-bearing surface is
-    /// edge-current only while `edge_generation == ws().content_generation()`.
+    /// time — the generation at which this artifact's cross-file edge
+    /// `canonical_id`s (wildcard reexports, named reexports, and plain
+    /// import targets, baked into `shallow_state` and `import_routes`)
+    /// were resolved. Those edges depend on the dependency file set, NOT
+    /// this file's own content, so a content-pinned `IndexedReady` whose
+    /// owner content is unchanged can still hold stale edges after a
+    /// dependency appears or retargets (e.g. a `.js` edge whose `.d.ts`
+    /// companion later appears). Route-surface consumers validate it
+    /// through the shared edge-currency oracle
+    /// (`route_surface_is_edge_current`): a cross-file-edge-bearing
+    /// surface is edge-current only while
+    /// `edge_generation == ws().content_generation()`.
     /// A VALUE field (read-side validation) — never a cache key (R6).
     pub edge_generation: u64,
+    /// [`ProjectTypeStore::current_project_generation`] captured when this
+    /// artifact's route surface was built. Route-resolution mutations
+    /// (`configure_projects` / `set_exact_resolutions` /
+    /// `configure_resolver`) bump `project_generation` WITHOUT bumping
+    /// `content_generation`, so a content-current artifact whose
+    /// cross-file edges were resolved under the old project graph is
+    /// route-stale: the read gate (`indexed_surface_is_current`) demands
+    /// a current stamp for any surface with cross-file edges and routes a
+    /// stale one through the edge-refresh materialise (the
+    /// content-addressed payload is reused; only the route surface
+    /// rebuilds). A VALUE field — never a cache key (R6).
+    pub project_generation: u64,
+    /// The owner's live `parse_env_hash` (the R21 parse dimension)
+    /// captured at materialise time — the parse environment this
+    /// artifact's `cached_parse` / `shallow_state` / `eval_env` were
+    /// built under. Today the base parse env derives from constant
+    /// workspace parser flags, but the dimension is load-bearing: the
+    /// reuse gates demand equality with the owner's LIVE parse env, so
+    /// the day per-project parser flags diverge, a moved parse env
+    /// routes the artifact through the FULL re-materialise (re-parse)
+    /// instead of the parse-reusing edge refresh or the
+    /// route-insensitive no-edge reuse. A VALUE field — never a cache
+    /// key (R6); the artifact stays stored under the canonical-keyed
+    /// legacy `FileArtifactKey`.
+    pub parse_env_hash: Hash16,
     /// Raw file source as-read. Shared immutable handle across consumers.
     pub raw_source: Arc<str>,
     /// Script source used as the body of the eval environment. For a `.vue`
@@ -167,6 +194,13 @@ pub struct IndexedReady {
     /// Cached external-type analysis used by the shared type resolver.
     pub external_type_analysis:
         Arc<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource>,
+    /// The canonical per-file `EvalEnv`, built ONCE by the materialise
+    /// closure from the same single eval-program parse the shallow state
+    /// and external-type analysis came from (script-setup type params
+    /// applied). Read through [`Self::eval_env`] — keep consumers on the
+    /// narrow accessor so the representation can change without
+    /// re-touching them.
+    pub(crate) eval_env: Arc<verter_semantic::analysis::type_eval::EvalEnv>,
     /// Mirror of `script_analysis.flags & DECLARES_INTERFACE_APP_CONFIG`
     /// projected onto `IndexedReady` so the
     /// `AppConfigNoOverrideProofDb` production producer can short-circuit
@@ -178,11 +212,88 @@ pub struct IndexedReady {
 }
 
 impl IndexedReady {
+    /// Whether this artifact's surface carries any cross-file edges —
+    /// resolved import routes, import targets, plain/wildcard reexports.
+    /// A surface WITHOUT cross-file edges is insensitive to
+    /// route-resolution mutations: nothing on it can retarget, so neither
+    /// the `project_generation` stamp nor the `edge_generation` stamp
+    /// gates its reuse.
+    ///
+    /// THE complete edge authority: composes the shallow-inventory
+    /// component (`has_shallow_cross_file_edges`) with the
+    /// `import_routes` table, whose entries (the external `src=` class,
+    /// caller-pushed route snapshots) bake dependency-set-derived targets
+    /// the shallow inventory never sees. Every edge-currency consumer
+    /// (`route_surface_is_edge_current`, `indexed_surface_is_current`,
+    /// `base_snapshot_equivalent`'s stamp gates) consults THIS predicate —
+    /// never the component alone.
+    #[must_use]
+    pub fn has_cross_file_edges(&self) -> bool {
+        !self.import_routes.is_empty() || self.shallow_state.has_shallow_cross_file_edges()
+    }
+
+    /// The canonical per-file `EvalEnv` — built once by the materialise
+    /// closure from the same parse as everything else on this artifact.
+    /// The SOLE base accessor for a file's eval env (`base_eval_env_arc`
+    /// reads through here); the narrow surface lets a later
+    /// representation change land without re-touching consumers.
+    #[must_use]
+    pub fn eval_env(&self) -> &Arc<verter_semantic::analysis::type_eval::EvalEnv> {
+        &self.eval_env
+    }
+
+    /// Test-only constructor for fact-emission-style fixtures: a minimal
+    /// artifact carrying a REAL shallow inventory + sources, with every
+    /// other field defaulted (including an empty `eval_env`, which those
+    /// fixtures never read). Integration tests cannot construct
+    /// `IndexedReady` literally — `eval_env` is crate-private behind the
+    /// [`Self::eval_env`] accessor — so this is their construction path.
+    ///
+    /// Gated `#[cfg(any(test, debug_assertions))]` (the crate's
+    /// cross-crate test-constructor convention): integration tests in
+    /// `tests/` compile the lib without `cfg(test)` but with debug
+    /// assertions, while release production builds compile this
+    /// invariant-bypassing construction path out entirely.
+    #[cfg(any(test, debug_assertions))]
+    pub fn new_for_test_with_state(
+        whole_hash: Hash16,
+        shallow_state: Arc<crate::resolver_core::shallow_file_state::ShallowFileState>,
+        raw_source: Arc<str>,
+        eval_source: Arc<str>,
+        external_type_analysis: Arc<
+            verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource,
+        >,
+    ) -> Self {
+        Self {
+            whole_hash,
+            shallow_state,
+            import_routes: Arc::new(FxHashMap::default()),
+            import_route_hash: None,
+            route_hash: None,
+            edge_generation: 0,
+            project_generation: 0,
+            parse_env_hash: [0u8; 16],
+            raw_source,
+            eval_source,
+            cached_parse: None,
+            script_analysis: None,
+            export_signatures: None,
+            snapshot: Arc::new(crate::types::FileAnalysisSnapshot::default()),
+            external_type_analysis,
+            eval_env: Arc::new(verter_semantic::analysis::type_eval::EvalEnv::default()),
+            declares_interface_app_config: false,
+        }
+    }
+
     /// Test-only constructor producing a minimal `IndexedReady` with
     /// stub fields. Consumers of this helper only inspect
     /// `whole_hash`, so everything else is empty. Used by the
     /// `no_legacy_trace_surface` integration test to drive
     /// `FileArtifactStore::insert` through the event-emitting path.
+    /// Same `#[cfg(any(test, debug_assertions))]` gate as
+    /// [`Self::new_for_test_with_state`] — an invariant-bypassing
+    /// construction path never ships in release production builds.
+    #[cfg(any(test, debug_assertions))]
     pub fn new_for_test(whole_hash: Hash16) -> Self {
         use rustc_hash::{FxHashMap, FxHashSet};
         let analysis = Arc::new(
@@ -207,6 +318,8 @@ impl IndexedReady {
             import_route_hash: None,
             route_hash: None,
             edge_generation: 0,
+            project_generation: 0,
+            parse_env_hash: [0u8; 16],
             raw_source: Arc::from(""),
             eval_source: Arc::from(""),
             cached_parse: None,
@@ -214,9 +327,29 @@ impl IndexedReady {
             export_signatures: None,
             snapshot: Arc::new(crate::types::FileAnalysisSnapshot::default()),
             external_type_analysis: analysis,
+            eval_env: Arc::new(verter_semantic::analysis::type_eval::EvalEnv::default()),
             declares_interface_app_config: false,
         }
     }
+}
+
+/// Outcome of one `ensure_indexed_ready_serve` singleflight flight: the built
+/// (or reused) artifact PLUS its publication validity.
+///
+/// `published == true` means the artifact is (or already was) the
+/// store-published current surface — safe for any singleflight follower
+/// to adopt. `published == false` means the flight's pre-publish fence
+/// tripped (a workspace / route mutation landed mid-flight): the result
+/// is ReturnOnly — valid ONLY for the request that ran the flight (its
+/// request pre-dates the mutation). A follower whose claim may post-date
+/// the mutation must NOT adopt it as current; it re-runs against fresh
+/// state. The singleflight `retain` predicate keys off this flag so a
+/// fenced result is never retained as a joinable rendezvous for late
+/// claimants.
+#[derive(Debug, Clone)]
+pub struct IndexedFlightOutcome {
+    pub(crate) indexed: Arc<IndexedReady>,
+    pub(crate) published: bool,
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -470,446 +603,26 @@ impl crate::invalidation_domain::InvalidationByCanonical for AnalysisReadyDb {
 }
 
 // ──────────────────────────────────────────────────────────────────────────
-// RouteOwnedShallow — F6/F7 unified destination DB
-// ──────────────────────────────────────────────────────────────────────────
-
-/// Project-store-owned route-only shallow state artifact.
-///
-/// / F7 — Option (c): a first-class
-/// `RouteOwnedShallowDb` field on [`ProjectTypeStore`], replacing the two
-/// pre-migration host mutex caches (`external_type_analysis_cache` and
-/// `route_owned_shallow_cache`). The pre-migration `route_shallow_state`
-/// helper at `host_resolve.rs:2222–2306` builds **eval_env**,
-/// **external_type_analysis**, **snapshot**, AND **shallow_state** from
-/// ONE route-only parse pass — F6 and F7 are two halves of the same
-/// materialisation. This struct carries all four halves in one shot.
-///
-/// Generation fields drive the materialiser's tiered staleness gate
-/// (sub-):
-/// - `whole_hash` — content authority (tier 1).
-/// - `workspace_generation` — `ws().content_generation()` captured at
-///   materialisation time, immediately before the wildcard reexport edges
-///   are canonicalized and fenced after (so it IS the workspace generation
-///   at which this entry's wildcard `canonical_id`s were resolved). Drives
-///   the tier-2 owner-surface fallback for files the scheduler hasn't seen,
-///   AND is the edge-resolution generation route-surface consumers check
-///   (`route_owned_entry_is_edge_current`): a wildcard-bearing entry whose
-///   owner content is unchanged but whose dependency file set has shifted is
-///   edge-stale and must not produce a route surface or be reused.
-/// - `project_generation` —
-///   [`ProjectTypeStore::current_project_generation`] at publish time
-///   (tier 3 — covers `configure_projects` / `set_exact_resolutions`
-///   route-resolution mutations that don't bump `content_generation`).
-///
-/// **Lands in 6b.D1 as the destination shape; F6/F7 readers/writers are
-/// migrated in 6b.D2a.** Until 6b.D2a, the legacy
-/// `external_type_analysis_cache` / `route_owned_shallow_cache` host
-/// mutexes remain the active authority; this DB is published-into only by
-/// tests and the new materialiser. The transitional coexistence is
-/// internal to verter_session (not a long-lived shim — the legacy fields
-/// are deleted.D2a step 4).
-#[derive(Debug)]
-pub struct RouteOwnedShallowEntry {
-    /// Tier-1 content hash.
-    pub whole_hash: Hash16,
-    /// Workspace content generation captured immediately before this entry's
-    /// wildcard reexport edges were canonicalized (fenced after) — i.e. the
-    /// generation at which the baked wildcard `canonical_id`s were resolved.
-    /// Tier-2 owner-surface fallback AND the edge-resolution generation
-    /// route-surface consumers validate (`route_owned_entry_is_edge_current`).
-    pub workspace_generation: u64,
-    /// Tier-3 project generation captured at publish time.
-    pub project_generation: u64,
-    /// Raw file source as-read.
-    pub raw_source: Arc<str>,
-    /// Script source used as the body of the eval environment. For a `.vue`
-    /// SFC this is **position-preserving** (same length as `raw_source`,
-    /// script content at raw SFC byte offsets, non-script bytes blanked), so
-    /// every OXC-produced span is SFC-absolute. For a non-SFC file this equals
-    /// the raw source verbatim.
-    pub eval_source: Arc<str>,
-    /// Cached parsed SFC payload when the canonical file is a Vue SFC.
-    pub cached_parse: Option<Arc<verter_compiler::parser::types::ParsedSfc>>,
-    /// File-level analysis snapshot consumed by component-meta / linter
-    /// pipelines (the F7 "raw_snapshot" half).
-    pub snapshot: Arc<crate::types::FileAnalysisSnapshot>,
-    /// Cached external-type analysis used by the shared type resolver
-    /// (the F6 half, retired from `host_manage::ExternalTypeAnalysisCacheEntry`).
-    pub external_type_analysis:
-        Arc<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource>,
-    /// Shallow file state — symbol/import/export inventory consumed by
-    /// route resolution and frontier traversal.
-    pub shallow_state: Arc<crate::resolver_core::shallow_file_state::ShallowFileState>,
-}
-
-impl RouteOwnedShallowEntry {
-    /// Test-only constructor producing a minimal `RouteOwnedShallowEntry`
-    /// with stub fields. Used by characterization tests T7 and
-    /// the eviction-cascade regression in 6b.D1; downstream consumers
-    /// don't read these fields, only assert on the entry's identity.
-    #[cfg(test)]
-    pub fn test_stub(_canonical_id: Arc<str>) -> Self {
-        use rustc_hash::{FxHashMap, FxHashSet};
-        let analysis = Arc::new(
-            verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default(),
-        );
-        let shallow = crate::resolver_core::shallow_file_state::ShallowFileState {
-            whole_hash: [0u8; 16],
-            exports: FxHashMap::default(),
-            wildcard_reexports: Vec::new(),
-            symbols: FxHashMap::default(),
-            value_symbols: FxHashMap::default(),
-            augmentation_scopes: FxHashMap::default(),
-            augmentation_value_scopes: FxHashMap::default(),
-            import_locals: FxHashSet::default(),
-            import_targets: FxHashMap::default(),
-            analysis: Arc::clone(&analysis),
-        };
-        Self {
-            whole_hash: [0u8; 16],
-            workspace_generation: 0,
-            project_generation: 0,
-            raw_source: Arc::from(""),
-            eval_source: Arc::from(""),
-            cached_parse: None,
-            snapshot: Arc::new(crate::types::FileAnalysisSnapshot::default()),
-            external_type_analysis: analysis,
-            shallow_state: Arc::new(shallow),
-        }
-    }
-}
-
-/// Host-owned cache of route-only [`RouteOwnedShallowEntry`] artifacts.
-///
-/// Mirrors [`FileArtifactStore`] exactly: canonical-keyed (`Arc<str>`) with
-/// `whole_hash` validated INSIDE the entry. New publishes REPLACE the
-/// canonical's current entry — there is no version accumulation. Per-entry
-/// staleness is checked by the host materialiser via the tiered gate
-/// (`route_owned_entry_is_fresh`); per-canonical eviction goes through
-/// [`ProjectTypeStore::evict_canonical`] (extended in 6b.D1 to call
-/// `route_owned_shallow.remove(canonical)`); bulk eviction uses
-/// [`Self::clear_all`].
-///
-/// No explicit capacity bound — sizing follows the upsert/eviction
-/// lifecycle (same stance as [`FileArtifactStore`]). Counters are required
-/// per sub- fifth-pass review; they feed
-/// [`ProjectTypeStoreCounters`] for observability symmetry with
-/// [`FileArtifactStore`].
-pub struct RouteOwnedShallowDb {
-    entries: DashMap<Arc<str>, Arc<RouteOwnedShallowEntry>>,
-    /// Live entry counter — bumped on insert of a new canonical key,
-    /// decremented on remove. Replacement (insert with existing key) does
-    /// not change the count.
-    live_counter: Arc<AtomicU64>,
-    /// Stale-sweep counter — bumped when [`Self::remove`] evicts an
-    /// existing entry or a replacement supersedes a prior whole-hash.
-    stale_sweeps: Arc<AtomicU64>,
-    /// Monotonic route-owned-shallow publication generation. A
-    /// `HostStoreView` snapshots a route-owned `Route` derived hash BY
-    /// VALUE; bumping this on every publish / remove / clear lets the
-    /// `StoreViewValidationToken` invalidate a view built before a lazy
-    /// route-owned publication landed. See
-    /// [`crate::file_artifact_store::FileArtifactStore::artifact_generation`]
-    /// for the same rationale on the indexed-artifact side.
-    artifact_generation: Arc<AtomicU64>,
-    /// Cache-cluster schema version this Db was constructed under. See
-    /// [`crate::cache_schema`] for the contract.
-    schema_version: u32,
-}
-
-impl RouteOwnedShallowDb {
-    pub fn new() -> Self {
-        Self::with_counters(Default::default(), Default::default())
-    }
-
-    pub(crate) fn with_counters(live: Arc<AtomicU64>, stale: Arc<AtomicU64>) -> Self {
-        Self::with_counters_and_schema_version(
-            live,
-            stale,
-            crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION,
-        )
-    }
-
-    /// Test-only constructor that pins a specific schema version on the Db.
-    /// Used by `cache_invariant_migration` fixtures.
-    #[cfg(any(test, debug_assertions))]
-    pub fn new_with_schema_version_for_test(schema_version: u32) -> Self {
-        Self::with_counters_and_schema_version(
-            Default::default(),
-            Default::default(),
-            schema_version,
-        )
-    }
-
-    fn with_counters_and_schema_version(
-        live: Arc<AtomicU64>,
-        stale: Arc<AtomicU64>,
-        schema_version: u32,
-    ) -> Self {
-        Self {
-            entries: DashMap::new(),
-            live_counter: live,
-            stale_sweeps: stale,
-            artifact_generation: Arc::new(AtomicU64::new(0)),
-            schema_version,
-        }
-    }
-
-    /// Current route-owned-shallow publication generation. Folded into
-    /// the `StoreViewValidationToken` so a `HostStoreView` built before
-    /// a lazy route-owned publication is token-invalidated.
-    #[must_use]
-    pub fn artifact_generation(&self) -> u64 {
-        self.artifact_generation.load(Ordering::Acquire)
-    }
-
-    /// Look up the route-only artifact for `canonical_id` if the cached
-    /// entry matches `expected_whole_hash`. Stale entries are ignored;
-    /// callers re-materialize through the host materialiser and re-publish.
-    #[must_use]
-    pub fn get(
-        &self,
-        canonical_id: &str,
-        expected_whole_hash: Hash16,
-    ) -> Option<Arc<RouteOwnedShallowEntry>> {
-        if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
-            return None;
-        }
-        let result = match self.entries.get(canonical_id) {
-            Some(entry) if entry.whole_hash == expected_whole_hash => Some(entry.clone()),
-            _ => None,
-        };
-        if let Some(ctx) = crate::request_context::current_request_context() {
-            if result.is_some() {
-                ctx.cache_counters
-                    .route_owned_shallow
-                    .hits
-                    .fetch_add(1, Ordering::Relaxed);
-            } else {
-                ctx.cache_counters
-                    .route_owned_shallow
-                    .misses
-                    .fetch_add(1, Ordering::Relaxed);
-            }
-        }
-        result
-    }
-
-    /// Look up the cached artifact for `canonical_id` without hash check.
-    /// The host materialiser uses this for the pre-flight fast path —
-    /// callers must apply the tiered staleness gate before trusting the
-    /// returned entry. Mirrors [`FileArtifactStore::get_any`].
-    #[must_use]
-    pub fn get_any(&self, canonical_id: &str) -> Option<Arc<RouteOwnedShallowEntry>> {
-        if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
-            return None;
-        }
-        let result = self.entries.get(canonical_id).map(|entry| entry.clone());
-        if let Some(ctx) = crate::request_context::current_request_context() {
-            if result.is_some() {
-                ctx.cache_counters
-                    .route_owned_shallow
-                    .hits
-                    .fetch_add(1, Ordering::Relaxed);
-            } else {
-                ctx.cache_counters
-                    .route_owned_shallow
-                    .misses
-                    .fetch_add(1, Ordering::Relaxed);
-            }
-        }
-        result
-    }
-
-    /// Insert or replace the entry for `canonical_id`. Older versions for
-    /// the same canonical are overwritten — strong-consistency lookup is
-    /// the responsibility of the caller via `expected_whole_hash`.
-    /// Replacement increments the stale-sweep counter so downstream
-    /// telemetry can see how often stale entries are superseded.
-    pub fn publish(&self, canonical_id: Arc<str>, entry: Arc<RouteOwnedShallowEntry>) {
-        let prev = self.entries.insert(canonical_id, entry);
-        if prev.is_some() {
-            self.stale_sweeps.fetch_add(1, Ordering::Relaxed);
-        } else {
-            self.live_counter.fetch_add(1, Ordering::Relaxed);
-        }
-        // A `HostStoreView` snapshots the route-owned `Route` derived
-        // hash by value; bump so a pre-publication view is invalidated.
-        self.artifact_generation.fetch_add(1, Ordering::AcqRel);
-    }
-
-    /// Remove the entry for `canonical_id` (e.g. on per-canonical eviction
-    /// from [`ProjectTypeStore::evict_canonical`]). Method name mirrors
-    /// [`FileArtifactStore::remove`]; the store-level cascade entry point is
-    /// `evict_canonical` (which calls into this method).
-    pub fn remove(&self, canonical_id: &str) {
-        if self.entries.remove(canonical_id).is_some() {
-            self.live_counter.fetch_sub(1, Ordering::Relaxed);
-            self.stale_sweeps.fetch_add(1, Ordering::Relaxed);
-            self.artifact_generation.fetch_add(1, Ordering::AcqRel);
-        }
-    }
-
-    /// Bulk eviction — drains every entry. Called by the route-resolution
-    /// invalidation cascade (sub-: extended into
-    /// `configure_projects`, `clear_compile_cache`, `close`,
-    /// `set_workspace`).
-    pub fn clear_all(&self) {
-        let drained = self.entries.len();
-        self.entries.clear();
-        self.live_counter
-            .fetch_sub(drained as u64, Ordering::Relaxed);
-        self.stale_sweeps
-            .fetch_add(drained as u64, Ordering::Relaxed);
-        self.artifact_generation.fetch_add(1, Ordering::AcqRel);
-    }
-
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
-    /// Test-only synthetic-entry inserter used exclusively by
-    /// `cache_invariant_migration` fixtures to verify the cache-cluster
-    /// schema-version eviction invariant.
-    #[cfg(any(test, debug_assertions))]
-    pub fn insert_synthetic_for_schema_test(&self, marker: &str) {
-        use rustc_hash::{FxHashMap, FxHashSet};
-        let canonical: Arc<str> = Arc::from(marker);
-        let analysis = Arc::new(
-            verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default(),
-        );
-        let shallow = crate::resolver_core::shallow_file_state::ShallowFileState {
-            whole_hash: [0u8; 16],
-            exports: FxHashMap::default(),
-            wildcard_reexports: Vec::new(),
-            symbols: FxHashMap::default(),
-            value_symbols: FxHashMap::default(),
-            augmentation_scopes: FxHashMap::default(),
-            augmentation_value_scopes: FxHashMap::default(),
-            import_locals: FxHashSet::default(),
-            import_targets: FxHashMap::default(),
-            analysis: Arc::clone(&analysis),
-        };
-        let entry = Arc::new(RouteOwnedShallowEntry {
-            whole_hash: [0u8; 16],
-            workspace_generation: 0,
-            project_generation: 0,
-            raw_source: Arc::from(""),
-            eval_source: Arc::from(""),
-            cached_parse: None,
-            snapshot: Arc::new(crate::types::FileAnalysisSnapshot::default()),
-            external_type_analysis: analysis,
-            shallow_state: Arc::new(shallow),
-        });
-        self.publish(canonical, entry);
-    }
-
-    /// Project each `(canonical_id, &RouteOwnedShallowEntry)` pair through
-    /// `f` and collect the results. exposes a stable
-    /// iteration surface for `resolver_store::derived_hashes` fact-capture
-    /// without leaking the inner `DashMap` type. The iteration is a DashMap
-    /// snapshot — concurrent inserts during iteration are handled by
-    /// DashMap's internal sharding.
-    pub fn for_each_entry<R, F>(&self, mut f: F) -> Vec<R>
-    where
-        F: FnMut(&str, &RouteOwnedShallowEntry) -> R,
-    {
-        let mut results = Vec::with_capacity(self.entries.len());
-        for entry in self.entries.iter() {
-            let key = entry.key();
-            let value = entry.value();
-            results.push(f(key.as_ref(), value.as_ref()));
-        }
-        results
-    }
-}
-
-impl Default for RouteOwnedShallowDb {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl crate::cache_schema::CacheSchemaVersioned for RouteOwnedShallowDb {
-    fn schema_version(&self) -> u32 {
-        self.schema_version
-    }
-
-    fn evict_if_schema_mismatch(&self, current: u32) -> usize {
-        if self.schema_version == current {
-            return 0;
-        }
-        let count = self.entries.len();
-        self.entries.clear();
-        if count > 0 {
-            self.live_counter.fetch_sub(count as u64, Ordering::Relaxed);
-            self.stale_sweeps.fetch_add(count as u64, Ordering::Relaxed);
-            // A `HostStoreView` snapshots the route-owned `Route` derived
-            // hash by value, and `route_owned_generation` is folded into
-            // the `StoreViewValidationToken`. Draining entries here mutates
-            // that snapshot source, so it MUST advance the generation
-            // exactly like `publish` / `remove` / `clear_all` — else a view
-            // captured before this sweep keeps validating against drained
-            // route-owned `Route` derived hashes. Bump-iff-changed: only
-            // when this sweep actually removed rows (mirrors the
-            // no-op-eviction gating on the per-key paths).
-            self.artifact_generation.fetch_add(1, Ordering::AcqRel);
-        }
-        count
-    }
-}
-
-impl crate::invalidation_domain::ParticipatesInInvalidation for RouteOwnedShallowDb {
-    fn domains(&self) -> &'static [crate::invalidation_domain::InvalidationDomain] {
-        use crate::invalidation_domain::InvalidationDomain::*;
-        &[FileContent, ResolverState, ProjectGeneration]
-    }
-    fn invalidate(&self, domain: crate::invalidation_domain::InvalidationDomain) {
-        use crate::invalidation_domain::InvalidationDomain::*;
-        if matches!(domain, ProjectGeneration) {
-            self.clear_all();
-        }
-    }
-}
-
-impl crate::invalidation_domain::InvalidationByCanonical for RouteOwnedShallowDb {
-    fn invalidate_canonical_for(&self, canonical_id: &str) -> usize {
-        let before = self.len();
-        self.remove(canonical_id);
-        let after = self.len();
-        before.saturating_sub(after)
-    }
-}
-
-// ──────────────────────────────────────────────────────────────────────────
 // ProjectTypeStore
 // ──────────────────────────────────────────────────────────────────────────
 
 // ──────────────────────────────────────────────────────────────────────────
-// Tier 1A typed-DB shapes (D17 + D18 + D44 + D46 + D48 + D65)
+// Typed-DB shapes (D17 + D18 + D44 + D46 + D48 + D65)
 //
-// Tier 1A introduces these DB wrappers as EMPTY shells (`DashMap`-backed
-// keyed by canonical id; no consumer code yet). The 1C-α worker wires
-// the actual consumers; the 1C-β worker splits `CompileCacheDb`'s
-// super-shape into `ProfileState` / `DerivedRawState` / `DependencyState`.
+// `DashMap`-backed DB wrappers keyed by canonical id. `CompileCacheDb`'s
+// per-canonical state is split into `ProfileState` / `DerivedRawState` /
+// `DependencyState` (D48).
 //
-// `TypeResolutionContextDb` and `EvalEnvCacheDb` consume the
-// post-lowering owned artifacts in
-// `crate::owned_artifacts::OwnedTypeResolutionContext` /
-// `crate::owned_artifacts::OwnedEvalProgram`. The OXC parser arena
-// is dropped at the lowering boundary so these DBs can sit on
-// `Send + Sync` host caches.
+// `TypeResolutionContextDb` consumes the post-lowering owned artifact
+// `crate::owned_artifacts::OwnedTypeResolutionContext`. The OXC parser
+// arena is dropped at the lowering boundary so the DB can sit on
+// `Send + Sync` host caches. There is no separate eval-env DB: the
+// canonical per-file `EvalEnv` lives on `IndexedReady`.
 // ──────────────────────────────────────────────────────────────────────────
 
 /// Cache identity for typed-DB entries that key by canonical-id +
-/// content-version. All four 1A typed DBs share this shape so they
-/// validate writes uniformly when the consumer migration lands.
+/// content-version. The owned-artifact typed DBs share this shape so
+/// writes validate uniformly.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct OwnedArtifactKey {
     pub canonical_id: Arc<str>,
@@ -927,9 +640,11 @@ impl OwnedArtifactKey {
 }
 
 /// Host-owned cache for [`crate::owned_artifacts::OwnedTypeResolutionContext`].
-/// Tier 1A introduces this empty; Tier 1C-α moves the existing
-/// `host_manage::HOST_PARSED_TYPE_CONTEXT_CACHE` thread-local consumers
-/// onto this DB.
+/// Currently populated only by tests; no production lowering path
+/// writes owned contexts here yet (the borrowed
+/// `ParsedTypeResolutionContext` is built fresh per call on the
+/// query-time element-resolver path, tracked-debt on the single-engine
+/// shrinking ledger).
 ///
 /// **Invariant**: `Send + Sync + 'static` (per axiom A1 — host-owned
 /// caches only). The owned-artifact payload itself is `Send + Sync +
@@ -947,8 +662,7 @@ impl TypeResolutionContextDb {
     }
 
     /// Look up an owned context by canonical-id + content-version.
-    /// Returns `None` when no entry is present (Tier 1A's empty-DB
-    /// state).
+    /// Returns `None` when no entry is present.
     #[must_use]
     pub fn get(
         &self,
@@ -968,8 +682,8 @@ impl TypeResolutionContextDb {
         self.entries.insert(key, value);
     }
 
-    /// Remove all entries — used by Tier 1C-γ eviction sweep policy
-    /// (introduced 1A as a primitive, exercised in 1C-γ).
+    /// Remove all entries — invoked by the project-generation
+    /// invalidation cascade.
     pub fn clear(&self) {
         self.entries.clear();
     }
@@ -980,230 +694,6 @@ impl TypeResolutionContextDb {
 
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
-    }
-}
-
-/// Host-owned cache for `EvalEnv` derived from a long-lived
-/// [`crate::owned_artifacts::OwnedEvalProgram`]. Per D46, `EvalEnv` is
-/// derived ad-hoc from the owned program rather than stored independently
-/// — the DB therefore caches programs (not pre-built envs); consumers
-/// derive the env on demand from the cached program.
-///
-/// Tier 1A introduced this with the [`OwnedArtifactKey`] →
-/// `Arc<OwnedEvalProgram>` storage shape (D17). Tier 1C-α retains that
-/// owned-program storage AND rehomes the existing
-/// `VerterHost::eval_env_cache` body alongside it under the same
-/// wrapper. Until the lowering pipeline produces
-/// [`crate::owned_artifacts::OwnedEvalProgram`] for live host parses,
-/// the legacy `Arc<EvalEnv>` cache stays warm here so
-/// `base_eval_env_arc` / `cache_eval_env_arc` callers preserve
-/// deterministic env reuse. The Tier 1C-α discriminating tests verify
-/// that the owned-program storage shape exists with `Arc<OwnedEvalProgram>`
-/// values; future commits remove the legacy `Arc<EvalEnv>` cache once
-/// lowering populates the owned form.
-#[derive(Debug)]
-pub struct EvalEnvCacheDb {
-    /// 1A storage — owned-program cache (D17). Empty until the lowering
-    /// pipeline produces `OwnedEvalProgram` for live parses; tests
-    /// populate it directly today.
-    entries: DashMap<OwnedArtifactKey, Arc<crate::owned_artifacts::OwnedEvalProgram>>,
-    /// Legacy `Arc<EvalEnv>` storage, keyed by the full per-file
-    /// parse-artifact identity (R21).
-    ///
-    /// `EvalEnv` is a pure parse artifact — it is the local
-    /// type/value symbol table built by re-parsing one file's eval
-    /// source, with no resolution / lib / type-env input. Per R21 a
-    /// cache keys ONLY on the dimensions it depends on; the eval-env
-    /// therefore shares the exact identity shape of every other
-    /// parse artifact, [`crate::file_artifact_store::FileArtifactKey`]
-    /// = `(canonical, content_hash, parse_env_hash, parser_version)`.
-    ///
-    /// Both the content hash AND the parse-env hash are part of the
-    /// key, so a stale entry is physically un-hittable: a content
-    /// change OR a parse-env change yields a key miss, not a stale
-    /// hit. The cache is correct by key identity alone — it does not
-    /// rely on an external eviction sweep for correctness.
-    legacy_env_entries: parking_lot::Mutex<
-        FxHashMap<
-            crate::file_artifact_store::FileArtifactKey,
-            Arc<verter_semantic::analysis::type_eval::EvalEnv>,
-        >,
-    >,
-    /// Cache-cluster schema version this Db was constructed under. See
-    /// [`crate::cache_schema`] for the contract.
-    schema_version: u32,
-}
-
-impl EvalEnvCacheDb {
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Test-only constructor that pins a specific schema version on the Db.
-    /// Used by `cache_invariant_migration` fixtures.
-    #[cfg(any(test, debug_assertions))]
-    pub fn new_with_schema_version_for_test(schema_version: u32) -> Self {
-        Self {
-            entries: DashMap::new(),
-            legacy_env_entries: parking_lot::Mutex::new(FxHashMap::default()),
-            schema_version,
-        }
-    }
-
-    /// Look up the owned program for the given content-pinned key.
-    #[must_use]
-    pub fn get(
-        &self,
-        key: &OwnedArtifactKey,
-    ) -> Option<Arc<crate::owned_artifacts::OwnedEvalProgram>> {
-        if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
-            return None;
-        }
-        self.entries.get(key).map(|r| Arc::clone(r.value()))
-    }
-
-    /// Insert an owned program. Per D46, the program is the canonical
-    /// cache value; consumers derive `EvalEnv` from the program on
-    /// demand.
-    pub fn insert(
-        &self,
-        key: OwnedArtifactKey,
-        value: Arc<crate::owned_artifacts::OwnedEvalProgram>,
-    ) {
-        self.entries.insert(key, value);
-    }
-
-    /// Cooperative cold admission — atomically look up `key`, and if
-    /// absent, compute a value via `compute()` and store it. Concurrent
-    /// callers racing the same key collapse onto a single closure
-    /// invocation: only the first caller observes the empty slot and
-    /// runs `compute()`; subsequent callers wait on the `entry()`
-    /// shard lock and see the just-inserted value.
-    ///
-    /// This is the storage-shape side of the cooperative-admission
-    /// contract: the rehoming-doc §3.3 test #3 discriminator races two
-    /// cold callers and asserts `compute_count == 1`. Pre-rehoming the
-    /// `Mutex.lookup_or_insert` shape allowed both callers to bypass
-    /// the dedup; post-rehoming this method is the single admission
-    /// surface for cold computes.
-    pub fn get_or_insert_with(
-        &self,
-        key: OwnedArtifactKey,
-        compute: impl FnOnce() -> Arc<crate::owned_artifacts::OwnedEvalProgram>,
-    ) -> Arc<crate::owned_artifacts::OwnedEvalProgram> {
-        // DashMap's `entry()` API is the right primitive here — it
-        // returns a shard-locked entry that can `or_insert_with` in a
-        // single critical section. Concurrent racers serialize on the
-        // shard lock and the second one observes the just-inserted
-        // value.
-        let entry = self.entries.entry(key).or_insert_with(compute);
-        Arc::clone(entry.value())
-    }
-
-    /// Look up a cached env arc by its full parse-artifact identity
-    /// (R21). The `FileArtifactKey` carries `(canonical, content_hash,
-    /// parse_env_hash, parser_version)`, so this is an exact-match
-    /// lookup: a content change OR a parse-env change is a key miss,
-    /// never a stale hit. Used by the `clone_cached_eval_env_arc`
-    /// accessor.
-    #[must_use]
-    pub fn legacy_env_for(
-        &self,
-        key: &crate::file_artifact_store::FileArtifactKey,
-    ) -> Option<Arc<verter_semantic::analysis::type_eval::EvalEnv>> {
-        let guard = self.legacy_env_entries.lock();
-        guard.get(key).map(Arc::clone)
-    }
-
-    /// Atomically read-or-insert a cached env arc across multiple
-    /// candidate keys (e.g. a barrel-aliased canonical + its resolved
-    /// target). Each key is a full R21 `FileArtifactKey`; a stale
-    /// entry under any key cannot collide with a fresh request.
-    pub fn legacy_env_cache_or_insert(
-        &self,
-        cache_keys: &[crate::file_artifact_store::FileArtifactKey],
-        cached_env: Arc<verter_semantic::analysis::type_eval::EvalEnv>,
-    ) -> Arc<verter_semantic::analysis::type_eval::EvalEnv> {
-        let mut guard = self.legacy_env_entries.lock();
-        for cache_key in cache_keys {
-            if let Some(existing_env) = guard.get(cache_key) {
-                return Arc::clone(existing_env);
-            }
-        }
-        for cache_key in cache_keys {
-            guard.insert(cache_key.clone(), Arc::clone(&cached_env));
-        }
-        cached_env
-    }
-
-    pub fn clear(&self) {
-        self.entries.clear();
-        self.legacy_env_entries.lock().clear();
-    }
-
-    /// Drain the legacy `Arc<EvalEnv>` storage only — used by callers
-    /// that want to invalidate env-shape state without touching the
-    /// owned-program cache.
-    pub fn clear_legacy_envs(&self) {
-        self.legacy_env_entries.lock().clear();
-    }
-
-    pub fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
-    /// Total occupancy across both storage shapes — exposed for
-    /// observability tests that need to see the legacy cache size.
-    pub fn total_entries(&self) -> usize {
-        self.entries.len() + self.legacy_env_entries.lock().len()
-    }
-
-    /// Test-only synthetic-entry inserter used exclusively by
-    /// `cache_invariant_migration` fixtures to verify the cache-cluster
-    /// schema-version eviction invariant. Populates the legacy
-    /// `Arc<EvalEnv>` storage path because constructing a full
-    /// `OwnedEvalProgram` requires lowering through the analyzer pipeline.
-    #[cfg(any(test, debug_assertions))]
-    pub fn insert_synthetic_for_schema_test(&self, marker: &str) {
-        let env = Arc::new(verter_semantic::analysis::type_eval::EvalEnv::default());
-        let key = crate::file_artifact_store::FileArtifactKey::legacy(Arc::from(marker), [0u8; 16]);
-        self.legacy_env_entries.lock().insert(key, env);
-    }
-}
-
-impl Default for EvalEnvCacheDb {
-    fn default() -> Self {
-        Self {
-            entries: DashMap::new(),
-            legacy_env_entries: parking_lot::Mutex::new(FxHashMap::default()),
-            schema_version: crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION,
-        }
-    }
-}
-
-impl crate::cache_schema::CacheSchemaVersioned for EvalEnvCacheDb {
-    fn schema_version(&self) -> u32 {
-        self.schema_version
-    }
-
-    fn evict_if_schema_mismatch(&self, current: u32) -> usize {
-        if self.schema_version == current {
-            return 0;
-        }
-        let entries_count = self.entries.len();
-        self.entries.clear();
-        let legacy_count = {
-            let mut guard = self.legacy_env_entries.lock();
-            let n = guard.len();
-            guard.clear();
-            n
-        };
-        entries_count + legacy_count
     }
 }
 
@@ -1305,9 +795,10 @@ impl DerivedRawCacheDb {
 /// resolution metadata (`dependencies`, `resolved_type_hashes`, `aliases`,
 /// `generation`). Dep-closure changes invalidate this entry;
 /// source-content changes invalidate it (because dep-closure is recomputed
-/// on parse); profile-flag changes preserve it. The unified
-/// `bump_project_generation_and_evict` cascade clears all three domain
-/// DBs together.
+/// on parse); profile-flag changes preserve it. The AUTHORITY-RESET
+/// `bump_project_generation_and_evict` cascade (`set_workspace` /
+/// `close` only) clears all three domain DBs together; route-resolution
+/// generation bumps preserve them.
 #[derive(Debug, Default)]
 pub struct DependencyCacheDb {
     /// Backing map: `DashMap<String, DependencyState>`. Public accessors
@@ -1339,22 +830,18 @@ impl DependencyCacheDb {
     }
 }
 
-/// Host-owned typed cache for resolved-type entries (D16). Tier 1A
-/// introduced this empty; Tier 1C-α moves the existing
-/// `VerterHost::resolved_type_cache` body in here verbatim. The
-/// bounded clear-all-at-`RESOLVED_TYPE_CACHE_CAP` policy
-/// (`crate::types::RESOLVED_TYPE_CACHE_CAP` = 4096) lives INSIDE the
-/// DB so the policy moves with the storage.
-///
-/// **Profile-gated writes preserved**: callers that previously routed
-/// through `lookup_resolved_external_type_cache` /
-/// `store_resolved_external_type_cache` keep that behaviour; the DB
-/// just hosts the inner mutex.
+/// Host-owned typed cache for resolved-type entries — the shared
+/// external-type cache backing
+/// `lookup_resolved_external_type_cache_with_view` /
+/// `store_resolved_external_type_cache_with_view` in
+/// `host_resolve::external_type_resolution`. The bounded
+/// clear-all-at-`RESOLVED_TYPE_CACHE_CAP` policy
+/// (`crate::types::RESOLVED_TYPE_CACHE_CAP`) lives INSIDE the DB so
+/// the policy travels with the storage; the DB hosts the inner mutex.
 #[derive(Debug, Default)]
 pub struct ResolvedTypeCacheDb {
-    /// Tier 1C-α storage: the rehomed shared external-type cache.
-    /// Held behind a `Mutex` for the same reason the off-store form
-    /// did — the bounded clear-all-at-cap policy needs an atomic
+    /// The shared external-type cache map. Held behind a `Mutex`
+    /// because the bounded clear-all-at-cap policy needs an atomic
     /// `len() >= cap → clear() → insert(...)` envelope that
     /// `parking_lot::Mutex::lock()` provides.
     entries: parking_lot::Mutex<
@@ -1424,21 +911,17 @@ impl ResolvedTypeCacheDb {
 const _: fn() = || {
     fn assert_send_sync_static<T: Send + Sync + 'static>() {}
     assert_send_sync_static::<TypeResolutionContextDb>();
-    assert_send_sync_static::<EvalEnvCacheDb>();
     assert_send_sync_static::<CompileCacheDb>();
     assert_send_sync_static::<ResolvedTypeCacheDb>();
 };
 
 // ──────────────────────────────────────────────────────────────────────
-// Tier 1A typed-DB invalidation impls
+// Typed-DB invalidation impls
 //
 // Every DB-typed field on `ProjectTypeStore` MUST implement
 // `ParticipatesInInvalidation` AND `InvalidationByCanonical` so the
 // cascade in `invalidate_canonical_across_all_dbs` can dispatch to it
-// monomorphically. For Tier 1A's empty DBs the canonical-drain
-// implementations are a `clear`-on-key-prefix walk; they're correct
-// for the empty-DB state and Tier 1C-α's consumer migration extends
-// them to use a per-canonical reverse index.
+// monomorphically.
 // ──────────────────────────────────────────────────────────────────────
 
 impl crate::invalidation_domain::ParticipatesInInvalidation for TypeResolutionContextDb {
@@ -1464,39 +947,8 @@ impl crate::invalidation_domain::ParticipatesInInvalidation for TypeResolutionCo
 impl crate::invalidation_domain::InvalidationByCanonical for TypeResolutionContextDb {
     fn invalidate_canonical_for(&self, canonical_id: &str) -> usize {
         let mut removed = 0usize;
-        // Linear scan — Tier 1A's empty-DB state is fine with O(N); the
-        // 1C-α consumer migration adds a CanonicalReverseIndex.
-        self.entries.retain(|key, _| {
-            if key.canonical_id.as_ref() == canonical_id {
-                removed += 1;
-                false
-            } else {
-                true
-            }
-        });
-        removed
-    }
-}
-
-impl crate::invalidation_domain::ParticipatesInInvalidation for EvalEnvCacheDb {
-    fn domains(&self) -> &'static [crate::invalidation_domain::InvalidationDomain] {
-        use crate::invalidation_domain::InvalidationDomain::*;
-        &[FileContent, ProjectGeneration]
-    }
-
-    fn invalidate(&self, domain: crate::invalidation_domain::InvalidationDomain) {
-        use crate::invalidation_domain::InvalidationDomain::*;
-        match domain {
-            ProjectGeneration => self.clear(),
-            FileContent => {}
-            ResolverState | TypeGraph | ComponentMeta | AppConfigInterfaceMerge => {}
-        }
-    }
-}
-
-impl crate::invalidation_domain::InvalidationByCanonical for EvalEnvCacheDb {
-    fn invalidate_canonical_for(&self, canonical_id: &str) -> usize {
-        let mut removed = 0usize;
+        // Linear scan — O(N) is acceptable here: only tests populate
+        // this DB today, so entry counts stay tiny.
         self.entries.retain(|key, _| {
             if key.canonical_id.as_ref() == canonical_id {
                 removed += 1;
@@ -1608,10 +1060,10 @@ impl crate::invalidation_domain::ParticipatesInInvalidation for ResolvedTypeCach
 
 impl crate::invalidation_domain::InvalidationByCanonical for ResolvedTypeCacheDb {
     fn invalidate_canonical_for(&self, canonical_id: &str) -> usize {
-        // Linear scan over the rehomed mutex-protected map. Tier 1C-α
-        // preserves the bounded clear-all-at-cap semantics from the
-        // off-store form; per-canonical invalidation walks the map
-        // once and drops the matching dep_canonical entries.
+        // Linear scan over the mutex-protected map. The bounded
+        // clear-all-at-cap policy keeps the map small; per-canonical
+        // invalidation walks the map once and drops the matching
+        // dep_canonical entries.
         let mut guard = self.entries.lock();
         let mut removed = 0usize;
         guard.retain(|key, _| {
@@ -1649,11 +1101,6 @@ pub struct ProjectTypeStoreCounters {
     /// snapshot reflects total host-owned cache occupancy without
     /// per-DB plumbing in the snapshot surface.
     pub component_meta_cache_live: Arc<AtomicU64>,
-    /// Route-only shallow cache (`RouteOwnedShallowDb`).
-    /// Mirrors `indexed_live` / `indexed_stale_sweeps` for symmetric
-    /// observability with [`FileArtifactStore`].
-    pub route_owned_shallow_live: Arc<AtomicU64>,
-    pub route_owned_shallow_stale_sweeps: Arc<AtomicU64>,
 }
 
 impl ProjectTypeStoreCounters {
@@ -1672,10 +1119,6 @@ impl ProjectTypeStoreCounters {
             component_meta_stale_sweeps: self.component_meta_stale_sweeps.load(Ordering::Relaxed),
             inflight_waiters: self.inflight_waiters.load(Ordering::Relaxed),
             component_meta_cache_live: self.component_meta_cache_live.load(Ordering::Relaxed),
-            route_owned_shallow_live: self.route_owned_shallow_live.load(Ordering::Relaxed),
-            route_owned_shallow_stale_sweeps: self
-                .route_owned_shallow_stale_sweeps
-                .load(Ordering::Relaxed),
         }
     }
 }
@@ -1692,8 +1135,6 @@ pub struct ProjectTypeStoreCounterSnapshot {
     pub component_meta_stale_sweeps: u64,
     pub inflight_waiters: u64,
     pub component_meta_cache_live: u64,
-    pub route_owned_shallow_live: u64,
-    pub route_owned_shallow_stale_sweeps: u64,
 }
 
 /// One per [`crate::VerterHost`] / loaded project. Owns the project-global
@@ -1774,13 +1215,6 @@ pub struct ProjectTypeStore {
     /// results stored as `(DeclIdentity → bool)` with reverse-index
     /// invalidation matching `MaterializeStructureDb`.
     ref_cycle_db: crate::component_meta_caches::RefCycleResultDb,
-    /// Route-only shallow cache. Canonical-keyed (`Arc<str>`) with
-    /// `whole_hash` validated INSIDE the entry; mirrors
-    /// [`FileArtifactStore`] exactly. Per-canonical eviction goes through
-    /// [`Self::evict_canonical`] (which calls
-    /// `route_owned_shallow.remove(canonical)`); bulk eviction uses
-    /// [`RouteOwnedShallowDb::clear_all`].
-    route_owned_shallow: RouteOwnedShallowDb,
     /// Issue #6 — host-owned proof cache for the ComponentConfig
     /// theme variant fast path. Keyed by
     /// `(app_config_decl_canonical_id, component_key_literal)`. An
@@ -1792,15 +1226,10 @@ pub struct ProjectTypeStore {
     /// value directly. See
     /// [`crate::app_config_proof_db::AppConfigNoOverrideProofDb`].
     app_config_no_override_proof: crate::app_config_proof_db::AppConfigNoOverrideProofDb,
-    /// Tier 1A — Host-owned typed DB for [`crate::owned_artifacts::OwnedTypeResolutionContext`].
-    /// Empty in 1A; populated in 1C-α (replaces `HOST_PARSED_TYPE_CONTEXT_CACHE`
-    /// thread-local).
+    /// Host-owned typed DB for [`crate::owned_artifacts::OwnedTypeResolutionContext`].
+    /// Currently populated only by tests; no production lowering path
+    /// writes owned contexts here yet.
     type_resolution_context_db: TypeResolutionContextDb,
-    /// Tier 1A — Host-owned typed DB for [`crate::owned_artifacts::OwnedEvalProgram`]
-    /// (D46 — `EvalEnv` is derived ad-hoc from cached programs).
-    /// Empty in 1A; populated in 1C-α (replaces `HOST_PARSED_EVAL_PROGRAM_CACHE`
-    /// thread-local).
-    eval_env_cache_db: EvalEnvCacheDb,
     /// Profile-domain DB for the per-canonical compile cache (D48). Holds
     /// [`crate::types::ProfileState`] entries; the §3.4.2 invalidation
     /// matrix governs eviction triggers.
@@ -1823,12 +1252,12 @@ pub struct ProjectTypeStore {
     /// resolved-type hashes, aliases, generation); the §3.4.2 invalidation
     /// matrix governs eviction triggers.
     dependency_cache_db: DependencyCacheDb,
-    /// Tier 1A — Host-owned typed cache for resolved-type entries (D16).
-    /// Tier 1C-α moved the existing `VerterHost::resolved_type_cache`
-    /// body in here verbatim (super-shape preserved); the bounded
+    /// Host-owned typed cache for resolved-type entries — the shared
+    /// external-type cache consumed by
+    /// `host_resolve::external_type_resolution`; the bounded
     /// clear-all-at-cap policy lives inside the DB.
     resolved_type_cache_db: ResolvedTypeCacheDb,
-    /// Tier 1C-α — Host-owned handle for `verter_semantic::db::SemanticDb`.
+    /// Host-owned handle for `verter_semantic::db::SemanticDb`.
     /// **Different crate, different artifact.** This is NOT a typed-DB
     /// wrapper around the project-global graph; it is the
     /// orthogonal query-memo DB serving the semantic surfaces /
@@ -1938,10 +1367,6 @@ impl ProjectTypeStore {
         let ref_cycle_db = crate::component_meta_caches::RefCycleResultDb::with_counter(
             Arc::clone(&counters.component_meta_cache_live),
         );
-        let route_owned_shallow = RouteOwnedShallowDb::with_counters(
-            Arc::clone(&counters.route_owned_shallow_live),
-            Arc::clone(&counters.route_owned_shallow_stale_sweeps),
-        );
         let app_config_no_override_proof =
             crate::app_config_proof_db::AppConfigNoOverrideProofDb::with_counter(Arc::clone(
                 &counters.component_meta_cache_live,
@@ -1963,10 +1388,8 @@ impl ProjectTypeStore {
             shape_cache_db,
             materialize_structure_db,
             ref_cycle_db,
-            route_owned_shallow,
             app_config_no_override_proof,
             type_resolution_context_db: TypeResolutionContextDb::new(),
-            eval_env_cache_db: EvalEnvCacheDb::new(),
             compile_cache_db: CompileCacheDb::new(),
             compile_output_pure_content: crate::cache_runtime::CompileOutputNodePureContent::new(),
             derived_raw_cache_db: DerivedRawCacheDb::new(),
@@ -2057,24 +1480,14 @@ impl ProjectTypeStore {
     }
 
     // ──────────────────────────────────────────────────────────────────
-    // Tier 1A typed-DB accessors (introduced empty; populated in 1C-α).
-    //
-    // These accessors are part of the Step 1A discriminating contract:
-    // the field MUST be addressable from the public surface so future
-    // (1C-α) migration work can wire consumer paths without churning
-    // the API surface again.
+    // Typed-DB accessors
     // ──────────────────────────────────────────────────────────────────
 
-    /// Tier 1A — typed DB for [`crate::owned_artifacts::OwnedTypeResolutionContext`].
-    /// Empty in 1A; consumer migration in 1C-α.
+    /// Typed DB for [`crate::owned_artifacts::OwnedTypeResolutionContext`].
+    /// Currently populated only by tests; no production lowering path
+    /// writes owned contexts here yet.
     pub fn type_resolution_context_cache(&self) -> &TypeResolutionContextDb {
         &self.type_resolution_context_db
-    }
-
-    /// Tier 1A — typed DB for owned eval-program payloads (D46).
-    /// Empty in 1A; consumer migration in 1C-α.
-    pub fn eval_env_cache(&self) -> &EvalEnvCacheDb {
-        &self.eval_env_cache_db
     }
 
     /// Profile-domain DB for the per-canonical compile cache (D48).
@@ -2107,28 +1520,19 @@ impl ProjectTypeStore {
         &self.dependency_cache_db
     }
 
-    /// Tier 1A — typed DB for resolved-type entries (D16).
-    /// Empty in 1A; consumer migration in 1C-α.
+    /// Typed DB for resolved-type entries — the shared external-type
+    /// cache consumed by `host_resolve::external_type_resolution`.
     pub fn resolved_type_cache(&self) -> &ResolvedTypeCacheDb {
         &self.resolved_type_cache_db
     }
 
-    /// Tier 1C-α — handle to the rehomed
+    /// Handle to the host-owned
     /// [`verter_semantic::db::SemanticDb`] (different crate, different
     /// artifact type than [`Self::semantic_graph`]). Returns the
-    /// `MutexGuard` so call sites that previously used
-    /// `host.semantic_db.lock()` keep their shape.
+    /// `MutexGuard` so every call site locks through this one
+    /// accessor.
     pub fn semantic_db(&self) -> parking_lot::MutexGuard<'_, verter_semantic::db::SemanticDb> {
         self.semantic_db.lock()
-    }
-
-    /// Route-only shallow cache. F6/F7 destination DB.
-    /// See [`RouteOwnedShallowDb`] for the cache shape and
-    /// [`Self::evict_canonical`] for per-canonical eviction semantics
-    /// (which this DB participates in via the cascade extension landed
-    /// in 6b.D1).
-    pub fn route_owned_shallow(&self) -> &RouteOwnedShallowDb {
-        &self.route_owned_shallow
     }
 
     /// Host-owned semantic-query memo table. Shared across every consumer
@@ -2294,9 +1698,6 @@ impl ProjectTypeStore {
     /// - `SemanticGraphStore`: removes every memo entry whose scope
     ///   references the canonical, and every Vue macro resolution entry
     ///   keyed on the canonical.
-    /// - `RouteOwnedShallowDb`: removes the route-only
-    ///   shallow entry for the canonical (extension landed in 6b.D1; the
-    ///   inner DB method is `remove`, mirroring `FileArtifactStore::remove`).
     pub fn evict_canonical(&self, canonical_id: &str) {
         self.indexed.remove(canonical_id);
         self.analysis.invalidate_canonical(canonical_id);
@@ -2324,9 +1725,6 @@ impl ProjectTypeStore {
         // R — same per-canonical reverse-index drain
         // for the BFS cycle-result cache.
         self.ref_cycle_db.invalidate_for_canonical(canonical_id);
-        // F6/F7 destination DB participates in the
-        // per-canonical eviction cascade.
-        self.route_owned_shallow.remove(canonical_id);
         // Issue #6 / drop any AppConfigNoOverrideProof entry
         // whose dep_signature references this canonical or whose
         // app_config_decl_canonical_id IS this canonical.
@@ -2371,6 +1769,41 @@ impl ProjectTypeStore {
         // for the project-global graph (IndexedReady, analysis, owner
         // surfaces, etc.) and stays orthogonal to the per-canonical
         // compile-cache caches.
+    }
+
+    /// Per-canonical eviction for a ROUTE-RESOLUTION mutation whose
+    /// content identity is unchanged (`set_exact_resolutions`): the full
+    /// [`Self::evict_canonical`] cascade EXCEPT the `FileArtifactStore`
+    /// removal. The content-addressed `IndexedReady` payload stays
+    /// retained so the next read refreshes only its route surface
+    /// through the project-stamp gate (edge refresh — no re-read, no
+    /// re-parse); every derived/query-identity layer for the canonical
+    /// still drains.
+    pub fn evict_canonical_for_route_mutation(&self, canonical_id: &str) {
+        self.analysis.invalidate_canonical(canonical_id);
+        self.owner_import_surfaces.remove(canonical_id);
+        self.component_meta_results.invalidate_owner(canonical_id);
+        self.semantic_graph.invalidate_canonical(canonical_id);
+        self.semantic_graph
+            .invalidate_resolved_named_types_for_canonical(canonical_id);
+        self.imported_registry_db.invalidate_canonical(canonical_id);
+        self.declaration_lookup_db
+            .invalidate_canonical(canonical_id);
+        self.resolvability_db.invalidate_canonical(canonical_id);
+        self.owner_collection_db.invalidate_canonical(canonical_id);
+        self.shape_cache_db.invalidate_canonical(canonical_id);
+        self.materialize_structure_db
+            .invalidate_for_canonical(canonical_id);
+        self.ref_cycle_db.invalidate_for_canonical(canonical_id);
+        self.app_config_no_override_proof
+            .invalidate_canonical(canonical_id);
+        self.resolved_type_cache_db.evict_canonical(canonical_id);
+        self.semantic_db.lock().invalidate(canonical_id);
+        self.member_semantic_facts
+            .invalidate_canonical(canonical_id);
+        self.member_display_facts.invalidate_canonical(canonical_id);
+        self.mapper_binder_registry
+            .clear_for_canonical(canonical_id);
     }
 
     /// Live-content reachability sweep on [`FileArtifactStore`].
@@ -2473,13 +1906,23 @@ impl ProjectTypeStore {
         self.dependency_cache_db.entries().remove(canonical_id);
     }
 
-    /// Targeted invalidation of a project-generation bump.
+    /// AUTHORITY-RESET bump: project-generation bump plus a wholesale
+    /// wipe of every cache layer whose identity depends on project
+    /// configuration — INCLUDING the per-canonical compile / derived /
+    /// dependency payloads.
     ///
-    /// Called when the host / workspace detects `tsconfig`,
-    /// active-TypeScript-SDK, workspace-folder, or other project-shape
-    /// changes. Bumps the project generation and wipes every cache layer
-    /// whose identity depends on project configuration rather than raw
-    /// file text. Invoked atomically before new queries are admitted.
+    /// Reserved for content-authority swaps and full teardowns
+    /// (`set_workspace`, `close`): the wide per-canonical clears orphan
+    /// retained state against an authority that no longer exists.
+    /// Route-resolution mutations (`set_exact_resolutions`,
+    /// `configure_projects`, `set_import_dependencies`) MUST NOT call
+    /// this — they use the stamp-only `bump_project_generation` (stale
+    /// entries miss by validation; route surfaces edge-refresh on
+    /// demand) plus owner-scoped route-mirror repair. Wholesale-clearing
+    /// `derived_raw_cache_db` for a route mutation flips every
+    /// scheduler-tracked canonical's derived state away while its
+    /// scheduler source lives on — the exact accreted-patchwork seam the
+    /// stamp-only model removes.
     pub fn bump_project_generation_and_evict(&self) -> u64 {
         let generation = self.bump_project_generation();
         // File-content identity stays (IndexedReady / AnalysisReady keyed
@@ -2548,7 +1991,6 @@ impl ProjectTypeStore {
         self.derived_raw_cache_db.clear();
         self.dependency_cache_db.clear();
         self.resolved_type_cache_db.clear();
-        self.eval_env_cache_db.clear();
         *self.semantic_db.lock() = verter_semantic::db::SemanticDb::new();
         generation
     }
@@ -2597,19 +2039,16 @@ pub const PROJECT_TYPE_STORE_DB_INVENTORY: &[&str] = &[
     "shape_cache_db",
     "materialize_structure_db",
     "ref_cycle_db",
-    "route_owned_shallow",
     "app_config_no_override_proof",
-    // Tier 1A typed-DB shapes (introduced empty; consumer migration in 1C-α).
     "type_resolution_context_db",
-    "eval_env_cache_db",
     "compile_cache_db",
-    // Tier 1C-β D48 split: source-content-domain and dep-closure-domain
-    // siblings of `compile_cache_db`. Each fans into the unified
+    // D48 split: source-content-domain and dep-closure-domain siblings
+    // of `compile_cache_db`. Each fans into the unified
     // `bump_project_generation_and_evict` cascade.
     "derived_raw_cache_db",
     "dependency_cache_db",
     "resolved_type_cache_db",
-    // The Tier 1C-α `semantic_db: Mutex<verter_semantic::db::SemanticDb>`
+    // The `semantic_db: Mutex<verter_semantic::db::SemanticDb>`
     // handle is intentionally absent from this inventory — it is the
     // *handle* sitting inside `ProjectTypeStore`, not a typed-DB wrapper
     // that implements `ParticipatesInInvalidation`. The unified
@@ -2638,14 +2077,11 @@ impl ProjectTypeStore {
             &self.shape_cache_db,
             &self.materialize_structure_db,
             &self.ref_cycle_db,
-            &self.route_owned_shallow,
             &self.app_config_no_override_proof,
-            // Tier 1A typed-DB shapes (introduced empty; consumer migration in 1C-α).
             &self.type_resolution_context_db,
-            &self.eval_env_cache_db,
             &self.compile_cache_db,
-            // Tier 1C-β D48 split: source-content-domain and dep-closure-domain
-            // siblings of `compile_cache_db`.
+            // Source-content-domain and dep-closure-domain siblings of
+            // `compile_cache_db`.
             &self.derived_raw_cache_db,
             &self.dependency_cache_db,
             &self.resolved_type_cache_db,
@@ -2718,19 +2154,11 @@ impl ProjectTypeStore {
         );
         total = total.saturating_add(self.ref_cycle_db.invalidate_canonical_for(canonical_id));
         total = total.saturating_add(
-            self.route_owned_shallow
-                .invalidate_canonical_for(canonical_id),
-        );
-        total = total.saturating_add(
             self.app_config_no_override_proof
                 .invalidate_canonical_for(canonical_id),
         );
         total = total.saturating_add(
             self.type_resolution_context_db
-                .invalidate_canonical_for(canonical_id),
-        );
-        total = total.saturating_add(
-            self.eval_env_cache_db
                 .invalidate_canonical_for(canonical_id),
         );
         total = total.saturating_add(self.compile_cache_db.invalidate_canonical_for(canonical_id));
@@ -2872,6 +2300,8 @@ mod tests {
                 import_route_hash: None,
                 route_hash: None,
                 edge_generation: 0,
+                project_generation: 0,
+                parse_env_hash: [0u8; 16],
                 raw_source: Arc::from(""),
                 eval_source: Arc::from(""),
                 cached_parse: None,
@@ -2881,6 +2311,7 @@ mod tests {
                 external_type_analysis: Arc::new(
                     verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default(),
                 ),
+                eval_env: Arc::new(verter_semantic::analysis::type_eval::EvalEnv::default()),
                 declares_interface_app_config: false,
             }),
         );
@@ -2931,6 +2362,8 @@ mod tests {
                 import_route_hash: None,
                 route_hash: None,
                 edge_generation: 0,
+                project_generation: 0,
+                parse_env_hash: [0u8; 16],
                 raw_source: Arc::from(""),
                 eval_source: Arc::from(""),
                 cached_parse: None,
@@ -2938,6 +2371,7 @@ mod tests {
                 export_signatures: None,
                 snapshot: Arc::new(crate::types::FileAnalysisSnapshot::default()),
                 external_type_analysis: Arc::clone(&analysis),
+                eval_env: Arc::new(verter_semantic::analysis::type_eval::EvalEnv::default()),
                 declares_interface_app_config: false,
             })
         };

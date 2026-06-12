@@ -88,13 +88,24 @@ use crate::types::Hash16;
 /// and increments the host's per-host
 /// [`crate::VerterHost::signature_overflow_at_install`] counter.
 ///
-/// Returns `(return_value, finalise_result)` so callers decide whether
-/// to admit the result to cache or treat it as non-cacheable.
-pub(crate) fn install_fact_tracer<F, R>(host: &crate::VerterHost, f: F) -> (R, FactReadSetFinalise)
+/// Returns `(return_value, finalise_result, fenced_serve_observed)` so
+/// callers decide whether to admit the result to cache or treat it as
+/// non-cacheable. `fenced_serve_observed == true` means the traced
+/// compute consumed a FENCED (ReturnOnly, `store_published == false`)
+/// `IndexedReady` serve: the result's fact stamps are read from the
+/// LIVE post-mutation state while its payload was computed FROM the
+/// superseded artifact — an entry the read-side fact rail cannot
+/// reject, so every shared-cache admission point MUST refuse it
+/// (serve the value to the caller, publish nothing).
+pub(crate) fn install_fact_tracer<F, R>(
+    host: &crate::VerterHost,
+    f: F,
+) -> (R, FactReadSetFinalise, bool)
 where
     F: FnOnce() -> R,
 {
     let (value, read_set) = host.with_fact_tracer(f);
+    let fenced_serve_observed = read_set.fenced_serve_observed();
     let finalise = read_set.finalise();
     if matches!(finalise, FactReadSetFinalise::Overflow) {
         crate::host_manage::push_structured_event(
@@ -106,7 +117,7 @@ where
         host.signature_overflow_at_install
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
-    (value, finalise)
+    (value, finalise, fenced_serve_observed)
 }
 
 /// Fan `sig` into every active tracer on the current thread's stack.
@@ -344,7 +355,7 @@ fn zero_hash() -> Hash16 {
 ///
 /// * The **artifact-store lookup** is keyed by
 ///   `normalized_analysis_canonical(canonical_id)` — every
-///   `FileArtifactStore` artifact (base via [`ResolverContext::ensure_indexed_ready`],
+///   `FileArtifactStore` artifact (base via [`ResolverContext::ensure_indexed_ready_serve`],
 ///   overlay via the overlay materialiser) is published under the
 ///   normalised analysis canonical as `FileArtifactKey::canonical`. A
 ///   lookup keyed by the raw owner misses the artifact whenever
@@ -386,7 +397,7 @@ pub(crate) fn parse_fact_ref_for_observed_current_content(
     // Content-addressed by `(analysis_canonical, observed_content_hash)`
     // — explicitly NOT view-dependent. The looked-up `FileFacts`
     // registry is parse-domain and content-derived: a base artifact
-    // (legacy key) and a session-overlay artifact (overlay-scoped key)
+    // (base key) and a session-overlay artifact (overlay-scoped key)
     // for the SAME content version carry an identical parse-fact
     // registry, so the `parse_env_hash` key dimension is irrelevant
     // here. `get_artifacts_for_content` scans for a `FileArtifacts`

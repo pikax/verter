@@ -1,3 +1,5 @@
+> **HISTORICAL.** This audit snapshot predates the removal of the route-owned shallow system (the `*route_owned_shallow*` functions, retired in favor of the single `IndexedReady` artifact path); the inventory below describes that deleted code and is retained for provenance only.
+
 # host_resolve — Tier 0 Step 0.3 god-module split audit
 
 **File:** `crates\verter_session\src\host_resolve.rs`  

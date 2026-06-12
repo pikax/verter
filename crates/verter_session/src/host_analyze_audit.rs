@@ -3,7 +3,7 @@
 //! `RequestKind::SemanticAnalysis` requests.
 //!
 //! Drives the host's existing semantic analysis path
-//! ([`VerterHost::ensure_indexed_ready`]) inside the same
+//! ([`VerterHost::ensure_indexed_ready_serve`]) inside the same
 //! audit-registration / TLS-observer machinery the component-meta and
 //! type-resolution producers use. Returns the materialised
 //! [`AnalysisReady`] artifact (when the canonical exists in the
@@ -20,7 +20,7 @@
 //!    - `Noop` → [`verter_audit::install_noop_observer`].
 //! 3. Detect "fresh build vs warm-cache reuse" with a content-pinned
 //!    probe ([`VerterHost::current_content_pinned_indexed`]) BEFORE
-//!    invoking [`VerterHost::ensure_indexed_ready`]. The probe is
+//!    invoking [`VerterHost::ensure_indexed_ready_serve`]. The probe is
 //!    cheap and provides a discriminating signal independent of the
 //!    producer's internal state machine — a regression that always
 //!    rebuilt would still surface a real `indexed_ready_built = true`
@@ -272,7 +272,7 @@ impl VerterHost {
     /// through the shared semantic analysis paths. Returns `None`
     /// when the canonical does not exist in the workspace.
     ///
-    /// Drives both [`Self::ensure_indexed_ready`] (for the canonical
+    /// Drives both [`Self::ensure_indexed_ready_serve`] (for the canonical
     /// `whole_hash` plus the cached `script_analysis` /
     /// `export_signatures` arcs) and [`Self::get_analysis`] (for the
     /// fully-finalised [`FileAnalysisSnapshot`], which includes
@@ -287,7 +287,7 @@ impl VerterHost {
     /// responsibility is to expose the ready artifact for the
     /// audited window, not to compete with that population path.
     fn materialize_analysis_ready(&self, canonical_id: &str) -> Option<AnalysisReady> {
-        let indexed = self.ensure_indexed_ready(canonical_id)?;
+        let indexed = self.ensure_indexed_ready_serve(canonical_id)?.indexed;
         let snapshot = self.get_analysis(canonical_id)?;
         let scope = self.config.effective_scope();
         let _key = AnalysisArtifactKey {

@@ -304,6 +304,14 @@ impl verter_workspace::WorkspaceAccess for LspProjectResolverReader<'_> {
     ) -> verter_workspace::ExactResolutionResult {
         verter_workspace::ExactResolutionResult::default()
     }
+    fn record_parsed_edges_with_exact_resolutions(
+        &self,
+        _canonical_id: &str,
+        _edges: &[verter_workspace::ParsedEdge],
+        _resolutions: Vec<verter_workspace::ExactResolution>,
+    ) -> verter_workspace::ExactResolutionResult {
+        verter_workspace::ExactResolutionResult::default()
+    }
 
     fn replace_semantic_transitive(
         &self,

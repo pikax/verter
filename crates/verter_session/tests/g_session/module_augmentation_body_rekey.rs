@@ -26,7 +26,8 @@
 //!   The discriminating assertion FAILS.
 //! - **Post-fix tree**: the body stitch self-heals the stale key via the
 //!   scheduler-authoritative current content hash (`indexed.whole_hash`,
-//!   already materialised by `ensure_indexed_ready`), so `fromAug` survives.
+//!   already materialised by the `ensure_indexed_ready_serve` flight), so
+//!   `fromAug` survives.
 //!   PASSES.
 
 use std::sync::Arc;

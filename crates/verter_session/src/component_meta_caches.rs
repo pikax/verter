@@ -2561,9 +2561,10 @@ where
         let validated_at_generation = ctx.project_type_store().current_project_generation();
         let mut compute_fence: Vec<(Arc<str>, crate::semantic_query::DepVersion)> = Vec::new();
         let mut observed_self_roots: Vec<(Arc<str>, crate::types::Hash16)> = Vec::new();
-        let (result, finalise) = crate::fact_signature_helpers::install_fact_tracer(host, || {
-            compute_bfs(&mut compute_fence, &mut observed_self_roots)
-        });
+        let (result, finalise, fenced_serve_observed) =
+            crate::fact_signature_helpers::install_fact_tracer(host, || {
+                compute_bfs(&mut compute_fence, &mut observed_self_roots)
+            });
         provenance
             .ref_cycle_fact_tracer_installs
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -2598,6 +2599,23 @@ where
             cache_suppress: false,
             result_is_partial: false,
         };
+        // ReturnOnly never publishes — fenced-serve arm. A BFS whose
+        // traced scope consumed a FENCED (ReturnOnly) IndexedReady
+        // serve derived its reachability answer from a
+        // served-without-publication artifact while its fact carrier
+        // validates against the live view. The computed bool is still
+        // returned via `ReturnOnly`, carrying the BFS fence.
+        if fenced_serve_observed {
+            provenance
+                .ref_cycle_overflow_refusals
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let _reason_guard = crate::cache_runtime::SetReasonGuard::arm(
+                crate::cache_runtime::NonAdmissionReason::GenerationSuperseded,
+            );
+            return ComputeAdmission::ReturnOnly(return_only_value(Arc::clone(
+                &dispatch_dep_signature,
+            )));
+        }
         // Refuse shared admission when the BFS fence carries a
         // `RouteGeneration` dependency — route generation has no
         // authoritative validating source, so an entry rooted on
@@ -2850,11 +2868,21 @@ pub(crate) fn app_config_no_override_proof_get_or_compute(
             .map(|ir| !ir.declares_interface_app_config)
             .unwrap_or(true)
     };
-    let (no_override, finalise) =
+    let (no_override, finalise, fenced_serve_observed) =
         crate::fact_signature_helpers::install_fact_tracer(host, cold_body);
     host.provenance
         .app_config_proof_fact_tracer_installs
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    // ReturnOnly never publishes — fenced-serve arm: a proof derived
+    // from a served-without-publication artifact must not seal a
+    // shared no-override entry whose facts validate against the live
+    // view. Decline to publish; the consumer takes the slow path.
+    if fenced_serve_observed {
+        host.provenance
+            .app_config_proof_overflow_refusals
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        return None;
+    }
     match finalise {
         crate::resolver_core::FactReadSetFinalise::Ok(fact_dep_signature) => {
             if !no_override {

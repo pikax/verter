@@ -865,7 +865,17 @@ impl MetaSession {
         // never admitted, so a transient trip cannot warm-replay as a
         // sticky degraded payload.
         if fixed.payload_promotion_admissible(host) && !resolved.synthesis_should_suppress {
-            host.store_meta_payload(canonical.as_str(), &facts, payload.clone());
+            // Stamp from the FLIGHT-CAPTURED generation (the fixed
+            // view's captured token), never the live counter: a project
+            // bump landing between the fence above and this store must
+            // leave the payload stamped under the graph it was computed
+            // from, so the warm read's generation backstop rejects it.
+            host.store_meta_payload(
+                canonical.as_str(),
+                &facts,
+                payload.clone(),
+                fixed.captured_validation_token().project_generation,
+            );
         }
         Ok(Some(payload))
     }
@@ -1042,19 +1052,19 @@ impl MetaSession {
     }
 
     // ───────────────────────────────────────────────────────────────────────
-    // Selective component-meta surface API (Tier 1B / D32 / D102 / D122)
+    // Selective component-meta surface API (D32 / D102 / D122)
     // ───────────────────────────────────────────────────────────────────────
 
     /// Build the eager-scalar + lazy-`TypeHandle` surface envelope for a
     /// canonical (D32 / D99). Returns `Ok(None)` when the canonical does not
     /// resolve to a component (e.g., not a Vue SFC).
     ///
-    /// Tier 1B contract: the lazy fields are populated from the existing
+    /// Contract: the lazy fields are populated from the existing
     /// `ComponentMetaAnalysis` snapshot with **empty** `TypeHandle` query
-    /// paths. Tier 1C-α populates `OwnedTypeResolutionContext::declaration_fingerprints`
-    /// at lowering time, after which the surface envelope handles point at
-    /// real declarations. The contract / proto wire shape / NAPI-side
-    /// behavior is identical at both tiers.
+    /// paths — no production path populates
+    /// `OwnedTypeResolutionContext::declaration_fingerprints`, so the
+    /// surface envelope handles never carry declaration-scoped query
+    /// paths today.
     pub fn get_component_meta_surface(
         &self,
         canonical_or_alias: &str,
@@ -1066,10 +1076,12 @@ impl MetaSession {
 
     /// Resolve a `TypeHandle` to a one-layer `TypeExpansion` (D32 / D104).
     ///
-    /// Tier 1B resolution: a handle whose `query_path` is `None` (the
+    /// Resolution contract: a handle whose `query_path` is `None` (the
     /// surface root) returns an empty Object expansion; handles with a
-    /// populated query path round-trip the proto identity. Tier 1C-α wires
-    /// the real walk against `OwnedTypeResolutionContext::declaration_fingerprints`.
+    /// populated query path also return an empty Object outline and
+    /// round-trip the handle identity — no declaration walk runs
+    /// (`OwnedTypeResolutionContext::declaration_fingerprints` has no
+    /// production producer).
     pub fn get_component_meta_type_expansion(
         &self,
         handle: crate::component_meta_payload::TypeHandle,
@@ -1158,10 +1170,11 @@ impl MetaSession {
 
         // Step 3 — fall through to the legacy ComponentMetaPayload encoder
         // for byte-equiv preservation (D19). The bridge has gathered all
-        // expansions; for Tier 1B the public bytes still come from the
-        // existing analysis pipeline. Tier 1C-α wires `assemble_volar_payload`
-        // as the encode source once `OwnedTypeResolutionContext::declaration_fingerprints`
-        // is populated.
+        // expansions, but the public bytes still come from the existing
+        // analysis pipeline — `assemble_volar_payload` is not the encode
+        // source here because the expansions carry no declaration-scoped
+        // data (`OwnedTypeResolutionContext::declaration_fingerprints`
+        // has no production producer).
         self.get_component_meta_payload(canonical_or_alias, encode_fn)
     }
 

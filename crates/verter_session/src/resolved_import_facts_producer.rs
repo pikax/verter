@@ -108,7 +108,7 @@ impl VerterHost {
         //    canonical content hash for the file's current bytes
         //    (`FileArtifactStore` records the same value as its
         //    `content_hash` dimension when `IndexedReady` is later
-        //    materialized via `ensure_indexed_ready`). Reading from
+        //    materialized via `ensure_indexed_ready_serve`). Reading from
         //    the scheduler lets the producer admit immediately after
         //    `upsert` without waiting for the lazy `IndexedReady`
         //    materialization.

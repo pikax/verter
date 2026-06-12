@@ -30,14 +30,9 @@ use std::sync::Arc;
 use rustc_hash::FxHashMap;
 
 use crate::resolver_core::{
-    FactVersionRef, PermissiveStoreView, SingleflightGroup, SingleflightRunResult, StoreView,
-    ValidatedFactCache,
+    FactVersionRef, PermissiveStoreView, SingleflightGroup, SingleflightRole,
+    SingleflightRunResult, StoreView, ValidatedFactCache,
 };
-// `SingleflightRole` is read only by the leader/follower telemetry split,
-// which is itself `cfg(any(test, debug_assertions))`; gate the import to
-// match so release (no debug_assertions) does not see an unused import.
-#[cfg(any(test, debug_assertions))]
-use crate::resolver_core::SingleflightRole;
 
 mod effective_export_set;
 
@@ -99,12 +94,32 @@ pub struct BarrelRouteSurface {
     pub fact_dep_signature: Arc<[FactVersionRef]>,
 }
 
+/// Cold route-resolve flight value: the resolved route plus its
+/// shared-store admission status BY VALUE.
+///
+/// Retention on the route singleflight mirrors admission: only an
+/// ADMITTED resolve (non-empty fact signature, persisted into
+/// [`RouteDb::routes`]) is retained as a joinable rendezvous for the
+/// burst. An UNADMITTED resolve — the empty-fact-signature carrier: a
+/// frontier walk that consumed a fenced (ReturnOnly) serve, or an
+/// unrootable-wildcard negative-cache resolve — is served to the
+/// leader's own caller only. A burst member that adopted it would
+/// receive a possibly-superseded route with neither a fact signature
+/// to bubble into its outer tracer nor any ReturnOnly signal on its
+/// own request; the by-value `admitted` bit is what lets a committed
+/// follower detect that and re-resolve against fresh state.
+#[derive(Debug)]
+struct RouteFlightOutcome {
+    route: Arc<RouteResult>,
+    admitted: bool,
+}
+
 /// Shared DB for canonical export routing facts.
 #[derive(Debug)]
 pub struct RouteDb {
     /// `(provider_canonical, exported_name)` → route result.
     routes: ValidatedFactCache<(String, String), RouteResult>,
-    route_singleflight: SingleflightGroup<(String, String), Arc<RouteResult>, ()>,
+    route_singleflight: SingleflightGroup<(String, String), RouteFlightOutcome, ()>,
     /// `barrel_canonical` → full wildcard route surface (lazy, built once).
     barrel_surfaces: ValidatedFactCache<String, BarrelRouteSurface>,
     barrel_singleflight: SingleflightGroup<String, Arc<BarrelRouteSurface>, ()>,
@@ -241,6 +256,10 @@ impl RouteDb {
     }
 
     /// Look up or materialize a route for `(provider, name)`.
+    ///
+    /// `resolve` is `Fn` (not `FnOnce`): a claimant that received an
+    /// UNADMITTED flight outcome as a follower re-runs it against fresh
+    /// state (see [`Self::resolve_route_singleflight_inner`]).
     pub fn get_or_resolve_route<V, F>(
         &self,
         provider_canonical: &str,
@@ -250,7 +269,7 @@ impl RouteDb {
     ) -> Option<Arc<RouteResult>>
     where
         V: StoreView + ?Sized,
-        F: FnOnce() -> Option<RouteResult>,
+        F: Fn() -> Option<RouteResult>,
     {
         self.get_or_resolve_route_with_facts(provider_canonical, exported_name, view, || {
             resolve().map(|result| (result, Vec::new()))
@@ -267,7 +286,7 @@ impl RouteDb {
     ) -> Option<Arc<RouteResult>>
     where
         V: StoreView + ?Sized,
-        F: FnOnce() -> Option<(RouteResult, Vec<FactVersionRef>)>,
+        F: Fn() -> Option<(RouteResult, Vec<FactVersionRef>)>,
     {
         let key = (provider_canonical.to_owned(), exported_name.to_owned());
 
@@ -276,7 +295,7 @@ impl RouteDb {
         }
 
         let run_result = self.resolve_route_singleflight_inner(key, view, resolve)?;
-        Some((*run_result.value).clone())
+        Some(Arc::clone(&run_result.value.route))
     }
 
     /// Shared singleflight orchestrator for the cold-path route resolve used
@@ -290,9 +309,24 @@ impl RouteDb {
     /// another path warmed the entry between the caller's pre-check and
     /// admission), then invokes `resolve()`. On success, the entry is admitted
     /// to [`Self::routes`] under strict admission rules (non-empty fact
-    /// signatures only — empty-signature resolves are the negative-cache
-    /// pattern surfaced from [`Self::get_or_resolve_route`] and are returned
-    /// to the caller without being persisted as a fact-validated cache hit).
+    /// signatures only — empty-signature resolves are the never-persisted
+    /// carrier: a frontier walk that consumed a fenced (ReturnOnly) serve, or
+    /// the negative-cache pattern surfaced from [`Self::get_or_resolve_route`]
+    /// — and are returned to the caller without being persisted as a
+    /// fact-validated cache hit).
+    ///
+    /// Retention mirrors admission (the bounded re-validation loop the
+    /// IndexedReady and prepared-decl-bundle lanes use): an ADMITTED
+    /// outcome is retained as a joinable rendezvous for the burst; an
+    /// UNADMITTED outcome serves only the LEADER (ReturnOnly — its own
+    /// request consumed the resolve on its own thread, so any fenced
+    /// serve already marked that thread's suppression rails); a FOLLOWER
+    /// receives the unadmitted outcome by value and re-runs `resolve`
+    /// against fresh state on a fresh lane. Under sustained churn the
+    /// bounded fallback adopts the last unadmitted outcome ReturnOnly,
+    /// carrying the suppression status onto THIS thread's request-sticky
+    /// and traced-scope rails (the original resolve ran on the leader's
+    /// thread, not this one).
     ///
     /// Returns `Some(SingleflightRunResult { value, role, .. })` on success
     /// (callers that need to discriminate leader vs follower for provenance
@@ -303,55 +337,90 @@ impl RouteDb {
         key: (String, String),
         view: &V,
         resolve: F,
-    ) -> Option<SingleflightRunResult<Arc<RouteResult>>>
+    ) -> Option<SingleflightRunResult<RouteFlightOutcome>>
     where
         V: StoreView + ?Sized,
-        F: FnOnce() -> Option<(RouteResult, Vec<FactVersionRef>)>,
+        F: Fn() -> Option<(RouteResult, Vec<FactVersionRef>)>,
     {
-        self.route_singleflight
-            .run(key.clone(), view.compat_token(), || {
-                if let Some(result) = self.routes.get_if_valid(&key, view) {
-                    return Ok(result);
-                }
-                match resolve() {
-                    Some((result, facts)) => {
-                        let arc = Arc::new(result);
-                        // Strict admission. Routes resolved with
-                        // non-empty fact signatures admit through the
-                        // strict entry-point; empty-signature resolves
-                        // are the negative-cache pattern
-                        // (`get_or_resolve_route` passes `Vec::new()`)
-                        // and are NOT admitted — the route surface is
-                        // still returned to the caller, but the entry is
-                        // not persisted as a fact-validated cache hit.
-                        if !facts.is_empty() {
-                            self.routes.insert_arc_with_kind(
-                                key.clone(),
-                                arc.clone(),
-                                facts,
-                                "route_db.routes",
-                            );
-                        }
-                        // R23 typed event: cold-path route admission.
-                        // Fires once per `(provider, exported_name)`
-                        // resolution. The `augmented` field is `false`
-                        // for the bare-route resolution path; the
-                        // post-augmentation-stitched
-                        // `EffectiveExportSet` path emits its own
-                        // `ExportRouteResolved` with `augmented: true`
-                        // when consumers walk its entries.
-                        emit_export_route_resolved_event(
-                            &key.0,
-                            &key.1,
-                            arc.as_ref(),
-                            /* augmented = */ false,
+        let flight_body = || {
+            if let Some(result) = self.routes.get_if_valid(&key, view) {
+                return Ok(RouteFlightOutcome {
+                    route: result,
+                    admitted: true,
+                });
+            }
+            match resolve() {
+                Some((result, facts)) => {
+                    let arc = Arc::new(result);
+                    // Strict admission. Routes resolved with
+                    // non-empty fact signatures admit through the
+                    // strict entry-point; empty-signature resolves
+                    // are NOT admitted — the route surface is
+                    // still returned to the caller, but the entry is
+                    // not persisted as a fact-validated cache hit.
+                    let admitted = !facts.is_empty();
+                    if admitted {
+                        self.routes.insert_arc_with_kind(
+                            key.clone(),
+                            arc.clone(),
+                            facts,
+                            "route_db.routes",
                         );
-                        Ok(arc)
                     }
-                    None => Err(()),
+                    // R23 typed event: cold-path route admission.
+                    // Fires once per `(provider, exported_name)`
+                    // resolution. The `augmented` field is `false`
+                    // for the bare-route resolution path; the
+                    // post-augmentation-stitched
+                    // `EffectiveExportSet` path emits its own
+                    // `ExportRouteResolved` with `augmented: true`
+                    // when consumers walk its entries.
+                    emit_export_route_resolved_event(
+                        &key.0,
+                        &key.1,
+                        arc.as_ref(),
+                        /* augmented = */ false,
+                    );
+                    Ok(RouteFlightOutcome {
+                        route: arc,
+                        admitted,
+                    })
                 }
-            })
-            .ok()
+                None => Err(()),
+            }
+        };
+        const MAX_FLIGHT_ATTEMPTS: usize = 3;
+        let mut last_unadmitted: Option<SingleflightRunResult<RouteFlightOutcome>> = None;
+        for _attempt in 0..MAX_FLIGHT_ATTEMPTS {
+            let run_result = self
+                .route_singleflight
+                .run_retaining(key.clone(), view.compat_token(), flight_body, |outcome| {
+                    outcome.admitted
+                })
+                .ok()?;
+            if run_result.value.admitted {
+                return Some(run_result);
+            }
+            if matches!(run_result.role, SingleflightRole::Leader) {
+                // Unadmitted leader: serve its own caller. The resolve
+                // ran on this thread, so any fenced serve it consumed
+                // already marked this thread's suppression rails.
+                return Some(run_result);
+            }
+            last_unadmitted = Some(run_result);
+        }
+        if last_unadmitted.is_some() {
+            // Sustained-churn bounded fallback (FOLLOWER adoption): the
+            // adopted route is unadmitted — fenced-derived or unrootable
+            // — and this thread never ran the resolve that produced it.
+            // Carry the ReturnOnly status onto this request's
+            // suppression rails by hand so an enclosing traced cold
+            // compute refuses shared-cache admission of any result
+            // folding a route it cannot root.
+            crate::request_context::mark_request_materialization_cache_suppress();
+            crate::resolver_core::resolver_context::note_fenced_serve_fan_out();
+        }
+        last_unadmitted
     }
 
     /// **Test-only.** Strong-reference count of the in-flight route
@@ -425,7 +494,7 @@ impl RouteDb {
     ) -> Option<Arc<RouteResult>>
     where
         V: StoreView + ?Sized,
-        F: FnOnce() -> Option<(RouteResult, Vec<FactVersionRef>)>,
+        F: Fn() -> Option<(RouteResult, Vec<FactVersionRef>)>,
     {
         // Warm-hit fast path: validated cache lookup with fact bubbling.
         if let Some((value, facts)) =
@@ -467,7 +536,7 @@ impl RouteDb {
                 }
             }
         }
-        Some((*run_result.value).clone())
+        Some(Arc::clone(&run_result.value.route))
     }
 
     /// Insert a pre-resolved route. **Test-only**: the empty-facts variant
@@ -868,6 +937,81 @@ mod tests {
              admission; the second call MUST re-invoke the resolver. \
              Migrate to `get_or_resolve_route_with_facts` with a \
              non-empty fact signature to opt back into caching."
+        );
+    }
+
+    /// ReturnOnly never publishes — route-singleflight rendezvous arm.
+    /// A resolve the strict admission refused to persist (the
+    /// empty-fact-signature carrier: the fenced-walk arm of
+    /// `build_named_type_export_route_entry`, or an unrootable-wildcard
+    /// negative-cache resolve) must NOT stay behind as a joinable
+    /// `Done` rendezvous: a late claimant on the still-pinned lane
+    /// would adopt a possibly-superseded route with neither a fact
+    /// signature to bubble nor any ReturnOnly signal on its own
+    /// request. Retention must mirror admission.
+    #[test]
+    fn unadmitted_route_resolve_is_not_retained_as_a_joinable_rendezvous() {
+        let db = RouteDb::new();
+        let view = TestView::accepting_all(1);
+        let key = ("provider.ts".to_owned(), "Foo".to_owned());
+
+        // A burst sibling's participation pin keeps the lane alive past
+        // the leader's completion — the window in which a late claimant
+        // could join a retained `Done`.
+        let _pin = db
+            .route_singleflight
+            .participate(key.clone(), view.compat_token());
+
+        let resolves = std::sync::atomic::AtomicU32::new(0);
+        let superseded = RouteResult::Resolved {
+            defining_canonical: "superseded.ts".to_owned(),
+            defining_symbol: "Foo".to_owned(),
+        };
+        let live = RouteResult::Resolved {
+            defining_canonical: "live.ts".to_owned(),
+            defining_symbol: "Foo".to_owned(),
+        };
+        let live_fact = FactVersionRef::FileWholeHash {
+            canonical_id: "live.ts".to_owned(),
+            hash: [7u8; 16],
+        };
+
+        // Call 1: the resolve returns the never-persisted empty-facts
+        // shape (the carrier the fenced frontier walk produces). The
+        // caller is still served its own result.
+        let first = db.get_or_resolve_route_with_facts("provider.ts", "Foo", &view, || {
+            resolves.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Some((superseded.clone(), Vec::new()))
+        });
+        assert_eq!(
+            first.as_deref(),
+            Some(&superseded),
+            "the leader's own caller is still served the unadmitted route",
+        );
+
+        // Call 2 (a late claimant on the pinned lane): must NOT adopt
+        // the unadmitted result — it re-resolves cold against fresh
+        // state and its admitted result serves warm afterwards.
+        let second = db.get_or_resolve_route_with_facts("provider.ts", "Foo", &view, || {
+            resolves.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Some((live.clone(), vec![live_fact.clone()]))
+        });
+        assert_eq!(
+            resolves.load(std::sync::atomic::Ordering::Relaxed),
+            2,
+            "a late claimant must re-run its own resolve instead of \
+             adopting the unadmitted (empty-facts) route as a retained \
+             rendezvous",
+        );
+        assert_eq!(
+            second.as_deref(),
+            Some(&live),
+            "the late claimant must return its own fresh resolve's route",
+        );
+        assert_eq!(
+            db.get_route("provider.ts", "Foo", &view).as_deref(),
+            Some(&live),
+            "the late claimant's admitted re-resolve must serve warm",
         );
     }
 

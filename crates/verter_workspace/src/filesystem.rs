@@ -201,8 +201,14 @@ impl FilesystemWorkspace {
     /// Inject a file directly into the snapshot cache.
     pub fn inject_file(&self, canonical_id: String, source: Arc<str>) {
         self.engine.invalidate_package_manifest(&canonical_id);
-        self.engine.snapshot.write().inject(canonical_id, source);
-        self.engine.bump_content_generation();
+        self.engine
+            .snapshot
+            .write()
+            .inject(canonical_id.clone(), source);
+        // Per-canonical content transition — same recording chokepoint
+        // as every other per-canonical mutator, so artifact-only
+        // freshness gates observe the injection.
+        self.engine.bump_content_generation_for(&canonical_id);
     }
 
     /// Apply a batch of workspace changes.
@@ -438,6 +444,10 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
         self.engine.current_content_generation()
     }
 
+    fn last_content_transition_generation(&self, canonical_id: &str) -> u64 {
+        self.engine.last_content_transition_generation(canonical_id)
+    }
+
     fn vfs_provenance_snapshot(&self) -> crate::types::VfsProvenanceSnapshot {
         FilesystemWorkspace::vfs_provenance_snapshot(self)
     }
@@ -544,6 +554,20 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
         self.engine.set_exact_resolutions(canonical_id, resolutions)
     }
 
+    fn record_parsed_edges_with_exact_resolutions(
+        &self,
+        canonical_id: &str,
+        edges: &[crate::types::ParsedEdge],
+        resolutions: Vec<crate::types::ExactResolution>,
+    ) -> crate::types::ExactResolutionResult {
+        self.engine.record_parsed_edges_with_exact_resolutions(
+            self,
+            canonical_id,
+            edges,
+            resolutions,
+        )
+    }
+
     fn replace_semantic_transitive(
         &self,
         canonical_id: &str,
@@ -570,7 +594,7 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
             .set(canonical_id.to_string(), source);
         if changed {
             self.engine.invalidate_package_manifest(canonical_id);
-            self.engine.bump_content_generation();
+            self.engine.bump_content_generation_for(canonical_id);
         }
     }
 
@@ -580,7 +604,7 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
         // Invalidate snapshot so next read falls through to disk,
         // picking up any saves made while the overlay was active.
         self.engine.snapshot.write().remove(canonical_id);
-        self.engine.bump_content_generation();
+        self.engine.bump_content_generation_for(canonical_id);
     }
 
     fn notify_delete(&self, canonical_id: &str) {
@@ -591,7 +615,7 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
         self.engine.overlay.write().clear(canonical_id);
         self.engine.snapshot.write().remove(canonical_id);
         self.engine.edges.write().remove_file(canonical_id);
-        self.engine.bump_content_generation();
+        self.engine.bump_content_generation_for(canonical_id);
     }
 
     fn configure_resolver(&self, projects: Vec<crate::resolver::IdeProjectConfig>) {
@@ -628,7 +652,7 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
             .snapshot
             .write()
             .inject(path.to_string(), Arc::from(content));
-        self.engine.bump_content_generation();
+        self.engine.bump_content_generation_for(path);
         Ok(())
     }
 
@@ -651,7 +675,7 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
         mark_parent_dir_dirty(&self.engine, path);
         self.engine.snapshot.write().remove(path);
         self.engine.edges.write().remove_file(path);
-        self.engine.bump_content_generation();
+        self.engine.bump_content_generation_for(path);
         Ok(())
     }
 
@@ -666,6 +690,12 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
         mark_parent_dir_dirty(&self.engine, path);
         self.engine.snapshot.write().remove_under(path);
         self.engine.edges.write().remove_under(path);
+        // A recursive disk delete transitions EVERY canonical under
+        // `path` — including ones the snapshot cache never saw (the
+        // filesystem engine reads through to disk). Record the SUBTREE
+        // so a delete→recreate of any member never serves a retained
+        // pre-delete artifact as fresh.
+        self.engine.record_subtree_content_transition(path);
         self.engine.bump_content_generation();
         Ok(())
     }
@@ -677,7 +707,7 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
         mark_parent_dir_dirty(&self.engine, dst);
         self.engine.snapshot.write().remove(dst);
         self.engine.edges.write().remove_file(dst);
-        self.engine.bump_content_generation();
+        self.engine.bump_content_generation_for(dst);
         Ok(())
     }
 

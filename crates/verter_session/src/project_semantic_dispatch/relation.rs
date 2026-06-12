@@ -172,35 +172,36 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // stale frame onto the stack.
         let taint_guard =
             crate::project_semantic_dispatch::BuildLocalTaintGuard::push(&self.build_local_taint);
-        let (result, finalise) = crate::fact_signature_helpers::install_fact_tracer(host, || {
-            // Test-only fact-injection hook. When the host's per-host
-            // `relation_force_overflow_observations` knob is non-zero, emit
-            // that many synthetic `FileWholeHash` observations onto the active
-            // tracer so finalise reports `Overflow` once the per-signature cap
-            // is exceeded — exercising the overflow non-admission path below
-            // without a pathological multi-file fixture.
-            let force_n = host
-                .relation_force_overflow_observations
-                .load(std::sync::atomic::Ordering::Relaxed);
-            if force_n > 0 {
-                for n in 0..force_n {
-                    crate::resolver_core::resolver_context::observe_fan_out(
-                        crate::resolver_core::FactVersionRef::FileWholeHash {
-                            canonical_id: format!("__relation_force_overflow_{n}.ts"),
-                            hash: [(n & 0xff) as u8; 16],
-                        },
-                    );
+        let (result, finalise, fenced_serve_observed) =
+            crate::fact_signature_helpers::install_fact_tracer(host, || {
+                // Test-only fact-injection hook. When the host's per-host
+                // `relation_force_overflow_observations` knob is non-zero, emit
+                // that many synthetic `FileWholeHash` observations onto the active
+                // tracer so finalise reports `Overflow` once the per-signature cap
+                // is exceeded — exercising the overflow non-admission path below
+                // without a pathological multi-file fixture.
+                let force_n = host
+                    .relation_force_overflow_observations
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                if force_n > 0 {
+                    for n in 0..force_n {
+                        crate::resolver_core::resolver_context::observe_fan_out(
+                            crate::resolver_core::FactVersionRef::FileWholeHash {
+                                canonical_id: format!("__relation_force_overflow_{n}.ts"),
+                                hash: [(n & 0xff) as u8; 16],
+                            },
+                        );
+                    }
                 }
-            }
-            if enter_relation_guard(&key) {
-                let mut bindings: Vec<InferBinding> = Vec::new();
-                let r = self.decide_relation_with_dispatch(source, target, &mut bindings);
-                exit_relation_guard(&key);
-                r
-            } else {
-                RelationResult::Unknown
-            }
-        });
+                if enter_relation_guard(&key) {
+                    let mut bindings: Vec<InferBinding> = Vec::new();
+                    let r = self.decide_relation_with_dispatch(source, target, &mut bindings);
+                    exit_relation_guard(&key);
+                    r
+                } else {
+                    RelationResult::Unknown
+                }
+            });
         // Pop this relation's cold-build-local taint frame. If a nested
         // identity-carrier `Instantiate` unwrap surfaced a PARTIAL or
         // non-cacheable read, the shared read boundary folded it here.
@@ -216,6 +217,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 relation_build_local.result_is_partial,
                 relation_build_local.cache_suppress,
             );
+        }
+        // ReturnOnly never publishes — fenced-serve arm: a judgement
+        // whose traced scope consumed a FENCED (ReturnOnly) serve was
+        // derived from a served-without-publication artifact; return it
+        // to the caller, refuse relation-memo admission.
+        if fenced_serve_observed {
+            return (result, fence);
         }
         // Overflowed read-set: the judgement is returned to the caller but
         // refused memo admission — the dependency fence cannot be

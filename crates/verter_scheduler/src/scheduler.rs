@@ -4402,6 +4402,22 @@ impl Scheduler {
             .expect("test_install_batch_admit_epoch_trace must be called before taking the trace")
     }
 
+    /// Test-only: clear the committed analysis snapshot for a file while
+    /// leaving its source snapshot and node generation untouched.
+    /// Reproduces the scheduler state inside the Source→Analysis commit
+    /// window — the Source job has committed at the node generation, the
+    /// Analysis job has not yet — which a concurrent read otherwise hits
+    /// only by racing the worker. `try_get_source` keeps serving the
+    /// committed source; `try_get_analysis` returns `None` until a new
+    /// analysis commit lands.
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    pub fn test_clear_analysis(&self, id: &str) {
+        if let Some(node) = self.nodes.get(id) {
+            node.analysis.store(Arc::new(None));
+        }
+    }
+
     /// Dispatch work inline (used by `drive_one`/`drive_all` in sync mode and WASM).
     fn execute_stage_inline(&self, job: ReadyJob) {
         // Cache-node work has no file node: run it inline through the single

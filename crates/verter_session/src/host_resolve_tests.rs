@@ -2016,7 +2016,7 @@ export interface Props {
         route_exports_only: true,
         view: None,
         ctx: &host_ctx_for_adapter,
-        route_shallow_cache: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
+        route_shallow_cache: std::cell::RefCell::new(Default::default()),
     };
     let mut inspected_symbols = rustc_hash::FxHashSet::default();
     let seeds = host.collect_frontier_companion_seeds(

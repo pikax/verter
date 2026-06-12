@@ -89,6 +89,16 @@ const INLINE_CAPACITY: usize = 16;
 /// marker enforces this at compile time.
 pub struct FactReadSet {
     observations: SmallVec<[FactVersionRef; INLINE_CAPACITY]>,
+    /// TRUE when a FENCED (ReturnOnly, `store_published == false`)
+    /// `IndexedReady` serve was consumed inside this tracer's scope.
+    /// Set through the fan-out at the serve chokepoint
+    /// (`VerterHost::ensure_indexed_ready_serve` / the overlay
+    /// materialiser); consumers refuse shared-cache admission for a
+    /// result whose compute consumed a fenced serve — the result's
+    /// fact stamps are read from the LIVE post-mutation state while
+    /// its payload was computed FROM the superseded artifact, an
+    /// entry the read-side fact rail cannot reject.
+    fenced_serve_observed: bool,
     _not_send_sync: PhantomData<*const ()>,
 }
 
@@ -114,8 +124,24 @@ impl FactReadSet {
     pub fn new() -> Self {
         Self {
             observations: SmallVec::new(),
+            fenced_serve_observed: false,
             _not_send_sync: PhantomData,
         }
+    }
+
+    /// Record that a FENCED (ReturnOnly) serve was consumed inside this
+    /// tracer's scope. Monotonic — never cleared.
+    #[inline]
+    pub fn note_fenced_serve(&mut self) {
+        self.fenced_serve_observed = true;
+    }
+
+    /// TRUE when any fenced (ReturnOnly) serve was consumed inside this
+    /// tracer's scope.
+    #[inline]
+    #[must_use]
+    pub fn fenced_serve_observed(&self) -> bool {
+        self.fenced_serve_observed
     }
 
     /// Record one observed fact.
@@ -245,6 +271,19 @@ impl FactReadSetCell {
     #[inline]
     pub fn observe_borrowed_signature(&self, sig: &[FactVersionRef]) {
         self.0.borrow_mut().observe_borrowed_signature(sig);
+    }
+
+    /// Record a fenced (ReturnOnly) serve consumption through `&self`.
+    #[inline]
+    pub fn note_fenced_serve(&self) {
+        self.0.borrow_mut().note_fenced_serve();
+    }
+
+    /// Whether a fenced (ReturnOnly) serve was consumed in this scope.
+    #[inline]
+    #[must_use]
+    pub fn fenced_serve_observed(&self) -> bool {
+        self.0.borrow().fenced_serve_observed()
     }
 
     /// Number of observations recorded so far (pre-dedup).

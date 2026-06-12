@@ -1,4 +1,4 @@
-//! Selective component-meta surface API types (Tier 1B / D102 / D125).
+//! Selective component-meta surface API types (D102 / D125).
 //!
 //! This module holds:
 //! - The `MAX_BRIDGE_DEPTH` constant (D125).
@@ -355,12 +355,11 @@ impl ComponentMetaSurface {
     pub fn to_proto_bytes(&self) -> Vec<u8> {
         // Keep the wire format readable by NAPI consumers via prost.
         // We emit the wire `ComponentMetaSurface` shape with the eager
-        // bytes carried by-tag. For Tier 1B the encoder is intentionally
-        // minimal — only the lazy NamedTypeHandle fields and the
-        // file_path / options_api scalars are populated. The downstream
-        // consumers reconstruct the eager fields from the existing
-        // ComponentMetaPayload path until 1C-α expands the protobuf
-        // mapping.
+        // bytes carried by-tag. The encoder is intentionally minimal —
+        // only the lazy NamedTypeHandle fields and the file_path /
+        // options_api scalars are populated; the eager fields are left
+        // at their defaults here. The downstream consumers reconstruct
+        // the eager fields from the existing ComponentMetaPayload path.
         use prost::Message;
         let surface = proto::ComponentMetaSurface {
             file_path: self.file_path.clone(),
@@ -724,7 +723,7 @@ pub fn assemble_volar_payload(
     surface: &ComponentMetaSurface,
     expansions: &FxHashMap<TypeHandle, TypeExpansion>,
 ) -> Vec<u8> {
-    // For Tier 1B, the public `getComponentMeta` bridge keeps emitting the
+    // The public `getComponentMeta` bridge keeps emitting the
     // legacy `ComponentMetaPayload` bytes (D19 byte-equiv preserved). The
     // expansions map is consumed by the bridge body itself; this function
     // currently re-encodes the surface so external callers (e.g., the LSP
@@ -745,14 +744,14 @@ pub fn assemble_volar_payload(
 /// Pure function — does not touch the host, the session, or any cache.
 /// Each type-bearing field becomes a `NamedTypeHandle` carrying a root
 /// `TypeHandle` for the analysis's canonical id. Eager opaque fields
-/// (`*_bytes`) are emitted empty in Tier 1B; 1C-α maps them through the
-/// existing `verter_protocol::component_meta` converters once the surface
-/// envelope encoder is wired.
+/// (`*_bytes`) are emitted empty; consumers reconstruct them from the
+/// existing `ComponentMetaPayload` path rather than from this envelope.
 ///
-/// Tier 1B: `project_id` is a stable empty string for the single-project
-/// host model. `query_path` on every handle is `None` (surface root) until
-/// 1C-α populates `OwnedTypeResolutionContext::declaration_fingerprints`
-/// at lowering time.
+/// `project_id` is a stable empty string for the single-project host
+/// model. `query_path` on every handle is `None` (surface root) — no
+/// production path populates
+/// `OwnedTypeResolutionContext::declaration_fingerprints` today, so
+/// declaration-scoped query paths are never emitted here.
 pub fn assemble_surface_from_analysis(
     analysis: &verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
 ) -> ComponentMetaSurface {
@@ -854,10 +853,12 @@ pub fn assemble_surface_from_analysis(
 /// Resolve a `TypeHandle` to a one-layer `TypeExpansion` against the shared
 /// `VerterHost` (D32 / D104).
 ///
-/// Tier 1B resolution: a handle whose `query_path` is `None` (the surface
+/// Resolution contract: a handle whose `query_path` is `None` (the surface
 /// root) returns an empty Object expansion; handles with a populated query
-/// path round-trip the proto identity. Tier 1C-α wires the real walk against
-/// `OwnedTypeResolutionContext::declaration_fingerprints`.
+/// path also return an empty Object outline and round-trip the handle
+/// identity. No declaration walk runs here —
+/// `OwnedTypeResolutionContext::declaration_fingerprints` has no
+/// production producer, so there is nothing to walk against.
 ///
 /// Errors are typed (D104 + D114): `ProjectMismatch` when the handle's
 /// project_id does not match the host's project; `StaleHandle` when the
@@ -921,8 +922,8 @@ mod tests {
         }
     }
 
-    /// Discriminating test (D125): verify the Tier 1B constant value.
-    /// FAILS pre-tier-1B (constant absent).
+    /// Discriminating test (D125): pins the `MAX_BRIDGE_DEPTH` value so
+    /// a silent constant drift fails loudly.
     #[test]
     fn max_bridge_depth_constant_is_thirty_two() {
         assert_eq!(MAX_BRIDGE_DEPTH, 32);

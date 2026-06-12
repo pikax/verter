@@ -194,7 +194,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         key: &ResolveDeclKey,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
         // Self-version rooting: observe the scope canonical.s
-        // `IndexedReady` ONCE through `ensure_indexed_ready` — the
+        // `IndexedReady` ONCE through `ensure_indexed_ready_serve` — the
         // overlay-aware host accessor (a `SessionResolverContext`
         // observes the overlay artifact, not the base file). The
         // single observed artifact roots both the node.s
@@ -207,7 +207,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // overlay and re-reads content outside the single observation.
         let indexed = match self
             .ctx
-            .ensure_indexed_ready(key.scope.canonical_id.as_ref())
+            .ensure_indexed_ready_serve(key.scope.canonical_id.as_ref())
+            .map(|serve| serve.indexed)
         {
             Some(indexed) => indexed,
             None => return (QueryResult::Error(QueryError::Miss), empty_signature()).into(),
@@ -335,7 +336,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
         // Self-version rooting: observe the value-root scope
         // canonical.s `IndexedReady` ONCE through the overlay-aware
-        // `ensure_indexed_ready` accessor. The single observed
+        // `ensure_indexed_ready_serve` accessor. The single observed
         // artifact roots both the node.s `NodeScopeId::File` and the
         // memo entry.s self-root `FileWholeHash` on
         // `indexed.whole_hash`; its `shallow_state` is the shallow
@@ -343,7 +344,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // descend from one observation.
         let indexed = match self
             .ctx
-            .ensure_indexed_ready(value_root.scope.canonical_id.as_ref())
+            .ensure_indexed_ready_serve(value_root.scope.canonical_id.as_ref())
+            .map(|serve| serve.indexed)
         {
             Some(indexed) => indexed,
             None => {
@@ -453,7 +455,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let synthesised_default: Option<crate::semantic_query::HashValue> =
             if root_identity.symbol_name == "default" {
                 self.ctx
-                    .ensure_indexed_ready(root_identity.canonical_id.as_str())
+                    .ensure_indexed_ready_serve(root_identity.canonical_id.as_str())
+                    .map(|serve| serve.indexed)
                     .and_then(|indexed| {
                         indexed
                             .shallow_state
@@ -634,7 +637,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // The synthesized `default` value symbol's construct-signature return
         // type is the instance object. Read it ONCE from the observed
         // `IndexedReady` (the same artifact that roots the memo entry below).
-        let indexed = self.ctx.ensure_indexed_ready(decl_canonical.as_ref())?;
+        let indexed = self
+            .ctx
+            .ensure_indexed_ready_serve(decl_canonical.as_ref())?
+            .indexed;
         let default_symbol = indexed.shallow_state.value_symbol("default")?;
         // PROVENANCE gate (prefer-direct-structural-facts-over-heuristics): only
         // the SYNTHESIZED `.vue` public-instance `default` symbol drives this
@@ -737,7 +743,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
 
         // `decl_whole_hash` (re-sourced live at value-compute from
-        // `ensure_indexed_ready(base.defining_canonical).whole_hash` — the
+        // `ensure_indexed_ready_serve(base.defining_canonical)`'s serve
+        // carrier `indexed.whole_hash` — the
         // content-free `Instantiate` key carries no version) and
         // `observed_hash` (the artifact just read) agree under a stable
         // content generation; root on the observed hash, which is the basis the
@@ -890,7 +897,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // Self-root the composed surface on the class declaration's own
         // live content version (R6/R20 — the key is content-free).
         let defining_canonical = &decl_slot.defining_canonical;
-        let observed = self.ctx.ensure_indexed_ready(defining_canonical.as_ref());
+        let observed = self
+            .ctx
+            .ensure_indexed_ready_serve(defining_canonical.as_ref())
+            .map(|serve| serve.indexed);
         let observed_self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot> =
             match &observed {
                 Some(indexed) => vec![(Arc::clone(defining_canonical), indexed.whole_hash)],
@@ -959,7 +969,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// key rather than a separate `DeclAnchor` node. The slot carries the
     /// env dims only; the live content version (`decl_whole_hash`) is
     /// re-sourced at value-compute from
-    /// `ensure_indexed_ready(base.defining_canonical).whole_hash`, never
+    /// `ensure_indexed_ready_serve(base.defining_canonical)`'s serve
+    /// carrier `indexed.whole_hash`, never
     /// from the key. Fetches the [`PreparedTypeDecl`] via
     /// [`DispatchHost`] and produces **one shell level** of the
     /// declaration's structural shape with `args` bound to the decl's
@@ -1047,7 +1058,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         //  - built-in utility carriers (`canonical_id == "__builtin__"`);
         //  - synthetic test identities (`canonical_id == "<synthetic>"`).
         // These bases root self-version through their `args` nodes
-        // only (no file fact). A real-file base whose `ensure_indexed_ready`
+        // only (no file fact). A real-file base whose `ensure_indexed_ready_serve`
         // returns `None` (the file is unknown to the live view) is a
         // stale key — the build cannot publish a cacheable result and
         // returns `cache_suppress` below.
@@ -1059,7 +1070,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         {
             None
         } else {
-            self.ctx.ensure_indexed_ready(decl_canonical_str)
+            self.ctx
+                .ensure_indexed_ready_serve(decl_canonical_str)
+                .map(|serve| serve.indexed)
         };
         let decl_whole_hash: crate::semantic_query::HashValue = match &live_indexed {
             Some(indexed) => indexed.whole_hash,
@@ -1111,7 +1124,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             && args.is_empty()
             && self
                 .ctx
-                .ensure_indexed_ready(decl_canonical.as_ref())
+                .ensure_indexed_ready_serve(decl_canonical.as_ref())
+                .map(|serve| serve.indexed)
                 .and_then(|indexed| {
                     indexed
                         .shallow_state
@@ -1576,7 +1590,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // content-hash cached; the augmentation index is then built once.
         let host = self.ctx.host_for_fact_tracer_install();
         for rdep in host.workspace().reverse_deps_for(decl_canonical.as_ref()) {
-            let _ = self.ctx.ensure_indexed_ready(&rdep);
+            let _ = self.ctx.ensure_indexed_ready_serve(&rdep);
         }
 
         let target = AugmentationTargetKind::ResolvedRelativeCanonical(Arc::clone(decl_canonical));
@@ -1693,7 +1707,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             Vec::new();
         for (augmenter_idx, augmenter) in augmenter_set.entries.iter().enumerate() {
             let augmenter_canonical = augmenter.canonical();
-            let Some(indexed) = self.ctx.ensure_indexed_ready(augmenter_canonical.as_ref()) else {
+            let Some(indexed) = self
+                .ctx
+                .ensure_indexed_ready_serve(augmenter_canonical.as_ref())
+                .map(|serve| serve.indexed)
+            else {
                 continue;
             };
             let state = &indexed.shallow_state;
@@ -1708,7 +1726,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // (draining the captured key) without moving its decl skeleton,
             // so the cached `AugmenterSet` keeps the pre-edit key. Skipping
             // the augmenter on that miss would silently drop a real
-            // augmentation. `ensure_indexed_ready` above already materialised
+            // augmentation. `ensure_indexed_ready_serve` above already materialised
             // the augmenter's CURRENT version, so `indexed.whole_hash` is the
             // scheduler-authoritative current content hash — the SAME healing
             // path the names stitch
@@ -1902,7 +1920,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // NON-FILE specifier reaches here: a specifier resolving to a workspace
         // file would have resolved `name` through the normal import path before
         // the miss.
-        let indexed = self.ctx.ensure_indexed_ready(scope_canonical)?;
+        let indexed = self
+            .ctx
+            .ensure_indexed_ready_serve(scope_canonical)?
+            .indexed;
         let specifier = indexed
             .shallow_state
             .import_target(name)
@@ -1922,7 +1943,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // has no base-file anchor.
         let host = self.ctx.host_for_fact_tracer_install();
         for canonical in host.workspace().known_canonicals() {
-            let _ = self.ctx.ensure_indexed_ready(&canonical);
+            let _ = self.ctx.ensure_indexed_ready_serve(&canonical);
         }
 
         let target =
@@ -6292,7 +6313,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// content-free `ResolvedDeclSlotIdentity` (R6) — its whole_hash is
     /// NOT in the key. At value-build time the owner's current content
     /// version is re-sourced live via
-    /// `ensure_indexed_ready(owner.defining_canonical)`; a real-file
+    /// `ensure_indexed_ready_serve(owner.defining_canonical)`; a real-file
     /// owner unknown to the live view is a stale key and the build is
     /// marked non-cacheable (`cache_suppress`) (see the arm body for
     /// the stale-key guard).
@@ -6354,7 +6375,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         //  - synthetic test identities (`canonical_id == "<synthetic>"`).
         // These owners root self-version through their `type_args`
         // nodes only (no file fact in the fence or the self-root set).
-        // A real-file owner whose `ensure_indexed_ready` returns `None`
+        // A real-file owner whose `ensure_indexed_ready_serve` returns `None`
         // (the file is unknown to the live view) is a STALE KEY: the
         // build still hands the value to the caller but marks the
         // output non-cacheable (`cache_suppress`) rather than publishing
@@ -6368,7 +6389,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
             if is_non_file_owner {
                 None
             } else {
-                self.ctx.ensure_indexed_ready(owner_canonical_str)
+                self.ctx
+                    .ensure_indexed_ready_serve(owner_canonical_str)
+                    .map(|serve| serve.indexed)
             };
         // A real-file owner unknown to the live view is a stale key —
         // suppress admission so the next caller cold-recomputes.
@@ -6436,7 +6459,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // Read the macro snapshot directly from the live
                 // indexed view obtained at function entry.
                 // Source-and-consistency: `owner_indexed` came from
-                // `ensure_indexed_ready` (the live view), and its
+                // `ensure_indexed_ready_serve` (the live view), and its
                 // `whole_hash` already discriminates content versions
                 // through the cached `MemoEntry`'s self-root rail. A
                 // missing `IndexedReady` for a snapshot-consuming arm
@@ -6555,7 +6578,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         output.cache_suppress |= nested_cache_suppress;
         output.result_is_partial |= nested_result_is_partial;
         // Stale real-file owner: the key names a file unknown to the
-        // live view (`ensure_indexed_ready == None`). The value flows to
+        // live view (`ensure_indexed_ready_serve == None`). The value flows to
         // the caller, but the entry is non-cacheable — never publish a
         // result self-rooted on the sentinel hash `0`.
         if stale_real_file_owner {

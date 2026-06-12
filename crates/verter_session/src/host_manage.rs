@@ -3,7 +3,6 @@
 //! Contains [`VerterHost::remove`], [`VerterHost::get_analysis`],
 //! [`VerterHost::get_diagnostics`], and [`VerterHost::set_import_dependencies`].
 
-use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 
 use crate::id::canonicalize_id;
@@ -25,6 +24,7 @@ use crate::VerterHost;
 
 pub(crate) mod analysis_io;
 pub(crate) mod component_meta_entry;
+pub(crate) mod component_meta_entry_resolution;
 pub(crate) mod component_meta_extract;
 // Moved from `meta_resolve/host_methods.rs`. The file is a
 // large `impl VerterHost { ... }` block (~18 host methods including
@@ -314,31 +314,12 @@ pub(crate) fn component_meta_debug(message: impl AsRef<str>) {
 // `component_meta_trace_output_path` / `component_meta_trace_next_span_id` /
 // `component_meta_trace_enabled` helpers have all been removed
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(in crate::host_manage) struct ParsedEvalProgramCacheKey {
-    pub(in crate::host_manage) host_instance_id: u64,
-    pub(in crate::host_manage) canonical_id: String,
-    pub(in crate::host_manage) source_type: oxc_span::SourceType,
-    /// §4.6 Sub-task C: `whole_hash` in the key partitions entries by content
-    /// version so a cross-generation request can't collide with a different
-    /// version's stored entry. The post-lookup `entry.whole_hash == whole_hash`
-    /// check becomes redundant (enforced at key level) but is kept as a
-    /// defense-in-depth assertion.
-    pub(in crate::host_manage) whole_hash: Hash16,
-}
-
-#[derive(Clone)]
-#[allow(dead_code)] // `whole_hash` retained for trace fidelity; consumer migration in 1C-α.
-pub(in crate::host_manage) struct ParsedEvalProgramCacheEntry {
-    pub(in crate::host_manage) whole_hash: Hash16,
-    pub(in crate::host_manage) parse_failed: bool,
-    pub(in crate::host_manage) program: Rc<crate::ParsedEvalProgram>,
-}
-
-// `ParsedTypeResolutionContextCacheEntry` retired with the
-// thread-locals (§3.2.4); the borrowed `ParsedTypeResolutionContext`
-// flows directly through `cached_type_resolution_context_entry` until
-// 1C-α migrates to the typed `OwnedTypeResolutionContext` cache.
+// The borrowed `ParsedTypeResolutionContext` is built fresh per call
+// by `host_manage::eval_program::build_type_resolution_context` (the
+// query-time element-resolver path, tracked-debt on the single-engine
+// shrinking ledger) and is never cached. The
+// owned `OwnedTypeResolutionContext` typed cache on `ProjectTypeStore`
+// exists for `Send + Sync` storage but has no production writer yet.
 
 /// Thin adapter that implements
 /// [`verter_compiler::utils::oxc::vue::resolve_type::cache_keys::NamedTypeCache`]
@@ -445,27 +426,20 @@ pub(crate) struct ExternalTypeResolutionInputs {
     pub(crate) analysis_cache_hit: bool,
 }
 
-// Tier 1A — `HOST_PARSED_EVAL_PROGRAM_CACHE` and
-// `HOST_PARSED_TYPE_CONTEXT_CACHE` thread-locals deleted (D44 + §3.2.4).
+// OXC parse arenas never enter host caches or thread-locals: the
+// transient `ParsedEvalProgram` lives and dies on the cold flight's
+// stack inside the `ensure_indexed_ready_serve` materialise closure
+// (`parse_eval_program` is the single parser entry), and the
+// arena-free outputs it feeds — the `EvalEnv`, analysis, and shallow
+// state — live on `IndexedReady`. `build_type_resolution_context`
+// likewise parses per call on the query-time element-resolver path
+// (tracked-debt on the single-engine shrinking ledger); for `Send + Sync` storage
+// the lowering boundary produces
+// `crate::owned_artifacts::OwnedTypeResolutionContext` for
+// `ProjectTypeStore::type_resolution_context_cache()`.
 //
-// The OXC parser arena drops at the lowering boundary: lowering produces
-// `crate::owned_artifacts::OwnedEvalProgram` /
-// `crate::owned_artifacts::OwnedTypeResolutionContext`, both `Send +
-// Sync + 'static`. The owned forms sit in
-// `ProjectTypeStore::eval_env_cache()` /
-// `ProjectTypeStore::type_resolution_context_cache()` (D17 + D18 typed
-// DBs). The empty-DB consumer migration is Tier 1C-α.
-//
-// In Tier 1A the borrowed `ParsedEvalProgram` / `ParsedTypeResolutionContext`
-// types are still produced fresh per call by
-// `cached_parsed_eval_program_entry` / `cached_type_resolution_context_entry`
-// — the cache that was here is gone; consumers fall back to direct
-// compute. Performance regression is intentional and bounded to 1A; the
-// 1C-α consumer migration restores warm-cache behaviour through the
-// owned-artifact path.
-//
-// Architecture guard: `no_thread_local_oxc_caches` (Tier 1A) rejects
-// any reintroduction of OXC-arena thread-local caches in
+// Architecture guard: `no_thread_local_oxc_caches` rejects any
+// reintroduction of OXC-arena thread-local caches in
 // `crates/verter_session/src/`.
 
 // ──────────────────────────────────────────────────────────────────────────

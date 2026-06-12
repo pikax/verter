@@ -544,12 +544,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // canonical names a LOADABLE workspace file. An unresolved bare
                 // specifier resolves to the empty non-file canonical OR to the
                 // specifier string itself (e.g. `"external-spec"`), neither of
-                // which `ensure_indexed_ready` can load — that is the external
+                // which `ensure_indexed_ready_serve` can load — that is the external
                 // ambient-module case the augmentation hook below handles.
                 let resolves_to_file = match resolved_root.as_ref() {
-                    Some((canonical, _)) if !canonical.is_empty() => {
-                        self.ctx.ensure_indexed_ready(canonical.as_ref()).is_some()
-                    }
+                    Some((canonical, _)) if !canonical.is_empty() => self
+                        .ctx
+                        .ensure_indexed_ready_serve(canonical.as_ref())
+                        .is_some(),
                     _ => false,
                 };
                 if !resolves_to_file {

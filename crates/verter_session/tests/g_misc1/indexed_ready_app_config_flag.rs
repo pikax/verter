@@ -43,7 +43,7 @@ fn upsert_ts(host: &Arc<VerterHost>, canonical: &str, source: &str) {
 /// Materialize `IndexedReady` via the production analyze path and
 /// return the `declares_interface_app_config` flag. The
 /// `analyze_with_audit` entrypoint forces the
-/// `ensure_indexed_ready` materialisation step that drives our
+/// `ensure_indexed_ready_serve` materialisation step that drives our
 /// projection.
 fn read_flag(host: &Arc<VerterHost>, canonical: &str) -> Option<bool> {
     let _ = host.analyze_with_audit(canonical);

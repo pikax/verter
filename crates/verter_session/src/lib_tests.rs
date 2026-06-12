@@ -5,8 +5,26 @@ use rustc_hash::FxHashMap;
 
 use super::cache;
 use super::id::canonicalize_id;
-use super::parse::parse_vue_snapshot;
 use super::shared::{read_lock, write_lock};
+
+// Test-local wrapper fixing the worker fn's provenance param (the
+// worker counts SFC parses on the host's provenance rail; these tests
+// exercise parsing only, so a scratch counter suffices).
+fn parse_vue_snapshot(
+    canonical_id: &str,
+    source: &str,
+    analysis_scope: verter_semantic::analysis::AnalysisScope,
+) -> (
+    crate::types::ParseSnapshot,
+    verter_compiler::parser::types::ParsedSfc,
+) {
+    super::parse::parse_vue_snapshot(
+        canonical_id,
+        source,
+        analysis_scope,
+        &crate::types::MetaProvenance::default(),
+    )
+}
 use super::upsert::{
     build_upsert_result, compute_upsert_changes_from_parse, UpsertChangeResult, UpsertResultData,
 };
@@ -1215,6 +1233,337 @@ fn session_compile_warm_hit_is_suppressed_when_store_view_is_not_current() {
     );
 }
 
+/// DISCRIMINATING regression (compile-output retention across route
+/// mutations): a ROUTE-CONSUMING compile
+/// slot must go stale after `set_exact_resolutions` retargets a route the
+/// compile consumed. The slot's recorded fact set carried only old-target
+/// facts (the owner's `ImportRef` shape + the OLD dep's parse facts /
+/// whole-hash) — none of which move on a retarget, so the warm validation
+/// kept serving the pre-retarget compile output with no route lookup ever
+/// replayed.
+///
+/// The fix records the owner's generation-current `ImportRoute` derived
+/// fact on the compile slot (the same rail the base store view snapshots
+/// per tracked canonical): the retarget clears the owner's route mirror
+/// and bumps `project_generation`, so the live `ImportRoute` hash moves
+/// (or collapses to the empty-table hash) and the slot's recorded fact
+/// mismatches → not warm → cold re-derive under the new route.
+///
+/// FAILS pre-fix: the slot stays warm after the retarget. PASSES
+/// post-fix: the slot reports not-warm, and a re-compile restores a warm
+/// slot rooted on the new route surface.
+#[test]
+fn route_consuming_compile_slot_goes_stale_after_exact_resolution_retarget() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+
+    let _ = upsert_vue(
+        &host,
+        "/src/Comp.vue",
+        "<script setup lang=\"ts\">\nimport type { MyType } from './types'\nconst props = defineProps<MyType>()\n</script>\n<template><div/></template>",
+    );
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "/src/types.ts".to_string(),
+            source: Arc::from("export interface MyType { foo: string }"),
+            file_kind: FileKind::NonSfc,
+            aliases: Vec::new(),
+        })
+        .unwrap();
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "/src/alt_types.ts".to_string(),
+            source: Arc::from("export interface MyType { foo: string; bar: number }"),
+            file_kind: FileKind::NonSfc,
+            aliases: Vec::new(),
+        })
+        .unwrap();
+
+    // Cold compile — consumes the `./types` route and publishes the slot.
+    let _ = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: Some("/src/Comp.vue".to_string()),
+            canonical_id: None,
+            node_kind: None,
+            compile_profile: profile_dev(),
+        })
+        .unwrap();
+    assert!(
+        host.compile_slot_is_warm("/src/Comp.vue", &profile_dev()),
+        "precondition: the slot is warm immediately after the cold compile"
+    );
+
+    // The embedder's resolver retargets `./types` → `/src/alt_types.ts`
+    // on every (phase, kind) lane. The owner's content is untouched.
+    use verter_workspace::{ResolvePhase as P, ResolveRequestKind as K};
+    let rows = [
+        (P::CodegenBlocker, K::EsmImport),
+        (P::CodegenBlocker, K::TypeImport),
+        (P::ProviderGraph, K::EsmImport),
+        (P::ProviderGraph, K::TypeImport),
+    ]
+    .into_iter()
+    .map(|(phase, kind)| verter_workspace::ExactResolution {
+        specifier: "./types".to_string(),
+        phase,
+        kind,
+        resolved_canonical_id: Some("/src/alt_types.ts".to_string()),
+        possible_canonical_ids: vec!["/src/alt_types.ts".to_string()],
+    })
+    .collect();
+    host.set_exact_resolutions("/src/Comp.vue", rows);
+
+    assert!(
+        !host.compile_slot_is_warm("/src/Comp.vue", &profile_dev()),
+        "STALE COMPILE SLOT: the route the compile consumed was retargeted by \
+         set_exact_resolutions, but the slot still warm-validates — its fact \
+         set carries only old-target facts with no route/ImportRoute \
+         dimension, so the retention decision is unsound"
+    );
+
+    // A re-compile re-derives under the new route and restores warmth —
+    // the staleness is a clean re-derive, not a permanent cold state.
+    let _ = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: Some("/src/Comp.vue".to_string()),
+            canonical_id: None,
+            node_kind: None,
+            compile_profile: profile_dev(),
+        })
+        .unwrap();
+    assert!(
+        host.compile_slot_is_warm("/src/Comp.vue", &profile_dev()),
+        "the re-compiled slot must be warm again under the retargeted route"
+    );
+}
+
+/// DISCRIMINATING regression (the external `src=` member): a
+/// MIXED file — a script import AND an external `src=` route — must record
+/// an `ImportRoute` fact covering BOTH route families, so a retarget of the
+/// `src=` route alone stales the compile slot.
+///
+/// The owner's `IndexedReady.import_routes` only ever contains routes for
+/// shallow-inventory specifiers (script imports / reexports); the `src=`
+/// route is a post-index `DerivedRawState` memo written by the compile
+/// prefetch. Selecting the indexed table WHOLE (as soon as it is non-empty)
+/// drops the post-index `src=` entry from the recorded fact: after an
+/// `SfcSrcAttr` retarget the old external target's facts (whole-hash
+/// unchanged, script route unchanged) still validate and the slot survives,
+/// serving compile output that embeds the retargeted-away file's content.
+///
+/// FAILS pre-fix: the slot stays warm after the `src=` retarget. PASSES
+/// post-fix: the merged route table (indexed + post-index entries, each
+/// gated by the per-entry freshness oracle) folds the `src=` route into the
+/// fact; the retarget clears the owner's route mirror, the recomputed hash
+/// mismatches, and the slot re-derives under the new external target.
+#[test]
+fn mixed_src_attr_compile_slot_goes_stale_after_sfc_src_retarget() {
+    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/workspace/src/partials/panel.html".to_string(),
+        Arc::from("<div>PANEL_ONE {{ props.msg }}</div>"),
+    );
+    ws.inject_file(
+        "/workspace/src/partials/panel2.html".to_string(),
+        Arc::from("<div>PANEL_TWO {{ props.msg }}</div>"),
+    );
+    ws.inject_file(
+        "/workspace/src/types.ts".to_string(),
+        Arc::from("export interface Props { msg: string }\n"),
+    );
+    let host = VerterHost::new(HostConfig::default(), ws);
+
+    let _ = upsert_vue(
+        &host,
+        "/workspace/src/App.vue",
+        "<template src=\"@/partials/panel.html\"></template>\n<script setup lang=\"ts\">\nimport type { Props } from '@/types'\nconst props = defineProps<Props>()\n</script>",
+    );
+
+    let src_row = |target: &str| verter_workspace::ExactResolution {
+        specifier: "@/partials/panel.html".to_string(),
+        phase: verter_workspace::ResolvePhase::CodegenBlocker,
+        kind: verter_workspace::ResolveRequestKind::SfcSrcAttr,
+        resolved_canonical_id: Some(target.to_string()),
+        possible_canonical_ids: vec![target.to_string()],
+    };
+    let types_row = || verter_workspace::ExactResolution {
+        specifier: "@/types".to_string(),
+        phase: verter_workspace::ResolvePhase::CodegenBlocker,
+        kind: verter_workspace::ResolveRequestKind::TypeImport,
+        resolved_canonical_id: Some("/workspace/src/types.ts".to_string()),
+        possible_canonical_ids: vec!["/workspace/src/types.ts".to_string()],
+    };
+    host.set_exact_resolutions(
+        "/workspace/src/App.vue",
+        vec![src_row("/workspace/src/partials/panel.html"), types_row()],
+    );
+
+    // Cold compile — consumes the script route AND the external `src=`
+    // route, publishes the slot.
+    let _ = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: Some("/workspace/src/App.vue".to_string()),
+            canonical_id: None,
+            node_kind: None,
+            compile_profile: profile_dev(),
+        })
+        .unwrap();
+    assert!(
+        host.compile_slot_is_warm("/workspace/src/App.vue", &profile_dev()),
+        "precondition: the slot is warm immediately after the cold compile"
+    );
+
+    // The embedder retargets ONLY the `SfcSrcAttr` row; the script-import
+    // row — and every file's content — is untouched.
+    host.set_exact_resolutions(
+        "/workspace/src/App.vue",
+        vec![src_row("/workspace/src/partials/panel2.html"), types_row()],
+    );
+
+    assert!(
+        !host.compile_slot_is_warm("/workspace/src/App.vue", &profile_dev()),
+        "STALE COMPILE SLOT: the external `src=` route the compile consumed \
+         was retargeted, but the slot still warm-validates — the recorded \
+         ImportRoute fact covered only the script route (the post-index \
+         DerivedRawState `src=` entry was dropped by the indexed-table \
+         selection), so the retention decision is unsound"
+    );
+
+    // The re-derive compiles under the NEW external target.
+    let _ = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: Some("/workspace/src/App.vue".to_string()),
+            canonical_id: None,
+            node_kind: None,
+            compile_profile: profile_dev(),
+        })
+        .unwrap();
+    assert!(
+        host.compile_slot_is_warm("/workspace/src/App.vue", &profile_dev()),
+        "the re-compiled slot must be warm again under the retargeted route"
+    );
+    assert!(
+        host.get_source("/workspace/src/partials/panel2.html")
+            .is_some(),
+        "the re-derive must hydrate the NEW `src=` target through the \
+         retargeted resolution"
+    );
+}
+
+/// DISCRIMINATING regression (`src=` prefetch stale-memo suppression): the
+/// compile prefetch's external-`src=` loop early-outs on ANY existing
+/// route — including the stamped host memos it wrote itself on an earlier
+/// compile. A memo whose capture-before-resolve stamp is stale against the
+/// live `content_generation` must be re-resolved (the dependency file set
+/// moved — the `SfcSrcAttr` resolution may now retarget), not served as
+/// caller-authoritative.
+///
+/// The compile's external-source MERGE resolves through the live
+/// `SfcSrcAttr` lane (`resolve_dep_source`), so the embedded BYTES follow
+/// the live target — but the compile-tier whole-hash OBSERVATION resolves
+/// through the memo (`resolve_import_source_to_canonical`). A stale memo
+/// therefore MISATTRIBUTES the observation: the slot's recorded
+/// `FileWholeHash` fact points at the retargeted-away canonical while the
+/// output embeds the new target's content — an edit to the file that is
+/// ACTUALLY EMBEDDED no longer invalidates the slot.
+///
+/// Scenario: an extensionless `<script src="./ext">` resolves to `ext.js`
+/// (the only candidate) on the cold compile and is memoized with a
+/// generation stamp; `ext.ts` appears (the `SfcSrcAttr` probe order
+/// prefers `.ts`) and the recompile embeds `ext.ts`; then `ext.ts` is
+/// EDITED.
+///
+/// FAILS pre-fix: the recompile's prefetch served the stale `ext.js` memo,
+/// the whole-hash fact was recorded against `ext.js`, and the `ext.ts`
+/// edit leaves the slot warm — the third compile serves the pre-edit
+/// embedded content. PASSES post-fix: the prefetch consults the per-entry
+/// freshness oracle, re-resolves the stale memo through its recorded
+/// `SfcSrcAttr` lane, the observation lands on `ext.ts`, and the edit
+/// re-derives the output. Unstamped caller-supplied routes keep their
+/// serve-until-replaced contract.
+#[test]
+fn src_attr_prefetch_reresolves_stale_stamped_memo_after_ts_sibling_appears() {
+    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/workspace/src/ext.js".to_string(),
+        Arc::from("export const marker = 'EXT_JS_IMPL'\n"),
+    );
+    let host = VerterHost::new(HostConfig::default(), ws.clone());
+
+    let _ = upsert_vue(
+        &host,
+        "/workspace/src/App.vue",
+        "<script src=\"./ext\"></script>\n<template><div/></template>",
+    );
+
+    let compile = || {
+        host.get_virtual_file(VirtualQuery {
+            raw_id: Some("/workspace/src/App.vue".to_string()),
+            canonical_id: None,
+            node_kind: None,
+            compile_profile: profile_dev(),
+        })
+        .unwrap()
+    };
+
+    // Cold compile: the extensionless `src=` probes `.ts` → `.js` and lands
+    // on `ext.js`; the prefetch memoizes the route with a generation stamp.
+    let first = compile();
+    assert!(
+        first.code.contains("EXT_JS_IMPL"),
+        "precondition: the cold compile embeds the only existing candidate \
+         (ext.js)"
+    );
+
+    // The TS sibling appears: content_generation advances past the memo's
+    // stamp AND the live `SfcSrcAttr` resolution retargets (`.ts` probes
+    // before `.js`). The recompile embeds the new target.
+    ws.inject_file(
+        "/workspace/src/ext.ts".to_string(),
+        Arc::from("export const marker = 'EXT_TS_IMPL_V1'\n"),
+    );
+    let second = compile();
+    assert!(
+        second.code.contains("EXT_TS_IMPL_V1"),
+        "precondition: the recompile's merge follows the live SfcSrcAttr \
+         resolution and embeds ext.ts"
+    );
+
+    // Edit the file the compile ACTUALLY EMBEDS — through the canonical
+    // host edit path (the second compile loaded ext.ts into the
+    // scheduler, so a raw workspace inject would be invisible to the
+    // scheduler-authoritative whole-hash validation). If the whole-hash
+    // observation was misattributed to the stale memo target (ext.js),
+    // nothing in the slot's recorded fact set moves and the stale output
+    // keeps serving.
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "/workspace/src/ext.ts".to_string(),
+            source: Arc::from("export const marker = 'EXT_TS_IMPL_V2'\n"),
+            file_kind: FileKind::NonSfc,
+            aliases: Vec::new(),
+        })
+        .unwrap();
+    let third = compile();
+    assert!(
+        third.code.contains("EXT_TS_IMPL_V2"),
+        "MISATTRIBUTED OBSERVATION: the compile embedded ext.ts but its \
+         whole-hash fact was recorded against the stale memo target \
+         (ext.js), so editing the actually-embedded file left the slot \
+         warm and the pre-edit output kept serving"
+    );
+    assert!(
+        !third.code.contains("EXT_TS_IMPL_V1"),
+        "the pre-edit embedded content must no longer be served"
+    );
+}
+
 #[test]
 fn transitive_workspace_macro_type_dep_change_invalidates_owner() {
     let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
@@ -2310,8 +2659,8 @@ fn ensure_compiled_hydrates_vue_compile_blockers_via_workspace_resolution() {
         "<template src=\"@/partials/panel.html\"></template>\n<script setup lang=\"ts\">\nimport type { Props } from '@/types'\nconst props = defineProps<Props>()\n</script>",
     );
     // Host wrapper runs the route-resolution invalidation cascade
-    // (bump_project_generation_and_evict + route_owned_shallow.clear_all
-    // + ws().set_exact_resolutions).
+    // (ws().set_exact_resolutions, then bump_project_generation_and_evict
+    // + the per-canonical route-mutation eviction).
     host.set_exact_resolutions(
         "/workspace/src/App.vue",
         vec![
@@ -2955,8 +3304,18 @@ const count = ref(0)
         let v1 = "<script setup>\nconst x = 1\n</script>\n<template><div>same</div></template>";
         let v2 = "<script setup>\nconst x = 1\n</script>\n\n\n<template><div>same</div></template>";
 
-        let (p1, _) = crate::parse::parse_vue_snapshot("/src/App.vue", v1, AnalysisScope::LSP);
-        let (p2, _) = crate::parse::parse_vue_snapshot("/src/App.vue", v2, AnalysisScope::LSP);
+        let (p1, _) = crate::parse::parse_vue_snapshot(
+            "/src/App.vue",
+            v1,
+            AnalysisScope::LSP,
+            &crate::types::MetaProvenance::default(),
+        );
+        let (p2, _) = crate::parse::parse_vue_snapshot(
+            "/src/App.vue",
+            v2,
+            AnalysisScope::LSP,
+            &crate::types::MetaProvenance::default(),
+        );
         assert_eq!(
             p1.semantic_hash, p2.semantic_hash,
             "precondition: semantic hashes must match"
@@ -3129,7 +3488,7 @@ mod phase1_structural_tests {
 
         let derived = DerivedRawState::default();
         assert!(derived.cached_tsc_extract.is_none());
-        assert!(derived.raw_template_analysis.is_none());
+        assert!(derived.raw_template_analysis().is_none());
         assert!(derived.import_routes.is_empty());
         assert!(!derived.evicted, "new entry should not be evicted");
 
@@ -3303,7 +3662,11 @@ mod upsert_compile_cache_tests {
                         template: None,
                         script: None,
                     },
-                    parse: crate::parse::parse_non_sfc_snapshot("/src/App.vue", ""),
+                    parse: crate::parse::parse_non_sfc_snapshot(
+                        "/src/App.vue",
+                        "",
+                        &crate::types::MetaProvenance::default(),
+                    ),
                     cached_parse: None,
                     source: Arc::from(""),
                 },
@@ -3941,7 +4304,7 @@ mod upsert_compile_cache_tests {
         // accessible to the scheduler when ensure_loaded runs. We register a
         // MemoryWorkspace overlay so the WorkspaceSourceLoader can read the
         // file content during the load.
-        // Host wrapper runs the route_owned_shallow eviction alongside
+        // Host wrapper runs the artifact-only canonical eviction alongside
         // the workspace overlay write.
         host.notify_upsert(
             "/lib/types.ts",

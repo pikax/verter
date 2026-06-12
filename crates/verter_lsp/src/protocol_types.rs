@@ -377,17 +377,18 @@ pub struct GetComponentMetaParams {
 }
 
 /// Params for `$/verter/getComponentMetaSurface` request — selective surface
-/// envelope (Tier 1B / D102).
+/// envelope (D102).
 #[derive(Debug, Deserialize)]
 pub struct GetComponentMetaSurfaceParams {
     pub uri: String,
 }
 
 /// Params for `$/verter/getComponentMetaTypeExpansion` request — one-layer
-/// `TypeHandle` resolution (Tier 1B / D104).
+/// `TypeHandle` resolution (D104).
 ///
 /// `handle_bytes` carries the protobuf-encoded `TypeHandle` (D100 wire format).
-/// `depth` is reserved for 1C-α; Tier 1B ignores it.
+/// `depth` is accepted and forwarded but currently ignored — the resolver
+/// always performs a one-layer expansion.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GetComponentMetaTypeExpansionParams {

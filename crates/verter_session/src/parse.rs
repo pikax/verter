@@ -97,13 +97,42 @@ pub(crate) fn try_resolve_src_block(
     }
 }
 
+/// The single counted SFC structure-parse chokepoint for
+/// `verter_session`. EVERY `parse_sfc` execution in this crate routes
+/// through here so the per-host `MetaProvenance::sfc_parses` rail counts
+/// each SFC structure parse exactly once — a raw
+/// `verter_compiler::compile::parse_sfc` call anywhere else in the crate
+/// is an uncounted parse the dedup suite cannot see (guard:
+/// `sfc_structure_parse_routes_through_the_counted_chokepoint`).
+pub(crate) fn parse_sfc_counted(
+    provenance: &crate::types::MetaProvenance,
+    source: &str,
+) -> ParsedSfc {
+    provenance
+        .sfc_parses
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    parse_sfc(source, None, None)
+}
+
 pub(crate) fn parse_vue_snapshot(
     canonical_id: &str,
     source: &str,
     analysis_scope: verter_semantic::analysis::AnalysisScope,
+    provenance: &crate::types::MetaProvenance,
 ) -> (ParseSnapshot, ParsedSfc) {
-    let parsed = parse_sfc(source, None, None);
-    let snapshot = build_vue_snapshot_from_parsed(canonical_id, source, analysis_scope, &parsed);
+    // Counted INSIDE the worker (via the chokepoint) so every lane
+    // counts — caller-side increments left the template source-miss
+    // fallback and the content-override upsert lane invisible to the
+    // dedup suite.
+    let parsed = parse_sfc_counted(provenance, source);
+    let snapshot = build_vue_snapshot_from_parsed(
+        canonical_id,
+        source,
+        analysis_scope,
+        &parsed,
+        provenance,
+        VueScriptProgram::ParseHere,
+    );
 
     (snapshot, parsed)
 }
@@ -141,13 +170,115 @@ pub(crate) fn imported_eval_source_type(
     }
 }
 
+/// Collect external `src=` block info from an already-parsed SFC — the
+/// pure SFC-structure walk (no OXC work, no parse counting) shared by
+/// the snapshot build and the lazy template-analysis computation, so
+/// src-block derivation has exactly one implementation.
+pub(crate) fn collect_vue_src_blocks(
+    canonical_id: &str,
+    source: &str,
+    parsed: &ParsedSfc,
+) -> (Vec<SrcBlockInfo>, Vec<ExternalSourceRequest>) {
+    let mut src_blocks = Vec::new();
+    let mut external_requests = Vec::new();
+
+    for (idx, script) in [parsed.script(), parsed.script_setup()]
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        if let Some(src_span) = script.src {
+            let specifier = source[src_span.start as usize..src_span.end as usize].to_string();
+            let resolved = resolve_external(canonical_id, &specifier);
+            src_blocks.push(SrcBlockInfo {
+                tag_name: "script".to_string(),
+                resolved_canonical_id: resolved.clone(),
+                tag_open_start: script.tag_open.start,
+                tag_open_end: script.tag_open.end,
+                tag_close_start: script.tag_close.as_ref().map(|c| c.start),
+            });
+            external_requests.push(ExternalSourceRequest {
+                owner_canonical_id: canonical_id.to_string(),
+                block_kind: ExternalBlockKind::Script,
+                index: idx,
+                specifier,
+                resolved_canonical_id: resolved,
+            });
+        }
+    }
+
+    if let Some(ast) = parsed.template_ast() {
+        let attrs = extract_attrs(&ast.root.attributes, source);
+        try_resolve_src_block(
+            canonical_id,
+            &attrs,
+            "template",
+            ExternalBlockKind::Template,
+            0,
+            ast.root.tag_open.start,
+            ast.root.tag_open.end,
+            ast.root.tag_close.as_ref().map(|c| c.start),
+            &mut external_requests,
+            &mut src_blocks,
+        );
+    }
+
+    for (idx, style) in parsed.style_nodes().iter().enumerate() {
+        let mut attrs = extract_attrs(&style.attributes, source);
+        if style.scoped {
+            attrs.push(("scoped", "true"));
+        }
+        if style.module {
+            attrs.push(("module", "true"));
+        }
+        try_resolve_src_block(
+            canonical_id,
+            &attrs,
+            "style",
+            ExternalBlockKind::Style,
+            idx,
+            style.tag_open.start,
+            style.tag_open.end,
+            style.tag_close.as_ref().map(|c| c.start),
+            &mut external_requests,
+            &mut src_blocks,
+        );
+    }
+
+    for (idx, custom) in parsed.unknown_nodes().iter().enumerate() {
+        let block_type =
+            &source[custom.tag_open.start as usize + 1..custom.tag_open.name_end as usize];
+        let mut attrs = extract_attrs(&custom.attributes, source);
+        attrs.push(("type", block_type));
+        try_resolve_src_block(
+            canonical_id,
+            &attrs,
+            block_type,
+            ExternalBlockKind::Custom,
+            idx,
+            custom.tag_open.start,
+            custom.tag_open.end,
+            custom.tag_close.as_ref().map(|c| c.start),
+            &mut external_requests,
+            &mut src_blocks,
+        );
+    }
+
+    (src_blocks, external_requests)
+}
+
 pub(crate) fn build_vue_snapshot_from_parsed(
     canonical_id: &str,
     source: &str,
     analysis_scope: verter_semantic::analysis::AnalysisScope,
     parsed: &ParsedSfc,
+    provenance: &crate::types::MetaProvenance,
+    script_program: VueScriptProgram<'_>,
 ) -> ParseSnapshot {
     let whole_hash = hash_16(source.as_bytes());
+
+    // External `src=` inventory via the single shared pure walk.
+    let (src_blocks, external_requests) = collect_vue_src_blocks(canonical_id, source, parsed);
 
     let mut script_hashes = Vec::new();
     let mut script_attrs_fp = Vec::new();
@@ -156,13 +287,10 @@ pub(crate) fn build_vue_snapshot_from_parsed(
     let mut script_lang: Option<String> = None;
     // Content span for script block (used for preprocessor request content extraction)
     let mut script_content_span: Option<(u32, u32)> = None;
-    let mut src_blocks = Vec::new();
-    let mut external_requests = Vec::new();
 
-    for (idx, script) in [parsed.script(), parsed.script_setup()]
+    for script in [parsed.script(), parsed.script_setup()]
         .into_iter()
         .flatten()
-        .enumerate()
     {
         script_count += 1;
         has_script = true;
@@ -188,24 +316,6 @@ pub(crate) fn build_vue_snapshot_from_parsed(
         }
         if script.is_setup {
             attrs.push(("setup", "true"));
-        }
-        if let Some(src_span) = script.src {
-            let specifier = source[src_span.start as usize..src_span.end as usize].to_string();
-            let resolved = resolve_external(canonical_id, &specifier);
-            src_blocks.push(SrcBlockInfo {
-                tag_name: "script".to_string(),
-                resolved_canonical_id: resolved.clone(),
-                tag_open_start: script.tag_open.start,
-                tag_open_end: script.tag_open.end,
-                tag_close_start: script.tag_close.as_ref().map(|c| c.start),
-            });
-            external_requests.push(ExternalSourceRequest {
-                owner_canonical_id: canonical_id.to_string(),
-                block_kind: ExternalBlockKind::Script,
-                index: idx,
-                specifier,
-                resolved_canonical_id: resolved,
-            });
         }
         script_attrs_fp.push(normalize_attr_map(
             &attrs,
@@ -250,18 +360,6 @@ pub(crate) fn build_vue_snapshot_from_parsed(
                 template_lang = Some(lang);
             }
         }
-        try_resolve_src_block(
-            canonical_id,
-            &attrs,
-            "template",
-            ExternalBlockKind::Template,
-            0,
-            ast.root.tag_open.start,
-            ast.root.tag_open.end,
-            ast.root.tag_close.as_ref().map(|c| c.start),
-            &mut external_requests,
-            &mut src_blocks,
-        );
         template_attrs_fp.push(normalize_attr_map(&attrs, &["lang", "src"]));
     }
 
@@ -272,7 +370,7 @@ pub(crate) fn build_vue_snapshot_from_parsed(
     // Content spans for style blocks (used for preprocessor request content extraction)
     let mut style_content_spans: Vec<Option<(u32, u32)>> = Vec::new();
 
-    for (idx, style) in parsed.style_nodes().iter().enumerate() {
+    for style in parsed.style_nodes().iter() {
         let content = if let Some(span) = style.content {
             &source.as_bytes()[span.start as usize..span.end as usize]
         } else {
@@ -288,19 +386,6 @@ pub(crate) fn build_vue_snapshot_from_parsed(
         if style.module {
             attrs.push(("module", "true"));
         }
-
-        try_resolve_src_block(
-            canonical_id,
-            &attrs,
-            "style",
-            ExternalBlockKind::Style,
-            idx,
-            style.tag_open.start,
-            style.tag_open.end,
-            style.tag_close.as_ref().map(|c| c.start),
-            &mut external_requests,
-            &mut src_blocks,
-        );
 
         style_attrs_fp.push(normalize_attr_map(
             &attrs,
@@ -318,7 +403,7 @@ pub(crate) fn build_vue_snapshot_from_parsed(
     // Content spans for custom blocks (used for preprocessor request content extraction)
     let mut custom_content_spans: Vec<Option<(u32, u32)>> = Vec::new();
 
-    for (idx, custom) in parsed.unknown_nodes().iter().enumerate() {
+    for custom in parsed.unknown_nodes().iter() {
         let content = if let Some(span) = custom.content {
             &source.as_bytes()[span.start as usize..span.end as usize]
         } else {
@@ -332,19 +417,6 @@ pub(crate) fn build_vue_snapshot_from_parsed(
 
         let mut attrs = extract_attrs(&custom.attributes, source);
         attrs.push(("type", block_type));
-
-        try_resolve_src_block(
-            canonical_id,
-            &attrs,
-            block_type,
-            ExternalBlockKind::Custom,
-            idx,
-            custom.tag_open.start,
-            custom.tag_open.end,
-            custom.tag_close.as_ref().map(|c| c.start),
-            &mut external_requests,
-            &mut src_blocks,
-        );
 
         custom_langs.push(find_attr(&attrs, "lang"));
         custom_content_spans.push(custom.content.map(|span| (span.start, span.end)));
@@ -401,36 +473,55 @@ pub(crate) fn build_vue_snapshot_from_parsed(
     // Vue SFCs are still modules: we need named export signatures from the
     // script content even when full script analysis is disabled so barrel
     // re-export resolution can find `export type Foo = ...` in `.vue` files.
-    let (export_signatures, export_panic_diag) =
-        build_export_signatures_from_parsed_with_diagnostic(parsed, source);
-
-    // Build script analysis from script block contents (when script analysis flags are set)
-    let (mut script_analysis, script_panic_diag) = if analysis_scope.needs_script_analysis() {
-        build_script_analysis_from_parsed_with_diagnostic(parsed, source)
-    } else {
-        (
-            verter_semantic::analysis::ScriptAnalysisSnapshot::default(),
-            None,
-        )
+    // Export signatures and (when the scope requests it) script analysis
+    // are walks over ONE shared OXC script-program parse — never
+    // per-consumer re-parses of the same script bytes. A flight-shared
+    // eval program (the cold materialise lanes) is walked directly so
+    // the whole flight pays exactly one script-program parse.
+    let script_outputs = match script_program {
+        VueScriptProgram::ParseHere => build_vue_script_outputs(
+            parsed,
+            source,
+            /* needs_exports */ true,
+            analysis_scope.needs_script_analysis(),
+            provenance,
+        ),
+        VueScriptProgram::Shared(program) => {
+            debug_assert_eq!(
+                Some(program.source_str()),
+                crate::host_resolve::extract_vue_script_content(source, Some(parsed)).as_deref(),
+                "a shared script program must carry this SFC's \
+                 position-preserving extracted script",
+            );
+            vue_script_walks_from_program(
+                program.source_str(),
+                program.source_type(),
+                program.borrow_dependent(),
+                /* needs_exports */ true,
+                analysis_scope.needs_script_analysis(),
+            )
+        }
+        VueScriptProgram::SharedFatal => VueScriptOutputs {
+            export_signatures: Vec::new(),
+            script_analysis: analysis_scope
+                .needs_script_analysis()
+                .then(verter_semantic::analysis::ScriptAnalysisSnapshot::default),
+            panic_diags: Vec::new(),
+        },
     };
+    let export_signatures = script_outputs.export_signatures;
+    let mut script_analysis = script_outputs.script_analysis.unwrap_or_default();
 
     // Cross-reference: mark script bindings that are referenced by CSS v-bind() in style blocks
     if !style_analyses.is_empty() && !script_analysis.bindings.is_empty() {
         script_analysis.mark_bindings_used_in_style(&style_analyses);
     }
 
-    // Merge any panic diagnostic into parse diagnostics
-    let mut extra_diags = Vec::new();
-    if let Some(diag) = export_panic_diag {
-        extra_diags.push(diag);
-    }
-    if let Some(diag) = script_panic_diag {
-        extra_diags.push(diag);
-    }
-    let parse_diagnostics = if extra_diags.is_empty() {
+    // Merge any panic diagnostics into parse diagnostics
+    let parse_diagnostics = if script_outputs.panic_diags.is_empty() {
         parse_diagnostics
     } else {
-        parse_diagnostics.merge(DiagnosticsSnapshot::from_vec(extra_diags))
+        parse_diagnostics.merge(DiagnosticsSnapshot::from_vec(script_outputs.panic_diags))
     };
 
     // Build preprocessor requests for non-native languages
@@ -701,76 +792,214 @@ pub(crate) fn sfc_script_source_type(parsed: &ParsedSfc, source: &str) -> Source
 /// with `LineIndex::offset_to_position()`.
 ///
 /// Shared by `parse_vue_snapshot()` (eager) and `build_script_analysis_from_parsed()`.
-fn build_script_analysis_from_parsed_with_diagnostic(
-    parsed: &ParsedSfc,
-    source: &str,
-) -> (
-    verter_semantic::analysis::ScriptAnalysisSnapshot,
-    Option<HostDiagnostic>,
-) {
-    let Some(script_source) = crate::host_resolve::extract_vue_script_content(source, Some(parsed))
-    else {
-        return (
-            verter_semantic::analysis::ScriptAnalysisSnapshot::default(),
-            None,
-        );
-    };
-    let source_type = sfc_script_source_type(parsed, source);
-    let alloc = Allocator::new();
-    catch_analysis_panic(
-        "script analysis",
-        std::panic::AssertUnwindSafe(|| {
-            verter_semantic::analysis::build_script_analysis(&script_source, source_type, &alloc)
-        }),
-    )
+/// Combined `.vue` script-program outputs from a SINGLE OXC parse.
+struct VueScriptOutputs {
+    export_signatures: Vec<verter_semantic::analysis::ExportSignature>,
+    /// `None` when the caller did not request script analysis.
+    script_analysis: Option<verter_semantic::analysis::ScriptAnalysisSnapshot>,
+    /// Panic diagnostics in production order: parse, export walk,
+    /// analysis walk.
+    panic_diags: Vec<HostDiagnostic>,
 }
 
-fn build_export_signatures_from_parsed_with_diagnostic(
-    parsed: &ParsedSfc,
-    source: &str,
-) -> (
-    Vec<verter_semantic::analysis::ExportSignature>,
-    Option<HostDiagnostic>,
-) {
-    let Some(script_source) = crate::host_resolve::extract_vue_script_content(source, Some(parsed))
-    else {
-        return (Vec::new(), None);
+/// Where the `.vue` snapshot build gets its script program from.
+///
+/// A cold materialise flight already OXC-parses the position-preserving
+/// extracted script ONCE as its eval program; the snapshot build walks
+/// that SAME program instead of paying a second parse over the same
+/// bytes. Lanes with no flight-shared program (the eager scheduler
+/// worker, the lazy `get_analysis` re-builds) parse here — the single
+/// counted snapshot-lane parse.
+pub(crate) enum VueScriptProgram<'a> {
+    /// No flight-shared program: extract and parse once here (counted
+    /// on the `vue_script_snapshot_parses` provenance rail).
+    ParseHere,
+    /// The flight's eval program IS the script program (the eval
+    /// source was the position-preserving extracted script): walk it,
+    /// parse nothing.
+    Shared(&'a crate::ParsedEvalProgram),
+    /// The flight's single parse attempt over the extracted script was
+    /// fatal (recovered panic). A re-parse over the same bytes under
+    /// the same source type fails identically, so every script output
+    /// defaults directly with zero additional parses — the `.vue`
+    /// mirror of the non-SFC fatal arm.
+    SharedFatal,
+}
+
+/// The panic-contained walks over ONE already-parsed `.vue` script
+/// program: export signatures and (when requested) script analysis are
+/// derived from the SHARED program — never per-consumer re-parses.
+/// Each walk is caught independently (an export-walk panic still
+/// yields script analysis, and vice versa), preserving the
+/// per-consumer granularity the split builders had.
+fn vue_script_walks_from_program(
+    script_source: &str,
+    source_type: SourceType,
+    program: &Program<'_>,
+    needs_exports: bool,
+    needs_script_analysis: bool,
+) -> VueScriptOutputs {
+    let mut outputs = VueScriptOutputs {
+        export_signatures: Vec::new(),
+        script_analysis: needs_script_analysis
+            .then(verter_semantic::analysis::ScriptAnalysisSnapshot::default),
+        panic_diags: Vec::new(),
     };
 
+    if needs_exports {
+        let (export_signatures, export_panic_diag) = catch_analysis_panic(
+            "export signature analysis",
+            std::panic::AssertUnwindSafe(|| {
+                verter_semantic::analysis::build_export_signatures_from_program(
+                    script_source,
+                    program,
+                )
+            }),
+        );
+        outputs.export_signatures = export_signatures;
+        if let Some(diag) = export_panic_diag {
+            outputs.panic_diags.push(diag);
+        }
+    }
+
+    if needs_script_analysis {
+        let (script_analysis, script_panic_diag) = catch_analysis_panic(
+            "script analysis",
+            std::panic::AssertUnwindSafe(|| {
+                verter_semantic::analysis::build_script_analysis_with_scope_from_program(
+                    script_source,
+                    source_type,
+                    program,
+                    verter_semantic::analysis::AnalysisScope::all(),
+                )
+            }),
+        );
+        outputs.script_analysis = Some(script_analysis);
+        if let Some(diag) = script_panic_diag {
+            outputs.panic_diags.push(diag);
+        }
+    }
+
+    outputs
+}
+
+/// The single `.vue` script-program parse for the snapshot path.
+///
+/// Extracts the **position-preserving** script source
+/// ([`crate::host_resolve::extract_vue_script_content`] — script content
+/// at its raw SFC byte offsets, non-script bytes whitespace-blanked, so
+/// every span the analyzer produces is SFC-absolute by construction),
+/// OXC-parses it EXACTLY ONCE (counted on the
+/// `MetaProvenance::vue_script_snapshot_parses` rail, inside the worker
+/// fn so every lane counts), and derives every requested consumer from
+/// the SHARED program via the `_from_program` walkers — the same
+/// threading [`build_non_sfc_snapshot_from_program`] uses for non-SFC
+/// files. Export signatures and script analysis are walks over the one
+/// program, never per-consumer re-parses of the same script bytes.
+///
+/// Panic containment mirrors the per-consumer granularity the split
+/// helpers had: each walk is caught independently (an export-walk panic
+/// still yields script analysis, and vice versa); a panic in the parse
+/// itself defaults every output with a single `script parse`
+/// diagnostic. A recovered-fatal parse (`panicked` without unwinding)
+/// defaults every output silently, matching the underlying builders.
+fn build_vue_script_outputs(
+    parsed: &ParsedSfc,
+    source: &str,
+    needs_exports: bool,
+    needs_script_analysis: bool,
+    provenance: &crate::types::MetaProvenance,
+) -> VueScriptOutputs {
+    let mut outputs = VueScriptOutputs {
+        export_signatures: Vec::new(),
+        script_analysis: needs_script_analysis
+            .then(verter_semantic::analysis::ScriptAnalysisSnapshot::default),
+        panic_diags: Vec::new(),
+    };
+    if !needs_exports && !needs_script_analysis {
+        return outputs;
+    }
+    let Some(script_source) = crate::host_resolve::extract_vue_script_content(source, Some(parsed))
+    else {
+        return outputs;
+    };
     let source_type = sfc_script_source_type(parsed, source);
+    provenance
+        .vue_script_snapshot_parses
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let alloc = Allocator::new();
-    catch_analysis_panic(
-        "export signature analysis",
+    let (parse_result, parse_panic_diag) = catch_analysis_panic(
+        "script parse",
         std::panic::AssertUnwindSafe(|| {
-            verter_semantic::analysis::build_export_signatures(&script_source, source_type, &alloc)
+            let parser =
+                Parser::new(&alloc, &script_source, source_type).with_options(ParseOptions {
+                    parse_regular_expression: false,
+                    ..ParseOptions::default()
+                });
+            Some(parser.parse())
         }),
-    )
+    );
+    if let Some(diag) = parse_panic_diag {
+        outputs.panic_diags.push(diag);
+    }
+    let Some(parse_result) = parse_result else {
+        return outputs;
+    };
+    if parse_result.panicked {
+        return outputs;
+    }
+
+    let mut walked = vue_script_walks_from_program(
+        &script_source,
+        source_type,
+        &parse_result.program,
+        needs_exports,
+        needs_script_analysis,
+    );
+    // Keep production diagnostic order: parse first, then the walks.
+    let mut panic_diags = outputs.panic_diags;
+    panic_diags.append(&mut walked.panic_diags);
+    walked.panic_diags = panic_diags;
+    walked
 }
 
 /// Compute script analysis on demand from SFC source. Used by get_analysis()
 /// when eager_analysis was false during upsert().
+///
+/// Counted INSIDE the worker (via the `parse_sfc_counted` chokepoint) so
+/// every caller's SFC structure parse lights up the `sfc_parses` rail.
 pub(crate) fn build_script_analysis_from_source(
     source: &str,
+    provenance: &crate::types::MetaProvenance,
 ) -> verter_semantic::analysis::ScriptAnalysisSnapshot {
-    let parsed = parse_sfc(source, None, None);
-    build_script_analysis_from_parsed(&parsed, source)
+    let parsed = parse_sfc_counted(provenance, source);
+    build_script_analysis_from_parsed(&parsed, source, provenance)
 }
 
 pub(crate) fn build_script_analysis_from_parsed(
     parsed: &ParsedSfc,
     source: &str,
+    provenance: &crate::types::MetaProvenance,
 ) -> verter_semantic::analysis::ScriptAnalysisSnapshot {
-    let (analysis, _diag) = build_script_analysis_from_parsed_with_diagnostic(parsed, source);
-    analysis
+    build_vue_script_outputs(
+        parsed, source, /* needs_exports */ false, /* needs_script_analysis */ true,
+        provenance,
+    )
+    .script_analysis
+    .unwrap_or_default()
 }
 
 /// Compute style analyses on demand from SFC source. Used by get_analysis()
 /// when eager_analysis was false during upsert().
+///
+/// Counted INSIDE the worker (via the `parse_sfc_counted` chokepoint) so
+/// every caller's SFC structure parse lights up the `sfc_parses` rail.
 pub(crate) fn build_style_analyses_from_source(
     source: &str,
     canonical_id: &str,
+    provenance: &crate::types::MetaProvenance,
 ) -> Vec<verter_semantic::analysis::StyleBlockAnalysis> {
-    let parsed = parse_sfc(source, None, None);
+    let parsed = parse_sfc_counted(provenance, source);
     build_style_analyses_from_parsed(&parsed, source, canonical_id)
 }
 
@@ -830,7 +1059,19 @@ pub(crate) fn build_non_sfc_snapshot_from_program(
     }
 }
 
-pub(crate) fn parse_non_sfc_snapshot(canonical_id: &str, source: &str) -> ParseSnapshot {
+pub(crate) fn parse_non_sfc_snapshot(
+    canonical_id: &str,
+    source: &str,
+    provenance: &crate::types::MetaProvenance,
+) -> ParseSnapshot {
+    // A full OXC program parse outside the `parse_eval_program` funnel —
+    // counted on its own provenance rail (it is not an SFC structure
+    // parse and not an eval-program parse) so every full-program
+    // snapshot lane (scheduler Source stage, analysis read path) is
+    // dedup-suite-visible.
+    provenance
+        .non_sfc_snapshot_parses
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let source_type = non_sfc_source_type(canonical_id);
     let alloc = Allocator::new();
     let parser = Parser::new(&alloc, source, source_type).with_options(ParseOptions {
@@ -864,6 +1105,30 @@ mod tests {
     use smallvec::SmallVec;
     use verter_compiler::types::NodeProp;
     use verter_semantic::analysis::AnalysisScope;
+
+    // Test-local wrappers fixing the worker fns' provenance param (the
+    // workers count parses on the host's provenance rail; these tests
+    // exercise parsing only, so a scratch counter suffices). Shadow the
+    // glob-imported names so every call below stays unchanged.
+    fn parse_vue_snapshot(
+        canonical_id: &str,
+        source: &str,
+        analysis_scope: AnalysisScope,
+    ) -> (ParseSnapshot, ParsedSfc) {
+        super::parse_vue_snapshot(
+            canonical_id,
+            source,
+            analysis_scope,
+            &crate::types::MetaProvenance::default(),
+        )
+    }
+    fn parse_non_sfc_snapshot(canonical_id: &str, source: &str) -> ParseSnapshot {
+        super::parse_non_sfc_snapshot(
+            canonical_id,
+            source,
+            &crate::types::MetaProvenance::default(),
+        )
+    }
 
     // ── Helper: build a NodeProp pointing into a source string ──
 

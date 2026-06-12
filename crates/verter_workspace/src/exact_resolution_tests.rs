@@ -1015,3 +1015,61 @@ fn forward_deps_includes_all_classes() {
     want.sort();
     assert_eq!(got, want);
 }
+
+/// The `replace_exact_resolutions` no-op gate must be duplicate-key
+/// safe: an input carrying the SAME key twice (`[A→x, A→x]`) against a
+/// stored table `{A→x, B→y}` has matching lengths and every input entry
+/// matches the stored value — but a real replace would DROP `B→y`. The
+/// gate must count DISTINCT input keys, not raw input length, so the
+/// drop is reported as a change and the caller's invalidation cascade
+/// runs.
+#[test]
+fn replace_exact_resolutions_noop_gate_is_duplicate_key_safe() {
+    let mut store = EdgeStore::new();
+    store.replace_exact_resolutions(
+        "/src/Comp.vue",
+        vec![
+            exact("./a", Some("/lib/a.ts"), vec![]),
+            exact("./b", Some("/lib/b.ts"), vec![]),
+        ],
+    );
+
+    // Duplicate-keyed input: same length as the stored table, every
+    // entry value-matches its stored counterpart — but it names only
+    // ONE distinct key, so the replace drops `./b`.
+    let result = store.replace_exact_resolutions(
+        "/src/Comp.vue",
+        vec![
+            exact("./a", Some("/lib/a.ts"), vec![]),
+            exact("./a", Some("/lib/a.ts"), vec![]),
+        ],
+    );
+    assert!(
+        result.changed,
+        "a duplicate-keyed input that drops a stored entry MUST report \
+         changed — reporting a no-op skips the invalidation cascade and \
+         leaves a stale exact resolution observable",
+    );
+    assert!(
+        store
+            .get_exact_resolution("/src/Comp.vue", "./b", default_ctx())
+            .is_none(),
+        "the replace must actually drop './b' (wholesale-replace semantics)",
+    );
+
+    // Control: a genuinely identical duplicate-keyed re-push against the
+    // now single-entry table IS a value no-op (distinct keys == stored
+    // keys, every value matches).
+    let idempotent = store.replace_exact_resolutions(
+        "/src/Comp.vue",
+        vec![
+            exact("./a", Some("/lib/a.ts"), vec![]),
+            exact("./a", Some("/lib/a.ts"), vec![]),
+        ],
+    );
+    assert!(
+        !idempotent.changed,
+        "a duplicate-keyed input whose distinct-key set value-matches the \
+         stored table is a true no-op",
+    );
+}

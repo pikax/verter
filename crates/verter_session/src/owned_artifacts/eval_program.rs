@@ -1,16 +1,18 @@
 //! `OwnedEvalProgram` — owned, `Send + Sync + 'static` lowered IR for the
 //! script body of a Vue SFC (or non-SFC dependency).
 //!
-//! ## Tier 1A authority (D17 + D44 + D107 + D116 + D117)
+//! ## Lowering-boundary contract
 //!
-//! `OwnedEvalProgram` is the post-parse, post-lowering owned representation
-//! consumed by the host-backed eval-env / type-resolution pipelines. The
-//! borrowed `oxc_parser::Parser` arena is dropped at the lowering boundary
-//! (D44); after construction, no field of `OwnedEvalProgram` retains any
-//! pointer into the OXC allocator. The struct is `Clone + Send + Sync +
-//! 'static` so it can be stored in host-owned typed DBs (`EvalEnvCacheDb`,
-//! `TypeResolutionContextDb`) without the previous thread-local
-//! workarounds (`HOST_PARSED_*_CACHE`).
+//! `OwnedEvalProgram` is a post-parse, post-lowering owned representation
+//! of a script body. The borrowed `oxc_parser::Parser` arena is dropped
+//! at the lowering boundary; after construction, no field of
+//! `OwnedEvalProgram` retains any pointer into the OXC allocator. The
+//! struct is `Clone + Send + Sync + 'static` so it can sit in host-owned
+//! typed DBs without thread-local workarounds. Production does not build
+//! or cache `OwnedEvalProgram` values yet — the live per-file `EvalEnv`
+//! lives on `IndexedReady`, and the transient `ParsedEvalProgram` is
+//! threaded by reference within a cold flight; this type and its tests
+//! pin the arena-free lowering contract.
 //!
 //! Identifier and literal payloads are interned through compact
 //! `InternedIdentifierTable` / `InternedLiteralTable` arenas (deduplicated
@@ -18,17 +20,17 @@
 //! slabs and reference each other by `InternedExpressionId` indices.
 //!
 //! The macro-impact inventory baseline lives at
-//! `crates/verter_session/src/owned_artifacts/eval_program_macro_impact_inventory.md`
-//! (D116). Tier 1A's `LoweringError` variants align one-to-one with the
+//! `crates/verter_session/src/owned_artifacts/eval_program_macro_impact_inventory.md`.
+//! The `LoweringError` variants align one-to-one with the
 //! "FAIL on Unsupported" rows of that inventory; "Diagnostic-only on
 //! Unsupported" rows lower to `LoweredStmt::Unsupported` / `LoweredExpr::Unsupported`
 //! with no `LoweringError`.
 //!
-//! Consumer-visible behavior under D117: when lowering produces a
+//! Consumer-visible contract: when lowering produces a
 //! `LoweringError`, the parse-stage diagnostic is recorded on the
-//! payload's `macro_expansion_diagnostics` and `flags.has_macro_failure`
-//! is set to `true`. NAPI does NOT throw exceptions for macro failures
-//! — they are surfaced as structured payload entries.
+//! payload's `macro_expansion_diagnostics`. NAPI does NOT throw
+//! exceptions for macro failures — they are surfaced as structured
+//! payload entries.
 
 use std::sync::Arc;
 
@@ -374,15 +376,17 @@ pub struct LoweringDiagnostic {
     pub message: Arc<str>,
 }
 
-/// Macro-impacting lowering failure (D107 + D117). Each variant aligns
-/// one-to-one with a "FAIL on Unsupported" row in
+/// Macro-impacting lowering failure. Each variant aligns one-to-one
+/// with a "FAIL on Unsupported" row in
 /// `eval_program_macro_impact_inventory.md`.
 ///
-/// Per D117, this error is converted to a structured payload diagnostic
-/// at the parse stage. The downstream `getComponentMeta` API still
-/// returns `Option<ComponentMetaPayload>`; the payload's
-/// `macro_expansion_diagnostics` field is populated and
-/// `flags.has_macro_failure` is set to `true` (D123).
+/// Contract: a lowering driver converts this error to a structured
+/// payload diagnostic at the parse stage. The downstream
+/// `getComponentMeta` API still returns `Option<ComponentMetaPayload>`;
+/// macro failures surface through the payload's
+/// `macro_expansion_diagnostics` field. Production lowering does not
+/// construct `LoweringError` yet; the structural contract is pinned by
+/// `macro_impacting_constructs_fail_lowering_not_silent_skip`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoweringError {
     /// Macro argument is an unsupported expression shape (e.g.,
@@ -438,9 +442,10 @@ impl std::error::Error for LoweringError {}
 // ─────────────────────────────────────────────────────────────────────
 
 /// Owned, lowered representation of a parsed script body. `Send + Sync +
-/// 'static` (D44). Stored in the `EvalEnvCacheDb` and the
-/// `TypeResolutionContextDb` (1C-α populates these consumers; 1A
-/// introduces the empty DBs and the type that lives in them).
+/// 'static` — safe for host-owned caches. Currently constructed only by
+/// tests; production parses eval programs once per cold materialise and
+/// threads the transient `ParsedEvalProgram` by reference instead of
+/// caching an owned program.
 #[derive(Debug, Clone)]
 pub struct OwnedEvalProgram {
     /// Top-level statements in source order.
@@ -455,8 +460,9 @@ pub struct OwnedEvalProgram {
     /// Flat expression slab; statement nodes reference by
     /// [`InternedExpressionId`].
     pub expressions: Arc<[LoweredExpr]>,
-    /// Per-import, set of identifiers brought in. Used by the eval-env
-    /// builder (1C-α) to seed import-symbol facts without rescanning.
+    /// Per-import set of identifiers brought in, available so an
+    /// eval-env builder can seed import-symbol facts without
+    /// rescanning.
     pub import_symbols: FxHashMap<Arc<str>, FxHashSet<InternedIdentifierId>>,
     /// Non-fatal lowering diagnostics — populated for `Unsupported`
     /// rows. Macro-impacting failures abort lowering with
@@ -481,9 +487,8 @@ impl OwnedEvalProgram {
         }
     }
 
-    /// Build from owned slabs. Used by the lowering pipeline in
-    /// [`crate::host_executor`] (1C-α wires the actual lowering;
-    /// 1A introduces the constructor signature and unit tests).
+    /// Build from owned slabs. Currently exercised only by tests; no
+    /// production lowering path constructs owned programs yet.
     #[must_use]
     pub fn from_parts(
         statements: Vec<LoweredStmt>,

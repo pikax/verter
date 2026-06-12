@@ -1184,7 +1184,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // The placeholder's `whole_hash` is diagnostic payload only;
                 // the `Instantiate` key is content-free (R6) and the cold
                 // build re-sources the live whole_hash from
-                // `ensure_indexed_ready`.
+                // `ensure_indexed_ready_serve`.
                 let _ = whole_hash;
                 let base = self.type_slot_for(Arc::clone(canonical_id), Arc::clone(name));
                 let key = SemanticQueryKey::Instantiate {
@@ -2080,7 +2080,12 @@ fn observe_closedness_walk_consult(
     if canonical_id.is_empty() || canonical_id == "__builtin__" || canonical_id == "<synthetic>" {
         return;
     }
-    if let Some(indexed) = ctx.ensure_indexed_ready(canonical_id) {
+    // Structurally read-only: observes the consulted file's whole hash
+    // onto the active tracer; fenced-ness flows via the chokepoint flag.
+    if let Some(indexed) = ctx
+        .ensure_indexed_ready_serve(canonical_id)
+        .map(|serve| serve.indexed)
+    {
         crate::resolver_core::resolver_context::observe_fan_out(
             crate::resolver_core::FactVersionRef::FileWholeHash {
                 canonical_id: canonical_id.to_string(),

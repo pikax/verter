@@ -730,7 +730,7 @@ impl VerterHost {
                 drained_derived = true;
             }
             if whole_hash_changed || changes.semantic_changed {
-                derived.raw_template_analysis = None;
+                derived.clear_raw_template_analysis();
                 drained_derived = true;
             }
             // import_routes is the sub-mirror of IndexedReady.import_routes.
@@ -738,10 +738,14 @@ impl VerterHost {
             // upsert; clear here so stale entries do not leak into the next
             // resolver run. R3/R26/R28 Gap 2: drop the parallel
             // per-specifier known-miss generation table so subsequent
-            // bundler resolutions admit fresh tags.
+            // bundler resolutions admit fresh tags — and the positive
+            // generation stamp table for the same reason.
             derived.import_routes.clear();
             derived
                 .import_routes_known_miss_recorded_at_generation
+                .clear();
+            derived
+                .import_routes_positive_recorded_at_generation
                 .clear();
             derived.evicted = false;
             if drained_derived {
@@ -804,7 +808,11 @@ impl VerterHost {
         self.record_parsed_edges_to_vfs(&canonical_id, &result_data);
         crate::host_manage::push_cache_drained_at_upsert("workspace_parsed_edges", &canonical_id);
 
-        self.ws().notify_upsert(&canonical_id, req.source.clone());
+        // Through the host wrapper rail (not a raw `ws()` call): the
+        // wrapper's artifact-only eviction arm is a no-op here — the
+        // canonical was just upserted, so the scheduler is its content
+        // authority — but ONE notify path keeps the perimeter auditable.
+        self.notify_upsert(&canonical_id, req.source.clone());
 
         let result = build_upsert_result(
             canonical_id.clone(),
@@ -1229,8 +1237,12 @@ impl VerterHost {
             );
             let synthetic_arc: Arc<str> = Arc::from(synthetic_source.as_str());
 
-            let (new_snapshot, new_parsed) =
-                parse_vue_snapshot(&canonical, &synthetic_source, self.config.effective_scope());
+            let (new_snapshot, new_parsed) = parse_vue_snapshot(
+                &canonical,
+                &synthetic_source,
+                self.config.effective_scope(),
+                &self.provenance,
+            );
 
             let layer = ContentOverrideLayer {
                 hash: override_hash,

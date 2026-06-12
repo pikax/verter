@@ -361,7 +361,6 @@ fn aggregate_cache_hit_rate(record: &RequestAuditRecord) -> Option<f64> {
         &layers.indexed,
         &layers.analysis,
         &layers.owner_import,
-        &layers.route_owned_shallow,
         &layers.component_meta,
         &layers.route_db,
         &layers.ref_cycle,

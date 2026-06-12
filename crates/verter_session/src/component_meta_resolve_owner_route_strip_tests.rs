@@ -18,9 +18,9 @@
 //! `Flight::Leader`).
 //!
 //! The owner's OWN `DerivedFactHash{Route}` fact is non-round-tripping:
-//! `HostStoreView::build` dual-sources `view.derived_hashes[(owner,
-//! Route)]` — from the owner's `IndexedReady.shallow_state` route surface
-//! AND from any `route_owned_shallow` entry. The non-`DirectSource`
+//! `HostStoreView::build` sources `view.derived_hashes[(owner,
+//! Route)]` from the owner's `IndexedReady.shallow_state` route surface.
+//! The non-`DirectSource`
 //! `DerivedFactHash` validation arm rejects a MISSING `(owner, Route)`
 //! entry (it uses `is_some_and`, NOT the permissive `None => true`
 //! untracked-accept the `FileWholeHash` arm uses), so under concurrency a
@@ -37,8 +37,8 @@
 //!
 //! ## Discrimination
 //!
-//! `resolve_component_meta_warm_caches_strip_owner_route_fact` plants a
-//! `route_owned_shallow` entry for the owner via a genuine route-only
+//! `resolve_component_meta_warm_caches_strip_owner_route_fact`
+//! materialises the owner's `IndexedReady` via a genuine route-only
 //! read, runs a cold `resolve_component_meta`, and asserts:
 //!
 //! 1. **Pre/post discriminator (BOTH caches).** Neither the validated
@@ -172,16 +172,16 @@ fn prop_names(
     names
 }
 
-/// Plant a `route_owned_shallow` entry for the OWNER via a genuine
-/// route-only read BEFORE the owner has an `IndexedReady`, then cold
-/// `resolve_component_meta`. This reproduces the precondition where an
-/// owner already has a `route_owned_shallow` entry from an earlier
-/// route-only read, which dual-sources the owner Route hash.
-fn prime_with_route_owned(host: &VerterHost) {
-    let route_owned = host.ensure_route_owned_shallow_entry(OWNER);
+/// Materialise the owner's `IndexedReady` via a genuine route-only read
+/// BEFORE the cold `resolve_component_meta`. This reproduces the
+/// precondition where an owner already has an `IndexedReady` from an
+/// earlier route-only read, which sources the owner Route hash on the
+/// live `HostStoreView`.
+fn prime_with_indexed_ready(host: &VerterHost) {
+    let indexed = host.ensure_indexed_ready(OWNER);
     assert!(
-        route_owned.is_some(),
-        "route-only read must materialise a route_owned_shallow entry for the owner SFC",
+        indexed.is_some(),
+        "route-only read must materialise an IndexedReady artifact for the owner SFC",
     );
     let resolved = host.resolve_component_meta(OWNER, ProjectionMode::Expanded);
     assert!(
@@ -195,7 +195,7 @@ fn resolve_component_meta_warm_caches_strip_owner_route_fact() {
     let host = build_host();
     upsert(&host, DEP, TYPES_TS, FileKind::NonSfc);
     upsert(&host, OWNER, OWNER_VUE, FileKind::VueSfc);
-    prime_with_route_owned(&host);
+    prime_with_indexed_ready(&host);
 
     // ── Legacy mirror ────────────────────────────────────────────────
     let mirror = legacy_mirror_facts(&host, OWNER);
@@ -262,7 +262,7 @@ fn resolve_component_meta_owner_content_edit_still_invalidates() {
     let host = build_host();
     upsert(&host, DEP, TYPES_TS, FileKind::NonSfc);
     upsert(&host, OWNER, OWNER_VUE, FileKind::VueSfc);
-    prime_with_route_owned(&host);
+    prime_with_indexed_ready(&host);
 
     // Warm hit (no edit) baseline — the validated cache reuses the entry.
     let stale_before_warm = host.resolver_runtime().component_meta.stale_miss_count();
@@ -319,7 +319,7 @@ fn resolve_component_meta_cross_file_edit_still_invalidates() {
     let host = build_host();
     upsert(&host, DEP, TYPES_TS, FileKind::NonSfc);
     upsert(&host, OWNER, OWNER_VUE, FileKind::VueSfc);
-    prime_with_route_owned(&host);
+    prime_with_indexed_ready(&host);
 
     let stale_before = host.resolver_runtime().component_meta.stale_miss_count();
 

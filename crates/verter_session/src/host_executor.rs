@@ -129,14 +129,24 @@ impl SnapshotData for HostArtifactData {
 pub struct HostStageExecutor {
     pub config: HostConfig,
     pub workspace: Arc<parking_lot::RwLock<Arc<dyn verter_workspace::WorkspaceAccess>>>,
+    /// Host-owned provenance counters. The executor bumps `sfc_parses`
+    /// once per Vue SFC structure parse so the cold-build dedup
+    /// counters observe scheduler-stage parses (rayon workers have no
+    /// capture-token TLS).
+    pub provenance: Arc<crate::types::MetaProvenance>,
 }
 
 impl HostStageExecutor {
     pub fn new(
         config: HostConfig,
         workspace: Arc<parking_lot::RwLock<Arc<dyn verter_workspace::WorkspaceAccess>>>,
+        provenance: Arc<crate::types::MetaProvenance>,
     ) -> Self {
-        Self { config, workspace }
+        Self {
+            config,
+            workspace,
+            provenance,
+        }
     }
 }
 
@@ -172,6 +182,7 @@ impl StageExecutor for HostStageExecutor {
                 canonical_id,
                 &content,
                 self.config.effective_scope(),
+                &self.provenance,
             );
             let parse_duration_ms = parse_start.elapsed().as_secs_f64() * 1000.0;
             let source_type =
@@ -190,7 +201,8 @@ impl StageExecutor for HostStageExecutor {
                 }),
             }
         } else {
-            let parse_snapshot = crate::parse::parse_non_sfc_snapshot(canonical_id, &content);
+            let parse_snapshot =
+                crate::parse::parse_non_sfc_snapshot(canonical_id, &content, &self.provenance);
             let parse_duration_ms = parse_start.elapsed().as_secs_f64() * 1000.0;
             let source_type = imported_eval_source_type(canonical_id, content.as_ref(), None);
             SourceSnapshot {

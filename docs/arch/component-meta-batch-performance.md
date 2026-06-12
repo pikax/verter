@@ -11,8 +11,7 @@ cache-validation pass, with the numbers measured on this tree.
    `Arc<StoreViewSnapshot>` per `StoreViewValidationToken` generation —
    built once under a no-torn singleflighted build, shared by cheap Arc
    clone. The token folds `store_view_epoch` + `project_generation` +
-   `FileArtifactStore.artifact_generation` +
-   `RouteOwnedShallowDb.artifact_generation` + `load_generation` + the
+   `FileArtifactStore.artifact_generation` + `load_generation` + the
    workspace `content_generation` + the R21 env-hash fold + project
    identity + frozen overlay identity. `resolver_store_view()` returns a
    typed `StoreViewRead { Current | ReturnOnly }`: a non-current view

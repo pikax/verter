@@ -827,7 +827,7 @@ fn observe_materialize_scope_recovers_parse_facts_for_normalised_js_overlay() {
 /// which resolved the canonical through `resolve_eval_dependency_canonical`
 /// (the `normalized_analysis_canonical` rewrite) BEFORE handing it to the
 /// overlay-aware reads `ctx.indexed_for_current_content(..)` and
-/// `route_owned_shallow_state_with_context(..)`. For an overlay on
+/// `routed_shallow_state_with_context(..)`. For an overlay on
 /// `/pkg/index.js` whose `/pkg/index.d.ts` companion exists, that
 /// pre-normalisation turned the raw `/pkg/index.js` id into
 /// `/pkg/index.d.ts` — and the `SessionView` overlay maps are keyed by

@@ -42,22 +42,13 @@ fn indexed_from_source(source: &str) -> Arc<IndexedReady> {
         verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default(),
     );
 
-    Arc::new(IndexedReady {
-        whole_hash: [0u8; 16],
-        shallow_state: Arc::new(shallow),
-        import_routes: Arc::new(rustc_hash::FxHashMap::default()),
-        import_route_hash: None,
-        route_hash: None,
-        edge_generation: 0,
-        raw_source: Arc::from(source),
-        eval_source: Arc::from(source),
-        cached_parse: None,
-        script_analysis: None,
-        export_signatures: None,
-        snapshot: Arc::new(verter_session::FileAnalysisSnapshot::default()),
-        external_type_analysis: empty_external,
-        declares_interface_app_config: false,
-    })
+    Arc::new(IndexedReady::new_for_test_with_state(
+        [0u8; 16],
+        Arc::new(shallow),
+        Arc::from(source),
+        Arc::from(source),
+        empty_external,
+    ))
 }
 
 #[test]

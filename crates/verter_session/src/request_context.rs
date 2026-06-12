@@ -280,8 +280,6 @@ pub struct PerRequestCacheCounters {
     pub analysis: HitMiss,
     /// `OwnerImportSurfaceDb` — owner direct-import surface cache.
     pub owner_import: HitMiss,
-    /// `RouteOwnedShallowDb` — route-only shallow cache.
-    pub route_owned_shallow: HitMiss,
     /// `ComponentMetaResultDb` — final component-meta result cache.
     pub component_meta: HitMiss,
     /// `RouteDb` — host-backed resolver route cache.
@@ -809,7 +807,7 @@ pub struct RequestContext {
     pub substitute_mapped_type_descend: AtomicU64,
     /// Calls to `build_typeof`.
     pub build_typeof_calls: AtomicU64,
-    /// `build_typeof` calls where `ensure_indexed_ready` returned
+    /// `build_typeof` calls where `ensure_indexed_ready_serve` returned
     /// `None`.
     pub build_typeof_prepared_value_misses: AtomicU64,
     // Mapped-member materialization counters

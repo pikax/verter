@@ -8,9 +8,10 @@
 //! `DerivedFactHash{Route}` — into the active tracer.
 //!
 //! The owner's own Route fact does not round-trip on warm validation:
-//! `HostStoreView::build` dual-sources `derived_hashes[(owner, Route)]`
-//! (the `IndexedReady` shallow state AND any `route_owned_shallow`
-//! entry), and the two can disagree. `publish_component_meta_cache_entry`
+//! the owner's `derived_hashes[(owner, Route)]` snapshot can move with
+//! the cold compute's own publication (the compute materialises the
+//! owner's `IndexedReady` as part of its work), so an entry rooted on
+//! it would self-invalidate. `publish_component_meta_cache_entry`
 //! therefore drops exactly the owner's own `DerivedFactHash{Route}`
 //! fact via `strip_owner_route_fact` before cache admission. Cross-file
 //! route facts — Route facts for the route DEPS the cold compute

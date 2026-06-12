@@ -26,17 +26,21 @@
 //! (`!import_route_is_known_miss`). A negative is recomputed by the
 //! caller's `resolve_workspace_dependency_and_cache` path, which
 //! re-resolves against the current workspace and reopens the route the
-//! moment the target file exists. Positive resolutions stay valid (a
-//! new file never invalidates an already-resolved positive).
+//! moment the target file exists. Positive entries served through the
+//! fallback are current by construction: `ensure_indexed_ready`'s reuse
+//! is edge-currency-gated, so a surface whose baked edges predate a
+//! dependency-set change takes the edge-refresh (re-resolving its
+//! edges) before this read.
 //!
 //! Discriminating fixture: an owner imports `./late_dep`, which does
 //! not exist when the owner's `IndexedReady` is materialised — so
 //! `IndexedReady.import_routes['./late_dep']` is a known-miss snapshot.
 //! `./late_dep.ts` is then upserted; the owner-upsert path has no
-//! eager reverse-dependent cascade, so the owner's `IndexedReady`
-//! (and its stale negative snapshot) survives. Pre-fix
-//! `resolve_type_dependency_canonical` keeps returning `None`;
-//! post-fix it recomputes and resolves the new file.
+//! eager reverse-dependent cascade. Pre-fix
+//! `resolve_type_dependency_canonical` kept returning `None`;
+//! post-fix the route reopens (the gated read edge-refreshes the
+//! owner's surface, and the known-miss filter backstops any
+//! pre-refresh artifact).
 use std::sync::Arc;
 
 use crate::{FileKind, HostConfig, UpsertRequest, VerterHost};
@@ -115,29 +119,36 @@ fn negative_import_route_reopens_after_target_file_appears() {
         })
         .expect("late_dep upsert");
 
-    // Sanity: the owner's `IndexedReady` survived the staging step and
-    // STILL carries the stale known-miss snapshot. If this is `None`,
-    // the owner was re-materialised and the test would not exercise the
-    // stale-snapshot path.
+    // The gated read path is edge-currency-gated: the owner's surface
+    // carries cross-file edges, so the target's appearance (a
+    // `content_generation` advance) routes `ensure_indexed_ready`
+    // through the edge-refresh, which re-resolves `./late_dep` against
+    // the live file set. The refreshed surface records the POSITIVE
+    // resolution — the stale known-miss never survives a gated read.
+    // (The known-miss filter on the `IndexedReady` fallback remains the
+    // backstop for any reader holding a pre-refresh artifact.)
     let owner_indexed_after = host
         .ensure_indexed_ready(owner)
         .expect("owner IndexedReady still present");
     if let Some(still) = owner_indexed_after.import_routes.get("./late_dep") {
         assert!(
-            VerterHost::import_route_is_known_miss(still),
-            "sanity: the owner's IndexedReady.import_routes['./late_dep'] \
-             snapshot is STILL a known-miss after the target file appeared \
-             — the snapshot is content-pinned to the owner and the owner's \
-             content did not change. This is the stale negative that \
-             `authoritative_import_route` must NOT serve.",
+            !VerterHost::import_route_is_known_miss(still),
+            "the gated read must serve an EDGE-REFRESHED surface whose \
+             './late_dep' entry re-resolved positively after the target \
+             appeared — serving the stale known-miss snapshot means the \
+             edge-currency gate failed to stale the owner's surface on \
+             the dependency-set change",
         );
     }
 
-    // Post-fix discriminator: `authoritative_import_route` filters the
-    // stale `IndexedReady` known-miss, returns `None`, and the caller
-    // recomputes against the current workspace — reopening the route.
-    // Pre-fix the stale negative is served, every caller maps it to
-    // `return None`, and the import stays permanently unresolvable.
+    // Discriminator: the route must reopen. Two independent rails
+    // enforce it — the edge-currency refresh (the gated read re-resolves
+    // the owner's edges against the live file set) and the
+    // `authoritative_import_route` known-miss filter (a stale negative
+    // from a pre-refresh artifact is never served; the caller recomputes
+    // against the current workspace). Pre-fix neither existed: the stale
+    // negative was served, every caller mapped it to `return None`, and
+    // the import stayed permanently unresolvable.
     let after = host.resolve_type_dependency_canonical(owner, "./late_dep");
     assert_eq!(
         after.as_deref(),

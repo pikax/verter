@@ -182,8 +182,8 @@ impl VerterHost {
         // raw source is read through the SAME `ctx` the surface was projected
         // under, so an overlay session reads its overlay raw source.
         Some(surface.with_member_jsdoc_spans(|canonical| {
-            ctx.ensure_indexed_ready(canonical)
-                .map(|indexed| Arc::clone(&indexed.raw_source))
+            ctx.ensure_indexed_ready_serve(canonical)
+                .map(|serve| Arc::clone(&serve.indexed.raw_source))
         }))
     }
 }

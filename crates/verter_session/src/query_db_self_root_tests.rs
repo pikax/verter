@@ -2054,7 +2054,17 @@ fn materialize_memo_db_artifact_only_scope_lowers_under_shallow_whole_hash() {
     // Build a real `IndexedReady` (with a resolvable `Probe`
     // interface) by loading a helper file through the production path.
     let helper = "/self_root_race/memo_artifact_only_helper.ts";
+    let scope = "/self_root_race/memo_artifact_only_scope.ts";
     upsert(&host, helper, "export interface Probe { a: number; }\n");
+    // The artifact-only tier-2 freshness gate requires workspace
+    // presence (`file_exists`) and a live `content_generation` stamp,
+    // so the scope file is given a workspace overlay BEFORE the helper
+    // artifact (whose `edge_generation` the seed inherits) is built —
+    // the seed below is then provably fresh: stamp == live generation,
+    // file present. The overlay touches ONLY the workspace; the
+    // scheduler still has no `DerivedRawState` for the scope, so it
+    // stays genuinely artifact-only.
+    host.notify_upsert(scope, Arc::from("export interface Probe { a: number; }\n"));
     let helper_indexed = host
         .ensure_indexed_ready(helper)
         .expect("helper IndexedReady materialises");
@@ -2064,11 +2074,10 @@ fn materialize_memo_db_artifact_only_scope_lowers_under_shallow_whole_hash() {
         "fixture invariant: the artifact's real content hash is non-zero",
     );
 
-    // Publish that `IndexedReady` into `FileArtifactStore` under a
+    // Publish that `IndexedReady` into `FileArtifactStore` under the
     // SEPARATE canonical the scheduler never tracked — a genuinely
     // artifact-only scope (a "foreign source or test-seeded
     // file with no scheduler DerivedRawState").
-    let scope = "/self_root_race/memo_artifact_only_scope.ts";
     host.project_type_store()
         .indexed()
         .insert(Arc::from(scope), Arc::clone(&helper_indexed));
@@ -4172,176 +4181,6 @@ fn ref_cycle_db_return_only_path_propagates_bfs_fence_to_caller() {
 }
 
 // ===========================================================================
-// `RouteOwnedShallowDb` — self-version-root (tier-1 content-hash) gate.
-//
-// `RouteOwnedShallowDb` is canonical-keyed with the self `whole_hash`
-// carried INSIDE the entry. Its warm-read freshness gate
-// (`route_owned_entry_is_fresh`) is tiered: tier 3 = `project_generation`,
-// tier 1 = scheduler-authoritative content hash, tier 2 = workspace
-// generation + `file_exists`. Tier 1 is the self-version root: it asserts
-// `authoritative_current_content_hash(canonical) == entry.whole_hash`.
-//
-// The existing tiered-gate coverage in `cache_identity_invariants_tests`
-// deliberately exercises a never-upserted canonical so `get_whole_hash`
-// returns `None` and tier 2 decides — tier 1, the self-root content-hash
-// comparison, is left uncovered there. The two tests below close that
-// gap.
-// ===========================================================================
-
-/// Build a `RouteOwnedShallowEntry` whose generations match `host`'s
-/// live state (so the tier-3 / tier-2 gates pass) but whose
-/// `whole_hash` is whatever the caller plants — letting the tier-1
-/// self-root comparison be the deciding tier.
-fn route_owned_entry_with_whole_hash(
-    host: &VerterHost,
-    whole_hash: [u8; 16],
-) -> crate::project_type_store::RouteOwnedShallowEntry {
-    use rustc_hash::{FxHashMap, FxHashSet};
-    let analysis = Arc::new(
-        verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default(),
-    );
-    crate::project_type_store::RouteOwnedShallowEntry {
-        whole_hash,
-        workspace_generation: host.ws().content_generation(),
-        project_generation: host.project_type_store().current_project_generation(),
-        raw_source: Arc::from(""),
-        eval_source: Arc::from(""),
-        cached_parse: None,
-        snapshot: Arc::new(crate::types::FileAnalysisSnapshot::default()),
-        external_type_analysis: Arc::clone(&analysis),
-        shallow_state: Arc::new(crate::resolver_core::shallow_file_state::ShallowFileState {
-            whole_hash,
-            exports: FxHashMap::default(),
-            wildcard_reexports: Vec::new(),
-            symbols: FxHashMap::default(),
-            value_symbols: FxHashMap::default(),
-            augmentation_scopes: FxHashMap::default(),
-            augmentation_value_scopes: FxHashMap::default(),
-            import_locals: FxHashSet::default(),
-            import_targets: FxHashMap::default(),
-            analysis,
-        }),
-    }
-}
-
-/// `RouteOwnedShallowDb` — a stale self `whole_hash` is rejected by the
-/// tier-1 self-version-root gate.
-///
-/// A real file is upserted, so the scheduler knows it and
-/// `get_whole_hash` returns the authoritative current hash. A
-/// `RouteOwnedShallowEntry` is then built with live generations (tier 3
-/// and tier 2 both pass) but a *planted, stale* `whole_hash`. The
-/// freshness gate must reject it on tier 1:
-/// `authoritative_current_content_hash != entry.whole_hash`.
-///
-/// Discrimination property: tier 1 is the only tier that inspects the
-/// entry's self `whole_hash`. If `RouteOwnedShallowEntry` did not carry
-/// a self `whole_hash` — or the gate skipped the tier-1 comparison —
-/// the entry would fall through to tier 2, whose `workspace_generation`
-/// and `file_exists` clauses BOTH hold here, so the stale entry would
-/// be wrongly accepted as fresh. The companion assertion plants the
-/// genuine current hash and confirms tier 1 then accepts — proving the
-/// gate is a real content-hash comparison, not an unconditional reject.
-#[test]
-fn route_owned_shallow_db_stale_whole_hash_rejects_warm_entry() {
-    let host = VerterHost::new_standalone(HostConfig::default());
-    let canonical = "/self_root/route_owned_probe.ts";
-    upsert(&host, canonical, "export const a = 1;\n");
-
-    let authoritative = host
-        .get_whole_hash(canonical)
-        .expect("an upserted canonical must have a scheduler-authoritative hash");
-
-    // A planted hash distinct from the authoritative one — a stale
-    // self-root.
-    let stale_hash = PLANTED_HASH;
-    assert_ne!(
-        stale_hash, authoritative,
-        "fixture invariant: the planted stale hash must differ from the \
-         authoritative current hash",
-    );
-    let stale_entry = route_owned_entry_with_whole_hash(&host, stale_hash);
-    assert!(
-        !host.route_owned_entry_is_fresh_for_test(canonical, &stale_entry),
-        "the route-owned freshness gate MUST reject an entry whose self \
-         `whole_hash` ({stale_hash:?}) mismatches the authoritative current \
-         content hash ({authoritative:?}) — tier 1 is the self-version root. \
-         An entry without a self `whole_hash`, or a gate skipping the tier-1 \
-         comparison, would fall through to tier 2 (workspace_generation + \
-         file_exists both hold here) and wrongly serve the stale entry",
-    );
-
-    // Companion: an entry carrying the genuine current hash passes
-    // tier 1 — the gate is a content-hash comparison, not an
-    // unconditional reject.
-    let fresh_entry = route_owned_entry_with_whole_hash(&host, authoritative);
-    assert!(
-        host.route_owned_entry_is_fresh_for_test(canonical, &fresh_entry),
-        "the route-owned freshness gate MUST accept an entry whose self \
-         `whole_hash` equals the authoritative current content hash \
-         ({authoritative:?}) — tier 1 self-root validation is a genuine \
-         comparison, so a matching self-root passes",
-    );
-}
-
-/// `RouteOwnedShallowDb` — a same-canonical content edit shifts the
-/// authoritative hash, so a previously-fresh self `whole_hash` becomes
-/// stale and the tier-1 gate rejects it.
-///
-/// This drives the self-version root end-to-end: the entry is built
-/// fresh against the canonical's content, then the canonical is
-/// re-upserted with edited content through the production `upsert`
-/// (which performs no eager own-canonical eviction, so the entry
-/// physically survives). The same entry — unchanged — must now be
-/// rejected, because its self `whole_hash` no longer matches the
-/// authoritative hash of the edited canonical.
-///
-/// Discrimination property: only an entry that carries a self
-/// `whole_hash` validated against the *current* authoritative content
-/// hash flips from fresh to stale across the edit. A gate that ignored
-/// the self `whole_hash` would keep reporting the entry fresh after the
-/// same-canonical edit.
-#[test]
-fn route_owned_shallow_db_self_root_rejects_warm_entry_after_same_canonical_edit() {
-    let host = VerterHost::new_standalone(HostConfig::default());
-    let canonical = "/self_root/route_owned_edit_probe.ts";
-    upsert(&host, canonical, "export const a = 1;\n");
-
-    let hash_v1 = host
-        .get_whole_hash(canonical)
-        .expect("v1 canonical must have a scheduler-authoritative hash");
-    let entry = route_owned_entry_with_whole_hash(&host, hash_v1);
-    assert!(
-        host.route_owned_entry_is_fresh_for_test(canonical, &entry),
-        "fixture invariant: an entry carrying the v1 authoritative hash \
-         must be fresh before the same-canonical edit",
-    );
-
-    // Same-canonical content edit through the production `upsert` — no
-    // eager own-canonical eviction runs, so the route-owned freshness
-    // gate's tier-1 self-root check is the only mechanism that can
-    // reject the now-stale entry.
-    upsert(&host, canonical, "export const a = 2;\n");
-
-    let hash_v2 = host
-        .get_whole_hash(canonical)
-        .expect("v2 canonical must have a scheduler-authoritative hash");
-    assert_ne!(
-        hash_v1, hash_v2,
-        "fixture invariant: the same-canonical content edit must shift the \
-         authoritative content hash",
-    );
-    assert!(
-        !host.route_owned_entry_is_fresh_for_test(canonical, &entry),
-        "after a same-canonical content edit the route-owned entry's self \
-         `whole_hash` ({hash_v1:?}) no longer matches the authoritative \
-         current hash ({hash_v2:?}) — the tier-1 self-version root MUST \
-         reject it. A gate that ignored the entry's self `whole_hash` would \
-         keep reporting the stale entry fresh",
-    );
-}
-
-// ===========================================================================
 // Closure guard — every in-scope query-identity cache has a
 // self-version-root discriminator.
 // ===========================================================================
@@ -4396,10 +4235,6 @@ const IN_SCOPE_QUERY_IDENTITY_SELF_ROOT_COVERAGE: &[(&str, &str)] = &[
     (
         "ref_cycle_db",
         "ref_cycle_db_untracked_self_root_rejects_warm_entry",
-    ),
-    (
-        "route_owned_shallow",
-        "route_owned_shallow_db_stale_whole_hash_rejects_warm_entry",
     ),
 ];
 
@@ -4500,7 +4335,6 @@ fn in_scope_query_identity_caches_all_have_self_root_coverage() {
         // Tier-1 typed DBs — content-domain / dep-closure-domain caches,
         // not query-identity caches.
         "type_resolution_context_db",
-        "eval_env_cache_db",
         "compile_cache_db",
         "derived_raw_cache_db",
         "dependency_cache_db",

@@ -90,13 +90,22 @@ pub struct ImportedTypeBinding {
 }
 
 /// Result of extracting type bindings from a dependency file.
-/// Includes named bindings (from `import` and `export {} from`) and
-/// wildcard re-export sources (from `export * from`).
+/// Includes named bindings (from `import` and `export {} from`),
+/// wildcard re-export sources (from `export * from`), and bindingless
+/// import sources (from `import './x'` / `import {} from './x'`).
 #[derive(Debug, Clone, Default)]
 pub struct ExtractedTypeBindings {
     pub bindings: Vec<ImportedTypeBinding>,
     pub reexport_bindings: Vec<ImportedTypeBinding>,
     pub wildcard_reexport_sources: Vec<String>,
+    /// Import declarations that bind NO local name — side-effect imports
+    /// (`import './x'`) and empty named-import lists (`import {} from
+    /// './x'`). They still create a cross-file dependency edge (the
+    /// specifier resolves to a canonical file), so the shallow edge
+    /// inventory must retain them: edge-currency oracles treat any
+    /// cross-file edge as dependency-set-derived state that can go stale
+    /// when the file set moves. In declaration order.
+    pub bindingless_import_sources: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -540,8 +549,23 @@ pub fn analyze_external_type_program(program: &Program<'_>) -> AnalyzedExternalT
         match stmt {
             Statement::ImportDeclaration(import_decl) => {
                 let Some(specifiers) = &import_decl.specifiers else {
+                    // Side-effect import (`import './x'`): no bindings,
+                    // but still a cross-file edge — retain the source in
+                    // the bindingless inventory.
+                    result
+                        .extracted
+                        .bindingless_import_sources
+                        .push(import_decl.source.value.to_string());
                     continue;
                 };
+                if specifiers.is_empty() {
+                    // `import {} from './x'`: binds nothing, still an edge.
+                    result
+                        .extracted
+                        .bindingless_import_sources
+                        .push(import_decl.source.value.to_string());
+                    continue;
+                }
                 for specifier in specifiers {
                     match specifier {
                         ImportDeclarationSpecifier::ImportSpecifier(import_spec) => {

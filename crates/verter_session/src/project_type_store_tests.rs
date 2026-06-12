@@ -1,16 +1,14 @@
-//! Tier 1A discriminating tests for the typed-DB shapes added to
+//! Discriminating tests for the typed-DB shapes on
 //! [`crate::project_type_store::ProjectTypeStore`].
 //!
-//! Asserts the empty-DB accessor presence and basic round-trip
-//! invariants. Tier 1C-α populates real consumers; these tests only
-//! verify the 1A contract (field present, accessor returns a typed
-//! reference, DB starts empty).
+//! Asserts accessor presence, basic round-trip invariants, the
+//! per-domain invalidation matrix, and the guard that the typed DBs
+//! live on `ProjectTypeStore` rather than as off-store fields on
+//! `VerterHost`.
 
-use super::owned_artifacts::eval_program::OwnedEvalProgram;
 use super::owned_artifacts::type_resolution_context::OwnedTypeResolutionContext;
 use super::project_type_store::{
-    EvalEnvCacheDb, OwnedArtifactKey, ProjectTypeStore, ResolvedTypeCacheDb,
-    TypeResolutionContextDb,
+    OwnedArtifactKey, ProjectTypeStore, ResolvedTypeCacheDb, TypeResolutionContextDb,
 };
 use std::sync::Arc;
 
@@ -22,7 +20,7 @@ fn type_resolution_context_db_present_with_accessor() {
     // would fail at the type level.
     let store = ProjectTypeStore::new();
     let db: &TypeResolutionContextDb = store.type_resolution_context_cache();
-    assert!(db.is_empty(), "Tier 1A introduces the DB empty");
+    assert!(db.is_empty(), "a fresh store starts with an empty DB");
     // Constructive insert + lookup roundtrip — verifies the DB is
     // really backed by storage and not a no-op stub.
     let key = OwnedArtifactKey::new("test.vue", [0u8; 16]);
@@ -35,23 +33,9 @@ fn type_resolution_context_db_present_with_accessor() {
 }
 
 #[test]
-fn eval_env_cache_db_present_with_accessor() {
-    let store = ProjectTypeStore::new();
-    let db: &EvalEnvCacheDb = store.eval_env_cache();
-    assert!(db.is_empty(), "Tier 1A introduces the DB empty");
-    let key = OwnedArtifactKey::new("test.vue", [0u8; 16]);
-    db.insert(key.clone(), Arc::new(OwnedEvalProgram::empty()));
-    assert_eq!(db.len(), 1);
-    let recovered = db.get(&key);
-    assert!(recovered.is_some());
-    db.clear();
-    assert!(db.is_empty());
-}
-
-#[test]
 fn compile_cache_db_present_with_accessor() {
-    // The 1C-β split rebinds the inner type; Tier 1A only asserts the
-    // accessor is callable and the DB starts empty.
+    // Asserts the accessor is callable and the DB starts empty; the
+    // per-domain invalidation tests below exercise the contents.
     let store = ProjectTypeStore::new();
     let db = store.compile_cache();
     assert!(db.is_empty());
@@ -70,12 +54,11 @@ fn resolved_type_cache_db_present_with_accessor() {
 
 #[test]
 fn typed_dbs_are_send_sync_static() {
-    // Aggregate guard — every Tier 1A typed DB must be `Send + Sync +
+    // Aggregate guard — every typed DB must be `Send + Sync +
     // 'static`. A regression that puts a borrowed lifetime on any
     // payload would fail to compile here.
     fn assert_send_sync_static<T: Send + Sync + 'static>() {}
     assert_send_sync_static::<TypeResolutionContextDb>();
-    assert_send_sync_static::<EvalEnvCacheDb>();
     assert_send_sync_static::<ResolvedTypeCacheDb>();
     assert_send_sync_static::<super::project_type_store::CompileCacheDb>();
     // The whole `ProjectTypeStore` likewise — already enforced by
@@ -85,25 +68,24 @@ fn typed_dbs_are_send_sync_static() {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Tier 1C-α discriminating tests (4)
+// Store-residency discriminating tests (4)
 //
-// FAIL pre-1C-α (the four off-store fields lived directly on
-// `VerterHost` and the typed-DB wrappers were empty 1A shells).
-// PASS post-1C-α (the off-store bodies have moved into the
-// `ProjectTypeStore` typed-DB wrappers, accessors return non-empty
-// wrappers, and the storage shapes match the D17 / D18 / D46 contract).
+// The typed DBs live on `ProjectTypeStore`, not as off-store fields on
+// `VerterHost`; these tests pin that the host accessors and the
+// project-store accessors reach the same backing storage, so
+// reintroducing an off-store field would fail them.
 // ─────────────────────────────────────────────────────────────────────
 
 #[test]
 fn compile_cache_db_present_with_accessor_post_tier_1c_alpha() {
     // Discriminator: a `VerterHost` constructed via `new_standalone` MUST
     // route compile-cache reads/writes through the `ProjectTypeStore`'s
-    // `CompileCacheDb` wrapper. Pre-1C-α the `compile_cache` field lived
-    // directly on `VerterHost` and `host.compile_cache().is_empty()` would
-    // fail to compile because no method existed (the field shadowed). Post
-    // -1C-α the method-call form returns a reference to the rehomed
-    // DashMap, and a round-trip through the typed wrapper observes the
-    // same insertion via `host.project_type_store.compile_cache()`.
+    // `CompileCacheDb` wrapper. An off-store `compile_cache` field on
+    // `VerterHost` would shadow the accessor and break the method-call
+    // form; here `host.compile_cache()` returns a reference to the
+    // store-owned DashMap, and a round-trip through the typed wrapper
+    // observes the same insertion via
+    // `host.project_type_store.compile_cache()`.
     use crate::types::{HostConfig, ProfileState};
     use crate::VerterHost;
 
@@ -114,10 +96,9 @@ fn compile_cache_db_present_with_accessor_post_tier_1c_alpha() {
         "rehomed compile_cache must start empty"
     );
     // Round-trip: insertion via the host accessor is observable through
-    // the project-store accessor, proving both reach the same body. Tier
-    // 1C-β shrunk the value type from `CompileCacheEntry` to
-    // `ProfileState` (D48 split — option (b) in the rehoming doc); the
-    // test exercises the new shape.
+    // the project-store accessor, proving both reach the same body. The
+    // value type is the profile-domain `ProfileState` sub-state; the
+    // test exercises that shape.
     host.compile_cache()
         .insert("/probe.vue".to_string(), ProfileState::default());
     assert_eq!(
@@ -128,8 +109,7 @@ fn compile_cache_db_present_with_accessor_post_tier_1c_alpha() {
     );
     assert_eq!(host.compile_cache().len(), 1);
     // Cascade observability: `bump_project_generation_and_evict` clears
-    // the rehomed compile cache (the unified cascade extension landed
-    // in 1C-α).
+    // the store-owned compile cache via the unified cascade.
     host.project_type_store()
         .bump_project_generation_and_evict();
     assert!(
@@ -140,10 +120,10 @@ fn compile_cache_db_present_with_accessor_post_tier_1c_alpha() {
 
 #[test]
 fn resolved_type_cache_db_present_with_accessor_post_tier_1c_alpha() {
-    // Discriminator: post-1C-α, `host.resolved_type_cache()` returns
-    // the typed `ResolvedTypeCacheDb` wrapper (the parking_lot Mutex
-    // moved INTO the wrapper). The bounded clear-all-at-cap policy
-    // is preserved INSIDE the DB.
+    // Discriminator: `host.resolved_type_cache()` returns the typed
+    // `ResolvedTypeCacheDb` wrapper (the parking_lot Mutex lives
+    // INSIDE the wrapper). The bounded clear-all-at-cap policy is
+    // enforced INSIDE the DB.
     use crate::types::{
         HostConfig, ResolvedTypeCacheEntry, ResolvedTypeCacheKey, RESOLVED_TYPE_CACHE_CAP,
     };
@@ -181,122 +161,6 @@ fn resolved_type_cache_db_present_with_accessor_post_tier_1c_alpha() {
 }
 
 #[test]
-fn eval_env_cache_db_stores_owned_eval_program_arc() {
-    // Discriminator: the rehomed `EvalEnvCacheDb` stores
-    // `Arc<OwnedEvalProgram>` per D17 (NOT raw `Arc<EvalEnv>`).
-    // Pre-1C-α the off-store `eval_env_cache: Mutex<FxHashMap<String,
-    // (Hash16, Arc<EvalEnv>)>>` field had a different value type;
-    // post-1C-α the typed DB exposes an `OwnedArtifactKey ->
-    // Arc<OwnedEvalProgram>` shape that round-trips through the
-    // `insert` / `get` API surface.
-    use super::owned_artifacts::eval_program::OwnedEvalProgram;
-    use crate::types::HostConfig;
-    use crate::VerterHost;
-    use std::sync::Arc;
-
-    let host = VerterHost::new_standalone(HostConfig::default());
-    let db: &EvalEnvCacheDb = host.project_type_store().eval_env_cache();
-    let key = OwnedArtifactKey::new("/probe.vue", [0u8; 16]);
-    let program: Arc<OwnedEvalProgram> = Arc::new(OwnedEvalProgram::empty());
-    db.insert(key.clone(), Arc::clone(&program));
-    let recovered = db.get(&key).expect("rehomed program lookup must hit");
-    assert!(
-        Arc::ptr_eq(&program, &recovered),
-        "EvalEnvCacheDb MUST store Arc<OwnedEvalProgram> (D17). The pointer-\
-         equality check would fail if the wrapper deep-cloned or mutated \
-         the inner program on read."
-    );
-}
-
-/// Eval-env key-dimension discriminator — the legacy `Arc<EvalEnv>`
-/// storage is keyed by the full R21 `FileArtifactKey` (`canonical`,
-/// `content_hash`, `parse_env_hash`, `parser_version`), NOT by
-/// `canonical_id` with `whole_hash` validated post-lookup.
-///
-/// The `EvalEnv` is a pure parse artifact: it depends on the parser
-/// configuration (`parse_env_hash`). Pre-1.J.3 the legacy storage was
-/// `FxHashMap<String, (Hash16, Arc<EvalEnv>)>` — a `parse_env_hash`
-/// dimension was absent from the key entirely, so the same
-/// `(canonical, content_hash)` under two parser configs would alias
-/// to one entry. That signature-less keying is exactly why the cache
-/// needed `eval_env_cache().clear()` as a backstop.
-///
-/// Discriminating: this test inserts an env under `parse_env_hash = A`
-/// and asserts a lookup under `parse_env_hash = B` (same canonical,
-/// same content hash) MISSES. Against the pre-1.J.3 canonical-only
-/// key the entry would be HIT (stale); against the post-1.J.3
-/// full-dimension key it is a key miss → recompute.
-#[cfg(not(target_arch = "wasm32"))]
-#[test]
-fn eval_env_cache_legacy_env_keyed_by_full_env_dimensions() {
-    use crate::file_artifact_store::{FileArtifactKey, LEGACY_PARSER_VERSION};
-    use verter_semantic::analysis::type_eval::EvalEnv;
-
-    let db = EvalEnvCacheDb::new();
-    let canonical: Arc<str> = Arc::from("/src/types.ts");
-    let content_hash = [7u8; 16];
-
-    // Two keys differing ONLY in `parse_env_hash` — same canonical,
-    // same content hash. Under the pre-1.J.3 canonical-only key these
-    // would collide; under the full R21 key they are distinct.
-    let key_parse_env_a = FileArtifactKey {
-        canonical: Arc::clone(&canonical),
-        content_hash,
-        parse_env_hash: [1u8; 16],
-        parser_version: LEGACY_PARSER_VERSION,
-    };
-    let key_parse_env_b = FileArtifactKey {
-        canonical: Arc::clone(&canonical),
-        content_hash,
-        parse_env_hash: [2u8; 16],
-        parser_version: LEGACY_PARSER_VERSION,
-    };
-
-    let env_a = Arc::new(EvalEnv::default());
-    let admitted =
-        db.legacy_env_cache_or_insert(std::slice::from_ref(&key_parse_env_a), Arc::clone(&env_a));
-    assert!(
-        Arc::ptr_eq(&admitted, &env_a),
-        "first insert returns the inserted env"
-    );
-
-    // Same-key lookup HITS.
-    let hit = db
-        .legacy_env_for(&key_parse_env_a)
-        .expect("same-parse-env lookup MUST hit");
-    assert!(
-        Arc::ptr_eq(&hit, &env_a),
-        "matching FileArtifactKey returns the cached Arc"
-    );
-
-    // Different-`parse_env_hash` lookup MISSES — this is the
-    // discriminator. Pre-1.J.3 (`canonical_id`-keyed, `whole_hash`
-    // value-validated) this would HIT because `parse_env_hash` was
-    // not part of the cache identity at all.
-    assert!(
-        db.legacy_env_for(&key_parse_env_b).is_none(),
-        "B1.j.3: a lookup whose parse_env_hash differs from the cached \
-         entry MUST miss. A hit here means the eval-env cache key omits \
-         the parse-env dimension — the signature-less keying that \
-         forced `eval_env_cache().clear()` as a correctness backstop."
-    );
-
-    // A different content hash also misses (content dimension still
-    // discriminates, now as part of the key rather than a value-side
-    // post-lookup check).
-    let key_other_content = FileArtifactKey {
-        canonical: Arc::clone(&canonical),
-        content_hash: [9u8; 16],
-        parse_env_hash: [1u8; 16],
-        parser_version: LEGACY_PARSER_VERSION,
-    };
-    assert!(
-        db.legacy_env_for(&key_other_content).is_none(),
-        "B1.j.3: a content-hash change MUST miss the legacy env cache."
-    );
-}
-
-#[test]
 fn type_resolution_context_db_stores_owned_arc() {
     // Discriminator: the rehomed `TypeResolutionContextDb` stores
     // `Arc<OwnedTypeResolutionContext>` per D18. Pointer-equality
@@ -319,22 +183,21 @@ fn type_resolution_context_db_stores_owned_arc() {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Tier 1C-β discriminating tests (4) — D48 invalidation matrix.
+// Per-domain invalidation-matrix discriminating tests (4).
 //
-// FAIL pre-1C-β: `CompileCacheEntry` was a single super-shape stored in
-// `CompileCacheDb`, so per-domain invalidation could not be observed
-// independently — every trigger either dropped the whole entry or
-// preserved it. The matrix-asymmetric assertions below could not hold
-// because the three sub-states shared eviction lifetime.
+// A single super-shape entry storing all three sub-states together
+// could not satisfy these assertions: every trigger would either drop
+// the whole entry or preserve it, so the matrix-asymmetric
+// drops/preserves below would be unobservable.
 //
-// PASS post-1C-β: `CompileCacheEntry` is split into three independent
-// sub-state types (`ProfileState`, `DerivedRawState`, `DependencyState`)
-// stored in three independent DBs (`CompileCacheDb`,
+// The live shape splits the per-canonical compile cache into three
+// independent sub-state types (`ProfileState`, `DerivedRawState`,
+// `DependencyState`) stored in three independent DBs (`CompileCacheDb`,
 // `DerivedRawCacheDb`, `DependencyCacheDb`). Each trigger fires per
 // domain per the §3.4.2 matrix; the asymmetric drops/preserves below
 // are observable.
 //
-// Matrix (D48):
+// Matrix:
 //
 // | Trigger                                  | ProfileState | DerivedRawState | DependencyState |
 // |------------------------------------------|--------------|-----------------|-----------------|
@@ -414,9 +277,9 @@ fn seed_all_three_sub_states(host: &super::VerterHost, canonical: &str) {
 /// Discriminating predicate: after `evict_canonical(canonical)` (the
 /// per-canonical source-content trigger), the ProfileState entry MUST
 /// still be queryable, and BOTH DerivedRawState AND DependencyState
-/// entries MUST be gone. Pre-1C-β this could not hold because all three
-/// "fields" lived in one struct that drops together; post-1C-β each DB
-/// fans the trigger only into its own domain per the matrix.
+/// entries MUST be gone. A single struct holding all three sub-states
+/// would drop them together; with the split DBs each trigger fans only
+/// into its own domain per the matrix.
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn source_content_change_preserves_profile_state() {
@@ -469,10 +332,10 @@ fn source_content_change_preserves_profile_state() {
 /// Discriminating predicate: after a profile-domain flush
 /// (`compile_cache().clear()` modeling a workspace-wide profile-flag
 /// rotation), the ProfileState entry MUST be gone, and BOTH
-/// DerivedRawState AND DependencyState entries MUST survive. Pre-1C-β
-/// this could not hold because the three "fields" lived in one entry
-/// that the same `clear()` would drop wholesale; post-1C-β the
-/// per-domain DB clear surgically targets only ProfileState.
+/// DerivedRawState AND DependencyState entries MUST survive. A single
+/// entry holding all three sub-states would drop wholesale under the
+/// same `clear()`; with the split DBs the per-domain clear surgically
+/// targets only ProfileState.
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn profile_flag_change_preserves_raw_and_dep_state() {
@@ -530,9 +393,9 @@ fn profile_flag_change_preserves_raw_and_dep_state() {
 /// (`dependency_cache().clear()` modeling a transitive-closure
 /// recomputation that observed a delta), the DependencyState entry
 /// MUST be gone, and BOTH ProfileState AND DerivedRawState entries
-/// MUST survive. Pre-1C-β this could not hold because the three fields
-/// shared an entry that drops together; post-1C-β the dep-domain DB
-/// clear surgically targets only DependencyState.
+/// MUST survive. A single entry shared by the three sub-states would
+/// drop together; with the split DBs the dep-domain clear surgically
+/// targets only DependencyState.
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn dep_transitive_close_change_preserves_profile_and_raw() {
@@ -587,13 +450,12 @@ fn dep_transitive_close_change_preserves_profile_and_raw() {
 /// THREE sub-state DBs.
 ///
 /// Discriminating predicate: after `bump_project_generation_and_evict`,
-/// every per-canonical entry across all three D48 sub-state DBs MUST
-/// be gone. Pre-1C-β the cascade extension only cleared the unified
-/// `compile_cache_db`; post-1C-β it MUST fan into the three sibling
-/// DBs (per the unified-cascade rehoming-doc rule). Failure to extend
-/// the cascade to BOTH new DBs would leak DerivedRawState +
-/// DependencyState entries past a project-generation rotation, which
-/// the matrix forbids.
+/// every per-canonical entry across all three sub-state DBs MUST be
+/// gone. The cascade MUST fan into all three sibling DBs (per the
+/// unified-cascade rehoming-doc rule) — a cascade that cleared only
+/// `compile_cache_db` would leak DerivedRawState + DependencyState
+/// entries past a project-generation rotation, which the matrix
+/// forbids.
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn bump_project_generation_evicts_all_three_sub_shapes() {
@@ -644,21 +506,20 @@ fn bump_project_generation_evicts_all_three_sub_shapes() {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Tier 1C-γ discriminating tests (6 from +
-// 5 from rewritten rehoming-doc §3.3 = 11 total).
+// Eviction-policy / reachability-sweep discriminating tests
+// (6 plus 5 from the rehoming-doc §3.3 set = 11 total).
 //
-// FAIL pre-1C-γ:
-//   - `evict_unreachable_artifacts` does not exist on
-//     `ProjectTypeStore` (D33 reachability sweep absent).
-//   - `EvictionPolicyConfig` does not exist on `HostConfig`
-//     (D119 tunable absent).
-//   - `evict_canonical` does not invalidate `semantic_db`
-//     (rehoming-doc §3.3 test #4).
-//   - `FileArtifactStore::keys` and `evict_lru` do not exist (D40 LRU
-//     floor absent).
+// Pinned invariants:
+//   - `evict_unreachable_artifacts` exists on `ProjectTypeStore`
+//     (the reachability sweep).
+//   - `EvictionPolicyConfig` is exposed on `HostConfig` (the
+//     eviction tunables).
+//   - `evict_canonical` invalidates `semantic_db` via the unified
+//     cascade (rehoming-doc §3.3 test #4).
+//   - `FileArtifactStore::keys` and `evict_lru` exist (the LRU
+//     floor).
 //
-// PASS post-1C-γ: each sub-test asserts one of the above invariants
-// directly. None of them can pass against the pre-1C-γ tree.
+// Each sub-test asserts one of the above invariants directly.
 // ─────────────────────────────────────────────────────────────────────
 
 /// Helper — seed `FileArtifactStore` with N synthetic entries, returning
@@ -690,12 +551,10 @@ fn seed_indexed_ready(
 /// content_hash)` pair is in `live_publish_set` across two
 /// reachability sweeps, the cached `IndexedReady` `Arc` survives
 /// pointer-equality, proving no re-lowering was triggered.
-/// Pre-1C-γ this could not hold because
-/// `evict_unreachable_artifacts` did not exist; the only
-/// cache-eviction primitives were `evict_canonical` (drops the
-/// entry unconditionally) and `bump_project_generation_and_evict`
-/// (clears `FileArtifactStore` indirectly via `evict_canonical_for`).
-/// Post-1C-γ the new method preserves entries whose pair is in
+/// Unlike the other eviction primitives — `evict_canonical` (drops
+/// the entry unconditionally) and `bump_project_generation_and_evict`
+/// (clears `FileArtifactStore` indirectly via `evict_canonical_for`)
+/// — `evict_unreachable_artifacts` preserves entries whose pair is in
 /// `live_publish_set`.
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
@@ -747,10 +606,10 @@ fn unchanged_live_file_never_re_lowered_across_publish_cycles() {
 ///
 /// Discriminating predicate: parse `lib.rs` via syn and assert that
 /// `VerterHost` has no field named `compile_cache`,
-/// `resolved_type_cache`, `eval_env_cache`, or `semantic_db`. Pre
-/// -1C-α the four fields lived on `VerterHost`; post-1C-α they all
-/// rehomed onto `ProjectTypeStore`. 1C-γ verifies they stay rehomed
-/// as part of the final allow-list shape.
+/// `resolved_type_cache`, `eval_env_cache`, or `semantic_db`. These
+/// caches live on `ProjectTypeStore`; reintroducing any of them as a
+/// `VerterHost` field would create a dual-path off-store cache and
+/// fail this guard.
 #[test]
 fn four_off_store_caches_absent_post_tier_1() {
     use std::path::PathBuf;
@@ -791,9 +650,9 @@ fn four_off_store_caches_absent_post_tier_1() {
     ] {
         assert!(
             !surveyed_fields.iter().any(|f| f == forbidden),
-            "Tier 1 final-state guard: VerterHost must NOT carry \
-             field `{forbidden}` post-Tier-1 (rehomed onto \
-             ProjectTypeStore in 1C-α). Re-introducing it would \
+            "off-store-cache guard: VerterHost must NOT carry \
+             field `{forbidden}`; that cache lives on \
+             ProjectTypeStore. Re-introducing it would \
              create a dual-path off-store cache."
         );
     }
@@ -804,13 +663,11 @@ fn four_off_store_caches_absent_post_tier_1() {
 /// Discriminating predicate: every `.rs` source file under
 /// `crates/verter_session/src/host_manage/` has no
 /// `HOST_PARSED_*_CACHE` thread-local (`thread_local!` macro
-/// invocation containing `HOST_PARSED_`). Tier 1A retired the two
-/// thread-locals (`HOST_PARSED_EVAL_PROGRAM_CACHE`,
-/// `HOST_PARSED_TYPE_CONTEXT_CACHE`); 1C-γ verifies they stay
-/// retired. Doc-comment references like `// HOST_PARSED_EVAL_PROGRAM_CACHE
-/// thread-local was 1A...` are allowed (they are
-/// not declarations); the guard fires only on actual
-/// `thread_local!` invocations.
+/// invocation containing `HOST_PARSED_`). Parsed eval programs are
+/// threaded by reference within a cold flight and never cached in
+/// thread-locals. Doc-comment references to the forbidden names are
+/// allowed (they are not declarations); the guard fires only on
+/// actual `thread_local!` invocations.
 #[test]
 fn host_manage_thread_local_caches_absent_post_tier_1() {
     use std::path::PathBuf;
@@ -875,8 +732,8 @@ fn host_manage_thread_local_caches_absent_post_tier_1() {
     }
     assert!(
         violations.is_empty(),
-        "Tier 1 final-state guard: host_manage thread-local caches \
-         must NOT exist post-Tier-1 (Tier 1A retired them). \
+        "off-store-cache guard: host_manage thread-local caches \
+         must NOT exist. \
          Violations:\n{}",
         violations.join("\n")
     );
@@ -919,10 +776,10 @@ fn no_off_store_host_caches_allow_list_shrunk() {
     ] {
         assert!(
             !body.contains(forbidden_key),
-            "Tier 1 final-state guard: phase_8_allow_list MUST NOT \
-             contain rehomed key {forbidden_key} (rehomed in 1C-α). \
-             Re-adding it implies a regression of the F1/F2/F4/F5 \
-             rehoming."
+            "allow-list guard: phase_8_allow_list MUST NOT contain \
+             store-owned cache key {forbidden_key}. Re-adding it \
+             implies an off-store cache field regression on \
+             VerterHost."
         );
     }
     for required_key in [
@@ -934,8 +791,8 @@ fn no_off_store_host_caches_allow_list_shrunk() {
     ] {
         assert!(
             body.contains(required_key),
-            "Tier 1 final-state guard: phase_8_allow_list MUST \
-             contain required final-state key {required_key} \
+            "allow-list guard: phase_8_allow_list MUST \
+             contain required key {required_key} \
              (these are the documented non-cache exceptions). \
              A missing key indicates the allow-list is broken."
         );
@@ -947,8 +804,7 @@ fn no_off_store_host_caches_allow_list_shrunk() {
 /// Discriminating predicate: `HostConfig::default()` produces a
 /// config whose `eviction_policy.memory_pressure_threshold ==
 /// usize::MAX` (per D119 — never trigger LRU floor by default).
-/// Pre-1C-γ the field did not exist; post-1C-γ the threshold is
-/// part of the documented public API.
+/// The threshold is part of the documented public API.
 #[test]
 fn eviction_policy_tunables_exposed_via_host_config() {
     use crate::types::{EvictionPolicyConfig, HostConfig};
@@ -978,8 +834,7 @@ fn eviction_policy_tunables_exposed_via_host_config() {
 /// Discriminating predicate: seeded with N entries (well above the
 /// floor), a sweep with `memory_pressure: false` MUST leave entry
 /// count unchanged; a sweep with `memory_pressure: true` MUST
-/// shrink entry count to exactly `min_floor`. Pre-1C-γ neither the
-/// `memory_pressure` flag nor `evict_lru` existed.
+/// shrink entry count to exactly `min_floor`.
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn lru_floor_only_triggers_under_memory_pressure_threshold() {
@@ -1122,78 +977,6 @@ fn resolved_type_cache_evict_canonical_drains_dep_canonical() {
     );
 }
 
-/// Rehoming-doc §3.3 test #3 — two concurrent cold callers compute
-/// the eval-env entry exactly once.
-///
-/// Discriminating predicate: spawn two threads that both look up
-/// the same `(canonical, whole_hash)` and, on miss, insert a value
-/// produced by an `Arc<AtomicUsize>` capture token. After the
-/// race resolves, the captured count MUST be exactly 1. Pre-rehoming
-/// the manual `Mutex.lookup_or_insert` shape allowed both threads
-/// to bypass the dedup; post-rehoming the cooperative-admission
-/// contract collapses concurrent cold computes onto a single
-/// admission.
-///
-/// NOTE: cooperative-admission cold-path wiring depends on the
-/// lowering pipeline (per the 1C-α follow-up note). This test
-/// exercises the simpler `entry().or_insert_with` shape that the
-/// `EvalEnvCacheDb` already exposes; it discriminates the
-/// `Arc::ptr_eq` / single-call-count contract that the storage
-/// shape MUST honour.
-#[cfg(not(target_arch = "wasm32"))]
-#[test]
-fn eval_env_cache_two_concurrent_cold_callers_compute_once() {
-    use super::owned_artifacts::eval_program::OwnedEvalProgram;
-    use crate::project_type_store::OwnedArtifactKey;
-    use crate::types::HostConfig;
-    use crate::VerterHost;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Barrier};
-
-    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
-    let key = OwnedArtifactKey::new("/probe-cooperative.vue", [3u8; 16]);
-    let compute_count = Arc::new(AtomicUsize::new(0));
-    let admit_barrier = Arc::new(Barrier::new(2));
-
-    // Each thread races the same key through
-    // `EvalEnvCacheDb::get_or_insert_with`. The cooperative-admission
-    // contract collapses concurrent computes onto a single closure
-    // invocation: only one of the two threads observes its `compute`
-    // closure being called.
-    let handles: Vec<_> = (0..2)
-        .map(|_| {
-            let host = Arc::clone(&host);
-            let key = key.clone();
-            let count = Arc::clone(&compute_count);
-            let barrier = Arc::clone(&admit_barrier);
-            std::thread::spawn(move || {
-                barrier.wait();
-                let db = host.project_type_store().eval_env_cache();
-                let _admitted = db.get_or_insert_with(key.clone(), || {
-                    count.fetch_add(1, Ordering::SeqCst);
-                    Arc::new(OwnedEvalProgram::empty())
-                });
-            })
-        })
-        .collect();
-    for h in handles {
-        h.join().expect("thread join");
-    }
-    let admitted = host.project_type_store().eval_env_cache().get(&key);
-    assert!(
-        admitted.is_some(),
-        "after the race, the entry MUST be in the cache"
-    );
-    assert_eq!(
-        compute_count.load(Ordering::SeqCst),
-        1,
-        "rehoming-doc §3.3 test #3: cooperative cold admission MUST \
-         collapse concurrent computes onto a single closure call. \
-         Got compute_count = {} (expected exactly 1).",
-        compute_count.load(Ordering::SeqCst)
-    );
-}
-
 /// Rehoming-doc §3.3 test #4 — `evict_canonical` invalidates
 /// `semantic_db` via the unified cascade.
 ///
@@ -1202,9 +985,9 @@ fn eval_env_cache_two_concurrent_cold_callers_compute_once() {
 /// `project_type_store.evict_canonical("X")`; assert that the
 /// subsequent semantic-db query for `"X"` returns
 /// `Completeness::Unavailable` (the entry is gone).
-/// Pre-rehoming `evict_canonical` did NOT touch `semantic_db`
-/// (only `smart_invalidate_dependents` did). Post-1C-γ the
-/// extension is added per the rehoming-doc §3.3 contract.
+/// `evict_canonical` reaches `semantic_db` through the unified
+/// cascade (not only through `smart_invalidate_dependents`), per
+/// the rehoming-doc §3.3 contract.
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn semantic_db_evict_canonical_invalidates_via_unified_cascade() {
@@ -1257,23 +1040,20 @@ fn semantic_db_evict_canonical_invalidates_via_unified_cascade() {
 }
 
 /// Rehoming-doc §3.3 test #5 — `bump_project_generation_and_evict`
-/// drains all four rehomed caches.
+/// drains the rehomed caches.
 ///
 /// Discriminating predicate: populate one entry in each of the
-/// four rehomed caches (compile_cache, resolved_type_cache,
-/// eval_env_cache, semantic_db); call
-/// `bump_project_generation_and_evict`; assert all four are empty.
-/// Pre-rehoming the off-store caches each had separate clear
-/// paths; post-rehoming the unified cascade fans out to all four
-/// per the rehoming-doc §3.3 contract.
+/// rehomed caches (compile_cache, resolved_type_cache, semantic_db —
+/// the per-file `EvalEnv` lives on `IndexedReady`, so no eval-env
+/// cache participates); call `bump_project_generation_and_evict`;
+/// assert all are empty. Pre-rehoming the off-store caches each had separate
+/// clear paths; post-rehoming the unified cascade fans out per the
+/// rehoming-doc §3.3 contract.
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn bump_project_generation_evicts_all_four() {
-    use super::owned_artifacts::eval_program::OwnedEvalProgram;
-    use crate::project_type_store::OwnedArtifactKey;
+fn bump_project_generation_evicts_all_rehomed_caches() {
     use crate::types::{HostConfig, ProfileState, ResolvedTypeCacheEntry, ResolvedTypeCacheKey};
     use crate::VerterHost;
-    use std::sync::Arc;
     use verter_semantic::facts::component::ComponentSurface;
     use verter_semantic::query::Completeness;
     use verter_semantic::refs::FileRef;
@@ -1287,8 +1067,7 @@ fn bump_project_generation_evicts_all_four() {
         ..RevisionMarker::initial()
     };
 
-    // 1 — compile_cache (rehomed F1, post-1C-β value type =
-    // ProfileState).
+    // 1 — compile_cache (profile-domain value type = ProfileState).
     host.compile_cache()
         .insert(canonical.to_string(), ProfileState::default());
     // 2 — resolved_type_cache (rehomed F2).
@@ -1306,25 +1085,15 @@ fn bump_project_generation_evicts_all_four() {
             tracked_deps: Vec::new(),
         },
     );
-    // 3 — eval_env_cache (rehomed F4, owned-program payload).
-    let ee_key = OwnedArtifactKey::new(canonical, [9u8; 16]);
-    host.project_type_store()
-        .eval_env_cache()
-        .insert(ee_key.clone(), Arc::new(OwnedEvalProgram::empty()));
-    // 4 — semantic_db (rehomed F5).
+    // 3 — semantic_db (rehomed F5).
     {
         let mut db = host.project_type_store().semantic_db();
         db.set_component_surface(canonical.to_string(), revision, ComponentSurface::default());
     }
 
-    // Sanity — all four populated.
+    // Sanity — all three rehomed caches populated.
     assert!(host.compile_cache().get(canonical).is_some());
     assert!(host.resolved_type_cache().lookup(&rt_key).is_some());
-    assert!(host
-        .project_type_store()
-        .eval_env_cache()
-        .get(&ee_key)
-        .is_some());
     {
         let db = host.project_type_store().semantic_db();
         assert_eq!(
@@ -1338,7 +1107,7 @@ fn bump_project_generation_evicts_all_four() {
     host.project_type_store()
         .bump_project_generation_and_evict();
 
-    // All four MUST be drained.
+    // All three MUST be drained.
     assert!(
         host.compile_cache().get(canonical).is_none(),
         "rehoming-doc §3.3 test #5 row 1: compile_cache MUST be \
@@ -1348,14 +1117,6 @@ fn bump_project_generation_evicts_all_four() {
         host.resolved_type_cache().lookup(&rt_key).is_none(),
         "rehoming-doc §3.3 test #5 row 2: resolved_type_cache MUST \
          be drained by bump_project_generation_and_evict"
-    );
-    assert!(
-        host.project_type_store()
-            .eval_env_cache()
-            .get(&ee_key)
-            .is_none(),
-        "rehoming-doc §3.3 test #5 row 3: eval_env_cache MUST be \
-         drained by bump_project_generation_and_evict"
     );
     {
         let db = host.project_type_store().semantic_db();

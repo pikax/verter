@@ -54,13 +54,16 @@ use std::sync::Arc;
 
 use verter_semantic::analysis::types::{
     AnalyzedEmitField, AnalyzedMacroKind, AnalyzedPropField, AnalyzedSlotField,
-    AnalyzedSlotFieldBinding, JsdocTag,
+    AnalyzedSlotFieldBinding,
 };
 use verter_type_expr::{LiteralValue, TypeExpr, TypeExprScope};
 
 use crate::resolver_core::surface_projector::render_type_expr_display;
 use crate::semantic_query::{
     PathSegment, ProjectionMode, ProjectionReductionContext, SurfaceProvenanceContext,
+};
+use crate::typeinfo::adapters::vue::jsdoc::{
+    member_jsdoc_from_spans, signature_jsdoc_from_spans, slice_canonical_span,
 };
 use crate::typeinfo::adapters::vue::store::{VueMacroDtoKey, VueMacroDtos};
 use crate::typeinfo::surface::{CanonicalSpan, TypeInfoSurface, TypeInfoSurfaceMember};
@@ -245,7 +248,11 @@ impl VerterHost {
             "resolve_vue_macro_surface serves the FullMetadata level"
         );
 
-        let indexed = ctx.ensure_indexed_ready(request.owner_canonical.as_ref())?;
+        // Structurally read-only: surface resolution runs inside the
+        // DTO producer's traced scope; fenced-ness gates admission there.
+        let indexed = ctx
+            .ensure_indexed_ready_serve(request.owner_canonical.as_ref())?
+            .indexed;
         let mac = indexed.snapshot.macros.get(request.macro_index)?;
         if !mac.is_type_based {
             return None;
@@ -436,123 +443,6 @@ pub(crate) fn navigate_param_to_object_surface(
         )
 }
 
-/// Slice a member's leading-JSDoc DESCRIPTION + TAG spans into owned text for
-/// the published DTO. The spans are already located on the surface (by
-/// `with_member_jsdoc_spans`); this reads the declaring file's cache-owned
-/// source and slices — it does NOT re-locate the comment block and does NOT
-/// take the lazy `member_display_jsdoc` name-search path.
-///
-/// Returns `(None, empty)` when the member carries no JSDoc spans or the
-/// declaring file's source is unavailable.
-/// Slice a [`CanonicalSpan`]'s byte range out of its file's cache-owned RAW
-/// source (`IndexedReady.raw_source`). [`CanonicalSpan`] offsets are
-/// SFC-absolute (the eval source is position-preserving, so OXC stamps spans
-/// in raw-file coordinates), so the slice indexes the raw source directly.
-/// `None` when the file is not loaded or the byte range is out of bounds (a
-/// stale / synthetic span). This is the single source-slicing primitive the
-/// normalizers use to materialize display text from a span at the consumer
-/// boundary — it does NOT re-resolve or re-parse.
-fn slice_canonical_span(host: &VerterHost, cspan: &CanonicalSpan) -> Option<String> {
-    let indexed = host.ensure_indexed_ready(cspan.file.as_ref())?;
-    let source = Arc::clone(&indexed.raw_source);
-    let start = cspan.span.start as usize;
-    let end = cspan.span.end as usize;
-    source.get(start..end).map(|s| s.to_string())
-}
-
-/// Normalize a multi-line JSDoc description/tag body sliced from a span.
-///
-/// A description/tag span is a contiguous `[start, end)` region whose FIRST line
-/// already had its leading `/**`-decoration stripped (the span starts at the
-/// content), but whose CONTINUATION lines still carry the `   * ` JSDoc
-/// decoration verbatim (the span is contiguous source text). The published
-/// `description` is DISPLAY text, not comment syntax, so strip each
-/// continuation line's leading whitespace + optional single `*` decoration —
-/// matching `verter_semantic::analysis::jsdoc`'s per-line stripping — and rejoin
-/// with `\n`. A single-line body is returned trimmed.
-pub(crate) fn normalize_jsdoc_body(raw: &str) -> String {
-    let mut lines = raw.lines();
-    let mut out = String::new();
-    if let Some(first) = lines.next() {
-        out.push_str(first.trim_end());
-    }
-    for line in lines {
-        out.push('\n');
-        // Strip leading whitespace, then a single `*` decoration, then the
-        // whitespace after it.
-        let trimmed = line.trim_start();
-        let stripped = trimmed
-            .strip_prefix('*')
-            .map(|rest| rest.trim_start())
-            .unwrap_or(trimmed);
-        out.push_str(stripped.trim_end());
-    }
-    out.trim().to_string()
-}
-
-/// Slice a leading-JSDoc description span + tag spans into the published
-/// `(description, tags)` display pair. Shared by the member path
-/// ([`member_jsdoc_from_spans`]) and the call-signature emit path
-/// ([`signature_jsdoc_from_spans`]) — both anchor JSDoc on the typeinfo
-/// surface's spans, never a reparse.
-fn jsdoc_from_spans(
-    host: &VerterHost,
-    description_span: Option<&CanonicalSpan>,
-    tag_spans: &[crate::typeinfo::surface::JsdocTagSpan],
-) -> (Option<String>, Vec<JsdocTag>) {
-    let slice = |cspan: &CanonicalSpan| -> Option<String> { slice_canonical_span(host, cspan) };
-
-    let description = description_span
-        .and_then(&slice)
-        .map(|text| normalize_jsdoc_body(&text))
-        .filter(|text| !text.is_empty());
-
-    let tags: Vec<JsdocTag> = tag_spans
-        .iter()
-        .filter_map(|tag| {
-            let name = slice(&tag.name_span)?.trim().to_string();
-            if name.is_empty() {
-                return None;
-            }
-            let text = tag
-                .text_span
-                .as_ref()
-                .and_then(&slice)
-                .map(|t| normalize_jsdoc_body(&t))
-                .filter(|t| !t.is_empty());
-            Some(JsdocTag { name, text })
-        })
-        .collect();
-
-    (description, tags)
-}
-
-fn member_jsdoc_from_spans(
-    host: &VerterHost,
-    member: &TypeInfoSurfaceMember,
-) -> (Option<String>, Vec<JsdocTag>) {
-    jsdoc_from_spans(
-        host,
-        member.jsdoc_description_span.as_ref(),
-        &member.jsdoc_tag_spans,
-    )
-}
-
-/// Slice a call/construct signature's leading-JSDoc into `(description, tags)`.
-/// A call-signature emit (`(e: 'change', v: T): void`) documents the event via
-/// the JSDoc on the signature itself — extracted here from the signature's
-/// typeinfo JSDoc spans (symmetric with [`member_jsdoc_from_spans`]).
-fn signature_jsdoc_from_spans(
-    host: &VerterHost,
-    sig: &crate::typeinfo::surface::TypeInfoSurfaceSignature,
-) -> (Option<String>, Vec<JsdocTag>) {
-    jsdoc_from_spans(
-        host,
-        sig.jsdoc_description_span.as_ref(),
-        &sig.jsdoc_tag_spans,
-    )
-}
-
 /// Normalize a `defineExpose<T>()` macro surface into [`AnalyzedExposeField`]s:
 /// one field per named public member, carrying the member's surface type
 /// raised through the active `ctx` (overlay-aware, scoped to its value-node
@@ -637,7 +527,7 @@ fn raise_realized_callable_member_value(
 /// serves subsequent calls from the content-addressed cache.
 ///
 /// EVERY view-sensitive step flows through `ctx`:
-/// - the owner SFC's `IndexedReady` ([`ctx.ensure_indexed_ready`]) — so an
+/// - the owner SFC's `IndexedReady` ([`ctx.ensure_indexed_ready_serve`]) — so an
 ///   overlay session keys on its OVERLAY `whole_hash`, never the base hash, and
 ///   a base session can never read or poison an overlay entry (or vice-versa);
 /// - the cold surface resolution
@@ -652,7 +542,7 @@ fn raise_realized_callable_member_value(
 /// `String`), so caching it across requests is safe. Returns an empty (default)
 /// bundle when the macro surface cannot be resolved.
 ///
-/// [`ctx.ensure_indexed_ready`]: crate::resolver_core::ResolverContext::ensure_indexed_ready
+/// [`ctx.ensure_indexed_ready_serve`]: crate::resolver_core::ResolverContext::ensure_indexed_ready_serve
 /// [`ctx.dispatch()`]: crate::resolver_core::ResolverContext::dispatch
 /// [`ctx.store_view`]: crate::resolver_core::ResolverContext::store_view
 #[must_use]
@@ -669,7 +559,10 @@ pub(crate) fn vue_macro_dtos_with_ctx(
     // `root_identity` can never read an old entry (the live `whole_hash` keys a
     // fresh slot) and a wrong `macro_kind` can never read or poison the sibling
     // kind's entry.
-    let Some(indexed) = ctx.ensure_indexed_ready(request.owner_canonical.as_ref()) else {
+    let Some(indexed) = ctx
+        .ensure_indexed_ready_serve(request.owner_canonical.as_ref())
+        .map(|serve| serve.indexed)
+    else {
         // SFC not loaded — no surface, no cache entry. Returning the default
         // bundle WITHOUT publishing (we have no validated key) keeps the cache
         // free of entries keyed on an unvalidated identity.
@@ -719,54 +612,67 @@ pub(crate) fn vue_macro_dtos_with_ctx(
         root_identity: whole_hash,
         level: request.level,
     };
-    let (dtos, finalise) = crate::fact_signature_helpers::install_fact_tracer(host, || {
-        match host.resolve_vue_macro_surface_with_ctx(ctx, &validated_request) {
-            Some(macro_surface) => match macro_kind {
-                AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::DefineModel => VueMacroDtos {
-                    props: props_from_typeinfo_surface(ctx, &macro_surface),
-                    // A props member is `properties + index signatures`: a
-                    // `defineProps<{ [k: string]: string }>()` surface carries an
-                    // index signature with no named property, so capture the
-                    // surface's index signatures (key/value raised through `ctx`)
-                    // for `define_props_shape` to publish. `DefineModel`'s surface
-                    // is empty, so this is an empty vec for it.
-                    prop_index_signatures: index_signatures_from_surface(ctx, &macro_surface),
-                    ..VueMacroDtos::default()
+    let (dtos, finalise, fenced_serve_observed) =
+        crate::fact_signature_helpers::install_fact_tracer(host, || {
+            match host.resolve_vue_macro_surface_with_ctx(ctx, &validated_request) {
+                Some(macro_surface) => match macro_kind {
+                    AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::DefineModel => {
+                        VueMacroDtos {
+                            props: props_from_typeinfo_surface(ctx, &macro_surface),
+                            // A props member is `properties + index signatures`: a
+                            // `defineProps<{ [k: string]: string }>()` surface carries an
+                            // index signature with no named property, so capture the
+                            // surface's index signatures (key/value raised through `ctx`)
+                            // for `define_props_shape` to publish. `DefineModel`'s surface
+                            // is empty, so this is an empty vec for it.
+                            prop_index_signatures: index_signatures_from_surface(
+                                ctx,
+                                &macro_surface,
+                            ),
+                            ..VueMacroDtos::default()
+                        }
+                    }
+                    AnalyzedMacroKind::DefineEmits => VueMacroDtos {
+                        emits: emits_from_typeinfo_surface(ctx, &macro_surface),
+                        // The emits object is `events + index signatures`: a
+                        // `defineEmits<{ [event: string]: [v: number] }>()` surface
+                        // carries an index signature with no named event, so capture
+                        // it (key/value raised through `ctx`) for `define_emits_shape`
+                        // to publish — dropping it here would silently lose the
+                        // dynamic-event surface from the published emits shape.
+                        emit_index_signatures: index_signatures_from_surface(ctx, &macro_surface),
+                        ..VueMacroDtos::default()
+                    },
+                    AnalyzedMacroKind::DefineSlots => VueMacroDtos {
+                        slots: slots_from_typeinfo_surface(ctx, &macro_surface),
+                        ..VueMacroDtos::default()
+                    },
+                    AnalyzedMacroKind::DefineExpose => VueMacroDtos {
+                        exposed: exposed_from_typeinfo_surface(ctx, &macro_surface),
+                        ..VueMacroDtos::default()
+                    },
+                    // `WithDefaults` is not a props-surface source on this path: the
+                    // outer `withDefaults` macro carries no type argument (it is not
+                    // `is_type_based`), so `resolve_vue_macro_surface_with_ctx`
+                    // returns `None` for it and this arm is unreachable. The props
+                    // come from the SEPARATELY-routed inner `DefineProps` macro.
+                    // Options is a separate subsystem and contributes no DTO
+                    // bundle.
+                    AnalyzedMacroKind::WithDefaults | AnalyzedMacroKind::DefineOptions => {
+                        VueMacroDtos::default()
+                    }
                 },
-                AnalyzedMacroKind::DefineEmits => VueMacroDtos {
-                    emits: emits_from_typeinfo_surface(ctx, &macro_surface),
-                    // The emits object is `events + index signatures`: a
-                    // `defineEmits<{ [event: string]: [v: number] }>()` surface
-                    // carries an index signature with no named event, so capture
-                    // it (key/value raised through `ctx`) for `define_emits_shape`
-                    // to publish — the retired materialiser surfaced this, so
-                    // dropping it on the dispatch path was a regression.
-                    emit_index_signatures: index_signatures_from_surface(ctx, &macro_surface),
-                    ..VueMacroDtos::default()
-                },
-                AnalyzedMacroKind::DefineSlots => VueMacroDtos {
-                    slots: slots_from_typeinfo_surface(ctx, &macro_surface),
-                    ..VueMacroDtos::default()
-                },
-                AnalyzedMacroKind::DefineExpose => VueMacroDtos {
-                    exposed: exposed_from_typeinfo_surface(ctx, &macro_surface),
-                    ..VueMacroDtos::default()
-                },
-                // `WithDefaults` is not a props-surface source on this path: the
-                // outer `withDefaults` macro carries no type argument (it is not
-                // `is_type_based`), so `resolve_vue_macro_surface_with_ctx`
-                // returns `None` for it and this arm is unreachable. The props
-                // come from the SEPARATELY-routed inner `DefineProps` macro.
-                // Options is a separate subsystem and contributes no DTO
-                // bundle.
-                AnalyzedMacroKind::WithDefaults | AnalyzedMacroKind::DefineOptions => {
-                    VueMacroDtos::default()
-                }
-            },
-            None => VueMacroDtos::default(),
-        }
-    });
+                None => VueMacroDtos::default(),
+            }
+        });
 
+    // ReturnOnly never publishes — fenced-serve arm: DTOs resolved from
+    // a served-without-publication artifact must not enter the shared
+    // metadata store (their carrier facts validate against the live
+    // view). Return the freshly-computed bundle WITHOUT caching.
+    if fenced_serve_observed {
+        return std::sync::Arc::new(dtos);
+    }
     match finalise {
         crate::resolver_core::FactReadSetFinalise::Ok(facts) => {
             let entry = crate::typeinfo::adapters::vue::store::VueMacroDtosEntry {
@@ -918,14 +824,17 @@ fn index_signatures_from_surface(
 /// so nested `Ref`s resolve in the SFC.
 ///
 /// The owner SFC's `IndexedReady` is fetched through the ACTIVE `ctx`
-/// (`ctx.ensure_indexed_ready`), NOT the base `VerterHost`, so an overlay
+/// (`ctx.ensure_indexed_ready_serve`), NOT the base `VerterHost`, so an overlay
 /// session reads the OVERLAY `defineModel` macro facts — a `defineModel<number>`
 /// edit no longer rereads the base host's `defineModel<string>` snapshot.
 fn model_prop_fields(
     ctx: &dyn crate::resolver_core::ResolverContext,
     macro_surface: &VueMacroSurface,
 ) -> Vec<AnalyzedPropField> {
-    let Some(indexed) = ctx.ensure_indexed_ready(macro_surface.owner_canonical.as_ref()) else {
+    let Some(indexed) = ctx
+        .ensure_indexed_ready_serve(macro_surface.owner_canonical.as_ref())
+        .map(|serve| serve.indexed)
+    else {
         return Vec::new();
     };
     let Some(mac) = indexed.snapshot.macros.get(macro_surface.macro_index) else {

@@ -1351,3 +1351,53 @@ fn analysis_only_overlay_read_never_computes_fingerprint() {
          first `fingerprint()` read).",
     );
 }
+
+/// S8 stamp-source pin: `store_meta_payload` stamps
+/// `validated_at_generation` from the CALLER-CAPTURED (flight) project
+/// generation, never a live re-read. A project bump landing in the
+/// admission-fence→store window must leave the payload stamped under
+/// the graph it was computed from, so the warm read's generation
+/// backstop (`validated_at_generation == live`) rejects it — pre-fix
+/// the live-read stamp gave the stale payload the post-bump generation
+/// and the backstop was permanently defeated for the under-recorded
+/// (empty-signature) case it exists for.
+#[test]
+fn store_meta_payload_stamps_flight_captured_generation_not_live() {
+    let project = make_project();
+    let ids = build_components(&project, 1);
+    let canonical = ids[0].as_str();
+    let host = project.host();
+
+    // The producing flight captured THIS generation…
+    let captured = host.project_type_store.current_project_generation();
+    // …and a project mutation lands in the fence→store window.
+    host.project_type_store.bump_project_generation();
+    assert_ne!(
+        captured,
+        host.project_type_store.current_project_generation(),
+        "anti-vacuity: the window mutation moved the live generation",
+    );
+
+    // The store stamps the CAPTURED generation (empty signature — the
+    // exact under-recorded case the backstop exists for).
+    host.store_meta_payload(canonical, &[], vec![0x58, 0x38], captured);
+    let cached = host
+        .derived_raw_cache()
+        .get(canonical)
+        .and_then(|e| e.value().cached_meta_payload.clone())
+        .expect("payload stored");
+    assert_eq!(
+        cached.validated_at_generation, captured,
+        "the stamp must be the flight-captured generation, not the live \
+         counter (a live re-read here is exactly the window race)",
+    );
+
+    // And the generation backstop holds: the warm read rejects the
+    // payload computed under the superseded graph.
+    assert_eq!(
+        host.try_get_cached_meta_payload(canonical),
+        None,
+        "a payload stamped under the captured (pre-bump) generation must \
+         MISS the warm read after the project shape moved",
+    );
+}

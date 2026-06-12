@@ -24,7 +24,7 @@
 //! `.ts` dep fixtures. Drive a `resolve_component_meta("/tabs.vue")`
 //! call (the same audited entry the `audit_caps_wiring` discriminator
 //! uses, which goes through the cold
-//! `ensure_loaded → ensure_indexed_ready → materialize_prepared_decl_bundle`
+//! `ensure_loaded → ensure_indexed_ready_serve → materialize_prepared_decl_bundle`
 //! path). Assert:
 //!
 //! - `footprint.materializations.len() >= 1`
@@ -146,7 +146,7 @@ fn materializations_lane_contains_prepared_decl_bundle_subjects() {
         "at least one `MaterializationSubject::PreparedDeclBundle {{ cold: true, .. }}` \
          entry must appear in the `materializations` lane after a cold resolution — \
          got {prepared_decl_bundle_count} entries. The two production cold producers \
-         are `materialize_prepared_decl_bundle_from_route_owned_shallow` and \
+         are `materialize_prepared_decl_bundle_from_routed_shallow` and \
          `materialize_prepared_decl_bundle` in \
          `crates/verter_session/src/host_manage/prepared_decl.rs`; both MUST call \
          `record_materialization` at the cold-build exit. \

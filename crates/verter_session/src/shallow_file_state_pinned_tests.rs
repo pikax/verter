@@ -15,10 +15,11 @@
 //! Content-pinned `shallow_file_state` resolves the canonical's
 //! authoritative current content hash and reads `FileArtifactStore`
 //! pinned to that hash. A stale older-content artifact yields a miss;
-//! the read either returns `None` for a live scheduler-tracked
-//! canonical or falls through to a content-pinned route-owned fallback.
-//! It never materialises (`ensure_indexed_ready` is the recursion the
-//! function's own comment guards against).
+//! the read falls through to the route-surface accessor
+//! (`routed_shallow_state_with_context`), whose base fall-through joins
+//! the canonical `IndexedReady` build (`ensure_indexed_ready`) — so the
+//! current content is re-materialised, never served from the stale
+//! artifact.
 //!
 //! Discrimination property of every test below: the mutation is driven
 //! through the production [`crate::VerterHost::upsert`], which performs
@@ -61,9 +62,9 @@ fn upsert(host: &VerterHost, canonical: &str, source: &str) {
 /// - **Content-pinned read:** `shallow_file_state` resolves the
 ///   authoritative current content hash (the scheduler's post-edit
 ///   `parse.whole_hash`) and reads `FileArtifactStore` pinned to it. The
-///   stale artifact misses; the content-pinned read (or route-owned
-///   fallback) observes the edited content, so the `whole_hash` is the
-///   post-edit hash and `Renamed` is present.
+///   stale artifact misses; the content-pinned read (or the
+///   IndexedReady-backed fallback) observes the edited content, so the
+///   `whole_hash` is the post-edit hash and `Renamed` is present.
 #[test]
 fn shallow_file_state_observes_current_content_after_dependency_edit() {
     let canonical = "/pinned_shallow/dep.ts";
@@ -160,8 +161,8 @@ fn shallow_file_state_observes_current_content_after_dependency_edit() {
 ///   `RenamedProbe`. Both symbol assertions FAIL.
 /// - **Content-pinned read:** the content-pinned read misses the stale
 ///   artifact (its content hash is not the scheduler's current hash);
-///   the route-owned fallback recomputes the current shallow surface,
-///   which carries `RenamedProbe`.
+///   the IndexedReady-backed fallback (`ensure_indexed_ready`) recomputes
+///   the current shallow surface, which carries `RenamedProbe`.
 #[test]
 fn shallow_file_state_observes_renamed_symbol_after_dependency_edit() {
     let canonical = "/pinned_shallow/probe.ts";
@@ -379,14 +380,14 @@ fn imported_prop_type_edit_misses_warm_component_meta() {
 /// set must carry the new route-surface shape.
 ///
 /// Discrimination property: the route-fact producer reads the dep's
-/// route surface through the route-owned shallow path. The upsert
+/// route surface through the routed-shallow path. The upsert
 /// performs no own-canonical drain, so a stale pre-edit `IndexedReady`
 /// lingers; a non-content-pinned `shallow_file_state` /
 /// `route_shallow_state` reading `get_any` would let that stale
-/// artifact shadow the freshly-published route-owned entry, so the
-/// route fact (and the owner's published signature) would be rooted on
-/// the stale surface and the warm entry would validate falsely.
-/// Content-pinning the route-owned indexed fast path makes the route
+/// artifact shadow the freshly-published current-content artifact, so
+/// the route fact (and the owner's published signature) would be rooted
+/// on the stale surface and the warm entry would validate falsely.
+/// Content-pinning the routed-shallow indexed fast path makes the route
 /// fact observe the edited surface, so the warm entry misses and the
 /// recompute reports both `a` and `b`.
 #[test]

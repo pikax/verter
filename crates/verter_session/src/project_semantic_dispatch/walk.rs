@@ -4582,7 +4582,7 @@ fn merge_union_surfaces(
 ///
 /// A prop / slot present in ANY union arm is part of the component macro
 /// surface (`defineProps<FixedProps | BubbleProps>()` declares every
-/// arm's props). Per the binding ruling:
+/// arm's props). The merge rules:
 ///
 /// - A member survives iff it is present (by name) in AT LEAST ONE arm.
 /// - Its value is the UNION of the per-arm member values for the arms

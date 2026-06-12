@@ -13,15 +13,12 @@
 //!   (`ExternalTypeTraceBaseline`, `external_type_trace_*`,
 //!   `emit_external_type_from_loaded_files_trace_result`,
 //!   `external_type_frontier_layer_*_detail`).
-//! - The route-only shallow snapshot projection
-//!   (`RouteOwnedShallowStateSnapshot`).
 //! - Wildcard re-export ranking helpers.
 //! - Compile-time-toggled `external_type_debug` helper.
 
 use std::sync::Arc;
 
 use crate::host_manage::component_meta_trace_custom;
-use crate::types::*;
 use crate::VerterHost;
 
 pub(crate) type ResolvedExternalTypes =
@@ -30,8 +27,72 @@ pub(crate) type ResolvedExternalTypes =
 pub(crate) type ExternalTypeCache = crate::resolver_core::ExternalTypeBodyCache;
 pub(crate) type FrontierRequestedRoutes =
     rustc_hash::FxHashMap<(String, String), crate::resolver_core::RouteDemand>;
-pub(crate) type RouteShallowStateCache =
-    rustc_hash::FxHashMap<String, Arc<crate::resolver_core::ShallowFileState>>;
+/// A routed shallow-state serve plus its publication status — the
+/// value-flow carrier for the ReturnOnly discriminant on the frontier
+/// route readers (`route_shallow_state_serve` /
+/// `routed_shallow_state_serve`), the shallow-state sibling of
+/// `host_manage::prepared_decl::IndexedReadyServe`.
+///
+/// `store_published == false` means the state came from a FENCED
+/// `IndexedReady` flight (a workspace or route-resolution mutation
+/// landed mid-flight; the artifact was built against superseded state
+/// and published nothing). The serve is valid for the requesting
+/// caller's read, but any derived value entering a SHARED cache must
+/// consult the flag and decline admission — the derived value's fact
+/// stamps are read from the LIVE post-mutation state while its payload
+/// was computed FROM the superseded surface, an entry the read-side
+/// fact rail cannot reject.
+#[derive(Clone)]
+pub(crate) struct RoutedShallowServe {
+    pub(crate) state: Arc<crate::resolver_core::ShallowFileState>,
+    pub(crate) store_published: bool,
+}
+
+/// Request-scoped frontier shallow-state memo (per-walk de-dupe of
+/// repeated `Arc` clones — NOT a host-side mirror).
+///
+/// Besides the memo it accumulates whether ANY serve observed through
+/// it was fenced (`store_published == false`). The route walk threads
+/// one cache per route entry, so the accumulator is per-entry-precise:
+/// `build_named_type_export_route_entry` consults it to route a result
+/// computed from a superseded surface through the strict-admission
+/// negative-cache pattern (empty fact signature — served, never
+/// persisted). Every serve exit in `route_shallow_state_serve` records
+/// itself here, including the edge-stale rebuild arm that bypasses the
+/// memo, so the accumulator cannot under-report.
+#[derive(Default)]
+pub(crate) struct RouteShallowStateCache {
+    states: rustc_hash::FxHashMap<String, RoutedShallowServe>,
+    fenced_serve_observed: bool,
+}
+
+impl RouteShallowStateCache {
+    pub(crate) fn get(&self, canonical: &str) -> Option<&RoutedShallowServe> {
+        let cached = self.states.get(canonical)?;
+        if !cached.store_published {
+            // A memoized FENCED serve consumed by a traced cold compute
+            // that opened AFTER the original serve was recorded would
+            // otherwise miss the chokepoint flag — re-flag on every
+            // memo read so the by-value rail cannot under-report.
+            crate::resolver_core::resolver_context::note_fenced_serve_fan_out();
+        }
+        Some(cached)
+    }
+
+    pub(crate) fn insert(&mut self, canonical: String, serve: RoutedShallowServe) {
+        self.states.insert(canonical, serve);
+    }
+
+    pub(crate) fn observe_serve(&mut self, serve: &RoutedShallowServe) {
+        self.fenced_serve_observed |= !serve.store_published;
+    }
+
+    /// TRUE when any serve recorded through this cache was fenced
+    /// (ReturnOnly) — the walk's result must not enter a shared cache.
+    pub(crate) fn fenced_serve_observed(&self) -> bool {
+        self.fenced_serve_observed
+    }
+}
 pub(crate) type FrontierCompanionPlanCache = rustc_hash::FxHashMap<
     (String, String, crate::resolver_core::RouteDemand),
     Arc<[PlannedFrontierCompanion]>,
@@ -264,39 +325,6 @@ pub(crate) fn external_type_frontier_layer_result_detail(
         target_found,
         route_cycle,
     )
-}
-
-/// Lightweight projection of a [`RouteOwnedShallowEntry`] used by
-/// [`crate::resolver_store`] when snapshotting the route-only shallow cache
-/// for fact-capture. **Not** a cache entry itself; the project-store-owned
-/// [`RouteOwnedShallowDb`](crate::project_type_store::RouteOwnedShallowDb)
-/// retains the full entry, while this projection is the thin shape exposed
-/// across the in-crate consumer boundary.
-pub(crate) struct RouteOwnedShallowStateSnapshot {
-    pub canonical_id: String,
-    pub whole_hash: Hash16,
-    pub route_hash: Option<Hash16>,
-}
-
-impl RouteOwnedShallowStateSnapshot {
-    /// Project a [`RouteOwnedShallowEntry`] into a snapshot. The entry's
-    /// shallow state is consulted to compute `route_hash` only when the
-    /// surface is resolvable — mirrors the pre-migration `From` behaviour
-    /// that lived inline in `snapshot_route_owned_shallow_cache_entries`.
-    pub(crate) fn from_entry(
-        canonical_id: &str,
-        entry: &crate::project_type_store::RouteOwnedShallowEntry,
-    ) -> Self {
-        let route_hash = entry
-            .shallow_state
-            .has_resolvable_surface()
-            .then(|| crate::resolver_store::hash_route_surface(entry.shallow_state.as_ref()));
-        Self {
-            canonical_id: canonical_id.to_string(),
-            whole_hash: entry.whole_hash,
-            route_hash,
-        }
-    }
 }
 
 pub(crate) fn wildcard_source_stem_for_matching(path: &str) -> Option<String> {

@@ -2,9 +2,6 @@
 //!
 //! Owns the helpers that drive route resolution / canonical-ID lookup
 //! before any external type traversal happens:
-//! - Wrappers around the project-store-owned `RouteOwnedShallowDb`
-//!   (`invalidate_route_owned_shallow_cache`,
-//!   `snapshot_route_owned_shallow_cache_entries`).
 //! - `expand_relative_candidates` — pre-snapshot blocker hydration probe.
 //! - `authoritative_import_route` + `import_route_target` /
 //!   `import_route_is_known_miss` predicates.
@@ -24,54 +21,10 @@
 //!   `resolve_type_dependency_canonical`, and
 //!   `resolve_type_dependency_canonical_shallow` entry points.
 
-use super::frontier_helpers::RouteOwnedShallowStateSnapshot;
 use crate::host_manage::component_meta_trace_custom;
 use crate::VerterHost;
 
 impl VerterHost {
-    /// invalidate the route-only shallow entry for a
-    /// canonical via the project-store-owned
-    /// [`RouteOwnedShallowDb`](crate::project_type_store::RouteOwnedShallowDb).
-    /// The pre-migration host-mutex (`route_owned_shallow_cache`) is gone;
-    /// this thin wrapper keeps the existing call site
-    /// (`host_manage::set_import_dependencies`) working through one indirection
-    /// while the body delegates to the store DB. Future cleanup may inline
-    /// the call.
-    pub(crate) fn invalidate_route_owned_shallow_cache(&self, canonical_id: &str) {
-        self.project_type_store
-            .route_owned_shallow()
-            .remove(canonical_id);
-    }
-
-    /// snapshot the route-only shallow entries from the
-    /// project-store DB for fact-capture (`resolver_store::derived_hashes`).
-    /// Iteration is across `DashMap<Arc<str>, Arc<RouteOwnedShallowEntry>>`;
-    /// the projection ([`RouteOwnedShallowStateSnapshot`]) carries the
-    /// minimal `(canonical_id, whole_hash, optional route_hash)` shape
-    /// consumed by `resolver_store.rs:137`.
-    ///
-    /// Only EDGE-CURRENT entries are snapshotted: `HostStoreView::build`
-    /// snapshots route hashes from this set, so a stale wildcard-bearing
-    /// route-owned entry (its resolved edges baked at an earlier workspace
-    /// generation, before a dependency appeared or retargeted) would
-    /// otherwise publish a `Route` hash that validates a warm `RouteDb`
-    /// entry after the change. The SAME `route_owned_entry_is_edge_current`
-    /// gate that governs `current_route_surface_hash` filters the snapshot —
-    /// one gate, two route-fact producers.
-    pub(crate) fn snapshot_route_owned_shallow_cache_entries(
-        &self,
-    ) -> Vec<RouteOwnedShallowStateSnapshot> {
-        self.project_type_store
-            .route_owned_shallow()
-            .for_each_entry(|canonical_id, entry| {
-                self.route_owned_entry_is_edge_current(canonical_id, entry)
-                    .then(|| RouteOwnedShallowStateSnapshot::from_entry(canonical_id, entry))
-            })
-            .into_iter()
-            .flatten()
-            .collect()
-    }
-
     /// Expand a relative import specifier into all candidate canonical IDs.
     ///
     /// Given an owner file and a relative specifier (e.g. `./types`), returns
@@ -140,11 +93,15 @@ impl VerterHost {
             // fallback: the miss is recomputed cheaply by the caller's
             // `resolve_workspace_dependency_and_cache` path, which
             // re-resolves against the current workspace and reopens the
-            // route the moment the target file exists. Positive
-            // resolutions stay valid (a new file never invalidates an
-            // already-resolved positive) and are served unchanged.
+            // route the moment the target file exists. Positive entries
+            // ARE served from here: `ensure_indexed_ready_serve`'s reuse is
+            // edge-currency-gated, so an artifact whose baked positive
+            // edges predate a dependency-set change has already been
+            // routed through the edge-refresh (re-resolving its edges
+            // against the live file set) before this read.
             let from_indexed = self
-                .ensure_indexed_ready(owner_canonical)?
+                .ensure_indexed_ready_serve(owner_canonical)?
+                .indexed
                 .import_routes
                 .get(import_source)
                 .cloned()
@@ -193,9 +150,7 @@ impl VerterHost {
     pub(crate) fn import_route_is_known_miss(
         resolution: &crate::types::DependencyResolution,
     ) -> bool {
-        resolution.resolved_canonical_id.is_none()
-            && resolution.effective_target().is_none()
-            && resolution.possible_canonical_ids.is_empty()
+        resolution.is_known_miss()
     }
 
     fn runtime_like_dependency_target(path: &str) -> bool {
@@ -221,7 +176,10 @@ impl VerterHost {
         owner_canonical: &str,
         import_source: &str,
     ) -> Option<String> {
-        let state = &self.ensure_indexed_ready(owner_canonical)?.shallow_state;
+        let state = &self
+            .ensure_indexed_ready_serve(owner_canonical)?
+            .indexed
+            .shallow_state;
         state
             .exports
             .values()
@@ -375,11 +333,26 @@ impl VerterHost {
     /// methods; the positive-route allow-list rejects any direct
     /// `.import_routes` mutation outside this helper, the snapshot
     /// writer, and the lifecycle reset methods.
+    /// `resolved_at_generation` is the workspace `content_generation` the
+    /// CALLER captured BEFORE performing the resolution this call
+    /// memoizes. The stamp must never be a live read taken at record
+    /// time: a mutation landing between resolve and record would then
+    /// forge a "current" stamp onto a possibly-retargeted resolution.
+    /// A pre-captured stamp is at worst conservatively stale — the
+    /// entry is refused as generation-current and re-resolves.
+    ///
+    /// `resolved_kind` is the workspace resolution lane the caller
+    /// resolved through; it is recorded on the stamp so a
+    /// generation-stale entry re-resolves through the SAME lane (exact
+    /// resolutions are kind-keyed — replaying a different lane would
+    /// diverge recorder from validator).
     pub(super) fn cache_positive_import_route_result(
         &self,
         owner_canonical: &str,
         import_source: &str,
         resolved_canonical_id: &str,
+        resolved_at_generation: u64,
+        resolved_kind: verter_workspace::ResolveRequestKind,
     ) {
         let resolution = crate::types::DependencyResolution {
             specifier: import_source.to_string(),
@@ -412,10 +385,26 @@ impl VerterHost {
                 .derived_raw_cache()
                 .entry(owner_canonical.to_string())
                 .or_default();
-            let previous = derived_ref
-                .value_mut()
+            let derived = derived_ref.value_mut();
+            let previous = derived
                 .import_routes
                 .insert(import_source.to_string(), resolution.clone());
+            // Host-memoized positives are dependency-set-derived: stamp
+            // the caller-captured pre-resolve generation so readers / the
+            // route-surface rebuild re-resolve once the file set moves (a
+            // re-admission of the same canonical refreshes the stamp — the
+            // route was just revalidated against the file set the caller
+            // resolved under). The stamp is NOT part of any snapshotted
+            // hash, so refreshing it is not a token-relevant mutation.
+            derived
+                .import_routes_positive_recorded_at_generation
+                .insert(
+                    import_source.to_string(),
+                    crate::types::PositiveRouteStamp {
+                        generation: resolved_at_generation,
+                        kind: resolved_kind,
+                    },
+                );
             previous
                 .map(|prev| prev.resolved_canonical_id.as_deref() != Some(resolved_canonical_id))
                 .unwrap_or(true)
@@ -470,11 +459,14 @@ impl VerterHost {
         owner_canonical: &str,
         import_source: &str,
         resolved_canonical_id: &str,
+        resolved_at_generation: u64,
     ) {
         self.cache_positive_import_route_result(
             owner_canonical,
             import_source,
             resolved_canonical_id,
+            resolved_at_generation,
+            verter_workspace::ResolveRequestKind::EsmImport,
         );
     }
 
@@ -484,6 +476,9 @@ impl VerterHost {
         import_source: &str,
         kind: verter_workspace::ResolveRequestKind,
     ) -> Option<String> {
+        // Capture-before-resolve: the stamp reflects the file set the
+        // resolution ran under, never a later one.
+        let resolved_at_generation = self.ws().content_generation();
         let resolved = self
             .ws()
             .resolve_import(
@@ -495,7 +490,13 @@ impl VerterHost {
                 },
             )?
             .source_id;
-        self.cache_positive_import_route_result(owner_canonical, import_source, &resolved);
+        self.cache_positive_import_route_result(
+            owner_canonical,
+            import_source,
+            &resolved,
+            resolved_at_generation,
+            kind,
+        );
         Some(resolved)
     }
 
@@ -624,6 +625,9 @@ impl VerterHost {
             return Some(resolved);
         }
 
+        // Capture-before-resolve: the stamp reflects the file set the
+        // resolution ran under, never a later one.
+        let resolved_at_generation = self.ws().content_generation();
         let resolved = self
             .ws()
             .resolve_import(
@@ -648,7 +652,13 @@ impl VerterHost {
             )
             .unwrap_or(resolved);
 
-        self.cache_positive_import_route_result(owner_canonical, import_source, &preferred);
+        self.cache_positive_import_route_result(
+            owner_canonical,
+            import_source,
+            &preferred,
+            resolved_at_generation,
+            verter_workspace::ResolveRequestKind::TypeImport,
+        );
         Some(preferred)
     }
 
@@ -659,10 +669,12 @@ impl VerterHost {
     /// This is the SOLE specifier→canonical policy for type-route edges. It is
     /// shared by route traversal ([`Self::resolve_route_type_edge`], which
     /// layers on a `.vue` store-view gate + `ensure_loaded` side effects),
-    /// shallow-state wildcard/reexport canonicalization (so a route-owned
-    /// surface resolves the SAME edges as the indexed surface), and
-    /// known-miss revalidation
-    /// ([`Self::generation_current_known_miss_resolution`]). Keeping the policy
+    /// shallow-state wildcard/reexport canonicalization (so an
+    /// overlay-materialised surface resolves the SAME edges as the base
+    /// indexed surface), and
+    /// stale-entry revalidation
+    /// ([`Self::generation_current_route_resolution`], whose type-route
+    /// lane delegates here). Keeping the policy
     /// in one place is what guarantees the recorder and the validator agree on
     /// every route-edge canonical, including the ESM-fallback normalization:
     /// a `TypeImport` resolution normalized
@@ -703,32 +715,55 @@ impl VerterHost {
             })
     }
 
-    /// Side-effect-free type-dependency re-resolve for a known-miss
-    /// specifier.
-    ///
-    /// Answers the same question as
-    /// [`Self::resolve_type_dependency_canonical`] — "what canonical id
-    /// does this type import resolve to under the current workspace?" —
-    /// but is safe to call from a cache-validation / read path. It does
-    /// NOT consult [`Self::authoritative_import_route`] (whose
-    /// `IndexedReady` fallback can call `ensure_indexed_ready` and
+    /// Side-effect-free re-resolution for a generation-stale
+    /// `import_routes` entry, replaying the entry's RECORDED resolution
+    /// lane. Answers "what canonical id does this specifier resolve to
+    /// under the current workspace?" on cache-validation / read paths:
+    /// it does NOT consult [`Self::authoritative_import_route`] (whose
+    /// `IndexedReady` fallback can call `ensure_indexed_ready_serve` and
     /// materialize a shallow-only importer) and does NOT call
     /// `cache_positive_import_route_result` (which would rewrite the
-    /// `DerivedRawState.import_routes` known-miss entry to a positive and
-    /// register a new dependency). Resolution flows straight through the
-    /// shared [`Self::resolve_route_edge_canonical`] policy, so the only
-    /// state it touches is the workspace engine's own resolution memo.
+    /// `DerivedRawState.import_routes` entry and register a new
+    /// dependency) — the only state it touches is the workspace engine's
+    /// own resolution memo.
     ///
-    /// Routing through the shared policy keeps the absence-sensitive
-    /// `ImportRoute` hash on the SAME canonical the route traversal would
-    /// record — including the ESM-fallback normalization — so a re-resolved
-    /// known-miss never diverges from the live
-    /// route resolution.
-    pub(crate) fn generation_current_known_miss_resolution(
+    /// `recorded_kind` is the [`crate::types::PositiveRouteStamp::kind`]
+    /// of a host-memoized positive, or `None` for a known-miss (whose
+    /// sidecar records no lane). Two lanes:
+    ///
+    /// * **`SfcSrcAttr`** — an external `src=` include: re-resolve through
+    ///   the same `SfcSrcAttr` workspace lane the memo was produced
+    ///   through. Exact resolutions are keyed `(specifier, phase, kind)`,
+    ///   so replaying the type-route chain here would miss the caller's
+    ///   `SfcSrcAttr` exact row and diverge validator from recorder; and a
+    ///   `src=` target is whole-content-included, so declaration-companion
+    ///   normalization does not apply.
+    /// * **everything else** (type/ESM-recorded positives and
+    ///   known-misses) — the shared
+    ///   [`Self::resolve_route_edge_canonical`] type-route policy, so the
+    ///   re-resolved canonical agrees with route traversal including the
+    ///   ESM-fallback normalization and the absence-sensitive
+    ///   `ImportRoute` hash lands on the SAME canonical the route
+    ///   traversal would record.
+    pub(crate) fn generation_current_route_resolution(
         &self,
         owner_canonical: &str,
         import_source: &str,
+        recorded_kind: Option<verter_workspace::ResolveRequestKind>,
     ) -> Option<String> {
-        self.resolve_route_edge_canonical(owner_canonical, import_source)
+        match recorded_kind {
+            Some(verter_workspace::ResolveRequestKind::SfcSrcAttr) => self
+                .ws()
+                .resolve_import(
+                    owner_canonical,
+                    import_source,
+                    verter_workspace::ResolutionContext {
+                        phase: verter_workspace::ResolvePhase::CodegenBlocker,
+                        kind: verter_workspace::ResolveRequestKind::SfcSrcAttr,
+                    },
+                )
+                .map(|resolution| resolution.source_id),
+            _ => self.resolve_route_edge_canonical(owner_canonical, import_source),
+        }
     }
 }

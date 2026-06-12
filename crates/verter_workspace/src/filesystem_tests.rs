@@ -529,12 +529,13 @@ fn directory_tree_dirty_forces_dir_index_rescan_on_next_access() {
 
 /// DISCRIMINATING regression (RouteDb stale-serve hole 4): a
 /// `DirectoryTreeDirty` change is a file-set mutation produced by
-/// watcher recovery. Route-owned freshness (`route_owned_entry_is_fresh`
-/// tier-2) and known-miss staleness checks in `verter_session` read the
-/// workspace `content_generation` epoch to decide whether a cached route
-/// is still fresh. If `DirectoryTreeDirty` clears the resolver lazy cache
-/// but leaves the epoch un-advanced, those downstream freshness checks
-/// serve the pre-recovery (stale) route surface.
+/// watcher recovery. Route-surface edge currency
+/// (`indexed_surface_is_current`) and known-miss staleness checks in
+/// `verter_session` read the workspace `content_generation` epoch to
+/// decide whether a cached route is still fresh. If
+/// `DirectoryTreeDirty` clears the resolver lazy cache but leaves the
+/// epoch un-advanced, those downstream freshness checks serve the
+/// pre-recovery (stale) route surface.
 ///
 /// FAILS pre-fix: the `DirectoryTreeDirty` arm did not set
 /// `content_changed`, so the batch never bumped `content_generation`
@@ -555,8 +556,8 @@ fn directory_tree_dirty_advances_content_generation() {
         before + 1,
         "DirectoryTreeDirty (watcher recovery) is a file-set generation \
          mutation: it must advance content_generation exactly once for the \
-         batch so route-owned freshness and known-miss staleness checks do \
-         not serve stale results after recovery"
+         batch so route-surface edge-currency and known-miss staleness \
+         checks do not serve stale results after recovery"
     );
 }
 
@@ -713,5 +714,80 @@ fn missing_read_file_trace_detail_distinguishes_dir_index_negative_from_generic_
         vfs_read_file_missing_result_detail(path, false),
         "path=d:/project/package.json layer=missing cache=miss bytes=0",
         "true uncached misses must keep the generic missing/cache=miss label"
+    );
+}
+
+/// `FilesystemWorkspace::inject_file` is a per-canonical content
+/// mutator and must record the canonical in the content-transition
+/// ledger — a plain generation bump leaves artifact-only freshness
+/// gates comparing against a stale (or 0) per-canonical entry, so
+/// retained artifacts built before the injection keep serving as
+/// fresh.
+#[test]
+fn inject_file_records_per_canonical_content_transition() {
+    let ws = FilesystemWorkspace::new(FilesystemOptions::default());
+    let canonical = "d:/project/src/injected.ts";
+    assert_eq!(
+        ws.last_content_transition_generation(canonical),
+        0,
+        "a never-transitioned canonical reports 0",
+    );
+
+    ws.inject_file(canonical.to_string(), Arc::from("export const i = 1;"));
+
+    let recorded = ws.last_content_transition_generation(canonical);
+    assert!(
+        recorded > 0,
+        "inject_file must record the canonical's content transition in \
+         the ledger — direct snapshot injection is exactly the perimeter \
+         the ledger exists to cover",
+    );
+    assert_eq!(
+        recorded,
+        ws.content_generation(),
+        "the recorded transition is the post-bump generation",
+    );
+}
+
+/// `FilesystemWorkspace::delete_dir_all` removes an UNKNOWN member set
+/// (a recursive disk delete also removes files the snapshot cache never
+/// saw), so it must record a SUBTREE transition: every member
+/// canonical's `last_content_transition_generation` advances past its
+/// pre-delete record. A delete→recreate of an artifact-only member must
+/// not serve a retained pre-delete artifact as fresh.
+#[test]
+fn delete_dir_all_records_subtree_content_transition() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_string_lossy().replace('\\', "/");
+    let pkg_dir = format!("{root}/pkg");
+    let member = format!("{pkg_dir}/member.ts");
+    let outside = format!("{root}/outside.ts");
+
+    let ws = FilesystemWorkspace::new(FilesystemOptions::default());
+    std::fs::create_dir_all(dir.path().join("pkg")).unwrap();
+    ws.write_file(&member, "export const m = 1;")
+        .expect("write member");
+    ws.write_file(&outside, "export const o = 1;")
+        .expect("write outside");
+    let member_gen = ws.last_content_transition_generation(&member);
+    let outside_gen = ws.last_content_transition_generation(&outside);
+    assert!(
+        member_gen > 0,
+        "precondition: write_file recorded the member"
+    );
+
+    ws.delete_dir_all(&pkg_dir).expect("delete_dir_all");
+
+    assert!(
+        ws.last_content_transition_generation(&member) > member_gen,
+        "delete_dir_all must advance every member canonical's transition \
+         generation — the recursive delete transitions members the engine \
+         cannot enumerate, so the subtree prefix is recorded and folded \
+         into the per-canonical query",
+    );
+    assert_eq!(
+        ws.last_content_transition_generation(&outside),
+        outside_gen,
+        "a canonical outside the deleted subtree is untouched",
     );
 }

@@ -127,6 +127,11 @@ pub struct ExactResolution {
 pub struct ExactResolutionResult {
     /// Canonical IDs of files that were newly added to the dependency graph.
     pub newly_resolved: Vec<String>,
+    /// Whether the stored exact-resolution table actually changed. `false`
+    /// means the supplied snapshot was value-identical to the stored one
+    /// and the call performed no write — callers use this to skip
+    /// invalidation cascades for steady-state re-pushes.
+    pub changed: bool,
 }
 
 /// Parsed package.json manifest fields (cached by PackageIndex).

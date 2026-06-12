@@ -13,20 +13,15 @@
 //! `tests/component_meta_route_facts_flow_into_signature.rs`, which
 //! characterises that the owner's Route fact reaches the tracer).
 //!
-//! The owner's own Route fact is non-round-tripping: `HostStoreView::build`
-//! dual-sources `view.derived_hashes[(owner, Route)]` — from the
-//! owner's `IndexedReady` shallow state AND from any `route_owned_shallow`
-//! entry, with the route-owned source overwriting the indexed source.
-//! The cold component-meta compute observes the Route hash via the
-//! `IndexedReady` shallow state; a later warm-hit validation can read
-//! the route-owned hash instead. When the two sources disagree, a
-//! repeated IDENTICAL `get_component_meta` query misses the
-//! final-result cache with no edit — a steady-state warm-cache miss /
-//! perf regression. The owner's own export route is not a dependency
+//! The owner's own Route fact is non-round-tripping on warm
+//! validation: a missing `(owner, Route)` entry on a later live
+//! `HostStoreView` rejects the published signature, so a repeated
+//! IDENTICAL `get_component_meta` query can miss the final-result
+//! cache with no edit — a steady-state warm-cache miss / perf
+//! regression. The owner's own export route is not a dependency
 //! of the owner's own component-meta result in the first place (the
 //! owner's `FileWholeHash` fact already covers owner-content edits),
-//! so the fix drops the fact unconditionally rather than gambling on
-//! whether the two sources happen to agree.
+//! so the fix drops the fact unconditionally.
 //!
 //! `strip_owner_route_fact` drops exactly the owner's own
 //! `DerivedFactHash{Route}` fact before cache admission. Cross-file
@@ -35,12 +30,11 @@
 //!
 //! ## Discrimination
 //!
-//! `repeated_query_with_route_owned_entry_is_warm_hit` plants a
-//! `route_owned_shallow` entry for the owner via a genuine route-only
-//! read BEFORE the owner has an `IndexedReady` (the
-//! precondition: an owner already has a `route_owned_shallow`
-//! entry from an earlier route-only read), then runs
-//! `get_component_meta` and asserts:
+//! `repeated_query_after_route_only_indexed_read_is_warm_hit`
+//! materialises the owner's `IndexedReady` via a genuine route-only
+//! read BEFORE `get_component_meta` runs (the precondition: an owner
+//! already has an `IndexedReady` from an earlier route-only read),
+//! then runs `get_component_meta` and asserts:
 //!
 //! 1. **Discriminator.** The published `ComponentMetaResultEntry`
 //!    signature does NOT contain `DerivedFactHash { canonical_id ==
@@ -52,7 +46,7 @@
 //!    proving the filter is NARROW, not the broad route-fact removal.
 //! 3. **Behavioural non-regression.** A repeated IDENTICAL query is a
 //!    warm-cache HIT with no new miss. The fix must not break warm
-//!    reuse for the route-owned-entry scenario.
+//!    reuse for the route-only-read-first scenario.
 
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Arc;
@@ -131,37 +125,33 @@ fn has_owner_route_fact(facts: &[FactVersionRef], owner: &str) -> bool {
 }
 
 #[test]
-fn repeated_query_with_route_owned_entry_is_warm_hit() {
+fn repeated_query_after_route_only_indexed_read_is_warm_hit() {
     let host = build_host();
     upsert(&host, "/src/types.ts", TYPES_TS, FileKind::NonSfc);
     upsert(&host, "/src/Comp.vue", OWNER_VUE, FileKind::VueSfc);
 
-    // Plant a `route_owned_shallow` entry for the OWNER via a genuine
-    // route-only read, BEFORE the owner has an `IndexedReady`. The
-    // materialiser aborts NEW publishes when `IndexedReady` already
-    // exists for the canonical, so this must happen first; the entry
-    // then persists once `get_component_meta` builds `IndexedReady`.
-    // This reproduces the precondition exactly: "an owner
-    // already has a `route_owned_shallow` entry from an earlier
-    // route-only read".
-    let route_owned = host.ensure_route_owned_shallow_entry("/src/Comp.vue");
+    // Materialise the OWNER's `IndexedReady` via a genuine route-only
+    // read BEFORE `get_component_meta` runs. This reproduces the
+    // precondition exactly: "an owner already has an `IndexedReady`
+    // from an earlier route-only read".
+    let indexed = host.ensure_indexed_ready("/src/Comp.vue");
     assert!(
-        route_owned.is_some(),
-        "route-only read must materialise a route_owned_shallow entry \
+        indexed.is_some(),
+        "route-only read must materialise an IndexedReady artifact \
          for the owner SFC — the route-only-read precondition",
     );
     assert!(
         host.project_type_store()
-            .route_owned_shallow()
+            .indexed()
             .get_any("/src/Comp.vue")
             .is_some(),
-        "the route_owned_shallow DB must hold the owner entry after \
+        "the FileArtifactStore must hold the owner artifact after \
          the route-only read",
     );
 
-    // Cold `get_component_meta` — builds `IndexedReady`, runs the cold
-    // resolver, publishes the `ComponentMetaResultEntry`. The pre-
-    // existing route_owned_shallow entry persists.
+    // Cold `get_component_meta` — runs the cold resolver and publishes
+    // the `ComponentMetaResultEntry` over the pre-existing
+    // `IndexedReady`.
     let prime = host.get_component_meta("/src/Comp.vue");
     assert!(prime.is_some(), "cold get_component_meta must resolve");
 
@@ -201,11 +191,9 @@ fn repeated_query_with_route_owned_entry_is_warm_hit() {
     // Discriminator 3 (behavioural non-regression) — a repeated
     // IDENTICAL query is a warm-cache HIT with no new miss. With the
     // owner-Route fact filtered, the published signature round-trips,
-    // so the second query reuses the warm result. (For a fixture
-    // whose route-owned and indexed Route hashes happen to coincide
-    // this would pass even without the filter; the hard discriminator
-    // is Discriminator 1. This assertion guards that the filter does not
-    // regress warm reuse.)
+    // so the second query reuses the warm result. (The hard
+    // discriminator is Discriminator 1. This assertion guards that the
+    // filter does not regress warm reuse.)
     let prov = host.provenance();
     let hits_before = prov.component_meta_result_cache_hits.load(Relaxed);
     let misses_before = prov.component_meta_result_cache_misses.load(Relaxed);
@@ -218,8 +206,8 @@ fn repeated_query_with_route_owned_entry_is_warm_hit() {
     assert!(
         hits_after > hits_before,
         "a repeated IDENTICAL `get_component_meta` query MUST be a \
-         warm-cache HIT even when the owner has a route_owned_shallow \
-         entry — the published signature must round-trip. \
+         warm-cache HIT even when the owner's IndexedReady came from an \
+         earlier route-only read — the published signature must round-trip. \
          hits {hits_before} -> {hits_after}, misses {misses_before} -> {misses_after}",
     );
     assert_eq!(
@@ -242,7 +230,7 @@ fn repeated_query_with_route_owned_entry_is_warm_hit() {
 }
 
 #[test]
-fn editing_route_dep_still_invalidates_with_route_owned_entry() {
+fn editing_route_dep_still_invalidates_after_route_only_indexed_read() {
     // The filter is narrow — it removes ONLY the owner's own Route
     // fact. Cross-file route facts stay, so editing a route dep MUST
     // still invalidate the owner's warm hit. This guards against the
@@ -252,9 +240,9 @@ fn editing_route_dep_still_invalidates_with_route_owned_entry() {
     upsert(&host, "/src/types.ts", TYPES_TS, FileKind::NonSfc);
     upsert(&host, "/src/Comp.vue", OWNER_VUE, FileKind::VueSfc);
 
-    // Plant the owner's route_owned_shallow entry first (the
-    // route-only-read precondition), then prime the component-meta cache.
-    let _ = host.ensure_route_owned_shallow_entry("/src/Comp.vue");
+    // Materialise the owner's IndexedReady first (the route-only-read
+    // precondition), then prime the component-meta cache.
+    let _ = host.ensure_indexed_ready("/src/Comp.vue");
     let prime = host.get_component_meta("/src/Comp.vue");
     assert!(prime.is_some(), "prime call must resolve");
 
@@ -358,8 +346,8 @@ fn publish_fence_skips_promotion_under_superseded_token() {
 /// promoted into the final-result cache — EVEN WHEN the seed's external
 /// validation token still matches the live host. This isolates the
 /// publish fence's SEED-CURRENTNESS gate from its token gate, and is
-/// exactly the window codex named: "a stale ReturnOnly seed while the
-/// live token still matches".
+/// exactly the isolated gap: a stale ReturnOnly seed while the
+/// live token still matches.
 ///
 /// The seed is forced non-current through the RESET-fence decline path,
 /// which declines the manager's build WITHOUT advancing any token
@@ -718,7 +706,12 @@ fn warm_meta_payload_hit_is_suppressed_when_store_view_is_not_current() {
          only validates a non-empty fact rail)",
     );
     let planted_payload: Vec<u8> = vec![0xAB, 0xCD, 0xEF];
-    host.store_meta_payload("/src/Comp.vue", &facts, planted_payload.clone());
+    host.store_meta_payload(
+        "/src/Comp.vue",
+        &facts,
+        planted_payload.clone(),
+        host.project_type_store.current_project_generation(),
+    );
 
     // Sanity arm: a quiescent peek is a genuine HIT (the planted entry is
     // valid and warm-hittable when the view IS current).
@@ -783,5 +776,217 @@ fn warm_meta_payload_hit_is_suppressed_when_store_view_is_not_current() {
         "the resolve against the mutated dep MUST reflect the new `RProps` \
          shape (a, no b) — a stale warm hit would still report `b`. \
          got {prop_names:?}",
+    );
+}
+
+/// The encoded-payload lane's value-side generation backstop (the same
+/// discipline as the typed result caches' `validated_at_generation`
+/// gate): an UNDER-RECORDED fact signature — the degenerate case being
+/// the EMPTY signature, which `validates_fact_signature` accepts
+/// trivially — must not keep validating across project-shape mutations
+/// the missing facts would have caught. The payload lane has no outer
+/// publish / `is_stable` fence, so without the stamp an under-recorded
+/// entry is served to the FFI consumer PERMANENTLY.
+#[test]
+fn meta_payload_under_recorded_signature_misses_after_project_mutation() {
+    let host = build_host();
+    upsert(&host, "/src/types.ts", TYPES_TS, FileKind::NonSfc);
+    upsert(&host, "/src/Comp.vue", OWNER_VUE, FileKind::VueSfc);
+
+    // Plant a payload with the EMPTY (under-recorded) signature.
+    let planted: Vec<u8> = vec![0x11, 0x22, 0x33];
+    host.store_meta_payload(
+        "/src/Comp.vue",
+        &[],
+        planted.clone(),
+        host.project_type_store.current_project_generation(),
+    );
+    assert_eq!(
+        host.try_get_cached_meta_payload("/src/Comp.vue").as_deref(),
+        Some(planted.as_slice()),
+        "sanity: the planted entry hits while the project shape is \
+         unchanged",
+    );
+
+    // Land a project-shape mutation that bumps `project_generation`
+    // WITHOUT the wide derived-raw evict (the stamp-only
+    // `set_import_dependencies` route push on the DEP): the planted
+    // payload entry survives physically, so only the generation
+    // backstop can reject it.
+    let pre = host.project_type_store().current_project_generation();
+    host.set_import_dependencies(
+        "/src/types.ts",
+        vec![crate::types::DependencyResolution {
+            specifier: "./somewhere".to_string(),
+            resolved_canonical_id: Some("/src/elsewhere.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    assert!(
+        host.project_type_store().current_project_generation() > pre,
+        "anti-vacuity: the route push must have bumped project_generation",
+    );
+
+    assert!(
+        host.try_get_cached_meta_payload("/src/Comp.vue").is_none(),
+        "an under-recorded (empty) signature must NOT keep validating \
+         across a project mutation — the generation backstop must miss \
+         to cold",
+    );
+}
+
+// ── Fenced-serve admission: ReturnOnly never publishes ───────────────
+//
+// A cold component-meta compute whose traced scope consumed a FENCED
+// (ReturnOnly, `store_published == false`) `IndexedReady` serve derived
+// its payload from a served-without-publication artifact while its fact
+// stamps are read from the LIVE state — an entry the read-side fact
+// rail cannot reject. Each producer must consult the tracer's by-value
+// `fenced_serve_observed` flag and DECLINE the shared-cache publish.
+//
+// Discrimination: the seam hook below raises the flag WITHOUT moving
+// any validation-token dimension (no mutation lands), so the publish
+// fence's seed-token recheck PASSES and only the by-value consult can
+// refuse. Pre-consult the entry LANDS; post-consult it is declined.
+
+/// Arm the materialize seam to raise the by-value fenced-serve flag on
+/// every tracer active on the flight's thread — the same chokepoint a
+/// real fenced serve fans out through — while mutating NOTHING, so the
+/// seed-fence token recheck cannot be what declines the publish.
+fn arm_force_fenced_serve_flag(host: &VerterHost) {
+    *host.materialize_seam_hook.lock() = Some(Arc::new(|| {
+        crate::resolver_core::resolver_context::note_fenced_serve_fan_out();
+    }));
+}
+
+fn disarm_materialize_seam(host: &VerterHost) {
+    *host.materialize_seam_hook.lock() = None;
+}
+
+/// ReturnOnly never publishes — `get_component_meta` (base path). The
+/// caller is still served the freshly computed meta; only the
+/// `ComponentMetaResultDb` promotion is declined. With the seam
+/// disarmed, the next cold compute publishes — the refusal was the
+/// admission gate acting, not a broken publish path.
+#[test]
+fn fenced_serve_inside_get_component_meta_declines_the_publish() {
+    let host = build_host();
+    upsert(&host, "/src/types.ts", TYPES_TS, FileKind::NonSfc);
+    upsert(&host, "/src/Comp.vue", OWNER_VUE, FileKind::VueSfc);
+
+    arm_force_fenced_serve_flag(&host);
+    let fenced = host.get_component_meta("/src/Comp.vue");
+    disarm_materialize_seam(&host);
+
+    assert!(
+        fenced.is_some(),
+        "the declined publish must still serve the freshly computed meta \
+         (return-only semantics)",
+    );
+    // THE PIN: the traced scope consumed a fenced serve, so the
+    // promotion must DECLINE — by value, even though the seed-fence
+    // token recheck passes (nothing mutated).
+    assert!(
+        !published_entry_present(&host, "/src/Comp.vue"),
+        "a component-meta cold compute whose traced scope consumed a \
+         FENCED (ReturnOnly) IndexedReady serve must DECLINE the \
+         final-result-cache publish — its fact stamps validate against \
+         the live view while its payload was computed from the \
+         superseded artifact, an entry the read-side fact rail cannot \
+         reject",
+    );
+
+    // Recovery: a quiescent recompute publishes and serves warm.
+    let recomputed = host.get_component_meta("/src/Comp.vue");
+    assert!(recomputed.is_some(), "quiescent recompute must resolve");
+    assert!(
+        published_entry_present(&host, "/src/Comp.vue"),
+        "a quiescent recompute must publish the final-result entry",
+    );
+}
+
+/// ReturnOnly never publishes — `get_component_meta_with_resolution`
+/// path (its own `with_fact_tracer` producer + publish site).
+#[test]
+fn fenced_serve_inside_with_resolution_declines_the_publish() {
+    let host = build_host();
+    upsert(&host, "/src/types.ts", TYPES_TS, FileKind::NonSfc);
+    upsert(&host, "/src/Comp.vue", OWNER_VUE, FileKind::VueSfc);
+
+    arm_force_fenced_serve_flag(&host);
+    let fenced = host.get_component_meta_with_resolution("/src/Comp.vue");
+    disarm_materialize_seam(&host);
+
+    assert!(
+        fenced.is_some(),
+        "the declined publish must still serve the freshly computed \
+         (meta, resolution) pair",
+    );
+    assert!(
+        !published_entry_present(&host, "/src/Comp.vue"),
+        "the with-resolution producer must decline the publish by value \
+         when its traced scope consumed a fenced serve",
+    );
+
+    let recomputed = host.get_component_meta_with_resolution("/src/Comp.vue");
+    assert!(recomputed.is_some(), "quiescent recompute must resolve");
+    assert!(
+        published_entry_present(&host, "/src/Comp.vue"),
+        "a quiescent recompute must publish the final-result entry",
+    );
+}
+
+/// ReturnOnly never publishes — `get_component_meta_via_view` path
+/// (the view-aware `with_fact_tracer` producer publishing through
+/// `publish_component_meta_cache_entry_with_view`). A base
+/// `HostViewRef` keys the same slot as the base path, so the base
+/// probe observes the view-aware publish decision.
+#[test]
+fn fenced_serve_inside_via_view_declines_the_publish() {
+    let host = build_host();
+    upsert(&host, "/src/types.ts", TYPES_TS, FileKind::NonSfc);
+    upsert(&host, "/src/Comp.vue", OWNER_VUE, FileKind::VueSfc);
+
+    let view = crate::session_view::HostViewRef::new(&host);
+    arm_force_fenced_serve_flag(&host);
+    let fenced = host.get_component_meta_via_view("/src/Comp.vue", &view);
+    disarm_materialize_seam(&host);
+
+    assert!(
+        fenced.is_some(),
+        "the declined publish must still serve the freshly computed meta",
+    );
+    assert!(
+        !published_entry_present(&host, "/src/Comp.vue"),
+        "the view-aware producer must decline the publish by value when \
+         its traced scope consumed a fenced serve",
+    );
+
+    let recomputed = host.get_component_meta_via_view("/src/Comp.vue", &view);
+    assert!(recomputed.is_some(), "quiescent recompute must resolve");
+    assert!(
+        published_entry_present(&host, "/src/Comp.vue"),
+        "a quiescent recompute must publish the final-result entry",
+    );
+}
+
+/// Negative control: the seam armed but raising NOTHING must not trip
+/// the consult — no fenced serve is consumed, the publish lands. Proves
+/// the producers consult the fenced-serve flag rather than declining
+/// whenever the seam fires.
+#[test]
+fn unfenced_cold_compute_still_publishes_through_the_seam() {
+    let host = build_host();
+    upsert(&host, "/src/types.ts", TYPES_TS, FileKind::NonSfc);
+    upsert(&host, "/src/Comp.vue", OWNER_VUE, FileKind::VueSfc);
+
+    *host.materialize_seam_hook.lock() = Some(Arc::new(|| {}));
+    let cold = host.get_component_meta("/src/Comp.vue");
+    disarm_materialize_seam(&host);
+
+    assert!(cold.is_some(), "cold compute must resolve");
+    assert!(
+        published_entry_present(&host, "/src/Comp.vue"),
+        "an un-fenced cold compute must publish the final-result entry",
     );
 }

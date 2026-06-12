@@ -91,6 +91,14 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             "no_thread_local_oxc_caches",
             "no_direct_oxc_parser_calls_outside_scheduler_path",
             "recursion_budget_invariant_across_module_boundary",
+            // Unified cold build: `ensure_indexed_ready_serve`'s
+            // materialise closure is the single per-file cold build —
+            // no parallel route-owned artifact system, no in-crate
+            // `parse_and_build_env` second parse. The scanner these
+            // guards share carries its own discriminator self-test.
+            "no_production_route_owned_shallow_system",
+            "no_production_parse_and_build_env_in_session",
+            "session_production_ident_scanner_discriminates",
         ],
     ),
     (
@@ -623,17 +631,19 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             // `resolver_store_view_read()` may never feed it — closing the
             // view+flag divergence the constructor-shape guards missed.
             "cold_seed_currentness_is_intrinsic_to_the_read",
-            // Token-generation completeness seam: every mutation of a
-            // token-folded generation's backing state must advance that
-            // generation. `RouteOwnedShallowDb::artifact_generation` is folded
-            // into `StoreViewValidationToken` (the `route_owned_generation`
-            // dimension) and the view snapshots the DB's `Route` derived
-            // hashes by value, so any method that mutates `self.entries` must
-            // bump — closing the mutate-without-bump soundness class (the
-            // schema-mismatch eviction path that cleared entries without a
-            // bump). Paired with the discriminator self-test.
-            "route_owned_shallow_db_entry_mutations_bump_token_generation",
-            "route_owned_shallow_db_bump_guard_is_discriminating",
+            // Mutate-without-bump completeness seam over the
+            // `project_generation` stamp discipline (the unified-path
+            // successor of the retired route-owned token-generation
+            // guard): every AUTO-DISCOVERED route-resolution mutator
+            // (syn-AST discovery over production source, comment-proof,
+            // with a documented no-bump allowlist) must advance the
+            // stamp the pre-publish fence reads, strictly AFTER the
+            // mutation it announces; plus the live ordering pin on the
+            // `set_exact_resolutions` wrapper and the discovery
+            // discriminator self-test.
+            "route_mutators_bump_project_generation_after_the_mutation",
+            "route_mutators_guard_discriminator_self_test",
+            "set_exact_resolutions_bumps_project_generation_after_the_workspace_mutation",
         ],
     ),
 ];

@@ -1,12 +1,12 @@
 //! `OwnedTypeResolutionContext` — owned, `Send + Sync + 'static` mirror
 //! of `verter_parser::utils::oxc::vue::script::resolve_type::TypeResolutionContext`.
 //!
-//! ## Tier 1A authority (D18 + D45 + D65)
+//! ## Field-by-field mirror contract
 //!
-//! Field-by-field migration from the borrowed
+//! Field-by-field mapping from the borrowed
 //! `TypeResolutionContext<'ctx, 'a>`:
 //!
-//! - `source: &'ctx [u8]` — DROPPED entirely (D65). All identifier
+//! - `source: &'ctx [u8]` — DROPPED entirely. All identifier
 //!   comparisons go through `InternedIdentifierId`. The post-lowering
 //!   pipeline has NO source-reread path; every byte the lowering saw is
 //!   already encoded in the interned tables on `OwnedEvalProgram`.
@@ -19,8 +19,7 @@
 //! - `blocked_types`, `current_surface`, `companion_cache_key` —
 //!   transient lowering-only state, NOT carried into
 //!   `OwnedTypeResolutionContext`. The borrowed `TypeResolutionContext`
-//!   stays around for the lowering call (D45) and these fields live
-//!   there.
+//!   stays around for the lowering call and these fields live there.
 //! - `named_type_cache` — DROPPED. Its replacement is the
 //!   `SemanticGraphStore::HostResolvedNamedTypeKey` identity map, which
 //!   is the single named-type cache going forward.
@@ -28,8 +27,9 @@
 //! The `decl_arena: TypeDeclArena` and `span_arena: SpanArena` payloads
 //! own the type-expression bodies referenced by `TypeAliasDeclId` /
 //! `TypeParameterDeclId` / `TypeExprId`. The
-//! `declaration_fingerprints` table (built at lowering) is consumed by
-//! Tier 1B's TypeHandle resolution (D104).
+//! `declaration_fingerprints` table maps a fingerprint to the owning
+//! decl for `TypeHandle`-style lookups; production does not populate
+//! it yet.
 
 use std::sync::Arc;
 
@@ -66,15 +66,15 @@ pub struct TypeParameterDeclId(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TypeExprId(pub u32);
 
-/// Stable identity over [`DeclId`] for D104 TypeHandle resolution.
+/// Stable identity over [`DeclId`] for TypeHandle resolution.
 /// Computed via `blake3(canonical_id || content_hash || decl_name_bytes
-/// || scope_path_bytes || decl_kind_byte)` — Tier 1B consumes this map.
+/// || scope_path_bytes || decl_kind_byte)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct DeclarationFingerprint(pub [u8; 16]);
 
 impl DeclarationFingerprint {
-    /// Construct from raw 16 bytes. The hashing schema is owned by
-    /// Tier 1B (D104).
+    /// Construct from raw 16 bytes; the caller owns the hashing
+    /// schema.
     #[must_use]
     pub const fn from_bytes(bytes: [u8; 16]) -> Self {
         Self(bytes)
@@ -82,9 +82,9 @@ impl DeclarationFingerprint {
 }
 
 /// Discriminated union over the owned decl-id space — the value side of
-/// `declaration_fingerprints`. Tier 1B's `MetaSession::get_component_meta_type_expansion`
-/// resolves a [`DeclarationFingerprint`] to a `DeclId` and walks the
-/// corresponding arena entry.
+/// `declaration_fingerprints`. A [`DeclarationFingerprint`] resolves to
+/// a `DeclId` whose corresponding arena entry holds the declaration
+/// body.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DeclId {
     Alias(TypeAliasDeclId),
@@ -97,10 +97,11 @@ pub enum DeclId {
 // Owned arena payloads
 // ─────────────────────────────────────────────────────────────────────
 
-/// Owned mirror of the borrowed `TSType<'a>` AST node. Tier 1A
-/// introduces the shell type; Tier 1C-α populates the variants from the
-/// real lowering. The `Send + Sync + 'static` bound holds because every
-/// payload is owned (no `&'a TSType<'a>` escapes into this struct).
+/// Owned mirror of the borrowed `TSType<'a>` AST node. Currently
+/// constructed only by tests; production lowering does not emit owned
+/// type expressions yet. The `Send + Sync + 'static` bound holds
+/// because every payload is owned (no `&'a TSType<'a>` escapes into
+/// this struct).
 #[derive(Debug, Clone)]
 pub enum OwnedTypeExpr {
     /// Named reference (e.g., `Foo` or `Foo<T>`).
@@ -329,9 +330,9 @@ impl TypeDeclArena {
 }
 
 /// Owned span arena. Spans are stored once and indexed via
-/// [`SpanId`]-equivalent keys when the resolver wants to amortize span
-/// storage across many references. Tier 1A keeps this minimal — the
-/// real consumer is Tier 1B (BFS bridge).
+/// [`SpanId`]-equivalent keys when a consumer wants to amortize span
+/// storage across many references. Kept minimal; currently exercised
+/// only by tests.
 #[derive(Debug, Clone, Default)]
 pub struct SpanArena {
     pub spans: Vec<SpanId>,
@@ -349,9 +350,9 @@ impl SpanArena {
 
 /// Owned, `Send + Sync + 'static` mirror of
 /// `verter_parser::utils::oxc::vue::script::resolve_type::TypeResolutionContext`
-/// minus borrowed AST pointers (D18 + D45 + D65). Stored in the
-/// `TypeResolutionContextDb` (introduced empty in 1A; populated in
-/// 1C-α).
+/// minus borrowed AST pointers. Storable in the
+/// `TypeResolutionContextDb`; currently populated only by tests — no
+/// production lowering path writes owned contexts yet.
 ///
 /// **No `source: &'ctx [u8]` field** (D65 — the borrowed form had this
 /// for byte-level identifier comparisons; the owned form uses
@@ -389,15 +390,15 @@ pub struct OwnedTypeResolutionContext {
     pub decl_arena: TypeDeclArena,
     /// Owned span arena.
     pub span_arena: SpanArena,
-    /// Declaration fingerprint table built at lowering time (D104). Tier
-    /// 1B's TypeHandle resolution looks up
-    /// [`DeclarationFingerprint`] -> [`DeclId`] in this map.
+    /// Declaration fingerprint table built at lowering time. Supports
+    /// [`DeclarationFingerprint`] -> [`DeclId`] lookup for TypeHandle
+    /// resolution.
     pub declaration_fingerprints: FxHashMap<DeclarationFingerprint, DeclId>,
 }
 
 impl OwnedTypeResolutionContext {
-    /// Construct an empty context. Used by Tier 1A's empty-DB shape and
-    /// by tests; Tier 1C-α populates the real context from lowering.
+    /// Construct an empty context. Used by tests as a sentinel value;
+    /// production lowering does not build owned contexts yet.
     #[must_use]
     pub fn empty() -> Self {
         Self {

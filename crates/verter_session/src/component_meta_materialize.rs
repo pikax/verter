@@ -1356,11 +1356,46 @@ pub(crate) fn materialize_component_meta_structure(
             // (the singleflight winner's thread).
             let _completeness_scope =
                 crate::request_context::ColdComputeCompletenessScope::enter();
-            let (admission, finalise) =
+            let (admission, finalise, fenced_serve_observed) =
                 crate::fact_signature_helpers::install_fact_tracer(host, compute);
             provenance
                 .materialize_structure_fact_tracer_installs
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            // ReturnOnly never publishes — fenced-serve arm. A compute
+            // whose traced scope consumed a FENCED (ReturnOnly)
+            // IndexedReady serve derived its value from a
+            // served-without-publication artifact while its fact rail
+            // validates against the live view. Convert a Cacheable
+            // outcome to ReturnOnly (value served, entry never
+            // admitted) — same shape as the Overflow arm below.
+            if fenced_serve_observed {
+                return match admission {
+                    crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(entry) => {
+                        let result_is_partial =
+                            crate::cache_runtime::refuse_result_cache_admission_if_partial(
+                                crate::request_context::current_cold_compute_completeness()
+                                    .is_partial(),
+                            );
+                        let _reason_guard = crate::cache_runtime::SetReasonGuard::arm(
+                            if result_is_partial {
+                                crate::cache_runtime::NonAdmissionReason::PartialResult
+                            } else {
+                                crate::cache_runtime::NonAdmissionReason::GenerationSuperseded
+                            },
+                        );
+                        crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly(
+                            crate::semantic_query::CacheRead {
+                                value: entry.outcome,
+                                dep_signature: empty_signature(),
+                                walker_diagnostics: Arc::from([]),
+                                cache_suppress: true,
+                                result_is_partial,
+                            },
+                        )
+                    }
+                    other => other,
+                };
+            }
             match finalise {
                 crate::resolver_core::FactReadSetFinalise::Ok(fact_dep_signature) => {
                     match admission {
@@ -3020,14 +3055,15 @@ export type C<T> = A<T>
         );
     }
 
-    /// Test 5 — project-generation bump invalidates the
-    /// cycle-BFS cache.
+    /// Test 5 — the authority-reset evict wipes the cycle-BFS cache.
     ///
-    /// `bump_project_generation_and_evict` is invoked atomically when
-    /// the host detects tsconfig / SDK / workspace-folder changes. The
-    /// cycle-BFS cache must be among the layers it wipes — entries
-    /// depend on routes / intrinsics that change at the project
-    /// boundary.
+    /// `bump_project_generation_and_evict` is the wide AUTHORITY-RESET
+    /// cascade reserved for content-authority swaps (`set_workspace`,
+    /// `close`); a project-config change (`configure_projects`) is
+    /// stamp-only — retained entries miss by validation instead. The
+    /// cycle-BFS cache must be among the layers the wide evict wipes —
+    /// entries depend on routes / intrinsics that do not survive an
+    /// authority swap.
     #[test]
     fn cycle_bfs_cache_invalidates_on_project_generation_bump() {
         let project = a0_make_project();

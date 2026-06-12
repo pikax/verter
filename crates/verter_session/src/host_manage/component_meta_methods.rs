@@ -559,7 +559,7 @@ impl VerterHost {
     /// rooted on `overlay`, so the resolver-tier reads inside
     /// [`Self::compute_component_meta_state_inner`] observe canonicals
     /// promoted by mid-request `ensure_loaded` /
-    /// `ensure_indexed_ready` through the shared overlay.
+    /// `ensure_indexed_ready_serve` through the shared overlay.
     ///
     /// Used by
     /// [`SessionRequestHost::compute_component_meta`](crate::host_manage::component_meta_request_impl::SessionRequestHost).
@@ -751,14 +751,15 @@ impl VerterHost {
         // `FileArtifactStore`-scan hash can never be paired with the
         // fresh source. Overlay detection uses the **strict**
         // `overlay_content_hash_for` (mirroring
-        // `overlay_priority::ensure_indexed_ready_with_view`): a
+        // `overlay_priority::ensure_indexed_ready_serve_with_view`): a
         // base-only view, or an overlay view for which this canonical
         // is unmasked, reports `None` here and correctly delegates to
         // the base capture path — the overlay-materialiser snapshot
         // path is reserved for genuine overlays. The base host's
         // scheduler stays untouched (R17).
         let overlay_facts = if view.overlay_content_hash_for(canonical).is_some() {
-            self.materialize_overlay_indexed_ready_with_view(canonical, view)
+            self.materialize_overlay_indexed_ready_serve_with_view(canonical, view)
+                .map(|serve| serve.indexed)
         } else {
             None
         };
@@ -772,7 +773,31 @@ impl VerterHost {
             self.resolve_snapshot_imports(canonical, &mut snapshot);
             self.enrich_destructured_bindings(&mut snapshot);
             if self.config.effective_scope().needs_template_analysis() {
-                self.compute_template_analysis_if_missing(canonical, &mut snapshot);
+                // Template inputs from the overlay artifact's OWN
+                // source + SFC parse — the same content the snapshot
+                // above was built from, so the template derives from
+                // one coherent overlay read (never base scheduler
+                // bytes converted with the overlay snapshot's
+                // imports/bindings). `store_published = false` is the
+                // conversion-context attestation: an overlay/session
+                // conversion serves this caller only and never
+                // populates the base `derived_raw_cache` slot (overlay
+                // results never populate base caches; R17 — the base
+                // host's scheduler and caches stay untouched).
+                let template_inputs = crate::types::VueTemplateInputs {
+                    source: Arc::clone(&facts.raw_source),
+                    cached_parse: facts.cached_parse.clone(),
+                    store_published: false,
+                    // Overlay artifact read — no scheduler node
+                    // generation to attest (and the persist is
+                    // declined above regardless).
+                    source_generation: None,
+                };
+                self.compute_template_analysis_if_missing(
+                    canonical,
+                    &mut snapshot,
+                    template_inputs,
+                );
             }
             let whole_hash = facts.whole_hash;
             let store_read_ms = store_read_started
@@ -2984,36 +3009,14 @@ impl VerterHost {
                 return None;
             }
 
-            // Route-owned cache fast path for imported-only files: if we
-            // already built a raw snapshot via the route-owned shallow state
-            // pipeline, reuse it here instead of rebuilding from the
-            // scheduler. This is gated on module_facts not holding it (= fully lazy).
-            if self
-                .project_type_store
-                .indexed()
-                .get_any(canonical)
-                .is_none()
-            {
-                if let Some(raw_snapshot) = self.cached_route_owned_snapshot(canonical) {
-                    self.provenance
-                        .route_owned_snapshot_cache_hits
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    let mut snapshot = (*raw_snapshot).clone();
-                    self.resolve_snapshot_imports(canonical, &mut snapshot);
-                    self.enrich_destructured_bindings(&mut snapshot);
-                    if self.config.effective_scope().needs_template_analysis() {
-                        self.compute_template_analysis_if_missing(canonical, &mut snapshot);
-                    }
-                    return Some(snapshot);
-                }
-            }
-
             // Scheduler-first path for owner files: the scheduler has the
             // latest analysis after recompile, including updated import
             // routes for newly-added dependencies. FileArtifactStore may hold
             // stale import routes for owner files whose deps changed after
             // materialization.
-            if let Some(snapshot) = self.build_snapshot_from_scheduler(canonical) {
+            if let Some((snapshot, template_inputs)) =
+                self.build_snapshot_from_scheduler_with_template_inputs(canonical)
+            {
                 let whole_hash = self
                     .current_or_read_whole_hash(canonical)
                     .unwrap_or_default();
@@ -3024,7 +3027,17 @@ impl VerterHost {
                 self.resolve_snapshot_imports(canonical, &mut snapshot);
                 self.enrich_destructured_bindings(&mut snapshot);
                 if self.config.effective_scope().needs_template_analysis() {
-                    self.compute_template_analysis_if_missing(canonical, &mut snapshot);
+                    // Thread the inputs joined at the snapshot's own
+                    // generation — never a second independent scheduler
+                    // consult. A torn join (the source moved between
+                    // the analysis capture and the source read) carries
+                    // `None` inputs: the template stays absent for this
+                    // caller instead of deriving from bytes the
+                    // snapshot was not built from and persisting them
+                    // into the rail-less `derived_raw_cache` slot.
+                    if let Some(inputs) = template_inputs {
+                        self.compute_template_analysis_if_missing(canonical, &mut snapshot, inputs);
+                    }
                 }
                 component_meta_trace_custom!(
                     "get_raw_analysis_snapshot_result",
@@ -3041,79 +3054,39 @@ impl VerterHost {
             }
         }
 
-        if self
-            .project_type_store
-            .indexed()
-            .get_any(canonical)
-            .is_none()
-        {
-            if let Some(raw_snapshot) = self.cached_route_owned_snapshot(canonical) {
-                self.provenance
-                    .route_owned_snapshot_cache_hits
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let mut snapshot = (*raw_snapshot).clone();
-                self.resolve_snapshot_imports(canonical, &mut snapshot);
-                self.enrich_destructured_bindings(&mut snapshot);
-                if self.config.effective_scope().needs_template_analysis() {
-                    self.compute_template_analysis_if_missing(canonical, &mut snapshot);
-                }
-                component_meta_trace_custom!(
-                    "get_raw_analysis_snapshot_result",
-                    format!(
-                        "owner={} imports={} macros={} bindings={} has_template={} source=route_owned_snapshot_cache",
-                        canonical,
-                        snapshot.imports.len(),
-                        snapshot.macros.len(),
-                        snapshot.bindings.len(),
-                        snapshot.template.is_some(),
-                    ),
-                );
-                return Some(snapshot);
-            }
-
-            if let Some((raw_source, cached_parse, whole_hash)) =
-                self.cached_route_owned_eval_state(canonical)
-            {
-                if !self.store_view_allows_current_whole_hash(canonical, whole_hash) {
-                    return None;
-                }
-                if cached_parse.is_some() {
-                    self.provenance
-                        .route_owned_snapshot_cached_parse_hits
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                }
-                let mut snapshot = self.build_snapshot_from_source_state(
-                    canonical,
-                    &raw_source,
-                    cached_parse.as_deref(),
-                );
-                self.resolve_snapshot_imports(canonical, &mut snapshot);
-                self.enrich_destructured_bindings(&mut snapshot);
-                if self.config.effective_scope().needs_template_analysis() {
-                    self.compute_template_analysis_if_missing(canonical, &mut snapshot);
-                }
-                component_meta_trace_custom!(
-                    "get_raw_analysis_snapshot_result",
-                    format!(
-                        "owner={} imports={} macros={} bindings={} has_template={} source=route_owned_cache",
-                        canonical,
-                        snapshot.imports.len(),
-                        snapshot.macros.len(),
-                        snapshot.bindings.len(),
-                        snapshot.template.is_some(),
-                    ),
-                );
-                return Some(snapshot);
-            }
-        }
-
         // FileArtifactStore path: covers imported deps and non-scheduler files.
-        let facts = self.ensure_indexed_ready(canonical)?;
+        let serve = self.ensure_indexed_ready_serve(canonical)?;
+        let facts = serve.indexed;
         let mut snapshot = (*facts.snapshot).clone();
         self.resolve_snapshot_imports(canonical, &mut snapshot);
         self.enrich_destructured_bindings(&mut snapshot);
         if self.config.effective_scope().needs_template_analysis() {
-            self.compute_template_analysis_if_missing(canonical, &mut snapshot);
+            // Thread the artifact's own base-authoritative source +
+            // SFC parse: the snapshot above came from this artifact,
+            // so the template derives from the SAME content — and an
+            // artifact-only canonical (scheduler-missed) computes with
+            // zero extra reads instead of losing the template. The
+            // serve's publication status flows with the inputs; the
+            // computed template serves THIS caller only — with no
+            // scheduler node generation to attest, the
+            // `derived_raw_cache` persist declines (fenced or not).
+            let template_inputs =
+                canonical
+                    .ends_with(".vue")
+                    .then(|| crate::types::VueTemplateInputs {
+                        source: Arc::clone(&facts.raw_source),
+                        cached_parse: facts.cached_parse.clone(),
+                        store_published: serve.store_published,
+                        // Artifact-serve read — no scheduler node
+                        // generation to attest; the template serves
+                        // this caller, the persist declines (an entry
+                        // without a rail cannot be validated by the
+                        // scheduler-backed readers).
+                        source_generation: None,
+                    });
+            if let Some(inputs) = template_inputs {
+                self.compute_template_analysis_if_missing(canonical, &mut snapshot, inputs);
+            }
         }
         component_meta_trace_custom!(
             "get_raw_analysis_snapshot_result",
@@ -3316,9 +3289,8 @@ impl VerterHost {
         // Drop the owner's own non-round-tripping `DerivedFactHash{Route}`
         // fact before admission, mirroring the `ComponentMetaResultDb`
         // publish path (see `component_meta_entry::strip_owner_route_fact`).
-        // The owner Route hash is dual-sourced on
-        // `HostStoreView::derived_hashes` (indexed surface vs
-        // `route_owned_shallow`), so it does not round-trip warm
+        // The owner Route hash can change as the owner's own indexed
+        // surface refreshes mid-request, so it does not round-trip warm
         // validation; under concurrency a straggler false-misses on it and
         // re-leads as a second cold `Flight::Leader`. The owner
         // `FileWholeHash` fact (retained) already covers owner-content
@@ -3491,6 +3463,14 @@ impl VerterHost {
         // cached_meta_payload lives on DerivedRawState (D48 split).
         let entry = self.derived_raw_cache().get(canonical)?;
         let cached = entry.cached_meta_payload.as_ref()?;
+        // Value-side generation backstop (the typed result caches'
+        // `validated_at_generation` discipline): an under-recorded
+        // signature — the empty signature validates trivially — must not
+        // keep validating across project-shape mutations, so a warm hit
+        // demands the LIVE project generation.
+        if cached.validated_at_generation != self.project_type_store.current_project_generation() {
+            return None;
+        }
         // R3/R26/R28 fast-path: dispatch through
         // `StoreView::validates_fact_signature` so per-domain validators
         // can short-circuit on the first mismatch. Empty signatures
@@ -3502,11 +3482,22 @@ impl VerterHost {
     }
 
     /// Store an encoded payload in the per-file cache.
+    ///
+    /// `validated_at_generation` is the FLIGHT-CAPTURED project
+    /// generation — the value snapshotted when the producing view was
+    /// taken (the `BatchFixedView`'s captured token), NOT a live
+    /// re-read. Reading `current_project_generation()` here would let a
+    /// project bump landing in the admission-fence→store window stamp a
+    /// payload computed under the OLD graph with the NEW generation —
+    /// permanently defeating the generation backstop for exactly the
+    /// under-recorded/empty-signature case it exists for (the same
+    /// flight-captured-stamp discipline as the `IndexedReady` publish).
     pub(crate) fn store_meta_payload(
         &self,
         canonical: &str,
         fact_versions: &[crate::resolver_core::FactVersionRef],
         payload: Vec<u8>,
+        validated_at_generation: u64,
     ) {
         // R3/R26/R28: stash the observed fact signature as an
         // `Arc<[FactVersionRef]>` so warm-hit validation clones a
@@ -3520,6 +3511,7 @@ impl VerterHost {
         let cached = crate::types::CachedMetaPayload {
             fact_versions,
             payload,
+            validated_at_generation,
         };
 
         // cached_meta_payload lives on DerivedRawState (D48 split).
@@ -3613,44 +3605,36 @@ impl VerterHost {
                 self.current_or_read_whole_hash(canonical_id)
             }
             crate::resolver_core::DerivedFactKind::Route => {
-                // Read the cached `route_hash` from IndexedReady when
-                // available — symmetric to `import_route_hash`. Falls
-                // back to recomputing via `hash_route_surface` only
-                // when the canonical isn't yet indexed (read-only:
-                // this code path must NOT call ensure_indexed because
-                // fact validation is side-effect-free).
+                // Fact capture is OBSERVE-ONLY: it must never
+                // materialise, refresh, or publish — a capture that
+                // cold-builds breadth-walks every unrelated import of
+                // the owner just to sign a result. So this reads through
+                // `observe_content_pinned_indexed` (content-pinned, NO
+                // re-index arm) and DECLINES on anything it cannot
+                // observe as current:
                 //
-                // The lookup is content-pinned. This is a
-                // fact-validation oracle: a permissive `get_any` here
-                // would let a stale `IndexedReady` (one whose content
-                // is no longer current — possible once eager
-                // `evict_canonical` is retired) surface its old
-                // `route_hash` as the "current" Route fact, confirming
-                // a stale dependent cache entry as valid.
-                // `current_content_pinned_indexed` returns `None` for
-                // a stale candidate, so the recompute path below
-                // produces the truly-current route surface hash.
-                if let Some(indexed) = self.current_content_pinned_indexed(canonical_id) {
-                    if self.route_surface_is_edge_current(
-                        &indexed.shallow_state,
-                        indexed.edge_generation,
-                    ) {
-                        if let Some(cached) = indexed.route_hash {
-                            return Some(cached);
-                        }
-                    } else {
-                        // Edge-stale indexed surface: its cached `route_hash`
-                        // encodes stale wildcard `export *` edges. Do NOT
-                        // reproduce it — return `None` so a dependent cache
-                        // entry rooted on the stale `Route` fact fails warm
-                        // validation and recomputes against the live file set.
-                        return None;
-                    }
+                // - NEVER-MATERIALISED canonical → `None`. The
+                //   `FileWholeHash` fact (more sensitive on the owner's
+                //   own content: any content change invalidates) is
+                //   always captured alongside and covers invalidation
+                //   until the canonical's first traversal materialises
+                //   its route surface.
+                // - STALE surface (edge generation / project stamp
+                //   moved, or only a non-current content candidate
+                //   exists) → `None`, so a dependent entry rooted on the
+                //   stale `Route` fact fails warm validation and
+                //   recomputes against the live state — without this
+                //   read rebuilding anything itself.
+                //
+                // The lookup is content-pinned: a permissive `get_any`
+                // would let a stale `IndexedReady` surface its old
+                // `route_hash` as the "current" Route fact, confirming a
+                // stale dependent cache entry as valid.
+                let indexed = self.observe_content_pinned_indexed(canonical_id)?;
+                if !self.indexed_surface_is_current(canonical_id, &indexed) {
+                    return None;
                 }
-                let state = self.shallow_file_state(canonical_id)?;
-                state
-                    .has_resolvable_surface()
-                    .then(|| crate::resolver_store::hash_route_surface(&state))
+                indexed.route_hash
             }
             crate::resolver_core::DerivedFactKind::ImportRoute => {
                 // Read-only: ImportRoute fact capture must not promote a

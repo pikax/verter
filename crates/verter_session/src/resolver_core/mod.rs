@@ -151,7 +151,7 @@ pub use surface_projector::{project_macro_surfaces, ProjectedMacroSurfaces, Reso
 /// never wrongly coalesce. Test / permissive stubs leave it `0` (their
 /// views are validation-trivial).
 ///
-/// The additive `artifact_generation` / `route_owned_generation` /
+/// The additive `artifact_generation` /
 /// `load_generation` are DELIBERATELY EXCLUDED from the fold: a cold
 /// compute advances those generations as its OWN work (publishing
 /// artifacts, loading dependencies), so two concurrent identical cold
@@ -176,7 +176,7 @@ pub struct StoreViewCompatToken {
     /// project-generation, env-hash, project-identity, overlay). `0` for
     /// validation-trivial stub views. Folds every external validity-
     /// affecting dimension that `epoch` alone does not cover — and excludes
-    /// the additive artifact / route-owned / load generations a cold
+    /// the additive artifact / load generations a cold
     /// compute advances as its own work — so the singleflight / stability
     /// coalescing lane is the SAME oracle the promotion fence applies.
     pub validity_fingerprint: u64,
@@ -285,27 +285,21 @@ pub trait StoreView {
         sig.iter().all(|f| self.validates(f))
     }
 
-    /// Promote a route-owned-shallow canonical's facts into the
+    /// Promote a lazily-materialised canonical's route facts into the
     /// request-scoped completion overlay.
     ///
-    /// Called by the cold prepared-decl-bundle materialiser that
-    /// publishes route-owned-only canonicals (declaration files —
-    /// `.d.ts`, `.d.mts`, `.d.cts` — for which `ensure_indexed_ready`
-    /// does not produce an artifact; the route-owned-shallow path
-    /// publishes a bundle keyed against the route-owned `whole_hash`
-    /// and the live-generation `import_route_hash`). Without this
-    /// promotion the request-entry [`crate::resolver_store::HostStoreView`]
-    /// snapshot misses the just-published canonical's `Route` /
-    /// `ImportRoute` derived-fact entries (the snapshot is built ONCE
-    /// at request entry from `snapshot_route_owned_shallow_cache_entries`
-    /// — entries published after that snapshot lookup are invisible to
-    /// the view), and every subsequent warm-validation read of the
-    /// bundle's stored derived-fact hashes routes through the base
-    /// view's untracked-canonical reject and triggers a fresh cold
-    /// rebuild. With promotion the next read sees the route-owned
-    /// canonical as tracked, the warm validation matches, and the
-    /// bundle's cold/warm ratio collapses from O(N) cold rebuilds to
-    /// the expected 1:N (one cold + N-1 warm).
+    /// Called by the cold prepared-decl-bundle materialiser for
+    /// declaration files (`.d.ts` / `.d.mts` / `.d.cts`) whose
+    /// `IndexedReady` materialised AFTER the request-entry
+    /// [`crate::resolver_store::HostStoreView`] snapshot was built —
+    /// entries published after that snapshot are invisible to the
+    /// view, so every subsequent warm-validation read of the bundle's
+    /// stored derived-fact hashes would route through the base view's
+    /// untracked-canonical reject and trigger a fresh cold rebuild.
+    /// With promotion the next read sees the canonical as tracked, the
+    /// warm validation matches, and the bundle's cold/warm ratio
+    /// collapses from O(N) cold rebuilds to the expected 1:N (one cold
+    /// + N-1 warm).
     ///
     /// The producer-side caller is responsible for the epoch guard
     /// (skip the call if the host's `current_store_view_epoch` no
@@ -329,7 +323,7 @@ pub trait StoreView {
     /// [`crate::resolver_store::HostStoreView`], test-only
     /// [`PermissiveStoreView`], etc.) inherit "no overlay" semantics
     /// — they have no per-request append-only side maps to mutate.
-    fn promote_route_owned_completion(
+    fn promote_route_completion(
         &self,
         _canonical: &str,
         _whole_hash: crate::types::Hash16,
@@ -391,19 +385,14 @@ impl<T: StoreView + ?Sized> StoreView for &T {
         (**self).validates_fact_signature(sig)
     }
     #[inline]
-    fn promote_route_owned_completion(
+    fn promote_route_completion(
         &self,
         canonical: &str,
         whole_hash: crate::types::Hash16,
         route_hash: Option<crate::types::Hash16>,
         import_route_hash: Option<crate::types::Hash16>,
     ) {
-        (**self).promote_route_owned_completion(
-            canonical,
-            whole_hash,
-            route_hash,
-            import_route_hash,
-        )
+        (**self).promote_route_completion(canonical, whole_hash, route_hash, import_route_hash)
     }
 }
 
@@ -768,7 +757,7 @@ where
         // A non-current snapshot must not only skip the warm probe — it
         // must also stay OUT of the result-sharing singleflight. The lane
         // key is `(cache_key, compat_token)`, and `compat_token`
-        // deliberately excludes the additive artifact / route-owned / load
+        // deliberately excludes the additive artifact / load
         // generations (so two identical cold computes coalesce). A snapshot
         // can therefore be non-current — the manager could not prove this
         // attempt's view coherent — while its `compat_token` still equals a
@@ -1622,13 +1611,91 @@ impl std::fmt::Debug for SeamHookSlot {
     }
 }
 
+/// The singleflight lane map plus the per-key live-token index, both
+/// guarded by ONE mutex so they can never diverge.
+///
+/// `live_tokens` is the fork-telemetry source: a multiset of the tokens
+/// whose lane for a key is LIVE (`Pending` / `Running`). It is
+/// maintained at the lane transitions (insert, terminal publish, abort,
+/// reap) so the claim-time "is another token's lane in flight for this
+/// key?" check is an O(1) index read instead of an O(#lanes) scan that
+/// acquired every lane's inner mutex under the map lock. Lanes that
+/// reach a terminal NON-LIVE state are unindexed in the same critical
+/// section that publishes the terminal: a retained `Done` at its
+/// publish, a non-retained `Done` and an `Aborted` lane at their
+/// publish+remove, and a never-claimed `Pending` lane at its reap.
+/// `FlightState::live_indexed` makes the unindex exactly-once.
+#[derive(Debug)]
+struct FlightTable<K, V, E>
+where
+    K: Eq + Hash,
+{
+    #[allow(clippy::type_complexity)]
+    lanes: FxHashMap<(K, StoreViewCompatToken), Arc<FlightState<V, E>>>,
+    live_tokens: FxHashMap<K, smallvec::SmallVec<[StoreViewCompatToken; 2]>>,
+}
+
+impl<K, V, E> Default for FlightTable<K, V, E>
+where
+    K: Eq + Hash,
+{
+    fn default() -> Self {
+        Self {
+            lanes: FxHashMap::default(),
+            live_tokens: FxHashMap::default(),
+        }
+    }
+}
+
+impl<K, V, E> FlightTable<K, V, E>
+where
+    K: Eq + Hash + Clone,
+{
+    /// Index a freshly-inserted LIVE (`Pending` / `Running`) lane.
+    /// Caller holds the table mutex.
+    fn mark_live(&mut self, key: &K, token: StoreViewCompatToken, state: &FlightState<V, E>) {
+        state
+            .live_indexed
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.live_tokens.entry(key.clone()).or_default().push(token);
+    }
+
+    /// Unindex a lane that is leaving the LIVE set (terminal publish,
+    /// abort, or reap of a never-claimed `Pending` lane). Exactly-once
+    /// per lane via the `live_indexed` flag, so a path that both
+    /// publishes and later reaps the same lane removes one token
+    /// occurrence, not two. Caller holds the table mutex.
+    fn clear_live(&mut self, key: &K, token: StoreViewCompatToken, state: &FlightState<V, E>) {
+        if !state
+            .live_indexed
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
+        {
+            return;
+        }
+        if let Some(tokens) = self.live_tokens.get_mut(key) {
+            if let Some(pos) = tokens.iter().position(|t| *t == token) {
+                tokens.swap_remove(pos);
+            }
+            if tokens.is_empty() {
+                self.live_tokens.remove(key);
+            }
+        }
+    }
+
+    /// Fork telemetry: is another token's lane LIVE for this key?
+    fn has_other_live_token(&self, key: &K, token: StoreViewCompatToken) -> bool {
+        self.live_tokens
+            .get(key)
+            .is_some_and(|tokens| tokens.iter().any(|t| *t != token))
+    }
+}
+
 #[derive(Debug)]
 pub struct SingleflightGroup<K, V, E>
 where
     K: Eq + Hash,
 {
-    #[allow(clippy::type_complexity)]
-    flights: Mutex<FxHashMap<(K, StoreViewCompatToken), Arc<FlightState<V, E>>>>,
+    flights: Mutex<FlightTable<K, V, E>>,
     /// **Test-only.** A rendezvous hook fired on the LEADER thread inside the
     /// NON-RETAINED (`keep == false`) terminal, strictly between the `Done`
     /// publish and the lane removal, WHILE the `flights` lock is held. Tests
@@ -1669,6 +1736,12 @@ struct FlightState<V, E> {
     /// "non-cacheable / empty-fact results are not persisted" contract
     /// the validated caches own).
     pins: std::sync::atomic::AtomicUsize,
+    /// Whether this lane currently holds an occurrence in the group's
+    /// per-key [`FlightTable::live_tokens`] fork-telemetry index. Set
+    /// at lane insert, cleared exactly once when the lane leaves the
+    /// LIVE (`Pending` / `Running`) set. Mutated ONLY under the
+    /// `flights` table lock (`Relaxed` suffices — the lock orders it).
+    live_indexed: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Debug, Clone)]
@@ -1772,11 +1845,13 @@ where
         self.state
             .pins
             .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        flights.clear_live(&self.lane_key.0, self.lane_key.1, self.state);
         if flights
+            .lanes
             .get(self.lane_key)
             .is_some_and(|existing| Arc::ptr_eq(existing, self.state))
         {
-            flights.remove(self.lane_key);
+            flights.lanes.remove(self.lane_key);
         }
     }
 }
@@ -1787,7 +1862,7 @@ where
 {
     fn default() -> Self {
         Self {
-            flights: Mutex::new(FxHashMap::default()),
+            flights: Mutex::new(FlightTable::default()),
             #[cfg(test)]
             non_retained_seam_hook: SeamHookSlot::default(),
         }
@@ -1814,7 +1889,7 @@ where
         let lane_key = (key, token);
         let state = {
             let mut flights = self.flights.lock();
-            if let Some(existing) = flights.get(&lane_key).cloned() {
+            if let Some(existing) = flights.lanes.get(&lane_key).cloned() {
                 existing
                     .pins
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1824,8 +1899,10 @@ where
                     inner: Mutex::new(FlightInner::Pending),
                     ready: Condvar::new(),
                     pins: std::sync::atomic::AtomicUsize::new(1),
+                    live_indexed: std::sync::atomic::AtomicBool::new(false),
                 });
-                flights.insert(lane_key.clone(), state.clone());
+                flights.lanes.insert(lane_key.clone(), state.clone());
+                flights.mark_live(&lane_key.0, lane_key.1, &state);
                 state
             }
         };
@@ -1855,9 +1932,14 @@ where
             .fetch_sub(1, std::sync::atomic::Ordering::Relaxed)
             - 1;
         if remaining == 0 {
-            if let Some(existing) = flights.get(lane_key) {
+            if let Some(existing) = flights.lanes.get(lane_key) {
                 if Arc::ptr_eq(existing, state) {
-                    flights.remove(lane_key);
+                    flights.lanes.remove(lane_key);
+                    // A never-claimed `Pending` lane reaped here is
+                    // still live-indexed (no terminal ever published);
+                    // unindex it. A retained-`Done` lane was already
+                    // unindexed at its publish (exactly-once flag).
+                    flights.clear_live(&lane_key.0, lane_key.1, state);
                 }
             }
         }
@@ -1936,12 +2018,11 @@ where
             // it.
             let (state, leader, forked_lane) = {
                 let mut flights = self.flights.lock();
-                let forked_lane = flights.iter().any(|((existing_key, existing_token), s)| {
-                    existing_key == &key
-                        && *existing_token != token
-                        && !matches!(&*s.inner.lock(), FlightInner::Done(_))
-                });
-                if let Some(existing) = flights.get(&lane_key).cloned() {
+                // Fork telemetry: O(1) read of the per-key live-token
+                // index (maintained at lane transitions) — true when
+                // another token's lane is in flight for this key.
+                let forked_lane = flights.has_other_live_token(&key, token);
+                if let Some(existing) = flights.lanes.get(&lane_key).cloned() {
                     existing
                         .pins
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1965,8 +2046,10 @@ where
                         }),
                         ready: Condvar::new(),
                         pins: std::sync::atomic::AtomicUsize::new(1),
+                        live_indexed: std::sync::atomic::AtomicBool::new(false),
                     });
-                    flights.insert(lane_key.clone(), state.clone());
+                    flights.lanes.insert(lane_key.clone(), state.clone());
+                    flights.mark_live(&lane_key.0, lane_key.1, &state);
                     (state, true, forked_lane)
                 }
             };
@@ -2011,10 +2094,18 @@ where
                     // released, so a burst member still mid-claim joins it
                     // instead of finding a vacant lane. New claimants joining
                     // a STABLE `Done` is correct and is the whole point.
+                    // The publish runs under the `flights` lock (order
+                    // `flights` → `inner`, as everywhere) so the lane
+                    // leaves the live-token fork-telemetry index in the
+                    // same critical section that makes it `Done`.
                     {
-                        let mut inner = state.inner.lock();
-                        *inner = FlightInner::Done(result.clone());
-                        state.ready.notify_all();
+                        let mut flights = self.flights.lock();
+                        {
+                            let mut inner = state.inner.lock();
+                            *inner = FlightInner::Done(result.clone());
+                            state.ready.notify_all();
+                        }
+                        flights.clear_live(&lane_key.0, lane_key.1, &state);
                     }
                     self.unpin(&lane_key, &state);
                 } else {
@@ -2054,6 +2145,7 @@ where
                     state
                         .pins
                         .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                    flights.clear_live(&lane_key.0, lane_key.1, &state);
                     // Test-only rendezvous: fire the seam hook AFTER the
                     // publish and BEFORE the removal, while `flights` is still
                     // held — the window a test probes to prove publish+remove
@@ -2064,10 +2156,11 @@ where
                         hook();
                     }
                     if flights
+                        .lanes
                         .get(&lane_key)
                         .is_some_and(|existing| Arc::ptr_eq(existing, &state))
                     {
-                        flights.remove(&lane_key);
+                        flights.lanes.remove(&lane_key);
                     }
                 }
                 return result.map(|value| SingleflightRunResult {
@@ -2129,7 +2222,9 @@ where
     }
 
     pub fn clear(&self) {
-        self.flights.lock().clear();
+        let mut flights = self.flights.lock();
+        flights.lanes.clear();
+        flights.live_tokens.clear();
     }
 
     /// **Test-only.** Strong-reference count of the in-flight
@@ -2161,6 +2256,7 @@ where
         let lane_key = (key.clone(), token);
         self.flights
             .lock()
+            .lanes
             .get(&lane_key)
             .map(Arc::strong_count)
             .unwrap_or(0)

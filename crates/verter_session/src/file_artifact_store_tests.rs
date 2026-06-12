@@ -113,8 +113,8 @@ fn remove_canonical_drops_every_version() {
 fn get_artifacts_any_returns_some_entry_for_canonical() {
     let store = FileArtifactStore::new();
     // `get_artifacts_any` is a base canonical-wide scan — it surfaces
-    // only `legacy`-key (base) artifacts, never overlay-scoped ones.
-    let key = FileArtifactKey::legacy(Arc::from("/a.ts"), [9u8; 16]);
+    // only base-key artifacts, never overlay-scoped ones.
+    let key = FileArtifactKey::base(Arc::from("/a.ts"), [9u8; 16]);
     store.insert_artifacts(key, synth_artifacts(0xaa));
     assert!(store.get_artifacts_any("/a.ts").is_some());
     assert!(store.get_artifacts_any("/nonexistent.ts").is_none());
@@ -150,7 +150,7 @@ fn augmentation_index_round_trip() {
     };
     let set = Arc::new(AugmenterSet {
         entries: smallvec![AugmenterEntry {
-            artifact_key: FileArtifactKey::legacy(Arc::from("/aug.ts"), [9u8; 16]),
+            artifact_key: FileArtifactKey::base(Arc::from("/aug.ts"), [9u8; 16]),
             parse_stable_hash: [3u8; 16],
         }],
         fingerprint: [4u8; 16],
@@ -228,7 +228,7 @@ fn legacy_remove_drops_entry() {
 /// Stable non-zero overlay discriminator for the isolation tests.
 /// Mirrors the `parse_env_hash` shape `FileArtifactKey::overlay_scoped`
 /// builds from a session view's overlay-set fingerprint — non-zero so
-/// it can never alias [`super::LEGACY_PARSE_ENV_HASH`].
+/// it can never alias [`super::BASE_PARSE_ENV_HASH`].
 fn overlay_discriminator_for_test() -> Hash16 {
     [
         b'v', b'o', b'v', b'l', b'-', b'a', b'r', b't', 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
@@ -240,14 +240,14 @@ fn overlay_discriminator_for_test() -> Hash16 {
 fn base_canonical_wide_scans_do_not_surface_overlay_only_artifact() {
     // Discrimination property: a session installs an overlay for
     // canonical X and the overlay artifact is published under its
-    // `overlay_scoped` key — and NO base (`legacy`-key) artifact
+    // `overlay_scoped` key — and NO base-key artifact
     // exists for X. A *base* scan for X must therefore return `None`
     // (a base reader sees no base artifact), NEVER the overlay-scoped
     // artifact.
     //
     // Discrimination: a scan that matched `canonical` only would surface
     // the overlay-scoped entry — the sole entry for X — to the base reader.
-    // The base canonical-wide scans filter to `legacy` keys, so they
+    // The base canonical-wide scans filter to base keys, so they
     // return `None` / omit X and never leak the overlay artifact to a base
     // reader.
     let store = FileArtifactStore::new();
@@ -298,12 +298,12 @@ fn base_canonical_wide_scans_return_base_artifact_when_base_and_overlay_coexist(
     //
     // Discrimination: a scan that matched `canonical` only would let
     // DashMap iteration order decide which of the two entries is surfaced
-    // — the overlay artifact could win. The scan filters to the `legacy`
+    // — the overlay artifact could win. The scan filters to the base
     // key and deterministically returns the base artifact.
     let store = FileArtifactStore::new();
     let content_hash = [0x77u8; 16];
     let base_indexed = synth_indexed(0xb0);
-    let base_key = FileArtifactKey::legacy(Arc::from("/shared.ts"), content_hash);
+    let base_key = FileArtifactKey::base(Arc::from("/shared.ts"), content_hash);
     store.insert_artifacts(
         base_key,
         Arc::new(FileArtifacts::with_indexed(Arc::clone(&base_indexed))),
@@ -402,7 +402,7 @@ fn remove_canonical_drains_overlay_scoped_keys() {
     // is a lifecycle scan, NOT a base-read scan: it stays unfiltered.
     let store = FileArtifactStore::new();
     let content_hash = [0x9bu8; 16];
-    let base_key = FileArtifactKey::legacy(Arc::from("/evict-me.ts"), content_hash);
+    let base_key = FileArtifactKey::base(Arc::from("/evict-me.ts"), content_hash);
     let overlay_key = FileArtifactKey::overlay_scoped(
         Arc::from("/evict-me.ts"),
         content_hash,
@@ -438,7 +438,7 @@ fn legacy_remove_drains_overlay_scoped_keys() {
     // lifecycle scan and MUST drain overlay-scoped keys too.
     let store = FileArtifactStore::new();
     let content_hash = [0xa5u8; 16];
-    let base_key = FileArtifactKey::legacy(Arc::from("/drop-me.ts"), content_hash);
+    let base_key = FileArtifactKey::base(Arc::from("/drop-me.ts"), content_hash);
     let overlay_key = FileArtifactKey::overlay_scoped(
         Arc::from("/drop-me.ts"),
         content_hash,
@@ -469,14 +469,14 @@ fn legacy_remove_drains_overlay_scoped_keys() {
 // bumped the generation unconditionally.
 
 #[test]
-fn artifact_generation_does_not_bump_on_noop_replace_of_legacy_key() {
+fn artifact_generation_does_not_bump_on_noop_replace_of_base_key() {
     // SAFETY ARM B (no over-bump): re-inserting byte-identical content under
     // the SAME content-addressed key is a no-op for every base snapshot
     // dimension, so the base-folded generation MUST stay put. This
     // discriminates against an implementation that bumped unconditionally
     // on the replace.
     let store = FileArtifactStore::new();
-    let key = FileArtifactKey::legacy(Arc::from("/noop.ts"), [0x42u8; 16]);
+    let key = FileArtifactKey::base(Arc::from("/noop.ts"), [0x42u8; 16]);
     store.insert_artifacts(key.clone(), synth_artifacts(0x42));
     let after_first = store.artifact_generation();
     // Distinct `Arc`, identical content (same whole_hash / surface / facts).
@@ -490,13 +490,13 @@ fn artifact_generation_does_not_bump_on_noop_replace_of_legacy_key() {
 }
 
 #[test]
-fn artifact_generation_bumps_on_base_visible_change_of_legacy_key() {
+fn artifact_generation_bumps_on_base_visible_change_of_base_key() {
     // SOUNDNESS ARM A (no under-bump — the mandatory arm): replacing a
-    // legacy key's value with one whose whole_hash (a base-visible snapshot
+    // base key's value with one whose whole_hash (a base-visible snapshot
     // dimension) differs MUST advance the generation, or a manager-cached
     // base view would go stale and warm-hit validation would false-MISS.
     let store = FileArtifactStore::new();
-    let key = FileArtifactKey::legacy(Arc::from("/changed.ts"), [0x42u8; 16]);
+    let key = FileArtifactKey::base(Arc::from("/changed.ts"), [0x42u8; 16]);
     store.insert_artifacts(key.clone(), synth_artifacts(0x42));
     let after_first = store.artifact_generation();
     // Same key, DIFFERENT content → different whole_hash → base-visible.
@@ -515,7 +515,7 @@ fn artifact_generation_bumps_on_fresh_insert() {
     // which is always a base-visible change and MUST bump.
     let store = FileArtifactStore::new();
     let before = store.artifact_generation();
-    let key = FileArtifactKey::legacy(Arc::from("/fresh.ts"), [0x11u8; 16]);
+    let key = FileArtifactKey::base(Arc::from("/fresh.ts"), [0x11u8; 16]);
     store.insert_artifacts(key, synth_artifacts(0x11));
     assert_ne!(
         before,
@@ -526,9 +526,9 @@ fn artifact_generation_bumps_on_fresh_insert() {
 
 #[test]
 fn artifact_generation_does_not_bump_on_noop_overlay_reinsert() {
-    // Overlay-only no-op: a base (`legacy`-key) artifact is present; an
+    // Overlay-only no-op: a base-key artifact is present; an
     // overlay-scoped artifact is re-inserted byte-identical. `snapshot_all()`
-    // filters to legacy keys, and the re-insert changes nothing base-visible,
+    // filters to base keys, and the re-insert changes nothing base-visible,
     // so the base-folded generation MUST stay put. This discriminates against
     // an implementation where the overlay re-insert bumped the SINGLE global
     // generation folded into every BASE token, churning unrelated base store
@@ -538,7 +538,7 @@ fn artifact_generation_does_not_bump_on_noop_overlay_reinsert() {
     // Base artifact under a DIFFERENT content so the overlay never aliases
     // the base `file_facts` slot (whole_hashes[canonical] != overlay hash).
     store.insert_artifacts(
-        FileArtifactKey::legacy(Arc::from("/ov.ts"), [0x01u8; 16]),
+        FileArtifactKey::base(Arc::from("/ov.ts"), [0x01u8; 16]),
         synth_artifacts(0x01),
     );
     let overlay_key = FileArtifactKey::overlay_scoped(
@@ -609,7 +609,7 @@ fn populate_augmenter_set_is_bump_iff_fingerprint_changed() {
     let make_set = |fingerprint: Hash16| {
         Arc::new(AugmenterSet {
             entries: smallvec![AugmenterEntry {
-                artifact_key: FileArtifactKey::legacy(Arc::from("/aug.ts"), [9u8; 16]),
+                artifact_key: FileArtifactKey::base(Arc::from("/aug.ts"), [9u8; 16]),
                 parse_stable_hash: [3u8; 16],
             }],
             fingerprint,
@@ -671,7 +671,7 @@ fn noop_legacy_replace_leaves_current_key_entry_in_place() {
     let canonical: Arc<str> = Arc::from("/g2-noop.ts");
     store.insert(Arc::clone(&canonical), synth_indexed(0x55));
 
-    let current_key = FileArtifactKey::legacy(Arc::clone(&canonical), [0x55u8; 16]);
+    let current_key = FileArtifactKey::base(Arc::clone(&canonical), [0x55u8; 16]);
     let before = store
         .get_artifacts(&current_key)
         .expect("current-key entry must exist after the first insert");
@@ -700,14 +700,14 @@ fn noop_legacy_replace_leaves_current_key_entry_in_place() {
 fn noop_legacy_replace_still_drains_stale_and_overlay_keys() {
     // PARITY ARM: the gap-free no-op path must NOT regress legacy "exactly
     // one base entry per canonical" semantics. A no-op replace at the
-    // current key still drains a STALE-content legacy key and any
+    // current key still drains a STALE-content base key and any
     // overlay-scoped key for the same canonical — only the base-equivalent
     // current key is preserved.
     let store = FileArtifactStore::new();
     let canonical: Arc<str> = Arc::from("/g2-drain.ts");
 
     // Seed a STALE-content legacy entry and an overlay-scoped entry directly.
-    let stale_key = FileArtifactKey::legacy(Arc::clone(&canonical), [0xAAu8; 16]);
+    let stale_key = FileArtifactKey::base(Arc::clone(&canonical), [0xAAu8; 16]);
     store.insert_artifacts(stale_key.clone(), synth_artifacts(0xAA));
     let overlay_key = FileArtifactKey::overlay_scoped(
         Arc::clone(&canonical),
@@ -718,7 +718,7 @@ fn noop_legacy_replace_still_drains_stale_and_overlay_keys() {
 
     // Insert the CURRENT content, then re-insert it byte-identically (no-op).
     store.insert(Arc::clone(&canonical), synth_indexed(0x55));
-    let current_key = FileArtifactKey::legacy(Arc::clone(&canonical), [0x55u8; 16]);
+    let current_key = FileArtifactKey::base(Arc::clone(&canonical), [0x55u8; 16]);
     assert!(store.get_artifacts(&current_key).is_some());
 
     store.insert(Arc::clone(&canonical), synth_indexed(0x55));
@@ -730,7 +730,7 @@ fn noop_legacy_replace_still_drains_stale_and_overlay_keys() {
     );
     assert!(
         store.get_artifacts(&stale_key).is_none(),
-        "a no-op replace must still drain a stale-content legacy key for the same canonical"
+        "a no-op replace must still drain a stale-content base key for the same canonical"
     );
     assert!(
         store.get_artifacts(&overlay_key).is_none(),
@@ -758,7 +758,7 @@ fn noop_legacy_replace_never_exposes_absent_current_key_under_race() {
     let store = Arc::new(FileArtifactStore::new());
     let canonical: Arc<str> = Arc::from("/g2-race.ts");
     store.insert(Arc::clone(&canonical), synth_indexed(0x55));
-    let current_key = FileArtifactKey::legacy(Arc::clone(&canonical), [0x55u8; 16]);
+    let current_key = FileArtifactKey::base(Arc::clone(&canonical), [0x55u8; 16]);
 
     let stop = Arc::new(AtomicBool::new(false));
     let saw_absent = Arc::new(AtomicBool::new(false));
@@ -877,7 +877,7 @@ fn cold_populate_concurrent_duplicate_does_not_overbump_artifact_generation() {
     let store = Arc::new(FileArtifactStore::new());
     // One base augmenter declaring `module "./dep"`.
     store.insert_artifacts(
-        FileArtifactKey::legacy(Arc::from("/aug.ts"), [9u8; 16]),
+        FileArtifactKey::base(Arc::from("/aug.ts"), [9u8; 16]),
         synth_relative_augmenter_artifacts([0x11u8; 16]),
     );
     let key = relative_dep_target_key();
@@ -938,7 +938,7 @@ fn cold_populate_fresh_transition_bumps_artifact_generation() {
     // handled the `None` / fresh case would fail to bump here).
     let store = FileArtifactStore::new();
     store.insert_artifacts(
-        FileArtifactKey::legacy(Arc::from("/aug.ts"), [9u8; 16]),
+        FileArtifactKey::base(Arc::from("/aug.ts"), [9u8; 16]),
         synth_relative_augmenter_artifacts([0x22u8; 16]),
     );
     let key = relative_dep_target_key();
@@ -991,7 +991,7 @@ fn noop_augmenter_reinsert_via_insert_artifacts_does_not_bump_artifact_generatio
     // POST-FIX: the invalidation is gated on contribution equivalence and is
     // skipped, so the token is unchanged.
     let store = FileArtifactStore::new();
-    let aug_key = FileArtifactKey::legacy(Arc::from("/aug.ts"), [0xA9u8; 16]);
+    let aug_key = FileArtifactKey::base(Arc::from("/aug.ts"), [0xA9u8; 16]);
     store.insert_artifacts(
         aug_key.clone(),
         synth_relative_augmenter_artifacts([0x11u8; 16]),
@@ -1034,7 +1034,7 @@ fn genuine_augmenter_change_via_insert_artifacts_still_invalidates_and_bumps() {
     // `artifact_generation`. Guards against a fix that suppresses the
     // invalidation unconditionally rather than only on a true no-op.
     let store = FileArtifactStore::new();
-    let aug_key = FileArtifactKey::legacy(Arc::from("/aug.ts"), [0xA9u8; 16]);
+    let aug_key = FileArtifactKey::base(Arc::from("/aug.ts"), [0xA9u8; 16]);
     store.insert_artifacts(
         aug_key.clone(),
         synth_relative_augmenter_artifacts([0x11u8; 16]),
@@ -1102,7 +1102,7 @@ fn parse_stable_hash_change_with_same_facts_invalidates_augmentation_index_and_b
     // `parse_stable_hash`): a `parse_stable_hash` change is NOT equivalent → the
     // row is invalidated and the generation bumps.
     let store = FileArtifactStore::new();
-    let aug_key = FileArtifactKey::legacy(Arc::from("/aug.ts"), [0xA9u8; 16]);
+    let aug_key = FileArtifactKey::base(Arc::from("/aug.ts"), [0xA9u8; 16]);
     store.insert_artifacts(
         aug_key.clone(),
         synth_relative_augmenter_artifacts([0x11u8; 16]),
@@ -1164,7 +1164,7 @@ fn augmentation_contribution_equivalence_tracks_fingerprint_inputs() {
     let canonical: Arc<str> = Arc::from("/aug.ts");
     let fingerprint_for = |parse_stable_hash: Hash16| -> Hash16 {
         let entries: smallvec::SmallVec<[AugmenterEntry; 2]> = smallvec![AugmenterEntry {
-            artifact_key: FileArtifactKey::legacy(Arc::clone(&canonical), [9u8; 16]),
+            artifact_key: FileArtifactKey::base(Arc::clone(&canonical), [9u8; 16]),
             parse_stable_hash,
         }];
         compute_augmenter_set_fingerprint(&entries)

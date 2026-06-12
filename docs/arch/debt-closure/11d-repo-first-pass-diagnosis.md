@@ -1,3 +1,5 @@
+> **HISTORICAL.** This document predates the removal of the route-owned shallow system (`route_owned_shallow`, retired in favor of the single `IndexedReady` artifact path); code and cache names below describe that deleted system and are retained for provenance only.
+
 # Phase 11d — `repo_first_pass` semantic-state regression diagnosis
 
 **Status: AWAITING_FIX_DECISION** (Phase 11b output; Phase 11d ships the fix.)

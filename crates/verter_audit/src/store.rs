@@ -48,8 +48,6 @@ pub struct CacheLayerBreakdown {
     pub analysis: CacheLayerHitMiss,
     /// `OwnerImportSurfaceDb` — owner direct-import surface cache.
     pub owner_import: CacheLayerHitMiss,
-    /// `RouteOwnedShallowDb` — route-only shallow cache.
-    pub route_owned_shallow: CacheLayerHitMiss,
     /// `ComponentMetaResultDb` — final component-meta result cache.
     pub component_meta: CacheLayerHitMiss,
     /// `RouteDb` — host-backed resolver route cache.

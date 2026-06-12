@@ -20,10 +20,9 @@
 //!   (`resolve_named_type_export_route_from_target` /
 //!   `resolve_named_type_export_route_uncached`) — the single non-trivial
 //!   intra-file SCC identified by the Tier 0 audit.
-//! - `route_shallow_state` / `route_owned_shallow_state` — request-scoped
-//!   readers that delegate to
-//!   [`Self::ensure_route_owned_shallow_entry`] (defined in the
-//!   `route_owned_shallow` sub-module).
+//! - `route_shallow_state` / `routed_shallow_state` — request-scoped
+//!   readers that join the canonical `IndexedReady` build
+//!   (`ensure_indexed_ready_serve`).
 //! - `build_named_type_export_route_entry` /
 //!   `resolve_named_type_export_target_uncached` /
 //!   `resolve_named_type_export_target_shallow` — host-level binding into
@@ -37,7 +36,7 @@ use super::frontier_helpers::{
     external_type_debug, external_type_debug_enabled, external_type_frontier_layer_result_detail,
     external_type_frontier_layer_start_detail, ordered_wildcard_indices_for_exported_name,
     FrontierCompanionPlans, FrontierRequestedRoutes, PlannedFrontierCompanion,
-    ResolvedExternalTypes, RouteShallowStateCache,
+    ResolvedExternalTypes, RouteShallowStateCache, RoutedShallowServe,
 };
 use super::test_guards::assert_route_frontier_allowed;
 use crate::host_manage::component_meta_trace_custom;
@@ -533,10 +532,11 @@ impl VerterHost {
 
         // Route fact production routes through the single
         // `current_route_surface_hash` helper — the SAME source order
-        // (current `IndexedReady` first, route-owned-shallow fallback)
-        // the `HostStoreView` validator snapshots route facts in. A
-        // route-owned-shallow-first order here would record a hash the
-        // validator could not reproduce when an `IndexedReady` exists.
+        // (content-pinned `IndexedReady` for a scheduler-tracked
+        // canonical, the artifact-only authority otherwise) the
+        // `HostStoreView` validator snapshots route facts in. A
+        // divergent source order here would record a hash the
+        // validator could not reproduce.
         if let Some(hash) = self.current_route_surface_hash(canonical) {
             let fact = crate::resolver_core::FactVersionRef::DerivedFactHash {
                 canonical_id: canonical.to_string(),
@@ -563,9 +563,7 @@ impl VerterHost {
         let resolved = self.resolve_route_edge_canonical(owner_canonical, source_specifier)?;
 
         if resolved.ends_with(".vue") {
-            let known_hash = self
-                .current_or_read_whole_hash(resolved.as_str())
-                .or_else(|| self.cached_route_owned_shallow_whole_hash(resolved.as_str()));
+            let known_hash = self.current_or_read_whole_hash(resolved.as_str());
             if let Some(hash) = known_hash {
                 if !self.store_view_allows_current_whole_hash(resolved.as_str(), hash) {
                     return None;
@@ -643,107 +641,173 @@ impl VerterHost {
             }
         }
     }
-    /// `route_shallow_state` is the
-    /// route-only frontier reader. Body now delegates to the shared
-    /// materialiser ([`Self::ensure_route_owned_shallow_entry`]) and
-    /// returns the entry's `shallow_state`. The request-scoped
-    /// `route_shallow_cache` (frontier-engine memo, kept per-request to
-    /// avoid repeated `Arc` clones) is still populated for in-flight
-    /// frontier traversal.
+    /// `route_shallow_state_serve` is the route-only frontier reader
+    /// with the publication status flowed BY VALUE (see
+    /// [`RoutedShallowServe`]). The cold fall-through JOINS the
+    /// canonical `IndexedReady` build
+    /// ([`Self::ensure_indexed_ready_serve`] — same singleflight lane
+    /// as every other cold consumer); there is no separate route-only
+    /// artifact build. The request-scoped `route_shallow_cache`
+    /// (frontier-engine memo, kept per-request to avoid repeated `Arc`
+    /// clones) is still populated for in-flight frontier traversal, and
+    /// every serve exit records its publication status on the cache
+    /// (`RouteShallowStateCache::observe_serve`) so a walk threading
+    /// one cache per route entry can decline shared-cache admission
+    /// for results computed from a fenced (ReturnOnly) surface.
+    pub(super) fn route_shallow_state_serve(
+        &self,
+        canonical_id: &str,
+        route_shallow_cache: &mut RouteShallowStateCache,
+    ) -> Option<RoutedShallowServe> {
+        let normalized_canonical = self
+            .resolve_eval_dependency_canonical(canonical_id)
+            .unwrap_or_else(|| canonical_id.to_string());
+
+        // Authoritative `IndexedReady` fast path — scheduler-materialised
+        // entries take precedence over the request-scoped memo.
+        //
+        // Current-content-pinned (no bare `get_any`): a stale pre-edit
+        // `IndexedReady` can linger past a same-canonical edit, and a
+        // `get_any` read here would let that stale artifact shadow the
+        // freshly-published current-content entry.
+        // `observe_content_pinned_indexed` serves the content-current
+        // artifact for a scheduler-tracked canonical and falls back to
+        // the artifact-current authority for a genuinely artifact-only
+        // canonical (a workspace dependency materialised into
+        // `FileArtifactStore` with no live scheduler `DerivedRawState`).
+        // The OBSERVE-only read is deliberate: the re-indexing accessors
+        // (`current_content_pinned_indexed` / `artifact_current_indexed`)
+        // rebuild an edge-stale surface internally through the
+        // status-DROPPING `ensure_indexed_ready`, which would launder a
+        // fenced rebuild into a published-looking serve — so the
+        // edge-stale rebuild runs here, through the serve-carrying
+        // entry-point. A stale older-content artifact for a live
+        // scheduler scope misses the observe read entirely, so the
+        // canonical `ensure_indexed_ready_serve` build (the fall-through
+        // below) rebuilds it.
+        if let Some(indexed) = self.observe_content_pinned_indexed(normalized_canonical.as_str()) {
+            // Reuse a baked indexed surface for route traversal ONLY while it
+            // is edge-current. A wildcard-bearing artifact whose `export *`
+            // edges were baked at an earlier generation (a dependency since
+            // appeared / retargeted) would otherwise feed traversal a stale
+            // `canonical_id`. Rebuild it through `ensure_indexed_ready_serve`
+            // (which re-resolves the edges against the live file set and
+            // replaces the stale candidate) and traverse the fresh surface.
+            if self.indexed_surface_is_current(normalized_canonical.as_str(), &indexed) {
+                // A store hit IS the published current surface.
+                let serve = RoutedShallowServe {
+                    state: Arc::clone(&indexed.shallow_state),
+                    store_published: true,
+                };
+                route_shallow_cache.observe_serve(&serve);
+                return Some(serve);
+            }
+            if let Some(fresh) = self.ensure_indexed_ready_serve(normalized_canonical.as_str()) {
+                let serve = RoutedShallowServe {
+                    state: Arc::clone(&fresh.indexed.shallow_state),
+                    store_published: fresh.store_published,
+                };
+                route_shallow_cache.observe_serve(&serve);
+                return Some(serve);
+            }
+            // The edge-stale rebuild missed. A second
+            // `ensure_indexed_ready_serve` attempt would re-run the
+            // identical flight under identical conditions (a serve miss
+            // means the canonical is unloadable or the store view
+            // disallows it — nothing a back-to-back retry changes; every
+            // fenced outcome returns `Some`), so serve from the
+            // request-scoped memo if an earlier traversal populated it,
+            // otherwise decline.
+            return route_shallow_cache
+                .get(normalized_canonical.as_str())
+                .cloned();
+        }
+
+        // Request-scoped memo (frontier engine de-dupe). NOT a host-side
+        // mirror — see `HostFrontierAdapter::route_shallow_cache` doc-comment.
+        // Memo entries carry their publication status by value; the fenced
+        // observation was already recorded at insert time.
+        if let Some(cached) = route_shallow_cache.get(normalized_canonical.as_str()) {
+            return Some(cached.clone());
+        }
+
+        let indexed_serve = self.ensure_indexed_ready_serve(normalized_canonical.as_str())?;
+        let serve = RoutedShallowServe {
+            state: Arc::clone(&indexed_serve.indexed.shallow_state),
+            store_published: indexed_serve.store_published,
+        };
+        route_shallow_cache.observe_serve(&serve);
+        route_shallow_cache.insert(normalized_canonical.clone(), serve.clone());
+        Some(serve)
+    }
+
+    /// Thin wrapper over [`Self::route_shallow_state_serve`] that drops
+    /// the publication status from the RETURN value. The fenced
+    /// observation still lands on the threaded `route_shallow_cache`,
+    /// so walk-level consumers stay covered; callers that derive
+    /// SHARED-cache entries from the returned state directly must use
+    /// the serve variant and gate admission on `store_published` (see
+    /// [`RoutedShallowServe`]).
     pub(super) fn route_shallow_state(
         &self,
         canonical_id: &str,
         route_shallow_cache: &mut RouteShallowStateCache,
     ) -> Option<Arc<crate::resolver_core::ShallowFileState>> {
-        let normalized_canonical = self
-            .resolve_eval_dependency_canonical(canonical_id)
-            .unwrap_or_else(|| canonical_id.to_string());
-
-        // Authoritative `IndexedReady` fast path — preserved from the
-        // pre-migration body so scheduler-materialised entries take
-        // precedence over route-only shadow entries.
-        //
-        // Current-content-pinned (no `get_any`): with the own-canonical
-        // drain retired a stale pre-edit `IndexedReady` can linger past a
-        // same-canonical edit, and a `get_any` read here would let that
-        // stale artifact shadow the freshly-published route-owned entry.
-        // `current_content_pinned_indexed` serves only a content-current
-        // artifact for a scheduler-tracked canonical;
-        // `artifact_current_indexed` answers for a genuinely artifact-only
-        // canonical (a workspace dependency materialised into
-        // `FileArtifactStore` with no live scheduler `DerivedRawState`) —
-        // the legitimate artifact-only scope this fast path serves. A
-        // stale older-content artifact for a live scheduler scope misses
-        // both, so the route-owned materialiser (its entry tiered-freshness
-        // gated) rebuilds below.
-        if let Some(indexed) = self
-            .current_content_pinned_indexed(normalized_canonical.as_str())
-            .or_else(|| self.artifact_current_indexed(normalized_canonical.as_str()))
-        {
-            // Reuse a baked indexed surface for route traversal ONLY while it
-            // is edge-current. A wildcard-bearing artifact whose `export *`
-            // edges were baked at an earlier generation (a dependency since
-            // appeared / retargeted) would otherwise feed traversal a stale
-            // `canonical_id`. Rebuild it through `ensure_indexed_ready` (which
-            // re-resolves the edges against the live file set and replaces the
-            // stale candidate) and traverse the fresh surface.
-            if self.route_surface_is_edge_current(&indexed.shallow_state, indexed.edge_generation) {
-                return Some(Arc::clone(&indexed.shallow_state));
-            }
-            if let Some(fresh) = self.ensure_indexed_ready(normalized_canonical.as_str()) {
-                return Some(Arc::clone(&fresh.shallow_state));
-            }
-        }
-
-        // Request-scoped memo (frontier engine de-dupe). NOT a host-side
-        // mirror — see `HostFrontierAdapter::route_shallow_cache` doc-comment
-        //.
-        if let Some(cached) = route_shallow_cache.get(normalized_canonical.as_str()) {
-            return Some(Arc::clone(cached));
-        }
-
-        let entry = self.ensure_route_owned_shallow_entry(normalized_canonical.as_str())?;
-        let shallow_state = Arc::clone(&entry.shallow_state);
-        route_shallow_cache.insert(normalized_canonical.clone(), Arc::clone(&shallow_state));
-        Some(shallow_state)
+        self.route_shallow_state_serve(canonical_id, route_shallow_cache)
+            .map(|serve| serve.state)
     }
 
-    pub(crate) fn route_owned_shallow_state(
+    /// One-shot [`Self::route_shallow_state_serve`] with a fresh memo —
+    /// the publication status reflects exactly the requested
+    /// canonical's serve.
+    pub(crate) fn routed_shallow_state_serve(
+        &self,
+        canonical_id: &str,
+    ) -> Option<RoutedShallowServe> {
+        let mut route_shallow_cache = RouteShallowStateCache::default();
+        self.route_shallow_state_serve(canonical_id, &mut route_shallow_cache)
+    }
+
+    /// Thin wrapper over [`Self::routed_shallow_state_serve`] that drops
+    /// the publication status. Callers that derive SHARED-cache entries
+    /// from the returned state must use the serve variant and gate
+    /// admission on `store_published` (see [`RoutedShallowServe`]).
+    pub(crate) fn routed_shallow_state(
         &self,
         canonical_id: &str,
     ) -> Option<Arc<crate::resolver_core::ShallowFileState>> {
-        let mut route_shallow_cache = RouteShallowStateCache::default();
-        self.route_shallow_state(canonical_id, &mut route_shallow_cache)
+        self.routed_shallow_state_serve(canonical_id)
+            .map(|serve| serve.state)
     }
 
-    /// Context-threaded variant of [`Self::route_owned_shallow_state`].
+    /// Context-threaded variant of [`Self::routed_shallow_state`].
     ///
     /// When `ctx` carries an active [`crate::session_view::SessionView`]
     /// with overlay parse artifacts for `canonical_id`, the overlay-rooted
     /// shallow surface is returned directly — so a session-bearing cold
     /// compute observes overlay re-export / tombstone edits. Otherwise the
-    /// base (content-pinned) [`Self::route_owned_shallow_state`] body runs.
+    /// base (content-pinned) [`Self::routed_shallow_state`] body runs.
     ///
-    /// This is the route-owned fallback [`Self::shallow_file_state_with_context`]
-    /// uses; its indexed fast path is content-pinned via
-    /// [`Self::route_shallow_state`].
-    pub(crate) fn route_owned_shallow_state_with_context(
+    /// This is the route-surface fallback
+    /// [`Self::shallow_file_state_with_context`] uses; its indexed fast
+    /// path is content-pinned via [`Self::route_shallow_state`].
+    pub(crate) fn routed_shallow_state_with_context(
         &self,
         ctx: &dyn crate::resolver_core::ResolverContext,
         canonical_id: &str,
     ) -> Option<Arc<crate::resolver_core::ShallowFileState>> {
-        self.route_owned_shallow_state_with_view(canonical_id, ctx.active_session_view())
+        self.routed_shallow_state_with_view(canonical_id, ctx.active_session_view())
     }
 
-    /// View-aware variant of [`Self::route_owned_shallow_state`].
+    /// View-aware variant of [`Self::routed_shallow_state`].
     ///
     /// When `view: Some(...)` carries parse artifacts for `canonical_id`,
     /// returns the overlay-rooted shallow state directly so route-aware
     /// callers driven from a session-bearing path observe overlay surfaces
     /// (re-export edits, tombstoned dependencies). Base callers
     /// (`view = None`) fall through to the historical
-    /// `route_owned_shallow_state` body — identical behaviour.
-    pub(crate) fn route_owned_shallow_state_with_view(
+    /// `routed_shallow_state` body — identical behaviour.
+    pub(crate) fn routed_shallow_state_with_view(
         &self,
         canonical_id: &str,
         view: Option<&dyn crate::session_view::SessionView>,
@@ -756,13 +820,13 @@ impl VerterHost {
                 // surface re-resolves against the live file set (re-materialised
                 // from the overlay source, never the base surface — no
                 // overlay-blindness) before it is served.
-                if let Some(indexed) =
-                    self.materialize_overlay_indexed_ready_with_view(canonical_id, view)
+                if let Some(serve) =
+                    self.materialize_overlay_indexed_ready_serve_with_view(canonical_id, view)
                 {
-                    return Some(Arc::clone(&indexed.shallow_state));
+                    return Some(Arc::clone(&serve.indexed.shallow_state));
                 }
             } else {
-                // Base-passthrough view: the legacy-key read returns the
+                // Base-passthrough view: the base-key read returns the
                 // published base artifact for a non-overlaid canonical. Serve
                 // it only while edge-current; an edge-stale wildcard `export *`
                 // surface falls through to the gated base path below
@@ -770,16 +834,13 @@ impl VerterHost {
                 // edge-stale) so the edges re-resolve against the live file set.
                 let identity = self.overlay_artifact_identity(canonical_id);
                 if let Some(facts) = identity.lookup_overlay_artifacts(self, view) {
-                    if self.route_surface_is_edge_current(
-                        &facts.indexed.shallow_state,
-                        facts.indexed.edge_generation,
-                    ) {
+                    if self.indexed_surface_is_current(canonical_id, &facts.indexed) {
                         return Some(Arc::clone(&facts.indexed.shallow_state));
                     }
                 }
             }
         }
-        self.route_owned_shallow_state(canonical_id)
+        self.routed_shallow_state(canonical_id)
     }
 
     fn resolve_named_type_export_route_uncached(
@@ -887,6 +948,21 @@ impl VerterHost {
             &mut route_shallow_cache,
         )?;
 
+        // ReturnOnly never publishes — fenced-participant arm. A walk that
+        // consumed ANY fenced (ReturnOnly) shallow serve computed its route
+        // from a superseded surface (a baked edge resolved under the
+        // pre-mutation route table), while the participant facts below are
+        // read from the LIVE post-mutation state — an entry the read-side
+        // fact rail cannot reject. Serve the result to this caller (its
+        // request pre-dates the mutation) with EMPTY facts: the same
+        // strict-admission negative-cache pattern as the unproduce-able
+        // wildcard-hash case below — the value is returned, `RouteDb` /
+        // `ImportedRootDb` never persist it, and the next query re-resolves
+        // cold against the live workspace.
+        if route_shallow_cache.fenced_serve_observed() {
+            return Some((route_result, Vec::new()));
+        }
+
         let mut facts = Vec::new();
         let mut seen = rustc_hash::FxHashSet::default();
         let mut participants: Vec<String> = touched_canonical_ids.into_iter().collect();
@@ -905,7 +981,7 @@ impl VerterHost {
         // workspace, so the recorded fact changes the moment the edge resolves.
         //
         // When an owner has no import-route surface to root the unresolved edge
-        // on (e.g. a route-owned-only barrel whose wildcards resolve into a
+        // on (e.g. a barrel whose wildcards resolve into a
         // local `dep_edges` map and never publish `import_routes`), the hash is
         // unproduce-able. We must NOT admit a fact-validated entry — a cached
         // value could stale-serve once the target appears. But we must equally
@@ -937,6 +1013,22 @@ impl VerterHost {
             let Some(import_route_hash) = self
                 .generation_current_import_route_hash_covering_sources(owner.as_str(), &sources)
             else {
+                // The empty-facts signal alone only protects the caches
+                // that inspect route facts directly (`RouteDb` /
+                // `ImportedRootDb` strict admission, the owner-import-
+                // surface producer's per-binding check). An ENCLOSING
+                // traced cold compute (a semantic-memo build, a
+                // component-meta proof producer) observes NOTHING from
+                // an empty fact list — its own stamps validate against
+                // the live view while the folded route silently
+                // retargets when the wildcard target appears. Mark the
+                // request-sticky and per-cold-compute suppression rails
+                // by hand, exactly as the route-singleflight follower
+                // fallback does for an adopted unrootable route — the
+                // leader-produced unrootable route must suppress the
+                // same admissions.
+                crate::request_context::mark_request_materialization_cache_suppress();
+                crate::resolver_core::resolver_context::note_fenced_serve_fan_out();
                 return Some((route_result, Vec::new()));
             };
             let fact = crate::resolver_core::FactVersionRef::DerivedFactHash {

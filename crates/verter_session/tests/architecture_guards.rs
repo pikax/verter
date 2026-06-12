@@ -2723,6 +2723,125 @@ fn phase_8_allow_list() -> std::collections::HashMap<&'static str, &'static str>
             "last_upsert_priority",
             "phase-09b-report.md §0 row \"Test-only observables on VerterHost\": Mutex<Option<Priority>> test mailbox written by upsert_with_priority and read by compile_many_propagates_*_priority. Compiled out in production builds. NOT a cache.",
         ),
+        // (c2) Test-only concurrency seams for mid-flight mutation tests.
+        //     `#[cfg(test)] materialize_seam_hook` is a single-cell
+        //     `Mutex<Option<Arc<dyn Fn()>>>` hook slot fired inside the
+        //     `IndexedReady` materialise flights (base / edge-refresh /
+        //     overlay) so mid-flight mutation tests can park a flight
+        //     deterministically between its generation-stamp capture and
+        //     its pre-publish fence. Compiled out in production builds.
+        (
+            "materialize_seam_hook",
+            "Pre-publish-fence regression pins: Mutex<Option<Arc<dyn Fn()>>> test-only seam slot fired inside materialise flights for deterministic mid-flight mutation tests. Compiled out in production builds. NOT a cache.",
+        ),
+        // - `flight_retry_seam_hook` (NOT a cache):
+        //     `#[cfg(test)] flight_retry_seam_hook` is the sibling
+        //     single-cell hook slot fired inside the `ensure_indexed_ready_serve`
+        //     singleflight retry loop (after a follower records a fenced
+        //     outcome) so sustained-churn tests can interleave a fresh
+        //     leader + mutation per bounded attempt. Compiled out in
+        //     production builds.
+        (
+            "flight_retry_seam_hook",
+            "Sustained-churn ReturnOnly regression pin: Mutex<Option<Arc<dyn Fn()>>> test-only seam slot fired inside the singleflight retry loop for deterministic sustained-churn choreography. Compiled out in production builds. NOT a cache.",
+        ),
+        // - `compile_publish_seam_hook` (NOT a cache):
+        //     `#[cfg(test)] compile_publish_seam_hook` is the sibling
+        //     single-cell hook slot fired inside `get_virtual_file`'s
+        //     cold compile path (after the compile, before the
+        //     mode-routed publish) so fence tests can land an env /
+        //     project mutation deterministically in the compute→publish
+        //     window. Compiled out in production builds.
+        (
+            "compile_publish_seam_hook",
+            "Content-mode compile pre-publish-fence regression pin (env_mutation_between_compute_and_publish_declines_the_content_publish): Mutex<Option<Arc<dyn Fn()>>> test-only seam slot fired in the compute→publish window for deterministic mid-flight mutation choreography. Compiled out in production builds. NOT a cache.",
+        ),
+        // - `compile_input_seam_hook` (NOT a cache):
+        //     `#[cfg(test)] compile_input_seam_hook` is the sibling
+        //     single-cell hook slot fired inside `get_virtual_file`'s
+        //     cold compile path (after the request's source snapshot
+        //     is captured, before the compile input is assembled) so
+        //     fence tests can land a content mutation
+        //     deterministically in the snapshot→compile-input window.
+        //     Compiled out in production builds.
+        (
+            "compile_input_seam_hook",
+            "Content-mode compile snapshot-coherence regression pin (content_mutation_between_snapshot_and_compile_input_never_publishes_under_the_stale_hash): Mutex<Option<Arc<dyn Fn()>>> test-only seam slot fired in the snapshot→compile-input window for deterministic mid-flight mutation choreography. Compiled out in production builds. NOT a cache.",
+        ),
+        // - `edge_refresh_gate_seam_hook` (NOT a cache):
+        //     `#[cfg(test)] edge_refresh_gate_seam_hook` is the sibling
+        //     single-cell hook slot fired inside `ensure_indexed_ready_serve`'s
+        //     singleflight body (after the edge-refresh parse-env reuse
+        //     gate passes, before the refresh flight runs) so fence tests
+        //     can land a parse-env-moving mutation deterministically in
+        //     the reuse-gate→publish window. Compiled out in production
+        //     builds.
+        (
+            "edge_refresh_gate_seam_hook",
+            "Edge-refresh parse-env fence regression pin (parse_env_mutation_between_reuse_gate_and_refresh_declines_the_edge_refresh_publish): Mutex<Option<Arc<dyn Fn()>>> test-only seam slot fired in the reuse-gate→refresh window for deterministic mid-flight mutation choreography. Compiled out in production builds. NOT a cache.",
+        ),
+        // - `raw_snapshot_template_join_seam_hook` (NOT a cache):
+        //     `#[cfg(test)] raw_snapshot_template_join_seam_hook` is the
+        //     sibling single-cell hook slot fired inside the
+        //     raw-analysis-snapshot scheduler lane (after the lane's
+        //     analysis snapshot capture, before the template-analysis
+        //     source join) so fence tests can land a content upsert
+        //     deterministically in the capture→join window. Compiled
+        //     out in production builds.
+        (
+            "raw_snapshot_template_join_seam_hook",
+            "Raw-analysis-snapshot template-join fence regression pin (source_move_between_analysis_capture_and_template_join_never_persists_the_template): Mutex<Option<Arc<dyn Fn()>>> test-only seam slot fired in the analysis-capture→template-source-join window for deterministic mid-flight mutation choreography. Compiled out in production builds. NOT a cache.",
+        ),
+        // - `template_persist_seam_hook` (NOT a cache):
+        //     `#[cfg(test)] template_persist_seam_hook` is the sibling
+        //     single-cell hook slot fired inside the lazy
+        //     template-analysis computation (after the by-value inputs
+        //     produced the template, before the `derived_raw_cache`
+        //     persist) so fence tests can land a content upsert
+        //     deterministically in the compute→persist window. Compiled
+        //     out in production builds.
+        (
+            "template_persist_seam_hook",
+            "Template-slot generation-rail regression pin (source_move_between_compute_and_persist_never_serves_the_stale_template): Mutex<Option<Arc<dyn Fn()>>> test-only seam slot fired in the compute→persist window for deterministic mid-flight mutation choreography. Compiled out in production builds. NOT a cache.",
+        ),
+        // - `narrowed_scope_serve_seam_hook` (NOT a cache):
+        //     `#[cfg(test)] narrowed_scope_serve_seam_hook` is the
+        //     sibling single-cell hook slot fired inside
+        //     `get_analysis_snapshot_internal`'s narrowed-scope serve
+        //     branch (after the branch's source snapshot capture,
+        //     before its snapshot products assembly) so fence tests can
+        //     land a content upsert deterministically in the
+        //     capture→assembly window. Compiled out in production
+        //     builds.
+        (
+            "narrowed_scope_serve_seam_hook",
+            "Narrowed-scope single-generation snapshot regression pin (source_move_inside_the_narrowed_scope_window_never_serves_a_generation_mix): Mutex<Option<Arc<dyn Fn()>>> test-only seam slot fired in the source-capture→products-assembly window for deterministic mid-flight mutation choreography. Compiled out in production builds. NOT a cache.",
+        ),
+        // - `compile_blockers_serve_seam_hook` (NOT a cache):
+        //     `#[cfg(test)] compile_blockers_serve_seam_hook` is the
+        //     sibling single-cell hook slot fired inside
+        //     `get_compile_blockers` (after the source snapshot
+        //     capture, before its snapshot products assembly) so fence
+        //     tests can land a content upsert deterministically in the
+        //     capture→assembly window. Compiled out in production
+        //     builds.
+        (
+            "compile_blockers_serve_seam_hook",
+            "Compile-blockers single-generation snapshot regression pin (source_move_inside_the_compile_blockers_window_never_serves_a_generation_mix): Mutex<Option<Arc<dyn Fn()>>> test-only seam slot fired in the source-capture→products-assembly window for deterministic mid-flight mutation choreography. Compiled out in production builds. NOT a cache.",
+        ),
+        // - `parse_env_override` (NOT a cache):
+        //     `#[cfg(test)] parse_env_override` is a single-cell
+        //     `Mutex<Option<Hash16>>` test-only override of the live
+        //     parse-env dimension read by `host_view_env_hashes(_for)`.
+        //     The production parse dimension derives solely from the
+        //     constant workspace parser flags, so fence tests flip this
+        //     override (paired with a `project_generation` bump) to
+        //     emulate a parse-env-moving configuration change mid-flight.
+        //     Compiled out in production builds.
+        (
+            "parse_env_override",
+            "Edge-refresh parse-env fence regression pin (parse_env_mutation_between_reuse_gate_and_refresh_declines_the_edge_refresh_publish): Mutex<Option<Hash16>> test-only live parse-env dimension override read by host_view_env_hashes(_for). Compiled out in production builds. NOT a cache; a per-host single-cell test knob.",
+        ),
         // (d) Typeinfo scratch synthesis cache (§5 Phase 3) — per-host
         //     LRU of synthesised scratch URI → SemanticNodeId. The
         //     cache lives on `VerterHost` (not ProjectTypeStore)
@@ -4376,12 +4495,12 @@ mod foundations_guards {
         // verter_type_runtime::backend::tests via meta_resolve types,
         // tests/host_tests.rs
         "pub mod meta_resolve",
-        // Tier 1A — `OwnedEvalProgram` / `OwnedTypeResolutionContext`
-        // owned-artifact module (D17 + D18 + D44 + D45 + D65). Public
-        // because the typed-DB shapes on `ProjectTypeStore` (1C-α
-        // consumers) need to expose `OwnedArtifactKey` -> payload
+        // `OwnedEvalProgram` / `OwnedTypeResolutionContext`
+        // owned-artifact module. Public so the typed-DB shapes on
+        // `ProjectTypeStore` can expose `OwnedArtifactKey` -> payload
         // values to consumers in `verter_type_runtime` /
-        // `verter_napi` once the lowering pipeline lands.
+        // `verter_napi`; production lowering does not populate the
+        // owned typed DBs yet (test-populated only).
         "pub mod owned_artifacts",
         // Tier 1B — selective component-meta surface API + BFS bridge
         // wire types (D102 + D125). Public because verter_napi calls
@@ -8329,7 +8448,9 @@ fn lsp_no_longer_embeds_mcp_AND_mcp_http_still_serves() {
 // 1. `no_thread_local_oxc_caches` — rejects reintroduction of the
 //    `HOST_PARSED_*_CACHE` thread-locals (D44 lowering boundary).
 // 2. `no_direct_oxc_parser_calls_outside_scheduler_path` — only the
-//    parse stage in `host_executor.rs` may invoke the OXC parser.
+//    allow-listed parse sites may invoke the OXC parser (fully
+//    qualified `oxc_parser::Parser::new` OR an imported/aliased bare
+//    `Parser::new`).
 // 3. `no_owned_artifact_holds_borrowed_lifetime` — `OwnedEvalProgram`
 //    and `OwnedTypeResolutionContext` are `Send + Sync + 'static`.
 // 4. `macro_impacting_constructs_fail_lowering_not_silent_skip` (D107)
@@ -8344,11 +8465,12 @@ fn lsp_no_longer_embeds_mcp_AND_mcp_http_still_serves() {
 /// `Rc<ParsedTypeResolutionContext>`) held the OXC parser arena alive
 /// past the lowering boundary, making the host caches `!Send`.
 ///
-/// The owned-artifact lowering pipeline produces `OwnedEvalProgram` /
-/// `OwnedTypeResolutionContext` (both `Send + Sync + 'static`) so the
-/// host caches now sit on the typed `EvalEnvCacheDb` /
-/// `TypeResolutionContextDb` shells (introduced empty in 1A; consumer
-/// migration in 1C-α).
+/// Live design: an eval program is parsed once per cold
+/// `ensure_indexed_ready_serve` materialise and threaded by reference within
+/// the flight; the derived `EvalEnv` lives on the published
+/// `IndexedReady`. Only `Send + Sync + 'static` owned-artifact forms
+/// (`OwnedEvalProgram` / `OwnedTypeResolutionContext`) are admissible
+/// in host-owned typed DBs.
 ///
 /// This guard rejects any reintroduction of an OXC-parser-arena
 /// thread-local cache. It scans every `.rs` file under
@@ -8382,7 +8504,12 @@ fn no_thread_local_oxc_caches() {
         if path.extension().and_then(|e| e.to_str()) != Some("rs") {
             continue;
         }
-        let body = std::fs::read_to_string(path).unwrap_or_default();
+        let body = std::fs::read_to_string(path).unwrap_or_else(|err| {
+            panic!(
+                "guard scanner could not read {path_str}: {err} — an \
+                 unreadable file must fail the guard, not silently pass"
+            )
+        });
         for ident in banned_idents {
             // Only count hits OUTSIDE comments. The retirement note
             // in `host_manage.rs` references the names in a
@@ -8406,47 +8533,208 @@ fn no_thread_local_oxc_caches() {
     );
 }
 
-/// Tier 1A guard 2 — only the host parse stage in `host_executor.rs`
-/// may directly invoke `oxc_parser::Parser::new`. Other production
-/// callers must go through the scheduler-routed parse path so the
-/// authoritative parse-once-per-(canonical, content_hash) discipline
-/// is preserved.
+/// Tier 1A guard 2 — only the allow-listed production parse sites may
+/// directly invoke the OXC parser, and only at their PINNED site count.
+/// Other production callers must go through the scheduler-routed parse
+/// path so the authoritative parse-once-per-(canonical, content_hash)
+/// discipline is preserved.
+///
+/// The matcher flags a line when it contains, outside comments and
+/// outside inline `#[cfg(test)]` modules, EITHER the fully-qualified
+/// `oxc_parser::Parser::new` OR a call through any local name a
+/// `use oxc_parser…` import binds the parser to: plain
+/// (`use oxc_parser::Parser;` → `Parser::new`), grouped
+/// (`use oxc_parser::{ParseOptions, Parser};`), item-aliased
+/// (`use oxc_parser::Parser as OxcParser;` → `OxcParser::new`), glob
+/// (`use oxc_parser::*;` → `Parser::new`), and module-aliased
+/// (`use oxc_parser as op;` → `op::Parser::new`). A bare call without
+/// an `oxc_parser` import is NOT flagged — that would be a different
+/// `Parser` type.
+///
+/// Honest coverage limits: the matcher is line-textual. It does not
+/// see a call split across lines between the binding and `::new`
+/// (rustfmt keeps them together), block-comment (`/* */`) bodies are
+/// scanned (fail-closed: a commented-out call can only ADD a hit), a
+/// string literal containing `Parser::new` counts as a hit
+/// (fail-closed), and the per-row count is line-granular (two calls on
+/// one line count once — rustfmt-shaped sources put one call per
+/// line). Inline test-module blanking assumes the rustfmt shape
+/// (`#[cfg(test)]` attribute line followed by a `mod … {` line); a
+/// mis-tracked brace skew either leaves test code visible (a spurious
+/// guard failure, visible) or blanks to end-of-file (a dead allow-list
+/// row, caught by the anti-vacuity assert) — never a silently passed
+/// NEW production site in a non-allow-listed file.
 ///
 /// The borrowed-form lowering input is constructed inside
 /// `crate::ParsedEvalProgram::parse` (in `parsed_eval_program.rs`), which
 /// IS the scheduler-bound entry point. Test sources are exempt.
 #[test]
 fn no_direct_oxc_parser_calls_outside_scheduler_path() {
-    // Allow-list: production files that legitimately invoke
-    // `oxc_parser::Parser::new`. Updating this list requires a
-    // matching reference to a scheduler-bound parse path or a
-    // documented TODO to migrate.
-    let allow_list = [
+    // Allow-list: production files that legitimately invoke the OXC
+    // parser directly, each pinned to its EXACT current site count so
+    // an allow-listed file cannot silently grow new direct-parse
+    // sites. Updating a row requires a matching reference to a
+    // scheduler-bound parse path or a documented TODO to migrate.
+    // Rows that stop matching any live OXC `Parser::new` site must be
+    // DELETED, not kept as pre-authorization for future uncounted
+    // parses (the anti-vacuity check below enforces this).
+    let allow_list: [(&str, usize); 5] = [
         // The `ParsedEvalProgram::parse` constructor IS the
-        // scheduler-bound parse entry; `host_executor.rs` calls it.
-        "crates/verter_session/src/parsed_eval_program.rs",
-        // host_executor.rs itself calls `parse_vue_snapshot` /
-        // `parse_non_sfc_snapshot`; the OXC parser is invoked inside
-        // those helpers in `crate::parse`, but they go through the
-        // scheduler. Allowed.
-        "crates/verter_session/src/parse.rs",
-        // host_executor.rs is the parse stage executor itself.
-        "crates/verter_session/src/host_executor.rs",
-        // Pre-existing resolver paths that allocate a temporary OXC
-        // arena for one-shot type-body re-parsing. These are NOT
-        // long-lived cache populators (the borrowed `Allocator` is
-        // constructed and dropped within the same function) so they
-        // do not violate the lowering-boundary invariant. The 1C-α
-        // consumer migration moves these onto the typed
-        // `EvalEnvCacheDb` path; until then the allow-list pins the
-        // exact files so a NEW caller would still trip the guard.
-        // TODO(1C-α): route through the scheduler's `execute_source`.
-        "crates/verter_session/src/resolver_core/external_type_body.rs",
-        "crates/verter_session/src/resolver_core/surface_projector.rs",
+        // scheduler-bound parse entry — the single eval-program parse
+        // funnel; `host_manage::eval_program::parse_eval_program` is
+        // its sole production caller and counts every execution on the
+        // `eval_program_parses` provenance rail.
+        ("crates/verter_session/src/parsed_eval_program.rs", 1),
+        // The scheduler-path parse module itself, two counted parse
+        // funnels: `parse_non_sfc_snapshot` is the scheduler snapshot
+        // lane's full-program parse (provenance rail
+        // `non_sfc_snapshot_parses`), and `build_vue_script_outputs`
+        // is the SINGLE `.vue` snapshot script-program parse shared by
+        // export signatures + script analysis via the `_from_program`
+        // walkers (provenance rail `vue_script_snapshot_parses`).
+        ("crates/verter_session/src/parse.rs", 2),
+        // Typeinfo oracle-core sites — tracked debt, not scheduler
+        // parses. These parse SMALL synthetic probe texts (a strict
+        // `type <probe> = <RHS>` alias grammar, hover-RHS admission
+        // wrappers) or re-derive a decl span for the deterministic
+        // offline digest-generation step. Each constructs and drops a
+        // local `Allocator` within one function; none populates a
+        // host cache. They predate the bare-form matcher (the old
+        // matcher only saw the fully-qualified path) and are
+        // allow-listed as self-reported deferred sites pending a
+        // migration onto a shared probe-parse helper.
+        (
+            "crates/verter_session/src/typeinfo/oracle_core/hover_extract.rs",
+            1,
+        ),
+        ("crates/verter_session/src/typeinfo/oracle_core/gen.rs", 1),
+        (
+            "crates/verter_session/src/typeinfo/oracle_core/admission.rs",
+            2,
+        ),
     ];
+
+    // Blank the lines of every inline `#[cfg(test)] mod … { … }` block
+    // (line numbers preserved) so test-only parser calls inside
+    // production files do not require allow-list rows. Rustfmt shape
+    // assumed: the `#[cfg(test)]` attribute line is followed —
+    // possibly via further attribute lines (`#[path = …]`) — by a
+    // `mod name {` line; the block ends when textual brace depth
+    // returns to zero. `mod name;` declarations are NOT blanked (they
+    // point at separate files the walker visits directly).
+    fn blank_inline_test_mods(body: &str) -> String {
+        let lines: Vec<&str> = body.lines().collect();
+        let mut keep = vec![true; lines.len()];
+        let mut i = 0;
+        while i < lines.len() {
+            if lines[i].trim() == "#[cfg(test)]" {
+                let mut j = i + 1;
+                while j < lines.len() && lines[j].trim_start().starts_with("#[") {
+                    j += 1;
+                }
+                let is_inline_mod = j < lines.len() && {
+                    let t = lines[j].trim_start();
+                    (t.starts_with("mod ")
+                        || t.starts_with("pub mod ")
+                        || t.starts_with("pub(crate) mod ")
+                        || t.starts_with("pub(super) mod "))
+                        && lines[j].contains('{')
+                };
+                if is_inline_mod {
+                    for flag in keep.iter_mut().take(j).skip(i) {
+                        *flag = false;
+                    }
+                    let mut depth: i64 = 0;
+                    let mut k = j;
+                    loop {
+                        depth += lines[k].matches('{').count() as i64;
+                        depth -= lines[k].matches('}').count() as i64;
+                        keep[k] = false;
+                        if depth <= 0 || k + 1 >= lines.len() {
+                            break;
+                        }
+                        k += 1;
+                    }
+                    i = k + 1;
+                    continue;
+                }
+            }
+            i += 1;
+        }
+        lines
+            .iter()
+            .zip(keep)
+            .map(|(line, kept)| if kept { *line } else { "" })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    // The local names a file's `use oxc_parser…` imports bind the
+    // parser to: `use oxc_parser::Parser;` → "Parser", grouped
+    // `use oxc_parser::{ParseOptions, Parser};` → "Parser", aliased
+    // `use oxc_parser::Parser as OxcParser;` → "OxcParser", glob
+    // `use oxc_parser::*;` → "Parser", module alias
+    // `use oxc_parser as op;` → "op::Parser".
+    fn oxc_parser_import_bindings(body: &str) -> Vec<String> {
+        let mut bindings = Vec::new();
+        let mut rest = body;
+        while let Some(pos) = rest.find("use oxc_parser") {
+            let stmt_start = &rest[pos..];
+            let end = stmt_start.find(';').unwrap_or(stmt_start.len());
+            let stmt = &stmt_start[..end];
+            // Module-alias form: the whole import is
+            // `use oxc_parser as <alias>` — calls then appear as
+            // `<alias>::Parser::new`.
+            if let Some((before, alias)) = stmt.split_once(" as ") {
+                if before.trim() == "use oxc_parser" {
+                    bindings.push(format!("{}::Parser", alias.trim()));
+                }
+            }
+            for item in stmt.split(['{', '}', ',']) {
+                let item = item.trim();
+                let (path, alias) = match item.split_once(" as ") {
+                    Some((p, a)) => (p.trim(), Some(a.trim())),
+                    None => (item, None),
+                };
+                let leaf = path.rsplit("::").next().unwrap_or(path).trim();
+                if leaf == "Parser" {
+                    bindings.push(alias.unwrap_or("Parser").to_string());
+                }
+                // Glob import: every `oxc_parser` item is in scope
+                // under its own name, `Parser` included.
+                if leaf == "*" {
+                    bindings.push("Parser".to_string());
+                }
+            }
+            rest = &stmt_start[end..];
+        }
+        bindings
+    }
+
+    // `<binding>::new` with an identifier/path boundary before the
+    // binding, so `SomeOtherParser::new` or a path-qualified
+    // `other_crate::Parser::new` does not false-positive on the bare
+    // binding "Parser".
+    fn contains_bare_call(line: &str, binding: &str) -> bool {
+        let needle = format!("{binding}::new");
+        let mut start = 0;
+        while let Some(idx) = line[start..].find(&needle) {
+            let abs = start + idx;
+            let boundary_ok = abs == 0 || {
+                let c = line.as_bytes()[abs - 1];
+                !(c.is_ascii_alphanumeric() || c == b'_' || c == b':')
+            };
+            if boundary_ok {
+                return true;
+            }
+            start = abs + needle.len();
+        }
+        false
+    }
 
     let crate_root = workspace_path("crates/verter_session/src");
     let mut violators: Vec<String> = Vec::new();
+    let mut allowed_hits: Vec<String> = Vec::new();
     for entry in walkdir::WalkDir::new(&crate_root)
         .into_iter()
         .filter_map(Result::ok)
@@ -8464,20 +8752,30 @@ fn no_direct_oxc_parser_calls_outside_scheduler_path() {
         if path_str.contains("/architecture_guards") {
             continue;
         }
-        let body = std::fs::read_to_string(path).unwrap_or_default();
-        // Match `oxc_parser::Parser::new` outside comments.
-        let mut hit = false;
-        for line in body.lines() {
+        let body = std::fs::read_to_string(path).unwrap_or_else(|err| {
+            panic!(
+                "guard scanner could not read {path_str}: {err} — an \
+                 unreadable file must fail the guard, not silently pass"
+            )
+        });
+        let body = blank_inline_test_mods(&body);
+        // Count, outside comments: lines with the fully-qualified
+        // `oxc_parser::Parser::new`, OR a call through any local name
+        // an `use oxc_parser…` import binds the parser to.
+        let bindings = oxc_parser_import_bindings(&body);
+        let mut site_lines: Vec<usize> = Vec::new();
+        for (lineno, line) in body.lines().enumerate() {
             let trimmed = line.trim_start();
             if trimmed.starts_with("//") || trimmed.starts_with("///") {
                 continue;
             }
-            if line.contains("oxc_parser::Parser::new") {
-                hit = true;
-                break;
+            if line.contains("oxc_parser::Parser::new")
+                || bindings.iter().any(|b| contains_bare_call(line, b))
+            {
+                site_lines.push(lineno + 1);
             }
         }
-        if hit {
+        if !site_lines.is_empty() {
             // Strip the workspace prefix so the suffix matches the
             // allow-list entries.
             let rel = path_str
@@ -8485,18 +8783,47 @@ fn no_direct_oxc_parser_calls_outside_scheduler_path() {
                 .last()
                 .map(|s| format!("crates/{s}"))
                 .unwrap_or(path_str.clone());
-            if !allow_list.iter().any(|allow| rel.ends_with(allow)) {
-                violators.push(rel);
+            match allow_list.iter().find(|(allow, _)| rel.ends_with(allow)) {
+                None => violators.push(format!("{rel} (lines {site_lines:?})")),
+                Some((allow, pinned)) => {
+                    assert_eq!(
+                        site_lines.len(),
+                        *pinned,
+                        "direct-OXC allow-list row `{allow}` is pinned to \
+                         {pinned} parser site(s) but the file now has \
+                         {} (lines {site_lines:?}) — an allow-listed file \
+                         must not silently grow or shed direct-parse \
+                         sites; route the new site through the scheduler \
+                         path or consciously re-pin the row",
+                        site_lines.len(),
+                    );
+                    allowed_hits.push(rel);
+                }
             }
         }
     }
     assert!(
         violators.is_empty(),
         "Tier 1A guard `no_direct_oxc_parser_calls_outside_scheduler_path`: \
-         production callers invoke `oxc_parser::Parser::new` outside the \
-         scheduler-bound parse path: {violators:#?}\n\n\
+         production callers invoke the OXC parser (fully-qualified \
+         `oxc_parser::Parser::new` or an imported bare `Parser::new`) \
+         outside the scheduler-bound parse path: {violators:#?}\n\n\
          Either route through the scheduler's `execute_source` (preferred) \
          or extend the allow-list with a pinned justification."
+    );
+    // Anti-vacuity: a row that no longer matches any live OXC
+    // `Parser::new` site (any covered form) is dead pre-authorization —
+    // delete it.
+    let dead_rows: Vec<&str> = allow_list
+        .iter()
+        .map(|(allow, _)| *allow)
+        .filter(|allow| !allowed_hits.iter().any(|hit| hit.ends_with(allow)))
+        .collect();
+    assert!(
+        dead_rows.is_empty(),
+        "direct-OXC allow-list rows match no live OXC `Parser::new` \
+         site — delete them rather than pre-authorizing future uncounted \
+         parses: {dead_rows:#?}"
     );
 }
 
@@ -8569,9 +8896,9 @@ fn no_owned_artifact_holds_borrowed_lifetime() {
 /// `LoweringError` to a unit-only enum would lose the contract and
 /// fail this test.
 ///
-/// The 1C-α consumer migration wires the actual lowering driver to
-/// produce these errors; this Tier 1A guard documents the contract
-/// and the structural shape.
+/// Production lowering does not construct these errors yet; this guard
+/// pins the contract and the structural shape so a lowering driver that
+/// adopts `LoweringError` fails loudly instead of silently skipping.
 #[test]
 fn macro_impacting_constructs_fail_lowering_not_silent_skip() {
     use verter_session::owned_artifacts::eval_program::{
@@ -12667,31 +12994,14 @@ mod content_pinned_artifact_read_guards {
     /// `FileArtifactStore` reads through a content-pinned named helper
     /// (`current_content_pinned_indexed` / `artifact_current_indexed` /
     /// `current_content_pinned_artifacts`).
-    const GET_ANY_ALLOWLIST: &[(&str, &str)] = &[
-        (
-            "crates/verter_session/src/host_manage/analysis_io.rs",
-            "Defines the content-pinned named helpers themselves \
+    const GET_ANY_ALLOWLIST: &[(&str, &str)] = &[(
+        "crates/verter_session/src/host_manage/analysis_io.rs",
+        "Defines the content-pinned named helpers themselves \
              (`artifact_current_indexed`, `current_content_pinned_artifacts`) \
              — their bodies are the artifact-only authority. Also the \
              documented permissive `get_whole_hash` accessor, whose strict \
              sibling is `authoritative_current_content_hash`.",
-        ),
-        (
-            "crates/verter_session/src/host_manage/eval_program.rs",
-            "`analysis_source_exists` probes `get_any().is_some()` as a \
-             pure existence check after the scheduler authority \
-             (`effective_file_state`) missed — it returns a `bool`, never \
-             artifact content.",
-        ),
-        (
-            "crates/verter_session/src/host_manage/component_meta_methods.rs",
-            "`get_raw_analysis_snapshot` gates a route-owned-snapshot \
-             fast path on `get_any().is_none()` — a pure existence gate. \
-             The artifact's content is never read here; the \
-             scheduler-first authority (`build_snapshot_from_scheduler`) \
-             produces the snapshot.",
-        ),
-    ];
+    )];
 
     /// Strip `//` line comments and `/* */` block comments so a
     /// `get_any` mention inside a doc-comment is not flagged as a call
@@ -12767,9 +13077,9 @@ mod content_pinned_artifact_read_guards {
     ///
     /// Whitespace and newlines between `indexed()` and the method call
     /// are tolerated — the call chain is frequently split across lines
-    /// by `rustfmt`. The `route_owned_shallow().get_any(` chain is a
-    /// DIFFERENT db (`RouteOwnedShallowDb`) and is deliberately NOT
-    /// matched: this guard targets `FileArtifactStore` reads only.
+    /// by `rustfmt`. A `get_any(` chain rooted on a different DB
+    /// accessor is deliberately NOT matched: this guard targets
+    /// `FileArtifactStore` reads only.
     ///
     /// ## Known limitation — fluent chains only
     ///
@@ -12782,7 +13092,7 @@ mod content_pinned_artifact_read_guards {
     /// `.get_any(`/`.get_artifacts_any(` on a binding cannot be
     /// attributed to a `FileArtifactStore` without false positives
     /// against the identically-named methods on other dbs
-    /// (`route_owned_shallow()`, `member_display_facts()`, …) — that
+    /// (`member_display_facts()`, `analysis()`, …) — that
     /// needs real name resolution, not a scanner. No current
     /// `verter_session` production file uses the var-bound form, and
     /// the structural guard in
@@ -12915,7 +13225,7 @@ mod content_pinned_artifact_read_guards {
 
     /// Discriminating self-test — proves the scan algorithm
     /// distinguishes a real direct `get_any` call from a comment, a
-    /// `route_owned_shallow().get_any` (different db), and a
+    /// `member_display_facts().get_any` (different db), and a
     /// content-pinned helper call.
     ///
     /// Without this, an empty-violations result of the guard above is
@@ -12976,16 +13286,16 @@ mod content_pinned_artifact_read_guards {
              comment MUST NOT be flagged"
         );
 
-        // (d) `route_owned_shallow().get_any(` is a DIFFERENT db
-        //     (`RouteOwnedShallowDb`) — must NOT be flagged.
-        let route_owned = (
-            "crates/verter_session/src/synthetic_route_owned.rs".to_string(),
-            "fn read(&self) { let _ = self.project_type_store.route_owned_shallow().get_any(c); }"
+        // (d) `member_display_facts().get_any(` is a DIFFERENT db —
+        //     must NOT be flagged.
+        let other_db = (
+            "crates/verter_session/src/synthetic_other_db.rs".to_string(),
+            "fn read(&self) { let _ = self.project_type_store.member_display_facts().get_any(c); }"
                 .to_string(),
         );
         assert!(
-            unallowlisted_get_any_files(std::slice::from_ref(&route_owned), &[]).is_empty(),
-            "discriminator: `route_owned_shallow().get_any(` targets a \
+            unallowlisted_get_any_files(std::slice::from_ref(&other_db), &[]).is_empty(),
+            "discriminator: `member_display_facts().get_any(` targets a \
              different db and MUST NOT be flagged by the FileArtifactStore guard"
         );
 
@@ -13386,7 +13696,7 @@ mod content_pinned_artifact_read_guards {
         //     MUST NOT be flagged.
         let pinned_sig =
             "fn get(&self, canonical_id: &str, expected_whole_hash: Hash16) -> Option<Arc<IndexedReady>>";
-        let pinned_body = "{ let key = FileArtifactKey::legacy(Arc::from(canonical_id), expected_whole_hash); self.artifacts.get(&key) }";
+        let pinned_body = "{ let key = FileArtifactKey::base(Arc::from(canonical_id), expected_whole_hash); self.artifacts.get(&key) }";
         assert!(
             !is_unpinned_currency_oracle(pinned_sig, pinned_body),
             "self-test: a content-pinned read (carries a `Hash16` pin) MUST NOT be flagged",
@@ -13662,7 +13972,7 @@ fn imported_macro_surface_not_in_verter_semantic() {
 /// The bridge is internal typed-IR infrastructure. Leaking it into a
 /// protocol DTO, an FFI host object, or a JS compat shape would
 /// promote internal dispatch identity into the public API surface —
-/// exactly the seam codex BINDING prohibits.
+/// exactly the seam the single-engine rule prohibits.
 #[test]
 fn imported_macro_surface_not_in_protocol_or_ffi() {
     let root = workspace_root();
@@ -15063,7 +15373,7 @@ mod single_resolution_engine_guards {
     // `ResolvedMacroMeta` output into the cutover seam's `Eager` arm. Every
     // production call selects the redundant eager (OXC) surface; the
     // consolidation flips these to the canonical typed-IR macro payload and
-    // then DELETES `from_eager_meta` and the `Eager` arm (codex Stage 2 row).
+    // then DELETES `from_eager_meta` and the `Eager` arm.
     // No NEW production caller may be added.
     //
     // Line-precise allowlist (few sites, exact site matters):
@@ -15142,8 +15452,8 @@ mod single_resolution_engine_guards {
     // `verter_parser::utils::oxc::vue::script::resolve_type` (referenced as
     // `crate::utils::oxc::vue::resolve_type::` within verter_parser /
     // verter_compiler, and `verter_compiler::utils::oxc::vue::resolve_type::`
-    // from verter_session). The consolidation deletes the query-time engine
-    // (codex Stages 2/5/6); the lowering front-end `verter_type_expr_oxc::
+    // from verter_session). The consolidation deletes the query-time
+    // engine; the lowering front-end `verter_type_expr_oxc::
     // lower_ts_type` is NOT this engine and references none of these tokens.
     //
     // Count-based per-file ledger (`scan_file_resolve_type_target_counts` →
@@ -15201,9 +15511,14 @@ mod single_resolution_engine_guards {
             3,
         ),
         ("crates/verter_parser/src/utils/oxc/vue/script/setup.rs", 21),
-        ("crates/verter_session/src/host_manage/eval_program.rs", 8),
+        ("crates/verter_session/src/host_manage/eval_program.rs", 5),
         ("crates/verter_session/src/host_manage/jsdoc_resolve.rs", 4),
-        ("crates/verter_session/src/host_manage/prepared_decl.rs", 7),
+        // 7 -> 8 (unified cold build): `build_indexed_route_surface` — the
+        // shared route-surface builder factored out of the materialise
+        // closure — names `AnalyzedExternalTypeSource` once in TYPE
+        // position (a parameter on moved code). No new engine CALL was
+        // added; the engine-call sites in this file are unchanged.
+        ("crates/verter_session/src/host_manage/prepared_decl.rs", 8),
         ("crates/verter_session/src/host_manage.rs", 6),
         (
             "crates/verter_session/src/host_resolve/external_macro_collector.rs",
@@ -15223,7 +15538,7 @@ mod single_resolution_engine_guards {
         ),
         ("crates/verter_session/src/lib.rs", 1),
         ("crates/verter_session/src/parsed_eval_program.rs", 1),
-        ("crates/verter_session/src/project_type_store.rs", 5),
+        ("crates/verter_session/src/project_type_store.rs", 3),
         (
             "crates/verter_session/src/resolver_core/component_meta/mod.rs",
             3,
@@ -15254,7 +15569,7 @@ mod single_resolution_engine_guards {
         ),
         (
             "crates/verter_session/src/resolver_core/shallow_file_state.rs",
-            8,
+            7,
         ),
         (
             "crates/verter_session/src/resolver_core/surface_projector.rs",
@@ -15285,8 +15600,8 @@ mod single_resolution_engine_guards {
     // `ResolvedElements` (defined at
     // `verter_parser/src/utils/oxc/vue/script/resolve_type/mod.rs`) is the
     // eager OXC resolver's resolved props/emits/slots/native output struct. It
-    // is the second engine's result type and is deleted with the engine (codex
-    // Stages 2/5). `lower_ts_type` produces `TypeExpr`, never `ResolvedElements`,
+    // is the second engine's result type and is deleted with the engine.
+    // `lower_ts_type` produces `TypeExpr`, never `ResolvedElements`,
     // so the front-end is not flagged.
     //
     // IDENTIFIER-BOUNDARY matching (`scan_file_identifier_counts` →
@@ -15393,8 +15708,8 @@ mod single_resolution_engine_guards {
     //
     // `PreparedSurfaceProjection` is the output enum of the prepared-decl
     // fallback surface walker (`component_meta_query_engine`), a SECOND surface
-    // engine distinct from the canonical `surface_view_from_base_node`. Codex
-    // Stage 4 deletes the walker (and its `prepared_surface_db` /
+    // engine distinct from the canonical `surface_view_from_base_node`. The
+    // consolidation deletes the walker (and its `prepared_surface_db` /
     // `prepared_member_db` caches); no NEW file may wire it in.
     //
     // Count-based per-file ledger (4 files — the walker's owning module),
@@ -15941,7 +16256,8 @@ pub fn run(p: &Program) {\n\
         // the guard would stay GREEN while query-time engine use grew inside an
         // allowlisted file.
 
-        // The exact form codex flagged: engine module nested one level deep.
+        // The exact evasion form the guard must catch: engine module
+        // nested one level deep.
         let nested_src = "\
 use verter_compiler::utils::oxc::vue::{resolve_type::{analyze_external_type_program}};\n\
 pub fn run(p: &Program) {\n\
@@ -17020,7 +17336,6 @@ const INTO_OWNED_VIEW_ALLOWLIST: &[&str] = &[
     "crates/verter_session/src/host_manage/component_meta_methods.rs",
     "crates/verter_session/src/host_manage/imported_type_root.rs",
     "crates/verter_session/src/host_resolve/frontier_engine.rs",
-    "crates/verter_session/src/host_resolve/route_owned_shallow.rs",
     // Build-time oracle-snapshot generator (`oracle-gen` feature only — never
     // on the consumption path): builds a quiescent owned view over a
     // freshly-constructed standalone host for the source-side walk.
@@ -17222,7 +17537,7 @@ const COLD_SEED_INTO_INNER_ALLOWLIST: &[&str] = &[
     // wrappers; production routes through a ctx-bound request boundary.
     "crates/verter_session/src/host_manage/imported_type_root.rs",
     "crates/verter_session/src/host_resolve/frontier_engine.rs",
-    "crates/verter_session/src/host_resolve/route_owned_shallow.rs",
+    "crates/verter_session/src/host_resolve/route_surface.rs",
 ];
 
 /// Whether `src` contains the cold-seed raw-unwrap escape-hatch pattern
@@ -17648,293 +17963,1250 @@ fn store_view_capability_split_guard_is_discriminating() {
     );
 }
 
-// ──────────────────────────────────────────────────────────────────────────
-// Token-generation bump-on-mutation guard
+// ─────────────────────────────────────────────────────────────────────────
+// Cold per-file artifact-build dedup guards.
 //
-// `StoreViewValidationToken` folds `RouteOwnedShallowDb::artifact_generation`
-// (the `route_owned_generation` token dimension) and a `HostStoreView`
-// snapshots that DB's `Route` derived hashes BY VALUE. Any method on the DB
-// that mutates `self.entries` (insert / remove / clear / retain / evict)
-// therefore MUST advance the generation — a mutation that drops or replaces
-// rows without bumping leaves a previously-snapshotted view validating
-// against state the store no longer holds (the exact soundness gap the
-// schema-mismatch eviction path had: it cleared `entries` without a bump).
-//
-// The guard parses `project_type_store.rs`, finds every method on
-// `RouteOwnedShallowDb`, and asserts each one whose body mutates
-// `self.entries` also references `self.artifact_generation` somewhere in the
-// same body. A new mutation path that forgets the bump fails here.
-// ──────────────────────────────────────────────────────────────────────────
+// `ensure_indexed_ready_serve`'s materialise closure is the SINGLE per-file
+// cold build: it parses once, builds one env, builds one shallow state,
+// and publishes one `IndexedReady`. The route-owned shallow system (a
+// parallel whole-file artifact build whose output the IndexedReady
+// build never read) is deleted, not shimmed; the eval-env fallback that
+// re-parsed the file inside `ShallowFileState::from_analysis_inner` is
+// likewise gone from every production path.
+// ─────────────────────────────────────────────────────────────────────────
 
-/// The field whose generation is folded into the `StoreViewValidationToken`
-/// (`route_owned_generation`) and must advance on every entry mutation.
-const ROUTE_OWNED_BUMP_FIELD: &str = "artifact_generation";
-/// The DB whose entry map is snapshotted by value into the validation token.
-const ROUTE_OWNED_DB_TYPE: &str = "RouteOwnedShallowDb";
-/// The entry-map field that backs the token's by-value `Route` derived hashes.
-const ROUTE_OWNED_ENTRIES_FIELD: &str = "entries";
-/// Mutating `DashMap` methods that change the row set (and thus the
-/// snapshotted derived-hash source). Pure reads (`get`, `iter`, `len`,
-/// `is_empty`, `contains_key`) are intentionally absent — they do not mutate
-/// and so do not require a bump.
-const ROUTE_OWNED_MUTATING_METHODS: &[&str] = &[
-    "insert",
-    "remove",
-    "remove_if",
-    "clear",
-    "retain",
-    "alter",
-    "alter_all",
-    "entry", // `entry(..)` yields an `OccupiedEntry` whose `.or_insert`/`.insert` mutate.
-];
-
-/// Result of scanning one `RouteOwnedShallowDb` method body for the
-/// mutate-without-bump pattern.
-struct RouteOwnedMethodScan {
-    method_name: String,
-    mutates_entries: bool,
-    references_bump_field: bool,
-}
-
-/// Parse `src` and return, for every method declared in an `impl … for
-/// RouteOwnedShallowDb` / `impl RouteOwnedShallowDb` block, whether its body
-/// mutates `self.entries` and whether it references `self.artifact_generation`.
-///
-/// Pulled out as a pure function (no I/O) so the discriminator self-test can
-/// feed it synthetic sources.
-fn scan_route_owned_db_methods(src: &str) -> Vec<RouteOwnedMethodScan> {
-    use syn::visit::Visit;
-    use syn::{Expr, ImplItem, Item, Member};
-
-    /// Whether `expr` is exactly the field access `self.<field>`.
-    fn is_self_field(expr: &Expr, field: &str) -> bool {
-        if let Expr::Field(f) = expr {
-            if let Expr::Path(p) = &*f.base {
-                if p.path.is_ident("self") {
-                    if let Member::Named(name) = &f.member {
-                        return name == field;
+/// Byte mask over `body`: `true` for every byte inside a line comment,
+/// block comment (nested), `"…"` string, raw/byte string, or char
+/// literal. Used by [`strip_cfg_test_gated_source`] so a `#[cfg(test)]`
+/// occurrence inside ANY comment or literal — including a line-leading
+/// one inside a multi-line `/* … */` block — never starts a blanking
+/// span.
+fn comment_and_string_mask(body: &str) -> Vec<bool> {
+    let bytes = body.as_bytes();
+    let mut mask = vec![false; bytes.len()];
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if body[i..].starts_with("//") {
+            let end = body[i..].find('\n').map_or(bytes.len(), |o| i + o);
+            for m in &mut mask[i..end] {
+                *m = true;
+            }
+            i = end;
+            continue;
+        }
+        if body[i..].starts_with("/*") {
+            let mut depth = 1usize;
+            let mut j = i + 2;
+            while j < bytes.len() && depth > 0 {
+                if body[j..].starts_with("/*") {
+                    depth += 1;
+                    j += 2;
+                } else if body[j..].starts_with("*/") {
+                    depth -= 1;
+                    j += 2;
+                } else {
+                    j += 1;
+                }
+            }
+            let end = j.min(bytes.len());
+            for m in &mut mask[i..end] {
+                *m = true;
+            }
+            i = end;
+            continue;
+        }
+        if bytes[i] == b'"' {
+            let mut j = i + 1;
+            while j < bytes.len() {
+                if bytes[j] == b'\\' {
+                    j += 2;
+                } else if bytes[j] == b'"' {
+                    j += 1;
+                    break;
+                } else {
+                    j += 1;
+                }
+            }
+            let end = j.min(bytes.len());
+            for m in &mut mask[i..end] {
+                *m = true;
+            }
+            i = end;
+            continue;
+        }
+        if bytes[i] == b'r' || bytes[i] == b'b' {
+            // Possible raw/byte string start: `r"`, `r#"`, `b"`, `br#"`.
+            let mut la = i + 1;
+            if bytes[i] == b'b' && la < bytes.len() && bytes[la] == b'r' {
+                la += 1;
+            }
+            let mut hashes = 0usize;
+            while la < bytes.len() && bytes[la] == b'#' {
+                hashes += 1;
+                la += 1;
+            }
+            if la < bytes.len() && bytes[la] == b'"' {
+                let closer = format!("\"{}", "#".repeat(hashes));
+                let content_start = la + 1;
+                let end = body[content_start..]
+                    .find(&closer)
+                    .map_or(bytes.len(), |o| content_start + o + closer.len());
+                for m in &mut mask[i..end] {
+                    *m = true;
+                }
+                i = end;
+                continue;
+            }
+        }
+        if bytes[i] == b'\'' {
+            // Char literal vs lifetime — same heuristic as the extent
+            // walk: a char literal closes within at most one escaped
+            // char; a lifetime has no closing quote.
+            let rest = &body[i + 1..];
+            let mut it = rest.char_indices();
+            if let Some((_, c1)) = it.next() {
+                let close = if c1 == '\\' {
+                    it.next();
+                    it.next().map(|(_, c3)| c3) == Some('\'')
+                } else {
+                    it.next().map(|(_, c2)| c2) == Some('\'')
+                };
+                if close {
+                    let end = i + 1 + rest.find('\'').map_or(0, |o| o + 1);
+                    for m in &mut mask[i..end.min(bytes.len())] {
+                        *m = true;
                     }
+                    i = end;
+                    continue;
                 }
             }
         }
-        false
+        i += 1;
+    }
+    mask
+}
+
+/// Blank every `#[cfg(test)]`-gated ITEM out of `body`, preserving
+/// newlines so reported line numbers stay stable. The gated extent is
+/// the attribute through the end of whatever it gates:
+///
+/// - the matching `}` of a brace-bodied item (fn / mod / impl),
+/// - the terminating `;` of a statement-form item (`use`, a gated
+///   statement),
+/// - the terminating `,` of a STRUCT FIELD / enum variant / fn param
+///   (fields end with `,`, not `;`/`}` — commas inside the field
+///   type's generics / parens / brackets do not count),
+/// - or, for a trailing field with no comma, the position JUST BEFORE
+///   the enclosing delimiter's close (`}` / `)` / `]`), which is never
+///   consumed — consuming it produced brace-unbalanced output that
+///   failed `syn::parse_file` downstream and silently skipped whole
+///   files in the route-mutator guard.
+///
+/// This is the scan-precision core of `session_production_ident_hits`:
+/// the predecessor truncated each file at the FIRST `#[cfg(test)]`
+/// occurrence, which left files whose first lines carry a test-only
+/// `use` (e.g. `resolver_core/prepared_decl.rs`) almost entirely
+/// unscanned. Only the exact `#[cfg(test)]` form is stripped —
+/// `#[cfg(any(test, ...))]` items are conditionally compiled into
+/// non-test builds, so they STAY scanned (strictly more coverage).
+///
+/// The item-extent walk is literal-aware: delimiters and terminators
+/// inside line comments, block comments (nested), `"…"` strings,
+/// `r#"…"#` raw strings, and char literals do not count. The marker
+/// SEARCH is comment/string-masked too ([`comment_and_string_mask`]):
+/// a `#[cfg(test)]` in doc-comment prose, a string literal, or a
+/// multi-line block comment never starts a blanking span.
+fn strip_cfg_test_gated_source(body: &str) -> String {
+    const MARKER: &str = "#[cfg(test)]";
+    let bytes = body.as_bytes();
+    let mask = comment_and_string_mask(body);
+    let mut blanked: Vec<u8> = bytes.to_vec();
+    let mut search_from = 0usize;
+    while let Some(rel) = body[search_from..].find(MARKER) {
+        let attr_start = search_from + rel;
+        // A marker inside a comment or string literal is prose, not an
+        // attribute — never a blanking span.
+        if mask[attr_start] {
+            search_from = attr_start + MARKER.len();
+            continue;
+        }
+        // The marker must also be the FIRST non-whitespace on its line —
+        // a genuine gate attribute is always line-leading
+        // (rustfmt-enforced).
+        let line_start = body[..attr_start].rfind('\n').map_or(0, |i| i + 1);
+        if !body[line_start..attr_start].trim().is_empty() {
+            search_from = attr_start + MARKER.len();
+            continue;
+        }
+        let mut cursor = attr_start + MARKER.len();
+        // Skip any further attributes between the marker and the item
+        // header (`#[allow(...)]`, doc attrs, …).
+        loop {
+            let rest = &body[cursor..];
+            let trimmed_len = rest.len() - rest.trim_start().len();
+            let after_ws = cursor + trimmed_len;
+            if body[after_ws..].starts_with("#[") {
+                // Advance past this attribute's closing `]` (attributes
+                // contain balanced brackets; track them literally).
+                let mut depth = 0usize;
+                let mut idx = after_ws;
+                for (off, ch) in body[after_ws..].char_indices() {
+                    match ch {
+                        '[' => depth += 1,
+                        ']' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                idx = after_ws + off + ch.len_utf8();
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                cursor = idx;
+                continue;
+            }
+            cursor = after_ws;
+            break;
+        }
+        // Walk to the end of the gated item: the first `;` at
+        // brace/paren/bracket depth 0, the `}` that closes the first
+        // opened brace block, a field/param-terminating `,` at
+        // all-delimiter depth 0 (including generics' angle depth), or
+        // — exclusively — the close of the ENCLOSING delimiter (a
+        // trailing struct field / fn param).
+        //
+        // A `,` terminates ONLY a non-ITEM extent (a struct field, enum
+        // variant, fn param, or gated statement/expression). A genuine
+        // ITEM (fn / struct / use / …) never ends at a comma — but its
+        // header can legitimately contain depth-0 commas (a `where` clause:
+        // `fn f<F, R>(f: F) -> (usize, R) where F: FnOnce() -> R, {`),
+        // so item extents keep walking to their `;` / body `}`. The
+        // discriminator is the first keyword after the attributes
+        // (with any `pub` / `pub(...)` visibility prefix skipped).
+        let comma_terminates = {
+            let head = body[cursor..].trim_start();
+            let head = match head.strip_prefix("pub") {
+                Some(rest) => {
+                    let rest = rest.trim_start();
+                    if let Some(inner) = rest.strip_prefix('(') {
+                        match inner.find(')') {
+                            Some(i) => inner[i + 1..].trim_start(),
+                            None => rest,
+                        }
+                    } else {
+                        rest
+                    }
+                }
+                None => head,
+            };
+            const ITEM_KEYWORDS: &[&str] = &[
+                "fn", "struct", "enum", "union", "trait", "impl", "mod", "use", "static", "const",
+                "type", "unsafe", "extern", "async", "macro",
+            ];
+            let first_word: String = head
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            !ITEM_KEYWORDS.contains(&first_word.as_str())
+        };
+        let mut depth = 0usize;
+        let mut paren_depth = 0usize;
+        let mut bracket_depth = 0usize;
+        let mut angle_depth = 0usize;
+        // Previous significant char (delimiter-relevant, not consumed
+        // by a literal/comment skip) — drives the `<` generic-open vs
+        // less-than and `->` / `=>` arrow disambiguation.
+        let mut prev_sig = '\0';
+        let mut end = body.len();
+        let mut chars = body[cursor..].char_indices().peekable();
+        while let Some((off, ch)) = chars.next() {
+            let abs = cursor + off;
+            match ch {
+                '/' => match chars.peek().map(|(_, c)| *c) {
+                    Some('/') => {
+                        // Line comment — consume to end of line.
+                        for (o2, c2) in chars.by_ref() {
+                            let _ = o2;
+                            if c2 == '\n' {
+                                break;
+                            }
+                        }
+                    }
+                    Some('*') => {
+                        // Block comment — consume to matching `*/` (nested).
+                        chars.next();
+                        let mut bdepth = 1usize;
+                        let mut prev = '\0';
+                        for (_, c2) in chars.by_ref() {
+                            if prev == '/' && c2 == '*' {
+                                bdepth += 1;
+                                prev = '\0';
+                            } else if prev == '*' && c2 == '/' {
+                                bdepth -= 1;
+                                if bdepth == 0 {
+                                    break;
+                                }
+                                prev = '\0';
+                            } else {
+                                prev = c2;
+                            }
+                        }
+                    }
+                    _ => {}
+                },
+                '"' => {
+                    // String literal — consume with escapes.
+                    let mut escaped = false;
+                    for (_, c2) in chars.by_ref() {
+                        if escaped {
+                            escaped = false;
+                        } else if c2 == '\\' {
+                            escaped = true;
+                        } else if c2 == '"' {
+                            break;
+                        }
+                    }
+                }
+                'r' | 'b' => {
+                    // Possible raw-string start: `r"`, `r#"`, `br#"`, `b"`.
+                    let mut hashes = 0usize;
+                    let mut la = abs + ch.len_utf8();
+                    if ch == 'b' && body[la..].starts_with('r') {
+                        la += 1;
+                    }
+                    while body[la..].starts_with('#') {
+                        hashes += 1;
+                        la += 1;
+                    }
+                    // A quote at the lookahead position means a raw/byte
+                    // string literal starts here (valid Rust has no other
+                    // `r…"` / `b…"` adjacency outside string content this
+                    // scanner is already inside of).
+                    if body[la..].starts_with('"') {
+                        let closer = format!("\"{}", "#".repeat(hashes));
+                        let body_after = la + 1;
+                        let close_at = body[body_after..]
+                            .find(&closer)
+                            .map(|i| body_after + i + closer.len())
+                            .unwrap_or(body.len());
+                        while let Some((o2, _)) = chars.peek().copied() {
+                            if cursor + o2 < close_at {
+                                chars.next();
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                }
+                '\'' => {
+                    // Char literal vs lifetime: a char literal closes with
+                    // `'` within at most one escaped char; a lifetime has
+                    // no closing quote — leave it.
+                    let rest = &body[abs + 1..];
+                    let mut it = rest.char_indices();
+                    if let Some((_, c1)) = it.next() {
+                        let close = if c1 == '\\' {
+                            it.next();
+                            it.next().map(|(_, c3)| c3) == Some('\'')
+                        } else {
+                            it.next().map(|(_, c2)| c2) == Some('\'')
+                        };
+                        if close {
+                            let consume_to = abs + 1 + rest.find('\'').map(|i| i + 1).unwrap_or(0);
+                            while let Some((o2, _)) = chars.peek().copied() {
+                                if cursor + o2 < consume_to {
+                                    chars.next();
+                                } else {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                '{' => depth += 1,
+                '}' => {
+                    if depth == 0 {
+                        // Close of the ENCLOSING block (a trailing
+                        // struct field with no comma) — end the extent
+                        // BEFORE it; consuming it leaves the output
+                        // brace-unbalanced.
+                        end = abs;
+                        break;
+                    }
+                    depth -= 1;
+                    // An item-body close terminates the extent ONLY at
+                    // paren/bracket depth 0 — a closure block inside an
+                    // argument list (`.with(|slot| { … });`) closes its
+                    // brace while the statement continues to `);`.
+                    if depth == 0 && paren_depth == 0 && bracket_depth == 0 {
+                        end = abs + ch.len_utf8();
+                        // A use-tree (`use x::{a, b};`) ends with `;`
+                        // AFTER its brace group — consume it, or the
+                        // stray top-level `;` fails syn downstream.
+                        let rest = &body[end..];
+                        let after_ws = end + (rest.len() - rest.trim_start().len());
+                        if body[after_ws..].starts_with(';') {
+                            end = after_ws + 1;
+                        }
+                        break;
+                    }
+                }
+                '(' => paren_depth += 1,
+                ')' => {
+                    if paren_depth == 0 {
+                        // Close of the enclosing paren list (a trailing
+                        // gated fn param) — exclusive, same as `}`.
+                        end = abs;
+                        break;
+                    }
+                    paren_depth -= 1;
+                }
+                '[' => bracket_depth += 1,
+                ']' => {
+                    if bracket_depth == 0 {
+                        end = abs;
+                        break;
+                    }
+                    bracket_depth -= 1;
+                }
+                '<' => {
+                    // Generic-open vs less-than: in item-header / field
+                    // type position a `<` following an identifier char,
+                    // `:` (paths), or another `<`/`>` opens generics.
+                    if depth == 0
+                        && paren_depth == 0
+                        && bracket_depth == 0
+                        && (prev_sig.is_alphanumeric()
+                            || prev_sig == '_'
+                            || prev_sig == ':'
+                            || prev_sig == '<'
+                            || prev_sig == '>')
+                    {
+                        angle_depth += 1;
+                    }
+                }
+                '>' => {
+                    // `->` / `=>` arrows are not generic closes.
+                    if prev_sig != '-'
+                        && prev_sig != '='
+                        && depth == 0
+                        && paren_depth == 0
+                        && bracket_depth == 0
+                    {
+                        angle_depth = angle_depth.saturating_sub(1);
+                    }
+                }
+                ';' if depth == 0 && paren_depth == 0 && bracket_depth == 0 => {
+                    end = abs + ch.len_utf8();
+                    break;
+                }
+                ',' if comma_terminates
+                    && depth == 0
+                    && paren_depth == 0
+                    && bracket_depth == 0
+                    && angle_depth == 0 =>
+                {
+                    // A struct-field / enum-variant / fn-param gate ends
+                    // at its comma (fields end with `,`, not `;`/`}`).
+                    end = abs + ch.len_utf8();
+                    break;
+                }
+                _ => {}
+            }
+            if !ch.is_whitespace() {
+                prev_sig = ch;
+            }
+        }
+        // Doc comments and attributes immediately ABOVE the marker
+        // attach to the gated item — leaving them behind produces a
+        // dangling `///` with no following item, which is not a
+        // parseable file (syn: "unexpected end of input"). Extend the
+        // span upward over contiguous full-line `///` docs and `#[...]`
+        // attributes.
+        let mut span_start = line_start;
+        while span_start > 0 {
+            let prev_line_start = body[..span_start - 1].rfind('\n').map_or(0, |i| i + 1);
+            let prev_line = body[prev_line_start..span_start - 1].trim();
+            if prev_line.starts_with("///")
+                || (prev_line.starts_with("#[") && prev_line.ends_with(']'))
+            {
+                span_start = prev_line_start;
+            } else {
+                break;
+            }
+        }
+        // Blank the gated span, preserving newlines for stable line
+        // numbers.
+        for b in blanked[span_start..end].iter_mut() {
+            if *b != b'\n' {
+                *b = b' ';
+            }
+        }
+        search_from = end.max(attr_start + MARKER.len());
+    }
+    String::from_utf8(blanked).expect("blanking preserves UTF-8 (ASCII spaces only)")
+}
+
+/// Per-body ident scan over PRODUCTION source: `#[cfg(test)]`-gated
+/// items are stripped first; comment-only lines are skipped. Returns
+/// 1-based line numbers of hits.
+fn ident_hits_in_production_body(body: &str, banned_idents: &[&str]) -> Vec<(usize, String)> {
+    let production_body = strip_cfg_test_gated_source(body);
+    let mut hits = Vec::new();
+    for ident in banned_idents {
+        for (lineno, line) in production_body.lines().enumerate() {
+            if !line.contains(ident) {
+                continue;
+            }
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("//") || trimmed.starts_with("///") || trimmed.starts_with("//!")
+            {
+                continue;
+            }
+            hits.push((lineno + 1, (*ident).to_string()));
+        }
+    }
+    hits
+}
+
+/// Scan production `.rs` sources under `crates/verter_session/src` for a
+/// banned identifier, skipping comment lines, file-level test sources
+/// (`*_tests.rs` / `tests.rs`), and `#[cfg(test)]`-gated ITEMS (modules,
+/// fns, uses — stripped by extent, NOT by truncating the file at the
+/// first marker). An unreadable file is a hard failure — silent green on
+/// I/O errors would make the guard decorative.
+fn session_production_ident_hits(banned_idents: &[&str]) -> Vec<(String, String)> {
+    let crate_root = workspace_path("crates/verter_session/src");
+    let mut hits: Vec<(String, String)> = Vec::new();
+    let mut scanned_files = 0usize;
+    for entry in walkdir::WalkDir::new(&crate_root)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|e| e.path().is_file())
+    {
+        let path = entry.path();
+        let path_str = path.to_string_lossy().replace('\\', "/");
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        if path_str.ends_with("_tests.rs")
+            || path_str.ends_with("/tests.rs")
+            || path_str.contains("/typeinfo_tests/")
+        {
+            continue;
+        }
+        let body = std::fs::read_to_string(path)
+            .unwrap_or_else(|err| panic!("guard scanner could not read {path_str}: {err}"));
+        scanned_files += 1;
+        for (lineno, ident) in ident_hits_in_production_body(&body, banned_idents) {
+            hits.push((format!("{path_str}:{lineno}"), ident));
+        }
+    }
+    assert!(
+        scanned_files > 100,
+        "guard scanner found only {scanned_files} production files under \
+         crates/verter_session/src — the walk itself is broken",
+    );
+    hits
+}
+
+/// Discriminator self-test for the production ident scanner: the guard
+/// must SEE code after a `#[cfg(test)]`-gated item (the predecessor
+/// truncated the whole remainder of the file), must NOT count test-gated
+/// bodies or comments, and must catch a planted violation end-to-end.
+#[test]
+fn session_production_ident_scanner_discriminates() {
+    // (1) A test-gated `use` at the top of the file (the
+    // `resolver_core/prepared_decl.rs` shape) must NOT hide later
+    // production code.
+    let body = "#[cfg(test)]\nuse std::cell::Cell;\n\nfn production() {\n    banned_ident();\n}\n";
+    let hits = ident_hits_in_production_body(body, &["banned_ident"]);
+    assert_eq!(
+        hits,
+        vec![(5, "banned_ident".to_string())],
+        "a leading #[cfg(test)] use must not blind the scanner to the rest \
+         of the file",
+    );
+
+    // (2) Idents INSIDE a #[cfg(test)] mod (including its raw strings and
+    // braces-in-strings) are NOT production references; production code
+    // AFTER the mod still is.
+    let body = "fn a() {}\n#[cfg(test)]\nmod tests {\n    fn t() { let s = \"{\"; banned_ident(); }\n    const R: &str = r#\"}\"#;\n}\nfn b() { banned_ident(); }\n";
+    let hits = ident_hits_in_production_body(body, &["banned_ident"]);
+    assert_eq!(
+        hits,
+        vec![(7, "banned_ident".to_string())],
+        "test-mod bodies must be stripped by ITEM EXTENT (literal-aware), \
+         and production code after the mod must stay visible",
+    );
+
+    // (3) Comment-only lines are skipped; a cfg(any(test, ...)) item is
+    // NOT stripped (it compiles into non-test builds).
+    let body = "// banned_ident in a comment\n#[cfg(any(test, debug_assertions))]\nfn dual() { banned_ident(); }\n";
+    let hits = ident_hits_in_production_body(body, &["banned_ident"]);
+    assert_eq!(
+        hits,
+        vec![(3, "banned_ident".to_string())],
+        "comments are skipped; cfg(any(test, ..)) items stay scanned",
+    );
+
+    // (3b) A `#[cfg(test)]` in DOC-COMMENT PROSE (or any non-line-leading
+    // position) must NOT start a blanking span: pre-fix it swallowed the
+    // production item beneath it through the next depth-0 terminator,
+    // silently un-scanning production code.
+    let body = "/// gated behind #[cfg(test)] in tests\nfn prod() { banned_ident(); }\n";
+    let hits = ident_hits_in_production_body(body, &["banned_ident"]);
+    assert_eq!(
+        hits,
+        vec![(2, "banned_ident".to_string())],
+        "a doc-comment-prose #[cfg(test)] must not blank the production \
+         item beneath it (the silent-green class)",
+    );
+    // (3c) …while a genuine line-leading marker still strips its item.
+    let body = "#[cfg(test)]\nfn t() { banned_ident(); }\nfn prod() { banned_ident(); }\n";
+    let hits = ident_hits_in_production_body(body, &["banned_ident"]);
+    assert_eq!(
+        hits,
+        vec![(3, "banned_ident".to_string())],
+        "a line-leading marker still strips exactly its gated item",
+    );
+
+    // (5) A `#[cfg(test)]` on a STRUCT FIELD: a field ends with `,` (or
+    // the enclosing struct's `}` for a trailing field), NOT `;`/`}` of
+    // its own — the extent must stop at the field's comma and must NOT
+    // swallow the production fields beneath it or the struct's closing
+    // brace (the lib.rs `VerterHost` host-state shape: the principal
+    // reintroduction surface is exactly what a mis-scoped field gate
+    // blinds).
+    let body = "struct S {\n    #[cfg(test)]\n    seam: Option<Hook<A, B>>,\n    prod: u32,\n}\nfn prod() { banned_ident(); }\n";
+    let hits = ident_hits_in_production_body(body, &["banned_ident", "prod"]);
+    assert!(
+        hits.contains(&(6, "banned_ident".to_string())),
+        "a #[cfg(test)] struct field must not blind the scanner to \
+         production code after the struct: {hits:#?}",
+    );
+    assert!(
+        hits.contains(&(4, "prod".to_string())),
+        "the production field AFTER a gated field must stay scanned: {hits:#?}",
+    );
+    let stripped = strip_cfg_test_gated_source(body);
+    assert!(
+        !stripped.contains("seam"),
+        "the gated field itself must be blanked: {stripped:?}",
+    );
+    assert!(
+        syn::parse_file(&stripped).is_ok(),
+        "field-gate stripping must keep the output brace-balanced \
+         (a swallowed struct close fails syn and silently skips the \
+         whole file in the route-mutator guard): {stripped:?}",
+    );
+
+    // (5b) A TRAILING gated field (no comma — the extent ends at the
+    // enclosing struct's `}`, which must NOT be consumed).
+    let body = "struct S {\n    prod: u32,\n    #[cfg(test)]\n    seam: Option<Hook<A, B>>\n}\nfn prod() { banned_ident(); }\n";
+    let hits = ident_hits_in_production_body(body, &["banned_ident"]);
+    assert_eq!(
+        hits,
+        vec![(6, "banned_ident".to_string())],
+        "a trailing gated field must end its extent BEFORE the enclosing \
+         struct's closing brace: {hits:#?}",
+    );
+    assert!(
+        syn::parse_file(&strip_cfg_test_gated_source(body)).is_ok(),
+        "trailing-field stripping must keep the output brace-balanced",
+    );
+
+    // (5c) Generic commas inside the gated field's type must NOT
+    // terminate the extent early (`Hook<A, B>` — the comma at angle
+    // depth 1 is part of the type).
+    let body = "struct S {\n    #[cfg(test)]\n    seam: Map<K, V>,\n    prod: u32,\n}\n";
+    let stripped = strip_cfg_test_gated_source(body);
+    assert!(
+        !stripped.contains("V>"),
+        "the generic tail of the gated field's type must be blanked (the \
+         comma inside `Map<K, V>` is not the field terminator): {stripped:?}",
+    );
+    assert!(
+        stripped.contains("prod: u32"),
+        "the production field after the gated field must survive: {stripped:?}",
+    );
+
+    // (6) A line-leading `#[cfg(test)]` INSIDE a multi-line block
+    // comment must NOT start a blanking span (the silent-green class,
+    // one shape over from doc-comment prose).
+    let body = "/*\n#[cfg(test)]\n*/\nfn prod() { banned_ident(); }\n";
+    let hits = ident_hits_in_production_body(body, &["banned_ident"]);
+    assert_eq!(
+        hits,
+        vec![(4, "banned_ident".to_string())],
+        "a #[cfg(test)] inside a block comment must not blank the \
+         production item beneath it: {hits:#?}",
+    );
+
+    // (4) End-to-end positive control: the real walker must observe a
+    // known production ident in the file the truncating predecessor
+    // left 1/821-scanned (`resolver_core/prepared_decl.rs`, which opens
+    // with `#[cfg(test)] use`).
+    let control = session_production_ident_hits(&["build_prepared_value_decl_cache"]);
+    assert!(
+        control
+            .iter()
+            .any(|(loc, _)| loc.contains("resolver_core/prepared_decl.rs")),
+        "the scanner must reach production code DEEP in files that open \
+         with a #[cfg(test)]-gated item; got {control:#?}",
+    );
+
+    // (7) End-to-end positive control for the FIELD shape: `lib.rs`
+    // carries `#[cfg(test)]`-gated `VerterHost` fields followed by
+    // production fields — the scanner must still see production
+    // identifiers from lib.rs AFTER the gated fields (pre-fix the
+    // field gate blanked through the struct's closing brace and the
+    // brace-unbalanced output failed syn in the route-mutator guard).
+    // `signature_overflow_at_install` is the LAST production field of
+    // `VerterHost`, declared below every gated field.
+    let control = session_production_ident_hits(&["signature_overflow_at_install"]);
+    assert!(
+        control.iter().any(|(loc, _)| {
+            loc.contains("verter_session/src/lib.rs")
+                && loc
+                    .rsplit(':')
+                    .next()
+                    .and_then(|n| n.parse::<usize>().ok())
+                    .is_some_and(|line| line > 600)
+        }),
+        "the scanner must see the production `VerterHost` fields below the \
+         #[cfg(test)]-gated fields in lib.rs; got {control:#?}",
+    );
+}
+
+/// Single-cold-build guard — the route-owned shallow artifact system is
+/// deleted. No production source references its materialiser, its
+/// singleflight lane, its DB, or its snapshot builder; the canonical
+/// `IndexedReady` build is the single per-file cold build.
+#[test]
+fn no_production_route_owned_shallow_system() {
+    let hits = session_production_ident_hits(&[
+        "ensure_route_owned_shallow_entry",
+        "route_owned_shallow_singleflight",
+        "RouteOwnedShallowDb",
+        "RouteOwnedShallowEntry",
+        "build_route_owned_snapshot_from_source_state",
+    ]);
+    assert!(
+        hits.is_empty(),
+        "route-owned shallow system references re-introduced in production \
+         source (the IndexedReady materialise closure is the single \
+         per-file cold build): {hits:#?}"
+    );
+}
+
+/// Source-order route-mutation / generation-bump event for one fn body.
+#[derive(Debug, PartialEq, Eq)]
+enum RouteMutationEvent {
+    Mutation(String),
+    Bump,
+}
+
+/// Per-fn body event collector for the mutate-without-bump guard.
+/// Records, in source (visit) order, every route-resolution mutation —
+/// the workspace route-table writers (`set_exact_resolutions`,
+/// `configure_resolver`, `record_parsed_edges_with_exact_resolutions`)
+/// and the workspace-authority swap (`*self.workspace.write() = …`) —
+/// plus every `bump_project_generation*` call. Operating on the syn AST
+/// makes the guard comment-proof: a `bump_project_generation` in a
+/// comment or string can never satisfy it, and a mutation in a comment
+/// can never false-flag.
+struct RouteMutationVisitor {
+    events: Vec<RouteMutationEvent>,
+}
+
+impl RouteMutationVisitor {
+    /// Classify one identifier name as a mutation marker, a bump, or
+    /// neither — the single marker table shared by method calls, UFCS
+    /// path calls, and macro-body ident scans.
+    fn classify(name: &str) -> Option<RouteMutationEvent> {
+        match name {
+            "set_exact_resolutions"
+            | "configure_resolver"
+            | "record_parsed_edges"
+            | "record_parsed_edges_with_exact_resolutions" => {
+                Some(RouteMutationEvent::Mutation(name.to_string()))
+            }
+            "bump_project_generation" | "bump_project_generation_and_evict" => {
+                Some(RouteMutationEvent::Bump)
+            }
+            _ => None,
+        }
     }
 
-    /// Counts (a) mutating method calls whose receiver is `self.entries` and
-    /// (b) references to the `self.artifact_generation` field, in one body.
-    struct BodyScan {
-        mutates_entries: bool,
-        references_bump_field: bool,
-    }
-    impl<'ast> Visit<'ast> for BodyScan {
-        fn visit_expr_method_call(&mut self, mc: &'ast syn::ExprMethodCall) {
-            // A mutating call on `self.entries` directly (e.g.
-            // `self.entries.insert(...)` / `self.entries.clear()`).
-            if is_self_field(&mc.receiver, ROUTE_OWNED_ENTRIES_FIELD)
-                && ROUTE_OWNED_MUTATING_METHODS.iter().any(|m| mc.method == m)
-            {
-                self.mutates_entries = true;
+    /// Scan a macro invocation's token stream for marker IDENTS —
+    /// `syn::visit` does not descend into macro bodies, so a mutation
+    /// buried in `with_lock!({ … })` would otherwise be invisible.
+    /// Ident tokens only: a marker name inside a string literal (a log
+    /// message) never flags.
+    fn scan_token_stream(&mut self, tokens: proc_macro2::TokenStream) {
+        for tree in tokens {
+            match tree {
+                proc_macro2::TokenTree::Group(group) => self.scan_token_stream(group.stream()),
+                proc_macro2::TokenTree::Ident(ident) => {
+                    if let Some(event) = Self::classify(&ident.to_string()) {
+                        self.events.push(event);
+                    }
+                }
+                _ => {}
             }
-            syn::visit::visit_expr_method_call(self, mc);
         }
-        fn visit_expr_field(&mut self, f: &'ast syn::ExprField) {
-            // Any reference to `self.artifact_generation` (the bump field) —
-            // typically `self.artifact_generation.fetch_add(...)`.
-            if let Expr::Path(p) = &*f.base {
-                if p.path.is_ident("self") {
-                    if let Member::Named(name) = &f.member {
-                        if name == ROUTE_OWNED_BUMP_FIELD {
-                            self.references_bump_field = true;
+    }
+}
+
+impl<'ast> syn::visit::Visit<'ast> for RouteMutationVisitor {
+    fn visit_expr_method_call(&mut self, mc: &'ast syn::ExprMethodCall) {
+        if let Some(event) = Self::classify(&mc.method.to_string()) {
+            self.events.push(event);
+        }
+        syn::visit::visit_expr_method_call(self, mc);
+    }
+
+    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+        // UFCS / fully-qualified calls (`VerterHost::set_exact_resolutions(
+        // self, …)`) — the method-call visitor never sees these.
+        if let syn::Expr::Path(path) = &*call.func {
+            if let Some(segment) = path.path.segments.last() {
+                if let Some(event) = Self::classify(&segment.ident.to_string()) {
+                    self.events.push(event);
+                }
+            }
+        }
+        syn::visit::visit_expr_call(self, call);
+    }
+
+    fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+        self.scan_token_stream(mac.tokens.clone());
+        syn::visit::visit_macro(self, mac);
+    }
+
+    fn visit_expr_assign(&mut self, assign: &'ast syn::ExprAssign) {
+        // The workspace-authority swap: `*self.workspace.write() = …`.
+        if let syn::Expr::Unary(unary) = &*assign.left {
+            if matches!(unary.op, syn::UnOp::Deref(_)) {
+                if let syn::Expr::MethodCall(mc) = &*unary.expr {
+                    if mc.method == "write" {
+                        if let syn::Expr::Field(field) = &*mc.receiver {
+                            if let syn::Member::Named(name) = &field.member {
+                                if name == "workspace" {
+                                    self.events.push(RouteMutationEvent::Mutation(
+                                        "workspace authority swap".to_string(),
+                                    ));
+                                }
+                            }
                         }
                     }
                 }
             }
-            syn::visit::visit_expr_field(self, f);
+        }
+        syn::visit::visit_expr_assign(self, assign);
+    }
+}
+
+/// Discover every fn in `src` that performs a route-resolution mutation
+/// and lacks a `project_generation` bump strictly AFTER its last
+/// mutation. Returns `(fn_name, violation)` pairs; fns named in
+/// `allowlist` are skipped.
+fn route_mutator_violations_in_source(src: &str, allowlist: &[&str]) -> Vec<(String, String)> {
+    route_mutator_violations_in_labeled_source(src, allowlist, "inline source")
+}
+
+/// [`route_mutator_violations_in_source`] with a source label for the
+/// unparseable-input panic — the real walk passes the file path so a
+/// stripper regression names the file it broke.
+fn route_mutator_violations_in_labeled_source(
+    src: &str,
+    allowlist: &[&str],
+    source_label: &str,
+) -> Vec<(String, String)> {
+    use syn::visit::Visit;
+
+    struct FnCollector<'a> {
+        allowlist: &'a [&'a str],
+        violations: Vec<(String, String)>,
+    }
+    impl<'a> FnCollector<'a> {
+        fn check_fn(&mut self, name: &str, block: &syn::Block) {
+            if self.allowlist.contains(&name) {
+                return;
+            }
+            let mut visitor = RouteMutationVisitor { events: Vec::new() };
+            syn::visit::visit_block(&mut visitor, block);
+            let Some(last_mutation) = visitor
+                .events
+                .iter()
+                .rposition(|e| matches!(e, RouteMutationEvent::Mutation(_)))
+            else {
+                return;
+            };
+            let bump_after = visitor.events[last_mutation + 1..]
+                .iter()
+                .any(|e| matches!(e, RouteMutationEvent::Bump));
+            if !bump_after {
+                let RouteMutationEvent::Mutation(kind) = &visitor.events[last_mutation] else {
+                    unreachable!();
+                };
+                let had_premature_bump = visitor.events[..last_mutation]
+                    .iter()
+                    .any(|e| matches!(e, RouteMutationEvent::Bump));
+                self.violations.push((
+                    name.to_string(),
+                    if had_premature_bump {
+                        format!(
+                            "route mutation (`{kind}`) with the generation bump BEFORE it \
+                             (bump-before-mutate lets a flight capture the new stamp over \
+                             the old table and pass the pre-publish fence)"
+                        )
+                    } else {
+                        format!(
+                            "route mutation (`{kind}`) with NO `bump_project_generation*` after it"
+                        )
+                    },
+                ));
+            }
+        }
+    }
+    impl<'a, 'ast> syn::visit::Visit<'ast> for FnCollector<'a> {
+        fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+            self.check_fn(&item.sig.ident.to_string(), &item.block);
+            syn::visit::visit_item_fn(self, item);
+        }
+        fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
+            self.check_fn(&item.sig.ident.to_string(), &item.block);
+            syn::visit::visit_impl_item_fn(self, item);
         }
     }
 
-    let file = match syn::parse_file(src) {
-        Ok(f) => f,
-        Err(_) => return Vec::new(),
+    // HARD failure on unparseable input. The sources this guard walks
+    // compile (cargo proves them parseable), so the only way to get
+    // here with broken syntax is a mis-stripped `#[cfg(test)]` extent —
+    // exactly the case that previously skipped whole files into silent
+    // green. A guard that cannot read its scope must fail, not pass.
+    let file = syn::parse_file(src).unwrap_or_else(|err| {
+        panic!(
+            "route-mutator guard could not parse {source_label} (a silent \
+             skip here hollows the guard's per-fn claim — fix the cfg(test) \
+             stripper or the source): {err}"
+        )
+    });
+    let mut collector = FnCollector {
+        allowlist,
+        violations: Vec::new(),
     };
-    let mut scans = Vec::new();
-    for item in &file.items {
-        let Item::Impl(item_impl) = item else {
-            continue;
-        };
-        // Only impls whose self-type is `RouteOwnedShallowDb`.
-        let self_ty_is_db = matches!(
-            &*item_impl.self_ty,
-            syn::Type::Path(tp)
-                if tp.path.segments.last().map(|s| s.ident == ROUTE_OWNED_DB_TYPE).unwrap_or(false)
-        );
-        if !self_ty_is_db {
+    collector.visit_file(&file);
+    collector.violations
+}
+
+/// Fns that perform a route-affecting workspace write WITHOUT a
+/// `project_generation` bump, each with its standing justification.
+/// Additions require the same class of argument. Entries are
+/// `(file-path suffix, fn name)` — a bare fn name would exempt ANY fn
+/// of that name anywhere in the crate.
+const ROUTE_MUTATOR_NO_BUMP_ALLOWLIST: &[(&str, &str)] = &[
+    // The scheduler-snapshot integrate re-syncs bundler routes through
+    // ONE atomic edge-store mutation
+    // (`record_parsed_edges_with_exact_resolutions`). Its fence
+    // dimension is CONTENT, not the project stamp: a byte-identical
+    // reload is a value no-op on both stores (R22 + the exact-table
+    // idempotency gate), a content-changed reload is content-addressed
+    // (new whole_hash → new artifact identity), and the torn
+    // exacts-cleared window the bump would otherwise have to announce
+    // no longer exists (the mutation is atomic). Pinned by
+    // `integrate_re_syncs_bundler_routes_via_one_atomic_workspace_mutation`.
+    (
+        "crates/verter_session/src/host_lifecycle.rs",
+        "integrate_scheduler_snapshot",
+    ),
+    // The upsert lane's parsed-edge sync (`record_parsed_edges`, which
+    // clears the OWNER's workspace exacts). Same CONTENT fence dimension
+    // as the integrate row above: the caller (`upsert`) runs
+    // `ws().notify_upsert` strictly AFTER this sync — a per-canonical
+    // content-generation bump + transition-ledger record that stales
+    // every cross-file-edge surface through the edge-currency oracle —
+    // and bumps `store_view_epoch` before returning. A byte-identical
+    // re-upsert is a value no-op on both stores (R22), and the cleared
+    // exacts belong to the owner whose content identity just moved
+    // (new whole_hash → new artifact identity), so the project stamp
+    // announces nothing the content rails do not already announce.
+    (
+        "crates/verter_session/src/host_upsert.rs",
+        "record_parsed_edges_to_vfs",
+    ),
+];
+
+/// Mutate-without-bump structural guard over the `project_generation`
+/// stamp discipline: every host route-resolution mutator must advance
+/// `project_generation` AFTER the route-affecting mutation it announces
+/// — the pre-publish fence compares a flight's start-of-flight stamp
+/// against the live stamp at publish, so a bump that PRECEDES the
+/// mutation lets a flight capture the new stamp over the old table and
+/// pass the fence (the `set_exact_resolutions` ordering defect).
+///
+/// AUTO-DISCOVERY (syn AST, not a closed case table): every production
+/// fn under `crates/verter_session/src` whose body performs a
+/// route-resolution mutation is discovered and checked; fns on the
+/// documented [`ROUTE_MUTATOR_NO_BUMP_ALLOWLIST`] are exempt with a
+/// standing justification. The behavioral twin
+/// (`set_exact_resolutions_bumps_project_generation_after_the_workspace_mutation`)
+/// pins the live ordering for the wrapper; this structural guard pins
+/// every discovered mutator.
+#[test]
+fn route_mutators_bump_project_generation_after_the_mutation() {
+    let crate_root = workspace_path("crates/verter_session/src");
+    let mut all_violations: Vec<(String, String, String)> = Vec::new();
+    let mut discovered_mutators = 0usize;
+    let mut scanned_files = 0usize;
+    for entry in walkdir::WalkDir::new(&crate_root)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|e| e.path().is_file())
+    {
+        let path = entry.path();
+        let path_str = path.to_string_lossy().replace('\\', "/");
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
             continue;
         }
-        for impl_item in &item_impl.items {
-            let ImplItem::Fn(method) = impl_item else {
-                continue;
-            };
-            let mut body = BodyScan {
-                mutates_entries: false,
-                references_bump_field: false,
-            };
-            body.visit_block(&method.block);
-            scans.push(RouteOwnedMethodScan {
-                method_name: method.sig.ident.to_string(),
-                mutates_entries: body.mutates_entries,
-                references_bump_field: body.references_bump_field,
+        if path_str.ends_with("_tests.rs")
+            || path_str.ends_with("/tests.rs")
+            || path_str.contains("/typeinfo_tests/")
+        {
+            continue;
+        }
+        let body = std::fs::read_to_string(path)
+            .unwrap_or_else(|err| panic!("guard scanner could not read {path_str}: {err}"));
+        scanned_files += 1;
+        // Production scope only: strip `#[cfg(test)]`-gated items before
+        // parsing (test-only helpers may legitimately skip the bump).
+        let production_body = strip_cfg_test_gated_source(&body);
+        // File-scoped allowlist: only rows whose path suffix matches THIS
+        // file exempt fn names in it.
+        let file_allowlist: Vec<&str> = ROUTE_MUTATOR_NO_BUMP_ALLOWLIST
+            .iter()
+            .filter(|(file, _)| path_str.ends_with(file))
+            .map(|(_, name)| *name)
+            .collect();
+        for (fn_name, violation) in
+            route_mutator_violations_in_labeled_source(&production_body, &file_allowlist, &path_str)
+        {
+            all_violations.push((path_str.clone(), fn_name, violation));
+        }
+        // Track discovery coverage (anti-vacuity floor below). The
+        // violation pass above already hard-failed on an unparseable
+        // body; parse again for the counter under the same contract.
+        let mut counter = RouteMutationVisitor { events: Vec::new() };
+        {
+            use syn::visit::Visit;
+            let file = syn::parse_file(&production_body).unwrap_or_else(|err| {
+                panic!("route-mutator discovery counter could not parse {path_str}: {err}")
             });
+            counter.visit_file(&file);
+        }
+        if counter
+            .events
+            .iter()
+            .any(|e| matches!(e, RouteMutationEvent::Mutation(_)))
+        {
+            discovered_mutators += 1;
         }
     }
-    scans
-}
-
-#[test]
-fn route_owned_shallow_db_entry_mutations_bump_token_generation() {
-    let src = read_workspace_file("crates/verter_session/src/project_type_store.rs");
-    let scans = scan_route_owned_db_methods(&src);
     assert!(
-        !scans.is_empty(),
-        "guard found no RouteOwnedShallowDb methods — the AST scan or the type \
-         name regressed (RouteOwnedShallowDb is the route-owned-shallow DB whose \
-         artifact_generation is folded into StoreViewValidationToken)"
+        scanned_files > 100,
+        "route-mutator guard scanned only {scanned_files} files — the walk \
+         is broken"
     );
-    // Sanity: the scan must actually see at least one mutating method (publish /
-    // remove / clear_all / evict_if_schema_mismatch), else the mutation
-    // detector is vacuous and the guard would pass trivially.
+    // Anti-vacuity: the known mutator homes must be discovered.
     assert!(
-        scans.iter().any(|s| s.mutates_entries),
-        "guard saw zero entry-mutating RouteOwnedShallowDb methods — the \
-         `self.entries.<mutator>` detector regressed and the guard is now vacuous"
+        discovered_mutators >= 2,
+        "route-mutator discovery found mutations in only \
+         {discovered_mutators} production files — discovery is broken \
+         (host_lifecycle.rs and host_manage/analysis_io.rs both carry \
+         route mutators)"
     );
-    let offenders: Vec<&str> = scans
-        .iter()
-        .filter(|s| s.mutates_entries && !s.references_bump_field)
-        .map(|s| s.method_name.as_str())
-        .collect();
     assert!(
-        offenders.is_empty(),
-        "every RouteOwnedShallowDb method that mutates `self.entries` MUST also \
-         advance `self.{ROUTE_OWNED_BUMP_FIELD}` (the `route_owned_generation` \
-         dimension folded into StoreViewValidationToken) — a mutation without a \
-         bump leaves a previously-snapshotted HostStoreView validating against \
-         drained/replaced route-owned `Route` derived hashes. Offending \
-         method(s): {offenders:?}"
+        all_violations.is_empty(),
+        "route-resolution mutators without a strictly-following \
+         `project_generation` bump (fence-blind mutation windows): \
+         {all_violations:#?}"
     );
 }
 
+/// Discriminator self-test for the route-mutator guard: each shape the
+/// guard exists to catch must flag, and the comment-foolable mode of the
+/// retired string-offset implementation must be impossible.
 #[test]
-fn route_owned_shallow_db_bump_guard_is_discriminating() {
-    // Self-test (anti-stub): the scanner FLAGS a mutate-without-bump method and
-    // ACCEPTS a mutate-with-bump method. If either property failed, the guard
-    // above would be vacuous.
+fn route_mutators_guard_discriminator_self_test() {
+    // Clean: bump strictly after the mutation.
+    let clean = "impl H { pub fn set_exact(&self) { self.ws().set_exact_resolutions(c, r); self.store.bump_project_generation(); } }";
+    assert!(
+        route_mutator_violations_in_source(clean, &[]).is_empty(),
+        "bump-after-mutate must pass"
+    );
 
-    // A synthetic DB whose `clear`-like method drains `self.entries` WITHOUT
-    // touching the bump field — exactly the closed bug's shape. The scanner
-    // must see a mutating method with NO bump reference.
-    let leaky = r#"
-        struct RouteOwnedShallowDb { entries: u8, artifact_generation: u8 }
-        impl crate::cache_schema::CacheSchemaVersioned for RouteOwnedShallowDb {
-            fn evict_if_schema_mismatch(&self, current: u32) -> usize {
-                let count = self.entries.len();
-                self.entries.clear();
-                count
-            }
-        }
-    "#;
-    let leaky_scans = scan_route_owned_db_methods(leaky);
-    let leaky_offenders: Vec<&str> = leaky_scans
-        .iter()
-        .filter(|s| s.mutates_entries && !s.references_bump_field)
-        .map(|s| s.method_name.as_str())
-        .collect();
+    // Missing bump: flagged.
+    let missing = "impl H { pub fn set_exact(&self) { self.ws().set_exact_resolutions(c, r); } }";
+    let violations = route_mutator_violations_in_source(missing, &[]);
     assert_eq!(
-        leaky_offenders,
-        vec!["evict_if_schema_mismatch"],
-        "discriminator: a method that clears `self.entries` without referencing \
-         `self.artifact_generation` MUST be flagged as an offender"
+        violations.len(),
+        1,
+        "a mutation with no bump must flag: {violations:#?}"
     );
 
-    // The fixed shape: the same drain plus a bump reference. The scanner must
-    // see the mutation AND the bump, so it is NOT an offender.
-    let fixed = r#"
-        struct RouteOwnedShallowDb { entries: u8, artifact_generation: u8 }
-        impl crate::cache_schema::CacheSchemaVersioned for RouteOwnedShallowDb {
-            fn evict_if_schema_mismatch(&self, current: u32) -> usize {
-                let count = self.entries.len();
-                self.entries.clear();
-                if count > 0 {
-                    self.artifact_generation.fetch_add(1, Ordering::AcqRel);
-                }
-                count
-            }
-        }
-    "#;
-    let fixed_scans = scan_route_owned_db_methods(fixed);
-    let fixed_method = fixed_scans
-        .iter()
-        .find(|s| s.method_name == "evict_if_schema_mismatch")
-        .expect("discriminator: fixed source must expose the method");
-    assert!(
-        fixed_method.mutates_entries,
-        "discriminator: the fixed method still mutates `self.entries`"
+    // Bump BEFORE the mutation: flagged (the fence-defeating order).
+    let premature = "impl H { pub fn set_exact(&self) { self.store.bump_project_generation(); self.ws().set_exact_resolutions(c, r); } }";
+    let violations = route_mutator_violations_in_source(premature, &[]);
+    assert_eq!(
+        violations.len(),
+        1,
+        "bump-before-mutate must flag: {violations:#?}"
     );
     assert!(
-        fixed_method.references_bump_field,
-        "discriminator: the fixed method references `self.artifact_generation`"
+        violations[0].1.contains("BEFORE"),
+        "the violation must name the premature-bump order: {violations:#?}"
     );
-    let fixed_offenders: Vec<&str> = fixed_scans
+
+    // COMMENT-PROOF (the retired implementation's silent-green): a
+    // `bump_project_generation` inside a comment must NOT satisfy the
+    // guard.
+    let comment_fooled = "impl H { pub fn set_exact(&self) { self.ws().set_exact_resolutions(c, r); /* self.store.bump_project_generation(); */ } }";
+    assert_eq!(
+        route_mutator_violations_in_source(comment_fooled, &[]).len(),
+        1,
+        "a commented-out bump must not satisfy the guard"
+    );
+
+    // Workspace-authority swap discovery (`set_workspace`'s shape).
+    let swap_missing =
+        "impl H { pub fn set_workspace(&self, w: W) { *self.workspace.write() = w; } }";
+    assert_eq!(
+        route_mutator_violations_in_source(swap_missing, &[]).len(),
+        1,
+        "the workspace-authority swap must be discovered as a mutation"
+    );
+    let swap_clean = "impl H { pub fn set_workspace(&self, w: W) { *self.workspace.write() = w; self.store.bump_project_generation_and_evict(); } }";
+    assert!(
+        route_mutator_violations_in_source(swap_clean, &[]).is_empty(),
+        "swap followed by the evicting bump must pass"
+    );
+
+    // The atomic combined re-sync is discovered too (allowlist-gated in
+    // the real walk).
+    let combined = "impl H { fn integrate(&self) { self.ws().record_parsed_edges_with_exact_resolutions(c, e, r); } }";
+    assert_eq!(
+        route_mutator_violations_in_source(combined, &[]).len(),
+        1,
+        "the combined atomic mutator must be discovered"
+    );
+    assert!(
+        route_mutator_violations_in_source(combined, &["integrate"]).is_empty(),
+        "the allowlist must exempt by fn name"
+    );
+
+    // Plain `record_parsed_edges` CLEARS the workspace's exact-resolved
+    // set (a route-resolution mutation in its own right) — it must be a
+    // tracked marker so its no-bump callers are discovered and forced
+    // onto the documented allowlist.
+    let plain_record =
+        "impl H { fn integrate(&self) { self.ws().record_parsed_edges(c, &edges); } }";
+    assert_eq!(
+        route_mutator_violations_in_source(plain_record, &[]).len(),
+        1,
+        "plain record_parsed_edges (clears workspace exacts) must be \
+         discovered as a route mutation"
+    );
+
+    // UFCS / fully-qualified calls must be visible to the visitor — a
+    // mutator written as a path call must not evade discovery, and a
+    // path-call bump must satisfy the guard.
+    let ufcs_mutation =
+        "impl H { fn set(&self) { VerterHost::set_exact_resolutions(self, c, r); } }";
+    assert_eq!(
+        route_mutator_violations_in_source(ufcs_mutation, &[]).len(),
+        1,
+        "a fully-qualified mutator call must be discovered"
+    );
+    let ufcs_clean = "impl H { fn set(&self) { VerterHost::set_exact_resolutions(self, c, r); ProjectTypeStore::bump_project_generation(&self.store); } }";
+    assert!(
+        route_mutator_violations_in_source(ufcs_clean, &[]).is_empty(),
+        "a fully-qualified bump after a fully-qualified mutation must pass"
+    );
+
+    // Macro bodies must be visible: a mutation buried in a macro
+    // invocation's token stream must be discovered (idents only — a
+    // marker name inside a string literal must NOT flag).
+    let in_macro =
+        "impl H { fn set(&self) { with_lock!({ self.ws().set_exact_resolutions(c, r); }); } }";
+    assert_eq!(
+        route_mutator_violations_in_source(in_macro, &[]).len(),
+        1,
+        "a mutation inside a macro body must be discovered"
+    );
+    let in_macro_string = "impl H { fn log(&self) { trace!(\"set_exact_resolutions skipped\"); } }";
+    assert!(
+        route_mutator_violations_in_source(in_macro_string, &[]).is_empty(),
+        "a marker name inside a macro STRING LITERAL must not flag (ident \
+         tokens only)"
+    );
+
+    // Per-file syn parse failure is a HARD guard failure — a silent
+    // `Vec::new()` skip turns an unparseable (e.g. mis-stripped) file
+    // into silent green exactly where the guard's claim must hold.
+    let parse_failure =
+        std::panic::catch_unwind(|| route_mutator_violations_in_source("fn broken( {", &[]));
+    assert!(
+        parse_failure.is_err(),
+        "an unparseable source must PANIC the route-mutator guard, not \
+         silently report no findings"
+    );
+}
+
+/// Single-cold-build guard — `parse_and_build_env` is a test/standalone
+/// convenience ONLY. A production call inside `verter_session` is a
+/// hidden second parse + second env build for a file the canonical
+/// materialise path already parsed; the materialise closure threads the
+/// single parsed program / env instead.
+#[test]
+fn no_production_parse_and_build_env_in_session() {
+    let hits = session_production_ident_hits(&["parse_and_build_env"]);
+    assert!(
+        hits.is_empty(),
+        "`parse_and_build_env` called from verter_session production code — \
+         thread the materialise closure's single EvalEnv instead: {hits:#?}"
+    );
+}
+
+/// `ProjectTypeStore::new_for_test_with_state` is a test constructor
+/// that compiles into `debug_assertions` builds (the crate's
+/// established `cfg(any(test, debug_assertions))` convention). A
+/// zero-stamped artifact it seeds passes freshness gates on a
+/// generation-0 host, so PRODUCTION code must never call it: the only
+/// production-scanned references allowed are in its defining module
+/// (`project_type_store.rs` — the definition and its docs). Test files
+/// and `#[cfg(test)]`-gated items are already outside the scan.
+#[test]
+fn new_for_test_with_state_has_no_production_call_site() {
+    let hits = session_production_ident_hits(&["new_for_test_with_state"]);
+    let foreign: Vec<_> = hits
         .iter()
-        .filter(|s| s.mutates_entries && !s.references_bump_field)
-        .map(|s| s.method_name.as_str())
+        .filter(|(loc, _)| !loc.contains("src/project_type_store.rs"))
         .collect();
     assert!(
-        fixed_offenders.is_empty(),
-        "discriminator: a method that bumps after mutating `self.entries` MUST \
-         NOT be flagged"
+        foreign.is_empty(),
+        "`new_for_test_with_state` referenced from production code outside \
+         its defining module — a debug-build production caller can seed \
+         zero-stamped artifacts that pass freshness gates: {foreign:#?}"
     );
-
-    // A pure-read method (`is_empty` over `self.entries`) must NOT be treated
-    // as a mutation — the bump is required only for row-changing methods, and
-    // demanding a bump on a read would be a false positive.
-    let read_only = r#"
-        struct RouteOwnedShallowDb { entries: u8, artifact_generation: u8 }
-        impl RouteOwnedShallowDb {
-            fn is_empty(&self) -> bool { self.entries.is_empty() }
-            fn for_each(&self) { for _e in self.entries.iter() {} }
-        }
-    "#;
-    let read_scans = scan_route_owned_db_methods(read_only);
+    // Anti-vacuity: the definition itself must be visible to the scan
+    // (it is `cfg(any(test, debug_assertions))`, which the stripper
+    // deliberately keeps).
     assert!(
-        read_scans.iter().all(|s| !s.mutates_entries),
-        "discriminator: pure-read methods (`is_empty` / `iter`) MUST NOT be \
-         classified as entry mutations"
-    );
-
-    // The `entry(...).or_insert(...)` shape (used by the snapshot fallback path
-    // elsewhere, but the canonical mutate-via-entry shape) must be classified
-    // as a mutation so a future `entry`-based write that forgets the bump is
-    // caught.
-    let entry_mut = r#"
-        struct RouteOwnedShallowDb { entries: u8, artifact_generation: u8 }
-        impl RouteOwnedShallowDb {
-            fn upsert(&self) { self.entries.entry(k).or_insert(v); }
-        }
-    "#;
-    let entry_scans = scan_route_owned_db_methods(entry_mut);
-    let entry_method = entry_scans
-        .iter()
-        .find(|s| s.method_name == "upsert")
-        .expect("discriminator: entry source must expose the method");
-    assert!(
-        entry_method.mutates_entries,
-        "discriminator: `self.entries.entry(..)` MUST be classified as a mutation \
-         (its returned entry handle inserts/mutates)"
-    );
-    assert!(
-        !entry_method.references_bump_field,
-        "discriminator: the synthetic entry-mutation has no bump, so it is an \
-         offender shape"
+        hits.iter()
+            .any(|(loc, _)| loc.contains("src/project_type_store.rs")),
+        "anti-vacuity: the scan must see the defining module's reference"
     );
 }

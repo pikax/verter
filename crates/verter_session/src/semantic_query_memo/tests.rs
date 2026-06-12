@@ -6043,7 +6043,7 @@ fn joiner_outer_tracer_contains_winner_carrier_fact() {
         let host = ctx_host();
         // Outer tracer scope spans the whole dispatch so the
         // joiner-bubble target is the cell the joiner returns into.
-        let ((), finalise) = crate::fact_signature_helpers::install_fact_tracer(&host, || {
+        let ((), finalise, _) = crate::fact_signature_helpers::install_fact_tracer(&host, || {
             let cache_read = joiner_store.execute_cooperative(
                 &host,
                 joiner_key,
@@ -6247,7 +6247,7 @@ fn joiner_of_cache_suppress_winner_inherits_carrier_and_suppression() {
         let host: &crate::VerterHost = joiner_host.as_ref();
         // Outer tracer scope spans the whole dispatch so the
         // joiner-bubble target is the cell the joiner returns into.
-        let (joiner_suppress, finalise) =
+        let (joiner_suppress, finalise, _) =
             crate::fact_signature_helpers::install_fact_tracer(host, || {
                 let cache_read = joiner_store.execute_cooperative(
                     host,

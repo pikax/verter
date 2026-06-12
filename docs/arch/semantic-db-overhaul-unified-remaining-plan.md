@@ -1052,6 +1052,92 @@ at `HEAD`, and on any disagreement this record is the stale party.
   reshaped from 9× `exactness_*: u32` scalar fields to one
   `exactness_counts: BTreeMap<ExactnessTag, u32>` map field.
 
+**SLOWPERF WAVE-1 — cold per-file artifact-build dedup (delivered):**
+`ensure_indexed_ready_serve`'s materialise closure is the SINGLE per-file cold build —
+one eval-program parse (`parse_eval_program`, the sole host parse entry; arena
+stack-local on the singleflight flight), one `EvalEnv` (script-setup type params
+applied; stored on `IndexedReady` behind the `eval_env()` accessor;
+`base_eval_env_arc` collapses to the artifact read), one `ShallowFileState`
+(the `from_analysis_inner` `parse_and_build_env` fallback is REMOVED), one
+publication. The route-owned shallow system (`RouteOwnedShallowDb` /
+`ensure_route_owned_shallow_entry` / its singleflight / the
+`route_owned_generation` token dimension / the `HostStoreView` route-owned
+`Route`-fact fallback) and the legacy `EvalEnvCacheDb` (legacy `Arc<EvalEnv>`
+surface + producer-less `Arc<OwnedEvalProgram>` shell) are DELETED.
+`IndexedReady` carries a `project_generation` stamp; route-resolution mutations
+drive an **edge-refresh materialise** (retained content-addressed payload, route
+surface rebuilt via `build_indexed_route_surface`, fresh stamps, pre-publish
+fence with ReturnOnly) instead of a full re-parse. Counters
+(`eval_program_parses` / `eval_env_builds` / `shallow_state_builds` /
+`indexed_ready_materializes` / `indexed_ready_edge_refreshes` / `sfc_parses`)
++ the `cold_artifact_dedup_tests` suite + the
+`no_production_route_owned_shallow_system` /
+`no_production_parse_and_build_env_in_session` guards pin the contract.
+**WAVE-2 (demand-scoped decl-body lowering) stays QUEUED** — one eager
+`EvalEnv` build per file version remains the documented design until then.
+Deferred follow-ups (lead-architect ruled, tracked here):
+
+- Re-plan the producer-less `OwnedEvalProgram` / `TypeResolutionContextDb`
+  owned-artifact substrate together with the WAVE-2 demand-scoped lowering work.
+  That re-plan MUST require query-time context construction to carry
+  `source_type` from the SELECTED artifact/view inputs, not from a
+  scheduler-base re-read after input selection: today
+  `resolve_external_type_from_indexed_ready_with_view`
+  (`host_manage/prepared_decl.rs`) selects its inputs through the session view
+  (possibly overlay) and then computes `source_type` via
+  `imported_eval_source_type_for` (`host_manage/eval_program.rs`), which
+  prefers the scheduler-base `authoritative_source_type_for` — an overlay
+  `.vue` whose `<script>` `lang` differs from the base (e.g. base `ts`,
+  overlay `tsx`) builds its type-resolution context under the BASE
+  generation's `source_type` while parsing the overlay bytes. Acceptance
+  includes an overlay `.vue` lang-flip regression proving no scheduler-base
+  `source_type` is used after overlay input selection.
+- VFS-cold `.vue` lane still pays TWO script-program parses (residual after the
+  flight-shared `VueScriptProgram` threading): the scheduler WORKER's ingress
+  parse inside `ensure_loaded` (`host_executor.rs` `execute_source` →
+  `parse_vue_snapshot`) plus the flight's own eval-program parse. The worker's
+  per-file OXC arena is dropped after lowering and must never enter host
+  caches, so it cannot be threaded into the flight's borrowed eval program
+  without either retaining a `!Send` arena in host state (forbidden by the
+  IndexedReady core invariant) or relocating the `EvalEnv` typed lowering into
+  the worker. Resolution path: that worker-side lowering relocation / an owned
+  `Send`-safe program artifact — paired with the `OwnedEvalProgram` /
+  `TypeResolutionContextDb` WAVE-2 re-plan bullet above.
+- Repo-wide cleanup of pre-existing phase vocabulary in
+  `crates/verter_session/src/**` as a dedicated cleanup item. Known
+  pre-existing sites (not introduced by the slow-cold-dedup branch):
+  `project_type_store.rs:360`, `types.rs:2165-2173`,
+  `host_upsert.rs:1117/1310`, `meta_resolve.rs:166`,
+  `meta_resolve/scoring.rs:332`, `semantic_query.rs:1501`.
+- `set_import_dependencies` invalidation precision: the wrapper now stamps
+  `project_generation` only on an ACTUAL route change (value-idempotent
+  `replace_exact_resolutions` + route-table no-op oracle) and drains only the
+  owner's derived layers (no wide evict). Remaining follow-up: evaluate whether
+  a CHANGING push should additionally evict the dependents that resolved
+  through the retargeted specifiers (today they re-validate read-side via the
+  generation-gated fact rails — correct, but a targeted reverse-dep drain
+  could cut the first warm-miss recompute).
+- Migrate the typeinfo oracle-core snippet parsers onto a shared probe-parse
+  helper: the parser-boundary guard
+  (`no_direct_oxc_parser_calls_outside_scheduler_path`) is now import-resolving
+  (bare/grouped/item-aliased/glob/module-aliased `use oxc_parser…` forms),
+  blanks inline `#[cfg(test)]` modules, and pins each allow-listed file to its
+  exact site count — so `typeinfo/oracle_core/hover_extract.rs` (1), `gen.rs`
+  (1), and `admission.rs` (2) are visible, counted, allow-listed tracked debt
+  rather than evasions. The remaining work is the migration itself, not guard
+  coverage.
+- `ResolvedImportFactsKey.known_miss_generation` carries a generation inside a
+  cache key (R6-adjacent); move the negative-miss freshness to value-side
+  validation semantics.
+- Fenced-publication class-completion: `ResolvedTypeCacheDb`
+  (`host_resolve/external_type_resolution.rs`) is not yet fact-validated /
+  captured-stamp / fenced-serve-aware — bring it onto the same
+  flight-captured-stamp + fenced-serve admission rails as the other shared
+  caches, or delete it. Ruled DEFER by the lead architect at SLOWPERF round 6.
+- Test-determinism cleanup: migrate the pre-existing wall-clock assertions
+  (`component_meta_caches_tests.rs:171,:222-227`, `meta_tests.rs:12904+`) to
+  counter-based pins / `verter_bench` measurements.
+
 ### 1.6 Known-failure baseline (recorded at the B7c land; re-derived at implementation)
 
 The recorded historical baseline is the **long-standing 8-failure cluster recorded
@@ -1155,7 +1241,7 @@ PARALLEL to the remaining scheduler work (U1/U7/U9).
   the `resolve_env_hash` dim rides the dedicated per-key context
   (`InstantiateContext` / `MacroPayloadContext`). Per R6 the slot is content-free;
   the live whole-hash is re-sourced at value-compute time via
-  `ensure_indexed_ready(base.defining_canonical).whole_hash`, NOT in the key. The
+  `ensure_indexed_ready_serve(base.defining_canonical)`'s serve carrier `indexed.whole_hash`, NOT in the key. The
   R6 whole-hash violation is resolved.
 - **Do NOT resurrect** `queue.rs`, `submit_batch` (the non-atomic one — 0 callers,
   deleted in §6c), `JobIndex`, `QueueEntry`, `EffectiveKey`,
@@ -2606,8 +2692,8 @@ baseline-divergent at volume.
   3. Enumerate the remaining B4 caches onto `ArtifactNode` / `QueryNode` against
      that same final key model: `FileArtifactStore`, `ResolvedImportFacts`,
      typed-IR resolve, `MemberSemanticFactStore`, `MemberDisplayFactStore`,
-     `ModuleAugmentationIndex`, `RouteDb` (×3) + `RouteOwnedShallowDb`,
-     `TypeResolutionContextDb`, `EvalEnvCacheDb`, `DependencyCacheDb`,
+     `ModuleAugmentationIndex`, `RouteDb` (×3),
+     `TypeResolutionContextDb`, `DependencyCacheDb`,
      `SemanticGraphStore`, `ComponentMetaResultDb`, `MaterializeStructureDb`,
      `RefCycleResultDb`, `ShapeCacheDb`, `AnalysisReadyDb`,
      `OwnerImportSurfaceDb`, `ImportedRootDb`, `AppConfigNoOverrideProofDb`,

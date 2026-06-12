@@ -37,8 +37,6 @@
 //! |----|------|
 //! | `FileArtifactStore`           | `project_type_store.rs`         |
 //! | `AnalysisReadyDb`          | `project_type_store.rs`         |
-//! | `RouteOwnedShallowDb`      | `project_type_store.rs`         |
-//! | `EvalEnvCacheDb`           | `project_type_store.rs`         |
 //! | `ComponentMetaResultDb`    | `component_meta_result_db.rs`   |
 //! | `OwnerImportSurfaceDb`     | `owner_import_surface.rs`       |
 //! | `ImportedRegistryDb`       | `component_meta_caches.rs`      |

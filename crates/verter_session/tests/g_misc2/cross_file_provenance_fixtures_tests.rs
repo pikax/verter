@@ -292,7 +292,7 @@ fn fixture_cross_file_negative_heritage_only_contested_name_is_stripped_by_refin
         contested.declared_in_macro_type_arg,
     );
 
-    // STRIPPED assertion (codex#2 CA5 fix): the Refined policy MUST
+    // STRIPPED assertion: the Refined policy MUST
     // remove `onSubmit` from the published surface because it
     // shadows the declared `submit` emit AND the structural fact
     // is `false`.

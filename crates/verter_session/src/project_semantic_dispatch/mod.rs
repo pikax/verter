@@ -1308,7 +1308,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // panic / early-return too (panic-safe pop), so an unwinding
             // cold build never leaks a stale frame onto the stack.
             let taint_guard = BuildLocalTaintGuard::push(&self.build_local_taint);
-            let (mut output, finalise) =
+            let (mut output, finalise, fenced_serve_observed) =
                 crate::fact_signature_helpers::install_fact_tracer(host, || {
                     // Test-only fact-injection hook. When the
                     // `dispatch_test_inject_parse_fact` slot is non-None,
@@ -1320,6 +1320,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
             let build_local = taint_guard.finish();
             output.result_is_partial |= build_local.result_is_partial;
             output.cache_suppress |= build_local.cache_suppress;
+            // ReturnOnly never publishes — fenced-serve arm. A build
+            // whose traced scope consumed a FENCED (ReturnOnly)
+            // `IndexedReady` serve computed its value basis from a
+            // served-without-publication artifact, while the memo
+            // entry's fact stamps (`dep_signature_for` reads the LIVE
+            // project generation; the traced facts validate against a
+            // fresh view) cannot be rejected read-side. The value still
+            // flows to the caller; the memo refuses admission.
+            output.cache_suppress |= fenced_serve_observed;
             provenance
                 .memo_entry_fact_tracer_installs
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);

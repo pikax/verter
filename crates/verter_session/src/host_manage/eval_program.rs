@@ -15,8 +15,7 @@ use crate::VerterHost;
 
 use super::{
     component_meta_trace_custom, is_raw_import_specifier_id, read_analysis_source_result_detail,
-    ExternalTypeResolutionInputs, HostNamedTypeCacheAdapter, ParsedEvalProgramCacheEntry,
-    ParsedEvalProgramCacheKey,
+    ExternalTypeResolutionInputs, HostNamedTypeCacheAdapter,
 };
 
 impl VerterHost {
@@ -121,8 +120,51 @@ impl VerterHost {
         source: &str,
         cached_parse: Option<&verter_compiler::parser::types::ParsedSfc>,
     ) -> String {
-        crate::host_resolve::extract_vue_script_content(source, cached_parse)
-            .unwrap_or_else(|| source.to_string())
+        Self::build_eval_script_source_with_extraction(source, cached_parse).0
+    }
+
+    /// [`Self::build_eval_script_source`] plus the extraction
+    /// provenance: the `bool` is `true` iff the returned text is the
+    /// position-preserving extracted `.vue` script — exactly the case
+    /// where the flight's eval-program parse over this text IS the
+    /// snapshot's script program and can be threaded into the snapshot
+    /// build ([`crate::parse::VueScriptProgram::Shared`]). `false`
+    /// means the raw source passed through unchanged (non-SFC files,
+    /// or a `.vue` with no extractable script), where the eval program
+    /// covers different bytes than a script-program walk would.
+    pub(crate) fn build_eval_script_source_with_extraction(
+        source: &str,
+        cached_parse: Option<&verter_compiler::parser::types::ParsedSfc>,
+    ) -> (String, bool) {
+        match crate::host_resolve::extract_vue_script_content(source, cached_parse) {
+            Some(script) => (script, true),
+            None => (source.to_string(), false),
+        }
+    }
+
+    /// Selects the `.vue` snapshot build's script-program input for a
+    /// cold materialise flight — the SINGLE decision point both the
+    /// base and overlay flights share. The flight's eval program IS
+    /// the snapshot's script program exactly when the eval source is
+    /// the position-preserving extracted script:
+    /// [`crate::parse::VueScriptProgram::Shared`] on a live parse,
+    /// [`crate::parse::VueScriptProgram::SharedFatal`] on a fatal one
+    /// (a re-parse of the same bytes under the same source type fails
+    /// identically), and
+    /// [`crate::parse::VueScriptProgram::ParseHere`] when the raw
+    /// source passed through unextracted (the eval program covers
+    /// different bytes than a script-program walk would).
+    pub(crate) fn vue_flight_script_program<'a>(
+        eval_is_extracted_script: bool,
+        parsed_eval_program: Option<&'a crate::ParsedEvalProgram>,
+    ) -> crate::parse::VueScriptProgram<'a> {
+        if !eval_is_extracted_script {
+            return crate::parse::VueScriptProgram::ParseHere;
+        }
+        match parsed_eval_program {
+            Some(program) => crate::parse::VueScriptProgram::Shared(program),
+            None => crate::parse::VueScriptProgram::SharedFatal,
+        }
     }
 
     /// Resolve the authoritative `source_type` for cache-key purposes.
@@ -131,7 +173,7 @@ impl VerterHost {
     /// (set once at `execute_source` time). Falls back to a pure recomputation for
     /// canonicals the scheduler has not yet processed — WASM path, first-time routing,
     /// or snapshot construction for files the scheduler does not own.
-    pub(super) fn imported_eval_source_type_for(
+    pub(crate) fn imported_eval_source_type_for(
         &self,
         canonical_id: &str,
         raw_source: &str,
@@ -204,8 +246,8 @@ impl VerterHost {
 
         // Project-global IndexedReady cache for cached raw_source —
         // **current-content-pinned** (no `get_any`). `read_analysis_source`
-        // feeds the route-owned-shallow materialiser (a route-fact
-        // producer) and the cold analysis path; a stale pre-edit
+        // feeds the routed-shallow prepared-decl materialiser (a
+        // route-fact producer) and the cold analysis path; a stale pre-edit
         // `IndexedReady` (which can linger past a same-canonical edit with
         // the own-canonical drain retired) would seed those producers with
         // pre-edit source. `artifact_current_indexed` answers ONLY for a
@@ -302,12 +344,13 @@ impl VerterHost {
             }
         }
 
-        if self
-            .project_type_store
-            .indexed()
-            .get_any(canonical_id)
-            .is_some()
-        {
+        // Artifact-only existence probe — gated by the single authority
+        // predicate (`artifact_only_authority_allows`) so a retained
+        // artifact the accessors reject (absent file,
+        // scheduler-superseded scope) does not claim existence here.
+        // Non-normalizing by contract: this probe is the oracle the
+        // canonical normalizer consults.
+        if self.artifact_only_entry_exists(canonical_id) {
             return true;
         }
 
@@ -318,129 +361,58 @@ impl VerterHost {
         self.ws().file_exists(canonical_id)
     }
 
-    pub(super) fn clone_cached_eval_env_arc(
-        &self,
-        cache_key: &str,
-        whole_hash: Hash16,
-    ) -> Option<Arc<verter_semantic::analysis::type_eval::EvalEnv>> {
-        // The legacy `Arc<EvalEnv>` storage is keyed by the full R21
-        // parse-artifact identity. Compose the `FileArtifactKey` for
-        // this `(canonical, content_hash)` pair from the canonical's
-        // per-project `parse_env_hash` so a parse-env change is a key
-        // miss rather than a stale hit.
-        let key = self.legacy_eval_env_key(cache_key, whole_hash);
-        self.eval_env_cache().legacy_env_for(&key)
-    }
-
-    /// Compose the full R21 [`crate::file_artifact_store::FileArtifactKey`]
-    /// under which the legacy `Arc<EvalEnv>` for `(canonical,
-    /// content_hash)` is cached.
+    /// THE single host parse entry for the borrowed eval-program form.
     ///
-    /// `EvalEnv` is a pure parse artifact, so its cache identity is
-    /// the same `(canonical, content_hash, parse_env_hash,
-    /// parser_version)` quadruple every other parse artifact uses.
-    /// `parse_env_hash` is the canonical's per-project parse-env
-    /// dimension; `parser_version` is the live-path parser version
-    /// (the `FileArtifactStore` legacy surface uses the same
-    /// constant). Because both the content hash AND the parse-env
-    /// hash are part of the key, a stale entry under a different
-    /// content or parse-env cannot be hit — the cache is correct by
-    /// key identity alone, with no eviction sweep required.
-    pub(super) fn legacy_eval_env_key(
-        &self,
-        canonical: &str,
-        content_hash: Hash16,
-    ) -> crate::file_artifact_store::FileArtifactKey {
-        crate::file_artifact_store::FileArtifactKey {
-            canonical: Arc::from(canonical),
-            content_hash,
-            parse_env_hash: self.host_view_env_hashes_for(canonical).parse_env_hash,
-            parser_version: crate::file_artifact_store::LEGACY_PARSER_VERSION,
-        }
-    }
-
-    /// Tier 1A — produces a fresh `ParsedEvalProgram` per call.
+    /// Produces a fresh `ParsedEvalProgram` per call. The parse lives
+    /// and dies on the caller's stack (the OXC arena is `!Send` and
+    /// must never enter host caches or thread-locals); the
+    /// `IndexedReady` materialise closure threads the parsed program by
+    /// reference so a cold canonical build parses exactly once.
+    /// Concurrent cold callers collapse on `indexed_singleflight`.
     ///
-    /// The previous warm-cache lived in the
-    /// `HOST_PARSED_EVAL_PROGRAM_CACHE` thread-local, which is now
-    /// retired (§3.2.4). The new typed [`crate::project_type_store::EvalEnvCacheDb`]
-    /// stores `Arc<crate::owned_artifacts::OwnedEvalProgram>` once
-    /// Tier 1C-α migrates the consumer; in 1A this method falls
-    /// through to direct compute.
-    ///
-    /// `_cache_key` is constructed for trace fidelity with the old
-    /// cache-key shape so 1C-α's migration can reuse the
-    /// `(canonical_id, whole_hash, source_type)` identity tuple
-    /// without a wrapper. The single parse authority (host_executor's
-    /// `execute_source`) lowers the OXC arena to
-    /// [`OwnedEvalProgram`](crate::owned_artifacts::OwnedEvalProgram)
-    /// and drops the arena at the boundary; this method is the
-    /// borrowed-form interim path until consumers migrate.
-    pub(super) fn cached_parsed_eval_program_entry(
+    /// Returns `None` when the parse panicked (fatal syntax fault) —
+    /// callers fall back to default analysis / an empty env rather than
+    /// re-parsing under a different source type.
+    pub(crate) fn parse_eval_program(
         &self,
         canonical_id: &str,
         whole_hash: Hash16,
         eval_source: &Arc<str>,
         source_type: oxc_span::SourceType,
-    ) -> ParsedEvalProgramCacheEntry {
-        let _cache_key = ParsedEvalProgramCacheKey {
-            host_instance_id: self.instance_id,
-            canonical_id: canonical_id.to_string(),
-            source_type,
-            whole_hash,
-        };
+    ) -> Option<Rc<crate::ParsedEvalProgram>> {
+        self.provenance
+            .eval_program_parses
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let parsed = crate::ParsedEvalProgram::parse(Arc::clone(eval_source), source_type);
-        let parse_failed = parsed.is_none();
-        let program =
-            Rc::new(parsed.unwrap_or_else(|| crate::ParsedEvalProgram::empty(source_type)));
-        let entry = ParsedEvalProgramCacheEntry {
-            whole_hash,
-            parse_failed,
-            program,
-        };
         component_meta_trace_custom!(
-            "cached_parsed_eval_program_store",
+            "parse_eval_program",
             format!(
                 "owner={} bytes={} whole_hash={whole_hash:?} parse_failed={}",
                 canonical_id,
                 eval_source.len(),
-                entry.parse_failed,
+                parsed.is_none(),
             ),
         );
-        entry
+        parsed.map(Rc::new)
     }
 
-    /// Tier 1A — builds a fresh `ParsedTypeResolutionContext` per call.
+    /// Builds a fresh `ParsedTypeResolutionContext` per call.
     ///
-    /// The previous warm-cache lived in the
-    /// `HOST_PARSED_TYPE_CONTEXT_CACHE` thread-local, which is now
-    /// retired (§3.2.4). The new typed [`crate::project_type_store::TypeResolutionContextDb`]
-    /// stores `Arc<crate::owned_artifacts::OwnedTypeResolutionContext>`
-    /// once Tier 1C-α migrates the consumer; in 1A this method falls
-    /// through to direct compute against the borrowed-form
-    /// `ParsedTypeResolutionContext`.
-    pub(super) fn cached_type_resolution_context_entry(
+    /// This per-call parse sits on the query-time OXC element-resolver
+    /// path (tracked-debt on the single-engine shrinking ledger — the
+    /// shared typed-IR dispatch is the sole sanctioned query-time
+    /// resolver); the parse routes through [`Self::parse_eval_program`]
+    /// so the parse-entry pin (`no_direct_oxc_parser_calls_outside_scheduler_path`)
+    /// keeps covering it.
+    pub(super) fn build_type_resolution_context(
         &self,
         canonical_id: &str,
         whole_hash: Hash16,
         eval_source: &Arc<str>,
         source_type: oxc_span::SourceType,
     ) -> Option<Rc<crate::ParsedTypeResolutionContext>> {
-        let _cache_key = ParsedEvalProgramCacheKey {
-            host_instance_id: self.instance_id,
-            canonical_id: canonical_id.to_string(),
-            source_type,
-            whole_hash,
-        };
-        let parsed_eval_program = self.cached_parsed_eval_program_entry(
-            canonical_id,
-            whole_hash,
-            eval_source,
-            source_type,
-        );
-        if parsed_eval_program.parse_failed {
-            return None;
-        }
+        let program =
+            self.parse_eval_program(canonical_id, whole_hash, eval_source, source_type)?;
 
         let graph = std::sync::Arc::clone(self.project_type_store.semantic_graph());
         // Snapshot the resolved-named-type reset epoch at adapter
@@ -470,7 +442,7 @@ impl VerterHost {
             named_type_generation,
         });
         let type_context = Rc::new(crate::ParsedTypeResolutionContext::new(
-            Rc::clone(&parsed_eval_program.program),
+            program,
             |parsed_program| {
                 let program = parsed_program.borrow_dependent();
                 let mut ctx = verter_compiler::utils::oxc::vue::resolve_type::build_type_context(
@@ -484,7 +456,7 @@ impl VerterHost {
             },
         ));
         component_meta_trace_custom!(
-            "cached_type_resolution_context_store",
+            "build_type_resolution_context",
             format!(
                 "owner={} bytes={} whole_hash={whole_hash:?}",
                 canonical_id,
@@ -507,9 +479,9 @@ impl VerterHost {
     /// (i.e. an overlay candidate has been published into FileArtifactStore
     /// under the overlay content hash), the inputs are read from the view's
     /// artifacts so the session-bearing cold compute sees overlay-rooted
-    /// shallow state and analysis. Base callers (`view = None`) get the
-    /// historical content-agnostic `get_any` fast path followed by the
-    /// route-owned materialiser fall-through.
+    /// shallow state and analysis. Base callers (`view = None`) read the
+    /// content-pinned `FileArtifactStore` fast path and fall through to
+    /// the singleflighted `ensure_indexed_ready_serve` cold build.
     pub(super) fn external_type_resolution_inputs_with_view(
         &self,
         canonical_id: &str,
@@ -522,9 +494,9 @@ impl VerterHost {
         // raw owner (the `SessionView` overlay maps + the overlay-set
         // discriminator are raw-keyed) while resolving to the
         // normalised `FileArtifactStore` identity; the project-global
-        // fast path and the route-owned materialiser below key on the
-        // normalised analysis canonical (the artifact / type-context
-        // cache identity).
+        // fast path and the `ensure_indexed_ready_serve` fall-through below
+        // key on the normalised analysis canonical (the artifact /
+        // type-context cache identity).
         let identity = self.overlay_artifact_identity(canonical_id);
         let canonical_id = identity.analysis_canonical();
 
@@ -544,7 +516,11 @@ impl VerterHost {
                 // materialiser so an edge-stale wildcard `export *` surface
                 // re-resolves from the OVERLAY source (never the base surface).
                 if let Some(indexed) = self
-                    .materialize_overlay_indexed_ready_with_view(identity.raw_overlay_owner(), view)
+                    .materialize_overlay_indexed_ready_serve_with_view(
+                        identity.raw_overlay_owner(),
+                        view,
+                    )
+                    .map(|serve| serve.indexed)
                 {
                     return Some(ExternalTypeResolutionInputs {
                         raw_source: Arc::clone(&indexed.raw_source),
@@ -575,8 +551,9 @@ impl VerterHost {
         // artifact for a scheduler-tracked canonical;
         // `artifact_current_indexed` answers for a genuinely artifact-only
         // canonical (foreign source / test seed). A stale older-content
-        // artifact for a live scope misses both — the route-owned
-        // materialiser (freshness-gated) rebuilds below.
+        // artifact for a live scope misses both — the singleflighted
+        // `ensure_indexed_ready_serve` build below rematerialises from
+        // current content.
         let cached_facts = self
             .current_content_pinned_indexed(canonical_id)
             .or_else(|| self.artifact_current_indexed(canonical_id));
@@ -592,53 +569,31 @@ impl VerterHost {
             return Some(inputs);
         }
 
-        // F6 reader migration. Drive the route-only
-        // fall-through path through the shared materialiser so external-type
-        // analysis is built exactly once per `(canonical, whole_hash)` and
-        // shared with F7's `route_shallow_state` reader. The materialiser's
-        // tiered staleness gate (route_owned_entry_is_fresh) is the
-        // authoritative freshness check; the legacy
-        // `cached_external_type_analysis_entry` mutex cache is gone.
-        let entry = self.ensure_route_owned_shallow_entry(canonical_id)?;
+        // Cold fall-through: JOIN the canonical `IndexedReady` build —
+        // external-type analysis is built exactly once per
+        // `(canonical, whole_hash)` on the single materialise path and
+        // shared with every other reader.
+        let indexed = self.ensure_indexed_ready_serve(canonical_id)?.indexed;
         let inputs = ExternalTypeResolutionInputs {
-            raw_source: Arc::clone(&entry.raw_source),
-            cached_parse: entry.cached_parse.clone(),
-            whole_hash: entry.whole_hash,
-            eval_source: Arc::clone(&entry.eval_source),
-            analysis: Arc::clone(&entry.external_type_analysis),
+            raw_source: Arc::clone(&indexed.raw_source),
+            cached_parse: indexed.cached_parse.clone(),
+            whole_hash: indexed.whole_hash,
+            eval_source: Arc::clone(&indexed.eval_source),
+            analysis: Arc::clone(&indexed.external_type_analysis),
             // The materialiser publishes once per content generation; warm
-            // hits return the same entry through the pre-flight fast path.
-            // Treat warm hits (singleflight returned the published entry)
-            // as cache hits for telemetry.
+            // hits return the same artifact through the fast path. Treat
+            // warm hits as cache hits for telemetry.
             analysis_cache_hit: true,
         };
         Some(inputs)
     }
 
-    /// Tier 1A — no-op after thread-local retirement (§3.2.4).
-    ///
-    /// The previous implementation drained the
-    /// `HOST_PARSED_EVAL_PROGRAM_CACHE` /
-    /// `HOST_PARSED_TYPE_CONTEXT_CACHE` thread-locals for this host
-    /// instance. Both caches are gone in 1A; this method is preserved
-    /// as a stable name for callers (Tier 1C-α reintroduces the
-    /// behaviour through the typed `EvalEnvCacheDb` /
-    /// `TypeResolutionContextDb` typed-DB clear methods).
-    pub(crate) fn clear_thread_local_parsed_eval_program_cache(&self) {
-        // Tier 1A — `HOST_PARSED_EVAL_PROGRAM_CACHE` /
-        // `HOST_PARSED_TYPE_CONTEXT_CACHE` thread-locals are retired
-        // (§3.2.4). Tier 1C-α replaces with:
-        //   self.project_type_store.eval_env_cache().clear();
-        //   self.project_type_store.type_resolution_context_cache().clear();
-        // The `external_type_analysis_cache` host mutex is already
-        // folded into `RouteOwnedShallowDb` (unified F6/F7 entry). The
-        // discipline is per-canonical tiered staleness gate + atomic
-        // `project_type_store.evict_canonical` cascade on file change +
-        // bulk `route_owned_shallow.clear_all` on route-resolution
-        // mutation. NO cache-wide epoch-bump clear — that was
-        // over-clearing and the per-entry `route_owned_entry_is_fresh`
-        // gate is precise.
-        //
+    /// Epoch-bump hook: clears the host-owned resolved-named-type
+    /// identities on the shared `SemanticGraphStore` (the only
+    /// epoch-scoped cache this hook owns — parse results live on
+    /// `IndexedReady` / the scheduler, never in thread-locals or a
+    /// separate eval-env cache).
+    pub(crate) fn clear_resolved_named_type_cache(&self) {
         // Clear host-owned named-type cache on epoch bump. Entries live
         // on the shared `SemanticGraphStore` under
         // `HostResolvedNamedTypeKey` identities, scoped by
@@ -652,58 +607,33 @@ impl VerterHost {
             .clear_resolved_named_types();
     }
 
-    pub(super) fn build_external_type_analysis(
+    /// Build the eval env AND the external-type analysis from ONE
+    /// already-parsed eval program — the single-parse core of the
+    /// `IndexedReady` materialise closure (base and overlay alike).
+    ///
+    /// `parsed: None` is the fatal-parse path: the env stays empty
+    /// (script-setup type params still apply — they come from the SFC
+    /// parse, not the eval program) and the analysis is the default.
+    /// There is NO re-parse under a different source type here — the
+    /// authoritative `source_type` already failed, and a forgiving
+    /// second parse under `SourceType::ts()` is exactly the env
+    /// divergence this builder exists to prevent.
+    pub(crate) fn build_eval_env_and_analysis_from_program(
         &self,
         canonical_id: &str,
-        whole_hash: Hash16,
         raw_source: &str,
         cached_parse: Option<&verter_compiler::parser::types::ParsedSfc>,
-        eval_source: &Arc<str>,
-    ) -> Arc<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource> {
-        let parsed_eval_program = self.cached_parsed_eval_program_entry(
-            canonical_id,
-            whole_hash,
-            eval_source,
-            self.imported_eval_source_type_for(canonical_id, raw_source, cached_parse),
-        );
-        if parsed_eval_program.parse_failed {
-            return Arc::new(
-                verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default(
-                ),
-            );
-        }
-
-        let program = parsed_eval_program.program.borrow_dependent();
-        let mut analyzed =
-            verter_compiler::utils::oxc::vue::resolve_type::analyze_external_type_program(program);
-        // Oracle harness: stamp the owning canonical onto the
-        // parse-time `RawSourceSurface` records so the `(canonical, name,
-        // symbol_space)` contributor identity is complete on the artifact.
-        analyzed.stamp_raw_surface_canonical(canonical_id);
-        Arc::new(analyzed)
-    }
-
-    pub(crate) fn build_eval_env_and_external_type_analysis(
-        &self,
-        canonical_id: &str,
-        whole_hash: Hash16,
-        raw_source: &str,
-        cached_parse: Option<&verter_compiler::parser::types::ParsedSfc>,
-        eval_source: &Arc<str>,
+        eval_source: &str,
+        parsed: Option<&crate::ParsedEvalProgram>,
     ) -> (
         Arc<verter_semantic::analysis::type_eval::EvalEnv>,
         Arc<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource>,
     ) {
-        let parsed_eval_program = self.cached_parsed_eval_program_entry(
-            canonical_id,
-            whole_hash,
-            eval_source,
-            self.imported_eval_source_type_for(canonical_id, raw_source, cached_parse),
-        );
-        if parsed_eval_program.parse_failed {
-            let mut env = verter_semantic::analysis::type_eval_build::parse_and_build_env(
-                eval_source.as_ref(),
-            );
+        self.provenance
+            .eval_env_builds
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let Some(parsed) = parsed else {
+            let mut env = verter_semantic::analysis::type_eval::EvalEnv::default();
             Self::apply_sfc_script_setup_type_params(&mut env, raw_source, cached_parse);
             return (
                 Arc::new(env),
@@ -712,21 +642,18 @@ impl VerterHost {
                     ),
                 ),
             );
-        }
+        };
 
-        let program = parsed_eval_program.program.borrow_dependent();
-        let mut env = verter_semantic::analysis::type_eval_build::build_eval_env(
-            program,
-            eval_source.as_ref(),
-        );
+        let program = parsed.borrow_dependent();
+        let mut env =
+            verter_semantic::analysis::type_eval_build::build_eval_env(program, eval_source);
         Self::apply_sfc_script_setup_type_params(&mut env, raw_source, cached_parse);
-        (
-            Arc::new(env),
-            Arc::new(
-                verter_compiler::utils::oxc::vue::resolve_type::analyze_external_type_program(
-                    program,
-                ),
-            ),
-        )
+        let mut analyzed =
+            verter_compiler::utils::oxc::vue::resolve_type::analyze_external_type_program(program);
+        // Oracle harness: stamp the owning canonical onto the
+        // parse-time `RawSourceSurface` records so the `(canonical, name,
+        // symbol_space)` contributor identity is complete on the artifact.
+        analyzed.stamp_raw_surface_canonical(canonical_id);
+        (Arc::new(env), Arc::new(analyzed))
     }
 }

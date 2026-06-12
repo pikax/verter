@@ -1007,6 +1007,20 @@ pub struct CompileProfile {
     pub requested_mode: CompileCacheMode,
 }
 
+impl CompileProfile {
+    /// Whether this profile carries parse-affecting template options.
+    ///
+    /// `delimiters` and `custom_elements` change how the SFC source
+    /// tokenizes, so a template extracted under them describes a
+    /// DIFFERENT parse of the same bytes than the default one: a
+    /// cached parse cannot be reused for the compile, and the
+    /// extraction must not populate the profileless default-extraction
+    /// template slot ([`RawTemplateSlotAdmission::default_extraction`]).
+    pub(crate) fn has_parse_affecting_template_options(&self) -> bool {
+        self.delimiters.is_some() || self.custom_elements.is_some()
+    }
+}
+
 impl Default for CompileProfile {
     fn default() -> Self {
         Self {
@@ -1684,6 +1698,50 @@ pub(crate) struct SrcBlockInfo {
     pub(crate) tag_close_start: Option<u32>,
 }
 
+/// Caller-threaded parse products for the lazy template-analysis
+/// computation (`compute_template_analysis_if_missing`): the SAME
+/// source + SFC parse the caller's analysis snapshot was built from,
+/// so the template derives from one coherent read with zero re-parses
+/// of the same bytes (src-block info is re-derived from the parse via
+/// the pure `collect_vue_src_blocks` walk — no OXC work).
+///
+/// This is the computation's SOLE source acquisition — it never
+/// consults the scheduler itself — and the carrier of the caller's
+/// conversion-context attestation, captured by value at the caller's
+/// own read site. Base lanes thread store-authoritative reads
+/// (`store_published = true`, eligible to persist into the base
+/// `derived_raw_cache` slot); overlay/session lanes thread their OWN
+/// overlay source with `store_published = false`, so the conversion
+/// stays coherent with the overlay snapshot AND serves return-only —
+/// overlay results never populate base caches.
+pub(crate) struct VueTemplateInputs {
+    pub(crate) source: Arc<str>,
+    /// The SFC structure parse of `source`. `None` routes the
+    /// computation through one counted `parse_sfc_counted` of its own
+    /// — a single parse, never a duplicate of one the caller ran.
+    pub(crate) cached_parse: Option<Arc<verter_compiler::parser::types::ParsedSfc>>,
+    /// Publication status of the state these inputs were captured
+    /// from, flowed BY VALUE (the gate works with or without an
+    /// installed `RequestContext`): live scheduler/workspace reads are
+    /// store-authoritative (`true`); an artifact threaded from a
+    /// FENCED (`store_published == false`) `IndexedReadyServe` carries
+    /// `false`. The computed template always serves the caller, but a
+    /// `false` here DECLINES the `derived_raw_cache` persist —
+    /// ReturnOnly never publishes: the persisted entry carries no
+    /// content rail, so a template derived from superseded bytes would
+    /// be served as current by every subsequent template read.
+    pub(crate) store_published: bool,
+    /// Scheduler node generation of the source read these inputs were
+    /// captured from — the value stamped onto
+    /// [`RawTemplateAnalysisEntry::source_generation`] at persist.
+    /// `None` when the capture site read no scheduler node (the
+    /// from-source snapshot builder, the artifact-serve lane): with no
+    /// generation to stamp, the computed template serves the caller
+    /// but the persist declines — an entry without a rail cannot be
+    /// validated by any reader, so it must not exist.
+    pub(crate) source_generation: Option<u64>,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct ParseSnapshot {
     pub(crate) whole_hash: Hash16,
@@ -1863,7 +1921,7 @@ pub(crate) struct CompileInput {
 /// Callers (unplugin, LSP, TS plugin) resolve import specifiers to canonical IDs
 /// and pass these records to [`VerterHost::set_import_dependencies`]. The host uses
 /// them for exact resolution instead of lossy basename/suffix heuristics.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DependencyResolution {
     /// The raw import specifier as written in source (e.g., `@/components/base`).
     pub specifier: String,
@@ -1923,6 +1981,18 @@ impl DependencyResolution {
             .iter()
             .min_by_key(|c| extension_priority(c))
             .map(|s| s.as_str())
+    }
+
+    /// A "known miss": the resolver answered with NO resolved canonical,
+    /// no candidates, and therefore no effective target. A known-miss is
+    /// a generation-scoped negative answer — its currency is governed by
+    /// the owner's known-miss generation sidecar
+    /// ([`DerivedRawState::import_routes_known_miss_recorded_at_generation`]),
+    /// never served as an unconditional authoritative route.
+    pub(crate) fn is_known_miss(&self) -> bool {
+        self.resolved_canonical_id.is_none()
+            && self.effective_target().is_none()
+            && self.possible_canonical_ids.is_empty()
     }
 }
 
@@ -1998,8 +2068,11 @@ impl ProfileState {
 ///
 /// Stored in [`crate::project_type_store::DerivedRawCacheDb`] keyed by canonical id.
 /// Source-content changes invalidate this; profile-flag changes preserve it;
-/// dep-closure changes preserve it; project-generation bumps invalidate it.
-/// See the §3.4.2 invalidation matrix.
+/// dep-closure changes preserve it. AUTHORITY RESETS (`set_workspace` /
+/// `close` — the wide `bump_project_generation_and_evict`) invalidate it;
+/// route-resolution project-generation bumps PRESERVE it (stamp-only
+/// freshness: stale route mirrors are cleared owner-scoped and stale
+/// reads miss by validation). See the §3.4.2 invalidation matrix.
 ///
 /// `import_routes` is a sub-mirror of
 /// [`crate::project_type_store::IndexedReady`]`.import_routes`: same content,
@@ -2009,6 +2082,97 @@ impl ProfileState {
 /// untouched. The asymmetry that motivated D48 is the per-domain trigger
 /// independence — keeping `import_routes` here means a profile-flag sweep
 /// no longer drops the resolved-route cache redundantly.
+/// A lazily computed template analysis pinned to the scheduler node
+/// generation of the source it derives from — the
+/// [`DerivedRawState::raw_template_analysis`] slot's validity rail.
+///
+/// The slot is canonical-keyed and lazily persisted, so a persist can
+/// land AFTER the upsert that superseded its inputs already cleared
+/// the slot (capture authority proves the inputs were coherent when
+/// captured, not that the slot is still current at persist time). The
+/// generation makes correctness read-side authoritative: every reader
+/// already holds a generation-coherent scheduler snapshot
+/// (`try_get_source` / `try_get_analysis` carry the node generation)
+/// and accepts the entry only at its own snapshot's generation — a
+/// late persist stamped with the superseded generation lands inert
+/// and the next coherent compute replaces it.
+#[derive(Debug)]
+pub(crate) struct RawTemplateAnalysisEntry {
+    pub(crate) template: Arc<verter_semantic::analysis::template::TemplateAnalysisSnapshot>,
+    /// Scheduler node generation of the source read the template's
+    /// inputs were captured from.
+    pub(crate) source_generation: u64,
+}
+
+/// A persist site's by-value admission statement for the
+/// [`DerivedRawState::raw_template_analysis`] slot.
+///
+/// The slot has exactly one structural write authority
+/// ([`DerivedRawState::install_raw_template_analysis`], reached through
+/// the host persist chokepoint `VerterHost::persist_raw_template_analysis`)
+/// and every persist site — the lazy template-analysis computation and
+/// the Session compile-publish lane — states its context through this
+/// carrier instead of duplicating the gate. The decision rules live on
+/// [`RawTemplateSlotAdmission::admitted_generation`]; the fields here
+/// are the facts only the capture site can attest.
+pub(crate) struct RawTemplateSlotAdmission {
+    /// Capture authority for the bytes the template derives from:
+    /// `true` only for store-authoritative reads (live
+    /// scheduler/workspace bytes, no content override). ReturnOnly
+    /// never publishes — a template derived from a fenced serve or
+    /// from overridden block content describes bytes the store never
+    /// published.
+    pub(crate) store_published: bool,
+    /// Scheduler node generation of the source read the template's
+    /// inputs were captured from — the validity rail readers key on.
+    /// `None` declines: an entry without a rail cannot be validated
+    /// by any reader, so it must not exist.
+    pub(crate) source_generation: Option<u64>,
+    /// Whether the SFC carries external `src=` blocks. External-src
+    /// templates never populate the slot: an external dep edit clears
+    /// compile slots, not this slot, and the owner's node generation
+    /// does not move, so the rail could never reject the stale entry.
+    pub(crate) has_src_blocks: bool,
+    /// Whether the template was extracted under the DEFAULT parse
+    /// options. A parse-affecting profile
+    /// ([`CompileProfile::has_parse_affecting_template_options`])
+    /// extracts a different template from the same bytes; the slot is
+    /// profileless and readers serve it as the raw/default template,
+    /// so a non-default extraction must not populate it — the entry
+    /// would carry a VALID current generation stamp no reader could
+    /// reject.
+    pub(crate) default_extraction: bool,
+}
+
+impl RawTemplateSlotAdmission {
+    /// THE admission decision for the
+    /// [`DerivedRawState::raw_template_analysis`] slot: `Some(rail)`
+    /// with the generation to stamp when the statement admits, `None`
+    /// when it declines. The rules live here only:
+    ///
+    /// - inline templates only (`has_src_blocks` declines): editing an
+    ///   external `src=` dep clears compile slots, not this slot, and
+    ///   the owner's node generation does not move, so the generation
+    ///   rail could never reject the stale entry;
+    /// - default extraction only (`!default_extraction` declines): the
+    ///   slot is profileless and every reader serves it as the
+    ///   raw/default template — a parse-affecting extraction would
+    ///   land under a VALID current generation stamp no reader could
+    ///   reject;
+    /// - store-published inputs only (ReturnOnly never publishes — a
+    ///   template derived from a fenced serve or overridden block
+    ///   content describes bytes the store never published);
+    /// - a captured source generation to stamp as the entry's validity
+    ///   rail: an entry without a rail cannot be validated by any
+    ///   reader, so it must not exist.
+    pub(crate) fn admitted_generation(&self) -> Option<u64> {
+        if self.has_src_blocks || !self.default_extraction || !self.store_published {
+            return None;
+        }
+        self.source_generation
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct DerivedRawState {
     /// Sub-mirror of [`IndexedReady.import_routes`](crate::project_type_store::IndexedReady).
@@ -2031,16 +2195,33 @@ pub struct DerivedRawState {
     /// Cached encoded protobuf payload for the canonical component-meta query.
     pub(crate) cached_meta_payload: Option<CachedMetaPayload>,
 
-    /// Raw template analysis (source-derived, profileless).
-    /// Computed by `compute_template_analysis_if_missing()` from raw scheduler data.
-    /// Always raw — never from overrides.
+    /// Raw template analysis (source-derived, profileless), pinned to
+    /// the scheduler node generation of the source it derives from
+    /// ([`RawTemplateAnalysisEntry`]). Always raw — never from
+    /// overrides, never a non-default extraction.
+    ///
+    /// MODULE-PRIVATE on purpose: the single write authority is
+    /// structural, not conventional. The only populating mutator is
+    /// [`DerivedRawState::install_raw_template_analysis`], which gates
+    /// on the persist site's by-value [`RawTemplateSlotAdmission`]
+    /// statement; the only other mutator is the fail-closed
+    /// [`DerivedRawState::clear_raw_template_analysis`]. A direct
+    /// `derived.raw_template_analysis = Some(...)` outside this module
+    /// does not compile, so no future writer can bypass the admission
+    /// gate. Readers go through
+    /// [`DerivedRawState::raw_template_analysis`].
     ///
     /// EXTERNAL SRC RULE: When src_blocks is non-empty, raw_template_analysis is NOT cached
     /// (set to None after read). Editing an external `<template src>` / `<script src>` dep
     /// only triggers `smart_invalidate_dependents` (which clears compile_slots), not
     /// raw_template_analysis.
-    pub(crate) raw_template_analysis:
-        Option<Arc<verter_semantic::analysis::template::TemplateAnalysisSnapshot>>,
+    ///
+    /// DEFAULT EXTRACTION RULE: parse-affecting profile options
+    /// (`delimiters`, `custom_elements`) extract a different template
+    /// from the same bytes; such an extraction never populates this
+    /// profileless slot — the entry would carry a valid current
+    /// generation stamp that no reader could reject.
+    raw_template_analysis: Option<RawTemplateAnalysisEntry>,
 
     /// Cached fallthrough resolution keyed by semantic fact versions and
     /// generic-root-propagation behavior. Cleared everywhere
@@ -2066,13 +2247,159 @@ pub struct DerivedRawState {
     /// no candidates) was admitted to `import_routes`. R3/R26/R28
     /// Gap 2: the reader must re-resolve once the workspace's
     /// `content_generation` advances past the recorded value — a new
-    /// canonical may now satisfy the specifier. Positive resolutions
-    /// do not need entries here; they stay valid until the owner's
-    /// source content changes (which evicts this `DerivedRawState`
-    /// entry outright via the resolver's parse-domain invalidation
-    /// path). Missing entries are treated as "never recorded" → the
-    /// reader forces a fresh resolution.
+    /// canonical may now satisfy the specifier. Missing entries are
+    /// treated as "never recorded" → the reader forces a fresh
+    /// resolution.
     pub(crate) import_routes_known_miss_recorded_at_generation: FxHashMap<String, u64>,
+
+    /// Per-specifier [`PositiveRouteStamp`] recorded when the HOST
+    /// memoized a positive `DependencyResolution` into `import_routes`
+    /// (`cache_positive_import_route_result` — the single positive point
+    /// producer). A positive resolution is a dependency-set-derived edge
+    /// exactly like a known-miss: a file appearing or retargeting (a
+    /// `.d.ts` companion, a more-specific sibling shadowing a directory
+    /// index, a resolve-extension change) can move it while the owner's
+    /// own content stays put, so readers and the route-surface rebuild
+    /// treat a stamped entry as current ONLY while its recorded
+    /// generation equals the live `content_generation`, re-resolving
+    /// otherwise — through the stamp's RECORDED resolution lane, so the
+    /// re-resolve replays exactly the resolution the memo captured.
+    /// Entries WITHOUT a stamp are caller-supplied authoritative routes
+    /// (`set_import_dependencies` — the bundler tells the host how
+    /// ITS resolver resolves, and re-pushes on its own watch events):
+    /// those serve unconditionally until replaced. The sidecar is
+    /// cleared wherever `import_routes` is cleared or wholesale
+    /// replaced.
+    pub(crate) import_routes_positive_recorded_at_generation: FxHashMap<String, PositiveRouteStamp>,
+}
+
+/// Sidecar record for one HOST-MEMOIZED positive `import_routes` entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PositiveRouteStamp {
+    /// Workspace `content_generation` the CALLER captured BEFORE
+    /// performing the resolution this stamp records (capture-before-
+    /// resolve: a mutation landing between resolve and record leaves the
+    /// stamp conservatively stale, never forged-current).
+    pub(crate) generation: u64,
+    /// The workspace resolution lane (`ResolveRequestKind`) the memo was
+    /// produced through. A generation-stale entry re-resolves through
+    /// the SAME lane: exact resolutions are keyed `(specifier, phase,
+    /// kind)`, so replaying a different lane (e.g. the type-route chain
+    /// for an `SfcSrcAttr` memo) would miss the caller's exact row and
+    /// diverge recorder from validator.
+    pub(crate) kind: verter_workspace::ResolveRequestKind,
+}
+
+impl DerivedRawState {
+    /// Read access to the module-private `raw_template_analysis`
+    /// slot. Readers validate the entry against their own snapshot's
+    /// generation (the entry's `source_generation` rail) before
+    /// serving it.
+    pub(crate) fn raw_template_analysis(&self) -> Option<&RawTemplateAnalysisEntry> {
+        self.raw_template_analysis.as_ref()
+    }
+
+    /// Drop the raw-template slot. Clearing is the fail-closed
+    /// direction — an absent entry can never serve stale — so this is
+    /// open to every invalidation site (upsert, eviction, cache
+    /// flush) without going through the admission gate.
+    pub(crate) fn clear_raw_template_analysis(&mut self) {
+        self.raw_template_analysis = None;
+    }
+
+    /// Sole populating mutator for the module-private
+    /// `raw_template_analysis` slot — the structural write authority.
+    /// The persist site states its facts through the by-value
+    /// [`RawTemplateSlotAdmission`] and THIS method decides via
+    /// [`RawTemplateSlotAdmission::admitted_generation`]; a statement
+    /// that declines never touches the slot, so no caller can install
+    /// an entry the admission rules reject.
+    ///
+    /// The install is monotonic over captured stamps (never a live
+    /// re-read): a late persist must not replace an entry a
+    /// newer-generation compute already installed.
+    pub(crate) fn install_raw_template_analysis(
+        &mut self,
+        template: Arc<verter_semantic::analysis::template::TemplateAnalysisSnapshot>,
+        admission: RawTemplateSlotAdmission,
+    ) {
+        let Some(source_generation) = admission.admitted_generation() else {
+            return;
+        };
+        let supersedes = self
+            .raw_template_analysis
+            .as_ref()
+            .is_none_or(|entry| entry.source_generation <= source_generation);
+        if supersedes {
+            self.raw_template_analysis = Some(RawTemplateAnalysisEntry {
+                template,
+                source_generation,
+            });
+        }
+    }
+
+    /// Whether the `import_routes` entry for `specifier` may be served /
+    /// seeded as current at `current_generation`. `true` for unstamped
+    /// entries (caller-supplied authoritative routes and known-misses —
+    /// the latter carry their own sidecar and re-resolution rail);
+    /// `false` for a host-memoized positive whose recorded generation no
+    /// longer matches the live `content_generation` (the dependency file
+    /// set moved — the entry must re-resolve).
+    pub(crate) fn import_route_is_generation_current(
+        &self,
+        specifier: &str,
+        current_generation: u64,
+    ) -> bool {
+        self.import_routes_positive_recorded_at_generation
+            .get(specifier)
+            .is_none_or(|stamp| stamp.generation == current_generation)
+    }
+
+    /// The resolution lane recorded on a HOST-MEMOIZED positive
+    /// `import_routes` entry, when one exists. `None` for unstamped
+    /// (caller-supplied authoritative) entries and known-misses. A
+    /// generation-stale stamped positive re-resolves through this lane so
+    /// the re-resolution replays exactly the resolution the memo captured
+    /// (exact resolutions are kind-keyed).
+    pub(crate) fn positive_route_resolution_kind(
+        &self,
+        specifier: &str,
+    ) -> Option<verter_workspace::ResolveRequestKind> {
+        self.import_routes_positive_recorded_at_generation
+            .get(specifier)
+            .map(|stamp| stamp.kind)
+    }
+
+    /// The COMPLETE per-entry freshness oracle for an `import_routes`
+    /// entry — the single predicate every seed loop and warm read site
+    /// consults before treating a stored route as current:
+    ///
+    /// * **Known-miss** — current ONLY while its known-miss sidecar
+    ///   stamp equals the live `content_generation`. A missing stamp
+    ///   means "never recorded" and is treated as stale (fail closed):
+    ///   a file appearing after the miss was recorded advances the
+    ///   generation, so the specifier must re-resolve against the live
+    ///   file set.
+    /// * **Host-memoized positive** (positive sidecar stamp present) —
+    ///   current ONLY while the stamp equals the live generation; the
+    ///   stamp is captured BEFORE the resolution it records, so a race
+    ///   leaves it conservatively stale.
+    /// * **Caller-supplied authoritative positive** (no stamp) — serves
+    ///   until replaced; the caller re-pushes on its own watch events.
+    pub(crate) fn import_route_entry_is_generation_current(
+        &self,
+        specifier: &str,
+        resolution: &DependencyResolution,
+        current_generation: u64,
+    ) -> bool {
+        if resolution.is_known_miss() {
+            return self
+                .import_routes_known_miss_recorded_at_generation
+                .get(specifier)
+                .is_some_and(|recorded| *recorded == current_generation);
+        }
+        self.import_route_is_generation_current(specifier, current_generation)
+    }
 }
 
 /// Dependency-closure-domain state for the scheduler-backed compile cache (D48).
@@ -2247,6 +2574,14 @@ pub(crate) struct CachedMetaPayload {
     /// (R3/R26/R28 fact-validation substrate).
     pub fact_versions: Arc<[crate::resolver_core::FactVersionRef]>,
     pub payload: Vec<u8>,
+    /// `project_generation` captured at publish — the value-side
+    /// generation backstop, the same discipline as the typed result
+    /// caches' `validated_at_generation` gate. The payload lane has no
+    /// outer publish / `is_stable` fence, so an UNDER-RECORDED fact
+    /// signature (degenerate case: the empty signature, which validates
+    /// trivially) would otherwise keep validating across project-shape
+    /// mutations permanently. A warm hit demands the LIVE generation.
+    pub validated_at_generation: u64,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -2438,10 +2773,66 @@ pub struct MetaProvenance {
     pub indexed_ready_scheduler_snapshot_reuse: std::sync::atomic::AtomicU64,
     pub bundle_cache_hits: std::sync::atomic::AtomicU64,
     pub bundle_materializations: std::sync::atomic::AtomicU64,
+    /// Cold bundle flight-body executions: the singleflight lane's cold
+    /// run past the in-flight recheck (the deterministic mirror of
+    /// `AuditEvent::PreparedDeclBundleCold`). Joiners adopting a
+    /// retained rendezvous do not count — the adopt-vs-rerun
+    /// discriminator for miss-retention tests, where a surface-empty
+    /// re-run bumps NO materialisation counter (the producers conclude
+    /// the miss before building anything).
+    pub bundle_cold_flight_runs: std::sync::atomic::AtomicU64,
     pub dep_resolution_calls: std::sync::atomic::AtomicU64,
     pub imported_macro_declaration_builds: std::sync::atomic::AtomicU64,
-    pub route_owned_snapshot_cache_hits: std::sync::atomic::AtomicU64,
-    pub route_owned_snapshot_cached_parse_hits: std::sync::atomic::AtomicU64,
+
+    // ── Cold per-file artifact-build dedup counters ─────────────────────
+    //
+    // One cold resolve of one canonical performs exactly ONE of each:
+    // one eval-program parse, one eval-env build, one shallow-state
+    // build, one `IndexedReady` materialisation. These counters are the
+    // deterministic observability rail for that contract (no
+    // wall-clock); `reset()` zeroes them like every other counter.
+    /// OXC eval-program parses performed through the single host parse
+    /// entry (`parse_eval_program`). Exactly 1 per cold canonical build.
+    pub eval_program_parses: std::sync::atomic::AtomicU64,
+    /// SFC structure parses (`parse_sfc` / `parse_vue_snapshot`)
+    /// initiated by the host or its scheduler stage executor — covering
+    /// the materialise lanes (base + overlay), the compile/template
+    /// merged-source lanes, and the lazy `get_analysis` re-parse
+    /// fallbacks, so a duplicate-SFC-parse regression on any host lane
+    /// is counter-visible.
+    pub sfc_parses: std::sync::atomic::AtomicU64,
+    /// Full OXC program parses through `parse_non_sfc_snapshot` —
+    /// the scheduler snapshot lane for non-SFC files plus the
+    /// `build_snapshot_from_source` analysis read path. Distinct from
+    /// `eval_program_parses`
+    /// (the `parse_eval_program` funnel) and `sfc_parses` (SFC
+    /// structure parses); counted inside the worker fn so every lane
+    /// counts.
+    pub non_sfc_snapshot_parses: std::sync::atomic::AtomicU64,
+    /// Full OXC SCRIPT-program parses on the `.vue` snapshot path —
+    /// the position-preserving script source extracted from the SFC and
+    /// parsed for export signatures + script analysis. Exactly 1 per
+    /// `.vue` snapshot build: both consumers walk the SAME program (the
+    /// `_from_program` threading), so a count of 2 on one snapshot
+    /// build means a lane re-introduced a per-consumer re-parse of the
+    /// same script bytes. Distinct from `sfc_parses` (the SFC STRUCTURE
+    /// parse, not an OXC program parse) and `eval_program_parses` (the
+    /// eval funnel); counted inside the worker fn so every lane counts.
+    pub vue_script_snapshot_parses: std::sync::atomic::AtomicU64,
+    /// `EvalEnv` builds initiated by the host (the program-taking
+    /// builder plus any call site that forces an internal fallback
+    /// build). Exactly 1 per cold canonical build.
+    pub eval_env_builds: std::sync::atomic::AtomicU64,
+    /// `ShallowFileState::from_analysis_with_resolver` builds initiated
+    /// by host call sites. Exactly 1 per cold canonical build.
+    pub shallow_state_builds: std::sync::atomic::AtomicU64,
+    /// Cold `IndexedReady` materialisations (base + overlay
+    /// materialiser bodies). Exactly 1 per cold canonical build.
+    pub indexed_ready_materializes: std::sync::atomic::AtomicU64,
+    /// Route-surface edge refreshes that reused the content-addressed
+    /// `IndexedReady` payload (no re-parse) and rebuilt only the route
+    /// surface after a route-resolution mutation.
+    pub indexed_ready_edge_refreshes: std::sync::atomic::AtomicU64,
 
     // ── Contention instrumentation ──────────────────────────────────────
     /// `VerterHost::ensure_loaded` invocation count.
@@ -2518,6 +2909,19 @@ pub struct MetaProvenance {
     /// `install_fact_tracer` overflow-refusal count for
     /// `OwnerImportSurfaceDb`.
     pub owner_import_surface_overflow_refusals: std::sync::atomic::AtomicU64,
+    /// Admission refusals for `OwnerImportSurfaceDb` because an
+    /// unresolved direct import could not be rooted in the owner's
+    /// `ImportRoute` fact rail (no coverage for the skipped specifier).
+    /// The surface is served to the caller but never cached — the next
+    /// request cold-recomputes against the live workspace.
+    pub owner_import_surface_unrooted_skip_refusals: std::sync::atomic::AtomicU64,
+    /// Admission refusals for `OwnerImportSurfaceDb` because the cold
+    /// build consumed a FENCED (ReturnOnly) serve — either the traced
+    /// scope observed one by value, or a per-binding route walk
+    /// returned the strict-admission empty-facts signal. The surface
+    /// is served to the caller but never cached; the next request
+    /// cold-recomputes against the live workspace.
+    pub owner_import_surface_fenced_serve_refusals: std::sync::atomic::AtomicU64,
 }
 
 impl Default for MetaProvenance {
@@ -2562,10 +2966,17 @@ impl Default for MetaProvenance {
             indexed_ready_scheduler_snapshot_reuse: std::sync::atomic::AtomicU64::new(0),
             bundle_cache_hits: std::sync::atomic::AtomicU64::new(0),
             bundle_materializations: std::sync::atomic::AtomicU64::new(0),
+            bundle_cold_flight_runs: std::sync::atomic::AtomicU64::new(0),
             dep_resolution_calls: std::sync::atomic::AtomicU64::new(0),
             imported_macro_declaration_builds: std::sync::atomic::AtomicU64::new(0),
-            route_owned_snapshot_cache_hits: std::sync::atomic::AtomicU64::new(0),
-            route_owned_snapshot_cached_parse_hits: std::sync::atomic::AtomicU64::new(0),
+            eval_program_parses: std::sync::atomic::AtomicU64::new(0),
+            sfc_parses: std::sync::atomic::AtomicU64::new(0),
+            non_sfc_snapshot_parses: std::sync::atomic::AtomicU64::new(0),
+            vue_script_snapshot_parses: std::sync::atomic::AtomicU64::new(0),
+            eval_env_builds: std::sync::atomic::AtomicU64::new(0),
+            shallow_state_builds: std::sync::atomic::AtomicU64::new(0),
+            indexed_ready_materializes: std::sync::atomic::AtomicU64::new(0),
+            indexed_ready_edge_refreshes: std::sync::atomic::AtomicU64::new(0),
             ensure_loaded_calls: std::sync::atomic::AtomicU64::new(0),
             ensure_loaded_wait_ns: std::sync::atomic::AtomicU64::new(0),
             ensure_loaded_work_ns: std::sync::atomic::AtomicU64::new(0),
@@ -2590,6 +3001,8 @@ impl Default for MetaProvenance {
             app_config_proof_overflow_refusals: std::sync::atomic::AtomicU64::new(0),
             owner_import_surface_fact_tracer_installs: std::sync::atomic::AtomicU64::new(0),
             owner_import_surface_overflow_refusals: std::sync::atomic::AtomicU64::new(0),
+            owner_import_surface_unrooted_skip_refusals: std::sync::atomic::AtomicU64::new(0),
+            owner_import_surface_fenced_serve_refusals: std::sync::atomic::AtomicU64::new(0),
         }
     }
 }
@@ -2703,20 +3116,16 @@ impl std::fmt::Debug for MetaProvenance {
                 &self.bundle_materializations.load(Relaxed),
             )
             .field(
+                "bundle_cold_flight_runs",
+                &self.bundle_cold_flight_runs.load(Relaxed),
+            )
+            .field(
                 "dep_resolution_calls",
                 &self.dep_resolution_calls.load(Relaxed),
             )
             .field(
                 "imported_macro_declaration_builds",
                 &self.imported_macro_declaration_builds.load(Relaxed),
-            )
-            .field(
-                "route_owned_snapshot_cache_hits",
-                &self.route_owned_snapshot_cache_hits.load(Relaxed),
-            )
-            .field(
-                "route_owned_snapshot_cached_parse_hits",
-                &self.route_owned_snapshot_cached_parse_hits.load(Relaxed),
             )
             .field(
                 "ensure_loaded_calls",
@@ -2823,12 +3232,17 @@ impl MetaProvenance {
                 .load(Relaxed),
             bundle_cache_hits: self.bundle_cache_hits.load(Relaxed),
             bundle_materializations: self.bundle_materializations.load(Relaxed),
+            bundle_cold_flight_runs: self.bundle_cold_flight_runs.load(Relaxed),
             dep_resolution_calls: self.dep_resolution_calls.load(Relaxed),
             imported_macro_declaration_builds: self.imported_macro_declaration_builds.load(Relaxed),
-            route_owned_snapshot_cache_hits: self.route_owned_snapshot_cache_hits.load(Relaxed),
-            route_owned_snapshot_cached_parse_hits: self
-                .route_owned_snapshot_cached_parse_hits
-                .load(Relaxed),
+            eval_program_parses: self.eval_program_parses.load(Relaxed),
+            sfc_parses: self.sfc_parses.load(Relaxed),
+            non_sfc_snapshot_parses: self.non_sfc_snapshot_parses.load(Relaxed),
+            vue_script_snapshot_parses: self.vue_script_snapshot_parses.load(Relaxed),
+            eval_env_builds: self.eval_env_builds.load(Relaxed),
+            shallow_state_builds: self.shallow_state_builds.load(Relaxed),
+            indexed_ready_materializes: self.indexed_ready_materializes.load(Relaxed),
+            indexed_ready_edge_refreshes: self.indexed_ready_edge_refreshes.load(Relaxed),
             ensure_loaded_calls: self.ensure_loaded_calls.load(Relaxed),
             ensure_loaded_wait_ns: self.ensure_loaded_wait_ns.load(Relaxed),
             ensure_loaded_work_ns: self.ensure_loaded_work_ns.load(Relaxed),
@@ -2864,6 +3278,12 @@ impl MetaProvenance {
                 .load(Relaxed),
             owner_import_surface_overflow_refusals: self
                 .owner_import_surface_overflow_refusals
+                .load(Relaxed),
+            owner_import_surface_unrooted_skip_refusals: self
+                .owner_import_surface_unrooted_skip_refusals
+                .load(Relaxed),
+            owner_import_surface_fenced_serve_refusals: self
+                .owner_import_surface_fenced_serve_refusals
                 .load(Relaxed),
         }
     }
@@ -2913,11 +3333,17 @@ impl MetaProvenance {
             .store(0, Relaxed);
         self.bundle_cache_hits.store(0, Relaxed);
         self.bundle_materializations.store(0, Relaxed);
+        self.bundle_cold_flight_runs.store(0, Relaxed);
         self.dep_resolution_calls.store(0, Relaxed);
         self.imported_macro_declaration_builds.store(0, Relaxed);
-        self.route_owned_snapshot_cache_hits.store(0, Relaxed);
-        self.route_owned_snapshot_cached_parse_hits
-            .store(0, Relaxed);
+        self.eval_program_parses.store(0, Relaxed);
+        self.sfc_parses.store(0, Relaxed);
+        self.non_sfc_snapshot_parses.store(0, Relaxed);
+        self.vue_script_snapshot_parses.store(0, Relaxed);
+        self.eval_env_builds.store(0, Relaxed);
+        self.shallow_state_builds.store(0, Relaxed);
+        self.indexed_ready_materializes.store(0, Relaxed);
+        self.indexed_ready_edge_refreshes.store(0, Relaxed);
         self.ensure_loaded_calls.store(0, Relaxed);
         self.ensure_loaded_wait_ns.store(0, Relaxed);
         self.ensure_loaded_work_ns.store(0, Relaxed);
@@ -2945,6 +3371,10 @@ impl MetaProvenance {
         self.owner_import_surface_fact_tracer_installs
             .store(0, Relaxed);
         self.owner_import_surface_overflow_refusals
+            .store(0, Relaxed);
+        self.owner_import_surface_unrooted_skip_refusals
+            .store(0, Relaxed);
+        self.owner_import_surface_fenced_serve_refusals
             .store(0, Relaxed);
     }
 }
@@ -3057,10 +3487,17 @@ pub struct MetaProvenanceSnapshot {
     pub indexed_ready_scheduler_snapshot_reuse: u64,
     pub bundle_cache_hits: u64,
     pub bundle_materializations: u64,
+    pub bundle_cold_flight_runs: u64,
     pub dep_resolution_calls: u64,
     pub imported_macro_declaration_builds: u64,
-    pub route_owned_snapshot_cache_hits: u64,
-    pub route_owned_snapshot_cached_parse_hits: u64,
+    pub eval_program_parses: u64,
+    pub sfc_parses: u64,
+    pub non_sfc_snapshot_parses: u64,
+    pub vue_script_snapshot_parses: u64,
+    pub eval_env_builds: u64,
+    pub shallow_state_builds: u64,
+    pub indexed_ready_materializes: u64,
+    pub indexed_ready_edge_refreshes: u64,
     /// Contention instrumentation counters surfaced through the
     /// host's `MetaProvenance`.
     pub ensure_loaded_calls: u64,
@@ -3098,6 +3535,8 @@ pub struct MetaProvenanceSnapshot {
     pub owner_import_surface_fact_tracer_installs: u64,
     /// `install_fact_tracer` overflow-refusal count for `OwnerImportSurfaceDb`.
     pub owner_import_surface_overflow_refusals: u64,
+    pub owner_import_surface_unrooted_skip_refusals: u64,
+    pub owner_import_surface_fenced_serve_refusals: u64,
 }
 
 /// Point-in-time snapshot of host performance metrics.

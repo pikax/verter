@@ -40,8 +40,8 @@ impl VerterHost {
             self.resolve_project_intrinsic_canonical(owner_canonical_id, "vue/jsx")?;
 
         // Ensure module facts are materialized for the resolved canonicals.
-        let _ = self.ensure_indexed_ready(&vue_canonical);
-        let _ = self.ensure_indexed_ready(&jsx_canonical);
+        let _ = self.ensure_indexed_ready_serve(&vue_canonical);
+        let _ = self.ensure_indexed_ready_serve(&jsx_canonical);
 
         let fallback_members = self
             .expand_project_intrinsic_shape_for_canonical(&vue_canonical, "HTMLAttributes", ctx)
@@ -78,7 +78,7 @@ impl VerterHost {
                 kind: verter_workspace::ResolveRequestKind::TypeImport,
             },
         )?;
-        let _ = self.ensure_indexed_ready(&resolved.source_id);
+        let _ = self.ensure_indexed_ready_serve(&resolved.source_id);
         Some(resolved.source_id)
     }
 
@@ -144,7 +144,7 @@ impl VerterHost {
             .map(|(resolved_id, _)| resolved_id)
             .filter(|resolved_id| resolved_id != canonical_id);
         let scope = tag_scope_canonical.as_deref().unwrap_or(canonical_id);
-        let _ = self.ensure_indexed_ready(scope);
+        let _ = self.ensure_indexed_ready_serve(scope);
         // Class A path via
         // the shared dispatch helper. The intrinsic-member
         // materialiser still uses the engine for its own bundle-level

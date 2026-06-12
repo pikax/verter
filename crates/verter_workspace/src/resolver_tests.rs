@@ -101,6 +101,14 @@ impl crate::traits::WorkspaceAccess for TestReader {
     ) -> crate::types::ExactResolutionResult {
         crate::types::ExactResolutionResult::default()
     }
+    fn record_parsed_edges_with_exact_resolutions(
+        &self,
+        _id: &str,
+        _edges: &[crate::types::ParsedEdge],
+        _resolutions: Vec<crate::types::ExactResolution>,
+    ) -> crate::types::ExactResolutionResult {
+        crate::types::ExactResolutionResult::default()
+    }
     fn replace_semantic_transitive(&self, _id: &str, _deps: std::collections::BTreeSet<String>) {}
     fn set_default_resolve_extensions(&self, _host_extensions: Vec<String>) {}
     fn record_ambient_dependency(&self, _consumer: &str, _virtual_id: &str) {}
@@ -257,6 +265,14 @@ impl crate::traits::WorkspaceAccess for CountingReader {
     fn set_exact_resolutions(
         &self,
         _id: &str,
+        _resolutions: Vec<crate::types::ExactResolution>,
+    ) -> crate::types::ExactResolutionResult {
+        crate::types::ExactResolutionResult::default()
+    }
+    fn record_parsed_edges_with_exact_resolutions(
+        &self,
+        _id: &str,
+        _edges: &[crate::types::ParsedEdge],
         _resolutions: Vec<crate::types::ExactResolution>,
     ) -> crate::types::ExactResolutionResult {
         crate::types::ExactResolutionResult::default()

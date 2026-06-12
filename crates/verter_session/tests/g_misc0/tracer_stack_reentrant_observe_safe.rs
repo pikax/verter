@@ -14,7 +14,7 @@
 //!
 //! ## What this test does NOT exercise
 //!
-//! The codex F6 contract has a stricter shape: an `observe` callback
+//! The full reentrancy contract has a stricter shape: an `observe` callback
 //! that itself re-enters `with_fact_tracer` (installing another scope
 //! inside an active observation) must also be safe. The current
 //! `FactReadSetCell::observe` body has no callback hook, so this

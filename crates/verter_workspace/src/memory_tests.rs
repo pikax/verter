@@ -877,6 +877,228 @@ fn set_exact_resolutions_stores_and_retrieves() {
     assert_eq!(result.unwrap().source_id, "d:/project/src/utils.ts");
 }
 
+/// The atomic combined mutator must carry the exact two-call semantics
+/// (parsed edges recorded, exacts applied and resolvable) plus the
+/// value-idempotency contract: an identical re-push reports
+/// `changed: false`, a differing push reports `changed: true`.
+#[test]
+fn record_parsed_edges_with_exact_resolutions_records_and_applies_atomically() {
+    use crate::traits::WorkspaceAccess;
+
+    let ws = MemoryWorkspace::new(MemoryOptions::default());
+    let owner = "d:/project/src/app.vue";
+    let target = "d:/project/src/utils.ts";
+    ws.inject_file(target.to_string(), Arc::from("export const x = 1;"));
+
+    let edges = vec![crate::types::ParsedEdge::Relative {
+        specifier: "./utils".to_string(),
+        kind: ResolveRequestKind::EsmImport,
+    }];
+    let exacts = vec![ExactResolution {
+        specifier: "./utils".to_string(),
+        phase: ResolvePhase::CodegenBlocker,
+        kind: ResolveRequestKind::EsmImport,
+        resolved_canonical_id: Some(target.to_string()),
+        possible_canonical_ids: vec![],
+    }];
+
+    let first = ws.record_parsed_edges_with_exact_resolutions(owner, &edges, exacts.clone());
+    assert!(first.changed, "first push must report a table change");
+
+    // Exact resolution is queryable (the set_exact_resolutions half).
+    let resolved = ws.resolve_import(
+        owner,
+        "./utils",
+        ResolutionContext {
+            phase: ResolvePhase::CodegenBlocker,
+            kind: ResolveRequestKind::EsmImport,
+        },
+    );
+    assert_eq!(
+        resolved.map(|r| r.source_id),
+        Some(target.to_string()),
+        "exacts must be applied",
+    );
+    // Reverse edge present (the record_parsed_edges half).
+    assert!(
+        ws.reverse_deps_for(target).contains(&owner.to_string()),
+        "parsed/exact reverse edge must be recorded",
+    );
+
+    // Identical re-push: value no-op on both halves.
+    let second = ws.record_parsed_edges_with_exact_resolutions(owner, &edges, exacts);
+    assert!(
+        !second.changed,
+        "identical re-push must report changed: false (value-idempotency)",
+    );
+
+    // Differing exacts: change reported.
+    let third = ws.record_parsed_edges_with_exact_resolutions(
+        owner,
+        &edges,
+        vec![ExactResolution {
+            specifier: "./utils".to_string(),
+            phase: ResolvePhase::CodegenBlocker,
+            kind: ResolveRequestKind::EsmImport,
+            resolved_canonical_id: Some("d:/project/src/other.ts".to_string()),
+            possible_canonical_ids: vec![],
+        }],
+    );
+    assert!(third.changed, "a differing exact push must report changed");
+}
+
+/// Every per-canonical content mutator must record the canonical's
+/// transition in the workspace's content-transition ledger — the
+/// read-side freshness authority consumers compare retained-artifact
+/// build generations against. Mutators that bypass host-level wrappers
+/// (direct embedder notify, write_file, copy_file) are exactly the
+/// perimeter this ledger closes.
+#[test]
+fn content_mutators_record_per_canonical_transition_generation() {
+    use crate::traits::{WorkspaceAccess, WorkspaceRead};
+
+    let ws = MemoryWorkspace::new(MemoryOptions::default());
+    let untouched = "d:/project/src/untouched.ts";
+    assert_eq!(
+        ws.last_content_transition_generation(untouched),
+        0,
+        "a never-transitioned canonical reports 0",
+    );
+
+    ws.inject_file(
+        "d:/project/src/seed.ts".to_string(),
+        Arc::from("export const s = 1;"),
+    );
+    let seed_gen = ws.last_content_transition_generation("d:/project/src/seed.ts");
+    assert!(seed_gen > 0, "inject_file records a transition");
+    assert_eq!(
+        seed_gen,
+        ws.content_generation(),
+        "the recorded transition is the post-bump generation",
+    );
+
+    ws.notify_upsert("d:/project/src/a.ts", Arc::from("export const a = 1;"));
+    let a_gen = ws.last_content_transition_generation("d:/project/src/a.ts");
+    assert!(a_gen > seed_gen, "notify_upsert records a transition");
+
+    ws.write_file("d:/project/src/b.ts", "export const b = 1;")
+        .expect("write_file");
+    let b_gen = ws.last_content_transition_generation("d:/project/src/b.ts");
+    assert!(b_gen > a_gen, "write_file records a transition");
+
+    ws.copy_file("d:/project/src/b.ts", "d:/project/src/c.ts")
+        .expect("copy_file");
+    let c_gen = ws.last_content_transition_generation("d:/project/src/c.ts");
+    assert!(
+        c_gen > b_gen,
+        "copy_file records the DESTINATION transition"
+    );
+
+    ws.notify_close("d:/project/src/a.ts");
+    assert!(
+        ws.last_content_transition_generation("d:/project/src/a.ts") > c_gen,
+        "notify_close records a transition",
+    );
+
+    ws.delete_file("d:/project/src/b.ts").expect("delete_file");
+    assert!(
+        ws.last_content_transition_generation("d:/project/src/b.ts") > c_gen,
+        "delete_file records a transition",
+    );
+
+    // Per-canonical isolation: every mutation above left the untouched
+    // canonical's ledger entry at 0.
+    assert_eq!(
+        ws.last_content_transition_generation(untouched),
+        0,
+        "unrelated mutations never touch another canonical's ledger entry",
+    );
+
+    // R22 idempotency: a byte-identical notify_upsert re-push is a TRUE
+    // no-op — no transition recorded.
+    ws.notify_upsert("d:/project/src/d.ts", Arc::from("export const d = 1;"));
+    let d_gen = ws.last_content_transition_generation("d:/project/src/d.ts");
+    ws.notify_upsert("d:/project/src/d.ts", Arc::from("export const d = 1;"));
+    assert_eq!(
+        ws.last_content_transition_generation("d:/project/src/d.ts"),
+        d_gen,
+        "a byte-identical re-upsert records no transition (R22)",
+    );
+}
+
+/// Ledger keys normalize at the recording chokepoint: a direct embedder
+/// passing a non-canonical key form (backslashes, Windows drive-letter
+/// casing) must record under the SAME key the artifact-only freshness
+/// gate queries with — an un-normalized record is a silent fresh
+/// verdict for the normalized query.
+#[test]
+fn content_transition_ledger_normalizes_keys_at_recording_and_query() {
+    use crate::traits::{WorkspaceAccess, WorkspaceRead};
+
+    let ws = MemoryWorkspace::new(MemoryOptions::default());
+
+    // Record under the RAW backslash + uppercase-drive form a direct
+    // NAPI embedder is most likely to pass.
+    ws.notify_upsert(
+        "D:\\project\\src\\Raw.ts",
+        Arc::from("export const raw = 1;"),
+    );
+    let normalized_query = ws.last_content_transition_generation("d:/project/src/Raw.ts");
+    assert!(
+        normalized_query > 0,
+        "a transition recorded under a backslash/drive-cased raw key MUST be \
+         observable under the normalized canonical the gate queries with",
+    );
+
+    // And the reverse: record normalized, query raw — the query side
+    // normalizes too, so any mixed-form caller pair agrees.
+    ws.notify_upsert(
+        "d:/project/src/plain.ts",
+        Arc::from("export const plain = 1;"),
+    );
+    assert!(
+        ws.last_content_transition_generation("D:\\project\\src\\plain.ts") > 0,
+        "the query side must normalize the probed canonical as well",
+    );
+}
+
+/// A watcher `DirectoryTreeDirty` recovery transitions an UNKNOWN member
+/// set — the engine cannot enumerate what changed on disk — so the
+/// ledger must record the SUBTREE: every member canonical's
+/// `last_content_transition_generation` advances, while canonicals
+/// outside the prefix are untouched.
+#[test]
+fn directory_tree_dirty_records_subtree_content_transition() {
+    use crate::changes::WorkspaceChange;
+    use crate::traits::{WorkspaceAccess, WorkspaceRead};
+
+    let ws = MemoryWorkspace::new(MemoryOptions::default());
+    let member = "d:/project/src/pkg/member.ts";
+    let outside = "d:/project/other/outside.ts";
+    ws.inject_file(member.to_string(), Arc::from("export const m = 1;"));
+    ws.inject_file(outside.to_string(), Arc::from("export const o = 1;"));
+    let member_gen = ws.last_content_transition_generation(member);
+    let outside_gen = ws.last_content_transition_generation(outside);
+
+    ws.apply_changes(vec![WorkspaceChange::DirectoryTreeDirty {
+        prefix: "d:/project/src/pkg".to_string(),
+    }]);
+
+    assert!(
+        ws.last_content_transition_generation(member) > member_gen,
+        "a DirectoryTreeDirty recovery must advance every member \
+         canonical's transition generation — an out-of-band disk change \
+         under the prefix may have rewritten any of them, so a retained \
+         pre-recovery artifact must stop validating as content-fresh",
+    );
+    assert_eq!(
+        ws.last_content_transition_generation(outside),
+        outside_gen,
+        "a canonical outside the dirty prefix is untouched (per-canonical \
+         isolation preserved)",
+    );
+}
+
 // ── MemoryWorkspace::set_project_graph ──
 
 #[test]
@@ -1129,12 +1351,13 @@ fn trait_configure_resolver_empty_clears_resolver() {
 
 /// DISCRIMINATING regression (RouteDb stale-serve hole 5): changing the
 /// default resolve-extension list is a resolve-config mutation. RouteDb
-/// effective-export-set entries are keyed on `resolve_env_hash`, and
-/// route-owned shallow freshness keys on `content_generation`. The
-/// extension setter must therefore (a) recompose + republish the per-
-/// project env-hash tables so the new `resolve_env_hash` takes effect
-/// (old-keyed entries become unreachable), and (b) advance
-/// `content_generation` so route-owned shallow freshness invalidates.
+/// effective-export-set entries are keyed on `resolve_env_hash`, and the
+/// session-side route-surface edge-currency and known-miss staleness
+/// gates key on `content_generation`. The extension setter must
+/// therefore (a) recompose + republish the per-project env-hash tables
+/// so the new `resolve_env_hash` takes effect (old-keyed entries become
+/// unreachable), and (b) advance `content_generation` so those
+/// downstream freshness gates invalidate.
 ///
 /// FAILS pre-fix: `set_default_resolve_extensions` only swapped the
 /// stored list and never republished env hashes or bumped the epoch, so
@@ -1184,7 +1407,8 @@ fn changing_default_resolve_extensions_republishes_resolve_env_hash() {
     assert!(
         gen_after > gen_before,
         "an extension-list change is a resolve-config mutation: it must advance \
-         content_generation so route-owned shallow freshness invalidates"
+         content_generation so the downstream edge-currency and known-miss \
+         staleness gates invalidate"
     );
 }
 
@@ -1504,4 +1728,121 @@ fn memory_set_exact_resolutions_dampens_active_stem_canonical_works() {
     );
     // Canonical populated.
     assert_eq!(ws.reverse_deps_for("/lib/types.ts"), vec!["/src/Comp.vue"],);
+}
+
+// ── delete_dir_all / subtree-transition prefix normalization ──
+
+/// `delete_dir_all("/")` must remove every file in the snapshot. The
+/// enumeration filter routes through `path_matches_prefix`, which
+/// normalizes the trailing slash; a naive `format!("{path}/")` prefix
+/// turns the root into `"//"` and matches nothing.
+#[test]
+fn delete_dir_all_root_removes_all_files() {
+    let ws = MemoryWorkspace::new(MemoryOptions::default());
+    ws.inject_file("/a/x.ts".to_string(), Arc::from("export const x = 1\n"));
+    ws.inject_file("/b/y.ts".to_string(), Arc::from("export const y = 2\n"));
+
+    ws.delete_dir_all("/")
+        .expect("root delete_dir_all succeeds");
+
+    assert!(
+        ws.read_file("/a/x.ts").is_none(),
+        "delete_dir_all(\"/\") must remove /a/x.ts"
+    );
+    assert!(
+        ws.read_file("/b/y.ts").is_none(),
+        "delete_dir_all(\"/\") must remove /b/y.ts"
+    );
+}
+
+/// Path-boundary correctness: deleting `/a` removes the `/a` subtree
+/// only — a sibling whose name merely starts with the same bytes
+/// (`/ab.ts`) survives.
+#[test]
+fn delete_dir_all_respects_path_component_boundaries() {
+    let ws = MemoryWorkspace::new(MemoryOptions::default());
+    ws.inject_file("/a/x.ts".to_string(), Arc::from("export const x = 1\n"));
+    ws.inject_file("/ab.ts".to_string(), Arc::from("export const ab = 3\n"));
+
+    ws.delete_dir_all("/a")
+        .expect("subtree delete_dir_all succeeds");
+
+    assert!(
+        ws.read_file("/a/x.ts").is_none(),
+        "delete_dir_all(\"/a\") must remove the subtree member /a/x.ts"
+    );
+    assert!(
+        ws.read_file("/ab.ts").is_some(),
+        "delete_dir_all(\"/a\") must NOT remove the byte-prefix sibling /ab.ts"
+    );
+}
+
+/// A recorded ROOT subtree transition (`"/"`) folds into every
+/// canonical's `last_content_transition_generation`. The read-side
+/// subtree filter routes through `path_matches_prefix`; a raw
+/// `canonical.as_bytes()[prefix.len()] == b'/'` boundary byte check
+/// can never match the root prefix (the byte after `"/"` is the first
+/// name character, not another `'/'`).
+#[test]
+fn root_subtree_transition_folds_into_every_canonical() {
+    let ws = MemoryWorkspace::new(MemoryOptions::default());
+    assert_eq!(
+        ws.engine
+            .last_content_transition_generation("/never/touched.ts"),
+        0,
+        "untouched canonical starts with no transition"
+    );
+
+    ws.engine.record_subtree_content_transition("/");
+
+    assert!(
+        ws.engine
+            .last_content_transition_generation("/never/touched.ts")
+            > 0,
+        "a root subtree transition must fold into every canonical under /"
+    );
+}
+
+/// Non-root subtree transitions stay component-boundary-precise: a
+/// `/src` record folds into `/src/a.ts` but not into the byte-prefix
+/// sibling `/srcx.ts`.
+#[test]
+fn subtree_transition_respects_path_component_boundaries() {
+    let ws = MemoryWorkspace::new(MemoryOptions::default());
+    ws.engine.record_subtree_content_transition("/src");
+
+    assert!(
+        ws.engine.last_content_transition_generation("/src/a.ts") > 0,
+        "subtree member must observe the recorded transition"
+    );
+    assert_eq!(
+        ws.engine.last_content_transition_generation("/srcx.ts"),
+        0,
+        "byte-prefix sibling outside the subtree must NOT observe it"
+    );
+}
+
+/// Trailing-slash input normalizes to the same semantics as the bare
+/// path: `delete_dir_all("/a/")` removes the exact entry `"/a"` just
+/// like `delete_dir_all("/a")` does (the enumeration filter strips the
+/// trailing slash through `path_matches_prefix` instead of comparing
+/// the raw input string against entry ids).
+#[test]
+fn delete_dir_all_trailing_slash_matches_exact_entry() {
+    let ws = MemoryWorkspace::new(MemoryOptions::default());
+    ws.inject_file("/a".to_string(), Arc::from("export const a = 0\n"));
+    ws.inject_file("/a/x.ts".to_string(), Arc::from("export const x = 1\n"));
+
+    ws.delete_dir_all("/a/")
+        .expect("trailing-slash delete_dir_all succeeds");
+
+    assert!(
+        ws.read_file("/a/x.ts").is_none(),
+        "delete_dir_all(\"/a/\") must remove the subtree member /a/x.ts"
+    );
+    assert!(
+        ws.read_file("/a").is_none(),
+        "delete_dir_all(\"/a/\") must remove the exact entry /a — same \
+         semantics as delete_dir_all(\"/a\")"
+    );
 }

@@ -20,14 +20,11 @@
 //! self-test exercises the scanner against synthetic violating / clean
 //! bodies so the scan cannot pass vacuously.
 //!
-//! Scope note: a bare `get_any` on the `route_owned_shallow()` DB (the
-//! `RouteOwnedShallowDb`, which keeps exactly one entry per canonical,
-//! replaced on every publish) is NOT banned — `current_route_surface_hash`
-//! uses it as the documented fallback for a scheduler-invisible
-//! route-only file. The banned tokens below are scoped to the
-//! `indexed()` artifact store (`indexed().get_any`) and the
-//! `get_artifacts_any` raw accessor, which are the permissive
-//! multi-candidate reads.
+//! Scope note: the banned tokens below are scoped to the `indexed()`
+//! artifact store (`indexed().get_any`) and the `get_artifacts_any`
+//! raw accessor — the permissive multi-candidate reads. A
+//! scheduler-invisible canonical reads through the artifact-only
+//! authority (`artifact_current_indexed_raw`), never `get_any`.
 
 use std::fs;
 use std::path::PathBuf;
@@ -158,7 +155,7 @@ fn structural_carrier_producers_use_no_permissive_get_any() {
             signature: "fn ref_cycle_read_set(",
         },
         Scanned {
-            file: "host_resolve/route_owned_shallow.rs",
+            file: "host_resolve/route_surface.rs",
             signature: "pub(crate) fn current_route_surface_hash(",
         },
         Scanned {
@@ -199,13 +196,13 @@ fn get_any_scanner_discriminates() {
         );
     }
 
-    // A `route_owned_shallow().get_any(...)` call is NOT banned — the
-    // banned token is `indexed().get_any`, scoped to the artifact store.
-    let route_owned_get_any = "let e = self.route_owned_shallow().get_any(canonical);";
+    // A `get_any` on a DIFFERENT db is NOT banned — the banned token is
+    // `indexed().get_any`, scoped to the artifact store.
+    let other_db_get_any = "let e = self.member_display_facts().get_any(canonical);";
     for banned in BANNED {
         assert!(
-            !body_contains_banned(route_owned_get_any, banned),
-            "scanner self-test: `route_owned_shallow().get_any` must NOT be flagged — \
+            !body_contains_banned(other_db_get_any, banned),
+            "scanner self-test: a different-db `get_any` must NOT be flagged — \
              only the `indexed()` artifact-store permissive read is banned",
         );
     }
@@ -258,7 +255,7 @@ fn get_any_scanner_discriminates() {
         "materialize_structure_read_set must be present",
     );
     assert!(
-        read_session_source("host_resolve/route_owned_shallow.rs")
+        read_session_source("host_resolve/route_surface.rs")
             .contains("pub(crate) fn current_route_surface_hash("),
         "current_route_surface_hash must be present",
     );

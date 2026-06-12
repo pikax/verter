@@ -351,10 +351,6 @@ analysis: CacheLayerHitMiss,
  */
 owner_import: CacheLayerHitMiss,
 /**
- * `RouteOwnedShallowDb` — route-only shallow cache.
- */
-route_owned_shallow: CacheLayerHitMiss,
-/**
  * `ComponentMetaResultDb` — final component-meta result cache.
  */
 component_meta: CacheLayerHitMiss,
@@ -2090,7 +2086,7 @@ substitute_mapped_type_descend: number,
  */
 build_typeof_calls: number,
 /**
- * `build_typeof` calls where `ensure_indexed_ready` returned
+ * `build_typeof` calls where `ensure_indexed_ready_serve` returned
  * `None` (the brief's prepared-value miss site).
  */
 build_typeof_prepared_value_misses: number,
@@ -2534,11 +2530,10 @@ mode: ProjectionModeAudit,
 depth: number, } } | { "CacheDrainedAtUpsert": {
 /**
  * Static identifier for the cache layer being drained
- * (e.g. `"resolved_type_cache"`, `"eval_env_cache"`,
- * `"compile_slots"`, `"derived_raw_cache"`,
- * `"semantic_invalidate"`, `"workspace_parsed_edges"`,
- * `"resolver_runtime"`, `"store_view_epoch"`,
- * `"project_type_store"`, `"dependency_cache"`).
+ * (e.g. `"compile_cache_overrides"`, `"compile_slots"`,
+ * `"compile_output_pure_content"`, `"derived_raw_cache"`,
+ * `"dependency_cache"`, `"semantic_invalidate"`,
+ * `"workspace_parsed_edges"`, `"store_view_epoch"`).
  */
 layer: string,
 /**

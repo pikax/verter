@@ -304,7 +304,7 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
         }
 
         if candidate_roots.is_empty() && macro_lacks_direct_local_surface(mac) {
-            let owner_has_symbol = self.ctx.route_owned_shallow_state(owner_canonical);
+            let owner_has_symbol = self.ctx.routed_shallow_state(owner_canonical);
             for type_name in &mac.type_references {
                 if type_name.contains('.') || !seen.insert(type_name.as_str()) {
                     continue;
@@ -753,7 +753,7 @@ pub(crate) fn resolve_jsdoc_tag_type(
 
     // Ensure module facts are materialized so the dispatch path can
     // resolve imports through host-owned caches.
-    let _facts = host.ensure_indexed_ready(canonical_source)?;
+    let _facts = host.ensure_indexed_ready_serve(canonical_source)?;
     tracked_deps.extend(
         host.imported_symbol_dependencies_for_expr(ctx, canonical_source, &parsed)
             .into_iter()

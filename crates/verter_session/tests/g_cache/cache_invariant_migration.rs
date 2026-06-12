@@ -586,44 +586,6 @@ fn schema_bump_evicts_analysis_ready_db_stale_entries() {
 }
 
 #[test]
-fn schema_bump_evicts_route_owned_shallow_db_stale_entries() {
-    use verter_session::project_type_store::RouteOwnedShallowDb;
-
-    let db = RouteOwnedShallowDb::new_with_schema_version_for_test(STALE_SCHEMA_VERSION);
-    db.insert_synthetic_for_schema_test("/workspace/synthetic-route.ts");
-
-    assert_eq!(db.len(), 1, "RouteOwnedShallowDb pre-evict count");
-    assert_eq!(db.schema_version(), STALE_SCHEMA_VERSION);
-
-    let evicted = db.evict_if_schema_mismatch(CACHE_CLUSTER_SCHEMA_VERSION);
-    assert_eq!(evicted, 1, "RouteOwnedShallowDb: must drain stale");
-    assert_eq!(db.len(), 0, "RouteOwnedShallowDb: empty after evict");
-}
-
-#[test]
-fn schema_bump_evicts_eval_env_cache_db_stale_entries() {
-    use verter_session::project_type_store::EvalEnvCacheDb;
-
-    let db = EvalEnvCacheDb::new_with_schema_version_for_test(STALE_SCHEMA_VERSION);
-    db.insert_synthetic_for_schema_test("/workspace/synthetic-evalenv.ts");
-
-    assert_eq!(
-        db.total_entries(),
-        1,
-        "EvalEnvCacheDb: synthetic legacy env must be present pre-evict"
-    );
-    assert_eq!(db.schema_version(), STALE_SCHEMA_VERSION);
-
-    let evicted = db.evict_if_schema_mismatch(CACHE_CLUSTER_SCHEMA_VERSION);
-    assert_eq!(evicted, 1, "EvalEnvCacheDb: must drain stale legacy env");
-    assert_eq!(
-        db.total_entries(),
-        0,
-        "EvalEnvCacheDb: total empty after evict"
-    );
-}
-
-#[test]
 fn schema_bump_evicts_owner_import_surface_db_stale_entries() {
     use verter_session::owner_import_surface::OwnerImportSurfaceDb;
 

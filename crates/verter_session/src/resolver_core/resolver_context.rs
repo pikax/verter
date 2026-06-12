@@ -187,7 +187,19 @@ pub(crate) trait ResolverContext: sealed::Sealed {
         symbol_name: &str,
     ) -> Option<Arc<PreparedValueDecl>>;
 
-    fn ensure_indexed_ready(&self, canonical_id: &str) -> Option<Arc<IndexedReady>>;
+    /// Materialise (or warm-read) the canonical post-parse artifact,
+    /// with the publication status flowed BY VALUE — see
+    /// [`crate::host_manage::prepared_decl::IndexedReadyServe`]. This is
+    /// the ONLY resolver-tier accessor for a cold/warm `IndexedReady`:
+    /// a consumer that derives shared-cache entries from the artifact
+    /// gates admission on `serve.store_published`; structurally
+    /// read-only consumers take `serve.indexed` (the fenced consumption
+    /// still reaches every enclosing traced admission point through the
+    /// `note_fenced_serve_fan_out` chokepoint flag).
+    fn ensure_indexed_ready_serve(
+        &self,
+        canonical_id: &str,
+    ) -> Option<crate::host_manage::prepared_decl::IndexedReadyServe>;
 
     fn ensure_loaded(&self, canonical_id: &str) -> bool;
 
@@ -342,7 +354,7 @@ pub(crate) trait ResolverContext: sealed::Sealed {
     /// wrapper that chains a
     /// [`crate::resolver_core::CanonicalCompletionOverlay`] in front of
     /// the request-entry base view. The overlay records additive loads
-    /// observed mid-request (`ensure_loaded` / `ensure_indexed_ready`
+    /// observed mid-request (`ensure_loaded` / `ensure_indexed_ready_serve`
     /// successes) so the self-root validator does not false-miss on
     /// canonicals loaded after the request-entry snapshot.
     #[allow(dead_code)]
@@ -387,7 +399,7 @@ pub(crate) trait ResolverContext: sealed::Sealed {
     /// fetch the routed shallow state for a canonical id.
     /// Used by macro-shape materialisation when re-resolving paths
     /// through cross-file type-import edges.
-    fn route_owned_shallow_state(
+    fn routed_shallow_state(
         &self,
         canonical_id: &str,
     ) -> Option<std::sync::Arc<crate::resolver_core::ShallowFileState>>;
@@ -560,7 +572,7 @@ pub(crate) trait ResolverContext: sealed::Sealed {
     /// runtime `.js` whose `.d.ts` companion is the analysis target). The
     /// two coincide for an ordinary `.ts` / `.tsx` / `.d.ts` file. The
     /// overlay materialiser publishes under the normalised id, and the
-    /// base [`Self::ensure_indexed_ready`] normalises before publishing,
+    /// base [`Self::ensure_indexed_ready_serve`] normalises before publishing,
     /// so `FileArtifactKey::canonical` is always the normalised id.
     ///
     /// Content-addressed `FileArtifactStore` lookups (parse-fact
@@ -694,8 +706,11 @@ impl ResolverContext for crate::VerterHost {
     }
 
     #[inline]
-    fn ensure_indexed_ready(&self, canonical_id: &str) -> Option<Arc<IndexedReady>> {
-        crate::VerterHost::ensure_indexed_ready(self, canonical_id)
+    fn ensure_indexed_ready_serve(
+        &self,
+        canonical_id: &str,
+    ) -> Option<crate::host_manage::prepared_decl::IndexedReadyServe> {
+        crate::VerterHost::ensure_indexed_ready_serve(self, canonical_id)
     }
 
     #[inline]
@@ -924,11 +939,11 @@ impl ResolverContext for crate::VerterHost {
     }
 
     #[inline]
-    fn route_owned_shallow_state(
+    fn routed_shallow_state(
         &self,
         canonical_id: &str,
     ) -> Option<Arc<crate::resolver_core::ShallowFileState>> {
-        crate::VerterHost::route_owned_shallow_state(self, canonical_id)
+        crate::VerterHost::routed_shallow_state(self, canonical_id)
     }
 
     #[inline]
@@ -1062,6 +1077,15 @@ pub(crate) fn observe_fan_out(fact: crate::resolver_core::FactVersionRef) {
 #[inline]
 pub(crate) fn observe_fan_out_borrowed(sig: &[crate::resolver_core::FactVersionRef]) {
     fact_tracer_tls::observe_fan_out_borrowed(sig);
+}
+
+/// Mark every active tracer on the current thread's stack as having
+/// consumed a FENCED (ReturnOnly) serve — the by-value rail enclosing
+/// traced cold computes consult to refuse shared-cache admission.
+/// No-op when the stack is empty (no traced compute is in scope).
+#[inline]
+pub(crate) fn note_fenced_serve_fan_out() {
+    fact_tracer_tls::note_fenced_serve_fan_out();
 }
 
 // ── `with_fact_tracer` installer ──────────────────────────────────────
@@ -1209,6 +1233,30 @@ mod fact_tracer_tls {
             if !ptr.is_null() {
                 // SAFETY: see module-level SAFETY contract.
                 unsafe { &*ptr }.observe_borrowed_signature(sig);
+            }
+        }
+    }
+
+    /// Mark **every** active tracer on the stack as having consumed a
+    /// FENCED (ReturnOnly, `store_published == false`) serve.
+    ///
+    /// Called from the serve chokepoints
+    /// ([`crate::VerterHost::ensure_indexed_ready_serve`], the overlay
+    /// materialiser, and the frontier route reader's per-walk memo) on
+    /// the consuming thread, so every enclosing traced cold compute —
+    /// the semantic-memo build, the owner-import-surface producer, the
+    /// component-meta proof producers — observes the fenced consumption
+    /// by value and can refuse shared-cache admission. Same
+    /// snapshot-then-iterate reentrancy discipline as
+    /// [`observe_fan_out`].
+    #[inline]
+    pub(super) fn note_fenced_serve_fan_out() {
+        let ptrs: SmallVec<[*const FactReadSetCell; 8]> =
+            ACTIVE_TRACERS.with(|slot| slot.borrow().clone());
+        for ptr in ptrs {
+            if !ptr.is_null() {
+                // SAFETY: see module-level SAFETY contract.
+                unsafe { &*ptr }.note_fenced_serve();
             }
         }
     }

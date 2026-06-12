@@ -206,6 +206,15 @@ impl verter_workspace::WorkspaceAccess for CountingWorkspace {
     ) -> verter_workspace::ExactResolutionResult {
         self.inner.set_exact_resolutions(canonical_id, resolutions)
     }
+    fn record_parsed_edges_with_exact_resolutions(
+        &self,
+        canonical_id: &str,
+        edges: &[verter_workspace::ParsedEdge],
+        resolutions: Vec<verter_workspace::ExactResolution>,
+    ) -> verter_workspace::ExactResolutionResult {
+        self.inner
+            .record_parsed_edges_with_exact_resolutions(canonical_id, edges, resolutions)
+    }
 
     // ── R6/R7: forwarding wrapper for new reverse-graph methods ──
     // The compile-time enforcement ensures CountingWorkspace cannot drop
@@ -1684,7 +1693,7 @@ defineProps<Props>()
         route_exports_only: false,
         view: None,
         ctx: &host_ctx_for_adapter,
-        route_shallow_cache: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
+        route_shallow_cache: std::cell::RefCell::new(Default::default()),
     };
 
     let mut frontier = crate::resolver_core::ExternalTypeFrontier::new();
@@ -1752,7 +1761,7 @@ defineProps<Props>()
         route_exports_only: false,
         view: None,
         ctx: &host_ctx_for_adapter,
-        route_shallow_cache: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
+        route_shallow_cache: std::cell::RefCell::new(Default::default()),
     };
 
     let mut frontier = crate::resolver_core::ExternalTypeFrontier::new();

@@ -311,16 +311,13 @@ impl VerterHost {
         // owner's content is already observed by the cold compute's
         // dispatch reads and gated by the result cache's legacy
         // whole-hash rail. Excluding them also keeps the owner's
-        // dual-sourced `DerivedFactHash{Route}` (populated from both
-        // `indexed.shallow_state` and `route_owned_shallow_cache`,
-        // which can disagree — see `resolver_store.rs`
-        // `HostStoreView::build`) out of the tracer-owned signature,
-        // so a fallthrough query does not reintroduce a
-        // non-round-tripping owner Route fact. Child / dep `Route`
-        // facts DO round-trip — a dep does not race a
-        // route-owned-shallow build during the owner's cold compute —
-        // so they are kept. Empty signatures and an absent tracer
-        // stack are both a no-op.
+        // `DerivedFactHash{Route}` — which can shift as the owner's
+        // own `IndexedReady` lazily (re-)materialises mid-request —
+        // out of the tracer-owned signature, so a fallthrough query
+        // does not reintroduce a non-round-tripping owner Route fact.
+        // Child / dep `Route` facts DO round-trip, so they are kept.
+        // Empty signatures and an absent tracer stack are both a
+        // no-op.
         let cross_file_fallthrough_facts: Vec<crate::resolver_core::FactVersionRef> =
             resolved_surface
                 .fact_versions

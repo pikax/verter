@@ -25,7 +25,6 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use rustc_hash::FxHashMap;
 use verter_semantic::facts::{FactKey, SymbolSpace};
 use verter_session::fact_emission::emit_parse_facts;
 use verter_session::file_artifact_store::InternedSpecifier;
@@ -63,22 +62,13 @@ fn build_indexed_with_source(raw: &str) -> Arc<IndexedReady> {
     // facts) is populated, exactly as production does.
     let env = verter_semantic::analysis::type_eval_build::parse_and_build_env(raw);
     let shallow = ShallowFileState::from_analysis([0u8; 16], empty_external(), Some(&env));
-    Arc::new(IndexedReady {
-        whole_hash: [0u8; 16],
-        shallow_state: Arc::new(shallow),
-        import_routes: Arc::new(FxHashMap::default()),
-        import_route_hash: None,
-        route_hash: None,
-        edge_generation: 0,
-        raw_source: Arc::from(raw),
-        eval_source: Arc::from(""),
-        cached_parse: None,
-        script_analysis: None,
-        export_signatures: None,
-        snapshot: Arc::new(verter_session::FileAnalysisSnapshot::default()),
-        external_type_analysis: empty_external(),
-        declares_interface_app_config: false,
-    })
+    Arc::new(IndexedReady::new_for_test_with_state(
+        [0u8; 16],
+        Arc::new(shallow),
+        Arc::from(raw),
+        Arc::from(""),
+        empty_external(),
+    ))
 }
 
 #[test]

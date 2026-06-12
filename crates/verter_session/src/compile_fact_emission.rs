@@ -261,6 +261,37 @@ pub(crate) fn observe_compile_tier_dependencies(
         }
         observe_file_whole_hash(host, &resolved);
     }
+
+    // 5. Owner `ImportRoute` derived fact — the route-retarget pin.
+    //    Every dep-side fact above is recorded against the canonical a
+    //    specifier RESOLVED TO at compile time; none of them moves when
+    //    a route mutation (`set_exact_resolutions` /
+    //    `configure_projects`) retargets the specifier while both the
+    //    owner's and the old target's content stay put. The owner's
+    //    generation-current `ImportRoute` hash is the discriminating
+    //    dimension: the base store view snapshots it per tracked
+    //    canonical (empty-table hash when the owner has no route
+    //    surface), so recording the compile-time value here makes the
+    //    warm validation fail the moment the owner's effective
+    //    specifier→canonical mapping changes — the slot re-derives
+    //    under the new route instead of serving the pre-retarget
+    //    output. Observed only for route-consuming compiles (a compile
+    //    with no cross-file specifiers has no route surface to pin);
+    //    the empty-table fallback mirrors the view-build convention so
+    //    producer and validator agree byte-for-byte on the no-routes
+    //    representation.
+    if !script_imports.is_empty() || !macro_type_deps.is_empty() || !external_requests.is_empty() {
+        let import_route_hash = host
+            .generation_current_import_route_hash(canonical_id)
+            .unwrap_or_else(|| {
+                crate::resolver_store::hash_import_route_targets(&rustc_hash::FxHashMap::default())
+            });
+        crate::resolver_core::resolver_context::observe_fan_out(FactVersionRef::DerivedFactHash {
+            canonical_id: canonical_id.to_string(),
+            kind: crate::resolver_core::DerivedFactKind::ImportRoute,
+            hash: import_route_hash,
+        });
+    }
 }
 
 /// Observe a `FactVersionRef::FileWholeHash` for `canonical_id`
@@ -395,6 +426,22 @@ fn symbol_space_for_import(import: &AnalyzedImport) -> SymbolSpace {
 /// the caller treats unresolved deps as "no fact observation" and
 /// the compile cache still validates via the augmentation
 /// fingerprint observation for augmented specifiers.
+///
+/// Deliberately AS-CONSUMED — no per-entry freshness-oracle consult.
+/// The dep-side observations this read feeds (`Export` /
+/// `MemberPresence` / `FileWholeHash`) must describe the canonical the
+/// compile ACTUALLY READ, and the compile and this producer consume
+/// the SAME mirror: the cold-compute prefetch
+/// (`prefetch_compile_tier_observation_targets`) re-resolves and
+/// re-stamps every entry this emission reads — script imports and
+/// macro deps unconditionally, `src=` memos through the per-entry
+/// oracle — immediately before the tracer runs. Re-resolving here
+/// against the live workspace would observe facts for a file the
+/// compile never read. Route-level drift is the step-5 `ImportRoute`
+/// fact's job: its producer/validator
+/// (`generation_current_import_route_hash`) consults the per-entry
+/// oracle and re-resolves stale entries, so a post-compile retarget
+/// mismatches on warm validation and the slot re-derives.
 fn resolve_import_source_to_canonical(
     host: &VerterHost,
     canonical_id: &str,

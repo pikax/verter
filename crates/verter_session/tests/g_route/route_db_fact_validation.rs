@@ -45,7 +45,7 @@ use verter_session::resolver_core::{
 /// signature, both driven by `parse_stable_hash` / mocked hooks).
 fn augmenter_entry(canonical: &str, parse_stable_hash: [u8; 16]) -> AugmenterEntry {
     AugmenterEntry {
-        artifact_key: FileArtifactKey::legacy_for_test(std::sync::Arc::from(canonical), [0u8; 16]),
+        artifact_key: FileArtifactKey::base_for_test(std::sync::Arc::from(canonical), [0u8; 16]),
         parse_stable_hash,
     }
 }
@@ -122,10 +122,10 @@ fn cross_consumer_route_hit_produces_one_entry() {
     let view = AcceptAllView::new(1);
 
     // Two consumers query the same `(provider, name)`.
-    let mut compute_count = 0u32;
-    let mut do_query = |_label: &str| {
+    let compute_count = std::sync::atomic::AtomicU32::new(0);
+    let do_query = |_label: &str| {
         db.get_or_resolve_route_with_facts("provider.ts", "Foo", &view, || {
-            compute_count += 1;
+            compute_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Some((
                 RouteResult::Resolved {
                     defining_canonical: "foo.ts".to_owned(),
@@ -142,7 +142,8 @@ fn cross_consumer_route_hit_produces_one_entry() {
     do_query("consumer-2");
 
     assert_eq!(
-        compute_count, 1,
+        compute_count.load(std::sync::atomic::Ordering::Relaxed),
+        1,
         "second consumer MUST short-circuit on the cached entry (one cold compute total)"
     );
 

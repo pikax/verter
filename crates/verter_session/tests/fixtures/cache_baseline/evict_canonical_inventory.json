@@ -1,5 +1,6 @@
 {
   "schema_version": 1,
+  "note": "PINNED-HISTORICAL baseline captured at captured_at_sha. Rows name databases as they existed AT THAT SHA — e.g. route_owned_shallow and eval_env_cache_db have since been DELETED from the live tree. Do not edit rows to match the current tree; the consuming tests compare against this historical observation, not the live inventory.",
   "captured_at_sha": "ccc0522309091c532d6fba756da392598eab059c",
   "stage_0_commit_sha_pending": true,
   "function": "project_type_store::ProjectTypeStore::evict_canonical",

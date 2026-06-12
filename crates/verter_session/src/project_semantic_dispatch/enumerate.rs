@@ -225,7 +225,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // enumerating keys. The placeholder's `whole_hash` is
             // payload-only diagnostic context; the `Instantiate` key
             // is content-free (R6) and `build_instantiate` re-sources
-            // the live content hash from `ensure_indexed_ready` at
+            // the live content hash from `ensure_indexed_ready_serve` at
             // value-build time.
             SemanticNodeData::Opaque(crate::semantic_query::QueryError::DeclPlaceholder {
                 canonical_id,
@@ -626,7 +626,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// public-keyspace + fact-fast-path admission contract directly
     /// (a non-public member of an `Object` base is refuted; a present
     /// member of a cross-file `DeclRef` base is INCONCLUSIVE because the
-    /// `MemberPresence` fact carries no visibility — binding ruling §4).
+    /// `MemberPresence` fact carries no visibility).
     pub(super) fn base_member_admission_non_emitting(
         &self,
         base: SemanticNodeId,
@@ -665,7 +665,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // observed content version, so the answer matches the
             // node's interned `DeclIdentity.whole_hash` exactly.
             //
-            // Admission follows the inconclusive-and-resolve ruling
+            // Admission follows the inconclusive-and-resolve rule
             // (`MemberPresence` carries presence/key only, NO
             // visibility — see [`Self::member_presence_fact_admission`]):
             //
@@ -877,7 +877,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// Type }`. The lookup is constant-time and never dispatches an
     /// `Instantiate` / `Mapped` / `KeyOf` query.
     ///
-    /// Admission follows the inconclusive-and-resolve ruling:
+    /// Admission follows the inconclusive-and-resolve rule:
     /// `MemberPresence` records presence/key only and carries NO
     /// visibility, so a bare presence fact can never *admit* a member
     /// into the public-only keyspace this predicate feeds. The mapping
@@ -937,7 +937,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             name: InternedName::from(needle),
             space: SymbolSpace::Type,
         };
-        // Visibility-aware admission (binding ruling §4: inconclusive-and-
+        // Visibility-aware admission (inconclusive-and-
         // resolve, NOT a `MemberPresence` schema change). `MemberPresence`
         // records presence/key only — it carries NO visibility. So:
         //

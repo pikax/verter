@@ -61,17 +61,39 @@ mod audited_request_tests;
 mod block_6c_view_hoist_tests;
 mod cache;
 pub mod cache_schema;
+#[cfg(test)]
+mod cold_artifact_dedup_tests;
 mod compile;
+#[cfg(test)]
+mod compile_blockers_snapshot_generation_tests;
+#[cfg(test)]
+mod compile_content_publish_fence_tests;
+#[cfg(test)]
+mod compile_session_fenced_serve_admission_tests;
+#[cfg(test)]
+mod compile_style_vbind_source_snapshot_tests;
+#[cfg(test)]
+mod compile_template_slot_admission_tests;
 pub mod component_meta_audit;
 #[cfg(test)]
 mod component_meta_cache_discipline_tests;
 pub mod host_audit_runtime;
 #[cfg(test)]
+mod host_lifecycle_cascade_tests;
+#[cfg(test)]
+mod narrowed_scope_snapshot_generation_tests;
+#[cfg(test)]
 mod overlay_promotion_isolation_tests;
+#[cfg(test)]
+mod overlay_template_conversion_isolation_tests;
 #[cfg(test)]
 mod prepared_decl_import_route_hash_alignment_tests;
 #[cfg(test)]
+mod raw_snapshot_template_source_move_tests;
+#[cfg(test)]
 mod request_store_view_derived_hash_tests;
+#[cfg(test)]
+mod template_slot_generation_rail_tests;
 // tests/invalidation_perf.rs — InvalidationByCanonical impl on
 // ImportedRegistryDb is exercised by the §12.A12 perf gate.
 pub(crate) mod bounded_query_retention;
@@ -418,11 +440,6 @@ pub struct VerterHost {
     /// not memoise query results. Different artifact type than anything in
     /// `ProjectTypeStore`.
     pub(crate) query_profile: parking_lot::Mutex<verter_semantic::profile::QueryProfile>,
-    // The `external_type_analysis_cache` (F6) and
-    // `route_owned_shallow_cache` (F7) host mutexes are not present here:
-    // both halves are carried in
-    // [`ProjectTypeStore.route_owned_shallow`](crate::project_type_store::ProjectTypeStore::route_owned_shallow)
-    // as a single first-class artifact ([`RouteOwnedShallowEntry`]).
     /// Project-global type-resolution cache root. Owns `IndexedReady`,
     /// `AnalysisReady`, and the rehomed
     /// `RouteDb` / `ImportedRootDb`. See `project_type_store` module docs.
@@ -501,6 +518,110 @@ pub struct VerterHost {
     /// in production builds.**
     #[cfg(test)]
     pub(crate) compile_one_host_cpu_pool_token: std::sync::atomic::AtomicUsize,
+    /// Test-only seam fired inside an `IndexedReady` materialise flight
+    /// (base materialise, edge refresh, and the overlay materialiser)
+    /// AFTER the flight's generation stamps are captured and BEFORE the
+    /// build + pre-publish fence. Concurrency tests install a barrier
+    /// here to deterministically land a workspace / route mutation in
+    /// the fence window and to admit singleflight followers while the
+    /// leader is parked. **Compiled out in production builds.**
+    #[cfg(test)]
+    pub(crate) materialize_seam_hook:
+        parking_lot::Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
+    /// Test-only seam fired inside `ensure_indexed_ready_serve`'s bounded
+    /// singleflight retry loop AFTER a follower records a fenced
+    /// (non-adoptable) outcome and BEFORE its next attempt. Sustained-churn
+    /// tests park here to interleave a fresh leader + mutation per
+    /// attempt, driving the loop to its bounded ReturnOnly fallback
+    /// deterministically. **Compiled out in production builds.**
+    #[cfg(test)]
+    pub(crate) flight_retry_seam_hook:
+        parking_lot::Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
+    /// Test-only seam fired inside `get_virtual_file`'s cold compile
+    /// path AFTER the compile completed and BEFORE the mode-routed
+    /// publish. Fence tests install an env / project mutation here to
+    /// land deterministically in the compute→publish window and assert
+    /// the publish declines (ReturnOnly) instead of stamping the
+    /// old-input output under the moved identity. **Compiled out in
+    /// production builds.**
+    #[cfg(test)]
+    pub(crate) compile_publish_seam_hook:
+        parking_lot::Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
+    /// Test-only seam fired inside `get_virtual_file`'s cold compile
+    /// path AFTER the request's scheduler source snapshot is captured
+    /// and BEFORE the compile input is assembled. Fence tests install
+    /// a content upsert here to land deterministically in the
+    /// snapshot→compile-input window and assert the content-addressed
+    /// publish never stamps bytes under a content hash the compiled
+    /// input did not have. **Compiled out in production builds.**
+    #[cfg(test)]
+    pub(crate) compile_input_seam_hook:
+        parking_lot::Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
+    /// Test-only seam fired inside `ensure_indexed_ready_serve`'s
+    /// singleflight body AFTER the edge-refresh parse-env reuse gate
+    /// passes and BEFORE the refresh flight runs. Fence tests install a
+    /// parse-env-moving mutation here ([`Self::parse_env_override`] flip
+    /// plus a `project_generation` bump) to land deterministically in
+    /// the reuse-gate→publish window and assert the refresh publish
+    /// declines (ReturnOnly) instead of stamping a current
+    /// `project_generation` onto a payload parsed under the superseded
+    /// env. **Compiled out in production builds.**
+    #[cfg(test)]
+    pub(crate) edge_refresh_gate_seam_hook:
+        parking_lot::Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
+    /// Test-only seam fired inside the raw-analysis-snapshot scheduler
+    /// lane AFTER the lane's analysis snapshot is captured and BEFORE
+    /// the template-analysis source join. Fence tests install a content
+    /// upsert here to land deterministically in the capture→join window
+    /// and assert a template derived from the moved bytes is never
+    /// persisted into the rail-less `derived_raw_cache` slot.
+    /// **Compiled out in production builds.**
+    #[cfg(test)]
+    pub(crate) raw_snapshot_template_join_seam_hook:
+        parking_lot::Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
+    /// Test-only seam fired inside the lazy template-analysis
+    /// computation AFTER the by-value inputs produced the template and
+    /// BEFORE the `derived_raw_cache` persist. Fence tests install a
+    /// content upsert here to land deterministically in the
+    /// compute→persist window and assert a coherently-captured but
+    /// since-superseded template never serves as current after the
+    /// racing upsert cleared the slot. **Compiled out in production
+    /// builds.**
+    #[cfg(test)]
+    pub(crate) template_persist_seam_hook:
+        parking_lot::Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
+    /// Test-only seam fired inside `get_analysis_snapshot_internal`'s
+    /// narrowed-scope serve branch AFTER the branch's source snapshot
+    /// is captured and BEFORE the snapshot's products are assembled.
+    /// Fence tests install a content upsert here to land
+    /// deterministically in the capture→assembly window and assert the
+    /// served snapshot stays single-generation — every product derives
+    /// from the held source snapshot, never from an independent later
+    /// read. **Compiled out in production builds.**
+    #[cfg(test)]
+    pub(crate) narrowed_scope_serve_seam_hook:
+        parking_lot::Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
+    /// Test-only seam fired inside `get_compile_blockers` AFTER the
+    /// source snapshot is captured and BEFORE the snapshot's products
+    /// are assembled. Fence tests install a content upsert here to
+    /// land deterministically in the capture→assembly window and
+    /// assert the served `CompileBlockersSnapshot` stays
+    /// single-generation — every product derives from the held source
+    /// snapshot, never from an independent later read. **Compiled out
+    /// in production builds.**
+    #[cfg(test)]
+    pub(crate) compile_blockers_serve_seam_hook:
+        parking_lot::Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
+    /// Test-only override of the live parse-env dimension returned by
+    /// `host_view_env_hashes` / `host_view_env_hashes_for`. The
+    /// production parse dimension derives solely from the constant
+    /// workspace parser flags today, so fence tests flip this override
+    /// (always paired with a `project_generation` bump — every
+    /// parse-env-moving mutation bumps `project_generation`) to emulate
+    /// a parse-env-moving configuration change mid-flight. **Compiled
+    /// out in production builds.**
+    #[cfg(test)]
+    pub(crate) parse_env_override: parking_lot::Mutex<Option<crate::types::Hash16>>,
     /// Host-owned LRU cache for the typeinfo `evaluate_type_expression`
     /// scratch URIs. See `typeinfo::scratch_cache` for the LRU policy
     /// and §5.3 of the typeinfo plan for the deterministic-URI

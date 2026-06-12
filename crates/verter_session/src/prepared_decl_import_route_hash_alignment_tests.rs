@@ -8,8 +8,8 @@
 //! their bundles with DIFFERENT `ImportRoute` derived-fact hashes for
 //! the same canonical:
 //!
-//! - The route-owned-shallow path
-//!   (`materialize_prepared_decl_bundle_from_route_owned_shallow`) uses
+//! - The routed-shallow path
+//!   (`materialize_prepared_decl_bundle_from_routed_shallow`) uses
 //!   `self.generation_current_import_route_hash(canonical)` — re-resolves
 //!   known-miss specifiers against the current workspace generation.
 //! - The standard path (`materialize_prepared_decl_bundle`) used the
@@ -24,30 +24,35 @@
 //! producing a permanent re-materialise loop and inflating the
 //! `PreparedDeclBundleRejectImportRoute*` counters.
 //!
-//! The fix unifies both paths on the dynamic hash. The discriminator
-//! below catches the regression by constructing a fixture where the
-//! static hash provably diverges from the dynamic hash, then asserting
-//! the bundle warm-hits on the second call.
+//! The fix unified both paths on the dynamic hash. The edge-currency
+//! gate has since widened to EVERY cross-file-edge surface, which
+//! closes the divergence class at its root: a gated
+//! `ensure_indexed_ready` read after a dependency-set change takes the
+//! edge-refresh and re-resolves the owner's routes, so the
+//! content-pinned `IndexedReady.import_route_hash` a bundle admission
+//! reads IS the generation-current hash — static/dynamic agreement is
+//! now by construction at gated reads. This test pins that agreement
+//! end-to-end plus the warm-hit property the unification bought.
 //!
-//! ## Discriminating property
+//! ## Pinned properties
 //!
 //! 1. Upsert an owner whose import `./late_dep` is unresolvable at
 //!    index time — `IndexedReady.import_routes` snapshots it as a
 //!    known-miss with `resolved_canonical_id = None`.
 //! 2. Upsert the late dep AFTER the owner is indexed — the owner's
-//!    content does not change, so its content-pinned
-//!    `IndexedReady.import_route_hash` stays static (pinned to the
-//!    miss). Meanwhile `generation_current_import_route_hash`
-//!    re-resolves the miss against the now-current workspace and
-//!    yields a DIFFERENT hash (the late dep now resolves positively).
-//! 3. Build a `HostStoreView` (which uses the dynamic hash).
+//!    content does not change, but its surface carries cross-file
+//!    edges, so the gated re-read takes the EDGE-REFRESH: the
+//!    refreshed artifact's `import_route_hash` moves off the stale
+//!    miss-hash and equals `generation_current_import_route_hash`.
+//! 3. Build a `HostStoreView` — its snapshot records that same hash.
 //! 4. Cold-materialise the bundle via
 //!    `prepared_decl_bundle_with_store_view` — counted as 1
 //!    materialisation.
 //! 5. Call `prepared_decl_bundle_with_store_view` again with the
 //!    SAME view. The stored bundle MUST warm-hit (1 materialisation
-//!    total, not 2). Pre-fix the bundle's `ImportRoute` fact carried
-//!    the static miss-hash while the view carried the dynamic
+//!    total, not 2): the admitted `ImportRoute` fact matches the
+//!    view's snapshot. Pre-unification the standard path admitted the
+//!    stale static miss-hash while the view carried the dynamic
 //!    positive-hash; the warm-read validator rejected; the second
 //!    call re-materialised → 2 materialisations total.
 
@@ -103,13 +108,10 @@ fn materialize_prepared_decl_bundle_uses_dynamic_import_route_hash() {
         "fixture invariant: './late_dep' must be a known-miss before the target appears"
     );
 
-    // The late dep appears. The owner's IndexedReady is NOT evicted
-    // (no eager reverse-dependent cascade), so:
-    // - The owner's static `IndexedReady.import_route_hash` STILL
-    //   reflects the miss.
-    // - `generation_current_import_route_hash` re-resolves the miss
-    //   against the now-current workspace and returns a DIFFERENT
-    //   hash incorporating the positive resolution.
+    // The late dep appears. The owner's content does not change, but
+    // its surface carries cross-file edges, so the dependency-set
+    // change stales it at the edge-currency gate: the gated re-read
+    // takes the EDGE-REFRESH and re-resolves `./late_dep` positively.
     let late_dep = "/proj_irh/late_dep.ts";
     upsert(
         &host,
@@ -117,30 +119,31 @@ fn materialize_prepared_decl_bundle_uses_dynamic_import_route_hash() {
         "export type LateType = { resolved: true };\n",
     );
 
-    // Sanity: the owner's IndexedReady survived (still carries the
-    // stale known-miss snapshot).
     let owner_indexed_after = host
         .ensure_indexed_ready(owner)
         .expect("owner IndexedReady still present");
-    let still_static_hash = owner_indexed_after.import_route_hash;
-    assert_eq!(
-        still_static_hash, static_hash,
-        "sanity: owner's IndexedReady.import_route_hash is content-pinned \
-         and MUST NOT change when an unrelated file appears (no eager \
-         reverse-dependent cascade)"
+    let refreshed_hash = owner_indexed_after.import_route_hash;
+    assert_ne!(
+        refreshed_hash, static_hash,
+        "the gated re-read must serve an EDGE-REFRESHED surface whose \
+         import_route_hash moved off the stale miss-hash — serving the \
+         static snapshot means the edge-currency gate failed to stale \
+         the owner's surface on the dependency-set change"
     );
 
-    // Compute the dynamic hash. The discriminator's core property:
-    // dynamic != static after the late dep appears.
+    // Static/dynamic agreement at gated reads — the property the
+    // unification (plus the edge-currency widening) guarantees by
+    // construction: the refreshed content-pinned hash IS the
+    // generation-current hash.
     let dynamic_hash = host
         .generation_current_import_route_hash(owner)
         .expect("owner has imports — dynamic hash must be Some");
-    assert_ne!(
+    assert_eq!(
+        refreshed_hash,
         Some(dynamic_hash),
-        static_hash,
-        "fixture invariant: after the late dep appears, the dynamic \
-         hash MUST differ from the static IndexedReady.import_route_hash \
-         — otherwise the discriminator does not characterise the unification"
+        "the refreshed IndexedReady.import_route_hash must equal \
+         generation_current_import_route_hash — bundle admissions and \
+         view snapshots must observe ONE hash for one surface"
     );
 
     // Build a HostStoreView. The view's
@@ -202,5 +205,88 @@ fn materialize_prepared_decl_bundle_uses_dynamic_import_route_hash() {
         "second call must register at least one bundle cache hit; \
          observed cache hits = {}",
         after_second.bundle_cache_hits
+    );
+}
+
+/// Unit-level pin on the bundle-admission `ImportRoute` hash SOURCE.
+///
+/// The fixture above proves static/dynamic AGREEMENT at gated reads, so a
+/// regression re-introducing static-hash admission in
+/// `materialize_prepared_decl_bundle` would still pass its warm-hit
+/// assertion (the two sources are value-identical there by construction).
+/// This pin builds the one state where the sources DIVERGE at admission
+/// time — an owner with NO syntax imports (static `IndexedReady`
+/// route table is empty ⇒ static `import_route_hash` is `None`) whose
+/// route surface lives ONLY in the post-index `DerivedRawState` memo (the
+/// prefetch class records routes after the artifact materialised; they do
+/// not back-fill the `IndexedReady`) — and then inspects the ADMITTED
+/// bundle's recorded fact signature directly:
+///
+/// - dynamic admission (correct): the signature carries
+///   `DerivedFactHash { owner, ImportRoute, generation_current hash }`.
+/// - static admission (regression): `facts.import_route_hash` is `None`,
+///   so NO `ImportRoute` fact is recorded at all — and the missing fact
+///   does NOT fail warm validation (fewer facts only), which is exactly
+///   why the warm-hit assertion alone cannot catch the regression.
+#[test]
+fn bundle_admission_records_dynamic_import_route_hash_when_static_is_absent() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+
+    let owner = "/proj_irh2/owner.ts";
+    // NO imports — the IndexedReady bakes an EMPTY route table.
+    upsert(&host, owner, "export type Local = { ok: boolean };\n");
+    let dep = "/proj_irh2/dep.ts";
+    upsert(&host, dep, "export type Dep = { d: boolean };\n");
+
+    let indexed = host
+        .ensure_indexed_ready(owner)
+        .expect("owner IndexedReady must materialise");
+    assert_eq!(
+        indexed.import_route_hash, None,
+        "fixture invariant: an import-less owner has NO static import_route_hash"
+    );
+
+    // Post-index host-memoized positive — lands in DerivedRawState only.
+    host.cache_positive_import_route_result_for_tests(
+        owner,
+        "./dep",
+        dep,
+        host.ws().content_generation(),
+    );
+
+    let dynamic_hash = host
+        .generation_current_import_route_hash(owner)
+        .expect("the DerivedRawState fallback answers with the post-index route");
+
+    let view = host.resolver_store_view_read().into_owned_view();
+    let _bundle = host
+        .prepared_decl_bundle_with_store_view(&view, owner)
+        .expect("bundle materialises for the import-less owner");
+
+    let signatures = host
+        .resolver
+        .runtime
+        .prepared_decl_bundles
+        .candidate_signatures_for_key(&owner.to_string());
+    assert!(
+        !signatures.is_empty(),
+        "the bundle admission must have recorded a fact signature"
+    );
+    let expected = crate::resolver_core::FactVersionRef::DerivedFactHash {
+        canonical_id: owner.to_string(),
+        kind: DerivedFactKind::ImportRoute,
+        hash: dynamic_hash,
+    };
+    assert!(
+        signatures
+            .iter()
+            .any(|signature| signature.iter().any(|fact| *fact == expected)),
+        "ADMISSION HASH SOURCE REGRESSION: the admitted bundle's fact \
+         signature must carry the DYNAMIC \
+         `generation_current_import_route_hash` ImportRoute fact. A static \
+         `facts.import_route_hash` admission records NO ImportRoute fact \
+         here (the static hash is None for an import-less owner), leaving \
+         the bundle blind to route changes that only the DerivedRawState \
+         memo tracks. Recorded signatures: {signatures:?}"
     );
 }

@@ -29,7 +29,7 @@ pub trait ComponentMetaRequestHost {
     /// dimensions (epoch / project-generation / env-hash / identity /
     /// overlay — the same set
     /// `StoreViewValidationToken::externally_superseded_by` compares,
-    /// EXCLUDING the compute's own artifact / route-owned / load
+    /// EXCLUDING the compute's own artifact / load
     /// generations). Captured at snapshot time and re-read at
     /// stable-promotion time: a mismatch means an external mutation that
     /// the `store_view_epoch` alone does NOT track (e.g. a

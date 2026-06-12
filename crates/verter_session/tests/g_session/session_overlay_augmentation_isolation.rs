@@ -17,7 +17,7 @@
 //! `sessionOnly`); the session meta surfaces prop `sessionOnly` (never
 //! `fromBase`); the post-session base re-query is unchanged.
 //!
-//! Against a non-overlay-aware index (base-only `is_legacy()` scan, no
+//! Against a non-overlay-aware index (base-only `is_base()` scan, no
 //! `population` dimension) the session scan never sees the overlay
 //! augmenter version, so the session meta would carry `fromBase` (the base
 //! augmenter) and NOT `sessionOnly` — the discriminating session assertion

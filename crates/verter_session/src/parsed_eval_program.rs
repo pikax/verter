@@ -68,12 +68,21 @@ impl ParsedEvalProgram {
         (!panicked).then_some(parsed)
     }
 
-    pub(crate) fn empty(source_type: oxc_span::SourceType) -> Self {
-        Self::parse(Arc::<str>::from(""), source_type)
-            .expect("empty eval program should always parse")
-    }
-
     pub(crate) fn source_bytes(&self) -> &[u8] {
         self.borrow_owner().source.as_bytes()
+    }
+
+    /// The exact source text this program was parsed from — for a
+    /// `.vue` eval program, the position-preserving extracted script
+    /// (script bytes at raw SFC offsets), so every span the program
+    /// carries is already SFC-absolute.
+    pub(crate) fn source_str(&self) -> &str {
+        self.borrow_owner().source.as_ref()
+    }
+
+    /// The `SourceType` the parse ran under — the self-consistent type
+    /// for any walker consuming this program.
+    pub(crate) fn source_type(&self) -> oxc_span::SourceType {
+        self.borrow_owner().source_type
     }
 }

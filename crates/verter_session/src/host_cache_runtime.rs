@@ -170,7 +170,7 @@ impl VerterHost {
         // Collect the per-import probe targets from the owner's own import
         // specifiers: an external (`declare module "vue"`) or relative
         // (`declare module "./x"`) augmenter can only reach the owner
-        // through a matching import. `ensure_indexed_ready` materialises
+        // through a matching import. `ensure_indexed_ready_serve` materialises
         // the owner's artifact (and its shallow import table) into the
         // store on a miss.
         //
@@ -196,7 +196,25 @@ impl VerterHost {
         // stale output when the augmenter is edited. Iterate snapshot
         // imports to pick up the side-effect-only relative case.
         let mut per_import_targets: Vec<AugmentationTargetKind> = Vec::new();
-        let indexed_opt = self.ensure_indexed_ready(canonical);
+        // ReturnOnly never publishes — FAIL-CLOSED rule for this probe.
+        // A successful-but-FENCED serve published NO artifacts row, so
+        // the served file's augmentation facts are invisible to the
+        // index cold-scan (`current_content_pinned_artifacts` reads the
+        // published row) and the probe would fail OPEN: a `Content`
+        // compile admits a content-addressed entry carrying no augmenter
+        // fingerprint into the one cache family with NO read-side fact
+        // rail. Any fenced serve in the walk therefore answers `true`
+        // (augmentation inventory unverifiable for this request — floor
+        // the compile to the fact-validated route; the next request
+        // re-probes against published state).
+        let indexed_serve = self.ensure_indexed_ready_serve(canonical);
+        if indexed_serve
+            .as_ref()
+            .is_some_and(|serve| !serve.store_published)
+        {
+            return true;
+        }
+        let indexed_opt = indexed_serve.map(|serve| serve.indexed);
         if let Some(indexed) = indexed_opt.as_ref() {
             for import in indexed.shallow_state.import_targets.values() {
                 // Materialise each resolved dependency so a direct-dep
@@ -205,9 +223,15 @@ impl VerterHost {
                 // and an augmenter that has not entered `FileArtifactStore`
                 // contributes nothing (R29). Indexing every dep up front
                 // (rather than interleaved with probing) keeps the result
-                // independent of the unordered import-table iteration.
-                if !import.canonical_id.is_empty() {
-                    let _ = self.ensure_indexed_ready(&import.canonical_id);
+                // independent of the unordered import-table iteration. A
+                // FENCED dep serve published no artifacts row — fail
+                // closed (see the owner serve above).
+                if !import.canonical_id.is_empty()
+                    && self
+                        .ensure_indexed_ready_serve(&import.canonical_id)
+                        .is_some_and(|serve| !serve.store_published)
+                {
+                    return true;
                 }
                 let specifier = import.source_specifier.as_str();
                 if specifier.starts_with("./") || specifier.starts_with("../") {
@@ -305,21 +329,29 @@ impl VerterHost {
                 // entries) enter the artifact store and the index
                 // cold-scan corpus before any target probe runs (mirror
                 // of the `import_targets`-driven materialisation
-                // above).
-                let _ = self.ensure_indexed_ready(&resolved_canonical);
-                // Read the augmenter's own augmentation facts and emit
-                // a structurally-matching target kind per fact.
-                // `ensure_indexed_ready` always inserts the materialised
-                // artifact at the `(canonical, whole_hash)` legacy-shape
-                // key (see `host_manage::prepared_decl::ensure_indexed_ready`
-                // → `FileArtifactStore::insert`), so a legacy-key row is
-                // guaranteed present after the call above succeeds.
-                // `get_artifacts_any` is the right read because the
-                // caller knows the canonical and does not want to
-                // re-derive the live `content_hash` — the permissive
-                // canonical-only lookup ignores `content_hash` and
-                // returns the latest legacy row directly.
-                if let Some(augmenter_artifacts) = store.get_artifacts_any(&resolved_canonical) {
+                // above). An un-materialisable canonical (absent file,
+                // stale leftover the authority gates reject) contributes
+                // NOTHING — its retained store rows must not feed the
+                // walk state no serving path would return. A FENCED
+                // serve published no artifacts row — fail closed (see
+                // the owner serve above).
+                let Some(walk_serve) = self.ensure_indexed_ready_serve(&resolved_canonical) else {
+                    continue;
+                };
+                if !walk_serve.store_published {
+                    return true;
+                }
+                let walk_indexed = walk_serve.indexed;
+                // Read the augmenter's own augmentation facts and emit a
+                // structurally-matching target kind per fact — through
+                // the SAME current-content-pinned accessor every other
+                // cross-file-edge reader uses (the permissive
+                // `get_artifacts_any` scan can return an arbitrary stale
+                // content row when an old version lingers as a
+                // multi-candidate sibling).
+                if let Some(augmenter_artifacts) =
+                    self.current_content_pinned_artifacts(&resolved_canonical)
+                {
                     // Invalidate any `augmentation_index` entry whose
                     // cold scan ran BEFORE this augmenter entered the
                     // store. A pre-augmenter probe of the same target
@@ -397,11 +429,22 @@ impl VerterHost {
                 // authority the binding-driven walk above uses — so a
                 // barrel whose shallow-time resolver returned `""`
                 // still surfaces the re-exported augmenter.
-                if let Some(barrel_indexed) = store.get_any(&resolved_canonical) {
+                {
                     use crate::resolver_core::shallow_file_state::ExportTarget;
-                    for wildcard in &barrel_indexed.shallow_state.wildcard_reexports {
+                    // The barrel edges come from the artifact the ensure
+                    // above returned (never a permissive `get_any` scan,
+                    // which can surface a stale multi-candidate row).
+                    // Baked edge `canonical_id`s are ROUTE-derived: they
+                    // are consumed only while the surface passes the
+                    // shared currency gate; a route-stale surface (e.g.
+                    // a fenced ReturnOnly serve under sustained churn)
+                    // re-resolves the raw source specifiers through the
+                    // live resolver instead.
+                    let baked_edges_current =
+                        self.indexed_surface_is_current(&resolved_canonical, &walk_indexed);
+                    for wildcard in &walk_indexed.shallow_state.wildcard_reexports {
                         let target_canonical: Option<Arc<str>> =
-                            if !wildcard.canonical_id.is_empty() {
+                            if baked_edges_current && !wildcard.canonical_id.is_empty() {
                                 Some(Arc::from(wildcard.canonical_id.as_str()))
                             } else {
                                 resolver(&resolved_canonical, &wildcard.source_specifier)
@@ -411,20 +454,20 @@ impl VerterHost {
                             queue.push_back((c, depth + 1));
                         }
                     }
-                    for target in barrel_indexed.shallow_state.exports.values() {
+                    for target in walk_indexed.shallow_state.exports.values() {
                         if let ExportTarget::Reexport {
                             canonical_id: cached_canonical,
                             source_specifier,
                             ..
                         } = target
                         {
-                            let target_canonical: Option<Arc<str>> = if !cached_canonical.is_empty()
-                            {
-                                Some(Arc::from(cached_canonical.as_str()))
-                            } else {
-                                resolver(&resolved_canonical, source_specifier)
-                                    .filter(|c| !c.is_empty())
-                            };
+                            let target_canonical: Option<Arc<str>> =
+                                if baked_edges_current && !cached_canonical.is_empty() {
+                                    Some(Arc::from(cached_canonical.as_str()))
+                                } else {
+                                    resolver(&resolved_canonical, source_specifier)
+                                        .filter(|c| !c.is_empty())
+                                };
                             if let Some(c) = target_canonical {
                                 queue.push_back((c, depth + 1));
                             }

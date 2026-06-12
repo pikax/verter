@@ -109,7 +109,13 @@ pub(crate) fn resolve_bare_name_in_scope(
     }
 
     // 2. Scope's cached IndexedReady — local symbols + local exports.
-    if let Some(entry) = ctx.ensure_indexed_ready(scope_canonical_id) {
+    // Structurally read-only: the resolved identity feeds enclosing
+    // builds whose admission gates consume the fenced-serve chokepoint
+    // flag, so the serve status is not re-checked here.
+    if let Some(entry) = ctx
+        .ensure_indexed_ready_serve(scope_canonical_id)
+        .map(|serve| serve.indexed)
+    {
         if symbol_exists_in_facts(&entry, name) {
             return Some(ResolvedRootIdentity::new(scope_canonical_id, name));
         }
@@ -192,8 +198,12 @@ fn resolve_import_binding_from_facts(
     local_name: &str,
 ) -> Option<ResolvedRootIdentity> {
     // A) Try the shallow-state import_targets map first (the cached
-    //    parse facts are the canonical authority).
-    if let Some(entry) = ctx.ensure_indexed_ready(canonical_id) {
+    //    parse facts are the canonical authority). Structurally
+    //    read-only (see the scope read above).
+    if let Some(entry) = ctx
+        .ensure_indexed_ready_serve(canonical_id)
+        .map(|serve| serve.indexed)
+    {
         let state = &entry.shallow_state;
         if let Some(target) = state.import_target(local_name) {
             let resolved_id = if target.canonical_id.is_empty() {
@@ -243,7 +253,11 @@ fn resolve_namespace_member_from_facts(
     let member = &symbol_name[dot_pos + 1..];
     let binding = resolve_import_binding_from_facts(ctx, canonical_id, scope_payload, prefix)?;
 
-    if let Some(target_entry) = ctx.ensure_indexed_ready(&binding.canonical_id) {
+    // Structurally read-only (see the scope read above).
+    if let Some(target_entry) = ctx
+        .ensure_indexed_ready_serve(&binding.canonical_id)
+        .map(|serve| serve.indexed)
+    {
         if symbol_exists_in_facts(&target_entry, member) {
             return Some(ResolvedRootIdentity::new(&binding.canonical_id, member));
         }

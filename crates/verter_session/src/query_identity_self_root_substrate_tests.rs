@@ -149,7 +149,7 @@ fn observed_parse_fact_lookup_is_content_addressed_not_get_any() {
     }
     host.project_type_store().indexed().remove(canonical);
     host.project_type_store().indexed().insert_artifacts(
-        FileArtifactKey::legacy(Arc::from(canonical), STALE_HASH),
+        FileArtifactKey::base(Arc::from(canonical), STALE_HASH),
         Arc::new(stale),
     );
 

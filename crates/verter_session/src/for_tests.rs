@@ -110,7 +110,9 @@ pub fn install_fact_tracer_for_tests<F, R>(
 where
     F: FnOnce() -> R,
 {
-    crate::fact_signature_helpers::install_fact_tracer(host, f)
+    let (value, finalise, _fenced_serve_observed) =
+        crate::fact_signature_helpers::install_fact_tracer(host, f);
+    (value, finalise)
 }
 
 /// Convert a dispatch-fence `DepSignature` into a

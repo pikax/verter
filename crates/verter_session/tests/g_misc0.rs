@@ -78,6 +78,8 @@ mod legacy_dep_signature_field_gone;
 mod legacy_walker_parity_baseline;
 #[path = "g_misc0/materialiser_observes_or_dies.rs"]
 mod materialiser_observes_or_dies;
+#[path = "g_misc0/materializations_lane_wired.rs"]
+mod materializations_lane_wired;
 #[path = "g_misc0/mcp_audit_e2e.rs"]
 mod mcp_audit_e2e;
 #[path = "g_misc0/mcp_audit_tls_propagation.rs"]
@@ -96,8 +98,6 @@ mod no_production_caller_of_zero_env_slot_constructors;
 mod origin_graph_consumer_contract;
 #[path = "g_misc0/overlay_prepared_decl_no_base_cache_pollution.rs"]
 mod overlay_prepared_decl_no_base_cache_pollution;
-#[path = "g_misc0/phase_d_materializations_lane_wired.rs"]
-mod phase_d_materializations_lane_wired;
 #[path = "g_misc0/r20_admission_refuses_empty_signature.rs"]
 mod r20_admission_refuses_empty_signature;
 #[path = "g_misc0/relative_path_session_parity.rs"]

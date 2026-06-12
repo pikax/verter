@@ -19,7 +19,7 @@
 //! `lookup_resolved_external_type_cache_with_view` /
 //! `store_resolved_external_type_cache_with_view` helpers are kept here
 //! too so the cache delegation to `ProjectTypeStore::resolved_type_cache()`
-//! (Tier 1C-α invariant) stays adjacent to its only callers. The cache
+//! stays adjacent to its only callers. The cache
 //! key carries `view_fingerprint` so base (`view = None` → 0) and
 //! per-session slots co-exist; neither evicts the other.
 
@@ -256,7 +256,10 @@ impl VerterHost {
             if let Some(obs) = verter_audit::current_observer() {
                 obs.record_event(verter_audit::AuditEvent::ResolvedExternalTypeCacheNegativeMiss);
             }
-            if self.ensure_indexed_ready(dep_canonical.as_str()).is_none() {
+            if self
+                .ensure_indexed_ready_serve(dep_canonical.as_str())
+                .is_none()
+            {
                 if required_root_dep {
                     let err = crate::types::ExternalTypeResolveError::MissingRootDependency;
                     emit_trace_result(
@@ -778,7 +781,7 @@ impl VerterHost {
             resolve_kind: kind,
             view_fingerprint,
         };
-        // Tier 1C-α — delegate to the rehomed `ResolvedTypeCacheDb`.
+        // Delegates to the `ResolvedTypeCacheDb` on `ProjectTypeStore`.
         // The DB owns the bounded clear-all-at-cap policy internally.
         self.resolved_type_cache().lookup(&key)
     }
@@ -811,9 +814,9 @@ impl VerterHost {
             resolve_kind: kind,
             view_fingerprint,
         };
-        // Tier 1C-α — `ResolvedTypeCacheDb::insert` honours the
-        // bounded clear-all-at-`RESOLVED_TYPE_CACHE_CAP` policy
-        // internally. The off-store `parking_lot::Mutex` is gone.
+        // `ResolvedTypeCacheDb::insert` honours the bounded
+        // clear-all-at-`RESOLVED_TYPE_CACHE_CAP` policy internally;
+        // the DB hosts its own `parking_lot::Mutex`.
         self.resolved_type_cache().insert(
             key,
             crate::types::ResolvedTypeCacheEntry {

@@ -7333,12 +7333,29 @@ export interface Props extends Base { msg: string; count?: number }"#,
         project.ensure_loaded("/workspace/App.vue").unwrap(),
         "owner SFC should load into the host"
     );
+    // Laziness probe: the dependency must not be eagerly ANALYSED or
+    // host-integrated before the first query. (The scheduler's source
+    // loader may legitimately hold the RAW source already — and
+    // `get_whole_hash` truthfully reports a present scheduler source,
+    // so it is no longer a "not loaded" oracle.)
     assert!(
         project
             .host()
-            .get_whole_hash("/workspace/types.ts")
+            .project_type_store
+            .indexed()
+            .get_any("/workspace/types.ts")
             .is_none(),
-        "workspace dependency should not be eagerly loaded before the first query"
+        "workspace dependency must not be eagerly analysed before the \
+         first query (no IndexedReady artifact)"
+    );
+    assert!(
+        project
+            .host()
+            .derived_raw_cache()
+            .get("/workspace/types.ts")
+            .is_none(),
+        "workspace dependency must not be eagerly host-integrated before \
+         the first query"
     );
 
     let session = project.open_session_batch().unwrap();
@@ -7406,12 +7423,29 @@ export interface Props extends Base { msg: string; count?: number }"#,
         project.ensure_loaded("/workspace/App.vue").unwrap(),
         "owner SFC should load into the host"
     );
+    // Laziness probe: the dependency must not be eagerly ANALYSED or
+    // host-integrated before the first query. (The scheduler's source
+    // loader may legitimately hold the RAW source already — and
+    // `get_whole_hash` truthfully reports a present scheduler source,
+    // so it is no longer a "not loaded" oracle.)
     assert!(
         project
             .host()
-            .get_whole_hash("/workspace/types.ts")
+            .project_type_store
+            .indexed()
+            .get_any("/workspace/types.ts")
             .is_none(),
-        "workspace dependency should not be eagerly loaded before the first query"
+        "workspace dependency must not be eagerly analysed before the \
+         first query (no IndexedReady artifact)"
+    );
+    assert!(
+        project
+            .host()
+            .derived_raw_cache()
+            .get("/workspace/types.ts")
+            .is_none(),
+        "workspace dependency must not be eagerly host-integrated before \
+         the first query"
     );
 
     let session = project.open_session_batch().unwrap();

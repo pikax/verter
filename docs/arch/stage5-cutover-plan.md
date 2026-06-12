@@ -52,9 +52,10 @@ parsing becomes spans-only; THEN delete the legacy rail. Four NEVERS. Each block
   TypeResolutionContext/ResolvedElements/ResolvedProp/ResolvedEmit/format_runtime_types(type-arg). Drive RESOLVED_ELEMENTS_FILE_ALLOWLIST
   + RESOLVE_TYPE_PATH_FILE_ALLOWLIST (architecture_guards.rs:13613/13580) to EMPTY. dep B9.
 - **B11 [5C]** delete session external-type rails (external_type_resolution.rs, external_macro_collector.rs, external_macro_types.rs
-  collect_external_macro_types, frontier ResolvedElements producers, route_owned_shallow.rs:613) + SemanticNodeData::VueMacroElements +
-  HostResolvedNamedTypeKey + parser NamedTypeCache adapters + graph named-type indexes. dep B10. [Q4: native_props FFI carrier
-  route_owned_shallow.rs:625 must re-source from B5 DTO or be retired FIRST]
+  collect_external_macro_types, frontier ResolvedElements producers, route_surface.rs collect_external_types_from_loaded_files) +
+  SemanticNodeData::VueMacroElements + HostResolvedNamedTypeKey + parser NamedTypeCache adapters + graph named-type indexes. dep B10.
+  [Q4: native_props FFI carrier route_surface.rs collect_external_types_from_loaded_files_with_view must re-source from B5 DTO or be
+  retired FIRST]
 - **B12 [5C close]** final absence guards (no prod refs to resolve_type_elements/infer_runtime_type/extract_companion_types/
   ResolvedElements/RuntimeType-type-arg/TypeResolutionContext/VueMacroElements/HostResolvedNamedTypeKey/parse_checker_text_to_type_expr);
   ledgers at empty floor; negative-guard test. dep B10,B11.
@@ -65,7 +66,7 @@ parsing becomes spans-only; THEN delete the legacy rail. Four NEVERS. Each block
 - Q2 (B2/B10): do lower_call_signature_payload/lower_function_shape have callers outside resolve_type/? If not, collapse B2 into B10.
 - Q3 (B9): cleanest spans-only source for template-scope prop NAMES (bindings.rs:377) post-deletion. Cross-file defineProps<Imported>
   has no local names → must come from DTO. Likely: bindings derive from B5 DTO (makes B9 depend on B6 host wiring).
-- Q4 (B11): native_props FFI carrier via collect_external_macro_types (route_owned_shallow.rs:625) — re-source from B5 DTO or retire first.
+- Q4 (B11): native_props FFI carrier via collect_external_macro_types (host_resolve/route_surface.rs collect_external_types_from_loaded_files_with_view) — re-source from B5 DTO or retire first.
 - B5 risk: unresolved flag must distinguish valid-empty-object (defineProps<{}> no diagnostic) from unresolvable-ref (defineProps<Missing>
   diagnostic) — legacy unresolved_type_ref distinction (setup.rs:823). Dispatch signal: Error(Miss) on Ref vs Value(empty Object).
 
@@ -84,7 +85,8 @@ setup.rs:782 + resolve_type/{mod,infer}.rs (parser flip + deletion), architectur
   surface.rs:602 / props_from_typeinfo_surface :669). B9 DEPENDS ON B6 host wiring; bindings.rs:377 consumes macro_surfaces.props[].name
   for type-based props; runtime object/array props stay syntax-only.
 - Q4 BIND: native_props is a LIVE public FFI surface (ResolvedMacroMeta.native_props mod.rs:53/75; component_meta.proto:630;
-  verter_ffi convert/component_meta.rs:383) built via collect_external_macro_types (external_macro_types.rs:16/46, route_owned_shallow.rs:613/626).
+  verter_ffi convert/component_meta.rs:383) built via collect_external_macro_types (external_macro_types.rs:46, driven from
+  host_resolve/route_surface.rs collect_external_types_from_loaded_files / _with_view).
   FOLD native_props into ResolvedMacroSurfaces (or sibling DTO) BEFORE B11; gate B11 deletion on it. **CRITICAL NEW SCOPE — CARRY class
   VISIBILITY through the DTO (it is NOT a typeinfo gap): class member visibility ALREADY belongs to the typeinfo / query surface as
   `verter_type_expr::MemberVisibility` — carried on `SurfaceMember.visibility` (typeinfo/surface.rs:141), the graph node `visibility` field

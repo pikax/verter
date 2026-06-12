@@ -87,7 +87,7 @@ impl VerterHost {
         // API stays honest about which canonicals have a synthesized public
         // component type, matching the `build_instantiate` branch's own
         // `is_synthesised_vue_default` gate.
-        let indexed = self.ensure_indexed_ready(canonical_id)?;
+        let indexed = self.ensure_indexed_ready_serve(canonical_id)?.indexed;
         let default_symbol = indexed.shallow_state.value_symbol("default")?;
         if !default_symbol.is_synthesised_vue_default {
             return None;

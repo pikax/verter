@@ -11,7 +11,7 @@
 //! `HostStoreView::from_host` does 5-7 full workspace sweeps and
 //! allocates ~5 hashmaps + an artifact `Vec` per call. The per-request hoist
 //! the build to once-per-request, then threads a borrow through the
-//! pipeline. But `ensure_loaded` and `ensure_indexed_ready` deliberately
+//! pipeline. But `ensure_loaded` and `ensure_indexed_ready_serve` deliberately
 //! do not bump `store_view_epoch` on first-time additive loads — so a
 //! request-entry view built BEFORE dependency discovery does not track
 //! later-loaded self-root canonicals. Without the overlay below the
@@ -195,7 +195,7 @@ impl CanonicalCompletionOverlay {
     /// Idempotently promote a freshly-loaded canonical's facts into the
     /// overlay.
     ///
-    /// Called after a successful `ensure_loaded` / `ensure_indexed_ready`
+    /// Called after a successful `ensure_loaded` / `ensure_indexed_ready_serve`
     /// on a canonical the request-entry base view does not track.
     /// Walking the host's currently-published per-canonical state is
     /// cheap (one `FileArtifactStore` lookup + a few scheduler reads);
@@ -256,20 +256,20 @@ impl CanonicalCompletionOverlay {
         self.complete_canonical_inner(host, base, canonical, Some(view));
     }
 
-    /// Promote a route-owned-shallow canonical's facts into the
-    /// overlay without consulting `host.scheduler` /
+    /// Promote a producer-known canonical's facts into the overlay
+    /// without consulting `host.scheduler` /
     /// `host.effective_file_state` / `host.project_type_store().indexed()`.
     ///
     /// The base [`Self::complete_canonical`] / `_inner` path resolves
     /// the canonical's `whole_hash` from the scheduler then loads
     /// `FileArtifacts` from the indexed authority to populate
-    /// `file_facts` + derived hashes. Route-owned-shallow canonicals
-    /// (declaration files — `.d.ts`, `.d.mts`, `.d.cts` — for which
-    /// `ensure_indexed_ready` does not produce an artifact) have NO
-    /// indexed artifact, so the indexed-authority fallback inside
+    /// `file_facts` + derived hashes. A canonical the scheduler does
+    /// not track and the indexed authority cannot answer for at
+    /// completion time has NO artifact to read, so the
+    /// indexed-authority fallback inside
     /// [`Self::write_completion_entry`] returns `None` and the route /
     /// import-route derived-hash entries never enter the overlay. The
-    /// next warm-read validation of a route-owned bundle's stored
+    /// next warm-read validation of such a bundle's stored
     /// `ImportRoute` fact therefore falls through to the base view's
     /// `derived_hashes` snapshot — which itself does not see entries
     /// published after the snapshot was built — and rejects the
@@ -289,7 +289,7 @@ impl CanonicalCompletionOverlay {
     /// before invoking this overlay write). Keeping `host` out of the
     /// resolver-tier API surface preserves the resolver-context seal
     /// (`no_concrete_verter_host_in_seal_scope` architecture guard).
-    pub(crate) fn complete_route_owned_canonical(
+    pub(crate) fn complete_route_canonical(
         &self,
         canonical: &str,
         whole_hash: Hash16,
@@ -475,8 +475,7 @@ impl CanonicalCompletionOverlay {
             // warm validation and recomputes through the edge-gated readers
             // (which re-materialise the surface) rather than validating against
             // a stale hash recorded in the completion overlay.
-            let edge_current =
-                host.route_surface_is_edge_current(&indexed.shallow_state, indexed.edge_generation);
+            let edge_current = host.indexed_surface_is_current(canonical, indexed);
             let route_hash = if indexed.shallow_state.has_resolvable_surface() && edge_current {
                 Some(crate::resolver_store::hash_route_surface(
                     &indexed.shallow_state,
@@ -659,7 +658,7 @@ pub(crate) struct RequestStoreView<'a> {
     /// has to know about currentness — the single view they all read
     /// through refuses to validate. Structural reads (`tracks_file`,
     /// `derived_hash_for`, `compat_token`) and completion writes
-    /// (`promote_route_owned_completion`) are NOT validation-promotion
+    /// (`promote_route_completion`) are NOT validation-promotion
     /// and stay live so the cold compute can still observe additive loads.
     base_is_current: bool,
 }
@@ -857,7 +856,7 @@ impl<'a> StoreView for RequestStoreView<'a> {
         // shared DB directly.
         //
         // Overlay-promoted canonicals: when
-        // `ensure_loaded` / `ensure_indexed_ready` promotes a canonical
+        // `ensure_loaded` / `ensure_indexed_ready_serve` promotes a canonical
         // that the request-entry base view did not track, the overlay
         // carries the authoritative whole hash but the base view's
         // `whole_hashes` snapshot does not. Falling straight through to
@@ -893,7 +892,7 @@ impl<'a> StoreView for RequestStoreView<'a> {
         self.base.validates_route_surface_domain(fact)
     }
 
-    fn promote_route_owned_completion(
+    fn promote_route_completion(
         &self,
         canonical: &str,
         whole_hash: Hash16,
@@ -901,7 +900,7 @@ impl<'a> StoreView for RequestStoreView<'a> {
         import_route_hash: Option<Hash16>,
     ) {
         // Route the call through the overlay's
-        // `complete_route_owned_canonical` writer — it writes
+        // `complete_route_canonical` writer — it writes
         // `whole_hashes` + `derived_hashes` entries with the same
         // flag-after-insert ordering as the standard
         // `write_completion_entry` path. The epoch guard lives at
@@ -910,11 +909,7 @@ impl<'a> StoreView for RequestStoreView<'a> {
         // `VerterHost` type and the resolver-context seal
         // (`no_concrete_verter_host_in_seal_scope` architecture
         // guard) keeps holding.
-        self.overlay.complete_route_owned_canonical(
-            canonical,
-            whole_hash,
-            route_hash,
-            import_route_hash,
-        );
+        self.overlay
+            .complete_route_canonical(canonical, whole_hash, route_hash, import_route_hash);
     }
 }

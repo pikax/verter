@@ -187,12 +187,16 @@ where
     pub counters: Arc<ResolverCounters>,
 
     // -- Semantic DB layers --
-    /// Singleflight used by `ensure_indexed_ready` to collapse concurrent cold
+    /// Singleflight used by `ensure_indexed_ready_serve` to collapse concurrent cold
     /// loads for the same canonical file onto one materialization path. The
-    /// flight value is the materialized `Arc<IndexedReady>`, which is then
-    /// unwrapped from the outer singleflight `Arc` at the call site.
+    /// flight value is an
+    /// [`IndexedFlightOutcome`](crate::project_type_store::IndexedFlightOutcome):
+    /// the materialized artifact PLUS whether the flight published it. A
+    /// fenced (ReturnOnly) outcome is NOT retained as a joinable `Done`,
+    /// and a follower that receives one re-runs against fresh state
+    /// instead of adopting a superseded artifact as current.
     pub indexed_singleflight:
-        SingleflightGroup<String, Arc<crate::project_type_store::IndexedReady>, ()>,
+        SingleflightGroup<String, crate::project_type_store::IndexedFlightOutcome, ()>,
     /// Host-owned cross-file route subsystem: barrel surfaces, route results,
     /// and stable negative answers.
     ///
@@ -207,15 +211,6 @@ where
     /// same `Arc`-shared discipline as `routes`. See
     /// [`Self::imported_roots_handle`].
     pub imported_roots: Arc<ImportedRootDb>,
-    /// Singleflight for the route-only shallow materialiser. Collapses
-    /// concurrent cold callers for the same canonical onto one
-    /// materialisation path. Mirrors the
-    /// [`Self::indexed_singleflight`] pattern: key is `Arc<str>`
-    /// (canonical alone), error type is `()` (matches `indexed_singleflight`;
-    /// the host materialiser maps internal errors to `()` and returns
-    /// `Option<...>` to callers).
-    pub route_owned_shallow_singleflight:
-        SingleflightGroup<Arc<str>, Arc<crate::project_type_store::RouteOwnedShallowEntry>, ()>,
 }
 
 impl<MetaV, FallthroughV> UnifiedResolverRuntime<MetaV, FallthroughV>
@@ -246,7 +241,6 @@ where
             indexed_singleflight: SingleflightGroup::default(),
             routes,
             imported_roots,
-            route_owned_shallow_singleflight: SingleflightGroup::default(),
         }
     }
 
@@ -268,7 +262,6 @@ where
             indexed_singleflight: SingleflightGroup::default(),
             routes,
             imported_roots,
-            route_owned_shallow_singleflight: SingleflightGroup::default(),
         }
     }
 
@@ -299,12 +292,6 @@ where
         self.indexed_singleflight.clear();
         self.routes.clear();
         self.imported_roots.clear();
-        // clear the route-only shallow singleflight too.
-        // The `RouteOwnedShallowDb` itself is project-store-owned and
-        // cleared via `ProjectTypeStore::route_owned_shallow().clear_all()`
-        // from the host's cascade. We only clear the singleflight here
-        // so any in-flight closures see a fresh start.
-        self.route_owned_shallow_singleflight.clear();
     }
 
     /// Evict artifacts owned by one canonical file without clearing unrelated

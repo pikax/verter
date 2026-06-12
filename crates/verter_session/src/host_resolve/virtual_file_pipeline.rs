@@ -170,6 +170,11 @@ impl VerterHost {
 
         let workspace = self.workspace();
         let mut blocker_ids = std::collections::BTreeSet::new();
+        // Capture-before-resolve: the positive-route stamps below reflect
+        // the file set the resolutions ran under, never a later one (a
+        // mutation racing this hydration leaves the stamps conservatively
+        // stale — a harmless re-resolve, never forged currency).
+        let resolved_at_generation = self.ws().content_generation();
 
         for request in blockers.external_source_requests {
             let resolved = workspace
@@ -186,6 +191,8 @@ impl VerterHost {
                         canonical_id,
                         &request.specifier,
                         &resolution.source_id,
+                        resolved_at_generation,
+                        verter_workspace::ResolveRequestKind::SfcSrcAttr,
                     );
                     resolution.source_id
                 })
@@ -210,6 +217,8 @@ impl VerterHost {
                         canonical_id,
                         &dep.import_source,
                         &resolution.source_id,
+                        resolved_at_generation,
+                        verter_workspace::ResolveRequestKind::TypeImport,
                     );
                 })
                 .or_else(|| {
@@ -227,6 +236,8 @@ impl VerterHost {
                                 canonical_id,
                                 &dep.import_source,
                                 &resolution.source_id,
+                                resolved_at_generation,
+                                verter_workspace::ResolveRequestKind::EsmImport,
                             );
                         })
                 })
@@ -269,14 +280,14 @@ impl VerterHost {
     /// - Resolve `dep.import_source` via `workspace.resolve_import`
     ///   (Type-import first, ESM-import fallback) and cache the route
     ///   in `derived_raw_cache().import_routes`.
-    /// - Call `ensure_indexed_ready(dep_canonical)` to publish the
+    /// - Call `ensure_indexed_ready_serve(dep_canonical)` to publish the
     ///   dependency's `IndexedReady` into `FileArtifactStore`. Just
     ///   `ensure_loaded` is insufficient — fact lookup reads the
     ///   indexed-artifact's `facts` registry, which is only populated
     ///   by the indexed-ready materialiser.
     ///
     /// Script imports (used by the augmentation observation) reach
-    /// `FileArtifactStore` via `ensure_indexed_ready` on each
+    /// `FileArtifactStore` via `ensure_indexed_ready_serve` on each
     /// resolvable specifier. Unresolved specifiers (external packages
     /// without a workspace fallback) are skipped: the augmentation
     /// observation uses the index-level fingerprint snapshot rather
@@ -299,10 +310,13 @@ impl VerterHost {
         // resolve owner-relative import surfaces; the owner's own
         // FileArtifactStore entry is also a producer-side dependency
         // of route observation (R26).
-        let _ = self.ensure_indexed_ready(owner_canonical);
+        let _ = self.ensure_indexed_ready_serve(owner_canonical);
 
         let workspace = self.workspace();
         let mut resolved_deps = std::collections::BTreeSet::<String>::new();
+        // Capture-before-resolve: the positive-route stamps below reflect
+        // the file set the resolutions ran under, never a later one.
+        let resolved_at_generation = self.ws().content_generation();
 
         // Macro-type deps: TypeImport first, ESM fallback. Cache the
         // import-route so `resolve_import_source_to_canonical` in
@@ -317,21 +331,28 @@ impl VerterHost {
                         kind: verter_workspace::ResolveRequestKind::TypeImport,
                     },
                 )
+                .map(|resolution| (resolution, verter_workspace::ResolveRequestKind::TypeImport))
                 .or_else(|| {
-                    workspace.resolve_import(
-                        owner_canonical,
-                        &dep.import_source,
-                        verter_workspace::ResolutionContext {
-                            phase: verter_workspace::ResolvePhase::CodegenBlocker,
-                            kind: verter_workspace::ResolveRequestKind::EsmImport,
-                        },
-                    )
+                    workspace
+                        .resolve_import(
+                            owner_canonical,
+                            &dep.import_source,
+                            verter_workspace::ResolutionContext {
+                                phase: verter_workspace::ResolvePhase::CodegenBlocker,
+                                kind: verter_workspace::ResolveRequestKind::EsmImport,
+                            },
+                        )
+                        .map(|resolution| {
+                            (resolution, verter_workspace::ResolveRequestKind::EsmImport)
+                        })
                 });
-            if let Some(resolution) = resolved {
+            if let Some((resolution, resolved_kind)) = resolved {
                 self.cache_positive_import_route_result(
                     owner_canonical,
                     &dep.import_source,
                     &resolution.source_id,
+                    resolved_at_generation,
+                    resolved_kind,
                 );
                 if resolution.source_id != owner_canonical {
                     resolved_deps.insert(resolution.source_id);
@@ -361,6 +382,8 @@ impl VerterHost {
                     owner_canonical,
                     import.source.as_str(),
                     &resolution.source_id,
+                    resolved_at_generation,
+                    kind,
                 );
                 if resolution.source_id != owner_canonical {
                     resolved_deps.insert(resolution.source_id);
@@ -372,34 +395,57 @@ impl VerterHost {
         // a `FileWholeHash` of each external canonical, so each
         // external dep must reach the store before the tracer runs.
         //
-        // A pre-existing import-route for the `src=` specifier is
-        // AUTHORITATIVE — it was placed by `set_import_dependencies`
-        // (caller-supplied exact resolution) or by an earlier
-        // resolution pass. This prefetch must NOT overwrite it: an
-        // aliased `src=` (`@/partials/panel.html`) does not resolve
-        // through `workspace.resolve_import`, so re-resolving and
-        // caching the fallback would clobber the correct caller route
-        // and break external-source merging. The prefetch only
-        // authors a route when none exists yet.
+        // Route-source discipline — the per-entry freshness oracle
+        // (`import_route_entry_is_generation_current`) decides whether a
+        // pre-existing route may answer:
+        //
+        // * An UNSTAMPED route is caller-authoritative
+        //   (`set_import_dependencies` — e.g. an aliased `src=`
+        //   (`@/partials/panel.html`) only the embedder's resolver can
+        //   map): served until replaced, never overwritten here.
+        // * A STAMPED route is a host memo this prefetch (or the
+        //   blocker hydration) wrote on an earlier compile: served only
+        //   while its capture-before-resolve stamp matches the live
+        //   `content_generation`. A stale memo means the dependency
+        //   file set moved since the memo resolved — the `SfcSrcAttr`
+        //   resolution may have retargeted — so it is treated as ABSENT
+        //   and re-resolved + re-stamped. Serving it would suppress the
+        //   retarget AND misattribute the compile-tier whole-hash
+        //   observation to the retargeted-away canonical (the merge
+        //   resolves live, the observation resolves through this memo).
+        // * A generation-current known-miss (caller-pushed) keeps the
+        //   parse-time-canonical fallback below; a stale one re-resolves.
+        let live_generation = self.ws().content_generation();
         for request in external_requests {
-            let existing_route = self
-                .derived_raw_cache()
-                .get(owner_canonical)
-                .and_then(|d| d.import_routes.get(&request.specifier).cloned());
+            let existing_route = self.derived_raw_cache().get(owner_canonical).and_then(|d| {
+                let route = d.import_routes.get(&request.specifier)?;
+                d.import_route_entry_is_generation_current(
+                    &request.specifier,
+                    route,
+                    live_generation,
+                )
+                .then(|| route.clone())
+            });
             let resolved = if let Some(route) = existing_route {
-                // Use the authoritative route's canonical for the
-                // indexed-ready prefetch; leave the route untouched.
+                // Generation-current (or caller-authoritative) route: use
+                // its canonical for the indexed-ready prefetch and leave
+                // the entry untouched.
                 route
                     .resolved_canonical_id
                     .clone()
                     .or_else(|| route.effective_target().map(str::to_string))
                     .unwrap_or_else(|| request.resolved_canonical_id.clone())
             } else {
-                // No route yet — resolve through the SfcSrcAttr phase
-                // and cache the result so the producer's
-                // `resolve_import_source_to_canonical` finds it. Fall
-                // back to the parse-time canonical when the workspace
-                // cannot resolve the specifier.
+                // No current route — resolve through the SfcSrcAttr lane
+                // and cache the result (stamped with the pre-resolve
+                // generation capture) so the producer's
+                // `resolve_import_source_to_canonical` finds it. When the
+                // workspace cannot resolve the specifier, the parse-time
+                // canonical answers and is memoized under the same stamp:
+                // the resolution attempt DID run against this file set and
+                // the memo records its fallback decision; any later
+                // file-set move stales the stamp and re-runs the attempt,
+                // so a specifier that becomes resolvable repairs itself.
                 let resolved = workspace
                     .resolve_import(
                         owner_canonical,
@@ -416,6 +462,8 @@ impl VerterHost {
                         owner_canonical,
                         &request.specifier,
                         &resolved,
+                        resolved_at_generation,
+                        verter_workspace::ResolveRequestKind::SfcSrcAttr,
                     );
                 }
                 resolved
@@ -430,7 +478,7 @@ impl VerterHost {
         // is published before the tracer queries fact hashes. Calls
         // are idempotent / cache-hit on warm reads.
         for dep_canonical in resolved_deps {
-            let _ = self.ensure_indexed_ready(&dep_canonical);
+            let _ = self.ensure_indexed_ready_serve(&dep_canonical);
         }
     }
 
@@ -764,41 +812,70 @@ impl VerterHost {
             compile_input: CompileInput,
             fallback_last_good: Option<FxHashMap<VirtualNodeKind, CachedVirtualFile>>,
             meta: FileMeta,
-            /// Captured under read lock so the compile slot is stored with the
-            /// semantic_hash that was current when we decided to compile.
+            /// Captured from the request's single source snapshot so the
+            /// compile slot is stored with the semantic_hash that was
+            /// current when we decided to compile.
             semantic_hash: Hash16,
-            /// Content `whole_hash` captured under the same read lock, so a
-            /// `Content`-mode publish keys the content-addressed entry on the
-            /// exact source version that was compiled.
-            whole_hash: Hash16,
-            /// The mode classification, computed once under the read lock
-            /// from this request's effective eligibility surface. The
-            /// classifier is the sole authority for the mode decision and
-            /// gates the warm-hit consult, so it must be known BEFORE any
-            /// cache read. Carried out of the block so the audit event and
-            /// the compile/publish routing reuse the single classification.
+            /// The mode classification, computed once from this request's
+            /// effective eligibility surface. The classifier is the sole
+            /// authority for the mode decision and gates the warm-hit
+            /// consult, so it must be known BEFORE any cache read. Carried
+            /// out of the block so the audit event and the compile/publish
+            /// routing reuse the single classification.
             classification: crate::compile_cache_mode::CompileModeClassification,
+            /// `Content`-mode publish stamps, captured BEFORE the compile
+            /// from the SAME source snapshot that supplies the compiled
+            /// bytes: the full content-addressed key (content hash +
+            /// env-hash bundle + project identity live INSIDE it) plus
+            /// the project generation. The publish uses ONLY these
+            /// captured values and declines (ReturnOnly) when the live
+            /// identity — content hash included — has moved; a
+            /// post-compile live re-read would stamp old-input bytes
+            /// under a new-current identity. `None` for `Session` /
+            /// `Stateless`.
+            content_publish_stamp: Option<(crate::cache_runtime::CompileOutputPureContentKey, u64)>,
         }
 
-        // Capture scheduler source state at compile START for artifact commit.
-        let sched_snapshot_at_start = self.scheduler.try_get_source(&canonical_id);
+        // The request's SINGLE scheduler source snapshot. ALL
+        // content-determined inputs derive from this one coherent read:
+        // the compiled bytes and script analysis (via
+        // `effective_file_state_from_snapshot`), the style v-bind vars
+        // (`parse.style_analyses`), the effective meta base, the
+        // `Content` key's content hash, the Session slot's
+        // `semantic_hash`, and the artifact-commit generation.
+        // Independent re-reads could each observe a different source
+        // version, pairing bytes from one version with the key hash of
+        // another.
+        let source_snap = self
+            .scheduler
+            .try_get_source(&canonical_id)
+            .ok_or_else(|| HostError::MissingSource {
+                canonical_id: canonical_id.clone(),
+            })?;
 
         let cache_miss = {
             {
-                use crate::host_executor::{HostAnalysisData, HostSourceData};
+                use crate::host_executor::HostSourceData;
 
-                let source_snap =
-                    self.scheduler
-                        .try_get_source(&canonical_id)
-                        .ok_or_else(|| HostError::MissingSource {
-                            canonical_id: canonical_id.clone(),
-                        })?;
                 let hd = source_snap
                     .downcast_data::<HostSourceData>()
                     .ok_or_else(|| HostError::MissingSource {
                         canonical_id: canonical_id.clone(),
                     })?;
                 let parse = &hd.parse;
+
+                // Test-only seam: the snapshot→compile-input window.
+                // Fence tests land a content upsert here to prove the
+                // compiled bytes and the content-addressed key cohere
+                // with ONE source snapshot and the publish fence
+                // detects the content movement.
+                #[cfg(test)]
+                {
+                    let hook = self.compile_input_seam_hook.lock().clone();
+                    if let Some(hook) = hook {
+                        hook();
+                    }
+                }
 
                 let cc_ref = self.compile_cache().get(&canonical_id);
 
@@ -829,13 +906,26 @@ impl VerterHost {
                 // stale `Content` entry for an input the override forces to
                 // downgrade. Classifying first closes that gap.
                 let efs = self
-                    .effective_file_state(&canonical_id, Some(profile_hash))
+                    .effective_file_state_from_snapshot(
+                        &source_snap,
+                        &canonical_id,
+                        Some(profile_hash),
+                    )
                     .ok_or_else(|| HostError::MissingSource {
                         canonical_id: canonical_id.clone(),
                     })?;
-                let effective_meta = self
-                    .effective_meta(&canonical_id, Some(profile_hash))
-                    .unwrap_or_else(|| parse.meta.clone());
+                // The content hash of the bytes the compile actually
+                // consumes — `efs` and `parse` derive from the same
+                // snapshot, and a `Content` request never carries a
+                // content override (`HasBlockOverride` downgrades it
+                // to `Stateless`), so for a `Content` publish this is
+                // the snapshot's `whole_hash`.
+                let effective_whole_hash = efs.whole_hash;
+                let effective_meta = self.effective_meta_from_base(
+                    parse.meta.clone(),
+                    &canonical_id,
+                    Some(profile_hash),
+                );
 
                 let style_override_layer = cc_ref.as_ref().and_then(|cc| {
                     cc.style_overrides
@@ -879,14 +969,15 @@ impl VerterHost {
                     })
                 });
 
-                // Style v-bind vars from raw analysis (override-independent)
-                let analysis_snap = self.scheduler.try_get_analysis(&canonical_id);
-                let style_analyses: Arc<Vec<verter_semantic::analysis::StyleBlockAnalysis>> =
-                    analysis_snap
-                        .as_ref()
-                        .and_then(|a| a.downcast_data::<HostAnalysisData>())
-                        .map(|ad| Arc::clone(&ad.style_analyses))
-                        .unwrap_or_default();
+                // Style v-bind vars from the SAME source snapshot the
+                // compiled bytes and the cache key derive from
+                // (override-independent). The analysis stage's
+                // `style_analyses` is a clone of this parse field; an
+                // independent analysis-snapshot read races the
+                // scheduler's Source→Analysis commit window and would
+                // compile — and publish warm under an unmoved key —
+                // EMPTY v-bind vars.
+                let style_analyses = &parse.style_analyses;
 
                 let compile_input = CompileInput {
                     canonical_id: canonical_id.clone(),
@@ -943,6 +1034,24 @@ impl VerterHost {
                     },
                 );
                 let actual_mode = classification.actual_mode;
+
+                // `Content`-mode flight-captured publish stamps: the
+                // content key (env-hash bundle + project identity) and
+                // the project generation, captured HERE — before the
+                // warm-hit consult and the compile — so the publish
+                // never re-reads identity state the compile did not run
+                // under. The same captured key drives the warm-hit peek
+                // below (one key construction per request).
+                let content_publish_stamp = (actual_mode == CompileCacheMode::Content).then(|| {
+                    (
+                        self.compile_pure_content_key(
+                            &canonical_id,
+                            effective_whole_hash,
+                            &query.compile_profile,
+                        ),
+                        self.project_type_store.current_project_generation(),
+                    )
+                });
 
                 // Warm-hit consult, routed by the ACTUAL (classified) cache
                 // mode. `Session` validates the fact-validated session slot;
@@ -1001,13 +1110,11 @@ impl VerterHost {
                             })
                     }),
                     CompileCacheMode::Content => {
-                        let key = self.compile_pure_content_key(
-                            &canonical_id,
-                            parse.whole_hash,
-                            &query.compile_profile,
-                        );
+                        let (key, _) = content_publish_stamp
+                            .as_ref()
+                            .expect("Content mode always captures its publish stamp");
                         self.compile_output_pure_content()
-                            .peek(&key)
+                            .peek(key)
                             .map(|value| WarmHit {
                                 outputs: value.outputs.clone(),
                                 diagnostics: value.diagnostics.clone(),
@@ -1071,8 +1178,8 @@ impl VerterHost {
                     fallback_last_good,
                     meta: effective_meta,
                     semantic_hash: parse.semantic_hash,
-                    whole_hash: parse.whole_hash,
                     classification,
+                    content_publish_stamp,
                 }
             }
         };
@@ -1082,8 +1189,8 @@ impl VerterHost {
             fallback_last_good,
             meta,
             semantic_hash: captured_semantic_hash,
-            whole_hash: captured_whole_hash,
             classification,
+            content_publish_stamp,
         } = cache_miss;
 
         #[cfg(feature = "session_metrics")]
@@ -1199,12 +1306,27 @@ impl VerterHost {
             });
             // `Cacheable(sig)` → publish the compile-output slot through
             // the typed session node under the path-precise signature.
-            // `NonCacheable` (overflow) → the session node removes any
-            // prior slot and the freshly computed value is returned
-            // without admitting. The caller-visible result is computed
-            // independently of admission.
-            let admission =
-                crate::cache_runtime::SignatureAdmission::from_finalise(fact_read_set.finalise());
+            // `NonCacheable` (fenced serve, overflow) → the session node
+            // removes any prior slot and the freshly computed value is
+            // returned without admitting. The caller-visible result is
+            // computed independently of admission.
+            //
+            // ReturnOnly never publishes — fenced-serve arm: a compile
+            // whose traced scope consumed a FENCED (ReturnOnly,
+            // `store_published == false`) `IndexedReady` serve derived
+            // its output from a served-without-publication artifact
+            // while its fact stamps are read from the LIVE post-mutation
+            // state — an entry the read-side fact rail cannot reject.
+            // Consult the tracer's by-value flag and refuse admission;
+            // the caller is still served the fresh output below.
+            let fenced_serve_observed = fact_read_set.fenced_serve_observed();
+            let admission = if fenced_serve_observed {
+                crate::cache_runtime::SignatureAdmission::NonCacheable(
+                    crate::cache_runtime::NonAdmissionReason::GenerationSuperseded,
+                )
+            } else {
+                crate::cache_runtime::SignatureAdmission::from_finalise(fact_read_set.finalise())
+            };
             (result, Some(admission))
         } else {
             // `Content` / `Stateless`: no tracer, no fact signature.
@@ -1294,6 +1416,18 @@ impl VerterHost {
             cc.diagnostics_generation += 1;
         }
 
+        // Test-only seam: the compute→publish window. Fence tests land
+        // an env / project mutation here to prove the mode-routed
+        // publish below declines instead of stamping the old-input
+        // output under the moved identity.
+        #[cfg(test)]
+        {
+            let hook = self.compile_publish_seam_hook.lock().clone();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
+
         // Publish, routed by the actual cache mode.
         match actual_mode {
             CompileCacheMode::Stateless => {
@@ -1306,17 +1440,46 @@ impl VerterHost {
                 // rail, no session slot, no scheduler artifact: the
                 // content key's env-hash dimensions already invalidate
                 // on every observable env change.
-                let key = self.compile_pure_content_key(
-                    &canonical_id,
-                    captured_whole_hash,
-                    &query.compile_profile,
-                );
-                let generation = self.project_type_store.current_project_generation();
-                self.compile_output_pure_content().publish_content(
-                    key,
-                    compile_output_value,
-                    generation,
-                );
+                //
+                // Flight-captured stamp discipline: the key — content
+                // hash INCLUDED — and the generation were captured
+                // BEFORE the compile, from the same source snapshot
+                // that supplied the compiled bytes. The publish fences
+                // on the LIVE identity across EVERY key dimension:
+                // when the content hash, the env-hash bundle, or the
+                // project identity moved in the compute→publish
+                // window, the compile may have observed a torn mix of
+                // the two states (the analysis-node and override-layer
+                // reads are taken against the captured version), so
+                // the output is attributable to NEITHER identity:
+                // decline the publish (ReturnOnly — the caller is
+                // still served the fresh output) and stamp nothing. A
+                // vanished live source declines the same way. On an
+                // unmoved identity the entry lands under the captured
+                // key with the captured generation (conservatively
+                // stale, never a forged-current stamp).
+                let (captured_key, captured_generation) =
+                    content_publish_stamp.expect("Content mode always captures its publish stamp");
+                let live_key = self
+                    .scheduler
+                    .try_get_source(&canonical_id)
+                    .and_then(|snap| {
+                        snap.downcast_data::<crate::host_executor::HostSourceData>()
+                            .map(|live_hd| {
+                                self.compile_pure_content_key(
+                                    &canonical_id,
+                                    live_hd.parse.whole_hash,
+                                    &query.compile_profile,
+                                )
+                            })
+                    });
+                if live_key.as_ref() == Some(&captured_key) {
+                    self.compile_output_pure_content().publish_content(
+                        captured_key,
+                        compile_output_value,
+                        captured_generation,
+                    );
+                }
             }
             CompileCacheMode::Session => {
                 // Route the finalised admission through the typed session
@@ -1348,17 +1511,29 @@ impl VerterHost {
 
                 if is_cacheable {
                     // Persist raw template analysis on DerivedRawState
-                    // (the profileless source-derived cache). Only for
-                    // non-override compiles.
-                    if compiled_template_analysis.is_some()
-                        && compile_input.content_override_layer.is_none()
-                    {
-                        let mut derived_ref = self
-                            .derived_raw_cache()
-                            .entry(canonical_id.clone())
-                            .or_default();
-                        derived_ref.value_mut().raw_template_analysis =
-                            compiled_template_analysis.clone().map(Arc::new);
+                    // (the profileless source-derived cache) through
+                    // the slot's single write authority. The admission
+                    // states this lane's facts: the bytes are
+                    // store-authoritative only without a content
+                    // override; the stamp is the flight's captured
+                    // source generation — the compile derives entirely
+                    // from `source_snap`; external-src SFCs and
+                    // parse-affecting profile extractions decline (the
+                    // slot stores the DEFAULT extraction of the
+                    // canonical's own inline bytes only).
+                    if let Some(template_analysis) = compiled_template_analysis.clone() {
+                        self.persist_raw_template_analysis(
+                            &canonical_id,
+                            Arc::new(template_analysis),
+                            crate::types::RawTemplateSlotAdmission {
+                                store_published: compile_input.content_override_layer.is_none(),
+                                source_generation: Some(source_snap.generation),
+                                has_src_blocks: !compile_input.src_blocks.is_empty(),
+                                default_extraction: !query
+                                    .compile_profile
+                                    .has_parse_affecting_template_options(),
+                            },
+                        );
                     }
 
                     // Commit to scheduler artifact snapshot (scheduler
@@ -1366,20 +1541,18 @@ impl VerterHost {
                     // carrier invariant holds at the artifact substrate
                     // layer too — a refused compile must not be observable
                     // via `try_get_artifact` or pending Artifact requests.
-                    if let Some(ref snap) = sched_snapshot_at_start {
-                        self.scheduler.commit_artifact(
-                            &canonical_id,
+                    self.scheduler.commit_artifact(
+                        &canonical_id,
+                        profile_hash,
+                        verter_scheduler::node::ArtifactSnapshot {
+                            generation: source_snap.generation,
                             profile_hash,
-                            verter_scheduler::node::ArtifactSnapshot {
-                                generation: snap.generation,
-                                profile_hash,
-                                data: Arc::new(crate::host_executor::HostArtifactData {
-                                    outputs: compiled_outputs.clone(),
-                                    diagnostics: diagnostics.clone(),
-                                }),
-                            },
-                        );
-                    }
+                            data: Arc::new(crate::host_executor::HostArtifactData {
+                                outputs: compiled_outputs.clone(),
+                                diagnostics: diagnostics.clone(),
+                            }),
+                        },
+                    );
                 } else {
                     // Refused admission. Symmetrically evict any prior
                     // scheduler artifact snapshot so `try_get_artifact`
@@ -1388,21 +1561,20 @@ impl VerterHost {
                     // artifact is committed.
                     //
                     // The eviction is gated on the compile's
-                    // start-of-compile generation captured in
-                    // `sched_snapshot_at_start`: a slow refused compile
-                    // that started at generation N can race with a fast
-                    // successful compile at N+k that already committed a
-                    // newer artifact, and an unconditional evict would
-                    // clobber it. Passing the captured start generation as
-                    // `max_generation` makes the eviction symmetric with
-                    // `commit_artifact`'s own node-generation rejection.
-                    if let Some(ref snap) = sched_snapshot_at_start {
-                        self.scheduler.remove_artifact_if_not_newer_than(
-                            &canonical_id,
-                            profile_hash,
-                            snap.generation,
-                        );
-                    }
+                    // start-of-compile generation captured on the
+                    // request's single source snapshot: a slow refused
+                    // compile that started at generation N can race with
+                    // a fast successful compile at N+k that already
+                    // committed a newer artifact, and an unconditional
+                    // evict would clobber it. Passing the captured start
+                    // generation as `max_generation` makes the eviction
+                    // symmetric with `commit_artifact`'s own
+                    // node-generation rejection.
+                    self.scheduler.remove_artifact_if_not_newer_than(
+                        &canonical_id,
+                        profile_hash,
+                        source_snap.generation,
+                    );
                 }
             }
         }
@@ -1791,9 +1963,8 @@ impl VerterHost {
 
         // Reuse cached parse when source wasn't modified by external src= merging
         // and no custom delimiters/elements that would change parse behavior.
-        let can_use_cache = snapshot.src_blocks.is_empty()
-            && profile.delimiters.is_none()
-            && profile.custom_elements.is_none();
+        let can_use_cache =
+            snapshot.src_blocks.is_empty() && !profile.has_parse_affecting_template_options();
 
         let compiled = if can_use_cache {
             if let Some(ref cached) = snapshot.cached_parse {

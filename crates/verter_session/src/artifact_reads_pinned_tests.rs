@@ -208,8 +208,9 @@ fn current_content_pinned_indexed_returns_none_after_eviction() {
 /// `current_derived_fact_hash(Route)` is the Route fact-validation
 /// oracle. With a stale artifact planted, a `get_any`-based oracle
 /// would return the planted stale `route_hash`; the content-pinned
-/// oracle recomputes the route surface hash from the live shallow
-/// state instead.
+/// observe-only oracle DECLINES (`None`) instead — fact capture never
+/// rebuilds a surface to sign it, so a dependent rooted on the prior
+/// Route fact fails warm validation and recomputes itself.
 #[test]
 fn route_derived_fact_hash_ignores_stale_artifact_route_hash() {
     let canonical = "/pinned/route_owner.ts";
@@ -227,25 +228,25 @@ fn route_derived_fact_hash_ignores_stale_artifact_route_hash() {
     let route_after_plant = host.current_derived_fact_hash(canonical, DerivedFactKind::Route);
 
     // Discriminating assertion: the oracle must NOT return the planted
-    // stale `route_hash`. Pre-fix (`get_any`) it returns
-    // `Some(STALE_HASH)`; post-fix (`current_content_pinned_indexed`)
-    // the pinned read misses the stale candidate and the recompute
-    // path produces the genuine current route surface hash.
+    // stale `route_hash`. A `get_any`-based oracle returns
+    // `Some(STALE_HASH)` here, confirming a stale dependent cache entry
+    // as valid — the exact stale-artifact-served-as-valid defect.
     assert_ne!(
         route_after_plant,
         Some(STALE_HASH),
         "current_derived_fact_hash(Route) MUST NOT surface the planted stale \
-         artifact's route_hash. A `get_any`-based oracle returns the stale \
-         hash here, confirming a stale dependent cache entry as valid — the \
-         exact stale-artifact-served-as-valid defect.",
+         artifact's route_hash.",
     );
-    // The pinned recompute must agree with the genuine current route
-    // surface (the fresh artifact's route hash, or a recompute of the
-    // same live shallow state).
+    // Observe-only contract: with ONLY the content-stale candidate in
+    // the store the content-pinned read misses, and fact capture must
+    // DECLINE (None) rather than rebuild the surface itself to sign it
+    // (capture is side-effect-free; the dependent rooted on the prior
+    // Route fact fails warm validation and recomputes through its own
+    // cold path).
     assert_eq!(
-        route_after_plant, route_fresh,
-        "the content-pinned Route oracle must reproduce the genuine current \
-         route surface hash regardless of the stale artifact in the store",
+        route_after_plant, None,
+        "the observe-only Route oracle must decline when no current \
+         artifact is observable — never recompute (build) at capture time",
     );
     assert!(
         route_fresh.is_some(),
@@ -433,45 +434,36 @@ fn indexed_for_current_content_pins_overlay_artifact_through_session_context() {
 }
 
 /// `HostStoreView::build` route-fact provenance — a STALE `IndexedReady`
-/// retained for a canonical whose current content is route-owned-shallow
-/// MUST NOT publish its stale `Route` derived hash, and MUST NOT suppress
-/// the current route-owned-shallow `Route` fact.
+/// retained for a canonical MUST NOT publish its stale `Route` derived
+/// hash, and MUST NOT suppress the `Route` fact derived from the
+/// canonical's CURRENT-content shallow surface.
 ///
 /// `HostStoreView::build` snapshots `FileArtifactStore::snapshot_all()`,
 /// which returns every retained `IndexedReady` regardless of content
-/// hash. Once eager eviction is retired, a stale older-content
-/// `IndexedReady` can linger for a canonical whose CURRENT content is
-/// only carried by a `RouteOwnedShallowEntry`. A build that
-/// unconditionally trusts the snapshotted `IndexedReady` would publish
-/// the stale artifact's route surface as the canonical's `Route` derived
-/// fact AND mark the canonical indexed-covered — suppressing the current
-/// route-owned-shallow `Route` fact below. The view's `Route` hash would
-/// then disagree with `current_route_surface_hash()` (the production
-/// route-fact oracle, which is content-pinned and skips the stale
-/// indexed artifact) until the stale artifact is swept — a false stale
-/// miss for every route-dependent cache entry.
+/// hash. A stale older-content `IndexedReady` planted for a canonical
+/// must never end up as the canonical's `Route` derived fact: the
+/// content-pinned `ensure_indexed_ready` read gates on the scheduler's
+/// current whole hash, MISSES the stale candidate, and re-materialises
+/// the CURRENT artifact — whose route surface the view then publishes,
+/// agreeing with `current_route_surface_hash()` (the production
+/// route-fact oracle, which is content-pinned).
 ///
 /// Discriminating fixture: `probe.ts` is materialised (real
 /// `IndexedReady` at the real content hash), then a synthetic STALE
 /// `IndexedReady` carrying a DIFFERENT file's shallow route surface is
 /// planted for it (`FileArtifactStore::insert` drains the real entry, so
-/// the store holds ONLY the stale candidate). A `RouteOwnedShallowEntry`
-/// for `probe.ts` is then materialised at the real current hash — the
-/// authoritative current route surface. The scheduler's content for
-/// `probe.ts` is never touched, so the tracked current whole hash stays
-/// at the real value while the lone retained `IndexedReady` is stale.
+/// the store holds ONLY the stale candidate). `ensure_indexed_ready` for
+/// `probe.ts` then re-materialises the current artifact at the real
+/// current hash. The scheduler's content for `probe.ts` is never
+/// touched, so the tracked current whole hash stays at the real value.
 ///
-/// - **Pre-fix tree:** the build's indexed loop inserts the stale
-///   artifact's route surface as `derived_hashes[(probe, Route)]` and
-///   marks `probe` indexed-covered, so the route-owned-shallow loop
-///   skips it. The view's `Route` hash is the STALE surface and
-///   disagrees with `current_route_surface_hash()` — this test FAILS.
-/// - **Post-fix tree:** the indexed loop gates on
-///   `indexed.whole_hash == tracked`; the stale artifact is skipped, so
-///   the route-owned-shallow loop publishes the current route surface.
-///   The view's `Route` hash equals `current_route_surface_hash()`.
+/// A permissive (`get_any`-style, non-hash-pinned) read regression would
+/// return the planted stale candidate instead of re-materialising; the
+/// view's `Route` hash would then be the STALE donor surface and
+/// disagree with `current_route_surface_hash()` — this test FAILS on
+/// that regression.
 #[test]
-fn host_store_view_route_fact_ignores_stale_indexed_when_current_is_route_owned() {
+fn host_store_view_route_fact_ignores_stale_indexed_after_current_rematerialization() {
     let probe = "/pinned/route_provenance_probe.ts";
     // The current content of `probe.ts` — a resolvable route surface.
     let (host, real_hash) = host_with_materialized_ts(
@@ -527,18 +519,18 @@ fn host_store_view_route_fact_ignores_stale_indexed_when_current_is_route_owned(
         .indexed()
         .insert(Arc::from(probe), Arc::new(stale));
 
-    // Materialise a `RouteOwnedShallowEntry` for `probe.ts` at its real
-    // current content hash — the authoritative current route surface.
-    // The route-owned producer publishes here because the only retained
-    // `IndexedReady` (the planted stale one) does not match the current
-    // content hash.
-    let route_owned = host
-        .ensure_route_owned_shallow_entry(probe)
-        .expect("route-owned-shallow entry must materialise for probe at the current hash");
+    // Re-materialise the canonical artifact for `probe.ts` through the
+    // content-pinned read. The hash-pinned lookup must MISS the planted
+    // stale candidate (its whole_hash is the stale sentinel, not the
+    // scheduler's current hash) and rebuild the CURRENT artifact.
+    let indexed = host
+        .ensure_indexed_ready(probe)
+        .expect("IndexedReady must re-materialise for probe at the current hash");
     assert_eq!(
-        route_owned.whole_hash, real_hash,
-        "fixture invariant: the route-owned-shallow entry is keyed by probe's real \
-         current content hash",
+        indexed.whole_hash, real_hash,
+        "fixture invariant: the re-materialised IndexedReady is pinned to probe's real \
+         current content hash — a permissive (non-hash-pinned) read would have returned \
+         the planted stale candidate instead",
     );
 
     // Build the production `HostStoreView`.
@@ -546,16 +538,16 @@ fn host_store_view_route_fact_ignores_stale_indexed_when_current_is_route_owned(
     let view_route_hash = view.derived_hash(probe, crate::resolver_core::DerivedFactKind::Route);
 
     // Discriminating assertion: the view's `Route` derived hash must be
-    // the CURRENT route surface (from the route-owned-shallow entry),
-    // NOT the planted stale artifact's surface.
+    // the CURRENT route surface (from the re-materialised current
+    // `IndexedReady`), NOT the planted stale artifact's surface.
     assert_eq!(
         view_route_hash,
         Some(current_route_surface),
-        "HostStoreView::build MUST publish the CURRENT route surface for a canonical \
-         whose only retained `IndexedReady` is stale — the route-owned-shallow entry is \
-         the current authority. A pre-fix build inserts the stale artifact's route \
-         surface (and suppresses the route-owned-shallow fallback via \
-         `indexed_route_canonicals`), so the view's Route hash is the stale surface.",
+        "HostStoreView::build MUST publish the CURRENT route surface for the canonical \
+         — the content-pinned `ensure_indexed_ready` read rejected the planted stale \
+         candidate and re-materialised the current artifact. A permissive read \
+         regression keeps the stale artifact, so the view's Route hash would be the \
+         stale donor surface.",
     );
     assert_ne!(
         view_route_hash,
@@ -573,177 +565,6 @@ fn host_store_view_route_fact_ignores_stale_indexed_when_current_is_route_owned(
         "HostStoreView::build's `Route` derived hash MUST agree with \
          `current_route_surface_hash()` — the producer and the validator must observe \
          one route surface for the canonical",
-    );
-}
-
-/// Companion to `host_store_view_route_fact_ignores_stale_indexed_when_current_is_route_owned`:
-/// the CURRENT `IndexedReady` exists but its shallow surface is NOT
-/// route-resolvable (the route export was removed by an edit), while a
-/// route-owned-shallow entry from a prior route-bearing version still
-/// LINGERS at the same content hash.
-///
-/// `HostStoreView::build`'s indexed loop must mark such a canonical in
-/// `indexed_route_canonicals` so the route-owned-shallow loop suppresses
-/// the lingering entry — a current `IndexedReady` is the route-surface
-/// authority for the canonical whether or not its surface is
-/// route-resolvable. The producer-side authority
-/// `current_route_surface_hash()` returns `None` (no route-owned-shallow
-/// fallback) the moment a current indexed artifact exists,
-/// route-resolvable or not; the store-view validator side must match, so
-/// the view ends up with NO `Route` derived fact for the canonical.
-///
-/// Discriminating fixture: `probe.ts` is materialised, then a synthetic
-/// CURRENT-content `IndexedReady` carrying a non-route-resolvable shallow
-/// surface (empty symbol/export inventory) is planted for it at the real
-/// content hash (`FileArtifactStore::insert` drains the real entry). A
-/// route-owned-shallow entry carrying a DONOR's route-bearing shallow
-/// surface is then published for `probe.ts` at the same real content
-/// hash — the lingering prior-version route-owned entry.
-///
-/// - **Pre-fix tree:** the indexed loop gates the
-///   `indexed_route_canonicals` mark on `has_resolvable_surface()`, so a
-///   current-but-non-route-resolvable `IndexedReady` does NOT mark the
-///   canonical. The route-owned-shallow loop therefore does not skip it
-///   and inserts the lingering route-owned `Route` hash into the view —
-///   the view carries a `Route` derived fact that `current_route_surface_hash()`
-///   (which returns `None`) cannot reproduce. This test FAILS.
-/// - **Post-fix tree:** the indexed loop marks the canonical in
-///   `indexed_route_canonicals` on `indexed.whole_hash == tracked` alone;
-///   the route-owned-shallow loop skips it, so the view has NO `Route`
-///   derived hash for it — agreeing with `current_route_surface_hash()`.
-#[test]
-fn host_store_view_suppresses_lingering_route_owned_hash_when_current_indexed_lacks_route_surface()
-{
-    let probe = "/pinned/route_suppression_probe.ts";
-    // The current content of `probe.ts` — a resolvable route surface.
-    let (host, real_hash) = host_with_materialized_ts(
-        probe,
-        "export interface Current { current: number; }\nexport const current = 1;\n",
-    );
-    assert_ne!(
-        real_hash, STALE_HASH,
-        "fixture invariant: the real content hash must differ from the stale sentinel",
-    );
-
-    // A DONOR file with a resolvable export surface. Its shallow state is
-    // harvested to give the lingering route-owned-shallow entry a genuine
-    // route-bearing surface (so the route-owned snapshot computes a
-    // `Some(route_hash)` the pre-fix view would publish).
-    let donor = "/pinned/route_suppression_donor.ts";
-    upsert_donor_with_distinct_surface(&host, donor);
-    let donor_indexed = host
-        .project_type_store()
-        .indexed()
-        .get_any(donor)
-        .expect("donor IndexedReady must materialise");
-    assert!(
-        donor_indexed.shallow_state.has_resolvable_surface(),
-        "fixture invariant: the donor surface must be route-resolvable so the \
-         lingering route-owned-shallow entry contributes a `Route` hash",
-    );
-    let lingering_route_surface =
-        crate::resolver_store::hash_route_surface(donor_indexed.shallow_state.as_ref());
-
-    // Plant a CURRENT-content `IndexedReady` for `probe.ts` whose shallow
-    // surface is NOT route-resolvable: clone the real artifact (so
-    // `whole_hash` stays at the real current content hash — this is the
-    // *current* indexed artifact, not a stale one) and swap in an empty
-    // shallow state. `has_resolvable_surface()` is then false, exactly the
-    // shape an edit that removes the file's last export would produce.
-    let real_probe_indexed = host
-        .project_type_store()
-        .indexed()
-        .get_any(probe)
-        .expect("real probe IndexedReady must exist before planting the current non-route one");
-    let non_route_shallow = {
-        use rustc_hash::{FxHashMap, FxHashSet};
-        crate::resolver_core::shallow_file_state::ShallowFileState {
-            whole_hash: real_hash,
-            exports: FxHashMap::default(),
-            wildcard_reexports: Vec::new(),
-            symbols: FxHashMap::default(),
-            value_symbols: FxHashMap::default(),
-            import_locals: FxHashSet::default(),
-            import_targets: FxHashMap::default(),
-            augmentation_scopes: Default::default(),
-            augmentation_value_scopes: Default::default(),
-            analysis: Arc::clone(&real_probe_indexed.shallow_state.analysis),
-        }
-    };
-    assert!(
-        !non_route_shallow.has_resolvable_surface(),
-        "fixture invariant: the planted current `IndexedReady` surface must NOT be \
-         route-resolvable — that is the scenario under test",
-    );
-    let mut current_non_route = (*real_probe_indexed).clone();
-    // `whole_hash` is kept at `real_hash` — the scheduler still tracks
-    // `real_hash`, so this artifact is the CURRENT-content indexed
-    // artifact (`indexed.whole_hash == tracked` in the view build), unlike
-    // the sibling test's deliberately-stale `STALE_HASH` artifact.
-    current_non_route.whole_hash = real_hash;
-    current_non_route.route_hash = None;
-    current_non_route.shallow_state = Arc::new(non_route_shallow);
-    host.project_type_store()
-        .indexed()
-        .insert(Arc::from(probe), Arc::new(current_non_route));
-
-    // The producer-side route-fact oracle: with a current `IndexedReady`
-    // whose surface is not route-resolvable, `current_route_surface_hash()`
-    // returns `None` and suppresses the route-owned-shallow fallback. The
-    // store-view build must agree.
-    assert_eq!(
-        host.current_route_surface_hash(probe),
-        None,
-        "fixture invariant: a current `IndexedReady` with a non-route-resolvable surface \
-         makes `current_route_surface_hash()` return `None` — the route-owned-shallow \
-         fallback is suppressed at the producer side",
-    );
-
-    // Plant a LINGERING route-owned-shallow entry for `probe.ts` at the
-    // real current content hash, carrying the donor's route-bearing
-    // shallow surface — the entry a prior route-bearing version of
-    // `probe.ts` left behind in `RouteOwnedShallowDb`.
-    let mut lingering =
-        crate::project_type_store::RouteOwnedShallowEntry::test_stub(Arc::from(probe));
-    lingering.whole_hash = real_hash;
-    lingering.shallow_state = Arc::clone(&donor_indexed.shallow_state);
-    host.project_type_store()
-        .route_owned_shallow()
-        .publish(Arc::from(probe), Arc::new(lingering));
-
-    // Build the production `HostStoreView`.
-    let view = host.resolver_store_view_read().into_owned_view();
-    let view_route_hash = view.derived_hash(probe, crate::resolver_core::DerivedFactKind::Route);
-
-    // Discriminating assertion: the view must carry NO `Route` derived
-    // hash for `probe.ts`. A current `IndexedReady` exists, so the
-    // route-owned-shallow fallback must be suppressed; the indexed
-    // surface is not route-resolvable, so the indexed loop contributes no
-    // `Route` fact either.
-    assert_eq!(
-        view_route_hash, None,
-        "HostStoreView::build MUST NOT publish a `Route` derived fact for a canonical \
-         whose current `IndexedReady` has a non-route-resolvable surface — the lingering \
-         route-owned-shallow entry must be suppressed via `indexed_route_canonicals`. A \
-         pre-fix build gates that mark on `has_resolvable_surface()`, so the lingering \
-         route-owned `Route` hash leaks into the view.",
-    );
-    assert_ne!(
-        view_route_hash,
-        Some(lingering_route_surface),
-        "HostStoreView::build MUST NOT publish the LINGERING route-owned-shallow entry's \
-         route surface as the canonical's `Route` derived fact once a current \
-         `IndexedReady` exists",
-    );
-    // The view's `Route` fact (absent) must agree with the production
-    // route-fact oracle `current_route_surface_hash()` (also `None`) —
-    // producer and validator must observe one route-surface verdict.
-    assert_eq!(
-        view_route_hash,
-        host.current_route_surface_hash(probe),
-        "HostStoreView::build's `Route` derived hash MUST agree with \
-         `current_route_surface_hash()` — both must observe NO route surface for a \
-         canonical whose current `IndexedReady` removed it",
     );
 }
 
@@ -777,7 +598,7 @@ fn upsert_donor_with_distinct_surface(host: &VerterHost, path: &str) {
 /// Pre-fix the entry count came from `FileArtifactStore::len()` (every
 /// keyed artifact — base + overlay-scoped) while the byte sum was taken
 /// over `snapshot_all()`, which filters to base
-/// (`FileArtifactKey::is_legacy`) keys only. In a session that
+/// (`FileArtifactKey::is_base`) keys only. In a session that
 /// materialised an overlay artifact the two figures describe different
 /// populations: the count includes the overlay candidate, the byte sum
 /// excludes it.
@@ -865,7 +686,7 @@ fn audit_store_snapshot_entry_and_byte_counts_share_one_population() {
         })
         .sum();
 
-    // The base-only oracle: the byte sum over `snapshot_all()` (legacy
+    // The base-only oracle: the byte sum over `snapshot_all()` (base
     // keys only). This is the population the PRE-FIX audit byte sum was
     // drawn from.
     let base_only_bytes: u64 = host

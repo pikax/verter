@@ -414,7 +414,7 @@ const STORE_VIEW_SNAPSHOT_RETRY_ATTEMPTS: usize = 3;
 ///      comparison IS the validity rail.
 ///
 /// Additive lazy loads observed mid-request (a dependency `FileArtifactStore`
-/// or `RouteOwnedShallowDb` publication that lands AFTER the snapshot was
+/// publication that lands AFTER the snapshot was
 /// built and does NOT bump the epoch) are NOT a soundness hole: for an
 /// untracked canonical the snapshot stays untracked → the request-scoped
 /// [`crate::resolver_core::CanonicalCompletionOverlay`] shadows it; for a
@@ -440,18 +440,13 @@ pub(crate) struct StoreViewValidationToken {
     /// augmentation-index mutation. This covers the BY-VALUE snapshot
     /// dimensions (`file_facts`, `derived_hashes`,
     /// `route_surface_index_fingerprints`) that a lazy
-    /// `ensure_indexed_ready` publication changes WITHOUT bumping
+    /// `ensure_indexed_ready_serve` publication changes WITHOUT bumping
     /// `store_view_epoch` — without it a manager-cached base view would
     /// go stale after a lazy publication and warm-hit validation would
     /// false-miss (a steady-state warm-cache regression). The
     /// lazy-publication burst during a cold compute is bounded, so the
     /// cache rebuilds once then stays warm.
     pub(crate) artifact_generation: u64,
-    /// Route-owned-shallow publication generation
-    /// ([`crate::project_type_store::RouteOwnedShallowDb::artifact_generation`]).
-    /// Same rationale as `artifact_generation` for the route-owned
-    /// `Route` derived-hash fallback the view snapshots by value.
-    pub(crate) route_owned_generation: u64,
     /// Additive derived-state generation
     /// ([`VerterHost::current_load_generation`]). Advances on additive
     /// `derived_raw_cache` mutations the base view snapshots BY VALUE but
@@ -474,7 +469,7 @@ pub(crate) struct StoreViewValidationToken {
     /// [`Self::externally_superseded_by`] — a cold compute's OWN
     /// dependency loads / route resolutions are its own work, not an
     /// external mutation, so they must not self-fence result promotion
-    /// (same treatment as `artifact_generation` / `route_owned_generation`).
+    /// (same treatment as `artifact_generation`).
     pub(crate) load_generation: u64,
     /// Workspace content/file-set generation
     /// ([`verter_workspace::WorkspaceAccess::content_generation`]).
@@ -495,9 +490,9 @@ pub(crate) struct StoreViewValidationToken {
     /// stayed put) for the snapshot's lifetime.
     ///
     /// Included in BOTH the `StoreViewManager` REUSE oracle and
-    /// [`Self::externally_superseded_by`]: unlike the three additive
+    /// [`Self::externally_superseded_by`]: unlike the two additive
     /// generations above, a cold compute's OWN work (loads,
-    /// `ensure_indexed_ready`, store-view builds) NEVER advances it —
+    /// `ensure_indexed_ready_serve`, store-view builds) NEVER advances it —
     /// only a real external file-set mutation does — so folding it into
     /// the supersession fingerprint cannot self-fence promotion.
     pub(crate) content_generation: u64,
@@ -539,14 +534,14 @@ impl StoreViewValidationToken {
     /// `content_generation` / env / identity change happened between the
     /// two captures.
     ///
-    /// Deliberately EXCLUDES `artifact_generation` /
-    /// `route_owned_generation` / `load_generation`: a cold compute
-    /// legitimately publishes indexed / route-owned artifacts AND loads
+    /// Deliberately EXCLUDES `artifact_generation` / `load_generation`:
+    /// a cold compute
+    /// legitimately publishes `IndexedReady` artifacts AND loads
     /// its dependencies (advancing those generations) as part of its own
     /// work. The publish fence must NOT treat the compute's OWN artifact
     /// publications or dependency loads as a supersession — only an
     /// external content/project/env/identity mutation invalidates the
-    /// snapshot the result was produced against. (Those three generations
+    /// snapshot the result was produced against. (Those two generations
     /// remain in the full token for the `StoreViewManager` REUSE oracle,
     /// where a post-build publication / load SHOULD trigger a rebuild on
     /// the next request.)
@@ -575,8 +570,8 @@ impl StoreViewValidationToken {
     /// env-hash shift that moves NO epoch) and its result MUST NOT be
     /// promoted to the shared cache.
     ///
-    /// Deliberately EXCLUDES `artifact_generation` /
-    /// `route_owned_generation` / `load_generation` for the SAME reason
+    /// Deliberately EXCLUDES `artifact_generation` / `load_generation`
+    /// for the SAME reason
     /// [`Self::externally_superseded_by`] does: a cold compute advances
     /// those generations as its OWN work (publishing artifacts, loading
     /// its dependencies, admitting its own routes), and folding them here
@@ -602,10 +597,6 @@ impl StoreViewValidationToken {
             store_view_epoch: host.current_store_view_epoch(),
             project_generation: host.project_type_store.project_generation(),
             artifact_generation: host.project_type_store.indexed().artifact_generation(),
-            route_owned_generation: host
-                .project_type_store
-                .route_owned_shallow()
-                .artifact_generation(),
             load_generation: host.current_load_generation(),
             content_generation: host.ws().content_generation(),
             env_hash_fold: fold_env_hashes(&env_hashes),
@@ -632,11 +623,12 @@ impl StoreViewValidationToken {
     /// external dimensions are coherent, and a follower on the same lane
     /// shares those dimensions.
     ///
-    /// Deliberately EXCLUDES `artifact_generation` / `route_owned_generation`
-    /// / `load_generation` for the SAME reason
+    /// Deliberately EXCLUDES `artifact_generation` / `load_generation`
+    /// for the SAME reason
     /// [`Self::external_supersession_fingerprint`] does: a cold compute
-    /// advances those generations as its OWN work (publishing indexed / route-
-    /// owned artifacts, loading its dependencies), so two concurrent identical
+    /// advances those generations as its OWN work (publishing
+    /// `IndexedReady` artifacts, loading its dependencies), so two
+    /// concurrent identical
     /// cold requests that snapshot at slightly different points in the load
     /// sweep observe DIFFERENT additive generations. Folding them into the
     /// lane identity would split those identical requests across distinct
@@ -655,7 +647,7 @@ impl StoreViewValidationToken {
 /// **No-torn-snapshot contract.** `HostStoreView::build` populates the
 /// per-canonical / per-domain snapshot maps (`whole_hashes`,
 /// `file_facts`, `derived_hashes`, …) one source at a time. Every
-/// token-relevant by-value dimension (the three additive generations,
+/// token-relevant by-value dimension (the two additive generations,
 /// the env-hash bundle, the project identity, the project generation)
 /// MUST be read BEFORE that population window opens and stamped into the
 /// view unchanged — never re-read live near the end of the build. If a
@@ -675,7 +667,6 @@ struct PreBuildTokenInputs {
     store_view_epoch: u64,
     project_generation: u64,
     artifact_generation: u64,
-    route_owned_generation: u64,
     load_generation: u64,
     content_generation: u64,
     env_hashes: crate::session_view::EnvHashes,
@@ -690,10 +681,6 @@ impl PreBuildTokenInputs {
             store_view_epoch: host.current_store_view_epoch(),
             project_generation: host.project_type_store.project_generation(),
             artifact_generation: host.project_type_store.indexed().artifact_generation(),
-            route_owned_generation: host
-                .project_type_store
-                .route_owned_shallow()
-                .artifact_generation(),
             load_generation: host.current_load_generation(),
             content_generation: host.ws().content_generation(),
             env_hashes: host.host_view_env_hashes(),
@@ -708,7 +695,6 @@ impl PreBuildTokenInputs {
             store_view_epoch: self.store_view_epoch,
             project_generation: self.project_generation,
             artifact_generation: self.artifact_generation,
-            route_owned_generation: self.route_owned_generation,
             load_generation: self.load_generation,
             content_generation: self.content_generation,
             env_hash_fold: fold_env_hashes(&self.env_hashes),
@@ -1376,13 +1362,12 @@ pub struct HostStoreView {
     /// a session-overlaid view is distinct from the base token and from
     /// another session's token.
     overlay_identity: Option<OverlayIdentity>,
-    /// Indexed-artifact + route-owned publication + first-time-load
+    /// Indexed-artifact publication + first-time-load
     /// generations captured at build time. View-level identity (not
     /// per-canonical content) so [`Self::validation_token`] can
     /// reconstruct the by-value-dimension generations without re-reading
     /// the host.
     artifact_generation: u64,
-    route_owned_generation: u64,
     load_generation: u64,
     /// Workspace content/file-set generation captured at build time
     /// (same single pre-build read window as the generations above) so
@@ -1426,7 +1411,6 @@ impl Default for HostStoreView {
             snapshot: Arc::new(StoreViewSnapshot::default()),
             overlay_identity: None,
             artifact_generation: 0,
-            route_owned_generation: 0,
             load_generation: 0,
             content_generation: 0,
         }
@@ -1810,7 +1794,8 @@ impl HostStoreView {
             // Compare the single PRE-build captured token against a fresh
             // live capture. Because the view was stamped entirely from
             // `pre`, this detects ANY mid-build advance of ANY token
-            // dimension (epoch, the three additive generations, env fold,
+            // dimension (epoch, the additive artifact / load generations,
+            // the content generation, env fold,
             // project identity, project generation) — including a dimension
             // that moved WITHOUT bumping `store_view_epoch` — and forces a
             // retry / `Superseded` rather than publishing a torn view whose
@@ -1926,7 +1911,7 @@ impl HostStoreView {
     /// cached values (semantic-graph `MemoEntry` self-roots, the
     /// path-precise fact rail, the legacy whole-hash rail) on the
     /// **overlay** content for every overlay-bearing canonical —
-    /// `ensure_indexed_ready` under a session resolves the overlay
+    /// `ensure_indexed_ready_serve` under a session resolves the overlay
     /// `IndexedReady`, and parse facts pin to the overlay content
     /// version. A warm read whose validation routed through the base
     /// view would compare overlay-rooted facts against base snapshots
@@ -2173,10 +2158,7 @@ impl HostStoreView {
                     // validation and recomputes through the edge-gated readers,
                     // which re-materialise the overlay surface — rather than
                     // copying a stale hash into the view.
-                    let edge_current = host.route_surface_is_edge_current(
-                        &overlay_indexed.shallow_state,
-                        overlay_indexed.edge_generation,
-                    );
+                    let edge_current = host.indexed_surface_is_current(canonical, overlay_indexed);
                     if overlay_indexed.shallow_state.has_resolvable_surface() && edge_current {
                         snapshot.derived_hashes.insert(
                             (
@@ -2264,7 +2246,6 @@ impl HostStoreView {
             store_view_epoch: self.mutation_epoch,
             project_generation: self.snapshot.project_generation,
             artifact_generation: self.artifact_generation,
-            route_owned_generation: self.route_owned_generation,
             load_generation: self.load_generation,
             content_generation: self.content_generation,
             env_hash_fold: fold_env_hashes(&self.snapshot.env_hashes),
@@ -2289,7 +2270,6 @@ impl HostStoreView {
         // comparison and forces a retry / `Superseded`.
         let snapshot_epoch = pre.store_view_epoch;
         let artifact_generation = pre.artifact_generation;
-        let route_owned_generation = pre.route_owned_generation;
         let load_generation = pre.load_generation;
         let content_generation = pre.content_generation;
         let mut snapshot = StoreViewSnapshot::default();
@@ -2338,67 +2318,56 @@ impl HostStoreView {
 
         // WASM-only: scheduler is unavailable on web; see CLAUDE.md "Scheduler as Sole Compile Authority".
 
-        // Canonicals that have a current-content `IndexedReady`
-        // artifact (`indexed.whole_hash == tracked`). The
-        // `route_owned_shallow` snapshot MUST NOT contribute a `Route`
-        // hash for any such canonical: the current-content indexed
-        // artifact is the sole route-surface authority, whether or not
-        // its surface is route-resolvable. A route-owned-shallow entry
-        // that lingers past an `IndexedReady` materialisation (the
-        // route-owned producer declines to publish a new entry once a
-        // content-matching `IndexedReady` exists, but a prior entry
-        // persists) would otherwise publish a route hash the producer
-        // authority `current_route_surface_hash` — which returns `None`
-        // as soon as a current indexed artifact exists — does not.
-        let mut indexed_route_canonicals: rustc_hash::FxHashSet<String> =
-            rustc_hash::FxHashSet::default();
-
-        // Snapshot FileArtifactStore entries into the store view.
+        // Snapshot FileArtifactStore entries into the store view. The
+        // `IndexedReady` artifact is the SOLE route-surface source —
+        // identical to the producer (`current_route_surface_hash`), so
+        // producer and validator stay on one source order.
         for (canonical_id, indexed) in host.project_type_store.indexed().snapshot_all() {
             let canonical_str = canonical_id.as_ref().to_owned();
             // The tracked current whole hash for this canonical: the
-            // value seeded earlier from `effective_file_state`, or
-            // `indexed.whole_hash` when no current state was tracked.
-            let tracked_whole_hash = *snapshot
-                .whole_hashes
-                .entry(canonical_str.clone())
-                .or_insert(indexed.whole_hash);
+            // value seeded earlier from `effective_file_state`, or — for
+            // an artifact-only canonical the single authority gate
+            // accepts — `indexed.whole_hash`. A canonical with NO
+            // scheduler state that fails the gate (absent file,
+            // scheduler-superseded leftover) contributes NOTHING: the
+            // accessors reject it, so manufacturing a tracked hash from
+            // the artifact itself would let stale
+            // FileWholeHash/Route/file facts validate against state no
+            // read path will serve.
+            let tracked_whole_hash = match snapshot.whole_hashes.get(&canonical_str) {
+                Some(tracked) => *tracked,
+                None => {
+                    if !host
+                        .artifact_only_candidate_is_fresh(&canonical_str, indexed.edge_generation)
+                    {
+                        continue;
+                    }
+                    snapshot
+                        .whole_hashes
+                        .insert(canonical_str.clone(), indexed.whole_hash);
+                    indexed.whole_hash
+                }
+            };
             // A current-content `IndexedReady` (`indexed.whole_hash ==
             // tracked`) is the route-surface authority for this
-            // canonical. Mark it in `indexed_route_canonicals` so the
-            // route-owned-shallow loop below suppresses any lingering
-            // fallback entry — whether or not the indexed surface is
-            // route-resolvable: `current_route_surface_hash` returns
-            // `None` (no route-owned fallback) the moment a current
-            // indexed artifact exists, route-resolvable or not, and the
-            // store-view validator side must match. A stale
-            // `IndexedReady` retained in `snapshot_all()` (whose
-            // `whole_hash` no longer matches `tracked`) is NOT marked,
-            // so a canonical whose current content is route-owned-only
-            // still gets its route hash from the fallback loop. The
-            // `Route` derived fact itself is contributed only when the
-            // current indexed surface is route-resolvable.
-            // The current-content indexed artifact is the route-surface
-            // authority — and suppresses the route-owned fallback — ONLY
-            // while edge-current. A wildcard-bearing artifact whose baked
-            // `export *` edges are stale (a dependency appeared / retargeted
-            // while this file's content stayed put) must neither contribute
-            // its stale `Route` hash NOR suppress the (edge-gated) fallback,
-            // so a warm entry rooted on the stale hash recomputes.
+            // canonical. The `Route` derived fact is contributed only
+            // when the current indexed surface is route-resolvable AND
+            // edge-current: a wildcard-bearing artifact whose baked
+            // `export *` edges are stale (a dependency appeared /
+            // retargeted while this file's content stayed put) must not
+            // contribute its stale `Route` hash, so a warm entry rooted
+            // on the stale hash recomputes.
             if indexed.whole_hash == tracked_whole_hash
-                && host
-                    .route_surface_is_edge_current(&indexed.shallow_state, indexed.edge_generation)
+                && host.indexed_surface_is_current(&canonical_str, &indexed)
+                && indexed.shallow_state.has_resolvable_surface()
             {
-                indexed_route_canonicals.insert(canonical_str.clone());
-                if indexed.shallow_state.has_resolvable_surface() {
-                    snapshot.derived_hashes.insert(
-                        (
-                            canonical_str.clone(),
-                            crate::resolver_core::DerivedFactKind::Route,
-                        ),
-                        hash_route_surface(&indexed.shallow_state),
-                    );
-                }
+                snapshot.derived_hashes.insert(
+                    (
+                        canonical_str.clone(),
+                        crate::resolver_core::DerivedFactKind::Route,
+                    ),
+                    hash_route_surface(&indexed.shallow_state),
+                );
             }
             // The `ImportRoute` derived fact must reflect the
             // generation-current import-target surface. A file with
@@ -2419,43 +2388,6 @@ impl HostStoreView {
                     ),
                     hash,
                 );
-            }
-        }
-
-        // Snapshot the route-only shallow cache's `Route` hashes — but
-        // ONLY for canonicals that have no live current-content
-        // `IndexedReady` route fact. The current-content `IndexedReady`
-        // artifact is the single canonical route-surface authority: its
-        // `Route` hash was inserted by the loop above. A
-        // route-owned-shallow entry is the fallback shape for a
-        // route-only file the indexed store has not (yet) materialised;
-        // the route-owned producer itself declines to publish a new
-        // entry once a content-matching `IndexedReady` exists. A
-        // route-owned entry that LINGERED past an `IndexedReady`
-        // materialisation must not overwrite the indexed `Route` hash —
-        // a cold-compute observing the indexed surface would record a
-        // hash this view could not reproduce, producing a false stale
-        // miss. Centralised source order: indexed `Route` first, the
-        // route-owned `Route` only for canonicals the indexed loop did
-        // not cover.
-        for route_owned in host.snapshot_route_owned_shallow_cache_entries() {
-            if indexed_route_canonicals.contains(&route_owned.canonical_id) {
-                continue;
-            }
-            let tracked_whole_hash = *snapshot
-                .whole_hashes
-                .entry(route_owned.canonical_id.clone())
-                .or_insert(route_owned.whole_hash);
-            if tracked_whole_hash == route_owned.whole_hash {
-                if let Some(route_hash) = route_owned.route_hash {
-                    snapshot.derived_hashes.insert(
-                        (
-                            route_owned.canonical_id.clone(),
-                            crate::resolver_core::DerivedFactKind::Route,
-                        ),
-                        route_hash,
-                    );
-                }
             }
         }
 
@@ -2520,7 +2452,6 @@ impl HostStoreView {
             snapshot: Arc::new(snapshot),
             overlay_identity: None,
             artifact_generation,
-            route_owned_generation,
             load_generation,
             content_generation,
         };
@@ -2556,7 +2487,7 @@ impl HostStoreView {
         // the live content's facts.
         //
         // When the artifact store has not yet been refreshed for
-        // the new content (lazy `ensure_indexed_ready` has not run
+        // the new content (lazy `ensure_indexed_ready_serve` has not run
         // yet), the `file_facts` entry for that canonical stays
         // ABSENT. The parse-domain validator interprets absence as
         // a miss (`validates_parse_domain` returns `false` for any
@@ -2753,7 +2684,7 @@ impl HostStoreView {
             // externally supersedes the other. `epoch` alone is insufficient
             // — a view's validity can change (env, identity, project /
             // overlay) at an unchanged `store_view_epoch`. The additive
-            // artifact / route-owned / load generations are EXCLUDED: a cold
+            // artifact / load generations are EXCLUDED: a cold
             // compute advances them as its own work, so folding them would
             // split identical concurrent cold requests across lanes (see
             // `StoreViewValidationToken::lane_fingerprint`).
@@ -2888,17 +2819,68 @@ pub(crate) fn hash_import_route_targets(
 
 pub(crate) fn hash_route_surface(state: &crate::resolver_core::ShallowFileState) -> Hash16 {
     hash16_from_sorted(|hasher| {
-        // Hash sorted export names.
-        let mut export_names: Vec<&str> = state.exports.keys().map(|s| s.as_str()).collect();
-        export_names.sort_unstable();
-        for name in &export_names {
+        // Hash sorted exports WITH their routing targets. A named
+        // reexport bakes a resolved dependency canonical exactly like a
+        // wildcard edge does; hashing only the export NAME would leave
+        // the `Route` fact blind to a dependency-set retarget (a
+        // `.d.ts` companion or a more-specific sibling appearing moves
+        // `Reexport.canonical_id` while the owner's content — and the
+        // export name set — stays put), so a stale cached route would
+        // keep validating against the refreshed surface.
+        let mut exports: Vec<(
+            &str,
+            &crate::resolver_core::shallow_file_state::ExportTarget,
+        )> = state
+            .exports
+            .iter()
+            .map(|(name, target)| (name.as_str(), target))
+            .collect();
+        exports.sort_unstable_by_key(|(name, _)| *name);
+        for (name, target) in &exports {
             name.hash(hasher);
+            match target {
+                crate::resolver_core::shallow_file_state::ExportTarget::Local { symbol_name } => {
+                    0u8.hash(hasher);
+                    symbol_name.hash(hasher);
+                }
+                crate::resolver_core::shallow_file_state::ExportTarget::Reexport {
+                    source_specifier,
+                    original_name,
+                    canonical_id,
+                    is_type,
+                } => {
+                    1u8.hash(hasher);
+                    source_specifier.hash(hasher);
+                    original_name.hash(hasher);
+                    canonical_id.hash(hasher);
+                    is_type.hash(hasher);
+                }
+            }
         }
 
         // Hash wildcard reexport source specifiers in declaration order.
         for wildcard in &state.wildcard_reexports {
             wildcard.source_specifier.hash(hasher);
             wildcard.canonical_id.hash(hasher);
+        }
+
+        // Hash sorted import targets — baked dependency canonicals the
+        // prepared-decl / bare-name chains traverse; a retarget moves
+        // the route surface the same way a reexport retarget does.
+        let mut import_targets: Vec<(
+            &str,
+            &crate::resolver_core::shallow_file_state::ImportTarget,
+        )> = state
+            .import_targets
+            .iter()
+            .map(|(name, target)| (name.as_str(), target))
+            .collect();
+        import_targets.sort_unstable_by_key(|(name, _)| *name);
+        for (name, target) in &import_targets {
+            name.hash(hasher);
+            target.source_specifier.hash(hasher);
+            target.imported_name.hash(hasher);
+            target.canonical_id.hash(hasher);
         }
 
         // Hash the file content hash.
@@ -2997,7 +2979,7 @@ impl crate::resolver_core::StoreView for HostStoreView {
                     // the facts were just materialized from current disk/workspace
                     // state and are valid. This avoids forcing every dependency
                     // access through the expensive permissive fallback path in
-                    // `ensure_indexed_ready`.
+                    // `ensure_indexed_ready_serve`.
                     None => true,
                 }
             }
@@ -4177,7 +4159,7 @@ impl VerterHost {
         // artifact (base + overlay-scoped); the byte sum therefore
         // routes through `snapshot_artifacts()`, which enumerates that
         // same full keyed set. `snapshot_all()` is base-only (it
-        // filters to `FileArtifactKey::is_legacy` keys), so summing
+        // filters to `FileArtifactKey::is_base` keys), so summing
         // bytes over it while counting entries via `len()` would report
         // two different populations in a session that materialised
         // overlay artifacts.

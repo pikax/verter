@@ -6,7 +6,7 @@
 //! traversal-mode flags (`materialize_symbols`, `route_exports_only`),
 //! and a `RefCell<RouteShallowStateCache>` for de-duping repeated
 //! shallow-state reads inside a single frontier traversal. The cache
-//! is **not** a host-side mirror of `ProjectTypeStore.route_owned_shallow`
+//! is **not** a host-side mirror of the project-store artifact cache
 //! — see the field doc-comment.
 
 use std::cell::RefCell;
@@ -42,8 +42,8 @@ pub(crate) struct HostFrontierAdapter<'a> {
     pub ctx: &'a dyn crate::resolver_core::resolver_context::ResolverContext,
     /// Request-scoped memoisation of route-only [`ShallowFileState`] entries
     /// for the duration of a single frontier traversal. **NOT a host-side
-    /// mirror** of the host's `route_owned_shallow` cache (the
-    /// host cache lives on `ProjectTypeStore.route_owned_shallow`); this
+    /// mirror** of the host's artifact cache (that authority lives on
+    /// `ProjectTypeStore::indexed`); this
     /// `RefCell<...>` exists only to dedupe repeated reads of the same
     /// canonical within one request, so request-level callers do not
     /// repeatedly clone the host-cached `Arc`. Lifetime bounded to the
@@ -60,7 +60,7 @@ impl crate::resolver_core::FrontierHost for HostFrontierAdapter<'_> {
         // canonical; `identity` pairs it with `analysis_canonical` (the
         // `normalized_analysis_canonical` rewrite). The overlay branches
         // below (`lookup_overlay_artifacts`,
-        // `ensure_indexed_ready_with_view`) operate on the RAW owner —
+        // `ensure_indexed_ready_serve_with_view`) operate on the RAW owner —
         // the `SessionView` overlay maps + the overlay-detection gate
         // are raw-keyed, and normalising first would (a) miss the
         // overlay-scoped artifact key and (b) make the overlay-detection
@@ -91,7 +91,8 @@ impl crate::resolver_core::FrontierHost for HostFrontierAdapter<'_> {
                 // (no overlay-blindness).
                 if let Some(indexed) = self
                     .host
-                    .materialize_overlay_indexed_ready_with_view(canonical_id, view)
+                    .materialize_overlay_indexed_ready_serve_with_view(canonical_id, view)
+                    .map(|serve| serve.indexed)
                 {
                     if indexed.shallow_state.has_resolvable_surface() || !self.materialize_symbols {
                         if indexed.shallow_state.has_wildcard_reexports() {
@@ -105,20 +106,19 @@ impl crate::resolver_core::FrontierHost for HostFrontierAdapter<'_> {
                 }
             } else if let Some(facts) = identity.lookup_overlay_artifacts(self.host, view) {
                 // Base-passthrough view (the canonical is not overlaid): the
-                // legacy-key read returns the published BASE artifact. Serve it
+                // base-key read returns the published BASE artifact. Serve it
                 // only while edge-current; an edge-stale wildcard `export *`
                 // surface falls through to the gated base reads below
                 // (`route_shallow_state` / `current_content_pinned_indexed` /
-                // `ensure_indexed_ready`), which re-resolve the edges against
+                // `ensure_indexed_ready_serve`), which re-resolve the edges against
                 // the live file set. Routing it through the overlay materialiser
                 // would instead build a redundant overlay candidate from base
                 // content.
                 if (facts.indexed.shallow_state.has_resolvable_surface()
                     || !self.materialize_symbols)
-                    && self.host.route_surface_is_edge_current(
-                        &facts.indexed.shallow_state,
-                        facts.indexed.edge_generation,
-                    )
+                    && self
+                        .host
+                        .indexed_surface_is_current(canonical_id, &facts.indexed)
                 {
                     if facts.indexed.shallow_state.has_wildcard_reexports() {
                         self.host
@@ -144,7 +144,7 @@ impl crate::resolver_core::FrontierHost for HostFrontierAdapter<'_> {
         // stale symbol surface (e.g. a pre-rename type body). The pinned
         // read serves only a content-current artifact for a
         // scheduler-tracked canonical; on a miss the materialising path
-        // below (`ensure_indexed_ready`, overlay-aware) rebuilds at the
+        // below (`ensure_indexed_ready_serve`, overlay-aware) rebuilds at the
         // current content. `artifact_current_indexed` covers a genuinely
         // artifact-only canonical (foreign source / test seed).
         if let Some(indexed) = self
@@ -163,22 +163,26 @@ impl crate::resolver_core::FrontierHost for HostFrontierAdapter<'_> {
             }
         }
 
-        // Materialize through ensure_indexed_ready (view-aware when a
+        // Materialize through ensure_indexed_ready_serve (view-aware when a
         // session view is active). The view-aware path is driven on the
         // RAW `canonical_id` — its overlay-detection gate
         // (`overlay_content_hash_for`) is raw-keyed, so a normalised id
-        // would fail to detect the overlay; `ensure_indexed_ready`
+        // would fail to detect the overlay; `ensure_indexed_ready_serve`
         // normalises internally on the base-path fall-through. The base
         // (no-view) path takes the normalised analysis canonical
         // directly.
+        // Structurally read-only: the frontier reads the shallow surface;
+        // derived shared-cache entries downstream gate on the
+        // fenced-serve chokepoint flag / walk-level fenced signals.
         let facts = if let Some(view) = self.view {
-            crate::host_manage::overlay_priority::ensure_indexed_ready_with_view(
+            crate::host_manage::overlay_priority::ensure_indexed_ready_serve_with_view(
                 self.host,
                 view,
                 canonical_id,
             )?
+            .indexed
         } else {
-            self.host.ensure_indexed_ready(canonical)?
+            self.host.ensure_indexed_ready_serve(canonical)?.indexed
         };
         if facts.shallow_state.has_resolvable_surface() || !self.materialize_symbols {
             if facts.shallow_state.has_wildcard_reexports() {

@@ -887,8 +887,8 @@ fn request_view_is_absent_from_crate_sources() {
         ),
         ("host_resolve/mod.rs", include_str!("host_resolve/mod.rs")),
         (
-            "host_resolve/route_owned_shallow.rs",
-            include_str!("host_resolve/route_owned_shallow.rs"),
+            "host_resolve/route_surface.rs",
+            include_str!("host_resolve/route_surface.rs"),
         ),
         (
             "host_resolve/test_guards.rs",

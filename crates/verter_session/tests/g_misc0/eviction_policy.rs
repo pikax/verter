@@ -22,10 +22,10 @@ fn synthetic_indexed(content_hash_seed: u8) -> Arc<IndexedReady> {
     Arc::new(IndexedReady::new_for_test(h))
 }
 
-fn legacy_key(canonical: &str, content_hash_seed: u8) -> FileArtifactKey {
+fn base_key(canonical: &str, content_hash_seed: u8) -> FileArtifactKey {
     let mut h = [0u8; 16];
     h[0] = content_hash_seed;
-    FileArtifactKey::legacy_for_test(Arc::from(canonical), h)
+    FileArtifactKey::base_for_test(Arc::from(canonical), h)
 }
 
 /// Discrimination: per-canonical retention caps the number
@@ -40,7 +40,7 @@ fn per_canonical_retention_evicts_oldest_variants_first() {
     // versions coexist; the legacy `insert` always drained prior
     // versions and would defeat the test).
     for seed in 0..5u8 {
-        let key = legacy_key("/x.ts", seed);
+        let key = base_key("/x.ts", seed);
         let indexed = synthetic_indexed(seed);
         let artifacts =
             Arc::new(verter_session::file_artifact_store::FileArtifacts::with_indexed(indexed));
@@ -81,7 +81,7 @@ fn per_canonical_retention_evicts_oldest_variants_first() {
 fn per_canonical_retention_one_keeps_only_top_variant() {
     let store = FileArtifactStore::new();
     for seed in 0..3u8 {
-        let key = legacy_key("/x.ts", seed);
+        let key = base_key("/x.ts", seed);
         let indexed = synthetic_indexed(seed);
         let artifacts =
             Arc::new(verter_session::file_artifact_store::FileArtifacts::with_indexed(indexed));
@@ -108,7 +108,7 @@ fn per_canonical_retention_one_keeps_only_top_variant() {
 fn per_canonical_retention_max_disables_cap() {
     let store = FileArtifactStore::new();
     for seed in 0..10u8 {
-        let key = legacy_key("/x.ts", seed);
+        let key = base_key("/x.ts", seed);
         let indexed = synthetic_indexed(seed);
         let artifacts =
             Arc::new(verter_session::file_artifact_store::FileArtifacts::with_indexed(indexed));
@@ -135,7 +135,7 @@ fn promote_threshold_retains_hot_entries() {
     // canonicals).
     for i in 0..10u8 {
         let canonical = format!("/c{i}.ts");
-        let key = FileArtifactKey::legacy_for_test(Arc::from(canonical.as_str()), [i; 16]);
+        let key = FileArtifactKey::base_for_test(Arc::from(canonical.as_str()), [i; 16]);
         let indexed = Arc::new(IndexedReady::new_for_test([i; 16]));
         let artifacts =
             Arc::new(verter_session::file_artifact_store::FileArtifacts::with_indexed(indexed));
@@ -147,7 +147,7 @@ fn promote_threshold_retains_hot_entries() {
     // (above the threshold of 2). Entries 3..10 remain "cold".
     for i in 0..3u8 {
         let canonical = format!("/c{i}.ts");
-        let key = FileArtifactKey::legacy_for_test(Arc::from(canonical.as_str()), [i; 16]);
+        let key = FileArtifactKey::base_for_test(Arc::from(canonical.as_str()), [i; 16]);
         for _ in 0..3 {
             let _ = store.get_artifacts(&key);
         }
@@ -162,7 +162,7 @@ fn promote_threshold_retains_hot_entries() {
     // Cold entries: zero hits.
     for i in 3..10u8 {
         let canonical = format!("/c{i}.ts");
-        let key = FileArtifactKey::legacy_for_test(Arc::from(canonical.as_str()), [i; 16]);
+        let key = FileArtifactKey::base_for_test(Arc::from(canonical.as_str()), [i; 16]);
         assert_eq!(
             store.hit_count(&key),
             0,
@@ -218,14 +218,14 @@ fn promote_threshold_zero_falls_back_to_pure_recency() {
     let store = FileArtifactStore::new();
     for i in 0..10u8 {
         let canonical = format!("/c{i}.ts");
-        let key = FileArtifactKey::legacy_for_test(Arc::from(canonical.as_str()), [i; 16]);
+        let key = FileArtifactKey::base_for_test(Arc::from(canonical.as_str()), [i; 16]);
         let indexed = Arc::new(IndexedReady::new_for_test([i; 16]));
         let artifacts =
             Arc::new(verter_session::file_artifact_store::FileArtifacts::with_indexed(indexed));
         store.insert_artifacts(key, artifacts);
     }
     // Bump access for entry 9 so it has the freshest tick.
-    let bump_key = FileArtifactKey::legacy_for_test(Arc::from("/c9.ts"), [9u8; 16]);
+    let bump_key = FileArtifactKey::base_for_test(Arc::from("/c9.ts"), [9u8; 16]);
     let _ = store.get_artifacts(&bump_key);
 
     store.evict_lru_promoted(3, 0);

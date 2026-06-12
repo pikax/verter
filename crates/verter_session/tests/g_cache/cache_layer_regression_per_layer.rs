@@ -62,13 +62,6 @@ fn layer_indexed_get_misses_increment_per_request_counter() {
             .load(Ordering::Relaxed),
         0
     );
-    assert_eq!(
-        ctx.cache_counters
-            .route_owned_shallow
-            .misses
-            .load(Ordering::Relaxed),
-        0
-    );
 }
 
 #[test]
@@ -135,43 +128,14 @@ fn layer_owner_import_get_miss_increments_per_request_counter() {
 }
 
 #[test]
-fn layer_route_owned_shallow_get_misses_increment_per_request_counter() {
-    use verter_session::project_type_store::RouteOwnedShallowDb;
-
-    let db = RouteOwnedShallowDb::new();
-    let ctx = make_ctx();
-    let _g = RequestContextGuard::install(Arc::clone(&ctx));
-
-    let _ = db.get("/missing", Default::default());
-    let _ = db.get_any("/missing-any");
-
-    assert_eq!(
-        ctx.cache_counters
-            .route_owned_shallow
-            .hits
-            .load(Ordering::Relaxed),
-        0
-    );
-    assert_eq!(
-        ctx.cache_counters
-            .route_owned_shallow
-            .misses
-            .load(Ordering::Relaxed),
-        2
-    );
-    assert_eq!(ctx.cache_counters.indexed.misses.load(Ordering::Relaxed), 0);
-}
-
-#[test]
-fn all_fourteen_cache_layers_present_and_default_to_zero() {
+fn all_thirteen_cache_layers_present_and_default_to_zero() {
     let ctx = make_ctx();
     // Structural regression: each named layer must compile-time
     // exist. Reading the field forces the compiler to verify it.
-    let pairs: [(u64, u64); 14] = [
+    let pairs: [(u64, u64); 13] = [
         ctx.cache_counters.indexed.snapshot(),
         ctx.cache_counters.analysis.snapshot(),
         ctx.cache_counters.owner_import.snapshot(),
-        ctx.cache_counters.route_owned_shallow.snapshot(),
         ctx.cache_counters.component_meta.snapshot(),
         ctx.cache_counters.route_db.snapshot(),
         ctx.cache_counters.ref_cycle.snapshot(),
@@ -233,13 +197,6 @@ fn cross_layer_non_leakage_indexed_to_analysis() {
     assert_eq!(
         ctx.cache_counters
             .owner_import
-            .misses
-            .load(Ordering::Relaxed),
-        0
-    );
-    assert_eq!(
-        ctx.cache_counters
-            .route_owned_shallow
             .misses
             .load(Ordering::Relaxed),
         0

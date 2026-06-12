@@ -134,7 +134,6 @@ struct LayerSums {
     indexed: (u64, u64),
     analysis: (u64, u64),
     owner_import: (u64, u64),
-    route_owned_shallow: (u64, u64),
     component_meta: (u64, u64),
     route_db: (u64, u64),
     ref_cycle: (u64, u64),
@@ -161,14 +160,6 @@ impl LayerSums {
             .owner_import
             .1
             .saturating_add(breakdown.owner_import.misses);
-        self.route_owned_shallow.0 = self
-            .route_owned_shallow
-            .0
-            .saturating_add(breakdown.route_owned_shallow.hits);
-        self.route_owned_shallow.1 = self
-            .route_owned_shallow
-            .1
-            .saturating_add(breakdown.route_owned_shallow.misses);
         self.component_meta.0 = self
             .component_meta
             .0
@@ -255,11 +246,6 @@ impl LayerSums {
                 layer: "owner_import",
                 hits: self.owner_import.0,
                 misses: self.owner_import.1,
-            },
-            LayerTotals {
-                layer: "route_owned_shallow",
-                hits: self.route_owned_shallow.0,
-                misses: self.route_owned_shallow.1,
             },
             LayerTotals {
                 layer: "component_meta",

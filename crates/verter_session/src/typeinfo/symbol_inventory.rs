@@ -57,13 +57,15 @@ impl VerterHost {
     #[must_use]
     pub fn list_file_symbols(&self, canonical_id: &str) -> Vec<SymbolEntry> {
         // Ensure the canonical post-parse artifact is materialised
-        // through the shared host pipeline. `ensure_indexed_ready`
+        // through the shared host pipeline. `ensure_indexed_ready_serve`
         // builds (or reuses) the `IndexedReady` for `canonical_id`,
         // which carries both the shallow inventory we walk for
         // names AND the analysis snapshot we use for spans. Calling
         // it here is idempotent: warm hits short-circuit on the
         // cached entry; cold misses populate it once.
-        let facts_arc = self.ensure_indexed_ready(canonical_id);
+        let facts_arc = self
+            .ensure_indexed_ready_serve(canonical_id)
+            .map(|serve| serve.indexed);
         let Some(facts) = facts_arc.as_ref() else {
             return Vec::new();
         };

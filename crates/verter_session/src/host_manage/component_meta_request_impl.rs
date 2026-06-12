@@ -100,7 +100,7 @@ pub struct CapturedComponentMetaInputs {
 /// [`CanonicalCompletionOverlay`](crate::resolver_core::CanonicalCompletionOverlay)
 /// — built ONCE at adapter construction time and shared by every
 /// resolver call inside the request. Mid-request `ensure_loaded` /
-/// `ensure_indexed_ready` successes promote canonicals into THIS
+/// `ensure_indexed_ready_serve` successes promote canonicals into THIS
 /// overlay; subsequent reads through the same request observe the
 /// promotions through the `RequestStoreView` shadowing rail.
 ///
@@ -173,7 +173,7 @@ impl ComponentMetaRequestHost for VerterHost {
                 snapshot.template.is_some(),
             ),
         );
-        let facts = self.ensure_indexed_ready(canonical)?;
+        let facts = self.ensure_indexed_ready_serve(canonical)?.indexed;
         let whole_hash = facts.whole_hash;
         let store_read_ms = store_read_started
             .map(|started| started.elapsed().as_secs_f64() * 1000.0)
@@ -436,7 +436,7 @@ impl<'a> ComponentMetaRequestHost for ViewBoundRequestHost<'a> {
         // session-host paths (which already rebind through
         // `from_executor_snapshot`). Taking a SECOND fresh base read here
         // would diverge from the fence: under additive store-view churn —
-        // which advances the artifact / route-owned / load generations the
+        // which advances the artifact / load generations the
         // external-supersession fingerprint EXCLUDES — that second read can be
         // `ReturnOnly` while the executor snapshot is `Current`, so the fence
         // would promote a result computed from a non-current seed.
@@ -589,7 +589,7 @@ impl<'a> ComponentMetaRequestHost for SessionRequestHost<'a> {
             format!("owner={} session={}", canonical, self.runtime.session_id()),
         );
         let snapshot = host.get_raw_analysis_snapshot(canonical)?;
-        let facts = host.ensure_indexed_ready(canonical)?;
+        let facts = host.ensure_indexed_ready_serve(canonical)?.indexed;
         let whole_hash = facts.whole_hash;
         let store_read_ms = store_read_started
             .map(|started| started.elapsed().as_secs_f64() * 1000.0)
@@ -642,7 +642,7 @@ impl<'a> ComponentMetaRequestHost for SessionRequestHost<'a> {
         // reuses it rather than rebuilding a fresh workspace snapshot.
         // The shared overlay (`self.overlay`) lives across capture /
         // try-get-cached / compute boundaries so canonicals promoted
-        // mid-request by `ensure_loaded` / `ensure_indexed_ready` stay
+        // mid-request by `ensure_loaded` / `ensure_indexed_ready_serve` stay
         // visible. `base_is_current` carries the snapshot's currentness so
         // the `HostResolverContext` fails its nested warm-cache probes
         // closed on a non-current seed.

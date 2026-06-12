@@ -28,7 +28,7 @@ use verter_semantic::facts::registry::{InternedGlobPattern, InternedSpecifier};
 use verter_session::fact_emission::emit_parse_facts;
 use verter_session::file_artifact_store::{
     AugmentationTargetKey, AugmentationTargetKind, FileArtifactKey, FileArtifactStore,
-    FileArtifacts, ProjectIdentity, LEGACY_PARSER_VERSION,
+    FileArtifacts, ProjectIdentity, CURRENT_PARSER_VERSION,
 };
 use verter_session::project_type_store::IndexedReady;
 use verter_session::resolver_core::shallow_file_state::ShallowFileState;
@@ -72,22 +72,13 @@ fn build_indexed_with_source(raw: &str, whole_hash: [u8; 16]) -> Arc<IndexedRead
     // facts) is populated, exactly as production does.
     let env = verter_semantic::analysis::type_eval_build::parse_and_build_env(raw);
     let shallow = ShallowFileState::from_analysis(whole_hash, empty_external(), Some(&env));
-    Arc::new(IndexedReady {
+    Arc::new(IndexedReady::new_for_test_with_state(
         whole_hash,
-        shallow_state: Arc::new(shallow),
-        import_routes: Arc::new(FxHashMap::default()),
-        import_route_hash: None,
-        route_hash: None,
-        edge_generation: 0,
-        raw_source: Arc::from(raw),
-        eval_source: Arc::from(""),
-        cached_parse: None,
-        script_analysis: None,
-        export_signatures: None,
-        snapshot: Arc::new(verter_session::FileAnalysisSnapshot::default()),
-        external_type_analysis: empty_external(),
-        declares_interface_app_config: false,
-    })
+        Arc::new(shallow),
+        Arc::from(raw),
+        Arc::from(""),
+        empty_external(),
+    ))
 }
 
 /// Insert a file artifact into `store` with parse-domain facts +
@@ -114,7 +105,7 @@ fn insert_artifact_from_fixture(
         canonical: Arc::from(canonical),
         content_hash,
         parse_env_hash: [0u8; 16],
-        parser_version: LEGACY_PARSER_VERSION,
+        parser_version: CURRENT_PARSER_VERSION,
     };
     store.insert_artifacts(key.clone(), artifacts);
     key
@@ -142,7 +133,7 @@ fn insert_artifact_with_raw_source(
         canonical: Arc::from(canonical),
         content_hash,
         parse_env_hash: [0u8; 16],
-        parser_version: LEGACY_PARSER_VERSION,
+        parser_version: CURRENT_PARSER_VERSION,
     };
     store.insert_artifacts(key.clone(), artifacts);
     key
@@ -1143,7 +1134,7 @@ impl verter_session::session_view::SessionView for OverlayFingerprintView {
 fn effective_export_set_session_view_stitches_overlay_augmenter() {
     let store = FileArtifactStore::new();
 
-    // Base augmenter (legacy key) that `declare module "vue" {}` augments.
+    // Base augmenter (base key) that `declare module "vue" {}` augments.
     let _base_key = insert_artifact_from_fixture(
         &store,
         "/aug-base.ts",
@@ -1151,7 +1142,7 @@ fn effective_export_set_session_view_stitches_overlay_augmenter() {
         [11u8; 16],
     );
 
-    // Session-overlay augmenter: a DIFFERENT file, keyed under the non-legacy
+    // Session-overlay augmenter: a DIFFERENT file, keyed under the non-base
     // overlay discriminator derived from fingerprint 7. It augments the same
     // `"vue"` target but exists ONLY in this session's overlay.
     let fingerprint: u64 = 7;
@@ -1165,7 +1156,7 @@ fn effective_export_set_session_view_stitches_overlay_augmenter() {
         canonical: Arc::from("/aug-overlay.ts"),
         content_hash: [99u8; 16],
         parse_env_hash: overlay_discriminator,
-        parser_version: LEGACY_PARSER_VERSION,
+        parser_version: CURRENT_PARSER_VERSION,
     };
     store.insert_artifacts(
         overlay_key,
@@ -1270,7 +1261,7 @@ fn effective_export_set_session_view_stitches_overlay_augmenter() {
 /// `declare module` augmenter NEVER appears in the base index.
 ///
 /// - **Against the pre-deletion tree** (no `population` dimension, scan filters
-///   `is_legacy()` only): the overlay (non-legacy) augmenter is invisible to
+///   `is_base()` only): the overlay (non-base) augmenter is invisible to
 ///   BOTH calls, so the session set never contains it — this test FAILS.
 /// - **Post-change tree**: the session scan (`Some(discriminator)`) includes
 ///   the overlay augmenter; the base scan (`None`) excludes it — PASSES.
@@ -1280,7 +1271,7 @@ fn session_overlay_augmenter_isolated_from_base_index() {
 
     let store = FileArtifactStore::new();
 
-    // Base augmenter (legacy key) that `declare module "vue" {}` augments.
+    // Base augmenter (base key) that `declare module "vue" {}` augments.
     let _base_key = insert_artifact_from_fixture(
         &store,
         "/aug-base.ts",
@@ -1288,7 +1279,7 @@ fn session_overlay_augmenter_isolated_from_base_index() {
         [11u8; 16],
     );
 
-    // Session-overlay augmenter: a DIFFERENT file, keyed under a non-legacy
+    // Session-overlay augmenter: a DIFFERENT file, keyed under a non-base
     // overlay discriminator `D` (the `parse_env_hash` dimension) derived from
     // the overlay-set fingerprint. It augments the same `"vue"` target but
     // exists ONLY in this session's overlay.
@@ -1312,7 +1303,7 @@ fn session_overlay_augmenter_isolated_from_base_index() {
         canonical: Arc::from("/aug-overlay.ts"),
         content_hash: [99u8; 16],
         parse_env_hash: overlay_discriminator,
-        parser_version: LEGACY_PARSER_VERSION,
+        parser_version: CURRENT_PARSER_VERSION,
     };
     store.insert_artifacts(
         overlay_key,
@@ -1920,7 +1911,7 @@ fn artifact_eviction_then_unrelated_delete_keeps_index_coherent() {
 //   cold-computes its own scope. PASSES.
 // ────────────────────────────────────────────────────────────────
 
-/// Seed a shared store with a base augmenter (`/aug-base.ts`, legacy
+/// Seed a shared store with a base augmenter (`/aug-base.ts`, base
 /// key) and a session-overlay augmenter (`/aug-overlay.ts`, keyed under
 /// the overlay discriminator for `fingerprint`). Both augment `"vue"`.
 fn seed_base_and_overlay_augmenters(
@@ -1944,7 +1935,7 @@ fn seed_base_and_overlay_augmenters(
         canonical: Arc::from("/aug-overlay.ts"),
         content_hash: [99u8; 16],
         parse_env_hash: overlay_discriminator,
-        parser_version: LEGACY_PARSER_VERSION,
+        parser_version: CURRENT_PARSER_VERSION,
     };
     store.insert_artifacts(
         overlay_key,
@@ -2378,8 +2369,9 @@ fn effective_export_set_content_free_key_warm_hits_across_unrelated_fingerprint_
 // turn a relative `declare module "./x"` specifier into a canonical.
 // The production resolver
 // (`owner_has_module_augmentation_dependency`'s
-// `resolve_type_dependency_canonical`) reaches `ensure_indexed_ready`,
-// which materialises the dependency and INSERTS it into the same
+// `resolve_type_dependency_canonical`) reaches the
+// `ensure_indexed_ready_serve` flight, which materialises the
+// dependency and INSERTS it into the same
 // `self.artifacts` DashMap the cold scan iterates.
 //
 // `DashMap` shards are non-reentrant `std::sync::RwLock`s, so an insert
@@ -2447,7 +2439,7 @@ fn relative_augmenter_resolver_runs_off_artifacts_guard() {
         build_filler_artifacts("export const y = 2;\nexport {};\n", [200u8; 16]);
 
     // The resolver re-enters the SAME `self.artifacts` DashMap with real
-    // writes — the exact hazard `ensure_indexed_ready ->
+    // writes — the exact hazard `ensure_indexed_ready_serve ->
     // artifacts.insert` poses in production. It writes enough distinct
     // keys to span every shard, so one write is guaranteed to target the
     // shard the cold-scan iterator holds when the resolver fires.

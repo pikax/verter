@@ -13,7 +13,7 @@
 //!
 //! The byte-identical fast path is a true no-op: it does NOT clear
 //! `compile_slots`, `cached_resolved_meta`, route-mirroring state, the
-//! project-wide `resolved_type_cache_db`, the `eval_env_cache_db`, or
+//! project-wide `resolved_type_cache_db` or
 //! the semantic-fact cache, and does NOT bump `store_view_epoch`. None
 //! of those mutations fire on a byte-identical re-upsert.
 //!
@@ -218,45 +218,6 @@ fn byte_identical_re_upsert_preserves_resolved_type_cache_len() {
          A fast path that called `self.resolved_type_cache().clear()` \
          wipes the entire DB project-wide; this assertion fails for such \
          a path if the cache had any non-zero entries pre-upsert."
-    );
-}
-
-/// R1 — byte-identical re-upsert MUST NOT clear the project-wide
-/// `eval_env_cache_db`.
-///
-/// A fast path that called `self.eval_env_cache().clear()` would do a
-/// project-wide wipe. The entries survive byte-identical re-upserts.
-#[test]
-fn byte_identical_re_upsert_preserves_eval_env_cache_len() {
-    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
-    let _ = host
-        .upsert(UpsertRequest {
-            canonical_id: Some(CANONICAL.to_string()),
-            input_id: CANONICAL.to_string(),
-            source: Arc::from(SFC_SOURCE),
-            file_kind: FileKind::from_path(CANONICAL),
-            aliases: Vec::new(),
-        })
-        .expect("initial upsert succeeds");
-
-    // Drive resolution to seed eval_env_cache_db.
-    let _ = host.get_component_meta_with_resolution(CANONICAL);
-
-    let count_before = host.project_type_store().eval_env_cache().len();
-
-    for _ in 0..10 {
-        re_upsert_byte_identical(&host);
-    }
-
-    let count_after = host.project_type_store().eval_env_cache().len();
-
-    assert_eq!(
-        count_after, count_before,
-        "R1: byte-identical re-upsert MUST NOT clear the project-wide \
-         eval_env_cache_db. count_before={count_before}, count_after={count_after}. \
-         A fast path that called `self.eval_env_cache().clear()` wipes \
-         the entire DB project-wide; this assertion fails for such a path \
-         if the cache had any non-zero entries pre-upsert."
     );
 }
 

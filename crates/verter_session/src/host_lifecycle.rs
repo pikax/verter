@@ -44,16 +44,40 @@ impl VerterHost {
     pub fn set_workspace(&self, workspace: Arc<dyn verter_workspace::WorkspaceAccess>) {
         workspace.set_default_resolve_extensions(self.config.resolve_extensions.clone());
         *self.workspace.write() = workspace;
+        // SWAP-FIRST, then clear — the order is load-bearing. Clearing
+        // before the swap would be unsound: a concurrent reader could
+        // repopulate a just-cleared cache from the OLD workspace, and
+        // nothing after the swap clears it again, so old-authority state
+        // would serve against the new workspace indefinitely. Swap-first
+        // leaves only a transient window where a reader sees the NEW
+        // workspace alongside not-yet-cleared cache state; that window
+        // is read-side rejected: a flight that captured pre-swap state
+        // is fenced at publish by the generation/epoch bumps below
+        // (mutate-first fence ordering — each bump strictly follows the
+        // state it announces), warm query-identity reads revalidate
+        // their recorded fact signatures against the live store view,
+        // and content-addressed entries are keyed by whole-hash, so a
+        // same-path file with different content in the new workspace
+        // misses them by key.
+        //
         // `set_workspace` is the most aggressive possible mutation: the
         // entire workspace authority swaps out, so every cache layer's
-        // identity is potentially invalidated. Mirrors the
-        // configure_projects cascade plus the resolver / resolved-type /
-        // eval-env / semantic clears that close() runs.
+        // identity is potentially invalidated. Runs the same
+        // AUTHORITY-RESET cascade as close(): the wide
+        // `bump_project_generation_and_evict` plus the artifact-store /
+        // resolver / resolved-type / semantic clears.
         self.project_type_store.bump_project_generation_and_evict();
-        self.project_type_store.route_owned_shallow().clear_all();
+        // The CONTENT authority itself swapped out: every retained
+        // `FileArtifactStore` artifact — content-addressed against the
+        // OLD workspace — is orphaned. Artifact-only canonicals would
+        // otherwise keep serving against a workspace they never came
+        // from (a new workspace can even carry a same-path file with
+        // different content, which the `file_exists` freshness gate
+        // alone cannot distinguish). Scheduler-tracked canonicals
+        // rebuild on demand from their retained scheduler sources.
+        self.project_type_store.indexed().clear_all();
         self.resolver.reset_all();
         self.resolved_type_cache().clear();
-        self.eval_env_cache().clear();
         self.semantic_invalidate_all();
         // The workspace authority swapped, so the cached base-view snapshot
         // (built against the OLD workspace / project graph) is structurally
@@ -112,7 +136,7 @@ impl VerterHost {
     }
 
     pub(crate) fn bump_store_view_epoch(&self) -> u64 {
-        self.clear_thread_local_parsed_eval_program_cache();
+        self.clear_resolved_named_type_cache();
         self.store_view_epoch
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             + 1
@@ -266,24 +290,33 @@ impl VerterHost {
 
         self.update_alias_map(canonical_id, &old_aliases, &aliases);
 
-        // Workspace is sole authority for reverse-dep tracking.
-        // record_parsed_edges CLEARS workspace
-        // exact_resolved/exact_resolutions/lazy_resolved/semantic_transitive.
-        // ambient_resolved survives.
-        self.ws().record_parsed_edges(canonical_id, &parsed_edges);
-
-        // Re-apply workspace exacts from preserved cc.import_routes so
-        // the workspace mirrors host bundler state. No-op when
-        // cc.import_routes is empty (typical first-load case where
-        // bundler hasn't touched the file).
-        if !preserved_routes.is_empty() {
+        // Workspace is sole authority for reverse-dep tracking. The
+        // parsed-edge record CLEARS workspace
+        // exact_resolved/exact_resolutions/lazy_resolved/semantic_transitive
+        // (ambient_resolved survives), so when bundler-preserved
+        // cc.import_routes exist the exacts re-apply must land in the
+        // SAME edge-store critical section: a record-then-set two-call
+        // sequence exposes an exacts-cleared window in which a concurrent
+        // cold flight resolves against the half-applied table and
+        // publishes a wrong route surface with no generation moved (the
+        // pre-publish fence cannot see a mutation that moves no
+        // generation, and content-identical re-records are value no-ops
+        // on both stores — the torn window was the only hole).
+        if preserved_routes.is_empty() {
+            // Typical first-load case (bundler hasn't touched the file):
+            // nothing to re-apply, and surviving directly-set workspace
+            // exacts (host `set_exact_resolutions` without a host-side
+            // route push) must not be clobbered by an empty re-apply.
+            self.ws().record_parsed_edges(canonical_id, &parsed_edges);
+        } else {
             let exact_resolutions =
                 self.build_exact_resolutions_from_routes(canonical_id, &preserved_routes);
-            self.ws()
-                .set_exact_resolutions(canonical_id, exact_resolutions);
+            self.ws().record_parsed_edges_with_exact_resolutions(
+                canonical_id,
+                &parsed_edges,
+                exact_resolutions,
+            );
         }
-        // Publish-fence: EdgeStore is RwLock-protected; concurrent
-        // readers see pre-write or post-write state, never torn.
         true
     }
 
@@ -310,17 +343,13 @@ impl VerterHost {
         // caches (raw template analysis, tsc extract, resolved meta,
         // fallthrough) are flushed. import_routes and evicted flag stay.
         for mut entry in self.derived_raw_cache().iter_mut() {
-            entry.raw_template_analysis = None;
+            entry.clear_raw_template_analysis();
             entry.cached_tsc_extract = None;
             entry.cached_resolved_meta.clear();
             entry.cached_meta_payload = None;
             entry.cached_fallthrough = None;
         }
         self.resolved_type_cache().clear();
-        self.eval_env_cache().clear();
-        // Extend cascade with the new `RouteOwnedShallowDb` bulk
-        // eviction. Mirrors the route-resolution invalidation discipline.
-        self.project_type_store.route_owned_shallow().clear_all();
         self.bump_store_view_epoch();
     }
 
@@ -358,30 +387,40 @@ impl VerterHost {
         write_lock(&self.alias_to_canonical).clear();
         write_lock(&self.last_const_prop_overrides).clear();
 
-        self.compile_cache().clear();
+        // AUTHORITY-RESET cascade: close() is a full teardown, one of
+        // the two reserved `bump_project_generation_and_evict` callers
+        // (with `set_workspace`). The wide per-canonical clears release
+        // the compile / derived / dependency domains, the project-config
+        // query-identity DB cluster, the resolved-type cache, and the
+        // semantic DB — retained state would otherwise stay resident
+        // against an authority that no longer exists — and the
+        // project-generation move guarantees no `ProjectGeneration`-
+        // rooted entry can validate against state populated before this
+        // teardown.
+        self.project_type_store.bump_project_generation_and_evict();
         // The content-addressed compile-output store is a sibling
         // compile-output cache; flush it so close() releases ALL cached
         // compile state and frees the backing memory. The session slots
-        // cleared above live on the per-file compile cache; the
-        // content-addressed entries live on a separate store that
-        // dropping the compile cache does not touch.
+        // released by the cascade above live on the per-file compile
+        // cache; the content-addressed entries live on a separate store
+        // that dropping the compile cache does not touch.
         self.compile_output_pure_content().clear_all();
         #[cfg(not(target_arch = "wasm32"))]
         {
             self.scheduler.reset();
             self.scheduler.restart_driver();
         }
-        self.resolved_type_cache().clear();
+        // close() owns the unified artifact lifecycle: every retained
+        // `IndexedReady` (and its `Arc<EvalEnv>`) lives on the
+        // `FileArtifactStore`, which neither the cascade above nor the
+        // scheduler reset touches. Without this clear the payloads stay
+        // resident (breaking the memory-release contract this method
+        // exists for) and artifact-only canonicals — untouched by the
+        // notify_delete loop, backing file still present — keep serving
+        // through the artifact-only authority gate.
+        self.project_type_store.indexed().clear_all();
         self.resolver.reset_all();
-        self.eval_env_cache().clear();
         self.provenance.reset();
-        // Clear all semantic caches
-        *self.semantic_db() = verter_semantic::db::SemanticDb::new();
-        // close-cascade extension for the `RouteOwnedShallowDb`.
-        // `close()` already resets the resolver (which clears RouteDb /
-        // ImportedRootDb), so route-resolution facts are gone; clear
-        // the route-only shallow DB in lockstep.
-        self.project_type_store.route_owned_shallow().clear_all();
         // Drop the StoreViewManager's cached base-view `Arc`. The epoch
         // bump below invalidates it as a warm-hit candidate, but a
         // token bump alone keeps the `Arc<StoreViewSnapshot>` (and its
@@ -427,101 +466,177 @@ impl VerterHost {
             entry
                 .import_routes_known_miss_recorded_at_generation
                 .clear();
+            entry.import_routes_positive_recorded_at_generation.clear();
         }
         for mut entry in self.dependency_cache().iter_mut() {
             entry.dependencies.clear();
         }
         self.resolver.reset_all();
         self.resolved_type_cache().clear();
-        self.eval_env_cache().clear();
         self.semantic_invalidate_all();
         // `configure_projects` is a route-resolution mutation: the
-        // project graph changes, which means the cached route-only
-        // shallow entries' `project_generation` tag is now stale. Bump
-        // project_generation (also evicts the project-shape cluster:
-        // owner_import_surfaces, semantic_graph, component_meta_results,
-        // etc.) and clear_all the route-only shallow DB. The
-        // materialiser's tier-3 staleness gate is the safety net for
-        // any in-flight cold publish that started before the bump.
-        self.project_type_store.bump_project_generation_and_evict();
-        self.project_type_store.route_owned_shallow().clear_all();
-        // The project graph changed (project_generation bumped, the
-        // project-shape cluster evicted), so the cached base-view snapshot
-        // is rooted on a stale project identity. Drop its `Arc` alongside
-        // the other full-clear cascade steps so its per-file maps release
-        // now rather than lingering until the next store-view request.
+        // project graph changes. STAMP-ONLY bump — retained payloads
+        // (`IndexedReady`, the per-canonical compile/derived/dependency
+        // entries beyond the explicit route-field loops above) survive;
+        // stale entries miss BY VALIDATION (the project-stamp read gate
+        // routes route surfaces through the edge refresh — no re-parse;
+        // query-identity caches reject on their `ProjectGeneration`
+        // facts / `validated_at_generation` backstops). The wide
+        // `bump_project_generation_and_evict` is reserved for content-
+        // authority swaps (`set_workspace`, `close`) — wholesale-
+        // clearing `derived_raw_cache` here flipped every
+        // scheduler-tracked canonical into the artifact-only class.
+        self.project_type_store.bump_project_generation();
+        // The project graph changed (stamp-only `project_generation`
+        // bump above — retained payloads survive, stale entries miss by
+        // validation), so the cached base-view snapshot is rooted on a
+        // stale project identity. Drop its `Arc` alongside the clears
+        // above so its per-file maps release now rather than lingering
+        // until the next store-view request.
         self.store_view_manager().clear();
         self.bump_store_view_epoch();
     }
 
-    /// Host wrapper for [`WorkspaceAccess::notify_close`] that runs the
-    /// cache-eviction cascade alongside the workspace-side overlay
-    /// clear. Replaces direct `host.workspace().notify_close(...)`
-    /// calls (now `pub(crate)`-gated).
+    /// Host wrapper for [`WorkspaceAccess::notify_close`] that evicts an
+    /// **artifact-only** canonical's `FileArtifactStore` payload
+    /// alongside the workspace-side overlay clear. Replaces direct
+    /// `host.workspace().notify_close(...)` calls (now
+    /// `pub(crate)`-gated).
     ///
-    /// EVICT FIRST. `notify_close` bumps `content_generation`; the
-    /// materialiser's tier-2 gate catches stale entries via
-    /// workspace_generation mismatch on subsequent reads. The
-    /// pre-publish fence catches in-flight publishes by re-reading
-    /// content_generation immediately before publish.
+    /// An artifact-only canonical (no scheduler source) has the
+    /// workspace as its sole content authority, so a workspace close is
+    /// its content-death signal: the retained artifact must not serve
+    /// afterwards. The eviction runs AFTER the workspace mutation
+    /// (mutate-first — the close also advances `content_generation`,
+    /// which the in-flight pre-publish fence reads). Scheduler-tracked
+    /// canonicals are untouched here: the scheduler stays their content
+    /// authority and the `evict()` / `close()` pipelines own their
+    /// lifecycle.
     pub fn notify_close(&self, canonical_id: &str) {
-        self.project_type_store
-            .route_owned_shallow()
-            .remove(canonical_id);
         self.ws().notify_close(canonical_id);
+        self.evict_artifact_only_canonical(canonical_id);
     }
 
-    /// Host wrapper for [`WorkspaceAccess::notify_upsert`] that runs
-    /// the route-only cache eviction alongside the workspace-side
-    /// overlay write. Replaces direct
-    /// `host.workspace().notify_upsert(...)` calls.
+    /// Host wrapper for [`WorkspaceAccess::notify_upsert`] that evicts an
+    /// **artifact-only** canonical's `FileArtifactStore` payload
+    /// alongside the workspace-side overlay write — for such a canonical
+    /// the workspace IS the content authority, so an overlay write
+    /// supersedes the retained artifact. Mutate-first, then evict (the
+    /// workspace write advances `content_generation`, which the
+    /// in-flight pre-publish fence reads).
     ///
-    /// EVICT FIRST. `ws().notify_upsert` internally bumps
-    /// `content_generation`, which feeds the materialiser's tier-2
-    /// fallback gate. Eviction-first shrinks the race window. The
-    /// residual race (a concurrent cold reader publishes an entry
-    /// tagged with the pre-mutation workspace_generation immediately
-    /// before this wrapper's `content_generation` bump lands) is
-    /// tolerated: the next reader's tier-2 gate catches it via
-    /// generation mismatch and re-materialises.
-    ///
-    /// Note: the full content-change cascade (resolved_type_cache,
-    /// semantic_invalidate, etc.) belongs on `host.upsert(canonical,
-    /// source)` — the authoritative content-change pipeline.
+    /// Scheduler-tracked canonicals are untouched: the scheduler is
+    /// their content authority and serves the committed version until
+    /// the authoritative content-change pipeline (`host.upsert`) runs —
     /// `notify_upsert` is the overlay-signal hook only.
     pub fn notify_upsert(&self, canonical_id: &str, source: Arc<str>) {
-        self.project_type_store
-            .route_owned_shallow()
-            .remove(canonical_id);
         self.ws().notify_upsert(canonical_id, source);
+        self.evict_artifact_only_canonical(canonical_id);
     }
 
-    /// Host wrapper for [`WorkspaceAccess::set_exact_resolutions`] with
-    /// the FULL `set_import_dependencies` cascade shape PLUS
-    /// `bump_project_generation_and_evict` and
-    /// `route_owned_shallow.clear_all`.
+    /// Per-canonical artifact eviction for workspace signals
+    /// (`notify_close` / `notify_upsert`) — fires ONLY for an
+    /// artifact-only canonical
+    /// ([`crate::VerterHost::is_artifact_only_scope`] — the same oracle
+    /// the serving authorities consult), whose content authority is the
+    /// workspace itself. Together with the single artifact-only
+    /// authority gate (`artifact_only_authority_allows`) and the
+    /// `set_workspace` / `close` artifact-store clears, this keeps
+    /// artifact-only staleness signal-driven.
+    fn evict_artifact_only_canonical(&self, canonical_id: &str) {
+        let analysis_canonical = self.normalized_analysis_canonical(canonical_id);
+        let analysis_canonical = analysis_canonical.as_ref();
+        if !self.is_artifact_only_scope(analysis_canonical) {
+            return;
+        }
+        self.project_type_store.evict_canonical(analysis_canonical);
+    }
+
+    /// Host wrapper for [`WorkspaceAccess::set_exact_resolutions`] —
+    /// STAMP-ONLY freshness with OWNER-SCOPED route-state repair.
     ///
     /// `set_exact_resolutions` is a route-resolution mutation — the
     /// project graph changes but `content_generation` does NOT bump.
-    /// Without bumping `project_generation`, an in-flight materialiser
-    /// that captured the old generation could publish a stale entry,
-    /// and the tier-3 gate would let the stale entry through on
-    /// subsequent reads. Bumping `project_generation` in this wrapper
-    /// closes that race.
+    /// Route-resolution mutations never wide-clear retained payloads:
+    /// `IndexedReady` / `FileArtifactStore` payloads survive, a stale
+    /// route surface fails `indexed_surface_is_current` and takes the
+    /// edge-refresh on demand, and only the route mirror the mutation
+    /// actually made stale (THIS owner's `DerivedRawState` route
+    /// fields) is cleared. Wide clears are reserved for content-
+    /// authority swaps (`set_workspace`, `close`).
     pub fn set_exact_resolutions(
         &self,
         canonical: &str,
-        resolutions: Vec<verter_workspace::ExactResolution>,
+        mut resolutions: Vec<verter_workspace::ExactResolution>,
     ) {
-        // EVICT-FIRST: bump project_generation BEFORE the workspace
-        // mutator so a concurrent in-flight materialiser's pre-read
-        // project_generation capture is invalidated by tier-3 before
-        // it can publish.
-        self.project_type_store.bump_project_generation_and_evict();
-        self.project_type_store.route_owned_shallow().clear_all();
-        self.ws().set_exact_resolutions(canonical, resolutions);
+        // Key EVERY operation below — the workspace edge-store write AND
+        // the host-side mirror repair — on the NORMALIZED canonical id
+        // (the `set_import_dependencies` discipline). An alias-keyed
+        // call must mutate the same workspace edge entry and the same
+        // canonical-keyed `DerivedRawState` mirror as the
+        // canonical-keyed call: keying the edge store on the alias while
+        // the mirror repair targets the canonical splits the route state
+        // across two ids (the alias-keyed edge entry is invisible to
+        // canonical-keyed resolution, and the canonical mirror keeps
+        // serving stale routes).
+        let canonical = self.resolve_alias_or_canonical(canonical);
+        let canonical = canonical.as_str();
+        // Resolution targets are canonical ids for every consumer, and
+        // the workspace edge store keeps them verbatim — canonicalize on
+        // admission, exactly like `set_import_dependencies` does for its
+        // `DependencyResolution` ids.
+        for res in &mut resolutions {
+            if let Some(ref mut id) = res.resolved_canonical_id {
+                let norm = canonicalize_id(id);
+                if norm != id.as_str() {
+                    *id = norm.into_owned();
+                }
+            }
+            for candidate in &mut res.possible_canonical_ids {
+                let norm = canonicalize_id(candidate);
+                if norm != candidate.as_str() {
+                    *candidate = norm.into_owned();
+                }
+            }
+        }
+        // MUTATE-FIRST, then bump (the `configure_projects` /
+        // `set_workspace` ordering). The pre-publish fence compares the
+        // generation a flight captured at its start against the live
+        // generation at publish time, so the bump must STRICTLY FOLLOW
+        // the state it announces: bumping before the workspace mutator
+        // opens a window where a flight captures the NEW generation,
+        // resolves against the OLD resolution table, passes the fence,
+        // and is served as current indefinitely. With mutate-first, a
+        // flight born inside the window (post-mutation, pre-bump) reads
+        // the NEW table and is at worst redundantly refreshed by the
+        // stamp gate; a flight that read the OLD table is fenced.
+        let result = self.ws().set_exact_resolutions(canonical, resolutions);
+        if !result.changed {
+            // Value-identical re-push (the duplicate-key-safe engine
+            // gate): nothing moved, so the whole invalidation cascade —
+            // including the project-wide stamp bump — is skipped.
+            return;
+        }
+        // Owner-scoped route-mirror repair: the workspace exacts for
+        // THIS owner just changed, so its derived route mirror (and the
+        // generation sidecars that root it) is stale. Other canonicals'
+        // mirrors are untouched — their routes did not move.
+        if let Some(mut entry) = self.derived_raw_cache().get_mut(canonical) {
+            entry.import_routes.clear();
+            entry
+                .import_routes_known_miss_recorded_at_generation
+                .clear();
+            entry.import_routes_positive_recorded_at_generation.clear();
+        }
+        self.project_type_store.bump_project_generation();
         self.resolver.runtime.invalidate_canonical(canonical);
-        self.project_type_store.evict_canonical(canonical); // belt-and-suspenders per-canonical
+        // Route mutation, content unchanged: drain the canonical's
+        // derived layers but RETAIN its content-addressed `IndexedReady`
+        // payload — the project-stamp read gate routes the next read
+        // through the edge-refresh materialise (route surface rebuilt,
+        // no re-parse).
+        self.project_type_store
+            .evict_canonical_for_route_mutation(canonical);
         self.resolved_type_cache().clear();
         // R4 producer: rebuild parse-domain facts for the reloaded
         // canonical so the next resolver pass sees the new content.
@@ -625,7 +740,7 @@ impl VerterHost {
             derived.evicted = true;
             derived.evicted_whole_hash = pre_evict_hash;
             derived.cached_tsc_extract = None;
-            derived.raw_template_analysis = None;
+            derived.clear_raw_template_analysis();
             derived.cached_resolved_meta.clear();
             derived.cached_meta_payload = None;
             derived.cached_fallthrough = None;

@@ -67,7 +67,6 @@ struct InventorySnapshot {
     derived_raw_cache_len: usize,
     dependency_cache_len: usize,
     resolved_type_cache_len: usize,
-    eval_env_cache_len: usize,
     store_view_epoch: u64,
 }
 
@@ -79,7 +78,6 @@ fn snapshot(host: &VerterHost) -> InventorySnapshot {
         derived_raw_cache_len: pts.derived_raw_cache().len(),
         dependency_cache_len: pts.dependency_cache().len(),
         resolved_type_cache_len: pts.resolved_type_cache().len(),
-        eval_env_cache_len: pts.eval_env_cache().len(),
         store_view_epoch: host.store_view_epoch(),
     }
 }
@@ -90,7 +88,7 @@ fn snapshot(host: &VerterHost) -> InventorySnapshot {
 ///
 /// Discriminating predicate: this test runs all the upserts after taking
 /// the baseline snapshot. A fast path that called `clear()` on
-/// `resolved_type_cache_db` and `eval_env_cache_db` AND bumped
+/// `resolved_type_cache_db` AND bumped
 /// `store_view_epoch` would fail it. The snapshot comparison fails if any
 /// DB shrank, any DB grew, or the epoch advanced.
 #[test]
@@ -108,8 +106,46 @@ fn inventory_dbs_unchanged_after_n_byte_identical_re_upserts() {
         "R1: every DB on the evict_canonical inventory MUST be \
          unchanged after byte-identical re-upserts. A fast \
          path that bumped store_view_epoch and called \
-         resolved_type_cache().clear() + eval_env_cache().clear() would \
+         resolved_type_cache().clear() would \
          diverge on at least one of those dimensions."
+    );
+}
+
+/// Artifact/env preservation probe (the successor of the retired
+/// env-cache dimension on this suite): the retained `IndexedReady` — and
+/// its `Arc<EvalEnv>` — survives byte-identical re-upserts BY IDENTITY.
+/// A fast path that evicted/rebuilt the artifact (or rebuilt only the
+/// env) would break `Arc::ptr_eq` even though every inventory LENGTH
+/// stays equal, so this discriminates what the length snapshot cannot.
+#[test]
+fn indexed_artifact_and_env_preserved_across_byte_identical_re_upserts() {
+    let host = build_host_and_seed();
+    // Materialise the canonical artifact through a public read.
+    let _ = host.get_component_meta(CANONICAL);
+    let before = host
+        .project_type_store()
+        .indexed()
+        .get_any(CANONICAL)
+        .expect("the meta read must have materialised an IndexedReady");
+
+    for _ in 0..10 {
+        re_upsert_byte_identical(&host);
+    }
+
+    let after = host
+        .project_type_store()
+        .indexed()
+        .get_any(CANONICAL)
+        .expect("the artifact must survive byte-identical re-upserts");
+    assert!(
+        Arc::ptr_eq(&before, &after),
+        "byte-identical re-upserts must preserve the retained \
+         IndexedReady by identity (no evict/rebuild churn)",
+    );
+    assert!(
+        Arc::ptr_eq(before.eval_env(), after.eval_env()),
+        "the artifact's EvalEnv must be the same allocation (no \
+         env-only rebuild)",
     );
 }
 

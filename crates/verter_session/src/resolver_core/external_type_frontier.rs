@@ -814,7 +814,6 @@ mod tests {
             Hash16::default(),
             make_analysis(source),
             None,
-            None,
             &resolver,
         )
     }

@@ -6,7 +6,7 @@
 //!
 //! | Dimension          | Captures                                                                              |
 //! |--------------------|---------------------------------------------------------------------------------------|
-//! | `parse_env_hash`   | Parser/SFC/compiler feature flags, syntax mode, language target.                      |
+//! | `parse_env_hash`   | The workspace parser-flag string (`EnvHashInputs.parser_flags`) — TODAY the sole consumed input; syntax mode / language target are NOT yet folded in (each new parse-relevant input must be added here AND to `parse_env_hash`). |
 //! | `resolve_env_hash` | `base_url`, `paths`, workspace aliases, project references, `moduleResolution` mode, `exports`/`imports` condition set, extension order. |
 //! | `type_env_hash`    | TS semantic options that change type meaning (`strict`, `noImplicitAny`, ...).        |
 //! | `lib_env_hash`     | TS built-in lib selection, `types`, `typeRoots`, ambient corpus identity.             |
@@ -118,8 +118,13 @@ const SALT_PROJECT_IDENTITY: &[u8] = b"verter-env:project-identity";
 const SEP: u8 = 0u8;
 
 impl IdeProjectConfig {
-    /// `parse_env_hash` — captures parser / SFC / compiler feature flags,
-    /// syntax mode, language target.
+    /// `parse_env_hash` — the parse dimension. TODAY it consumes exactly
+    /// one input: the workspace parser-flag string
+    /// (`EnvHashInputs.parser_flags`). Syntax mode / language target are
+    /// NOT yet folded in — any new parse-relevant configuration MUST be
+    /// added to this hash (and the module doc table) the moment it can
+    /// vary per project, or the value-side `parse_env_hash` reuse gates
+    /// go blind to it.
     ///
     /// Does NOT include project root, tsconfig paths, alias maps, TS
     /// semantic options, or lib data. Editing `paths` or flipping `strict`

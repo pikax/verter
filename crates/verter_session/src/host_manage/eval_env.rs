@@ -1,10 +1,9 @@
 //! `host_manage::eval_env` — eval-env builders, file-analysis snapshot
 //! constructors, and evaluated-type computation.
 //!
-//! Domain G. Owns the host's `eval_env_cache`
-//! discipline (cache-key acquisition + `base_eval_env` materialisation),
-//! the `FileAnalysisSnapshot` builders for parse / source / route-owned
-//! flows, and the per-owner evaluated-type compute path. Public surface
+//! Domain G. Owns the host's `base_eval_env` artifact read, the
+//! `FileAnalysisSnapshot` builders for parse / source flows, and the
+//! per-owner evaluated-type compute path. Public surface
 //! remains rooted at `crate::host_manage::*`; this file contributes a
 //! continuation `impl VerterHost { … }` block.
 
@@ -21,28 +20,14 @@ use super::{
 };
 
 impl VerterHost {
-    fn cache_eval_env_arc(
-        &self,
-        cache_keys: &[String],
-        whole_hash: Hash16,
-        cached_env: Arc<verter_semantic::analysis::type_eval::EvalEnv>,
-    ) -> Arc<verter_semantic::analysis::type_eval::EvalEnv> {
-        // Delegate to the rehomed `EvalEnvCacheDb`. The legacy
-        // `Arc<EvalEnv>` storage is keyed by the full R21
-        // parse-artifact identity (`FileArtifactKey`); compose one key
-        // per candidate canonical so a parse-env change is a key miss.
-        // Per D46 the long-term contract caches `Arc<OwnedEvalProgram>`
-        // and derives `EvalEnv` ad-hoc, but until lowering produces
-        // owned programs for live parses the legacy env-arc cache
-        // stays warm under the same wrapper.
-        let keys: Vec<crate::file_artifact_store::FileArtifactKey> = cache_keys
-            .iter()
-            .map(|canonical| self.legacy_eval_env_key(canonical, whole_hash))
-            .collect();
-        self.eval_env_cache()
-            .legacy_env_cache_or_insert(&keys, cached_env)
-    }
-
+    /// The canonical per-file `EvalEnv` for a base (non-overlay) read.
+    ///
+    /// Collapses onto the single per-file cold build: the env lives on
+    /// [`crate::project_type_store::IndexedReady`] (built once by the
+    /// materialise closure from the same parse as the shallow state and
+    /// the external-type analysis), so this accessor is a warm artifact
+    /// read — or one `ensure_indexed_ready_serve` cold build on miss. There
+    /// is no separate env cache and no env-only build path.
     pub(crate) fn base_eval_env_arc(
         &self,
         canonical_id: &str,
@@ -54,87 +39,14 @@ impl VerterHost {
         let resolved_canonical_id = self
             .resolve_eval_dependency_canonical(canonical_id)
             .unwrap_or_else(|| canonical_id.to_string());
-        let imported_cache_keys = if resolved_canonical_id == canonical_id {
-            vec![canonical_id.to_string()]
-        } else {
-            vec![canonical_id.to_string(), resolved_canonical_id.clone()]
-        };
-        // No ambient view gates hash acceptance. The project-global
-        // cache fact-validates entries on warm read (each candidate's
-        // `read_set_signature.facts` re-walked against the live
-        // `StoreView`), so reads here are live-host permissive.
-        let cached_whole_hash = self
-            .current_or_read_whole_hash(resolved_canonical_id.as_str())
-            .or_else(|| self.cached_route_owned_shallow_whole_hash(resolved_canonical_id.as_str()));
-        if let Some(whole_hash) = cached_whole_hash {
-            if let Some(cached_env) = self
-                .clone_cached_eval_env_arc(canonical_id, whole_hash)
-                .or_else(|| {
-                    if resolved_canonical_id != canonical_id {
-                        self.clone_cached_eval_env_arc(resolved_canonical_id.as_str(), whole_hash)
-                    } else {
-                        None
-                    }
-                })
-            {
-                component_meta_trace_custom!(
-                    "base_eval_env_cache_hit",
-                    format!("owner={} whole_hash={whole_hash:?}", canonical_id),
-                );
-                return Some(cached_env);
-            }
-        }
-        let (raw_source, cached_parse, whole_hash) =
-            self.current_eval_state(resolved_canonical_id.as_str())?;
-        if let Some(cached_env) = self
-            .clone_cached_eval_env_arc(canonical_id, whole_hash)
-            .or_else(|| {
-                if resolved_canonical_id != canonical_id {
-                    self.clone_cached_eval_env_arc(resolved_canonical_id.as_str(), whole_hash)
-                } else {
-                    None
-                }
-            })
-        {
-            component_meta_trace_custom!(
-                "base_eval_env_cache_hit",
-                format!("owner={} whole_hash={whole_hash:?}", canonical_id),
-            );
-            return Some(cached_env);
-        }
-
-        // Reuse the cached `eval_source` only from a **current-content**
-        // artifact (no `get_any`). With the own-canonical drain retired a
-        // stale pre-edit `IndexedReady` can linger past a same-canonical
-        // edit; its `eval_source` is the pre-edit script body. Reading it
-        // here would build the eval-env — and the type evaluation that
-        // depends on it — from stale source even though `raw_source`
-        // (resolved via the content-pinned `current_eval_state` above) is
-        // current. The pinned read serves only a content-current artifact;
-        // on a miss the `eval_source` is rebuilt from the current
-        // `raw_source`.
-        let eval_source = self
-            .current_content_pinned_indexed(resolved_canonical_id.as_str())
-            .or_else(|| self.artifact_current_indexed(resolved_canonical_id.as_str()))
-            .map(|facts| Arc::clone(&facts.eval_source))
-            .unwrap_or_else(|| {
-                Arc::<str>::from(Self::build_eval_script_source(
-                    raw_source.as_ref(),
-                    cached_parse.as_deref(),
-                ))
-            });
-        let (cached_env, _) = self.build_eval_env_and_external_type_analysis(
-            resolved_canonical_id.as_str(),
-            whole_hash,
-            raw_source.as_ref(),
-            cached_parse.as_deref(),
-            &eval_source,
-        );
+        let indexed = self
+            .ensure_indexed_ready_serve(resolved_canonical_id.as_str())?
+            .indexed;
         component_meta_trace_custom!(
             "base_eval_env_built",
-            format!("owner={} whole_hash={whole_hash:?}", canonical_id),
+            format!("owner={} whole_hash={:?}", canonical_id, indexed.whole_hash),
         );
-        Some(self.cache_eval_env_arc(&imported_cache_keys, whole_hash, cached_env))
+        Some(Arc::clone(indexed.eval_env()))
     }
 
     pub(crate) fn local_type_declaration_id(
@@ -143,7 +55,7 @@ impl VerterHost {
         resolved_name: &str,
     ) -> Option<verter_semantic::analysis::type_eval::DeclarationId> {
         if self
-            .route_owned_shallow_state(canonical_source)
+            .routed_shallow_state(canonical_source)
             .is_some_and(|state| state.import_target(resolved_name).is_some())
         {
             return None;
@@ -245,14 +157,57 @@ impl VerterHost {
         canonical: &str,
         source: &Arc<str>,
     ) -> FileAnalysisSnapshot {
+        // The template inputs are discarded — no publication authority
+        // is minted for them, so the flag is passed fail-closed.
+        self.build_snapshot_and_template_inputs_from_source(canonical, source, false)
+            .0
+    }
+
+    /// [`Self::build_snapshot_from_source`] plus the parse products the
+    /// lazy template-analysis computation consumes
+    /// (`compute_template_analysis_if_missing`): for a `.vue` canonical
+    /// the SAME `parse_vue_snapshot` run yields both the snapshot and
+    /// the threaded `VueTemplateInputs` (source, SFC parse, src-blocks)
+    /// — one logical read performs exactly one SFC structure parse and
+    /// one script-program parse. Non-SFC canonicals carry no template
+    /// inputs.
+    ///
+    /// `store_published` is the caller's authority statement for the
+    /// bytes it passes as `source`, flowed by value onto
+    /// [`crate::types::VueTemplateInputs::store_published`]. On this
+    /// lane the flag is ATTESTATION-ONLY: the builder reads no
+    /// scheduler node, so it stamps `source_generation: None` and the
+    /// `derived_raw_cache` persist declines regardless of the flag —
+    /// the generation rail, not this flag, is what gates persistence
+    /// (an entry without a rail cannot be validated by any reader).
+    /// Callers still state the authority truthfully: pass `true` only
+    /// for a store-authoritative read (a live scheduler/workspace
+    /// read, or the artifact-current authority for a genuinely
+    /// artifact-only canonical); bytes from a FENCED (`ReturnOnly`)
+    /// serve or an overlay pass `false` — the attestation is consulted
+    /// by value, and this builder cannot see where `source` came from,
+    /// so it never asserts the authority itself.
+    pub(crate) fn build_snapshot_and_template_inputs_from_source(
+        &self,
+        canonical: &str,
+        source: &Arc<str>,
+        store_published: bool,
+    ) -> (
+        FileAnalysisSnapshot,
+        Option<crate::types::VueTemplateInputs>,
+    ) {
         component_meta_trace_custom!(
             "build_snapshot_from_source",
             format!("owner={} bytes={}", canonical, source.len()),
         );
         if canonical.ends_with(".vue") {
             component_meta_trace_custom!("parse_vue_snapshot", format!("owner={canonical}"));
-            let (parse, _) =
-                crate::parse::parse_vue_snapshot(canonical, source, self.config.effective_scope());
+            let (parse, parsed) = crate::parse::parse_vue_snapshot(
+                canonical,
+                source,
+                self.config.effective_scope(),
+                &self.provenance,
+            );
             component_meta_trace_custom!(
                 "parse_vue_snapshot_result",
                 format!(
@@ -263,10 +218,22 @@ impl VerterHost {
                     parse.export_signatures.len(),
                 ),
             );
-            Self::build_snapshot_from_parse(parse)
+            let template_inputs = crate::types::VueTemplateInputs {
+                source: Arc::clone(source),
+                cached_parse: Some(Arc::new(parsed)),
+                store_published,
+                // This builder reads no scheduler node, so it can
+                // never attest a node generation; the computed
+                // template serves the caller but never persists.
+                source_generation: None,
+            };
+            (
+                Self::build_snapshot_from_parse(parse),
+                Some(template_inputs),
+            )
         } else {
             component_meta_trace_custom!("parse_non_sfc_snapshot", format!("owner={canonical}"));
-            let parse = crate::parse::parse_non_sfc_snapshot(canonical, source);
+            let parse = crate::parse::parse_non_sfc_snapshot(canonical, source, &self.provenance);
             component_meta_trace_custom!(
                 "parse_non_sfc_snapshot_result",
                 format!(
@@ -277,7 +244,7 @@ impl VerterHost {
                     parse.export_signatures.len(),
                 ),
             );
-            Self::build_snapshot_from_parse(parse)
+            (Self::build_snapshot_from_parse(parse), None)
         }
     }
 
@@ -286,6 +253,7 @@ impl VerterHost {
         canonical: &str,
         source: &Arc<str>,
         cached_parse: Option<&verter_compiler::parser::types::ParsedSfc>,
+        script_program: crate::parse::VueScriptProgram<'_>,
     ) -> FileAnalysisSnapshot {
         if canonical.ends_with(".vue") {
             if let Some(parsed) = cached_parse {
@@ -298,6 +266,8 @@ impl VerterHost {
                     source.as_ref(),
                     self.config.effective_scope(),
                     parsed,
+                    &self.provenance,
+                    script_program,
                 );
                 component_meta_trace_custom!(
                     "parse_vue_snapshot_cached_result",
@@ -316,46 +286,22 @@ impl VerterHost {
         self.build_snapshot_from_source(canonical, source)
     }
 
-    pub(crate) fn build_route_owned_snapshot_from_source_state(
-        &self,
-        canonical: &str,
-        source: &Arc<str>,
-        cached_parse: Option<&verter_compiler::parser::types::ParsedSfc>,
-        whole_hash: Hash16,
-    ) -> FileAnalysisSnapshot {
-        if cached_parse.is_some() {
-            return self.build_snapshot_from_source_state(canonical, source, cached_parse);
-        }
-
-        let eval_source = Arc::<str>::from(Self::build_eval_script_source(source.as_ref(), None));
-        let source_type = self.imported_eval_source_type_for(canonical, source.as_ref(), None);
-        let parsed_eval_program =
-            self.cached_parsed_eval_program_entry(canonical, whole_hash, &eval_source, source_type);
-        if parsed_eval_program.parse_failed {
-            return self.build_snapshot_from_source_state(canonical, source, None);
-        }
-
-        let program = parsed_eval_program.program.borrow_dependent();
-        let parse = crate::parse::build_non_sfc_snapshot_from_program(
-            canonical,
-            source.as_ref(),
-            source_type,
-            program,
-        );
-        Self::build_snapshot_from_parse(parse)
-    }
-
     pub(in crate::host_manage) fn finalize_analysis_snapshot(
         &self,
         canonical: &str,
         mut snapshot: FileAnalysisSnapshot,
         needs_template_analysis: bool,
+        template_inputs: Option<crate::types::VueTemplateInputs>,
         analysis_started: Option<Instant>,
     ) -> FileAnalysisSnapshot {
         self.resolve_snapshot_imports(canonical, &mut snapshot);
         self.enrich_destructured_bindings(&mut snapshot);
         if needs_template_analysis {
-            self.compute_template_analysis_if_missing(canonical, &mut snapshot);
+            // No coherent inputs (torn generation join, non-SFC) →
+            // the template stays absent for this caller — fail closed.
+            if let Some(inputs) = template_inputs {
+                self.compute_template_analysis_if_missing(canonical, &mut snapshot, inputs);
+            }
         }
         if let Some(started) = analysis_started {
             log_snapshot_debug("get_analysis", canonical, started, &snapshot);
@@ -463,9 +409,22 @@ impl VerterHost {
     ) -> std::collections::BTreeSet<String> {
         let mut candidates = std::collections::BTreeSet::new();
 
-        if let Some(facts) = self.ensure_indexed_ready(owner_canonical_id) {
+        if let Some(serve) = self.ensure_indexed_ready_serve(owner_canonical_id) {
+            let facts = &serve.indexed;
+            // Baked-edge currency gate. The artifact's cross-file edge
+            // `canonical_id`s were resolved at materialise time; a
+            // FENCED (ReturnOnly) serve carries edges baked against the
+            // pre-mutation file set, so trusting them would track the
+            // superseded dependency targets. Consume baked edges only
+            // from a store-published serve (published artifacts are
+            // store-current at publish; a stale one re-materialises
+            // through the serve's own currency gates); a fenced serve
+            // re-resolves every raw source specifier through the live
+            // resolver instead — the same discipline as the
+            // augmentation probe's re-export walk.
+            let baked_edges_current = serve.store_published;
             for target in facts.shallow_state.import_targets.values() {
-                if !target.canonical_id.is_empty() {
+                if baked_edges_current && !target.canonical_id.is_empty() {
                     candidates.insert(target.canonical_id.clone());
                     continue;
                 }
@@ -483,7 +442,7 @@ impl VerterHost {
                     ..
                 } = export
                 {
-                    if !canonical_id.is_empty() {
+                    if baked_edges_current && !canonical_id.is_empty() {
                         candidates.insert(canonical_id.clone());
                     } else if let Some(resolved) =
                         self.resolve_route_type_edge(owner_canonical_id, source_specifier)
@@ -494,7 +453,7 @@ impl VerterHost {
             }
 
             for wildcard in &facts.shallow_state.wildcard_reexports {
-                if !wildcard.canonical_id.is_empty() {
+                if baked_edges_current && !wildcard.canonical_id.is_empty() {
                     candidates.insert(wildcard.canonical_id.clone());
                 } else if let Some(resolved) =
                     self.resolve_route_type_edge(owner_canonical_id, &wildcard.source_specifier)
@@ -589,7 +548,7 @@ impl VerterHost {
                 "compute_evaluated_types_seed_owner_cache",
                 format!("owner={} store_view={}", canonical, false),
             );
-            let _ = ctx.ensure_indexed_ready(canonical);
+            let _ = ctx.ensure_indexed_ready_serve(canonical);
         }
         let requested_binding_names =
             if purpose == crate::resolver_core::ComponentMetaResolutionPurpose::Full {

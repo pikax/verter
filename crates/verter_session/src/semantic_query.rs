@@ -15,7 +15,7 @@
 //!   or `fact_dep_signature`. Version-rooting lives EXCLUSIVELY on the cached
 //!   VALUE via `ReadSetSignature.facts` + `self_root_canonicals`, revalidated
 //!   on every warm read; the live content version (whole-hash) is re-sourced at
-//!   value-compute time (via `ensure_indexed_ready`), never carried in the key.
+//!   value-compute time (via `ensure_indexed_ready_serve`), never carried in the key.
 //! - Semantic nodes are **immutable**; file changes create new node identities
 //!   rather than mutating existing nodes in place.
 //! - Shared semantic entries **never retain borrowed OXC AST pointers** — they
@@ -1208,7 +1208,7 @@ impl ProjectionReductionContext {
 /// **R6-clean:** `resolve_env_hash` is an ENV dimension, NOT a
 /// content/version hash; the slot stays content-free and the file
 /// content version is re-sourced at value-compute time from
-/// [`ResolverContext::ensure_indexed_ready`]. No `parse_stable_hash`,
+/// [`ResolverContext::ensure_indexed_ready_serve`]. No `parse_stable_hash`,
 /// content hash, or `fact_dep_signature` enters this context.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct InstantiateContext {
@@ -1305,7 +1305,7 @@ impl MacroPayloadContext {
 /// **R6-clean:** `resolve_env_hash` is an ENV dimension, NOT a
 /// content/version hash; the value-root slot stays content-free and the
 /// file content version is re-sourced at value-compute time from
-/// [`ResolverContext::ensure_indexed_ready`]. No `parse_stable_hash`,
+/// [`ResolverContext::ensure_indexed_ready_serve`]. No `parse_stable_hash`,
 /// content hash, or `fact_dep_signature` enters this context.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TypeOfContext {
