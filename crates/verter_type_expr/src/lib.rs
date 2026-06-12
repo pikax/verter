@@ -397,6 +397,12 @@ impl Hash for LiteralValue {
 pub struct ValueRef {
     /// Dotted path segments: `typeof a.b.c` → `["a", "b", "c"]`.
     pub path: Vec<String>,
+    /// Instantiation-expression type arguments: `typeof C.make<string>` →
+    /// `[string]`. Empty for a bare `typeof a.b.c`. The arguments select the
+    /// generic instantiation of the referenced value — semantic meaning, so
+    /// they are part of identity (Hash/Eq) and of the serialized form.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub type_args: Vec<TypeExpr>,
 }
 
 /// A single element in a tuple type.

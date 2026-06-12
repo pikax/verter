@@ -15990,3 +15990,1862 @@ fn identity_mapped_build_without_projectable_source_publishes_addressable_carrie
         ),
     }
 }
+
+// =============================================================================
+// Class-surface mechanisms (U2.CLASS_SURFACES)
+//
+// The class dual-space model through the ONE shared dispatch: static heritage
+// composition (own statics shadow base statics; ctor-less subclasses inherit
+// the base constructor's parameters with the DERIVED instance return),
+// signature-kind bucket selection for the function-signature utilities
+// (Parameters/ReturnType read the CALL bucket, ConstructorParameters/
+// InstanceType the CONSTRUCT bucket — including call+construct hybrids and
+// member-bearing constructor objects), last-VISIBLE-overload selection,
+// bare-generic ReturnType instantiation at `unknown`, the projection-time
+// `.prototype` hop, and typeof instantiation-expression arguments.
+// =============================================================================
+
+const CLASS_SURFACE_MECHANISMS: &str = r#"
+export class BaseCounter {
+  static initial: string = "0";
+  static describe(): string { return "counter"; }
+  protected static hidden: number = 0;
+}
+export class StepCounter extends BaseCounter {}
+export type StepCounterInitial = typeof StepCounter.initial;
+export type StepCounterDescribeReturn = ReturnType<typeof StepCounter.describe>;
+
+export class BaseShape { constructor(public id: string) {} }
+export class PlainShape extends BaseShape {}
+export type PlainShapeCtorParams = ConstructorParameters<typeof PlainShape>;
+
+export class ShadowBase { static tag(): "base" { return "base"; } }
+export class ShadowSub extends ShadowBase { static tag(): "sub" { return "sub"; } }
+export type ShadowTagReturn = ReturnType<typeof ShadowSub.tag>;
+
+export class PrivateStatics {
+  static #secret: number = 0;
+  static visible: string = "";
+}
+export type PrivateStaticsVisible = typeof PrivateStatics.visible;
+export type PrivateStaticsSurface = typeof PrivateStatics;
+
+export class MethodHolder { greet(name: string): string { return name; } }
+export type ProtoGreetReturn = ReturnType<typeof MethodHolder.prototype.greet>;
+export type ProtoGreetParams = Parameters<typeof MethodHolder.prototype.greet>;
+
+export interface Hybrid {
+  (a: number): string;
+  new (b: string): { value: number };
+}
+export declare const hybrid: Hybrid;
+export type HybridCallParams = Parameters<typeof hybrid>;
+export type HybridCallReturn = ReturnType<typeof hybrid>;
+export type HybridCtorParams = ConstructorParameters<typeof hybrid>;
+export type HybridInstance = InstanceType<typeof hybrid>;
+
+export function lookup(key: "name"): string;
+export function lookup(key: "count"): number;
+export function lookup(key: string): string | number {
+  return null as any;
+}
+export type LookupLastReturn = ReturnType<typeof lookup>;
+
+export function bare<T>(x: T): T {
+  return x;
+}
+export type BareReturn = ReturnType<typeof bare>;
+
+export class GenericStatic {
+  static make<T>(value: T): { wrapped: T } {
+    return { wrapped: value };
+  }
+}
+export type StaticInstantiated = ReturnType<typeof GenericStatic.make<string>>;
+
+export class NestedShadowHolder {
+  static outer<T>(): <T>(x: T) => T {
+    return null as any;
+  }
+}
+export type NestedShadowInstantiated = ReturnType<typeof NestedShadowHolder.outer<string>>;
+export type NestedShadowAtUnknown = ReturnType<typeof NestedShadowHolder.outer>;
+
+export class GenBase<T> {
+  constructor(x: T) {}
+}
+export class GenSub extends GenBase<string> {}
+export type GenSubCtorParams = ConstructorParameters<typeof GenSub>;
+
+export class GenMid<U> extends GenBase<U> {}
+export class GenLeaf extends GenMid<boolean> {}
+export type GenLeafCtorParams = ConstructorParameters<typeof GenLeaf>;
+
+export class InstBase<T> {
+  val: T = null as any;
+}
+export class InstSub extends InstBase<string> {}
+export type InstSubVal = InstSub["val"];
+
+export class AmbientLike {
+  id: string;
+  constructor(id: string);
+  method(count: number): string;
+}
+export type AmbientInstance = InstanceType<typeof AmbientLike>;
+
+export interface OverloadedIface {
+  (x: string): string;
+  (x: number): number;
+}
+export declare const overloadedIface: OverloadedIface;
+
+export interface GenLookup<T> {
+  (key: "one"): T;
+  (key: "two"): T[];
+}
+
+export class NestedDefaultHolder {
+  static outer<T>(): <U = T>() => U {
+    return null as any;
+  }
+}
+export type NestedDefaultInstantiated = ReturnType<typeof NestedDefaultHolder.outer<string>>;
+
+export class NestedConstraintHolder {
+  static outer<T>(): <U extends T>(x: U) => U {
+    return null as any;
+  }
+}
+export type NestedConstraintInstantiated = ReturnType<typeof NestedConstraintHolder.outer<string>>;
+
+export interface Boxed<T> {
+  boxed: T;
+}
+
+export class CondReturnHolder {
+  static pick<T>(): T extends string ? "narrow" : "wide" {
+    return null as any;
+  }
+}
+export type CondReturnInstantiated = ReturnType<typeof CondReturnHolder.pick<string>>;
+export type CondReturnAtUnknown = ReturnType<typeof CondReturnHolder.pick>;
+
+export class MappedReturnHolder {
+  static project<T>(): { [K in keyof T]: T[K] } {
+    return null as any;
+  }
+}
+export type MappedReturnInstantiated = ReturnType<typeof MappedReturnHolder.project<{ a: string }>>;
+
+export class MappedShadowHolder {
+  static remap<K extends string, T>(): { [K in keyof T]: K } {
+    return null as any;
+  }
+}
+export type MappedShadowInstantiated = ReturnType<typeof MappedShadowHolder.remap<"z", { a: string }>>;
+
+export class InferCollisionHolder {
+  static unwrap<T>(): T extends Boxed<infer T> ? T : "miss" {
+    return null as any;
+  }
+}
+export type InferCollisionInstantiated = ReturnType<typeof InferCollisionHolder.unwrap<string>>;
+"#;
+
+fn class_mech_host() -> VerterHost {
+    let host = host();
+    upsert_ts(&host, "/w/class_mech.ts", CLASS_SURFACE_MECHANISMS);
+    host
+}
+
+fn resolve_class_mech(host: &VerterHost, name: &str) -> verter_type_expr::TypeExpr {
+    let (outcome, _record) = host
+        .resolve_named_symbol_with_audit(
+            "/w/class_mech.ts",
+            name,
+            &[],
+            Some(ProjectionMode::Expanded),
+        )
+        .into_parts();
+    let node = outcome
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| panic!("{name} must resolve"));
+    host.project_node_to_type_expr(node)
+        .unwrap_or_else(|| panic!("{name} resolved node must project to TypeExpr"))
+}
+
+fn expect_tuple_of_primitives(
+    expr: &verter_type_expr::TypeExpr,
+    expected: &[verter_type_expr::PrimitiveName],
+    label: &str,
+) {
+    let verter_type_expr::TypeExpr::Tuple { elements, .. } = expr else {
+        panic!("{label}: expected tuple, got {expr:?}");
+    };
+    assert_eq!(elements.len(), expected.len(), "{label}: tuple arity");
+    for (el, want) in elements.iter().zip(expected) {
+        assert_eq!(
+            el.ty,
+            verter_type_expr::TypeExpr::Primitive(*want),
+            "{label}: element type"
+        );
+    }
+}
+
+/// Static heritage: a ctor-less subclass exposes the BASE class's static
+/// field and static method through `typeof Subclass`.
+#[test]
+fn class_surface_static_heritage_composes_base_statics() {
+    let host = class_mech_host();
+    let initial = resolve_class_mech(&host, "StepCounterInitial");
+    assert_eq!(
+        initial,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+        "inherited static field type"
+    );
+    let describe = resolve_class_mech(&host, "StepCounterDescribeReturn");
+    assert_eq!(
+        describe,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+        "inherited static method ReturnType"
+    );
+}
+
+/// Shadow precedence: an own static shadows the inherited one — the
+/// subclass's `tag(): "sub"` wins over the base's `tag(): "base"`.
+#[test]
+fn class_surface_own_static_shadows_base_static() {
+    let host = class_mech_host();
+    let tag_return = resolve_class_mech(&host, "ShadowTagReturn");
+    assert_eq!(
+        tag_return,
+        verter_type_expr::TypeExpr::string_literal("sub"),
+        "own static must shadow the base static (never the base's \"base\")"
+    );
+    assert_ne!(
+        tag_return,
+        verter_type_expr::TypeExpr::string_literal("base")
+    );
+}
+
+/// Constructor inheritance: a ctor-less subclass inherits the BASE
+/// constructor's parameter list.
+#[test]
+fn class_surface_ctorless_subclass_inherits_base_constructor_params() {
+    let host = class_mech_host();
+    let params = resolve_class_mech(&host, "PlainShapeCtorParams");
+    expect_tuple_of_primitives(
+        &params,
+        &[verter_type_expr::PrimitiveName::String],
+        "inherited constructor params",
+    );
+}
+
+/// NEGATIVE: `#private` statics never reach the published static surface;
+/// plain statics on the same class still do.
+#[test]
+fn class_surface_private_hash_static_is_excluded() {
+    let host = class_mech_host();
+    let visible = resolve_class_mech(&host, "PrivateStaticsVisible");
+    assert_eq!(
+        visible,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+    );
+    let surface = resolve_class_mech(&host, "PrivateStaticsSurface");
+    let verter_type_expr::TypeExpr::Object(object) = &surface else {
+        panic!("typeof PrivateStatics must project a constructor Object, got {surface:?}");
+    };
+    // Positive presence: the PUBLIC static member rides the surface — a
+    // regression that empties the member list (or stops projecting an
+    // Object) must fail here, never pass vacuously.
+    assert!(
+        object.properties.iter().any(|member| matches!(
+            member,
+            verter_type_expr::ObjectMember::Property(p) if p.name == "visible"
+        )),
+        "public static `visible` must be present on the published static surface"
+    );
+    for member in &object.properties {
+        if let verter_type_expr::ObjectMember::Property(p) = member {
+            assert!(
+                !p.name.contains("secret"),
+                "#private static leaked into the published static surface: {}",
+                p.name
+            );
+        }
+    }
+}
+
+/// Bucket selection over a call+construct hybrid: Parameters/ReturnType read
+/// the CALL signature; ConstructorParameters/InstanceType read the CONSTRUCT
+/// signature. Negative direction included: the call return is `string`, the
+/// construct return `{ value: number }` — crossing the buckets fails.
+#[test]
+fn signature_utilities_select_bucket_on_call_construct_hybrid() {
+    let host = class_mech_host();
+    expect_tuple_of_primitives(
+        &resolve_class_mech(&host, "HybridCallParams"),
+        &[verter_type_expr::PrimitiveName::Number],
+        "hybrid call params",
+    );
+    assert_eq!(
+        resolve_class_mech(&host, "HybridCallReturn"),
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+        "hybrid call return"
+    );
+    expect_tuple_of_primitives(
+        &resolve_class_mech(&host, "HybridCtorParams"),
+        &[verter_type_expr::PrimitiveName::String],
+        "hybrid construct params",
+    );
+    let instance = resolve_class_mech(&host, "HybridInstance");
+    let verter_type_expr::TypeExpr::Object(object) = &instance else {
+        panic!("hybrid InstanceType must be the construct return object, got {instance:?}");
+    };
+    let value = object
+        .properties
+        .iter()
+        .find_map(|m| match m {
+            verter_type_expr::ObjectMember::Property(p) if p.name == "value" => Some(p),
+            _ => None,
+        })
+        .expect("construct return member `value`");
+    assert_eq!(
+        value.ty,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+    );
+}
+
+/// Overload selection: `ReturnType` of an overloaded function is the LAST
+/// visible (bodiless) overload's return — `number`, not the first overload's
+/// `string` and not the hidden implementation signature's union.
+#[test]
+fn return_type_of_overloaded_function_selects_last_visible_overload() {
+    let host = class_mech_host();
+    let last_return = resolve_class_mech(&host, "LookupLastReturn");
+    assert_eq!(
+        last_return,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+        "last visible overload return"
+    );
+    assert_ne!(
+        last_return,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+        "must not select the FIRST overload"
+    );
+}
+
+/// Bare-generic ReturnType: the unbound `T` instantiates at `unknown`.
+#[test]
+fn return_type_of_bare_generic_instantiates_at_unknown() {
+    let host = class_mech_host();
+    assert_eq!(
+        resolve_class_mech(&host, "BareReturn"),
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Unknown)
+    );
+}
+
+/// `.prototype` is a projection-time hop onto the instance side — never a
+/// stored member. `typeof C.prototype.method` reaches the instance method.
+#[test]
+fn prototype_hop_projects_instance_side_at_projection_time() {
+    let host = class_mech_host();
+    assert_eq!(
+        resolve_class_mech(&host, "ProtoGreetReturn"),
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+    );
+    expect_tuple_of_primitives(
+        &resolve_class_mech(&host, "ProtoGreetParams"),
+        &[verter_type_expr::PrimitiveName::String],
+        "prototype-extracted method params",
+    );
+}
+
+/// Instantiation expression under typeof: `typeof C.make<string>` applies
+/// the type argument; `ReturnType` of it is the substituted `{ wrapped: string }`.
+#[test]
+fn typeof_instantiation_expression_substitutes_static_generic_method() {
+    let host = class_mech_host();
+    let instantiated = resolve_class_mech(&host, "StaticInstantiated");
+    let verter_type_expr::TypeExpr::Object(object) = &instantiated else {
+        panic!("expected substituted object, got {instantiated:?}");
+    };
+    let wrapped = object
+        .properties
+        .iter()
+        .find_map(|m| match m {
+            verter_type_expr::ObjectMember::Property(p) if p.name == "wrapped" => Some(p),
+            _ => None,
+        })
+        .expect("member `wrapped`");
+    assert_eq!(
+        wrapped.ty,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+        "T must substitute to string, never stay a bare TypeParam"
+    );
+}
+
+/// A class with a DECLARED constructor publishes the class instance as the
+/// construct-signature return: `InstanceType<typeof C>` exposes the
+/// instance members (fields and methods).
+#[test]
+fn instance_type_of_class_with_declared_ctor_resolves_instance_members() {
+    let host = class_mech_host();
+    let instance = resolve_class_mech(&host, "AmbientInstance");
+    let verter_type_expr::TypeExpr::Object(object) = &instance else {
+        panic!("expected instance object, got {instance:?}");
+    };
+    let mut names: Vec<&str> = object
+        .properties
+        .iter()
+        .filter_map(|m| match m {
+            verter_type_expr::ObjectMember::Property(p) => Some(p.name.as_str()),
+            verter_type_expr::ObjectMember::Method(mm) => Some(mm.name.as_str()),
+            _ => None,
+        })
+        .collect();
+    names.sort_unstable();
+    assert_eq!(names, vec!["id", "method"]);
+}
+
+/// The projected `<T>(x: T) => T` identity function: the inner binder `T`
+/// survives intact — never rewritten by an OUTER substitution that happens
+/// to use the same parameter name.
+fn assert_inner_generic_identity_fn(expr: &verter_type_expr::TypeExpr, label: &str) {
+    let verter_type_expr::TypeExpr::Function(f) = expr else {
+        panic!("{label}: expected the inner generic identity function, got {expr:?}");
+    };
+    assert_eq!(f.type_parameters.len(), 1, "{label}: inner binder count");
+    assert_eq!(f.type_parameters[0].name, "T", "{label}: inner binder name");
+    assert_eq!(f.parameters.len(), 1, "{label}: parameter count");
+    let inner_t = verter_type_expr::TypeExpr::TypeParameter(verter_type_expr::TypeParam {
+        name: "T".to_string(),
+        constraint: None,
+        default: None,
+    });
+    // Discriminating negatives: the OUTER `T`'s substitution must not leak
+    // into the shadowing inner binder's occurrences.
+    assert_ne!(
+        f.parameters[0].ty,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+        "{label}: inner `x: T` must NOT be rewritten to the outer `<string>` argument"
+    );
+    assert_ne!(
+        f.parameters[0].ty,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Unknown),
+        "{label}: inner `x: T` must NOT be instantiated at `unknown` for the outer binder"
+    );
+    // Positive: parameter and return ARE the inner `T`.
+    assert_eq!(f.parameters[0].ty, inner_t, "{label}: parameter type");
+    assert_eq!(
+        f.return_type.as_deref(),
+        Some(&inner_t),
+        "{label}: return type"
+    );
+}
+
+/// `outerNested<T>(): <T>(x: T) => T` — the inner function RE-DECLARES `T`,
+/// shadowing the outer binder. Applying explicit instantiation-expression
+/// arguments (`typeof outerNested<string>`) substitutes the OUTER `T` only;
+/// the inner binder and its occurrences survive.
+#[test]
+fn typeof_instantiation_args_do_not_rewrite_shadowing_inner_binder() {
+    let host = class_mech_host();
+    let inst = resolve_class_mech(&host, "NestedShadowInstantiated");
+    assert_inner_generic_identity_fn(&inst, "explicit <string> instantiation");
+}
+
+/// Same shadowing shape through the bare-generic read: `ReturnType<typeof
+/// outerNested>` instantiates the OUTER free `T` at `unknown`, but the
+/// extracted return re-declares `T` — the inner binder must survive.
+#[test]
+fn unknown_instantiation_does_not_rewrite_shadowing_inner_binder() {
+    let host = class_mech_host();
+    let at_unknown = resolve_class_mech(&host, "NestedShadowAtUnknown");
+    assert_inner_generic_identity_fn(&at_unknown, "bare-generic instantiation at unknown");
+}
+
+/// `outer<T>(): <U = T>() => U` — the ONLY occurrence of the outer `T` is the
+/// nested (non-shadowing) function's type-parameter DEFAULT. The substitute
+/// engine descends into nested `type_parameters[*].default`, so the
+/// shadowing-aware binder collection must too: explicit instantiation
+/// (`typeof outer<string>`) substitutes the default while the inner `U`
+/// binder itself survives.
+#[test]
+fn typeof_instantiation_args_substitute_outer_binder_in_nested_default() {
+    let host = class_mech_host();
+    let inst = resolve_class_mech(&host, "NestedDefaultInstantiated");
+    let verter_type_expr::TypeExpr::Function(f) = &inst else {
+        panic!("expected the inner generic function, got {inst:?}");
+    };
+    assert_eq!(f.type_parameters.len(), 1, "inner binder count");
+    assert_eq!(
+        f.type_parameters[0].name, "U",
+        "the inner `U` binder itself survives"
+    );
+    // The outer `T` in nested-default position substitutes…
+    assert_eq!(
+        f.type_parameters[0].default.as_deref(),
+        Some(&verter_type_expr::TypeExpr::Primitive(
+            verter_type_expr::PrimitiveName::String
+        )),
+        "outer `T` in the nested type-parameter default must substitute to \
+         the explicit `<string>` argument"
+    );
+    // …and must NOT survive as the unspecialized outer binder.
+    assert_ne!(
+        f.type_parameters[0].default.as_deref(),
+        Some(&verter_type_expr::TypeExpr::TypeParameter(
+            verter_type_expr::TypeParam {
+                name: "T".to_string(),
+                constraint: None,
+                default: None,
+            }
+        )),
+        "the collection must not leave the nested default as the unbound `T`"
+    );
+    // The return type stays the inner `U` occurrence.
+    let Some(verter_type_expr::TypeExpr::TypeParameter(ret)) = f.return_type.as_deref() else {
+        panic!("return must stay the inner binder, got {:?}", f.return_type);
+    };
+    assert_eq!(ret.name, "U", "return is the surviving inner `U`");
+}
+
+/// `outer<T>(): <U extends T>(x: U) => U` — same gap on the CONSTRAINT rail:
+/// the only occurrence of the outer `T` is the nested function's
+/// type-parameter constraint. Explicit instantiation substitutes it; the
+/// inner `U` binder and its occurrences survive.
+#[test]
+fn typeof_instantiation_args_substitute_outer_binder_in_nested_constraint() {
+    let host = class_mech_host();
+    let inst = resolve_class_mech(&host, "NestedConstraintInstantiated");
+    let verter_type_expr::TypeExpr::Function(f) = &inst else {
+        panic!("expected the inner generic function, got {inst:?}");
+    };
+    assert_eq!(f.type_parameters.len(), 1, "inner binder count");
+    assert_eq!(
+        f.type_parameters[0].name, "U",
+        "the inner `U` binder itself survives"
+    );
+    assert_eq!(
+        f.type_parameters[0].constraint.as_deref(),
+        Some(&verter_type_expr::TypeExpr::Primitive(
+            verter_type_expr::PrimitiveName::String
+        )),
+        "outer `T` in the nested type-parameter constraint must substitute to \
+         the explicit `<string>` argument"
+    );
+    assert_ne!(
+        f.type_parameters[0].constraint.as_deref(),
+        Some(&verter_type_expr::TypeExpr::TypeParameter(
+            verter_type_expr::TypeParam {
+                name: "T".to_string(),
+                constraint: None,
+                default: None,
+            }
+        )),
+        "the collection must not leave the nested constraint as the unbound `T`"
+    );
+    // Parameter and return stay the inner `U` occurrences.
+    assert_eq!(f.parameters.len(), 1, "parameter count");
+    let verter_type_expr::TypeExpr::TypeParameter(param) = &f.parameters[0].ty else {
+        panic!(
+            "parameter must stay the inner binder, got {:?}",
+            f.parameters[0].ty
+        );
+    };
+    assert_eq!(param.name, "U", "`x: U` is the surviving inner `U`");
+    let Some(verter_type_expr::TypeExpr::TypeParameter(ret)) = f.return_type.as_deref() else {
+        panic!("return must stay the inner binder, got {:?}", f.return_type);
+    };
+    assert_eq!(ret.name, "U", "return is the surviving inner `U`");
+}
+
+/// Extract the single named property of a materialised object projection.
+fn expect_object_property(
+    expr: &verter_type_expr::TypeExpr,
+    member: &str,
+    label: &str,
+) -> verter_type_expr::TypeExpr {
+    let verter_type_expr::TypeExpr::Object(object) = expr else {
+        panic!("{label}: expected a materialised object, got {expr:?}");
+    };
+    object
+        .properties
+        .iter()
+        .find_map(|m| match m {
+            verter_type_expr::ObjectMember::Property(p) if p.name == member => Some(p.ty.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("{label}: object must carry the `{member}` member"))
+}
+
+/// The unspecialized outer binder shape that must never survive an
+/// instantiation that consumed it.
+fn unbound_type_param(name: &str) -> verter_type_expr::TypeExpr {
+    verter_type_expr::TypeExpr::TypeParameter(verter_type_expr::TypeParam {
+        name: name.to_string(),
+        constraint: None,
+        default: None,
+    })
+}
+
+/// `pick<T>(): T extends string ? "narrow" : "wide"` — the only occurrence
+/// of the outer `T` is the Conditional's CHECK operand. Explicit
+/// instantiation must substitute it (the substitute engine descends into
+/// Conditional operands, so the shadowing-aware binder collection must
+/// too); pre-fix the consumed parameter was stripped while the check kept
+/// the now-FREE `T` — silently wrong, not an honest Miss. The published
+/// shape stays the (now closed) conditional: reducing a closed conditional
+/// at the signature-extraction read is a recorded follow-up, not this
+/// read's contract.
+#[test]
+fn typeof_instantiation_args_substitute_outer_binder_in_conditional_return() {
+    let host = class_mech_host();
+    let inst = resolve_class_mech(&host, "CondReturnInstantiated");
+    let verter_type_expr::TypeExpr::Conditional {
+        check,
+        extends,
+        true_type,
+        false_type,
+    } = &inst
+    else {
+        panic!("expected the conditional return, got {inst:?}");
+    };
+    assert_ne!(
+        check.as_ref(),
+        &unbound_type_param("T"),
+        "the conditional CHECK must NOT keep the free outer `T`"
+    );
+    assert_eq!(
+        check.as_ref(),
+        &verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+        "the explicit `<string>` argument substitutes into the check operand"
+    );
+    assert_eq!(
+        extends.as_ref(),
+        &verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+        "the extends operand is untouched"
+    );
+    assert_eq!(
+        true_type.as_ref(),
+        &verter_type_expr::TypeExpr::Literal(verter_type_expr::LiteralValue::String(
+            "narrow".to_string()
+        )),
+        "true branch intact"
+    );
+    assert_eq!(
+        false_type.as_ref(),
+        &verter_type_expr::TypeExpr::Literal(verter_type_expr::LiteralValue::String(
+            "wide".to_string()
+        )),
+        "false branch intact"
+    );
+}
+
+/// Same conditional position on the bare-generic rail: the free `T`
+/// instantiates at `unknown` INSIDE the check operand — never survives as
+/// the unbound parameter.
+#[test]
+fn unknown_instantiation_substitutes_outer_binder_in_conditional_return() {
+    let host = class_mech_host();
+    let at_unknown = resolve_class_mech(&host, "CondReturnAtUnknown");
+    let verter_type_expr::TypeExpr::Conditional { check, .. } = &at_unknown else {
+        panic!("expected the conditional return, got {at_unknown:?}");
+    };
+    assert_ne!(
+        check.as_ref(),
+        &unbound_type_param("T"),
+        "the conditional CHECK must NOT keep the free outer `T`"
+    );
+    assert_eq!(
+        check.as_ref(),
+        &verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Unknown),
+        "the bare-generic read instantiates the check operand at `unknown`"
+    );
+}
+
+/// `unwrap<T>(): T extends Boxed<infer T> ? T : "miss"` — the name-collision
+/// idiom: `infer T` DECLARES a fresh conditional-scoped binder shadowing the
+/// function's own `T`. Explicit instantiation substitutes the CHECK operand;
+/// the `infer T` declaration inside the extends carrier survives — pre-fix
+/// the substitute engine's name-only Infer-occurrence arm clobbered it with
+/// the argument, turning the extends into `Boxed<string>` (silently wrong:
+/// the conditional then relates against the argument instead of binding the
+/// infer).
+///
+/// Known residual (NOT asserted): the true-branch `T` reference lowers as a
+/// `TypeParam` shell whose file-scoped name-keyed identity equals the outer
+/// binder, so it still substitutes as the outer parameter; full TS parity
+/// there needs conditional-scope shadowing in the descent (engine-layer
+/// follow-up). This test pins exactly what the Infer-binder gate
+/// guarantees: the infer DECLARATION is never clobbered, and the published
+/// extends no longer contains the argument where the infer binds.
+#[test]
+fn typeof_instantiation_args_do_not_clobber_same_name_infer_declaration() {
+    let host = class_mech_host();
+    let inst = resolve_class_mech(&host, "InferCollisionInstantiated");
+    let verter_type_expr::TypeExpr::Conditional {
+        check,
+        extends,
+        false_type,
+        ..
+    } = &inst
+    else {
+        panic!("expected the conditional return, got {inst:?}");
+    };
+    // The OUTER occurrence substitutes…
+    assert_eq!(
+        check.as_ref(),
+        &verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+        "the explicit `<string>` argument substitutes into the check operand"
+    );
+    // …the `infer T` declaration inside the extends carrier survives…
+    assert_eq!(
+        expect_object_property(extends, "boxed", "extends carrier surface"),
+        verter_type_expr::TypeExpr::Infer {
+            name: "T".to_string()
+        },
+        "the `infer T` declaration survives in the extends position"
+    );
+    assert_ne!(
+        expect_object_property(extends, "boxed", "extends carrier surface"),
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+        "the published extends must NOT contain the argument where the infer binds"
+    );
+    // …and the false branch is intact.
+    assert_eq!(
+        false_type.as_ref(),
+        &verter_type_expr::TypeExpr::Literal(verter_type_expr::LiteralValue::String(
+            "miss".to_string()
+        )),
+        "false branch intact"
+    );
+}
+
+/// `project<T>(): { [K in keyof T]: T[K] }` — the outer `T` occurs only
+/// inside the Mapped node: the key space (`keyof T`) and the per-key value's
+/// indexed-access object (`T[K]`). Explicit instantiation with a closed
+/// object argument must substitute BOTH positions; the mapper's own `K`
+/// binder survives as the per-key index. (Enumerating the now-closed mapped
+/// surface at the signature-extraction read is the same recorded follow-up
+/// as the conditional case.)
+#[test]
+fn typeof_instantiation_args_substitute_outer_binder_in_mapped_return() {
+    let host = class_mech_host();
+    let inst = resolve_class_mech(&host, "MappedReturnInstantiated");
+    let verter_type_expr::TypeExpr::Mapped {
+        parameter,
+        source,
+        value,
+        ..
+    } = &inst
+    else {
+        panic!("expected the mapped return, got {inst:?}");
+    };
+    assert_eq!(parameter, "K", "the mapper's own binder is preserved");
+    // Key space: `keyof T` → `keyof { a: string }`.
+    let verter_type_expr::TypeExpr::KeyOf(source_base) = source.as_ref() else {
+        panic!("expected the keyof key space, got {source:?}");
+    };
+    assert_ne!(
+        source_base.as_ref(),
+        &unbound_type_param("T"),
+        "the key space must NOT keep the free outer `T`"
+    );
+    assert_eq!(
+        expect_object_property(source_base, "a", "substituted key-space object"),
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+        "the explicit object argument substitutes into the key space"
+    );
+    // Per-key value: `T[K]` → `{ a: string }[K]` with the inner `K` intact.
+    let verter_type_expr::TypeExpr::IndexedAccess { object, index } = value.as_ref() else {
+        panic!("expected the indexed-access value, got {value:?}");
+    };
+    assert_ne!(
+        object.as_ref(),
+        &unbound_type_param("T"),
+        "the value's indexed-access object must NOT keep the free outer `T`"
+    );
+    assert_eq!(
+        expect_object_property(object, "a", "substituted value object"),
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+        "the explicit object argument substitutes into the per-key value"
+    );
+    let verter_type_expr::TypeExpr::TypeParameter(index_param) = index.as_ref() else {
+        panic!("the per-key index must stay the mapper's own binder, got {index:?}");
+    };
+    assert_eq!(index_param.name, "K", "the mapper's own `K` index survives");
+}
+
+/// `remap<K extends string, T>(): { [K in keyof T]: K }` — the mapped type's
+/// OWN `K` binder re-declares the outer parameter's name, so the mapped
+/// VALUE position belongs to the inner binder (TS lexical shadowing):
+/// explicit instantiation (`typeof remap<"z", { a: string }>`) substitutes
+/// the outer `T` through the mapped SOURCE but must NOT rewrite the inner
+/// `K` value — the same binder-shadow rule the substitute engine applies to
+/// a shadowing mapper.
+#[test]
+fn typeof_instantiation_args_do_not_rewrite_mapped_own_binder() {
+    let host = class_mech_host();
+    let inst = resolve_class_mech(&host, "MappedShadowInstantiated");
+    let verter_type_expr::TypeExpr::Mapped {
+        parameter,
+        source,
+        value,
+        ..
+    } = &inst
+    else {
+        panic!("expected the mapped return, got {inst:?}");
+    };
+    assert_eq!(parameter, "K", "the mapper's own binder is preserved");
+    // The outer `T` substitutes through the mapped SOURCE position…
+    let verter_type_expr::TypeExpr::KeyOf(source_base) = source.as_ref() else {
+        panic!("expected the keyof key space, got {source:?}");
+    };
+    assert_eq!(
+        expect_object_property(source_base, "a", "shadow-fixture key space"),
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+        "the explicit object argument substitutes into the key space"
+    );
+    // …while the mapped VALUE belongs to the mapper's own `K`: the outer
+    // `K` instantiation argument must NOT leak into it.
+    assert_ne!(
+        value.as_ref(),
+        &verter_type_expr::TypeExpr::Literal(verter_type_expr::LiteralValue::String(
+            "z".to_string()
+        )),
+        "the mapped type's OWN `K` binder must be shadow-protected from the \
+         outer `K` substitution"
+    );
+    let verter_type_expr::TypeExpr::TypeParameter(inner) = value.as_ref() else {
+        panic!("the mapped value must stay the inner `K` binder, got {value:?}");
+    };
+    assert_eq!(
+        inner.name, "K",
+        "the inner `K` survives as the per-key value"
+    );
+}
+
+/// Generic static heritage: `class GenSub extends GenBase<string> {}` — the
+/// ctor-less subclass inherits `GenBase<T>`'s constructor with `T`
+/// SPECIALIZED to the heritage type-argument, never the unbound `T`.
+#[test]
+fn ctorless_subclass_inherits_base_ctor_with_heritage_type_args_applied() {
+    let host = class_mech_host();
+    let params = resolve_class_mech(&host, "GenSubCtorParams");
+    let verter_type_expr::TypeExpr::Tuple { elements, .. } = &params else {
+        panic!("ConstructorParameters must project a tuple, got {params:?}");
+    };
+    assert_eq!(elements.len(), 1, "inherited ctor arity");
+    // Discriminating negative: the unspecialized base binder must not leak.
+    assert_ne!(
+        elements[0].ty,
+        verter_type_expr::TypeExpr::TypeParameter(verter_type_expr::TypeParam {
+            name: "T".to_string(),
+            constraint: None,
+            default: None,
+        }),
+        "inherited ctor param must NOT stay the unbound base `T`"
+    );
+    assert_eq!(
+        elements[0].ty,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+        "heritage `extends GenBase<string>` must specialize the inherited ctor param"
+    );
+}
+
+/// Two-step generic static heritage: `GenLeaf extends GenMid<boolean>`,
+/// `GenMid<U> extends GenBase<U>` — the heritage substitution composes
+/// through the intermediate generic subclass.
+#[test]
+fn heritage_type_args_compose_through_intermediate_generic_subclass() {
+    let host = class_mech_host();
+    let params = resolve_class_mech(&host, "GenLeafCtorParams");
+    let verter_type_expr::TypeExpr::Tuple { elements, .. } = &params else {
+        panic!("ConstructorParameters must project a tuple, got {params:?}");
+    };
+    assert_eq!(elements.len(), 1, "inherited ctor arity");
+    assert_eq!(
+        elements[0].ty,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean),
+        "two-step heritage substitution must land `boolean`, not `T`/`U`"
+    );
+}
+
+/// Instance-side pin: the INSTANCE surface resolves heritage through the
+/// type-space `Instantiate` over the producer's Intersection fold, where
+/// `extends InstBase<string>` rides as an instantiation carrier — the
+/// projected member is the specialized `string`, proving the instance rail
+/// does not share the static composer's former type-argument drop.
+#[test]
+fn instance_member_through_generic_heritage_projects_substituted_arg() {
+    let host = class_mech_host();
+    assert_eq!(
+        resolve_class_mech(&host, "InstSubVal"),
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+        "instance member inherited from `InstBase<string>` must be `string`"
+    );
+}
+
+// =============================================================================
+// Class static surfaces through re-exports: the export-target fallback must
+// derive the class-surface SLOT identity and the constructor-shape lowering
+// scope from the POST-fallback (declaring) canonical, never the re-exporting
+// barrel.
+// =============================================================================
+
+const REEXPORT_CLASS_ORIGIN: &str = r#"
+export class ReBase {
+  static origin(): string { return ""; }
+}
+export class ReClass extends ReBase {
+  static own(): number { return 0; }
+}
+"#;
+
+fn reexport_class_host() -> VerterHost {
+    let host = host();
+    upsert_ts(&host, "/w/reexp_origin.ts", REEXPORT_CLASS_ORIGIN);
+    upsert_ts(
+        &host,
+        "/w/reexp_barrel.ts",
+        "export { ReClass } from './reexp_origin';\n",
+    );
+    upsert_ts(
+        &host,
+        "/w/reexp_use.ts",
+        "import { ReClass } from './reexp_barrel';\n\
+         export type ReOwnReturn = ReturnType<typeof ReClass.own>;\n\
+         export type ReOriginReturn = ReturnType<typeof ReClass.origin>;\n",
+    );
+    host
+}
+
+fn resolve_named_in(host: &VerterHost, canonical: &str, name: &str) -> verter_type_expr::TypeExpr {
+    let (outcome, _record) = host
+        .resolve_named_symbol_with_audit(canonical, name, &[], Some(ProjectionMode::Expanded))
+        .into_parts();
+    let node = outcome
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| panic!("{name} must resolve"));
+    host.project_node_to_type_expr(node)
+        .unwrap_or_else(|| panic!("{name} resolved node must project to TypeExpr"))
+}
+
+/// A class queried THROUGH a re-exporting barrel composes its full static
+/// surface under the DECLARING file's identity: the own static resolves AND
+/// the heritage statics compose (the type-side sibling decl lives in the
+/// origin file — a barrel-keyed slot would never find it).
+#[test]
+fn reexported_class_static_surface_composes_heritage_under_origin_scope() {
+    let host = reexport_class_host();
+    assert_eq!(
+        resolve_named_in(&host, "/w/reexp_use.ts", "ReOwnReturn"),
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+        "own static through the re-export"
+    );
+    assert_eq!(
+        resolve_named_in(&host, "/w/reexp_use.ts", "ReOriginReturn"),
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+        "heritage static must compose — the slot must carry the ORIGIN canonical \
+         (the barrel has no type-side sibling decl to read heritage from)"
+    );
+    // Slot attribution: the admitted `ResolveClassSurface(Static)` slot is
+    // keyed by the ORIGIN canonical; NO barrel-keyed slot exists (across
+    // every projection mode — the probe is mode-agnostic on purpose).
+    let graph = host.project_type_store().semantic_graph();
+    let slot_count_for = |canonical: &str| -> usize {
+        let env = host.host_view_env_hashes_for(canonical);
+        let project_identity = host.host_view_project_identity_for(canonical).fold_u32();
+        [
+            ProjectionMode::Identity,
+            ProjectionMode::Navigate,
+            ProjectionMode::Shallow,
+            ProjectionMode::Expanded,
+            ProjectionMode::Skeleton,
+        ]
+        .into_iter()
+        .map(|mode| {
+            let key = SemanticQueryKey::ResolveClassSurface {
+                decl_slot: crate::semantic_query::ResolvedDeclSlotIdentity::type_slot(
+                    Arc::from(canonical),
+                    Arc::from("ReClass"),
+                    project_identity,
+                    env.type_env_hash,
+                    env.lib_env_hash,
+                ),
+                type_args: Arc::from(Vec::new().into_boxed_slice()),
+                side: crate::semantic_query::ClassSurfaceSide::Static,
+                context: crate::semantic_query::ClassSurfaceContext {
+                    parse_env_hash: env.parse_env_hash,
+                    resolve_env_hash: env.resolve_env_hash,
+                    mode,
+                },
+            };
+            graph.slot_candidate_count_for_tests(&key)
+        })
+        .sum()
+    };
+    assert_eq!(
+        slot_count_for("/w/reexp_barrel.ts"),
+        0,
+        "no class-surface slot may be keyed by the re-exporting barrel"
+    );
+    assert!(
+        slot_count_for("/w/reexp_origin.ts") > 0,
+        "the class-surface slot must be keyed by the declaring origin canonical"
+    );
+}
+
+/// A `ResolveClassSurface(Static)` key whose slot names the RE-EXPORTING
+/// barrel (no local prepared value decl — the export-target fallback rail)
+/// must compose the surface under the POST-fallback declaring identity:
+/// heritage statics compose (the type-side sibling decl lives in the origin
+/// file) and the constructor-shape lowering runs in the origin's scope —
+/// never a partial own-only surface lowered under the stale barrel scope.
+#[test]
+fn barrel_keyed_class_surface_composes_under_export_target_identity() {
+    let host = reexport_class_host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let barrel = "/w/reexp_barrel.ts";
+    let env = host.host_view_env_hashes_for(barrel);
+    let project_identity = host.host_view_project_identity_for(barrel).fold_u32();
+    let key = SemanticQueryKey::ResolveClassSurface {
+        decl_slot: crate::semantic_query::ResolvedDeclSlotIdentity::type_slot(
+            Arc::from(barrel),
+            Arc::from("ReClass"),
+            project_identity,
+            env.type_env_hash,
+            env.lib_env_hash,
+        ),
+        type_args: Arc::from(Vec::new().into_boxed_slice()),
+        side: crate::semantic_query::ClassSurfaceSide::Static,
+        context: crate::semantic_query::ClassSurfaceContext {
+            parse_env_hash: env.parse_env_hash,
+            resolve_env_hash: env.resolve_env_hash,
+            mode: ProjectionMode::Shallow,
+        },
+    };
+    let node = match dispatch.execute_type_node(key) {
+        QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
+        other => panic!("barrel-keyed ResolveClassSurface(Static) errored: {other:?}"),
+    };
+    let graph = host.project_type_store().semantic_graph();
+    let data = graph.node_data(node);
+    let Some(SemanticNodeData::Object(view)) = data.as_deref() else {
+        panic!("static surface must be a constructor Object, got {data:?}");
+    };
+    let member_names: Vec<&str> = view.members.iter().map(|m| m.name.as_ref()).collect();
+    assert!(
+        member_names.contains(&"own"),
+        "own static must be present: {member_names:?}"
+    );
+    assert!(
+        member_names.contains(&"origin"),
+        "heritage static `origin` must compose — the fallback must rebase the \
+         surface onto the export-target (declaring) identity, not lower an \
+         own-only shape under the stale barrel scope: {member_names:?}"
+    );
+}
+
+// =============================================================================
+// ResolveOverloadSet — the live signature-group reducer. The value domain is
+// `OverloadSet(Arc<[SignatureRef]>)`: the callee's ordered VISIBLE signature
+// group (call bucket first, then construct), produced through the ONE shared
+// engine. The LAST element is the last visible overload — the projection the
+// signature utilities (and U6's call resolution) select from.
+// =============================================================================
+
+fn typeof_value_node(
+    host: &VerterHost,
+    dispatch: &ProjectSemanticDispatch,
+    canonical: &str,
+    name: &str,
+) -> SemanticNodeId {
+    let env = host.host_view_env_hashes_for(canonical);
+    let project_identity = host.host_view_project_identity_for(canonical).fold_u32();
+    let key = SemanticQueryKey::TypeOf {
+        value_root: crate::semantic_query::ValueRootSlotIdentity::new(
+            ValueRootKey {
+                scope: ScopeId::file(Arc::from(canonical)),
+                name: Arc::from(name),
+            },
+            project_identity,
+            env.type_env_hash,
+            env.lib_env_hash,
+        ),
+        context: crate::semantic_query::TypeOfContext::new(
+            ProjectionReductionContext::published(ProjectionMode::Expanded),
+            env.resolve_env_hash,
+        ),
+    };
+    match dispatch.execute_type_node(key) {
+        QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
+        other => panic!("typeof {name} errored: {other:?}"),
+    }
+}
+
+fn overload_set_key_for(
+    host: &VerterHost,
+    canonical: &str,
+    callee: SemanticNodeId,
+    type_args: Vec<SemanticNodeId>,
+) -> SemanticQueryKey {
+    let env = host.host_view_env_hashes_for(canonical);
+    SemanticQueryKey::ResolveOverloadSet {
+        callee,
+        type_args: Arc::from(type_args.into_boxed_slice()),
+        context: crate::semantic_query::OverloadSetContext {
+            resolve_env_hash: env.resolve_env_hash,
+        },
+    }
+}
+
+/// The dispatched overload set, or the raw error result.
+fn execute_overload_set(
+    dispatch: &ProjectSemanticDispatch,
+    key: SemanticQueryKey,
+) -> Result<Arc<[crate::semantic_query::SignatureRef]>, QueryResult<SemanticNodeId>> {
+    match crate::semantic_query::SemanticQueryApi::execute(dispatch, key) {
+        QueryResult::Value(SemanticQueryOutput { value, .. }) => match value {
+            crate::semantic_query::SemanticQueryValue::OverloadSet(refs) => Ok(refs),
+            other => {
+                panic!("ResolveOverloadSet must produce the OverloadSet domain, got {other:?}")
+            }
+        },
+        QueryResult::Recursive(node) => Err(QueryResult::Recursive(node)),
+        QueryResult::Error(err) => Err(QueryResult::Error(err)),
+    }
+}
+
+/// The return-type node data of a signature entry.
+fn signature_return_data(
+    host: &VerterHost,
+    sig: &crate::semantic_query::SignatureRef,
+) -> SemanticNodeData {
+    let graph = host.project_type_store().semantic_graph();
+    let data = graph.node_data(sig.node);
+    let Some(SemanticNodeData::Function { return_type, .. }) = data.as_deref() else {
+        panic!("overload-set entry must be a Function node, got {data:?}");
+    };
+    let ret = graph
+        .node_data(*return_type)
+        .expect("signature return node");
+    (*ret).clone()
+}
+
+/// Multi-overload function: the set carries the ordered VISIBLE group only —
+/// both bodiless overloads in source order, the trailing implementation
+/// hidden (build_typeof's visibility rule). The LAST element is the last
+/// visible overload, distinct from both the first overload and the hidden
+/// implementation signature.
+#[test]
+fn resolve_overload_set_projects_ordered_visible_group_hiding_implementation() {
+    let host = class_mech_host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let callee = typeof_value_node(&host, &dispatch, "/w/class_mech.ts", "lookup");
+    let key = overload_set_key_for(&host, "/w/class_mech.ts", callee, Vec::new());
+    let refs = execute_overload_set(&dispatch, key.clone())
+        .unwrap_or_else(|err| panic!("overload set must resolve, got {err:?}"));
+    assert_eq!(
+        refs.len(),
+        2,
+        "exactly the two bodiless overloads are visible; the implementation is hidden"
+    );
+    let first = signature_return_data(&host, &refs[0]);
+    let last = signature_return_data(&host, refs.last().expect("non-empty"));
+    // Exact projection: the LAST visible overload is `lookup(key: "count"): number`.
+    assert_eq!(
+        last,
+        SemanticNodeData::Primitive(crate::semantic_query::PrimitiveKind::Number),
+        "last visible overload returns `number`"
+    );
+    // Discriminating negatives: not the FIRST overload, not the implementation.
+    assert_ne!(last, first, "last visible overload differs from the first");
+    assert_eq!(
+        first,
+        SemanticNodeData::Primitive(crate::semantic_query::PrimitiveKind::String),
+        "first overload returns `string`"
+    );
+    for sig in refs.iter() {
+        assert!(
+            !matches!(
+                signature_return_data(&host, sig),
+                SemanticNodeData::Union(_)
+            ),
+            "the implementation signature (string | number return) must never \
+             surface in the visible overload set"
+        );
+    }
+    // Live producer: the result admits into the shared family memo
+    // (Singleflight), proving it routed through execute() — not a stub.
+    let graph = host.project_type_store().semantic_graph();
+    assert!(
+        graph.slot_candidate_count_for_tests(&key) > 0,
+        "a live ResolveOverloadSet producer must admit into the shared memo"
+    );
+}
+
+/// A lone signature is visible even if bodied (the lone-signature arm of the
+/// visibility rule): `bare<T>(x: T): T {}` yields a one-element set.
+#[test]
+fn resolve_overload_set_lone_bodied_signature_is_visible() {
+    let host = class_mech_host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let callee = typeof_value_node(&host, &dispatch, "/w/class_mech.ts", "bare");
+    let key = overload_set_key_for(&host, "/w/class_mech.ts", callee, Vec::new());
+    let refs = execute_overload_set(&dispatch, key)
+        .unwrap_or_else(|err| panic!("lone-signature overload set must resolve, got {err:?}"));
+    assert_eq!(refs.len(), 1, "a lone bodied signature IS the visible set");
+}
+
+/// A call+construct hybrid orders the CALL bucket before the CONSTRUCT
+/// bucket: `hybrid`'s call signature (returns `string`) precedes its
+/// construct signature (returns the instance object).
+#[test]
+fn resolve_overload_set_orders_call_then_construct_buckets() {
+    let host = class_mech_host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let callee = typeof_value_node(&host, &dispatch, "/w/class_mech.ts", "hybrid");
+    let key = overload_set_key_for(&host, "/w/class_mech.ts", callee, Vec::new());
+    let refs = execute_overload_set(&dispatch, key)
+        .unwrap_or_else(|err| panic!("hybrid overload set must resolve, got {err:?}"));
+    assert_eq!(refs.len(), 2, "one call + one construct signature");
+    assert_eq!(
+        signature_return_data(&host, &refs[0]),
+        SemanticNodeData::Primitive(crate::semantic_query::PrimitiveKind::String),
+        "call bucket first"
+    );
+    assert!(
+        matches!(
+            signature_return_data(&host, &refs[1]),
+            SemanticNodeData::Object(_)
+        ),
+        "construct bucket second (returns the instance object)"
+    );
+}
+
+/// Explicit `type_args` instantiate each candidate positionally; a candidate
+/// that cannot accept the argument list (non-generic, arity mismatch) drops
+/// from the set — all-dropped is an honest Miss, never an empty set.
+#[test]
+fn resolve_overload_set_applies_explicit_type_args_per_candidate() {
+    let host = class_mech_host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = host.project_type_store().semantic_graph();
+    let string_node = graph.intern_node(SemanticNodeData::Primitive(
+        crate::semantic_query::PrimitiveKind::String,
+    ));
+
+    // Generic lone signature instantiates: `bare<string>` → `(x: string) => string`.
+    let bare = typeof_value_node(&host, &dispatch, "/w/class_mech.ts", "bare");
+    let key = overload_set_key_for(&host, "/w/class_mech.ts", bare, vec![string_node]);
+    let refs = execute_overload_set(&dispatch, key)
+        .unwrap_or_else(|err| panic!("instantiated overload set must resolve, got {err:?}"));
+    assert_eq!(refs.len(), 1);
+    let data = graph.node_data(refs[0].node);
+    let Some(SemanticNodeData::Function {
+        params,
+        return_type,
+        type_parameters,
+        ..
+    }) = data.as_deref()
+    else {
+        panic!("instantiated entry must be a Function, got {data:?}");
+    };
+    assert!(
+        type_parameters.is_empty(),
+        "an instantiation expression yields a non-generic signature"
+    );
+    assert_eq!(
+        graph.node_data(params[0].ty).as_deref(),
+        Some(&SemanticNodeData::Primitive(
+            crate::semantic_query::PrimitiveKind::String
+        )),
+        "parameter substitutes to the explicit argument"
+    );
+    assert_eq!(
+        graph.node_data(*return_type).as_deref(),
+        Some(&SemanticNodeData::Primitive(
+            crate::semantic_query::PrimitiveKind::String
+        )),
+        "return substitutes to the explicit argument"
+    );
+
+    // Non-generic candidates cannot accept explicit type args → honest Miss.
+    let lookup = typeof_value_node(&host, &dispatch, "/w/class_mech.ts", "lookup");
+    let miss_key = overload_set_key_for(&host, "/w/class_mech.ts", lookup, vec![string_node]);
+    let err = execute_overload_set(&dispatch, miss_key.clone())
+        .expect_err("explicit type args over non-generic overloads must MISS");
+    assert!(
+        matches!(err, QueryResult::Error(QueryError::Miss)),
+        "all-candidates-dropped is an honest Miss, got {err:?}"
+    );
+    assert_eq!(
+        graph.slot_candidate_count_for_tests(&miss_key),
+        0,
+        "a Miss admits nothing into the shared memo"
+    );
+}
+
+/// A callee with no signature group (a primitive node) is an honest Miss
+/// that admits nothing — never a fabricated empty `OverloadSet`.
+#[test]
+fn resolve_overload_set_misses_on_non_signature_callee() {
+    let host = class_mech_host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = host.project_type_store().semantic_graph();
+    let callee = graph.intern_node(SemanticNodeData::Primitive(
+        crate::semantic_query::PrimitiveKind::Number,
+    ));
+    let key = overload_set_key_for(&host, "/w/class_mech.ts", callee, Vec::new());
+    let err =
+        execute_overload_set(&dispatch, key.clone()).expect_err("a non-signature callee must MISS");
+    assert!(
+        matches!(err, QueryResult::Error(QueryError::Miss)),
+        "honest Miss, got {err:?}"
+    );
+    assert_eq!(
+        graph.slot_candidate_count_for_tests(&key),
+        0,
+        "nothing admitted for a Miss"
+    );
+}
+
+/// The node-narrowing consumer entry (`execute_type_node`) rejects the
+/// OverloadSet domain exactly as the trait-default narrowing does — the
+/// produced value is NOT a `TypeNode` and must not leak as one.
+#[test]
+fn resolve_overload_set_value_domain_rejects_type_node_narrowing() {
+    let host = class_mech_host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let callee = typeof_value_node(&host, &dispatch, "/w/class_mech.ts", "lookup");
+    let key = overload_set_key_for(&host, "/w/class_mech.ts", callee, Vec::new());
+    match dispatch.execute_type_node(key) {
+        QueryResult::Error(QueryError::ValueDomainMismatch { expected, actual }) => {
+            assert_eq!(
+                expected,
+                crate::semantic_query::SemanticQueryValueTag::TypeNode
+            );
+            assert_eq!(
+                actual,
+                crate::semantic_query::SemanticQueryValueTag::OverloadSet
+            );
+        }
+        other => panic!(
+            "execute_type_node over a producing OverloadSet key must report \
+             ValueDomainMismatch, got {other:?}"
+        ),
+    }
+}
+
+/// A callee that arrives as a `DeclRef` CARRIER (an annotation-typed
+/// overloaded interface that was never materialised at the call site)
+/// settles through the SAME shared signature-source carrier rail the
+/// signature utilities use (`resolve_signature_source_carrier`) — the two
+/// settlement rails must never diverge on the same callee node.
+#[test]
+fn resolve_overload_set_settles_decl_ref_carrier_callee() {
+    let host = class_mech_host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let callee = graph.intern_node(SemanticNodeData::DeclRef {
+        identity: decl_identity_value(&host, "/w/class_mech.ts", "OverloadedIface"),
+    });
+    let key = overload_set_key_for(&host, "/w/class_mech.ts", callee, Vec::new());
+    let refs = execute_overload_set(&dispatch, key).unwrap_or_else(|err| {
+        panic!("a DeclRef carrier callee must settle to its signature group, got {err:?}")
+    });
+    assert_eq!(
+        refs.len(),
+        2,
+        "both bodiless interface call overloads are visible"
+    );
+    let first = signature_return_data(&host, &refs[0]);
+    let last = signature_return_data(&host, refs.last().expect("non-empty"));
+    assert_eq!(
+        first,
+        SemanticNodeData::Primitive(crate::semantic_query::PrimitiveKind::String),
+        "first overload in source order returns `string`"
+    );
+    assert_eq!(
+        last,
+        SemanticNodeData::Primitive(crate::semantic_query::PrimitiveKind::Number),
+        "last overload in source order returns `number`"
+    );
+    assert_ne!(first, last, "the group is ordered, not collapsed");
+
+    // Rail consistency: `ReturnType` settles the SAME carrier node through
+    // `resolve_signature_source_carrier` and selects the last visible call
+    // signature's return — it must agree with the set's last call-bucket
+    // entry, proving the two rails no longer diverge on a carrier callee.
+    let return_type = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
+        base: utility_identity(&graph, "ReturnType"),
+        args: Arc::from(vec![callee].into_boxed_slice()),
+        context: crate::semantic_query::InstantiateContext::new(
+            ProjectionReductionContext::published(ProjectionMode::Expanded),
+            Default::default(),
+        ),
+    }) {
+        QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
+        other => panic!("ReturnType over the same carrier callee must resolve, got {other:?}"),
+    };
+    assert_eq!(
+        graph.node_data(return_type).as_deref(),
+        Some(&SemanticNodeData::Primitive(
+            crate::semantic_query::PrimitiveKind::Number
+        )),
+        "ReturnType and ResolveOverloadSet must settle the same carrier \
+         callee consistently (no dual-rail divergence)"
+    );
+}
+
+/// An `InstantiationRef` carrier callee (a generic overloaded interface with
+/// explicit type arguments) settles through the same shared rail, with the
+/// carrier's type arguments substituted into every projected signature.
+#[test]
+fn resolve_overload_set_settles_instantiation_ref_carrier_callee() {
+    let host = class_mech_host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let number_node = graph.intern_node(SemanticNodeData::Primitive(
+        crate::semantic_query::PrimitiveKind::Number,
+    ));
+    let callee = graph.intern_node(SemanticNodeData::InstantiationRef {
+        base: decl_identity_value(&host, "/w/class_mech.ts", "GenLookup"),
+        args: Arc::from(vec![number_node].into_boxed_slice()),
+    });
+    let key = overload_set_key_for(&host, "/w/class_mech.ts", callee, Vec::new());
+    let refs = execute_overload_set(&dispatch, key).unwrap_or_else(|err| {
+        panic!("an InstantiationRef carrier callee must settle to its signature group, got {err:?}")
+    });
+    assert_eq!(refs.len(), 2, "both call signatures are visible");
+    assert_eq!(
+        signature_return_data(&host, &refs[0]),
+        SemanticNodeData::Primitive(crate::semantic_query::PrimitiveKind::Number),
+        "`T` substitutes through the carrier's explicit argument"
+    );
+    match signature_return_data(&host, refs.last().expect("non-empty")) {
+        SemanticNodeData::Array { element, .. } => {
+            assert_eq!(
+                graph.node_data(element).as_deref(),
+                Some(&SemanticNodeData::Primitive(
+                    crate::semantic_query::PrimitiveKind::Number
+                )),
+                "`T[]` substitutes to `number[]`"
+            );
+        }
+        other => panic!("last signature must return the substituted `T[]`, got {other:?}"),
+    }
+}
+
+/// Hand-build a `<T>() => Boxed<T>` Function node whose ONLY `T` occurrence
+/// is the return carrier's type-argument vector — the exact shape the
+/// Shallow / structural-transit rails see (carrier-preserving lowering
+/// interns `InstantiationRef` for a generic type reference; only an
+/// Expanded-context lowering realises it eagerly). Returns the function
+/// node and the `T` binder node.
+fn generic_fn_with_carrier_return(host: &VerterHost) -> (SemanticNodeId, SemanticNodeId) {
+    let graph = host.project_type_store().semantic_graph();
+    let t_param = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: decl_identity_value(host, "/w/class_mech.ts", "T"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("T"),
+    });
+    let carrier_return = graph.intern_node(SemanticNodeData::InstantiationRef {
+        base: decl_identity_value(host, "/w/class_mech.ts", "Boxed"),
+        args: Arc::from(vec![t_param].into_boxed_slice()),
+    });
+    let func = graph.intern_node(SemanticNodeData::Function {
+        params: Arc::from(Vec::new().into_boxed_slice()),
+        return_type: carrier_return,
+        type_parameters: Arc::from(
+            vec![crate::semantic_query::TypeParamDecl {
+                name: Arc::from("T"),
+                constraint: None,
+                default: None,
+            }]
+            .into_boxed_slice(),
+        ),
+        signature_span: None,
+        return_type_span: None,
+    });
+    (func, t_param)
+}
+
+/// Explicit type arguments must substitute INTO a signature's return
+/// CARRIER arguments: for `<T>() => Boxed<T>` — where the only `T`
+/// occurrence is the `InstantiationRef` type-argument vector — the
+/// overload-set instantiation rewrites the carrier arg to `string` instead
+/// of stripping the consumed parameter and leaving a FREE `T` inside the
+/// carrier (silently wrong, not an honest Miss).
+#[test]
+fn resolve_overload_set_type_args_substitute_into_return_carrier_args() {
+    let host = class_mech_host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let (func, t_param) = generic_fn_with_carrier_return(&host);
+    let string_node = graph.intern_node(SemanticNodeData::Primitive(
+        crate::semantic_query::PrimitiveKind::String,
+    ));
+    let key = overload_set_key_for(&host, "/w/class_mech.ts", func, vec![string_node]);
+    let refs = execute_overload_set(&dispatch, key)
+        .unwrap_or_else(|err| panic!("the instantiated set must resolve, got {err:?}"));
+    assert_eq!(
+        refs.len(),
+        1,
+        "the lone candidate accepts the argument list"
+    );
+    let ret = signature_return_data(&host, &refs[0]);
+    let SemanticNodeData::InstantiationRef { base, args } = ret else {
+        panic!("the return must stay the `Boxed` carrier under structural transit, got {ret:?}");
+    };
+    assert_eq!(base.decl_name.as_ref(), "Boxed", "carrier base preserved");
+    assert_eq!(args.len(), 1, "carrier arity preserved");
+    assert_ne!(
+        args[0], t_param,
+        "the consumed `T` must NOT survive free inside the carrier args"
+    );
+    assert_eq!(
+        args[0], string_node,
+        "the explicit `string` argument substitutes into the carrier arg"
+    );
+}
+
+/// The bare-generic at-`unknown` rail has the identical hole: `ReturnType`
+/// over `<T>() => Boxed<T>` under the structural-transit context must
+/// instantiate the free `T` INSIDE the return carrier's argument vector at
+/// `unknown` — never publish `Boxed<T>` with a free `T`.
+#[test]
+fn unknown_instantiation_substitutes_into_return_carrier_args() {
+    let host = class_mech_host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let (func, t_param) = generic_fn_with_carrier_return(&host);
+    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
+        base: utility_identity(&graph, "ReturnType"),
+        args: Arc::from(vec![func].into_boxed_slice()),
+        context: crate::semantic_query::InstantiateContext::new(
+            ProjectionReductionContext::structural_transit(),
+            Default::default(),
+        ),
+    }) {
+        QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
+        other => {
+            panic!("ReturnType over the carrier-returning generic must resolve, got {other:?}")
+        }
+    };
+    let data = graph.node_data(result).expect("return node interned");
+    let SemanticNodeData::InstantiationRef { base, args } = &*data else {
+        panic!("the return must stay the `Boxed` carrier under structural transit, got {data:?}");
+    };
+    assert_eq!(base.decl_name.as_ref(), "Boxed", "carrier base preserved");
+    assert_eq!(args.len(), 1, "carrier arity preserved");
+    assert_ne!(
+        args[0], t_param,
+        "the free `T` must NOT survive inside the carrier args"
+    );
+    assert_eq!(
+        graph.node_data(args[0]).as_deref(),
+        Some(&SemanticNodeData::Primitive(
+            crate::semantic_query::PrimitiveKind::Unknown
+        )),
+        "the bare-generic read instantiates the carrier arg at `unknown`"
+    );
+}
+
+/// `subtree_references_node` must mirror the substitute engine's descent
+/// edges exactly (its contract): substitute rewrites through `MergedDecl`
+/// contributors, so the read-only walker must report a binder reference
+/// inside a contributor — a `false` would let the `build_mapped_type` hoist
+/// treat a binder-DEPENDENT merged-decl value expression as key-independent
+/// and share one materialisation across the whole key space.
+#[test]
+fn subtree_references_node_descends_merged_decl_contributors() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let binder = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: decl_identity_value(&host, "/w/merged.ts", "T"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("T"),
+    });
+    let merged = graph.intern_node(SemanticNodeData::MergedDecl {
+        contributors: Arc::from(vec![binder].into_boxed_slice()),
+    });
+    assert!(
+        dispatch.subtree_references_node(merged, binder),
+        "the walker must descend MergedDecl contributors exactly as substitute does"
+    );
+    // Mirror consistency: substitution over the same shape DOES rewrite —
+    // the walker and the rewrite engine must agree on reachability.
+    let replacement = graph.intern_node(SemanticNodeData::Primitive(
+        crate::semantic_query::PrimitiveKind::Number,
+    ));
+    let substituted = dispatch.substitute_semantic_type_param(merged, binder, replacement);
+    assert_ne!(
+        substituted, merged,
+        "substitute rewrites through MergedDecl contributors; a non-referencing \
+         walker verdict would contradict it"
+    );
+}
+
+/// A `TypeParam`-binder substitution must NOT rewrite a same-name
+/// `Infer { name }` node: TS `infer T` DECLARES a fresh conditional-scoped
+/// binder that shadows the function's own `T`, so the cross-variant
+/// name-bridge in the substitute engine is Infer-BINDER-only. Pre-fix the
+/// Infer-occurrence arm matched on name alone, clobbering the infer
+/// declaration with the argument (`unwrap<T>(): T extends Boxed<infer T>
+/// ? T : T` instantiated at `number` published `Boxed<number>` in the
+/// extends instead of `Boxed<infer T>`).
+#[test]
+fn typeparam_binder_substitution_preserves_same_name_infer_declaration() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let t_param = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: decl_identity_value(&host, "/w/infer_collision.ts", "T"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("T"),
+    });
+    let infer_t = graph.intern_node(SemanticNodeData::Infer {
+        name: Arc::from("T"),
+    });
+    let extends = graph.intern_node(SemanticNodeData::InstantiationRef {
+        base: decl_identity_value(&host, "/w/infer_collision.ts", "Boxed"),
+        args: Arc::from(vec![infer_t].into_boxed_slice()),
+    });
+    let cond = graph.intern_node(SemanticNodeData::Conditional {
+        check: t_param,
+        extends,
+        true_branch_ref: infer_t,
+        false_branch_ref: t_param,
+        distributive: true,
+    });
+    let number = graph.intern_node(SemanticNodeData::Primitive(
+        crate::semantic_query::PrimitiveKind::Number,
+    ));
+    let result = dispatch.substitute_semantic_type_param(cond, t_param, number);
+    let data = graph.node_data(result).expect("substituted node interned");
+    let SemanticNodeData::Conditional {
+        check,
+        extends: sub_extends,
+        true_branch_ref,
+        false_branch_ref,
+        ..
+    } = &*data
+    else {
+        panic!("the conditional shape must survive substitution, got {data:?}");
+    };
+    // The OUTER occurrences substitute (the gate must not over-block)…
+    assert_eq!(*check, number, "the check-position outer `T` substitutes");
+    assert_eq!(
+        *false_branch_ref, number,
+        "the false-branch outer `T` substitutes (outside the infer scope)"
+    );
+    // …while the `infer T` DECLARATION and its bound occurrence survive.
+    let extends_data = graph.node_data(*sub_extends).expect("extends interned");
+    let SemanticNodeData::InstantiationRef { args, .. } = &*extends_data else {
+        panic!("extends must stay the carrier, got {extends_data:?}");
+    };
+    assert_ne!(
+        args[0], number,
+        "the `infer T` declaration must NOT be clobbered by the argument"
+    );
+    assert_eq!(
+        args[0], infer_t,
+        "the `infer T` declaration survives a TypeParam-binder substitution"
+    );
+    assert_ne!(
+        *true_branch_ref, number,
+        "the infer-bound true-branch occurrence must NOT be rewritten"
+    );
+    assert_eq!(
+        *true_branch_ref, infer_t,
+        "the infer-bound true-branch occurrence survives intact"
+    );
+}
+
+/// Mirror of the gate above in the read-only reachability walker:
+/// `subtree_references_node` must NOT count a same-name `Infer { name }`
+/// as a reference under a `TypeParam` probe — the cross-variant
+/// name-bridge requires an `Infer` target, exactly as substitute's
+/// occurrence arm requires an `Infer` binder. Both halves of the mirror
+/// contract are asserted: the walker verdict AND substitute's agreeing
+/// no-rewrite.
+#[test]
+fn subtree_references_node_ignores_same_name_infer_under_typeparam_probe() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let t_param = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: decl_identity_value(&host, "/w/infer_collision.ts", "T"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("T"),
+    });
+    let infer_t = graph.intern_node(SemanticNodeData::Infer {
+        name: Arc::from("T"),
+    });
+    let root = graph.intern_node(SemanticNodeData::Array {
+        element: infer_t,
+        readonly: false,
+    });
+    assert!(
+        !dispatch.subtree_references_node(root, t_param),
+        "a same-name `infer` declaration is NOT a reference to a TypeParam binder"
+    );
+    // Mirror consistency: substitute agrees — nothing to rewrite.
+    let number = graph.intern_node(SemanticNodeData::Primitive(
+        crate::semantic_query::PrimitiveKind::Number,
+    ));
+    let substituted = dispatch.substitute_semantic_type_param(root, t_param, number);
+    assert_eq!(
+        substituted, root,
+        "substitute must leave the same-name infer declaration untouched; a \
+         referencing walker verdict would contradict it"
+    );
+    // The dedicated Infer-binder direction is unchanged: an Infer target
+    // still bridges to same-name TypeParam occurrences (the Conditional
+    // reducer's infer-bind consumer relies on it).
+    let typeparam_root = graph.intern_node(SemanticNodeData::Array {
+        element: t_param,
+        readonly: false,
+    });
+    assert!(
+        dispatch.subtree_references_node(typeparam_root, infer_t),
+        "an Infer probe still bridges to same-name TypeParam occurrences"
+    );
+    assert_ne!(
+        dispatch.substitute_semantic_type_param(typeparam_root, infer_t, number),
+        typeparam_root,
+        "an Infer binder still rewrites same-name TypeParam occurrences"
+    );
+}
+
+/// The memo entry self-roots on the callee AND the explicit type-argument
+/// input nodes: the produced value semantically depends on the arg nodes, so
+/// an edit to an ARG's defining file must refuse the stale warm entry.
+#[test]
+fn resolve_overload_set_warm_entry_refused_on_type_arg_origin_edit() {
+    let host = class_mech_host();
+    upsert_ts(
+        &host,
+        "/w/overload_arg_origin.ts",
+        "export type OverloadArg = { tag: string };",
+    );
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    // Materialise the arg type so its node is scoped to ITS OWN file.
+    let arg = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
+        base: decl_identity(&host, "/w/overload_arg_origin.ts", "OverloadArg"),
+        args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        context: crate::semantic_query::InstantiateContext::new(
+            ProjectionReductionContext::published(ProjectionMode::Expanded),
+            Default::default(),
+        ),
+    }) {
+        QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
+        other => panic!("arg type must materialise, got {other:?}"),
+    };
+    assert!(
+        matches!(
+            graph.node_scope(arg),
+            Some(NodeScopeId::File { canonical_id, .. })
+                if canonical_id.as_ref() == "/w/overload_arg_origin.ts"
+        ),
+        "probe precondition: the arg node carries its defining file's scope"
+    );
+    let callee = typeof_value_node(&host, &dispatch, "/w/class_mech.ts", "bare");
+    let key = overload_set_key_for(&host, "/w/class_mech.ts", callee, vec![arg]);
+    execute_overload_set(&dispatch, key.clone())
+        .unwrap_or_else(|err| panic!("instantiated overload set must resolve, got {err:?}"));
+    assert!(
+        graph.get_validated_with_host_for_tests(&key, &host),
+        "pre-edit the warm entry validates"
+    );
+    upsert_ts(
+        &host,
+        "/w/overload_arg_origin.ts",
+        "export type OverloadArg = { tag: number };",
+    );
+    assert!(
+        !graph.get_validated_with_host_for_tests(&key, &host),
+        "an edit to the type-argument's defining file must refuse the stale \
+         warm entry — the produced value semantically depends on the arg \
+         node, so its file-derived origin must be self-rooted"
+    );
+}
+
+/// Cross-file carrier-target invalidation: the carrier TARGET (an
+/// overloaded interface) is declared in a DIFFERENT file than the key
+/// owner. The shared rail's settlement (`execute_read(Instantiate)`)
+/// records the target file's facts on the entry, so an edit to the
+/// TARGET's defining file must refuse the stale warm entry.
+#[test]
+fn resolve_overload_set_warm_entry_refused_on_carrier_target_origin_edit() {
+    let host = class_mech_host();
+    upsert_ts(
+        &host,
+        "/w/overload_target_origin.ts",
+        "export interface RemoteOverloaded {\n  (x: string): string;\n  (x: number): number;\n}",
+    );
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let callee = graph.intern_node(SemanticNodeData::DeclRef {
+        identity: decl_identity_value(&host, "/w/overload_target_origin.ts", "RemoteOverloaded"),
+    });
+    let key = overload_set_key_for(&host, "/w/class_mech.ts", callee, Vec::new());
+    let refs = execute_overload_set(&dispatch, key.clone())
+        .unwrap_or_else(|err| panic!("the cross-file carrier callee must settle, got {err:?}"));
+    assert_eq!(refs.len(), 2, "both remote interface overloads are visible");
+    assert!(
+        graph.get_validated_with_host_for_tests(&key, &host),
+        "pre-edit the warm entry validates"
+    );
+    upsert_ts(
+        &host,
+        "/w/overload_target_origin.ts",
+        "export interface RemoteOverloaded {\n  (x: string): string;\n  (x: number): boolean;\n}",
+    );
+    assert!(
+        !graph.get_validated_with_host_for_tests(&key, &host),
+        "an edit to the carrier TARGET's defining file must refuse the stale \
+         warm entry — the settled signature group was lowered from that \
+         file's content version"
+    );
+}
+
+/// Editing the DECLARING file invalidates the warm composed surface: the
+/// facts rail roots on the origin's content version, so the re-resolved
+/// heritage static reflects the new annotation instead of a stale warm hit.
+#[test]
+fn reexported_class_static_surface_revalidates_on_origin_edit() {
+    let host = reexport_class_host();
+    assert_eq!(
+        resolve_named_in(&host, "/w/reexp_use.ts", "ReOriginReturn"),
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+        "pre-edit heritage static"
+    );
+    upsert_ts(
+        &host,
+        "/w/reexp_origin.ts",
+        &REEXPORT_CLASS_ORIGIN.replace("origin(): string", "origin(): boolean"),
+    );
+    assert_eq!(
+        resolve_named_in(&host, "/w/reexp_use.ts", "ReOriginReturn"),
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean),
+        "an origin-file edit must miss the warm composed surface and re-lower"
+    );
+}

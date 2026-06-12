@@ -247,14 +247,15 @@ fn normalize_node(
         }),
 
         TypeExpr::Tuple { elements, readonly } => {
-            // Tuple element ORDER is semantic — never sorted. Element label is a
-            // cosmetic axis the initial admissible set excludes (labelled/optional
-            // tuple members are a REJECT construct), so a label is canonicalized
-            // away here for confluence over the admitted (unlabelled) set.
+            // Tuple element ORDER is semantic — never sorted. Element LABELS
+            // are PRESERVED and compared label-aware (E2 — labelled elements
+            // are an admissible shape: a label mismatch IS a mismatch, since
+            // tsgo hovers print declared labels and the lowered surface
+            // carries them losslessly on `TupleElement.label`).
             let mut out = Vec::with_capacity(elements.len());
             for e in elements.iter() {
                 out.push(TupleElement {
-                    label: None,
+                    label: e.label.clone(),
                     ty: normalize_node(&e.ty, mode, scope)?,
                     optional: e.optional,
                     rest: e.rest,

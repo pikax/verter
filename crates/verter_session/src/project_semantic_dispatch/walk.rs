@@ -1253,6 +1253,47 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                             self.intermediate_nodes.push(Some(current));
                         }
                         None => {
+                            // `prototype` is a PROJECTION-TIME hop onto the
+                            // instance side of a constructor object — never a
+                            // stored member. A constructor-shaped surface (one
+                            // carrying construct signatures) projects
+                            // `prototype` as the construct signature's
+                            // instance return (`typeof C.prototype.greet`
+                            // walks the instance surface from there). The
+                            // LAST construct signature is the selected one,
+                            // mirroring the signature-utility overload rule.
+                            // A member-bearing surface that DECLARES a
+                            // `prototype` member never reaches this arm (the
+                            // member lookup above wins).
+                            if matches!(segment, PathSegment::Member(name) if name.as_ref() == "prototype")
+                            {
+                                if let Some(instance) = surface
+                                    .construct_signatures
+                                    .last()
+                                    .and_then(|sig| match self.graph().node_data(*sig).as_deref() {
+                                        Some(SemanticNodeData::Function {
+                                            return_type, ..
+                                        }) => Some(*return_type),
+                                        _ => None,
+                                    })
+                                {
+                                    self.graph().record_origin_edge(
+                                        instance,
+                                        OriginEdgeKind::ProjectMember,
+                                        Arc::from(vec![current].into_boxed_slice()),
+                                        OriginMeta::ProjectedMember {
+                                            name: Arc::from("prototype"),
+                                            provenance:
+                                                verter_audit::MemberEdgeProvenance::PathProjection,
+                                        },
+                                        Arc::clone(self.fence),
+                                    );
+                                    current = instance;
+                                    index += 1;
+                                    self.intermediate_nodes.push(Some(current));
+                                    continue;
+                                }
+                            }
                             results.push(self.opaque_miss());
                             return;
                         }

@@ -76,7 +76,7 @@ use verter_type_expr::{LiteralValue, MemberVisibility, ObjectMember, PrimitiveNa
 // type. The admission VERDICT model (`SourceContributor` / `SourceWalkResult` /
 // `AdmissionVerdict` / `RejectReason`) is admission-specific and stays here.
 use verter_compiler::utils::oxc::vue::raw_surface::{
-    RawKey, RawMemberKind, RawSourceSurface, TupleElementShape,
+    RawKey, RawMemberKind, RawSourceSurface, SymbolSpace, TupleElementShape,
 };
 
 use super::normalize::ProjectionModeKind;
@@ -288,16 +288,14 @@ pub(crate) fn admit_raw_surface(raw: &RawSourceSurface) -> AdmissionVerdict {
     {
         return AdmissionVerdict::Reject(RejectReason::Accessor);
     }
-    if raw.member_kinds.iter().any(|k| {
-        matches!(
-            k,
-            RawMemberKind::Method
-                | RawMemberKind::CallSignature
-                | RawMemberKind::ConstructSignature
-        )
-    }) {
-        return AdmissionVerdict::Reject(RejectReason::Callable);
-    }
+    // E3 (loss-based): `Method` / `CallSignature` / `ConstructSignature`
+    // member PRESENCE is NOT lossy — signatures are retained losslessly on
+    // the lowered surface (overload GROUPS included, per the Declaration
+    // Merging contract), so the per-signature admissibility walk on the
+    // lowered/hover side is the discriminating gate. The raw side keeps
+    // rejecting only the genuinely-erased signature facts: accessors
+    // (above), `this` types/params, `abstract` constructors, visibility,
+    // type-param modifiers (below).
     if raw
         .member_visibility
         .iter()
@@ -317,13 +315,15 @@ pub(crate) fn admit_raw_surface(raw: &RawSourceSurface) -> AdmissionVerdict {
     if raw.value_const_assertion == Some(true) {
         return AdmissionVerdict::Reject(RejectReason::ConstAssertion);
     }
-    if raw.overload_signatures.len() >= 2 {
-        return AdmissionVerdict::Reject(RejectReason::Callable);
-    }
+    // E3: an overload SET is retained losslessly (ordered signature group,
+    // visibility-projected downstream) — presence alone no longer rejects.
+    // E2: a LABELLED tuple element is faithfully representable
+    // (`TupleElement.label` is carried end-to-end and compared
+    // label-aware); `Optional` / `Rest` stay lossy → REJECT.
     if raw
         .tuple_element_shape
         .iter()
-        .any(|s| !matches!(s, TupleElementShape::Plain))
+        .any(|s| !matches!(s, TupleElementShape::Plain | TupleElementShape::Labelled))
     {
         return AdmissionVerdict::Reject(RejectReason::TupleElementShape);
     }
@@ -386,6 +386,16 @@ pub(crate) enum SourceRootShape {
     /// `Root[keyof Root]` — BOTH refs the SAME bare unqualified `Ref` with
     /// empty type args (the self-index value-union projection).
     KeyofSelfIndex,
+    /// `typeof Ref(.ident)*` — a typeof VALUE-path root (`ValueRef.path` is
+    /// lossless), optionally carrying instantiation-expression type args
+    /// (`typeof C.make<string>` — each arg must itself be admissible).
+    /// The root binds in VALUE space; non-root `typeof` stays rejected.
+    TypeofPath,
+    /// `Util<Arg>` — a registry-recognised builtin utility whose SINGLE
+    /// type argument is itself carve-out-shaped (a bare unqualified ref, a
+    /// typeof value-path, or a string-literal index chain). The same-file /
+    /// root-fact gates apply to the ARGUMENT's root.
+    BuiltinUtilityCarveOutArg,
     /// Not a carve-out root — the generic predicate decides.
     NotCarveOut,
 }
@@ -409,7 +419,29 @@ pub(crate) fn classify_source_root(body: &TypeExpr) -> SourceRootShape {
         TypeExpr::IndexedAccess { .. } if is_string_literal_index_chain(body) => {
             SourceRootShape::StringLiteralIndexChain
         }
+        TypeExpr::TypeOf(value_ref) if !value_ref.path.is_empty() => SourceRootShape::TypeofPath,
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } if type_arguments.len() == 1
+            && verter_semantic::analysis::type_solver::builtin::BuiltinUtility::from_name(name)
+                .is_some()
+            && is_carve_out_arg_shape(&type_arguments[0]) =>
+        {
+            SourceRootShape::BuiltinUtilityCarveOutArg
+        }
         _ => SourceRootShape::NotCarveOut,
+    }
+}
+
+/// Whether `expr` is an admissible carve-out ARGUMENT shape for the
+/// builtin-utility root: a bare unqualified `Ref`, a `typeof` value-path, or
+/// a string-literal index chain. PURE structure (the same-file root identity
+/// is enforced by [`admit_source_root`] via the walk's stamp).
+fn is_carve_out_arg_shape(expr: &TypeExpr) -> bool {
+    match expr {
+        TypeExpr::TypeOf(value_ref) => !value_ref.path.is_empty(),
+        _ => is_bare_unqualified_ref(expr) || is_string_literal_index_chain(expr),
     }
 }
 
@@ -440,37 +472,82 @@ fn keyof_self_index_root<'a>(object: &'a TypeExpr, index: &TypeExpr) -> Option<&
 pub(crate) fn admit_source_root(contributor: &SourceContributor) -> AdmissionVerdict {
     let body = &contributor.lowered_body;
     match classify_source_root(body) {
+        SourceRootShape::TypeofPath | SourceRootShape::BuiltinUtilityCarveOutArg => {
+            // Instantiation-expression type args (`typeof C.make<string>`)
+            // must each be admissible — `typeof C.make<any>` rejects.
+            let v = admit_typeof_root_type_args(body);
+            if !v.is_admit() {
+                return v;
+            }
+            admit_carve_out_root_gates(contributor, body)
+        }
         SourceRootShape::KeyofBareRef
         | SourceRootShape::StringLiteralIndexChain
-        | SourceRootShape::KeyofSelfIndex => {
-            match contributor.carve_out_root_def.as_deref() {
-                Some(root_def) if root_def == contributor.def_canonical => {
-                    // Root-operand raw-fact admission (every carve-out shape):
-                    // the same-file ROOT declaration's parse-time raw facts
-                    // must be clean — a `unique symbol` / computed /
-                    // non-static-key root's keyspace is not faithfully
-                    // representable, so its keyof / chain / self-index
-                    // projection rejects loudly. An EMPTY root-fact vector is
-                    // a pairing failure: conservatively REJECT.
-                    if contributor.carve_out_root_surfaces.is_empty() {
-                        return AdmissionVerdict::Reject(RejectReason::SourceUnresolvedOrCyclic);
-                    }
-                    for root_raw in &contributor.carve_out_root_surfaces {
-                        let v = admit_raw_surface(root_raw);
-                        if !v.is_admit() {
-                            return v;
-                        }
-                    }
-                    AdmissionVerdict::Admit
-                }
-                // Imported / cross-file / unresolved root → NOT a same-file
-                // carve-out. Fall through to the generic predicate, which
-                // rejects the bare `keyof` / indexed-access operator.
-                _ => admit_type_expr(body),
-            }
-        }
+        | SourceRootShape::KeyofSelfIndex => admit_carve_out_root_gates(contributor, body),
         SourceRootShape::NotCarveOut => admit_type_expr(body),
     }
+}
+
+/// The shared same-file + root-raw-fact gates for EVERY carve-out shape (the
+/// (b)/(c)-side discipline): the resolved root must equal the contributor's
+/// defining file, and every root raw-fact record must walk the allowlist
+/// clean. A non-same-file / unresolved root falls through to the generic
+/// predicate VERBATIM (which rejects the bare operator body exactly as
+/// before the carve-out existed).
+fn admit_carve_out_root_gates(
+    contributor: &SourceContributor,
+    body: &TypeExpr,
+) -> AdmissionVerdict {
+    match contributor.carve_out_root_def.as_deref() {
+        Some(root_def) if root_def == contributor.def_canonical => {
+            // Root-operand raw-fact admission (every carve-out shape):
+            // the same-file ROOT declaration's parse-time raw facts
+            // must be clean — a `unique symbol` / computed /
+            // non-static-key root's keyspace is not faithfully
+            // representable, so its keyof / chain / self-index / typeof
+            // projection rejects loudly. An EMPTY root-fact vector is
+            // a pairing failure: conservatively REJECT.
+            if contributor.carve_out_root_surfaces.is_empty() {
+                return AdmissionVerdict::Reject(RejectReason::SourceUnresolvedOrCyclic);
+            }
+            for root_raw in &contributor.carve_out_root_surfaces {
+                let v = admit_raw_surface(root_raw);
+                if !v.is_admit() {
+                    return v;
+                }
+            }
+            AdmissionVerdict::Admit
+        }
+        // Imported / cross-file / unresolved root → NOT a same-file
+        // carve-out. Fall through to the generic predicate, which
+        // rejects the bare operator body.
+        _ => admit_type_expr(body),
+    }
+}
+
+/// E1: the instantiation-expression type-argument admissibility check for a
+/// `TypeofPath` / utility-wrapped typeof root — each `ValueRef.type_args`
+/// element must walk the positive allowlist clean (`typeof C.make<string>`
+/// admits; `typeof C.make<any>` rejects). A bare typeof path (no args) is
+/// trivially clean; non-typeof carve-out args carry no instantiation axis.
+fn admit_typeof_root_type_args(body: &TypeExpr) -> AdmissionVerdict {
+    let value_ref = match body {
+        TypeExpr::TypeOf(value_ref) => value_ref,
+        TypeExpr::Ref { type_arguments, .. } if type_arguments.len() == 1 => {
+            match &type_arguments[0] {
+                TypeExpr::TypeOf(value_ref) => value_ref,
+                _ => return AdmissionVerdict::Admit,
+            }
+        }
+        _ => return AdmissionVerdict::Admit,
+    };
+    for arg in &value_ref.type_args {
+        let v = admit_type_expr(arg);
+        if !v.is_admit() {
+            return v;
+        }
+    }
+    AdmissionVerdict::Admit
 }
 
 /// The root `Ref` NAME of a carve-out-shaped body (the operand of `keyof Root`,
@@ -480,7 +557,52 @@ pub(crate) fn admit_source_root(contributor: &SourceContributor) -> AdmissionVer
 /// so the walk and the classifier never disagree on what the root is.
 #[allow(dead_code)]
 pub(crate) fn carve_out_root_ref_name(body: &TypeExpr) -> Option<&str> {
+    carve_out_root_locator(body)
+        .filter(|(_, space)| matches!(space, SymbolSpace::Type))
+        .map(|(name, _)| name)
+}
+
+/// The SPACE-AWARE carve-out root locator: the root NAME plus the symbol
+/// space it binds in. A `keyof Root` / index chain / self-index / utility
+/// bare-ref-arg root binds in TYPE space; a `typeof` value-path root (top
+/// level or as a utility's single argument) binds its HEAD segment in VALUE
+/// space. PURE structure (mirrors [`classify_source_root`]), so the walk and
+/// the classifier never disagree on what the root is.
+#[allow(dead_code)]
+pub(crate) fn carve_out_root_locator(body: &TypeExpr) -> Option<(&str, SymbolSpace)> {
     match body {
+        // `typeof a.b.c` — the HEAD value name is the walk root.
+        TypeExpr::TypeOf(value_ref) => value_ref
+            .path
+            .first()
+            .map(|head| (head.as_str(), SymbolSpace::Value)),
+        // `Util<Arg>` — the ARGUMENT's root, recursively (one level: the
+        // classifier admits only a single carve-out-shaped argument).
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } if type_arguments.len() == 1
+            && verter_semantic::analysis::type_solver::builtin::BuiltinUtility::from_name(name)
+                .is_some() =>
+        {
+            match &type_arguments[0] {
+                TypeExpr::TypeOf(value_ref) => value_ref
+                    .path
+                    .first()
+                    .map(|head| (head.as_str(), SymbolSpace::Value)),
+                arg => carve_out_type_space_root(arg).map(|name| (name, SymbolSpace::Type)),
+            }
+        }
+        _ => carve_out_type_space_root(body).map(|name| (name, SymbolSpace::Type)),
+    }
+}
+
+/// The TYPE-space root of the original carve-out shapes (`keyof Root`, the
+/// string-literal index chain, the self-index) — plus a bare unqualified
+/// `Ref` itself (the utility bare-ref-argument case).
+fn carve_out_type_space_root(body: &TypeExpr) -> Option<&str> {
+    match body {
+        TypeExpr::Ref { .. } => bare_unqualified_ref_name(body),
         TypeExpr::KeyOf(inner) => bare_unqualified_ref_name(inner),
         // The self-index shape: `Root[keyof Root]` names ONE shared root.
         TypeExpr::IndexedAccess { object, index }
@@ -556,11 +678,10 @@ pub(crate) fn admit_type_expr(expr: &TypeExpr) -> AdmissionVerdict {
         },
         TypeExpr::Literal(_) => AdmissionVerdict::Admit,
         TypeExpr::Union(arms) | TypeExpr::Intersection(arms) => {
+            // E3: a callable arm is admissible per-signature (the recursive
+            // walk below descends into its params/return) — no blanket
+            // callable reject.
             for arm in arms.iter() {
-                // A callable arm is an overload group / function arm — REJECT.
-                if is_callable_type_expr(arm) {
-                    return AdmissionVerdict::Reject(RejectReason::Callable);
-                }
                 let v = admit_type_expr(arm);
                 if !v.is_admit() {
                     return v;
@@ -596,10 +717,21 @@ pub(crate) fn admit_type_expr(expr: &TypeExpr) -> AdmissionVerdict {
                             return v;
                         }
                     }
-                    ObjectMember::CallSignature(_)
-                    | ObjectMember::ConstructSignature(_)
-                    | ObjectMember::Method(_) => {
-                        return AdmissionVerdict::Reject(RejectReason::Callable);
+                    // E3 (loss-based, per-signature): callable members admit
+                    // when EVERY param type and the return type walk the
+                    // allowlist clean — including overload groups (multiple
+                    // same-bucket signatures) and call+construct hybrids.
+                    ObjectMember::CallSignature(func) | ObjectMember::ConstructSignature(func) => {
+                        let v = admit_lowered_signature(func);
+                        if !v.is_admit() {
+                            return v;
+                        }
+                    }
+                    ObjectMember::Method(method) => {
+                        let v = admit_lowered_signature(&method.function);
+                        if !v.is_admit() {
+                            return v;
+                        }
                     }
                 }
             }
@@ -640,9 +772,10 @@ pub(crate) fn admit_type_expr(expr: &TypeExpr) -> AdmissionVerdict {
         TypeExpr::Infer { .. } => {
             AdmissionVerdict::Reject(RejectReason::DeferredConstruct("infer"))
         }
-        TypeExpr::Function(_) | TypeExpr::ConstructorType(_) => {
-            AdmissionVerdict::Reject(RejectReason::Callable)
-        }
+        // E3 (loss-based, per-signature): a function / bare constructor type
+        // admits when its full signature walks clean — the construct-vs-call
+        // distinction and the signature itself are retained losslessly.
+        TypeExpr::Function(func) | TypeExpr::ConstructorType(func) => admit_lowered_signature(func),
         TypeExpr::RecursiveRef { .. } => AdmissionVerdict::Reject(RejectReason::RecursiveRef),
         TypeExpr::SyntheticSlotBinding(_) => {
             AdmissionVerdict::Reject(RejectReason::NotOnAllowlist("synthetic-slot-binding"))
@@ -651,21 +784,38 @@ pub(crate) fn admit_type_expr(expr: &TypeExpr) -> AdmissionVerdict {
     }
 }
 
-/// Whether a `TypeExpr` is callable (a function, a constructor type, or an
-/// object whose only/any members are call/construct/method signatures) — a
-/// callable arm/member is an overload-group surface (REJECT).
-fn is_callable_type_expr(expr: &TypeExpr) -> bool {
-    match expr {
-        TypeExpr::Function(_) | TypeExpr::ConstructorType(_) => true,
-        TypeExpr::Object(obj) => obj.properties.iter().any(|m| {
-            matches!(
-                m,
-                ObjectMember::CallSignature(_)
-                    | ObjectMember::ConstructSignature(_)
-                    | ObjectMember::Method(_)
-            )
-        }),
-        _ => false,
+/// The E3 per-signature admissibility walk over a LOWERED signature: every
+/// parameter type and the return type must walk the positive allowlist
+/// clean, and every own type parameter's constraint / default must too. A
+/// signature with NO return annotation lowers to an implicit `any` — REJECT
+/// (`AnyKeyword`). The genuinely-ERASED signature facts (`this`
+/// types/params, accessors, `abstract` constructors) are caught on the raw
+/// (source) and AST (hover) sides, which still exist at this point in the
+/// pipeline — this walk covers the retained structure only.
+fn admit_lowered_signature(func: &verter_type_expr::FunctionExpr) -> AdmissionVerdict {
+    for param in &func.parameters {
+        let v = admit_type_expr(&param.ty);
+        if !v.is_admit() {
+            return v;
+        }
+    }
+    for tp in &func.type_parameters {
+        if let Some(constraint) = tp.constraint.as_deref() {
+            let v = admit_type_expr(constraint);
+            if !v.is_admit() {
+                return v;
+            }
+        }
+        if let Some(default) = tp.default.as_deref() {
+            let v = admit_type_expr(default);
+            if !v.is_admit() {
+                return v;
+            }
+        }
+    }
+    match func.return_type.as_deref() {
+        Some(ret) => admit_type_expr(ret),
+        None => AdmissionVerdict::Reject(RejectReason::AnyKeyword),
     }
 }
 
@@ -762,9 +912,22 @@ pub(crate) fn admit_hover_ast(ts: &TSType<'_>) -> AdmissionVerdict {
         TSType::TSTupleType(tuple) => {
             for el in &tuple.element_types {
                 match el {
-                    TSTupleElement::TSOptionalType(_)
-                    | TSTupleElement::TSNamedTupleMember(_)
-                    | TSTupleElement::TSRestType(_) => {
+                    // E2: a LABELLED (non-optional) element is faithfully
+                    // representable — `TupleElement.label` carries it and the
+                    // compare is label-aware. `Optional` / `Rest` stay lossy.
+                    TSTupleElement::TSNamedTupleMember(named) => {
+                        if named.optional {
+                            return AdmissionVerdict::Reject(RejectReason::TupleElementShape);
+                        }
+                        let Some(inner) = named.element_type.as_ts_type() else {
+                            return AdmissionVerdict::Reject(RejectReason::TupleElementShape);
+                        };
+                        let v = admit_hover_ast(inner);
+                        if !v.is_admit() {
+                            return v;
+                        }
+                    }
+                    TSTupleElement::TSOptionalType(_) | TSTupleElement::TSRestType(_) => {
                         return AdmissionVerdict::Reject(RejectReason::TupleElementShape);
                     }
                     other => {
@@ -857,8 +1020,32 @@ pub(crate) fn admit_hover_ast(ts: &TSType<'_>) -> AdmissionVerdict {
         TSType::TSInferType(_) => {
             AdmissionVerdict::Reject(RejectReason::DeferredConstruct("infer"))
         }
-        TSType::TSFunctionType(_) => AdmissionVerdict::Reject(RejectReason::Callable),
-        TSType::TSConstructorType(_) => AdmissionVerdict::Reject(RejectReason::Callable),
+        // E3 (loss-based, per-signature): a function type admits when its
+        // params + return + type-param bounds all walk clean. The lossy
+        // signature facts STAY rejected: a `this` parameter, and `const` /
+        // variance type-param modifiers.
+        TSType::TSFunctionType(func) => {
+            if func.this_param.is_some() {
+                return AdmissionVerdict::Reject(RejectReason::ThisTypeOrParam);
+            }
+            admit_hover_callable_parts(
+                &func.params,
+                func.type_parameters.as_deref(),
+                Some(&func.return_type.type_annotation),
+            )
+        }
+        // An `abstract new (...) => T` constructor type stays REJECTED — the
+        // `abstract` brand is not representable on the lowered carrier.
+        TSType::TSConstructorType(ctor) => {
+            if ctor.r#abstract {
+                return AdmissionVerdict::Reject(RejectReason::AbstractCtor);
+            }
+            admit_hover_callable_parts(
+                &ctor.params,
+                ctor.type_parameters.as_deref(),
+                Some(&ctor.return_type.type_annotation),
+            )
+        }
         TSType::TSThisType(_) => AdmissionVerdict::Reject(RejectReason::ThisTypeOrParam),
         // default-REJECT: any node not enumerated above falls through here.
         _ => AdmissionVerdict::Reject(RejectReason::NotOnAllowlist("unenumerated-ts-node")),
@@ -866,7 +1053,12 @@ pub(crate) fn admit_hover_ast(ts: &TSType<'_>) -> AdmissionVerdict {
 }
 
 /// Admit a single object/interface type-literal member on the hover side.
+/// E3 (loss-based, per-signature): method / call / construct signature
+/// members admit when their params + return + type-param bounds walk clean;
+/// the lossy facts stay rejected — computed keys, getter/setter accessors,
+/// and `this` parameters.
 fn admit_hover_signature(sig: &TSSignature<'_>) -> AdmissionVerdict {
+    use oxc_ast::ast::TSMethodSignatureKind;
     match sig {
         TSSignature::TSPropertySignature(prop) => {
             if prop.computed {
@@ -879,13 +1071,95 @@ fn admit_hover_signature(sig: &TSSignature<'_>) -> AdmissionVerdict {
             }
         }
         TSSignature::TSIndexSignature(idx) => admit_hover_ast(&idx.type_annotation.type_annotation),
-        TSSignature::TSMethodSignature(_) => AdmissionVerdict::Reject(RejectReason::Callable),
-        TSSignature::TSCallSignatureDeclaration(_) => {
-            AdmissionVerdict::Reject(RejectReason::Callable)
+        TSSignature::TSMethodSignature(method) => {
+            if !matches!(method.kind, TSMethodSignatureKind::Method) {
+                // `get x(): T` / `set x(v: T)` in a type literal — accessor.
+                return AdmissionVerdict::Reject(RejectReason::Accessor);
+            }
+            if method.computed {
+                return AdmissionVerdict::Reject(RejectReason::NonStaticKey);
+            }
+            if method.this_param.is_some() {
+                return AdmissionVerdict::Reject(RejectReason::ThisTypeOrParam);
+            }
+            admit_hover_callable_parts(
+                &method.params,
+                method.type_parameters.as_deref(),
+                method.return_type.as_ref().map(|rt| &rt.type_annotation),
+            )
         }
-        TSSignature::TSConstructSignatureDeclaration(_) => {
-            AdmissionVerdict::Reject(RejectReason::Callable)
+        TSSignature::TSCallSignatureDeclaration(call) => {
+            if call.this_param.is_some() {
+                return AdmissionVerdict::Reject(RejectReason::ThisTypeOrParam);
+            }
+            admit_hover_callable_parts(
+                &call.params,
+                call.type_parameters.as_deref(),
+                call.return_type.as_ref().map(|rt| &rt.type_annotation),
+            )
         }
+        TSSignature::TSConstructSignatureDeclaration(ctor) => admit_hover_callable_parts(
+            &ctor.params,
+            ctor.type_parameters.as_deref(),
+            ctor.return_type.as_ref().map(|rt| &rt.type_annotation),
+        ),
+    }
+}
+
+/// The shared E3 hover-side per-signature walk: every parameter must carry an
+/// admissible type annotation (an unannotated param lowers to `any` →
+/// REJECT), every own type parameter must be modifier-free (`const` /
+/// variance reject — the modifier is erased by lowering) with admissible
+/// bounds, and the return annotation must be present and admissible.
+fn admit_hover_callable_parts(
+    params: &oxc_ast::ast::FormalParameters<'_>,
+    type_parameters: Option<&oxc_ast::ast::TSTypeParameterDeclaration<'_>>,
+    return_type: Option<&TSType<'_>>,
+) -> AdmissionVerdict {
+    for param in &params.items {
+        match &param.type_annotation {
+            Some(ann) => {
+                let v = admit_hover_ast(&ann.type_annotation);
+                if !v.is_admit() {
+                    return v;
+                }
+            }
+            None => return AdmissionVerdict::Reject(RejectReason::AnyKeyword),
+        }
+    }
+    if let Some(rest) = &params.rest {
+        match &rest.type_annotation {
+            Some(ann) => {
+                let v = admit_hover_ast(&ann.type_annotation);
+                if !v.is_admit() {
+                    return v;
+                }
+            }
+            None => return AdmissionVerdict::Reject(RejectReason::AnyKeyword),
+        }
+    }
+    if let Some(tps) = type_parameters {
+        for tp in &tps.params {
+            if tp.r#const || tp.r#in || tp.r#out {
+                return AdmissionVerdict::Reject(RejectReason::TypeParamModifier);
+            }
+            if let Some(constraint) = &tp.constraint {
+                let v = admit_hover_ast(constraint);
+                if !v.is_admit() {
+                    return v;
+                }
+            }
+            if let Some(default) = &tp.default {
+                let v = admit_hover_ast(default);
+                if !v.is_admit() {
+                    return v;
+                }
+            }
+        }
+    }
+    match return_type {
+        Some(ret) => admit_hover_ast(ret),
+        None => AdmissionVerdict::Reject(RejectReason::AnyKeyword),
     }
 }
 

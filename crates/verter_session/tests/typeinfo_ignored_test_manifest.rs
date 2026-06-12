@@ -1333,43 +1333,36 @@ fn ignored_test_row_table_holds_exactly_362_rows() {
         EXPECTED_IGNORE_MANIFEST.len(),
     );
 
-    // The derived live-ignore count is 343: the table holds 362 rows, of which
-    // 19 are `Lifted` (the 2 index-signature publication rows at
-    // U2.QUERY_VALUE_DOMAIN + the 2 built-in modifier-utility rows at
-    // U2.MAPPED_TEMPLATE + the 2 terminal indexed-access projection rows at
-    // U2.INDEXED_ACCESS + the 1 wide/deep literal-union projection row at
-    // U2.MAPPED_TEMPLATE + the 1 `-?` optional-remover row
-    // (`mapped_modifier_minus_optional`) at U2.MAPPED_TEMPLATE + the 3
-    // keyof-expansion carve-out rows at U2.INDEXED_ACCESS + the 8 U2.UTILITIES
-    // reducer rows lifted at U2.QUERY_VALUE_DOMAIN: five Awaited rows, two
-    // NonNullable rows, and the variadic-spread Concat row) and 343 remain
-    // `Ignored`. `EXPECTED_TOTAL_IGNORED_COUNT` is DERIVED as
-    // count(status == Ignored), so it tracks lifts automatically.
+    // The derived live-ignore count is 324: the table holds 362 rows, of which
+    // 38 are `Lifted` (the 19 pre-class-surface lifts — 2 index-signature
+    // publication rows at U2.QUERY_VALUE_DOMAIN + 2 built-in modifier-utility
+    // rows at U2.MAPPED_TEMPLATE + 2 terminal indexed-access projection rows
+    // at U2.INDEXED_ACCESS + 1 wide/deep literal-union projection row at
+    // U2.MAPPED_TEMPLATE + 1 `-?` optional-remover row at U2.MAPPED_TEMPLATE
+    // + 3 keyof-expansion carve-out rows at U2.INDEXED_ACCESS + 8 U2.UTILITIES
+    // reducer rows at U2.QUERY_VALUE_DOMAIN — plus the 19 class-surface-era
+    // lifts: 2 brand-tag index chains + 2 decoration-invariance rows at
+    // U2.INDEXED_ACCESS, 5 class typeof-path rows at U2.CLASS_SURFACES, and
+    // 10 signature-bucket/overload/bare-generic reduction rows at
+    // U2.QUERY_VALUE_DOMAIN) and 324 remain `Ignored`.
+    // `EXPECTED_TOTAL_IGNORED_COUNT` is DERIVED as count(status == Ignored),
+    // so it tracks lifts automatically.
     assert_eq!(
-        EXPECTED_TOTAL_IGNORED_COUNT, 343,
+        EXPECTED_TOTAL_IGNORED_COUNT, 324,
         "EXPECTED_TOTAL_IGNORED_COUNT is DERIVED as count(status == \
-         Ignored); with 19 rows lifted it must equal 343. Got {}.",
+         Ignored); with 38 rows lifted it must equal 324. Got {}.",
         EXPECTED_TOTAL_IGNORED_COUNT,
     );
-    // Exactly 19 rows are `Lifted` (2 index-signature publication + 2 built-in
-    // modifier-utility + 2 terminal indexed-access projections + 1 wide/deep
-    // literal-union projection + 1 `-?` optional-remover at U2.MAPPED_TEMPLATE
-    // + 3 keyof-expansion carve-outs at U2.INDEXED_ACCESS + 8 U2.UTILITIES
-    // reducer rows at U2.QUERY_VALUE_DOMAIN: five Awaited rows, two
-    // NonNullable rows, and the variadic-spread Concat row).
+    // Exactly 38 rows are `Lifted` (the 19 pre-class-surface lifts plus the
+    // 19 class-surface-era lifts enumerated above).
     let lifted = EXPECTED_IGNORE_MANIFEST
         .iter()
         .filter(|r| matches!(r.status, IgnoreStatus::Lifted { .. }))
         .count();
     assert_eq!(
-        lifted, 19,
-        "exactly 19 IgnoredTestRows are Lifted (2 index-signature publication at \
-         U2.QUERY_VALUE_DOMAIN + 2 built-in modifier-utility at U2.MAPPED_TEMPLATE \
-         + 2 terminal indexed-access projections at U2.INDEXED_ACCESS + 1 wide/deep \
-         literal-union projection at U2.MAPPED_TEMPLATE + 1 `-?` optional-remover \
-         (`mapped_modifier_minus_optional`) at U2.MAPPED_TEMPLATE + 3 \
-         keyof-expansion carve-outs at U2.INDEXED_ACCESS + 8 U2.UTILITIES reducer \
-         rows at U2.QUERY_VALUE_DOMAIN); got {lifted}",
+        lifted, 38,
+        "exactly 38 IgnoredTestRows are Lifted (the 19 pre-class-surface lifts \
+         plus the 19 class-surface-era lifts); got {lifted}",
     );
 
     // Disjointness: no `(file, function)` in both tables. A
@@ -2904,19 +2897,16 @@ fn lifted_row_audit_query_mode_matches_spec() {
         );
     }
 
-    // Independent expected fact: all nineteen seated rows are Expanded-mode
-    // oracle identities (the two index-signature publications + the two
-    // modifier utilities + the three U2 IndexedAccess-reduction carve-outs +
-    // the U2.MAPPED_TEMPLATE `-?` optional-remover + the three keyof-expansion
-    // carve-outs + the eight U2.UTILITIES reducer lifts, each verified in the
+    // Independent expected fact: all thirty-eight seated rows are
+    // Expanded-mode oracle identities (every lift to date was verified in the
     // original `Expanded` projection mode).
     let expanded = ORACLE_QUERY_SPECS
         .iter()
         .filter(|s| matches!(spec_mode(&s.query_helper), ProjectionModeSpec::Expanded))
         .count();
     assert_eq!(
-        expanded, 19,
-        "all nineteen seated lifted rows must be Expanded-mode oracle identities",
+        expanded, 38,
+        "all thirty-eight seated lifted rows must be Expanded-mode oracle identities",
     );
 }
 

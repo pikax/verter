@@ -477,7 +477,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     .map(|segment| segment.to_string())
                     .collect::<Vec<_>>();
                 segments.extend(path.iter().map(|segment| segment.as_ref().to_string()));
-                TypeExpr::TypeOf(verter_type_expr::ValueRef { path: segments })
+                // The node-level `TypeOf` is an already-resolved value root +
+                // member path; instantiation-expression args were consumed at
+                // lowering time, so the projection has none to carry.
+                TypeExpr::TypeOf(verter_type_expr::ValueRef {
+                    path: segments,
+                    type_args: Vec::new(),
+                })
             }
             SemanticNodeData::TypeParam {
                 display_name,

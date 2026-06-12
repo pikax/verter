@@ -666,11 +666,32 @@ fn corpus() -> Vec<(&'static str, TypeExpr)> {
     ));
 
     // TypeOf — empty and multi-segment path.
-    v.push(("typeof-empty", TypeExpr::TypeOf(ValueRef { path: vec![] })));
+    v.push((
+        "typeof-empty",
+        TypeExpr::TypeOf(ValueRef {
+            path: vec![],
+            type_args: vec![],
+        }),
+    ));
     v.push((
         "typeof-path",
         TypeExpr::TypeOf(ValueRef {
             path: vec!["a".into(), "b".into(), "c".into()],
+            type_args: vec![],
+        }),
+    ));
+    // TypeOf with instantiation-expression args (`typeof C.make<string>`) —
+    // the args are recursive children walked on the heap stack; the stream
+    // must match the recursive reference mirror AND differ from the bare
+    // path form (injectivity of the arg block).
+    v.push((
+        "typeof-instantiation",
+        TypeExpr::TypeOf(ValueRef {
+            path: vec!["C".into(), "make".into()],
+            type_args: vec![
+                TypeExpr::Primitive(PrimitiveName::String),
+                TypeExpr::named_with_args("Box", vec![TypeExpr::Primitive(PrimitiveName::Number)]),
+            ],
         }),
     ));
 

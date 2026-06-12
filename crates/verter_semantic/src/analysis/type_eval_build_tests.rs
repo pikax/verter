@@ -348,6 +348,210 @@ fn extract_class_with_heritage_records_non_public_own_members() {
     );
 }
 
+// =============================================================================
+// Class STATIC members ride INSIDE the value-side constructor-shape ObjectExpr
+// (the `typeof C` constructor-object model). Own static props/methods are
+// recorded as ObjectMember::Property / ObjectMember::Method WITH their declared
+// visibility alongside the ConstructSignature. The instance surface stays
+// unchanged (statics excluded there); accessors still drop; `#private` statics
+// never appear; decorated classes lower normally.
+// =============================================================================
+
+/// Find a property member by name in an `ObjectExpr`.
+fn shape_property<'a>(shape: &'a ObjectExpr, name: &str) -> Option<&'a ObjectProperty> {
+    shape.properties.iter().find_map(|m| match m {
+        ObjectMember::Property(p) if p.name == name => Some(p),
+        _ => None,
+    })
+}
+
+/// Find a method member by name in an `ObjectExpr`.
+fn shape_method<'a>(shape: &'a ObjectExpr, name: &str) -> Option<&'a MethodSignature> {
+    shape.properties.iter().find_map(|m| match m {
+        ObjectMember::Method(mm) if mm.name == name => Some(mm),
+        _ => None,
+    })
+}
+
+#[test]
+fn extract_class_folds_static_members_into_constructor_shape() {
+    let env = parse_and_build_env(
+        r#"
+        class C {
+            a: string = "";
+            static initial: string = "0";
+            static describe(): string { return "c"; }
+            protected static hidden: number = 0;
+            private static secret: boolean = false;
+            constructor(id: string) {}
+        }
+        "#,
+    );
+    let value = env.value_symbols["C"].primary();
+    let shape = value
+        .object_shape
+        .as_ref()
+        .expect("class value must carry the constructor-object shape");
+
+    // The construct signature is still present (the `new C(...)` half).
+    assert!(
+        shape
+            .properties
+            .iter()
+            .any(|m| matches!(m, ObjectMember::ConstructSignature(_))),
+        "constructor shape must keep its ConstructSignature"
+    );
+
+    // Own static field with declared type and visibility.
+    let initial = shape_property(shape, "initial").expect("static field `initial` must be folded");
+    assert_eq!(initial.ty, TypeExpr::Primitive(PrimitiveName::String));
+    assert_eq!(initial.visibility, MemberVisibility::Public);
+
+    // Own static method with its signature.
+    let describe =
+        shape_method(shape, "describe").expect("static method `describe` must be folded");
+    assert_eq!(describe.visibility, MemberVisibility::Public);
+    assert_eq!(
+        describe.function.return_type.as_deref(),
+        Some(&TypeExpr::Primitive(PrimitiveName::String))
+    );
+
+    // Non-public statics are RECORDED with their declared visibility.
+    assert_eq!(
+        shape_property(shape, "hidden")
+            .expect("protected static must be recorded")
+            .visibility,
+        MemberVisibility::Protected
+    );
+    assert_eq!(
+        shape_property(shape, "secret")
+            .expect("private static must be recorded")
+            .visibility,
+        MemberVisibility::Private
+    );
+
+    // NEGATIVE: instance members never leak into the constructor shape.
+    assert!(
+        shape_property(shape, "a").is_none(),
+        "instance field `a` must NOT appear on the constructor shape"
+    );
+    // NEGATIVE: the constructor itself is not a named member.
+    assert!(
+        shape_property(shape, "constructor").is_none()
+            && shape_method(shape, "constructor").is_none(),
+        "the constructor must not appear as a named member of the shape"
+    );
+
+    // NEGATIVE: the instance surface still excludes statics.
+    let body = &env.type_symbols["C"].primary().body;
+    assert!(
+        class_property(body, "initial").is_none() && class_method(body, "describe").is_none(),
+        "static members must stay excluded from the instance surface"
+    );
+}
+
+#[test]
+fn extract_class_static_private_hash_and_accessor_members_stay_excluded() {
+    // `static #tag` has a PrivateIdentifier key (no public name) and the
+    // `accessor` keyword produces an AccessorProperty — neither is folded
+    // into the constructor shape, and the instance accessor stays off the
+    // instance surface (current producer contract: accessors drop).
+    let env = parse_and_build_env(
+        r#"
+        class C {
+            static #tag: number = 0;
+            static accessor sv: string = "";
+            accessor v: string = "";
+            static visible: string = "";
+        }
+        "#,
+    );
+    let value = env.value_symbols["C"].primary();
+    let shape = value.object_shape.as_ref().expect("constructor shape");
+
+    assert!(
+        shape_property(shape, "visible").is_some(),
+        "plain static still folds (control)"
+    );
+    assert!(
+        shape_property(shape, "#tag").is_none() && shape_property(shape, "tag").is_none(),
+        "static #private field must not be folded"
+    );
+    assert!(
+        shape_property(shape, "sv").is_none(),
+        "static accessor must not be folded (accessor lowering is out of scope)"
+    );
+    let body = &env.type_symbols["C"].primary().body;
+    assert!(
+        class_property(body, "v").is_none(),
+        "instance accessor must stay off the instance surface"
+    );
+}
+
+#[test]
+fn extract_class_static_only_class_keeps_synthesized_construct_signature() {
+    // A class with no explicit constructor still synthesizes the implicit
+    // `new () => C` construct signature next to its folded statics.
+    let env = parse_and_build_env(
+        r#"
+        class GenericStatic {
+            static make(value: string): { wrapped: string } { return { wrapped: value }; }
+        }
+        "#,
+    );
+    let value = env.value_symbols["GenericStatic"].primary();
+    let shape = value.object_shape.as_ref().expect("constructor shape");
+    assert!(
+        shape
+            .properties
+            .iter()
+            .any(|m| matches!(m, ObjectMember::ConstructSignature(_))),
+        "implicit constructor must still synthesize a ConstructSignature"
+    );
+    let make = shape_method(shape, "make").expect("static method `make` folded");
+    assert!(
+        matches!(
+            make.function.return_type.as_deref(),
+            Some(TypeExpr::Object(_))
+        ),
+        "static method return type must be lowered"
+    );
+}
+
+#[test]
+fn extract_class_decorated_class_lowers_normally() {
+    // Decorator-capture checkpoint: a decorated class flows through
+    // `extract_class` exactly like an undecorated one — surfaces are
+    // decorator-invariant; decorators are ignored, never a lowering failure.
+    let env = parse_and_build_env(
+        r#"
+        function logged(ctor: any, ctx: any) { return ctor; }
+        @logged
+        class LoggedItem {
+            id: string = "";
+            static version: string = "1";
+            label(): string { return "label"; }
+        }
+        "#,
+    );
+    let decl = env.type_symbols.get("LoggedItem");
+    assert!(
+        decl.is_some(),
+        "decorated class must register a type symbol"
+    );
+    let body = &decl.unwrap().primary().body;
+    assert!(
+        class_property(body, "id").is_some() && class_method(body, "label").is_some(),
+        "decorated class instance members must lower normally"
+    );
+    let value = env.value_symbols["LoggedItem"].primary();
+    let shape = value.object_shape.as_ref().expect("constructor shape");
+    assert!(
+        shape_property(shape, "version").is_some(),
+        "decorated class static members must fold normally"
+    );
+}
+
 #[test]
 fn extracts_namespace_qualified_interfaces() {
     let env = parse_and_build_env(

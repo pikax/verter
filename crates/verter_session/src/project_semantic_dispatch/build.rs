@@ -43,6 +43,12 @@ type AugmentationContributions = (
     Vec<(Arc<str>, crate::semantic_query::HashValue)>,
 );
 
+/// One resolved heritage base from a class's `extends` clause
+/// ([`ProjectSemanticDispatch::class_heritage_bases`]): the base decl's
+/// `(canonical, symbol)` identity plus the heritage clause's authored
+/// type-arguments (`extends Base<string>`), still un-lowered `TypeExpr`s.
+type HeritageBase = (Arc<str>, Arc<str>, Arc<[TypeExpr]>);
+
 /// Upper bound on the template-literal keyspace product width
 /// `∏ |choice_set_i|` enumerated by
 /// [`ProjectSemanticDispatch::reduce_template_literal_nodes`]. A finite
@@ -411,30 +417,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 Some(identity) => identity,
                 None => return (QueryResult::Error(QueryError::Miss), empty_signature()).into(),
             };
-        let prepared = match self
-            .ctx
-            .prepared_value_decl(&root_identity.canonical_id, &root_identity.symbol_name)
-            .or_else(|| {
-                // Fallback to export-target walk when prepared cache misses
-                // on the resolved root — matches the legacy
-                // `SessionSolverHost::resolve_prepared_value_decl`.
-                if root_identity.canonical_id.is_empty() {
-                    return None;
-                }
-                let target = self.ctx.resolve_value_export_target(
-                    &root_identity.canonical_id,
-                    &root_identity.symbol_name,
-                )?;
-                if target.canonical_id == root_identity.canonical_id
-                    && target.name == root_identity.symbol_name
-                {
-                    return None;
-                }
-                self.ctx
-                    .prepared_value_decl(&target.canonical_id, &target.name)
-            }) {
-            Some(prepared) => prepared,
-            None => return (QueryResult::Error(QueryError::Miss), empty_signature()).into(),
+        // Effective post-fallback identity: when the resolved root names a
+        // re-exporting canonical with no local prepared VALUE decl, the
+        // export-target walk yields the DECLARING decl — every downstream
+        // consumer (the class-surface slot in particular) keys and lowers
+        // under THAT identity, never the stale re-export root.
+        let Some((effective_canonical, effective_symbol, prepared)) = self
+            .effective_prepared_value_decl(&root_identity.canonical_id, &root_identity.symbol_name)
+        else {
+            return (QueryResult::Error(QueryError::Miss), empty_signature()).into();
         };
         let empty_env = FxHashMap::default();
         let mut substitutions = Vec::new();
@@ -467,10 +458,40 @@ impl<'a> ProjectSemanticDispatch<'a> {
             } else {
                 None
             };
+        let mut composed_partial = false;
         let node_id = if let Some(_resolved_default_whole_hash) = synthesised_default {
             let resolved_default_canonical: Arc<str> =
                 Arc::from(root_identity.canonical_id.as_str());
             self.build_synthesized_vue_default_construct_object(&resolved_default_canonical, &scope)
+        } else if prepared.kind == verter_semantic::analysis::type_eval::ValueDeclKind::Class {
+            // Class value root — `typeof C` IS the class's STATIC surface,
+            // whose owning composer is `ResolveClassSurface::Static` (own
+            // statics + ctor PLUS heritage statics). Delegate through the
+            // keyed query so the composed surface is addressable, memoised
+            // per class identity, and fact-rooted on every heritage
+            // contributor. The composer lowers the prepared value decl
+            // directly (it never dispatches `TypeOf` back), so this
+            // delegation cannot recurse onto itself. The slot carries the
+            // EFFECTIVE (post-fallback) identity: a re-export root would
+            // key, lower, and invalidate the composed surface against the
+            // wrong canonical.
+            let slot = self.type_slot_for(
+                Arc::clone(&effective_canonical),
+                Arc::clone(&effective_symbol),
+            );
+            let class_context =
+                self.class_surface_context_for(effective_canonical.as_ref(), context.mode);
+            let read = self.execute_read(SemanticQueryKey::ResolveClassSurface {
+                decl_slot: slot,
+                type_args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                side: crate::semantic_query::ClassSurfaceSide::Static,
+                context: class_context,
+            });
+            composed_partial |= read.result_is_partial;
+            match read.value {
+                QueryResult::Value(id) => id,
+                _ => return (QueryResult::Error(QueryError::Miss), empty_signature()).into(),
+            }
         } else if let Some(ty_ann) = prepared.type_annotation.as_ref() {
             self.shallow_lower_type_expr_with_context(
                 ty_ann,
@@ -575,11 +596,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return (QueryResult::Error(QueryError::Miss), empty_signature()).into();
         };
         let signature = self.dep_signature_for(&value_root.scope.canonical_id, observed_hash);
-        crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
+        let mut output = crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
             QueryResult::Value(node_id),
             signature,
         ))
-        .with_observed_self_roots([(Arc::clone(&value_root.scope.canonical_id), observed_hash)])
+        .with_observed_self_roots([(Arc::clone(&value_root.scope.canonical_id), observed_hash)]);
+        // Two-signal fold: a partial composed class-surface read surfaces as
+        // a partial `TypeOf` result (it would otherwise pass through with
+        // `result_is_partial = false`).
+        output.result_is_partial |= composed_partial;
+        output
     }
 
     /// Build a `.vue` SFC's synthesized `default` PUBLIC INSTANCE surface for
@@ -890,7 +916,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         decl_slot: &crate::semantic_query::ResolvedDeclSlotIdentity,
         type_args: &Arc<[SemanticNodeId]>,
         side: crate::semantic_query::ClassSurfaceSide,
-        _context: crate::semantic_query::ClassSurfaceContext,
+        context: crate::semantic_query::ClassSurfaceContext,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
         use crate::semantic_query::{ClassSurfaceSide, ProjectionReductionContext};
 
@@ -932,15 +958,133 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 })
             }
             ClassSurfaceSide::Static => {
-                // Static side = the VALUE-space half: TypeOf the value
-                // root (the constructor value). The static surface is a
-                // genuine-Expanded consumer (the registry reads the
-                // composed constructor object surface directly).
-                let value_root = crate::semantic_query::value_root_of(decl_slot);
-                self.execute_read(self.typeof_key_for(
-                    value_root,
-                    ProjectionReductionContext::published(ProjectionMode::Expanded),
-                ))
+                // Static side — the OWNING composer. Own statics + own
+                // ctor come from the prepared VALUE decl's constructor
+                // shape (lowered directly — never a `TypeOf` re-dispatch,
+                // which would recurse: `build_typeof` delegates class
+                // values HERE). Base statics compose recursively through
+                // the SAME keyed query via the type-side heritage refs on
+                // the sibling slot's `PreparedTypeDecl.body` (Intersection
+                // fold, base-first), with shadow precedence: own members
+                // shadow base members; an own DECLARED ctor replaces the
+                // base's; a ctor-LESS subclass inherits the base ctor's
+                // parameters with the DERIVED instance return. Heritage
+                // type-arguments (`extends Base<string>`) lower in THIS
+                // class's defining scope and ride the recursive base key's
+                // `type_args` — instantiated surfaces are semantic meaning,
+                // so the substitution is part of the base query identity.
+                // The key's own `type_args` specialize THIS class's type
+                // parameters across the composed surface: statics cannot
+                // legally reference class type parameters (TS2302), so the
+                // substitution reaches only the constructor signatures the
+                // shells survive into (a static method's OWN same-name
+                // generic is protected by the shadow-aware collection).
+                // `prototype` is synthesized at projection time (the
+                // walker's member hop), never stored here.
+                //
+                // Effective post-fallback identity (the ONE shared
+                // export-target fallback rail — `build_typeof` keys NEW
+                // slots with it already): a slot that still names a
+                // re-exporting canonical rebases HERE, so the constructor
+                // shape lowers in the DECLARING file's scope, heritage
+                // reads the declaring type-side sibling decl, and the
+                // entry self-roots on the declaring content version.
+                let mut observed_self_roots = observed_self_roots;
+                let effective = self.effective_prepared_value_decl(
+                    defining_canonical.as_ref(),
+                    decl_slot.merged_symbol_name.as_ref(),
+                );
+                let Some((own_canonical, own_symbol, prepared)) = effective else {
+                    let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput =
+                        (QueryResult::Error(QueryError::Miss), empty_signature()).into();
+                    if observed.is_none() {
+                        output.cache_suppress = true;
+                    }
+                    return output.with_observed_self_roots(observed_self_roots);
+                };
+                let mut effective_root_missing = false;
+                if own_canonical.as_ref() != defining_canonical.as_ref() {
+                    // Self-root derivation observes the declaring file's
+                    // whole hash; fenced-ness flows via the chokepoint flag
+                    // into the dispatch executor's admission gate.
+                    match self
+                        .ctx
+                        .ensure_indexed_ready_serve(own_canonical.as_ref())
+                        .map(|serve| serve.indexed)
+                    {
+                        Some(indexed) => observed_self_roots
+                            .push((Arc::clone(&own_canonical), indexed.whole_hash)),
+                        // The declaring file's content version could not be
+                        // observed — refuse warm admission (the value would
+                        // otherwise survive a declaring-file edit).
+                        None => effective_root_missing = true,
+                    }
+                }
+                let own = self.lower_class_constructor_object(
+                    own_canonical.as_ref(),
+                    own_symbol.as_ref(),
+                    &prepared,
+                    ProjectionReductionContext::published(context.mode),
+                );
+                let Some(own_node) = own else {
+                    let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput =
+                        (QueryResult::Error(QueryError::Miss), empty_signature()).into();
+                    if observed.is_none() || effective_root_missing {
+                        output.cache_suppress = true;
+                    }
+                    return output.with_observed_self_roots(observed_self_roots);
+                };
+                let mut composed_node = own_node;
+                let mut composed_partial = false;
+                for (base_canonical, base_name, base_args) in
+                    self.class_heritage_bases(own_canonical.as_ref(), own_symbol.as_ref())
+                {
+                    let lowered_args: Vec<SemanticNodeId> = if base_args.is_empty() {
+                        Vec::new()
+                    } else {
+                        self.lower_class_heritage_args(
+                            own_canonical.as_ref(),
+                            own_symbol.as_ref(),
+                            base_args.as_ref(),
+                            context.mode,
+                        )
+                    };
+                    let base_slot =
+                        self.type_slot_for(Arc::clone(&base_canonical), Arc::clone(&base_name));
+                    let base_context =
+                        self.class_surface_context_for(base_canonical.as_ref(), context.mode);
+                    let read = self.execute_read(SemanticQueryKey::ResolveClassSurface {
+                        decl_slot: base_slot,
+                        type_args: Arc::from(lowered_args.into_boxed_slice()),
+                        side: ClassSurfaceSide::Static,
+                        context: base_context,
+                    });
+                    composed_partial |= read.result_is_partial;
+                    if let QueryResult::Value(base_node) = read.value {
+                        composed_node = self.merge_static_surfaces(composed_node, base_node);
+                    }
+                }
+                // Specialize THIS class's own type parameters with the key's
+                // `type_args` (produced by a derived class's heritage hop
+                // above, or any caller instantiating the static surface).
+                if !type_args.is_empty() {
+                    composed_node = self.apply_class_surface_type_args(
+                        own_canonical.as_ref(),
+                        own_symbol.as_ref(),
+                        composed_node,
+                        type_args,
+                    );
+                }
+                let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput = (
+                    QueryResult::Value(composed_node),
+                    self.project_generation_signature(),
+                )
+                    .into();
+                output.result_is_partial = composed_partial;
+                if observed.is_none() || effective_root_missing {
+                    output.cache_suppress = true;
+                }
+                return output.with_observed_self_roots(observed_self_roots);
             }
         };
 
@@ -960,6 +1104,535 @@ impl<'a> ProjectSemanticDispatch<'a> {
             output.cache_suppress = true;
         }
         output.with_observed_self_roots(observed_self_roots)
+    }
+
+    /// The EFFECTIVE prepared VALUE-decl identity for a `(canonical,
+    /// symbol)` root: the root itself when its prepared value decl exists
+    /// locally; otherwise the value-export-target walk's declaring identity
+    /// (the post-fallback canonical) — the ONE shared fallback rail for
+    /// re-exported value roots (`build_typeof` and the class-surface Static
+    /// composer both consume it, so the two rails cannot drift). Returns
+    /// `None` when neither side has a prepared value decl.
+    fn effective_prepared_value_decl(
+        &self,
+        canonical: &str,
+        symbol: &str,
+    ) -> Option<(
+        Arc<str>,
+        Arc<str>,
+        Arc<verter_semantic::analysis::type_solver::PreparedValueDecl>,
+    )> {
+        if let Some(prepared) = self.ctx.prepared_value_decl(canonical, symbol) {
+            return Some((Arc::from(canonical), Arc::from(symbol), prepared));
+        }
+        if canonical.is_empty() {
+            return None;
+        }
+        let target = self.ctx.resolve_value_export_target(canonical, symbol)?;
+        if target.canonical_id == canonical && target.name == symbol {
+            return None;
+        }
+        let prepared = self
+            .ctx
+            .prepared_value_decl(&target.canonical_id, &target.name)?;
+        Some((
+            Arc::from(target.canonical_id.as_str()),
+            Arc::from(target.name.as_str()),
+            prepared,
+        ))
+    }
+
+    /// `ResolveOverloadSet` — the live signature-group reducer.
+    ///
+    /// Resolves the already-resolved `callee` node to its ordered VISIBLE
+    /// signature group and returns the group-bearing node (the public
+    /// `execute` boundary converts it into the
+    /// `OverloadSet(Arc<[SignatureRef]>)` value domain — call bucket
+    /// first, then construct). Visibility is build_typeof's projection
+    /// rule, applied UPSTREAM where the callee node was produced: a lone
+    /// signature is visible even if bodied; a multi-signature group
+    /// carries every bodiless overload in source order with the trailing
+    /// implementation already hidden — this reducer never re-derives it.
+    /// The LAST element is therefore the last visible overload (the
+    /// signature-utility selection rule; U6's call resolution reads the
+    /// same order first-applicable).
+    ///
+    /// - The callee settles through the ONE shared signature-source rail
+    ///   ([`Self::resolve_signature_source_carrier`]) — the same demand
+    ///   point the signature utilities (`ReturnType` / `Parameters` / …)
+    ///   use. The rails share the FUNCTION, not the CONTEXT: the
+    ///   utilities pass their caller's context, this reducer always
+    ///   passes the non-published structural transit (the key is
+    ///   mode-erased). A carrier-shaped callee (`DeclRef` to an
+    ///   annotation-typed overloaded interface, `InstantiationRef` to a
+    ///   generic one) still settles to the same signature group on both
+    ///   rails because `Instantiate` of a signature-bearing decl is
+    ///   mode-stable.
+    /// - `Alias` chains unwrap (cycle-guarded, mirroring
+    ///   `select_signature_function`).
+    /// - A callee with no signature group (no `Function`, no signature-
+    ///   bearing `Object`) is an honest `Miss` — never a fabricated empty
+    ///   set.
+    /// - Non-empty `type_args` instantiate each candidate positionally
+    ///   through the shared `apply_typeof_instantiation_args`; a candidate
+    ///   that cannot accept the argument list (non-generic, unsatisfied
+    ///   arity) DROPS from the set (TS overload resolution under explicit
+    ///   type arguments); all-dropped is an honest `Miss`.
+    ///
+    /// Self-version rooting: on the file-derived origins of EVERY input
+    /// node — the callee AND each explicit type argument (the node-keyed
+    /// rooting rule `NormalizeUnion` uses; the produced value semantically
+    /// depends on the arg nodes, so they root too).
+    pub(super) fn build_resolve_overload_set(
+        &self,
+        callee: SemanticNodeId,
+        type_args: &Arc<[SemanticNodeId]>,
+    ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+        let miss = || -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+            (QueryResult::Error(QueryError::Miss), empty_signature()).into()
+        };
+        // Settle the callee through the ONE shared signature-source rail —
+        // the same demand point the signature utilities use. The deferred
+        // evaluator alone deliberately leaves `DeclRef` / `InstantiationRef`
+        // carriers symbolic (the intermediate indexed-access preservation
+        // carve-out), but an overload-set read IS a demand point: an
+        // annotation-typed callee (`declare const x: Overloaded`) arrives as
+        // a carrier and must resolve to its signature-bearing surface here,
+        // exactly as it does for `ReturnType` / `Parameters` — one rail, no
+        // divergence. The key is mode-erased (no projection context), so the
+        // settlement runs under the non-published `StructuralTransit` context
+        // (`Shallow`) — the shallow-by-default-consistent choice: the reducer
+        // needs the structural signature group, never a published member
+        // surface. An unsettleable carrier stays non-signature and misses
+        // honestly below.
+        let settled = self.resolve_signature_source_carrier(
+            callee,
+            crate::semantic_query::ProjectionReductionContext::structural_transit(),
+        );
+        // Unwrap alias chains to the signature-group-bearing node.
+        let mut group_node = settled;
+        let mut visited: FxHashSet<SemanticNodeId> = FxHashSet::default();
+        let (call_sigs, construct_sigs): (Vec<SemanticNodeId>, Vec<SemanticNodeId>) = loop {
+            if !visited.insert(group_node) {
+                return miss();
+            }
+            let Some(data) = self.graph().node_data(group_node) else {
+                return miss();
+            };
+            match &*data {
+                SemanticNodeData::Alias(target) => {
+                    let target = *target;
+                    drop(data);
+                    group_node = target;
+                }
+                SemanticNodeData::Function { .. } => break (vec![group_node], Vec::new()),
+                SemanticNodeData::Object(surface) => {
+                    break (
+                        surface.call_signatures.to_vec(),
+                        surface.construct_signatures.to_vec(),
+                    )
+                }
+                _ => return miss(),
+            }
+        };
+        if call_sigs.is_empty() && construct_sigs.is_empty() {
+            return miss();
+        }
+
+        let result_node = if type_args.is_empty() {
+            group_node
+        } else {
+            // Explicit type arguments: instantiate per candidate; drop the
+            // candidates that cannot accept the argument list.
+            let instantiate = |sigs: &[SemanticNodeId]| -> Vec<SemanticNodeId> {
+                sigs.iter()
+                    .filter_map(|sig| {
+                        let instantiated = self.apply_typeof_instantiation_args(*sig, type_args);
+                        let dropped = matches!(
+                            self.graph().node_data(instantiated).as_deref(),
+                            Some(SemanticNodeData::Opaque(_))
+                        );
+                        (!dropped).then_some(instantiated)
+                    })
+                    .collect()
+            };
+            let instantiated_calls = instantiate(&call_sigs);
+            let instantiated_constructs = instantiate(&construct_sigs);
+            match (
+                instantiated_calls.as_slice(),
+                instantiated_constructs.as_slice(),
+            ) {
+                ([], []) => return miss(),
+                // A lone instantiated signature IS the group node — no
+                // synthetic surface wrapper for the single-candidate case.
+                ([lone], []) | ([], [lone]) => *lone,
+                _ => self
+                    .graph()
+                    .intern_node(SemanticNodeData::Object(SurfaceView {
+                        members: Arc::from(Vec::new().into_boxed_slice()),
+                        call_signatures: Arc::from(instantiated_calls.into_boxed_slice()),
+                        construct_signatures: Arc::from(instantiated_constructs.into_boxed_slice()),
+                        index_signatures: Arc::from(Vec::new().into_boxed_slice()),
+                        keyspace: None,
+                        has_index_signature: false,
+                    })),
+            }
+        };
+
+        let observed_self_roots = self.observed_self_roots_from_nodes(
+            std::iter::once(callee).chain(type_args.iter().copied()),
+        );
+        crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
+            QueryResult::Value(result_node),
+            self.project_generation_signature(),
+        ))
+        .with_observed_self_roots(observed_self_roots)
+    }
+
+    /// Lower the class's OWN constructor-object surface — the prepared
+    /// VALUE decl's `object_shape` (construct signature + own statics with
+    /// visibility) — in the DECLARING file's scope. The own half of the
+    /// `ResolveClassSurface::Static` composer; heritage is composed by the
+    /// caller, which also resolves the effective post-fallback identity
+    /// (`canonical`/`symbol`/`prepared` arrive already rebased — this
+    /// helper performs NO export-target walk of its own). Returns `None`
+    /// when the declaring file cannot be indexed or the prepared decl
+    /// carries no constructor shape.
+    fn lower_class_constructor_object(
+        &self,
+        canonical: &str,
+        symbol: &str,
+        prepared: &verter_semantic::analysis::type_solver::PreparedValueDecl,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Option<SemanticNodeId> {
+        let indexed = self.ctx.ensure_indexed_ready_serve(canonical)?.indexed;
+        let scope = NodeScopeId::File {
+            canonical_id: Arc::from(canonical),
+            whole_hash: indexed.whole_hash,
+            local_scope: None,
+        };
+        let scope_payload = self.ctx.prepared_decl_bundle(canonical).map(|bundle| {
+            crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(&bundle)
+        });
+        let shadowing = crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(
+            scope_payload.as_ref(),
+        );
+        let shape = prepared.object_shape.as_ref()?;
+        // Bind the class's OWN type parameters as `TypeParam` shells so a
+        // declared `constructor(x: T)` lowers `T` to the substitutable
+        // binder node (the heritage hop specializes it through the key's
+        // `type_args`). Statics cannot legally reference class type
+        // parameters, so the shells surface only through the ctor.
+        let env = self.class_type_param_shell_env(canonical, symbol, indexed.whole_hash, &scope);
+        let mut substitutions = Vec::new();
+        Some(self.shallow_lower_type_expr_with_context(
+            &TypeExpr::Object(Arc::new(shape.clone())),
+            &env,
+            &scope,
+            &prepared.name_resolution,
+            scope_payload.as_ref(),
+            &shadowing,
+            &mut substitutions,
+            context,
+        ))
+    }
+
+    /// Interned `TypeParam` shell nodes for a class declaration's own type
+    /// parameters, env-keyed by parameter name. Bound during value-side
+    /// constructor-shape lowering and heritage-argument lowering so the
+    /// class-level binders stay substitutable (mirrors `build_instantiate`'s
+    /// Skeleton shell binding). A class with no type-side sibling decl (or
+    /// no parameters) yields an empty env.
+    fn class_type_param_shell_env(
+        &self,
+        canonical: &str,
+        symbol: &str,
+        whole_hash: crate::semantic_query::HashValue,
+        scope: &NodeScopeId,
+    ) -> FxHashMap<String, SemanticNodeId> {
+        let mut env: FxHashMap<String, SemanticNodeId> = FxHashMap::default();
+        let Some(type_decl) = self.ctx.prepared_type_decl(canonical, symbol) else {
+            return env;
+        };
+        for (index, param) in type_decl.type_parameters.iter().enumerate() {
+            let shell = self.graph().intern_node_with_scope(
+                SemanticNodeData::TypeParam {
+                    decl: crate::semantic_query::DeclIdentity {
+                        canonical_id: Arc::from(canonical),
+                        whole_hash,
+                        decl_name: Arc::from(symbol),
+                    },
+                    param_index: index as u16,
+                    constraint: None,
+                    default: None,
+                    display_name: Arc::from(param.name.as_str()),
+                },
+                scope.clone(),
+            );
+            env.insert(param.name.clone(), shell);
+        }
+        env
+    }
+
+    /// Lower a heritage clause's type-arguments (`extends Base<...>`) in the
+    /// DERIVED class's defining scope — the arguments are authored there, so
+    /// imports resolve through the derived decl's `name_resolution` and the
+    /// derived class's own type parameters bind as shells (`class Mid<U>
+    /// extends Base<U>` lowers `U` to Mid's binder shell, which Mid's own
+    /// `type_args` substitution later specializes).
+    fn lower_class_heritage_args(
+        &self,
+        canonical: &str,
+        symbol: &str,
+        args: &[TypeExpr],
+        mode: crate::semantic_query::ProjectionMode,
+    ) -> Vec<SemanticNodeId> {
+        let Some(indexed) = self
+            .ctx
+            .ensure_indexed_ready_serve(canonical)
+            .map(|serve| serve.indexed)
+        else {
+            return Vec::new();
+        };
+        let Some(type_decl) = self.ctx.prepared_type_decl(canonical, symbol) else {
+            return Vec::new();
+        };
+        let scope = NodeScopeId::File {
+            canonical_id: Arc::from(canonical),
+            whole_hash: indexed.whole_hash,
+            local_scope: None,
+        };
+        let scope_payload = self.ctx.prepared_decl_bundle(canonical).map(|bundle| {
+            crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(&bundle)
+        });
+        let shadowing = crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(
+            scope_payload.as_ref(),
+        );
+        let env = self.class_type_param_shell_env(canonical, symbol, indexed.whole_hash, &scope);
+        let mut substitutions = Vec::new();
+        args.iter()
+            .map(|arg| {
+                self.shallow_lower_type_expr_with_context(
+                    arg,
+                    &env,
+                    &scope,
+                    &type_decl.name_resolution,
+                    scope_payload.as_ref(),
+                    &shadowing,
+                    &mut substitutions,
+                    crate::semantic_query::ProjectionReductionContext::published(mode),
+                )
+            })
+            .collect()
+    }
+
+    /// Substitute a class's OWN type parameters positionally with the
+    /// `ResolveClassSurface` key's `type_args` across the composed static
+    /// surface. Unfilled trailing parameters keep their open shells (the
+    /// instance rail's `Instantiate` owns default settlement). Collection is
+    /// shadow-aware, so a static method re-declaring a same-name generic
+    /// keeps its own binder.
+    fn apply_class_surface_type_args(
+        &self,
+        canonical: &str,
+        symbol: &str,
+        surface: SemanticNodeId,
+        args: &Arc<[SemanticNodeId]>,
+    ) -> SemanticNodeId {
+        let Some(type_decl) = self.ctx.prepared_type_decl(canonical, symbol) else {
+            return surface;
+        };
+        let mut result = surface;
+        for (index, param) in type_decl.type_parameters.iter().enumerate() {
+            let Some(arg) = args.get(index).copied() else {
+                continue;
+            };
+            for binder in self.collect_type_param_nodes_by_name(
+                result,
+                param.name.as_str(),
+                /* root_is_own_signature */ false,
+            ) {
+                result = self.substitute_semantic_type_param(result, binder, arg);
+            }
+        }
+        result
+    }
+
+    /// The class's heritage bases, base-first, read from the type-side
+    /// sibling slot's `PreparedTypeDecl.body` (the producer's Intersection
+    /// fold puts heritage `Ref` arms before the own `Object` arm). Each
+    /// base ref resolves through the prepared decl's own `name_resolution`
+    /// (import-aware); an unresolved bare name falls back to the same file.
+    /// The third element carries the heritage clause's type-arguments
+    /// (`extends Base<string>` — preserved by the producer as
+    /// `named_with_args`), still as authored `TypeExpr`s; the Static
+    /// composer lowers them in the derived class's scope. Non-class decls
+    /// and heritage-free classes return an empty list.
+    fn class_heritage_bases(&self, canonical: &str, symbol: &str) -> Vec<HeritageBase> {
+        let Some(prepared) = self.ctx.prepared_type_decl(canonical, symbol) else {
+            return Vec::new();
+        };
+        if prepared.kind != verter_semantic::analysis::type_eval::TypeDeclKind::Class {
+            return Vec::new();
+        }
+        let TypeExpr::Intersection(parts) = &prepared.body else {
+            return Vec::new();
+        };
+        parts
+            .iter()
+            .filter_map(|part| match part {
+                TypeExpr::Ref {
+                    name,
+                    type_arguments,
+                } => match prepared.name_resolution.get(name.as_ref()) {
+                    Some(root) => Some((
+                        Arc::<str>::from(root.canonical_id.as_str()),
+                        Arc::<str>::from(root.symbol_name.as_str()),
+                        Arc::clone(type_arguments),
+                    )),
+                    // Same-file base not in the name-resolution map —
+                    // resolve locally.
+                    None => Some((
+                        Arc::<str>::from(canonical),
+                        Arc::clone(name),
+                        Arc::clone(type_arguments),
+                    )),
+                },
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Merge a class's own static surface with ONE base class's composed
+    /// static surface (shadow precedence):
+    ///
+    /// - own members shadow base members by name (visibility carried);
+    /// - an own DECLARED constructor (signature span present) replaces the
+    ///   base's; a ctor-LESS class (its construct signatures are all
+    ///   synthesized — no signature span) inherits the base constructor's
+    ///   parameters with the DERIVED instance return type;
+    /// - call/index signatures union own-first.
+    ///
+    /// Non-object inputs return `own` unchanged (a miss on either side
+    /// never fabricates a surface).
+    fn merge_static_surfaces(&self, own: SemanticNodeId, base: SemanticNodeId) -> SemanticNodeId {
+        let Some(own_data) = self.graph().node_data(own) else {
+            return own;
+        };
+        let SemanticNodeData::Object(own_view) = &*own_data else {
+            return own;
+        };
+        let own_view = own_view.clone();
+        drop(own_data);
+        let Some(base_data) = self.graph().node_data(base) else {
+            return own;
+        };
+        let SemanticNodeData::Object(base_view) = &*base_data else {
+            return own;
+        };
+        let base_view = base_view.clone();
+        drop(base_data);
+
+        let mut members: Vec<SurfaceMember> = own_view.members.to_vec();
+        for base_member in base_view.members.iter() {
+            if !members
+                .iter()
+                .any(|own_member| own_member.name == base_member.name)
+            {
+                members.push(base_member.clone());
+            }
+        }
+
+        let function_signature_span = |node: SemanticNodeId| -> Option<verter_span::Span> {
+            match self.graph().node_data(node).as_deref() {
+                Some(SemanticNodeData::Function { signature_span, .. }) => *signature_span,
+                _ => None,
+            }
+        };
+        let own_ctor_declared = own_view
+            .construct_signatures
+            .iter()
+            .any(|sig| function_signature_span(*sig).is_some());
+        let construct_signatures: Vec<SemanticNodeId> =
+            if own_ctor_declared || base_view.construct_signatures.is_empty() {
+                own_view.construct_signatures.to_vec()
+            } else {
+                // Ctor-less class: inherit the base constructor's parameters,
+                // keep the DERIVED instance return (the own synthesized
+                // construct signature's return IS the derived instance ref).
+                let own_instance_return = own_view.construct_signatures.first().and_then(|sig| {
+                    match self.graph().node_data(*sig).as_deref() {
+                        Some(SemanticNodeData::Function { return_type, .. }) => Some(*return_type),
+                        _ => None,
+                    }
+                });
+                match own_instance_return {
+                    Some(derived_return) => base_view
+                        .construct_signatures
+                        .iter()
+                        .map(
+                            |base_sig| match self.graph().node_data(*base_sig).as_deref() {
+                                Some(SemanticNodeData::Function {
+                                    params,
+                                    type_parameters,
+                                    ..
+                                }) => self.graph().intern_node(SemanticNodeData::Function {
+                                    params: Arc::clone(params),
+                                    return_type: derived_return,
+                                    type_parameters: Arc::clone(type_parameters),
+                                    // Composed signature — no single source site.
+                                    signature_span: None,
+                                    return_type_span: None,
+                                }),
+                                _ => *base_sig,
+                            },
+                        )
+                        .collect(),
+                    None => own_view.construct_signatures.to_vec(),
+                }
+            };
+
+        // Union dedup is STRUCTURAL, not id-only: `intern_node_with_scope`
+        // can fork two ids for byte-identical signature data lowered under
+        // different scopes, and an id-only `contains` would double-list the
+        // same declaration. Distinct declarations stay distinct — their
+        // source spans participate in node data, so two same-shape
+        // signatures from different sites never compare equal.
+        let same_node_data = |a: SemanticNodeId, b: SemanticNodeId| -> bool {
+            a == b || self.graph().node_data(a) == self.graph().node_data(b)
+        };
+        let mut call_signatures: Vec<SemanticNodeId> = own_view.call_signatures.to_vec();
+        for sig in base_view.call_signatures.iter() {
+            if !call_signatures
+                .iter()
+                .any(|existing| same_node_data(*existing, *sig))
+            {
+                call_signatures.push(*sig);
+            }
+        }
+        let mut index_signatures = own_view.index_signatures.to_vec();
+        for sig in base_view.index_signatures.iter() {
+            let duplicate = index_signatures.iter().any(|existing| {
+                existing == sig
+                    || (existing.readonly == sig.readonly
+                        && existing.spans == sig.spans
+                        && same_node_data(existing.key_type, sig.key_type)
+                        && same_node_data(existing.value_type, sig.value_type))
+            });
+            if !duplicate {
+                index_signatures.push(sig.clone());
+            }
+        }
+        let has_index_signature = !index_signatures.is_empty();
+        self.graph()
+            .intern_node(SemanticNodeData::Object(SurfaceView {
+                members: Arc::from(members.into_boxed_slice()),
+                call_signatures: Arc::from(call_signatures.into_boxed_slice()),
+                construct_signatures: Arc::from(construct_signatures.into_boxed_slice()),
+                index_signatures: Arc::from(index_signatures.into_boxed_slice()),
+                keyspace: None,
+                has_index_signature,
+            }))
     }
 
     /// Generic instantiation.
@@ -2835,18 +3508,33 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // falls through to the opaque shell so downstream consumers
             // still see an `Instantiate` edge anchored to the utility
             // identity.
-            "ReturnType" if args.len() == 1 => {
+            "ReturnType" | "InstanceType" if args.len() == 1 => {
                 // Demand-point source resolution: a decl-placeholder /
                 // alias-shell / `DeclRef` carrier argument
                 // (`ReturnType<Handler>` where `Handler` is a
                 // function-type alias) settles to its canonical Function
-                // carrier before the signature walk.
+                // carrier before the signature walk. Bucket selection:
+                // `ReturnType` reads the CALL bucket, `InstanceType` the
+                // CONSTRUCT bucket — hybrids and member-bearing
+                // constructor objects select per kind, never per shape.
+                let bucket = if name == "ReturnType" {
+                    SignatureBucket::Call
+                } else {
+                    SignatureBucket::Construct
+                };
                 let source_resolved = self.resolve_signature_source_carrier(args[0], context);
-                if let Some(function_node) = self.resolve_call_signature_function(source_resolved) {
+                if let Some(function_node) = self.select_signature_function(source_resolved, bucket)
+                {
                     if let Some(SemanticNodeData::Function { return_type, .. }) =
                         self.graph().node_data(function_node).as_deref()
                     {
-                        let id = *return_type;
+                        // Free signature generics instantiate at `unknown`
+                        // (the sb15 rule: `ReturnType<typeof id>` over
+                        // `id<T>(x: T): T` is `unknown`).
+                        let id = self.instantiate_free_signature_params_at_unknown(
+                            function_node,
+                            *return_type,
+                        );
                         record_utility_edges(id);
                         return (QueryResult::Value(id), fence, false);
                     }
@@ -2855,46 +3543,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 record_utility_edges(result);
                 (QueryResult::Value(result), fence, false)
             }
-            "Parameters" if args.len() == 1 => {
-                // Demand-point source resolution — see ReturnType.
+            "Parameters" | "ConstructorParameters" if args.len() == 1 => {
+                // Demand-point source resolution + bucket selection — see
+                // ReturnType/InstanceType above.
+                let bucket = if name == "Parameters" {
+                    SignatureBucket::Call
+                } else {
+                    SignatureBucket::Construct
+                };
                 let source_resolved = self.resolve_signature_source_carrier(args[0], context);
-                if let Some(function_node) = self.resolve_call_signature_function(source_resolved) {
-                    if let Some(tuple_id) = self.intern_function_params_tuple(function_node) {
-                        record_utility_edges(tuple_id);
-                        return (QueryResult::Value(tuple_id), fence, false);
-                    }
-                }
-                let result = self.opaque(QueryError::Miss);
-                record_utility_edges(result);
-                (QueryResult::Value(result), fence, false)
-            }
-            "ConstructorParameters" if args.len() == 1 => {
-                // Demand-point source resolution — see ReturnType.
-                let source_resolved = self.resolve_signature_source_carrier(args[0], context);
-                if let Some(function_node) =
-                    self.resolve_construct_signature_function(source_resolved)
+                if let Some(function_node) = self.select_signature_function(source_resolved, bucket)
                 {
                     if let Some(tuple_id) = self.intern_function_params_tuple(function_node) {
+                        let tuple_id = self
+                            .instantiate_free_signature_params_at_unknown(function_node, tuple_id);
                         record_utility_edges(tuple_id);
                         return (QueryResult::Value(tuple_id), fence, false);
-                    }
-                }
-                let result = self.opaque(QueryError::Miss);
-                record_utility_edges(result);
-                (QueryResult::Value(result), fence, false)
-            }
-            "InstanceType" if args.len() == 1 => {
-                // Demand-point source resolution — see ReturnType.
-                let source_resolved = self.resolve_signature_source_carrier(args[0], context);
-                if let Some(function_node) =
-                    self.resolve_construct_signature_function(source_resolved)
-                {
-                    if let Some(SemanticNodeData::Function { return_type, .. }) =
-                        self.graph().node_data(function_node).as_deref()
-                    {
-                        let id = *return_type;
-                        record_utility_edges(id);
-                        return (QueryResult::Value(id), fence, false);
                     }
                 }
                 let result = self.opaque(QueryError::Miss);
@@ -3308,7 +3972,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
     /// Demand-point carrier resolution for a function-signature utility's
     /// SOURCE argument (`ReturnType<F>` / `Parameters<F>` /
-    /// `ConstructorParameters<C>` / `InstanceType<C>`).
+    /// `ConstructorParameters<C>` / `InstanceType<C>`) and for the
+    /// `ResolveOverloadSet` reducer's callee — every signature-demanding
+    /// settlement runs through this ONE rail so the rails never diverge on
+    /// the same carrier node.
     ///
     /// The deferred-shell evaluator deliberately leaves `DeclRef` /
     /// `InstantiationRef` carriers symbolic (intermediate indexed-access
@@ -3513,23 +4180,41 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
-    /// Resolve `node` to a `SemanticNodeData::Function` node via call
-    /// signatures. Unwraps a canonical `Function` node directly, an
-    /// `Object` surface with exactly one call signature and no user
-    /// members / construct signatures, or an `Alias` chain (cycle
-    /// guarded).
+    /// Resolve `node` to the SELECTED `SemanticNodeData::Function` node via
+    /// signature-kind BUCKET selection — the one shared rule for the
+    /// function-signature utilities. `Parameters` / `ReturnType` read the
+    /// CALL bucket; `ConstructorParameters` / `InstanceType` read the
+    /// CONSTRUCT bucket.
     ///
-    /// Returns `None` when the shape is a plain object, primitive,
-    /// opaque, or carries multiple overloads — callers fall through to
-    /// the utility's `Opaque(Miss)` shell.
-    fn resolve_call_signature_function(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
-        let mut visited: FxHashSet<SemanticNodeId> = FxHashSet::default();
-        self.resolve_call_signature_function_inner(node, &mut visited)
-    }
-
-    fn resolve_call_signature_function_inner(
+    /// - A canonical `Function` node serves BOTH buckets (a bare
+    ///   `new (...) => R` constructor type lowers through the same
+    ///   `Function` carrier — the constructor-vs-function distinction is
+    ///   consumed before query-time dispatch; see the `ConstructorType`
+    ///   lowering arm).
+    /// - An `Object` surface selects from the REQUESTED bucket only. The
+    ///   surface MAY carry user-level members (a class's static surface)
+    ///   and MAY carry both buckets (a call+construct hybrid) — selection
+    ///   never requires the other bucket or the member list to be empty.
+    /// - A multi-signature bucket is a visibility-filtered overload group
+    ///   (build_typeof already hides trailing implementation signatures);
+    ///   per TS, the signature utilities read the LAST visible overload.
+    /// - `Alias` chains unwrap (cycle guarded).
+    ///
+    /// Returns `None` when the shape carries no signature in the requested
+    /// bucket — callers fall through to the utility's `Opaque(Miss)` shell.
+    fn select_signature_function(
         &self,
         node: SemanticNodeId,
+        bucket: SignatureBucket,
+    ) -> Option<SemanticNodeId> {
+        let mut visited: FxHashSet<SemanticNodeId> = FxHashSet::default();
+        self.select_signature_function_inner(node, bucket, &mut visited)
+    }
+
+    fn select_signature_function_inner(
+        &self,
+        node: SemanticNodeId,
+        bucket: SignatureBucket,
         visited: &mut FxHashSet<SemanticNodeId>,
     ) -> Option<SemanticNodeId> {
         if !visited.insert(node) {
@@ -3539,57 +4224,333 @@ impl<'a> ProjectSemanticDispatch<'a> {
         match &*data {
             SemanticNodeData::Function { .. } => Some(node),
             SemanticNodeData::Alias(target) => {
-                self.resolve_call_signature_function_inner(*target, visited)
+                self.select_signature_function_inner(*target, bucket, visited)
             }
-            SemanticNodeData::Object(surface)
-                if surface.members.is_empty()
-                    && surface.construct_signatures.is_empty()
-                    && surface.call_signatures.len() == 1 =>
-            {
-                self.resolve_call_signature_function_inner(surface.call_signatures[0], visited)
+            SemanticNodeData::Object(surface) => {
+                let group = match bucket {
+                    SignatureBucket::Call => &surface.call_signatures,
+                    SignatureBucket::Construct => &surface.construct_signatures,
+                };
+                let selected = *group.last()?;
+                drop(data);
+                self.select_signature_function_inner(selected, bucket, visited)
             }
             _ => None,
         }
     }
 
-    /// Mirror of [`Self::resolve_call_signature_function`] for construct
-    /// signatures (`ConstructorParameters`, `InstanceType`). Construct
-    /// signatures are lowered as `Function` nodes too — distinguished
-    /// only by the surface bucket they live in.
-    fn resolve_construct_signature_function(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
-        let mut visited: FxHashSet<SemanticNodeId> = FxHashSet::default();
-        self.resolve_construct_signature_function_inner(node, &mut visited)
+    /// Instantiate a signature-utility extraction at `unknown`: every type
+    /// parameter OWNED by `function_node` that survives into `extracted`
+    /// substitutes to the `unknown` primitive (TS instantiates free
+    /// signature generics at `unknown` when a signature utility reads the
+    /// bare generic — `ReturnType<typeof id>` for `id<T>(x: T): T` is
+    /// `unknown`). A non-generic signature returns `extracted` unchanged.
+    ///
+    /// The `Function` node's `type_parameters` carry [`TypeParamDecl`]s
+    /// (name + constraint/default), not binder node ids; the binder NODES
+    /// the body's references interned are discovered by walking
+    /// `extracted` for `TypeParam` nodes whose `display_name` matches a
+    /// declared parameter name — consistent with the file-scoped
+    /// name-keyed `TypeParam` identity the lowering uses. The walk is
+    /// SHADOWING-AWARE: a function node inside `extracted` (its root
+    /// included — `extracted` is not the owning signature) that
+    /// re-declares the name owns every same-name binder in its subtree,
+    /// so those occurrences stay generic instead of collapsing to
+    /// `unknown`. Each discovered binder node substitutes through the
+    /// shared binder-identity substitution (never a name-rewrite of the
+    /// subtree).
+    fn instantiate_free_signature_params_at_unknown(
+        &self,
+        function_node: SemanticNodeId,
+        extracted: SemanticNodeId,
+    ) -> SemanticNodeId {
+        let Some(data) = self.graph().node_data(function_node) else {
+            return extracted;
+        };
+        let SemanticNodeData::Function {
+            type_parameters, ..
+        } = &*data
+        else {
+            return extracted;
+        };
+        let type_parameters = Arc::clone(type_parameters);
+        drop(data);
+        if type_parameters.is_empty() {
+            return extracted;
+        }
+        let unknown = self.graph().intern_node(SemanticNodeData::Primitive(
+            crate::semantic_query::PrimitiveKind::Unknown,
+        ));
+        let mut result = extracted;
+        for decl in type_parameters.iter() {
+            // Shadowing-aware per-name collection: `extracted` is NOT the
+            // owning signature, so a function node ANYWHERE in it (its root
+            // included) that re-declares `decl.name` owns every same-name
+            // binder in its subtree — those occurrences are the nested
+            // binder's, never the free outer parameter being instantiated.
+            for binder in self.collect_type_param_nodes_by_name(
+                result,
+                decl.name.as_ref(),
+                /* root_is_own_signature */ false,
+            ) {
+                result = self.substitute_semantic_type_param(result, binder, unknown);
+            }
+        }
+        result
     }
 
-    fn resolve_construct_signature_function_inner(
+    /// Apply instantiation-expression type arguments
+    /// (`typeof C.make<string>`) to a resolved generic signature node:
+    /// each of the function's OWN type parameters substitutes positionally
+    /// to the matching argument (an unfilled trailing parameter takes its
+    /// declared default when present), and the instantiated signature is
+    /// re-interned WITHOUT the consumed type parameters — an instantiation
+    /// expression yields a non-generic signature. Returns the deferred
+    /// `Opaque(Miss)` shell when the node is not a generic function or the
+    /// arguments cannot satisfy the parameter list (an honest miss, never
+    /// a partially-substituted signature).
+    pub(super) fn apply_typeof_instantiation_args(
         &self,
         node: SemanticNodeId,
-        visited: &mut FxHashSet<SemanticNodeId>,
-    ) -> Option<SemanticNodeId> {
-        if !visited.insert(node) {
-            return None;
+        args: &[SemanticNodeId],
+    ) -> SemanticNodeId {
+        let Some(data) = self.graph().node_data(node) else {
+            return self.opaque(QueryError::Miss);
+        };
+        let SemanticNodeData::Function {
+            type_parameters, ..
+        } = &*data
+        else {
+            return self.opaque(QueryError::Miss);
+        };
+        let type_parameters = Arc::clone(type_parameters);
+        drop(data);
+        if type_parameters.is_empty() || args.len() > type_parameters.len() {
+            return self.opaque(QueryError::Miss);
         }
-        let data = self.graph().node_data(node)?;
-        match &*data {
-            // A bare constructor type (`new (...) => R`) lowers through
-            // the SAME canonical `Function` carrier as a call signature
-            // (the constructor-vs-function distinction is consumed
-            // before query-time dispatch — see the `ConstructorType`
-            // lowering arm), so a direct `Function` node IS the
-            // construct signature here.
-            SemanticNodeData::Function { .. } => Some(node),
-            SemanticNodeData::Alias(target) => {
-                self.resolve_construct_signature_function_inner(*target, visited)
+        let mut result = node;
+        for (index, decl) in type_parameters.iter().enumerate() {
+            let arg = match args.get(index).copied().or(decl.default) {
+                Some(arg) => arg,
+                // Unsatisfied non-defaulted parameter — honest miss.
+                None => return self.opaque(QueryError::Miss),
+            };
+            // The walked root IS the signature whose own parameters are being
+            // instantiated — its own `type_parameters` entry for `decl.name`
+            // must not shadow; NESTED functions re-declaring the name do.
+            for binder in self.collect_type_param_nodes_by_name(
+                result,
+                decl.name.as_ref(),
+                /* root_is_own_signature */ true,
+            ) {
+                result = self.substitute_semantic_type_param(result, binder, arg);
             }
-            SemanticNodeData::Object(surface)
-                if surface.members.is_empty()
-                    && surface.call_signatures.is_empty()
-                    && surface.construct_signatures.len() == 1 =>
-            {
-                self.resolve_call_signature_function_inner(surface.construct_signatures[0], visited)
-            }
-            _ => None,
         }
+        // Strip the consumed type parameters — the instantiated signature
+        // is non-generic.
+        match self.graph().node_data(result).as_deref() {
+            Some(SemanticNodeData::Function {
+                params,
+                return_type,
+                signature_span,
+                return_type_span,
+                ..
+            }) => self.graph().intern_node(SemanticNodeData::Function {
+                params: Arc::clone(params),
+                return_type: *return_type,
+                type_parameters: Arc::from(
+                    Vec::<crate::semantic_query::TypeParamDecl>::new().into_boxed_slice(),
+                ),
+                signature_span: *signature_span,
+                return_type_span: *return_type_span,
+            }),
+            _ => result,
+        }
+    }
+
+    /// Bounded subtree walk collecting the distinct `TypeParam` binder
+    /// NODES under `root` whose `display_name` is `name`. Cycle-guarded
+    /// via the visited set; descends the same structural child edges the
+    /// substitute engine rewrites through
+    /// ([`Self::substitute_semantic_type_param`]) — including
+    /// `InstantiationRef` type-argument vectors, `Conditional` operands,
+    /// `Mapped` sub-trees, and `MergedDecl` contributors — so every
+    /// position substitution can reach is also a position collection
+    /// discovers. Two deliberate divergences from that mirror: the
+    /// `Function` and `Mapped` descents are NAME-shadowing-aware (below;
+    /// substitution shadows by binder node identity instead, which the
+    /// per-name collection decides up front), and `Infer { name }` nodes
+    /// are never collected — an `infer X` DECLARES a fresh
+    /// conditional-scoped binder, never an occurrence of a function's
+    /// declared type parameter. The substitute engine's cross-variant
+    /// Infer name-bridge is Infer-BINDER-gated in both directions, so
+    /// collection-driven substitutions — whose binders come from
+    /// `Function::type_parameters` and always lower as `TypeParam`
+    /// shells — never rewrite `infer` declarations; the bridge fires
+    /// only for its dedicated Infer-binder consumer (the Conditional
+    /// reducer's infer-arm substitution, which passes an `Infer` node
+    /// as the binder directly).
+    ///
+    /// SHADOWING-AWARE: a `Function` node whose own `type_parameters`
+    /// re-declare `name` is NOT descended into — its subtree's same-name
+    /// occurrences belong to the nested binder (TS lexical shadowing), so
+    /// rewriting them for an OUTER parameter would corrupt the inner
+    /// signature (`outer<T>(): <T>(x: T) => T` — the inner `T` survives an
+    /// outer instantiation). A NON-shadowing nested function is walked in
+    /// full, including its own `type_parameters[*].constraint` / `.default`
+    /// nodes — those positions can reference the searched outer binder
+    /// (`<U extends T>` / `<U = T>`) and the substitute engine descends
+    /// into them, so collection mirrors that coverage.
+    /// `root_is_own_signature` exempts the ROOT node
+    /// from the shadow check: when the walked root is exactly the signature
+    /// whose own parameters are being instantiated, its own declaration of
+    /// `name` is the parameter being substituted, not a shadow. The
+    /// file-scoped name-keyed `TypeParam` identity itself is unchanged —
+    /// this stops CROSS-BINDER rewrites within one extraction only.
+    fn collect_type_param_nodes_by_name(
+        &self,
+        root: SemanticNodeId,
+        name: &str,
+        root_is_own_signature: bool,
+    ) -> Vec<SemanticNodeId> {
+        use crate::semantic_query::IndexKey;
+        let mut visited: FxHashSet<SemanticNodeId> = FxHashSet::default();
+        let mut stack: Vec<SemanticNodeId> = vec![root];
+        let mut found: Vec<SemanticNodeId> = Vec::new();
+        while let Some(node) = stack.pop() {
+            if !visited.insert(node) {
+                continue;
+            }
+            let Some(data) = self.graph().node_data(node) else {
+                continue;
+            };
+            match data.as_ref() {
+                SemanticNodeData::TypeParam { display_name, .. } => {
+                    if display_name.as_ref() == name {
+                        found.push(node);
+                    }
+                }
+                SemanticNodeData::Alias(target) => stack.push(*target),
+                SemanticNodeData::Union(members) | SemanticNodeData::Intersection(members) => {
+                    stack.extend(members.iter().copied());
+                }
+                SemanticNodeData::Array { element, .. } => stack.push(*element),
+                SemanticNodeData::Tuple { elements, .. } => {
+                    stack.extend(elements.iter().map(|element| element.value));
+                }
+                SemanticNodeData::Object(surface) => {
+                    stack.extend(surface.members.iter().map(|member| member.value));
+                    stack.extend(surface.call_signatures.iter().copied());
+                    stack.extend(surface.construct_signatures.iter().copied());
+                    for signature in surface.index_signatures.iter() {
+                        stack.push(signature.key_type);
+                        stack.push(signature.value_type);
+                    }
+                    if let Some(keyspace) = surface.keyspace {
+                        stack.push(keyspace);
+                    }
+                }
+                SemanticNodeData::Function {
+                    params,
+                    return_type,
+                    type_parameters,
+                    ..
+                } => {
+                    // A nested signature re-declaring `name` shadows: its
+                    // subtree's `name` binders are its own — skip descent
+                    // (including its own type-parameter constraint/default
+                    // nodes: the re-declaring function owns its WHOLE
+                    // subtree).
+                    let shadows = type_parameters
+                        .iter()
+                        .any(|decl| decl.name.as_ref() == name)
+                        && !(node == root && root_is_own_signature);
+                    if shadows {
+                        continue;
+                    }
+                    stack.extend(params.iter().map(|param| param.ty));
+                    stack.push(*return_type);
+                    // A non-shadowing nested signature's own type-parameter
+                    // declarations can reference the searched OUTER binder in
+                    // constraint/default position (`<U extends T>` /
+                    // `<U = T>`). The substitute engine descends into these
+                    // nodes, so collection must walk them too — otherwise
+                    // `outer<T>(): <U = T>() => U` leaves `T` unspecialized
+                    // when its only occurrence is the nested default.
+                    for decl in type_parameters.iter() {
+                        if let Some(constraint) = decl.constraint {
+                            stack.push(constraint);
+                        }
+                        if let Some(default) = decl.default {
+                            stack.push(default);
+                        }
+                    }
+                }
+                SemanticNodeData::TemplateLiteral { expressions, .. } => {
+                    stack.extend(expressions.iter().copied());
+                }
+                SemanticNodeData::KeyOf { base } => stack.push(*base),
+                SemanticNodeData::IndexedAccess { object, index } => {
+                    stack.push(*object);
+                    if let IndexKey::TypeNode(idx_node) = index {
+                        stack.push(*idx_node);
+                    }
+                }
+                // A generic-application carrier's type-argument vector is a
+                // substitutable position (`Boxed<T>` — the carrier-preserving
+                // lowering of a generic type reference); `base` is a
+                // declaration identity with no binder occurrences.
+                SemanticNodeData::InstantiationRef { args, .. } => {
+                    stack.extend(args.iter().copied());
+                }
+                SemanticNodeData::Conditional {
+                    check,
+                    extends,
+                    true_branch_ref,
+                    false_branch_ref,
+                    ..
+                } => {
+                    stack.push(*check);
+                    stack.push(*extends);
+                    stack.push(*true_branch_ref);
+                    stack.push(*false_branch_ref);
+                }
+                SemanticNodeData::Mapped { source, mapper } => {
+                    // The mapped SOURCE and key space evaluate in the outer
+                    // scope; the VALUE / name-remap positions are inside the
+                    // mapper binder's scope, so a mapped type whose OWN
+                    // binder re-declares `name` owns every same-name
+                    // occurrence there (TS lexical shadowing) — the same
+                    // shadow stop the substitute engine applies to a
+                    // shadowing mapper, decided per-name here because the
+                    // binder node is what this walk is discovering.
+                    stack.push(*source);
+                    stack.push(mapper.key_space);
+                    let mapper_shadows = self
+                        .graph()
+                        .node_data(mapper.parameter_node)
+                        .as_deref()
+                        .is_some_and(|binder| {
+                            matches!(
+                                binder,
+                                SemanticNodeData::TypeParam { display_name, .. }
+                                    if display_name.as_ref() == name
+                            )
+                        });
+                    if !mapper_shadows {
+                        stack.push(mapper.value_expr);
+                        if let Some(remap) = mapper.name_remap {
+                            stack.push(remap);
+                        }
+                    }
+                }
+                SemanticNodeData::MergedDecl { contributors } => {
+                    stack.extend(contributors.iter().copied());
+                }
+                _ => {}
+            }
+        }
+        found
     }
 
     // (See `NormalizedTupleShape` at module scope below the impl block.)
@@ -6867,4 +7828,15 @@ pub(super) fn mapped_produced_name_inherits_declaration_site(
     source_key: &str,
 ) -> bool {
     produced_name == source_key
+}
+
+/// The signature-kind bucket a function-signature utility selects from —
+/// `Parameters` / `ReturnType` read [`Call`](Self::Call);
+/// `ConstructorParameters` / `InstanceType` read
+/// [`Construct`](Self::Construct). See
+/// [`ProjectSemanticDispatch::select_signature_function`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SignatureBucket {
+    Call,
+    Construct,
 }

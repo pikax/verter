@@ -790,6 +790,14 @@ impl<'a> Walker<'a> {
             self.buf.extend_from_slice(seg.as_bytes());
             self.buf.push(0xFE);
         }
+        // Instantiation-expression args (`typeof C.make<string>`) are
+        // semantic meaning: length-prefixed so `typeof f` and
+        // `typeof f<string>` never collide in the fingerprint.
+        self.buf
+            .extend_from_slice(&(value_ref.type_args.len() as u32).to_le_bytes());
+        for arg in &value_ref.type_args {
+            self.walk_node(arg);
+        }
     }
 
     fn find_type_param(&self, name: &str) -> Option<usize> {

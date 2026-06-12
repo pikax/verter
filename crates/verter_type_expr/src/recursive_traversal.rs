@@ -132,10 +132,17 @@ fn drain_children(node: &mut TypeExpr, worklist: &mut Vec<TypeExpr>) {
     match node {
         TypeExpr::Primitive(_)
         | TypeExpr::Literal(_)
-        | TypeExpr::TypeOf(_)
         | TypeExpr::Infer { .. }
         | TypeExpr::SyntheticSlotBinding(_)
         | TypeExpr::Unknown { .. } => {}
+
+        // `typeof C.make<string>` — the instantiation-expression arguments are
+        // owned recursive children (a plain `Vec`, no shared-`Arc` gate).
+        TypeExpr::TypeOf(value_ref) => {
+            for arg in value_ref.type_args.drain(..) {
+                worklist.push(arg);
+            }
+        }
 
         TypeExpr::Union(items) | TypeExpr::Intersection(items) => drain_slice(items, worklist),
 
@@ -419,7 +426,15 @@ fn hash_node<'a, H: Hasher>(node: &'a TypeExpr, state: &mut H, stack: &mut Vec<H
         // -- Leaves (no recursive children) --
         TypeExpr::Primitive(name) => name.hash(state),
         TypeExpr::Literal(lit) => lit.hash(state),
-        TypeExpr::TypeOf(value_ref) => value_ref.hash(state),
+        // TypeOf: path (leaf) then the instantiation-expression args walked on
+        // the heap stack (an arg subtree must not recurse the native stack).
+        TypeExpr::TypeOf(value_ref) => {
+            value_ref.path.hash(state);
+            value_ref.type_args.len().hash(state);
+            for arg in value_ref.type_args.iter().rev() {
+                stack.push(HashStep::Node(arg));
+            }
+        }
         TypeExpr::Infer { name } => name.hash(state),
         TypeExpr::SyntheticSlotBinding(carrier) => carrier.hash(state),
         TypeExpr::Unknown { raw } => raw.hash(state),

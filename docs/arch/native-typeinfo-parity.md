@@ -932,7 +932,7 @@ HAND-AUTHORED pure data — the locked design superseded its generated shape —
 | `ResolveMergedDeclaration` | planned (U2-MODULE) | `MergedDeclarationContext` | `TypeNode` | `resolve_merged_declaration_same_site_different_env_or_context_do_not_warm_hit` | `Singleflight`; `ReturnOnly` on budget/cycle |
 | `ResolveDeclarationAugmentation` | planned (U2-MODULE; generalizes `ResolveModuleAugmentation`) | `DeclarationAnalysisContext` (`{R,L,J}` — NO `parse_env_hash` key dim; parse env enters via the value-side body read only) | `DeclarationAnalysis(DeclarationAnalysisValue)` | `declaration_augmentation_key_same_site_different_env_or_context_do_not_warm_hit` | `Singleflight`; `ReturnOnly` on overflow/cancel |
 | `ResolveAmbientNamespace` | live (added — U2B.5; reducer deferred, `execute` returns `Miss`) | `AmbientNamespaceContext` (`{P,R}` incl. `parse_env_hash` + `mode`) | `TypeNode` | `resolve_ambient_namespace_do_not_warm_hit` + `resolve_ambient_namespace_identity_covers_parse_env_axis` / `_mode_axis` | `NonProducingPendingReducer` |
-| `ResolveOverloadSet` | live (added — U2B.5; reducer deferred, `execute` returns `Miss`) | `OverloadSetContext` (`{R}`) | `OverloadSet(Arc<[SignatureRef]>)` | `resolve_overload_set_do_not_warm_hit` + `resolve_overload_set_key_covers_context` | `NonProducingPendingReducer` |
+| `ResolveOverloadSet` | live (added — U2B.5; LIVE producer — the callee's ordered VISIBLE signature group, call bucket then construct; explicit `type_args` instantiate per candidate; signature-less callee ⇒ honest `Miss`) | `OverloadSetContext` (`{R}`) | `OverloadSet(Arc<[SignatureRef]>)` | `resolve_overload_set_do_not_warm_hit` + `resolve_overload_set_key_covers_context` | `Singleflight` |
 | `ResolveEnum` | live (added — U2B.5; reducer deferred, `execute` returns `Miss`) | `EnumContext` (`{R}`) | `TypeNode` | `resolve_enum_do_not_warm_hit` + `resolve_enum_key_covers_context` | `NonProducingPendingReducer` |
 | `FlowNarrowingAt` | live (added — U2B.7; flow engine deferred to U6, `execute` returns `Miss`) | `ProgramAnalysisContext` (env `{P,R,T,L,J}` + shared `substitution`) + per-variant `flow: FlowNarrowingKey` | `ProgramAnalysis(ProgramAnalysisValue)` | `flow_narrowing_at_do_not_warm_hit` + `flow_narrowing_at_identity_covers_flow_axis` / `_substitution_axis` + `flow_narrowing_at_key_covers_full_env_and_point` | `NonProducingPendingReducer` |
 | `ContextualTypeAt` | live (added — U2B.7; contextual engine deferred to U6, `execute` returns `Miss`) | `ProgramAnalysisContext` (env `{P,R,T,L,J}` + shared `substitution`) + per-variant `contextual: ContextualTypingKey` | `ProgramAnalysis(ProgramAnalysisValue)` | `contextual_type_at_do_not_warm_hit` + `contextual_type_at_identity_covers_contextual_axis` / `_substitution_axis` + `contextual_type_at_key_covers_full_env_and_point` | `NonProducingPendingReducer` |
@@ -2950,11 +2950,11 @@ fixes the single owning block. The per-block counts (summing to 362) are:
 | Owning `block_id` | Rows | Owning `block_id` | Rows |
 |---|---:|---|---:|
 | `U2.RELATION_INFER` | 20 | `U6.NARROW_*` (8 sub-blocks, below) | 104 |
-| `U2.UTILITIES` | 40 | `U6.PREDICATE_ASSERTION` | 3 |
-| `U2.INDEXED_ACCESS` | 14 | `U6.CALL_RESOLVE` | 21 |
+| `U2.UTILITIES` | 32 | `U6.PREDICATE_ASSERTION` | 3 |
+| `U2.INDEXED_ACCESS` | 18 | `U6.CALL_RESOLVE` | 21 |
 | `U2.MAPPED_TEMPLATE` | 19 | `U6.CONTEXTUAL_CALLBACK` | 15 |
-| `U2.QUERY_VALUE_DOMAIN` | 2 | `U6.VALUE_INFERENCE` | 1 |
-| `U2.CLASS_SURFACES` | 52 | `U6.ASYNC_GENERATOR` | 1 |
+| `U2.QUERY_VALUE_DOMAIN` | 20 | `U6.VALUE_INFERENCE` | 1 |
+| `U2.CLASS_SURFACES` | 38 | `U6.ASYNC_GENERATOR` | 1 |
 | `U2.ENUMS` | 7 | `U6.CROSS_FILE` | 6 |
 | `U2.MODULE_AUGMENTATION` | 8 | `U6.LOOP_CLOSURE` | 3 |
 | `U2.JSX_FOUNDATIONS` | 9 | `U3.CACHE_FACT_MODEL` | 3 |
@@ -2994,6 +2994,28 @@ PUBLICATION lifts (`index_signatures.rs::index_signatures_numeric_index_publishe
 current partition fact, not an invariant; the first oracle-backed lifts re-homed
 to their true producer block.
 
+The class-surface-era lifts follow the same measured-trace re-homing: the ten
+signature-bucket / overload / bare-generic reduction rows (the four
+call+construct hybrids, the two construct-signature-alias utilities, the
+last-visible-overload `ReturnType`, sb15, and the two typescript-rules
+construct rows) trace as pure `ResolveDecl`/`Instantiate`(/`TypeOf`)
+reductions and sit under `U2.QUERY_VALUE_DOMAIN`; the two brand-tag index
+chains and the two decoration-invariance indexed-access rows terminate at
+`IndexedAccess` and sit under `U2.INDEXED_ACCESS`; the five class typeof-path
+rows (static inheritance ×2, static-generic instantiation, `.prototype`
+extraction ×2) dispatch `ResolveClassSurface` + `ProjectPath` and stay under
+`U2.CLASS_SURFACES`. That measured trace also PROVED the prereq edge
+`U2.CLASS_SURFACES → U2.INDEXED_ACCESS` (class-surface member projection
+path-projects through the shared `ProjectPath` sub-dispatch), now recorded in
+the block DAG. Two contested rows deferred honestly on a hover display limit:
+tsgo renders a class instance type NOMINALLY (`Wrapper<string>` /
+`ClassRules` as bare refs), so no snapshot can discriminate the structural
+surface those rows contract
+(`class_features.rs::class_features_generic_subclass_with_own_type_param_substitutes_through_base`,
+`typescript_rules.rs::typescript_rules_class_instance_type_includes_fields_and_methods`
+— lift pending an oracle probe/grammar extension that elicits structural
+display for class instance types).
+
 The complete partition (each entry `file::function — substrate`):
 <!-- BEGIN U0 row→block coverage table (362 rows). [Marker name is a fixed parse contract
      consumed by scripts/gen-typeinfo-ignore-manifest.py parse_partition — do NOT rename.
@@ -3007,11 +3029,21 @@ The complete partition (each entry `file::function — substrate`):
      DAG (typeinfo_parity_blocks.rs) come from the generator's own Python maps, NOT from this
      partition. Edit block_id assignments HERE, then regenerate. -->
 
-**`U2.QUERY_VALUE_DOMAIN`** (10 rows):
+**`U2.QUERY_VALUE_DOMAIN`** (20 rows):
 
+- `function_advanced.rs::function_advanced_call_construct_hybrid_constructor_parameters_uses_construct_signature` — `CallResolution`
+- `function_advanced.rs::function_advanced_call_construct_hybrid_instance_type_uses_construct_signature` — `CallResolution`
+- `function_advanced.rs::function_advanced_call_construct_hybrid_parameters_uses_call_signature` — `CallResolution`
+- `function_advanced.rs::function_advanced_call_construct_hybrid_return_type_uses_call_signature` — `CallResolution`
+- `function_advanced.rs::function_advanced_constructor_parameters_publishes_constructor_arg_tuple` — `CallResolution`
+- `function_advanced.rs::function_advanced_instance_type_publishes_constructor_return_shape` — `CallResolution`
+- `function_advanced.rs::function_advanced_return_type_of_overloaded_function_uses_last_overload` — `CallResolution`
 - `index_signatures.rs::index_signatures_numeric_index_publishes_signature` — `IndexSignatures`
 - `index_signatures.rs::index_signatures_symbol_index_publishes_signature` — `IndexSignatures`
+- `substitution_types.rs::substitution_types_sb15_recursive_generic_substitution` — `TypeParameterFeatures`
 - `typescript_rules.rs::typescript_rules_awaited_recursively_unwraps_promises` — `TypeScriptRules`
+- `typescript_rules.rs::typescript_rules_constructor_parameters_resolve_tuple` — `TypeScriptRules`
+- `typescript_rules.rs::typescript_rules_instance_type_resolves_constructed_object` — `TypeScriptRules`
 - `utility_edge.rs::utility_edge_non_nullable_strips_null_and_undefined` — `UtilityComposition`
 - `utility_top_bottom.rs::utility_top_bottom_utb15_awaited_unknown_is_unknown` — `UtilityComposition`
 - `utility_top_bottom.rs::utility_top_bottom_utb17_awaited_null_is_null` — `UtilityComposition`
@@ -3078,8 +3110,12 @@ The complete partition (each entry `file::function — substrate`):
 - `variadic_tuples.rs::variadic_tuple_tail_of_sample_resolves_to_remaining_tuple` — `TupleFeatures`
 - `variadic_tuples.rs::variadic_tuple_variadic_function_with_explicit_type_args_concatenates_tuples` — `TupleFeatures`
 
-**`U2.INDEXED_ACCESS`** (14 rows):
+**`U2.INDEXED_ACCESS`** (18 rows):
 
+- `branded_types.rs::branded_key_access_projects_boolean_literal_brand_tag` — `ApparentTypes`
+- `branded_types.rs::branded_key_access_projects_literal_brand_tag` — `ApparentTypes`
+- `decorators.rs::decorators_identity_method_decorator_preserves_return_inference` — `ClassFeatures`
+- `decorators.rs::decorators_metadata_reader_describe_return_is_literal_union` — `ClassFeatures`
 - `deep_path.rs::deep_path_projection_resolves_terminal_without_losing_shape` — `PathProjection`
 - `index_signatures.rs::index_signatures_dual_numeric_key_returns_numeric_signature_value` — `IndexSignatures`
 - `index_signatures.rs::index_signatures_dual_string_key_returns_string_signature_value` — `IndexSignatures`
@@ -3117,7 +3153,7 @@ The complete partition (each entry `file::function — substrate`):
 - `utility_edge.rs::utility_edge_required_strips_optional_markers` — `UtilityComposition`
 - `wide_deep.rs::wide_deep_projected_token_resolves_literal_union` — `PathProjection`
 
-**`U2.CLASS_SURFACES`** (52 rows):
+**`U2.CLASS_SURFACES`** (38 rows):
 
 - `apparent_types.rs::apparent_types_ap01_string_length` — `ApparentTypes`
 - `apparent_types.rs::apparent_types_ap02_string_to_upper_case` — `ApparentTypes`
@@ -3135,8 +3171,6 @@ The complete partition (each entry `file::function — substrate`):
 - `apparent_types.rs::apparent_types_ap14_symbol_description` — `ApparentTypes`
 - `apparent_types.rs::apparent_types_ap15_generic_constraint_length` — `ApparentTypes`
 - `branded_types.rs::branded_double_intersection_collapses_to_never` — `ApparentTypes`
-- `branded_types.rs::branded_key_access_projects_boolean_literal_brand_tag` — `ApparentTypes`
-- `branded_types.rs::branded_key_access_projects_literal_brand_tag` — `ApparentTypes`
 - `branded_types.rs::branded_symbol_key_access_projects_wrapped_value_type` — `ApparentTypes`
 - `branded_types.rs::branded_unique_symbol_wrapper_publishes_branded_surface` — `ApparentTypes`
 - `call_resolution.rs::call_resolution_abstract_constructor_instance_type_projects_class_shape` — `CallResolution`
@@ -3151,23 +3185,11 @@ The complete partition (each entry `file::function — substrate`):
 - `class_features.rs::class_features_static_inheritance_resolves_inherited_method_return` — `ClassFeatures`
 - `decorators.rs::decorators_accessor_decorator_returning_same_target_publishes_public_property` — `ClassFeatures`
 - `decorators.rs::decorators_identity_accessor_decorator_publishes_public_property` — `ClassFeatures`
-- `decorators.rs::decorators_identity_method_decorator_preserves_return_inference` — `ClassFeatures`
-- `decorators.rs::decorators_metadata_reader_describe_return_is_literal_union` — `ClassFeatures`
-- `function_advanced.rs::function_advanced_call_construct_hybrid_constructor_parameters_uses_construct_signature` — `CallResolution`
-- `function_advanced.rs::function_advanced_call_construct_hybrid_instance_type_uses_construct_signature` — `CallResolution`
-- `function_advanced.rs::function_advanced_call_construct_hybrid_parameters_uses_call_signature` — `CallResolution`
-- `function_advanced.rs::function_advanced_call_construct_hybrid_return_type_uses_call_signature` — `CallResolution`
 - `function_advanced.rs::function_advanced_class_method_prototype_extraction_projects_parameters` — `CallResolution`
 - `function_advanced.rs::function_advanced_class_method_prototype_extraction_projects_return` — `CallResolution`
-- `function_advanced.rs::function_advanced_constructor_parameters_publishes_constructor_arg_tuple` — `CallResolution`
-- `function_advanced.rs::function_advanced_instance_type_publishes_constructor_return_shape` — `CallResolution`
-- `function_advanced.rs::function_advanced_return_type_of_overloaded_function_uses_last_overload` — `CallResolution`
 - `modern_ts_features.rs::variance_annotation_in_substitution_through_consumer_consume_parameters` — `ModernTsFeatures`
 - `substitution_types.rs::substitution_types_sb14_default_type_arg_ignored_by_return_type` — `TypeParameterFeatures`
-- `substitution_types.rs::substitution_types_sb15_recursive_generic_substitution` — `TypeParameterFeatures`
 - `typescript_rules.rs::typescript_rules_class_instance_type_includes_fields_and_methods` — `TypeScriptRules`
-- `typescript_rules.rs::typescript_rules_constructor_parameters_resolve_tuple` — `TypeScriptRules`
-- `typescript_rules.rs::typescript_rules_instance_type_resolves_constructed_object` — `TypeScriptRules`
 - `typescript_rules.rs::typescript_rules_typeof_const_preserves_readonly_literals` — `TypeScriptRules`
 - `unique_symbol.rs::unique_symbol_indexed_access_via_typeof_returns_literal_value` — `UniqueSymbol`
 - `unique_symbol.rs::unique_symbol_string_key_access_returns_sibling_value` — `UniqueSymbol`

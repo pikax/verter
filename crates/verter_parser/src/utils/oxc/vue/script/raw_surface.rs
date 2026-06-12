@@ -333,19 +333,44 @@ fn capture_interface(interface: &TSInterfaceDeclaration<'_>) -> CapturedSurface 
     }
 }
 
-fn capture_class(class: &Class<'_>) -> Option<CapturedSurface> {
-    let name = class.id.as_ref()?.name.to_string();
-    let mut surface = RawSourceSurface::new(RawDeclKind::Class);
-    surface.abstract_ctor = class.r#abstract;
-    capture_type_params(class.type_parameters.as_deref(), &mut surface);
+/// A class is BOTH a type and a value, so the capture emits TWO surfaces:
+/// the TYPE-space instance half (instance members; statics excluded) and the
+/// VALUE-space `typeof C` constructor-object half (STATIC members + the
+/// constructor's parameter-annotation scan). The `abstract` flag and the
+/// class type parameters ride both halves — each is a lossy axis for the
+/// half that reads it.
+fn capture_class(class: &Class<'_>) -> Vec<CapturedSurface> {
+    let Some(id) = class.id.as_ref() else {
+        return Vec::new();
+    };
+    let name = id.name.to_string();
+
+    let mut instance = RawSourceSurface::new(RawDeclKind::Class);
+    instance.abstract_ctor = class.r#abstract;
+    capture_type_params(class.type_parameters.as_deref(), &mut instance);
     for element in &class.body.body {
-        capture_class_element(element, &mut surface);
+        capture_class_element(element, &mut instance, ClassHalf::Instance);
     }
-    Some(CapturedSurface {
-        name,
-        symbol_space: SymbolSpace::Type,
-        surface,
-    })
+
+    let mut value = RawSourceSurface::new(RawDeclKind::Class);
+    value.abstract_ctor = class.r#abstract;
+    capture_type_params(class.type_parameters.as_deref(), &mut value);
+    for element in &class.body.body {
+        capture_class_element(element, &mut value, ClassHalf::Static);
+    }
+
+    vec![
+        CapturedSurface {
+            name: name.clone(),
+            symbol_space: SymbolSpace::Type,
+            surface: instance,
+        },
+        CapturedSurface {
+            name,
+            symbol_space: SymbolSpace::Value,
+            surface: value,
+        },
+    ]
 }
 
 fn capture_function(func: &Function<'_>) -> Option<CapturedSurface> {
@@ -471,11 +496,28 @@ fn capture_signature_member(sig: &TSSignature<'_>, surface: &mut RawSourceSurfac
     }
 }
 
-/// Capture a single class body element.
-fn capture_class_element(element: &ClassElement<'_>, surface: &mut RawSourceSurface) {
+/// Which half of a class body a capture pass collects: the TYPE-space
+/// instance half or the VALUE-space `typeof C` constructor-object half.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClassHalf {
+    Instance,
+    Static,
+}
+
+/// Capture a single class body element onto the surface of ONE half. A
+/// `static` member rides the VALUE half; an instance member rides the TYPE
+/// half. The constructor is a VALUE-half fact (it feeds the `typeof C`
+/// construct signature, and its declared accessibility is LOSSY — the
+/// lowering silently drops a non-public constructor's signature).
+fn capture_class_element(
+    element: &ClassElement<'_>,
+    surface: &mut RawSourceSurface,
+    half: ClassHalf,
+) {
+    let wants_static = half == ClassHalf::Static;
     match element {
         ClassElement::PropertyDefinition(prop) => {
-            if prop.r#static {
+            if prop.r#static != wants_static {
                 return;
             }
             surface
@@ -490,13 +532,26 @@ fn capture_class_element(element: &ClassElement<'_>, surface: &mut RawSourceSurf
             }
         }
         ClassElement::MethodDefinition(method) => {
-            if method.r#static {
+            if method.kind == MethodDefinitionKind::Constructor {
+                // The constructor (always syntactically non-static) is the
+                // VALUE half's construct signature.
+                if wants_static {
+                    surface
+                        .raw_member_keys
+                        .push(raw_key_of(&method.key, method.computed));
+                    surface.member_kinds.push(RawMemberKind::ConstructSignature);
+                    surface
+                        .member_visibility
+                        .push(visibility_of(method.accessibility));
+                }
+                return;
+            }
+            if method.r#static != wants_static {
                 return;
             }
             let kind = match method.kind {
                 MethodDefinitionKind::Get => RawMemberKind::Getter,
                 MethodDefinitionKind::Set => RawMemberKind::Setter,
-                // A constructor / instance method is not a data property.
                 MethodDefinitionKind::Constructor | MethodDefinitionKind::Method => {
                     RawMemberKind::Method
                 }
@@ -510,7 +565,7 @@ fn capture_class_element(element: &ClassElement<'_>, surface: &mut RawSourceSurf
                 .push(visibility_of(method.accessibility));
         }
         ClassElement::AccessorProperty(prop) => {
-            if prop.r#static {
+            if prop.r#static != wants_static {
                 return;
             }
             // An `accessor` field synthesises a getter/setter pair — not a
@@ -524,8 +579,11 @@ fn capture_class_element(element: &ClassElement<'_>, surface: &mut RawSourceSurf
                 .push(visibility_of(prop.accessibility));
         }
         ClassElement::TSIndexSignature(_) => {
-            surface.member_kinds.push(RawMemberKind::IndexSignature);
-            surface.member_visibility.push(MemberVisibility::Public);
+            // A class index signature is an instance-surface member.
+            if half == ClassHalf::Instance {
+                surface.member_kinds.push(RawMemberKind::IndexSignature);
+                surface.member_visibility.push(MemberVisibility::Public);
+            }
         }
         ClassElement::StaticBlock(_) => {}
     }

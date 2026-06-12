@@ -458,18 +458,24 @@ fn resolve_overload_set_do_not_warm_hit() {
 }
 
 // ---------------------------------------------------------------------------
-// (3b) Execute-side NON-PRODUCING behavior. The three non-producing keys'
-//      `execute` arms must (a) return `QueryError::Miss` — NOT a Value, NOT a
-//      fabricated empty/unknown value — AND (b) admit/cache NOTHING. These
-//      dispatch through the REAL `execute()` cooperative path (not a direct
-//      publish), so a fake producer returning `OverloadSet([])` (→ narrows to
-//      `ValueDomainMismatch`, not `Miss`) or `TypeNode(node)` (→ a `Value`,
-//      not `Miss`; also leaves a warm candidate) FAILS both assertions.
+// (3b) Execute-side honest-Miss behavior. The two non-producing keys
+//      (`ResolveAmbientNamespace`, `ResolveEnum`) must (a) return
+//      `QueryError::Miss` — NOT a Value, NOT a fabricated empty/unknown
+//      value — AND (b) admit/cache NOTHING. The LIVE `ResolveOverloadSet`
+//      producer shares the same honest-Miss contract on its reject path: a
+//      callee with no signature group misses and admits nothing (its
+//      positive projection contract lives in the in-crate dispatch tests).
+//      These dispatch through the REAL `execute()` cooperative path (not a
+//      direct publish), so a fake producer returning `OverloadSet([])`
+//      (→ narrows to `ValueDomainMismatch`, not `Miss`) or `TypeNode(node)`
+//      (→ a `Value`, not `Miss`; also leaves a warm candidate) FAILS both
+//      assertions.
 // ---------------------------------------------------------------------------
 
-/// Dispatch `key` through the canonical `execute()` path and assert it is a
-/// non-producing `Miss` that admitted nothing into the shared memo.
-fn assert_execute_is_non_producing_miss(host: &VerterHost, key: SemanticQueryKey) {
+/// Dispatch `key` through the canonical `execute()` path and assert it is an
+/// honest `Miss` that admitted nothing into the shared memo (the
+/// non-producing arms, and the live `ResolveOverloadSet` reject path).
+fn assert_execute_is_honest_miss_admitting_nothing(host: &VerterHost, key: SemanticQueryKey) {
     let result = verter_session::for_tests::dispatch_execute_type_node_for_tests(host, key.clone());
     // (a) honest Miss — discriminates a `Value` (TypeNode) producer and a
     // `ValueDomainMismatch` (e.g. an `OverloadSet([])` fake) alike.
@@ -494,25 +500,32 @@ fn resolve_ambient_namespace_execute_is_non_producing_miss() {
         "/n.ts",
         "export namespace N {\n  export const a = 1;\n}\n",
     );
-    assert_execute_is_non_producing_miss(&host, ambient_namespace_key("/n.ts", "N", 0));
+    assert_execute_is_honest_miss_admitting_nothing(&host, ambient_namespace_key("/n.ts", "N", 0));
 }
 
 #[test]
 fn resolve_enum_execute_is_non_producing_miss() {
     let host = host();
     upsert(&host, "/e.ts", "export enum E {\n  A,\n  B,\n}\n");
-    assert_execute_is_non_producing_miss(&host, enum_key("/e.ts", "E", 0));
+    assert_execute_is_honest_miss_admitting_nothing(&host, enum_key("/e.ts", "E", 0));
 }
 
 #[test]
-fn resolve_overload_set_execute_is_non_producing_miss() {
+fn resolve_overload_set_misses_on_non_signature_callee_and_admits_nothing() {
     let host = host();
     upsert(
         &host,
         "/o.ts",
         "export function f(x: number): void;\nexport function f(x: string): void;\nexport function f(x: unknown): void {}\n",
     );
-    assert_execute_is_non_producing_miss(&host, overload_set_key(dummy_node(), 0));
+    // A DETERMINISTIC non-signature callee: an interned primitive node.
+    // The LIVE producer must reject it with an honest Miss (never an empty
+    // `OverloadSet`) and admit nothing into the shared memo.
+    let callee = host
+        .project_type_store()
+        .semantic_graph()
+        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    assert_execute_is_honest_miss_admitting_nothing(&host, overload_set_key(callee, 0));
 }
 
 // ---------------------------------------------------------------------------
@@ -642,16 +655,40 @@ fn class_dual_space_routes_instance_and_static_through_distinct_shared_paths() {
          Instantiate(type slot) entry must be warm in the shared memo"
     );
 
-    // Static warmed the TypeOf(value_root) slot — the class-surface
-    // Static side composes its constructor surface as a genuine
-    // Expanded consumer. The composed key matches the production
-    // `typeof_key_for` derivation exactly — the env-bearing
-    // `ValueRootSlotIdentity` (T/L/J from the value-root canonical's live
-    // host env) plus a `TypeOfContext` carrying the canonical's
-    // `resolve_env_hash` (R).
+    // Static is the OWNING composer: it lowers the prepared VALUE decl's
+    // constructor shape directly (own statics + ctor) and composes
+    // heritage statics through recursive `ResolveClassSurface(Static)` —
+    // it does NOT dispatch `TypeOf` (the delegation runs the OTHER way:
+    // `build_typeof` routes class value roots HERE). The structural proof
+    // is the composed surface itself: the static node is an Object
+    // carrying the construct signature AND the own static member `y`,
+    // while excluding the instance member `x`.
+    let static_data = graph.node_data(r#static);
+    match static_data.as_deref() {
+        Some(verter_session::semantic_query::SemanticNodeData::Object(view)) => {
+            assert!(
+                !view.construct_signatures.is_empty(),
+                "static surface must carry the class construct signature"
+            );
+            assert!(
+                view.members.iter().any(|m| m.name.as_ref() == "y"),
+                "static surface must carry the own static member `y`"
+            );
+            assert!(
+                !view.members.iter().any(|m| m.name.as_ref() == "x"),
+                "instance member `x` must NOT leak onto the static surface"
+            );
+        }
+        other => panic!("static surface must be a constructor Object, got {other:?}"),
+    }
+
+    // Delegation direction: a `TypeOf` over the class VALUE root routes
+    // through the SAME `ResolveClassSurface(Static)` composer — the family
+    // memo already holds the admitted Static slot, and the TypeOf result
+    // is the identical composed node (one engine, no second path).
     let typeof_env = host.host_view_env_hashes_for(canonical);
     let typeof_project_identity = host.host_view_project_identity_for(canonical).fold_u32();
-    let inner_typeof = SemanticQueryKey::TypeOf {
+    let typeof_key = SemanticQueryKey::TypeOf {
         value_root: verter_session::semantic_query::ValueRootSlotIdentity::new(
             ValueRootKey {
                 scope: verter_session::semantic_query::ScopeId::file(Arc::from(canonical)),
@@ -663,16 +700,19 @@ fn class_dual_space_routes_instance_and_static_through_distinct_shared_paths() {
         ),
         context: verter_session::semantic_query::TypeOfContext::new(
             verter_session::semantic_query::ProjectionReductionContext::published(
-                verter_session::semantic_query::ProjectionMode::Expanded,
+                verter_session::semantic_query::ProjectionMode::Shallow,
             ),
             typeof_env.resolve_env_hash,
         ),
     };
-    assert!(
-        graph.slot_candidate_count_for_tests(&inner_typeof) > 0,
-        "Static side must have composed execute(TypeOf) — the inner \
-         TypeOf(value root) entry must be warm in the shared memo"
-    );
+    match verter_session::for_tests::dispatch_execute_type_node_for_tests(&host, typeof_key) {
+        QueryResult::Value(out) => assert_eq!(
+            out.value, r#static,
+            "typeof over the class value root must resolve to the SAME \
+             composed static-surface node ResolveClassSurface(Static) produced"
+        ),
+        other => panic!("typeof over the class value root errored: {other:?}"),
+    }
 }
 
 fn run_class_surface(

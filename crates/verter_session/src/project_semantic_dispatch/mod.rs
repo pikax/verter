@@ -67,7 +67,7 @@ use crate::semantic_query::{
     NodeScopeId, OriginEdgeKind, OriginMeta, PathSegment, PrimitiveKind, ProjectionMode,
     QueryError, QueryResult, ResolveDeclKey, ResultProvenance, ScopeId, SemanticNodeData,
     SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput, SemanticQueryValue,
-    SurfaceView,
+    SemanticQueryValueTag, SignatureRef, SurfaceView,
 };
 use crate::semantic_query_memo::SemanticGraphStore;
 use verter_type_expr::{PrimitiveName, TypeExpr};
@@ -425,6 +425,52 @@ impl<'a> ProjectSemanticDispatch<'a> {
         mode: crate::semantic_query::ProjectionMode,
     ) -> crate::semantic_query::MacroPayloadContext {
         crate::semantic_query::MacroPayloadContext::new(self.resolve_env_hash_for(canonical), mode)
+    }
+
+    /// Convert a signature-group-bearing node into the ordered
+    /// `OverloadSet` SignatureRefs — the public `execute` boundary's
+    /// value-domain conversion for `ResolveOverloadSet` (call bucket
+    /// first, then construct; a lone `Function` IS its one-element set).
+    /// Returns `None` for a non-signature-bearing node (only reachable
+    /// through a poisoned synthetic publish).
+    fn overload_set_refs_for(&self, node: SemanticNodeId) -> Option<Arc<[SignatureRef]>> {
+        let graph = self.ctx.project_type_store().semantic_graph();
+        let data = graph.node_data(node)?;
+        match &*data {
+            SemanticNodeData::Function { .. } => {
+                Some(Arc::from(vec![SignatureRef { node }].into_boxed_slice()))
+            }
+            SemanticNodeData::Object(surface) => Some(Arc::from(
+                surface
+                    .call_signatures
+                    .iter()
+                    .chain(surface.construct_signatures.iter())
+                    .map(|sig| SignatureRef { node: *sig })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+            )),
+            _ => None,
+        }
+    }
+
+    /// Build the [`ClassSurfaceContext`](crate::semantic_query::ClassSurfaceContext)
+    /// for a class defined in `canonical` from the canonical's
+    /// `parse_env_hash` + `resolve_env_hash` plus the projection `mode`.
+    #[must_use]
+    pub(crate) fn class_surface_context_for(
+        &self,
+        canonical: &str,
+        mode: crate::semantic_query::ProjectionMode,
+    ) -> crate::semantic_query::ClassSurfaceContext {
+        let env = self
+            .ctx
+            .host_for_fact_tracer_install()
+            .host_view_env_hashes_for(canonical);
+        crate::semantic_query::ClassSurfaceContext {
+            parse_env_hash: env.parse_env_hash,
+            resolve_env_hash: env.resolve_env_hash,
+            mode,
+        }
     }
 
     /// Build the full [`SemanticQueryKey::TypeOf`] key for the value root
@@ -1246,21 +1292,33 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     args,
                     context,
                 } => self.build_template_literal_reduce(pattern, args, *context),
-                // ResolveAmbientNamespace / ResolveEnum / ResolveOverloadSet /
-                // ApparentType / FlowNarrowingAt / ContextualTypeAt —
+                // ResolveOverloadSet — LIVE producer. Projects the callee's
+                // ordered VISIBLE signature group (build_typeof's visibility
+                // rule already hid trailing implementations where the callee
+                // node was produced); explicit `type_args` instantiate per
+                // candidate, dropping candidates that cannot accept the
+                // argument list; a callee with no signature group is an
+                // honest Miss. The inner pipeline carries the group-bearing
+                // NODE; the public `execute` boundary below converts it into
+                // the `OverloadSet(Arc<[SignatureRef]>)` value domain.
+                SemanticQueryKey::ResolveOverloadSet {
+                    callee,
+                    type_args,
+                    context: _,
+                } => self.build_resolve_overload_set(*callee, type_args),
+                // ResolveAmbientNamespace / ResolveEnum / ApparentType /
+                // FlowNarrowingAt / ContextualTypeAt —
                 // non-producing: these variants have no execute-side reducer.
                 // The build returns `Opaque(Miss)` verbatim (mirroring the
                 // `Relate` arm above); an `Error` result is never
                 // warm-published, so nothing is admitted or cached. Returning
-                // an empty `OverloadSet` for `ResolveOverloadSet` — a
-                // fabricated apparent surface for `ApparentType` (whose
+                // a fabricated apparent surface for `ApparentType` (whose
                 // lib-member index does not exist yet) — or a fabricated
                 // narrowed / contextual node for `FlowNarrowingAt` /
                 // `ContextualTypeAt` (whose flow / contextual engines land in
                 // U6) — would be a stub; `Miss` is the honest non-result.
                 SemanticQueryKey::ResolveAmbientNamespace { .. }
                 | SemanticQueryKey::ResolveEnum { .. }
-                | SemanticQueryKey::ResolveOverloadSet { .. }
                 | SemanticQueryKey::ApparentType { .. }
                 | SemanticQueryKey::FlowNarrowingAt { .. }
                 | SemanticQueryKey::ContextualTypeAt { .. } => {
@@ -1664,15 +1722,33 @@ impl<'a> SemanticQueryApi for ProjectSemanticDispatch<'a> {
         // `CacheRead`; `execute_read` keeps them.
         //
         // The helper resolves to a bare node id; wrap it into the
-        // domain-agnostic value here at the public boundary. This wrap
-        // fires ONLY on the `Value` arm, so the value is always `TypeNode`;
-        // the non-producing keys (`Relate` and the `NonProducingPendingReducer`
-        // variants: `ResolveAmbientNamespace`, `ResolveEnum`,
-        // `ResolveOverloadSet`, `ApparentType`, `FlowNarrowingAt`,
-        // `ContextualTypeAt`) return `Error(Miss)` and never reach the wrap,
-        // which keeps the unconditional `TypeNode` wrap correct. The boundary provenance is
-        // `clean` — a wrapper only, never a cached semantic fact.
+        // domain-agnostic value here at the public boundary. The wrap is
+        // key-aware: `ResolveOverloadSet` (the one live non-`TypeNode`
+        // producer — its inner pipeline value is the signature-group-
+        // bearing node) converts into the `OverloadSet(Arc<[SignatureRef]>)`
+        // domain; every other producing key wraps as `TypeNode`. The
+        // remaining non-producing keys (`Relate`, `ResolveAmbientNamespace`,
+        // `ResolveEnum`, `ApparentType`, `FlowNarrowingAt`,
+        // `ContextualTypeAt`) return `Error(Miss)` and never reach the wrap.
+        // The boundary provenance is `clean` — a wrapper only, never a
+        // cached semantic fact.
+        let wants_overload_set = matches!(key, SemanticQueryKey::ResolveOverloadSet { .. });
         match self.execute_via_cold_build_helper(key).value {
+            QueryResult::Value(node) if wants_overload_set => {
+                match self.overload_set_refs_for(node) {
+                    Some(refs) => QueryResult::Value(SemanticQueryOutput {
+                        value: SemanticQueryValue::OverloadSet(refs),
+                        provenance: ResultProvenance::clean(),
+                    }),
+                    // The memoized node is not signature-bearing (only
+                    // reachable through a poisoned synthetic publish) —
+                    // refuse to misrepresent it in either domain.
+                    None => QueryResult::Error(QueryError::ValueDomainMismatch {
+                        expected: SemanticQueryValueTag::OverloadSet,
+                        actual: SemanticQueryValueTag::TypeNode,
+                    }),
+                }
+            }
             QueryResult::Value(node) => QueryResult::Value(SemanticQueryOutput {
                 value: SemanticQueryValue::TypeNode(node),
                 provenance: ResultProvenance::clean(),
@@ -1707,6 +1783,10 @@ impl<'a> SemanticQueryApi for ProjectSemanticDispatch<'a> {
         // `execute_type_node` callers (every convenience wrapper, the
         // path-precision hop oracle) keep their attribution.
         self.record_dispatch_intent_counters(&key);
+        // The non-`TypeNode`-domain producer must not leak its inner
+        // carrier node as a type node — mirror the trait default's
+        // `narrow_output_to_type_node` rejection exactly.
+        let wants_overload_set = matches!(key, SemanticQueryKey::ResolveOverloadSet { .. });
         // The shared read boundary inside `execute_read` →
         // `execute_via_cold_build_helper` performs the universal taint fold
         // (build-local `result_is_partial` + `cache_suppress`, and the
@@ -1716,6 +1796,12 @@ impl<'a> SemanticQueryApi for ProjectSemanticDispatch<'a> {
         // Narrow the value half exactly as the trait default would, wrapping
         // the bare node into the domain value with clean boundary provenance.
         match read.value {
+            QueryResult::Value(_) if wants_overload_set => {
+                QueryResult::Error(QueryError::ValueDomainMismatch {
+                    expected: SemanticQueryValueTag::TypeNode,
+                    actual: SemanticQueryValueTag::OverloadSet,
+                })
+            }
             QueryResult::Value(node) => QueryResult::Value(SemanticQueryOutput {
                 value: node,
                 provenance: ResultProvenance::clean(),

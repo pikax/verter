@@ -14,9 +14,10 @@ use super::*;
 // predicate references; these four are exercised only by the guards, so they are
 // imported here at the consumer rather than left as an unused parent import in
 // the non-test (`oracle-gen`) build.
-use crate::typeinfo::oracle_core::normalize::ProjectionModeKind;
+use crate::typeinfo::oracle_core::normalize::{normalize, ProjectionModeKind};
 use verter_compiler::utils::oxc::vue::raw_surface::{
-    OverloadSignature, RawDeclKind, TypeParamModifiers, UniqueSymbolOp,
+    OverloadSignature, RawDeclKind, SymbolSpace as RawSymbolSpace, TypeParamModifiers,
+    UniqueSymbolOp,
 };
 
 const SHALLOW: ProjectionModeKind = ProjectionModeKind::Shallow;
@@ -132,7 +133,10 @@ fn carve_out_contributor_with_root_surfaces(
 
 #[test]
 fn hover_construct_whitelist() {
-    // ADMIT: every construct on the closed positive list.
+    // ADMIT: every construct on the closed positive list — including (E3,
+    // loss-based per-signature) callables whose params + return walk clean:
+    // bare function / constructor types, method / call / construct signature
+    // members, overload GROUPS, and call+construct hybrids.
     for ok in [
         "string",
         "number",
@@ -149,6 +153,13 @@ fn hover_construct_whitelist() {
         "{ a: number } & { b: string }",
         "Foo",
         "Promise<string>",
+        "() => void",
+        "new () => Foo",
+        "{ m(): void }",
+        "{ (): void }",
+        "(a: number) => string",
+        "{ (a: string): number; (a: number): string }",
+        "{ (a: number): string; new (b: string): { value: number } }",
     ] {
         assert_eq!(
             admit_hover_text(ok),
@@ -158,13 +169,22 @@ fn hover_construct_whitelist() {
     }
 
     // REJECT: each non-allowlisted construct, asserting the EXACT reason.
+    // The LOSSY signature facts STAY rejected post-E3: `this` params,
+    // `abstract` constructors, accessors, unannotated params (implicit
+    // `any`), and lossy payloads inside an otherwise-admissible signature.
     let cases: &[(&str, RejectReason)] = &[
         ("unique symbol", RejectReason::UniqueSymbol),
         ("{ x: unique symbol }", RejectReason::UniqueSymbol),
-        ("() => void", RejectReason::Callable),
-        ("new () => Foo", RejectReason::Callable),
-        ("{ m(): void }", RejectReason::Callable),
-        ("{ (): void }", RejectReason::Callable),
+        (
+            "(this: { v: number }) => void",
+            RejectReason::ThisTypeOrParam,
+        ),
+        ("abstract new () => Foo", RejectReason::AbstractCtor),
+        ("{ m(this: Foo): void }", RejectReason::ThisTypeOrParam),
+        ("{ get x(): string }", RejectReason::Accessor),
+        ("{ set x(v: string) }", RejectReason::Accessor),
+        ("(a: any) => void", RejectReason::AnyKeyword),
+        ("() => keyof Foo", RejectReason::DeferredConstruct("keyof")),
         ("Color.Red", RejectReason::EnumMemberOrQualified),
         ("keyof T", RejectReason::DeferredConstruct("keyof")),
         ("typeof x", RejectReason::DeferredConstruct("typeof")),
@@ -198,23 +218,55 @@ fn hover_construct_whitelist() {
 }
 
 #[test]
-fn tuple_optional_labelled_rejected() {
+fn tuple_labelled_admitted_optional_rest_rejected() {
     assert_eq!(
         admit_hover_text("[string, number]"),
         AdmissionVerdict::Admit
     );
+    // E2: a LABELLED (non-optional) element is faithfully representable —
+    // `TupleElement.label` carries it end-to-end; the inner type still walks.
+    assert_eq!(admit_hover_text("[label: string]"), AdmissionVerdict::Admit);
+    assert_eq!(
+        admit_hover_text("[id: string, count: number]"),
+        AdmissionVerdict::Admit
+    );
+    assert_eq!(
+        admit_hover_text("[label: any]"),
+        AdmissionVerdict::Reject(RejectReason::AnyKeyword),
+        "a labelled element's INNER type must still walk the allowlist"
+    );
+    // Optional / Rest STAY lossy → REJECT — including a labelled OPTIONAL.
     assert_eq!(
         admit_hover_text("[string, number?]"),
         AdmissionVerdict::Reject(RejectReason::TupleElementShape)
     );
     assert_eq!(
-        admit_hover_text("[label: string]"),
+        admit_hover_text("[label?: string]"),
         AdmissionVerdict::Reject(RejectReason::TupleElementShape)
     );
     assert_eq!(
         admit_hover_text("[...string[]]"),
         AdmissionVerdict::Reject(RejectReason::TupleElementShape)
     );
+}
+
+#[test]
+fn tuple_label_compare_is_label_aware() {
+    // E2: normalization PRESERVES labels, so two tuples differing only in
+    // label normalize to DIFFERENT canonical values (a label mismatch IS a
+    // mismatch) — and the labelled form differs from the unlabelled one.
+    let a = normalize(&lower("[id: string]"), ProjectionModeKind::Expanded)
+        .expect("labelled tuple must normalize");
+    let b = normalize(&lower("[name: string]"), ProjectionModeKind::Expanded)
+        .expect("labelled tuple must normalize");
+    let bare = normalize(&lower("[string]"), ProjectionModeKind::Expanded)
+        .expect("plain tuple must normalize");
+    assert_ne!(a, b, "label mismatch must be a compare mismatch");
+    assert_ne!(a, bare, "labelled vs unlabelled must be a compare mismatch");
+    // Identical labels stay equal (negative control).
+    let a2 = normalize(&lower("[id: string]"), ProjectionModeKind::Expanded)
+        .expect("labelled tuple must normalize");
+    assert_eq!(a, a2);
 }
 
 // ---------------------------------------------------------------------------
@@ -347,13 +399,23 @@ fn class_visibility_accessor_rejected() {
         AdmissionVerdict::Reject(RejectReason::Accessor)
     );
 
-    // Each remaining erased fact rejects with its own reason.
+    // E3: an overload SET is retained losslessly (ordered signature group)
+    // — presence alone no longer rejects on the raw side.
     let mut overload = clean_surface();
     overload.overload_signatures = vec![OverloadSignature, OverloadSignature];
-    assert_eq!(
-        admit_raw_surface(&overload),
-        AdmissionVerdict::Reject(RejectReason::Callable)
-    );
+    assert_eq!(admit_raw_surface(&overload), AdmissionVerdict::Admit);
+
+    // E3: method / call / construct signature PRESENCE is not lossy — the
+    // per-signature walk on the lowered/hover side discriminates instead.
+    let mut method = clean_surface();
+    method.member_kinds = vec![RawMemberKind::Method];
+    assert_eq!(admit_raw_surface(&method), AdmissionVerdict::Admit);
+    let mut hybrid = clean_surface();
+    hybrid.member_kinds = vec![
+        RawMemberKind::CallSignature,
+        RawMemberKind::ConstructSignature,
+    ];
+    assert_eq!(admit_raw_surface(&hybrid), AdmissionVerdict::Admit);
 
     let mut tp = clean_surface();
     tp.type_param_modifiers = vec![TypeParamModifiers {
@@ -429,11 +491,21 @@ fn type_expr_backstop_rejects_any_never_unknown() {
         }),
         AdmissionVerdict::Reject(RejectReason::UnknownOrParseLeftover)
     );
-    // A lowered object carrying a callable (method) member rejects as an
-    // overload-group surface — exercising `admit_type_expr`'s object branch.
+    // E3: a lowered object carrying a clean callable member ADMITs through
+    // the per-signature walk; a signature smuggling a lossy payload (an
+    // `any` param, a deferred-construct return) still rejects with the
+    // payload's own reason.
     assert_eq!(
         admit_type_expr(&lower("{ m(): void }")),
-        AdmissionVerdict::Reject(RejectReason::Callable)
+        AdmissionVerdict::Admit
+    );
+    assert_eq!(
+        admit_type_expr(&lower("{ m(x: any): void }")),
+        AdmissionVerdict::Reject(RejectReason::AnyKeyword)
+    );
+    assert_eq!(
+        admit_type_expr(&lower("{ m(): keyof Foo }")),
+        AdmissionVerdict::Reject(RejectReason::DeferredConstruct("keyof"))
     );
     // A clean lowered object ADMITs (negative control).
     assert_eq!(
@@ -469,11 +541,12 @@ fn hover_capture_is_lossless_or_rejected() {
         AdmissionVerdict::Reject(RejectReason::TruncationMarker)
     );
 
-    // A reject construct on the HOVER side fails the whole query even though the
-    // source is clean.
+    // A reject construct on the HOVER side fails the whole query even though
+    // the source is clean — post-E3 the discriminating hover reject is a
+    // LOSSY signature fact (`this` param), not callable presence.
     assert_eq!(
-        admit_query("() => void", &clean_source, SHALLOW),
-        AdmissionVerdict::Reject(RejectReason::Callable)
+        admit_query("(this: { v: number }) => void", &clean_source, SHALLOW),
+        AdmissionVerdict::Reject(RejectReason::ThisTypeOrParam)
     );
 
     // A reject construct on the SOURCE side fails even though the hover is clean.
@@ -714,28 +787,83 @@ fn source_root_carve_out_rejects_every_still_rejected_shape() {
 }
 
 #[test]
-fn source_root_typeof_and_infer_bodies_rejected() {
-    // The source-root reject matrix must also pin `typeof` and `Infer` bodies:
-    // neither is a carve-out shape, and each must reject with its EXACT reason
-    // through the generic predicate. Without these the guard would not
-    // discriminate against a future over-admission of either construct at the
-    // source root.
+fn source_root_typeof_path_carve_out() {
+    let same: &str = "/fixtures/classes.ts";
 
-    // `typeof x` lowers to `TypeExpr::TypeOf` — NotCarveOut, rejected as typeof.
-    let typeof_body = lower("typeof x");
+    // E1 POSITIVE: a `typeof Ref(.ident)*` ROOT classifies as the TypeofPath
+    // carve-out, names its VALUE-space head as the walk root, and admits
+    // under the same three-gate discipline (structure + same-file root +
+    // clean root raw facts).
+    let typeof_body = lower("typeof StepCounter.initial");
     assert_eq!(
         classify_source_root(&typeof_body),
-        SourceRootShape::NotCarveOut,
-        "`typeof x` is not a carve-out root"
+        SourceRootShape::TypeofPath
     );
     assert_eq!(
-        admit_source_root(&contributor(clean_surface(), typeof_body)),
+        carve_out_root_locator(&typeof_body),
+        Some(("StepCounter", RawSymbolSpace::Value))
+    );
+    assert_eq!(
+        admit_source_root(&carve_out_contributor(
+            clean_surface(),
+            typeof_body.clone(),
+            same,
+            Some(same),
+        )),
+        AdmissionVerdict::Admit
+    );
+
+    // Cross-file / unresolved root → falls through to the generic predicate,
+    // which rejects the bare typeof — exactly the pre-carve-out behavior.
+    assert_eq!(
+        admit_source_root(&carve_out_contributor(
+            clean_surface(),
+            typeof_body.clone(),
+            same,
+            Some("/fixtures/other.ts"),
+        )),
+        AdmissionVerdict::Reject(RejectReason::DeferredConstruct("typeof"))
+    );
+    assert_eq!(
+        admit_source_root(&carve_out_contributor(
+            clean_surface(),
+            typeof_body.clone(),
+            same,
+            None,
+        )),
         AdmissionVerdict::Reject(RejectReason::DeferredConstruct("typeof"))
     );
 
-    // A bare `infer U` cannot appear in valid source (it only occurs inside a
-    // conditional's extends clause), so construct the lowered `TypeExpr::Infer`
-    // directly — the predicate must reject it defensively at the source root.
+    // Dirty ROOT raw facts (an `as const` value root) reject loudly.
+    let mut dirty_root = clean_surface();
+    dirty_root.value_const_assertion = Some(true);
+    assert_eq!(
+        admit_source_root(&carve_out_contributor_with_root_surfaces(
+            clean_surface(),
+            typeof_body,
+            same,
+            Some(same),
+            vec![dirty_root],
+        )),
+        AdmissionVerdict::Reject(RejectReason::ConstAssertion)
+    );
+
+    // NEGATIVE (non-root typeof STAYS rejected): a typeof NESTED inside an
+    // object member is NOT a carve-out root — the generic predicate rejects
+    // it even with a same-file stamp.
+    let nested = lower("{ a: typeof StepCounter.initial }");
+    assert_eq!(classify_source_root(&nested), SourceRootShape::NotCarveOut);
+    assert_eq!(
+        admit_source_root(&carve_out_contributor(
+            clean_surface(),
+            nested,
+            same,
+            Some(same),
+        )),
+        AdmissionVerdict::Reject(RejectReason::DeferredConstruct("typeof"))
+    );
+
+    // A bare `infer U` stays rejected at the source root.
     let infer_body = TypeExpr::Infer {
         name: "U".to_string(),
     };
@@ -747,6 +875,111 @@ fn source_root_typeof_and_infer_bodies_rejected() {
     assert_eq!(
         admit_source_root(&contributor(clean_surface(), infer_body)),
         AdmissionVerdict::Reject(RejectReason::DeferredConstruct("infer"))
+    );
+}
+
+#[test]
+fn typeof_instantiation_root_args_must_be_admissible() {
+    let same: &str = "/fixtures/classes.ts";
+
+    // `typeof C.make<string>` — instantiation-expression args ride
+    // `ValueRef.type_args` (the A2 producer axis) and each must walk the
+    // allowlist clean.
+    let clean_inst = lower("typeof GenericStatic.make<string>");
+    assert_eq!(
+        classify_source_root(&clean_inst),
+        SourceRootShape::TypeofPath
+    );
+    assert_eq!(
+        admit_source_root(&carve_out_contributor(
+            clean_surface(),
+            clean_inst,
+            same,
+            Some(same),
+        )),
+        AdmissionVerdict::Admit
+    );
+
+    // A lossy instantiation argument rejects with the payload's own reason.
+    let any_inst = lower("typeof GenericStatic.make<any>");
+    assert_eq!(
+        admit_source_root(&carve_out_contributor(
+            clean_surface(),
+            any_inst,
+            same,
+            Some(same),
+        )),
+        AdmissionVerdict::Reject(RejectReason::AnyKeyword)
+    );
+}
+
+#[test]
+fn builtin_utility_carve_out_root() {
+    let same: &str = "/fixtures/classes.ts";
+
+    // E1: a registry-recognised builtin utility whose SINGLE argument is
+    // carve-out-shaped (here a typeof value-path) classifies as the
+    // utility carve-out and admits under the three gates; the walk root is
+    // the ARGUMENT's root.
+    let ret_typeof = lower("ReturnType<typeof lookup>");
+    assert_eq!(
+        classify_source_root(&ret_typeof),
+        SourceRootShape::BuiltinUtilityCarveOutArg
+    );
+    assert_eq!(
+        carve_out_root_locator(&ret_typeof),
+        Some(("lookup", RawSymbolSpace::Value))
+    );
+    assert_eq!(
+        admit_source_root(&carve_out_contributor(
+            clean_surface(),
+            ret_typeof.clone(),
+            same,
+            Some(same),
+        )),
+        AdmissionVerdict::Admit
+    );
+
+    // A bare-ref argument is also carve-out-shaped; its root binds in TYPE
+    // space.
+    let inst_ref = lower("InstanceType<Ctor>");
+    assert_eq!(
+        classify_source_root(&inst_ref),
+        SourceRootShape::BuiltinUtilityCarveOutArg
+    );
+    assert_eq!(
+        carve_out_root_locator(&inst_ref),
+        Some(("Ctor", RawSymbolSpace::Type))
+    );
+
+    // Cross-file / unresolved root → generic predicate: the utility `Ref`
+    // itself admits per the Ref arm ONLY when its args walk clean — a
+    // typeof arg therefore rejects exactly as before the carve-out.
+    assert_eq!(
+        admit_source_root(&carve_out_contributor(
+            clean_surface(),
+            ret_typeof,
+            same,
+            Some("/fixtures/other.ts"),
+        )),
+        AdmissionVerdict::Reject(RejectReason::DeferredConstruct("typeof"))
+    );
+
+    // NEGATIVE: a NON-utility ref with a typeof arg is NOT a carve-out (the
+    // registry gate), and a utility with a NON-carve-out-shaped argument
+    // (a conditional) is NOT a carve-out either.
+    assert_eq!(
+        classify_source_root(&lower("MyWrapper<typeof lookup>")),
+        SourceRootShape::NotCarveOut
+    );
+    assert_eq!(
+        classify_source_root(&lower("ReturnType<A extends B ? C : D>")),
+        SourceRootShape::NotCarveOut
+    );
+    // And a TWO-argument utility stays out of the single-arg carve-out.
+    assert_eq!(
+        classify_source_root(&lower("Pick<Foo, \"a\">")),
+        SourceRootShape::NotCarveOut
     );
 }
 

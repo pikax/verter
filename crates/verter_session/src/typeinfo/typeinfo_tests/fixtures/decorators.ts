@@ -1,4 +1,4 @@
-// @ai-generated - Synthetic TS7 (TC39 stage 3) decorators typeinfo fixture.
+// @ai-generated - Synthetic TS7 (TC39 proposal-decorators) decorators typeinfo fixture.
 //
 // Covers identity-shaped class / method / field / accessor decorators, a
 // decorator factory (a function returning a decorator), and a decorator

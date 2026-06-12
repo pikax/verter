@@ -1025,7 +1025,7 @@ fn complex_return_type() {
             assert_eq!(type_arguments.len(), 1);
             assert!(matches!(
                 &type_arguments[0],
-                TypeExpr::TypeOf(ValueRef { path }) if path == &["createConfig"]
+                TypeExpr::TypeOf(ValueRef { path, .. }) if path == &["createConfig"]
             ));
         }
         _ => panic!("expected ReturnType ref, got {expr:?}"),

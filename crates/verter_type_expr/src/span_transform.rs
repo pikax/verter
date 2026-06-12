@@ -243,10 +243,17 @@ impl TypeExpr {
             // -- Terminals with no spans and no children --
             Self::Primitive(_)
             | Self::Literal(_)
-            | Self::TypeOf(_)
             | Self::Infer { .. }
             | Self::SyntheticSlotBinding(_)
             | Self::Unknown { .. } => {}
+
+            // -- `typeof C.make<string>`: the instantiation-expression args
+            //    are children; the path itself carries no span --
+            Self::TypeOf(value_ref) => {
+                for arg in value_ref.type_args.iter_mut() {
+                    arg.shift_spans(delta);
+                }
+            }
 
             // -- Compound: recurse into children --
             Self::Union(members) | Self::Intersection(members) => {
@@ -334,10 +341,15 @@ impl TypeExpr {
         match self {
             Self::Primitive(_)
             | Self::Literal(_)
-            | Self::TypeOf(_)
             | Self::Infer { .. }
             | Self::SyntheticSlotBinding(_)
             | Self::Unknown { .. } => {}
+
+            Self::TypeOf(value_ref) => {
+                for arg in value_ref.type_args.iter_mut() {
+                    arg.clear_spans();
+                }
+            }
 
             Self::Union(members) | Self::Intersection(members) => {
                 clear_arc_slice(members);

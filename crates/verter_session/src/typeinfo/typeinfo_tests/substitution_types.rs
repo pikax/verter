@@ -36,7 +36,9 @@
 //! propagate substitution-type semantics through `ReturnType<typeof fn>`.
 //! Each test is the future contract for that specific emission.
 
+use super::oracle;
 use super::support::*;
+use verter_session_oracle_macro::oracle_row;
 
 const SUBSTITUTION_TYPES: &str = include_str!("fixtures/substitution_types.ts");
 
@@ -213,9 +215,11 @@ fn substitution_types_sb14_default_type_arg_ignored_by_return_type() {
 // ----- 15) Recursive generic substitution ------------------------------
 // TS7: Self-recursion `f(x)` is NOT a substitution event. The declared
 // return type `T` stays as `T` -> `unknown` via ReturnType.
+// LIFTED: `ReturnType<typeof sb15>` over the self-recursive generic: the declared
+// `T` return stays un-substituted and a bare-generic ReturnType
+// instantiates at `unknown` (recursion is NOT a substitution event). The lifted body is the
+// registry-keyed `oracle::run_row` shared-driver call comparing Verter's
+// `Expanded` projection against the checked-in tsgo snapshot.
+#[oracle_row]
 #[test]
-#[ignore = "typeinfo currently does not propagate the recursive-call return type on a bare generic through `ReturnType<typeof fn>` to the un-substituted T-resolves-to-`unknown` emission; keep as the future Sb15 recursive-generic-substitution contract"]
-fn substitution_types_sb15_recursive_generic_substitution() {
-    let expr = resolve_alias("Sb15Result");
-    assert_primitive(&expr, PrimitiveName::Unknown);
-}
+fn substitution_types_sb15_recursive_generic_substitution() {}

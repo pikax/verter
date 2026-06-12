@@ -18,7 +18,7 @@ ResolveMacroPayload | Live | TypeNode | R T L J | Facets,MemberBody,AliasPreserv
 ResolveClassSurface | Live | TypeNode | P R T L J | Facets,MemberBody,AliasPreservation,NormalizationDepth,GenericOpen,OperatorReduction,CarrierStop | ClassSurfaceContext | resolve_class_surface_do_not_warm_hit | Singleflight
 ResolveAmbientNamespace | Live | TypeNode | P R T L J | Facets,MemberBody,AliasPreservation,NormalizationDepth,GenericOpen,OperatorReduction,CarrierStop | AmbientNamespaceContext | resolve_ambient_namespace_do_not_warm_hit | NonProducingPendingReducer
 ResolveEnum | Live | TypeNode | R T L J | — | EnumContext | resolve_enum_do_not_warm_hit | NonProducingPendingReducer
-ResolveOverloadSet | Live | OverloadSet | R T L J | — | OverloadSetContext | resolve_overload_set_do_not_warm_hit | NonProducingPendingReducer
+ResolveOverloadSet | Live | OverloadSet | R T L J | — | OverloadSetContext | resolve_overload_set_do_not_warm_hit | Singleflight
 ApparentType | Live | TypeNode | T L J | Facets,MemberBody,AliasPreservation,NormalizationDepth,GenericOpen,OperatorReduction,CarrierStop | ApparentTypeContext | apparent_type_do_not_warm_hit | NonProducingPendingReducer
 TemplateLiteralReduce | Live | TypeNode | R T L J | — | TemplateLiteralReduceContext | template_literal_reduce_do_not_warm_hit | Singleflight
 FlowNarrowingAt | Live | ProgramAnalysis | P R T L J | — | ProgramAnalysisContext | flow_narrowing_at_do_not_warm_hit | NonProducingPendingReducer

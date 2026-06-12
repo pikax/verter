@@ -315,3 +315,58 @@ fn capture_is_infallible_on_empty_and_exotic() {
     // No top-level capturable surface (namespaces are out of the closed set).
     assert!(caps.iter().all(|c| c.name != "N"));
 }
+
+#[test]
+fn class_value_space_surface_captures_static_half() {
+    // A class is BOTH a type and a value: `typeof C` walks the VALUE-space
+    // declaration, so the capture must emit a VALUE surface carrying the
+    // STATIC half's facts (keys, kinds, visibility) plus the abstract flag —
+    // while the TYPE surface keeps the instance half only.
+    let caps = capture_all(
+        "class C { x: number = 1; static s: string = \"\"; protected static h: number = 0; \
+         static describe(): string { return \"\"; } constructor(id: string) {} }",
+    );
+    let value = surface(&caps, "C", SymbolSpace::Value);
+    assert!(
+        value
+            .raw_member_keys
+            .contains(&RawKey::Static("s".to_string())),
+        "static field on the VALUE surface: {:?}",
+        value.raw_member_keys
+    );
+    assert!(
+        value
+            .raw_member_keys
+            .contains(&RawKey::Static("describe".to_string())),
+        "static method on the VALUE surface"
+    );
+    assert!(
+        value
+            .member_visibility
+            .contains(&MemberVisibility::Protected),
+        "static visibility carried on the VALUE surface"
+    );
+    // NEGATIVE: the instance member stays OFF the value surface, and the
+    // statics stay OFF the type surface.
+    assert!(
+        !value
+            .raw_member_keys
+            .contains(&RawKey::Static("x".to_string())),
+        "instance member must not leak onto the VALUE surface"
+    );
+    let ty = surface(&caps, "C", SymbolSpace::Type);
+    assert!(
+        !ty.raw_member_keys
+            .contains(&RawKey::Static("s".to_string())),
+        "static member must not leak onto the TYPE surface"
+    );
+
+    // A static ACCESSOR's kind is captured on the VALUE surface (lossy fact).
+    let acc = capture_all("class D { static get x(): number { return 1; } }");
+    let acc_value = surface(&acc, "D", SymbolSpace::Value);
+    assert!(acc_value.member_kinds.contains(&RawMemberKind::Getter));
+
+    // The abstract flag rides BOTH halves.
+    let abs = capture_all("abstract class A {}");
+    assert!(surface(&abs, "A", SymbolSpace::Value).abstract_ctor);
+}

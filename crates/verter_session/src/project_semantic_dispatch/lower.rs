@@ -1810,6 +1810,31 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         _ => return self.opaque(QueryError::Miss),
                     };
                 }
+                // Instantiation expression: `typeof C.make<string>` applies
+                // the lowered type arguments to the resolved generic
+                // signature — positional binder substitution through the
+                // shared substitute, yielding the non-generic instantiated
+                // signature (the `ValueRef.type_args` axis from the
+                // producer).
+                if !value_ref.type_args.is_empty() {
+                    let arg_nodes: Vec<SemanticNodeId> = value_ref
+                        .type_args
+                        .iter()
+                        .map(|arg| {
+                            self.shallow_lower_type_expr_with_context(
+                                arg,
+                                env,
+                                scope,
+                                name_resolution,
+                                scope_payload,
+                                shadowing,
+                                substitutions,
+                                reduction_context,
+                            )
+                        })
+                        .collect();
+                    result = self.apply_typeof_instantiation_args(result, &arg_nodes);
+                }
                 result
             }
             // Function-type lowering. Produces a
@@ -1831,25 +1856,72 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // type props to `Unknown("semanticMiss")`.
             TypeExpr::Function(func) | TypeExpr::ConstructorType(func) => {
                 use crate::semantic_query::{FunctionParam, TypeParamDecl};
-                // Function generic shadowing: a function type's OWN
-                // `<T>` shadows an identically-named outer generic
-                // parameter, so the outer instantiation argument must
-                // NOT substitute into this function's params / return /
-                // type-param constraints+defaults. Strip the
-                // function-local type-param names from `env` for the
-                // duration of lowering this signature, so a function's
-                // own `<T>` shadows the outer instantiation argument.
-                // The storage binding lives for the whole arm; `env` is
-                // re-bound to it only when the function declares its own
-                // type parameters (functions with none pay nothing —
-                // they keep the outer `env` by reference).
+                // Function generic shadowing + binder binding: a function
+                // type's OWN `<T>` shadows an identically-named outer
+                // generic parameter, so the outer instantiation argument
+                // must NOT substitute into this function's params /
+                // return / type-param constraints+defaults. Each own
+                // parameter binds to its interned `TypeParam` BINDER node
+                // (the same file-scoped name-keyed identity the unbound
+                // `TypeExpr::TypeParameter` arm interns), so a body
+                // reference that reaches this lowering un-normalised — a
+                // prepared declaration signature carries `Ref("T")`, not
+                // `TypeParameter(T)` — lowers to the binder node instead
+                // of a `ResolveDecl` miss. The storage binding lives for
+                // the whole arm; `env` is re-bound to it only when the
+                // function declares its own type parameters (functions
+                // with none pay nothing — they keep the outer `env` by
+                // reference).
                 let scoped_env_storage;
                 let env: &FxHashMap<String, SemanticNodeId> = if func.type_parameters.is_empty() {
                     env
                 } else {
                     let mut scoped = env.clone();
                     for tp in &func.type_parameters {
-                        scoped.remove(tp.name.as_str());
+                        let display_name: Arc<str> = Arc::from(tp.name.as_str());
+                        // Constraint / default lower under the OUTER env
+                        // (a constraint referencing an outer generic must
+                        // still substitute; the own binder is not in
+                        // scope for its own constraint head).
+                        let constraint = tp.constraint.as_deref().map(|c| {
+                            self.shallow_lower_type_expr_with_context(
+                                c,
+                                env,
+                                scope,
+                                name_resolution,
+                                scope_payload,
+                                shadowing,
+                                substitutions,
+                                reduction_context,
+                            )
+                        });
+                        let default = tp.default.as_deref().map(|d| {
+                            self.shallow_lower_type_expr_with_context(
+                                d,
+                                env,
+                                scope,
+                                name_resolution,
+                                scope_payload,
+                                shadowing,
+                                substitutions,
+                                reduction_context,
+                            )
+                        });
+                        let decl = crate::semantic_query::DeclIdentity::from_scope(
+                            scope,
+                            Arc::clone(&display_name),
+                        );
+                        let binder = graph.intern_node_with_scope(
+                            SemanticNodeData::TypeParam {
+                                decl,
+                                param_index: 0,
+                                constraint,
+                                default,
+                                display_name,
+                            },
+                            scope.clone(),
+                        );
+                        scoped.insert(tp.name.clone(), binder);
                     }
                     scoped_env_storage = scoped;
                     &scoped_env_storage

@@ -18,8 +18,8 @@
 //! 3. **Per-row sanity** — every row is `Live`; the value domain is `TypeNode`
 //!    for every variant EXCEPT `Relate` (`Relation` — its execute arm is
 //!    non-producing and its judgement lives in the dedicated relation_memo),
-//!    `ResolveOverloadSet` (`OverloadSet` — a forward-declared value domain
-//!    whose non-producing execute arm returns `Miss`), and `FlowNarrowingAt` /
+//!    `ResolveOverloadSet` (`OverloadSet` — the LIVE ordered visible
+//!    signature group), and `FlowNarrowingAt` /
 //!    `ContextualTypeAt` (`ProgramAnalysis` — forward-declared value domains
 //!    whose non-producing execute arms return `Miss` until the reducers land in
 //!    U6), and `SemanticQueryKeyTag::ALL` triangulates against both the spec set
@@ -123,9 +123,10 @@ fn semantic_query_key_spec_table_equals_enum() {
     // Every row is `Live`. The value-domain mapping is:
     //   - `Relate`            → `Relation` (execute arm non-producing; the
     //                            tri-state judgement lives in `relation_memo`).
-    //   - `ResolveOverloadSet`→ `OverloadSet` (its non-producing execute arm
-    //                            returns `Miss`; the value domain is the
-    //                            ordered signature set, NEVER a fake empty set).
+    //   - `ResolveOverloadSet`→ `OverloadSet` (LIVE producer: the ordered
+    //                            VISIBLE signature group; a signature-less
+    //                            callee is an honest `Miss`, NEVER a fake
+    //                            empty set).
     //   - `FlowNarrowingAt`   → `ProgramAnalysis` (forward-declared; its
     //                            non-producing execute arm returns `Miss` until
     //                            the flow-narrowing reducer lands in U6).

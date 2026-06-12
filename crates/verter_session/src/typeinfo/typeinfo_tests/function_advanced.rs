@@ -5,7 +5,9 @@
 //! call+construct hybrid interfaces, higher-order generic functions, and
 //! `void`-return preservation.
 
+use super::oracle;
 use super::support::*;
+use verter_session_oracle_macro::oracle_row;
 use verter_type_expr::ObjectMember;
 
 const FUNCTION_ADVANCED: &str = include_str!("fixtures/function_advanced.ts");
@@ -43,28 +45,14 @@ fn function_advanced_overload_call_picks_matching_signature_return() {
     assert_query_mode(&record, ProjectionModeTag::Expanded);
 }
 
+// LIFTED: `ReturnType<typeof lookup>` selects the LAST VISIBLE overload of the
+// ordered declaration group (the bodied implementation signature is
+// hidden) and projects its `boolean` return. The lifted body is the
+// registry-keyed `oracle::run_row` shared-driver call comparing Verter's
+// `Expanded` projection against the checked-in tsgo snapshot.
+#[oracle_row]
 #[test]
-#[ignore = "typeinfo currently does not return the LAST overload's return type from `ReturnType<typeof f>` over an overloaded function; keep as the future overload-ReturnType contract"]
-fn function_advanced_return_type_of_overloaded_function_uses_last_overload() {
-    // TS7 quirk: `ReturnType<typeof lookup>` on an overloaded function
-    // returns the LAST visible overload's return type — here the third
-    // overload returns `boolean`. The implementation signature is NOT
-    // considered. Active discriminator: the result is `boolean`, not the
-    // union of all overloads or `string | number | boolean | undefined`.
-    let host = make_host_with_footprint();
-    upsert(&host);
-
-    let (expr, record) = resolve_expr(
-        &host,
-        "/fixtures/function_advanced.ts",
-        "LookupReturnType",
-        &[],
-        ProjectionMode::Expanded,
-    );
-
-    assert_primitive(&expr, PrimitiveName::Boolean);
-    assert_query_mode(&record, ProjectionModeTag::Expanded);
-}
+fn function_advanced_return_type_of_overloaded_function_uses_last_overload() {}
 
 #[test]
 fn function_advanced_parameters_omits_this_slot() {
@@ -143,53 +131,21 @@ fn function_advanced_omit_this_parameter_returns_function_without_this() {
     assert_query_mode(&record, ProjectionModeTag::Expanded);
 }
 
+// LIFTED: `ConstructorParameters<Ctor>` reduces the construct-signature alias to
+// the labelled parameter tuple `[id: string]` via the construct bucket. The lifted body is the
+// registry-keyed `oracle::run_row` shared-driver call comparing Verter's
+// `Expanded` projection against the checked-in tsgo snapshot.
+#[oracle_row]
 #[test]
-#[ignore = "typeinfo currently does not reduce `ConstructorParameters<T>` to the constructor's parameter tuple; keep as the future ConstructorParameters contract"]
-fn function_advanced_constructor_parameters_publishes_constructor_arg_tuple() {
-    // TS7 contract: `ConstructorParameters<Ctor>` for
-    // `new (id: string) => { id: string; ready: boolean }` = `[id: string]`.
-    let host = make_host_with_footprint();
-    upsert(&host);
+fn function_advanced_constructor_parameters_publishes_constructor_arg_tuple() {}
 
-    let (expr, record) = resolve_expr(
-        &host,
-        "/fixtures/function_advanced.ts",
-        "CtorParams",
-        &[],
-        ProjectionMode::Expanded,
-    );
-
-    let TypeExpr::Tuple { elements, .. } = &expr else {
-        panic!("expected tuple, got {expr:?}");
-    };
-    assert_eq!(elements.len(), 1);
-    assert_primitive(&elements[0].ty, PrimitiveName::String);
-    assert_query_mode(&record, ProjectionModeTag::Expanded);
-}
-
+// LIFTED: `InstanceType<Ctor>` materialises the construct signature's declared
+// return object `{ id: string; ready: boolean }`. The lifted body is the
+// registry-keyed `oracle::run_row` shared-driver call comparing Verter's
+// `Expanded` projection against the checked-in tsgo snapshot.
+#[oracle_row]
 #[test]
-#[ignore = "typeinfo currently does not reduce `InstanceType<Ctor>` to the constructor's return shape; keep as the future InstanceType contract"]
-fn function_advanced_instance_type_publishes_constructor_return_shape() {
-    // TS7 contract: `InstanceType<Ctor>` for
-    // `new (id: string) => { id: string; ready: boolean }` =
-    // `{ id: string; ready: boolean }`.
-    let host = make_host_with_footprint();
-    upsert(&host);
-
-    let (expr, record) = resolve_expr(
-        &host,
-        "/fixtures/function_advanced.ts",
-        "CtorInstance",
-        &[],
-        ProjectionMode::Expanded,
-    );
-
-    let props = object_props(&expr);
-    assert_eq!(prop_names(&props), vec!["id", "ready"]);
-    assert_primitive(&props["id"].ty, PrimitiveName::String);
-    assert_primitive(&props["ready"].ty, PrimitiveName::Boolean);
-    assert_query_mode(&record, ProjectionModeTag::Expanded);
-}
+fn function_advanced_instance_type_publishes_constructor_return_shape() {}
 
 #[test]
 fn function_advanced_generic_function_alias_instantiates_to_concrete_signature() {
@@ -219,98 +175,37 @@ fn function_advanced_generic_function_alias_instantiates_to_concrete_signature()
     assert_query_mode(&record, ProjectionModeTag::Expanded);
 }
 
+// LIFTED: `Parameters<typeof callable>` picks the CALL bucket of the hybrid
+// call+construct interface — `[a: number]`, never the construct params. The lifted body is the
+// registry-keyed `oracle::run_row` shared-driver call comparing Verter's
+// `Expanded` projection against the checked-in tsgo snapshot.
+#[oracle_row]
 #[test]
-#[ignore = "typeinfo currently does not reduce `Parameters<T>` on a call+construct interface to the CALL signature parameters; keep as the future hybrid-call-parameters contract"]
-fn function_advanced_call_construct_hybrid_parameters_uses_call_signature() {
-    // TS7 contract: For an interface declaring both a call signature and a
-    // construct signature, `Parameters<typeof x>` reduces against the CALL
-    // signature. Here `Callable` has `(a: number): string` as the call
-    // signature, so `Parameters<typeof callable>` = `[a: number]`.
-    let host = make_host_with_footprint();
-    upsert(&host);
+fn function_advanced_call_construct_hybrid_parameters_uses_call_signature() {}
 
-    let (expr, record) = resolve_expr(
-        &host,
-        "/fixtures/function_advanced.ts",
-        "CallableCallParams",
-        &[],
-        ProjectionMode::Expanded,
-    );
-
-    let TypeExpr::Tuple { elements, .. } = &expr else {
-        panic!("expected tuple, got {expr:?}");
-    };
-    assert_eq!(elements.len(), 1);
-    assert_primitive(&elements[0].ty, PrimitiveName::Number);
-    assert_query_mode(&record, ProjectionModeTag::Expanded);
-}
-
+// LIFTED: `ReturnType<typeof callable>` picks the CALL bucket of the hybrid
+// interface and projects `string`. The lifted body is the
+// registry-keyed `oracle::run_row` shared-driver call comparing Verter's
+// `Expanded` projection against the checked-in tsgo snapshot.
+#[oracle_row]
 #[test]
-#[ignore = "typeinfo currently does not reduce `ReturnType<T>` on a call+construct interface to the CALL signature return; keep as the future hybrid-call-return contract"]
-fn function_advanced_call_construct_hybrid_return_type_uses_call_signature() {
-    // TS7 contract: `ReturnType<typeof callable>` reduces against the CALL
-    // signature `(a: number): string` = `string`.
-    let host = make_host_with_footprint();
-    upsert(&host);
+fn function_advanced_call_construct_hybrid_return_type_uses_call_signature() {}
 
-    let (expr, record) = resolve_expr(
-        &host,
-        "/fixtures/function_advanced.ts",
-        "CallableCallReturn",
-        &[],
-        ProjectionMode::Expanded,
-    );
-
-    assert_primitive(&expr, PrimitiveName::String);
-    assert_query_mode(&record, ProjectionModeTag::Expanded);
-}
-
+// LIFTED: `ConstructorParameters<typeof callable>` picks the CONSTRUCT bucket of
+// the hybrid interface — `[b: string]`, never the call params. The lifted body is the
+// registry-keyed `oracle::run_row` shared-driver call comparing Verter's
+// `Expanded` projection against the checked-in tsgo snapshot.
+#[oracle_row]
 #[test]
-#[ignore = "typeinfo currently does not reduce `ConstructorParameters<T>` on a call+construct interface to the CONSTRUCT signature parameters; keep as the future hybrid-construct-parameters contract"]
-fn function_advanced_call_construct_hybrid_constructor_parameters_uses_construct_signature() {
-    // TS7 contract: `ConstructorParameters<typeof callable>` reduces against
-    // the CONSTRUCT signature `new (b: string): { value: number }`. Result:
-    // `[b: string]`.
-    let host = make_host_with_footprint();
-    upsert(&host);
+fn function_advanced_call_construct_hybrid_constructor_parameters_uses_construct_signature() {}
 
-    let (expr, record) = resolve_expr(
-        &host,
-        "/fixtures/function_advanced.ts",
-        "CallableCtorParams",
-        &[],
-        ProjectionMode::Expanded,
-    );
-
-    let TypeExpr::Tuple { elements, .. } = &expr else {
-        panic!("expected tuple, got {expr:?}");
-    };
-    assert_eq!(elements.len(), 1);
-    assert_primitive(&elements[0].ty, PrimitiveName::String);
-    assert_query_mode(&record, ProjectionModeTag::Expanded);
-}
-
+// LIFTED: `InstanceType<typeof callable>` picks the CONSTRUCT bucket of the hybrid
+// interface and materialises `{ value: number }`. The lifted body is the
+// registry-keyed `oracle::run_row` shared-driver call comparing Verter's
+// `Expanded` projection against the checked-in tsgo snapshot.
+#[oracle_row]
 #[test]
-#[ignore = "typeinfo currently does not reduce `InstanceType<T>` on a call+construct interface to the CONSTRUCT signature return; keep as the future hybrid-construct-return contract"]
-fn function_advanced_call_construct_hybrid_instance_type_uses_construct_signature() {
-    // TS7 contract: `InstanceType<typeof callable>` = `{ value: number }` —
-    // the return shape of the CONSTRUCT signature.
-    let host = make_host_with_footprint();
-    upsert(&host);
-
-    let (expr, record) = resolve_expr(
-        &host,
-        "/fixtures/function_advanced.ts",
-        "CallableCtorInstance",
-        &[],
-        ProjectionMode::Expanded,
-    );
-
-    let props = object_props(&expr);
-    assert_eq!(prop_names(&props), vec!["value"]);
-    assert_primitive(&props["value"].ty, PrimitiveName::Number);
-    assert_query_mode(&record, ProjectionModeTag::Expanded);
-}
+fn function_advanced_call_construct_hybrid_instance_type_uses_construct_signature() {}
 
 #[test]
 fn function_advanced_hybrid_interface_publishes_both_call_and_construct_signatures() {
@@ -427,55 +322,22 @@ fn function_advanced_void_callback_return_preserves_void() {
     assert_query_mode(&record, ProjectionModeTag::Expanded);
 }
 
+// LIFTED: `ReturnType<typeof MethodHolder.prototype.greet>` hops the synthesized
+// `.prototype` instance projection to the method and projects its
+// declared `string` return. The lifted body is the
+// registry-keyed `oracle::run_row` shared-driver call comparing Verter's
+// `Expanded` projection against the checked-in tsgo snapshot.
+#[oracle_row]
 #[test]
-#[ignore = "typeinfo currently does not reduce `ReturnType<typeof <Class>.prototype.<method>>` to the declared method return; keep as the future class-method-prototype extraction contract"]
-fn function_advanced_class_method_prototype_extraction_projects_return() {
-    // TS7 contract: `typeof MethodHolder.prototype.greet` is the canonical
-    // way to extract a class method as a callable type. `ReturnType<>` over
-    // that callable yields the method's declared return — here `string`.
-    //
-    // Verified via tsgo `IsExactly<ExtractedGreetReturn, string>`.
-    let host = make_host_with_footprint();
-    upsert(&host);
+fn function_advanced_class_method_prototype_extraction_projects_return() {}
 
-    let (expr, record) = resolve_expr(
-        &host,
-        "/fixtures/function_advanced.ts",
-        "ExtractedGreetReturn",
-        &[],
-        ProjectionMode::Expanded,
-    );
-
-    assert_primitive(&expr, PrimitiveName::String);
-    assert_query_mode(&record, ProjectionModeTag::Expanded);
-}
-
+// LIFTED: `Parameters<typeof MethodHolder.prototype.greet>` hops `.prototype` to
+// the method and projects the labelled parameter tuple `[name: string]`. The lifted body is the
+// registry-keyed `oracle::run_row` shared-driver call comparing Verter's
+// `Expanded` projection against the checked-in tsgo snapshot.
+#[oracle_row]
 #[test]
-#[ignore = "typeinfo currently does not reduce `Parameters<typeof <Class>.prototype.<method>>` to the method's parameter tuple; keep as the future class-method-parameter extraction contract"]
-fn function_advanced_class_method_prototype_extraction_projects_parameters() {
-    // TS7 contract: `Parameters<ExtractedGreetMethod>` =
-    // `[name: string]` — a single-element labelled tuple matching the
-    // method's declared `(name: string)` parameter list.
-    //
-    // Verified via tsgo `IsExactly<ExtractedGreetParams, [name: string]>`.
-    let host = make_host_with_footprint();
-    upsert(&host);
-
-    let (expr, record) = resolve_expr(
-        &host,
-        "/fixtures/function_advanced.ts",
-        "ExtractedGreetParams",
-        &[],
-        ProjectionMode::Expanded,
-    );
-
-    let TypeExpr::Tuple { elements, .. } = &expr else {
-        panic!("expected tuple, got {expr:?}");
-    };
-    assert_eq!(elements.len(), 1);
-    assert_primitive(&elements[0].ty, PrimitiveName::String);
-    assert_query_mode(&record, ProjectionModeTag::Expanded);
-}
+fn function_advanced_class_method_prototype_extraction_projects_parameters() {}
 
 #[test]
 #[ignore = "typeinfo currently does not perform overload selection at a numeric call site against a generic-vs-string-specific overload pair; keep as the future overload-selection generic-binds-literal contract"]

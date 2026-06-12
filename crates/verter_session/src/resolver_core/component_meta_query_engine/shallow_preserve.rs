@@ -666,7 +666,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             expr: &TypeExpr,
         ) -> bool {
             match strip_parens_expr(expr) {
-                TypeExpr::TypeOf(verter_type_expr::ValueRef { path }) => {
+                TypeExpr::TypeOf(verter_type_expr::ValueRef { path, .. }) => {
                     path.first().is_some_and(|root| {
                         engine.bare_ref_origin_in_scope(scope_canonical_id, root)
                             == BareRefOrigin::Imported

@@ -628,70 +628,62 @@ fn extract_class(decl: &Class<'_>, source: &str, env: &mut EvalEnv) {
         None => return,
     };
 
-    // Extract public instance shape from class body
+    // Extract the public instance shape AND the value-side static surface
+    // from the class body. Instance members go to the TYPE-space body;
+    // static members ride INSIDE the value-side constructor-shape
+    // `ObjectExpr` (the `typeof C` constructor-object model) next to the
+    // `ConstructSignature` — never a separate field.
     let mut members = Vec::new();
+    let mut static_members = Vec::new();
     let mut ctor_sig = None;
     let mut ctor_fn_spans = FunctionSpans::default();
 
     for element in &decl.body.body {
         match element {
             ClassElement::PropertyDefinition(prop) => {
-                // Record every NON-static instance field. Accessibility is no
-                // longer an exclusion — a `private` / `protected` field is
-                // RECORDED on the shared surface with its declared visibility;
-                // the published-prop projection re-applies a Public-only filter
-                // at the publication boundary.
-                if !prop.r#static {
-                    if let Some(prop_name) = property_key_name(&prop.key) {
-                        let ty = prop
+                // Record every class field WITH its declared accessibility
+                // (a `private` / `protected` member is RECORDED; the
+                // published-prop projection re-applies a Public-only filter
+                // at the publication boundary). `static` selects the surface:
+                // instance body vs constructor shape. A `#private` key has no
+                // public name (`property_key_name` → `None`) and never lands
+                // on either surface.
+                if let Some(prop_name) = property_key_name(&prop.key) {
+                    let ty = prop
+                        .type_annotation
+                        .as_ref()
+                        .map(|ta| lower_ts_type(&ta.type_annotation, source))
+                        .unwrap_or(TypeExpr::Primitive(PrimitiveName::Any));
+                    let spans = MemberSpans {
+                        declaration: Some(prop.span.into()),
+                        name: Some(prop.key.span().into()),
+                        type_annotation: prop
                             .type_annotation
                             .as_ref()
-                            .map(|ta| lower_ts_type(&ta.type_annotation, source))
-                            .unwrap_or(TypeExpr::Primitive(PrimitiveName::Any));
-                        let spans = MemberSpans {
-                            declaration: Some(prop.span.into()),
-                            name: Some(prop.key.span().into()),
-                            type_annotation: prop
-                                .type_annotation
-                                .as_ref()
-                                .map(|ta| ta.type_annotation.span().into()),
-                        };
-                        members.push(ObjectMember::Property(
-                            verter_type_expr::ObjectProperty::with_visibility(
-                                prop_name,
-                                ty,
-                                prop.optional,
-                                prop.readonly,
-                                visibility_from_ts_accessibility(prop.accessibility),
-                                spans,
-                            ),
+                            .map(|ta| ta.type_annotation.span().into()),
+                    };
+                    let member =
+                        ObjectMember::Property(verter_type_expr::ObjectProperty::with_visibility(
+                            prop_name,
+                            ty,
+                            prop.optional,
+                            prop.readonly,
+                            visibility_from_ts_accessibility(prop.accessibility),
+                            spans,
                         ));
+                    if prop.r#static {
+                        static_members.push(member);
+                    } else {
+                        members.push(member);
                     }
                 }
             }
             ClassElement::MethodDefinition(method) => {
-                if !method.r#static {
-                    if method.kind == MethodDefinitionKind::Constructor {
-                        // The constructor is NOT an instance surface member; it
-                        // feeds the VALUE-side `ConstructSignature` (for
-                        // `typeof ClassName` / `InstanceType`). Its value-side
-                        // extraction is unchanged by the visibility flip — a
-                        // non-public constructor still does not contribute a
-                        // call signature to the consuming surface.
-                        if matches!(method.accessibility, None | Some(TSAccessibility::Public)) {
-                            ctor_sig = Some(extract_function_signature(&method.value, source));
-                            ctor_fn_spans = FunctionSpans {
-                                signature: Some(method.span.into()),
-                                return_type: method
-                                    .value
-                                    .return_type
-                                    .as_ref()
-                                    .map(|rt| rt.type_annotation.span().into()),
-                            };
-                        }
-                    } else if let Some(method_name) = property_key_name(&method.key) {
-                        // Record every NON-static instance method with its
-                        // declared accessibility (no longer an exclusion).
+                if method.r#static {
+                    // Static method → constructor-shape member with its
+                    // declared accessibility (a static can never be the
+                    // constructor — `static constructor` is invalid TS).
+                    if let Some(method_name) = property_key_name(&method.key) {
                         let func = extract_function_signature(&method.value, source);
                         let fn_spans = FunctionSpans {
                             signature: Some(method.value.span.into()),
@@ -706,19 +698,68 @@ fn extract_class(decl: &Class<'_>, source: &str, env: &mut EvalEnv) {
                             name: Some(method.key.span().into()),
                             type_annotation: None,
                         };
-                        members.push(ObjectMember::Method(MethodSignature::with_visibility(
-                            method_name,
-                            FunctionExpr::with_spans(
-                                func.parameters,
-                                func.return_type.map(Arc::new),
-                                func.type_parameters,
-                                fn_spans,
+                        static_members.push(ObjectMember::Method(
+                            MethodSignature::with_visibility(
+                                method_name,
+                                FunctionExpr::with_spans(
+                                    func.parameters,
+                                    func.return_type.map(Arc::new),
+                                    func.type_parameters,
+                                    fn_spans,
+                                ),
+                                method.optional,
+                                visibility_from_ts_accessibility(method.accessibility),
+                                member_spans,
                             ),
-                            method.optional,
-                            visibility_from_ts_accessibility(method.accessibility),
-                            member_spans,
-                        )));
+                        ));
                     }
+                } else if method.kind == MethodDefinitionKind::Constructor {
+                    // The constructor is NOT an instance surface member; it
+                    // feeds the VALUE-side `ConstructSignature` (for
+                    // `typeof ClassName` / `InstanceType`). Its value-side
+                    // extraction is unchanged by the visibility flip — a
+                    // non-public constructor still does not contribute a
+                    // call signature to the consuming surface.
+                    if matches!(method.accessibility, None | Some(TSAccessibility::Public)) {
+                        ctor_sig = Some(extract_function_signature(&method.value, source));
+                        ctor_fn_spans = FunctionSpans {
+                            signature: Some(method.span.into()),
+                            return_type: method
+                                .value
+                                .return_type
+                                .as_ref()
+                                .map(|rt| rt.type_annotation.span().into()),
+                        };
+                    }
+                } else if let Some(method_name) = property_key_name(&method.key) {
+                    // Record every NON-static instance method with its
+                    // declared accessibility (no longer an exclusion).
+                    let func = extract_function_signature(&method.value, source);
+                    let fn_spans = FunctionSpans {
+                        signature: Some(method.value.span.into()),
+                        return_type: method
+                            .value
+                            .return_type
+                            .as_ref()
+                            .map(|rt| rt.type_annotation.span().into()),
+                    };
+                    let member_spans = MemberSpans {
+                        declaration: Some(method.span.into()),
+                        name: Some(method.key.span().into()),
+                        type_annotation: None,
+                    };
+                    members.push(ObjectMember::Method(MethodSignature::with_visibility(
+                        method_name,
+                        FunctionExpr::with_spans(
+                            func.parameters,
+                            func.return_type.map(Arc::new),
+                            func.type_parameters,
+                            fn_spans,
+                        ),
+                        method.optional,
+                        visibility_from_ts_accessibility(method.accessibility),
+                        member_spans,
+                    )));
                 }
             }
             _ => {}
@@ -777,19 +818,34 @@ fn extract_class(decl: &Class<'_>, source: &str, env: &mut EvalEnv) {
     });
 
     // Also register as a value (for typeof ClassName / InstanceType)
-    let constructor_signature = ctor_sig.clone().unwrap_or_else(|| FunctionSignature {
+    let mut constructor_signature = ctor_sig.clone().unwrap_or_else(|| FunctionSignature {
         parameters: Vec::new(),
         return_type: Some(TypeExpr::named(name.clone())),
         type_parameters: Vec::new(),
         has_implementation_body: true,
     });
-    let constructor_shape = ObjectExpr {
-        properties: vec![ObjectMember::ConstructSignature(FunctionExpr::with_spans(
+    // A DECLARED constructor carries no return annotation — its construct
+    // "return" IS the class instance. Backfill the instance reference so
+    // `InstanceType<typeof C>` reads the instance type from the construct
+    // signature exactly as it does from the synthesized default.
+    if constructor_signature.return_type.is_none() {
+        constructor_signature.return_type = Some(TypeExpr::named(name.clone()));
+    }
+    // The constructor shape is the `typeof C` constructor-object model: the
+    // construct signature first, then the class's OWN static members (with
+    // their declared visibility). Base statics are NOT folded here — static
+    // heritage composes at query time through the shared class-surface
+    // reducer, never eagerly at the producer.
+    let mut constructor_properties =
+        vec![ObjectMember::ConstructSignature(FunctionExpr::with_spans(
             constructor_signature.parameters.clone(),
             constructor_signature.return_type.clone().map(Arc::new),
             constructor_signature.type_parameters.clone(),
             ctor_fn_spans,
-        ))],
+        ))];
+    constructor_properties.extend(static_members);
+    let constructor_shape = ObjectExpr {
+        properties: constructor_properties,
     };
 
     env.add_value(ValueDeclInfo {
@@ -1322,6 +1378,7 @@ fn infer_expression_type(expr: &Expression<'_>, source: &str) -> TypeExpr {
     match expr {
         Expression::Identifier(ident) => TypeExpr::TypeOf(ValueRef {
             path: vec![ident.name.as_str().to_string()],
+            type_args: Vec::new(),
         }),
         Expression::StringLiteral(s) => TypeExpr::string_literal(s.value.as_str()),
         Expression::NumericLiteral(n) => TypeExpr::number_literal(n.value),
@@ -1414,7 +1471,10 @@ fn infer_expression_type(expr: &Expression<'_>, source: &str) -> TypeExpr {
             if path.is_empty() {
                 TypeExpr::Primitive(PrimitiveName::Any)
             } else {
-                TypeExpr::TypeOf(ValueRef { path })
+                TypeExpr::TypeOf(ValueRef {
+                    path,
+                    type_args: Vec::new(),
+                })
             }
         }
         Expression::CallExpression(call) => {
@@ -2437,6 +2497,7 @@ fn lower_value_expression(expr: &Expression<'_>, source: &str) -> TypeExpr {
     match expr {
         Expression::Identifier(ident) => TypeExpr::TypeOf(ValueRef {
             path: vec![ident.name.as_str().to_string()],
+            type_args: Vec::new(),
         }),
         Expression::ConditionalExpression(cond) => TypeExpr::union(vec![
             lower_value_expression(&cond.consequent, source),

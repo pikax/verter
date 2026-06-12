@@ -31,7 +31,9 @@
 //!     NOT appear on the instance projection of subclasses (the
 //!     `InstanceType` is the public surface).
 
+use super::oracle;
 use super::support::*;
+use verter_session_oracle_macro::oracle_row;
 
 const CLASS_FEATURES: &str = include_str!("fixtures/class_features.ts");
 
@@ -94,54 +96,23 @@ fn class_features_dog_sound_return_type_is_literal_woof() {
     assert_query_mode(&record, ProjectionModeTag::Expanded);
 }
 
+// LIFTED: `typeof StepCounter.initial` walks the static-heritage chain to the
+// base `BaseCounter.initial: string` declared annotation (the static
+// composer folds base statics under own-shadows-base precedence). The lifted body is the
+// registry-keyed `oracle::run_row` shared-driver call comparing Verter's
+// `Expanded` projection against the checked-in tsgo snapshot.
+#[oracle_row]
 #[test]
-#[ignore = "typeinfo currently does not project static-member access on `typeof Subclass` through the base class's static surface; keep as the future static-inheritance contract"]
-fn class_features_static_inheritance_resolves_inherited_field_type() {
-    // TS7 contract: `typeof StepCounter.initial` looks up the `initial`
-    // static field on the constructor-side type of `StepCounter`. Since
-    // `StepCounter` does not declare its own `initial`, the lookup falls
-    // through to its base `BaseCounter`, which declares
-    // `static initial: string`. So the published type is `string`.
-    //
-    // The field is `string` (not `number`) by design — a numeric `0`
-    // initialiser would let an implementer pass this test via numeric-literal
-    // widening on the initialiser side rather than by actually walking the
-    // static chain to the declared annotation.
-    let host = make_host_with_footprint();
-    upsert(&host);
+fn class_features_static_inheritance_resolves_inherited_field_type() {}
 
-    let (expr, record) = resolve_expr(
-        &host,
-        "/fixtures/class_features.ts",
-        "StepCounterInitial",
-        &[],
-        ProjectionMode::Expanded,
-    );
-
-    assert_primitive(&expr, PrimitiveName::String);
-    assert_query_mode(&record, ProjectionModeTag::Expanded);
-}
-
+// LIFTED: `ReturnType<typeof StepCounter.describe>` resolves the INHERITED static
+// method through the static-heritage composer and projects its declared
+// `string` return. The lifted body is the
+// registry-keyed `oracle::run_row` shared-driver call comparing Verter's
+// `Expanded` projection against the checked-in tsgo snapshot.
+#[oracle_row]
 #[test]
-#[ignore = "typeinfo currently does not invoke ReturnType against a static method reached via static inheritance; keep as the future static-inheritance ReturnType contract"]
-fn class_features_static_inheritance_resolves_inherited_method_return() {
-    // TS7 contract: `ReturnType<typeof StepCounter.describe>` follows the
-    // static-inheritance chain to `BaseCounter.describe(): string`, then
-    // projects its return type `string`.
-    let host = make_host_with_footprint();
-    upsert(&host);
-
-    let (expr, record) = resolve_expr(
-        &host,
-        "/fixtures/class_features.ts",
-        "StepCounterDescribeReturn",
-        &[],
-        ProjectionMode::Expanded,
-    );
-
-    assert_primitive(&expr, PrimitiveName::String);
-    assert_query_mode(&record, ProjectionModeTag::Expanded);
-}
+fn class_features_static_inheritance_resolves_inherited_method_return() {}
 
 #[test]
 #[ignore = "typeinfo currently does not compose `extends` + `implements` into the InstanceType projection; keep as the future class-implements contract"]
@@ -279,7 +250,7 @@ fn class_features_protected_inherited_member_drives_subclass_method_inference() 
 }
 
 #[test]
-#[ignore = "typeinfo currently does not substitute the subclass's own type parameter into the base class's generic type parameter when projecting `Wrapper<string>`; keep as the future generic-subclass-with-own-type-parameter inheritance contract"]
+#[ignore = "reducer composes the two-hop dual-space substitution correctly (Verter expands `Wrapper<string>` to `{ tag(): \"wrapped\" } & { value: string }`) but the row is NOT oracle-liftable — tsgo's hover displays a generic class instance type NOMINALLY (`Wrapper<string>`, a bare ref), so the snapshot value cannot discriminate the structural substitution the row contracts (measured ValueMismatch: verter structural vs oracle nominal ref). Lift pending an oracle probe/grammar extension that elicits structural display for class instance types"]
 fn class_features_generic_subclass_with_own_type_param_substitutes_through_base() {
     // TS7 contract: `class Wrapper<U> extends Box<U>` declares its own type
     // parameter `U` and forwards it through to the base `Box<T>`. When
@@ -319,36 +290,14 @@ fn class_features_generic_subclass_with_own_type_param_substitutes_through_base(
     assert_query_mode(&record, ProjectionModeTag::Expanded);
 }
 
+// LIFTED: `ReturnType<typeof GenericStatic.make<string>>` lowers the
+// instantiation-expression type args on the typeof path and instantiates
+// the static generic method to `{ wrapped: string }`. The lifted body is the
+// registry-keyed `oracle::run_row` shared-driver call comparing Verter's
+// `Expanded` projection against the checked-in tsgo snapshot.
+#[oracle_row]
 #[test]
-#[ignore = "typeinfo currently does not evaluate ReturnType against an instantiation expression `typeof Class.method<Concrete>`; keep as the future static-generic-method instantiation contract"]
-fn class_features_static_generic_method_instantiation_projects_return_with_substitution() {
-    // TS7 contract (instantiation expressions): given
-    // `static make<T>(value: T): { wrapped: T }`, the expression
-    // `typeof GenericStatic.make<string>` instantiates the generic function
-    // with `T = string`, yielding `(value: string) => { wrapped: string }`.
-    // `ReturnType<...>` then projects the object return as
-    //   `{ wrapped: string }`
-    //
-    // The deliberately-different field name (`wrapped`, not `value`) and the
-    // concrete primitive (`string`, not the original `T`) make the assertion
-    // discriminate between "substituted T into the return" and a fallback
-    // that returns the unsubstituted shape `{ wrapped: T }`.
-    let host = make_host_with_footprint();
-    upsert(&host);
-
-    let (expr, record) = resolve_expr(
-        &host,
-        "/fixtures/class_features.ts",
-        "StaticMethodInstantiated",
-        &[],
-        ProjectionMode::Expanded,
-    );
-
-    let props = object_props(&expr);
-    assert_eq!(prop_names(&props), vec!["wrapped"]);
-    assert_primitive(&props["wrapped"].ty, PrimitiveName::String);
-    assert_query_mode(&record, ProjectionModeTag::Expanded);
-}
+fn class_features_static_generic_method_instantiation_projects_return_with_substitution() {}
 
 #[test]
 fn class_features_private_field_is_absent_from_published_instance_surface() {

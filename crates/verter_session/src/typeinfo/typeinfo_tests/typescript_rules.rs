@@ -275,50 +275,24 @@ fn typescript_rules_non_distributive_conditional_selects_false_branch() {
     assert_query_mode(&record, ProjectionModeTag::Expanded);
 }
 
+// LIFTED: `ConstructorParameters<NumberBoxCtor>` reduces the construct signature
+// to its parameter tuple via the construct bucket. The lifted body is the
+// registry-keyed `oracle::run_row` shared-driver call comparing Verter's
+// `Expanded` projection against the checked-in tsgo snapshot.
+#[oracle_row]
 #[test]
-#[ignore = "typeinfo currently leaves ConstructorParameters<T> tuple projection unresolved for construct signatures; keep as the future constructor utility contract"]
-fn typescript_rules_constructor_parameters_resolve_tuple() {
-    let host = make_host_with_footprint();
-    upsert_ts(&host, "/fixtures/typescript-rules.ts", TYPESCRIPT_RULES);
+fn typescript_rules_constructor_parameters_resolve_tuple() {}
 
-    let (expr, record) = resolve_expr(
-        &host,
-        "/fixtures/typescript-rules.ts",
-        "ConstructorParamsRules",
-        &[],
-        ProjectionMode::Expanded,
-    );
-
-    let TypeExpr::Tuple { elements, .. } = &expr else {
-        panic!("expected constructor parameter tuple, got {expr:?}");
-    };
-    assert_eq!(elements.len(), 1);
-    assert_primitive(&elements[0].ty, PrimitiveName::String);
-    assert_query_mode(&record, ProjectionModeTag::Expanded);
-}
+// LIFTED: `InstanceType<NumberBoxCtor>` materialises the construct signature's
+// declared instance shape. The lifted body is the
+// registry-keyed `oracle::run_row` shared-driver call comparing Verter's
+// `Expanded` projection against the checked-in tsgo snapshot.
+#[oracle_row]
+#[test]
+fn typescript_rules_instance_type_resolves_constructed_object() {}
 
 #[test]
-#[ignore = "typeinfo currently does not materialize InstanceType<T> from construct signatures; keep as the future constructor instance contract"]
-fn typescript_rules_instance_type_resolves_constructed_object() {
-    let host = make_host_with_footprint();
-    upsert_ts(&host, "/fixtures/typescript-rules.ts", TYPESCRIPT_RULES);
-
-    let (expr, record) = resolve_expr(
-        &host,
-        "/fixtures/typescript-rules.ts",
-        "InstanceRules",
-        &[],
-        ProjectionMode::Expanded,
-    );
-
-    let props = object_props(&expr);
-    assert_primitive(&props["id"].ty, PrimitiveName::String);
-    assert_primitive(&props["ready"].ty, PrimitiveName::Boolean);
-    assert_query_mode(&record, ProjectionModeTag::Expanded);
-}
-
-#[test]
-#[ignore = "typeinfo currently does not project class instance members through InstanceType<typeof Class>; keep as the future class instance contract"]
+#[ignore = "reducer projects the full public instance surface correctly (Verter expands `InstanceType<typeof ClassRules>` to `{ id: string; method(p0: number): string }`) but the row is NOT oracle-liftable — tsgo's hover displays a class instance type NOMINALLY (`ClassRules`, a bare ref), so the snapshot value cannot discriminate the structural field+method composition the row contracts (measured ValueMismatch: verter structural vs oracle nominal ref). Lift pending an oracle probe/grammar extension that elicits structural display for class instance types"]
 fn typescript_rules_class_instance_type_includes_fields_and_methods() {
     let host = make_host_with_footprint();
     upsert_ts(&host, "/fixtures/typescript-rules.ts", TYPESCRIPT_RULES);

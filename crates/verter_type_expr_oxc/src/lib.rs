@@ -364,7 +364,22 @@ fn lower_type_query(query: &TSTypeQuery<'_>, source: &str) -> TypeExpr {
         }
     };
 
-    TypeExpr::TypeOf(ValueRef { path })
+    // Instantiation expression under typeof: `typeof C.make<string>` carries
+    // its type arguments on the query node. They select the generic
+    // instantiation of the referenced value — lower them structurally.
+    let type_args: Vec<TypeExpr> = query
+        .type_arguments
+        .as_ref()
+        .map(|params| {
+            params
+                .params
+                .iter()
+                .map(|p| lower_ts_type(p, source))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    TypeExpr::TypeOf(ValueRef { path, type_args })
 }
 
 fn lower_mapped_type(mapped: &TSMappedType<'_>, source: &str) -> TypeExpr {

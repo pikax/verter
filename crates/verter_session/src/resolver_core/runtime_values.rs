@@ -505,6 +505,7 @@ mod tests {
             type_annotation: Some(verter_type_expr::TypeExpr::TypeOf(
                 verter_type_expr::ValueRef {
                     path: vec!["theme".to_string()],
+                    type_args: Vec::new(),
                 },
             )),
             signatures: Vec::new(),

@@ -1739,6 +1739,7 @@ import theme from './theme'
                 "ComponentConfig",
                 vec![TypeExpr::TypeOf(verter_type_expr::ValueRef {
                     path: vec!["theme".to_string()],
+                    type_args: Vec::new(),
                 })],
             )),
             index: Arc::new(TypeExpr::string_literal("variants")),

@@ -2170,19 +2170,22 @@ pub enum QueryResult<T> {
 /// Canonical typed value a semantic query resolves to.
 ///
 /// Every live [`SemanticQueryKey`] that PRODUCES a value produces
-/// [`TypeNode`](Self::TypeNode): the interned graph node id for the resolved
-/// type. The non-producing keys (`Relate`, plus the `NonProducingPendingReducer`
-/// variants `ResolveAmbientNamespace`, `ResolveEnum`, `ResolveOverloadSet`,
-/// `ApparentType`, `FlowNarrowingAt`, `ContextualTypeAt`) return `Miss` and
-/// forward-declare the `Relation` / `OverloadSet` / `ProgramAnalysis` domains
-/// they will produce once their reducers land. The remaining arms are shells
-/// with no live producer — declaration / augmentation analysis and diagnostic
-/// analysis. They carry honest data shapes so the
-/// value domain is closed and exhaustive.
+/// [`TypeNode`](Self::TypeNode) — the interned graph node id for the
+/// resolved type — EXCEPT [`SemanticQueryKey::ResolveOverloadSet`], whose
+/// live producer fills [`OverloadSet`](Self::OverloadSet) (the boundary
+/// `execute` wrap converts its signature-group-bearing node). The
+/// non-producing keys (`Relate`, plus the `NonProducingPendingReducer`
+/// variants `ResolveAmbientNamespace`, `ResolveEnum`, `ApparentType`,
+/// `FlowNarrowingAt`, `ContextualTypeAt`) return `Miss` and forward-declare
+/// the `Relation` / `ProgramAnalysis` domains they will produce once their
+/// reducers land. The remaining arms are shells with no live producer —
+/// declaration / augmentation analysis and diagnostic analysis. They carry
+/// honest data shapes so the value domain is closed and exhaustive.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SemanticQueryValue {
-    /// The interned graph node id for the resolved type — the only domain a
-    /// live query produces today.
+    /// The interned graph node id for the resolved type — the domain every
+    /// live query produces, EXCEPT [`SemanticQueryKey::ResolveOverloadSet`],
+    /// whose live producer fills [`OverloadSet`](Self::OverloadSet).
     TypeNode(SemanticNodeId),
     /// Narrowed / contextual type produced by flow or contextual program
     /// analysis. No live producer.
@@ -2195,12 +2198,12 @@ pub enum SemanticQueryValue {
     /// nested `GraphDeclarationPart`). This value variant has no live producer
     /// and never crosses the wire — do not read it as the merge wire source.
     DeclarationAnalysis(DeclarationAnalysisValue),
-    /// An ordered set of call/construct signatures (an overload set). The
-    /// forward-declared value domain of
-    /// [`SemanticQueryKey::ResolveOverloadSet`]: that key's spec row records
-    /// this domain, but its `execute` arm is non-producing (returns `Miss`)
-    /// until the overload-producing reducer that fills this carrier lands.
-    /// No live producer.
+    /// An ordered set of call/construct signatures (an overload set) — the
+    /// LIVE value domain of [`SemanticQueryKey::ResolveOverloadSet`]: the
+    /// callee's ordered VISIBLE signature group, call bucket first, then
+    /// construct (the `typeof` projection's visibility rule already hid
+    /// trailing implementation signatures). The last element is the last
+    /// visible overload.
     OverloadSet(Arc<[SignatureRef]>),
     /// The tri-state outcome of a relation query. No live producer; the
     /// live relation path is the separate relation memo.
@@ -2239,8 +2242,8 @@ impl SemanticQueryValue {
     }
 }
 
-/// A single call/construct signature, identified by its graph node.
-/// No live producer; carried by the overload-set domain.
+/// A single call/construct signature, identified by its graph node
+/// (a `SemanticNodeData::Function`). Carried by the overload-set domain.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignatureRef {
     pub node: SemanticNodeId,
@@ -3752,23 +3755,36 @@ pub enum SemanticQueryKey {
     /// `type_args` are its call-site type arguments (part of semantic
     /// identity); `context` carries only `resolve_env_hash` (`R`).
     ///
-    /// **Non-producing.** This variant has no `execute`-side producer: its
-    /// signature-lowering reducer is unimplemented. The `execute` build arm
-    /// returns [`QueryError::Miss`] and never admits or caches (admission
-    /// [`AdmissionSpec::NonProducingPendingReducer`]).
+    /// **LIVE producer** ([`AdmissionSpec::Singleflight`]). The build
+    /// settles the callee through the ONE shared signature-source carrier
+    /// rail (`resolve_signature_source_carrier` — the same demand point the
+    /// signature utilities use; the rails share the FUNCTION, not the
+    /// CONTEXT — the utilities pass their caller's context while this key,
+    /// being mode-erased, always settles under structural transit — and a
+    /// `DeclRef` / `InstantiationRef` carrier callee still settles to the
+    /// same signature group on both because `Instantiate` of a
+    /// signature-bearing decl is mode-stable), unwraps
+    /// alias chains, and projects the ordered VISIBLE signature group —
+    /// call bucket first, then construct, with trailing implementation
+    /// signatures already hidden by the `typeof` projection's visibility
+    /// rule (a lone signature is visible even if bodied). The LAST element
+    /// is the last visible overload (the signature-utility selection rule;
+    /// U6 call resolution reads the same order first-applicable). Explicit
+    /// `type_args` instantiate each candidate positionally; candidates
+    /// that cannot accept the argument list drop from the set; all-dropped
+    /// — like a callee with no signature group — is an honest
+    /// [`QueryError::Miss`], NEVER a fabricated empty
+    /// `OverloadSet(Arc::from([]))`.
     ///
-    /// **Forward-declared value domain.** The row records value domain
-    /// [`SemanticQueryValueTag::OverloadSet`]
-    /// (`SemanticQueryValue::OverloadSet(Arc<[SignatureRef]>)`) — the
-    /// ordered call/construct signature set this key will ultimately carry.
-    /// This is a forward-declared contract, mirroring how `Relate`
-    /// forward-declares [`SemanticQueryValueTag::Relation`]: the value
-    /// carrier capable of holding an `OverloadSet` is introduced together
-    /// with the overload-producing reducer. Until then the runtime arm is
-    /// non-producing — it returns `Miss`, NEVER a fabricated empty
-    /// `OverloadSet(Arc::from([]))`, which would be a stub.
+    /// **Value domain** [`SemanticQueryValueTag::OverloadSet`]
+    /// (`SemanticQueryValue::OverloadSet(Arc<[SignatureRef]>)`): the inner
+    /// pipeline carries the signature-group-bearing node; the public
+    /// `execute` boundary converts it into the `OverloadSet` carrier.
+    /// Node-narrowing consumers (`execute_type_node`) report
+    /// [`QueryError::ValueDomainMismatch`] instead of leaking the carrier
+    /// node as a type node.
     ///
-    /// [`AdmissionSpec::NonProducingPendingReducer`]: crate::semantic_query::query_key_spec::AdmissionSpec::NonProducingPendingReducer
+    /// [`AdmissionSpec::Singleflight`]: crate::semantic_query::query_key_spec::AdmissionSpec::Singleflight
     ResolveOverloadSet {
         callee: SemanticNodeId,
         type_args: Arc<[SemanticNodeId]>,
@@ -4916,8 +4932,9 @@ pub trait SemanticQueryApi {
     /// Canonical entry point. Returns the domain-agnostic
     /// [`SemanticQueryValue`] wrapped with the provenance of the producing
     /// work. Every live key that produces a value resolves to
-    /// [`SemanticQueryValue::TypeNode`]; the non-producing keys (`Relate`,
-    /// `ResolveOverloadSet`) return `Miss`. Callers that want the node narrow
+    /// [`SemanticQueryValue::TypeNode`] except `ResolveOverloadSet`
+    /// ([`SemanticQueryValue::OverloadSet`]); the non-producing keys
+    /// (e.g. `Relate`) return `Miss`. Callers that want the node narrow
     /// with [`execute_type_node`].
     ///
     /// [`execute_type_node`]: Self::execute_type_node

@@ -862,6 +862,7 @@ mod tests {
         // Legacy infer.rs:125 — typeof x in defineProps context => Object.
         let ty = TypeExpr::TypeOf(verter_type_expr::ValueRef {
             path: vec!["x".to_string()],
+            type_args: Vec::new(),
         });
         assert_eq!(
             runtime_constructors_from_type_expr(&ty),

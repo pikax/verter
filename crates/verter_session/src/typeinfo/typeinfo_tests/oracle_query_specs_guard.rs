@@ -3,23 +3,22 @@
 //! registry `include!`-compiles WITHOUT the unit-test `support` module
 //! (`oracle_query_specs_is_pure_data`); this src-side half proves the structural
 //! well-formedness validation is genuinely discriminating, with SYNTHETIC specs.
-//! The real table seats the 19 lifted rows (two index-signature publication
-//! queries + two built-in modifier-utility queries + three U2
-//! IndexedAccess-reduction carve-out queries + the mapped-modifier `-?`
-//! carve-out query at U2.MAPPED_TEMPLATE + three keyof-expansion carve-out
-//! queries + eight U2.UTILITIES reducer queries).
+//! The real table seats the 38 lifted rows — the authoritative enumeration
+//! lives on `ORACLE_QUERY_SPECS`' doc comment and is pinned exactly by
+//! `oracle_query_specs_registry_holds_the_lifted_rows_and_is_well_formed`.
 
 use super::oracle::query_specs::{
     registry_well_formed, HostProjectSpec, HostSetupKindSpec, OracleValueKindSpec, ProbeRhsSpec,
     ProjectionModeSpec, QueryHelperSpec, QuerySpec, RegistryError, SourceLocatorSpec, SymbolSpace,
-    DEEP_PATH_SOURCE, INDEX_SIGNATURES_SOURCE, MAPPED_MODIFIERS_SOURCE,
+    BRANDED_TYPES_SOURCE, CLASS_FEATURES_SOURCE, DECORATORS_SOURCE, DEEP_PATH_SOURCE,
+    FUNCTION_ADVANCED_SOURCE, INDEX_SIGNATURES_SOURCE, MAPPED_MODIFIERS_SOURCE,
     MODE_BOUNDARY_REEXPORT_BARREL_SOURCE, MODE_BOUNDARY_REEXPORT_LEAF_SOURCE,
     MODE_BOUNDARY_REEXPORT_LINK_1_SOURCE, MODE_BOUNDARY_REEXPORT_LINK_2_SOURCE,
     MODE_BOUNDARY_REEXPORT_LINK_3_SOURCE, MODE_BOUNDARY_REEXPORT_LINK_4_SOURCE,
     MODE_BOUNDARY_REEXPORT_LINK_5_SOURCE, MODE_BOUNDARY_REEXPORT_LINK_6_SOURCE,
-    MODE_BOUNDARY_REEXPORT_PRINCIPAL_SOURCE, ORACLE_QUERY_SPECS, TYPESCRIPT_RULES_SOURCE,
-    UNION_KEY_ACCESS_SOURCE, UTILITY_COMPOSITION_SOURCE, UTILITY_EDGE_SOURCE,
-    UTILITY_TOP_BOTTOM_SOURCE, VARIADIC_TUPLES_SOURCE, WIDE_DEEP_SOURCE,
+    MODE_BOUNDARY_REEXPORT_PRINCIPAL_SOURCE, ORACLE_QUERY_SPECS, SUBSTITUTION_TYPES_SOURCE,
+    TYPESCRIPT_RULES_SOURCE, UNION_KEY_ACCESS_SOURCE, UTILITY_COMPOSITION_SOURCE,
+    UTILITY_EDGE_SOURCE, UTILITY_TOP_BOTTOM_SOURCE, VARIADIC_TUPLES_SOURCE, WIDE_DEEP_SOURCE,
 };
 
 /// The registry inlines each fixture's source bytes (`INDEX_SIGNATURES_SOURCE` /
@@ -34,6 +33,36 @@ use super::oracle::query_specs::{
 /// `fixtures/`, not the `include!`'d registry file.
 #[test]
 fn inlined_registry_source_is_byte_identical_to_fixture_files() {
+    assert_eq!(
+        CLASS_FEATURES_SOURCE,
+        include_str!("fixtures/class_features.ts"),
+        "CLASS_FEATURES_SOURCE (inlined in the registry) drifted from \
+         fixtures/class_features.ts"
+    );
+    assert_eq!(
+        FUNCTION_ADVANCED_SOURCE,
+        include_str!("fixtures/function_advanced.ts"),
+        "FUNCTION_ADVANCED_SOURCE (inlined in the registry) drifted from \
+         fixtures/function_advanced.ts"
+    );
+    assert_eq!(
+        BRANDED_TYPES_SOURCE,
+        include_str!("fixtures/branded_types.ts"),
+        "BRANDED_TYPES_SOURCE (inlined in the registry) drifted from \
+         fixtures/branded_types.ts"
+    );
+    assert_eq!(
+        DECORATORS_SOURCE,
+        include_str!("fixtures/decorators.ts"),
+        "DECORATORS_SOURCE (inlined in the registry) drifted from \
+         fixtures/decorators.ts"
+    );
+    assert_eq!(
+        SUBSTITUTION_TYPES_SOURCE,
+        include_str!("fixtures/substitution_types.ts"),
+        "SUBSTITUTION_TYPES_SOURCE (inlined in the registry) drifted from \
+         fixtures/substitution_types.ts"
+    );
     assert_eq!(
         INDEX_SIGNATURES_SOURCE,
         include_str!("fixtures/index_signatures.ts"),
@@ -182,16 +211,21 @@ fn spec(row_function: &'static str, query_ordinal: u16, oracle_family: &'static 
 
 #[test]
 fn oracle_query_specs_registry_holds_the_lifted_rows_and_is_well_formed() {
-    // The lifts seat 19 queries: the two index-signature publication
+    // The lifts seat 38 queries: the two index-signature publication
     // queries, the two built-in modifier-utility queries, the three U2
     // IndexedAccess-reduction carve-out queries, the U2.MAPPED_TEMPLATE
     // `-?` optional-remover query, the three keyof-expansion carve-out
-    // queries, and the eight U2.UTILITIES lifts (the five Awaited rows,
-    // the two NonNullable rows, and the variadic concat row); the table
-    // is well-formed (non-empty `oracle_family`, contiguous ordinals).
+    // queries, the eight U2.UTILITIES lifts (the five Awaited rows,
+    // the two NonNullable rows, and the variadic concat row), and the
+    // nineteen U2.CLASS_SURFACES-era lifts (two brand-tag index chains,
+    // three class-features static rows, nine function-advanced
+    // signature-bucket/prototype/overload rows, the sb15 bare-generic
+    // ReturnType row, two typescript-rules construct-signature rows, and
+    // two decoration-invariance rows); the table is well-formed
+    // (non-empty `oracle_family`, contiguous ordinals).
     assert_eq!(registry_well_formed(ORACLE_QUERY_SPECS), Ok(()));
 
-    // The seated set is EXACTLY those 19 rows, one query each. A stray
+    // The seated set is EXACTLY those 38 rows, one query each. A stray
     // addition / removal FAILS here (discriminating).
     let seated: Vec<(&str, &str, u16)> = ORACLE_QUERY_SPECS
         .iter()
@@ -293,6 +327,101 @@ fn oracle_query_specs_registry_holds_the_lifted_rows_and_is_well_formed() {
             (
                 "utility_top_bottom.rs",
                 "utility_top_bottom_utb15_awaited_unknown_is_unknown",
+                0
+            ),
+            (
+                "branded_types.rs",
+                "branded_key_access_projects_literal_brand_tag",
+                0
+            ),
+            (
+                "branded_types.rs",
+                "branded_key_access_projects_boolean_literal_brand_tag",
+                0
+            ),
+            (
+                "class_features.rs",
+                "class_features_static_inheritance_resolves_inherited_field_type",
+                0
+            ),
+            (
+                "class_features.rs",
+                "class_features_static_inheritance_resolves_inherited_method_return",
+                0
+            ),
+            (
+                "class_features.rs",
+                "class_features_static_generic_method_instantiation_projects_return_with_substitution",
+                0
+            ),
+            (
+                "function_advanced.rs",
+                "function_advanced_constructor_parameters_publishes_constructor_arg_tuple",
+                0
+            ),
+            (
+                "function_advanced.rs",
+                "function_advanced_instance_type_publishes_constructor_return_shape",
+                0
+            ),
+            (
+                "function_advanced.rs",
+                "function_advanced_call_construct_hybrid_parameters_uses_call_signature",
+                0
+            ),
+            (
+                "function_advanced.rs",
+                "function_advanced_call_construct_hybrid_return_type_uses_call_signature",
+                0
+            ),
+            (
+                "function_advanced.rs",
+                "function_advanced_call_construct_hybrid_constructor_parameters_uses_construct_signature",
+                0
+            ),
+            (
+                "function_advanced.rs",
+                "function_advanced_call_construct_hybrid_instance_type_uses_construct_signature",
+                0
+            ),
+            (
+                "function_advanced.rs",
+                "function_advanced_class_method_prototype_extraction_projects_return",
+                0
+            ),
+            (
+                "function_advanced.rs",
+                "function_advanced_class_method_prototype_extraction_projects_parameters",
+                0
+            ),
+            (
+                "function_advanced.rs",
+                "function_advanced_return_type_of_overloaded_function_uses_last_overload",
+                0
+            ),
+            (
+                "substitution_types.rs",
+                "substitution_types_sb15_recursive_generic_substitution",
+                0
+            ),
+            (
+                "typescript_rules.rs",
+                "typescript_rules_constructor_parameters_resolve_tuple",
+                0
+            ),
+            (
+                "typescript_rules.rs",
+                "typescript_rules_instance_type_resolves_constructed_object",
+                0
+            ),
+            (
+                "decorators.rs",
+                "decorators_identity_method_decorator_preserves_return_inference",
+                0
+            ),
+            (
+                "decorators.rs",
+                "decorators_metadata_reader_describe_return_is_literal_union",
                 0
             ),
         ],

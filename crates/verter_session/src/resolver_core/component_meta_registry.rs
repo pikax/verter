@@ -3169,6 +3169,7 @@ export interface AvatarProps {
     fn imported_type_body_specificity_prefers_object_surfaces_over_refs_and_typeof() {
         let typeof_score = imported_type_body_specificity_score(&TypeExpr::TypeOf(ValueRef {
             path: vec!["theme".to_string()],
+            type_args: Vec::new(),
         }));
         let ref_score = imported_type_body_specificity_score(&TypeExpr::named("Props"));
         let object_score = imported_type_body_specificity_score(&object_with_props(&["label"]));

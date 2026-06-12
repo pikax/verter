@@ -151,22 +151,16 @@ fn typeinfo_manifest_files_are_byte_equal_to_regenerated_generator_output() {
     );
 }
 
-/// Discriminating per-block-count pin for the lifted rows (the 2 index-signature
-/// publication rows at `U2.QUERY_VALUE_DOMAIN` + the 2 built-in modifier-utility
-/// rows + the wide/deep literal-union projection at `U2.MAPPED_TEMPLATE` + the 2
-/// terminal indexed-access projections at `U2.INDEXED_ACCESS`). Before any lift
-/// `U2.QUERY_VALUE_DOMAIN` owned 0 rows, `U2.INDEXED_ACCESS` 16, `U2.UTILITIES`
-/// 42, `U2.MAPPED_TEMPLATE` 16, with 0 lifted; after the publication/utility lifts
-/// plus the U2 IndexedAccess-reduction lifts (which also move
-/// `wide_deep_projected_token` from `U2.INDEXED_ACCESS` to `U2.MAPPED_TEMPLATE`)
-/// the generated counts are 2 / 13 / 40 / 19 with 8 lifted (2 at
-/// QUERY_VALUE_DOMAIN, 2 at INDEXED_ACCESS, 4 at MAPPED_TEMPLATE) and 354 ignored;
-/// after the three keyof-expansion lifts (which also move
-/// `mode_boundary_keyof_across_reexport_chain` from `U10.RESULT_DB` to
-/// `U2.INDEXED_ACCESS`) the counts are 2 / 14 / 40 / 19 with 11 lifted (2 at
-/// QUERY_VALUE_DOMAIN, 5 at INDEXED_ACCESS, 4 at MAPPED_TEMPLATE) and 351 ignored.
-/// Each assertion is pinned to the exact committed lift partition — so reverting
-/// (or mis-counting) any lift's manifest re-partition breaks this test.
+/// Discriminating per-block-count pin for the lifted rows. Each assertion is
+/// pinned to the exact committed lift partition — so reverting (or
+/// mis-counting) any lift's manifest re-partition breaks this test. The
+/// committed partition: `U2.QUERY_VALUE_DOMAIN` owns 20 rows (all lifted —
+/// the 2 index-signature publications, the 8 utility-reducer lifts, and the
+/// 10 class-surface-era pure-reduction lifts whose measured trace terminates
+/// at {ResolveDecl, Instantiate(, TypeOf)}); `U2.INDEXED_ACCESS` owns 18 (9
+/// lifted); `U2.UTILITIES` owns 32; `U2.MAPPED_TEMPLATE` owns 19 (4 lifted);
+/// `U2.CLASS_SURFACES` owns 38 (5 lifted — the class typeof-path rows whose
+/// trace dispatches `ResolveClassSurface` + `ProjectPath`).
 #[test]
 fn manifest_block_counts_reflect_lifts() {
     let rows = workspace_root()
@@ -178,21 +172,18 @@ fn manifest_block_counts_reflect_lifts() {
     // Per-block generated row counts (the honest override distribution).
     assert_eq!(
         count("block_id: TypeInfoParityBlockId::U2QueryValueDomain,"),
-        10,
-        "U2.QUERY_VALUE_DOMAIN must own 10 rows: the 2 lifted index-signature \
-         publication rows (it was a 0-row substrate block before that lift) plus \
-         the 8 U2.UTILITIES reducer rows whose measured trace terminates at \
-         {{ResolveDecl, Instantiate}} (five Awaited rows, two NonNullable rows, \
-         and the variadic-spread Concat row)",
+        20,
+        "U2.QUERY_VALUE_DOMAIN must own 20 rows: the 2 lifted index-signature \
+         publication rows, the 8 U2.UTILITIES reducer rows, and the 10 \
+         class-surface-era pure-reduction rows — every row whose measured trace \
+         terminates at {{ResolveDecl, Instantiate(, TypeOf)}}",
     );
     assert_eq!(
         count("block_id: TypeInfoParityBlockId::U2IndexedAccess,"),
-        14,
-        "U2.INDEXED_ACCESS must own 14 rows after the 2 publication rows moved to \
-         U2.QUERY_VALUE_DOMAIN, `wide_deep_projected_token` moved to \
-         U2.MAPPED_TEMPLATE on the IndexedAccess-reduction lift, and \
-         `mode_boundary_keyof_across_reexport_chain` moved IN from U10.RESULT_DB \
-         on the keyof-expansion lift (13 → 14)",
+        18,
+        "U2.INDEXED_ACCESS must own 18 rows after the 2 brand-tag index chains \
+         and the 2 decoration-invariance indexed-access rows moved IN from \
+         U2.CLASS_SURFACES on their measured-trace lifts (14 → 18)",
     );
     assert_eq!(
         count("block_id: TypeInfoParityBlockId::U2Utilities,"),
@@ -212,28 +203,26 @@ fn manifest_block_counts_reflect_lifts() {
     // Lifted-status counts.
     assert_eq!(
         count("status: IgnoreStatus::Lifted {"),
-        19,
-        "exactly 19 IgnoredTestRows must carry `status: Lifted` (2 index-signature \
-         publication + 2 built-in modifier-utility + 2 terminal indexed-access \
-         projections + 1 wide/deep literal-union projection + 1 U2.MAPPED_TEMPLATE \
-         `-?` optional-remover + 3 keyof-expansion carve-out lifts + 8 U2.UTILITIES \
-         reducer lifts at U2.QUERY_VALUE_DOMAIN)",
+        38,
+        "exactly 38 IgnoredTestRows must carry `status: Lifted` (the 19 \
+         pre-class-surface lifts plus the 19 class-surface-era lifts)",
     );
     assert_eq!(
         count(
             "status: IgnoreStatus::Lifted { block_id: TypeInfoParityBlockId::U2QueryValueDomain }"
         ),
-        10,
-        "the 2 index-signature lifts plus the 8 utility-reducer lifts must record \
-         their lifting block as U2.QUERY_VALUE_DOMAIN",
+        20,
+        "the 2 index-signature lifts, the 8 utility-reducer lifts, and the 10 \
+         class-surface-era pure-reduction lifts must record their lifting block \
+         as U2.QUERY_VALUE_DOMAIN",
     );
     assert_eq!(
         count("status: IgnoreStatus::Lifted { block_id: TypeInfoParityBlockId::U2IndexedAccess }"),
-        5,
-        "the 2 terminal indexed-access projection lifts (typescript_rules + deep_path) \
-         plus the 3 keyof-expansion lifts (typescript_rules keyof + mode_boundary \
-         re-export keyof + union_key_access keyof-self) must record their lifting \
-         block as U2.INDEXED_ACCESS",
+        9,
+        "the 2 terminal indexed-access projection lifts, the 3 keyof-expansion \
+         lifts, the 2 brand-tag index-chain lifts, and the 2 \
+         decoration-invariance lifts must record their lifting block as \
+         U2.INDEXED_ACCESS",
     );
     assert_eq!(
         count("status: IgnoreStatus::Lifted { block_id: TypeInfoParityBlockId::U2MappedTemplate }"),
@@ -243,10 +232,19 @@ fn manifest_block_counts_reflect_lifts() {
          lift must record their lifting block as U2.MAPPED_TEMPLATE",
     );
 
-    // Total ignored (status: Ignored) rows after 19 lifts.
+    assert_eq!(
+        count("status: IgnoreStatus::Lifted { block_id: TypeInfoParityBlockId::U2ClassSurfaces }"),
+        5,
+        "the 5 class typeof-path lifts (static inheritance ×2, static-generic \
+         instantiation, `.prototype` extraction ×2 — the rows whose measured \
+         trace dispatches ResolveClassSurface + ProjectPath) must record their \
+         lifting block as U2.CLASS_SURFACES",
+    );
+
+    // Total ignored (status: Ignored) rows after 38 lifts.
     assert_eq!(
         count("status: IgnoreStatus::Ignored"),
-        343,
-        "exactly 343 IgnoredTestRows must remain `Ignored` (362 total − 19 lifted)",
+        324,
+        "exactly 324 IgnoredTestRows must remain `Ignored` (362 total − 38 lifted)",
     );
 }

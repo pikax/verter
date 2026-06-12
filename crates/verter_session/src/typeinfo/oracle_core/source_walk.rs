@@ -187,7 +187,57 @@ fn walk<C: ResolverContext>(
     for (ordinal, (raw_surface, lowered_body)) in
         surfaces.iter().zip(lowered_bodies.into_iter()).enumerate()
     {
+        // Source-ROOT carve-out SAME-FILE binding: for a carve-out-shaped body
+        // (`keyof Root` / `Root["a"]["b"]…` / `Root[keyof Root]` /
+        // `typeof Root(.ident)*` / `Util<carve-out-arg>`) resolve the root
+        // through the SHARED resolver edges in the SPACE the locator names
+        // (TYPE space for keyof/chain/self-index/bare-ref-arg roots, VALUE
+        // space for a typeof path head) and stamp the file it defines in
+        // PLUS the root declaration's OWN parse-time raw-fact records (every
+        // merged contributor). The admission gate admits the operator body
+        // ONLY when the stamp equals `def_canonical` AND every root raw
+        // surface walks the allowlist clean. The transitive walk below
+        // follows `typeof` referents ONLY — it does NOT chase a `keyof` /
+        // index root — so this targeted resolution is what proves same-file.
+        // A root that does not bind stamps `None` and the gate rejects the
+        // operator.
+        let carve_out_locator = super::admission::carve_out_root_locator(&lowered_body);
+        let carve_out_root = carve_out_locator.and_then(|(root_name, space)| {
+            resolve_defining(ctx, &def_canonical, root_name, space)
+                .map(|resolved| (resolved, space))
+        });
+        // A VALUE-space carve-out root whose every raw surface is a LEAF (no
+        // transitive `typeof` referents of its own) is SUBSUMED: its raw facts
+        // ride inside this contributor (`carve_out_root_surfaces`), so the
+        // `typeof` referent naming it is NOT re-walked as a second top-level
+        // contributor — that would conflate navigation depth with the queried
+        // declaration's merge multiplicity and break the provably-single-
+        // contributor class for every admissible `Util<typeof x>` row. A
+        // NON-leaf root keeps the hop (one-level subsumption cannot vouch for
+        // the deeper chain's lossy facts — conservative default-reject).
+        let mut subsumed_referent: Option<&str> = None;
+        let (carve_out_root_def, carve_out_root_surfaces) = match carve_out_root {
+            Some(((root_canonical, root_name), space)) => {
+                let root_surfaces = ctx
+                    .external_type_analysis(&root_canonical)
+                    .map(|analysis| analysis.raw_source_surfaces_for(&root_name, space).to_vec())
+                    .unwrap_or_default();
+                if space == SymbolSpace::Value
+                    && !root_surfaces.is_empty()
+                    && root_surfaces
+                        .iter()
+                        .all(|s| s.transitive_referents.is_empty())
+                {
+                    subsumed_referent = carve_out_locator.map(|(name, _)| name);
+                }
+                (Some(root_canonical), root_surfaces)
+            }
+            None => (None, Vec::new()),
+        };
         for referent in &raw_surface.transitive_referents {
+            if Some(referent.reference_name.as_str()) == subsumed_referent {
+                continue;
+            }
             // A `typeof x` referent resolves in VALUE space (the referent is a
             // value whose declaration carries the lossy provenance). The hop is
             // made FROM the defining file (the referent name is written there).
@@ -197,36 +247,6 @@ fn walk<C: ResolverContext>(
                 symbol_space: SymbolSpace::Value,
             });
         }
-        // Source-ROOT carve-out SAME-FILE binding: for a carve-out-shaped body
-        // (`keyof Root` / `Root["a"]["b"]…` / `Root[keyof Root]`) resolve the
-        // root `Ref` through the SHARED resolver edges (TYPE space — the root
-        // is always a type) and stamp the file it defines in PLUS the root
-        // declaration's OWN parse-time raw-fact records (every merged
-        // contributor). The admission gate admits the operator body ONLY when
-        // the stamp equals `def_canonical` AND every root raw surface walks
-        // the allowlist clean. The transitive walk above follows `typeof`
-        // referents ONLY — it does NOT chase a `keyof` / index root — so this
-        // targeted resolution is what proves same-file. A root that does not
-        // bind stamps `None` and the gate rejects the operator.
-        let carve_out_root = super::admission::carve_out_root_ref_name(&lowered_body)
-            .map(str::to_string)
-            .and_then(|root_name| {
-                resolve_defining(ctx, &def_canonical, &root_name, SymbolSpace::Type)
-            });
-        let (carve_out_root_def, carve_out_root_surfaces) = match carve_out_root {
-            Some((root_canonical, root_name)) => {
-                let surfaces = ctx
-                    .external_type_analysis(&root_canonical)
-                    .map(|analysis| {
-                        analysis
-                            .raw_source_surfaces_for(&root_name, SymbolSpace::Type)
-                            .to_vec()
-                    })
-                    .unwrap_or_default();
-                (Some(root_canonical), surfaces)
-            }
-            None => (None, Vec::new()),
-        };
         acc.push(SourceContributor {
             ordinal: ordinal as u16,
             def_canonical: def_canonical.clone(),

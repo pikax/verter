@@ -341,264 +341,6 @@ const fn utility_edge_modifier_spec(row_function: &'static str, symbol: &'static
     }
 }
 
-/// The vendored source bytes of `/fixtures/typescript-rules.ts` (the registry is the source-byte
-/// authority). Inlined verbatim (PURE owned `&'static str`); the guard
-/// `oracle_query_specs_guard` asserts byte-identity with `fixtures/typescript_rules.ts`.
-#[allow(dead_code)]
-pub(crate) const TYPESCRIPT_RULES_SOURCE: &str = r#"// @ai-generated - Synthetic TypeScript type-system rules fixture.
-
-export type LiteralAndPrimitiveSurface = {
-  stringLiteral: "ready";
-  numberLiteral: 42;
-  booleanLiteral: true;
-  stringValue: string;
-  numberValue: number;
-  booleanValue: boolean;
-  symbolValue: symbol;
-  bigintValue: bigint;
-  nullValue: null;
-  undefinedValue: undefined;
-  unknownValue: unknown;
-  anyValue: any;
-  neverValue: never;
-};
-
-export type MethodAndIndexSurface = {
-  readonly id: string;
-  label?: string;
-  method?: (input: string, count?: number) => boolean;
-  [key: string]:
-    | string
-    | number
-    | boolean
-    | undefined
-    | ((input: string, count?: number) => boolean);
-};
-
-export type TupleRules = [name: string, count?: number, ...flags: boolean[]];
-
-export type ReadonlyTupleRules = readonly [mode: "view", values: readonly number[]];
-
-export type FunctionRules = (
-  item: { id: string },
-  ...flags: boolean[]
-) => { id: string; flags: boolean[] };
-
-export type RecordLiteralKeys = Record<"alpha" | "beta", number>;
-
-export type MappedModifierRules<T> = {
-  readonly [K in keyof T]-?: T[K];
-};
-
-export type MappedModifierSurface = MappedModifierRules<{
-  id?: string;
-  count?: number;
-}>;
-
-export type UnionObjectRules =
-  | { kind: "a"; a: string; shared: boolean }
-  | { kind: "b"; b: number; shared: boolean };
-
-export type IntersectionObjectRules = { id: string } & { count?: number } & {
-  readonly ready: boolean;
-};
-
-export interface KeySource {
-  id: string;
-  count?: number;
-  nested: {
-    value: string;
-  };
-}
-
-export type KeyOfRules = keyof KeySource;
-export type IndexedRules = KeySource["nested"]["value"];
-
-export type ConditionalDistributive<T> = T extends string ? { text: T } : { other: T };
-export type ConditionalDistributedRules = ConditionalDistributive<"a" | 1>;
-
-export type ConditionalNonDistributive<T> = [T] extends [string] ? { text: T } : { other: T };
-export type ConditionalNonDistributedRules = ConditionalNonDistributive<"a" | 1>;
-
-export type ConstructorLike = new (id: string) => { id: string; ready: boolean };
-export type ConstructorParamsRules = ConstructorParameters<ConstructorLike>;
-export type InstanceRules = InstanceType<ConstructorLike>;
-
-export class ClassRules {
-  id: string;
-  constructor(id: string);
-  method(count: number): string;
-}
-export type ClassInstanceRules = InstanceType<typeof ClassRules>;
-export type ClassConstructorParamsRules = ConstructorParameters<typeof ClassRules>;
-
-export const literalConfig = {
-  mode: "view",
-  nested: {
-    value: 1,
-  },
-} as const;
-export type TypeOfConstRules = typeof literalConfig;
-export type TypeOfConstNestedValue = typeof literalConfig.nested.value;
-
-export type AwaitedRules = Awaited<Promise<Promise<{ done: true }>>>;
-
-export type TemplateIntrinsicRules = `on${Capitalize<"submit" | "cancel">}`;
-
-export type KeyRemapExcludeRules<T> = {
-  [K in keyof T as K extends "internal" ? never : `public:${K & string}`]: T[K];
-};
-export type KeyRemapExcludeSurface = KeyRemapExcludeRules<{
-  id: string;
-  internal: boolean;
-  count: number;
-}>;
-"#;
-
-/// The vendored source bytes of `/fixtures/deep-path.ts` (the registry is the source-byte
-/// authority). Inlined verbatim (PURE owned `&'static str`); the guard
-/// `oracle_query_specs_guard` asserts byte-identity with `fixtures/deep_path.ts`.
-#[allow(dead_code)]
-pub(crate) const DEEP_PATH_SOURCE: &str = r#"// @ai-generated - Synthetic deep indexed-access typeinfo fixture.
-
-export type TerminalPayload = {
-  id: string;
-  priority: 1 | 2 | 3;
-};
-
-export type HeavySibling00 = {
-  ignored00: {
-    label: string;
-    values: Array<{ id: string; score: number; nested: Record<string, string[]> }>;
-  };
-};
-
-export type HeavySibling01 = {
-  ignored01: {
-    label: string;
-    values: Array<{ id: string; score: number; nested: Record<string, string[]> }>;
-  };
-};
-
-export type HeavySibling02 = {
-  ignored02: {
-    label: string;
-    values: Array<{ id: string; score: number; nested: Record<string, string[]> }>;
-  };
-};
-
-export type HeavySibling03 = {
-  ignored03: {
-    label: string;
-    values: Array<{ id: string; score: number; nested: Record<string, string[]> }>;
-  };
-};
-
-export type HeavySibling04 = {
-  ignored04: {
-    label: string;
-    values: Array<{ id: string; score: number; nested: Record<string, string[]> }>;
-  };
-};
-
-export type HeavySibling05 = {
-  ignored05: {
-    label: string;
-    values: Array<{ id: string; score: number; nested: Record<string, string[]> }>;
-  };
-};
-
-export type HeavySibling06 = {
-  ignored06: {
-    label: string;
-    values: Array<{ id: string; score: number; nested: Record<string, string[]> }>;
-  };
-};
-
-export type HeavySibling07 = {
-  ignored07: {
-    label: string;
-    values: Array<{ id: string; score: number; nested: Record<string, string[]> }>;
-  };
-};
-
-export type HeavySibling08 = {
-  ignored08: {
-    label: string;
-    values: Array<{ id: string; score: number; nested: Record<string, string[]> }>;
-  };
-};
-
-export type HeavySibling09 = {
-  ignored09: {
-    label: string;
-    values: Array<{ id: string; score: number; nested: Record<string, string[]> }>;
-  };
-};
-
-export type HeavySibling10 = {
-  ignored10: {
-    label: string;
-    values: Array<{ id: string; score: number; nested: Record<string, string[]> }>;
-  };
-};
-
-export type HeavySibling11 = {
-  ignored11: {
-    label: string;
-    values: Array<{ id: string; score: number; nested: Record<string, string[]> }>;
-  };
-};
-
-export type HeavySibling12 = {
-  ignored12: {
-    label: string;
-    values: Array<{ id: string; score: number; nested: Record<string, string[]> }>;
-  };
-};
-
-export type HeavySibling13 = {
-  ignored13: {
-    label: string;
-    values: Array<{ id: string; score: number; nested: Record<string, string[]> }>;
-  };
-};
-
-export type HeavySibling14 = {
-  ignored14: {
-    label: string;
-    values: Array<{ id: string; score: number; nested: Record<string, string[]> }>;
-  };
-};
-
-export type HeavySibling15 = {
-  ignored15: {
-    label: string;
-    values: Array<{ id: string; score: number; nested: Record<string, string[]> }>;
-  };
-};
-
-export type Layer00<T> = { target: T; sibling00?: HeavySibling00 };
-export type Layer01<T> = { level00: Layer00<T>; sibling01?: HeavySibling01 };
-export type Layer02<T> = { level01: Layer01<T>; sibling02?: HeavySibling02 };
-export type Layer03<T> = { level02: Layer02<T>; sibling03?: HeavySibling03 };
-export type Layer04<T> = { level03: Layer03<T>; sibling04?: HeavySibling04 };
-export type Layer05<T> = { level04: Layer04<T>; sibling05?: HeavySibling05 };
-export type Layer06<T> = { level05: Layer05<T>; sibling06?: HeavySibling06 };
-export type Layer07<T> = { level06: Layer06<T>; sibling07?: HeavySibling07 };
-export type Layer08<T> = { level07: Layer07<T>; sibling08?: HeavySibling08 };
-export type Layer09<T> = { level08: Layer08<T>; sibling09?: HeavySibling09 };
-export type Layer10<T> = { level09: Layer09<T>; sibling10?: HeavySibling10 };
-export type Layer11<T> = { level10: Layer10<T>; sibling11?: HeavySibling11 };
-export type Layer12<T> = { level11: Layer11<T>; sibling12?: HeavySibling12 };
-export type Layer13<T> = { level12: Layer12<T>; sibling13?: HeavySibling13 };
-export type Layer14<T> = { level13: Layer13<T>; sibling14?: HeavySibling14 };
-export type Layer15<T> = { level14: Layer14<T>; sibling15?: HeavySibling15 };
-export type DeepRoot = Layer15<TerminalPayload>;
-export type DeepProjectedTarget =
-  DeepRoot["level14"]["level13"]["level12"]["level11"]["level10"]["level09"]["level08"]["level07"]["level06"]["level05"]["level04"]["level03"]["level02"]["level01"]["level00"]["target"];
-"#;
-
 /// The vendored source bytes of `/fixtures/wide-deep.ts` (the registry is the source-byte
 /// authority). Inlined verbatim (PURE owned `&'static str`); the guard
 /// `oracle_query_specs_guard` asserts byte-identity with `fixtures/wide_deep.ts`.
@@ -657,20 +399,6 @@ export type WideDeepProjectedToken = WidePanel["nested"]["level1"]["level2"]["ta
 export type WideDeepRowFlags = NonNullable<WidePanel["row00"]>["flags"];
 export type WideDeepFlagActive = NonNullable<NonNullable<WidePanel["row00"]>["flags"]>["active"];
 "#;
-
-/// The workspace-file set the two `typescript_rules.rs` carve-out rows upsert.
-#[allow(dead_code)]
-const TYPESCRIPT_RULES_FILES: &[WorkspaceFileSpec] = &[WorkspaceFileSpec {
-    path: "/fixtures/typescript-rules.ts",
-    source: TYPESCRIPT_RULES_SOURCE,
-}];
-
-/// The workspace-file set the `deep_path.rs` carve-out row upserts.
-#[allow(dead_code)]
-const DEEP_PATH_FILES: &[WorkspaceFileSpec] = &[WorkspaceFileSpec {
-    path: "/fixtures/deep-path.ts",
-    source: DEEP_PATH_SOURCE,
-}];
 
 /// The workspace-file set the `wide_deep.rs` carve-out row upserts.
 #[allow(dead_code)]
@@ -1250,14 +978,21 @@ export type DeepUtilityConfig = Required<
 };
 "#;
 
-/// The closed registry table. Holds the 19 lifted rows — the two
+include!("oracle_query_specs_vendored_sources.rs");
+
+/// The closed registry table. Holds the 38 lifted rows — the two
 /// index-signature publication queries, the two built-in modifier-utility
 /// queries, the three U2 IndexedAccess-reduction carve-out queries (two
 /// terminal indexed-access projections + one wide/deep literal-union
 /// projection), the mapped-modifier `-?` query, the three keyof-expansion
 /// carve-out queries captured through the distributive-identity scaffold,
-/// and the eight U2.UTILITIES reducer queries (five Awaited rows, two
-/// NonNullable rows, and the variadic-spread Concat row)
+/// the eight U2.UTILITIES reducer queries (five Awaited rows, two
+/// NonNullable rows, and the variadic-spread Concat row), and the nineteen
+/// U2.CLASS_SURFACES-era queries (two brand-tag index chains, three
+/// class-features static rows, nine function-advanced
+/// signature-bucket/prototype/overload rows, the sb15 bare-generic
+/// ReturnType row, two typescript-rules construct-signature rows, two
+/// decoration-invariance rows)
 /// (`docs/arch/ts-compat-two-mode-model.md`, `docs/arch/u0-oracle-harness-design.md`).
 #[allow(dead_code)]
 pub(crate) const ORACLE_QUERY_SPECS: &[QuerySpec] = &[
@@ -1396,6 +1131,158 @@ pub(crate) const ORACLE_QUERY_SPECS: &[QuerySpec] = &[
         UTILITY_TOP_BOTTOM_FILES,
         "/fixtures/utility_top_bottom.ts",
         "Utb15AwaitedUnknown",
+    ),
+    carve_out_spec(
+        "branded_types.rs",
+        "branded_key_access_projects_literal_brand_tag",
+        "branded_types",
+        BRANDED_TYPES_FILES,
+        "/fixtures/branded_types.ts",
+        "UserIdBrandTag",
+    ),
+    carve_out_spec(
+        "branded_types.rs",
+        "branded_key_access_projects_boolean_literal_brand_tag",
+        "branded_types",
+        BRANDED_TYPES_FILES,
+        "/fixtures/branded_types.ts",
+        "CentsBrandTag",
+    ),
+    carve_out_spec(
+        "class_features.rs",
+        "class_features_static_inheritance_resolves_inherited_field_type",
+        "class_features",
+        CLASS_FEATURES_FILES,
+        "/fixtures/class_features.ts",
+        "StepCounterInitial",
+    ),
+    carve_out_spec(
+        "class_features.rs",
+        "class_features_static_inheritance_resolves_inherited_method_return",
+        "class_features",
+        CLASS_FEATURES_FILES,
+        "/fixtures/class_features.ts",
+        "StepCounterDescribeReturn",
+    ),
+    carve_out_spec(
+        "class_features.rs",
+        "class_features_static_generic_method_instantiation_projects_return_with_substitution",
+        "class_features",
+        CLASS_FEATURES_FILES,
+        "/fixtures/class_features.ts",
+        "StaticMethodInstantiated",
+    ),
+    carve_out_spec(
+        "function_advanced.rs",
+        "function_advanced_constructor_parameters_publishes_constructor_arg_tuple",
+        "function_advanced",
+        FUNCTION_ADVANCED_FILES,
+        "/fixtures/function_advanced.ts",
+        "CtorParams",
+    ),
+    carve_out_spec(
+        "function_advanced.rs",
+        "function_advanced_instance_type_publishes_constructor_return_shape",
+        "function_advanced",
+        FUNCTION_ADVANCED_FILES,
+        "/fixtures/function_advanced.ts",
+        "CtorInstance",
+    ),
+    carve_out_spec(
+        "function_advanced.rs",
+        "function_advanced_call_construct_hybrid_parameters_uses_call_signature",
+        "function_advanced",
+        FUNCTION_ADVANCED_FILES,
+        "/fixtures/function_advanced.ts",
+        "CallableCallParams",
+    ),
+    carve_out_spec(
+        "function_advanced.rs",
+        "function_advanced_call_construct_hybrid_return_type_uses_call_signature",
+        "function_advanced",
+        FUNCTION_ADVANCED_FILES,
+        "/fixtures/function_advanced.ts",
+        "CallableCallReturn",
+    ),
+    carve_out_spec(
+        "function_advanced.rs",
+        "function_advanced_call_construct_hybrid_constructor_parameters_uses_construct_signature",
+        "function_advanced",
+        FUNCTION_ADVANCED_FILES,
+        "/fixtures/function_advanced.ts",
+        "CallableCtorParams",
+    ),
+    carve_out_spec(
+        "function_advanced.rs",
+        "function_advanced_call_construct_hybrid_instance_type_uses_construct_signature",
+        "function_advanced",
+        FUNCTION_ADVANCED_FILES,
+        "/fixtures/function_advanced.ts",
+        "CallableCtorInstance",
+    ),
+    carve_out_spec(
+        "function_advanced.rs",
+        "function_advanced_class_method_prototype_extraction_projects_return",
+        "function_advanced",
+        FUNCTION_ADVANCED_FILES,
+        "/fixtures/function_advanced.ts",
+        "ExtractedGreetReturn",
+    ),
+    carve_out_spec(
+        "function_advanced.rs",
+        "function_advanced_class_method_prototype_extraction_projects_parameters",
+        "function_advanced",
+        FUNCTION_ADVANCED_FILES,
+        "/fixtures/function_advanced.ts",
+        "ExtractedGreetParams",
+    ),
+    carve_out_spec(
+        "function_advanced.rs",
+        "function_advanced_return_type_of_overloaded_function_uses_last_overload",
+        "function_advanced",
+        FUNCTION_ADVANCED_FILES,
+        "/fixtures/function_advanced.ts",
+        "LookupReturnType",
+    ),
+    carve_out_spec(
+        "substitution_types.rs",
+        "substitution_types_sb15_recursive_generic_substitution",
+        "substitution_types",
+        SUBSTITUTION_TYPES_FILES,
+        "/fixtures/substitution_types.ts",
+        "Sb15Result",
+    ),
+    carve_out_spec(
+        "typescript_rules.rs",
+        "typescript_rules_constructor_parameters_resolve_tuple",
+        "typescript_rules",
+        TYPESCRIPT_RULES_FILES,
+        "/fixtures/typescript-rules.ts",
+        "ConstructorParamsRules",
+    ),
+    carve_out_spec(
+        "typescript_rules.rs",
+        "typescript_rules_instance_type_resolves_constructed_object",
+        "typescript_rules",
+        TYPESCRIPT_RULES_FILES,
+        "/fixtures/typescript-rules.ts",
+        "InstanceRules",
+    ),
+    carve_out_spec(
+        "decorators.rs",
+        "decorators_identity_method_decorator_preserves_return_inference",
+        "decorators",
+        DECORATORS_FILES,
+        "/fixtures/decorators.ts",
+        "MethodHostTagReturn",
+    ),
+    carve_out_spec(
+        "decorators.rs",
+        "decorators_metadata_reader_describe_return_is_literal_union",
+        "decorators",
+        DECORATORS_FILES,
+        "/fixtures/decorators.ts",
+        "MetadataAwareDescribeReturn",
     ),
 ];
 

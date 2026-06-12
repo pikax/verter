@@ -1151,6 +1151,7 @@ fn small_partial_helper_slot_binding_expansions_fall_back_to_symbolic_indexed_ac
                 name: Arc::from("ComponentUI"),
                 type_arguments: Arc::from(vec![TypeExpr::TypeOf(verter_type_expr::ValueRef {
                     path: vec!["theme".to_string()],
+                    type_args: Vec::new(),
                 })]),
             },
             raw_type: Some("Button['ui']".to_string()),
@@ -1250,6 +1251,7 @@ fn define_slots_prefer_concrete_evaluated_slot_bindings_over_symbolic_direct_bin
                                                         TypeExpr::TypeOf(
                                                             verter_type_expr::ValueRef {
                                                                 path: vec!["theme".to_string()],
+                                                                type_args: Vec::new(),
                                                             },
                                                         ),
                                                     ]),

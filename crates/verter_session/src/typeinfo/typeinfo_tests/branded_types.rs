@@ -4,7 +4,9 @@
 //! intersection, `unique symbol` brands, brand-tag key projection, phantom
 //! types, and branded-guard narrowing.
 
+use super::oracle;
 use super::support::*;
+use verter_session_oracle_macro::oracle_row;
 
 const BRANDED_TYPES: &str = include_str!("fixtures/branded_types.ts");
 
@@ -171,26 +173,13 @@ fn branded_unique_symbol_wrapper_publishes_branded_surface() {
     assert_query_mode(&record, ProjectionModeTag::Expanded);
 }
 
+// LIFTED: `UserId["__brand"]` projects the string-literal brand tag `"UserId"` —
+// the string-literal index chain walks the brand intersection arm path-precisely. The lifted body is the
+// registry-keyed `oracle::run_row` shared-driver call comparing Verter's
+// `Expanded` projection against the checked-in tsgo snapshot.
+#[oracle_row]
 #[test]
-#[ignore = "typeinfo currently does not project `UserId[\"__brand\"]` to the literal brand tag; keep as the future brand-tag projection contract"]
-fn branded_key_access_projects_literal_brand_tag() {
-    // TS7 contract: `UserId["__brand"]` = `"UserId"`. The intersection arm
-    // `{ readonly __brand: "UserId" }` participates in indexed-access, and
-    // the literal brand-tag value is what survives the projection.
-    let host = make_host_with_footprint();
-    upsert(&host);
-
-    let (expr, record) = resolve_expr(
-        &host,
-        "/fixtures/branded_types.ts",
-        "UserIdBrandTag",
-        &[],
-        ProjectionMode::Expanded,
-    );
-
-    assert_string_literal(&expr, "UserId");
-    assert_query_mode(&record, ProjectionModeTag::Expanded);
-}
+fn branded_key_access_projects_literal_brand_tag() {}
 
 #[test]
 fn branded_phantom_carrier_projects_underlying_with_phantom_tag() {
@@ -308,29 +297,13 @@ fn branded_guard_narrowing_publishes_union_of_branded_and_undefined() {
     assert_query_mode(&record, ProjectionModeTag::Expanded);
 }
 
+// LIFTED: `Cents["__cents"]` projects the boolean-literal brand tag `true` —
+// the same string-literal index chain over the numeric-brand intersection. The lifted body is the
+// registry-keyed `oracle::run_row` shared-driver call comparing Verter's
+// `Expanded` projection against the checked-in tsgo snapshot.
+#[oracle_row]
 #[test]
-#[ignore = "typeinfo currently does not project `Cents[\"__cents\"]` to the boolean-literal brand tag; keep as the future numeric-brand-tag projection contract"]
-fn branded_key_access_projects_boolean_literal_brand_tag() {
-    // TS7 contract: `Cents["__cents"]` = `true`. Parallel to the
-    // `UserIdBrandTag` string-literal projection, the numeric brand pattern
-    // carries a boolean-literal tag on the intersection's object arm; the
-    // indexed-access must project that literal value (not bare `boolean`).
-    //
-    // Verified via tsgo `IsExactly<CentsBrandTag, true>`.
-    let host = make_host_with_footprint();
-    upsert(&host);
-
-    let (expr, record) = resolve_expr(
-        &host,
-        "/fixtures/branded_types.ts",
-        "CentsBrandTag",
-        &[],
-        ProjectionMode::Expanded,
-    );
-
-    assert_boolean_literal(&expr, true);
-    assert_query_mode(&record, ProjectionModeTag::Expanded);
-}
+fn branded_key_access_projects_boolean_literal_brand_tag() {}
 
 #[test]
 #[ignore = "typeinfo currently does not project `AccountId[typeof idBrand]` to the wrapped value type; keep as the future symbol-key value-projection contract"]

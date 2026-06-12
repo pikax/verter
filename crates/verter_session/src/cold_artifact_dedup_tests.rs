@@ -2874,6 +2874,120 @@ fn fenced_indexed_serve_semantic_memo_build_is_served_but_not_admitted() {
     );
 }
 
+/// ReturnOnly never publishes — CLASS-SURFACE STATIC arm over the
+/// export-target fallback rail. A `ResolveClassSurface(Static)` key whose
+/// slot names a RE-EXPORTING barrel rebases onto the declaring identity
+/// and self-roots on BOTH files' content versions. When the declaring
+/// file's `IndexedReady` flight is FENCED mid-build (a foreign mutation
+/// lands between artifact build and publish fence), the composed surface's
+/// value basis is a served-without-publication artifact: the build must
+/// refuse memo admission (the chokepoint flag reaches the dispatch
+/// executor's `cache_suppress` gate) while the value still flows to the
+/// caller — and an unfenced re-execute must publish warm (no over-decline).
+#[test]
+fn fenced_declaring_serve_class_surface_static_is_served_but_not_admitted() {
+    use std::sync::atomic::Ordering;
+
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use crate::semantic_query::{
+        ClassSurfaceContext, ClassSurfaceSide, QueryResult, ResolvedDeclSlotIdentity,
+        SemanticQueryApi, SemanticQueryKey,
+    };
+
+    let host = make_host(&[]);
+    let barrel = "/workspace/src/barrel.ts";
+    let origin = "/workspace/src/origin.ts";
+    let other = "/workspace/src/other.ts";
+    upsert(&host, other, "export type Other = { o: 1 };\n");
+    upsert(
+        &host,
+        origin,
+        "export class Klass { static own(): number { return 0; } }\n",
+    );
+    upsert(&host, barrel, "export { Klass } from './origin';\n");
+
+    let env = host.host_view_env_hashes_for(barrel);
+    let project_identity = host.host_view_project_identity_for(barrel).fold_u32();
+    let key = SemanticQueryKey::ResolveClassSurface {
+        decl_slot: ResolvedDeclSlotIdentity::type_slot(
+            Arc::from(barrel),
+            Arc::from("Klass"),
+            project_identity,
+            env.type_env_hash,
+            env.lib_env_hash,
+        ),
+        type_args: Arc::from(Vec::new().into_boxed_slice()),
+        side: ClassSurfaceSide::Static,
+        context: ClassSurfaceContext {
+            parse_env_hash: env.parse_env_hash,
+            resolve_env_hash: env.resolve_env_hash,
+            mode: ProjectionMode::Shallow,
+        },
+    };
+
+    // Park the DECLARING file's IndexedReady flight pre-fence: the
+    // barrel-keyed build materialises the barrel first (flight 0), then
+    // the export-target walk reaches the origin (flight 1 → seam call
+    // 2·1 + 1 = 3). Land a foreign-content mutation while parked,
+    // release: the origin's serve is FENCED (served, never published).
+    let (parked_pre_fence, release) = park_nth_materialize_pre_fence(&host, 3);
+
+    let result = std::thread::scope(|scope| {
+        let flight = {
+            let host = Arc::clone(&host);
+            let key = key.clone();
+            scope.spawn(move || {
+                let dispatch = ProjectSemanticDispatch::new(&*host);
+                dispatch.execute_type_node(key)
+            })
+        };
+        spin_until("declaring flight parked pre-fence", || {
+            parked_pre_fence.load(Ordering::SeqCst)
+        });
+        upsert(&host, other, "export type Other = { o: 2 };\n");
+        release.store(true, Ordering::SeqCst);
+        flight.join().unwrap()
+    });
+    *host.materialize_seam_hook.lock() = None;
+
+    assert!(
+        matches!(result, QueryResult::Value(_)),
+        "the fenced build must still serve its own caller a value \
+         (got {result:?})",
+    );
+    // The discriminator: a class-surface memo entry whose declaring-file
+    // value basis was a fenced (ReturnOnly) serve must NOT be published
+    // warm — its self-roots / fact stamps read the LIVE post-mutation
+    // state while the composed surface was computed FROM the superseded
+    // artifact. (Vacuity guard built in: if the park fenced nothing, the
+    // build publishes and this assertion fails.)
+    assert!(
+        host.project_type_store()
+            .semantic_graph()
+            .get_unvalidated(&key)
+            .is_none(),
+        "a class-surface memo entry built from a fenced (ReturnOnly) \
+         declaring-file serve must not be admitted warm",
+    );
+
+    // No over-decline: an unfenced re-execute publishes warm.
+    let result = {
+        let dispatch = ProjectSemanticDispatch::new(&*host);
+        dispatch.execute_type_node(key.clone())
+    };
+    assert!(
+        matches!(result, QueryResult::Value(_)),
+        "the unfenced re-execute serves a value",
+    );
+    assert!(
+        host.project_type_store()
+            .semantic_graph()
+            .get_unvalidated(&key)
+            .is_some(),
+        "a class-surface build from store-published serves is admitted warm",
+    );
+}
+
 /// ReturnOnly never publishes — OWNER-IMPORT-SURFACE arm. The
 /// per-binding route walk inside the surface producer signals a fenced
 /// (ReturnOnly) underlying serve by returning the resolved root with

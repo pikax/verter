@@ -1756,6 +1756,7 @@ mod tests {
         let candidates = collect_dynamic_root_candidates_from_type(
             &TypeExpr::TypeOf(ValueRef {
                 path: vec!["Child".to_string()],
+                type_args: Vec::new(),
             }),
             imports.as_slice(),
         );
@@ -1791,6 +1792,7 @@ mod tests {
         let candidates = collect_dynamic_root_candidates_from_type(
             &TypeExpr::TypeOf(ValueRef {
                 path: vec!["Child".to_string()],
+                type_args: Vec::new(),
             }),
             imports.as_slice(),
         );
@@ -1876,6 +1878,7 @@ mod tests {
 
         let lowered = TypeExpr::TypeOf(verter_type_expr::ValueRef {
             path: vec!["as".to_string()],
+            type_args: Vec::new(),
         });
 
         assert_eq!(
@@ -1889,6 +1892,7 @@ mod tests {
         let env = verter_semantic::analysis::type_eval::EvalEnv::new();
         let lowered = TypeExpr::TypeOf(verter_type_expr::ValueRef {
             path: vec!["missing".to_string()],
+            type_args: Vec::new(),
         });
 
         assert_eq!(
@@ -1921,9 +1925,11 @@ mod tests {
         let union = TypeExpr::union(vec![
             TypeExpr::TypeOf(verter_type_expr::ValueRef {
                 path: vec!["a".to_string()],
+                type_args: Vec::new(),
             }),
             TypeExpr::TypeOf(verter_type_expr::ValueRef {
                 path: vec!["b".to_string()],
+                type_args: Vec::new(),
             }),
         ]);
 
@@ -1950,6 +1956,7 @@ mod tests {
 
         let lowered = TypeExpr::TypeOf(verter_type_expr::ValueRef {
             path: vec!["props".to_string(), "name".to_string()],
+            type_args: Vec::new(),
         });
 
         assert_eq!(

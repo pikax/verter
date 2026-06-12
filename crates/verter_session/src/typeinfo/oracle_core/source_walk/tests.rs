@@ -573,3 +573,90 @@ fn source_root_carve_out_rejects_unique_symbol_root() {
         "a unique-symbol-bearing keyof ROOT must reject at generation admission"
     );
 }
+
+/// E1 carve-out subsumption: a TYPE-space body whose carve-out ROOT is a
+/// same-file LEAF value (`Util<typeof root>` / root `typeof root`) resolves
+/// to EXACTLY ONE contributor — the root's raw facts ride INSIDE the
+/// principal contributor (`carve_out_root_surfaces`), so the typeof referent
+/// is NOT re-walked as a second top-level contributor (which would conflate
+/// navigation depth with merge multiplicity and break the provably-single-
+/// contributor class for every admissible utility-over-typeof row).
+#[test]
+fn carve_out_value_root_is_subsumed_not_double_walked() {
+    let host = make_host();
+    let canonical = "/fixtures/carveout_typeof_subsume.ts";
+    upsert(
+        &host,
+        canonical,
+        "export declare const leaf: (a: number) => string;\n\
+         export type LeafParams = Parameters<typeof leaf>;\n\
+         export type LeafSelf = typeof leaf;\n",
+    );
+    host.ensure_indexed_ready(canonical).expect("indexed");
+
+    // `Util<typeof leaf>` — single contributor, root surfaces stamped inside.
+    let util = walk(&host, &type_locator(canonical, "LeafParams"));
+    let contributors = match &util {
+        SourceWalkResult::Resolved { contributors } => contributors,
+        other => panic!("expected Resolved, got {other:?}"),
+    };
+    assert_eq!(
+        contributors.len(),
+        1,
+        "the carve-out root is subsumed into the principal contributor, \
+         not double-walked: {contributors:?}"
+    );
+    assert_eq!(
+        contributors[0].carve_out_root_def.as_deref(),
+        Some(canonical),
+        "the subsumed root still stamps same-file"
+    );
+    assert!(
+        !contributors[0].carve_out_root_surfaces.is_empty(),
+        "the subsumed root's raw facts ride inside the principal contributor"
+    );
+    assert_eq!(admit_source_walk(&util), AdmissionVerdict::Admit);
+
+    // Bare `typeof leaf` root — same subsumption.
+    let bare = walk(&host, &type_locator(canonical, "LeafSelf"));
+    match &bare {
+        SourceWalkResult::Resolved { contributors } => {
+            assert_eq!(contributors.len(), 1, "bare typeof-path root subsumed");
+        }
+        other => panic!("expected Resolved, got {other:?}"),
+    }
+}
+
+/// NEGATIVE (the subsumption is leaf-only): a carve-out root that ITSELF
+/// carries a transitive `typeof` referent is NOT subsumed — the hop is still
+/// walked (multi-contributor), so the deeper chain's lossy facts can never
+/// silently escape admission via one-level root subsumption.
+#[test]
+fn carve_out_non_leaf_value_root_still_walks_transitively() {
+    let host = make_host();
+    let canonical = "/fixtures/carveout_typeof_nonleaf.ts";
+    upsert(
+        &host,
+        canonical,
+        "export const base = { a: 1 } as const;\n\
+         export declare const chained: typeof base;\n\
+         export type ChainedSelf = typeof chained;\n",
+    );
+    host.ensure_indexed_ready(canonical).expect("indexed");
+
+    let result = walk(&host, &type_locator(canonical, "ChainedSelf"));
+    let contributors = match &result {
+        SourceWalkResult::Resolved { contributors } => contributors,
+        other => panic!("expected Resolved, got {other:?}"),
+    };
+    assert!(
+        contributors.len() > 1,
+        "a NON-leaf root keeps the transitive hop: {contributors:?}"
+    );
+    // The deep chain's `as const` provenance still rejects the query.
+    assert_eq!(
+        admit_source_walk(&result),
+        AdmissionVerdict::Reject(RejectReason::ConstAssertion),
+        "the transitively-reached as-const referent still rejects"
+    );
+}

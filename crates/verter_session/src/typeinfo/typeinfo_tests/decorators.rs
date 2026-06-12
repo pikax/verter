@@ -27,7 +27,9 @@
 //! describing the missing semantics. Un-ignore as Verter starts to
 //! pass them.
 
+use super::oracle;
 use super::support::*;
+use verter_session_oracle_macro::oracle_row;
 
 const DECORATORS: &str = include_str!("fixtures/decorators.ts");
 
@@ -65,26 +67,14 @@ fn decorators_identity_class_decorator_preserves_instance_shape() {
     assert_query_mode(&record, ProjectionModeTag::Expanded);
 }
 
+// LIFTED: `ReturnType<MethodHost["tag"]>` is decoration-invariant: the projection
+// ignores the identity method decorator and preserves the literal
+// `"tag"` declared return. The lifted body is the
+// registry-keyed `oracle::run_row` shared-driver call comparing Verter's
+// `Expanded` projection against the checked-in tsgo snapshot.
+#[oracle_row]
 #[test]
-#[ignore = "typeinfo currently does not preserve a decorated method's literal-declared ReturnType through indexed-access on the class instance; keep as the future method-decorator literal ReturnType contract"]
-fn decorators_identity_method_decorator_preserves_return_inference() {
-    // TS7 contract: `@bound` is identity for method decorators. The method
-    // body `return "tag"` against the declared return type `"tag"` keeps
-    // the literal return. `ReturnType<MethodHost["tag"]>` = `"tag"`.
-    let host = make_host_with_footprint();
-    upsert(&host);
-
-    let (expr, record) = resolve_expr(
-        &host,
-        "/fixtures/decorators.ts",
-        "MethodHostTagReturn",
-        &[],
-        ProjectionMode::Expanded,
-    );
-
-    assert_string_literal(&expr, "tag");
-    assert_query_mode(&record, ProjectionModeTag::Expanded);
-}
+fn decorators_identity_method_decorator_preserves_return_inference() {}
 
 #[test]
 fn decorators_method_decorator_keeps_method_on_instance() {
@@ -213,26 +203,14 @@ fn decorators_metadata_reader_decorator_preserves_class_shape() {
     assert_query_mode(&record, ProjectionModeTag::Expanded);
 }
 
+// LIFTED: `ReturnType<MetadataAware["describe"]>` is decoration-invariant: the
+// metadata-reading class decorator does not rewrite the surface, so the
+// literal union `"ready" | "pending"` survives. The lifted body is the
+// registry-keyed `oracle::run_row` shared-driver call comparing Verter's
+// `Expanded` projection against the checked-in tsgo snapshot.
+#[oracle_row]
 #[test]
-#[ignore = "typeinfo currently does not evaluate ReturnType against a decorated class instance's literal-union method via indexed access; keep as the future decorated-method literal-union ReturnType contract"]
-fn decorators_metadata_reader_describe_return_is_literal_union() {
-    // TS7 contract: `ReturnType<MetadataAware["describe"]>` =
-    //   `"ready" | "pending"`. The decorator does not interfere with the
-    // method's declared return type.
-    let host = make_host_with_footprint();
-    upsert(&host);
-
-    let (expr, record) = resolve_expr(
-        &host,
-        "/fixtures/decorators.ts",
-        "MetadataAwareDescribeReturn",
-        &[],
-        ProjectionMode::Expanded,
-    );
-
-    assert_literal_union(&expr, &["pending", "ready"]);
-    assert_query_mode(&record, ProjectionModeTag::Expanded);
-}
+fn decorators_metadata_reader_describe_return_is_literal_union() {}
 
 #[test]
 fn decorators_const_type_param_factory_does_not_widen_class_shape() {

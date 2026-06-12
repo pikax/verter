@@ -129,7 +129,11 @@ pub fn type_expr_from_json(v: &serde_json::Value) -> Option<TypeExpr> {
                 .iter()
                 .filter_map(|s| s.as_str().map(String::from))
                 .collect();
-            Some(TypeExpr::TypeOf(ValueRef { path }))
+            let type_args = v
+                .get("typeArgs")
+                .and_then(json_array_to_type_exprs)
+                .unwrap_or_default();
+            Some(TypeExpr::TypeOf(ValueRef { path, type_args }))
         }
         "indexedAccess" => {
             let obj = type_expr_from_json(v.get("object")?)?;
@@ -532,7 +536,17 @@ impl TypeExpr {
                 value
             }
             Self::KeyOf(operand) => json!({ "kind": "keyOf", "operand": operand.to_json_value() }),
-            Self::TypeOf(vr) => json!({ "kind": "typeOf", "path": vr.path }),
+            Self::TypeOf(vr) => {
+                if vr.type_args.is_empty() {
+                    json!({ "kind": "typeOf", "path": vr.path })
+                } else {
+                    json!({
+                        "kind": "typeOf",
+                        "path": vr.path,
+                        "typeArgs": vr.type_args.iter().map(|a| a.to_json_value()).collect::<Vec<_>>()
+                    })
+                }
+            }
             Self::IndexedAccess { object, index } => json!({
                 "kind": "indexedAccess",
                 "object": object.to_json_value(),

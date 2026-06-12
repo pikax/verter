@@ -27,14 +27,12 @@
 //!    (`snapshot::assemble_snapshot_document`) and write it.
 //!
 //! [`run_oracle_gen`] is the single `pub` entry the `src/bin/oracle_gen` binary
-//! invokes. It walks the oracle-query-spec registry (the 19 lifted rows — two
-//! index-signature publications + two built-in modifier utilities + three U2
-//! IndexedAccess-reduction carve-outs + the mapped-modifier `-?` carve-out at
-//! U2.MAPPED_TEMPLATE + three keyof-expansion carve-outs + the eight
-//! U2.UTILITIES reducer rows) and writes one
-//! snapshot per spec. The per-spec pipeline ([`generate_snapshot`]) is also
-//! exercised end-to-end against the pinned tsgo over a SYNTHETIC spec by
-//! `gen_tests::oracle_gen_is_idempotent`.
+//! invokes. It walks the oracle-query-spec registry (every LIFTED row — the
+//! authoritative seated set lives in `ORACLE_QUERY_SPECS`, pinned exactly by
+//! `oracle_query_specs_registry_holds_the_lifted_rows_and_is_well_formed`) and
+//! writes one snapshot per spec. The per-spec pipeline ([`generate_snapshot`])
+//! is also exercised end-to-end against the pinned tsgo over a SYNTHETIC spec
+//! by `gen_tests::oracle_gen_is_idempotent`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -172,9 +170,8 @@ impl GenConfig {
 }
 
 /// Generate + write every registry snapshot, returning the count written (one
-/// per `ORACLE_QUERY_SPECS` entry — the 19 lifted rows). The per-spec body
-/// ([`generate_snapshot`]) is additionally exercised against real tsgo by the
-/// idempotence test.
+/// per `ORACLE_QUERY_SPECS` entry). The per-spec body ([`generate_snapshot`])
+/// is additionally exercised against real tsgo by the idempotence test.
 pub fn run_oracle_gen() -> Result<usize, GenError> {
     let config = GenConfig::checked_in();
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -183,7 +180,16 @@ pub fn run_oracle_gen() -> Result<usize, GenError> {
         .map_err(|e| GenError::Runtime(e.to_string()))?;
     let mut written = 0usize;
     for spec in ORACLE_QUERY_SPECS {
-        let document = runtime.block_on(generate_snapshot(spec, &config))?;
+        // Attribute a rejection to the row that produced it — a bare verdict
+        // is undiagnosable across a multi-row registry.
+        let document = runtime
+            .block_on(generate_snapshot(spec, &config))
+            .map_err(|e| match e {
+                GenError::Rejected(msg) => {
+                    GenError::Rejected(format!("{}::{} — {msg}", spec.row_file, spec.row_function))
+                }
+                other => other,
+            })?;
         write_snapshot(&config, spec.oracle_family, &document)?;
         written += 1;
     }

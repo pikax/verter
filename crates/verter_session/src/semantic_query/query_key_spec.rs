@@ -44,11 +44,12 @@
 //!   every judgement in the dedicated `SemanticGraphStore::relation_memo` —
 //!   NOT the family singleflight. That is why this row's `admission` is
 //!   [`RelationMemo`](AdmissionSpec::RelationMemo). `ResolveOverloadSet`
-//!   records [`SemanticQueryValueTag::OverloadSet`] as a FORWARD-DECLARED
-//!   value domain: its `execute` arm is non-producing (returns `Miss`,
-//!   admission [`NonProducingPendingReducer`](AdmissionSpec::NonProducingPendingReducer))
-//!   until the overload-producing reducer that fills the `OverloadSet`
-//!   carrier lands — it never fabricates an empty set. `FlowNarrowingAt`
+//!   records [`SemanticQueryValueTag::OverloadSet`] as its LIVE value
+//!   domain: the execute arm projects the callee's ordered VISIBLE
+//!   signature group and the boundary `execute` wrap converts the
+//!   group-bearing node into `OverloadSet(Arc<[SignatureRef]>)` — a
+//!   signature-less callee is an honest `Miss`, never a fabricated empty
+//!   set. `FlowNarrowingAt`
 //!   and `ContextualTypeAt` both record
 //!   [`SemanticQueryValueTag::ProgramAnalysis`] as a FORWARD-DECLARED
 //!   value domain: each `execute` arm is non-producing (returns `Miss`,
@@ -317,7 +318,6 @@ pub enum AdmissionSpec {
     /// value is unimplemented:
     /// - `ResolveAmbientNamespace` → the namespace-analysis reducer.
     /// - `ResolveEnum` → the enum value/type-duality reducer.
-    /// - `ResolveOverloadSet` → the signature-lowering reducer.
     ///
     /// Distinct from [`RelationMemo`](Self::RelationMemo) (implies a
     /// dedicated relation-memo producer), [`Singleflight`](Self::Singleflight)
@@ -749,11 +749,15 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
         // ResolveOverloadSet { callee, type_args, context } — resolves a
         // callee's overload set. Signature lowering resolves imported
         // references but reads no parsed body skeleton at query time, so
-        // `R T L J` (no `P`). Non-producing: the execute arm returns Miss
-        // and never admits/caches (returning an empty OverloadSet would be
-        // a stub). Value domain is the forward-declared `OverloadSet`, NOT
-        // `TypeNode`. Carries no `mode` → no demand axes (substitution is
-        // carried by `type_args` on the key).
+        // `R T L J` (no `P`). LIVE producer: the execute arm projects the
+        // callee's ordered VISIBLE signature group (call bucket first, then
+        // construct; trailing implementations already hidden by the typeof
+        // projection's visibility rule), instantiating per candidate under
+        // explicit `type_args`; a callee with no signature group is an
+        // honest Miss. Value domain is `OverloadSet`, NOT `TypeNode` — the
+        // boundary `execute` wrap converts the group-bearing node into
+        // `OverloadSet(Arc<[SignatureRef]>)`. Carries no `mode` → no demand
+        // axes (substitution is carried by `type_args` on the key).
         SemanticQueryKeySpec {
             variant: SemanticQueryKeyTag::ResolveOverloadSet,
             lifecycle: KeyLifecycle::Live,
@@ -762,7 +766,7 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
             env_dims: env_resolve(),
             allowed_demand: AxisMask::empty(),
             cross_context_guard: "resolve_overload_set_do_not_warm_hit",
-            admission: AdmissionSpec::NonProducingPendingReducer,
+            admission: AdmissionSpec::Singleflight,
         },
         // ApparentType { base, context } — resolves the apparent member
         // surface of an already-substituted node (a primitive widens to its

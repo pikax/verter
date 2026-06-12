@@ -214,7 +214,7 @@ BLOCK_PREREQS: dict[str, list[str]] = {
         "U2IndexedAccess",
         "U2MappedTemplate",
     ],
-    "U2ClassSurfaces": ["U2QueryValueDomain", "U2RelationInfer"],
+    "U2ClassSurfaces": ["U2QueryValueDomain", "U2RelationInfer", "U2IndexedAccess"],
     "U2Enums": [
         "U2QueryValueDomain",
         "U2RelationInfer",
@@ -1497,6 +1497,177 @@ LIFTED_ROW_OVERRIDES: dict[tuple[str, str], dict[str, object]] = {
             "`string | number | boolean | null` (the KeyofSelfIndex source-root "
             "carve-out), proven against the checked-in tsgo oracle snapshot "
             "(distributive-identity probe scaffold) via oracle::run_row"
+        ),
+    },
+    ("branded_types.rs", "branded_key_access_projects_literal_brand_tag"): {
+        "mech": "IndexedAccessUnionDistribution",
+        "proof": "ProofRequirement::Ts7Oracle(OracleId::ApparentType)",
+        "semantic_queries": ["ResolveDecl", "Instantiate", "IndexedAccess"],
+        "consumed_mechanisms": ["QueryValueDomainFoundation"],
+        "unblocker": (
+            "lifted by U2.CLASS_SURFACES-era E1 grammar: `UserId[\"__brand\"]` reduces the string-literal index chain over the brand intersection to the literal tag `\"UserId\"`, proven against the checked-in tsgo oracle snapshot via oracle::run_row"
+        ),
+    },
+    ("branded_types.rs", "branded_key_access_projects_boolean_literal_brand_tag"): {
+        "mech": "IndexedAccessUnionDistribution",
+        "proof": "ProofRequirement::Ts7Oracle(OracleId::ApparentType)",
+        "semantic_queries": ["ResolveDecl", "Instantiate", "IndexedAccess"],
+        "consumed_mechanisms": ["QueryValueDomainFoundation"],
+        "unblocker": (
+            "lifted by U2.CLASS_SURFACES-era E1 grammar: `Cents[\"__cents\"]` reduces the string-literal index chain over the numeric-brand intersection to the boolean literal `true`, proven against the checked-in tsgo oracle snapshot via oracle::run_row"
+        ),
+    },
+    ("class_features.rs", "class_features_static_inheritance_resolves_inherited_field_type"): {
+        "mech": "ClassSurfaceProjection",
+        "proof": "ProofRequirement::Ts7Oracle(OracleId::ClassSurface)",
+        "semantic_queries": ["ResolveDecl", "Instantiate", "TypeOf", "ProjectPath", "ResolveClassSurface"],
+        "consumed_mechanisms": ["QueryValueDomainFoundation", "IndexedAccessUnionDistribution"],
+        "unblocker": (
+            "lifted by U2.CLASS_SURFACES: `typeof StepCounter.initial` walks the static-heritage composer to the base `BaseCounter.initial: string` declared annotation, proven against the checked-in tsgo oracle snapshot via oracle::run_row"
+        ),
+    },
+    ("class_features.rs", "class_features_static_inheritance_resolves_inherited_method_return"): {
+        "mech": "ClassSurfaceProjection",
+        "proof": "ProofRequirement::Ts7Oracle(OracleId::ClassSurface)",
+        "semantic_queries": ["ResolveDecl", "Instantiate", "TypeOf", "ProjectPath", "ResolveClassSurface"],
+        "consumed_mechanisms": ["QueryValueDomainFoundation", "IndexedAccessUnionDistribution"],
+        "unblocker": (
+            "lifted by U2.CLASS_SURFACES: `ReturnType<typeof StepCounter.describe>` resolves the inherited static method through the static-heritage composer and projects `string`, proven against the checked-in tsgo oracle snapshot via oracle::run_row"
+        ),
+    },
+    ("class_features.rs", "class_features_static_generic_method_instantiation_projects_return_with_substitution"): {
+        "mech": "ClassSurfaceProjection",
+        "proof": "ProofRequirement::Ts7Oracle(OracleId::ClassSurface)",
+        "semantic_queries": ["ResolveDecl", "Instantiate", "TypeOf", "ProjectPath", "ResolveClassSurface"],
+        "consumed_mechanisms": ["QueryValueDomainFoundation", "IndexedAccessUnionDistribution"],
+        "unblocker": (
+            "lifted by U2.CLASS_SURFACES: `ReturnType<typeof GenericStatic.make<string>>` lowers the instantiation-expression args on the typeof path and instantiates the static generic method to `{ wrapped: string }`, proven against the checked-in tsgo oracle snapshot via oracle::run_row"
+        ),
+    },
+    ("function_advanced.rs", "function_advanced_return_type_of_overloaded_function_uses_last_overload"): {
+        "mech": "QueryValueDomainFoundation",
+        "proof": "ProofRequirement::Ts7Oracle(OracleId::CallResolution)",
+        "semantic_queries": ["ResolveDecl", "Instantiate", "TypeOf"],
+        "consumed_mechanisms": [],
+        "unblocker": (
+            "lifted by U2.CLASS_SURFACES: `ReturnType<typeof lookup>` selects the LAST VISIBLE overload of the ordered declaration group (implementation hidden) and projects `boolean`, proven against the checked-in tsgo oracle snapshot via oracle::run_row"
+        ),
+    },
+    ("function_advanced.rs", "function_advanced_constructor_parameters_publishes_constructor_arg_tuple"): {
+        "mech": "QueryValueDomainFoundation",
+        "proof": "ProofRequirement::Ts7Oracle(OracleId::CallResolution)",
+        "semantic_queries": ["ResolveDecl", "Instantiate"],
+        "consumed_mechanisms": [],
+        "unblocker": (
+            "lifted by U2.CLASS_SURFACES: `ConstructorParameters<Ctor>` reduces the construct signature to the labelled tuple `[id: string]` via the construct bucket, proven against the checked-in tsgo oracle snapshot via oracle::run_row"
+        ),
+    },
+    ("function_advanced.rs", "function_advanced_instance_type_publishes_constructor_return_shape"): {
+        "mech": "QueryValueDomainFoundation",
+        "proof": "ProofRequirement::Ts7Oracle(OracleId::CallResolution)",
+        "semantic_queries": ["ResolveDecl", "Instantiate"],
+        "consumed_mechanisms": [],
+        "unblocker": (
+            "lifted by U2.CLASS_SURFACES: `InstanceType<Ctor>` materialises the construct signature's declared return object, proven against the checked-in tsgo oracle snapshot via oracle::run_row"
+        ),
+    },
+    ("function_advanced.rs", "function_advanced_call_construct_hybrid_parameters_uses_call_signature"): {
+        "mech": "QueryValueDomainFoundation",
+        "proof": "ProofRequirement::Ts7Oracle(OracleId::CallResolution)",
+        "semantic_queries": ["ResolveDecl", "Instantiate", "TypeOf"],
+        "consumed_mechanisms": [],
+        "unblocker": (
+            "lifted by U2.CLASS_SURFACES: `Parameters<typeof callable>` picks the CALL bucket of the hybrid call+construct interface (`[a: number]`), proven against the checked-in tsgo oracle snapshot via oracle::run_row"
+        ),
+    },
+    ("function_advanced.rs", "function_advanced_call_construct_hybrid_return_type_uses_call_signature"): {
+        "mech": "QueryValueDomainFoundation",
+        "proof": "ProofRequirement::Ts7Oracle(OracleId::CallResolution)",
+        "semantic_queries": ["ResolveDecl", "Instantiate", "TypeOf"],
+        "consumed_mechanisms": [],
+        "unblocker": (
+            "lifted by U2.CLASS_SURFACES: `ReturnType<typeof callable>` picks the CALL bucket of the hybrid interface and projects `string`, proven against the checked-in tsgo oracle snapshot via oracle::run_row"
+        ),
+    },
+    ("function_advanced.rs", "function_advanced_call_construct_hybrid_constructor_parameters_uses_construct_signature"): {
+        "mech": "QueryValueDomainFoundation",
+        "proof": "ProofRequirement::Ts7Oracle(OracleId::CallResolution)",
+        "semantic_queries": ["ResolveDecl", "Instantiate", "TypeOf"],
+        "consumed_mechanisms": [],
+        "unblocker": (
+            "lifted by U2.CLASS_SURFACES: `ConstructorParameters<typeof callable>` picks the CONSTRUCT bucket of the hybrid interface (`[b: string]`), proven against the checked-in tsgo oracle snapshot via oracle::run_row"
+        ),
+    },
+    ("function_advanced.rs", "function_advanced_call_construct_hybrid_instance_type_uses_construct_signature"): {
+        "mech": "QueryValueDomainFoundation",
+        "proof": "ProofRequirement::Ts7Oracle(OracleId::CallResolution)",
+        "semantic_queries": ["ResolveDecl", "Instantiate", "TypeOf"],
+        "consumed_mechanisms": [],
+        "unblocker": (
+            "lifted by U2.CLASS_SURFACES: `InstanceType<typeof callable>` picks the CONSTRUCT bucket of the hybrid interface and materialises `{ value: number }`, proven against the checked-in tsgo oracle snapshot via oracle::run_row"
+        ),
+    },
+    ("function_advanced.rs", "function_advanced_class_method_prototype_extraction_projects_return"): {
+        "mech": "ClassSurfaceProjection",
+        "proof": "ProofRequirement::Ts7Oracle(OracleId::CallResolution)",
+        "semantic_queries": ["ResolveDecl", "Instantiate", "TypeOf", "ProjectPath", "ResolveClassSurface"],
+        "consumed_mechanisms": ["QueryValueDomainFoundation", "IndexedAccessUnionDistribution"],
+        "unblocker": (
+            "lifted by U2.CLASS_SURFACES: `ReturnType<typeof MethodHolder.prototype.greet>` hops the synthesized `.prototype` instance projection to the method and projects `string`, proven against the checked-in tsgo oracle snapshot via oracle::run_row"
+        ),
+    },
+    ("function_advanced.rs", "function_advanced_class_method_prototype_extraction_projects_parameters"): {
+        "mech": "ClassSurfaceProjection",
+        "proof": "ProofRequirement::Ts7Oracle(OracleId::CallResolution)",
+        "semantic_queries": ["ResolveDecl", "Instantiate", "TypeOf", "ProjectPath", "ResolveClassSurface"],
+        "consumed_mechanisms": ["QueryValueDomainFoundation", "IndexedAccessUnionDistribution"],
+        "unblocker": (
+            "lifted by U2.CLASS_SURFACES: `Parameters<typeof MethodHolder.prototype.greet>` hops `.prototype` to the method and projects the labelled tuple `[name: string]`, proven against the checked-in tsgo oracle snapshot via oracle::run_row"
+        ),
+    },
+    ("substitution_types.rs", "substitution_types_sb15_recursive_generic_substitution"): {
+        "mech": "QueryValueDomainFoundation",
+        "proof": "ProofRequirement::Ts7Oracle(OracleId::RelationSemantics)",
+        "semantic_queries": ["ResolveDecl", "Instantiate", "TypeOf"],
+        "consumed_mechanisms": [],
+        "unblocker": (
+            "lifted by U2.CLASS_SURFACES-era E1 grammar: `ReturnType<typeof sb15>` over the self-recursive generic instantiates the bare-generic declared `T` return at `unknown` (recursion is NOT a substitution event), proven against the checked-in tsgo oracle snapshot via oracle::run_row"
+        ),
+    },
+    ("typescript_rules.rs", "typescript_rules_constructor_parameters_resolve_tuple"): {
+        "mech": "QueryValueDomainFoundation",
+        "proof": "ProofRequirement::Ts7Oracle(OracleId::RelationSemantics)",
+        "semantic_queries": ["ResolveDecl", "Instantiate"],
+        "consumed_mechanisms": [],
+        "unblocker": (
+            "lifted by U2.CLASS_SURFACES: `ConstructorParameters<NumberBoxCtor>` reduces the construct signature to its parameter tuple via the construct bucket, proven against the checked-in tsgo oracle snapshot via oracle::run_row"
+        ),
+    },
+    ("typescript_rules.rs", "typescript_rules_instance_type_resolves_constructed_object"): {
+        "mech": "QueryValueDomainFoundation",
+        "proof": "ProofRequirement::Ts7Oracle(OracleId::RelationSemantics)",
+        "semantic_queries": ["ResolveDecl", "Instantiate"],
+        "consumed_mechanisms": [],
+        "unblocker": (
+            "lifted by U2.CLASS_SURFACES: `InstanceType<NumberBoxCtor>` materialises the construct signature's declared instance shape, proven against the checked-in tsgo oracle snapshot via oracle::run_row"
+        ),
+    },
+    ("decorators.rs", "decorators_identity_method_decorator_preserves_return_inference"): {
+        "mech": "IndexedAccessUnionDistribution",
+        "proof": "ProofRequirement::Ts7Oracle(OracleId::ClassSurface)",
+        "semantic_queries": ["ResolveDecl", "Instantiate", "IndexedAccess"],
+        "consumed_mechanisms": ["QueryValueDomainFoundation"],
+        "unblocker": (
+            "lifted by U2.CLASS_SURFACES: `ReturnType<MethodHost[\"tag\"]>` is decoration-invariant — the projection ignores the identity method decorator and preserves the literal `\"tag\"` return, proven against the checked-in tsgo oracle snapshot via oracle::run_row"
+        ),
+    },
+    ("decorators.rs", "decorators_metadata_reader_describe_return_is_literal_union"): {
+        "mech": "IndexedAccessUnionDistribution",
+        "proof": "ProofRequirement::Ts7Oracle(OracleId::ClassSurface)",
+        "semantic_queries": ["ResolveDecl", "Instantiate", "IndexedAccess"],
+        "consumed_mechanisms": ["QueryValueDomainFoundation"],
+        "unblocker": (
+            "lifted by U2.CLASS_SURFACES: `ReturnType<MetadataAware[\"describe\"]>` is decoration-invariant — the metadata-reading class decorator does not rewrite the surface, so the literal union `\"ready\" | \"pending\"` survives, proven against the checked-in tsgo oracle snapshot via oracle::run_row"
         ),
     },
 }

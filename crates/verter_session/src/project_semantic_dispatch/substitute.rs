@@ -180,33 +180,29 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let Some(data) = self.graph().node_data(node) else {
             return (self.opaque(QueryError::Miss), true);
         };
-        // Cross-variant name fallback. `parameter_node` may be a
-        // `TypeParam` (the primary path) OR an `Infer` (the
-        // build.rs:1432 Infer-arm cross-variant consumer that
-        // interns an Infer node and calls substitute). Extract the
-        // binder's "name" from either variant so the Infer arm
-        // matches Infer references AND any TypeParam references in
-        // `node` whose display_name matches the binder's name. The
-        // latter handles cases where a TypeScript `infer X` is
-        // referenced in the true_branch as a regular TypeParam
-        // (lowered from a name-only reference), not as a literal
-        // Infer node.
-        //
-        // Infer nodes keep their string-match path; this branch is
-        // purely cross-variant bridging — it does NOT fall back for
-        // ordinary TypeParam substitutions (those go through the
-        // node-id branch above). Nested-infer does not require full
-        // node-id matching here.
-        let parameter_name: Option<Arc<str>> =
-            self.graph()
-                .node_data(parameter_node)
-                .and_then(|param_data| match param_data.as_ref() {
-                    SemanticNodeData::TypeParam { display_name, .. } => {
-                        Some(Arc::clone(display_name))
-                    }
-                    SemanticNodeData::Infer { name } => Some(Arc::clone(name)),
-                    _ => None,
-                });
+        // Cross-variant name bridge — Infer-BINDER-only, in BOTH
+        // directions. `parameter_node` may be a `TypeParam` (the
+        // primary path) OR an `Infer` (the Conditional reducer's
+        // infer-bind consumer that interns an Infer node and calls
+        // substitute). Only an `Infer` binder activates name-based
+        // matching: it rewrites same-name `Infer` references AND
+        // same-name `TypeParam` references (true_branch references
+        // may lower as TypeParam shells via the
+        // unresolved-TypeParameter path). A `TypeParam` binder never
+        // matches by name — its sole authority is the node-id branch
+        // above, and in particular it must NOT rewrite a same-name
+        // `Infer { name }` node: TS `infer X` DECLARES a fresh
+        // conditional-scoped binder that shadows the outer parameter,
+        // so a collection-driven (TypeParam-binder) substitution
+        // leaves it intact.
+        let (parameter_name, parameter_is_infer): (Option<Arc<str>>, bool) =
+            match self.graph().node_data(parameter_node).as_deref() {
+                Some(SemanticNodeData::TypeParam { display_name, .. }) => {
+                    (Some(Arc::clone(display_name)), false)
+                }
+                Some(SemanticNodeData::Infer { name }) => (Some(Arc::clone(name)), true),
+                _ => (None, false),
+            };
         // Cross-variant TypeParam-by-name fallback: when the caller
         // passed an Infer parameter_node, true_branch references
         // may be TypeParam nodes with the matching display_name
@@ -214,9 +210,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // by name. This branch fires only when parameter_node is
         // an Infer (not a TypeParam) — for TypeParam parameter_node
         // the node-id branch above is the sole authority.
-        if let Some(SemanticNodeData::Infer { .. }) =
-            self.graph().node_data(parameter_node).as_deref()
-        {
+        if parameter_is_infer {
             if let SemanticNodeData::TypeParam { display_name, .. } = data.as_ref() {
                 if let Some(name) = parameter_name.as_ref() {
                     if display_name.as_ref() == name.as_ref() {
@@ -226,11 +220,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
         }
         match data.as_ref() {
+            // Same-name `Infer` occurrence: rewritten ONLY for an
+            // `Infer` binder. Under a `TypeParam` binder the node is
+            // a fresh conditional-scoped declaration shadowing the
+            // parameter — never an occurrence of it.
             SemanticNodeData::Infer { name }
-                if parameter_name
-                    .as_ref()
-                    .map(|n| n.as_ref() == name.as_ref())
-                    .unwrap_or(false) =>
+                if parameter_is_infer
+                    && parameter_name
+                        .as_ref()
+                        .map(|n| n.as_ref() == name.as_ref())
+                        .unwrap_or(false) =>
             {
                 (arg, true)
             }
@@ -795,28 +794,27 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// `shadowed` short-circuit.
     ///
     /// **Cross-variant `Infer { name }` fallback** mirrors substitute's
-    /// name-based bridge at line 131 of `substitute_with_change_tracking`:
-    /// when the descendant is an `Infer { name }` and `name` equals the
-    /// `target` binder's display name (extracted from either `TypeParam`
-    /// or `Infer`), substitute treats it as a reference. The walker
-    /// returns `true` for that case so the hoist correctly declines on
-    /// `infer`-bearing value expressions whose `infer`-name shadows the
-    /// outer binder.
+    /// Infer-BINDER-only name bridge: when the `target` binder is itself
+    /// an `Infer` node, a descendant `Infer { name }` (or `TypeParam`)
+    /// whose name equals the target's is treated as a reference. Under a
+    /// `TypeParam` target a same-name `Infer { name }` descendant is NOT
+    /// a reference — TS `infer X` declares a fresh conditional-scoped
+    /// binder that shadows the outer parameter, and substitute leaves it
+    /// intact — so the walker reports `false` for it, keeping the two
+    /// engines in agreement.
     pub(super) fn subtree_references_node(
         &self,
         root: SemanticNodeId,
         target: SemanticNodeId,
     ) -> bool {
-        let target_name: Option<Arc<str>> =
-            self.graph()
-                .node_data(target)
-                .and_then(|d| match d.as_ref() {
-                    SemanticNodeData::TypeParam { display_name, .. } => {
-                        Some(Arc::clone(display_name))
-                    }
-                    SemanticNodeData::Infer { name } => Some(Arc::clone(name)),
-                    _ => None,
-                });
+        let (target_name, target_is_infer): (Option<Arc<str>>, bool) =
+            match self.graph().node_data(target).as_deref() {
+                Some(SemanticNodeData::TypeParam { display_name, .. }) => {
+                    (Some(Arc::clone(display_name)), false)
+                }
+                Some(SemanticNodeData::Infer { name }) => (Some(Arc::clone(name)), true),
+                _ => (None, false),
+            };
 
         let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
         let mut stack: Vec<SemanticNodeId> = Vec::new();
@@ -833,29 +831,33 @@ impl<'a> ProjectSemanticDispatch<'a> {
             };
             match data.as_ref() {
                 // Cross-variant name fallback: an `Infer { name }`
-                // whose `name` matches the binder's display name is a
+                // whose `name` matches an Infer BINDER's name is a
                 // structural reference, per
                 // `substitute_with_change_tracking`'s `Infer` arm.
+                // Under a `TypeParam` binder the same-name `Infer` is
+                // a fresh conditional-scoped declaration shadowing the
+                // parameter — substitute leaves it intact, so the
+                // walker must not count it as a reference.
                 SemanticNodeData::Infer { name } => {
-                    if let Some(t) = target_name.as_ref() {
-                        if t.as_ref() == name.as_ref() {
-                            return true;
+                    if target_is_infer {
+                        if let Some(t) = target_name.as_ref() {
+                            if t.as_ref() == name.as_ref() {
+                                return true;
+                            }
                         }
                     }
                 }
                 // A `TypeParam` reference whose `display_name` matches
                 // the binder's name is ALSO a structural reference when
-                // the binder itself is `Infer` (substitute's lines 120–
-                // 130 cross-variant bridge). Under the `build_mapped_type`
-                // hoist contract the binder is always a `TypeParam`, so
-                // this branch is a no-op for the hoist caller; including
-                // it keeps the walker symmetric with substitute and
-                // robust against future callers passing an `Infer` target.
+                // the binder itself is `Infer` (substitute's
+                // TypeParam-by-name cross-variant bridge). Under the
+                // `build_mapped_type` hoist contract the binder is
+                // always a `TypeParam`, so this branch is a no-op for
+                // the hoist caller; including it keeps the walker
+                // symmetric with substitute and robust against future
+                // callers passing an `Infer` target.
                 SemanticNodeData::TypeParam { display_name, .. } => {
-                    if matches!(
-                        self.graph().node_data(target).as_deref(),
-                        Some(SemanticNodeData::Infer { .. })
-                    ) {
+                    if target_is_infer {
                         if let Some(t) = target_name.as_ref() {
                             if t.as_ref() == display_name.as_ref() {
                                 return true;
@@ -937,6 +939,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 SemanticNodeData::InstantiationRef { args, .. } => {
                     for arg in args.iter() {
                         stack.push(*arg);
+                    }
+                }
+                SemanticNodeData::MergedDecl { contributors } => {
+                    for contributor in contributors.iter() {
+                        stack.push(*contributor);
                     }
                 }
                 SemanticNodeData::Function {
