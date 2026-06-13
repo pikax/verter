@@ -3,10 +3,6 @@ import { dirname, resolve } from "node:path";
 
 import {
   TypeInfoSession,
-  type ProjectionMode,
-  type ResolveSymbolResult,
-  type EvaluateTypeExpressionResult,
-  type TypeDescriptor,
 } from "@verter/typeinfo";
 
 const here = dirname(fileURLToPath(import.meta.url));
