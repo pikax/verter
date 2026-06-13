@@ -81,6 +81,8 @@ pub mod host_audit_runtime;
 #[cfg(test)]
 mod host_lifecycle_cascade_tests;
 #[cfg(test)]
+mod lazy_decl_body_tests;
+#[cfg(test)]
 mod narrowed_scope_snapshot_generation_tests;
 #[cfg(test)]
 mod overlay_promotion_isolation_tests;
@@ -140,6 +142,8 @@ mod component_meta_terminal_mode_tests;
 #[cfg(test)]
 mod component_meta_warm_invalidation_oracle_tests;
 pub mod cross_file;
+pub(crate) mod decl_body_memo;
+pub(crate) mod decl_lowering;
 pub mod fact_emission;
 // `fact_signature_helpers` is `pub(crate)`: the module's internals are
 // implementation detail. The only externally-needed type is
@@ -651,6 +655,19 @@ pub struct VerterHost {
     /// is gated alongside it.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) host_cpu_pool: Arc<verter_scheduler::HostCpuPool>,
+    /// Scheduler-side lazy declaration-lowering service: dedicated
+    /// worker threads own the retained (!Send) eval-program parses per
+    /// content generation and run pure per-declaration lowering jobs
+    /// for the declaration-body memos. Built once at host construction;
+    /// shared by every `IndexedReady` artifact's memo. Retention is
+    /// LEASE-PINNED — a memo holds the snapshot for its content
+    /// generation, so a live artifact reuses one parse instead of
+    /// re-parsing per body demand. On `wasm32` there are no worker
+    /// threads and the (`Rc`-backed, `!Send`) parse cannot be a service
+    /// field, so the retained snapshot lives in a single-thread
+    /// thread-local shard (`WASM_DECL_LOWERING_SHARD`) the job runs
+    /// inline against — still lease-pinned, NOT a re-parse per demand.
+    pub(crate) decl_lowering: Arc<crate::decl_lowering::DeclLoweringService>,
     /// Per-host test-injection knob for the compile-tier cold-build
     /// path. When set to `N > 0`, the `Session` cold-compute closure
     /// observes `N` synthetic `FileWholeHash` facts via `observe_fan_out`

@@ -110,6 +110,17 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             // their published surface.
             "audit_publishes_member_edge_with_published_field_provenance_at_macro_boundaries",
             "macro_impacting_constructs_fail_lowering_not_silent_skip",
+            // Demand-scoped declaration-body lowering: publish is
+            // index-only (zero bodies), a resolve lowers exactly the
+            // demanded declaration closure, concurrent first-touch
+            // singleflights, publish-time fact emission hashes no
+            // bodies, and the artifact stores no eval env / eager
+            // body — bodies live only in the lazy `DeclBodyMemo`.
+            "indexed_ready_publish_lowers_zero_decl_bodies",
+            "resolve_unrelated_symbol_lowers_only_demanded_decl",
+            "lazy_decl_body_singleflight_lowers_once",
+            "no_indexed_ready_eval_env_or_type_decl_body_storage",
+            "emit_parse_facts_never_hashes_decl_bodies",
         ],
     ),
     (
@@ -320,6 +331,10 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             // pinning the "no synthesise-then-reparse via checker text"
             // facet of this rule.
             "retired_symbols_absent_from_production_source",
+            // Lazy top-level declaration-body lowering reuses the
+            // scheduler-retained parse snapshot and returns owned typed
+            // IR — never a raw-string re-parse per body touch.
+            "lazy_decl_lowering_uses_scheduler_snapshot_not_reparse",
         ],
     ),
     (

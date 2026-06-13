@@ -235,13 +235,12 @@ fn run_baseline_measurement() -> BaselineSnapshot {
         p99_per_component_ms: p99,
         fact_validation_warm_hit_count: 0,
         fact_validation_miss_count: canonicals.len() as u64,
-        // Stage-5 sub-task A audit conclusion: today every
-        // `(scope_canonical_id, base, scope_axis, mode)` slot in
-        // `MaterializeStructureDb` carries exactly one entry. The
-        // hermetic baseline's `ChatMessageProps`-style shared dep
-        // (`DerivedProps`) appears in all N component-owners' slots
-        // pre-cutover, giving cardinality == N. Stage 5 inverts to
-        // == 1 (single shared slot, multi-candidate).
+        // Today every `(scope_canonical_id, base, scope_axis, mode)`
+        // slot in `MaterializeStructureDb` carries exactly one entry.
+        // The hermetic baseline's `ChatMessageProps`-style shared dep
+        // (`DerivedProps`) appears in all N component-owners' slots when
+        // stored per-owner (cardinality == N); the multi-candidate
+        // single-shared-slot form collapses it to == 1.
         materialise_cardinality_per_owner: canonicals.len() as f64,
         candidate_set_size_histogram: CandidateSetSizeHistogram {
             one: canonicals.len() as u64,

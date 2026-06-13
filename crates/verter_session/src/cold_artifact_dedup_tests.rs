@@ -1,13 +1,15 @@
 //! Cold per-file artifact-build dedup contract.
 //!
 //! One cold resolve of one canonical performs exactly ONE eval-program
-//! parse, ONE `EvalEnv` build, ONE `ShallowFileState` build, and ONE
-//! `IndexedReady` materialisation — the `ensure_indexed_ready`
-//! materialise closure is the single per-file cold build, every other
-//! path reads its output or joins its singleflight. Warm resolves build
-//! nothing; route-resolution mutations refresh route edges WITHOUT
-//! re-parsing (the edge-refresh path reuses the content-addressed
-//! payload).
+//! parse, ONE `ShallowFileState` build, and ONE `IndexedReady`
+//! materialisation — the `ensure_indexed_ready` materialise closure is
+//! the single per-file cold build, every other path reads its output or
+//! joins its singleflight. The cold build is INDEX-ONLY: it builds ZERO
+//! whole-file `EvalEnv`s (the env is a lazy demand product of the
+//! artifact's declaration-body memo — `eval_env_builds` counts those
+//! demands). Warm resolves build nothing; route-resolution mutations
+//! refresh route edges WITHOUT re-parsing (the edge-refresh path reuses
+//! the content-addressed payload).
 //!
 //! Counters are host-owned `MetaProvenance` atomics (deterministic, no
 //! wall-clock); see `types::MetaProvenance` for the counter contract.
@@ -78,8 +80,10 @@ fn assert_single_build(provenance: &MetaProvenanceSnapshot, label: &str) {
         provenance.eval_program_parses,
     );
     assert_eq!(
-        provenance.eval_env_builds, 1,
-        "{label}: exactly one EvalEnv build per cold canonical build (got {})",
+        provenance.eval_env_builds, 0,
+        "{label}: a cold canonical build is INDEX-ONLY — the whole-file \
+         EvalEnv is a lazy demand product and a per-symbol resolve must \
+         never demand it (got {})",
         provenance.eval_env_builds,
     );
     assert_eq!(
@@ -364,14 +368,13 @@ fn vue_tsx_sfc_canonical_state_parses_under_authoritative_source_type() {
         .ensure_indexed_ready(canonical)
         .expect("vue canonical must materialise");
     assert!(
-        indexed.shallow_state.value_symbols.contains_key("node"),
+        indexed.shallow_state.has_value_symbol("node"),
         "the INDEXED artifact's shallow value inventory must include the \
          TSX-bodied binding (the canonical artifact was built from a \
          worse env than the resolve-route probe); value_symbols = {:?}",
         indexed
             .shallow_state
-            .value_symbols
-            .keys()
+            .value_symbol_names()
             .collect::<Vec<_>>(),
     );
     let provenance = snap(&host);
@@ -412,10 +415,21 @@ fn vue_generic_sfc_canonical_env_carries_script_setup_type_params() {
         .ensure_indexed_ready(canonical)
         .expect("generic vue canonical must materialise");
     assert!(
-        indexed.eval_env().type_bindings.contains_key("T"),
+        indexed
+            .shallow_state
+            .decl_bodies()
+            .whole_env()
+            .type_bindings
+            .contains_key("T"),
         "the INDEXED artifact's eval env must carry the script-setup \
          generic binding `T`; bindings = {:?}",
-        indexed.eval_env().type_bindings.keys().collect::<Vec<_>>(),
+        indexed
+            .shallow_state
+            .decl_bodies()
+            .whole_env()
+            .type_bindings
+            .keys()
+            .collect::<Vec<_>>(),
     );
     let provenance = snap(&host);
     assert_eq!(
@@ -451,8 +465,9 @@ fn route_then_deepen_is_one_build_per_file() {
         provenance.eval_program_parses,
     );
     assert_eq!(
-        provenance.eval_env_builds, 2,
-        "exactly one EvalEnv build per canonical (barrel + leaf), got {}",
+        provenance.eval_env_builds, 0,
+        "route-then-deepen is per-symbol demand — neither canonical's \
+         whole-file EvalEnv may build (got {})",
         provenance.eval_env_builds,
     );
     assert_eq!(
@@ -961,7 +976,6 @@ fn moved_parse_env_forces_full_rematerialise_not_edge_refresh() {
         export_signatures: built.export_signatures.clone(),
         snapshot: Arc::clone(&built.snapshot),
         external_type_analysis: Arc::clone(&built.external_type_analysis),
-        eval_env: Arc::clone(built.eval_env()),
         declares_interface_app_config: built.declares_interface_app_config,
     };
     let mut moved_env = live_env;
@@ -976,9 +990,21 @@ fn moved_parse_env_forces_full_rematerialise_not_edge_refresh() {
         .ensure_indexed_ready(owner)
         .expect("owner must re-materialise under the live parse env");
     let provenance = snap(&host);
+    // The rebuild reuses the lowering service's RETAINED snapshot: it was
+    // parsed under the LIVE parse env at first build, and the retention
+    // key (`SnapshotKey`) carries `parse_env_hash`, so only a parse made
+    // under the SAME live env can answer (a snapshot parsed under a moved
+    // env can never serve — pinned by the decl_lowering service test
+    // `moved_parse_env_key_forces_fresh_parse`).
     assert_eq!(
-        provenance.eval_program_parses, 1,
-        "a moved parse env must force a re-parse under the live env"
+        provenance.eval_program_parses, 0,
+        "the full rematerialise reuses the live-env retained snapshot \
+         (got {} parses)",
+        provenance.eval_program_parses,
+    );
+    assert_eq!(
+        provenance.indexed_ready_materializes, 1,
+        "a moved parse env must force a FULL rematerialise"
     );
     assert_eq!(
         provenance.indexed_ready_edge_refreshes, 0,

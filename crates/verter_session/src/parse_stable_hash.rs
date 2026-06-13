@@ -6,44 +6,63 @@
 //! - whitespace changes
 //! - comment additions / deletions
 //! - JSDoc edits
-//! - generic param identifier rename (`T` ↔ `U`) — applies once the fact-emission walk
-//!   lowers typed parameter lists; today, hashes the shallow symbol
-//!   inventory only, which does NOT include parameter identifiers, so the
-//!   property already holds.
+//! - generic param IDENTIFIER rename (`T` ↔ `U`) — the hash folds a type
+//!   parameter's ARITY and the presence of its constraint / default
+//!   clauses, never the parameter identifier, so an alpha-rename is
+//!   invariant.
+//! - a member's VALUE-type edit (`x: string` ↔ `x: number`) — the
+//!   member's body type is lowered on demand, never at publish, so it is
+//!   not part of this skeleton hash (body sensitivity rides the
+//!   `FileWholeHash` rail).
 //!
 //! It **changes** under decl-shape edits:
 //!
 //! - adding / removing a declaration
 //! - renaming a declaration
 //! - changing a declaration's kind (`interface` ↔ `type`)
-//! - adding / removing a member
-//! - renaming a member
-//! - changing a member's kind
+//! - adding / removing / renaming a member
+//! - changing a member's kind (property ↔ method), `optional`, or
+//!   `readonly` flag
+//! - changing a type parameter's ARITY (count) or the presence of its
+//!   constraint / default clause
+//! - splitting / merging a same-name declaration (the source-order
+//!   CONTRIBUTOR COUNT changes even when the unioned member set does not)
+//! - adding / removing / renaming an object-literal value member, or
+//!   changing its header flags
 //!
 //! ## Algorithm (R27 stack-safe)
 //!
-//! The hash walks the [`ShallowFileState`] symbol inventory in a stable
-//! order. The inventory captures only top-level declarations (the post-
-//! shallow-analysis decl skeleton); deep member bodies live in
-//! `Member`/`MemberShape` facts emitted by the fact-emission walk.
+//! The hash walks the [`ShallowFileState`] header inventory in a stable
+//! order. The inventory captures only top-level declaration HEADERS (the
+//! post-shallow-analysis decl skeleton); member VALUE types and other
+//! body data live in `Member`/`MemberShape` facts lowered on demand.
 //!
 //! 1. Sort symbol names per kind so order is independent of the parse's
 //!    declaration order. (Decl reorders within a file are cosmetic for the
 //!    SHALLOW skeleton — the parse_stable_hash is invariant under
 //!    reorder.)
-//! 2. For each symbol, emit `(kind, name)` and (for type symbols with
-//!    members) the sorted member name list.
-//! 3. For exports, emit `(exported_name, target_kind)`.
-//! 4. Hash the serialised tuple stream with xxh3.
+//! 2. For each TYPE symbol, emit `(kind, name)`, the type-parameter shape
+//!    (arity + per-param constraint/default presence, IN ORDER, never the
+//!    identifier), the contributor count, and the name-sorted member
+//!    headers `(name, kind, optional, readonly)`.
+//! 3. For each VALUE symbol, emit `(kind, name)`, the contributor count,
+//!    and the name-sorted object-member headers `(name, kind, optional,
+//!    readonly)`.
+//! 4. For exports, emit `(exported_name, target_kind)`.
+//! 5. Hash the serialised tuple stream with xxh3.
 //!
-//! A future extension may the walk with typed-IR-derived alpha-normalisation
-//! (e.g., to make the body of a `type Foo<T> = T[]` stable under
-//! `T` ↔ `U` rename). The current skeleton does NOT inspect bodies.
+//! The skeleton folds header SHAPE only — it never inspects declaration
+//! bodies (no member value types, no lowered clauses).
 
+use verter_semantic::analysis::decl_headers::{MemberHeader, MemberHeaderKind};
 use verter_semantic::analysis::Hash16;
 use xxhash_rust::xxh3::xxh3_128;
 
 use crate::project_type_store::IndexedReady;
+
+#[cfg(test)]
+#[path = "parse_stable_hash_tests.rs"]
+mod parse_stable_hash_tests;
 
 const SALT: &[u8] = b"verter-parse-stable-hash:v1";
 const SEP: u8 = 0u8;
@@ -60,39 +79,96 @@ pub fn compute_parse_stable_hash(indexed: &IndexedReady) -> Hash16 {
     buf.extend_from_slice(SALT);
     buf.push(SEP);
 
-    // ── Section: type symbols ──
+    // ── Section: type symbols (HEADER inventory — no body lowering) ──
     write_section(&mut buf, b"types");
-    let mut type_keys: Vec<&String> = shallow.symbols.keys().collect();
-    type_keys.sort();
+    let mut type_keys: Vec<&str> = shallow.type_symbol_names().collect();
+    type_keys.sort_unstable();
     for name in type_keys {
-        let symbol = &shallow.symbols[name];
-        write_decl(&mut buf, kind_str_type(&symbol.kind), name);
-        // Emit member skeleton (member name set only — bodies live in
-        // `Member` facts from the fact-emission walk).
-        let mut members: Vec<&String> = symbol.member_deps.keys().collect();
-        members.sort();
-        for m in members {
-            buf.extend_from_slice(b"m:");
-            buf.extend_from_slice(m.as_bytes());
+        let Some(kind) = shallow.type_symbol_kind(name) else {
+            continue;
+        };
+        write_decl(&mut buf, kind_str_type(&kind), name);
+        // Type-parameter SHAPE: arity (count) + per-parameter
+        // constraint/default-clause presence, IN DECLARATION ORDER. The
+        // parameter IDENTIFIER is deliberately NOT folded so an
+        // alpha-rename (`T` ↔ `U`) stays invariant; arity + clause
+        // presence are semantic-shape signals that DO move the hash.
+        if let Some(params) = shallow.type_param_headers(name) {
+            buf.extend_from_slice(b"tp:");
+            buf.extend_from_slice(&(params.len() as u32).to_le_bytes());
+            for param in params {
+                buf.push(u8::from(param.constraint_span.is_some()));
+                buf.push(u8::from(param.default_span.is_some()));
+            }
             buf.push(SEP);
+        }
+        // Contributor count: a same-name decl split / merge changes the
+        // number of contributing top-level statements even when the
+        // unioned member set is unchanged.
+        if let Some(count) = shallow.type_contributor_count(name) {
+            buf.extend_from_slice(b"tc:");
+            buf.extend_from_slice(&(count as u32).to_le_bytes());
+            buf.push(SEP);
+        }
+        // Emit member skeleton: name + header SHAPE (kind, optional,
+        // readonly). Member VALUE types are body data, lowered on demand
+        // — NOT folded here. Sorted by name so source order is cosmetic.
+        let mut members: Vec<&MemberHeader> = shallow
+            .type_member_headers(name)
+            .map(|headers| headers.iter().collect())
+            .unwrap_or_default();
+        members.sort_unstable_by(|a, b| a.name.cmp(&b.name));
+        for m in members {
+            write_member_header(&mut buf, m);
         }
     }
 
-    // ── Section: value symbols ──
+    // ── Section: value symbols (HEADER inventory) ──
     write_section(&mut buf, b"values");
-    let mut value_keys: Vec<&String> = shallow.value_symbols.keys().collect();
-    value_keys.sort();
+    let mut value_keys: Vec<&str> = shallow.value_symbol_names().collect();
+    value_keys.sort_unstable();
     for name in value_keys {
-        let symbol = &shallow.value_symbols[name];
-        write_decl(&mut buf, kind_str_value(&symbol.kind), name);
-        if let Some(members) = &symbol.enum_members {
-            let mut member_names: Vec<&String> = members.keys().collect();
-            member_names.sort();
-            for m in member_names {
-                buf.extend_from_slice(b"e:");
-                buf.extend_from_slice(m.as_bytes());
-                buf.push(SEP);
-            }
+        let Some(kind) = shallow.value_symbol_kind(name) else {
+            continue;
+        };
+        write_decl(&mut buf, kind_str_value(&kind), name);
+        // Contributor count (same-name decl split / merge).
+        if let Some(count) = shallow.value_contributor_count(name) {
+            buf.extend_from_slice(b"vc:");
+            buf.extend_from_slice(&(count as u32).to_le_bytes());
+            buf.push(SEP);
+        }
+        // Object-literal / class-static member headers: name + header
+        // SHAPE (kind, optional, readonly). The old hash folded NOTHING
+        // about value members, so an object-member add/remove/rename or
+        // header-flag change was invisible. Sorted by name (source order
+        // cosmetic).
+        let mut members: Vec<&MemberHeader> = shallow
+            .value_object_member_headers(name)
+            .map(|headers| headers.iter().collect())
+            .unwrap_or_default();
+        members.sort_unstable_by(|a, b| a.name.cmp(&b.name));
+        for m in members {
+            write_member_header(&mut buf, m);
+        }
+    }
+
+    // ── Section: enum symbols (HEADER inventory — member NAMES only) ──
+    // Enums live in their own header table (the eval-env walk never
+    // registers them as value symbols), so they must be folded in
+    // explicitly: a variant add/rename/remove is a decl-shape edit that
+    // MUST move this hash. Member order is preserved (auto-increment enum
+    // values are positional, so a reorder is a semantic change).
+    write_section(&mut buf, b"enums");
+    let mut enum_keys: Vec<&str> = shallow.enum_symbol_names().collect();
+    enum_keys.sort_unstable();
+    for name in enum_keys {
+        write_decl(&mut buf, "enum", name);
+        let members = shallow.enum_member_names(name).unwrap_or_default();
+        for m in members {
+            buf.extend_from_slice(b"e:");
+            buf.extend_from_slice(m.as_bytes());
+            buf.push(SEP);
         }
     }
 
@@ -154,6 +230,20 @@ fn write_decl(buf: &mut Vec<u8>, kind: &str, name: &str) {
     buf.push(b':');
     buf.extend_from_slice(name.as_bytes());
     buf.push(SEP);
+}
+
+/// Emit one member header's SHAPE: name + kind tag + optional/readonly
+/// flags. Member VALUE types are body data and are NOT folded.
+fn write_member_header(buf: &mut Vec<u8>, member: &MemberHeader) {
+    buf.extend_from_slice(b"m:");
+    buf.extend_from_slice(member.name.as_bytes());
+    buf.push(SEP);
+    buf.push(match member.kind {
+        MemberHeaderKind::Property => b'p',
+        MemberHeaderKind::Method => b'm',
+    });
+    buf.push(u8::from(member.optional));
+    buf.push(u8::from(member.readonly));
 }
 
 fn write_export_target(

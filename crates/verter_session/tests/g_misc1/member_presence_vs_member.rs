@@ -20,8 +20,8 @@
 
 use std::sync::Arc;
 
-use rustc_hash::{FxHashMap, FxHashSet};
-use verter_semantic::analysis::type_eval::{TypeDeclBody, TypeDeclKind};
+use rustc_hash::FxHashMap;
+use verter_semantic::analysis::type_eval::TypeDeclKind;
 use verter_semantic::facts::{
     compute_member_presence_hash, compute_semantic_hash, FactKey, MemberKind, SymbolSpace,
     UnresolvedLens,
@@ -29,9 +29,7 @@ use verter_semantic::facts::{
 use verter_session::fact_emission::emit_parse_facts;
 use verter_session::file_artifact_store::InternedName;
 use verter_session::project_type_store::IndexedReady;
-use verter_session::resolver_core::shallow_file_state::{
-    ExportTarget, ShallowFileState, ShallowTypeSymbol,
-};
+use verter_session::resolver_core::shallow_file_state::{ExportTarget, ShallowFileState};
 use verter_type_expr::{ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName, TypeExpr};
 
 fn empty_external(
@@ -39,7 +37,9 @@ fn empty_external(
     Arc::new(verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default())
 }
 
-/// Build a `Foo` interface from a member list `[(name, body)]`.
+/// Build a `Foo` interface from a member list `[(name, body)]` through
+/// the env-seeded construction path (synthetic header inventory +
+/// seeded declaration-body memo).
 fn build_foo(members: Vec<(&str, TypeExpr)>) -> Arc<IndexedReady> {
     let body = TypeExpr::Object(Arc::new(ObjectExpr {
         properties: members
@@ -54,22 +54,14 @@ fn build_foo(members: Vec<(&str, TypeExpr)>) -> Arc<IndexedReady> {
             })
             .collect(),
     }));
-    let mut member_deps: FxHashMap<String, Vec<String>> = FxHashMap::default();
-    for (n, _) in &members {
-        member_deps.insert((*n).to_string(), Vec::new());
-    }
-    let mut symbols = FxHashMap::default();
-    symbols.insert(
-        "Foo".to_string(),
-        ShallowTypeSymbol {
-            kind: TypeDeclKind::Interface,
-            body: TypeDeclBody::Single(body),
-            type_parameters: Vec::new(),
-            local_deps: Vec::new(),
-            external_deps: Vec::new(),
-            member_deps,
-        },
-    );
+    let mut env = verter_semantic::analysis::type_eval::EvalEnv::new();
+    env.add_type(verter_semantic::analysis::type_eval::TypeDeclInfo {
+        name: "Foo".to_string(),
+        declaration_id: 0,
+        kind: TypeDeclKind::Interface,
+        type_parameters: Vec::new(),
+        body,
+    });
     let mut exports = FxHashMap::default();
     exports.insert(
         "Foo".to_string(),
@@ -77,18 +69,8 @@ fn build_foo(members: Vec<(&str, TypeExpr)>) -> Arc<IndexedReady> {
             symbol_name: "Foo".to_string(),
         },
     );
-    let shallow = ShallowFileState {
-        whole_hash: [0u8; 16],
-        exports,
-        wildcard_reexports: Vec::new(),
-        symbols,
-        value_symbols: FxHashMap::default(),
-        import_locals: FxHashSet::default(),
-        import_targets: FxHashMap::default(),
-        augmentation_scopes: Default::default(),
-        augmentation_value_scopes: Default::default(),
-        analysis: empty_external(),
-    };
+    let mut shallow = ShallowFileState::from_analysis([0u8; 16], empty_external(), Some(&env));
+    shallow.exports = exports;
     Arc::new(IndexedReady::new_for_test_with_state(
         [0u8; 16],
         Arc::new(shallow),

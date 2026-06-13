@@ -114,67 +114,7 @@ pub fn build_eval_env(program: &Program<'_>, source: &str) -> EvalEnv {
     let mut env = EvalEnv::new();
 
     for stmt in &program.body {
-        match stmt {
-            Statement::TSTypeAliasDeclaration(decl) => {
-                extract_type_alias(decl, source, &mut env);
-            }
-            Statement::TSInterfaceDeclaration(decl) => {
-                extract_interface(decl, source, &mut env);
-            }
-            Statement::TSModuleDeclaration(module) => {
-                extract_module_declaration(module, source, &mut env, None);
-            }
-            Statement::TSGlobalDeclaration(global) => {
-                extract_global_declaration(global, source, &mut env);
-            }
-            Statement::ClassDeclaration(decl) => {
-                extract_class(decl, source, &mut env);
-            }
-            Statement::FunctionDeclaration(func) => {
-                extract_function(func, source, &mut env);
-            }
-            Statement::VariableDeclaration(var_decl) => {
-                for decl in &var_decl.declarations {
-                    extract_variable(decl, var_decl.kind, source, &mut env);
-                }
-            }
-            Statement::ExportNamedDeclaration(export) => {
-                if let Some(ref decl) = export.declaration {
-                    extract_from_declaration(decl, source, &mut env);
-                }
-            }
-            Statement::ExportDefaultDeclaration(export) => match &export.declaration {
-                ExportDefaultDeclarationKind::FunctionDeclaration(func) => {
-                    extract_function(func, source, &mut env);
-                }
-                ExportDefaultDeclarationKind::ClassDeclaration(cls) => {
-                    extract_class(cls, source, &mut env);
-                    // `export default class Props { … }` exports the class under
-                    // the `default` export name (the named identifier is NOT a
-                    // separate export — see ShallowFileState's default-export
-                    // contract), but `extract_class` keys the instance shape under
-                    // the declared name `Props`. A barrel that reaches this file
-                    // resolves the `(canonical, "default")` route, so the class
-                    // body must also be reachable under `default`. Alias the
-                    // declared-name type symbol into a `default` entry (same body,
-                    // same params) so the prepared-decl lookup at the resolved
-                    // default route hydrates the class.
-                    if let Some(name) = class_or_function_default_name(&cls.id) {
-                        alias_default_export_type_symbol(&mut env, &name);
-                    }
-                }
-                ExportDefaultDeclarationKind::TSInterfaceDeclaration(iface) => {
-                    extract_interface(iface, source, &mut env);
-                    alias_default_export_type_symbol(&mut env, iface.id.name.as_str());
-                }
-                other => {
-                    if let Some(expr) = other.as_expression() {
-                        extract_default_expression(expr, source, &mut env);
-                    }
-                }
-            },
-            _ => {}
-        }
+        lower_top_level_statement(stmt, source, &mut env);
     }
 
     // JSDoc `@typedef {T} Name` declarations are first-class REGULAR types: a
@@ -187,6 +127,113 @@ pub fn build_eval_env(program: &Program<'_>, source: &str) -> EvalEnv {
     register_jsdoc_typedefs(&program.comments, source, &mut env);
 
     env
+}
+
+/// Lower ONE top-level statement's declarations into `env`.
+///
+/// The statement-granular lowering entry: [`build_eval_env`] folds every
+/// statement through it, and the lazy declaration-body service lowers only
+/// a demanded symbol's contributing statements through the same arms — one
+/// shared lowering path, no per-consumer fork. JSDoc `@typedef`
+/// registration is NOT part of the statement walk (it reads the program's
+/// comments); whole-env builds run [`build_eval_env`], selective demands
+/// register a demanded typedef through
+/// [`lower_jsdoc_typedef_named`].
+pub fn lower_top_level_statement(stmt: &Statement<'_>, source: &str, env: &mut EvalEnv) {
+    match stmt {
+        Statement::TSTypeAliasDeclaration(decl) => {
+            extract_type_alias(decl, source, env);
+        }
+        Statement::TSInterfaceDeclaration(decl) => {
+            extract_interface(decl, source, env);
+        }
+        Statement::TSModuleDeclaration(module) => {
+            extract_module_declaration(module, source, env, None);
+        }
+        Statement::TSGlobalDeclaration(global) => {
+            extract_global_declaration(global, source, env);
+        }
+        Statement::ClassDeclaration(decl) => {
+            extract_class(decl, source, env);
+        }
+        Statement::FunctionDeclaration(func) => {
+            extract_function(func, source, env);
+        }
+        Statement::VariableDeclaration(var_decl) => {
+            for decl in &var_decl.declarations {
+                extract_variable(decl, var_decl.kind, source, env);
+            }
+        }
+        Statement::ExportNamedDeclaration(export) => {
+            if let Some(ref decl) = export.declaration {
+                extract_from_declaration(decl, source, env);
+            }
+        }
+        Statement::ExportDefaultDeclaration(export) => match &export.declaration {
+            ExportDefaultDeclarationKind::FunctionDeclaration(func) => {
+                extract_function(func, source, env);
+            }
+            ExportDefaultDeclarationKind::ClassDeclaration(cls) => {
+                extract_class(cls, source, env);
+                // `export default class Props { … }` exports the class under
+                // the `default` export name (the named identifier is NOT a
+                // separate export — see ShallowFileState's default-export
+                // contract), but `extract_class` keys the instance shape under
+                // the declared name `Props`. A barrel that reaches this file
+                // resolves the `(canonical, "default")` route, so the class
+                // body must also be reachable under `default`. Alias the
+                // declared-name type symbol into a `default` entry (same body,
+                // same params) so the prepared-decl lookup at the resolved
+                // default route hydrates the class.
+                if let Some(name) = class_or_function_default_name(&cls.id) {
+                    alias_default_export_type_symbol(env, &name);
+                }
+            }
+            ExportDefaultDeclarationKind::TSInterfaceDeclaration(iface) => {
+                extract_interface(iface, source, env);
+                alias_default_export_type_symbol(env, iface.id.name.as_str());
+            }
+            other => {
+                if let Some(expr) = other.as_expression() {
+                    extract_default_expression(expr, source, env);
+                }
+            }
+        },
+        _ => {}
+    }
+}
+
+/// Register the JSDoc `@typedef {T} Name` declaration named `name` into
+/// `env`, applying the same TS-decl precedence as the whole-env walk: a
+/// name a TS declaration already claimed in `env` is skipped. Returns
+/// `true` when a typedef body was registered.
+///
+/// The selective counterpart to the whole-env typedef registration inside
+/// [`build_eval_env`] — a demanded symbol that exists only as a `@typedef`
+/// lowers exactly its own `{T}` payload.
+pub fn lower_jsdoc_typedef_named(
+    comments: &[oxc_ast::Comment],
+    source: &str,
+    name: &str,
+    env: &mut EvalEnv,
+) -> bool {
+    if env.type_symbols.contains_key(name) {
+        return false;
+    }
+    for typedef in crate::analysis::jsdoc::collect_jsdoc_typedefs(comments, source) {
+        if typedef.name != name {
+            continue;
+        }
+        env.add_type(TypeDeclInfo {
+            name: typedef.name,
+            declaration_id: 0,
+            kind: TypeDeclKind::Alias,
+            type_parameters: Vec::new(),
+            body: typedef.body,
+        });
+        return true;
+    }
+    false
 }
 
 /// Register each JSDoc `@typedef {T} Name` from the program's comments as a

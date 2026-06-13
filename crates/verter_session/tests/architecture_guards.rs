@@ -31,6 +31,29 @@ fn workspace_path(rel: &str) -> std::path::PathBuf {
 }
 
 #[test]
+fn vue_default_synth_uses_header_only_default_probe() {
+    // The `.vue` default-injection seam must probe for an existing
+    // `default` via the header-only `has_value_symbol("default")`
+    // accessor — never `value_symbol("default")`, which would
+    // materialize a value body just to test presence.
+    let src = read_workspace_file("crates/verter_session/src/resolver_core/vue_default_synth.rs");
+    // `.value_symbol("default")` is the bare materializing call; the
+    // leading dot excludes the permitted `.has_value_symbol("default")`
+    // (which contains `value_symbol("default")` as a substring).
+    assert!(
+        !src.contains(".value_symbol(\"default\")"),
+        "vue_default_synth.rs must NOT probe `default` via \
+         `value_symbol(\"default\")` (materializes a body); use the \
+         header-only `has_value_symbol(\"default\")` accessor"
+    );
+    assert!(
+        src.contains("has_value_symbol(\"default\")"),
+        "vue_default_synth.rs must probe `default` via the header-only \
+         `has_value_symbol(\"default\")` accessor"
+    );
+}
+
+#[test]
 fn no_read_source_in_component_meta() {
     // After the Tier 2 W5d split `component_meta.rs` became a directory
     // module (`component_meta/{mod,cold_resolver,projected_type_expr,
@@ -4588,6 +4611,17 @@ mod foundations_guards {
         // `#[cfg(test)] mod tests` inline in
         // `cache_runtime/world_snapshot.rs`.
         "pub(crate) mod cache_runtime",
+        // Lazy declaration-body memo — the per-artifact
+        // content-addressed body store (`DeclBodyMemo`) bodies lower
+        // into on first semantic demand. Crate-private: consumers
+        // reach it via `ShallowFileState::decl_bodies()` /
+        // `IndexedReady.decl_bodies`; no downstream crate touches it.
+        "pub(crate) mod decl_body_memo",
+        // Scheduler-side lazy lowering service — worker-shard
+        // retained eval-program parses (`DeclLoweringService`).
+        // Crate-private: the materialise closure and the memo are its
+        // only callers.
+        "pub(crate) mod decl_lowering",
         // R3/R26/R28 — fact-validation helpers shared by the inner
         // component-meta caches (Family A/B). Carries
         // `validate_fact_signature`, `bubble_fact_signature`, and the
@@ -5345,6 +5379,44 @@ mod foundations_guards {
                     }
                 }
                 search_from = abs + prefix.len();
+            }
+        }
+        // `Wave <digit>` / `wave-<digit>` / `wave<digit>` (case-
+        // insensitive on `wave`) — the project-management "Wave"
+        // build-slice marker, sibling of the `Slice <digit>` family
+        // above (the orchestrator's audit/cache work is organised into
+        // numbered Waves). A leading word boundary keeps compounds like
+        // `microwave` / `shockwave` / `wavefront` from matching; after
+        // the `wave` token an OPTIONAL run of `-`/space separators (so
+        // `wave2`, `wave-2`, and `wave 2` all trip) must be followed by
+        // an ASCII digit. `_` is deliberately NOT in the run set, so
+        // underscore identifiers like `wave_3_entry_points_propagate_tls`
+        // / `WAVE_3_ENTRY_POINTS` stay valid, and common-noun prose (`a
+        // follow-up wave`, `within-wave churn`, `per wave`) lacks the
+        // digit tail and is preserved. Scanned against the lowercased
+        // line so every capitalisation (including ALL-CAPS `WAVE-2`)
+        // trips in one pass.
+        {
+            let needle = "wave";
+            let lower_bytes = lower.as_bytes();
+            let mut search_from = 0usize;
+            while let Some(rel) = lower[search_from..].find(needle) {
+                let abs = search_from + rel;
+                let is_word_start = abs == 0
+                    || !(lower_bytes[abs - 1].is_ascii_alphanumeric()
+                        || lower_bytes[abs - 1] == b'_');
+                if is_word_start {
+                    let mut after = abs + needle.len();
+                    while after < lower_bytes.len()
+                        && (lower_bytes[after] == b'-' || lower_bytes[after] == b' ')
+                    {
+                        after += 1;
+                    }
+                    if after < lower_bytes.len() && lower_bytes[after].is_ascii_digit() {
+                        return true;
+                    }
+                }
+                search_from = abs + needle.len();
             }
         }
         // `deleted in <digit>` / `deletion in <digit>` — deletion
@@ -6184,6 +6256,7 @@ mod foundations_guards {
             "consult #",                 // numbered `consult #<digit>` marker
             "§",                         // plan § / decimal-section refs
             "slice",                     // Slice \d
+            "wave",                      // Wave \d build-slice marker
             "deleted in",                // deletion history
             "deletion in",               // deletion history
             "block",                     // \bblock \d\b / Block \d.x
@@ -6539,6 +6612,15 @@ mod foundations_guards {
         "// BLOCK 6 descends the per-member cursor.",
         "// ROUND-7 substrate extension closes the publication boundary.",
         "// SLICE 3 of the wave plan owns the projector surface.",
+        // WAVE-N plan vocabulary — the project-management "Wave"
+        // build-slice marker, digit-bearing after `-`/space
+        // normalisation, mirroring the Phase / Stage / Slice families.
+        // All four separator forms must trip: `WAVE-2`, `WAVE 2`,
+        // `wave2`, `wave-2`.
+        "// This is the established WAVE-2 rail, not a second mechanism.",
+        "// WAVE 2 made the ModuleAugmentation fact value header-level.",
+        "// the wave2 demand-lowering branch retained the parse snapshot.",
+        "// pre-wave-2 wiring left the fingerprint header-only.",
         // Bare `cutover` with NO old fixed needle and NO prefix — pins
         // the standalone case-insensitive `cutover` branch. Every other
         // cutover fixture above carries a second needle (`D-Cutover`,
@@ -6650,6 +6732,20 @@ mod foundations_guards {
             "// Background lookup uses the workspace's resolver.", // `round` in `Background`
             "// Surround the literal with quotes.",                // `round` in `Surround`
             "// round trip without digits.",
+            // `wave` common-noun negatives — the WAVE-N digit-bearing
+            // marker must NOT flag legitimate prose where `wave` is a
+            // common noun with NO trailing digit (verified production
+            // uses in verter_audit / host_lifecycle / resolver_store).
+            "// scheduled in a follow-up wave once the index settles.",
+            "// within-wave churn is absorbed by the retained snapshot.",
+            "// one prefetch wave completes before the next begins.",
+            "// the next wave is a cold rebuild of the owner set.",
+            "// invalidate across the wave after any token change.",
+            // `wave_<digit>` underscore identifier form is NOT the marker:
+            // the needle skips only `-`/space separators, never `_`, so
+            // guard / function names like `wave_3_entry_points_propagate_tls`
+            // and `WAVE_3_ENTRY_POINTS` are preserved.
+            "// the wave_3_entry_points_propagate_tls guard pins the TLS rail.",
             // `Codex ` prose that is NOT a consult marker: missing
             // the ordinal + `consult` suffix, and not adjacent to the
             // `audit` / `finding` / `observed` triple matched by the
@@ -9333,6 +9429,16 @@ mod general_test_archaeology {
         "crates/verter_session/tests/component_meta_audit/resolver_coverage_slot_shapes.rs",
         // Asserted `#[ignore]` reason pinned to a pending deletion.
         "crates/verter_session/tests/g_misc3/legacy_accumulate_dispatch_dep_signature_gone.rs",
+        // Pre-existing audit-infrastructure wave-build vocabulary (the
+        // audit substrate landed in numbered build waves; `Wave 3.A` /
+        // `pre-Wave-3` cross-references that build narrative, which spans
+        // the audit-infra test suite — e.g. the `WAVE_3_ENTRY_POINTS` /
+        // `wave_3_entry_points_propagate_tls` guard surface). Out of
+        // WAVE-2 scope; deferred to a dedicated audit-Wave-vocabulary
+        // cleanup so the narrative stays internally consistent.
+        "crates/verter_session/tests/g_type/type_resolution_audit_no_unrelated_imports.rs",
+        "crates/verter_session/tests/g_type/type_resolution_audit_intermediate_navigate_terminal_caller_mode.rs",
+        "crates/verter_session/tests/g_misc0/workspace_audit_tls_propagation.rs",
     ];
 
     /// Walk every `crates/*/tests/**/*.rs` file and return each
@@ -9463,7 +9569,15 @@ mod packages_ts_archaeology {
     /// hatch. Keep it minimal — only a file whose vocabulary cannot be
     /// removed without breaking the file belongs here.
     pub(super) const PACKAGES_TS_ARCHAEOLOGY_ALLOWLIST: &[&str] = &[
-        // (intentionally empty — all package source reads as final-state)
+        // Pre-existing audit-infrastructure wave-build vocabulary. The
+        // `Wave-1` alias names and `Wave-3` typed-entry-point grouping
+        // document the audit binding's build narrative (consistent across
+        // the native package's source + tests, e.g.
+        // `audit-typed-entrypoints.test.ts`). Out of WAVE-2 scope;
+        // deferred to a dedicated audit-Wave-vocabulary cleanup (mirrors
+        // the Rust-side `ARCHAEOLOGY_ALLOWLIST` audit-infra entries).
+        "packages/native/audit.ts",
+        "packages/wasm/src/audit.ts",
     ];
 
     /// `.ts` / `.tsx` / `.vue` source extension, or a package `readme.md`
@@ -15511,14 +15625,34 @@ mod single_resolution_engine_guards {
             3,
         ),
         ("crates/verter_parser/src/utils/oxc/vue/script/setup.rs", 21),
-        ("crates/verter_session/src/host_manage/eval_program.rs", 5),
+        // Lazy decl-body memo: names the per-statement LOWERING
+        // front-end (`collect_statement_dependency_names`) + the
+        // `AnalyzedExternalTypeSource` TYPE in the seeded-construction
+        // signature. No engine call — bodies lower to typed IR and
+        // resolve through the canonical dispatch.
+        ("crates/verter_session/src/decl_body_memo.rs", 3),
+        // 5 -> 2 (lazy-body cutover): `build_eval_env_and_analysis_from_program`
+        // deleted with the eager whole-file lowering path. The two
+        // remaining references are the tracked-debt element-resolver
+        // context (`NamedTypeCache` + `build_type_context`).
+        ("crates/verter_session/src/host_manage/eval_program.rs", 2),
         ("crates/verter_session/src/host_manage/jsdoc_resolve.rs", 4),
-        // 7 -> 8 (unified cold build): `build_indexed_route_surface` — the
-        // shared route-surface builder factored out of the materialise
-        // closure — names `AnalyzedExternalTypeSource` once in TYPE
-        // position (a parameter on moved code). No new engine CALL was
-        // added; the engine-call sites in this file are unchanged.
-        ("crates/verter_session/src/host_manage/prepared_decl.rs", 8),
+        // 8 -> 10 (index-only cold build): the materialise
+        // closure's cold job names `AnalyzedExternalTypeSource` in TYPE
+        // position (`ColdIndexProducts.analysis`) and calls the
+        // HEADER-ONLY analyzer variant
+        // (`analyze_external_type_program_headers`) — both lowering
+        // front-end, no new engine CALL; the legacy engine-call sites
+        // in this file are unchanged.
+        ("crates/verter_session/src/host_manage/prepared_decl.rs", 10),
+        // Overlay lane mirror of the index-only cold build: the
+        // overlay materialise job names `AnalyzedExternalTypeSource` in
+        // TYPE position and calls the HEADER-ONLY analyzer variant —
+        // lowering front-end only, no engine call.
+        (
+            "crates/verter_session/src/host_manage/overlay_materialize.rs",
+            2,
+        ),
         ("crates/verter_session/src/host_manage.rs", 6),
         (
             "crates/verter_session/src/host_resolve/external_macro_collector.rs",
@@ -19208,5 +19342,341 @@ fn new_for_test_with_state_has_no_production_call_site() {
         hits.iter()
             .any(|(loc, _)| loc.contains("src/project_type_store.rs")),
         "anti-vacuity: the scan must see the defining module's reference"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Demand-scoped declaration-body lowering: storage-shape guard.
+//
+// `IndexedReady` is a shallow declaration INDEX plus body locators — never
+// a body store: no whole-file `EvalEnv` field, no eagerly lowered
+// `TypeDeclBody` storage. Declaration bodies live exclusively in the lazy
+// `DeclBodyMemo` (demand-materialised through the scheduler-retained parse
+// snapshot); `ShallowFileState` may hold only the memo handle, a per-name
+// dependency-EDGE cache (`ClassifiedTypeDeps` — dependency edges only, no
+// body product), and the eager macro-producer synthesised `.vue`-default
+// value HEADER + its dedicated `LoweredValueDecl` body map.
+//
+// The shallow symbol STRUCTS (`ShallowTypeSymbol` / `ShallowValueSymbol`)
+// are SLIM HEADER views — kind / member-names / type-param-names /
+// contributor-count — never lowered-body handles and never body products.
+// Body data is read through the memo accessors (`type_decl` / `value_decl`);
+// dependency edges through `type_deps`.
+// ─────────────────────────────────────────────────────────────────────────
+mod lazy_decl_body_storage_guards {
+    use std::path::PathBuf;
+
+    fn read_production_source(rel: &str) -> String {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel);
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("guard must read {}: {e}", path.display()))
+    }
+
+    /// Strip `//` line comments and `/* */` block comments (string
+    /// literals are irrelevant to the struct bodies scanned here).
+    fn strip_comments(src: &str) -> String {
+        let mut out = String::with_capacity(src.len());
+        let bytes = src.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+            } else if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
+                i += 2;
+                while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                    i += 1;
+                }
+                i = (i + 2).min(bytes.len());
+            } else {
+                out.push(bytes[i] as char);
+                i += 1;
+            }
+        }
+        out
+    }
+
+    /// The brace-balanced body of `struct <name> { ... }` in
+    /// comment-stripped `src`. Panics (guard failure) when absent.
+    fn struct_body(src: &str, name: &str) -> String {
+        let needle = format!("struct {name} {{");
+        let start = src
+            .find(&needle)
+            .unwrap_or_else(|| panic!("guard must find `struct {name}`"));
+        let mut depth = 0usize;
+        let body_start = start + needle.len();
+        for (offset, ch) in src[body_start..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    if depth == 0 {
+                        return src[body_start..body_start + offset].to_string();
+                    }
+                    depth -= 1;
+                }
+                _ => {}
+            }
+        }
+        panic!("guard must find the closing brace of `struct {name}`");
+    }
+
+    #[test]
+    fn no_indexed_ready_eval_env_or_type_decl_body_storage() {
+        // ── IndexedReady: index + locators, never a body store ──
+        let store_src = strip_comments(&read_production_source("src/project_type_store.rs"));
+        let indexed = struct_body(&store_src, "IndexedReady");
+        assert!(
+            indexed.contains("shallow_state"),
+            "anti-vacuity: the extracted IndexedReady body carries its \
+             known fields"
+        );
+        for forbidden in ["eval_env", "EvalEnv", "TypeDeclBody"] {
+            assert!(
+                !indexed.contains(forbidden),
+                "`IndexedReady` must not store `{forbidden}` — it is a \
+                 shallow declaration index plus body locators; declaration \
+                 bodies are owned by the lazy `DeclBodyMemo` and lower on \
+                 first semantic demand"
+            );
+        }
+
+        // ── ShallowFileState: bodies only behind the memo; deps in a
+        //    dedicated dependency-edge cache ──
+        let state_src = strip_comments(&read_production_source(
+            "src/resolver_core/shallow_file_state.rs",
+        ));
+        let state = struct_body(&state_src, "ShallowFileState");
+        assert!(
+            state.contains("decl_bodies"),
+            "`ShallowFileState` must own the lazy `DeclBodyMemo` handle — \
+             it is the sole declaration-body authority"
+        );
+        assert!(
+            !state.contains("EvalEnv"),
+            "`ShallowFileState` must not store a whole-file `EvalEnv` — \
+             the env is a demand product of the memo (`whole_env()`)"
+        );
+        // The per-name dependency-edge cache stores `ClassifiedTypeDeps`
+        // (dependency edges ONLY, never a body product).
+        assert!(
+            state.contains("ClassifiedTypeDeps"),
+            "anti-vacuity: `ShallowFileState` must own the
+             `ClassifiedTypeDeps` dependency-edge cache"
+        );
+        // Fields split on depth-0 commas (types span multiple lines).
+        let mut fields: Vec<String> = Vec::new();
+        let mut nesting = 0i32;
+        let mut current = String::new();
+        for ch in state.chars() {
+            match ch {
+                '<' | '(' | '[' | '{' => nesting += 1,
+                '>' | ')' | ']' | '}' => nesting -= 1,
+                ',' if nesting == 0 => {
+                    fields.push(std::mem::take(&mut current));
+                    continue;
+                }
+                _ => {}
+            }
+            current.push(ch);
+        }
+        if !current.trim().is_empty() {
+            fields.push(current);
+        }
+        // No body-backed `materialized_*` shallow-symbol cache may exist:
+        // the slim symbols carry no body, so caching them as bodies is a
+        // category error. The only `Shallow*Symbol`-typed field permitted
+        // is the eager synthesised `.vue`-default HEADER record
+        // (`synthesised_value_symbols`).
+        let mut symbol_fields = 0usize;
+        for field in &fields {
+            let field_name = field
+                .split(':')
+                .next()
+                .map(|n| n.trim().trim_start_matches("pub ").trim())
+                .unwrap_or_default()
+                .to_string();
+            assert!(
+                !field_name.starts_with("materialized_"),
+                "`ShallowFileState` must NOT carry a body-backed \
+                 `materialized_*` shallow-symbol cache; found `{field_name}` \
+                 — the slim header symbols own no body, dependency edges live \
+                 in the `ClassifiedTypeDeps` cache, bodies in the memo"
+            );
+            if field.contains("ShallowTypeSymbol") || field.contains("ShallowValueSymbol") {
+                symbol_fields += 1;
+                assert!(
+                    field_name == "synthesised_value_symbols",
+                    "the only `Shallow*Symbol`-typed `ShallowFileState` field \
+                     permitted is the synthesised `.vue`-default header record \
+                     (`synthesised_value_symbols`); found `{field_name}`"
+                );
+            }
+        }
+        assert!(
+            symbol_fields == 1,
+            "anti-vacuity: the scan must see exactly the synthesised \
+             `.vue`-default header record (found {symbol_fields})"
+        );
+
+        // ── Shallow symbol STRUCTS are SLIM HEADER views, never body
+        //    stores and never lowered-body handles ──
+        //
+        // `ShallowTypeSymbol` / `ShallowValueSymbol` must carry ONLY
+        // header facts (kind, member/param NAMES, contributor count,
+        // provenance flag). They must NOT hold a lowered-body handle
+        // (`Arc<Lowered*Decl>`) and must NOT own a body product
+        // (`TypeDeclBody`, `FunctionSignature`, `ObjectExpr`, an owned
+        // `member_deps` map, a bare `type_annotation` / `signatures`, a
+        // `Vec<TypeParam>` / `type_parameters`, `enum_members`). Body data
+        // is read through the memo accessors; dependency EDGES live in
+        // `ClassifiedTypeDeps`, not inline on the header symbol.
+        for (struct_name, required_headers, forbidden_fields) in [
+            (
+                "ShallowTypeSymbol",
+                &[
+                    "kind",
+                    "type_param_names",
+                    "member_names",
+                    "contributor_count",
+                ][..],
+                &[
+                    "LoweredTypeDecl",
+                    "TypeDeclBody",
+                    "Vec<TypeParam>",
+                    "type_parameters",
+                    "member_deps",
+                    "FunctionSignature",
+                    "ObjectExpr",
+                    "local_deps",
+                    "external_deps",
+                ][..],
+            ),
+            (
+                "ShallowValueSymbol",
+                &[
+                    "kind",
+                    "object_member_headers",
+                    "is_synthesised_vue_default",
+                ][..],
+                &[
+                    "LoweredValueDecl",
+                    "FunctionSignature",
+                    "ObjectExpr",
+                    "type_annotation",
+                    "signatures",
+                    "TypeDeclBody",
+                    "Vec<TypeParam>",
+                    "enum_members",
+                ][..],
+            ),
+        ] {
+            let body = struct_body(&state_src, struct_name);
+            for forbidden in forbidden_fields {
+                assert!(
+                    !body.contains(forbidden),
+                    "`{struct_name}` must NOT carry `{forbidden}` — it is a \
+                     SLIM HEADER view; declaration bodies are owned by the \
+                     lazy `DeclBodyMemo` (read through `type_decl`/`value_decl`) \
+                     and dependency edges by `ClassifiedTypeDeps` (read through \
+                     `type_deps`); found struct body:\n{body}"
+                );
+            }
+            for required in required_headers {
+                assert!(
+                    body.contains(required),
+                    "anti-vacuity: `{struct_name}` must carry the header field \
+                     `{required}`; found struct body:\n{body}"
+                );
+            }
+        }
+
+        // ── ClassifiedTypeDeps stores dependency EDGES only, never a body
+        //    product ──
+        let deps = struct_body(&state_src, "ClassifiedTypeDeps");
+        assert!(
+            deps.contains("local_deps") && deps.contains("external_deps"),
+            "anti-vacuity: `ClassifiedTypeDeps` must carry the \
+             `local_deps` / `external_deps` dependency edges"
+        );
+        for forbidden in [
+            "LoweredTypeDecl",
+            "TypeDeclBody",
+            "FunctionSignature",
+            "ObjectExpr",
+            "member_deps",
+        ] {
+            assert!(
+                !deps.contains(forbidden),
+                "`ClassifiedTypeDeps` must store dependency edges ONLY, not \
+                 the body product `{forbidden}`"
+            );
+        }
+    }
+}
+
+/// The `wasm32` decl-lowering path must RETAIN its parse snapshot in a
+/// single-thread thread-local shard — NOT a `DeclLoweringService` field
+/// (the `Rc`-backed parse is `!Send`/`!Sync`; a field would poison the
+/// service's `Send + Sync` bounds), and NOT an inline reparse per
+/// demand. Guards against both the documentation-only exemption and the
+/// FIX1C `RefCell<SnapshotShard>` service field that broke the wasm
+/// build.
+#[test]
+fn decl_lowering_wasm_path_retains_snapshot_source_guard() {
+    let src = read_workspace_file("crates/verter_session/src/decl_lowering.rs");
+
+    // Stale "no retention" / "parse inline per call" wording is gone.
+    for stale in ["parse inline per call", "No retention", "no retention"] {
+        assert!(
+            !src.contains(stale),
+            "decl_lowering.rs still carries the stale wasm wording `{stale}` — \
+             the wasm path now retains a snapshot shard, not an inline reparse"
+        );
+    }
+
+    // The wasm retention lives in a thread-local shard, never a service
+    // field. A `RefCell<SnapshotShard>` field on the service is the
+    // FIX1C regression that poisoned `Send + Sync` on wasm.
+    assert!(
+        src.contains("thread_local!") && src.contains("WASM_DECL_LOWERING_SHARD"),
+        "the wasm decl-lowering path must retain via a `thread_local!` \
+         `WASM_DECL_LOWERING_SHARD` shard"
+    );
+
+    // No `unsafe impl Send`/`Sync` papering over the `!Send` parse.
+    for forbidden in [
+        "unsafe impl Send for DeclLoweringService",
+        "unsafe impl Sync for DeclLoweringService",
+    ] {
+        assert!(
+            !src.contains(forbidden),
+            "decl_lowering.rs must not paper over the `!Send` parse with \
+             `{forbidden}` — the wasm shard is a thread-local instead"
+        );
+    }
+
+    // Isolate the `target_arch = \"wasm32\"` arm of `run(...)` and prove it
+    // routes through the retained thread-local shard rather than
+    // unconditionally reporting a fresh parse.
+    let wasm_run_marker = "// Single-threaded platform:";
+    let wasm_run = src
+        .split(wasm_run_marker)
+        .nth(1)
+        .expect("the wasm `run` arm must carry its explanatory comment");
+    let wasm_run = &wasm_run[..wasm_run.len().min(800)];
+    assert!(
+        wasm_run.contains("snapshot_for_run"),
+        "the wasm `run` arm must reuse the retained shard via \
+         `snapshot_for_run`"
+    );
+    assert!(
+        wasm_run.contains("WASM_DECL_LOWERING_SHARD"),
+        "the wasm `run` arm must reuse the thread-local retained shard"
+    );
+    assert!(
+        !wasm_run.contains("parsed_now: true"),
+        "the wasm `run` arm must derive `parsed_now` from the shard's \
+         hit/miss result — never an unconditional `parsed_now: true`"
     );
 }

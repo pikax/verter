@@ -94,7 +94,8 @@ impl VerterHost {
         }
         // The synthesized default carries a construct-signature return type (the
         // instance object); its absence means no public instance surface.
-        default_symbol.signatures.first()?.return_type.as_ref()?;
+        let default_body = indexed.shallow_state.value_decl("default")?;
+        default_body.signatures.first()?.return_type.as_ref()?;
         let _whole_hash = indexed.whole_hash;
 
         // Query-RETURNER: it returns the public instance surface with no

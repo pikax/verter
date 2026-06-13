@@ -28,15 +28,13 @@
 
 use std::sync::Arc;
 
-use rustc_hash::{FxHashMap, FxHashSet};
-use verter_semantic::analysis::type_eval::{TypeDeclBody, TypeDeclKind, ValueDeclKind};
+use rustc_hash::FxHashMap;
+use verter_semantic::analysis::type_eval::{TypeDeclKind, ValueDeclKind};
 use verter_semantic::facts::{FactKey, FactRegistry, SymbolSpace};
 use verter_session::fact_emission::emit_parse_facts;
 use verter_session::file_artifact_store::InternedName;
 use verter_session::project_type_store::IndexedReady;
-use verter_session::resolver_core::shallow_file_state::{
-    ExportTarget, ShallowFileState, ShallowTypeSymbol, ShallowValueSymbol,
-};
+use verter_session::resolver_core::shallow_file_state::{ExportTarget, ShallowFileState};
 use verter_type_expr::{ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName, TypeExpr};
 
 fn empty_external(
@@ -51,7 +49,6 @@ fn empty_external(
 struct TypeDecl<'a> {
     name: &'a str,
     kind: TypeDeclKind,
-    members: Vec<(&'a str, TypeExpr)>,
     body: TypeExpr,
 }
 
@@ -73,7 +70,6 @@ fn build_type_decl<'a>(name: &'a str, members: Vec<(&'a str, TypeExpr)>) -> Type
     TypeDecl {
         name,
         kind: TypeDeclKind::Interface,
-        members,
         body,
     }
 }
@@ -84,54 +80,35 @@ fn build_indexed(
     exports: Vec<(&str, ExportTarget)>,
     raw_source: &str,
 ) -> Arc<IndexedReady> {
-    let mut symbols: FxHashMap<String, ShallowTypeSymbol> = FxHashMap::default();
+    // Env-seeded construction: the synthetic header inventory + seeded
+    // declaration-body memo mirror the production header walk + lazy
+    // memo for the same declarations.
+    let mut env = verter_semantic::analysis::type_eval::EvalEnv::new();
     for decl in type_decls {
-        let mut member_deps: FxHashMap<String, Vec<String>> = FxHashMap::default();
-        for (n, _) in &decl.members {
-            member_deps.insert((*n).to_string(), Vec::new());
-        }
-        symbols.insert(
-            decl.name.to_string(),
-            ShallowTypeSymbol {
-                kind: decl.kind,
-                body: TypeDeclBody::Single(decl.body),
-                type_parameters: Vec::new(),
-                local_deps: Vec::new(),
-                external_deps: Vec::new(),
-                member_deps,
-            },
-        );
+        env.add_type(verter_semantic::analysis::type_eval::TypeDeclInfo {
+            name: decl.name.to_string(),
+            declaration_id: 0,
+            kind: decl.kind,
+            type_parameters: Vec::new(),
+            body: decl.body,
+        });
     }
-    let mut value_syms: FxHashMap<String, ShallowValueSymbol> = FxHashMap::default();
     for (name, kind) in value_symbols {
-        value_syms.insert(
-            name.to_string(),
-            ShallowValueSymbol {
-                kind,
-                type_annotation: None,
-                signatures: Vec::new(),
-                object_shape: None,
-                enum_members: None,
-                is_synthesised_vue_default: false,
-            },
-        );
+        env.add_value(verter_semantic::analysis::type_eval::ValueDeclInfo {
+            name: name.to_string(),
+            declaration_id: 0,
+            kind,
+            type_annotation: None,
+            signatures: Vec::new(),
+            object_shape: None,
+        });
     }
     let mut exports_map: FxHashMap<String, ExportTarget> = FxHashMap::default();
     for (name, target) in exports {
         exports_map.insert(name.to_string(), target);
     }
-    let shallow = ShallowFileState {
-        whole_hash: [0u8; 16],
-        exports: exports_map,
-        wildcard_reexports: Vec::new(),
-        symbols,
-        value_symbols: value_syms,
-        import_locals: FxHashSet::default(),
-        import_targets: FxHashMap::default(),
-        augmentation_scopes: Default::default(),
-        augmentation_value_scopes: Default::default(),
-        analysis: empty_external(),
-    };
+    let mut shallow = ShallowFileState::from_analysis([0u8; 16], empty_external(), Some(&env));
+    shallow.exports = exports_map;
     Arc::new(IndexedReady::new_for_test_with_state(
         [0u8; 16],
         Arc::new(shallow),
@@ -154,6 +131,13 @@ fn prim(p: PrimitiveName) -> TypeExpr {
 fn registry_of(indexed: &IndexedReady) -> FactRegistry {
     let emission = emit_parse_facts(indexed);
     emission.facts.registry().clone()
+}
+
+/// The full `FileFacts` (eager registry + lazy body-fact source) —
+/// body-sensitive `Export` / `LocalDecl` facts are observed through
+/// `lookup_or_compute`, never the eager registry.
+fn facts_of(indexed: &IndexedReady) -> verter_session::file_artifact_store::FileFacts {
+    emit_parse_facts(indexed).facts
 }
 
 // ── Bullet 1 — Cosmetic edits: semantic_hash unchanged ──
@@ -179,14 +163,18 @@ fn raw_source_only_change_does_not_change_semantic_hash() {
     };
     let a = make("// comment A\nexport interface Foo { a: string }");
     let b = make("// comment B (cosmetic edit)\nexport interface Foo { a: string }");
-    let reg_a = registry_of(&a);
-    let reg_b = registry_of(&b);
+    let facts_a = facts_of(&a);
+    let facts_b = facts_of(&b);
     let key = FactKey::Export {
         name: InternedName::from("Foo"),
         space: SymbolSpace::Type,
     };
-    let fact_a = reg_a.get(&key).expect("Foo export emitted");
-    let fact_b = reg_b.get(&key).expect("Foo export emitted");
+    let fact_a = facts_a
+        .lookup_or_compute(&key)
+        .expect("Foo export computed on observation");
+    let fact_b = facts_b
+        .lookup_or_compute(&key)
+        .expect("Foo export computed on observation");
     assert_eq!(
         fact_a.semantic_hash, fact_b.semantic_hash,
         "cosmetic edits (different raw_source) MUST NOT change semantic_hash"
@@ -288,24 +276,29 @@ fn adding_export_bumps_syntactic_export_set_and_adds_export_fact() {
         vec![("Foo", export_local("Foo")), ("Bar", export_local("Bar"))],
         "export interface Foo { a: string }\nexport interface Bar { b: number }",
     );
-    let reg_one = registry_of(&one_export);
-    let reg_two = registry_of(&two_exports);
+    let facts_one = facts_of(&one_export);
+    let facts_two = facts_of(&two_exports);
 
     let bar_key = FactKey::Export {
         name: InternedName::from("Bar"),
         space: SymbolSpace::Type,
     };
     assert!(
-        reg_one.get(&bar_key).is_none(),
+        facts_one.lookup_or_compute(&bar_key).is_none(),
         "Bar must NOT exist before adding the export"
     );
-    assert!(reg_two.get(&bar_key).is_some(), "Bar MUST exist post-add");
+    assert!(
+        facts_two.lookup_or_compute(&bar_key).is_some(),
+        "Bar MUST exist post-add"
+    );
 
-    let set_one = reg_one
-        .get(&FactKey::SyntacticExportSet)
+    let set_one = facts_one
+        .lookup(&FactKey::SyntacticExportSet)
+        .cloned()
         .expect("SyntacticExportSet emitted");
-    let set_two = reg_two
-        .get(&FactKey::SyntacticExportSet)
+    let set_two = facts_two
+        .lookup(&FactKey::SyntacticExportSet)
+        .cloned()
         .expect("SyntacticExportSet emitted");
     assert_ne!(
         set_one.semantic_hash, set_two.semantic_hash,
@@ -330,7 +323,7 @@ fn type_and_value_namespace_keys_coexist_for_same_name() {
         vec![("Foo", export_local("Foo"))],
         "export type Foo = { a: string }\nexport const Foo = 1",
     );
-    let reg = registry_of(&indexed);
+    let facts = facts_of(&indexed);
 
     let type_key = FactKey::Export {
         name: InternedName::from("Foo"),
@@ -340,8 +333,12 @@ fn type_and_value_namespace_keys_coexist_for_same_name() {
         name: InternedName::from("Foo"),
         space: SymbolSpace::Value,
     };
-    let type_fact = reg.get(&type_key).expect("type-space Export");
-    let value_fact = reg.get(&value_key).expect("value-space Export");
+    let type_fact = facts
+        .lookup_or_compute(&type_key)
+        .expect("type-space Export");
+    let value_fact = facts
+        .lookup_or_compute(&value_key)
+        .expect("value-space Export");
     assert_ne!(
         type_fact.semantic_hash, value_fact.semantic_hash,
         "type-space and value-space facts have distinct identities (R11)"
@@ -430,16 +427,16 @@ fn removing_export_drops_export_fact_key() {
         vec![("Foo", export_local("Foo"))],
         "",
     );
-    let reg_with = registry_of(&with_bar);
-    let reg_without = registry_of(&without_bar);
+    let facts_with = facts_of(&with_bar);
+    let facts_without = facts_of(&without_bar);
     let bar_key = FactKey::Export {
         name: InternedName::from("Bar"),
         space: SymbolSpace::Type,
     };
-    assert!(reg_with.get(&bar_key).is_some());
+    assert!(facts_with.lookup_or_compute(&bar_key).is_some());
     assert!(
-        reg_without.get(&bar_key).is_none(),
-        "removed exports MUST validate as registry misses (R10)"
+        facts_without.lookup_or_compute(&bar_key).is_none(),
+        "removed exports MUST validate as observation misses (R10)"
     );
 }
 

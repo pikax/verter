@@ -1137,6 +1137,109 @@ Deferred follow-ups (lead-architect ruled, tracked here):
 - Test-determinism cleanup: migrate the pre-existing wall-clock assertions
   (`component_meta_caches_tests.rs:171,:222-227`, `meta_tests.rs:12904+`) to
   counter-based pins / `verter_bench` measurements.
+- **EXTERNAL-TYPE-RESOLUTION ENGINE CUTOVER (delete query-time OXC
+  `ResolvedElements`; build typed-IR external resolution through the shared
+  5-mode dispatch).** One legacy query-time OXC `ResolvedElements` external-type
+  path — `resolve_external_type_from_indexed_ready_with_view`
+  (`host_manage/prepared_decl.rs`) plus the frontier materializer in
+  `host_resolve/external_type_resolution.rs` / `frontier_engine.rs` — still
+  resolves external types at query time instead of routing through the single
+  `SemanticQueryKey → ProjectSemanticDispatch::execute → SemanticGraphStore`
+  five-mode dispatch. This is a REAL, long-standing single-engine-rule violation
+  (the "Exactly one type-resolution engine" CRITICAL rule): it is PRE-EXISTING at
+  `2dc03a529` and earlier, grandfathered by the
+  `no_new_resolved_elements_production_file` shrinking-ledger guard, and was
+  surfaced (not introduced) by the WAVE-2 demand-lowering escalation. It is
+  ORTHOGONAL to WAVE-2 correctness — WAVE-2 keeps it working and does not grow it;
+  it is not a WAVE-2 regression. It CANNOT be deleted mechanically in the
+  demand-lowering pass because it is currently load-bearing; the replacement
+  (typed-IR external resolution through the shared 5-mode dispatch) must be built
+  first. Tracked here as a dedicated follow-up block; it is NOT a sanctioned rule
+  exception — the single-engine CRITICAL rule states the target invariant and this
+  live path is a debt against it, to be retired by the dedicated engine cutover.
+- **WHOLE-ENV CONSUMER BOUNDED-DEMAND CUTOVER (convert the `whole_env()`
+  env-shaped legacy adapters to bounded per-symbol demand surfaces).** The
+  lazy `DeclBodyMemo::whole_env()` whole-file `EvalEnv` build
+  (`decl_body_memo.rs`) — exposed via `base_eval_env_arc`
+  (`host_manage/eval_env.rs`) — is M3-SANCTIONED for WAVE-2 (it is a lazy,
+  on-demand product, NOT publish-time eager lowering; `IndexedReady` carries no
+  `eval_env` and `indexed_ready_publish_lowers_zero_decl_bodies` pins zero
+  publish-time body lowering). It is therefore NOT a WAVE-2 landing blocker, and the
+  current behavior is result-correct and strictly better than base: base eagerly
+  built and stored the whole-file env for EVERY file at publish, whereas now only
+  TOUCHED files lower it, once, memoized — bounded to LOCAL body lowering and never
+  triggering cross-file `Expanded` materialization (projector publication stays
+  shallow-by-default). The PRIMARY / most-hit consumer is `local_type_declaration_id`
+  (`host_manage/eval_env.rs`): it is reached on EVERY `get_component_meta` resolution
+  (via `resolve_ref_to_root_identity` → `base_eval_env_arc` → `whole_env()` — the hot
+  meta path), not merely fallthrough/alias, and it can route through header/prepared
+  identity. The remaining consumers are env-shaped legacy adapters rather than true
+  whole-file algorithms and could likewise run on bounded per-symbol demand:
+  `peel_value_decl_alias` (`host_manage/eval_env.rs`) follows ONE value-alias
+  chain and can route through `prepared_value_decl` / `ShallowFileState::value_decl`
+  + header presence; fallthrough's `build_fallthrough_eval_env_lightweight`
+  (`host_manage/fallthrough.rs`) clones the full base env then narrows to required
+  root/template names and only uses it for bounded ops (root-spread consumption,
+  generic prop overrides, dynamic root candidates). Follow-up block: build the
+  bounded fallthrough/runtime value env from required owner/imported bindings +
+  prop overrides; rewrite value-alias peeling over prepared/value decls; add tests
+  proving fallthrough + alias peeling do NOT materialize `whole_env()` or lower
+  unrelated declarations; then fence `base_eval_env_arc`/`whole_env()` as an
+  explicit compatibility/debug demand only, or delete it if no true whole-file
+  consumer remains. Lead-architect ruling 2026-06-13: DEFER (real over-broad
+  semantic-demand debt, outside WAVE-2's settled publish-zero cutover).
+- **COMPILE-TIER AUGMENTATION R29 COMPLETENESS CUTOVER (active augmentation-target
+  population on the compile rail; cover all target kinds + the cold Session path).**
+  The compile-tier augmentation rail `observe_augmentation_fingerprints`
+  (`compile_fact_emission.rs`) PASSIVELY snapshots the augmentation index, returns on
+  empty, and observes the `ModuleAugmentationIndexShape` fingerprint (plus, since
+  WAVE-2, the per-augmenter `FileWholeHash`) ONLY for `ExternalSpecifier` rows that a
+  prior Content classification already populated. Two pre-existing gaps follow: (a) a
+  FIRST cold Session compile (no prior Content classification) can publish a compile
+  slot with NO augmentation fact at all, because the Session prefetch path
+  (`host_resolve/virtual_file_pipeline.rs`) resolves/import-indexes script deps but does
+  not call `ensure_augmentation_index_populated`; (b) the rail's `by_external` filter +
+  `_ => None` arm ignore resolved-relative, wildcard-ambient, and global augmentation
+  targets, whereas the semantic/Content closure-aware probe (`host_cache_runtime.rs`)
+  handles all kinds. Both behaviors PRE-DATE WAVE-2 at `2dc03a529` (the passive
+  snapshot, the empty-return, the `ExternalSpecifier`-only `filter_map`, and the
+  index-population dependency all exist at base); WAVE-2's e7e4c458a only ADDED the
+  per-augmenter `FileWholeHash` observation inside the already-existing, already-populated
+  external loop — it did not create the cold-population hole nor narrow the rail. The
+  WAVE-2 regression test (`compile_slot_invalidates_on_external_augmenter_member_type_edit`)
+  intentionally warms the index via a Content classification first, so it does not
+  exercise the cold Session path. Lead-architect ruling 2026-06-13: DEFER (real
+  pre-existing compile-rail coverage gap, NOT a WAVE-2 regression). Dedicated follow-up
+  block: replace the passive snapshot / external-only compile observation with active
+  augmentation-target derivation that calls `ensure_augmentation_index_populated`,
+  observes the shape + per-contributor `FileWholeHash` for external, resolved-relative,
+  wildcard, and global targets through the shared target-key mapping, fails closed when
+  the target set is unverifiable, and adds cold Session tests with no prior Content
+  classification.
+- **DECL-BODY LOCATOR GRANULARITY CUTOVER (replace top-level statement locators
+  with declaration/block-child locators).** WAVE-2's lazy body memo currently
+  records contributor locators as top-level `stmt_index` values and lowers each
+  demanded contributor via `lower_top_level_statement`, so a demand for one
+  declarator in `export const a = ..., b = ...` or one inner declaration in a
+  `namespace` / `declare module` block can lower and coverage-backfill
+  same-statement siblings. This is real bounded-demand debt: it leaves common
+  multi-declaration `.d.ts` shapes as coarser eager islands and makes the
+  "demanded declaration" shorthand true only at statement granularity. It is
+  DEFERRED because the current behavior is content-addressed, coverage-gated, and
+  result-correct; it does not lower bodies at publish, does not serve stale bodies
+  across edits/overlays, and does not under-invalidate. It is therefore not a
+  WAVE-2 landing blocker for the sanctioned publish-zero / parse-once /
+  lazy-first-demand cutover. Follow-up target: extend `DeclHeaderIndex`
+  contributors from `stmt_index` to real declaration locators for variable
+  declarators, namespace block children, and augmentation block children; add
+  selective lowerers and per-locator dependency/raw-surface capture; keep backfill
+  only for entries whose full locator set was actually lowered; add regressions for
+  same-statement declarators, namespace blocks, and augmentation blocks.
+  Lead-architect ruling 2026-06-13: DEFER (real per-symbol lazy-body
+  locator-precision debt surfaced by the review6 codexA P1; the R6 scope-consult
+  ruled it a new row that does NOT fold into WHOLE-ENV CONSUMER BOUNDED-DEMAND
+  CUTOVER, which concerns `whole_env()` consumers, not the per-symbol lazy-body
+  path's locator precision).
 
 ### 1.6 Known-failure baseline (recorded at the B7c land; re-derived at implementation)
 

@@ -1,56 +1,57 @@
-//! Parse-time fact emission — parse-time, shallow, O(file_size).
+//! Parse-time fact emission — parse-time, shallow, HEADER-ONLY.
 //!
 //! Walks the post-shallow-analysis [`IndexedReady`] (via its
-//! [`ShallowFileState`]) and produces the parse-domain
-//! [`FactRegistry`] populated with R10–R16, R28, R29 facts:
+//! [`ShallowFileState`] header inventory) and produces the parse-domain
+//! [`FactRegistry`]. Publishing an artifact computes NO body-derived
+//! hashes and lowers ZERO declaration bodies:
 //!
-//! - `Export.semantic_hash` (over the export body alone — cross-decl
-//!   refs as reference-shape edges per R14).
-//! - `LocalDecl.semantic_hash` for each NOT-exported local
-//!   declaration.
-//! - `MemberShape.semantic_hash` (R28 whole-surface).
+//! - `MemberShape.semantic_hash` (R28 whole-surface) — from the direct
+//!   syntactic member HEADERS.
 //! - `MemberPresence.semantic_hash` (R28 header-only — `(name, kind,
-//!   exporter_salt)`; NO body).
+//!   exporter_salt)`; NO body). Emitted for type/value member headers
+//!   AND for each `enum` variant (a Value-space `EnumMember` of the enum
+//!   — enums live in their own header table, never as value symbols).
 //! - `SyntacticExportSet.semantic_hash` over the sorted local export
 //!   names + bare re-export specifiers.
 //! - `ImportRef` per syntactic import binding.
 //! - `SyntacticReexportRef` per `export {X} from "spec"` clause.
-//! - `MacroSurface` per macro invocation in the script-analysis
-//!   snapshot.
-//! - `TemplateRoot` (Vue SFC root reachability fact).
-//! - `ModuleAugmentation` (one fact per `declare module … {}`
-//!   block).
+//! - `ModuleAugmentation` (one fact per `(scope, name)` augmentation
+//!   header, with a HEADER-LEVEL shape fingerprint — body sensitivity
+//!   for augmentation consumers rides on the per-contributor
+//!   `FileWholeHash` facts the stitch records).
+//!
+//! Body-sensitive `Export` / `LocalDecl` fingerprints are NOT emitted
+//! here — they are LAZY: [`LazyBodyFactSource`] computes them on first
+//! observation through the artifact's declaration-body memo (lowering
+//! exactly the named declaration) and memoizes them in a shared
+//! side-store, so observation and validation see the same value without
+//! any publish-time body walk.
 //!
 //! **R12 separation**: parse-domain emission MUST NOT resolve
 //! cross-file paths. `ImportRef` carries only `(specifier, binding,
 //! space)`; the resolved canonical lives on the resolve-domain
 //! `ResolvedImportClause` fact (populated by the resolver
 //! producer).
-//!
-//! **R28 shallow-walk arch-guard**: the parse-phase fact emitter
-//! MUST NOT call into cross-decl AST traversal. Same-file member
-//! body fingerprints (`Member` facts) are NOT emitted here — they
-//! emit lazily into `MemberSemanticFactStore` /
-//! `MemberDisplayFactStore` on first member-access query (the lazy member-body store).
 
 use std::sync::Arc;
 
-use rustc_hash::FxHashMap;
+use dashmap::DashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
+use verter_semantic::analysis::decl_headers::{MemberHeader, MemberHeaderKind};
 use verter_semantic::analysis::types::hash_16;
 use verter_semantic::analysis::Hash16;
 use verter_semantic::facts::{
     compute_member_presence_hash, compute_member_shape_hash, compute_semantic_hash, CrossDeclLens,
     CrossDeclRef, Fact, FactKey, FactRegistry, MemberKind, SymbolSpace,
 };
-use verter_type_expr::{ObjectExpr, ObjectMember, TypeExpr};
+use verter_type_expr::TypeExpr;
 
+use crate::decl_body_memo::{DeclBodyMemo, LoweredValueDecl};
 use crate::file_artifact_store::{
     FileFacts, InternedName, InternedSpecifier, ModuleAugmentationFact,
 };
 use crate::project_type_store::IndexedReady;
-use crate::resolver_core::shallow_file_state::{
-    ExportTarget, ShallowFileState, ShallowTypeSymbol, ShallowValueSymbol,
-};
+use crate::resolver_core::shallow_file_state::{ExportTarget, ShallowFileState};
 
 /// parse-time emission result: a populated [`FileFacts`] plus the
 /// per-file augmentation list.
@@ -68,20 +69,20 @@ pub struct ParseFactsEmission {
 
 /// Emit parse-domain facts from an [`IndexedReady`].
 ///
-/// Side-effect free; deterministic over the same [`IndexedReady`]
-/// input. Producers feed the result into
+/// Side-effect free over the header inventory; deterministic over the
+/// same [`IndexedReady`] input. Producers feed the result into
 /// `FileArtifacts::{facts, augmentations}`.
 #[must_use]
 pub fn emit_parse_facts(indexed: &IndexedReady) -> ParseFactsEmission {
     let shallow = &*indexed.shallow_state;
-    let lens = ShallowLens::from_shallow(shallow);
+    let lens = Arc::new(ShallowLens::from_shallow(shallow));
 
     let mut registry = FactRegistry::empty();
 
-    // ── Per-symbol facts: `Export` / `LocalDecl` / `MemberShape` /
-    //    `MemberPresence` ──
-    emit_type_symbols(&mut registry, shallow, &lens);
-    emit_value_symbols(&mut registry, shallow, &lens);
+    // ── Per-symbol header facts: `MemberShape` / `MemberPresence` ──
+    emit_type_symbol_headers(&mut registry, shallow);
+    emit_value_symbol_headers(&mut registry, shallow);
+    emit_enum_symbol_headers(&mut registry, shallow);
 
     // ── `Export` / `ExportAlias` / `SyntacticReexportRef` for
     //    explicit re-exports ──
@@ -107,9 +108,121 @@ pub fn emit_parse_facts(indexed: &IndexedReady) -> ParseFactsEmission {
         });
     }
 
+    let lazy = LazyBodyFactSource {
+        memo: Arc::clone(shallow.decl_bodies()),
+        lens,
+        synthesised_value_bodies: shallow
+            .synthesised_value_bodies()
+            .map(|(name, body)| (name.to_string(), Arc::clone(body)))
+            .collect(),
+        computed: Arc::new(DashMap::default()),
+    };
+
     ParseFactsEmission {
-        facts: FileFacts::from_registry(registry),
+        facts: FileFacts::from_registry_with_lazy(registry, lazy),
         augmentations,
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Lazy body-sensitive fact source
+// ──────────────────────────────────────────────────────────────────
+
+/// Computes the body-sensitive `Export` / `LocalDecl` fact values on
+/// first observation, through the artifact's declaration-body memo —
+/// the lazy body fact path. Memoized per key in a shared side-store
+/// (`Arc`-shared with every clone of the owning [`FileFacts`]).
+#[derive(Debug, Clone)]
+pub(crate) struct LazyBodyFactSource {
+    memo: Arc<DeclBodyMemo>,
+    lens: Arc<ShallowLens>,
+    /// Eager synthesised value BODIES (the `.vue` implicit `default`)
+    /// — their facts compute from the eager `LoweredValueDecl`, never
+    /// the lazy memo.
+    synthesised_value_bodies: FxHashMap<String, Arc<LoweredValueDecl>>,
+    computed: Arc<DashMap<FactKey, Fact>>,
+}
+
+impl LazyBodyFactSource {
+    pub(crate) fn compute(&self, key: &FactKey) -> Option<Fact> {
+        if let Some(hit) = self.computed.get(key) {
+            return Some(hit.clone());
+        }
+        // `name` is the backing LOCAL declaration name probed against the
+        // body memo; the emitted `Fact.key` stays the original requested
+        // key (e.g. `Export(Bar, Type)`), never the backing local key.
+        let (name, space): (&str, SymbolSpace) = match key {
+            // The `Export` key answers only for names that resolve to a
+            // LOCAL declaration — `export { Foo as Bar }` maps the public
+            // `Bar` to the backing local `Foo`; reexports are absent from
+            // the map and so never compute body facts here.
+            FactKey::Export { name, space } => {
+                let backing = self.lens.local_export_targets.get(name.as_ref())?;
+                (backing.as_str(), *space)
+            }
+            // `LocalDecl` answers only for non-exported names — mirroring
+            // the historical emission's exported-name split, so consistent
+            // absence stays consistent.
+            FactKey::LocalDecl { name, space } => {
+                if self.lens.exported.contains(name.as_ref()) {
+                    return None;
+                }
+                (name.as_ref(), *space)
+            }
+            _ => return None,
+        };
+        let body = match space {
+            SymbolSpace::Type => {
+                let lowered = self.memo.type_decl(name)?;
+                lowered.body.lookup_object().into_owned()
+            }
+            // No namespace-space declarations are inventoried by the
+            // shallow walk — consistent absence.
+            SymbolSpace::Namespace => return None,
+            SymbolSpace::Value => {
+                let lowered = match self.synthesised_value_bodies.get(name) {
+                    Some(body) => Arc::clone(body),
+                    None => self.memo.value_decl(name)?,
+                };
+                value_body_for_hash(
+                    lowered.type_annotation.as_ref(),
+                    &lowered.signatures,
+                    lowered.kind,
+                    lowered.object_shape.as_ref(),
+                )
+            }
+        };
+        let outcome = compute_semantic_hash(&body, space, self.lens.as_ref());
+        let semantic_hash = outcome.hash;
+        let display_hash = compute_display_hash(&body, &semantic_hash);
+        let fact = Fact {
+            key: key.clone(),
+            semantic_hash,
+            display_hash,
+        };
+        self.computed.insert(key.clone(), fact.clone());
+        Some(fact)
+    }
+}
+
+/// Body hash carrier for a VALUE declaration: the type annotation if
+/// present, else a synthesised type-expression that captures the
+/// declaration kind / signature set. The structural representation MUST
+/// be distinct across edits.
+fn value_body_for_hash(
+    type_annotation: Option<&TypeExpr>,
+    signatures: &[verter_semantic::analysis::type_eval::FunctionSignature],
+    kind: verter_semantic::analysis::type_eval::ValueDeclKind,
+    object_shape: Option<&verter_type_expr::ObjectExpr>,
+) -> TypeExpr {
+    match (type_annotation, signatures.first()) {
+        (Some(ty), _) => ty.clone(),
+        (None, Some(_)) => TypeExpr::Unknown {
+            raw: format!("{signatures:?}"),
+        },
+        _ => TypeExpr::Unknown {
+            raw: format!("{kind:?}::{object_shape:?}"),
+        },
     }
 }
 
@@ -119,11 +232,20 @@ pub fn emit_parse_facts(indexed: &IndexedReady) -> ParseFactsEmission {
 // ──────────────────────────────────────────────────────────────────
 
 /// Resolve `name` against the shallow state's local-symbol +
-/// import-binding tables. Falls back to `Unresolved` for free
-/// references.
-struct ShallowLens {
-    locals: rustc_hash::FxHashSet<String>,
-    value_locals: rustc_hash::FxHashSet<String>,
+/// import-binding tables (header data). Falls back to `Unresolved` for
+/// free references.
+#[derive(Debug)]
+pub(crate) struct ShallowLens {
+    locals: FxHashSet<String>,
+    value_locals: FxHashSet<String>,
+    exported: FxHashSet<String>,
+    /// Maps a public exported name to its backing LOCAL declaration name
+    /// for `export { Foo as Bar }` / `export { Foo }` (the latter maps a
+    /// name to itself). Built ONLY from `ExportTarget::Local` entries —
+    /// reexports are excluded, so they never compute body facts through
+    /// the lazy path. The lazy `Export(Bar, …)` fact preserves the public
+    /// key `Bar` while lowering/hashing the backing local `Foo`.
+    local_export_targets: FxHashMap<String, String>,
     /// Maps `local_binding_name → source_specifier`.
     import_targets: FxHashMap<String, Arc<str>>,
 }
@@ -131,8 +253,19 @@ struct ShallowLens {
 impl ShallowLens {
     fn from_shallow(shallow: &ShallowFileState) -> Self {
         Self {
-            locals: shallow.symbols.keys().cloned().collect(),
-            value_locals: shallow.value_symbols.keys().cloned().collect(),
+            locals: shallow.type_symbol_names().map(str::to_string).collect(),
+            value_locals: shallow.value_symbol_names().map(str::to_string).collect(),
+            exported: shallow.exports.keys().cloned().collect(),
+            local_export_targets: shallow
+                .exports
+                .iter()
+                .filter_map(|(public_name, target)| match target {
+                    ExportTarget::Local { symbol_name } => {
+                        Some((public_name.clone(), symbol_name.clone()))
+                    }
+                    ExportTarget::Reexport { .. } => None,
+                })
+                .collect(),
             import_targets: shallow
                 .import_targets
                 .iter()
@@ -172,233 +305,138 @@ impl CrossDeclLens for ShallowLens {
 }
 
 // ──────────────────────────────────────────────────────────────────
-// Emission helpers
+// Emission helpers (HEADER data only)
 // ──────────────────────────────────────────────────────────────────
 
-fn emit_type_symbols(registry: &mut FactRegistry, shallow: &ShallowFileState, lens: &ShallowLens) {
-    let mut sorted: Vec<(&String, &ShallowTypeSymbol)> = shallow.symbols.iter().collect();
-    sorted.sort_by(|a, b| a.0.cmp(b.0));
-    for (name, symbol) in sorted {
-        let exporter = InternedName::from(name.as_str());
-        let space = SymbolSpace::Type;
-
-        // Body fingerprint over the type-alias / interface body. For a merged
-        // interface this hashes the union of every contributor's members, so a
-        // change in any same-name contributor invalidates downstream importers.
-        let body = symbol.body.lookup_object();
-        let outcome = compute_semantic_hash(body.as_ref(), space, lens);
-        let body_hash = outcome.hash;
-        let display_hash = compute_display_hash(body.as_ref(), &body_hash);
-
-        // `Export` if exported; `LocalDecl` otherwise.
-        let is_exported = shallow.exports.contains_key(name);
-        let key = if is_exported {
-            FactKey::Export {
-                name: exporter.clone(),
-                space,
-            }
-        } else {
-            FactKey::LocalDecl {
-                name: exporter.clone(),
-                space,
-            }
-        };
-        registry.insert(Fact {
-            key,
-            semantic_hash: body_hash,
-            display_hash,
-        });
-
-        // `MemberShape` + `MemberPresence` per member, derived from
-        // the type's `member_deps` skeleton (which the shallow walk
-        // already maintains). The kind is `Property` by default —
-        // declaration-level kind information lives on the body, NOT
-        // on the member_deps map.
-        if !symbol.member_deps.is_empty() {
-            let members_for_shape = members_for_shape(&symbol.member_deps);
-            let shape_hash = compute_member_shape_hash(name, &members_for_shape, space);
-            registry.insert(Fact {
-                key: FactKey::MemberShape {
-                    exporter: exporter.clone(),
-                    space,
-                },
-                semantic_hash: shape_hash,
-                display_hash: shape_hash,
-            });
-            for (member_name, _) in &members_for_shape {
-                let member_kind = MemberKind::Property {
-                    readonly: false,
-                    optional: false,
-                };
-                let presence_hash =
-                    compute_member_presence_hash(name, member_name.as_ref(), member_kind, space);
-                registry.insert(Fact {
-                    key: FactKey::MemberPresence {
-                        exporter: exporter.clone(),
-                        name: InternedName(Arc::clone(member_name)),
-                        space,
-                    },
-                    semantic_hash: presence_hash,
-                    display_hash: presence_hash,
-                });
-            }
-        }
+fn member_kind_for_header(header: &MemberHeader) -> MemberKind {
+    match header.kind {
+        MemberHeaderKind::Property => MemberKind::Property {
+            readonly: header.readonly,
+            optional: header.optional,
+        },
+        MemberHeaderKind::Method => MemberKind::Method,
     }
 }
 
-fn members_for_shape(
-    member_deps: &rustc_hash::FxHashMap<String, Vec<String>>,
-) -> Vec<(Arc<str>, MemberKind)> {
-    let mut members: Vec<(Arc<str>, MemberKind)> = member_deps
-        .keys()
-        .map(|n| {
+fn emit_member_shape_facts(
+    registry: &mut FactRegistry,
+    name: &str,
+    exporter: &InternedName,
+    space: SymbolSpace,
+    headers: &[MemberHeader],
+) {
+    if headers.is_empty() {
+        return;
+    }
+    let members_for_shape: Vec<(Arc<str>, MemberKind)> = headers
+        .iter()
+        .map(|header| {
             (
-                Arc::<str>::from(n.as_str()),
-                MemberKind::Property {
-                    readonly: false,
-                    optional: false,
-                },
+                Arc::<str>::from(header.name.as_str()),
+                member_kind_for_header(header),
             )
         })
         .collect();
-    members.sort_by(|a, b| a.0.as_ref().cmp(b.0.as_ref()));
-    members
+    emit_member_facts_from_kinds(registry, name, exporter, space, members_for_shape);
 }
 
-fn emit_value_symbols(registry: &mut FactRegistry, shallow: &ShallowFileState, lens: &ShallowLens) {
-    let mut sorted: Vec<(&String, &ShallowValueSymbol)> = shallow.value_symbols.iter().collect();
-    sorted.sort_by(|a, b| a.0.cmp(b.0));
-    for (name, symbol) in sorted {
-        let exporter = InternedName::from(name.as_str());
-        let space = SymbolSpace::Value;
+/// Emit the `MemberShape` whole-surface fact plus one `MemberPresence`
+/// fact per member, from a pre-built `(name, kind)` list. Shared by the
+/// header-walk emitters (type/value/enum). Sorts by member name so the
+/// shape hash is order-independent; a no-member list emits nothing.
+fn emit_member_facts_from_kinds(
+    registry: &mut FactRegistry,
+    name: &str,
+    exporter: &InternedName,
+    space: SymbolSpace,
+    mut members_for_shape: Vec<(Arc<str>, MemberKind)>,
+) {
+    if members_for_shape.is_empty() {
+        return;
+    }
+    members_for_shape.sort_by(|a, b| a.0.as_ref().cmp(b.0.as_ref()));
 
-        // Body hash: take the type annotation if present, else fall
-        // back to a synthesised type-expression that captures the
-        // declaration kind. The structural representation MUST be
-        // distinct across edits.
-        let body = match (&symbol.type_annotation, symbol.signatures.first()) {
-            (Some(ty), _) => ty.clone(),
-            (None, Some(_)) => TypeExpr::Unknown {
-                raw: format!("{:?}", symbol.signatures),
-            },
-            _ => TypeExpr::Unknown {
-                raw: format!("{:?}::{:?}", symbol.kind, symbol.object_shape),
-            },
-        };
-        let outcome = compute_semantic_hash(&body, space, lens);
-        let body_hash = outcome.hash;
-        let display_hash = compute_display_hash(&body, &body_hash);
-
-        // `Export` if exported; `LocalDecl` otherwise.
-        let is_exported = shallow.exports.contains_key(name);
-        let key = if is_exported {
-            FactKey::Export {
-                name: exporter.clone(),
-                space,
-            }
-        } else {
-            FactKey::LocalDecl {
-                name: exporter.clone(),
-                space,
-            }
-        };
+    let shape_hash = compute_member_shape_hash(name, &members_for_shape, space);
+    registry.insert(Fact {
+        key: FactKey::MemberShape {
+            exporter: exporter.clone(),
+            space,
+        },
+        semantic_hash: shape_hash,
+        display_hash: shape_hash,
+    });
+    for (member_name, kind) in &members_for_shape {
+        let presence_hash = compute_member_presence_hash(name, member_name.as_ref(), *kind, space);
         registry.insert(Fact {
-            key,
-            semantic_hash: body_hash,
-            display_hash,
+            key: FactKey::MemberPresence {
+                exporter: exporter.clone(),
+                name: InternedName(Arc::clone(member_name)),
+                space,
+            },
+            semantic_hash: presence_hash,
+            display_hash: presence_hash,
         });
-
-        // Enum members → `MemberShape` + `MemberPresence` (R28).
-        if let Some(enum_members) = &symbol.enum_members {
-            let members_for_shape: Vec<(Arc<str>, MemberKind)> = {
-                let mut v: Vec<(Arc<str>, MemberKind)> = enum_members
-                    .keys()
-                    .map(|n| (Arc::<str>::from(n.as_str()), MemberKind::EnumMember))
-                    .collect();
-                v.sort_by(|a, b| a.0.as_ref().cmp(b.0.as_ref()));
-                v
-            };
-            let shape_hash = compute_member_shape_hash(name, &members_for_shape, space);
-            registry.insert(Fact {
-                key: FactKey::MemberShape {
-                    exporter: exporter.clone(),
-                    space,
-                },
-                semantic_hash: shape_hash,
-                display_hash: shape_hash,
-            });
-            for (member_name, _) in &members_for_shape {
-                let presence_hash = compute_member_presence_hash(
-                    name,
-                    member_name.as_ref(),
-                    MemberKind::EnumMember,
-                    space,
-                );
-                registry.insert(Fact {
-                    key: FactKey::MemberPresence {
-                        exporter: exporter.clone(),
-                        name: InternedName(Arc::clone(member_name)),
-                        space,
-                    },
-                    semantic_hash: presence_hash,
-                    display_hash: presence_hash,
-                });
-            }
-        }
-
-        // Object literal shape → `MemberShape` + `MemberPresence`
-        // (covers `const x = { a: ..., b: ... }`).
-        if let Some(obj) = &symbol.object_shape {
-            let members_for_shape = members_for_object_shape(obj);
-            if !members_for_shape.is_empty() {
-                let shape_hash = compute_member_shape_hash(name, &members_for_shape, space);
-                registry.insert(Fact {
-                    key: FactKey::MemberShape {
-                        exporter: exporter.clone(),
-                        space,
-                    },
-                    semantic_hash: shape_hash,
-                    display_hash: shape_hash,
-                });
-                for (member_name, kind) in &members_for_shape {
-                    let presence_hash =
-                        compute_member_presence_hash(name, member_name.as_ref(), *kind, space);
-                    registry.insert(Fact {
-                        key: FactKey::MemberPresence {
-                            exporter: exporter.clone(),
-                            name: InternedName(Arc::clone(member_name)),
-                            space,
-                        },
-                        semantic_hash: presence_hash,
-                        display_hash: presence_hash,
-                    });
-                }
-            }
-        }
     }
 }
 
-fn members_for_object_shape(obj: &ObjectExpr) -> Vec<(Arc<str>, MemberKind)> {
-    let mut out: Vec<(Arc<str>, MemberKind)> = Vec::with_capacity(obj.properties.len());
-    for member in &obj.properties {
-        match member {
-            ObjectMember::Property(p) => out.push((
-                Arc::<str>::from(p.name.as_str()),
-                MemberKind::Property {
-                    readonly: p.readonly,
-                    optional: p.optional,
-                },
-            )),
-            ObjectMember::Method(m) => {
-                out.push((Arc::<str>::from(m.name.as_str()), MemberKind::Method))
-            }
-            ObjectMember::IndexSignature(_) => continue,
-            ObjectMember::CallSignature(_) => continue,
-            ObjectMember::ConstructSignature(_) => continue,
-        }
+fn emit_type_symbol_headers(registry: &mut FactRegistry, shallow: &ShallowFileState) {
+    let mut sorted: Vec<&str> = shallow.type_symbol_names().collect();
+    sorted.sort_unstable();
+    for name in sorted {
+        let exporter = InternedName::from(name);
+        let headers = shallow.type_member_headers(name).unwrap_or(&[]);
+        emit_member_shape_facts(registry, name, &exporter, SymbolSpace::Type, headers);
     }
-    out.sort_by(|a, b| a.0.as_ref().cmp(b.0.as_ref()));
-    out
+}
+
+fn emit_value_symbol_headers(registry: &mut FactRegistry, shallow: &ShallowFileState) {
+    let header_index = shallow.decl_bodies().header_index();
+    let mut sorted: Vec<&str> = shallow.value_symbol_names().collect();
+    sorted.sort_unstable();
+    for name in sorted {
+        let exporter = InternedName::from(name);
+        let Some(header) = header_index.value_header(name) else {
+            continue;
+        };
+        emit_member_shape_facts(
+            registry,
+            name,
+            &exporter,
+            SymbolSpace::Value,
+            &header.object_member_headers,
+        );
+    }
+}
+
+/// Emit header-level member-presence facts for each `enum` declaration.
+///
+/// Enums are kept in their own header table (the eval-env walk never
+/// registers them as value symbols), so they need their own emitter —
+/// each variant becomes a Value-space [`MemberKind::EnumMember`] of the
+/// enum, on the SAME `MemberShape` / `MemberPresence` rail as type/value
+/// member headers. Header-only: variant NAMES + kind, no initializer
+/// body lowering (consistent with the zero-body-lowering publish
+/// invariant).
+fn emit_enum_symbol_headers(registry: &mut FactRegistry, shallow: &ShallowFileState) {
+    let mut sorted: Vec<&str> = shallow.enum_symbol_names().collect();
+    sorted.sort_unstable();
+    for name in sorted {
+        let Some(members) = shallow.enum_member_names(name) else {
+            continue;
+        };
+        let exporter = InternedName::from(name);
+        let members_for_shape: Vec<(Arc<str>, MemberKind)> = members
+            .iter()
+            .map(|variant| (Arc::<str>::from(variant.as_str()), MemberKind::EnumMember))
+            .collect();
+        emit_member_facts_from_kinds(
+            registry,
+            name,
+            &exporter,
+            SymbolSpace::Value,
+            members_for_shape,
+        );
+    }
 }
 
 fn emit_export_targets(registry: &mut FactRegistry, shallow: &ShallowFileState) {
@@ -407,9 +445,9 @@ fn emit_export_targets(registry: &mut FactRegistry, shallow: &ShallowFileState) 
     for (exported_name, target) in sorted {
         match target {
             ExportTarget::Local { .. } => {
-                // Local exports are already covered by
-                // `emit_type_symbols` / `emit_value_symbols`. The
-                // `Export` key was already inserted there.
+                // Local exports carry body-sensitive `Export` facts —
+                // produced LAZILY by the body fact path on first
+                // observation, never at publish.
             }
             ExportTarget::Reexport {
                 source_specifier,
@@ -559,18 +597,19 @@ fn compute_display_hash(_body: &TypeExpr, semantic: &Hash16) -> Hash16 {
 // ──────────────────────────────────────────────────────────────────
 
 /// Derive the parse-domain [`ModuleAugmentationFact`]s from the typed
-/// augmentation inventory the binder retained on the
-/// [`ShallowFileState`] — the SINGLE source of truth.
+/// augmentation HEADER inventory on the [`ShallowFileState`] — the
+/// SINGLE source of truth.
 ///
 /// `declare module "X" { ... }` / `declare global { ... }` inner declarations
-/// are retained during shallow analysis into
-/// [`ShallowFileState::augmentation_scopes`] (type space) and
-/// [`ShallowFileState::augmentation_value_scopes`] (value space). One fact is
-/// emitted per `(scope, name)` entry, carrying the augmented name, its symbol
-/// space, and a content-sensitive shape fingerprint over the retained body.
-/// There is NO raw-source rescan — the shallow inventory already classified and
-/// retained every augmentation declaration (Build Philosophy: no stage rescans
-/// raw source to rediscover what shallow processing captured).
+/// are inventoried during shallow analysis into the header index's
+/// augmentation tables. One fact is emitted per `(scope, name)` entry,
+/// carrying the augmented name, its symbol space, and a HEADER-LEVEL
+/// shape fingerprint (scope, name, kind, member-header names,
+/// contributor count). Body sensitivity for augmentation consumers
+/// rides on the per-contributor `FileWholeHash` facts the stitch
+/// records — a body edit moves the contributor's whole hash, which
+/// every warm stitch read revalidates against. There is NO raw-source
+/// rescan and NO body lowering here.
 ///
 /// Cross-project `augmentation_index` population is NOT done here — the
 /// augmentation-index producer populates it lazily on first
@@ -585,30 +624,43 @@ fn collect_augmentations(shallow: &ShallowFileState) -> Vec<ModuleAugmentationFa
         }
     };
 
+    let header_index = shallow.decl_bodies().header_index();
     let mut out: Vec<ModuleAugmentationFact> = Vec::new();
 
     // Type-space augmentations (interfaces, type aliases).
-    for ((scope, name), symbol) in &shallow.augmentation_scopes {
-        out.push(ModuleAugmentationFact {
-            specifier: specifier_for(scope),
-            augmented_name: InternedName::from(name.as_str()),
-            space: SymbolSpace::Type,
-            augmented_member_shape_fingerprint: type_augmentation_shape_fingerprint(
-                scope, name, symbol,
-            ),
-        });
+    for (scope, names) in &header_index.augmentation_type_headers {
+        for (name, header) in names {
+            out.push(ModuleAugmentationFact {
+                specifier: specifier_for(scope),
+                augmented_name: InternedName::from(name.as_str()),
+                space: SymbolSpace::Type,
+                augmented_member_shape_fingerprint: augmentation_header_fingerprint(
+                    scope,
+                    name,
+                    format!("{:?}", header.kind).as_str(),
+                    header.member_headers.as_slice(),
+                    header.contributors.len(),
+                ),
+            });
+        }
     }
 
     // Value-space augmentations (`const`/`let`/`var`, `function`, `class`).
-    for ((scope, name), symbol) in &shallow.augmentation_value_scopes {
-        out.push(ModuleAugmentationFact {
-            specifier: specifier_for(scope),
-            augmented_name: InternedName::from(name.as_str()),
-            space: SymbolSpace::Value,
-            augmented_member_shape_fingerprint: value_augmentation_shape_fingerprint(
-                scope, name, symbol,
-            ),
-        });
+    for (scope, names) in &header_index.augmentation_value_headers {
+        for (name, header) in names {
+            out.push(ModuleAugmentationFact {
+                specifier: specifier_for(scope),
+                augmented_name: InternedName::from(name.as_str()),
+                space: SymbolSpace::Value,
+                augmented_member_shape_fingerprint: augmentation_header_fingerprint(
+                    scope,
+                    name,
+                    format!("{:?}", header.kind).as_str(),
+                    header.object_member_headers.as_slice(),
+                    header.contributors.len(),
+                ),
+            });
+        }
     }
 
     // `HashMap` iteration is nondeterministic; sort for a stable fact order
@@ -632,67 +684,37 @@ fn hash16_from_pair(lo: u64, hi: u64) -> Hash16 {
     out
 }
 
-/// Content-sensitive shape fingerprint over a retained TYPE augmentation body.
-/// Folds the scope, name and every contributor body (`TypeExpr: Hash`) so a
-/// body edit moves the fingerprint while an unrelated edit does not.
-fn type_augmentation_shape_fingerprint(
+/// HEADER-LEVEL shape fingerprint over one retained augmentation
+/// header: scope, name, declaration kind, sorted member-header
+/// names/kinds/flags, contributor count. Moves on any skeleton edit
+/// (member add/remove/rename, kind change, contributor add/remove);
+/// body-VALUE sensitivity is the per-contributor `FileWholeHash` rail.
+fn augmentation_header_fingerprint(
     scope: &verter_semantic::analysis::type_eval::AugmentationScopeKind,
     name: &str,
-    symbol: &ShallowTypeSymbol,
+    kind: &str,
+    members: &[MemberHeader],
+    contributor_count: usize,
 ) -> Hash16 {
     use std::hash::{Hash, Hasher};
+    let mut sorted: Vec<&MemberHeader> = members.iter().collect();
+    sorted.sort_by(|a, b| a.name.cmp(&b.name));
     let digest = |salt: u64| -> u64 {
         let mut h = rustc_hash::FxHasher::default();
         salt.hash(&mut h);
         scope.hash(&mut h);
         name.hash(&mut h);
-        for contributor in symbol.body.contributors() {
-            contributor.hash(&mut h);
+        kind.hash(&mut h);
+        contributor_count.hash(&mut h);
+        for member in &sorted {
+            member.name.hash(&mut h);
+            matches!(member.kind, MemberHeaderKind::Method).hash(&mut h);
+            member.optional.hash(&mut h);
+            member.readonly.hash(&mut h);
         }
         h.finish()
     };
     hash16_from_pair(digest(0), digest(0x9E37_79B9_7F4A_7C15))
-}
-
-/// Content-sensitive shape fingerprint over a retained VALUE augmentation
-/// declaration. `FunctionSignature` is not `Hash`, so its `parameters`
-/// (`FunctionParam: Hash`) and `return_type` (`TypeExpr: Hash`) are folded
-/// explicitly alongside the value kind, type annotation and object shape.
-fn value_augmentation_shape_fingerprint(
-    scope: &verter_semantic::analysis::type_eval::AugmentationScopeKind,
-    name: &str,
-    symbol: &ShallowValueSymbol,
-) -> Hash16 {
-    use std::hash::{Hash, Hasher};
-    let digest = |salt: u64| -> u64 {
-        let mut h = rustc_hash::FxHasher::default();
-        salt.hash(&mut h);
-        scope.hash(&mut h);
-        name.hash(&mut h);
-        value_kind_tag(symbol.kind).hash(&mut h);
-        symbol.type_annotation.hash(&mut h);
-        symbol.object_shape.hash(&mut h);
-        for sig in &symbol.signatures {
-            sig.parameters.hash(&mut h);
-            sig.return_type.hash(&mut h);
-        }
-        h.finish()
-    };
-    hash16_from_pair(digest(0), digest(0x9E37_79B9_7F4A_7C15))
-}
-
-/// Stable byte tag for a [`ValueDeclKind`] (the enum is not `Hash`).
-fn value_kind_tag(kind: verter_semantic::analysis::type_eval::ValueDeclKind) -> u8 {
-    use verter_semantic::analysis::type_eval::ValueDeclKind;
-    match kind {
-        ValueDeclKind::Const => 0,
-        ValueDeclKind::Let => 1,
-        ValueDeclKind::Var => 2,
-        ValueDeclKind::Function => 3,
-        ValueDeclKind::AsyncFunction => 4,
-        ValueDeclKind::Class => 5,
-        ValueDeclKind::Enum => 6,
-    }
 }
 
 /// Sentinel specifier used inside [`ModuleAugmentationFact`] to
@@ -803,18 +825,18 @@ const sentinel = 7;"#;
     }
 
     #[test]
-    fn body_edit_moves_shape_fingerprint_unrelated_edit_does_not() {
+    fn member_skeleton_edit_moves_shape_fingerprint_unrelated_edit_does_not() {
         let base = augmentations_for("declare module \"vue\" { interface C { a: number } }");
-        let body_changed =
-            augmentations_for("declare module \"vue\" { interface C { a: string } }");
+        let member_changed =
+            augmentations_for("declare module \"vue\" { interface C { a: number; b: string } }");
         let unrelated = augmentations_for(
             "declare module \"vue\" { interface C { a: number } }\nconst other = 1;",
         );
         assert_eq!(base.len(), 1);
         assert_ne!(
             base[0].augmented_member_shape_fingerprint,
-            body_changed[0].augmented_member_shape_fingerprint,
-            "editing the augmenter body MUST move the shape fingerprint"
+            member_changed[0].augmented_member_shape_fingerprint,
+            "editing the augmenter member skeleton MUST move the shape fingerprint"
         );
         // The unrelated file-scope `const other` is not an augmentation, so the
         // augmentation fact's fingerprint is unchanged.

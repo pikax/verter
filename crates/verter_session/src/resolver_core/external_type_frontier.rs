@@ -244,13 +244,12 @@ impl ExternalTypeFrontier {
                 if let Some(obs) = verter_audit::current_observer() {
                     obs.record_event(verter_audit::AuditEvent::RouteDbBarrelStep);
                 }
-                let target_canonical = if ext_ref.canonical_id.is_empty() {
-                    host.resolve_type_edge_canonical(
+                let target_canonical = match ext_ref.canonical_id.as_deref() {
+                    Some(canonical) => Some(canonical.to_string()),
+                    None => host.resolve_type_edge_canonical(
                         &resolved.canonical_id,
                         &ext_ref.source_specifier,
-                    )
-                } else {
-                    Some(ext_ref.canonical_id.clone())
+                    ),
                 };
                 let Some(target_canonical) = target_canonical else {
                     continue;
@@ -404,7 +403,7 @@ impl ExternalTypeFrontier {
                                     local_name: symbol_name.clone(),
                                     source_specifier: import_target.source_specifier.clone(),
                                     imported_name: import_target.imported_name.clone(),
-                                    canonical_id: target_canonical.clone(),
+                                    canonical_id: Some(Arc::<str>::from(target_canonical.as_str())),
                                     route: pending.route.clone().unwrap_or_default(),
                                 }],
                                 route_provenance: Some(ResolvedRouteProvenance {
@@ -419,12 +418,11 @@ impl ExternalTypeFrontier {
 
                 if host.route_exports_only() {
                     let (body, type_parameters) = state
-                        .type_view()
-                        .symbol(symbol_name)
-                        .map(|symbol| {
+                        .type_decl(symbol_name)
+                        .map(|lowered| {
                             (
-                                Some(symbol.body.lookup_object().into_owned()),
-                                symbol.type_parameters.clone(),
+                                Some(lowered.body.lookup_object().into_owned()),
+                                lowered.type_parameters.clone(),
                             )
                         })
                         .unwrap_or_else(|| (None, Vec::new()));
@@ -445,12 +443,11 @@ impl ExternalTypeFrontier {
                 }
 
                 let (body, type_parameters) = state
-                    .type_view()
-                    .symbol(symbol_name)
-                    .map(|symbol| {
+                    .type_decl(symbol_name)
+                    .map(|lowered| {
                         (
-                            Some(symbol.body.lookup_object().into_owned()),
-                            symbol.type_parameters.clone(),
+                            Some(lowered.body.lookup_object().into_owned()),
+                            lowered.type_parameters.clone(),
                         )
                     })
                     .unwrap_or_else(|| (None, Vec::new()));
@@ -523,7 +520,7 @@ impl ExternalTypeFrontier {
                             local_name: pending.exported_name.clone(),
                             source_specifier: source_specifier.clone(),
                             imported_name: original_name.clone(),
-                            canonical_id: reexport_canonical.clone(),
+                            canonical_id: Some(Arc::<str>::from(reexport_canonical.as_str())),
                             route: pending.route.clone().unwrap_or_default(),
                         }],
                         route_provenance: Some(ResolvedRouteProvenance {
@@ -810,7 +807,7 @@ mod tests {
 
     fn make_state_resolved(source: &str, resolutions: &[(&str, &str)]) -> ShallowFileState {
         let resolver = MapResolver::from_pairs(resolutions);
-        ShallowFileState::from_analysis_with_resolver(
+        ShallowFileState::from_analysis_with_resolver_seeded(
             Hash16::default(),
             make_analysis(source),
             None,

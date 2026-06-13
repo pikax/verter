@@ -23,6 +23,7 @@
 mod build;
 mod classify;
 pub mod component_meta;
+pub mod decl_headers;
 mod exports;
 pub mod file_usage;
 pub mod html_intrinsics;

@@ -31,7 +31,9 @@ use verter_semantic::analysis::type_eval::{FunctionSignature, ValueDeclKind};
 use verter_semantic::analysis::types::{AnalyzedMacro, AnalyzedMacroKind};
 use verter_type_expr::{ObjectExpr, ObjectMember, ObjectProperty, TypeExpr};
 
-use super::shallow_file_state::{ShallowFileState, ShallowValueSymbol};
+use crate::decl_body_memo::LoweredValueDecl;
+
+use super::shallow_file_state::ShallowFileState;
 
 /// Property name on the synthesised SFC instance that carries the
 /// `defineProps<T>()` shape.
@@ -70,7 +72,7 @@ pub const VUE_INSTANCE_SLOTS_MEMBER: &str = "$slots";
 /// adding it to `ShallowFileState` construction stays inside the
 /// shallow-processing budget.
 #[must_use]
-pub fn synthesise_vue_default_value_symbol(macros: &[AnalyzedMacro]) -> Option<ShallowValueSymbol> {
+pub fn synthesise_vue_default_value_symbol(macros: &[AnalyzedMacro]) -> Option<LoweredValueDecl> {
     let mut members: Vec<ObjectMember> = Vec::new();
     let mut seen_props = false;
     let mut seen_emit = false;
@@ -125,7 +127,13 @@ pub fn synthesise_vue_default_value_symbol(macros: &[AnalyzedMacro]) -> Option<S
         properties: members,
     }));
 
-    Some(ShallowValueSymbol {
+    // EAGER macro-producer result: the synthesized public-instance shape is
+    // a fully lowered value body (a class with one construct signature), not
+    // a re-lowered declaration. It is the same `LoweredValueDecl` body carrier
+    // the lazy path produces; the caller stores it in the dedicated
+    // synthesised-body map and derives the header symbol (which carries the
+    // `is_synthesised_vue_default` provenance flag) from it.
+    Some(LoweredValueDecl {
         kind: ValueDeclKind::Class,
         type_annotation: None,
         signatures: vec![FunctionSignature {
@@ -136,10 +144,6 @@ pub fn synthesise_vue_default_value_symbol(macros: &[AnalyzedMacro]) -> Option<S
         }],
         object_shape: None,
         enum_members: None,
-        // PROVENANCE: this is the SOLE construction site of the synthesized
-        // `.vue` public-instance `default` symbol. The flag is the direct
-        // consumer proof the synthesized-default consumers gate on.
-        is_synthesised_vue_default: true,
     })
 }
 
@@ -188,11 +192,11 @@ pub fn inject_vue_default_into_shallow_state(
     if !is_synthesis_candidate(canonical_id) {
         return;
     }
-    if state.value_symbol("default").is_some() {
+    if state.has_value_symbol("default") {
         return;
     }
-    if let Some(default_symbol) = synthesise_vue_default_value_symbol(macros) {
-        state.insert_synthesised_value_symbol("default", default_symbol);
+    if let Some(default_body) = synthesise_vue_default_value_symbol(macros) {
+        state.insert_synthesised_value_default("default", default_body);
     }
 }
 
@@ -247,8 +251,8 @@ mod tests {
         }
     }
 
-    fn instance_members(symbol: &ShallowValueSymbol) -> Vec<String> {
-        let sig = symbol
+    fn instance_members(lowered: &LoweredValueDecl) -> Vec<String> {
+        let sig = lowered
             .signatures
             .first()
             .expect("synthesised default must carry a construct signature");

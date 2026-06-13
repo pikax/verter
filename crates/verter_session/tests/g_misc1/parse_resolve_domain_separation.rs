@@ -41,18 +41,14 @@ fn build_with_import(
     );
     let mut import_locals = FxHashSet::default();
     import_locals.insert(local.to_string());
-    let shallow = ShallowFileState {
-        whole_hash: [0u8; 16],
-        exports: FxHashMap::default(),
-        wildcard_reexports: Vec::new(),
-        symbols: FxHashMap::default(),
-        value_symbols: FxHashMap::default(),
+    let shallow = ShallowFileState::new_for_test_with_routing(
+        [0u8; 16],
+        FxHashMap::default(),
+        Vec::new(),
         import_locals,
         import_targets,
-        augmentation_scopes: Default::default(),
-        augmentation_value_scopes: Default::default(),
-        analysis: empty_external(),
-    };
+        empty_external(),
+    );
     Arc::new(IndexedReady::new_for_test_with_state(
         [0u8; 16],
         Arc::new(shallow),

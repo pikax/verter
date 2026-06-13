@@ -332,6 +332,7 @@ impl VerterHost {
                 crate::typeinfo::adapters::vue::store::VueShallowMetadataStore::new(),
             #[cfg(not(target_arch = "wasm32"))]
             host_cpu_pool,
+            decl_lowering: Arc::new(crate::decl_lowering::DeclLoweringService::new()),
             compile_force_overflow_observations: std::sync::atomic::AtomicUsize::new(0),
             materialize_force_overflow_observations: std::sync::atomic::AtomicUsize::new(0),
             materialize_force_in_scope_partial: std::sync::atomic::AtomicBool::new(false),
@@ -679,9 +680,11 @@ impl VerterHost {
     //
     // The off-store fields (`compile_cache`, `resolved_type_cache`,
     // `semantic_db`) live on the `ProjectTypeStore` typed-DB wrappers,
-    // not on `VerterHost`. The canonical per-file `EvalEnv` lives on
-    // `IndexedReady.eval_env` behind its narrow accessor — there is no
-    // separate host-level env cache. These accessors return
+    // not on `VerterHost`. The canonical per-file `EvalEnv` is a
+    // memo-owned whole-env demand product (built lazily through the
+    // artifact's `DeclBodyMemo::whole_env`) reached behind its narrow
+    // accessor — there is no separate host-level env cache. These
+    // accessors return
     // references to the rehomed storage; call sites use the accessor
     // form `host.<field>().<method>()`.
     // ──────────────────────────────────────────────────────────────────

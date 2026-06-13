@@ -829,7 +829,7 @@ impl<'a> StoreView for RequestStoreView<'a> {
             // Shadowing: overlay `FileFacts` are authoritative for the
             // canonical. A registered fact must match; an absent fact
             // matches only the zero-sentinel observation.
-            match overlay_facts.lookup(&fact.key) {
+            match overlay_facts.lookup_or_compute(&fact.key) {
                 Some(stored) => {
                     let stored_hash = match fact.lane {
                         verter_semantic::facts::registry::FactLane::Semantic => {

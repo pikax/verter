@@ -416,7 +416,11 @@ pub(crate) fn parse_fact_ref_for_observed_current_content(
         .project_type_store()
         .indexed()
         .get_artifacts_for_content(analysis_canonical.as_ref(), observed_content_hash)?;
-    let expected_hash = match artifacts.facts.lookup(&key) {
+    // Body-sensitive `Export` / `LocalDecl` facts are LAZY: the
+    // lookup demands exactly the named declaration's body through the
+    // artifact's memo on first observation (`lookup_or_compute`);
+    // eager header facts answer without lowering.
+    let expected_hash = match artifacts.facts.lookup_or_compute(&key) {
         Some(fact) => match lane {
             FactLane::Semantic => fact.semantic_hash,
             FactLane::Display => fact.display_hash,

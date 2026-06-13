@@ -254,20 +254,40 @@ pub const BASE_PARSE_ENV_HASH: Hash16 = [0u8; 16];
 /// during file-artifact construction (R10–R16, R28, R29). Consumers
 /// read parse-domain facts via [`FileFacts::registry`] / `lookup`.
 ///
-/// Parse-time emission populates: `Export`, `ExportAlias`,
-/// `SyntacticExportSet`, `LocalDecl`, `MemberShape`, `MemberPresence`,
-/// `MacroSurface`, `TemplateRoot`, `ImportRef`, `SyntacticReexportRef`,
-/// `ModuleAugmentation`. The `Member` body fingerprint is computed
-/// lazily on first member-access query and lives in
-/// `MemberSemanticFactStore` / `MemberDisplayFactStore`, NOT in
-/// this registry.
+/// Parse-time emission populates ONLY header-derived facts:
+/// `MemberShape`, `MemberPresence`, `SyntacticExportSet`, `ImportRef`,
+/// `SyntacticReexportRef`, `ExportAlias`, `ModuleAugmentation`. The
+/// body-sensitive `Export` / `LocalDecl` facts are NOT emitted here —
+/// publishing lowers zero declaration bodies, so they compute lazily on
+/// first observation through the artifact's declaration-body memo and
+/// are served via [`FileFacts::lookup_or_compute`]. The `Member` body
+/// fingerprint is likewise computed lazily on first member-access query
+/// and lives in `MemberSemanticFactStore` / `MemberDisplayFactStore`,
+/// NOT in this registry.
 ///
 /// Resolve-domain facts are NOT populated here — they emit from the
 /// resolver / `RouteDb` producers downstream.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone)]
 pub struct FileFacts {
     registry: fact_registry::FactRegistry,
+    /// Lazy body-sensitive fact source: `Export` / `LocalDecl` body
+    /// fingerprints are NOT emitted at publish (publishing lowers zero
+    /// declaration bodies) — they compute on first observation through
+    /// the artifact's declaration-body memo and memoize in a shared
+    /// side-store (`Arc`-shared across clones, so a `StoreView`
+    /// snapshot's copy serves the same lazily computed facts).
+    /// EXCLUDED from equality — the eager registry is the artifact's
+    /// fact identity.
+    lazy: Option<crate::fact_emission::LazyBodyFactSource>,
 }
+
+impl PartialEq for FileFacts {
+    fn eq(&self, other: &Self) -> bool {
+        self.registry == other.registry
+    }
+}
+
+impl Eq for FileFacts {}
 
 impl FileFacts {
     /// Construct an empty fact registry. Used by tests + legacy
@@ -280,7 +300,35 @@ impl FileFacts {
     /// Construct a populated `FileFacts` from a fact registry.
     #[must_use]
     pub fn from_registry(registry: fact_registry::FactRegistry) -> Self {
-        Self { registry }
+        Self {
+            registry,
+            lazy: None,
+        }
+    }
+
+    /// Construct a populated `FileFacts` carrying the lazy
+    /// body-sensitive fact source (the production emission path).
+    #[must_use]
+    pub(crate) fn from_registry_with_lazy(
+        registry: fact_registry::FactRegistry,
+        lazy: crate::fact_emission::LazyBodyFactSource,
+    ) -> Self {
+        Self {
+            registry,
+            lazy: Some(lazy),
+        }
+    }
+
+    /// Look up a fact, computing body-sensitive `Export` / `LocalDecl`
+    /// facts on demand through the lazy declaration-body path when the
+    /// eager registry misses. Eager facts answer without lowering;
+    /// a body-sensitive miss lowers exactly the named declaration.
+    #[must_use]
+    pub fn lookup_or_compute(&self, key: &fact_registry::FactKey) -> Option<fact_registry::Fact> {
+        if let Some(fact) = self.lookup(key) {
+            return Some(fact.clone());
+        }
+        self.lazy.as_ref()?.compute(key)
     }
 
     /// Borrow the underlying registry. O(1) per-key lookup via
@@ -534,15 +582,18 @@ impl FileArtifacts {
     /// Construct a `FileArtifacts` carrying only an `IndexedReady`.
     ///
     /// **Parse-time fact emission runs here** — the constructed
-    /// `FileFacts` is populated with the parse-domain
-    /// `FactRegistry` (`Export`, `LocalDecl`, `MemberShape`,
-    /// `MemberPresence`, `SyntacticExportSet`, `ImportRef`,
-    /// `SyntacticReexportRef`, `ExportAlias`, `ModuleAugmentation`)
-    /// by [`crate::fact_emission::emit_parse_facts`]. The per-file
-    /// augmentation list is populated alongside the facts. The
-    /// cross-project `augmentation_index` on
-    /// [`FileArtifactStore`] is NOT touched here — it is
-    /// populated lazily on first augmentation-sensitive query.
+    /// `FileFacts` is populated with the HEADER-derived parse-domain
+    /// `FactRegistry` (`MemberShape`, `MemberPresence`,
+    /// `SyntacticExportSet`, `ImportRef`, `SyntacticReexportRef`,
+    /// `ExportAlias`, `ModuleAugmentation`) by
+    /// [`crate::fact_emission::emit_parse_facts`]; publishing lowers
+    /// zero declaration bodies, so the body-sensitive `Export` /
+    /// `LocalDecl` facts are NOT emitted here — they compute lazily on
+    /// first observation (served via [`FileFacts::lookup_or_compute`]).
+    /// The per-file augmentation list is populated alongside the facts.
+    /// The cross-project `augmentation_index` on [`FileArtifactStore`]
+    /// is NOT touched here — it is populated lazily on first
+    /// augmentation-sensitive query.
     #[must_use]
     pub fn with_indexed(indexed: Arc<IndexedReady>) -> Self {
         let parse_stable_hash = crate::parse_stable_hash::compute_parse_stable_hash(&indexed);

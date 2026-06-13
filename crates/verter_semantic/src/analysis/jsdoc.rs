@@ -355,6 +355,62 @@ pub fn collect_jsdoc_typedefs(comments: &[Comment], source: &str) -> Vec<JsdocTy
     typedefs
 }
 
+/// Recover every `@typedef {T} Name` declaration NAME from the program's
+/// JSDoc block comments, in source order — WITHOUT lowering any `{T}`
+/// payload.
+///
+/// The header-walk counterpart to [`collect_jsdoc_typedefs`]: the shallow
+/// declaration index inventories typedef names so a later demand can
+/// address them, while the payload body lowers only when that demand
+/// arrives. Mirrors the same tag scan and name-token rules, so the two
+/// walks always agree on which names exist.
+pub fn collect_jsdoc_typedef_names(comments: &[Comment], source: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    for comment in comments {
+        if !comment.is_block()
+            || !matches!(
+                comment.content,
+                CommentContent::Jsdoc | CommentContent::JsdocLegal
+            )
+        {
+            continue;
+        }
+        let start = comment.span.start as usize;
+        let end = comment.span.end as usize;
+        if end > source.len() {
+            continue;
+        }
+        let block = jsdoc_block_spans(source, start, end);
+        for tag in &block.tags {
+            let tag_name = &source[tag.name.start as usize..tag.name.end as usize];
+            if tag_name != "typedef" {
+                continue;
+            }
+            let Some(text) = tag_text_slice(source, tag) else {
+                continue;
+            };
+            // `@typedef {T} Name` — skip past the balanced `{T}` payload
+            // (no lowering) and take the first identifier token after it,
+            // applying the same emptiness/name rules as the lowering walk.
+            let Some((payload, rest)) = split_jsdoc_brace_payload(text) else {
+                continue;
+            };
+            if payload.is_empty() {
+                continue;
+            }
+            let Some(raw_name) = rest.split_whitespace().next() else {
+                continue;
+            };
+            let name = raw_name.trim();
+            if name.is_empty() || !is_jsdoc_typedef_name(name) {
+                continue;
+            }
+            names.push(name.to_string());
+        }
+    }
+    names
+}
+
 /// Whether `name` is a plain identifier usable as a `@typedef` name (the
 /// closing-brace-following token must be a bare type name, not punctuation /
 /// another `{`).

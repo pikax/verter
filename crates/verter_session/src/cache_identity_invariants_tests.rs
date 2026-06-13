@@ -642,23 +642,21 @@ fn augmentation_probe_rejects_stale_artifact_the_authority_gate_rejects() {
 
     // Seed the stale leftover: a barrel artifact whose baked wildcard
     // edge points at the REAL augmenter file.
-    let shallow = crate::resolver_core::shallow_file_state::ShallowFileState {
-        whole_hash: [9u8; 16],
-        exports: FxHashMap::default(),
-        wildcard_reexports: vec![crate::resolver_core::shallow_file_state::WildcardReexport {
-            source_specifier: "./real_aug".to_string(),
-            canonical_id: real_aug.to_string(),
-        }],
-        symbols: FxHashMap::default(),
-        value_symbols: FxHashMap::default(),
-        augmentation_scopes: FxHashMap::default(),
-        augmentation_value_scopes: FxHashMap::default(),
-        import_locals: rustc_hash::FxHashSet::default(),
-        import_targets: FxHashMap::default(),
-        analysis: StdArc::new(
-            verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default(),
-        ),
-    };
+    let shallow =
+        crate::resolver_core::shallow_file_state::ShallowFileState::new_for_test_with_routing(
+            [9u8; 16],
+            FxHashMap::default(),
+            vec![crate::resolver_core::shallow_file_state::WildcardReexport {
+                source_specifier: "./real_aug".to_string(),
+                canonical_id: real_aug.to_string(),
+            }],
+            rustc_hash::FxHashSet::default(),
+            FxHashMap::default(),
+            StdArc::new(
+                verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default(
+                ),
+            ),
+        );
     let indexed = crate::project_type_store::IndexedReady::new_for_test_with_state(
         [9u8; 16],
         StdArc::new(shallow),
@@ -891,7 +889,9 @@ fn close_clears_retained_artifact_store() {
     assert!(
         host.project_type_store().indexed().is_empty(),
         "close() must clear the FileArtifactStore (memory-release \
-         contract: every IndexedReady + its Arc<EvalEnv> lives there)",
+         contract: every IndexedReady lives there, including its shallow \
+         index and DeclBodyMemo, which owns the lazily-materialised \
+         whole_env)",
     );
     assert!(
         host.artifact_current_indexed_raw(canonical).is_none(),

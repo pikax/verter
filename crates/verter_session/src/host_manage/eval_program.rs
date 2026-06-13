@@ -95,7 +95,7 @@ impl VerterHost {
         verter_semantic::analysis::type_eval_build::parse_type_parameter_clause(clause)
     }
 
-    fn apply_sfc_script_setup_type_params(
+    pub(crate) fn apply_sfc_script_setup_type_params(
         env: &mut verter_semantic::analysis::type_eval::EvalEnv,
         source: &str,
         cached_parse: Option<&verter_compiler::parser::types::ParsedSfc>,
@@ -605,55 +605,5 @@ impl VerterHost {
         self.project_type_store
             .semantic_graph()
             .clear_resolved_named_types();
-    }
-
-    /// Build the eval env AND the external-type analysis from ONE
-    /// already-parsed eval program — the single-parse core of the
-    /// `IndexedReady` materialise closure (base and overlay alike).
-    ///
-    /// `parsed: None` is the fatal-parse path: the env stays empty
-    /// (script-setup type params still apply — they come from the SFC
-    /// parse, not the eval program) and the analysis is the default.
-    /// There is NO re-parse under a different source type here — the
-    /// authoritative `source_type` already failed, and a forgiving
-    /// second parse under `SourceType::ts()` is exactly the env
-    /// divergence this builder exists to prevent.
-    pub(crate) fn build_eval_env_and_analysis_from_program(
-        &self,
-        canonical_id: &str,
-        raw_source: &str,
-        cached_parse: Option<&verter_compiler::parser::types::ParsedSfc>,
-        eval_source: &str,
-        parsed: Option<&crate::ParsedEvalProgram>,
-    ) -> (
-        Arc<verter_semantic::analysis::type_eval::EvalEnv>,
-        Arc<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource>,
-    ) {
-        self.provenance
-            .eval_env_builds
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let Some(parsed) = parsed else {
-            let mut env = verter_semantic::analysis::type_eval::EvalEnv::default();
-            Self::apply_sfc_script_setup_type_params(&mut env, raw_source, cached_parse);
-            return (
-                Arc::new(env),
-                Arc::new(
-                    verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default(
-                    ),
-                ),
-            );
-        };
-
-        let program = parsed.borrow_dependent();
-        let mut env =
-            verter_semantic::analysis::type_eval_build::build_eval_env(program, eval_source);
-        Self::apply_sfc_script_setup_type_params(&mut env, raw_source, cached_parse);
-        let mut analyzed =
-            verter_compiler::utils::oxc::vue::resolve_type::analyze_external_type_program(program);
-        // Oracle harness: stamp the owning canonical onto the
-        // parse-time `RawSourceSurface` records so the `(canonical, name,
-        // symbol_space)` contributor identity is complete on the artifact.
-        analyzed.stamp_raw_surface_canonical(canonical_id);
-        (Arc::new(env), Arc::new(analyzed))
     }
 }

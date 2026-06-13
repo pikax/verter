@@ -17,12 +17,12 @@ use std::sync::Arc;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::route_demand::RouteDemand;
+use crate::decl_body_memo::{LoweredTypeDecl, LoweredValueDecl};
 use verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource;
-use verter_semantic::analysis::type_eval::{
-    FunctionSignature, TypeDeclBody, TypeDeclKind, ValueDeclKind,
-};
+use verter_semantic::analysis::decl_headers::{TypeDeclHeader, ValueDeclHeader};
+use verter_semantic::analysis::type_eval::{TypeDeclKind, ValueDeclKind};
 use verter_semantic::analysis::Hash16;
-use verter_type_expr::{ObjectExpr, TypeExpr, TypeParam};
+use verter_type_expr::TypeExpr;
 
 // ---------------------------------------------------------------------------
 // Core types
@@ -47,42 +47,6 @@ pub struct ShallowFileState {
     /// `export * from` sources with canonical targets, in declaration order.
     pub wildcard_reexports: Vec<WildcardReexport>,
 
-    /// All locally-declared type symbols (exported or internal).
-    pub symbols: FxHashMap<String, ShallowTypeSymbol>,
-
-    /// All locally-declared value symbols that may participate in `typeof`
-    /// queries or value-driven type expansion.
-    pub value_symbols: FxHashMap<String, ShallowValueSymbol>,
-
-    /// Ambient declaration-augmentation inventory: `(scope, name)` → retained
-    /// declaration. Holds the bodies of declarations nested in
-    /// `declare module "X" { ... }` / `declare global { ... }` blocks. These
-    /// NEVER appear in [`symbols`](Self::symbols) (file-scope) — they augment
-    /// another module's surface or the global scope and are stitched onto the
-    /// augmented declaration on demand. Same-file multiple-block contributors
-    /// already merge here (the group's [`TypeDeclBody::Merged`] carrier);
-    /// cross-file augmenters are appended by the augmentation stitch.
-    pub augmentation_scopes: FxHashMap<
-        (
-            verter_semantic::analysis::type_eval::AugmentationScopeKind,
-            String,
-        ),
-        ShallowTypeSymbol,
-    >,
-
-    /// Value-space counterpart to [`augmentation_scopes`](Self::augmentation_scopes):
-    /// the retained VALUE declarations (`const`/`let`/`var`, `function`,
-    /// `class`) nested in `declare module "X" { ... }` / `declare global { ... }`
-    /// blocks. The typed source for value-space module-augmentation facts;
-    /// never enters file-scope [`value_symbols`](Self::value_symbols).
-    pub augmentation_value_scopes: FxHashMap<
-        (
-            verter_semantic::analysis::type_eval::AugmentationScopeKind,
-            String,
-        ),
-        ShallowValueSymbol,
-    >,
-
     /// Import-local names (names that come from `import` declarations).
     /// Used to classify dependencies as local vs external during closure.
     pub import_locals: FxHashSet<String>,
@@ -90,9 +54,37 @@ pub struct ShallowFileState {
     /// Import specifier targets: local import name → canonical import target.
     pub import_targets: FxHashMap<String, ImportTarget>,
 
-    /// The underlying analyzed source (retained for methods that still need
-    /// the full analysis surface during the transition).
+    /// The HEADER-ONLY analyzed source: import/export/reexport tables plus
+    /// the local type-symbol NAME inventory (kind + span, no dependency
+    /// names). Body-derived data lives behind the lazy declaration-body
+    /// memo.
     pub analysis: Arc<AnalyzedExternalTypeSource>,
+
+    /// The lazy declaration-body memo this state materialises symbols
+    /// from — the SOLE body authority. Shared (`Arc`) across route-only
+    /// edge refreshes of the same content generation.
+    decl_bodies: Arc<crate::decl_body_memo::DeclBodyMemo>,
+
+    /// Per-name DEPENDENCY-EDGE cache: the local/external dependency
+    /// classification for one file-scope TYPE symbol (canonicals baked
+    /// from THIS state's import targets — rebuilt with the state at edge
+    /// refresh so cross-file edges re-resolve). Stores ONLY dependency
+    /// edges, never a lowered body product — body data is read through
+    /// the lazy memo accessors ([`Self::type_decl`]). Populated only for
+    /// names the header inventory knows; a header miss never inserts.
+    type_deps_cache: dashmap::DashMap<String, Option<Arc<ClassifiedTypeDeps>>>,
+
+    /// EAGER synthesised value-symbol HEADERS (the `.vue` implicit
+    /// `default` public-instance shape) — header-only records carrying
+    /// the `is_synthesised_vue_default` provenance flag. The matching
+    /// eager body lives in [`Self::synthesised_value_bodies`].
+    synthesised_value_symbols: FxHashMap<String, Arc<ShallowValueSymbol>>,
+
+    /// EAGER synthesised value BODIES (the macro-producer-boundary
+    /// `LoweredValueDecl` for the `.vue` implicit `default`). Kept in a
+    /// dedicated body map rather than hidden inside the header symbol —
+    /// `value_decl(name)` routes through it before the lazy memo.
+    synthesised_value_bodies: FxHashMap<String, Arc<LoweredValueDecl>>,
 }
 
 /// A wildcard `export * from ‘...’` reexport with its resolved canonical target.
@@ -143,46 +135,73 @@ pub enum ExportTarget {
     },
 }
 
-/// Shallow metadata for one locally-declared type symbol.
+/// Slim HEADER metadata for one locally-declared type symbol.
+///
+/// This is a header-only view over the shallow declaration index — it
+/// OWNS no body product. Declaration BODIES live exclusively in the
+/// memo-owned [`LoweredTypeDecl`] (read through [`ShallowFileState::type_decl`]);
+/// dependency edges live in [`ClassifiedTypeDeps`] (read through
+/// [`ShallowFileState::type_deps`]).
 #[derive(Debug, Clone)]
 pub struct ShallowTypeSymbol {
-    /// Declaration kind.
+    /// Declaration kind (header fact).
     pub kind: TypeDeclKind,
-    /// The declaration body. [`TypeDeclBody::Single`] for one declaration;
-    /// [`TypeDeclBody::Merged`] when multiple same-name `interface`
-    /// declarations in this file merge (each contributor's body retained in
-    /// source order for the project-semantic peer-merge reducer).
-    pub body: TypeDeclBody,
-    /// Generic type parameters.
-    pub type_parameters: Vec<TypeParam>,
+    /// Generic type-parameter NAMES, unioned across contributors in
+    /// first-seen order. (The full `TypeParam` carriers — constraints /
+    /// defaults — are body data, read through `type_decl`.)
+    pub type_param_names: Vec<String>,
+    /// Direct syntactic member NAMES (own members only, heritage
+    /// excluded) — a shallow shape fact.
+    pub member_names: Vec<String>,
+    /// Number of same-name contributing declarations that merged into
+    /// this symbol.
+    pub contributor_count: usize,
+}
+
+impl ShallowTypeSymbol {
+    /// Build the slim header view from a shallow type-declaration header.
+    fn from_header(header: &TypeDeclHeader) -> Self {
+        Self {
+            kind: header.kind,
+            type_param_names: header.type_params.iter().map(|p| p.name.clone()).collect(),
+            member_names: header
+                .member_headers
+                .iter()
+                .map(|m| m.name.clone())
+                .collect(),
+            contributor_count: header.contributors.len(),
+        }
+    }
+}
+
+/// Per-symbol dependency-edge classification — the local vs external
+/// split over one type declaration's reference graph, baked against the
+/// owning state's import targets. Dependency EDGES only; no body product.
+#[derive(Debug, Clone, Default)]
+pub struct ClassifiedTypeDeps {
     /// Names of same-file symbols this type directly depends on.
     /// Used for iterative local closure.
     pub local_deps: Vec<String>,
     /// Names of import-local symbols this type directly depends on.
     /// These become `ExternalSymbolRef` during frontier traversal.
     pub external_deps: Vec<ExternalSymbolRef>,
-    /// Per-member dependency tracking for route-aware closure narrowing.
-    /// Maps member name → names referenced in that member's type.
-    /// Populated only for Object-bodied symbols (interfaces, object types).
-    /// Empty for non-object bodies or if member-level tracking is unavailable.
-    pub member_deps: rustc_hash::FxHashMap<String, Vec<String>>,
 }
 
-/// Shallow metadata for one locally-declared value symbol.
+/// Slim HEADER metadata for one locally-declared value symbol.
+///
+/// A header-only view over the shallow declaration index (kind +
+/// object-literal member names) plus the `.vue`-default provenance flag.
+/// It OWNS no body product — declaration bodies live exclusively in the
+/// memo-owned (or eager synthesised) [`LoweredValueDecl`], read through
+/// [`ShallowFileState::value_decl`].
 #[derive(Debug, Clone)]
 pub struct ShallowValueSymbol {
-    /// Declaration kind.
+    /// Declaration kind (header fact).
     pub kind: ValueDeclKind,
-    /// Explicit type annotation, if present.
-    pub type_annotation: Option<TypeExpr>,
-    /// Function signatures, if this value is callable. Empty = non-callable;
-    /// length 1 = the common single-declaration case; length > 1 = an overload
-    /// group (source order; trailing entry may be the implementation).
-    pub signatures: Vec<FunctionSignature>,
-    /// Object literal shape, if the declaration is a literal object.
-    pub object_shape: Option<ObjectExpr>,
-    /// Enum member values — populated for `ValueDeclKind::Enum`.
-    pub enum_members: Option<rustc_hash::FxHashMap<String, TypeExpr>>,
+    /// Direct member NAMES of an object-literal initializer
+    /// (`const x = { a, b }`) — a shallow shape fact; empty for
+    /// non-object-literal values.
+    pub object_member_headers: Vec<String>,
     /// Structural PROVENANCE fact: `true` only for the synthesized `default`
     /// VALUE symbol that [`super::vue_default_synth::synthesise_vue_default_value_symbol`]
     /// fabricates for a `.vue` SFC's implicit public instance (the construct
@@ -201,6 +220,35 @@ pub struct ShallowValueSymbol {
     pub is_synthesised_vue_default: bool,
 }
 
+impl ShallowValueSymbol {
+    /// Build the slim header view from a shallow value-declaration header.
+    /// `is_synthesised_vue_default` is `false` for every header-index
+    /// (userland) value symbol.
+    fn from_header(header: &ValueDeclHeader) -> Self {
+        Self {
+            kind: header.kind,
+            object_member_headers: header
+                .object_member_headers
+                .iter()
+                .map(|m| m.name.clone())
+                .collect(),
+            is_synthesised_vue_default: false,
+        }
+    }
+
+    /// Build the slim header view for the EAGER synthesised `.vue`-default
+    /// from its macro-producer lowered body. The body itself is stored
+    /// separately ([`ShallowFileState::synthesised_value_bodies`]); this
+    /// is the header probe carrying the provenance flag.
+    pub(crate) fn synthesised_from_lowered(lowered: &LoweredValueDecl) -> Self {
+        Self {
+            kind: lowered.kind,
+            object_member_headers: Vec::new(),
+            is_synthesised_vue_default: true,
+        }
+    }
+}
+
 /// A reference to an imported symbol that needs cross-file resolution.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ExternalSymbolRef {
@@ -210,11 +258,55 @@ pub struct ExternalSymbolRef {
     pub source_specifier: String,
     /// The original exported name in the source module.
     pub imported_name: String,
-    /// The resolved canonical file ID of the target.
-    /// Empty string if unresolved (construction without host resolver).
-    pub canonical_id: String,
+    /// The resolved canonical file ID of the target; `None` when the
+    /// specifier did not resolve (construction without a host resolver,
+    /// or a genuinely unresolvable specifier).
+    pub canonical_id: Option<Arc<str>>,
     /// The remaining route demand on the imported symbol.
     pub route: RouteDemand,
+}
+
+/// Lift an [`ImportTarget`]'s resolved canonical onto the typed
+/// resolved/unresolved carrier (the import table keeps the empty-string
+/// miss sentinel internally; external refs carry the explicit `Option`).
+pub(crate) fn external_canonical(target: &ImportTarget) -> Option<Arc<str>> {
+    (!target.canonical_id.is_empty()).then(|| Arc::<str>::from(target.canonical_id.as_str()))
+}
+
+/// Keyed-map external-ref accumulator: merges same-`(specifier,
+/// imported_name)` refs by route-union in O(1) per add (insertion order
+/// preserved for deterministic output).
+#[derive(Debug, Default)]
+pub(crate) struct ExternalRefAccumulator {
+    index: FxHashMap<(String, String), usize>,
+    refs: Vec<ExternalSymbolRef>,
+}
+
+impl ExternalRefAccumulator {
+    pub(crate) fn add(&mut self, ext_ref: ExternalSymbolRef) {
+        match self.index.entry((
+            ext_ref.source_specifier.clone(),
+            ext_ref.imported_name.clone(),
+        )) {
+            std::collections::hash_map::Entry::Occupied(entry) => {
+                let existing = &mut self.refs[*entry.get()];
+                existing.route =
+                    crate::resolver_core::merge_route_demands(&existing.route, &ext_ref.route);
+            }
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(self.refs.len());
+                self.refs.push(ext_ref);
+            }
+        }
+    }
+
+    pub(crate) fn into_vec(self) -> Vec<ExternalSymbolRef> {
+        self.refs
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.refs.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -371,9 +463,11 @@ impl ShallowImportResolver for NullResolver {
 impl ShallowFileState {
     /// Test-only convenience: build from an existing
     /// `AnalyzedExternalTypeSource` with a null resolver — canonical IDs
-    /// on cross-file edges stay empty. The production construction path
-    /// is [`Self::from_analysis_with_resolver`] (the materialise
-    /// closure supplies the resolver and the single built `EvalEnv`).
+    /// on cross-file edges stay empty. The supplied `eval_env` seeds the
+    /// declaration-body memo (every entry pre-filled through the same
+    /// per-symbol fold the lazy path performs). The production
+    /// construction path is [`Self::from_analysis_with_resolver`] (the
+    /// materialise closure supplies the resolver and the lazy memo).
     /// Gated `#[cfg(any(test, debug_assertions))]` — integration tests
     /// in `tests/` compile without `cfg(test)`; release production
     /// builds compile this edge-less constructor out.
@@ -383,51 +477,99 @@ impl ShallowFileState {
         analysis: Arc<AnalyzedExternalTypeSource>,
         eval_env: Option<&verter_semantic::analysis::type_eval::EvalEnv>,
     ) -> Self {
-        Self::from_analysis_inner(whole_hash, analysis, eval_env, &NullResolver)
+        let empty_env = verter_semantic::analysis::type_eval::EvalEnv::default();
+        let env = eval_env.unwrap_or(&empty_env);
+        let header_index =
+            Arc::new(verter_semantic::analysis::decl_headers::DeclHeaderIndex::from_eval_env(env));
+        let memo = crate::decl_body_memo::DeclBodyMemo::seeded_from_env(
+            crate::decl_lowering::SnapshotKey {
+                canonical: Arc::from(""),
+                whole_hash,
+                parse_env_hash: [0u8; 16],
+            },
+            env,
+            analysis.as_ref(),
+            header_index,
+        );
+        Self::from_analysis_inner(whole_hash, analysis, Arc::new(memo), &NullResolver)
     }
 
-    /// Build from analysis with a resolver that canonicalizes all cross-file edges.
-    ///
-    /// This is the preferred production construction path. The caller
-    /// supplies the already-built `EvalEnv` — there is NO internal parse
-    /// path here: the materialise closure's single parse/env is the only
-    /// production producer, and a hidden fallback re-parse is exactly
-    /// the duplicate-build/divergence class this builder must not own.
-    pub fn from_analysis_with_resolver(
+    /// Test-only counterpart of [`Self::from_analysis_with_resolver`]
+    /// taking an already-built `EvalEnv` to SEED the declaration-body
+    /// memo (every entry pre-filled through the same per-symbol fold the
+    /// lazy path performs) while resolving cross-file edges through the
+    /// supplied resolver. Same gate as [`Self::from_analysis`].
+    #[cfg(any(test, debug_assertions))]
+    pub fn from_analysis_with_resolver_seeded(
         whole_hash: Hash16,
         analysis: Arc<AnalyzedExternalTypeSource>,
         eval_env: Option<&verter_semantic::analysis::type_eval::EvalEnv>,
         resolver: &dyn ShallowImportResolver,
     ) -> Self {
-        Self::from_analysis_inner(whole_hash, analysis, eval_env, resolver)
+        let empty_env = verter_semantic::analysis::type_eval::EvalEnv::default();
+        let env = eval_env.unwrap_or(&empty_env);
+        let header_index =
+            Arc::new(verter_semantic::analysis::decl_headers::DeclHeaderIndex::from_eval_env(env));
+        let memo = crate::decl_body_memo::DeclBodyMemo::seeded_from_env(
+            crate::decl_lowering::SnapshotKey {
+                canonical: Arc::from(""),
+                whole_hash,
+                parse_env_hash: [0u8; 16],
+            },
+            env,
+            analysis.as_ref(),
+            header_index,
+        );
+        Self::from_analysis_inner(whole_hash, analysis, Arc::new(memo), resolver)
+    }
+
+    /// Test-only constructor with caller-supplied ROUTING tables (exports,
+    /// wildcard reexports, import tables) and an EMPTY seeded symbol
+    /// inventory — for fixtures that exercise route surfaces without any
+    /// declared symbols. Same gate as [`Self::from_analysis`].
+    #[cfg(any(test, debug_assertions))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_for_test_with_routing(
+        whole_hash: Hash16,
+        exports: FxHashMap<String, ExportTarget>,
+        wildcard_reexports: Vec<WildcardReexport>,
+        import_locals: FxHashSet<String>,
+        import_targets: FxHashMap<String, ImportTarget>,
+        analysis: Arc<AnalyzedExternalTypeSource>,
+    ) -> Self {
+        let mut state = Self::from_analysis(whole_hash, analysis, None);
+        state.exports = exports;
+        state.wildcard_reexports = wildcard_reexports;
+        state.import_locals = import_locals;
+        state.import_targets = import_targets;
+        state
+    }
+
+    /// Build from the header-only analysis + the lazy declaration-body
+    /// memo, with a resolver that canonicalizes all cross-file edges.
+    ///
+    /// This is the production construction path: HEADER work only —
+    /// export/import routing tables, no body lowering. Symbol bodies
+    /// materialise on first demand through the memo.
+    pub fn from_analysis_with_resolver(
+        whole_hash: Hash16,
+        analysis: Arc<AnalyzedExternalTypeSource>,
+        decl_bodies: Arc<crate::decl_body_memo::DeclBodyMemo>,
+        resolver: &dyn ShallowImportResolver,
+    ) -> Self {
+        Self::from_analysis_inner(whole_hash, analysis, decl_bodies, resolver)
     }
 
     fn from_analysis_inner(
         whole_hash: Hash16,
         analysis: Arc<AnalyzedExternalTypeSource>,
-        eval_env: Option<&verter_semantic::analysis::type_eval::EvalEnv>,
+        decl_bodies: Arc<crate::decl_body_memo::DeclBodyMemo>,
         resolver: &dyn ShallowImportResolver,
     ) -> Self {
         let mut exports = FxHashMap::default();
         let mut wildcard_reexports = Vec::new();
         let mut import_locals = FxHashSet::default();
         let mut import_targets: FxHashMap<String, ImportTarget> = FxHashMap::default();
-        let mut symbols: FxHashMap<String, ShallowTypeSymbol> = FxHashMap::default();
-        let mut value_symbols: FxHashMap<String, ShallowValueSymbol> = FxHashMap::default();
-        let mut augmentation_scopes: FxHashMap<
-            (
-                verter_semantic::analysis::type_eval::AugmentationScopeKind,
-                String,
-            ),
-            ShallowTypeSymbol,
-        > = FxHashMap::default();
-        let mut augmentation_value_scopes: FxHashMap<
-            (
-                verter_semantic::analysis::type_eval::AugmentationScopeKind,
-                String,
-            ),
-            ShallowValueSymbol,
-        > = FxHashMap::default();
 
         // Populate exports from the extracted bindings
         // Direct reexports
@@ -496,163 +638,17 @@ impl ShallowFileState {
             );
         }
 
-        // Locally-declared symbols from eval env (if available)
-        if let Some(env) = eval_env {
-            for (name, group) in &env.type_symbols {
-                // Same-name interface contributors merge into one declaration
-                // body (TS same-file declaration merging). The merge SEMANTICS
-                // live in the project-semantic peer-merge reducer over the
-                // `MergedDecl` carrier — here we only retain the ordered
-                // contributors and index their union of members/deps. The
-                // `lookup_object` projection is a shallow member index, never an
-                // intersection, so it cannot route through heritage-shadow.
-                let primary = group.primary();
-                let body = group.merged_body();
-                let lookup = body.lookup_object();
-
-                let local_type_sym = analysis.local_type_symbol(name);
-                let (local_deps, mut external_deps) = if let Some(sym) = local_type_sym {
-                    classify_deps(
-                        name,
-                        analysis.as_ref(),
-                        sym,
-                        &import_locals,
-                        &import_targets,
-                    )
-                } else {
-                    (Vec::new(), Vec::new())
-                };
-                augment_with_typeof_import_deps(
-                    lookup.as_ref(),
-                    &import_targets,
-                    &mut external_deps,
-                );
-
-                // Union generic type parameters across every contributor in
-                // source order (a merged generic interface keeps each part's
-                // parameters).
-                let mut type_parameters: Vec<TypeParam> = Vec::new();
-                for decl in group.contributors() {
-                    for param in &decl.type_parameters {
-                        if !type_parameters.iter().any(|p| p.name == param.name) {
-                            type_parameters.push(param.clone());
-                        }
-                    }
-                }
-
-                let member_deps = extract_member_deps(lookup.as_ref());
-                drop(lookup);
-                symbols.insert(
-                    name.clone(),
-                    ShallowTypeSymbol {
-                        kind: primary.kind,
-                        body,
-                        type_parameters,
-                        local_deps,
-                        external_deps,
-                        member_deps,
-                    },
-                );
-            }
-
-            for (name, group) in &env.value_symbols {
-                let decl = group.primary();
-                // For enum values, extract member names from the corresponding
-                // type symbol's union body (TypeScript enums are dual-space:
-                // type = union, value = object with member lookup).
-                let enum_members = if decl.kind == ValueDeclKind::Enum {
-                    env.type_symbols
-                        .get(name)
-                        .and_then(|g| extract_enum_members_from_type_body(&g.primary().body))
-                } else {
-                    None
-                };
-                value_symbols.insert(
-                    name.clone(),
-                    ShallowValueSymbol {
-                        kind: decl.kind,
-                        type_annotation: decl.type_annotation.clone(),
-                        signatures: group.merged_signatures(),
-                        object_shape: decl.object_shape.clone(),
-                        enum_members,
-                        // Userland value symbols from the eval env are NEVER the
-                        // synthesized `.vue` public instance (that one is
-                        // fabricated by `vue_default_synth` and inserted via
-                        // `insert_synthesised_value_symbol`).
-                        is_synthesised_vue_default: false,
-                    },
-                );
-            }
-
-            // Ambient augmentation inventory (`declare module "X"` /
-            // `declare global`). Mirror each scoped group as a
-            // `ShallowTypeSymbol` keyed by `(scope, name)`. Same-file multiple
-            // contributors already fold through the group's `merged_body()`
-            // carrier here; cross-file augmenters are stitched on at resolve
-            // time. These never enter `symbols` (file scope).
-            for ((scope, name), group) in &env.augmentation_scopes {
-                let primary = group.primary();
-                let body = group.merged_body();
-                let lookup = body.lookup_object();
-                let mut type_parameters: Vec<TypeParam> = Vec::new();
-                for decl in group.contributors() {
-                    for param in &decl.type_parameters {
-                        if !type_parameters.iter().any(|p| p.name == param.name) {
-                            type_parameters.push(param.clone());
-                        }
-                    }
-                }
-                let member_deps = extract_member_deps(lookup.as_ref());
-                drop(lookup);
-                augmentation_scopes.insert(
-                    (scope.clone(), name.clone()),
-                    ShallowTypeSymbol {
-                        kind: primary.kind,
-                        body,
-                        type_parameters,
-                        local_deps: Vec::new(),
-                        external_deps: Vec::new(),
-                        member_deps,
-                    },
-                );
-            }
-
-            // Value-space augmentation inventory — mirror each scoped value
-            // group as a `ShallowValueSymbol` keyed by `(scope, name)`. The
-            // typed source for value-space module-augmentation facts; never
-            // enters file-scope `value_symbols`.
-            for ((scope, name), group) in &env.augmentation_value_scopes {
-                let decl = group.primary();
-                augmentation_value_scopes.insert(
-                    (scope.clone(), name.clone()),
-                    ShallowValueSymbol {
-                        kind: decl.kind,
-                        type_annotation: decl.type_annotation.clone(),
-                        signatures: group.merged_signatures(),
-                        object_shape: decl.object_shape.clone(),
-                        enum_members: None,
-                        is_synthesised_vue_default: false,
-                    },
-                );
-            }
-        }
-        // Without an eval env or source fallback, the shallow state can still
-        // expose export/import routing but cannot populate declaration bodies.
-        // The analysis-level symbol data (AnalyzedExternalTypeSymbol) does not
-        // carry TypeExpr bodies â€” only dependency metadata. Callers that need
-        // symbol bodies must build the shallow state through the eval-env path.
-
         Self {
             whole_hash,
             exports,
             wildcard_reexports,
-            symbols,
-            value_symbols,
-            augmentation_scopes,
-            augmentation_value_scopes,
             import_locals,
             import_targets,
             analysis,
+            decl_bodies,
+            type_deps_cache: dashmap::DashMap::default(),
+            synthesised_value_symbols: FxHashMap::default(),
+            synthesised_value_bodies: FxHashMap::default(),
         }
     }
 
@@ -663,11 +659,12 @@ impl ShallowFileState {
     /// Returns `true` when the shallow state carries no meaningful content
     /// (no type symbols, no value symbols, no exports, no wildcard reexports,
     /// and no import targets). A non-empty state is worth caching and
-    /// returning to callers even when `symbols` alone is empty (e.g. a
-    /// barrel file with only reexports, or an SFC with only value bindings).
+    /// returning to callers even when the symbol inventory alone is empty
+    /// (e.g. a barrel file with only reexports, or an SFC with only value
+    /// bindings). Header-level check — no body lowering.
     pub fn is_empty(&self) -> bool {
-        self.symbols.is_empty()
-            && self.value_symbols.is_empty()
+        !self.has_any_type_symbol_names()
+            && !self.has_any_value_symbol_names()
             && self.exports.is_empty()
             && self.wildcard_reexports.is_empty()
             && self.import_targets.is_empty()
@@ -677,12 +674,219 @@ impl ShallowFileState {
     /// actually resolve against: local type/value symbols, direct exports,
     /// or wildcard reexport entries. Files that only contain imports but no
     /// exports or symbols should not be handed to the frontier — they have
-    /// nothing to contribute to export resolution.
+    /// nothing to contribute to export resolution. Header-level check.
     pub fn has_resolvable_surface(&self) -> bool {
-        !self.symbols.is_empty()
-            || !self.value_symbols.is_empty()
+        self.has_any_type_symbol_names()
+            || self.has_any_value_symbol_names()
             || !self.exports.is_empty()
             || !self.wildcard_reexports.is_empty()
+    }
+
+    fn has_any_type_symbol_names(&self) -> bool {
+        !self.decl_bodies.header_index().type_headers.is_empty()
+    }
+
+    fn has_any_value_symbol_names(&self) -> bool {
+        !self.decl_bodies.header_index().value_headers.is_empty()
+            || !self.synthesised_value_symbols.is_empty()
+    }
+
+    /// The lazy declaration-body memo this state reads from (the body
+    /// authority for this content generation).
+    pub fn decl_bodies(&self) -> &Arc<crate::decl_body_memo::DeclBodyMemo> {
+        &self.decl_bodies
+    }
+
+    /// Every file-scope TYPE symbol name in the shallow inventory
+    /// (header-level — no body lowering).
+    pub fn type_symbol_names(&self) -> impl Iterator<Item = &str> {
+        self.decl_bodies
+            .header_index()
+            .type_headers
+            .keys()
+            .map(String::as_str)
+    }
+
+    /// Every file-scope VALUE symbol name in the shallow inventory,
+    /// including eager synthesised symbols (header-level).
+    pub fn value_symbol_names(&self) -> impl Iterator<Item = &str> {
+        let headers = &self.decl_bodies.header_index().value_headers;
+        headers.keys().map(String::as_str).chain(
+            self.synthesised_value_symbols
+                .keys()
+                .map(String::as_str)
+                .filter(move |name| !headers.contains_key(*name)),
+        )
+    }
+
+    /// Every eager synthesised VALUE body (the `.vue` implicit
+    /// `default`'s macro-producer [`LoweredValueDecl`]) as
+    /// `(name, body)` pairs. Eager-only: it iterates the synthesised
+    /// inventory directly and never materializes an ordinary value
+    /// declaration body through the lazy memo.
+    pub fn synthesised_value_bodies(&self) -> impl Iterator<Item = (&str, &Arc<LoweredValueDecl>)> {
+        self.synthesised_value_bodies
+            .iter()
+            .map(|(name, body)| (name.as_str(), body))
+    }
+
+    /// Header-level kind of a file-scope TYPE symbol (no body lowering).
+    pub fn type_symbol_kind(
+        &self,
+        name: &str,
+    ) -> Option<verter_semantic::analysis::type_eval::TypeDeclKind> {
+        self.decl_bodies
+            .header_index()
+            .type_header(name)
+            .map(|header| header.kind)
+    }
+
+    /// Header-level kind of a file-scope VALUE symbol (no body lowering;
+    /// synthesised symbols answer from their eager record).
+    pub fn value_symbol_kind(
+        &self,
+        name: &str,
+    ) -> Option<verter_semantic::analysis::type_eval::ValueDeclKind> {
+        if let Some(synthesised) = self.synthesised_value_symbols.get(name) {
+            return Some(synthesised.kind);
+        }
+        self.decl_bodies
+            .header_index()
+            .value_header(name)
+            .map(|header| header.kind)
+    }
+
+    /// Header-level direct syntactic member headers of a file-scope TYPE
+    /// symbol (no body lowering).
+    pub fn type_member_headers(
+        &self,
+        name: &str,
+    ) -> Option<&[verter_semantic::analysis::decl_headers::MemberHeader]> {
+        self.decl_bodies
+            .header_index()
+            .type_header(name)
+            .map(|header| header.member_headers.as_slice())
+    }
+
+    /// Every `enum` declaration name in the shallow inventory
+    /// (header-level). Enums are kept in their OWN header table — the
+    /// eval-env walk does not register them as value symbols — so they
+    /// are NOT yielded by [`Self::value_symbol_names`].
+    pub fn enum_symbol_names(&self) -> impl Iterator<Item = &str> {
+        self.decl_bodies
+            .header_index()
+            .enum_headers
+            .keys()
+            .map(String::as_str)
+    }
+
+    /// Header-level ordered member (variant) names of an `enum`
+    /// declaration, in source order. `None` when `name` is not an enum.
+    pub fn enum_member_names(&self, name: &str) -> Option<&[String]> {
+        self.decl_bodies
+            .header_index()
+            .enum_headers
+            .get(name)
+            .map(|header| header.member_names.as_slice())
+    }
+
+    /// Header-level type-parameter names of a file-scope TYPE symbol.
+    pub fn type_param_names(&self, name: &str) -> Option<Vec<&str>> {
+        self.decl_bodies
+            .header_index()
+            .type_header(name)
+            .map(|header| header.type_params.iter().map(|p| p.name.as_str()).collect())
+    }
+
+    /// Header-level type-parameter headers of a file-scope TYPE symbol
+    /// (each carries the param name plus the source locators of its
+    /// constraint / default clauses). No body lowering.
+    pub fn type_param_headers(
+        &self,
+        name: &str,
+    ) -> Option<&[verter_semantic::analysis::decl_headers::TypeParamHeader]> {
+        self.decl_bodies
+            .header_index()
+            .type_header(name)
+            .map(|header| header.type_params.as_slice())
+    }
+
+    /// Number of source-order contributing top-level statements for a
+    /// file-scope TYPE symbol (a same-name decl split / merge changes
+    /// this). No body lowering.
+    pub fn type_contributor_count(&self, name: &str) -> Option<usize> {
+        self.decl_bodies
+            .header_index()
+            .type_header(name)
+            .map(|header| header.contributors.len())
+    }
+
+    /// Header-level direct syntactic member headers of an object-literal
+    /// initializer (or class-static surface) bound to a file-scope VALUE
+    /// symbol. No body lowering.
+    pub fn value_object_member_headers(
+        &self,
+        name: &str,
+    ) -> Option<&[verter_semantic::analysis::decl_headers::MemberHeader]> {
+        self.decl_bodies
+            .header_index()
+            .value_header(name)
+            .map(|header| header.object_member_headers.as_slice())
+    }
+
+    /// Number of source-order contributing top-level statements for a
+    /// file-scope VALUE symbol. No body lowering.
+    pub fn value_contributor_count(&self, name: &str) -> Option<usize> {
+        self.decl_bodies
+            .header_index()
+            .value_header(name)
+            .map(|header| header.contributors.len())
+    }
+
+    /// Whether `name` is a file-scope TYPE symbol (header-level).
+    pub fn has_type_symbol(&self, name: &str) -> bool {
+        self.decl_bodies.header_index().type_header(name).is_some()
+    }
+
+    /// Whether `name` is a file-scope VALUE symbol (header-level,
+    /// including synthesised symbols).
+    pub fn has_value_symbol(&self, name: &str) -> bool {
+        self.decl_bodies.header_index().value_header(name).is_some()
+            || self.synthesised_value_symbols.contains_key(name)
+    }
+
+    /// Every `(scope, name)` key in the augmentation-scope TYPE inventory
+    /// (header-level).
+    pub fn augmentation_type_keys(
+        &self,
+    ) -> impl Iterator<
+        Item = (
+            &verter_semantic::analysis::type_eval::AugmentationScopeKind,
+            &str,
+        ),
+    > {
+        self.decl_bodies
+            .header_index()
+            .augmentation_type_headers
+            .iter()
+            .flat_map(|(scope, names)| names.keys().map(move |name| (scope, name.as_str())))
+    }
+
+    /// Every `(scope, name)` key in the augmentation-scope VALUE inventory
+    /// (header-level).
+    pub fn augmentation_value_keys(
+        &self,
+    ) -> impl Iterator<
+        Item = (
+            &verter_semantic::analysis::type_eval::AugmentationScopeKind,
+            &str,
+        ),
+    > {
+        self.decl_bodies
+            .header_index()
+            .augmentation_value_headers
+            .iter()
+            .flat_map(|(scope, names)| names.keys().map(move |name| (scope, name.as_str())))
     }
 
     // -----------------------------------------------------------------------
@@ -740,55 +944,280 @@ impl ShallowFileState {
                 .any(|target| matches!(target, ExportTarget::Reexport { .. }))
     }
 
-    /// Look up a local symbol by name.
-    pub fn symbol(&self, name: &str) -> Option<&ShallowTypeSymbol> {
-        self.symbols.get(name)
+    /// Look up the slim HEADER view of a local TYPE symbol by name —
+    /// header-only (no body lowering). A header miss returns `None`.
+    pub fn symbol(&self, name: &str) -> Option<Arc<ShallowTypeSymbol>> {
+        self.decl_bodies
+            .header_index()
+            .type_header(name)
+            .map(|header| Arc::new(ShallowTypeSymbol::from_header(header)))
     }
 
-    /// Look up a local value symbol by name.
-    pub fn value_symbol(&self, name: &str) -> Option<&ShallowValueSymbol> {
-        self.value_symbols.get(name)
+    /// Look up the slim HEADER view of a local VALUE symbol by name —
+    /// synthesised symbols first (eager macro-producer header records),
+    /// then the header index. Header-only (no body lowering).
+    pub fn value_symbol(&self, name: &str) -> Option<Arc<ShallowValueSymbol>> {
+        if let Some(synthesised) = self.synthesised_value_symbols.get(name) {
+            return Some(Arc::clone(synthesised));
+        }
+        self.decl_bodies
+            .header_index()
+            .value_header(name)
+            .map(|header| Arc::new(ShallowValueSymbol::from_header(header)))
     }
 
-    /// Look up an ambient-augmentation-scoped type symbol (a declaration nested
-    /// in a `declare module "X"` / `declare global` block) by scope + name.
-    pub fn augmentation_symbol(
+    /// Demand the lowered BODY of a local TYPE symbol — lazily lowered
+    /// through the declaration-body memo on first touch. A header miss
+    /// returns `None`. This is the sole body authority for file-scope
+    /// type symbols; the slim [`ShallowTypeSymbol`] carries no body.
+    pub fn type_decl(&self, name: &str) -> Option<Arc<LoweredTypeDecl>> {
+        self.decl_bodies.type_decl(name)
+    }
+
+    /// Demand the lowered BODY of a local VALUE symbol — eager
+    /// synthesised `.vue`-default bodies first, then the lazy memo. A
+    /// miss returns `None`.
+    pub fn value_decl(&self, name: &str) -> Option<Arc<LoweredValueDecl>> {
+        if let Some(body) = self.synthesised_value_bodies.get(name) {
+            return Some(Arc::clone(body));
+        }
+        self.decl_bodies.value_decl(name)
+    }
+
+    /// Demand the dependency-edge classification of a local TYPE symbol —
+    /// the local/external split over its reference graph, baked against
+    /// THIS state's import targets and cached per name. Returns `Some`
+    /// for any header type symbol (possibly with empty edge lists); a
+    /// header miss returns `None` without lowering or caching anything.
+    pub fn type_deps(&self, name: &str) -> Option<Arc<ClassifiedTypeDeps>> {
+        self.decl_bodies.header_index().type_header(name)?;
+        if let Some(hit) = self.type_deps_cache.get(name) {
+            return hit.clone();
+        }
+        let computed = self.classify_type_deps(name);
+        self.type_deps_cache
+            .insert(name.to_string(), computed.clone());
+        computed
+    }
+
+    /// Demand the lowered BODY of an ambient-augmentation-scoped TYPE
+    /// symbol (a declaration nested in a `declare module "X"` /
+    /// `declare global` block) by scope + name — lazily lowered through
+    /// the memo; borrowed-key lookup (no tuple allocation). A header
+    /// miss returns `None`.
+    pub fn augmentation_type_decl(
         &self,
         scope: &verter_semantic::analysis::type_eval::AugmentationScopeKind,
         name: &str,
-    ) -> Option<&ShallowTypeSymbol> {
-        self.augmentation_scopes
-            .get(&(scope.clone(), name.to_string()))
+    ) -> Option<Arc<LoweredTypeDecl>> {
+        self.decl_bodies
+            .header_index()
+            .augmentation_type_header(scope, name)?;
+        self.decl_bodies.augmentation_type_decl(scope, name)
+    }
+
+    /// Value-space counterpart of [`Self::augmentation_type_decl`].
+    pub fn augmentation_value_decl(
+        &self,
+        scope: &verter_semantic::analysis::type_eval::AugmentationScopeKind,
+        name: &str,
+    ) -> Option<Arc<LoweredValueDecl>> {
+        self.decl_bodies
+            .header_index()
+            .augmentation_value_header(scope, name)?;
+        self.decl_bodies.augmentation_value_decl(scope, name)
+    }
+
+    /// Classify one file-scope TYPE symbol's dependency edges: the local
+    /// vs external split over the per-declaration dependency names,
+    /// `typeof`-root import edges appended, deterministic ordering by
+    /// final sort. Lowers the body through the memo to read its
+    /// dependency-name roots; stores ONLY dependency edges.
+    fn classify_type_deps(&self, name: &str) -> Option<Arc<ClassifiedTypeDeps>> {
+        let lowered = self.decl_bodies.type_decl(name)?;
+
+        // LOCAL deps: dependency-name roots that are local type symbols
+        // (analyzer name inventory — header data), never imports, never
+        // self.
+        let mut local_set = FxHashSet::default();
+        for reference in &lowered.dep_names {
+            let root = reference.split('.').next().unwrap_or(reference.as_str());
+            if self.import_locals.contains(root) {
+                continue;
+            }
+            // Local membership consults the analyzer inventory AND the
+            // shallow header index: namespaced (`N.T`), default-aliased,
+            // and JSDoc-`@typedef` symbols live in the header index but
+            // not the analyzer's `local_type_symbol` table, so a dep on
+            // one must still resolve as a LOCAL hop — never a phantom
+            // import / dropped edge.
+            if root != name
+                && (self.analysis.local_type_symbol(root).is_some() || self.has_type_symbol(root))
+            {
+                local_set.insert(root.to_string());
+            }
+        }
+        let mut local_deps: Vec<String> = local_set.into_iter().collect();
+        local_deps.sort();
+
+        // EXTERNAL deps: dependency-name roots bound by imports, deduped
+        // by `(specifier, imported_name)` via keyed-map accumulation.
+        let mut external_deps = Vec::new();
+        let mut seen_external: FxHashSet<(String, String)> = FxHashSet::default();
+        for dep_name in lowered
+            .dep_names
+            .iter()
+            .chain(lowered.structural_dep_names.iter())
+        {
+            let root = dep_name.split('.').next().unwrap_or(dep_name.as_str());
+            if !self.import_locals.contains(root) {
+                continue;
+            }
+            let Some(target) = self.import_targets.get(root) else {
+                continue;
+            };
+            let imported_name = if root == dep_name {
+                target.imported_name.clone()
+            } else if let Some(suffix) = dep_name.strip_prefix(root) {
+                format!("{}{suffix}", target.imported_name)
+            } else {
+                target.imported_name.clone()
+            };
+            if !seen_external.insert((target.source_specifier.clone(), imported_name.clone())) {
+                continue;
+            }
+            external_deps.push(ExternalSymbolRef {
+                local_name: dep_name.clone(),
+                source_specifier: target.source_specifier.clone(),
+                imported_name,
+                canonical_id: external_canonical(target),
+                route: RouteDemand::Whole,
+            });
+        }
+
+        // `typeof` roots referencing imports contribute external edges
+        // (the precomputed roots ride on the lowered entry — no body
+        // re-walk here).
+        for root in &lowered.typeof_root_names {
+            let Some(target) = self.import_targets.get(root.as_str()) else {
+                continue;
+            };
+            if !seen_external.insert((
+                target.source_specifier.clone(),
+                target.imported_name.clone(),
+            )) {
+                continue;
+            }
+            external_deps.push(ExternalSymbolRef {
+                local_name: root.clone(),
+                source_specifier: target.source_specifier.clone(),
+                imported_name: target.imported_name.clone(),
+                canonical_id: external_canonical(target),
+                route: RouteDemand::Whole,
+            });
+        }
+
+        external_deps.sort_by(|left, right| {
+            left.local_name
+                .cmp(&right.local_name)
+                .then_with(|| left.source_specifier.cmp(&right.source_specifier))
+                .then_with(|| left.imported_name.cmp(&right.imported_name))
+        });
+
+        Some(Arc::new(ClassifiedTypeDeps {
+            local_deps,
+            external_deps,
+        }))
+    }
+
+    /// The transitive required-import closure of one local type — the
+    /// import-local names the type's structural dependency graph reaches.
+    /// Demand-scoped: only the walked symbols' bodies lower.
+    pub(crate) fn required_import_names(&self, type_name: &str) -> FxHashSet<String> {
+        let mut required_imports = FxHashSet::default();
+        let mut visited = FxHashSet::default();
+        let mut pending = vec![type_name.to_string()];
+
+        // Import membership mirrors the analyzer's `import_locals` set
+        // (named + default bindings; namespace bindings are NOT members),
+        // so the walk agrees with the historical whole-analysis product.
+        let is_import_local =
+            |name: &str| -> bool { self.analysis.local_import_symbol_target(name).is_some() };
+
+        while let Some(current) = pending.pop() {
+            if !visited.insert(current.clone()) {
+                continue;
+            }
+
+            if is_import_local(&current) {
+                required_imports.insert(current);
+                continue;
+            }
+
+            // Header-index membership too: namespaced / default-aliased /
+            // JSDoc-`@typedef` symbols are not in the analyzer table but
+            // ARE shallow type symbols whose structural dep graph must be
+            // walked for the required-import closure.
+            if self.analysis.local_type_symbol(&current).is_some() || self.has_type_symbol(&current)
+            {
+                let Some(lowered) = self.decl_bodies.type_decl(&current) else {
+                    continue;
+                };
+                for reference in &lowered.structural_dep_names {
+                    let root = reference
+                        .split('.')
+                        .next()
+                        .map(str::to_string)
+                        .unwrap_or_else(|| reference.clone());
+                    if is_import_local(&root) {
+                        required_imports.insert(root);
+                    } else if !visited.contains(&root) {
+                        pending.push(root);
+                    }
+                }
+            }
+        }
+
+        required_imports
     }
 
     /// Whether this file declares any global (`declare global`) augmentation
-    /// contributors for `name`.
+    /// contributors for `name` (header-level check).
     pub fn has_global_augmentation(&self, name: &str) -> bool {
-        self.augmentation_symbol(
-            &verter_semantic::analysis::type_eval::AugmentationScopeKind::Global,
-            name,
-        )
-        .is_some()
+        self.decl_bodies
+            .header_index()
+            .augmentation_type_header(
+                &verter_semantic::analysis::type_eval::AugmentationScopeKind::Global,
+                name,
+            )
+            .is_some()
     }
 
-    /// Inject a synthesised value symbol that the file's eval-env
-    /// path did not produce, plus the matching `ExportTarget::Local`
-    /// entry so `default`-style routes resolve identically to
-    /// userland-declared symbols.
+    /// Inject the eager synthesised `.vue`-default value body that the
+    /// file's eval-env path did not produce, plus the matching slim
+    /// header record and the `ExportTarget::Local` entry so
+    /// `default`-style routes resolve identically to userland-declared
+    /// symbols.
     ///
     /// Used by [`super::vue_default_synth`] to publish the implicit
     /// SFC default-export instance shape without modifying the
     /// `verter_semantic` analysis pipeline (which sees only the raw
     /// `<script setup>` content and therefore cannot observe the
-    /// compiler-driven default export).
+    /// compiler-driven default export). The body lands in the dedicated
+    /// synthesised-body map (read through [`Self::value_decl`]); the
+    /// header-only [`ShallowValueSymbol`] carries the provenance flag.
     ///
     /// No-op when a value symbol with the given name already exists
     /// — userland declarations always win over synthesised ones.
-    pub fn insert_synthesised_value_symbol(&mut self, name: &str, symbol: ShallowValueSymbol) {
-        if self.value_symbols.contains_key(name) {
+    pub fn insert_synthesised_value_default(&mut self, name: &str, lowered: LoweredValueDecl) {
+        if self.has_value_symbol(name) {
             return;
         }
-        self.value_symbols.insert(name.to_string(), symbol);
+        let header = ShallowValueSymbol::synthesised_from_lowered(&lowered);
+        self.synthesised_value_symbols
+            .insert(name.to_string(), Arc::new(header));
+        self.synthesised_value_bodies
+            .insert(name.to_string(), Arc::new(lowered));
         self.exports
             .entry(name.to_string())
             .or_insert_with(|| ExportTarget::Local {
@@ -817,7 +1246,7 @@ impl ShallowFileState {
     pub fn local_closure(&self, symbol_name: &str, budget: usize) -> LocalClosureResult {
         let mut visited = FxHashSet::default();
         let mut pending = vec![symbol_name.to_string()];
-        let mut external_refs = Vec::new();
+        let mut external_refs = ExternalRefAccumulator::default();
         let mut local_used = Vec::new();
         let mut steps = 0;
 
@@ -830,24 +1259,24 @@ impl ShallowFileState {
                 return LocalClosureResult {
                     status: LocalClosureStatus::BudgetExceeded,
                     local_symbols_used: local_used,
-                    unresolved_external: external_refs,
+                    unresolved_external: external_refs.into_vec(),
                     steps: steps as u64,
                 };
             }
 
-            if let Some(sym) = self.symbols.get(&current) {
+            if let Some(deps) = self.type_deps(&current) {
                 local_used.push(current.clone());
 
                 // Queue same-file dependencies
-                for dep in &sym.local_deps {
+                for dep in &deps.local_deps {
                     if !visited.contains(dep.as_str()) {
                         pending.push(dep.clone());
                     }
                 }
 
                 // Collect external refs
-                for ext in &sym.external_deps {
-                    upsert_external_ref(&mut external_refs, ext.clone());
+                for ext in &deps.external_deps {
+                    external_refs.add(ext.clone());
                 }
             } else if self.import_locals.contains(&current) {
                 // This is an import — classify as external
@@ -856,16 +1285,16 @@ impl ShallowFileState {
                         local_name: current.clone(),
                         source_specifier: target.source_specifier.clone(),
                         imported_name: target.imported_name.clone(),
-                        canonical_id: target.canonical_id.clone(),
+                        canonical_id: external_canonical(target),
                         route: RouteDemand::Whole,
                     };
-                    upsert_external_ref(&mut external_refs, ext_ref);
+                    external_refs.add(ext_ref);
                 } else {
                     // Import-local without a target — treat as missing
                     return LocalClosureResult {
                         status: LocalClosureStatus::MissingLocalSymbol { name: current },
                         local_symbols_used: local_used,
-                        unresolved_external: external_refs,
+                        unresolved_external: external_refs.into_vec(),
                         steps: steps as u64,
                     };
                 }
@@ -873,12 +1302,13 @@ impl ShallowFileState {
                 return LocalClosureResult {
                     status: LocalClosureStatus::MissingLocalSymbol { name: current },
                     local_symbols_used: local_used,
-                    unresolved_external: external_refs,
+                    unresolved_external: external_refs.into_vec(),
                     steps: steps as u64,
                 };
             }
         }
 
+        let external_refs = external_refs.into_vec();
         let status = if external_refs.is_empty() {
             LocalClosureStatus::Resolved
         } else {
@@ -918,11 +1348,11 @@ impl ShallowFileState {
                 self.member_route_closure(symbol_name, &refs, budget)
             }
             RouteDemand::Omit(omitted) => {
-                let Some(sym) = self.symbols.get(symbol_name) else {
+                let Some(lowered) = self.type_decl(symbol_name) else {
                     return self.local_closure(symbol_name, budget);
                 };
-                let Some(members) = direct_object_member_names(sym.body.lookup_object().as_ref())
-                else {
+                let lookup = lowered.body.lookup_object();
+                let Some(members) = direct_object_member_names(lookup.as_ref()) else {
                     return self.local_closure(symbol_name, budget);
                 };
                 let omitted: FxHashSet<&str> = omitted.iter().map(|name| name.as_str()).collect();
@@ -954,16 +1384,17 @@ impl ShallowFileState {
             return self.member_route_closure(symbol_name, &[path[0].as_str()], budget);
         }
 
-        let Some(sym) = self.symbols.get(symbol_name) else {
+        let Some(lowered) = self.type_decl(symbol_name) else {
             return self.local_closure(symbol_name, budget);
         };
 
         let mut seed_names = Vec::new();
-        let mut seed_external = Vec::new();
+        let mut seed_external = ExternalRefAccumulator::default();
         let mut seen_symbols = FxHashSet::default();
+        let lookup = lowered.body.lookup_object();
         let found_path = collect_member_path_seed_names(
             self,
-            sym.body.lookup_object().as_ref(),
+            lookup.as_ref(),
             path,
             &mut seed_names,
             &mut seed_external,
@@ -1004,20 +1435,20 @@ impl ShallowFileState {
                 return LocalClosureResult {
                     status: LocalClosureStatus::BudgetExceeded,
                     local_symbols_used: local_used,
-                    unresolved_external: external_refs,
+                    unresolved_external: external_refs.into_vec(),
                     steps,
                 };
             }
 
-            if let Some(dep_sym) = self.symbols.get(&current) {
+            if let Some(dep_edges) = self.type_deps(&current) {
                 local_used.push(current.clone());
-                for dep in &dep_sym.local_deps {
+                for dep in &dep_edges.local_deps {
                     if !visited.contains(dep.as_str()) {
                         pending.push(dep.clone());
                     }
                 }
-                for ext in &dep_sym.external_deps {
-                    upsert_external_ref(&mut external_refs, ext.clone());
+                for ext in &dep_edges.external_deps {
+                    external_refs.add(ext.clone());
                 }
             } else if self.import_locals.contains(&current) {
                 if let Some(target) = self.import_targets.get(&current) {
@@ -1025,14 +1456,15 @@ impl ShallowFileState {
                         local_name: current.clone(),
                         source_specifier: target.source_specifier.clone(),
                         imported_name: target.imported_name.clone(),
-                        canonical_id: target.canonical_id.clone(),
+                        canonical_id: external_canonical(target),
                         route: RouteDemand::Whole,
                     };
-                    upsert_external_ref(&mut external_refs, ext_ref);
+                    external_refs.add(ext_ref);
                 }
             }
         }
 
+        let external_refs = external_refs.into_vec();
         let status = if external_refs.is_empty() {
             LocalClosureStatus::Resolved
         } else {
@@ -1054,21 +1486,22 @@ impl ShallowFileState {
         members: &[&str],
         budget: usize,
     ) -> LocalClosureResult {
-        let sym = match self.symbols.get(symbol_name) {
+        let lowered = match self.type_decl(symbol_name) {
             Some(s) => s,
             None => return self.local_closure(symbol_name, budget),
         };
 
         // If no member_deps tracking, fall back to whole closure
-        if sym.member_deps.is_empty() {
+        if lowered.member_deps.is_empty() {
             return self.local_closure(symbol_name, budget);
         }
 
         // Collect the initial seed names from the requested members' deps
+        let lookup = lowered.body.lookup_object();
         let mut seed_names: Vec<String> = Vec::new();
         let mut saw_known_member = false;
         for member in members {
-            if let Some(deps) = sym.member_deps.get(*member) {
+            if let Some(deps) = lowered.member_deps.get(*member) {
                 saw_known_member = true;
                 for dep in deps {
                     if !seed_names.contains(dep) {
@@ -1077,7 +1510,7 @@ impl ShallowFileState {
                 }
                 continue;
             }
-            if let Some(prop) = direct_object_property(sym.body.lookup_object().as_ref(), member) {
+            if let Some(prop) = direct_object_property(lookup.as_ref(), member) {
                 saw_known_member = true;
                 let mut refs = Vec::new();
                 collect_type_refs(&prop.ty, &mut refs);
@@ -1108,7 +1541,7 @@ impl ShallowFileState {
         let mut visited = FxHashSet::default();
         visited.insert(symbol_name.to_string()); // mark the root as visited
         let mut pending = seed_names;
-        let mut external_refs = Vec::new();
+        let mut external_refs = ExternalRefAccumulator::default();
         let mut local_used = vec![symbol_name.to_string()];
         let mut steps = 1u64;
 
@@ -1121,20 +1554,20 @@ impl ShallowFileState {
                 return LocalClosureResult {
                     status: LocalClosureStatus::BudgetExceeded,
                     local_symbols_used: local_used,
-                    unresolved_external: external_refs,
+                    unresolved_external: external_refs.into_vec(),
                     steps,
                 };
             }
 
-            if let Some(dep_sym) = self.symbols.get(&current) {
+            if let Some(dep_edges) = self.type_deps(&current) {
                 local_used.push(current.clone());
-                for dep in &dep_sym.local_deps {
+                for dep in &dep_edges.local_deps {
                     if !visited.contains(dep.as_str()) {
                         pending.push(dep.clone());
                     }
                 }
-                for ext in &dep_sym.external_deps {
-                    upsert_external_ref(&mut external_refs, ext.clone());
+                for ext in &dep_edges.external_deps {
+                    external_refs.add(ext.clone());
                 }
             } else if self.import_locals.contains(&current) {
                 if let Some(target) = self.import_targets.get(&current) {
@@ -1142,15 +1575,16 @@ impl ShallowFileState {
                         local_name: current.clone(),
                         source_specifier: target.source_specifier.clone(),
                         imported_name: target.imported_name.clone(),
-                        canonical_id: target.canonical_id.clone(),
+                        canonical_id: external_canonical(target),
                         route: RouteDemand::Whole,
                     };
-                    upsert_external_ref(&mut external_refs, ext_ref);
+                    external_refs.add(ext_ref);
                 }
             }
             // Skip unknown names silently — they may be type parameters
         }
 
+        let external_refs = external_refs.into_vec();
         let status = if external_refs.is_empty() {
             LocalClosureStatus::Resolved
         } else {
@@ -1166,18 +1600,19 @@ impl ShallowFileState {
     }
 
     fn whole_route_closure(&self, symbol_name: &str, budget: usize) -> LocalClosureResult {
-        let Some(sym) = self.symbols.get(symbol_name) else {
+        let Some(lowered) = self.type_decl(symbol_name) else {
             return self.local_closure(symbol_name, budget);
         };
 
         let mut visited = FxHashSet::default();
         visited.insert(symbol_name.to_string());
         let mut local_used = vec![symbol_name.to_string()];
-        let mut external_refs = Vec::new();
+        let mut external_refs = ExternalRefAccumulator::default();
         let mut steps = 1u64;
 
+        let lookup = lowered.body.lookup_object();
         if !self.collect_whole_route_refs(
-            sym.body.lookup_object().as_ref(),
+            lookup.as_ref(),
             WholeRouteContext::Root,
             &mut visited,
             &mut local_used,
@@ -1188,11 +1623,12 @@ impl ShallowFileState {
             return LocalClosureResult {
                 status: LocalClosureStatus::BudgetExceeded,
                 local_symbols_used: local_used,
-                unresolved_external: external_refs,
+                unresolved_external: external_refs.into_vec(),
                 steps,
             };
         }
 
+        let external_refs = external_refs.into_vec();
         let status = if external_refs.is_empty() {
             LocalClosureStatus::Resolved
         } else {
@@ -1213,7 +1649,7 @@ impl ShallowFileState {
         context: WholeRouteContext,
         visited: &mut FxHashSet<String>,
         local_used: &mut Vec<String>,
-        external_refs: &mut Vec<ExternalSymbolRef>,
+        external_refs: &mut ExternalRefAccumulator,
         steps: &mut u64,
         budget: usize,
     ) -> bool {
@@ -1348,16 +1784,13 @@ impl ShallowFileState {
                         context,
                         WholeRouteContext::Root | WholeRouteContext::CallableParam
                     ) {
-                        upsert_external_ref(
-                            external_refs,
-                            ExternalSymbolRef {
-                                local_name: symbol_name.to_string(),
-                                source_specifier: target.source_specifier.clone(),
-                                imported_name: target.imported_name.clone(),
-                                canonical_id: target.canonical_id.clone(),
-                                route: RouteDemand::Whole,
-                            },
-                        );
+                        external_refs.add(ExternalSymbolRef {
+                            local_name: symbol_name.to_string(),
+                            source_specifier: target.source_specifier.clone(),
+                            imported_name: target.imported_name.clone(),
+                            canonical_id: external_canonical(target),
+                            route: RouteDemand::Whole,
+                        });
                     }
                     return true;
                 }
@@ -1391,7 +1824,7 @@ impl ShallowFileState {
                     );
                 }
 
-                if self.symbols.contains_key(symbol_name) {
+                if self.has_type_symbol(symbol_name) {
                     return self.follow_local_symbol_precise(
                         symbol_name,
                         context,
@@ -1504,16 +1937,13 @@ impl ShallowFileState {
                             context,
                             WholeRouteContext::Root | WholeRouteContext::CallableParam
                         ) {
-                            upsert_external_ref(
-                                external_refs,
-                                ExternalSymbolRef {
-                                    local_name: root.clone(),
-                                    source_specifier: target.source_specifier.clone(),
-                                    imported_name: target.imported_name.clone(),
-                                    canonical_id: target.canonical_id.clone(),
-                                    route: RouteDemand::Whole,
-                                },
-                            );
+                            external_refs.add(ExternalSymbolRef {
+                                local_name: root.clone(),
+                                source_specifier: target.source_specifier.clone(),
+                                imported_name: target.imported_name.clone(),
+                                canonical_id: external_canonical(target),
+                                route: RouteDemand::Whole,
+                            });
                         }
                     }
                 }
@@ -1536,7 +1966,7 @@ impl ShallowFileState {
         func: &verter_type_expr::FunctionExpr,
         visited: &mut FxHashSet<String>,
         local_used: &mut Vec<String>,
-        external_refs: &mut Vec<ExternalSymbolRef>,
+        external_refs: &mut ExternalRefAccumulator,
         steps: &mut u64,
         budget: usize,
     ) -> bool {
@@ -1590,7 +2020,7 @@ impl ShallowFileState {
         context: WholeRouteContext,
         visited: &mut FxHashSet<String>,
         local_used: &mut Vec<String>,
-        external_refs: &mut Vec<ExternalSymbolRef>,
+        external_refs: &mut ExternalRefAccumulator,
         steps: &mut u64,
         budget: usize,
     ) -> bool {
@@ -1601,12 +2031,13 @@ impl ShallowFileState {
         if *steps as usize >= budget {
             return false;
         }
-        let Some(sym) = self.symbols.get(symbol_name) else {
+        let Some(lowered) = self.type_decl(symbol_name) else {
             return true;
         };
         local_used.push(symbol_name.to_string());
+        let lookup = lowered.body.lookup_object();
         self.collect_whole_route_refs(
-            sym.body.lookup_object().as_ref(),
+            lookup.as_ref(),
             context,
             visited,
             local_used,
@@ -1622,7 +2053,7 @@ impl ShallowFileState {
         route: RouteDemand,
         visited: &mut FxHashSet<String>,
         local_used: &mut Vec<String>,
-        external_refs: &mut Vec<ExternalSymbolRef>,
+        external_refs: &mut ExternalRefAccumulator,
         steps: &mut u64,
         budget: usize,
     ) -> bool {
@@ -1642,19 +2073,16 @@ impl ShallowFileState {
             } if type_arguments.is_empty() => {
                 let symbol_name = name.as_ref();
                 if let Some(target) = self.import_targets.get(symbol_name) {
-                    upsert_external_ref(
-                        external_refs,
-                        ExternalSymbolRef {
-                            local_name: symbol_name.to_string(),
-                            source_specifier: target.source_specifier.clone(),
-                            imported_name: target.imported_name.clone(),
-                            canonical_id: target.canonical_id.clone(),
-                            route,
-                        },
-                    );
+                    external_refs.add(ExternalSymbolRef {
+                        local_name: symbol_name.to_string(),
+                        source_specifier: target.source_specifier.clone(),
+                        imported_name: target.imported_name.clone(),
+                        canonical_id: external_canonical(target),
+                        route,
+                    });
                     return true;
                 }
-                if let Some(sym) = self.symbols.get(symbol_name) {
+                if self.has_type_symbol(symbol_name) {
                     match &route {
                         RouteDemand::Whole => self.follow_local_symbol_precise(
                             symbol_name,
@@ -1666,12 +2094,16 @@ impl ShallowFileState {
                             budget,
                         ),
                         RouteDemand::MemberPath(path) => {
+                            let Some(lowered) = self.type_decl(symbol_name) else {
+                                return true;
+                            };
                             let mut seed_names = Vec::new();
-                            let mut seed_external = Vec::new();
+                            let mut seed_external = ExternalRefAccumulator::default();
                             let mut seen_symbols = FxHashSet::default();
+                            let lookup = lowered.body.lookup_object();
                             let found_path = collect_member_path_seed_names(
                                 self,
-                                sym.body.lookup_object().as_ref(),
+                                lookup.as_ref(),
                                 path,
                                 &mut seed_names,
                                 &mut seed_external,
@@ -1680,22 +2112,19 @@ impl ShallowFileState {
                             if !found_path {
                                 return true;
                             }
-                            for ext in seed_external {
-                                upsert_external_ref(external_refs, ext);
+                            for ext in seed_external.into_vec() {
+                                external_refs.add(ext);
                             }
                             for seed_name in seed_names {
                                 if let Some(target) = self.import_targets.get(seed_name.as_str()) {
-                                    upsert_external_ref(
-                                        external_refs,
-                                        ExternalSymbolRef {
-                                            local_name: seed_name.clone(),
-                                            source_specifier: target.source_specifier.clone(),
-                                            imported_name: target.imported_name.clone(),
-                                            canonical_id: target.canonical_id.clone(),
-                                            route: RouteDemand::Whole,
-                                        },
-                                    );
-                                } else if self.symbols.contains_key(seed_name.as_str())
+                                    external_refs.add(ExternalSymbolRef {
+                                        local_name: seed_name.clone(),
+                                        source_specifier: target.source_specifier.clone(),
+                                        imported_name: target.imported_name.clone(),
+                                        canonical_id: external_canonical(target),
+                                        route: RouteDemand::Whole,
+                                    });
+                                } else if self.has_type_symbol(seed_name.as_str())
                                     && !self.follow_local_symbol_precise(
                                         seed_name.as_str(),
                                         WholeRouteContext::Root,
@@ -1722,7 +2151,7 @@ impl ShallowFileState {
                                 }
                             }
                             for ext in closure.unresolved_external {
-                                upsert_external_ref(external_refs, ext);
+                                external_refs.add(ext);
                             }
                             true
                         }
@@ -1782,16 +2211,16 @@ impl ShallowFileState {
             TypeExpr::Ref {
                 name,
                 type_arguments,
-            } if type_arguments.is_empty() && self.symbols.contains_key(name.as_ref()) => {
+            } if type_arguments.is_empty() && self.has_type_symbol(name.as_ref()) => {
                 if !seen_locals.insert(name.to_string()) {
                     return Vec::new();
                 }
                 let keys = self
-                    .symbols
-                    .get(name.as_ref())
-                    .map(|symbol| {
+                    .type_decl(name.as_ref())
+                    .map(|lowered| {
+                        let lookup = lowered.body.lookup_object();
                         self.extract_string_literal_keys_from_type_expr(
-                            symbol.body.lookup_object().as_ref(),
+                            lookup.as_ref(),
                             seen_locals,
                         )
                     })
@@ -1849,7 +2278,7 @@ fn collect_member_path_seed_names(
     expr: &TypeExpr,
     path: &[String],
     seed_names: &mut Vec<String>,
-    seed_external: &mut Vec<ExternalSymbolRef>,
+    seed_external: &mut ExternalRefAccumulator,
     seen_symbols: &mut FxHashSet<String>,
 ) -> bool {
     if path.is_empty() {
@@ -1866,28 +2295,25 @@ fn collect_member_path_seed_names(
         } if type_arguments.is_empty() => {
             let symbol_name = name.to_string();
             if let Some(target) = state.import_targets.get(symbol_name.as_str()) {
-                upsert_external_ref(
-                    seed_external,
-                    ExternalSymbolRef {
-                        local_name: symbol_name,
-                        source_specifier: target.source_specifier.clone(),
-                        imported_name: target.imported_name.clone(),
-                        canonical_id: target.canonical_id.clone(),
-                        route: RouteDemand::MemberPath(path.to_vec()),
-                    },
-                );
+                seed_external.add(ExternalSymbolRef {
+                    local_name: symbol_name,
+                    source_specifier: target.source_specifier.clone(),
+                    imported_name: target.imported_name.clone(),
+                    canonical_id: external_canonical(target),
+                    route: RouteDemand::MemberPath(path.to_vec()),
+                });
                 return true;
             }
             if !seen_symbols.insert(symbol_name.clone()) {
                 return false;
             }
             let result = state
-                .symbols
-                .get(symbol_name.as_str())
-                .is_some_and(|symbol| {
+                .type_decl(symbol_name.as_str())
+                .is_some_and(|lowered| {
+                    let lookup = lowered.body.lookup_object();
                     collect_member_path_seed_names(
                         state,
-                        symbol.body.lookup_object().as_ref(),
+                        lookup.as_ref(),
                         path,
                         seed_names,
                         seed_external,
@@ -1940,8 +2366,8 @@ impl<'a> ShallowTypeView<'a> {
         &self.state.wildcard_reexports
     }
 
-    /// Look up a local type symbol by name.
-    pub fn symbol(self, name: &str) -> Option<&'a ShallowTypeSymbol> {
+    /// Look up a local type symbol by name (demand-materialised).
+    pub fn symbol(self, name: &str) -> Option<Arc<ShallowTypeSymbol>> {
         self.state.symbol(name)
     }
 
@@ -1955,52 +2381,12 @@ impl<'a> ShallowTypeView<'a> {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-/// Extract enum member names and values from a union type body.
-///
-/// TypeScript enums produce a union of literal types as their type-space body.
-/// This function extracts the member name → literal value mapping for the
-/// value-space `enum_members` field.
-fn extract_enum_members_from_type_body(body: &TypeExpr) -> Option<FxHashMap<String, TypeExpr>> {
-    match body {
-        TypeExpr::Union(members) => {
-            let mut result = FxHashMap::default();
-            for (i, member) in members.iter().enumerate() {
-                match member {
-                    TypeExpr::Literal(lit) => {
-                        let name = match lit {
-                            verter_type_expr::LiteralValue::String(s) => s.clone(),
-                            verter_type_expr::LiteralValue::Number(n) => {
-                                format!("{n}")
-                            }
-                            verter_type_expr::LiteralValue::Boolean(b) => {
-                                format!("{b}")
-                            }
-                            verter_type_expr::LiteralValue::BigInt(s) => s.clone(),
-                        };
-                        result.insert(name, member.clone());
-                    }
-                    _ => {
-                        // Non-literal member — use index as name
-                        result.insert(format!("_{i}"), member.clone());
-                    }
-                }
-            }
-            if result.is_empty() {
-                None
-            } else {
-                Some(result)
-            }
-        }
-        _ => None,
-    }
-}
-
 /// Extract per-member dependency names from direct object slices in the body.
 /// For each direct property, collects all type names referenced in that
 /// property's type annotation. Transparent intersections are flattened
 /// right-to-left so declaration-merged interfaces keep earlier members while
 /// later object slices win on duplicate names.
-fn extract_member_deps(body: &TypeExpr) -> FxHashMap<String, Vec<String>> {
+pub(crate) fn extract_member_deps(body: &TypeExpr) -> FxHashMap<String, Vec<String>> {
     let mut result = FxHashMap::default();
     for prop in direct_object_properties(body) {
         let mut refs = Vec::new();
@@ -2063,20 +2449,9 @@ fn collect_direct_object_properties<'a>(
     }
 }
 
-fn upsert_external_ref(external_refs: &mut Vec<ExternalSymbolRef>, ext_ref: ExternalSymbolRef) {
-    if let Some(existing) = external_refs.iter_mut().find(|existing| {
-        existing.source_specifier == ext_ref.source_specifier
-            && existing.imported_name == ext_ref.imported_name
-    }) {
-        existing.route = crate::resolver_core::merge_route_demands(&existing.route, &ext_ref.route);
-        return;
-    }
-    external_refs.push(ext_ref);
-}
-
 /// Collect all named type references from a TypeExpr, non-recursively
 /// (only direct references, not transitive).
-fn collect_type_refs(expr: &TypeExpr, out: &mut Vec<String>) {
+pub(crate) fn collect_type_refs(expr: &TypeExpr, out: &mut Vec<String>) {
     match expr {
         TypeExpr::Ref {
             name,
@@ -2150,94 +2525,10 @@ fn collect_type_refs(expr: &TypeExpr, out: &mut Vec<String>) {
     }
 }
 
-/// Classify a symbol's structural dependencies into local vs external.
-fn classify_deps(
-    symbol_name: &str,
-    analysis: &verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource,
-    sym: &verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSymbol,
-    import_locals: &FxHashSet<String>,
-    import_targets: &FxHashMap<String, ImportTarget>,
-) -> (Vec<String>, Vec<ExternalSymbolRef>) {
-    let mut local = analysis
-        .local_symbol_dependency_names(symbol_name)
-        .into_iter()
-        .collect::<Vec<_>>();
-    local.sort();
-
-    let mut external = Vec::new();
-    let mut seen_external = FxHashSet::default();
-
-    for dep_name in sym
-        .dependency_names
-        .iter()
-        .chain(sym.structural_dependency_names.iter())
-    {
-        let root_name = dep_name.split('.').next().unwrap_or(dep_name.as_str());
-        if import_locals.contains(root_name) {
-            if let Some(target) = import_targets.get(root_name) {
-                let imported_name = if root_name == dep_name {
-                    target.imported_name.clone()
-                } else if let Some(suffix) = dep_name.strip_prefix(root_name) {
-                    format!("{}{suffix}", target.imported_name)
-                } else {
-                    target.imported_name.clone()
-                };
-                if !seen_external.insert((target.source_specifier.clone(), imported_name.clone())) {
-                    continue;
-                }
-                upsert_external_ref(
-                    &mut external,
-                    ExternalSymbolRef {
-                        local_name: dep_name.clone(),
-                        source_specifier: target.source_specifier.clone(),
-                        imported_name,
-                        canonical_id: target.canonical_id.clone(),
-                        route: RouteDemand::Whole,
-                    },
-                );
-            }
-        }
-    }
-
-    external.sort_by(|left, right| {
-        left.local_name
-            .cmp(&right.local_name)
-            .then_with(|| left.source_specifier.cmp(&right.source_specifier))
-            .then_with(|| left.imported_name.cmp(&right.imported_name))
-    });
-
-    (local, external)
-}
-
-fn augment_with_typeof_import_deps(
-    expr: &TypeExpr,
-    import_targets: &FxHashMap<String, ImportTarget>,
-    external: &mut Vec<ExternalSymbolRef>,
-) {
-    let mut roots = FxHashSet::default();
-    collect_typeof_roots(expr, &mut roots);
-    for root in roots {
-        let Some(target) = import_targets.get(root.as_str()) else {
-            continue;
-        };
-        let dep = ExternalSymbolRef {
-            local_name: root.clone(),
-            source_specifier: target.source_specifier.clone(),
-            imported_name: target.imported_name.clone(),
-            canonical_id: target.canonical_id.clone(),
-            route: RouteDemand::Whole,
-        };
-        upsert_external_ref(external, dep);
-    }
-    external.sort_by(|left, right| {
-        left.local_name
-            .cmp(&right.local_name)
-            .then_with(|| left.source_specifier.cmp(&right.source_specifier))
-            .then_with(|| left.imported_name.cmp(&right.imported_name))
-    });
-}
-
-fn collect_typeof_roots(expr: &TypeExpr, out: &mut FxHashSet<String>) {
+/// Fold one lazily lowered VALUE declaration into the shallow value
+/// symbol shape (synthesised-default provenance is always `false` for a
+/// lowered userland declaration).
+pub(crate) fn collect_typeof_roots(expr: &TypeExpr, out: &mut FxHashSet<String>) {
     match expr {
         TypeExpr::TypeOf(value_ref) => {
             if let Some(root) = value_ref.path.first() {
@@ -2435,7 +2726,7 @@ mod tests {
 
         // Symbols require eval_env
         assert!(
-            state.symbols.is_empty(),
+            state.type_symbol_names().next().is_none(),
             "analysis-only construction should produce no symbols"
         );
         // But exports should still be populated
@@ -2460,7 +2751,41 @@ export const defaults: Props = { label: 'ok' }
             .value_symbol("defaults")
             .expect("env-backed construction should populate value symbols");
         assert_eq!(defaults.kind, ValueDeclKind::Const);
-        assert!(defaults.type_annotation.is_some());
+        let defaults_body = state
+            .value_decl("defaults")
+            .expect("value body should lower on demand");
+        assert!(defaults_body.type_annotation.is_some());
+    }
+
+    /// A type that references a JSDoc-`@typedef` name must classify that
+    /// reference as a LOCAL dep — the typedef lives in the shallow header
+    /// index but NOT the analyzer's `local_type_symbol` table, so local
+    /// classification must consult the header index. Pre-fix the `Alias`
+    /// hop is dropped (neither local nor external → a phantom/lost edge).
+    #[test]
+    fn jsdoc_typedef_reference_classifies_as_local_dep() {
+        let source = r#"
+import { Imported } from './dep'
+/** @typedef {Imported} Alias */
+export type X = Alias
+"#;
+        let analysis = make_analysis(source);
+        let env = parse_and_build_env(source);
+        let state = ShallowFileState::from_analysis(Hash16::default(), analysis, Some(&env));
+
+        // `Alias` is a shallow type symbol (header index) even though the
+        // analyzer never tracked it.
+        assert!(
+            state.has_type_symbol("Alias"),
+            "the JSDoc typedef must be a shallow type symbol"
+        );
+        let x_deps = state.type_deps("X").expect("X should exist");
+        assert!(
+            x_deps.local_deps.iter().any(|d| d == "Alias"),
+            "a reference to a JSDoc typedef must classify as a LOCAL dep \
+             (not be dropped); got local_deps = {:?}",
+            x_deps.local_deps
+        );
     }
 
     #[test]
@@ -2475,7 +2800,7 @@ export type Button = {
         let analysis = make_analysis(source);
         let env = parse_and_build_env(source);
         let state = ShallowFileState::from_analysis(Hash16::default(), analysis, Some(&env));
-        let button = state.symbol("Button").expect("Button should exist");
+        let button = state.type_deps("Button").expect("Button should exist");
 
         assert!(
             button.external_deps.iter().any(|dep| {
@@ -2616,14 +2941,20 @@ export function makeProps(): Props { return defaults }
             .value_symbol("defaults")
             .expect("defaults value symbol should be present");
         assert_eq!(defaults.kind, ValueDeclKind::Const);
-        assert!(defaults.type_annotation.is_some());
-        assert!(defaults.object_shape.is_some());
+        let defaults_body = state
+            .value_decl("defaults")
+            .expect("defaults value body should lower on demand");
+        assert!(defaults_body.type_annotation.is_some());
+        assert!(defaults_body.object_shape.is_some());
 
         let make_props = state
             .value_symbol("makeProps")
             .expect("makeProps value symbol should be present");
         assert_eq!(make_props.kind, ValueDeclKind::Function);
-        assert!(!make_props.signatures.is_empty());
+        let make_props_body = state
+            .value_decl("makeProps")
+            .expect("makeProps value body should lower on demand");
+        assert!(!make_props_body.signatures.is_empty());
     }
 
     #[test]
@@ -2683,11 +3014,12 @@ export interface Props { y: number }
             "symbol should keep Interface kind"
         );
 
+        let body = state.type_decl("Props").expect("Props body should lower");
         assert!(
-            symbol.body.is_merged(),
+            body.body.is_merged(),
             "two `interface Props` declarations must produce a Merged body"
         );
-        let members = symbol.body.merged_member_names();
+        let members = body.body.merged_member_names();
         assert!(
             members.contains(&"x".to_string()),
             "merged Props must expose `x`; got {members:?}"
@@ -2764,7 +3096,7 @@ type AppConfig = { theme: string }
         let env = parse_and_build_env(source);
         let state = ShallowFileState::from_analysis(Hash16::default(), analysis, Some(&env));
 
-        let sym = state.symbols.get("CheckboxProps").expect("CheckboxProps");
+        let sym = state.type_decl("CheckboxProps").expect("CheckboxProps");
 
         // member_deps should exist for 'ui', 'indicator', but not 'color' (primitive)
         assert!(
@@ -3099,7 +3431,7 @@ export interface Props { child: Foo }
 "#;
         let analysis = make_analysis(source);
         let env = parse_and_build_env(source);
-        let state = ShallowFileState::from_analysis_with_resolver(
+        let state = ShallowFileState::from_analysis_with_resolver_seeded(
             Hash16::default(),
             analysis,
             Some(&env),
@@ -3151,14 +3483,15 @@ export interface Props { child: Foo }
         assert_eq!(foo_target.imported_name, "Foo");
 
         // External symbol refs on Props should carry the resolved canonical ID
-        let props_sym = state.symbol("Props").expect("Props symbol should exist");
-        let foo_ext = props_sym
+        let props_deps = state.type_deps("Props").expect("Props symbol should exist");
+        let foo_ext = props_deps
             .external_deps
             .iter()
             .find(|dep| dep.local_name == "Foo")
             .expect("Props should have Foo as an external dep");
         assert_eq!(
-            foo_ext.canonical_id, "/resolved/bar.ts",
+            foo_ext.canonical_id.as_deref(),
+            Some("/resolved/bar.ts"),
             "external symbol ref canonical ID should be resolved"
         );
         assert_eq!(foo_ext.imported_name, "Foo");

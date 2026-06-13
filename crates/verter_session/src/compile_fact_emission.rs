@@ -403,7 +403,9 @@ fn lookup_parse_fact_hash(
     // retired) would root the consumer's signature on a pre-edit fact
     // hash and the warm slot would validate against stale content.
     let artifacts = host.current_content_pinned_artifacts(canonical_id)?;
-    let fact = artifacts.facts.lookup(key)?;
+    // `lookup_or_compute`: body-sensitive `Export` / `LocalDecl` facts
+    // materialise lazily through the artifact's declaration-body memo.
+    let fact = artifacts.facts.lookup_or_compute(key)?;
     Some(match lane {
         FactLane::Semantic => fact.semantic_hash,
         FactLane::Display => fact.display_hash,
@@ -456,15 +458,31 @@ fn resolve_import_source_to_canonical(
 }
 
 /// Observe the augmentation-index fingerprint for every imported
-/// specifier the owner consumes. The producer reads the augmenter
-/// set when expanding `import X from 'spec'`; consuming macros
-/// (defineProps / defineEmits) depend on the fingerprint via
-/// `RouteSurfaceFactRef::ModuleAugmentationIndexShape` (R29).
+/// specifier the owner consumes, plus a `FileWholeHash` for each
+/// augmenter contributor file in that specifier's augmenter set.
+///
+/// The producer reads the augmenter set when expanding `import X from
+/// 'spec'`; consuming macros (defineProps / defineEmits) depend on the
+/// augmenter-set shape via `RouteSurfaceFactRef::ModuleAugmentationIndexShape`
+/// (R29).
+///
+/// The `ModuleAugmentationIndexShape` fingerprint is HEADER-level — it
+/// folds each augmenter's `parse_stable_hash` (the decl skeleton), which
+/// is invariant under an augmenter member's VALUE-type edit (publish
+/// lowers zero bodies). A body-only edit inside `declare module 'X' {
+/// interface … { foo: <T> } }` therefore leaves the fingerprint
+/// unchanged. So this rail ALSO observes each augmenter contributor's
+/// `FileWholeHash` — the SAME per-augmenter content fact the semantic
+/// augmentation stitch records
+/// (`ProjectSemanticDispatch::collect_augmentation_contributions`) — so a
+/// member-body edit moves the augmenter's whole-hash and the dependent
+/// compile slot invalidates. This mirrors the semantic augmentation
+/// stitch's per-augmenter `FileWholeHash` fact, not a second
+/// mechanism: that whole-file content fact is already available, so
+/// this adds NO body lowering at publish.
 fn observe_augmentation_fingerprints(host: &VerterHost, script_imports: &[AnalyzedImport]) {
-    let snapshot = host
-        .project_type_store
-        .indexed()
-        .snapshot_augmentation_index_fingerprints();
+    let store = host.project_type_store.indexed();
+    let snapshot = store.snapshot_augmentation_index_fingerprints();
     if snapshot.is_empty() {
         return;
     }
@@ -479,6 +497,10 @@ fn observe_augmentation_fingerprints(host: &VerterHost, script_imports: &[Analyz
         })
         .collect();
     let mut emitted = FxHashSet::default();
+    // Dedup per-augmenter whole-hash observations: one augmenter file may
+    // augment several consumed specifiers (or appear under several
+    // population-scoped keys).
+    let mut emitted_augmenter_whole_hashes = FxHashSet::default();
     for import in script_imports {
         if !by_external.contains(import.source.as_str()) {
             continue;
@@ -509,6 +531,22 @@ fn observe_augmentation_fingerprints(host: &VerterHost, script_imports: &[Analyz
                     expected_hash: *fingerprint,
                 },
             ));
+
+            // Per-augmenter `FileWholeHash`: the header-level fingerprint
+            // above is invariant under a member-VALUE-type edit, so the
+            // body-edit invalidation rides each augmenter's whole-file
+            // content fact — mirroring the semantic augmentation stitch.
+            // Read the augmenter set from the SAME population-scoped key
+            // already in the snapshot, so base / session scopes stay
+            // consistent with how the index was populated.
+            if let Some(augmenter_set) = store.get_augmenter_set(key) {
+                for entry in augmenter_set.entries.iter() {
+                    let augmenter_canonical = entry.canonical();
+                    if emitted_augmenter_whole_hashes.insert(Arc::clone(augmenter_canonical)) {
+                        observe_file_whole_hash(host, augmenter_canonical.as_ref());
+                    }
+                }
+            }
         }
     }
 }

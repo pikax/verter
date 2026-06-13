@@ -2750,25 +2750,14 @@ defineProps<Pick<HelperProps, 'size'>>()
 #[test]
 fn step8_route_hash_pure_content_derived() {
     use crate::resolver_core::shallow_file_state::ShallowFileState;
-    use rustc_hash::{FxHashMap, FxHashSet};
+
     use std::sync::Arc;
     use verter_semantic::analysis::Hash16;
 
     let analysis = Arc::new(
         verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default(),
     );
-    let state = ShallowFileState {
-        whole_hash: Hash16::default(),
-        exports: FxHashMap::default(),
-        wildcard_reexports: Vec::new(),
-        symbols: FxHashMap::default(),
-        value_symbols: FxHashMap::default(),
-        augmentation_scopes: FxHashMap::default(),
-        augmentation_value_scopes: FxHashMap::default(),
-        import_locals: FxHashSet::default(),
-        import_targets: FxHashMap::default(),
-        analysis,
-    };
+    let state = ShallowFileState::from_analysis(Hash16::default(), analysis, None);
 
     let h1 = crate::resolver_store::hash_route_surface(&state);
     // Construct an unrelated host between calls to ensure

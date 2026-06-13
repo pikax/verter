@@ -1886,9 +1886,10 @@ use infer::{extract_heritage_type_names, get_type_reference_name, resolve_value_
 mod external;
 use external::collect_type_reference_names;
 pub use external::{
-    analyze_external_type_program, analyze_external_type_source,
-    collect_required_import_names_for_external_type, extract_export_surface,
-    extract_imported_type_bindings, hash_resolved_type, imported_member_name_for_required_alias,
+    analyze_external_type_program, analyze_external_type_program_headers,
+    analyze_external_type_source, collect_required_import_names_for_external_type,
+    collect_statement_dependency_names, extract_export_surface, extract_imported_type_bindings,
+    hash_resolved_type, imported_member_name_for_required_alias,
     required_import_alias_names_for_binding, resolve_external_type,
     resolve_external_type_in_context_with_analyzed_symbol_companion,
     resolve_external_type_in_context_with_analyzed_symbol_companion_and_canonical,
@@ -1897,7 +1898,7 @@ pub use external::{
     resolve_external_type_with_canonical, resolve_external_type_with_companion,
     resolve_external_type_with_companion_and_canonical, AnalyzedExternalTypeSource,
     AnalyzedExternalTypeSourceStats, AnalyzedExternalTypeSymbol, AnalyzedExternalTypeSymbolKind,
-    ExtractedExportSurface, ExtractedTypeBindings, ImportedTypeBinding,
+    DeclDependencyNames, ExtractedExportSurface, ExtractedTypeBindings, ImportedTypeBinding,
 };
 
 #[cfg(test)]

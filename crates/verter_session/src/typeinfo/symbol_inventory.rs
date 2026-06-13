@@ -86,19 +86,24 @@ impl VerterHost {
         // Classify each shallow type / value declaration into the
         // public taxonomy. Class + Enum are dual-space and surface
         // twice (once on the type side, once on the value side).
-        let mut entries: Vec<SymbolEntry> =
-            Vec::with_capacity(shallow.symbols.len() + shallow.value_symbols.len());
+        // HEADER-LEVEL inventory walk — symbol names and kinds come
+        // from the shallow declaration-header index; no declaration
+        // body lowers to list a file's symbols.
+        let mut entries: Vec<SymbolEntry> = Vec::new();
 
-        for (name, type_sym) in &shallow.symbols {
-            let kind = match type_sym.kind {
+        for name in shallow.type_symbol_names() {
+            let Some(kind) = shallow.type_symbol_kind(name) else {
+                continue;
+            };
+            let kind = match kind {
                 TypeDeclKind::Alias => SymbolKind::TypeAlias,
                 TypeDeclKind::Interface => SymbolKind::Interface,
                 TypeDeclKind::Class => SymbolKind::Class,
             };
-            let span = decl_index.get(name.as_str()).map(|entry| entry.span);
+            let span = decl_index.get(name).map(|entry| entry.span);
             let is_exported = is_exported_local(shallow.as_ref(), name)
                 || decl_index
-                    .get(name.as_str())
+                    .get(name)
                     .map(|entry| {
                         // The shallow `exports` table is the primary
                         // exporter authority; the analysis-snapshot
@@ -114,15 +119,18 @@ impl VerterHost {
                     .unwrap_or(false)
                     && is_local_export_target(shallow.as_ref(), name);
             entries.push(SymbolEntry {
-                name: name.clone(),
+                name: name.to_string(),
                 kind,
                 span,
                 is_exported,
             });
         }
 
-        for (name, value_sym) in &shallow.value_symbols {
-            let kind = match value_sym.kind {
+        for name in shallow.value_symbol_names() {
+            let Some(kind) = shallow.value_symbol_kind(name) else {
+                continue;
+            };
+            let kind = match kind {
                 ValueDeclKind::Const => SymbolKind::Const,
                 ValueDeclKind::Let => SymbolKind::Let,
                 ValueDeclKind::Var => SymbolKind::Var,
@@ -131,10 +139,10 @@ impl VerterHost {
                 ValueDeclKind::Class => SymbolKind::ClassValue,
                 ValueDeclKind::Enum => SymbolKind::Enum,
             };
-            let span = decl_index.get(name.as_str()).map(|entry| entry.span);
+            let span = decl_index.get(name).map(|entry| entry.span);
             let is_exported = is_exported_local(shallow.as_ref(), name);
             entries.push(SymbolEntry {
-                name: name.clone(),
+                name: name.to_string(),
                 kind,
                 span,
                 is_exported,

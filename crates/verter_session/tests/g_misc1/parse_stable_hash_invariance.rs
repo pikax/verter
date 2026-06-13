@@ -18,7 +18,7 @@
 
 use std::sync::Arc;
 
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 use verter_session::parse_stable_hash::compute_parse_stable_hash;
 use verter_session::project_type_store::IndexedReady;
 
@@ -39,45 +39,44 @@ fn build_indexed(
         verter_session::resolver_core::shallow_file_state::ExportTarget,
     )>,
 ) -> Arc<IndexedReady> {
-    let mut symbols: FxHashMap<
-        String,
-        verter_session::resolver_core::shallow_file_state::ShallowTypeSymbol,
-    > = FxHashMap::default();
+    // Env-seeded construction: member names become the symbol's direct
+    // syntactic member headers (the inventory `parse_stable_hash` walks).
+    let mut env = verter_semantic::analysis::type_eval::EvalEnv::new();
     for (name, kind, members) in type_symbols {
-        let mut member_deps: FxHashMap<String, Vec<String>> = FxHashMap::default();
-        for m in members {
-            member_deps.insert(m.to_string(), Vec::new());
-        }
-        symbols.insert(
-            name.to_string(),
-            verter_session::resolver_core::shallow_file_state::ShallowTypeSymbol {
-                kind,
-                body: verter_semantic::analysis::type_eval::TypeDeclBody::Single(
-                    verter_type_expr::TypeExpr::Unknown { raw: String::new() },
-                ),
-                type_parameters: Vec::new(),
-                local_deps: Vec::new(),
-                external_deps: Vec::new(),
-                member_deps,
-            },
-        );
+        let body = verter_type_expr::TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
+            properties: members
+                .iter()
+                .map(|m| {
+                    verter_type_expr::ObjectMember::Property(
+                        verter_type_expr::ObjectProperty::synthetic_public(
+                            (*m).to_string(),
+                            verter_type_expr::TypeExpr::Primitive(
+                                verter_type_expr::PrimitiveName::String,
+                            ),
+                            false,
+                            false,
+                        ),
+                    )
+                })
+                .collect(),
+        }));
+        env.add_type(verter_semantic::analysis::type_eval::TypeDeclInfo {
+            name: name.to_string(),
+            declaration_id: 0,
+            kind,
+            type_parameters: Vec::new(),
+            body,
+        });
     }
-    let mut value_symbols_map: FxHashMap<
-        String,
-        verter_session::resolver_core::shallow_file_state::ShallowValueSymbol,
-    > = FxHashMap::default();
     for (name, kind) in value_symbols {
-        value_symbols_map.insert(
-            name.to_string(),
-            verter_session::resolver_core::shallow_file_state::ShallowValueSymbol {
-                kind,
-                type_annotation: None,
-                signatures: Vec::new(),
-                object_shape: None,
-                enum_members: None,
-                is_synthesised_vue_default: false,
-            },
-        );
+        env.add_value(verter_semantic::analysis::type_eval::ValueDeclInfo {
+            name: name.to_string(),
+            declaration_id: 0,
+            kind,
+            type_annotation: None,
+            signatures: Vec::new(),
+            object_shape: None,
+        });
     }
     let mut exports_map: FxHashMap<
         String,
@@ -86,18 +85,13 @@ fn build_indexed(
     for (name, target) in exports {
         exports_map.insert(name.to_string(), target);
     }
-    let shallow = verter_session::resolver_core::shallow_file_state::ShallowFileState {
-        whole_hash: [0u8; 16],
-        exports: exports_map,
-        wildcard_reexports: Vec::new(),
-        symbols,
-        value_symbols: value_symbols_map,
-        import_locals: FxHashSet::default(),
-        import_targets: FxHashMap::default(),
-        augmentation_scopes: Default::default(),
-        augmentation_value_scopes: Default::default(),
-        analysis: empty_external(),
-    };
+    let mut shallow =
+        verter_session::resolver_core::shallow_file_state::ShallowFileState::from_analysis(
+            [0u8; 16],
+            empty_external(),
+            Some(&env),
+        );
+    shallow.exports = exports_map;
     Arc::new(IndexedReady::new_for_test_with_state(
         [0u8; 16],
         Arc::new(shallow),
@@ -106,8 +100,6 @@ fn build_indexed(
         empty_external(),
     ))
 }
-
-// ── Invariance tests ──
 
 #[test]
 fn whitespace_edit_does_not_change_parse_stable_hash() {

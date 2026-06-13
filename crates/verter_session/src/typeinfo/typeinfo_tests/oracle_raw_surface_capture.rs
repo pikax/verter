@@ -1,10 +1,12 @@
 //! Guard: `raw_source_surface_captured_pre_lowering`.
 //!
-//! Proves the parse-time `RawSourceSurface` raw-fact inventory is captured
-//! during the file's INITIAL PARSE, stored on the content-addressed artifact
-//! (`IndexedReady.external_type_analysis`), carries the erased §Q2 facts the
-//! lowered body lost, stamps the owning canonical, and is RECOMPUTED on a
-//! content-hash change rather than served stale.
+//! Proves the `RawSourceSurface` raw-fact record is captured from the RAW
+//! statement syntax (pre-lowering) through the artifact's lazy
+//! declaration-body memo (`DeclBodyMemo::raw_surfaces_for` — a per-symbol
+//! DEMAND product of the retained parse snapshot, never an eager
+//! whole-program inventory), carries the erased §Q2 facts the lowered body
+//! lost, stamps the owning canonical, and is RECOMPUTED on a content-hash
+//! change rather than served stale (the memo is content-addressed).
 
 use std::sync::Arc;
 
@@ -43,10 +45,11 @@ fn raw_source_surface_captured_pre_lowering() {
     );
 
     let indexed = host.ensure_indexed_ready(CANONICAL).expect("indexed ready");
-    let analysis = &indexed.external_type_analysis;
-    let surface = analysis
-        .raw_source_surface("Branded", SymbolSpace::Type)
-        .expect("captured raw surface for Branded");
+    let surfaces = indexed
+        .shallow_state
+        .decl_bodies()
+        .raw_surfaces_for("Branded", SymbolSpace::Type);
+    let surface = surfaces.first().expect("captured raw surface for Branded");
 
     // The owning canonical is stamped.
     assert_eq!(surface.decl_canonical, CANONICAL);
@@ -84,11 +87,11 @@ fn raw_source_surface_recomputes_on_content_change() {
         "export class Widget { private secret: number = 1; }\n",
     );
     let v1 = host.ensure_indexed_ready(CANONICAL).expect("v1 indexed");
-    let s1 = v1
-        .external_type_analysis
-        .raw_source_surface("Widget", SymbolSpace::Type)
-        .expect("v1 surface")
-        .clone();
+    let v1_surfaces = v1
+        .shallow_state
+        .decl_bodies()
+        .raw_surfaces_for("Widget", SymbolSpace::Type);
+    let s1 = v1_surfaces.first().expect("v1 surface").clone();
     assert!(
         s1.member_visibility
             .iter()
@@ -105,10 +108,11 @@ fn raw_source_surface_recomputes_on_content_change() {
     );
     let v2 = host.ensure_indexed_ready(CANONICAL).expect("v2 indexed");
     assert_ne!(v1.whole_hash, v2.whole_hash, "content hash changed");
-    let s2 = v2
-        .external_type_analysis
-        .raw_source_surface("Widget", SymbolSpace::Type)
-        .expect("v2 surface");
+    let v2_surfaces = v2
+        .shallow_state
+        .decl_bodies()
+        .raw_surfaces_for("Widget", SymbolSpace::Type);
+    let s2 = v2_surfaces.first().expect("v2 surface");
     assert!(
         s2.member_visibility
             .iter()
@@ -149,8 +153,10 @@ fn raw_surface_retains_all_merged_contributors() {
     );
 
     let indexed = host.ensure_indexed_ready(CANONICAL).expect("indexed ready");
-    let analysis = &indexed.external_type_analysis;
-    let surfaces = analysis.raw_source_surfaces_for("Merged", SymbolSpace::Type);
+    let surfaces = indexed
+        .shallow_state
+        .decl_bodies()
+        .raw_surfaces_for("Merged", SymbolSpace::Type);
 
     // BOTH contributors retained, in source order — a single-value map could
     // only ever yield one.

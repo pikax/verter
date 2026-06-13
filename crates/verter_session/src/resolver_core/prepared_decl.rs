@@ -8,7 +8,9 @@ use verter_semantic::analysis::type_solver::{
     PreparedTypeDecl, PreparedValueDecl, ResolvedRootIdentity,
 };
 
+use super::shallow_file_state::ClassifiedTypeDeps;
 use super::{ExportTarget, ShallowFileState};
+use crate::decl_body_memo::{LoweredTypeDecl, LoweredValueDecl};
 
 type PreparedTypeDeclSlot = Arc<OnceLock<Option<Arc<PreparedTypeDecl>>>>;
 type PreparedTypeDeclSlots = Arc<FxHashMap<String, PreparedTypeDeclSlot>>;
@@ -101,22 +103,31 @@ pub fn prepare_local_type_decl(
     // declaration. Global augmentations are visible from any scope, so a bare
     // reference (`type Alias = GlobalContract`) reaches the merged surface
     // through the same prepared-decl → `MergedDecl` machinery as a file symbol.
-    let symbol = match state.symbol(symbol_name) {
-        Some(symbol) => symbol,
-        None => state.augmentation_symbol(
-            &verter_semantic::analysis::type_eval::AugmentationScopeKind::Global,
-            symbol_name,
-        )?,
+    // Resolve the lowered body (and, for a file-scope symbol, its
+    // classified dependency edges): file-scope symbol first, then the
+    // global-augmentation fallback (which carries no classified deps —
+    // its body stitches onto another module's surface).
+    let (lowered, deps) = if state.has_type_symbol(symbol_name) {
+        (state.type_decl(symbol_name)?, state.type_deps(symbol_name))
+    } else {
+        (
+            state.augmentation_type_decl(
+                &verter_semantic::analysis::type_eval::AugmentationScopeKind::Global,
+                symbol_name,
+            )?,
+            None,
+        )
     };
     if state.is_import_local(symbol_name) {
         return None;
     }
 
-    Some(prepare_type_decl_from_symbol(
+    Some(prepare_type_decl_from_lowered(
         canonical_id,
         state,
         symbol_name,
-        symbol,
+        lowered.as_ref(),
+        deps.as_deref(),
         dep_edges,
     ))
 }
@@ -140,26 +151,30 @@ pub fn prepare_augmentation_type_decl(
     symbol_name: &str,
     dep_edges: Option<&FxHashMap<String, String>>,
 ) -> Option<PreparedTypeDecl> {
-    let symbol = state.augmentation_symbol(scope, symbol_name)?;
-    Some(prepare_type_decl_from_symbol(
+    let lowered = state.augmentation_type_decl(scope, symbol_name)?;
+    Some(prepare_type_decl_from_lowered(
         canonical_id,
         state,
         symbol_name,
-        symbol,
+        lowered.as_ref(),
+        None,
         dep_edges,
     ))
 }
 
-/// Build a [`PreparedTypeDecl`] from an already-resolved
-/// [`ShallowTypeSymbol`]. Shared by [`prepare_local_type_decl`] (file-scope
-/// symbol) and [`prepare_augmentation_type_decl`] (augmentation-scope symbol):
-/// both categories lower their body through the identical name-resolution +
-/// merged-contributor path, differing only in WHERE the symbol was looked up.
-fn prepare_type_decl_from_symbol(
+/// Build a [`PreparedTypeDecl`] from an already-lowered
+/// [`LoweredTypeDecl`] body plus its (optional) classified dependency
+/// edges. Shared by [`prepare_local_type_decl`] (file-scope symbol) and
+/// [`prepare_augmentation_type_decl`] (augmentation-scope symbol): both
+/// categories lower their body through the identical name-resolution +
+/// merged-contributor path, differing only in WHERE the body was looked
+/// up (augmentation bodies carry no classified deps; `deps` is `None`).
+fn prepare_type_decl_from_lowered(
     canonical_id: &str,
     state: &ShallowFileState,
     symbol_name: &str,
-    symbol: &super::shallow_file_state::ShallowTypeSymbol,
+    lowered: &LoweredTypeDecl,
+    deps: Option<&ClassifiedTypeDeps>,
     dep_edges: Option<&FxHashMap<String, String>>,
 ) -> PreparedTypeDecl {
     #[cfg(test)]
@@ -169,18 +184,20 @@ fn prepare_type_decl_from_symbol(
 
     let mut prepared = PreparedTypeDecl::new(
         ResolvedRootIdentity::new(canonical_id, symbol_name),
-        symbol.kind,
-        symbol.body.lookup_object().into_owned(),
+        lowered.kind,
+        lowered.body.lookup_object().into_owned(),
     );
     // A merged interface carries its ordered contributor bodies so body
     // lowering interns a `MergedDecl` peer-merge carrier rather than collapsing
     // to a bare intersection.
-    if symbol.body.is_merged() {
-        prepared.merged_contributors = symbol.body.contributors().to_vec();
+    if lowered.body.is_merged() {
+        prepared.merged_contributors = lowered.body.contributors().to_vec();
     }
-    prepared.type_parameters = symbol.type_parameters.clone();
-    prepared.local_deps = symbol.local_deps.clone();
-    prepared.external_deps = symbol
+    prepared.type_parameters = lowered.type_parameters.clone();
+    let empty_deps = ClassifiedTypeDeps::default();
+    let deps = deps.unwrap_or(&empty_deps);
+    prepared.local_deps = deps.local_deps.clone();
+    prepared.external_deps = deps
         .external_deps
         .iter()
         .map(|dep| {
@@ -188,7 +205,7 @@ fn prepare_type_decl_from_symbol(
                 canonical_id,
                 dep_edges,
                 &dep.source_specifier,
-                Some(dep.canonical_id.as_str()),
+                dep.canonical_id.as_deref(),
             );
             PreparedExternalDep {
                 canonical_id: resolved_id,
@@ -199,15 +216,15 @@ fn prepare_type_decl_from_symbol(
 
     // Build name_resolution: maps bare names in the body to resolved identities
     // Local deps resolve to the same file
-    for dep_name in state.symbols.keys() {
+    for dep_name in state.type_symbol_names() {
         prepared.name_resolution.insert(
-            dep_name.clone(),
+            dep_name.to_string(),
             ResolvedRootIdentity::new(canonical_id, dep_name),
         );
     }
-    for dep_name in state.value_symbols.keys() {
+    for dep_name in state.value_symbol_names() {
         prepared.name_resolution.insert(
-            dep_name.clone(),
+            dep_name.to_string(),
             ResolvedRootIdentity::new(canonical_id, dep_name),
         );
     }
@@ -228,7 +245,7 @@ fn prepare_type_decl_from_symbol(
     // Populate cache deps for invalidation
     let hash_u64 = u64::from_le_bytes(state.whole_hash[..8].try_into().unwrap_or_default());
     prepared.cache_deps.defining_file = Some((canonical_id.to_string(), hash_u64));
-    prepared.cache_deps.local_closure_participants = symbol.local_deps.clone();
+    prepared.cache_deps.local_closure_participants = deps.local_deps.clone();
 
     prepared.build_member_index();
     prepared.classify_wrapper_shape();
@@ -261,29 +278,29 @@ pub fn prepare_local_value_decl(
     symbol_name: &str,
     dep_edges: Option<&FxHashMap<String, String>>,
 ) -> Option<PreparedValueDecl> {
-    let symbol = state.value_symbol(symbol_name)?;
+    let lowered: Arc<LoweredValueDecl> = state.value_decl(symbol_name)?;
     if state.is_import_local(symbol_name) {
         return None;
     }
 
     let mut prepared = PreparedValueDecl::new(
         ResolvedRootIdentity::new(canonical_id, symbol_name),
-        symbol.kind,
+        lowered.kind,
     );
-    prepared.type_annotation = symbol.type_annotation.clone();
-    prepared.signatures = symbol.signatures.clone();
-    prepared.object_shape = symbol.object_shape.clone();
-    prepared.enum_members = symbol.enum_members.clone();
+    prepared.type_annotation = lowered.type_annotation.clone();
+    prepared.signatures = lowered.signatures.clone();
+    prepared.object_shape = lowered.object_shape.clone();
+    prepared.enum_members = lowered.enum_members.clone();
 
-    for local_name in state.symbols.keys() {
+    for local_name in state.type_symbol_names() {
         prepared.name_resolution.insert(
-            local_name.clone(),
+            local_name.to_string(),
             ResolvedRootIdentity::new(canonical_id, local_name),
         );
     }
-    for local_name in state.value_symbols.keys() {
+    for local_name in state.value_symbol_names() {
         prepared.name_resolution.insert(
-            local_name.clone(),
+            local_name.to_string(),
             ResolvedRootIdentity::new(canonical_id, local_name),
         );
     }
@@ -489,9 +506,11 @@ pub fn build_prepared_decl_bundle(
         }
     }
 
-    // Collect same-file symbol name sets.
-    let scope_type_names: FxHashSet<String> = state.symbols.keys().cloned().collect();
-    let scope_value_names: FxHashSet<String> = state.value_symbols.keys().cloned().collect();
+    // Collect same-file symbol name sets (header-level — no body lowering).
+    let scope_type_names: FxHashSet<String> =
+        state.type_symbol_names().map(str::to_string).collect();
+    let scope_value_names: FxHashSet<String> =
+        state.value_symbol_names().map(str::to_string).collect();
 
     let owner_whole_hash = state.whole_hash;
     PreparedDeclBundle {
@@ -521,24 +540,23 @@ pub fn build_prepared_type_decl_cache(
     dep_edges: Arc<FxHashMap<String, String>>,
 ) -> PreparedTypeDeclCache {
     let mut slots: FxHashMap<String, Arc<OnceLock<Option<Arc<PreparedTypeDecl>>>>> = state
-        .symbols
-        .keys()
+        .type_symbol_names()
         .filter(|symbol_name| !state.is_import_local(symbol_name))
-        .map(|symbol_name| (symbol_name.clone(), Arc::new(OnceLock::new())))
+        .map(|symbol_name| (symbol_name.to_string(), Arc::new(OnceLock::new())))
         .collect();
     // Global-augmentation declarations (`declare global { interface N {} }`)
     // are resolvable by bare name through `prepare_local_type_decl`'s global
     // fallback, so they need a prepared-decl slot even though they never enter
     // the file surface. (A name that IS a file symbol already has a slot and
     // takes precedence.)
-    for (scope, name) in state.augmentation_scopes.keys() {
+    for (scope, name) in state.augmentation_type_keys() {
         if matches!(
             scope,
             verter_semantic::analysis::type_eval::AugmentationScopeKind::Global
         ) && !slots.contains_key(name)
             && !state.is_import_local(name)
         {
-            slots.insert(name.clone(), Arc::new(OnceLock::new()));
+            slots.insert(name.to_string(), Arc::new(OnceLock::new()));
         }
     }
 
@@ -557,10 +575,9 @@ pub fn build_prepared_value_decl_cache(
     dep_edges: Arc<FxHashMap<String, String>>,
 ) -> PreparedValueDeclCache {
     let slots = state
-        .value_symbols
-        .keys()
+        .value_symbol_names()
         .filter(|symbol_name| !state.is_import_local(symbol_name))
-        .map(|symbol_name| (symbol_name.clone(), Arc::new(OnceLock::new())))
+        .map(|symbol_name| (symbol_name.to_string(), Arc::new(OnceLock::new())))
         .collect();
 
     PreparedValueDeclCache {

@@ -143,9 +143,12 @@ fn indexed_artifact_and_env_preserved_across_byte_identical_re_upserts() {
          IndexedReady by identity (no evict/rebuild churn)",
     );
     assert!(
-        Arc::ptr_eq(before.eval_env(), after.eval_env()),
-        "the artifact's EvalEnv must be the same allocation (no \
-         env-only rebuild)",
+        Arc::ptr_eq(
+            &before.shallow_state.decl_bodies().whole_env(),
+            &after.shallow_state.decl_bodies().whole_env(),
+        ),
+        "the artifact's memoized whole-file env must be the same \
+         allocation (no env-only rebuild)",
     );
 }
 

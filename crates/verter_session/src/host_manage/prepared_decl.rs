@@ -508,11 +508,7 @@ impl VerterHost {
         // route resolution.
         let route_canonical_id = identity.analysis_canonical();
         let state = &facts.shallow_state;
-        if state.symbols.is_empty()
-            && state.value_symbols.is_empty()
-            && state.exports.is_empty()
-            && state.import_targets.is_empty()
-        {
+        if !state.has_resolvable_surface() && state.import_targets.is_empty() {
             return None;
         }
         let (dep_edges, _import_route_hash) =
@@ -651,11 +647,7 @@ impl VerterHost {
         // admission.
         let serve = self.routed_shallow_state_serve(canonical_id)?;
         let state = serve.state;
-        if state.symbols.is_empty()
-            && state.value_symbols.is_empty()
-            && state.exports.is_empty()
-            && state.import_targets.is_empty()
-        {
+        if !state.has_resolvable_surface() && state.import_targets.is_empty() {
             // Surface-emptiness is a property of the SERVED artifact,
             // not necessarily of live content — carry the serve's
             // publication status so the flight lane can judge the
@@ -839,11 +831,7 @@ impl VerterHost {
         let serve = self.ensure_indexed_ready_serve(canonical_id)?;
         let facts = &serve.indexed;
         let state = &facts.shallow_state;
-        if state.symbols.is_empty()
-            && state.value_symbols.is_empty()
-            && state.exports.is_empty()
-            && state.import_targets.is_empty()
-        {
+        if !state.has_resolvable_surface() && state.import_targets.is_empty() {
             // Surface-emptiness is a property of the SERVED artifact,
             // not necessarily of live content — carry the serve's
             // publication status so the flight lane can judge the
@@ -1116,21 +1104,19 @@ impl VerterHost {
                         })
                         .or_insert_with(|| ext.route.clone());
                 }
-                if state.symbol(symbol_name).is_some_and(|symbol| {
-                    symbol.kind == verter_semantic::analysis::type_eval::TypeDeclKind::Class
+                if state.type_symbol_kind(symbol_name).is_some_and(|kind| {
+                    kind == verter_semantic::analysis::type_eval::TypeDeclKind::Class
                 }) {
-                    if let Some(analysis) = self.external_type_analysis(canonical_id) {
-                        for required_name in analysis.required_import_names(exported_name) {
-                            result
-                                .entry(required_name)
-                                .and_modify(|existing| {
-                                    *existing = crate::resolver_core::merge_route_demands(
-                                        existing,
-                                        &RouteDemand::Whole,
-                                    );
-                                })
-                                .or_insert(RouteDemand::Whole);
-                        }
+                    for required_name in state.required_import_names(exported_name) {
+                        result
+                            .entry(required_name)
+                            .and_modify(|existing| {
+                                *existing = crate::resolver_core::merge_route_demands(
+                                    existing,
+                                    &RouteDemand::Whole,
+                                );
+                            })
+                            .or_insert(RouteDemand::Whole);
                     }
                 }
                 return result;
@@ -1147,9 +1133,9 @@ impl VerterHost {
 
         if matches!(route, RouteDemand::Whole) {
             return self
-                .external_type_analysis(canonical_id)
-                .map(|analysis| {
-                    analysis
+                .routed_shallow_state(canonical_id)
+                .map(|state| {
+                    state
                         .required_import_names(exported_name)
                         .into_iter()
                         .map(|name| (name, RouteDemand::Whole))
@@ -1205,23 +1191,19 @@ impl VerterHost {
                         })
                         .or_insert_with(|| ext.route.clone());
                 }
-                if state.symbol(symbol_name).is_some_and(|symbol| {
-                    symbol.kind == verter_semantic::analysis::type_eval::TypeDeclKind::Class
+                if state.type_symbol_kind(symbol_name).is_some_and(|kind| {
+                    kind == verter_semantic::analysis::type_eval::TypeDeclKind::Class
                 }) {
-                    if let Some(analysis) =
-                        self.external_type_analysis_with_view(canonical_id, view)
-                    {
-                        for required_name in analysis.required_import_names(exported_name) {
-                            result
-                                .entry(required_name)
-                                .and_modify(|existing| {
-                                    *existing = crate::resolver_core::merge_route_demands(
-                                        existing,
-                                        &RouteDemand::Whole,
-                                    );
-                                })
-                                .or_insert(RouteDemand::Whole);
-                        }
+                    for required_name in state.required_import_names(exported_name) {
+                        result
+                            .entry(required_name)
+                            .and_modify(|existing| {
+                                *existing = crate::resolver_core::merge_route_demands(
+                                    existing,
+                                    &RouteDemand::Whole,
+                                );
+                            })
+                            .or_insert(RouteDemand::Whole);
                     }
                 }
                 return result;
@@ -1239,9 +1221,9 @@ impl VerterHost {
 
         if matches!(route, RouteDemand::Whole) {
             return self
-                .external_type_analysis_with_view(canonical_id, view)
-                .map(|analysis| {
-                    analysis
+                .routed_shallow_state_with_view(canonical_id, view)
+                .map(|state| {
+                    state
                         .required_import_names(exported_name)
                         .into_iter()
                         .map(|name| (name, RouteDemand::Whole))
@@ -1635,7 +1617,7 @@ impl VerterHost {
         external_type_analysis: &Arc<
             verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource,
         >,
-        eval_env: &Arc<verter_semantic::analysis::type_eval::EvalEnv>,
+        decl_bodies: &Arc<crate::decl_body_memo::DeclBodyMemo>,
     ) -> BuiltIndexedRouteSurface {
         let declaration_file = canonical_id.ends_with(".d.ts")
             || canonical_id.ends_with(".d.mts")
@@ -1859,7 +1841,7 @@ impl VerterHost {
             crate::resolver_core::ShallowFileState::from_analysis_with_resolver(
                 whole_hash,
                 Arc::clone(external_type_analysis),
-                Some(eval_env.as_ref()),
+                Arc::clone(decl_bodies),
                 &resolver,
             );
         crate::resolver_core::vue_default_synth::inject_vue_default_into_shallow_state(
@@ -1889,7 +1871,8 @@ impl VerterHost {
     ///
     /// The content-addressed payload — `raw_source`, `eval_source`,
     /// `cached_parse`, `snapshot`, `script_analysis`,
-    /// `external_type_analysis`, `eval_env`, the shallow symbol bodies'
+    /// `external_type_analysis`, the memo-owned whole-env demand product,
+    /// the shallow symbol bodies'
     /// inputs — is REUSED (`whole_hash` unchanged, no re-read, no
     /// re-parse); the COHERENT route surface (`import_routes`,
     /// `ShallowFileState` route edges, `route_hash`, `import_route_hash`)
@@ -1943,7 +1926,11 @@ impl VerterHost {
             stale.whole_hash,
             stale.snapshot.as_ref(),
             &stale.external_type_analysis,
-            stale.eval_env(),
+            // The content-addressed declaration-body memo is REUSED
+            // across route-only edge refreshes (same content generation;
+            // bodies are canonical-free) — only the route surface and
+            // its per-state classification caches rebuild.
+            stale.shallow_state.decl_bodies(),
         );
         let indexed = Arc::new(crate::project_type_store::IndexedReady {
             whole_hash: stale.whole_hash,
@@ -1967,7 +1954,6 @@ impl VerterHost {
             export_signatures: stale.export_signatures.clone(),
             snapshot: Arc::clone(&stale.snapshot),
             external_type_analysis: Arc::clone(&stale.external_type_analysis),
-            eval_env: Arc::clone(stale.eval_env()),
             declares_interface_app_config: stale.declares_interface_app_config,
         });
         // PRE-PUBLISH FENCE — same ReturnOnly contract as the full
@@ -2274,75 +2260,150 @@ impl VerterHost {
                 raw_source.as_ref(),
                 cached_parse.as_deref(),
             );
-            // THE single eval-program parse for this cold canonical build.
-            // The arena lives and dies on this flight's stack (`!Send` —
-            // never enters host caches); env, analysis, and the non-SFC
-            // snapshot below all read this one program.
-            let parsed_eval_program =
-                self.parse_eval_program(canonical_id, whole_hash, &eval_source, source_type);
+            // THE single eval-program parse for this cold canonical
+            // build — performed AND RETAINED on the lazy lowering
+            // service's worker (keyed by the content-generation
+            // `SnapshotKey`), so later declaration-body demands reuse
+            // the same parse instead of re-parsing per touch. The cold
+            // job builds only INDEX products from the borrowed program:
+            // the shallow declaration-header index, the header-only
+            // external-type analysis, and (when the scheduler had no
+            // snapshot) the file-analysis snapshot. ZERO declaration
+            // bodies lower here.
+            let snapshot_key = crate::decl_lowering::SnapshotKey {
+                canonical: Arc::from(canonical_id),
+                whole_hash,
+                parse_env_hash: flight_parse_env_hash,
+            };
 
-            let snapshot = if let Some(snapshot) = self.build_snapshot_from_scheduler(canonical_id)
-            {
+            let scheduler_snapshot = self.build_snapshot_from_scheduler(canonical_id).map(|s| {
                 self.provenance
                     .indexed_ready_scheduler_snapshot_reuse
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                Arc::new(snapshot)
-            } else if canonical_id.ends_with(".vue") {
-                // SFC snapshot from the cached SFC parse — no re-parse.
-                // The script program is the flight's eval program when
-                // the eval source IS the extracted script: the snapshot
-                // walks the SAME parse (or defaults directly on a fatal
-                // parse) — this flight performs zero additional
-                // script-program parses.
-                Arc::new(self.build_snapshot_from_source_state(
-                    canonical_id,
-                    &raw_source,
-                    cached_parse.as_deref(),
-                    Self::vue_flight_script_program(
-                        eval_is_extracted_script,
-                        parsed_eval_program.as_deref(),
-                    ),
-                ))
-            } else if let Some(parsed) = parsed_eval_program.as_deref() {
-                // Non-SFC snapshot from the SAME parsed program — this
-                // flight performs zero additional parses; the snapshot
-                // is lowered from the single eval-program parse above.
-                let parse = crate::parse::build_non_sfc_snapshot_from_program(
-                    canonical_id,
-                    raw_source.as_ref(),
-                    source_type,
-                    parsed.borrow_dependent(),
-                );
-                Arc::new(Self::build_snapshot_from_parse(parse))
-            } else {
-                // Fatal (panicked) eval-program parse on a non-SFC
-                // canonical (the `.vue` arm above never reaches here).
-                // The empty snapshot is constructed directly: a re-parse
-                // would run over the same bytes under the same source
-                // type (`non_sfc_source_type` on both lanes) and is
-                // guaranteed to panic identically, producing exactly
-                // this default-empty surface. `FileAnalysisSnapshot`
-                // carries no parse diagnostics, so nothing is lost.
-                Arc::new(crate::types::FileAnalysisSnapshot::default())
-            };
+                Arc::new(s)
+            });
 
-            // ONE env + ONE analysis from the single threaded parse. The
-            // env is stored on `IndexedReady` below — it is the canonical
-            // per-file `EvalEnv` every later consumer reads.
-            let (eval_env, external_type_analysis) = self.build_eval_env_and_analysis_from_program(
-                canonical_id,
-                raw_source.as_ref(),
-                cached_parse.as_deref(),
-                eval_source.as_ref(),
-                parsed_eval_program.as_deref(),
+            struct ColdIndexProducts {
+                header_index: verter_semantic::analysis::decl_headers::DeclHeaderIndex,
+                analysis:
+                    verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource,
+                snapshot: Option<crate::types::FileAnalysisSnapshot>,
+            }
+
+            let job_canonical = canonical_id.to_string();
+            let job_raw_source = Arc::clone(&raw_source);
+            let job_cached_parse = cached_parse.clone();
+            let job_scope = self.config.effective_scope();
+            let job_provenance = Arc::clone(&self.provenance);
+            let need_snapshot = scheduler_snapshot.is_none();
+            let is_vue = canonical_id.ends_with(".vue");
+            // Pin the retained parse for this content generation HERE — at
+            // the cold-index parse, the earliest service parse — and hand
+            // the lease to the artifact's memo below, so the header-index
+            // parse and every later body demand share ONE parse for the
+            // artifact's whole life (no LRU, no silent re-parse).
+            let cold_lease =
+                self.decl_lowering
+                    .acquire_lease(&snapshot_key, &eval_source, source_type);
+            if cold_lease.parsed_now {
+                self.provenance
+                    .eval_program_parses
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            let outcome = self.decl_lowering.run(
+                &snapshot_key,
+                &eval_source,
+                source_type,
+                move |program| {
+                    let (header_index, analysis) = match program {
+                        Some(parsed) => {
+                            let body = parsed.borrow_dependent();
+                            (
+                                verter_semantic::analysis::decl_headers::build_decl_header_index(
+                                    body,
+                                    parsed.source_str(),
+                                ),
+                                verter_compiler::utils::oxc::vue::resolve_type::analyze_external_type_program_headers(body),
+                            )
+                        }
+                        // Fatal parse: empty index, default analysis — no
+                        // re-parse under a different source type (the
+                        // authoritative `source_type` already failed).
+                        None => Default::default(),
+                    };
+                    let snapshot = if !need_snapshot {
+                        None
+                    } else if is_vue {
+                        // SFC snapshot from the cached SFC parse. The
+                        // script program is the flight's eval program when
+                        // the eval source IS the extracted script — the
+                        // snapshot walks the SAME retained parse.
+                        job_cached_parse.as_deref().map(|parsed_sfc| {
+                            let parse = crate::parse::build_vue_snapshot_from_parsed(
+                                &job_canonical,
+                                job_raw_source.as_ref(),
+                                job_scope,
+                                parsed_sfc,
+                                &job_provenance,
+                                VerterHost::vue_flight_script_program(
+                                    eval_is_extracted_script,
+                                    program,
+                                ),
+                            );
+                            VerterHost::build_snapshot_from_parse(parse)
+                        })
+                    } else if let Some(parsed) = program {
+                        let parse = crate::parse::build_non_sfc_snapshot_from_program(
+                            &job_canonical,
+                            job_raw_source.as_ref(),
+                            source_type,
+                            parsed.borrow_dependent(),
+                        );
+                        Some(VerterHost::build_snapshot_from_parse(parse))
+                    } else {
+                        // Fatal (panicked) eval-program parse on a non-SFC
+                        // canonical: a re-parse over the same bytes under
+                        // the same source type panics identically, so the
+                        // default-empty snapshot IS the parse outcome.
+                        Some(crate::types::FileAnalysisSnapshot::default())
+                    };
+                    ColdIndexProducts {
+                        header_index,
+                        analysis,
+                        snapshot,
+                    }
+                },
             );
+            // The parse was already counted at lease acquisition above; the
+            // cold-index run reuses the pinned snapshot.
+            let products = outcome.value;
+            let snapshot = scheduler_snapshot
+                .unwrap_or_else(|| Arc::new(products.snapshot.unwrap_or_default()));
+            let external_type_analysis = Arc::new(products.analysis);
+
+            // The lazy declaration-body memo this artifact owns — the
+            // body authority for this content generation; bodies lower
+            // through the retained snapshot on first semantic demand. It
+            // holds the cold-index lease so its body demands reuse that
+            // one pinned parse.
+            let decl_bodies = Arc::new(crate::decl_body_memo::DeclBodyMemo::new(
+                snapshot_key,
+                Arc::clone(&eval_source),
+                Arc::clone(&raw_source),
+                cached_parse.clone(),
+                source_type,
+                Arc::clone(&self.decl_lowering),
+                Arc::new(products.header_index),
+                Arc::clone(&self.provenance),
+                Some(cold_lease.lease),
+            ));
 
             let surface = self.build_indexed_route_surface(
                 canonical_id,
                 whole_hash,
                 snapshot.as_ref(),
                 &external_type_analysis,
-                &eval_env,
+                &decl_bodies,
             );
 
             // Prefer the scheduler's file state for script_analysis (it may have
@@ -2404,7 +2465,6 @@ impl VerterHost {
                 export_signatures,
                 snapshot,
                 external_type_analysis: Arc::clone(&external_type_analysis),
-                eval_env,
                 declares_interface_app_config,
             });
 

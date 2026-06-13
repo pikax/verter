@@ -26,7 +26,8 @@ use verter_semantic::facts::registry::FactKey;
 use verter_session::resolver_core::{FactVersionRef, ParseFactRef};
 use verter_session::ReadSetSignature;
 use verter_session::{
-    CompileProfile, FileKind, HostConfig, UpsertRequest, VerterHost, VirtualNodeKind, VirtualQuery,
+    CompileCacheMode, CompileErrorPolicy, CompileProfile, FileKind, HostConfig, UpsertRequest,
+    VerterHost, VirtualNodeKind, VirtualQuery,
 };
 
 fn upsert_ts(host: &VerterHost, canonical: &str, source: &str) {
@@ -588,5 +589,275 @@ fn compile_slot_invalidates_on_side_effect_import_body_edit() {
     assert!(
         host.compile_slot_is_warm("/src/Comp.vue", &profile),
         "after ensure_compiled the slot is warm again (recompiled)"
+    );
+}
+
+// ── External module-augmentation whole-hash discriminator (R29) ─────
+//
+// The `ModuleAugmentation` parse-fact value is HEADER-level (kind +
+// member headers + contributor count — no bodies) to honor the
+// zero-body-lowering publish invariant. The augmenter-set fingerprint
+// (`ModuleAugmentationIndexShape`) folds each augmenter's
+// `parse_stable_hash` (the decl skeleton), which is invariant under a
+// member's VALUE-type edit. The SEMANTIC augmentation stitch compensates
+// by recording a per-augmenter `FileWholeHash` self-root; the COMPILE
+// augmentation rail (`observe_augmentation_fingerprints`) historically
+// observed ONLY the header-level index-shape fingerprint, so a body-only
+// edit inside `declare module 'vue' { interface … { foo: <T> } }` left
+// the dependent compile slot warm-but-stale.
+//
+// Isolation that makes this discriminating: the owner imports `'vue'`
+// (external specifier) but does NOT import the augmenter file, so the
+// owner's compile signature pins NO `Export` / `ImportRef` fact on the
+// augmenter — the augmentation index-shape fingerprint is the only fact
+// referencing the augmenter's content. A separate `Helper.vue`
+// side-effect-imports the augmenter purely to materialise it into the
+// store so the owner's Content-classification index scan discovers it.
+
+fn upsert_vue_prod(host: &VerterHost, canonical: &str, source: &str) {
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: Some(canonical.to_string()),
+            input_id: canonical.to_string(),
+            source: source.into(),
+            file_kind: FileKind::VueSfc,
+            aliases: Vec::new(),
+        })
+        .expect("upsert vue (prod host)");
+}
+
+/// The augmenter set discovered for `ExternalSpecifier("vue")` across
+/// every populated augmentation-index entry (canonical ids).
+fn external_vue_augmenters(host: &VerterHost) -> Vec<String> {
+    let store = host.project_type_store().indexed();
+    for (key, _fp) in store.snapshot_augmentation_index_fingerprints() {
+        if let verter_session::file_artifact_store::AugmentationTargetKind::ExternalSpecifier(
+            spec,
+        ) = &key.target
+        {
+            if spec.0.as_ref() == "vue" {
+                return store
+                    .get_augmenter_set(&key)
+                    .map(|s| {
+                        s.entries
+                            .iter()
+                            .map(|e| e.canonical().to_string())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+            }
+        }
+    }
+    Vec::new()
+}
+
+/// The `ModuleAugmentationIndexShape` fingerprint for
+/// `ExternalSpecifier("vue")` (the header-level augmenter-set hash).
+fn external_vue_index_shape_fp(host: &VerterHost) -> Option<[u8; 16]> {
+    let store = host.project_type_store().indexed();
+    for (key, fp) in store.snapshot_augmentation_index_fingerprints() {
+        if let verter_session::file_artifact_store::AugmentationTargetKind::ExternalSpecifier(
+            spec,
+        ) = &key.target
+        {
+            if spec.0.as_ref() == "vue" {
+                return Some(fp);
+            }
+        }
+    }
+    None
+}
+
+/// Discriminator — compile-slot invalidation on an EXTERNAL module
+/// augmenter's member-VALUE-type edit.
+///
+/// `aug.ts` declares `declare module 'vue' { interface
+/// ComponentCustomProperties { $foo: string } }`. `Comp.vue` imports
+/// `{ ref } from 'vue'` (so `'vue'` is a consumed external specifier)
+/// but never imports `aug.ts`. `Helper.vue` side-effect-imports `aug.ts`
+/// to materialise it; a Content-classification of `Comp.vue` then
+/// populates `ExternalSpecifier("vue")` with `aug.ts` as augmenter.
+///
+/// Editing `$foo`'s type (`string` → `number`) leaves the augmenter's
+/// decl skeleton — hence `parse_stable_hash`, hence the
+/// `ModuleAugmentationIndexShape` fingerprint — UNCHANGED (asserted), so
+/// the header-level fingerprint fact cannot catch the edit. The ONLY
+/// fact rail that can is a per-augmenter `FileWholeHash`.
+///
+/// Pre-fix: the compile augmentation rail observed only the index-shape
+/// fingerprint, so the signature carried no `FileWholeHash` for `aug.ts`
+/// and the member-type edit left the slot warm-but-stale
+/// (`observes_aug_whole_hash == false`, `warm_after == true`). Post-fix:
+/// the producer also observes a `FileWholeHash` per augmenter contributor
+/// file, so the edit mismatches and the warm hit misses.
+#[test]
+fn compile_slot_invalidates_on_external_augmenter_member_type_edit() {
+    const AUG_PRE: &str = "declare module 'vue' {\n\
+         \x20 interface ComponentCustomProperties { $foo: string }\n\
+         }\n\
+         export {};\n";
+    // Same member name `$foo`, same kind (property), same member count —
+    // ONLY the annotated VALUE type changes (string → number). The
+    // augmenter decl skeleton (hence `parse_stable_hash`, hence the
+    // augmenter-set fingerprint) is invariant under this edit.
+    const AUG_POST: &str = "declare module 'vue' {\n\
+         \x20 interface ComponentCustomProperties { $foo: number }\n\
+         }\n\
+         export {};\n";
+
+    let host = VerterHost::new_standalone(HostConfig {
+        dev_mode: false,
+        compile_error_policy: CompileErrorPolicy::StrictError,
+        ..HostConfig::default()
+    });
+    upsert_ts(&host, "/src/aug.ts", AUG_PRE);
+    // An unrelated non-augmenter file — its edit must NOT invalidate the
+    // owner's warm slot (no over-invalidation).
+    upsert_ts(&host, "/src/other.ts", "export const x = 1;\n");
+    // Materialiser: a separate SFC that side-effect-imports the augmenter
+    // so `aug.ts` enters the store (the index cold-scan only sees loaded
+    // artifacts). It is NOT the SFC under test.
+    upsert_vue_prod(
+        &host,
+        "/src/Helper.vue",
+        "<script setup lang=\"ts\">\n\
+         import '/src/aug';\n\
+         const h = 1;\n\
+         </script>\n\
+         <template><div>{{ h }}</div></template>\n",
+    );
+    // Owner under test: imports `'vue'` (external specifier) only. It does
+    // NOT import `aug.ts`, so its compile signature pins NO Parse fact on
+    // the augmenter — the augmentation index-shape fingerprint is the sole
+    // fact referencing the augmenter's content.
+    upsert_vue_prod(
+        &host,
+        "/src/Comp.vue",
+        "<script setup lang=\"ts\">\n\
+         import { ref } from 'vue';\n\
+         const n = ref(1);\n\
+         </script>\n\
+         <template><div>{{ n }}</div></template>\n",
+    );
+
+    let profile = CompileProfile::default();
+
+    // Materialise the augmenter (Helper side-effect import pulls aug.ts
+    // into the store).
+    let _ = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some("/src/Helper.vue".to_string()),
+            node_kind: Some(VirtualNodeKind::Script),
+            compile_profile: profile.clone(),
+        })
+        .expect("materialise augmenter via Helper.vue");
+
+    // A Content classification of the owner runs the augmentation probe
+    // (`owner_has_module_augmentation_dependency`), populating
+    // `ExternalSpecifier("vue")` with the now-materialised augmenter.
+    let _ = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some("/src/Comp.vue".to_string()),
+            node_kind: Some(VirtualNodeKind::Script),
+            compile_profile: CompileProfile {
+                requested_mode: CompileCacheMode::Content,
+                ..CompileProfile::default()
+            },
+        })
+        .expect("content classify owner");
+    assert_eq!(
+        external_vue_augmenters(&host),
+        vec!["/src/aug.ts".to_string()],
+        "precondition: the ExternalSpecifier(\"vue\") augmenter set must contain aug.ts \
+         after the owner's Content classification (the discriminator cannot run otherwise)"
+    );
+
+    // Session compile of the owner — installs the fact tracer and admits a
+    // warm slot whose signature carries the augmentation observation.
+    prime_compile(&host, "/src/Comp.vue");
+    let warm_before = host.compile_slot_is_warm("/src/Comp.vue", &profile);
+    assert!(
+        warm_before,
+        "precondition: Comp.vue MUST have a warm compile slot after the Session compile \
+         (warm_before=false means prime failed to admit a slot — the discriminator cannot run)."
+    );
+
+    let signature = read_signature(&host, "/src/Comp.vue");
+    // The owner pins NO Parse fact on the augmenter (it never imports it) —
+    // this isolates the augmentation rail as the sole augmenter-referencing
+    // fact, so the discriminator measures exactly the augmentation rail.
+    assert!(
+        !signature
+            .facts
+            .iter()
+            .any(|f| matches!(f, FactVersionRef::Parse(ParseFactRef { canonical_id, .. }) if canonical_id == "/src/aug.ts")),
+        "isolation invariant: the owner must pin NO Parse (Export/ImportRef) fact on the \
+         augmenter it never imports — otherwise that fact, not the augmentation rail, would \
+         catch the edit. Signature: {:?}",
+        signature.facts.iter().map(|f| format!("{f:?}")).collect::<Vec<_>>()
+    );
+    // DISCRIMINATING fact-presence: the compile-tier producer MUST observe
+    // a FileWholeHash for the augmenter contributor file. Pre-fix the
+    // augmentation rail observed only the header-level index-shape
+    // fingerprint, so this is absent and the assertion FAILS.
+    let observes_aug_whole_hash = signature.facts.iter().any(|fact| {
+        matches!(
+            fact,
+            FactVersionRef::FileWholeHash { canonical_id, .. }
+                if canonical_id == "/src/aug.ts"
+        )
+    });
+    assert!(
+        observes_aug_whole_hash,
+        "R29: the compile-tier producer MUST observe a FileWholeHash for each external-specifier \
+         augmenter contributor file. Without it, a member-VALUE-type edit (which leaves the \
+         header-level augmenter-set fingerprint unchanged) cannot invalidate the dependent slot. \
+         Signature observed: {:?}",
+        signature
+            .facts
+            .iter()
+            .map(|f| format!("{f:?}"))
+            .collect::<Vec<_>>()
+    );
+
+    let fp_before = external_vue_index_shape_fp(&host);
+
+    // No-over-invalidation: an UNRELATED non-augmenter file edit must NOT
+    // invalidate the owner's warm slot.
+    upsert_ts(&host, "/src/other.ts", "export const x = 2;\n");
+    assert!(
+        host.compile_slot_is_warm("/src/Comp.vue", &profile),
+        "an UNRELATED non-augmenter file edit must NOT invalidate the owner's compile slot \
+         (no over-invalidation)."
+    );
+
+    // Body-only augmenter edit: member type string → number, decl skeleton
+    // unchanged. The owner-upsert path has no eager reverse-dependent
+    // cascade, so fact-validation is the sole invalidation rail.
+    upsert_ts(&host, "/src/aug.ts", AUG_POST);
+
+    // Prove the test discriminates the RIGHT gap: the header-level
+    // augmenter-set fingerprint is UNCHANGED across the member-type edit,
+    // so only a per-augmenter FileWholeHash can catch it.
+    let fp_after = external_vue_index_shape_fp(&host);
+    assert_eq!(
+        fp_before, fp_after,
+        "the ModuleAugmentationIndexShape fingerprint MUST stay equal across a member-VALUE-type \
+         edit (parse_stable_hash is invariant) — proving the FileWholeHash rail is the only thing \
+         that can catch this edit (pre={fp_before:?} post={fp_after:?})"
+    );
+
+    // DISCRIMINATING warm-miss: the member-type edit MUST invalidate the
+    // owner's warm slot via the per-augmenter FileWholeHash. Pre-fix the
+    // slot stays warm-but-stale (warm_after == true).
+    let warm_after = host.compile_slot_is_warm("/src/Comp.vue", &profile);
+    assert!(
+        !warm_after,
+        "R29: an external module-augmenter member-VALUE-type edit MUST invalidate the dependent \
+         compile slot via the per-augmenter FileWholeHash fact. warm_after=true means the producer \
+         recorded no whole-hash fact for the augmenter — the header-level index-shape fingerprint \
+         alone cannot see a member-value edit, so the slot is served stale."
     );
 }

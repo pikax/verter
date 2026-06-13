@@ -2579,7 +2579,7 @@ fn prepared_type_decl_lookup_resolves_barrel_reexport_through_indexed_ready() {
         .ensure_indexed_ready("/src/base.ts")
         .expect("base should materialize module facts");
     assert!(
-        base_facts.shallow_state.symbols.contains_key("BaseProps"),
+        base_facts.shallow_state.has_type_symbol("BaseProps"),
         "base module facts should have BaseProps as a local symbol",
     );
 }
@@ -6138,18 +6138,14 @@ fn edge_currency_oracle_stales_wildcard_surface_after_generation_advance() {
                 );
             }
         }
-        let shallow = ShallowFileState {
-            whole_hash: [7u8; 16],
+        let shallow = ShallowFileState::new_for_test_with_routing(
+            [7u8; 16],
             exports,
             wildcard_reexports,
-            symbols: FxHashMap::default(),
-            value_symbols: FxHashMap::default(),
-            augmentation_scopes: FxHashMap::default(),
-            augmentation_value_scopes: FxHashMap::default(),
-            import_locals: FxHashSet::default(),
+            FxHashSet::default(),
             import_targets,
-            analysis: Arc::clone(&analysis),
-        };
+            Arc::clone(&analysis),
+        );
         let mut artifact = crate::project_type_store::IndexedReady::new_for_test_with_state(
             [7u8; 16],
             Arc::new(shallow),
@@ -7152,9 +7148,18 @@ export interface Props extends Base {
         Some(("./base", "Base")),
         "vue dependency analysis should keep import lookup-table entries for script imports",
     );
+    // Required imported names are a BODY-dependent product: they
+    // demand-walk through the artifact's shallow state (lazy
+    // declaration-body memo), still over the script/eval source.
+    let indexed = host
+        .ensure_indexed_ready("/src/types.vue")
+        .expect("vue artifact must materialise");
     assert!(
-        analysis.required_import_names("Props").contains("Base"),
-        "vue dependency analysis should compute required imported names from the script block",
+        indexed
+            .shallow_state
+            .required_import_names("Props")
+            .contains("Base"),
+        "vue dependency demand-walk should compute required imported names from the script block",
     );
 }
 

@@ -134,26 +134,28 @@ fn walk<C: ResolverContext>(
         return WalkOutcome::Cycle;
     }
 
-    // 3. The defining file's shallow inventory + parse-time raw-fact analysis.
+    // 3. The defining file's shallow inventory. The per-symbol raw-fact
+    //    surfaces are a DEMAND product of the declaration-body memo —
+    //    captured from exactly the demanded symbol's contributing
+    //    statements, never an eager whole-program inventory.
     let Some(shallow) = ctx.shallow_file_state(&def_canonical) else {
-        return WalkOutcome::Unresolved;
-    };
-    let Some(analysis) = ctx.external_type_analysis(&def_canonical) else {
         return WalkOutcome::Unresolved;
     };
 
     // 4. Enumerate the contributor surface(s): the lowered body / value, paired
     //    by ordinal with the parse-time raw-fact contributor vector.
-    let surfaces = analysis.raw_source_surfaces_for(&def_name, locator.symbol_space);
+    let surfaces = shallow
+        .decl_bodies()
+        .raw_surfaces_for(&def_name, locator.symbol_space);
     let lowered_bodies: Vec<TypeExpr> = match locator.symbol_space {
         SymbolSpace::Type => {
-            let Some(symbol) = shallow.symbols.get(&def_name) else {
+            let Some(lowered) = shallow.type_decl(&def_name) else {
                 return WalkOutcome::Unresolved;
             };
-            symbol.body.contributors().to_vec()
+            lowered.body.contributors().to_vec()
         }
         SymbolSpace::Value => {
-            if !shallow.value_symbols.contains_key(&def_name) {
+            if !shallow.has_value_symbol(&def_name) {
                 return WalkOutcome::Unresolved;
             }
             // A value has no `TypeDeclBody` — the lowered-body half is a TYPE-
@@ -219,8 +221,14 @@ fn walk<C: ResolverContext>(
         let (carve_out_root_def, carve_out_root_surfaces) = match carve_out_root {
             Some(((root_canonical, root_name), space)) => {
                 let root_surfaces = ctx
-                    .external_type_analysis(&root_canonical)
-                    .map(|analysis| analysis.raw_source_surfaces_for(&root_name, space).to_vec())
+                    .shallow_file_state(&root_canonical)
+                    .map(|root_shallow| {
+                        root_shallow
+                            .decl_bodies()
+                            .raw_surfaces_for(&root_name, space)
+                            .as_ref()
+                            .clone()
+                    })
                     .unwrap_or_default();
                 if space == SymbolSpace::Value
                     && !root_surfaces.is_empty()
@@ -308,8 +316,8 @@ fn resolve_defining<C: ResolverContext>(
 
         // (c) A locally-declared symbol in the requested space — the definition.
         let locally_defined = match space {
-            SymbolSpace::Type => shallow.symbols.contains_key(&cur_name),
-            SymbolSpace::Value => shallow.value_symbols.contains_key(&cur_name),
+            SymbolSpace::Type => shallow.has_type_symbol(&cur_name),
+            SymbolSpace::Value => shallow.has_value_symbol(&cur_name),
         };
         if locally_defined {
             return Some((cur_canonical, cur_name));
@@ -321,8 +329,8 @@ fn resolve_defining<C: ResolverContext>(
             if symbol_name != &cur_name {
                 let backing = symbol_name.clone();
                 let backing_defined = match space {
-                    SymbolSpace::Type => shallow.symbols.contains_key(&backing),
-                    SymbolSpace::Value => shallow.value_symbols.contains_key(&backing),
+                    SymbolSpace::Type => shallow.has_type_symbol(&backing),
+                    SymbolSpace::Value => shallow.has_value_symbol(&backing),
                 };
                 if backing_defined {
                     return Some((cur_canonical, backing));

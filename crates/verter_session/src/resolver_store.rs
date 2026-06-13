@@ -3114,7 +3114,11 @@ impl crate::resolver_core::StoreView for HostStoreView {
             // hash but the file has dropped out of the index.
             None => return fact.expected_hash == ZERO_HASH,
         };
-        match facts.lookup(&fact.key) {
+        // `lookup_or_compute`: a recorded body-sensitive `Export` /
+        // `LocalDecl` observation revalidates through the SAME lazy
+        // body fact path that produced it (the side-store is Arc-shared
+        // with the snapshot's `FileFacts` clone).
+        match facts.lookup_or_compute(&fact.key) {
             Some(stored) => {
                 let stored_hash = match fact.lane {
                     verter_semantic::facts::registry::FactLane::Semantic => stored.semantic_hash,

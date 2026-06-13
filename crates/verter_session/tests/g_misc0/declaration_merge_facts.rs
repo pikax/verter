@@ -11,15 +11,13 @@
 
 use std::sync::Arc;
 
-use rustc_hash::{FxHashMap, FxHashSet};
-use verter_semantic::analysis::type_eval::{MergedTypeBody, TypeDeclBody, TypeDeclKind};
+use rustc_hash::FxHashMap;
+use verter_semantic::analysis::type_eval::TypeDeclKind;
 use verter_semantic::facts::{FactKey, SymbolSpace};
 use verter_session::fact_emission::emit_parse_facts;
 use verter_session::file_artifact_store::InternedName;
 use verter_session::project_type_store::IndexedReady;
-use verter_session::resolver_core::shallow_file_state::{
-    ExportTarget, ShallowFileState, ShallowTypeSymbol,
-};
+use verter_session::resolver_core::shallow_file_state::{ExportTarget, ShallowFileState};
 use verter_type_expr::{ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName, TypeExpr};
 
 fn empty_external(
@@ -33,52 +31,33 @@ fn empty_external(
 /// a [`TypeDeclBody::Single`]. The fact emitter observes the merged member
 /// union via `body.lookup_object()`.
 fn build_with_merged_foo(parts: Vec<Vec<(&str, TypeExpr)>>) -> Arc<IndexedReady> {
-    // Combined member list: union the parts' member name sets.
-    let mut combined_members: FxHashMap<String, Vec<String>> = FxHashMap::default();
+    // Env-seeded construction: appending same-name interface
+    // contributors to the env produces the ordered group whose
+    // `merged_body()` is the `TypeDeclBody::Merged` carrier — exactly
+    // what the lazy declaration-body fold serves.
+    let mut env = verter_semantic::analysis::type_eval::EvalEnv::new();
     for part in &parts {
-        for (n, _) in part {
-            combined_members.insert((*n).to_string(), Vec::new());
-        }
-    }
-    let part_bodies: Vec<TypeExpr> = parts
-        .iter()
-        .map(|p| {
-            TypeExpr::Object(Arc::new(ObjectExpr {
-                properties: p
-                    .iter()
-                    .map(|(n, ty)| {
-                        ObjectMember::Property(ObjectProperty::synthetic_public(
-                            (*n).to_string(),
-                            ty.clone(),
-                            false,
-                            false,
-                        ))
-                    })
-                    .collect(),
-            }))
-        })
-        .collect();
-    let body = if part_bodies.len() == 1 {
-        TypeDeclBody::Single(part_bodies.into_iter().next().unwrap())
-    } else {
-        let kinds = vec![TypeDeclKind::Interface; part_bodies.len()];
-        TypeDeclBody::Merged(MergedTypeBody {
-            contributors: part_bodies,
-            kinds,
-        })
-    };
-    let mut symbols = FxHashMap::default();
-    symbols.insert(
-        "Foo".to_string(),
-        ShallowTypeSymbol {
+        let body = TypeExpr::Object(Arc::new(ObjectExpr {
+            properties: part
+                .iter()
+                .map(|(n, ty)| {
+                    ObjectMember::Property(ObjectProperty::synthetic_public(
+                        (*n).to_string(),
+                        ty.clone(),
+                        false,
+                        false,
+                    ))
+                })
+                .collect(),
+        }));
+        env.add_type(verter_semantic::analysis::type_eval::TypeDeclInfo {
+            name: "Foo".to_string(),
+            declaration_id: 0,
             kind: TypeDeclKind::Interface,
-            body,
             type_parameters: Vec::new(),
-            local_deps: Vec::new(),
-            external_deps: Vec::new(),
-            member_deps: combined_members,
-        },
-    );
+            body,
+        });
+    }
     let mut exports = FxHashMap::default();
     exports.insert(
         "Foo".to_string(),
@@ -86,18 +65,8 @@ fn build_with_merged_foo(parts: Vec<Vec<(&str, TypeExpr)>>) -> Arc<IndexedReady>
             symbol_name: "Foo".to_string(),
         },
     );
-    let shallow = ShallowFileState {
-        whole_hash: [0u8; 16],
-        exports,
-        wildcard_reexports: Vec::new(),
-        symbols,
-        value_symbols: FxHashMap::default(),
-        import_locals: FxHashSet::default(),
-        import_targets: FxHashMap::default(),
-        augmentation_scopes: Default::default(),
-        augmentation_value_scopes: Default::default(),
-        analysis: empty_external(),
-    };
+    let mut shallow = ShallowFileState::from_analysis([0u8; 16], empty_external(), Some(&env));
+    shallow.exports = exports;
     Arc::new(IndexedReady::new_for_test_with_state(
         [0u8; 16],
         Arc::new(shallow),
@@ -122,7 +91,10 @@ fn two_interface_parts_emit_one_merged_export_fact() {
         name: InternedName::from("Foo"),
         space: SymbolSpace::Type,
     };
-    let fact = emission.facts.lookup(&key).expect("merged Export emitted");
+    let fact = emission
+        .facts
+        .lookup_or_compute(&key)
+        .expect("merged Export computed by the lazy body fact path");
     assert!(
         fact.semantic_hash != [0u8; 16],
         "merged Export must have non-zero semantic_hash"
@@ -185,8 +157,8 @@ fn declaration_merge_member_reorder_produces_byte_identical_export_fact() {
         name: InternedName::from("Foo"),
         space: SymbolSpace::Type,
     };
-    let fact_a = emission_a.facts.lookup(&key).unwrap();
-    let fact_b = emission_b.facts.lookup(&key).unwrap();
+    let fact_a = emission_a.facts.lookup_or_compute(&key).unwrap();
+    let fact_b = emission_b.facts.lookup_or_compute(&key).unwrap();
     assert_eq!(
         fact_a.semantic_hash, fact_b.semantic_hash,
         "R10: within-contributor member reorder MUST hash identically (alpha-normalised)"
@@ -213,8 +185,8 @@ fn merge_with_added_part_changes_export_fact() {
         name: InternedName::from("Foo"),
         space: SymbolSpace::Type,
     };
-    let fact_2 = emission_2.facts.lookup(&key).unwrap();
-    let fact_3 = emission_3.facts.lookup(&key).unwrap();
+    let fact_2 = emission_2.facts.lookup_or_compute(&key).unwrap();
+    let fact_3 = emission_3.facts.lookup_or_compute(&key).unwrap();
     assert_ne!(
         fact_2.semantic_hash, fact_3.semantic_hash,
         "adding an interface part MUST shift Export.semantic_hash"

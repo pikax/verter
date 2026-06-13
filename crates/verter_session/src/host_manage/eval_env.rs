@@ -22,12 +22,13 @@ use super::{
 impl VerterHost {
     /// The canonical per-file `EvalEnv` for a base (non-overlay) read.
     ///
-    /// Collapses onto the single per-file cold build: the env lives on
-    /// [`crate::project_type_store::IndexedReady`] (built once by the
-    /// materialise closure from the same parse as the shallow state and
-    /// the external-type analysis), so this accessor is a warm artifact
-    /// read — or one `ensure_indexed_ready_serve` cold build on miss. There
-    /// is no separate env cache and no env-only build path.
+    /// A DEMAND product for whole-file consumers (fallthrough, runtime
+    /// values, value-alias peeling): the artifact's lazy declaration-body
+    /// memo materialises the whole-file env once through the retained
+    /// scheduler-side parse snapshot and memoizes it (script-setup type
+    /// params applied). The per-symbol query path never touches it, and
+    /// publishing the artifact never builds it. There is no separate env
+    /// cache and no env-only build path.
     pub(crate) fn base_eval_env_arc(
         &self,
         canonical_id: &str,
@@ -46,7 +47,7 @@ impl VerterHost {
             "base_eval_env_built",
             format!("owner={} whole_hash={:?}", canonical_id, indexed.whole_hash),
         );
-        Some(Arc::clone(indexed.eval_env()))
+        Some(indexed.shallow_state.decl_bodies().whole_env())
     }
 
     pub(crate) fn local_type_declaration_id(
@@ -152,41 +153,6 @@ impl VerterHost {
         }
     }
 
-    pub(crate) fn build_snapshot_from_source(
-        &self,
-        canonical: &str,
-        source: &Arc<str>,
-    ) -> FileAnalysisSnapshot {
-        // The template inputs are discarded — no publication authority
-        // is minted for them, so the flag is passed fail-closed.
-        self.build_snapshot_and_template_inputs_from_source(canonical, source, false)
-            .0
-    }
-
-    /// [`Self::build_snapshot_from_source`] plus the parse products the
-    /// lazy template-analysis computation consumes
-    /// (`compute_template_analysis_if_missing`): for a `.vue` canonical
-    /// the SAME `parse_vue_snapshot` run yields both the snapshot and
-    /// the threaded `VueTemplateInputs` (source, SFC parse, src-blocks)
-    /// — one logical read performs exactly one SFC structure parse and
-    /// one script-program parse. Non-SFC canonicals carry no template
-    /// inputs.
-    ///
-    /// `store_published` is the caller's authority statement for the
-    /// bytes it passes as `source`, flowed by value onto
-    /// [`crate::types::VueTemplateInputs::store_published`]. On this
-    /// lane the flag is ATTESTATION-ONLY: the builder reads no
-    /// scheduler node, so it stamps `source_generation: None` and the
-    /// `derived_raw_cache` persist declines regardless of the flag —
-    /// the generation rail, not this flag, is what gates persistence
-    /// (an entry without a rail cannot be validated by any reader).
-    /// Callers still state the authority truthfully: pass `true` only
-    /// for a store-authoritative read (a live scheduler/workspace
-    /// read, or the artifact-current authority for a genuinely
-    /// artifact-only canonical); bytes from a FENCED (`ReturnOnly`)
-    /// serve or an overlay pass `false` — the attestation is consulted
-    /// by value, and this builder cannot see where `source` came from,
-    /// so it never asserts the authority itself.
     pub(crate) fn build_snapshot_and_template_inputs_from_source(
         &self,
         canonical: &str,
@@ -246,44 +212,6 @@ impl VerterHost {
             );
             (Self::build_snapshot_from_parse(parse), None)
         }
-    }
-
-    pub(crate) fn build_snapshot_from_source_state(
-        &self,
-        canonical: &str,
-        source: &Arc<str>,
-        cached_parse: Option<&verter_compiler::parser::types::ParsedSfc>,
-        script_program: crate::parse::VueScriptProgram<'_>,
-    ) -> FileAnalysisSnapshot {
-        if canonical.ends_with(".vue") {
-            if let Some(parsed) = cached_parse {
-                component_meta_trace_custom!(
-                    "build_snapshot_from_cached_parse",
-                    format!("owner={} bytes={}", canonical, source.len()),
-                );
-                let parse = crate::parse::build_vue_snapshot_from_parsed(
-                    canonical,
-                    source.as_ref(),
-                    self.config.effective_scope(),
-                    parsed,
-                    &self.provenance,
-                    script_program,
-                );
-                component_meta_trace_custom!(
-                    "parse_vue_snapshot_cached_result",
-                    format!(
-                        "owner={} imports={} macros={} export_signatures={}",
-                        canonical,
-                        parse.script_analysis.imports.len(),
-                        parse.script_analysis.macros.len(),
-                        parse.export_signatures.len(),
-                    ),
-                );
-                return Self::build_snapshot_from_parse(parse);
-            }
-        }
-
-        self.build_snapshot_from_source(canonical, source)
     }
 
     pub(in crate::host_manage) fn finalize_analysis_snapshot(

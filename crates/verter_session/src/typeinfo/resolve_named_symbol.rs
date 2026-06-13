@@ -345,7 +345,7 @@ fn resolve_named_symbol_inner(
         .and_then(|state| {
             state
                 .symbol(name)
-                .map(|sym| !sym.type_parameters.is_empty())
+                .map(|sym| !sym.type_param_names.is_empty())
         })
         .unwrap_or(false);
 

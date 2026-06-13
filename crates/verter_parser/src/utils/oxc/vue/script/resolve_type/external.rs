@@ -542,6 +542,27 @@ pub fn collect_required_import_names_for_external_type(
 
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub fn analyze_external_type_program(program: &Program<'_>) -> AnalyzedExternalTypeSource {
+    analyze_external_type_program_impl(program, true)
+}
+
+/// HEADER-ONLY analyzer variant — the `IndexedReady` artifact producer.
+///
+/// Identical import/export/reexport/symbol-NAME inventory to
+/// [`analyze_external_type_program`], with the per-declaration BODY walks
+/// skipped: `local_type_symbols` carry kind + span with EMPTY dependency
+/// sets, and no `RawSourceSurface` inventory is captured. Body-derived
+/// facts (dependency names, raw surfaces) are demand products of the lazy
+/// declaration-body path ([`collect_statement_dependency_names`], the
+/// per-statement raw-surface capture) — never an eager whole-program walk
+/// at artifact publish.
+pub fn analyze_external_type_program_headers(program: &Program<'_>) -> AnalyzedExternalTypeSource {
+    analyze_external_type_program_impl(program, false)
+}
+
+fn analyze_external_type_program_impl(
+    program: &Program<'_>,
+    with_bodies: bool,
+) -> AnalyzedExternalTypeSource {
     let mut result = AnalyzedExternalTypeSource::default();
 
     for stmt in &program.body {
@@ -670,6 +691,7 @@ pub fn analyze_external_type_program(program: &Program<'_>) -> AnalyzedExternalT
                     record_local_type_symbol_from_declaration(
                         declaration,
                         &mut result.local_type_symbols,
+                        with_bodies,
                     );
                     record_exported_local_type_names_from_declaration(
                         declaration,
@@ -684,76 +706,51 @@ pub fn analyze_external_type_program(program: &Program<'_>) -> AnalyzedExternalT
                     .push(export_all.source.value.to_string());
             }
             Statement::TSTypeAliasDeclaration(type_alias) => {
-                let mut refs = FxHashSet::default();
-                let mut structural_refs = FxHashSet::default();
-                collect_type_reference_names(&type_alias.type_annotation, &mut refs);
-                collect_structural_type_reference_names(
-                    &type_alias.type_annotation,
-                    StructuralDependencyContext::Root,
-                    &mut structural_refs,
-                );
+                let deps = if with_bodies {
+                    type_alias_dependency_names(type_alias)
+                } else {
+                    DeclDependencyNames::default()
+                };
                 result.local_type_symbols.insert(
                     type_alias.id.name.to_string(),
                     AnalyzedExternalTypeSymbol {
                         kind: AnalyzedExternalTypeSymbolKind::TypeAlias,
                         span: type_alias.span.into(),
-                        dependency_names: refs,
-                        structural_dependency_names: structural_refs,
+                        dependency_names: deps.dependency_names,
+                        structural_dependency_names: deps.structural_dependency_names,
                     },
                 );
             }
             Statement::TSInterfaceDeclaration(interface) => {
-                let mut refs = FxHashSet::default();
-                let mut structural_refs = FxHashSet::default();
-                for parent in &interface.extends {
-                    if let Some(name) = get_expression_reference_name(&parent.expression) {
-                        refs.insert(name.clone());
-                        structural_refs.insert(name);
-                    }
-                    if let Some(type_arguments) = &parent.type_arguments {
-                        for param in &type_arguments.params {
-                            collect_type_reference_names(param, &mut refs);
-                            collect_structural_type_reference_names(
-                                param,
-                                StructuralDependencyContext::Root,
-                                &mut structural_refs,
-                            );
-                        }
-                    }
-                }
-                collect_interface_reference_names(
-                    &interface.body.body,
-                    &interface.extends,
-                    &mut refs,
-                );
-                collect_structural_interface_reference_names(
-                    &interface.body.body,
-                    &interface.extends,
-                    &mut structural_refs,
-                );
+                let deps = if with_bodies {
+                    interface_dependency_names(interface)
+                } else {
+                    DeclDependencyNames::default()
+                };
                 result.local_type_symbols.insert(
                     interface.id.name.to_string(),
                     AnalyzedExternalTypeSymbol {
                         kind: AnalyzedExternalTypeSymbolKind::Interface,
                         span: interface.span.into(),
-                        dependency_names: refs,
-                        structural_dependency_names: structural_refs,
+                        dependency_names: deps.dependency_names,
+                        structural_dependency_names: deps.structural_dependency_names,
                     },
                 );
             }
             Statement::ClassDeclaration(class_decl) => {
                 if let Some(id) = &class_decl.id {
-                    let mut refs = FxHashSet::default();
-                    let mut structural_refs = FxHashSet::default();
-                    collect_class_reference_names(class_decl, &mut refs);
-                    collect_structural_class_reference_names(class_decl, &mut structural_refs);
+                    let deps = if with_bodies {
+                        class_dependency_names(class_decl)
+                    } else {
+                        DeclDependencyNames::default()
+                    };
                     result.local_type_symbols.insert(
                         id.name.to_string(),
                         AnalyzedExternalTypeSymbol {
                             kind: AnalyzedExternalTypeSymbolKind::Class,
                             span: class_decl.span.into(),
-                            dependency_names: refs,
-                            structural_dependency_names: structural_refs,
+                            dependency_names: deps.dependency_names,
+                            structural_dependency_names: deps.structural_dependency_names,
                         },
                     );
                 }
@@ -761,56 +758,34 @@ pub fn analyze_external_type_program(program: &Program<'_>) -> AnalyzedExternalT
             Statement::ExportDefaultDeclaration(export_default) => {
                 match &export_default.declaration {
                     ExportDefaultDeclarationKind::ClassDeclaration(class_decl) => {
-                        let mut refs = FxHashSet::default();
-                        let mut structural_refs = FxHashSet::default();
-                        collect_class_reference_names(class_decl, &mut refs);
-                        collect_structural_class_reference_names(class_decl, &mut structural_refs);
+                        let deps = if with_bodies {
+                            class_dependency_names(class_decl)
+                        } else {
+                            DeclDependencyNames::default()
+                        };
                         result.local_type_symbols.insert(
                             "default".to_string(),
                             AnalyzedExternalTypeSymbol {
                                 kind: AnalyzedExternalTypeSymbolKind::Class,
                                 span: export_default.span.into(),
-                                dependency_names: refs,
-                                structural_dependency_names: structural_refs,
+                                dependency_names: deps.dependency_names,
+                                structural_dependency_names: deps.structural_dependency_names,
                             },
                         );
                     }
                     ExportDefaultDeclarationKind::TSInterfaceDeclaration(interface) => {
-                        let mut refs = FxHashSet::default();
-                        let mut structural_refs = FxHashSet::default();
-                        for parent in &interface.extends {
-                            if let Some(name) = get_expression_reference_name(&parent.expression) {
-                                refs.insert(name.clone());
-                                structural_refs.insert(name);
-                            }
-                            if let Some(type_arguments) = &parent.type_arguments {
-                                for param in &type_arguments.params {
-                                    collect_type_reference_names(param, &mut refs);
-                                    collect_structural_type_reference_names(
-                                        param,
-                                        StructuralDependencyContext::Root,
-                                        &mut structural_refs,
-                                    );
-                                }
-                            }
-                        }
-                        collect_interface_reference_names(
-                            &interface.body.body,
-                            &interface.extends,
-                            &mut refs,
-                        );
-                        collect_structural_interface_reference_names(
-                            &interface.body.body,
-                            &interface.extends,
-                            &mut structural_refs,
-                        );
+                        let deps = if with_bodies {
+                            interface_dependency_names(interface)
+                        } else {
+                            DeclDependencyNames::default()
+                        };
                         result.local_type_symbols.insert(
                             "default".to_string(),
                             AnalyzedExternalTypeSymbol {
                                 kind: AnalyzedExternalTypeSymbolKind::Interface,
                                 span: export_default.span.into(),
-                                dependency_names: refs,
-                                structural_dependency_names: structural_refs,
+                                dependency_names: deps.dependency_names,
+                                structural_dependency_names: deps.structural_dependency_names,
                             },
                         );
                     }
@@ -821,26 +796,30 @@ pub fn analyze_external_type_program(program: &Program<'_>) -> AnalyzedExternalT
         }
     }
 
-    // Oracle harness: capture the parse-time `RawSourceSurface`
-    // raw-fact inventory while the OXC arena is still live (same parse pass that
-    // built the shallow inventory above). Overload groups merge by name so a
-    // multi-signature `function f` surfaces its overload-SET arity.
-    let captured = merge_overload_groups(
-        program
-            .body
-            .iter()
-            .flat_map(capture_statement_surfaces)
-            .collect(),
-    );
-    for c in captured {
-        // Append in source order: a MERGED declaration shares one `(name, space)`
-        // triple across several contributors, so each is RETAINED (not last-wins
-        // overwritten) for the source-side walk's per-contributor allowlist check.
-        result
-            .raw_source_surfaces
-            .entry((c.name, c.symbol_space))
-            .or_default()
-            .push(c.surface);
+    // Oracle harness: capture the parse-time `RawSourceSurface` raw-fact
+    // inventory while the OXC arena is still live. BODY data — captured
+    // only on the with-bodies path; the header-only artifact analyzer
+    // leaves the inventory empty (per-symbol raw surfaces are demand
+    // products of the lazy declaration-body memo).
+    if with_bodies {
+        let captured = merge_overload_groups(
+            program
+                .body
+                .iter()
+                .flat_map(capture_statement_surfaces)
+                .collect(),
+        );
+        for c in captured {
+            // Append in source order: a MERGED declaration shares one
+            // `(name, space)` triple across several contributors, so each is
+            // RETAINED (not last-wins overwritten) for the source-side
+            // walk's per-contributor allowlist check.
+            result
+                .raw_source_surfaces
+                .entry((c.name, c.symbol_space))
+                .or_default()
+                .push(c.surface);
+        }
     }
 
     result
@@ -849,75 +828,55 @@ pub fn analyze_external_type_program(program: &Program<'_>) -> AnalyzedExternalT
 fn record_local_type_symbol_from_declaration(
     declaration: &Declaration<'_>,
     local_type_symbols: &mut FxHashMap<String, AnalyzedExternalTypeSymbol>,
+    with_bodies: bool,
 ) {
     match declaration {
         Declaration::TSTypeAliasDeclaration(type_alias) => {
-            let mut refs = FxHashSet::default();
-            let mut structural_refs = FxHashSet::default();
-            collect_type_reference_names(&type_alias.type_annotation, &mut refs);
-            collect_structural_type_reference_names(
-                &type_alias.type_annotation,
-                StructuralDependencyContext::Root,
-                &mut structural_refs,
-            );
+            let deps = if with_bodies {
+                type_alias_dependency_names(type_alias)
+            } else {
+                DeclDependencyNames::default()
+            };
             local_type_symbols.insert(
                 type_alias.id.name.to_string(),
                 AnalyzedExternalTypeSymbol {
                     kind: AnalyzedExternalTypeSymbolKind::TypeAlias,
                     span: type_alias.span.into(),
-                    dependency_names: refs,
-                    structural_dependency_names: structural_refs,
+                    dependency_names: deps.dependency_names,
+                    structural_dependency_names: deps.structural_dependency_names,
                 },
             );
         }
         Declaration::TSInterfaceDeclaration(interface) => {
-            let mut refs = FxHashSet::default();
-            let mut structural_refs = FxHashSet::default();
-            for parent in &interface.extends {
-                if let Some(name) = get_expression_reference_name(&parent.expression) {
-                    refs.insert(name.clone());
-                    structural_refs.insert(name);
-                }
-                if let Some(type_arguments) = &parent.type_arguments {
-                    for param in &type_arguments.params {
-                        collect_type_reference_names(param, &mut refs);
-                        collect_structural_type_reference_names(
-                            param,
-                            StructuralDependencyContext::Root,
-                            &mut structural_refs,
-                        );
-                    }
-                }
-            }
-            collect_interface_reference_names(&interface.body.body, &interface.extends, &mut refs);
-            collect_structural_interface_reference_names(
-                &interface.body.body,
-                &interface.extends,
-                &mut structural_refs,
-            );
+            let deps = if with_bodies {
+                interface_dependency_names(interface)
+            } else {
+                DeclDependencyNames::default()
+            };
             local_type_symbols.insert(
                 interface.id.name.to_string(),
                 AnalyzedExternalTypeSymbol {
                     kind: AnalyzedExternalTypeSymbolKind::Interface,
                     span: interface.span.into(),
-                    dependency_names: refs,
-                    structural_dependency_names: structural_refs,
+                    dependency_names: deps.dependency_names,
+                    structural_dependency_names: deps.structural_dependency_names,
                 },
             );
         }
         Declaration::ClassDeclaration(class_decl) => {
             if let Some(id) = &class_decl.id {
-                let mut refs = FxHashSet::default();
-                let mut structural_refs = FxHashSet::default();
-                collect_class_reference_names(class_decl, &mut refs);
-                collect_structural_class_reference_names(class_decl, &mut structural_refs);
+                let deps = if with_bodies {
+                    class_dependency_names(class_decl)
+                } else {
+                    DeclDependencyNames::default()
+                };
                 local_type_symbols.insert(
                     id.name.to_string(),
                     AnalyzedExternalTypeSymbol {
                         kind: AnalyzedExternalTypeSymbolKind::Class,
                         span: class_decl.span.into(),
-                        dependency_names: refs,
-                        structural_dependency_names: structural_refs,
+                        dependency_names: deps.dependency_names,
+                        structural_dependency_names: deps.structural_dependency_names,
                     },
                 );
             }
@@ -1037,6 +996,253 @@ fn enqueue_required_import_refs(
             pending.push(root);
         }
     }
+}
+
+/// The reference-name pair one declaration's BODY contributes: the plain
+/// dependency names plus the structural subset. This is the per-statement
+/// demand product the lazy declaration-body path consumes — computed for
+/// exactly the demanded declaration, never for every symbol in the file.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DeclDependencyNames {
+    pub dependency_names: FxHashSet<String>,
+    pub structural_dependency_names: FxHashSet<String>,
+}
+
+/// Collect the `(declared name, body reference names)` pairs ONE top-level
+/// statement contributes, keyed under exactly the env-symbol names the
+/// LOWERER (`lower_top_level_statement`) registers — the names the lazy
+/// declaration-body memo iterates. This is NOT the analyzer's keying: the
+/// default-exported class / interface arms emit deps under BOTH the
+/// declared name AND the `default` alias (mirroring
+/// `alias_default_export_type_symbol`), whereas the analyzer keys a
+/// default export under `"default"` only. Covers type aliases, interfaces,
+/// named classes, their `export` wrappers, identifier-namespace inner
+/// declarations (under qualified `Ns.Name` keys), and the default export.
+/// A statement that declares no type-space symbol yields an empty vector.
+pub fn collect_statement_dependency_names(
+    stmt: &Statement<'_>,
+) -> Vec<(String, DeclDependencyNames)> {
+    match stmt {
+        Statement::TSTypeAliasDeclaration(type_alias) => vec![(
+            type_alias.id.name.to_string(),
+            type_alias_dependency_names(type_alias),
+        )],
+        Statement::TSInterfaceDeclaration(interface) => vec![(
+            interface.id.name.to_string(),
+            interface_dependency_names(interface),
+        )],
+        Statement::ClassDeclaration(class_decl) => class_decl
+            .id
+            .as_ref()
+            .map(|id| vec![(id.name.to_string(), class_dependency_names(class_decl))])
+            .unwrap_or_default(),
+        Statement::TSModuleDeclaration(module) => {
+            // An identifier namespace registers its inner type declarations
+            // under qualified `Ns.Name` keys (matching `lower_top_level_
+            // statement`'s `extract_module_declaration`); a string-literal
+            // ambient module is an augmentation scope whose dep edges ride
+            // on the per-contributor `FileWholeHash` rail — nothing to
+            // collect here.
+            let mut out = Vec::new();
+            collect_module_dependency_names(module, None, &mut out);
+            out
+        }
+        Statement::ExportNamedDeclaration(export) => export
+            .declaration
+            .as_ref()
+            .map(collect_declaration_dependency_names)
+            .unwrap_or_default(),
+        Statement::ExportDefaultDeclaration(export_default) => match &export_default.declaration {
+            // The default class lowers under BOTH its declared name and the
+            // `default` alias (see `alias_default_export_type_symbol`), so
+            // emit the heritage deps under both keys — an anonymous default
+            // class has no declared name, only `default`.
+            ExportDefaultDeclarationKind::ClassDeclaration(class_decl) => {
+                let deps = class_dependency_names(class_decl);
+                match &class_decl.id {
+                    Some(id) => vec![
+                        (id.name.to_string(), deps.clone()),
+                        ("default".to_string(), deps),
+                    ],
+                    None => vec![("default".to_string(), deps)],
+                }
+            }
+            ExportDefaultDeclarationKind::TSInterfaceDeclaration(interface) => {
+                let deps = interface_dependency_names(interface);
+                vec![
+                    (interface.id.name.to_string(), deps.clone()),
+                    ("default".to_string(), deps),
+                ]
+            }
+            _ => Vec::new(),
+        },
+        _ => Vec::new(),
+    }
+}
+
+/// Collect `(qualified name, body reference names)` pairs for an
+/// identifier namespace's inner type declarations, mirroring
+/// `extract_module_declaration` / `extract_namespaced_statement` so the
+/// dep-record keys match the `Ns.Name` keys the env walk lowers under.
+/// A string-literal ambient module (augmentation scope) contributes
+/// nothing here.
+fn collect_module_dependency_names(
+    module: &TSModuleDeclaration<'_>,
+    prefix: Option<&str>,
+    out: &mut Vec<(String, DeclDependencyNames)>,
+) {
+    let namespace = match &module.id {
+        TSModuleDeclarationName::Identifier(id) => match prefix {
+            Some(prefix) => format!("{prefix}.{}", id.name),
+            None => id.name.to_string(),
+        },
+        TSModuleDeclarationName::StringLiteral(_) => return,
+    };
+    let Some(body) = module.body.as_ref() else {
+        return;
+    };
+    match body {
+        TSModuleDeclarationBody::TSModuleDeclaration(inner) => {
+            collect_module_dependency_names(inner, Some(namespace.as_str()), out);
+        }
+        TSModuleDeclarationBody::TSModuleBlock(block) => {
+            for stmt in &block.body {
+                collect_namespaced_statement_dependency_names(stmt, namespace.as_str(), out);
+            }
+        }
+    }
+}
+
+fn collect_namespaced_statement_dependency_names(
+    stmt: &Statement<'_>,
+    namespace: &str,
+    out: &mut Vec<(String, DeclDependencyNames)>,
+) {
+    match stmt {
+        Statement::TSTypeAliasDeclaration(alias) => {
+            out.push((
+                format!("{namespace}.{}", alias.id.name),
+                type_alias_dependency_names(alias),
+            ));
+        }
+        Statement::TSInterfaceDeclaration(interface) => {
+            out.push((
+                format!("{namespace}.{}", interface.id.name),
+                interface_dependency_names(interface),
+            ));
+        }
+        Statement::TSModuleDeclaration(module) => {
+            collect_module_dependency_names(module, Some(namespace), out);
+        }
+        Statement::ExportNamedDeclaration(export) => {
+            if let Some(decl) = export.declaration.as_ref() {
+                collect_namespaced_declaration_dependency_names(decl, namespace, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_namespaced_declaration_dependency_names(
+    decl: &Declaration<'_>,
+    namespace: &str,
+    out: &mut Vec<(String, DeclDependencyNames)>,
+) {
+    match decl {
+        Declaration::TSTypeAliasDeclaration(alias) => {
+            out.push((
+                format!("{namespace}.{}", alias.id.name),
+                type_alias_dependency_names(alias),
+            ));
+        }
+        Declaration::TSInterfaceDeclaration(interface) => {
+            out.push((
+                format!("{namespace}.{}", interface.id.name),
+                interface_dependency_names(interface),
+            ));
+        }
+        Declaration::TSModuleDeclaration(module) => {
+            collect_module_dependency_names(module, Some(namespace), out);
+        }
+        _ => {}
+    }
+}
+
+fn collect_declaration_dependency_names(
+    declaration: &Declaration<'_>,
+) -> Vec<(String, DeclDependencyNames)> {
+    match declaration {
+        Declaration::TSTypeAliasDeclaration(type_alias) => vec![(
+            type_alias.id.name.to_string(),
+            type_alias_dependency_names(type_alias),
+        )],
+        Declaration::TSInterfaceDeclaration(interface) => vec![(
+            interface.id.name.to_string(),
+            interface_dependency_names(interface),
+        )],
+        Declaration::ClassDeclaration(class_decl) => class_decl
+            .id
+            .as_ref()
+            .map(|id| vec![(id.name.to_string(), class_dependency_names(class_decl))])
+            .unwrap_or_default(),
+        Declaration::TSModuleDeclaration(module) => {
+            // `export namespace N { … }` — collect its inner type
+            // declarations under qualified `N.Name` keys.
+            let mut out = Vec::new();
+            collect_module_dependency_names(module, None, &mut out);
+            out
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn type_alias_dependency_names(type_alias: &TSTypeAliasDeclaration<'_>) -> DeclDependencyNames {
+    let mut out = DeclDependencyNames::default();
+    collect_type_reference_names(&type_alias.type_annotation, &mut out.dependency_names);
+    collect_structural_type_reference_names(
+        &type_alias.type_annotation,
+        StructuralDependencyContext::Root,
+        &mut out.structural_dependency_names,
+    );
+    out
+}
+
+fn interface_dependency_names(interface: &TSInterfaceDeclaration<'_>) -> DeclDependencyNames {
+    let mut out = DeclDependencyNames::default();
+    for parent in &interface.extends {
+        if let Some(name) = get_expression_reference_name(&parent.expression) {
+            out.dependency_names.insert(name.clone());
+            out.structural_dependency_names.insert(name);
+        }
+        if let Some(type_arguments) = &parent.type_arguments {
+            for param in &type_arguments.params {
+                collect_type_reference_names(param, &mut out.dependency_names);
+                collect_structural_type_reference_names(
+                    param,
+                    StructuralDependencyContext::Root,
+                    &mut out.structural_dependency_names,
+                );
+            }
+        }
+    }
+    collect_interface_reference_names(
+        &interface.body.body,
+        &interface.extends,
+        &mut out.dependency_names,
+    );
+    collect_structural_interface_reference_names(
+        &interface.body.body,
+        &interface.extends,
+        &mut out.structural_dependency_names,
+    );
+    out
+}
+
+fn class_dependency_names(class_decl: &Class<'_>) -> DeclDependencyNames {
+    let mut out = DeclDependencyNames::default();
+    collect_class_reference_names(class_decl, &mut out.dependency_names);
+    collect_structural_class_reference_names(class_decl, &mut out.structural_dependency_names);
+    out
 }
 
 fn collect_interface_reference_names(
@@ -1911,4 +2117,74 @@ pub fn hash_resolved_type(resolved: &ResolvedElements, source: &[u8]) -> [u8; 16
     let mut result = [0u8; 16];
     result.copy_from_slice(&hash[..16]);
     result
+}
+
+#[cfg(test)]
+mod statement_dependency_tests {
+    use super::*;
+
+    fn with_program<R>(source: &str, f: impl FnOnce(&Program<'_>) -> R) -> R {
+        let allocator = oxc_allocator::Allocator::default();
+        let parsed =
+            oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+        assert!(!parsed.panicked, "fixture must parse");
+        f(&parsed.program)
+    }
+
+    /// Per-statement collection must agree with the whole-program
+    /// analyzer's per-symbol reference sets, statement by statement —
+    /// the parity that lets the lazy body path replace the eager
+    /// whole-file dep walk without semantic drift.
+    #[test]
+    fn per_statement_dependency_names_match_whole_program_analyzer() {
+        let source = r#"
+import { Imported } from './dep';
+type AliasDep = { a: Imported; b: LocalRef };
+type LocalRef = { v: 1 };
+export interface WithHeritage extends Imported<LocalRef> { m(p: AliasDep): void }
+class Klass extends Imported implements LocalRef { f: AliasDep }
+export default class { d: Imported }
+"#;
+        with_program(source, |program| {
+            let whole = analyze_external_type_program(program);
+            let mut seen = 0usize;
+            for stmt in &program.body {
+                for (name, deps) in collect_statement_dependency_names(stmt) {
+                    let symbol = whole
+                        .local_type_symbol(&name)
+                        .unwrap_or_else(|| panic!("analyzer must know {name}"));
+                    assert_eq!(
+                        symbol.dependency_names, deps.dependency_names,
+                        "dependency_names must match for {name}"
+                    );
+                    assert_eq!(
+                        symbol.structural_dependency_names, deps.structural_dependency_names,
+                        "structural_dependency_names must match for {name}"
+                    );
+                    seen += 1;
+                }
+            }
+            assert_eq!(
+                seen, 5,
+                "AliasDep, LocalRef, WithHeritage, Klass and the default class \
+                 must each yield one per-statement record"
+            );
+        });
+    }
+
+    /// NEGATIVE: statements that declare no type-space symbol yield
+    /// nothing (imports, bare expressions, anonymous classes are not
+    /// type symbols).
+    #[test]
+    fn non_type_statements_yield_no_dependency_records() {
+        let source = "import { X } from './x';\nconst v = 1;\nexport * from './y';\n";
+        with_program(source, |program| {
+            for stmt in &program.body {
+                assert!(
+                    collect_statement_dependency_names(stmt).is_empty(),
+                    "no type-space records expected"
+                );
+            }
+        });
+    }
 }

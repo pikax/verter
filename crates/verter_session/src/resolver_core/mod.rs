@@ -123,8 +123,8 @@ pub use runtime_values::{
     materialize_imported_runtime_values_into_env, ImportedRuntimeValueResolver,
 };
 pub use shallow_file_state::{
-    BudgetDomain, BudgetExceededFailure, ExportTarget, ExternalSymbolRef, ImportTarget,
-    LocalClosureResult, LocalClosureStatus, ResolutionBudgets, ResolutionCounters,
+    BudgetDomain, BudgetExceededFailure, ClassifiedTypeDeps, ExportTarget, ExternalSymbolRef,
+    ImportTarget, LocalClosureResult, LocalClosureStatus, ResolutionBudgets, ResolutionCounters,
     ShallowFileState, ShallowImportResolver, ShallowTypeSymbol, ShallowTypeView,
     ShallowValueSymbol, WildcardReexport,
 };

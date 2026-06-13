@@ -83,10 +83,13 @@ fn shallow_file_state_observes_current_content_after_dependency_edit() {
         .expect("pre-edit IndexedReady must materialise for the seeded dep");
     let pre_edit_hash = pre_edit.whole_hash;
     assert!(
-        pre_edit.shallow_state.symbols.contains_key("Original"),
+        pre_edit.shallow_state.has_type_symbol("Original"),
         "fixture invariant: the pre-edit shallow state must expose the \
          `Original` type symbol — got {:?}",
-        pre_edit.shallow_state.symbols.keys().collect::<Vec<_>>()
+        pre_edit
+            .shallow_state
+            .type_symbol_names()
+            .collect::<Vec<_>>()
     );
 
     // Edit the dependency: the upsert performs no own-canonical drain,
@@ -129,18 +132,18 @@ fn shallow_file_state_observes_current_content_after_dependency_edit() {
     // Discriminating assertion 2 — the observed shallow surface carries
     // the edited content (the `Renamed` symbol), not the stale one.
     assert!(
-        after.symbols.contains_key("Renamed"),
+        after.has_type_symbol("Renamed"),
         "shallow_file_state MUST observe the edited content — the post-edit \
          shallow surface must expose the `Renamed` type symbol. Got {:?}",
-        after.symbols.keys().collect::<Vec<_>>()
+        after.type_symbol_names().collect::<Vec<_>>()
     );
     assert!(
-        !after.symbols.contains_key("Original"),
+        !after.has_type_symbol("Original"),
         "shallow_file_state MUST NOT observe the stale pre-edit content — \
          the `Original` symbol was renamed away and must be absent. A \
          non-content-pinned `get_any` read surfaces the stale artifact \
          and still reports `Original`. Got {:?}",
-        after.symbols.keys().collect::<Vec<_>>()
+        after.type_symbol_names().collect::<Vec<_>>()
     );
 }
 
@@ -177,7 +180,7 @@ fn shallow_file_state_observes_renamed_symbol_after_dependency_edit() {
         .ensure_indexed_ready(canonical)
         .expect("pre-edit IndexedReady must materialise");
     assert!(
-        pre_edit.shallow_state.symbols.contains_key("Probe"),
+        pre_edit.shallow_state.has_type_symbol("Probe"),
         "fixture invariant: the pre-edit shallow surface must expose `Probe`"
     );
 
@@ -196,7 +199,7 @@ fn shallow_file_state_observes_renamed_symbol_after_dependency_edit() {
         .get_any(canonical)
         .expect("upsert must leave the pre-edit IndexedReady in FileArtifactStore");
     assert!(
-        lingering.shallow_state.symbols.contains_key("Probe"),
+        lingering.shallow_state.has_type_symbol("Probe"),
         "fixture invariant: the lingering artifact's shallow surface still \
          carries the pre-edit `Probe` symbol — a non-content-pinned \
          `get_any` read of `shallow_file_state` would surface THIS stale \
@@ -208,18 +211,18 @@ fn shallow_file_state_observes_renamed_symbol_after_dependency_edit() {
         .shallow_file_state(canonical)
         .expect("post-edit shallow_file_state must resolve via the content-pinned path");
     assert!(
-        observed.symbols.contains_key("RenamedProbe"),
+        observed.has_type_symbol("RenamedProbe"),
         "shallow_file_state MUST observe the renamed content — the \
          post-edit shallow surface must expose `RenamedProbe`. A \
          non-content-pinned `get_any` read surfaces the lingering \
          pre-edit artifact's surface (only `Probe`). Got {:?}",
-        observed.symbols.keys().collect::<Vec<_>>()
+        observed.type_symbol_names().collect::<Vec<_>>()
     );
     assert!(
-        !observed.symbols.contains_key("Probe"),
+        !observed.has_type_symbol("Probe"),
         "shallow_file_state MUST NOT surface the stale pre-edit `Probe` \
          symbol — it was renamed away. Got {:?}",
-        observed.symbols.keys().collect::<Vec<_>>()
+        observed.type_symbol_names().collect::<Vec<_>>()
     );
 }
 

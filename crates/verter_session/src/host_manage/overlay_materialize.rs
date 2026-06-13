@@ -597,42 +597,119 @@ impl VerterHost {
             raw_source.as_ref(),
             cached_parse.as_deref(),
         );
-        let parsed_eval_program =
-            self.parse_eval_program(analysis_canonical_id, whole_hash, &eval_source, source_type);
-
-        let snapshot = if analysis_canonical_id.ends_with(".vue") {
-            // The script program is the flight's eval program when the
-            // eval source IS the extracted script: the snapshot walks
-            // the SAME parse (or defaults directly on a fatal parse) —
-            // this flight performs zero additional script-program
-            // parses.
-            Arc::new(self.build_snapshot_from_source_state(
-                analysis_canonical_id,
-                &raw_source,
-                cached_parse.as_deref(),
-                Self::vue_flight_script_program(
-                    eval_is_extracted_script,
-                    parsed_eval_program.as_deref(),
-                ),
-            ))
-        } else if let Some(parsed) = parsed_eval_program.as_deref() {
-            let parse = crate::parse::build_non_sfc_snapshot_from_program(
-                analysis_canonical_id,
-                raw_source.as_ref(),
-                source_type,
-                parsed.borrow_dependent(),
-            );
-            Arc::new(Self::build_snapshot_from_parse(parse))
-        } else {
-            // Fatal (panicked) eval-program parse on a non-SFC overlay
-            // (the `.vue` arm above never reaches here). The empty
-            // snapshot is constructed directly: a re-parse would run
-            // over the same bytes under the same source type
-            // (`non_sfc_source_type` on both lanes) and is guaranteed
-            // to panic identically, producing exactly this
-            // default-empty surface.
-            Arc::new(crate::types::FileAnalysisSnapshot::default())
+        // THE single eval-program parse for this overlay flight —
+        // performed and retained on the lazy lowering service's worker,
+        // content-addressed by `(canonical, overlay whole_hash,
+        // parse_env)`: identical overlay bytes share the parse (a pure
+        // function of the bytes), while the overlay artifact's MEMO
+        // below stays instance-isolated, so overlay body results never
+        // populate a base read. The cold job builds only INDEX
+        // products; zero declaration bodies lower here.
+        let snapshot_key = crate::decl_lowering::SnapshotKey {
+            canonical: Arc::from(analysis_canonical_id),
+            whole_hash,
+            parse_env_hash: flight_parse_env_hash,
         };
+        struct ColdIndexProducts {
+            header_index: verter_semantic::analysis::decl_headers::DeclHeaderIndex,
+            analysis: verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource,
+            snapshot: Option<crate::types::FileAnalysisSnapshot>,
+        }
+        let job_canonical = analysis_canonical_id.to_string();
+        let job_raw_source = Arc::clone(&raw_source);
+        let job_cached_parse = cached_parse.clone();
+        let job_scope = self.config.effective_scope();
+        let job_provenance = Arc::clone(&self.provenance);
+        let is_vue = analysis_canonical_id.ends_with(".vue");
+        // Pin the overlay's retained parse HERE (the cold-index parse) and
+        // hand the lease to the overlay artifact's memo below, so the
+        // header-index parse and every later overlay body demand share ONE
+        // parse for the overlay artifact's life.
+        let cold_lease = self
+            .decl_lowering
+            .acquire_lease(&snapshot_key, &eval_source, source_type);
+        if cold_lease.parsed_now {
+            self.provenance
+                .eval_program_parses
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        let outcome = self.decl_lowering.run(
+            &snapshot_key,
+            &eval_source,
+            source_type,
+            move |program| {
+                let (header_index, analysis) = match program {
+                    Some(parsed) => {
+                        let body = parsed.borrow_dependent();
+                        (
+                            verter_semantic::analysis::decl_headers::build_decl_header_index(
+                                body,
+                                parsed.source_str(),
+                            ),
+                            verter_compiler::utils::oxc::vue::resolve_type::analyze_external_type_program_headers(body),
+                        )
+                    }
+                    None => Default::default(),
+                };
+                let snapshot = if is_vue {
+                    job_cached_parse.as_deref().map(|parsed_sfc| {
+                        let parse = crate::parse::build_vue_snapshot_from_parsed(
+                            &job_canonical,
+                            job_raw_source.as_ref(),
+                            job_scope,
+                            parsed_sfc,
+                            &job_provenance,
+                            VerterHost::vue_flight_script_program(
+                                eval_is_extracted_script,
+                                program,
+                            ),
+                        );
+                        VerterHost::build_snapshot_from_parse(parse)
+                    })
+                } else if let Some(parsed) = program {
+                    let parse = crate::parse::build_non_sfc_snapshot_from_program(
+                        &job_canonical,
+                        job_raw_source.as_ref(),
+                        source_type,
+                        parsed.borrow_dependent(),
+                    );
+                    Some(VerterHost::build_snapshot_from_parse(parse))
+                } else {
+                    // Fatal (panicked) eval-program parse on a non-SFC
+                    // overlay: a re-parse over the same bytes under the
+                    // same source type panics identically, so the
+                    // default-empty snapshot IS the parse outcome.
+                    Some(crate::types::FileAnalysisSnapshot::default())
+                };
+                ColdIndexProducts {
+                    header_index,
+                    analysis,
+                    snapshot,
+                }
+            },
+        );
+        // The parse was already counted at lease acquisition above; the
+        // cold-index run reuses the pinned snapshot.
+        let products = outcome.value;
+        let snapshot = Arc::new(products.snapshot.unwrap_or_default());
+        let external_type_analysis = Arc::new(products.analysis);
+
+        // The OVERLAY artifact's own declaration-body memo — a fresh
+        // instance per overlay materialise, so overlay bodies are
+        // memoized only on the overlay artifact that produced them and
+        // can never answer a base demand. It holds the cold-index lease so
+        // its body demands reuse that one pinned overlay parse.
+        let decl_bodies = Arc::new(crate::decl_body_memo::DeclBodyMemo::new(
+            snapshot_key,
+            Arc::clone(&eval_source),
+            Arc::clone(&raw_source),
+            cached_parse.clone(),
+            source_type,
+            Arc::clone(&self.decl_lowering),
+            Arc::new(products.header_index),
+            Arc::clone(&self.provenance),
+            Some(cold_lease.lease),
+        ));
         let declaration_file = analysis_canonical_id.ends_with(".d.ts")
             || analysis_canonical_id.ends_with(".d.mts")
             || analysis_canonical_id.ends_with(".d.cts");
@@ -770,14 +847,6 @@ impl VerterHost {
             import_routes.insert(specifier.clone(), resolution);
         }
 
-        let (eval_env, external_type_analysis) = self.build_eval_env_and_analysis_from_program(
-            analysis_canonical_id,
-            raw_source.as_ref(),
-            cached_parse.as_deref(),
-            eval_source.as_ref(),
-            parsed_eval_program.as_deref(),
-        );
-
         // Re-resolve every `export *` wildcard reexport source through the
         // shared route-edge policy and OVERWRITE the loop-baked entry, mirroring
         // the base indexed materialiser. The loop above classifies a PLAIN
@@ -814,7 +883,7 @@ impl VerterHost {
             crate::resolver_core::ShallowFileState::from_analysis_with_resolver(
                 whole_hash,
                 Arc::clone(&external_type_analysis),
-                Some(eval_env.as_ref()),
+                Arc::clone(&decl_bodies),
                 &resolver,
             );
         crate::resolver_core::vue_default_synth::inject_vue_default_into_shallow_state(
@@ -863,7 +932,6 @@ impl VerterHost {
             export_signatures,
             snapshot,
             external_type_analysis: Arc::clone(&external_type_analysis),
-            eval_env,
             declares_interface_app_config,
         });
 

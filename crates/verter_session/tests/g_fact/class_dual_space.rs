@@ -11,8 +11,10 @@
 //! This guard drives the ACTUAL `class Foo` lowering / shallow-analysis
 //! path end-to-end (`analyze_external_type_source` →
 //! `parse_and_build_env` → `ShallowFileState::from_analysis` →
-//! `emit_parse_facts`) and asserts that the parse-fact registry holds
-//! both `Export` facts under distinct spaces. It FAILS if class
+//! `emit_parse_facts`) and asserts both `Export` facts serve under
+//! distinct spaces on first observation through the lazy body fact
+//! path (`FileFacts::lookup_or_compute` — the publish-time registry
+//! itself is header-only). It FAILS if class
 //! lowering ever collapses to a single space (e.g. only `Type`, only
 //! `Value`, or a fused space) — which is strictly stronger than the
 //! manual-insert non-collision check
@@ -58,7 +60,7 @@ fn class_dual_space_emits_two_symbols() {
     let source = "export class Foo {\n  bar(): number { return 1 }\n}\n";
     let indexed = indexed_from_source(source);
     let emission = emit_parse_facts(&indexed);
-    let registry = emission.facts.registry();
+    let facts = &emission.facts;
 
     let name = InternedName::from("Foo");
     let type_key = FactKey::Export {
@@ -70,22 +72,26 @@ fn class_dual_space_emits_two_symbols() {
         space: SymbolSpace::Value,
     };
 
-    let type_fact = registry.get(&type_key);
-    let value_fact = registry.get(&value_key);
+    // Body-sensitive `Export` facts are LAZY: the publish-time
+    // registry omits them (publish lowers zero declaration bodies);
+    // first observation computes them through the declaration-body
+    // path (`lookup_or_compute`).
+    let type_fact = facts.lookup_or_compute(&type_key);
+    let value_fact = facts.lookup_or_compute(&value_key);
 
     assert!(
         type_fact.is_some(),
-        "class `Foo` lowering MUST emit an `Export(\"Foo\", Type)` parse \
-         fact — the class is usable as a type (`let x: Foo`). The fact \
-         registry held: {:?}",
-        registry.iter().map(|(k, _)| k).collect::<Vec<_>>(),
+        "class `Foo` lowering MUST serve an `Export(\"Foo\", Type)` fact \
+         on first observation — the class is usable as a type \
+         (`let x: Foo`). The eager registry held: {:?}",
+        facts.registry().iter().map(|(k, _)| k).collect::<Vec<_>>(),
     );
     assert!(
         value_fact.is_some(),
-        "class `Foo` lowering MUST emit an `Export(\"Foo\", Value)` parse \
-         fact — the class is usable as a value (`new Foo()`, `typeof \
-         Foo`). The fact registry held: {:?}",
-        registry.iter().map(|(k, _)| k).collect::<Vec<_>>(),
+        "class `Foo` lowering MUST serve an `Export(\"Foo\", Value)` fact \
+         on first observation — the class is usable as a value \
+         (`new Foo()`, `typeof Foo`). The eager registry held: {:?}",
+        facts.registry().iter().map(|(k, _)| k).collect::<Vec<_>>(),
     );
 
     // Exactly the two spaces, no `Namespace`-space `Export(Foo, …)`
@@ -95,8 +101,8 @@ fn class_dual_space_emits_two_symbols() {
         space: SymbolSpace::Namespace,
     };
     assert!(
-        registry.get(&namespace_key).is_none(),
-        "a plain `class Foo` must NOT emit a `Namespace`-space `Export` \
+        facts.lookup_or_compute(&namespace_key).is_none(),
+        "a plain `class Foo` must NOT serve a `Namespace`-space `Export` \
          fact — class lowering occupies exactly Type + Value, not the \
          namespace space",
     );

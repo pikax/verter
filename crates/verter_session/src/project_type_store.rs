@@ -160,7 +160,7 @@ pub struct IndexedReady {
     pub project_generation: u64,
     /// The owner's live `parse_env_hash` (the R21 parse dimension)
     /// captured at materialise time — the parse environment this
-    /// artifact's `cached_parse` / `shallow_state` / `eval_env` were
+    /// artifact's `cached_parse` / `shallow_state` / `decl_bodies` were
     /// built under. Today the base parse env derives from constant
     /// workspace parser flags, but the dimension is load-bearing: the
     /// reuse gates demand equality with the owner's LIVE parse env, so
@@ -191,16 +191,12 @@ pub struct IndexedReady {
     /// File-level analysis snapshot consumed by component-meta / linter
     /// pipelines.
     pub snapshot: Arc<crate::types::FileAnalysisSnapshot>,
-    /// Cached external-type analysis used by the shared type resolver.
+    /// Cached HEADER-ONLY external-type analysis used by the shared type
+    /// resolver (import/export/reexport tables + symbol name inventory;
+    /// no dependency names, no raw surfaces — body-derived data lives on
+    /// the shallow state's lazy declaration-body memo).
     pub external_type_analysis:
         Arc<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource>,
-    /// The canonical per-file `EvalEnv`, built ONCE by the materialise
-    /// closure from the same single eval-program parse the shallow state
-    /// and external-type analysis came from (script-setup type params
-    /// applied). Read through [`Self::eval_env`] — keep consumers on the
-    /// narrow accessor so the representation can change without
-    /// re-touching them.
-    pub(crate) eval_env: Arc<verter_semantic::analysis::type_eval::EvalEnv>,
     /// Mirror of `script_analysis.flags & DECLARES_INTERFACE_APP_CONFIG`
     /// projected onto `IndexedReady` so the
     /// `AppConfigNoOverrideProofDb` production producer can short-circuit
@@ -232,22 +228,9 @@ impl IndexedReady {
         !self.import_routes.is_empty() || self.shallow_state.has_shallow_cross_file_edges()
     }
 
-    /// The canonical per-file `EvalEnv` — built once by the materialise
-    /// closure from the same parse as everything else on this artifact.
-    /// The SOLE base accessor for a file's eval env (`base_eval_env_arc`
-    /// reads through here); the narrow surface lets a later
-    /// representation change land without re-touching consumers.
-    #[must_use]
-    pub fn eval_env(&self) -> &Arc<verter_semantic::analysis::type_eval::EvalEnv> {
-        &self.eval_env
-    }
-
     /// Test-only constructor for fact-emission-style fixtures: a minimal
     /// artifact carrying a REAL shallow inventory + sources, with every
-    /// other field defaulted (including an empty `eval_env`, which those
-    /// fixtures never read). Integration tests cannot construct
-    /// `IndexedReady` literally — `eval_env` is crate-private behind the
-    /// [`Self::eval_env`] accessor — so this is their construction path.
+    /// other field defaulted.
     ///
     /// Gated `#[cfg(any(test, debug_assertions))]` (the crate's
     /// cross-crate test-constructor convention): integration tests in
@@ -280,7 +263,6 @@ impl IndexedReady {
             export_signatures: None,
             snapshot: Arc::new(crate::types::FileAnalysisSnapshot::default()),
             external_type_analysis,
-            eval_env: Arc::new(verter_semantic::analysis::type_eval::EvalEnv::default()),
             declares_interface_app_config: false,
         }
     }
@@ -295,22 +277,15 @@ impl IndexedReady {
     /// construction path never ships in release production builds.
     #[cfg(any(test, debug_assertions))]
     pub fn new_for_test(whole_hash: Hash16) -> Self {
-        use rustc_hash::{FxHashMap, FxHashSet};
+        use rustc_hash::FxHashMap;
         let analysis = Arc::new(
             verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default(),
         );
-        let shallow = crate::resolver_core::shallow_file_state::ShallowFileState {
+        let shallow = crate::resolver_core::shallow_file_state::ShallowFileState::from_analysis(
             whole_hash,
-            exports: FxHashMap::default(),
-            wildcard_reexports: Vec::new(),
-            symbols: FxHashMap::default(),
-            value_symbols: FxHashMap::default(),
-            augmentation_scopes: FxHashMap::default(),
-            augmentation_value_scopes: FxHashMap::default(),
-            import_locals: FxHashSet::default(),
-            import_targets: FxHashMap::default(),
-            analysis: Arc::clone(&analysis),
-        };
+            Arc::clone(&analysis),
+            None,
+        );
         Self {
             whole_hash,
             shallow_state: Arc::new(shallow),
@@ -327,7 +302,6 @@ impl IndexedReady {
             export_signatures: None,
             snapshot: Arc::new(crate::types::FileAnalysisSnapshot::default()),
             external_type_analysis: analysis,
-            eval_env: Arc::new(verter_semantic::analysis::type_eval::EvalEnv::default()),
             declares_interface_app_config: false,
         }
     }
@@ -617,7 +591,10 @@ impl crate::invalidation_domain::InvalidationByCanonical for AnalysisReadyDb {
 // `crate::owned_artifacts::OwnedTypeResolutionContext`. The OXC parser
 // arena is dropped at the lowering boundary so the DB can sit on
 // `Send + Sync` host caches. There is no separate eval-env DB: the
-// canonical per-file `EvalEnv` lives on `IndexedReady`.
+// per-file `EvalEnv` is not a stored field but the lazy `whole_env()`
+// demand product owned by `IndexedReady`'s `DeclBodyMemo` (a shallow
+// declaration index plus body locators), materialised on first
+// semantic demand.
 // ──────────────────────────────────────────────────────────────────────────
 
 /// Cache identity for typed-DB entries that key by canonical-id +
@@ -2279,18 +2256,11 @@ mod tests {
         let analysis = Arc::new(
             verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default(),
         );
-        let shallow = Arc::new(crate::resolver_core::shallow_file_state::ShallowFileState {
-            whole_hash: hash_v1,
-            exports: FxHashMap::default(),
-            wildcard_reexports: vec![],
-            symbols: FxHashMap::default(),
-            value_symbols: FxHashMap::default(),
-            augmentation_scopes: FxHashMap::default(),
-            augmentation_value_scopes: FxHashMap::default(),
-            import_locals: rustc_hash::FxHashSet::default(),
-            import_targets: FxHashMap::default(),
-            analysis,
-        });
+        let shallow = Arc::new(
+            crate::resolver_core::shallow_file_state::ShallowFileState::from_analysis(
+                hash_v1, analysis, None,
+            ),
+        );
         db.insert(
             Arc::from("/w/a.ts"),
             Arc::new(IndexedReady {
@@ -2311,7 +2281,6 @@ mod tests {
                 external_type_analysis: Arc::new(
                     verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default(),
                 ),
-                eval_env: Arc::new(verter_semantic::analysis::type_eval::EvalEnv::default()),
                 declares_interface_app_config: false,
             }),
         );
@@ -2345,18 +2314,11 @@ mod tests {
             Arc::new(IndexedReady {
                 whole_hash: hash,
                 shallow_state: Arc::new(
-                    crate::resolver_core::shallow_file_state::ShallowFileState {
-                        whole_hash: hash,
-                        exports: FxHashMap::default(),
-                        wildcard_reexports: vec![],
-                        symbols: FxHashMap::default(),
-                        value_symbols: FxHashMap::default(),
-                        augmentation_scopes: FxHashMap::default(),
-                        augmentation_value_scopes: FxHashMap::default(),
-                        import_locals: rustc_hash::FxHashSet::default(),
-                        import_targets: FxHashMap::default(),
-                        analysis: Arc::clone(&analysis),
-                    },
+                    crate::resolver_core::shallow_file_state::ShallowFileState::from_analysis(
+                        hash,
+                        Arc::clone(&analysis),
+                        None,
+                    ),
                 ),
                 import_routes: Arc::new(FxHashMap::default()),
                 import_route_hash: None,
@@ -2371,7 +2333,6 @@ mod tests {
                 export_signatures: None,
                 snapshot: Arc::new(crate::types::FileAnalysisSnapshot::default()),
                 external_type_analysis: Arc::clone(&analysis),
-                eval_env: Arc::new(verter_semantic::analysis::type_eval::EvalEnv::default()),
                 declares_interface_app_config: false,
             })
         };

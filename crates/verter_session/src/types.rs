@@ -2823,6 +2823,15 @@ pub struct MetaProvenance {
     /// builder plus any call site that forces an internal fallback
     /// build). Exactly 1 per cold canonical build.
     pub eval_env_builds: std::sync::atomic::AtomicU64,
+    /// Declaration BODIES lowered to typed IR on behalf of this host —
+    /// one increment per type/value/augmentation declaration contributor
+    /// whose body (annotation, signature set, object shape, heritage,
+    /// member types) was lowered from OXC syntax. The deterministic
+    /// demand-scoping rail: publishing a file's `IndexedReady` lowers
+    /// ZERO bodies; a semantic query lowers exactly the demanded
+    /// declaration closure; a whole-file env demand (fallthrough /
+    /// runtime values) lowers the file's full declaration set once.
+    pub decl_bodies_lowered: std::sync::atomic::AtomicU64,
     /// `ShallowFileState::from_analysis_with_resolver` builds initiated
     /// by host call sites. Exactly 1 per cold canonical build.
     pub shallow_state_builds: std::sync::atomic::AtomicU64,
@@ -2974,6 +2983,7 @@ impl Default for MetaProvenance {
             non_sfc_snapshot_parses: std::sync::atomic::AtomicU64::new(0),
             vue_script_snapshot_parses: std::sync::atomic::AtomicU64::new(0),
             eval_env_builds: std::sync::atomic::AtomicU64::new(0),
+            decl_bodies_lowered: std::sync::atomic::AtomicU64::new(0),
             shallow_state_builds: std::sync::atomic::AtomicU64::new(0),
             indexed_ready_materializes: std::sync::atomic::AtomicU64::new(0),
             indexed_ready_edge_refreshes: std::sync::atomic::AtomicU64::new(0),
@@ -3240,6 +3250,7 @@ impl MetaProvenance {
             non_sfc_snapshot_parses: self.non_sfc_snapshot_parses.load(Relaxed),
             vue_script_snapshot_parses: self.vue_script_snapshot_parses.load(Relaxed),
             eval_env_builds: self.eval_env_builds.load(Relaxed),
+            decl_bodies_lowered: self.decl_bodies_lowered.load(Relaxed),
             shallow_state_builds: self.shallow_state_builds.load(Relaxed),
             indexed_ready_materializes: self.indexed_ready_materializes.load(Relaxed),
             indexed_ready_edge_refreshes: self.indexed_ready_edge_refreshes.load(Relaxed),
@@ -3341,6 +3352,7 @@ impl MetaProvenance {
         self.non_sfc_snapshot_parses.store(0, Relaxed);
         self.vue_script_snapshot_parses.store(0, Relaxed);
         self.eval_env_builds.store(0, Relaxed);
+        self.decl_bodies_lowered.store(0, Relaxed);
         self.shallow_state_builds.store(0, Relaxed);
         self.indexed_ready_materializes.store(0, Relaxed);
         self.indexed_ready_edge_refreshes.store(0, Relaxed);
@@ -3495,6 +3507,7 @@ pub struct MetaProvenanceSnapshot {
     pub non_sfc_snapshot_parses: u64,
     pub vue_script_snapshot_parses: u64,
     pub eval_env_builds: u64,
+    pub decl_bodies_lowered: u64,
     pub shallow_state_builds: u64,
     pub indexed_ready_materializes: u64,
     pub indexed_ready_edge_refreshes: u64,

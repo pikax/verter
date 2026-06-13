@@ -955,7 +955,7 @@ fn record_parsed_edges_with_exact_resolutions_records_and_applies_atomically() {
 /// perimeter this ledger closes.
 #[test]
 fn content_mutators_record_per_canonical_transition_generation() {
-    use crate::traits::{WorkspaceAccess, WorkspaceRead};
+    use crate::traits::WorkspaceRead;
 
     let ws = MemoryWorkspace::new(MemoryOptions::default());
     let untouched = "d:/project/src/untouched.ts";
@@ -1070,7 +1070,7 @@ fn content_transition_ledger_normalizes_keys_at_recording_and_query() {
 #[test]
 fn directory_tree_dirty_records_subtree_content_transition() {
     use crate::changes::WorkspaceChange;
-    use crate::traits::{WorkspaceAccess, WorkspaceRead};
+    use crate::traits::WorkspaceRead;
 
     let ws = MemoryWorkspace::new(MemoryOptions::default());
     let member = "d:/project/src/pkg/member.ts";

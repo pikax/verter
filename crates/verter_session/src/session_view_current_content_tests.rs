@@ -922,7 +922,7 @@ fn shallow_file_state_observes_overlay_for_normalised_js() {
         .shallow_file_state("/pkg/index.d.ts")
         .expect("the base `.d.ts` companion has a shallow state");
     assert!(
-        !base_dts_shallow.symbols.contains_key("OverlayOnly"),
+        !base_dts_shallow.has_type_symbol("OverlayOnly"),
         "fixture invariant: the base `.d.ts` companion declares no \
          `OverlayOnly` interface — a pre-fix `shallow_file_state` of the \
          `.js` overlay falls back to THIS surface",
@@ -939,10 +939,7 @@ fn shallow_file_state_observes_overlay_for_normalised_js() {
         "fixture invariant: the overlay artifact is keyed by the overlay content hash",
     );
     assert!(
-        materialised
-            .shallow_state
-            .symbols
-            .contains_key("OverlayOnly"),
+        materialised.shallow_state.has_type_symbol("OverlayOnly"),
         "fixture invariant: the overlay artifact's shallow surface carries \
          the `OverlayOnly` interface",
     );
@@ -984,11 +981,11 @@ fn shallow_file_state_observes_overlay_for_normalised_js() {
     // Discriminating assertion 2 — the observed shallow surface carries
     // the overlay-only `OverlayOnly` type symbol.
     assert!(
-        observed.symbols.contains_key("OverlayOnly"),
+        observed.has_type_symbol("OverlayOnly"),
         "shallow_file_state MUST observe the overlaid shallow surface — the \
          `OverlayOnly` interface declared only by the overlay bytes must be \
          present. A pre-fix read falls back to the base `.d.ts` companion \
          (no `OverlayOnly`). Got {:?}",
-        observed.symbols.keys().collect::<Vec<_>>(),
+        observed.type_symbol_names().collect::<Vec<_>>(),
     );
 }

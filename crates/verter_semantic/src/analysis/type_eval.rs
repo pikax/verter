@@ -444,6 +444,36 @@ impl Default for EvalLimits {
 }
 
 impl EvalEnv {
+    /// Total number of declaration-body CONTRIBUTORS this environment
+    /// holds across the file-scope type/value tables and the
+    /// augmentation-scope inventories. Each contributor corresponds to
+    /// one lowered declaration body (a same-name merge group of `k`
+    /// declarations counts `k`). This is the deterministic
+    /// "bodies lowered" measure the host's demand-scoping counters
+    /// observe when a whole-file environment is built.
+    #[must_use]
+    pub fn total_decl_count(&self) -> usize {
+        self.type_symbols
+            .values()
+            .map(|g| g.contributors().len())
+            .sum::<usize>()
+            + self
+                .value_symbols
+                .values()
+                .map(|g| g.contributors().len())
+                .sum::<usize>()
+            + self
+                .augmentation_scopes
+                .values()
+                .map(|g| g.contributors().len())
+                .sum::<usize>()
+            + self
+                .augmentation_value_scopes
+                .values()
+                .map(|g| g.contributors().len())
+                .sum::<usize>()
+    }
+
     /// Create a new evaluation environment with default limits.
     pub fn new() -> Self {
         Self {
@@ -532,19 +562,6 @@ impl EvalEnv {
                     .insert((scope, name), ValueDeclGroup::new(decl));
             }
         }
-    }
-
-    /// Look up the ordered contributor group for an augmentation-scoped type
-    /// declaration, if any. The lookup key is `(scope, name)`; the temporary
-    /// owned key it composes is unavoidable while the map keys on owned
-    /// `(AugmentationScopeKind, String)` tuples.
-    pub fn augmentation_symbol(
-        &self,
-        scope: &AugmentationScopeKind,
-        name: &str,
-    ) -> Option<&TypeDeclGroup> {
-        self.augmentation_scopes
-            .get(&(scope.clone(), name.to_string()))
     }
 
     /// Returns the total number of evaluation steps consumed so far.

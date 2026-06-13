@@ -679,7 +679,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if !default_symbol.is_synthesised_vue_default {
             return None;
         }
-        let instance_shape: TypeExpr = default_symbol
+        let default_body = indexed.shallow_state.value_decl("default")?;
+        let instance_shape: TypeExpr = default_body
             .signatures
             .first()?
             .return_type

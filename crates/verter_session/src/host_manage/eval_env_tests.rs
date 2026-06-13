@@ -1,9 +1,11 @@
 //! Discriminating tests for `host_manage::eval_env`.
 //!
-//! The canonical per-file `EvalEnv` lives on `IndexedReady` (built once
-//! by the materialise closure); `base_eval_env_arc` is a warm artifact
-//! read. Content-edit correctness comes from the content-addressed
-//! artifact identity — no eager env-cache clear participates.
+//! The per-file `EvalEnv` is not a stored `IndexedReady` field but the
+//! lazy `whole_env()` demand product owned by `IndexedReady`'s
+//! `DeclBodyMemo`, materialised on first demand and shared as one
+//! `Arc`; `base_eval_env_arc` hands out that memo-owned whole-env.
+//! Content-edit correctness comes from the content-addressed artifact
+//! identity — no eager env-cache clear participates.
 
 use std::sync::Arc;
 
@@ -12,11 +14,12 @@ use std::sync::Arc;
 /// clear.
 ///
 /// The owner-upsert path has no eager reverse-dependent cascade. The
-/// env lives on the content-addressed `IndexedReady`; the edited
-/// file's new content hash misses the stale artifact and the
-/// materialise closure rebuilds env + state + analysis from one fresh
-/// parse. The freshly built env therefore reflects the new
-/// declaration.
+/// per-file env is the lazy `whole_env()` product of the
+/// content-addressed `IndexedReady`'s `DeclBodyMemo`, not an
+/// eagerly-stored field; the edited file's new content hash misses the
+/// stale artifact and the materialise closure rebuilds the shallow
+/// index from one fresh parse, so the next `whole_env()` demand lowers
+/// the env and reflects the new declaration.
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn base_eval_env_reflects_content_edit_without_eager_clear() {
@@ -64,8 +67,9 @@ fn base_eval_env_reflects_content_edit_without_eager_clear() {
         .expect("content edit upsert");
 
     // The eval-env for the edited file MUST reflect the new content.
-    // The new content hash misses the stale `IndexedReady` and the
-    // materialise closure rebuilds the env from a fresh parse.
+    // The new content hash misses the stale `IndexedReady`, the
+    // materialise closure rebuilds the shallow index from a fresh
+    // parse, and the next `whole_env()` demand lowers the env from it.
     let env_after = host
         .base_eval_env("/src/types.ts")
         .expect("eval-env builds for edited content");
@@ -77,11 +81,11 @@ fn base_eval_env_reflects_content_edit_without_eager_clear() {
     );
 }
 
-/// The env handed out by `base_eval_env_arc` IS the artifact-owned env
-/// — one shared `Arc`, no per-read rebuild.
+/// The env handed out by `base_eval_env_arc` IS the memo-owned whole-env
+/// demand product — one shared `Arc`, no per-read rebuild.
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn base_eval_env_arc_is_the_indexed_ready_owned_env() {
+fn base_eval_env_arc_is_the_memo_owned_whole_env() {
     use crate::types::{FileKind, HostConfig, UpsertRequest};
     use crate::VerterHost;
 
@@ -103,7 +107,7 @@ fn base_eval_env_arc_is_the_indexed_ready_owned_env() {
         .ensure_indexed_ready("/src/types.ts")
         .expect("artifact must exist");
     assert!(
-        Arc::ptr_eq(&env, indexed.eval_env()),
+        Arc::ptr_eq(&env, &indexed.shallow_state.decl_bodies().whole_env()),
         "base_eval_env_arc must hand out the IndexedReady-owned env Arc"
     );
     let env_again = host

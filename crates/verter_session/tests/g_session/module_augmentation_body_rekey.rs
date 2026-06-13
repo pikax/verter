@@ -30,6 +30,7 @@
 //!   `fromAug` survives.
 //!   PASSES.
 
+use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Arc;
 
 use verter_session::meta::MetaProject;
@@ -62,6 +63,17 @@ fn prop_names(
     names
 }
 
+/// Debug-rendered resolved `type_expr` of the prop named `name`.
+fn prop_type_repr(
+    meta: &verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    name: &str,
+) -> Option<String> {
+    meta.props
+        .iter()
+        .find(|p| p.name == name)
+        .map(|p| format!("{:?}", p.type_expr))
+}
+
 /// The `artifact_key.content_hash` the cached augmentation index holds for
 /// `augmenter_canonical`, scanned across every populated `AugmenterSet` (no
 /// need to reconstruct the exact target key). `None` if no populated set lists
@@ -75,6 +87,32 @@ fn cached_augmenter_content_hash(host: &VerterHost, augmenter_canonical: &str) -
                 if entry.canonical().as_ref() == augmenter_canonical {
                     return Some(entry.artifact_key.content_hash);
                 }
+            }
+        }
+    }
+    None
+}
+
+/// The `ModuleAugmentationIndexShape` fingerprint of the (single)
+/// augmenter set that lists `augmenter_canonical`. This fingerprint folds
+/// each augmenter's `parse_stable_hash` (the decl skeleton) — it is
+/// INVARIANT under a member's VALUE-type edit. `None` if no populated set
+/// lists the augmenter. Lets the test prove the header-level fingerprint
+/// rail cannot see a body-only member-type edit (so the per-augmenter
+/// `FileWholeHash` self-root is the only rail that can).
+fn cached_augmenter_index_shape_fp(
+    host: &VerterHost,
+    augmenter_canonical: &str,
+) -> Option<[u8; 16]> {
+    let store = host.project_type_store().indexed();
+    for (key, fingerprint) in store.snapshot_augmentation_index_fingerprints() {
+        if let Some(set) = store.get_augmenter_set(&key) {
+            if set
+                .entries
+                .iter()
+                .any(|entry| entry.canonical().as_ref() == augmenter_canonical)
+            {
+                return Some(fingerprint);
             }
         }
     }
@@ -193,5 +231,180 @@ fn merged_decl_body_stitch_self_heals_rekeyed_augmenter() {
         "the cosmetic re-key must advance the augmenter's content hash AND the \
          body stitch must write the healed exact key back into the cached \
          AugmenterSet (pre={pre_key_hash:?} post={post_key_hash:?})"
+    );
+}
+
+/// Body-ONLY edit of an augmenter member: the member's TYPE changes
+/// (`fromAug: string` → `fromAug: number`) while its name, kind, and the
+/// member COUNT stay put — so the augmenter's decl skeleton (hence
+/// `parse_stable_hash` and the augmenter-set fingerprint) is UNCHANGED.
+///
+/// The ONLY rail that can invalidate a WARM consumer here is the
+/// per-augmenter `FileWholeHash` self-root recorded in the cold stitch's
+/// read-set. This test characterises that rail HONESTLY — it does NOT
+/// evict the owner before the post-edit read, so the post-edit
+/// `get_component_meta` exercises the genuine WARM path:
+///
+/// 1. A second pre-edit `get_component_meta` is a warm HIT
+///    (`component_meta_result_cache_hits` advances) — proving a warm
+///    `ComponentMetaResultDb` entry exists to be invalidated.
+/// 2. The augmenter-set `ModuleAugmentationIndexShape` fingerprint is
+///    UNCHANGED across the member-VALUE-type edit (`fp_before == fp_after`)
+///    — proving the header-level fingerprint rail CANNOT see the edit, so
+///    the per-augmenter `FileWholeHash` self-root is the only rail that can.
+/// 3. The post-edit `get_component_meta` is a genuine warm MISS + recompute
+///    (`component_meta_result_cache_misses` advances), and — the end-to-end
+///    correctness signal — that recompute observes the NEW member type
+///    (`number`, not a stale lower-layer `string`).
+///
+/// It would FAIL — the recompute would pull the stale `MergedDecl` and
+/// serve `string` — if that per-augmenter `FileWholeHash` self-root were
+/// ever dropped from the semantic stitch's read-set. Mirrors the
+/// compile-tier sibling
+/// `compile_slot_invalidates_on_external_augmenter_member_type_edit`
+/// (`fp_before == fp_after` proof) and the component-meta sibling
+/// `imported_prop_type_edit_misses_warm_component_meta` (warm hit/miss
+/// counter deltas, no eviction).
+#[test]
+fn augmenter_member_type_only_edit_invalidates_warm_consumer() {
+    const AUG_TYPE_PRE: &str = "import './types'\n\
+         declare module './types' {\n\
+         \x20 interface Cfg { fromAug: string }\n\
+         }\n\
+         export {}\n";
+    // Same member name `fromAug`, same kind (property), same member count —
+    // ONLY the annotated type changes. `parse_stable_hash` is invariant
+    // under member-type edits, so the augmenter-set fingerprint does not
+    // move; only the per-augmenter `FileWholeHash` differs.
+    const AUG_TYPE_POST: &str = "import './types'\n\
+         declare module './types' {\n\
+         \x20 interface Cfg { fromAug: number }\n\
+         }\n\
+         export {}\n";
+
+    let (project, workspace) = workspace_project(&[
+        (
+            "/workspace/src/types.ts",
+            "export interface Cfg { base: string }\n",
+        ),
+        ("/workspace/src/aug.ts", AUG_TYPE_PRE),
+        (
+            "/workspace/src/Comp.vue",
+            "<script setup lang=\"ts\">\n\
+             import type { Cfg } from '/workspace/src/types'\n\
+             import '/workspace/src/aug'\n\
+             defineProps<Cfg>()\n\
+             </script>\n\
+             <template><div/></template>\n",
+        ),
+    ]);
+
+    // Cold pass: `fromAug` surfaces with its PRE type (`string`).
+    let pre_meta = project
+        .host()
+        .get_component_meta("/workspace/src/Comp.vue")
+        .expect("cold component-meta returns Some");
+    let pre_type = prop_type_repr(&pre_meta, "fromAug")
+        .expect("augmenter member `fromAug` must surface as a prop pre-edit");
+    assert!(
+        pre_type.contains("String"),
+        "control: pre-edit augmenter member type is string: {pre_type}"
+    );
+
+    // Warm sanity — an unedited second query must round-trip a warm HIT, so a
+    // warm `ComponentMetaResultDb` entry exists to be invalidated and the
+    // post-edit miss-delta is a discriminating signal. (No eviction: the
+    // post-edit read MUST exercise the genuine warm path.)
+    let prov = project.host().provenance();
+    let hits_before = prov.component_meta_result_cache_hits.load(Relaxed);
+    let _ = project
+        .host()
+        .get_component_meta("/workspace/src/Comp.vue")
+        .expect("warm pre-edit component-meta returns Some");
+    assert!(
+        prov.component_meta_result_cache_hits.load(Relaxed) > hits_before,
+        "warm sanity: an unedited second get_component_meta must hit the warm \
+         ComponentMetaResultDb — without a round-tripping warm hit the \
+         post-edit miss-delta is not discriminating"
+    );
+
+    // The augmenter-set (decl-skeleton) fingerprint BEFORE the edit. It folds
+    // each augmenter's `parse_stable_hash`, invariant under a member
+    // VALUE-type edit.
+    let fp_before = cached_augmenter_index_shape_fp(project.host(), "/workspace/src/aug.ts")
+        .expect("augmenter must be in the augmentation index after the cold + warm passes");
+    let misses_before = prov.component_meta_result_cache_misses.load(Relaxed);
+
+    // Body-only edit of the augmenter: member type string → number, decl
+    // skeleton unchanged. The owner-upsert path has NO eager reverse-dependent
+    // cascade, and we deliberately do NOT evict the owner — so its warm
+    // `ComponentMetaResultDb` entry survives and fact-validation (the
+    // per-augmenter `FileWholeHash` self-root) is the SOLE invalidation rail.
+    workspace.inject_file("/workspace/src/aug.ts".into(), Arc::from(AUG_TYPE_POST));
+    let _ = project.host().upsert(UpsertRequest {
+        canonical_id: Some("/workspace/src/aug.ts".into()),
+        input_id: "/workspace/src/aug.ts".into(),
+        source: Arc::from(AUG_TYPE_POST),
+        file_kind: FileKind::NonSfc,
+        aliases: vec![],
+    });
+
+    // Warm pass after the body-only edit — NO eviction.
+    let post_meta = project
+        .host()
+        .get_component_meta("/workspace/src/Comp.vue")
+        .expect("post-edit component-meta returns Some");
+    let misses_after = prov.component_meta_result_cache_misses.load(Relaxed);
+
+    // Warm-path sanity — top-level warm-miss: the augmenter edit MUST
+    // invalidate the owner's top-level warm `ComponentMetaResultDb` entry, so
+    // the post-edit read is a genuine MISS + recompute, NOT a pure stale
+    // top-level hit. (This proves the warm path was exercised; it does NOT by
+    // itself prove the recompute is CORRECT — a top-level miss can still pull a
+    // stale lower-layer `MergedDecl`, which is exactly what the type assertion
+    // below catches.)
+    assert!(
+        misses_after > misses_before,
+        "warm-path sanity: a body-only augmenter member-type edit MUST \
+         invalidate the owner's top-level warm ComponentMetaResultDb entry — \
+         the post-edit read must be a genuine MISS + recompute, not a pure \
+         stale top-level hit (misses {misses_before} -> {misses_after})"
+    );
+
+    // PRIMARY DISCRIMINATING signal — end-to-end correctness: the recompute
+    // MUST observe the NEW member type (`number`), and the stale `string` must
+    // NOT leak through. The per-augmenter `FileWholeHash` self-root lives on
+    // the SEMANTIC `MergedDecl` memo entry; dropping it lets that memo validate
+    // falsely so the recompute returns the stale `string` — this assertion is
+    // the one that fails when the self-root is removed.
+    let post_type = prop_type_repr(&post_meta, "fromAug")
+        .expect("augmenter member `fromAug` must still surface post-edit");
+    assert!(
+        post_type.contains("Number"),
+        "DISCRIMINATING: a body-only augmenter member-type edit \
+         (string → number, decl skeleton unchanged) MUST invalidate the warm \
+         consumer via the per-augmenter FileWholeHash self-root — the stale \
+         `string` type must NOT survive: got {post_type}"
+    );
+    assert!(
+        !post_type.contains("String"),
+        "the stale pre-edit `string` type must not leak into the recomputed \
+         prop: {post_type}"
+    );
+
+    // SUPPORTING isolation proof: the augmenter-set `ModuleAugmentationIndexShape`
+    // fingerprint is UNCHANGED across the member-VALUE-type edit
+    // (`parse_stable_hash` is invariant). The recompute the warm-miss above
+    // forced re-populated this index entry, so it reads back current. Proving
+    // `fp_before == fp_after` rules out the alternative explanation that the
+    // header-level fingerprint rail (not the `FileWholeHash`) caught the edit.
+    let fp_after = cached_augmenter_index_shape_fp(project.host(), "/workspace/src/aug.ts")
+        .expect("augmenter must still be in the augmentation index after the warm recompute");
+    assert_eq!(
+        fp_before, fp_after,
+        "the augmenter-set ModuleAugmentationIndexShape fingerprint MUST stay \
+         equal across a member-VALUE-type edit (parse_stable_hash is invariant) \
+         — proving the per-augmenter FileWholeHash self-root is the only rail \
+         that can catch this edit (pre={fp_before:?} post={fp_after:?})"
     );
 }
