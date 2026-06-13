@@ -15,6 +15,11 @@
 //! 2. Inter-crate stored types prefer [`Span`]. [`RelativeSpan`] is for intra-crate processing.
 //! 3. [`RelativeSpan`] is 8 bytes, same as [`Span`]. The base offset lives in context.
 
+pub mod path;
+pub use path::{
+    canonicalize_path, canonicalize_path_cow, is_under_dir, longest_project_root, CanonicalPath,
+};
+
 // ======================== Span (SFC-absolute) ========================
 
 /// SFC-absolute byte offset span. `[start, end)` half-open.

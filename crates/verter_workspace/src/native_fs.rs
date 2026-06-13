@@ -202,27 +202,37 @@ fn normalize_read_dir_path(os_path: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
-/// Normalize an OS path string to canonical form (forward slashes, lowercase drive on Windows).
+/// Normalize an OS path string to canonical form.
+///
+/// Delegates to the single canonical-path owner (`verter_span::path`) so VFS-key
+/// ingestion produces exactly the same canonical ID as every other consumer —
+/// no divergent second normalizer.
 #[cfg(not(target_arch = "wasm32"))]
 fn normalize_path_str(path: &str) -> String {
-    let mut s = path.replace('\\', "/");
-    // Strip \\?\ UNC prefix that canonicalize() adds on Windows
-    if s.starts_with("//?/") {
-        s = s[4..].to_string();
-    }
-    // Lowercase drive letter on Windows (D:/... → d:/...)
-    if s.len() >= 2 && s.as_bytes()[1] == b':' {
-        let mut chars: Vec<char> = s.chars().collect();
-        chars[0] = chars[0].to_ascii_lowercase();
-        s = chars.into_iter().collect();
-    }
-    s
+    verter_span::path::canonicalize_path(path)
 }
 
 #[cfg(test)]
 #[cfg(not(target_arch = "wasm32"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalize_path_str_delegates_to_canonical_owner() {
+        // FIX 3 regression: the owner strips `//?/UNC/` BEFORE `//?/`, so a
+        // Windows UNC file canonicalizes to `//server/share/...`, NOT
+        // `UNC/server/share/...` (the old generic `//?/` strip).
+        assert_eq!(
+            normalize_path_str("//?/UNC/server/share/f"),
+            "//server/share/f"
+        );
+        // Owner strips a strippable trailing slash; the old impl did not.
+        assert_eq!(normalize_path_str("c:/x/y/"), "c:/x/y");
+        // Plain-path passthrough is unchanged.
+        assert_eq!(normalize_path_str("/a/b/c.ts"), "/a/b/c.ts");
+        // Backslash + drive lowering still applied.
+        assert_eq!(normalize_path_str("D:\\x\\y"), "d:/x/y");
+    }
 
     #[test]
     fn read_nonexistent_file() {

@@ -721,6 +721,22 @@ struct ViteAliasEntry {
     replacement: String,
 }
 
+/// Whether `config_path` is in the user's `trustedFiles` set.
+///
+/// This gates whether a vite config is EXECUTED, so it is a same-file identity
+/// test: both the stored trusted entries and the candidate `config_path` are
+/// compared in the shared canonical form (`verter_span::path::canonicalize_path`)
+/// — a bare `\`→`/` would leave a Windows `C:\proj\vite.config.ts` trusted entry
+/// unequal to a canonical `c:/proj/vite.config.ts`, silently refusing to execute
+/// a trusted config (aliases then go missing). Shared by the LSP config flow and
+/// the snapshot builder so there is ONE trust-equality answer.
+pub fn vite_config_is_trusted(trusted_files: &[String], config_path: &str) -> bool {
+    let target = verter_span::path::canonicalize_path(config_path);
+    trusted_files
+        .iter()
+        .any(|tf| verter_span::path::canonicalize_path(tf) == target)
+}
+
 /// Execute a vite config by spawning Node.js (requires explicit trust).
 pub fn execute_trusted_vite_config(
     config_path: &Path,

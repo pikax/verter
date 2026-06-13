@@ -43,7 +43,7 @@ impl ExtensionTypeProvider {
             client,
             contents: Arc::new(Mutex::new(HashMap::new())),
             opened_files: Arc::new(Mutex::new(HashSet::new())),
-            workspace_root: workspace_root.replace('\\', "/"),
+            workspace_root: verter_span::path::canonicalize_path(workspace_root),
             project_roots: Arc::new(parking_lot::RwLock::new(Vec::new())),
         }
     }
@@ -68,17 +68,12 @@ impl ExtensionTypeProvider {
     }
 
     fn normalize_path(path: &str) -> String {
-        path.replace('\\', "/")
+        verter_span::path::canonicalize_path(path)
     }
 
     fn project_root_for(&self, file: &str) -> String {
         let roots = self.project_roots.read();
-        for root in roots.iter() {
-            if file.starts_with(root.as_str()) {
-                return root.clone();
-            }
-        }
-        self.workspace_root.clone()
+        verter_span::path::longest_project_root(file, &roots, &self.workspace_root).to_string()
     }
 }
 
@@ -509,11 +504,12 @@ impl TypeProvider for ExtensionTypeProvider {
                         groups
                             .iter()
                             .flat_map(|group| {
-                                let file_path = group
-                                    .get("file")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or_default()
-                                    .replace('\\', "/");
+                                let file_path = verter_span::path::canonicalize_path(
+                                    group
+                                        .get("file")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or_default(),
+                                );
                                 let content = cache.get(&file_path).map(|s| s.as_str());
                                 group
                                     .get("locs")
@@ -964,6 +960,8 @@ impl TypeProvider for ExtensionTypeProvider {
 
             for folder in &removed {
                 if let Some(uri) = folder.get("uri").and_then(|v| v.as_str()) {
+                    // `uri_to_canonical_id_from_str` already routes through the
+                    // canonical owner — no second canonicalization needed.
                     let canonical = crate::documents::uri_to_canonical_id_from_str(uri);
                     roots.retain(|r| r != &canonical);
                 }

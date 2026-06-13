@@ -123,10 +123,10 @@ pub fn build_workspace_snapshot(
                 reason,
             } = analyze_vite_config(ws, canonical_root.as_str())
             {
-                let is_trusted = vite_opts
-                    .trusted_files
-                    .iter()
-                    .any(|tf| tf.replace('\\', "/") == config_path);
+                let is_trusted = crate::vite_config::vite_config_is_trusted(
+                    &vite_opts.trusted_files,
+                    &config_path,
+                );
                 if !is_trusted {
                     trust_required.push(ViteConfigTrustInfo {
                         config_path,

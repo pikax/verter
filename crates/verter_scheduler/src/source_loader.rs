@@ -180,21 +180,13 @@ impl SourceLoader for DiskSourceLoader {
     }
 }
 
-/// Convert a canonical ID (forward-slash, no drive prefix on Windows)
-/// to an OS path.
+/// Convert a canonical ID (forward-slash, lowercase `c:/` drive on Windows) to
+/// an OS path. This is purely an OS-boundary exit adapter.
 #[cfg(not(target_arch = "wasm32"))]
 fn canonical_to_os_path(canonical_id: &str) -> String {
     #[cfg(target_os = "windows")]
     {
-        // /c/foo/bar → C:\foo\bar
-        if canonical_id.len() >= 3
-            && canonical_id.as_bytes()[0] == b'/'
-            && canonical_id.as_bytes()[2] == b'/'
-        {
-            let drive = canonical_id.as_bytes()[1].to_ascii_uppercase() as char;
-            let rest = &canonical_id[2..];
-            return format!("{drive}:{}", rest.replace('/', "\\"));
-        }
+        // c:/foo/bar → c:\foo\bar (drive-with-colon is a valid Windows path).
         canonical_id.replace('/', "\\")
     }
     #[cfg(not(target_os = "windows"))]
@@ -203,24 +195,10 @@ fn canonical_to_os_path(canonical_id: &str) -> String {
     }
 }
 
-/// Normalize an OS path string to canonical form.
+/// Normalize an OS path string to canonical form via the shared owner.
 #[cfg(not(target_arch = "wasm32"))]
 fn normalize_path_str(path: &str) -> String {
-    let normalized = path.replace('\\', "/");
-    // Strip \\?\ UNC prefix (Windows canonicalize artifact)
-    let normalized = normalized
-        .strip_prefix("//?/")
-        .unwrap_or(&normalized)
-        .to_string();
-    // Lowercase drive letter: C:/foo → /c/foo
-    #[cfg(target_os = "windows")]
-    {
-        if normalized.len() >= 2 && normalized.as_bytes()[1] == b':' {
-            let drive = normalized.as_bytes()[0].to_ascii_lowercase() as char;
-            return format!("/{drive}{}", &normalized[2..]);
-        }
-    }
-    normalized
+    verter_span::path::canonicalize_path(path)
 }
 
 #[cfg(test)]
@@ -325,8 +303,38 @@ mod tests {
         #[test]
         #[cfg(target_os = "windows")]
         fn canonical_to_os_path_windows_drive() {
-            assert_eq!(canonical_to_os_path("/c/foo/bar.vue"), "C:\\foo\\bar.vue");
-            assert_eq!(canonical_to_os_path("/d/src/app.ts"), "D:\\src\\app.ts");
+            // The canonical form is `c:/...` (drive-with-colon), NOT `/c/...`.
+            assert_eq!(canonical_to_os_path("c:/foo/bar.vue"), "c:\\foo\\bar.vue");
+            assert_eq!(canonical_to_os_path("d:/src/app.ts"), "d:\\src\\app.ts");
+
+            // Discriminating negative: the OLD impl carried a drive-as-segment
+            // round-trip that mapped `/c/foo` → `C:\foo`. That branch is DELETED;
+            // a `/c/...` input is now treated as an ordinary path (leading
+            // separator preserved), NOT reconstituted into a `C:\` drive path.
+            // This assertion FAILS against the pre-change tree (which produced
+            // `C:\foo\bar.vue`) and PASSES post-change.
+            assert_eq!(canonical_to_os_path("/c/foo/bar.vue"), "\\c\\foo\\bar.vue");
+            assert_ne!(canonical_to_os_path("/c/foo/bar.vue"), "C:\\foo\\bar.vue");
+            assert_ne!(canonical_to_os_path("/c/foo/bar.vue"), "c:\\foo\\bar.vue");
+        }
+
+        #[test]
+        fn normalize_path_str_strips_extended_and_unc_prefixes() {
+            // Cross-platform: backslash→slash + `//?/` and `//?/UNC/` stripping.
+            assert_eq!(normalize_path_str("\\\\?\\C:\\x"), "c:/x");
+            assert_eq!(normalize_path_str("//?/UNC/server/share"), "//server/share");
+        }
+
+        #[test]
+        #[cfg(target_os = "windows")]
+        fn normalize_path_str_emits_drive_with_colon_not_segment() {
+            // Canonical drive form is `c:/...`, never the drive-as-segment `/c/`.
+            let out = normalize_path_str("C:\\Users\\Dev\\App.vue");
+            assert_eq!(out, "c:/Users/Dev/App.vue");
+            assert!(
+                !out.starts_with("/c/"),
+                "must not use drive-as-segment form"
+            );
         }
     }
 }

@@ -24,6 +24,7 @@ smallvec = "1.15"
 thiserror = "2.0"
 verter_audit = { path = "../verter_audit" }
 verter_scheduler = { path = "../verter_scheduler" }
+verter_span = { path = "../verter_span" }
 xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

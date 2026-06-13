@@ -539,11 +539,11 @@ impl ProjectRegistry {
                         config_path,
                         reason,
                     } => {
-                        // Check if file is trusted
-                        let is_trusted = vite_opts.trusted_files.iter().any(|tf| {
-                            let tf_normalized = tf.replace('\\', "/");
-                            tf_normalized == config_path
-                        });
+                        // Check if file is trusted (canonical same-file identity)
+                        let is_trusted = verter_workspace::vite_config_is_trusted(
+                            &vite_opts.trusted_files,
+                            &config_path,
+                        );
 
                         if is_trusted {
                             if let Some(np) = &vite_opts.node_path {

@@ -347,11 +347,11 @@ async fn handle_message(
             let event_name = msg.get("event").and_then(|v| v.as_str()).unwrap_or("");
             if event_name == "semanticDiag" || event_name == "syntaxDiag" {
                 if let Some(body) = msg.get("body") {
-                    let file = body
-                        .get("file")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .replace('\\', "/");
+                    let file = verter_span::path::canonicalize_path(
+                        body.get("file")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default(),
+                    );
                     let content = {
                         let cache = contents_cache.lock().await;
                         cache.get(&file).cloned()
@@ -478,7 +478,7 @@ async fn configure_tsserver_session(
     transport: Arc<TsserverTransport>,
     workspace_root: &str,
 ) -> Result<String, TypeProviderError> {
-    let ws_root = workspace_root.replace('\\', "/");
+    let ws_root = verter_span::path::canonicalize_path(workspace_root);
     transport
         .request(
             "configure",
@@ -653,21 +653,16 @@ impl TsserverTypeProvider {
         })
     }
 
-    /// Normalize a file path for tsserver (forward slashes, no file:// prefix).
+    /// Normalize a file path for tsserver (canonical forward-slash form).
     fn normalize_path(path: &str) -> String {
-        path.replace('\\', "/")
+        verter_span::path::canonicalize_path(path)
     }
 
-    /// Find the best project root for a file path (longest prefix match).
-    /// Falls back to the global `workspace_root` if no project root matches.
+    /// Find the best project root for a file path (longest directory-boundary
+    /// match). Falls back to the global `workspace_root` if none match.
     fn project_root_for(&self, file: &str) -> String {
         let roots = self.project_roots.read();
-        for root in roots.iter() {
-            if file.starts_with(root.as_str()) {
-                return root.clone();
-            }
-        }
-        self.workspace_root.clone()
+        verter_span::path::longest_project_root(file, &roots, &self.workspace_root).to_string()
     }
 }
 
@@ -1313,11 +1308,12 @@ impl TypeProvider for TsserverTypeProvider {
                         groups
                             .iter()
                             .flat_map(|group| {
-                                let file_path = group
-                                    .get("file")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or_default()
-                                    .replace('\\', "/");
+                                let file_path = verter_span::path::canonicalize_path(
+                                    group
+                                        .get("file")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or_default(),
+                                );
                                 let content = cache.get(&file_path).map(|s| s.as_str());
                                 group
                                     .get("locs")
@@ -1772,7 +1768,8 @@ impl TypeProvider for TsserverTypeProvider {
             // Remove closed folders
             for folder in &removed {
                 if let Some(uri) = folder.get("uri").and_then(|v| v.as_str()) {
-                    let canonical = crate::uri::file_uri_to_path(uri);
+                    let canonical =
+                        verter_span::path::canonicalize_path(&crate::uri::file_uri_to_path(uri));
                     roots.retain(|r| r != &canonical);
                 }
             }
@@ -1780,7 +1777,8 @@ impl TypeProvider for TsserverTypeProvider {
             // Add new folders
             for folder in &added {
                 if let Some(uri) = folder.get("uri").and_then(|v| v.as_str()) {
-                    let canonical = crate::uri::file_uri_to_path(uri);
+                    let canonical =
+                        verter_span::path::canonicalize_path(&crate::uri::file_uri_to_path(uri));
                     if !roots.contains(&canonical) {
                         roots.push(canonical);
                     }
@@ -1814,11 +1812,8 @@ impl TypeProvider for TsserverTypeProvider {
                 // Re-open with fresh projectRootPath from the now-populated project_roots
                 let project_root = {
                     let roots = project_roots.read();
-                    roots
-                        .iter()
-                        .find(|r| file.starts_with(r.as_str()))
-                        .cloned()
-                        .unwrap_or_else(|| workspace_root.clone())
+                    verter_span::path::longest_project_root(file, &roots, &workspace_root)
+                        .to_string()
                 };
                 transport
                     .command_no_response(
@@ -2010,11 +2005,9 @@ pub fn parse_tsserver_location(
     loc: &serde_json::Value,
     contents_cache: &HashMap<String, String>,
 ) -> Option<TypeLocation> {
-    let file = loc
-        .get("file")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .replace('\\', "/");
+    let file = verter_span::path::canonicalize_path(
+        loc.get("file").and_then(|v| v.as_str()).unwrap_or_default(),
+    );
     let start = loc.get("start")?;
     let end = loc.get("end")?;
     let sl = start.get("line")?.as_u64()? as u32;
@@ -2098,11 +2091,12 @@ pub fn parse_tsserver_code_action(
 
     let mut edits = Vec::new();
     for change in changes {
-        let file = change
-            .get("fileName")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .replace('\\', "/");
+        let file = verter_span::path::canonicalize_path(
+            change
+                .get("fileName")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default(),
+        );
         let content = contents_cache.get(&file);
         if let Some(text_changes) = change.get("textChanges").and_then(|v| v.as_array()) {
             for tc in text_changes {
@@ -2844,7 +2838,8 @@ mod tests {
             .expect("configuration should succeed");
         let elapsed = start.elapsed();
 
-        assert_eq!(ws_root, "C:/project");
+        // Canonical form lowercases the Windows drive letter (keeps the colon).
+        assert_eq!(ws_root, "c:/project");
         assert!(
             elapsed < std::time::Duration::from_millis(250),
             "tsserver startup should not wait for inferred project options (elapsed {:?})",

@@ -675,12 +675,18 @@ pub fn uri_to_canonical_id(uri: &Uri) -> String {
     uri_to_canonical_id_from_str(uri.as_str())
 }
 
-/// Convert a `file://` URI string to a canonical filesystem path.
+/// Convert a `file://` URI string to a canonical filesystem path ID.
 ///
-/// Handles percent-encoded characters (e.g., `%3A` → `:` on Windows),
-/// normalises separators to `/`, and restores the leading `/` on Unix.
+/// Handles percent-encoded characters (e.g., `%3A` → `:` on Windows) and
+/// restores the leading `/` on Unix, then routes the result through the single
+/// canonical-path owner (`verter_span::path`) so the produced ID is byte-equal
+/// to every other producer (type providers, VFS ingestion, scheduler). On
+/// Windows this lowercases the drive letter (`C:/…` → `c:/…`) — URI-derived IDs
+/// previously stayed uppercase and split file identity against the owner-
+/// normalized IDs the VFS keys on. On Unix it is a no-op (paths already
+/// canonical).
 pub fn uri_to_canonical_id_from_str(s: &str) -> String {
-    file_uri_to_path(s)
+    verter_span::path::canonicalize_path(&file_uri_to_path(s))
 }
 /// Parse a `verter-virtual://` URI and extract the source .vue file URI.
 ///
@@ -709,9 +715,16 @@ mod tests {
 
     #[test]
     fn test_uri_to_canonical_id_windows_file_uri() {
+        // The canonical-ID owner lowercases the Windows drive letter so a
+        // URI-derived ID is byte-equal to every other producer (type providers,
+        // VFS ingestion) — otherwise `did_open` would key the VFS under
+        // `C:/...` while lookups resolve `c:/...`, splitting file identity.
+        // Pre-fix this returned the uppercase `C:/...`; this assertion is
+        // discriminating.
         let uri: Uri = "file:///C:/Users/dev/project/App.vue".parse().unwrap();
         let id = uri_to_canonical_id(&uri);
-        assert_eq!(id, "C:/Users/dev/project/App.vue");
+        assert_eq!(id, "c:/Users/dev/project/App.vue");
+        assert_ne!(id, "C:/Users/dev/project/App.vue");
     }
 
     #[test]

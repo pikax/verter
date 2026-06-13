@@ -4219,6 +4219,7 @@ dependencies = [
  "tracing",
  "verter_audit",
  "verter_scheduler",
+ "verter_span",
  "walkdir",
  "xxhash-rust",
 ]

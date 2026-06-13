@@ -868,14 +868,19 @@ fn reverse_tsconfig_path(
     let (target_prefix, target_suffix) = if let Some(star) = target_template.find('*') {
         let prefix_part = &target_template[..star];
         let suffix_part = &target_template[star + 1..];
-        (
-            if is_absolute_specifier(prefix_part) {
-                normalize_canonical_id(prefix_part)
-            } else {
-                join_paths(base_url, prefix_part)
-            },
-            suffix_part.to_string(),
-        )
+        let mut prefix = if is_absolute_specifier(prefix_part) {
+            normalize_canonical_id(prefix_part)
+        } else {
+            join_paths(base_url, prefix_part)
+        };
+        // The template's trailing slash (`/workspace/src/*`) is a directory
+        // boundary marker; the canonical-id normalizer strips trailing slashes,
+        // so restore the boundary the template carried — otherwise the captured
+        // remainder would keep a leading `/`.
+        if prefix_part.ends_with('/') && !prefix.ends_with('/') {
+            prefix.push('/');
+        }
+        (prefix, suffix_part.to_string())
     } else {
         // No wildcard — exact match only
         let abs = if is_absolute_specifier(target_template) {
@@ -1605,31 +1610,59 @@ fn match_package_mapping<'a>(
 
 // ── Public path helpers (used by downstream crates) ──
 
-/// Normalize a canonical ID: backslash to slash, lowercase drive letter,
-/// strip Windows extended-length prefix.
+/// Normalize a canonical ID.
+///
+/// Delegates to the single canonical-path owner (`verter_span::path` via the
+/// crate's `canonical_path` re-export): backslash→slash, `//?/UNC/`/`//?/`
+/// extended-prefix stripping, lowercase Windows drive letter, and trailing-slash
+/// stripping (except the roots `/` and `x:/`) — no divergent second normalizer.
+///
+/// The `\\?\` / `//?/` extended-length prefixes the owner strips are the ones
+/// `std::fs::canonicalize()` produces on Windows; this normalizer never touches
+/// disk itself (the `NativeFs` boundary owns all `std::fs::` access).
 pub fn normalize_canonical_id(value: &str) -> String {
-    let normalized = value.replace('\\', "/");
-    // Strip Windows extended-length path prefix (`//?/` or `\\?\`)
-    // produced by `std::fs::canonicalize()` on Windows.
-    let normalized = if let Some(rest) = normalized.strip_prefix("//?/UNC/") {
-        format!("//{rest}")
-    } else if let Some(rest) = normalized.strip_prefix("//?/") {
-        rest.to_string()
-    } else {
-        normalized
-    };
-    if normalized.len() >= 2 && normalized.as_bytes()[1] == b':' {
-        let mut chars = normalized.chars();
-        if let Some(first) = chars.next() {
-            return format!("{}{}", first.to_ascii_lowercase(), chars.as_str());
-        }
-    }
-    normalized
+    crate::canonical_path::canonicalize_path(value)
 }
 
 /// Collapse `.` and `..` segments from a path.
 pub fn collapse_path(value: &str) -> String {
     let normalized = normalize_canonical_id(value);
+
+    // UNC paths (`//host/share/...`): the `//host/share` portion is the immutable
+    // root — preserved verbatim, and `..` can NEVER escape above the share (just
+    // as `..` can't escape `/` or a drive root). Splitting `//` as ordinary
+    // segments would either flatten it to `/host/...` or let `..` pop the host /
+    // share, both of which split UNC file identity. Handle it as a dedicated
+    // branch: peel off host + share as the root, collapse only the tail below it.
+    if let Some(after) = normalized.strip_prefix("//") {
+        let mut segs = after.split('/').filter(|s| !s.is_empty());
+        let mut root = String::from("//");
+        if let Some(host) = segs.next() {
+            root.push_str(host);
+        }
+        if let Some(share) = segs.next() {
+            root.push('/');
+            root.push_str(share);
+        }
+        let mut parts: Vec<&str> = Vec::new();
+        for part in segs {
+            match part {
+                "." => {}
+                // Bounded at the share root: popping an empty stack is a no-op,
+                // so `..` never escapes `//host/share`.
+                ".." => {
+                    parts.pop();
+                }
+                p => parts.push(p),
+            }
+        }
+        return if parts.is_empty() {
+            root
+        } else {
+            format!("{root}/{}", parts.join("/"))
+        };
+    }
+
     let (prefix, rest) = if normalized.len() >= 2 && normalized.as_bytes()[1] == b':' {
         (normalized[..2].to_string(), normalized[2..].to_string())
     } else {

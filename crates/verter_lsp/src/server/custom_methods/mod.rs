@@ -644,8 +644,12 @@ impl VerterLanguageServer {
             .get_canonical_id(&parsed_uri)
             .unwrap_or_else(|| uri_to_canonical_id(&parsed_uri));
 
-        // Normalize the target path for comparison
-        let target_normalized = target_canonical.replace('\\', "/");
+        // Canonicalize the target path for comparison through the shared owner
+        // (NOT a bare `\`→`/`): the comparison below is string-equality, so both
+        // sides must be in the same canonical form (drive-lowercased, extended
+        // prefix stripped) or a Windows `C:/…` target would never equal an
+        // owner-canonicalized `c:/…` import resolution.
+        let target_normalized = verter_span::path::canonicalize_path(&target_canonical);
 
         let file_list = self.documents.host.list_files();
         let mut parents = Vec::new();
@@ -663,8 +667,8 @@ impl VerterLanguageServer {
             if *file_kind != verter_session::FileKind::VueSfc {
                 continue;
             }
-            // Skip the target file itself
-            let normalized_id = canonical_id.replace('\\', "/");
+            // Skip the target file itself (canonical-form comparison via owner)
+            let normalized_id = verter_span::path::canonicalize_path(canonical_id);
             if normalized_id == target_normalized {
                 continue;
             }
@@ -696,7 +700,8 @@ impl VerterLanguageServer {
                                 src,
                                 resolved
                             );
-                            let resolved_normalized = resolved.replace('\\', "/");
+                            let resolved_normalized =
+                                verter_span::path::canonicalize_path(&resolved);
                             let matches = import_resolved_matches_target(
                                 &resolved_normalized,
                                 &target_normalized,

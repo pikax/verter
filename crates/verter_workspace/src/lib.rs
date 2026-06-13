@@ -161,8 +161,8 @@ pub use types::{
 #[cfg(not(target_arch = "wasm32"))]
 pub use vite_config::{
     analyze_vite_config, discover_vite_aliases, execute_trusted_vite_config, find_vite_config,
-    get_lkg_or_empty, normalize_alias_pair, TrustedExecResult, ViteConfigAnalysis,
-    ViteConfigOptions, ViteConfigTrustInfo,
+    get_lkg_or_empty, normalize_alias_pair, vite_config_is_trusted, TrustedExecResult,
+    ViteConfigAnalysis, ViteConfigOptions, ViteConfigTrustInfo,
 };
 pub use workspace_snapshot::{
     ConfiguredOwnerResolution, OwnershipProject, ProjectId, ProjectPayload, SnapshotGeneration,

@@ -46,11 +46,7 @@ pub struct VfsProjectConfig {
 impl VfsProjectConfig {
     /// Check if a file path is under this project's root.
     fn is_under_root(&self, canonical_id: &str) -> bool {
-        let normalized = normalize_path(canonical_id);
-        let root = normalize_path(&self.root);
-        normalized.starts_with(&root)
-            && (normalized.len() == root.len()
-                || normalized.as_bytes().get(root.len()) == Some(&b'/'))
+        verter_span::path::is_under_dir(canonical_id, &self.root)
     }
 
     /// Convert to an `IdeProjectConfig` for the project resolver.
@@ -87,12 +83,18 @@ impl ProjectGraph {
     }
 
     /// Build a project graph from a list of project configs.
-    /// Sorts them by precedence: (rank ASC, root_length DESC).
+    /// Sorts them by precedence: (rank ASC, CANONICAL root_length DESC).
+    ///
+    /// Precedence among multiple containing projects is "deepest root wins", and
+    /// `is_under_root` matches on the CANONICAL form — so the tie-break must rank
+    /// by canonical length too. Ranking by raw `root.len()` lets a non-canonical
+    /// root (e.g. a `//?/C:/r` extended prefix, raw len 8) outrank a genuinely
+    /// deeper canonical root (`c:/r/p`, len 6), winning ownership it should lose.
     pub fn from_configs(mut projects: Vec<VfsProjectConfig>) -> Self {
         projects.sort_by(|a, b| {
-            a.rank
-                .cmp(&b.rank)
-                .then_with(|| b.root.len().cmp(&a.root.len()))
+            let a_len = verter_span::path::canonicalize_path_cow(&a.root).len();
+            let b_len = verter_span::path::canonicalize_path_cow(&b.root).len();
+            a.rank.cmp(&b.rank).then_with(|| b_len.cmp(&a_len))
         });
         Self {
             projects,
@@ -101,12 +103,17 @@ impl ProjectGraph {
     }
 
     /// Find the owning project for a file.
+    ///
+    /// The returned `project_root` is CANONICAL — a project may have been
+    /// constructed with a non-canonical root (the tsconfig root comes from a
+    /// filesystem walk that can yield backslashes / extended prefixes on
+    /// Windows), and that raw form must never leak back out as the project root.
     pub fn owner_for_file(&self, canonical_id: &str) -> Option<ProjectOwnership> {
         self.projects
             .iter()
             .find(|p| p.is_under_root(canonical_id))
             .map(|p| ProjectOwnership {
-                project_root: p.root.clone(),
+                project_root: verter_span::path::canonicalize_path(&p.root),
                 tsconfig_path: p.tsconfig_path.clone(),
             })
     }
@@ -198,7 +205,7 @@ impl ProjectGraph {
         let mut trust_required = Vec::new();
 
         for root_str in roots {
-            let canonical = root_str.replace('\\', "/");
+            let canonical = verter_span::path::canonicalize_path(root_str);
             let root_path = PathBuf::from(&canonical);
 
             // Discover tsconfigs under this root
@@ -246,10 +253,10 @@ impl ProjectGraph {
                         config_path,
                         reason,
                     } => {
-                        let is_trusted = vite_opts.trusted_files.iter().any(|tf| {
-                            let tf_normalized = tf.replace('\\', "/");
-                            tf_normalized == config_path
-                        });
+                        let is_trusted = crate::vite_config::vite_config_is_trusted(
+                            &vite_opts.trusted_files,
+                            &config_path,
+                        );
 
                         if is_trusted {
                             if let Some(np) = &vite_opts.node_path {
@@ -318,7 +325,72 @@ impl ProjectGraph {
     }
 }
 
-/// Normalize a path to lowercase with forward slashes for comparison.
-fn normalize_path(path: &str) -> String {
-    path.replace('\\', "/").to_lowercase()
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg(root: &str) -> VfsProjectConfig {
+        VfsProjectConfig {
+            root: root.to_string(),
+            rank: ProjectRank::Inferred,
+            tsconfig_path: None,
+            root_files: vec![],
+            extensions: vec![".vue".to_string()],
+            workspace_root: root.to_string(),
+            workspace_aliases: vec![],
+            compiler_options: IdeProjectCompilerOptions::default(),
+            references: vec![],
+            membership: ProjectMembership::MatchAll,
+        }
+    }
+
+    #[test]
+    fn is_under_root_is_case_preserving() {
+        // Regression: the old whole-path lowercase normalize collapsed distinct
+        // case. On case-sensitive filesystems `/proj/App` does NOT contain
+        // `/proj/app/x`.
+        let project = cfg("/proj/App");
+        assert!(!project.is_under_root("/proj/app/x"));
+        // Same casing still matches.
+        assert!(cfg("/proj/app").is_under_root("/proj/app/x"));
+    }
+
+    #[test]
+    fn is_under_root_rejects_sibling_prefix() {
+        let project = cfg("/proj/App");
+        assert!(!project.is_under_root("/proj/Appendix/x"));
+        assert!(project.is_under_root("/proj/App"));
+        assert!(project.is_under_root("/proj/App/sub/x.vue"));
+    }
+
+    #[test]
+    fn owner_for_file_returns_canonical_root_not_raw() {
+        // A project constructed with a raw extended-prefix root must not leak
+        // that raw form back as the project root — `owner_for_file` returns the
+        // canonical `c:/repo/pkg`, never the stored `//?/C:/repo/pkg`.
+        let graph = ProjectGraph::from_configs(vec![cfg("//?/C:/repo/pkg")]);
+        let owner = graph.owner_for_file("c:/repo/pkg/App.vue").unwrap();
+        assert_eq!(owner.project_root, "c:/repo/pkg");
+        assert_ne!(owner.project_root, "//?/C:/repo/pkg");
+    }
+
+    #[test]
+    fn from_configs_precedence_ranks_by_canonical_length() {
+        // Two same-rank projects both contain the file after canonicalization;
+        // the genuinely deeper canonical root (`c:/r/p`) must win precedence,
+        // NOT the shallower raw `//?/C:/r` whose inflated raw length (8 > 6)
+        // would otherwise sort first and win ownership it should lose.
+        let graph = ProjectGraph::from_configs(vec![cfg("//?/C:/r"), cfg("c:/r/p")]);
+        let owner = graph.owner_for_file("c:/r/p/App.vue").unwrap();
+        assert_eq!(owner.project_root, "c:/r/p");
+        // Order-independence: reversed input picks the same canonical-deeper root.
+        let graph2 = ProjectGraph::from_configs(vec![cfg("c:/r/p"), cfg("//?/C:/r")]);
+        assert_eq!(
+            graph2
+                .owner_for_file("c:/r/p/App.vue")
+                .unwrap()
+                .project_root,
+            "c:/r/p"
+        );
+    }
 }

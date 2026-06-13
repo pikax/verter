@@ -247,7 +247,7 @@ async fn create_type_provider(
                 .map(|p| p.to_string_lossy().to_string())
         })
         .unwrap_or_else(|| ".".to_string());
-    let ws_canonical = workspace_root.replace('\\', "/");
+    let ws_canonical = verter_span::path::canonicalize_path(&workspace_root);
 
     match args.type_provider.as_str() {
         "off" => {

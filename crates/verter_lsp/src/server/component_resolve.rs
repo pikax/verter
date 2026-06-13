@@ -653,15 +653,15 @@ impl VerterLanguageServer {
         None
     }
 
+    /// Canonicalize a raw type-provider path into the shared canonical-ID form
+    /// before keying `host.get_analysis`. Delegates to the single owner
+    /// (`verter_span::path`) so this lookup keys byte-identically to every other
+    /// producer — the previous hand-rolled form omitted the `//?/` extended-
+    /// prefix strip and the trailing-slash strip, so a Windows extended-prefix
+    /// path missed the analysis cache. The leading `trim()` is retained because
+    /// provider locations can carry surrounding whitespace.
     pub(super) fn canonicalize_provider_path(path: &str) -> String {
-        let normalized = path.trim().replace('\\', "/");
-        if normalized.len() >= 2 && normalized.as_bytes()[1] == b':' {
-            let mut chars = normalized.chars();
-            let first = chars.next().unwrap_or_default().to_ascii_lowercase();
-            format!("{first}{}", chars.as_str())
-        } else {
-            normalized
-        }
+        verter_span::path::canonicalize_path(path.trim())
     }
 
     /// Resolve a raw type-provider location that lands on a barrel file to the terminal target.
@@ -1089,5 +1089,36 @@ impl VerterLanguageServer {
                 )
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod canonicalize_provider_path_tests {
+    use super::VerterLanguageServer;
+
+    #[test]
+    fn delegates_to_owner_strips_extended_prefix_and_trailing_slash() {
+        // Pre-fix the hand-rolled body omitted the `//?/` extended-prefix strip
+        // and the trailing-slash strip, so a Windows extended-prefix path keyed
+        // `get_analysis` under `//?/D:/x/` and missed the cache. Delegating to
+        // the owner produces the same `d:/x` every other producer keys on.
+        assert_eq!(
+            VerterLanguageServer::canonicalize_provider_path("  //?/D:/x/  "),
+            "d:/x"
+        );
+        assert_ne!(
+            VerterLanguageServer::canonicalize_provider_path("//?/D:/x/"),
+            "//?/D:/x/"
+        );
+        // UNC extended prefix and backslash + drive-lower still handled.
+        assert_eq!(
+            VerterLanguageServer::canonicalize_provider_path("\\\\?\\UNC\\srv\\sh"),
+            "//srv/sh"
+        );
+        // Plain Unix path passes through unchanged (trim still applied).
+        assert_eq!(
+            VerterLanguageServer::canonicalize_provider_path(" /a/b/c.ts "),
+            "/a/b/c.ts"
+        );
     }
 }

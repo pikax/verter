@@ -519,3 +519,32 @@ fn trusted_execution_env_sanitization() {
     );
     assert!(result.is_none(), "should return None for missing node");
 }
+
+// ── vite_config_is_trusted: canonical same-file identity ──────────────
+
+#[test]
+fn vite_config_is_trusted_matches_across_canonical_forms() {
+    // A trusted entry stored with a backslash + uppercase Windows drive must
+    // still match a canonical `c:/…` config_path — both sides canonicalize.
+    // Pre-fix (`tf.replace('\\','/') == config_path`) this returned false on
+    // Windows (`C:/…` != `c:/…`), silently refusing to execute a trusted config.
+    let trusted = vec!["C:\\proj\\vite.config.ts".to_string()];
+    assert!(vite_config_is_trusted(&trusted, "c:/proj/vite.config.ts"));
+    // Extended-prefix trusted entry also matches the canonical form.
+    let trusted_ext = vec!["//?/C:/proj/vite.config.ts".to_string()];
+    assert!(vite_config_is_trusted(
+        &trusted_ext,
+        "c:/proj/vite.config.ts"
+    ));
+    // Unix is a no-op: exact match still trusted, different file still not.
+    assert!(vite_config_is_trusted(
+        &["/proj/vite.config.ts".to_string()],
+        "/proj/vite.config.ts"
+    ));
+    assert!(!vite_config_is_trusted(
+        &["/proj/vite.config.ts".to_string()],
+        "/other/vite.config.ts"
+    ));
+    // NEGATIVE: an untrusted file is never trusted.
+    assert!(!vite_config_is_trusted(&trusted, "c:/proj/other.config.ts"));
+}

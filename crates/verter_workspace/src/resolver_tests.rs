@@ -2915,3 +2915,82 @@ fn unowned_resolution_remains_unbounded() {
         "unowned resolution should still find packages (unbounded walk)"
     );
 }
+
+// ── normalize_canonical_id / collapse_path — delegation to canonical owner ──
+
+#[test]
+fn normalize_canonical_id_strips_trailing_slash_via_owner() {
+    // FIX 4 regression: delegating to the canonical owner strips a strippable
+    // trailing slash (the old impl left `c:/x/y/`).
+    assert_eq!(normalize_canonical_id("c:/x/y/"), "c:/x/y");
+    // UNC: `//?/UNC/` stripped before `//?/`.
+    assert_eq!(normalize_canonical_id("//?/UNC/s/sh/f"), "//s/sh/f");
+    // drive lowering + backslash still applied.
+    assert_eq!(normalize_canonical_id("D:\\x\\y"), "d:/x/y");
+    // roots preserved (not stripped).
+    assert_eq!(normalize_canonical_id("c:/"), "c:/");
+    assert_eq!(normalize_canonical_id("/"), "/");
+}
+
+#[test]
+fn collapse_path_still_collapses_dot_and_dotdot() {
+    // FIX 4: collapse_path keeps its `.`/`..` segment-collapse semantics even
+    // though its front-half normalization now delegates to the owner.
+    assert_eq!(collapse_path("c:/a/./b/../c"), "c:/a/c");
+    assert_eq!(collapse_path("/a/b/../c"), "/a/c");
+    assert_eq!(collapse_path("/a/./b/"), "/a/b");
+}
+
+#[test]
+fn collapse_path_preserves_unc_host_prefix() {
+    // Now that the URI/owner layer produces `//server/share/...` for UNC files,
+    // collapse_path must NOT flatten the `//` host prefix to a single `/` — that
+    // would give the same UNC file two canonical IDs. Pre-fix `//server/share`
+    // collapsed to `/server/share`; this asserts the UNC prefix survives the
+    // `.`/`..` collapse.
+    assert_eq!(
+        collapse_path("//server/share/proj/src/../Foo.vue"),
+        "//server/share/proj/Foo.vue"
+    );
+    assert_eq!(collapse_path("//server/share/a/./b"), "//server/share/a/b");
+    assert_eq!(collapse_path("//server/share"), "//server/share");
+    // NEGATIVE: must not degrade to a single-slash absolute path.
+    assert_ne!(collapse_path("//server/share/x"), "/server/share/x");
+
+    // `..` must NOT escape the UNC share root (`//host/share` is immutable, like
+    // `/` or a drive root). `..` directly under the share is a no-op, NOT a pop
+    // of the share/host segment.
+    assert_eq!(
+        collapse_path("//server/share/../App.vue"),
+        "//server/share/App.vue"
+    );
+    assert_eq!(collapse_path("//server/share/.."), "//server/share");
+    assert_eq!(
+        collapse_path("//server/share/a/../../b"),
+        "//server/share/b"
+    );
+    // NEGATIVE: the share segment must survive — never `//server/App.vue`.
+    assert_ne!(
+        collapse_path("//server/share/../App.vue"),
+        "//server/App.vue"
+    );
+    assert_ne!(collapse_path("//server/share/.."), "//server");
+}
+
+#[test]
+fn join_paths_preserves_unc_host_prefix() {
+    // The flow codexB cited: a relative import resolved against a UNC base must
+    // keep the `//` host prefix (join_paths routes through collapse_path).
+    assert_eq!(
+        join_paths("//server/share/proj/src", "./Foo.vue"),
+        "//server/share/proj/src/Foo.vue"
+    );
+    assert_eq!(
+        join_paths("//server/share/proj/src", "../Bar.vue"),
+        "//server/share/proj/Bar.vue"
+    );
+    assert_ne!(
+        join_paths("//server/share/proj/src", "./Foo.vue"),
+        "/server/share/proj/src/Foo.vue"
+    );
+}

@@ -831,13 +831,17 @@ fn parse_lsp_location(loc: &serde_json::Value, content: Option<&str>) -> Option<
     })
 }
 
-/// Convert a `file://` URI string to a filesystem path.
+/// Convert a `file://` URI from TSGO into the shared CANONICAL filesystem-path
+/// ID used in every path-bearing DTO this provider returns (`TypeLocation`,
+/// `RenameLocation`, `TypeCodeEdit`).
 ///
-/// Handles both Windows (`file:///C:/...`) and Unix (`file:///home/...`) URIs.
-/// Also handles percent-encoded URIs from TSGO (e.g., `file:///c%3A/...`).
-/// Falls back to returning the input unchanged if it's not a `file://` URI.
+/// Handles both Windows (`file:///C:/...`) and Unix (`file:///home/...`) URIs and
+/// percent-encoded TSGO URIs (`file:///c%3A/...`), then routes the result through
+/// the single canonical-path owner so TSGO emits the SAME ID as the documents/
+/// VFS layer (`c:/...`, not `D:/...`). Without this the TSGO provider would
+/// split file identity on Windows for go-to-def / hover / rename / code-actions.
 fn uri_to_file_path(uri: &str) -> String {
-    file_uri_to_path(uri)
+    verter_span::path::canonicalize_path(&file_uri_to_path(uri))
 }
 
 /// Percent-decode a URI string. Handles standard `%XX` encoding.
@@ -2418,7 +2422,10 @@ fn parse_rename_edit(
     let range = edit.get("range")?;
     let (start, end) = parse_range_to_offsets(range, content)?;
     Some(RenameLocation {
-        path: uri.to_string(),
+        // Canonical filesystem-path ID, matching `TypeLocation.path` and the
+        // tsserver provider — NOT the raw `file://` URI (which would split file
+        // identity vs the documents/VFS layer on Windows).
+        path: uri_to_file_path(uri),
         start,
         end,
     })
@@ -2523,7 +2530,8 @@ fn parse_text_edit_to_code_edit(
     let new_text = te.get("newText")?.as_str()?.to_string();
     let (start, end) = parse_range_to_offsets(range, content)?;
     Some(TypeCodeEdit {
-        path: uri.to_string(),
+        // Canonical filesystem-path ID (see `parse_rename_edit`), not the raw URI.
+        path: uri_to_file_path(uri),
         start,
         end,
         new_text,
@@ -2962,6 +2970,66 @@ pub fn create_test_project(dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+// Ungated unit tests for the pure URI→canonical-path DTO parsers. These run in
+// the canonical `cargo nextest run --workspace` gate (no `__lsp_tests` harness
+// dependency) so the G1 contract — every path-bearing TSGO DTO carries the
+// shared CANONICAL filesystem ID, not a raw `file://` URI — is enforced.
+#[cfg(test)]
+mod dto_path_canonicalization_tests {
+    use super::{parse_rename_edit, parse_text_edit_to_code_edit, uri_to_file_path};
+
+    fn edit_json() -> serde_json::Value {
+        serde_json::json!({
+            "range": {
+                "start": { "line": 0, "character": 0 },
+                "end": { "line": 0, "character": 1 }
+            }
+        })
+    }
+
+    #[test]
+    fn uri_to_file_path_canonicalizes_drive_and_unc() {
+        // Drive lowered to the shared canonical form (was `D:/…` raw).
+        assert_eq!(uri_to_file_path("file:///D:/x/App.vue"), "d:/x/App.vue");
+        assert_ne!(uri_to_file_path("file:///D:/x/App.vue"), "D:/x/App.vue");
+        // UNC authority preserved + canonical.
+        assert_eq!(
+            uri_to_file_path("file://srv/share/App.vue"),
+            "//srv/share/App.vue"
+        );
+        // Unix is a no-op.
+        assert_eq!(
+            uri_to_file_path("file:///home/u/App.vue"),
+            "/home/u/App.vue"
+        );
+    }
+
+    #[test]
+    fn parse_rename_edit_stores_canonical_path_not_raw_uri() {
+        // The DTO path must be the canonical filesystem ID, NEVER the raw URI.
+        // Reverting `parse_rename_edit` to `path: uri.to_string()` fails this.
+        let loc = parse_rename_edit("file:///D:/proj/App.vue", &edit_json(), None).unwrap();
+        assert_eq!(loc.path, "d:/proj/App.vue");
+        assert_ne!(loc.path, "file:///D:/proj/App.vue");
+        assert!(!loc.path.starts_with("file://"));
+    }
+
+    #[test]
+    fn parse_text_edit_to_code_edit_stores_canonical_path_not_raw_uri() {
+        let te = serde_json::json!({
+            "range": {
+                "start": { "line": 0, "character": 0 },
+                "end": { "line": 0, "character": 1 }
+            },
+            "newText": "x"
+        });
+        let edit = parse_text_edit_to_code_edit("file:///D:/proj/App.vue", &te, None).unwrap();
+        assert_eq!(edit.path, "d:/proj/App.vue");
+        assert_ne!(edit.path, "file:///D:/proj/App.vue");
+        assert!(!edit.path.starts_with("file://"));
+    }
+}
+
 // Tests that depend on LSP-internal types (PositionMapper, uri_to_canonical_id, merge)
 // are kept in verter_lsp. Only transport-level tests that use runtime-local types live here.
 #[cfg(all(test, feature = "__lsp_tests"))]
@@ -3214,7 +3282,14 @@ import Bar from './Bar.vue'"#;
             uri_to_file_path("file:///d:/dev/project/src/utils.ts"),
             "d:/dev/project/src/utils.ts"
         );
+        // Drive letter is lowered by the canonical owner — TSGO emits the same
+        // `c:/...` ID as documents/VFS (pre-fix this stayed `C:/...` and split
+        // file identity on Windows go-to-def/hover/rename/code-actions).
         assert_eq!(
+            uri_to_file_path("file:///C:/Users/test/file.ts"),
+            "c:/Users/test/file.ts"
+        );
+        assert_ne!(
             uri_to_file_path("file:///C:/Users/test/file.ts"),
             "C:/Users/test/file.ts"
         );
@@ -3237,8 +3312,13 @@ import Bar from './Bar.vue'"#;
             "untitled:Untitled-1"
         );
 
-        // file:// with authority (UNC-style)
+        // file:// with authority (UNC) — authority preserved as the `//` UNC
+        // prefix and canonicalized, NOT dropped to `server/share/file.ts`.
         assert_eq!(
+            uri_to_file_path("file://server/share/file.ts"),
+            "//server/share/file.ts"
+        );
+        assert_ne!(
             uri_to_file_path("file://server/share/file.ts"),
             "server/share/file.ts"
         );
