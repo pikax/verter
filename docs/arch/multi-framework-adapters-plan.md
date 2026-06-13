@@ -1048,8 +1048,11 @@ consumers and call the relocated delegates.
   `GRAPH_OPERATION_FRAMEWORK_SURFACES` executor (and the module-private `ExecutorResolveCtx`
   home); `vue_exec.rs` is the relocated Vue resolution-delegate module (the Vue re-housing
   bullet below). The executor:
-  `VerterHost::resolve_framework_surface_with_audit(FrameworkSurfaceRequest)`:
-  validate (`validate_framework_surface_request` + the D-s op-minimum gate) → intern id →
+  `VerterHost::resolve_framework_surface_with_audit(TypeInfoGraphRequest)` — the audited entry
+  takes the FULL `TypeInfoGraphRequest` envelope B1 landed and runs `validate_type_info_graph_request`
+  FIRST (the earlier `FrameworkSurfaceRequest` / `validate_framework_surface_request` prose is
+  superseded by this envelope signature, the D-ai-ratified resolution that matches the live validator):
+  validate (`validate_type_info_graph_request` + the D-s op-minimum gate) → intern id →
   registry lookup → resolve selector (default-export components via the synthesized `default`) →
   adapter plans (against the facts/carrier-only `FrameworkAdapterCtx`, D-as) → executor resolves
   each `PlannedDemand` through the shared engine via its private resolve surface → adapter
