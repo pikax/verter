@@ -2241,10 +2241,14 @@ plan transcribes (§2); do not reorder.
 
 ---
 
-### XP — nuxt-ui component-meta parity gaps (XP.2 + XP.3 LANDED on `mom/meta-xp23`; XP.1 tracked, not yet scheduled)
+### XP — nuxt-ui component-meta parity gaps (XP.2 + XP.3 LANDED on `mom/meta-xp23`; XP.1 corrected + XP.4 + XP.5 tracked, not yet scheduled)
 
-Three CURRENT-pipeline component-meta parity defects, observed as typecheck
-divergences against the `vue-component-meta` baseline on the real nuxt-ui corpus.
+Five CURRENT-pipeline component-meta parity rows, observed as typecheck
+divergences against the `vue-component-meta` baseline on the real nuxt-ui corpus
+(XP.1 corrected per the v4.8.2 re-verification below; XP.2 + XP.3 LANDED; XP.4 +
+XP.5 added as post-U2 follow-ups from that same re-verification), plus a class/style
+note recorded as a vue-component-meta divergence where Verter is source-faithful —
+NOT a Verter defect.
 These are TRACKED FOLLOW-UPS, not scheduled blocks: no critical-path insertion, no
 deps-graph edges, no sequencing claim beyond "not yet scheduled". They are NOT
 U14-adapter-rebuild scope — U14's "4 known Vue mismatch cases" (Popover
@@ -2255,76 +2259,129 @@ adapter must reproduce the fixed behavior. (U14's actual bar is its 4
 mismatch-case regression tests plus its stated existing-corpus regression-risk
 prose — "regression risk against the existing corpus is greatest here"; U14
 names NO standing existing-corpus regression guard.) A
-fourth observed defect from the same corpus diff (the Accordion `update:modelValue`
-emit payload) maps to an EXISTING ignored manifest row and gets NO item here — see
-the real-corpus manifestation note in the U2 block below.
+further observed defect from that original corpus diff (the Accordion
+`update:modelValue` emit payload) maps to an EXISTING ignored manifest row and gets
+NO item here — see the real-corpus manifestation note in the U2 block below.
 
-The family counts cited below (253 missing members / 224 empty-description /
+The XP.2 / XP.3 family counts cited below (224 empty-description /
 154 tags / 111 default-value, 81 of them quoting-only) come from the defining
 artifact for these families: the diff of verter's component-meta output against
 the `vue-component-meta` baseline over the real nuxt-ui corpus (the comparison
 the `bench:meta:ui` harness's expected-backend mode drives;
 `packages/benchmark/src/meta-ui-bench.ts`, corpus at
 `.integration-tests/repos/nuxt-ui`). No in-repo artifact pins these counts —
-the families are re-derived by re-running that comparison.
+the families are re-derived by re-running that comparison. The original XP.1
+"253 missing members" figure from that same unpinned sweep is CLOSED — XP1PREP
+refuted it reproducing via the stated heritage-`Pick` mechanism on five rails, and
+the corrected XP.1 below carries its own pinned v4.8.2 evidence in its place.
 
-**Severity order is XP.1 > XP.2 > XP.3, and why:** XP.1 is member-PRESENCE loss —
-the picked heritage members never surface at all, accounting for most of the 253
-missing members in the corpus diff; XP.2 is metadata loss at scale on members that
-DO surface (224 empty-description / 154 tags mismatch families); XP.3 is a
-cosmetic display divergence (quoting-only default-value text), type-semantics
-harmless — display/source-fidelity only: default-value text fidelity is what
-distinguishes a string literal from an identifier in the published API — but
-baseline-divergent at volume.
+**Severity order — XP.1 (sev 1) > {XP.2, XP.4} (sev 2) > {XP.3, XP.5} (sev 3),
+and why:** XP.1 is member-PRESENCE loss — closed cross-file heritage / object-filter
+members never surface at all (e.g. Button drops the entire `LinkProps` set); it
+outranks every other row. The severity-2 rows are published-type/schema corruption
+on surfaces that still partly appear: XP.2 is metadata loss at scale on members that
+DO surface (224 empty-description / 154 tags mismatch families); XP.4 is a
+directly-declared imported-alias prop wrongly EXPANDED (the published type becomes a
+materially-wrong inlined surface where vcm and the heritage path both keep a shallow
+`Ref`). The severity-3 rows are display/compat-layer divergences, type-semantics
+harmless but baseline-divergent at volume: XP.3 is the quoting-only default-value
+text divergence (default-value text fidelity distinguishes a string literal from an
+identifier in the published API); XP.5 is the compat slot-binding function printer
+divergence (`(props?: mapped): string` vs vcm's arrow form).
 
-#### XP.1 — Heritage `Pick` / `Partial<Pick>` member contribution dropped on the real corpus (severity 1)
+#### XP.1 — Routed cross-file heritage / object-filter (`Omit` / `Pick`) resolution drop (severity 1)
 
-- **Defect:** members contributed through heritage `Pick<...>` /
-  `Partial<Pick<...>>` clauses are dropped from the published prop surface on the
-  real nuxt-ui corpus — most of the 253 missing members in the baseline diff.
-  `ChatPromptProps extends Pick<TextareaProps, 'rows' | 'autofocus' | … |
-  'loading'>` loses ALL 11 picked props; the same family reproduces on
-  CommandPalette, ContentSearch, DashboardSearch, and the three `Editor*Menu`
-  components (`extends Partial<Pick<EditorMenuOptions<T>, …>>`).
-- **Refuted attribution:** this is NOT the tracked
-  `Pick<PropsBase<UIMessage[]>,'icon'>` chained-conditional `semanticMiss`
-  reduction gap — `TextareaProps` is a CONCRETE fixed-key generic interface with
-  defaulted parameters (vendored fixture
-  `crates/verter_session/tests/component_meta_audit_corpus/fixtures/Textarea.vue:15-54`),
-  not conditional-bodied.
-- **Owner layer:** reducer — the L1 key-domain closedness classifier and its
-  cross-file resolution hops
-  (`crates/verter_session/src/project_semantic_dispatch/raise.rs`), judging
-  real-corpus closed-in-TS sources OPEN-or-UNKNOWN (or failing to resolve a hop),
-  so the by-design open-domain carrier-stop suppresses the picked members.
-- **Candidate sub-mechanisms (both untracked elsewhere):** (a) the bounded
-  key-domain walk budget `KEY_DOMAIN_TYPE_EXPR_WALK_BUDGET = 256`
-  (`raise.rs:2052-2058`; exhaustion ⇒ conservatively OPEN) exhausted by the huge
-  real heritage graphs (`TextareaProps` → `Omit<TextareaHTMLAttributes, …>` → the
-  full HTML-attributes graph; reka-ui heritage chains; tiptap-backed
-  `EditorMenuOptions`); (b) an unresolved hop in the closedness walk through the
-  nuxt-ui `'../types'` barrel re-exporting types from `.vue` modules
-  (undecidable ⇒ OPEN).
-- **Why the default gate never sees it:** hermetic `extends Pick<Concrete, keys>`
-  coverage is GREEN on the current tree
-  (`crates/verter_session/src/meta_tests.rs:11618-11671` and siblings), and the
-  OPEN-judged carrier-stop is pinned as correct (`meta_tests.rs:4404-4469`) — the
-  gap manifests only at real-corpus scale/import-shape: the vendored corpus audit
-  tests tolerate `ResolutionFailed`, and the external-corpus gate is feature-gated
-  out of the canonical run.
-- **Lineage (plausible, UNVERIFIED):** before the L1 open-domain carrier-stop
-  landed (CARRIERSTOP `54d394e5b`, follow-up METAFOLLOWUP `1860d6655`), these
-  heritage Picks plausibly flattened eagerly — the carrier-stop traded eager
-  flattening for conservatism — so the fix may be hunting a
-  regression-by-conservatism rather than a never-worked; this lineage is
-  unverified, so bisect before assuming greenfield.
-- **Acceptance (discriminating):** the picked heritage members surface on the
-  affected components' prop meta on the real nuxt-ui corpus (e.g. ChatPrompt
-  publishes all 11 picked `TextareaProps` members), verified on the real
-  nuxt-ui corpus run (the feature-gated `external-corpus` /
-  `bench:meta:ui`-class real-component run), not a hermetic fixture; the fix
-  names which open-or-unknown predicate fired (budget vs unresolved-hop) and
-  lands a discriminating regression at that scale/shape.
+- **Closure of the original claim (REFUTED — do NOT keep the heritage-`Pick`
+  wording or its fix direction):** the prior XP.1 mechanism — heritage `Pick<...>` /
+  `Partial<Pick<...>>` member-drop — does NOT reproduce. The XP1PREP prework
+  exonerated it on FIVE rails at verter `94fc46d3c` / corpus `v4.6.0-14-g39665c9d4`:
+  fresh-cold native (back through `3424e23d8`), instrumented in-process predicate,
+  one-host warm, session-overlay mimic, and the real JS-compat/NAPI bench — both
+  candidate sub-mechanisms (the `KEY_DOMAIN_TYPE_EXPR_WALK_BUDGET = 256` exhaustion
+  and the `'../types'` barrel-hop) measured ZERO firings corpus-wide, and the
+  affected components' picked members all published. The original "253 missing
+  members" figure traces to the unpinned pre-`3424e23d8` warm-rail
+  partial-admission taint class (inferred, not a pinned artifact). Evidence rails
+  are owed as committed artifacts under `docs/arch/parity-evidence/` (bisect /
+  predicate / warm / session / realbench reports). **NO L1-classifier /
+  `KEY_DOMAIN_TYPE_EXPR_WALK_BUDGET` / barrel-hop change is owed for that phantom**
+  — implementing it would have risked weakening the correct L1 carrier-stop
+  contract (`table_resolves_complete_and_warm` / `chat_messages_*`).
+- **Corrected defect (codex-ruled; re-verified @ verter `4484e8596` / corpus
+  `v4.8.2-30-g52d3c4547` / vue-component-meta 3.3.2):** closed, resolvable
+  cross-file heritage / object-filter (`Omit` / `Pick`) sources are carrier-stopped
+  or contribute ZERO members when the source declaration is reached through a
+  routed materialisation path — BOTH (a) an `export *` barrel re-export of a type
+  declared in a `.vue` `<script>` block (`LinkProps`, declared in `Link.vue`,
+  re-exported via `types/index.ts` `export * from '../components/Link.vue'`), AND
+  (b) a package-backed declaration (tiptap `EditorOptions` for `Editor.vue`). The
+  honest root (codex): the `export *` CAN surface the name — the failure is the
+  LATER heritage / `Omit` / closedness materialisation route, where the routed
+  declaration becomes opaque / undecidable so the open-or-unknown carrier-stop
+  suppresses the arm or it merges in zero members. This CONFIRMS the original
+  XP.1's own candidate (b) (the barrel → `.vue` hop) over candidate (a) (the walk
+  budget). Do NOT narrow it to ".vue barrel only" — the package-backed tiptap
+  heritage is the same class.
+- **Evidence (pinned):** Button verter=20 vs vcm=57 — 38 missing = exactly the
+  `LinkProps` (NuxtLink / RouterLink / anchor) set plus the polymorphic `as`
+  (Verter DOES publish the `UseComponentIconsProps` members; only the
+  `Omit<LinkProps, …>` heritage arm drops); ContentSearchButton 27 missing (the
+  inherited `ButtonProps` surface); Editor 29 missing (tiptap `extensions` /
+  `editable` / `onUpdate` / …); EditorDragHandle 30 missing — the Button/link set
+  PLUS the tiptap `nestedOptions` / `pluginKey` pair, which FOLDS IN the XP1PREP
+  residual (those two were the only drop at v4.6.0). Discriminator pinning the
+  mechanism: `Link.vue` ITSELF (`withDefaults(defineProps<LinkProps>(), …)`,
+  same-file, no barrel, no `Omit`) resolves ALL 36 `LinkProps` members; the
+  same-workspace `.ts` heritage (`UseComponentIconsProps` in
+  `composables/useComponentIcons.ts`) resolves correctly — only the routed
+  cross-file hop drops. (The comparison agent's higher per-component figures —
+  Button "76" etc. — likely summed props+slots+events+schema; the named prop sets,
+  direction, and mechanism reproduce exactly, the absolute counts do not, so this
+  row pins the mechanism, not the count.)
+- **Corpus-version confound (NO regression claim):** XP1PREP ran at corpus
+  `v4.6.0`, this re-verification at `v4.8.2`; the vcm reference and the corpus type
+  shapes both moved. XP1PREP's "0 missing" and this run's drops are NOT
+  apples-to-apples — this row asserts the state AT verter `4484e8596` + corpus
+  `v4.8.2-30-g52d3c4547` and the mechanism, NOT a Verter regression between commits.
+- **Scope — absorbs the "deepening half" of XP.4:** the `Alert.avatar` cross-file
+  member value-collapse-to-bare-`object` (Avatar.vue's `AvatarProps` members losing
+  their value types when deepened through the `'../types'` barrel) shares THIS
+  resolution surface and is carried under this umbrella — but with a SEPARATE
+  acceptance test, because member-presence loss (this row) and member-value
+  collapse are distinct symptoms of the same root. The expand-vs-shallow projector
+  half stays in XP.4.
+- **Connects to existing IGNORED contracts (the fix likely lands IN this work, not
+  a standalone parity block):** U10
+  `mode_boundary_reexport_chain_resolves_imported_alias` (verter leaves `Foo` an
+  unresolved `Ref` after a re-export chain ending in `export * from './barrel'`) and
+  U6 `flow_return_xf04_expands_barrel_imported_value_function_return` (barrel-imported
+  expansion). The component-meta heritage drop is the parity manifestation of the
+  same routed cross-file resolution gap those typeinfo contracts track.
+- **Owner files:** `crates/verter_session/src/resolver_core/…` (the host-backed
+  routed re-export / barrel / package-backed resolution into a `.vue` module's
+  `<script>`-block named-type exports);
+  `crates/verter_session/src/project_semantic_dispatch/raise.rs` (key-domain
+  closedness walk — the opaque-hop conservative-OPEN when the heritage `Omit` source
+  is the barrel-`.vue` or package type); the `verter_session` heritage member-merge
+  for `extends`-clause contribution.
+- **Mechanism (STEP-0 must NAME which fires):** (i) the routed `export *` / package
+  hop leaves an unresolved `Ref`; (ii) the `Omit` / `Pick` key-domain goes
+  open-or-unknown so the L1 carrier-stop suppresses the arm; or (iii) the heritage
+  member-merge contributes zero members.
+- **Acceptance (discriminating):** hermetic fixtures for BOTH routed shapes — a
+  `.ts` barrel `export *`-ing a `.vue` `<script>`'s `export interface X` consumed by
+  a component `extends Omit<X, 'k'>`, AND a package-backed `extends` — that FAIL
+  pre-fix and PASS post-fix; feature-gated `external-corpus` checks (Button
+  publishes the `LinkProps` set; `Alert.avatar` members carry real value types); the
+  existing L1 carrier-stop pins plus `table_resolves_complete_and_warm` /
+  `chat_messages_*` trackers stay green — the fix must NOT buy the members by
+  weakening L1.
+- **Workstream:** POST-U2 parity (codex: finish U2 first). The fix likely lands IN
+  the cross-file resolution rebuild it depends on — coordinate with the external /
+  imported resolution work (the U6 / U10 cross-file contracts above and the Stage-5
+  macro-surface rebuild `S5.B5`–`S5.B12`); STEP-0 confirms whether this folds INTO
+  that rebuild or follows it, rather than standing up a separate parity block. Not
+  scheduled: no critical-path insertion, no deps-graph edges.
 
 #### XP.2 — Per-member JSDoc loss across the cross-file publication path (severity 2)  **(LANDED — branch `mom/meta-xp23`)**
 
@@ -2438,6 +2495,85 @@ baseline-divergent at volume.
   no type-driven inference) is permitted, and is distinct from the forbidden
   recover-meaning-at-display heuristic, which would INFER string-ness from
   descriptor type compatibility.
+
+#### XP.4 — Directly-declared imported-alias prop wrongly EXPANDED (severity 2)
+
+- **Defect (re-verified @ verter `4484e8596` / corpus `v4.8.2-30-g52d3c4547` /
+  vue-component-meta 3.3.2):** a directly-declared prop whose type is an imported
+  alias is EXPANDED instead of published shallow — a Shallow-By-Default violation.
+  `Alert.vue` declares `avatar?: AvatarProps` directly (`AvatarProps` imported from
+  the `'../types'` barrel); vcm publishes `avatar?: AvatarProps | undefined` (a
+  shallow named ref) but Verter inlines the full `AvatarProps` surface. The contrast
+  that isolates the anomaly: `Button.props.avatar` reaches the SAME `AvatarProps` via
+  `UseComponentIconsProps` HERITAGE and Verter keeps it shallow
+  (`AvatarProps | undefined`, matching vcm) — so the same type stays shallow through
+  heritage but expands when directly declared.
+- **Scope split:** this row is the expand-vs-shallow projector half ONLY. The second
+  symptom — the expanded members then collapsing to bare `object`
+  (`crossorigin?: object`, …) — is a cross-file member value-collapse on the SAME
+  routed resolution surface as XP.1 and is carried under XP.1's umbrella with its own
+  acceptance test; it is NOT this row.
+- **Owner files:** `meta_resolve::projectors` (`reduce_field_type_expr_with_mode` —
+  why a directly-declared imported alias materialises instead of staying a `Ref`;
+  contrast the heritage path that stays shallow).
+- **Acceptance (discriminating):** `Alert.avatar` publishes `AvatarProps` shallow
+  (matching `Button.avatar` and vcm), with a negative assertion against expansion; a
+  hermetic fixture (a component directly declaring `x?: ImportedAlias`) FAILS pre-fix
+  / PASSES post-fix.
+- **NOT bundled — separate future row:** whether Verter should honor `@vue-ignore` on
+  heritage arms (Avatar.vue's `AvatarProps extends /** @vue-ignore */
+  Omit<ImgHTMLAttributes, …>` surfaces the ignored arm; vcm honors `@vue-ignore`) is
+  a SEPARATE Vue-macro-policy question needing its own direct vcm/Verter prop-set
+  evidence — do NOT fold it into XP.4 or XP.1.
+- **Workstream:** POST-U2 parity. STEP-0 may merge with XP.1 (shared root for the
+  value-collapse half); the expand-vs-shallow projector decision lives here. Not
+  scheduled: no critical-path insertion, no deps-graph edges.
+
+#### XP.5 — Compat slot-binding function printer divergence (severity 3)
+
+- **Defect (re-verified @ verter `4484e8596` / corpus `v4.8.2-30-g52d3c4547` /
+  vue-component-meta 3.3.2):** the `@verter/component-meta/compat` layer renders
+  slot-binding functions as `(props?: mapped): string` — a literal `mapped` token in
+  method-call syntax — instead of vcm's
+  `(props?: Record<string, any> | undefined) => string`. Two divergences: the
+  `mapped` token (a `Record<string, any>` param that degrades to an
+  `unknown("mapped")` descriptor) and method-call vs arrow syntax. The structured
+  slot `TypeDescriptor` is otherwise intact — this is a compat DISPLAY/bridge defect,
+  NOT a native member loss, observed at volume (nearly every component with slots).
+- **Owner files (TS, compat display + bridge ONLY):**
+  `packages/component-meta/src/compat/checker.ts` (`compatFunctionTypeToString` —
+  emit arrow syntax + the optional `| undefined`; `buildCompatUiBindingType` already
+  emits the correct form but only engages on the indexed-access fast-path) and
+  `packages/component-meta/src/type-expr-bridge.ts` (`resolveMappedDescriptor` —
+  resolve `Record<string, any>` to an index-signature descriptor instead of
+  `unknown("mapped")`). codex: the fix must NOT depend on keeping the binding shallow
+  to trigger the `buildCompatUiBindingType` fast-path (that is a display fast-path,
+  not an architectural dependency). Typed-IR-only — fix the producer (bridge +
+  printer), NOT a text patch on the output string.
+- **Acceptance (discriminating):** a vendored slot-binding fixture renders
+  `(props?: Record<string, any> | undefined) => string`; negative assertions that the
+  literal `mapped` token and the method-syntax `): string` are absent.
+- **Workstream:** SEPARATE `@verter/component-meta` compat bridge/printer workstream —
+  does NOT need the XP.1 / XP.4 resolver work and can land independently. Not
+  scheduled: no critical-path insertion, no deps-graph edges.
+
+#### class/style — vue-component-meta divergence, Verter source-faithful (NOT a defect row)
+
+- **Finding (codex ruling B; re-verified @ verter `4484e8596` / corpus
+  `v4.8.2-30-g52d3c4547`):** Verter publishes `class` / `style` IFF the source
+  declares them as props, and does NOT inject inherited/fallthrough attributes as
+  props. 113 of 121 top-level nuxt-ui components declare `class?: any` explicitly and
+  Verter publishes `class` exactly on those; the 8 non-declaring components (App,
+  Icon, DashboardSidebarToggle, EditorDragHandle, LinkBase, OverlayProvider, Theme,
+  DashboardSidebarCollapse) publish NEITHER `class` NOR `style` — no spurious
+  injection, no inherited-attr surfacing. vcm strips declared `class` / `style` from
+  the props list as its own behavior.
+- **Disposition:** Verter is the more source-faithful side — this is a
+  vue-component-meta divergence where Verter is correct, **NOT a Verter defect: NO
+  defect row, NO resolver change owed.** If byte-for-byte vcm compat is ever required,
+  stripping declared `class` / `style` is a compat-PROJECTION-only change (never a
+  resolver change), and the `bench:meta:ui` expected-backend comparison should NOT
+  count this divergence against Verter.
 
 ---
 
@@ -2832,7 +2968,7 @@ baseline-divergent at volume.
   TRUE-branch selection, or a non-conditional spelling such as an
   indexed-access map — means the mechanism is NOT covered by this row and the
   mapping must be reopened. No new tracked item —
-  the manifest row is the tracking (see also §4 XP, which tracks the three
+  the manifest row is the tracking (see also §4 XP, which tracks the
   genuinely-new nuxt-ui parity gaps and excludes this one).
 - **Deps:** U0; B2 + B3 (landed); pre-existing `SemanticGraphStore` /
   `ProjectSemanticDispatch` / `execute_cooperative` (landed).
