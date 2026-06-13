@@ -2499,6 +2499,52 @@ impl NapiVerterHost {
             })
         }))?
     }
+
+    /// Resolve a component's framework surfaces and return the wire
+    /// `TypeInfoGraphResponse` plus the per-request audit record.
+    ///
+    /// `request` is a protobuf-encoded
+    /// `verter_protocol::typeinfo::graph::TypeInfoGraphRequest` envelope
+    /// carrying the `GRAPH_OPERATION_FRAMEWORK_SURFACES` operation (the
+    /// framework-surface operation rides the existing graph envelope — no
+    /// dedicated request type). The host runs the envelope validator FIRST,
+    /// so a malformed envelope returns the typed wire `error` arm in
+    /// `response` BEFORE any registry lookup or semantic dispatch.
+    ///
+    /// `response` is the protobuf-encoded `TypeInfoGraphResponse` — the
+    /// `framework_surface` arm on success, the `error` arm on a typed
+    /// rejection — and is ALWAYS present (the validation-first executor
+    /// always produces a typed response). `auditRecord` is `null` when
+    /// audit is disabled / filtered; the audit envelope rides BOTH the
+    /// success AND the rejection outcome.
+    #[napi(js_name = "resolveFrameworkSurfaceWithAudit")]
+    pub fn resolve_framework_surface_with_audit(
+        &self,
+        request: Buffer,
+    ) -> Result<typeinfo::NapiFrameworkSurfaceResult> {
+        let envelope = typeinfo::decode_type_info_graph_request(request)?;
+        let host = std::sync::Arc::clone(&self.inner);
+        catch_panic(std::panic::AssertUnwindSafe(move || {
+            let (outcome, record) = host
+                .resolve_framework_surface_with_audit(envelope)
+                .into_parts();
+            // The validation-first executor always yields a typed wire
+            // response: the `framework_surface` arm on success, the
+            // `error` arm on a typed rejection. The `AuditedResult` Err
+            // arm drops the (error-arm) response, so re-form it here so
+            // the JS side always decodes a `TypeInfoGraphResponse`.
+            let response = match outcome {
+                Ok(response) => response,
+                Err(error) => typeinfo::framework_error_response(error),
+            };
+            let response_buf = typeinfo::encode_type_info_graph_response(&response);
+            let audit_buf = typeinfo::encode_stored_audit_record(&record)?;
+            Ok(typeinfo::NapiFrameworkSurfaceResult {
+                response: response_buf,
+                auditRecord: audit_buf,
+            })
+        }))?
+    }
 }
 
 // =============================================================================

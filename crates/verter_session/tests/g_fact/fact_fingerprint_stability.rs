@@ -114,7 +114,7 @@ fn build_indexed(
                 signatures: Vec::new(),
                 object_shape: None,
                 enum_members: None,
-                is_synthesised_vue_default: false,
+                is_synthesised_component_default: false,
             },
         );
     }

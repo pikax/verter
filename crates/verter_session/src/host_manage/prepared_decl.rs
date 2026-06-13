@@ -1734,9 +1734,10 @@ impl VerterHost {
             let resolver = HostShallowImportResolver {
                 dep_edges: &dep_edges,
             };
-            // Synthesise the implicit Vue SFC `default` value symbol
-            // from type-based macros — see `vue_default_synth` for
-            // the policy and rationale.
+            // Synthesise the implicit component `default` value symbol
+            // from type-based macros, dispatched through the framework
+            // registry's synthesis leg — see `framework::synth` for the
+            // policy and the per-framework legs.
             let mut shallow_state_inner =
                 crate::resolver_core::ShallowFileState::from_analysis_with_resolver(
                     whole_hash,
@@ -1745,7 +1746,7 @@ impl VerterHost {
                     None,
                     &resolver,
                 );
-            crate::resolver_core::vue_default_synth::inject_vue_default_into_shallow_state(
+            self.inject_component_default_into_shallow_state(
                 canonical_id,
                 &mut shallow_state_inner,
                 &snapshot.macros,

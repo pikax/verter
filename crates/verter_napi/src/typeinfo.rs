@@ -10,7 +10,9 @@ use napi::bindgen_prelude::*;
 use napi::{Error, Status};
 use napi_derive::napi;
 
+use prost::Message;
 use verter_audit::{AuditCaptureState, RequestAuditRecord};
+use verter_protocol::typeinfo::graph::{TypeInfoGraphRequest, TypeInfoGraphResponse};
 use verter_protocol::typeinfo::FfiSymbolEntry;
 use verter_session::host_resolve_type_audit::TypeResolutionRequestError;
 use verter_session::semantic_query::{ProjectionMode, SemanticNodeId};
@@ -165,4 +167,57 @@ pub(crate) fn parse_resolve_mode(mode: Option<String>) -> Result<Option<Projecti
         )
     })?;
     Ok(Some(parsed))
+}
+
+/// Combined response shape for `resolveFrameworkSurfaceWithAudit`.
+///
+/// `response` is the protobuf-encoded `TypeInfoGraphResponse` — the
+/// `framework_surface` arm on success, the `error` arm on a typed
+/// rejection. It is ALWAYS present (the validation-first executor always
+/// produces a typed response). `auditRecord` carries the per-request
+/// `RequestAuditRecord` as a JSON Buffer; `null` when audit is disabled
+/// or the record was filtered.
+#[napi(object)]
+pub struct NapiFrameworkSurfaceResult {
+    /// Protobuf-encoded `TypeInfoGraphResponse` Buffer (always present).
+    pub response: Buffer,
+    /// JSON-serialised `RequestAuditRecord` Buffer; `null` when audit is
+    /// off / filtered.
+    pub auditRecord: Option<Buffer>,
+}
+
+/// Decode a `Buffer` carrying a protobuf-encoded
+/// [`TypeInfoGraphRequest`] envelope into the host wire type.
+///
+/// The framework-surface operation rides the existing graph envelope;
+/// this is the binding-side decode that hands the validated request to
+/// the host's validation-first executor.
+pub(crate) fn decode_type_info_graph_request(buf: Buffer) -> Result<TypeInfoGraphRequest> {
+    TypeInfoGraphRequest::decode(buf.as_ref()).map_err(|e| {
+        Error::new(
+            Status::InvalidArg,
+            format!("type-info graph request decode error: {e}"),
+        )
+    })
+}
+
+/// Encode a [`TypeInfoGraphResponse`] to a protobuf Buffer.
+pub(crate) fn encode_type_info_graph_response(resp: &TypeInfoGraphResponse) -> Buffer {
+    Buffer::from(resp.encode_to_vec())
+}
+
+/// Wrap a typed [`TypeInfoRequestError`] back into the `error` arm of a
+/// [`TypeInfoGraphResponse`].
+///
+/// The host's `AuditedResult` Err arm carries only the typed error (the
+/// error-arm response it built is dropped on the carrier). The binding
+/// re-forms the wire response so the JS side always decodes a uniform
+/// `TypeInfoGraphResponse` regardless of success / rejection.
+pub(crate) fn framework_error_response(
+    error: verter_protocol::typeinfo::graph::TypeInfoRequestError,
+) -> TypeInfoGraphResponse {
+    use verter_protocol::verter::v1::type_info_graph_response;
+    TypeInfoGraphResponse {
+        kind: Some(type_info_graph_response::Kind::Error(error)),
+    }
 }

@@ -213,17 +213,17 @@ fn vue_macro_dtos_cache_keys_on_content_and_macro() {
     let host = make_host();
     upsert(&host, FILE, VUE_PROPS_AND_EMITS);
 
-    assert_eq!(
-        host.vue_shallow_metadata_store().len(),
-        0,
-        "store starts empty"
-    );
+    assert_eq!(host.vue_surface_store().len(), 0, "store starts empty");
 
     let request_props = props_request(&host, FILE, AnalyzedMacroKind::DefineProps);
     let first = host.vue_macro_dtos(&request_props);
-    assert_eq!(first.props.len(), 2, "cold compute produces the props");
     assert_eq!(
-        host.vue_shallow_metadata_store().len(),
+        first.prop_fields().len(),
+        2,
+        "cold compute produces the props"
+    );
+    assert_eq!(
+        host.vue_surface_store().len(),
         1,
         "one cold entry published"
     );
@@ -232,7 +232,7 @@ fn vue_macro_dtos_cache_keys_on_content_and_macro() {
     // cached value (pointer-equal).
     let second = host.vue_macro_dtos(&request_props);
     assert_eq!(
-        host.vue_shallow_metadata_store().len(),
+        host.vue_surface_store().len(),
         1,
         "warm hit reuses the cached entry; store does not grow"
     );
@@ -245,12 +245,12 @@ fn vue_macro_dtos_cache_keys_on_content_and_macro() {
     let request_emits = props_request(&host, FILE, AnalyzedMacroKind::DefineEmits);
     let emits_dtos = host.vue_macro_dtos(&request_emits);
     assert_eq!(
-        emits_dtos.emits.len(),
+        emits_dtos.emit_fields().len(),
         1,
         "the emits DTO bundle is computed"
     );
     assert_eq!(
-        host.vue_shallow_metadata_store().len(),
+        host.vue_surface_store().len(),
         2,
         "a different macro occupies a distinct cache slot"
     );
@@ -264,7 +264,11 @@ fn vue_macro_dtos_cache_keys_on_content_and_macro() {
         "the content edit changed the .vue's whole_hash"
     );
     let edited = host.vue_macro_dtos(&request_edited);
-    let mut edited_names: Vec<&str> = edited.props.iter().map(|p| p.name.as_str()).collect();
+    let mut edited_names: Vec<&str> = edited
+        .prop_fields()
+        .iter()
+        .map(|p| p.name.as_str())
+        .collect();
     edited_names.sort_unstable();
     assert_eq!(
         edited_names,
@@ -272,7 +276,7 @@ fn vue_macro_dtos_cache_keys_on_content_and_macro() {
         "the edited content's props reflect the NEW source, not the stale entry"
     );
     assert!(
-        host.vue_shallow_metadata_store().len() >= 3,
+        host.vue_surface_store().len() >= 3,
         "the content edit produced a distinct content-addressed cache entry"
     );
 }
@@ -311,7 +315,7 @@ fn vue_macro_dtos_rejects_stale_root_identity_after_edit() {
     // the cache for the props macro.
     let stale_request = props_request(&host, FILE, AnalyzedMacroKind::DefineProps);
     let v1 = host.vue_macro_dtos(&stale_request);
-    let mut v1_names: Vec<&str> = v1.props.iter().map(|p| p.name.as_str()).collect();
+    let mut v1_names: Vec<&str> = v1.prop_fields().iter().map(|p| p.name.as_str()).collect();
     v1_names.sort_unstable();
     assert_eq!(
         v1_names,
@@ -332,7 +336,11 @@ fn vue_macro_dtos_rejects_stale_root_identity_after_edit() {
     // hash). `vue_macro_dtos` must derive `whole_hash` from the LIVE
     // `IndexedReady` and return the v2 props — never the stale v1 entry.
     let after_edit = host.vue_macro_dtos(&stale_request);
-    let mut after_names: Vec<&str> = after_edit.props.iter().map(|p| p.name.as_str()).collect();
+    let mut after_names: Vec<&str> = after_edit
+        .prop_fields()
+        .iter()
+        .map(|p| p.name.as_str())
+        .collect();
     after_names.sort_unstable();
     assert_eq!(
         after_names,
@@ -377,7 +385,7 @@ fn vue_macro_dtos_rejects_macro_kind_mismatch_without_poisoning_cache() {
     // the bundle carries PROPS, not the emits the property-style fallback would
     // fabricate from the props surface.
     let cold = host.vue_macro_dtos(&lying_request);
-    let mut cold_props: Vec<&str> = cold.props.iter().map(|p| p.name.as_str()).collect();
+    let mut cold_props: Vec<&str> = cold.prop_fields().iter().map(|p| p.name.as_str()).collect();
     cold_props.sort_unstable();
     assert_eq!(
         cold_props,
@@ -385,7 +393,7 @@ fn vue_macro_dtos_rejects_macro_kind_mismatch_without_poisoning_cache() {
         "the derived DefineProps kind wins; the bundle is props, not the lying-kind emits"
     );
     assert!(
-        cold.emits.is_empty(),
+        cold.emit_fields().is_empty(),
         "a props macro must not produce emits even when the request lies about the kind (negative)"
     );
 
@@ -412,72 +420,93 @@ fn vue_macro_dtos_rejects_macro_kind_mismatch_without_poisoning_cache() {
 /// 16-byte env hash.
 #[test]
 fn vue_macro_dto_key_carries_level_and_content_not_env_hash() {
-    use crate::typeinfo::adapters::vue::store::VueMacroDtoKey;
+    use crate::framework::surface_store::FullKey;
+    use crate::typeinfo::framework_surface::VueSurfaceKey;
+    use verter_protocol::typeinfo::graph::FrameworkSurfaceKind;
 
-    let a = VueMacroDtoKey::new(
-        Arc::from("/w/x.vue"),
+    let make = |kind: FrameworkSurfaceKind,
+                whole_hash: [u8; 16],
+                level: TypeInfoQueryLevel,
+                macro_index: usize,
+                macro_kind: AnalyzedMacroKind|
+     -> FullKey<VueSurfaceKey> {
+        FullKey {
+            kind,
+            query_level: level,
+            canonical: Arc::from("/w/x.vue"),
+            owner_whole_hash: whole_hash,
+            adapter_key: VueSurfaceKey {
+                macro_index,
+                macro_kind,
+            },
+        }
+    };
+
+    let a = make(
+        FrameworkSurfaceKind::Props,
         [1u8; 16],
-        0,
-        AnalyzedMacroKind::DefineProps,
         TypeInfoQueryLevel::PublicType,
-    );
-    let b = VueMacroDtoKey::new(
-        Arc::from("/w/x.vue"),
-        [1u8; 16],
         0,
         AnalyzedMacroKind::DefineProps,
+    );
+    let b = make(
+        FrameworkSurfaceKind::Props,
+        [1u8; 16],
         TypeInfoQueryLevel::FullMetadata,
+        0,
+        AnalyzedMacroKind::DefineProps,
     );
     // Distinct level ⇒ distinct key (level is part of identity).
     assert_ne!(a, b, "the level discriminates the key");
 
     // Distinct content ⇒ distinct key (content-addressed).
-    let c = VueMacroDtoKey::new(
-        Arc::from("/w/x.vue"),
+    let c = make(
+        FrameworkSurfaceKind::Props,
         [2u8; 16],
+        TypeInfoQueryLevel::PublicType,
         0,
         AnalyzedMacroKind::DefineProps,
-        TypeInfoQueryLevel::PublicType,
     );
     assert_ne!(a, c, "the content hash discriminates the key");
 
-    // Distinct macro kind ⇒ distinct key (kind is part of identity — a kind
-    // mismatch must not read / poison the sibling kind's slot).
-    let d = VueMacroDtoKey::new(
-        Arc::from("/w/x.vue"),
+    // Distinct macro kind (and its derived surface kind) ⇒ distinct key — a
+    // kind mismatch must not read / poison the sibling kind's slot.
+    let d = make(
+        FrameworkSurfaceKind::Emits,
         [1u8; 16],
+        TypeInfoQueryLevel::PublicType,
         0,
         AnalyzedMacroKind::DefineEmits,
-        TypeInfoQueryLevel::PublicType,
     );
     assert_ne!(a, d, "the macro kind discriminates the key");
 
-    // Structural field-set guard: destructure the WHOLE key without `..`. Any
-    // added owned field breaks this destructure (compile error), forcing a
-    // conscious decision about whether the new field belongs in cache identity.
-    let VueMacroDtoKey {
+    // Structural field-set guard: destructure the WHOLE neutral key AND the Vue
+    // adapter remainder without `..`. Any added owned field breaks this
+    // destructure (compile error), forcing a conscious decision about whether
+    // the new field belongs in cache identity. An env-hash dimension folded into
+    // either struct would surface here (and would not be `Copy`/discriminant).
+    let FullKey {
+        kind,
+        query_level,
         canonical,
-        whole_hash,
-        macro_index,
-        macro_kind,
-        level_tag,
+        owner_whole_hash,
+        adapter_key: VueSurfaceKey {
+            macro_index,
+            macro_kind,
+        },
     } = &a;
+    assert_eq!(*kind, FrameworkSurfaceKind::Props);
+    assert_eq!(*query_level, TypeInfoQueryLevel::PublicType);
     assert_eq!(canonical.as_ref(), "/w/x.vue");
     assert_eq!(
-        *whole_hash, [1u8; 16],
+        *owner_whole_hash, [1u8; 16],
         "the content hash is part of the key"
     );
     assert_eq!(*macro_index, 0);
     assert_eq!(*macro_kind, AnalyzedMacroKind::DefineProps);
-    // The level tag is a small query-identity discriminant (1 byte), NOT a
-    // 16-byte env-hash.
-    assert_eq!(
-        std::mem::size_of_val(level_tag),
-        1,
-        "level_tag is a 1-byte query-identity discriminant, not an env hash"
-    );
 
-    // PublicType and FullMetadata differ by exactly the tag byte.
+    // The query level is a small query-identity discriminant, NOT a 16-byte
+    // env-hash; PublicType and FullMetadata differ by exactly the tag byte.
     assert_eq!(TypeInfoQueryLevel::PublicType.cache_tag(), 0);
     assert_eq!(TypeInfoQueryLevel::FullMetadata.cache_tag(), 1);
     assert_ne!(

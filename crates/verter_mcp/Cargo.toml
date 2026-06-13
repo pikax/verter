@@ -24,6 +24,7 @@ verter_semantic = { path = "../verter_semantic" }
 verter_workspace = { path = "../verter_workspace" }
 verter_diagnostics = { path = "../verter_diagnostics" }
 verter_actions = { path = "../verter_actions" }
+verter_protocol = { path = "../verter_protocol" }
 rmcp = { version = "1.7", features = [
   "server",
   "macros",

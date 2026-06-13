@@ -1243,7 +1243,7 @@ fn try_project_jsdoc_descriptions(
     let mut sources: rustc_hash::FxHashMap<Arc<str>, Option<Arc<str>>> =
         rustc_hash::FxHashMap::default();
 
-    use crate::typeinfo::adapters::vue::surface::normalize_jsdoc_body;
+    use crate::typeinfo::framework_surface::vue_exec::normalize_jsdoc_body;
     for member in surface.members.iter() {
         let description = member
             .jsdoc_description_span

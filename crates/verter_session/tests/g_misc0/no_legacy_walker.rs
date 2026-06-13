@@ -462,6 +462,19 @@ const RETIRED_SYMBOLS: &[&str] = &[
     // as aliases beside it.
     "ResolvedEmit",
     "ResolvedEmitSignature",
+    // The Vue adapter's host-owned shallow-metadata store + its key/value
+    // types are RETIRED. The neutral, framework-generic
+    // `FrameworkSurfaceStore<VueSurfaceKey, MacroSurfaceDtos>` (reached
+    // through `VerterHost::vue_surface_store`) is the sole home of the
+    // `.vue` macro-surface DTO cache; the relocated producer in
+    // `typeinfo::framework_surface::vue_exec` keys it with the neutral
+    // `FullKey<VueSurfaceKey>` + `StoredSurfaceDto<MacroSurfaceDtos>`.
+    // Re-introducing any of these Vue-private store types would resurrect
+    // a second, framework-specific cache lane beside the neutral store.
+    "VueShallowMetadataStore",
+    "VueMacroDtoKey",
+    "VueMacroDtos",
+    "VueMacroDtosEntry",
 ];
 
 /// File names whose presence at the head of the path should make us

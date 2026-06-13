@@ -10,9 +10,32 @@
 //! classification reaches them exclusively through session-implemented
 //! trait objects (the scheduler `SourceLoader` impl).
 
+pub mod api_projector;
+pub mod api_projectors;
 pub mod ctx;
+pub mod descriptor;
 pub mod language_classifier;
 pub mod project_capabilities;
+pub mod registry;
+pub mod script_facts;
+pub mod surface_store;
+pub mod synth;
+pub mod virtual_file_naming_ts;
 
+pub use api_projector::{ComponentApiProjector, ComponentApiProjectorCtx};
+pub use ctx::FrameworkAdapterCtx;
+pub use descriptor::{
+    vue_descriptor, FrameworkAdapterDescriptor, IdeSuffixPolicy, VirtualFileNaming,
+    ALL_FRAMEWORK_SURFACE_KINDS,
+};
 pub use language_classifier::HostLanguageClassifier;
 pub use project_capabilities::ProjectCapabilitySnapshot;
+pub use registry::{
+    CarrierLeg, FrameworkAdapterRegistry, FrameworkRegistration, SurfaceRegistration,
+    TagDisposition,
+};
+
+/// The interned framework-adapter id, re-exported from `verter_language` so
+/// session-side registry/descriptor code names it through the `framework`
+/// module.
+pub use verter_language::FrameworkAdapterId;

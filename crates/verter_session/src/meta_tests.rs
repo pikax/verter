@@ -92,7 +92,7 @@ fn resolved_macro_prop_names(
                 root_identity: host.current_or_read_whole_hash(owner).unwrap_or([0u8; 16]),
                 level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
             })
-            .props
+            .prop_fields()
             .iter()
             .map(|p| p.name.clone())
             .collect::<Vec<_>>()
@@ -13561,12 +13561,18 @@ defineProps<ChildProps>()
                 level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
             });
     assert!(
-        button_dtos.props.iter().any(|prop| prop.name == "loading"),
+        button_dtos
+            .prop_fields()
+            .iter()
+            .any(|prop| prop.name == "loading"),
         "resolved ButtonProps should include inherited props, got: {:?}",
         button_dtos.props
     );
     assert!(
-        button_dtos.props.iter().any(|prop| prop.name == "label"),
+        button_dtos
+            .prop_fields()
+            .iter()
+            .any(|prop| prop.name == "label"),
         "resolved ButtonProps should include button props, got: {:?}",
         button_dtos.props
     );

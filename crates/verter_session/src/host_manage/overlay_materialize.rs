@@ -530,7 +530,7 @@ impl VerterHost {
                 None,
                 &resolver,
             );
-        crate::resolver_core::vue_default_synth::inject_vue_default_into_shallow_state(
+        self.inject_component_default_into_shallow_state(
             analysis_canonical_id,
             &mut shallow_state_inner,
             &snapshot.macros,

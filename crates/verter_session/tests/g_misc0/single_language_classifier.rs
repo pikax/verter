@@ -63,7 +63,6 @@ const CARRIER_LITERAL_ALLOWLIST: &[&str] = &[
     "crates/verter_session/src/host_resolve/virtual_file_pipeline.rs",
     "crates/verter_session/src/resolver_core/component_meta/direct_macro.rs",
     "crates/verter_session/src/resolver_core/fallthrough.rs",
-    "crates/verter_session/src/resolver_core/vue_default_synth.rs",
     // Workspace resolver `.vue`-aware routing (resolution data, not
     // classification).
     "crates/verter_workspace/src/resolver.rs",

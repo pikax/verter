@@ -198,7 +198,7 @@ pub struct ShallowValueSymbol {
     /// file-classifier `is_synthesis_candidate`, so a `.vue` with a USERLAND
     /// `export default` (synthesis skipped, userland default present) is never
     /// mistreated as the synthesized public instance.
-    pub is_synthesised_vue_default: bool,
+    pub is_synthesised_component_default: bool,
 }
 
 /// A reference to an imported symbol that needs cross-file resolution.
@@ -591,7 +591,7 @@ impl ShallowFileState {
                         // synthesized `.vue` public instance (that one is
                         // fabricated by `vue_default_synth` and inserted via
                         // `insert_synthesised_value_symbol`).
-                        is_synthesised_vue_default: false,
+                        is_synthesised_component_default: false,
                     },
                 );
             }
@@ -643,7 +643,7 @@ impl ShallowFileState {
                         signatures: group.merged_signatures(),
                         object_shape: decl.object_shape.clone(),
                         enum_members: None,
-                        is_synthesised_vue_default: false,
+                        is_synthesised_component_default: false,
                     },
                 );
             }

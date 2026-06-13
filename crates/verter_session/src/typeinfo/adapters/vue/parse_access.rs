@@ -37,6 +37,17 @@ pub(crate) fn receive_vue_carrier_token() {
     let _ = vue_carrier_token();
 }
 
+/// A clone of the Vue carrier registration proof for the adapter registry's
+/// Vue carrier leg.
+///
+/// The registry and the blessed `vue_parse()` accessor converge on the SAME
+/// minted token (`CarrierAccessToken` is value-equal by adapter id), so the
+/// registry leg receives a clone of the held proof rather than minting a second
+/// one — there is exactly one mint channel (this module's `OnceLock`).
+pub(crate) fn vue_carrier_token_clone() -> CarrierAccessToken {
+    vue_carrier_token().clone()
+}
+
 /// Token-gated typed access to a Vue parse artifact's [`ParsedSfc`].
 ///
 /// Returns `None` for a non-Vue artifact (wrong-adapter tokens never

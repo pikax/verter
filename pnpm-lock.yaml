@@ -441,9 +441,15 @@ importers:
 
   packages/typeinfo:
     dependencies:
+      '@bufbuild/protobuf':
+        specifier: 2.12.0
+        version: 2.12.0
       '@verter/native':
         specifier: workspace:^
         version: link:../native
+      '@verter/proto':
+        specifier: workspace:^
+        version: link:../proto
       '@verter/type-ir':
         specifier: workspace:^
         version: link:../type-ir

@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use verter_language::{FileLanguage, LanguageRegistry, StaticClassification};
+use verter_language::{CapabilityId, FileLanguage, LanguageRegistry, StaticClassification};
 
 use super::project_capabilities::ProjectCapabilitySnapshot;
 use crate::types::Hash16;
@@ -58,6 +58,13 @@ impl HostLanguageClassifier {
     /// flip no derived bit do not).
     pub fn capability_hash(&self) -> Hash16 {
         self.capabilities.hash()
+    }
+
+    /// Whether a derived capability bit is ON. The resolved-validation half of
+    /// the framework script-fact seam consults this to gate a provider's
+    /// resolved facts on a derived capability.
+    pub fn capability_is_enabled(&self, capability: &CapabilityId) -> bool {
+        self.capabilities.is_enabled(capability)
     }
 }
 

@@ -420,7 +420,7 @@ fn read_surface_members(
 /// Depth-fused at 256 to bound recursion on adversarial inputs.
 ///
 /// `pub(crate)` so the DTO slot-binding extractor
-/// (`typeinfo::adapters::vue::surface::binding_fields_from_param_ty` via
+/// (`typeinfo::framework_surface::vue_exec::binding_fields_from_param_ty` via
 /// `navigate_param_to_object_surface`) can apply the SAME open-vs-concrete gate
 /// before materialising a slot-param object surface — otherwise an open generic
 /// slot param (`SlotProps<M>` in a `generic="M"` component) would reduce to a
@@ -1146,9 +1146,9 @@ fn typeinfo_macro_dtos(
     owner_canonical: &str,
     macro_index: usize,
     macro_kind: verter_semantic::analysis::AnalyzedMacroKind,
-) -> std::sync::Arc<crate::typeinfo::adapters::vue::store::VueMacroDtos> {
+) -> std::sync::Arc<crate::typeinfo::framework_surface::MacroSurfaceDtos> {
     let root_identity = ctx.get_whole_hash(owner_canonical).unwrap_or([0u8; 16]);
-    crate::typeinfo::adapters::vue::surface::vue_macro_dtos_with_ctx(
+    crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx(
         ctx,
         &crate::typeinfo::types::VueMacroSurfaceRequest {
             owner_canonical: std::sync::Arc::from(owner_canonical),
@@ -1184,8 +1184,8 @@ pub(crate) fn publish_merged_bindings(
                 resolved.macro_index,
                 AnalyzedMacroKind::DefineSlots,
             )
-            .slots
-            .clone()
+            .slot_fields()
+            .to_vec()
         })
         .collect();
 

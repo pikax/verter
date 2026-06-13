@@ -25,6 +25,7 @@ verter_diagnostics = { path = "../verter_diagnostics", version = "0.0.1-beta.1" 
 verter_actions = { path = "../verter_actions", version = "0.0.1-beta.1" }
 verter_protocol = { path = "../verter_protocol", version = "0.0.1-beta.1" }
 verter_span = { path = "../verter_span" }
+prost = "0.14.3"
 wasm-bindgen = "0.2.122"
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

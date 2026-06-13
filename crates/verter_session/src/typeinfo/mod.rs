@@ -40,6 +40,7 @@
 
 pub mod adapters;
 pub mod evaluate_type_expression;
+pub mod framework_surface;
 pub mod raise;
 pub mod request_validation;
 pub mod resolve_named_symbol;

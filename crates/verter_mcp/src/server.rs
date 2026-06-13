@@ -510,6 +510,52 @@ impl VerterMcpServer {
     }
 
     #[tool(
+        description = "Resolve a component's framework surfaces (props, emits, slots, options, expose, model) through the framework-surface executor. Returns per-kind support status and members. Routes through the host's single validation-first executor — no second resolver."
+    )]
+    pub async fn get_framework_surface(
+        &self,
+        Parameters(params): Parameters<FilePathParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let canonical = self.resolve(&params.path);
+        let args_size = params.path.len() as u32;
+        self.host
+            .audit_mcp_tool_call("get_framework_surface", &canonical, args_size, |host| {
+                let result: Result<CallToolResult, ErrorData> = (|| {
+                    ensure_loaded(host, &canonical)?;
+                    let file_language = host.language_classifier().classify(&canonical);
+                    let adapter_id = file_language.adapter_id().ok_or_else(|| {
+                        mcp_err(format!(
+                            "{canonical} is not a framework component file (no adapter)"
+                        ))
+                    })?;
+                    let request = crate::tools::framework_surface::build_request(
+                        &canonical,
+                        adapter_id.as_str(),
+                    );
+                    let (outcome, _record) = host
+                        .resolve_framework_surface_with_audit(request)
+                        .into_parts();
+                    let response = match outcome {
+                        Ok(response) => response,
+                        Err(error) => verter_protocol::typeinfo::graph::TypeInfoGraphResponse {
+                            kind: Some(
+                                verter_protocol::verter::v1::type_info_graph_response::Kind::Error(
+                                    error,
+                                ),
+                            ),
+                        },
+                    };
+                    let projected = crate::tools::framework_surface::project_response(&response);
+                    let json = serde_json::to_string_pretty(&projected)
+                        .map_err(|e| mcp_err(e.to_string()))?;
+                    Ok(CallToolResult::success(vec![Content::text(json)]))
+                })();
+                mcp_tool_success(result)
+            })
+            .into_result()
+    }
+
+    #[tool(
         description = "Get all imports with Vue API classification (lifecycle, reactivity, watchers, etc.)."
     )]
     async fn get_imports(

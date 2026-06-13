@@ -179,6 +179,20 @@ impl FileLanguage {
         }
     }
 
+    /// The concrete CARRIER language id, for framework CARRIER rows only.
+    ///
+    /// `None` for plain scripts AND for framework TEMPLATE rows (a template
+    /// is not a carrier — it has no own carrier language id). A consumer that
+    /// dispatches by [`Self::adapter_id`] uses this to confirm the row is the
+    /// adapter's CARRIER language (matching the descriptor's
+    /// `carrier_language`), not a same-adapter template.
+    pub fn carrier_language_id(&self) -> Option<&LanguageId> {
+        match self {
+            Self::Framework { language_id, .. } => Some(language_id),
+            Self::Script { .. } | Self::FrameworkTemplate { .. } => None,
+        }
+    }
+
     /// The script dialect, for plain scripts.
     pub fn script_source_type(&self) -> Option<ScriptSourceType> {
         match self {
@@ -230,6 +244,50 @@ mod tests {
             "a Vue-adapter language that is not the SFC carrier must not be is_vue"
         );
         assert!(FileLanguage::vue().is_vue());
+    }
+
+    /// `carrier_language_id()` returns the concrete CARRIER language id for
+    /// `Framework` rows ONLY — the registry-faithful decomposition a
+    /// public-API projector uses (after adapter-id dispatch) to confirm the
+    /// row is the adapter's carrier, not a same-adapter template. It must NOT
+    /// answer for a plain script or a framework template (neither is a
+    /// carrier).
+    #[test]
+    fn carrier_language_id_answers_for_framework_carriers_only() {
+        assert_eq!(
+            FileLanguage::vue().carrier_language_id(),
+            Some(&LanguageId::new("vue"))
+        );
+        assert_eq!(
+            FileLanguage::svelte().carrier_language_id(),
+            Some(&LanguageId::new("svelte"))
+        );
+        // A Vue-ADAPTER non-carrier language reports its OWN id — distinct
+        // from the carrier id, so a `carrier_language` equality check rejects
+        // it (the byte-faithful replacement for the `is_vue()` carrier gate).
+        let vue_template = FileLanguage::Framework {
+            adapter_id: FrameworkAdapterId::vue(),
+            language_id: LanguageId::new("vue_template"),
+        };
+        assert_eq!(
+            vue_template.carrier_language_id(),
+            Some(&LanguageId::new("vue_template"))
+        );
+        assert_ne!(
+            vue_template.carrier_language_id(),
+            FileLanguage::vue().carrier_language_id(),
+            "a Vue-adapter non-carrier language must not match the carrier language id"
+        );
+        // Plain scripts and framework TEMPLATE rows are not carriers.
+        assert_eq!(FileLanguage::script_ts().carrier_language_id(), None);
+        assert_eq!(
+            FileLanguage::FrameworkTemplate {
+                adapter_id: FrameworkAdapterId::vue(),
+                owner_hint: None,
+            }
+            .carrier_language_id(),
+            None
+        );
     }
 
     #[test]

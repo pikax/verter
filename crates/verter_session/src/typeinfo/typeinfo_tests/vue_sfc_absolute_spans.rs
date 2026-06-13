@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use verter_semantic::analysis::types::AnalyzedMacroKind;
 
-use crate::typeinfo::adapters::vue::slots_from_typeinfo_surface;
+use crate::typeinfo::framework_surface::vue_exec::slots_from_typeinfo_surface;
 use crate::typeinfo::types::{TypeInfoQueryLevel, VueMacroSurfaceRequest};
 use crate::typeinfo::{CanonicalSpan, TypeInfoSurface, TypeInfoSurfaceMember};
 use crate::types::{HostConfig, UpsertRequest};
@@ -277,7 +277,7 @@ fn dual_block_member_spans_slice_raw_from_both_blocks() {
 
 /// Raise a surface member's value node to its `TypeExpr` through the SAME
 /// shared structural raiser the production normalizer uses
-/// (`adapters::vue::surface::raise_member_value`: store view + completion
+/// (`framework_surface::vue_exec::raise_member_value`: store view + completion
 /// overlay + `ProjectSemanticDispatch::raise_node_to_type_expr`). The member's
 /// `value` is a shallow `SemanticNodeId`; for a function-like slot member it
 /// raises to `TypeExpr::Function`.

@@ -38,7 +38,7 @@ fn macro_dtos_for_kind(
     owner: &str,
     state: &ResolvedComponentMetaState,
     kind: verter_semantic::analysis::AnalyzedMacroKind,
-) -> Vec<std::sync::Arc<crate::typeinfo::adapters::vue::store::VueMacroDtos>> {
+) -> Vec<std::sync::Arc<crate::typeinfo::framework_surface::MacroSurfaceDtos>> {
     let mut seen = rustc_hash::FxHashSet::default();
     state
         .resolved_macros
@@ -69,7 +69,7 @@ fn prop_names_from_resolved(
         verter_semantic::analysis::AnalyzedMacroKind::DefineProps,
     )
     .iter()
-    .flat_map(|dtos| dtos.props.iter())
+    .flat_map(|dtos| dtos.prop_fields().iter())
     .map(|p| p.name.clone())
     .collect()
 }
@@ -86,7 +86,7 @@ fn emit_names_from_resolved(
         verter_semantic::analysis::AnalyzedMacroKind::DefineEmits,
     )
     .iter()
-    .flat_map(|dtos| dtos.emits.iter())
+    .flat_map(|dtos| dtos.emit_fields().iter())
     .map(|e| e.name.clone())
     .collect()
 }
@@ -103,7 +103,7 @@ fn slot_names_from_resolved(
         verter_semantic::analysis::AnalyzedMacroKind::DefineSlots,
     )
     .iter()
-    .flat_map(|dtos| dtos.slots.iter())
+    .flat_map(|dtos| dtos.slot_fields().iter())
     .map(|s| s.name.clone())
     .collect()
 }
@@ -4739,7 +4739,7 @@ const emitB = defineEmits<Events>()
                         .unwrap_or([0u8; 16]),
                     level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
                 })
-                .emits
+                .emit_fields()
                 .iter()
                 .any(|emit| emit.name == "save")
         }),
@@ -5800,7 +5800,7 @@ defineExpose({ exposed })
         });
     assert!(
         fallthrough_props_dtos
-            .props
+            .prop_fields()
             .iter()
             .any(|prop| prop.name == "label"),
         "fallthrough-expanded state must still preserve the requested defineProps surface"
@@ -5916,7 +5916,7 @@ defineEmits<Emits>()
         });
     assert!(
         fallthrough_props_dtos
-            .props
+            .prop_fields()
             .iter()
             .any(|prop| prop.name == "label"),
         "fallthrough-expanded state must still preserve the requested defineProps surface",
@@ -7585,14 +7585,14 @@ defineEmits<Emits>()
     });
 
     let emit = define_emits_dtos
-        .emits
+        .emit_fields()
         .iter()
         .find(|emit| emit.name == "update:modelValue")
         .unwrap_or_else(|| {
             panic!(
                 "update:modelValue emit should be present on resolved define-emits, got {:?}",
                 define_emits_dtos
-                    .emits
+                    .emit_fields()
                     .iter()
                     .map(|emit| emit.name.as_str())
                     .collect::<Vec<_>>(),
@@ -9360,8 +9360,8 @@ fn overlay_session_vue_macro_dtos_sees_overlay_prop_without_leaking_to_base() {
         root_identity,
         level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
     };
-    let prop_names = |dtos: &crate::typeinfo::adapters::vue::store::VueMacroDtos| -> Vec<String> {
-        dtos.props.iter().map(|p| p.name.clone()).collect()
+    let prop_names = |dtos: &crate::typeinfo::framework_surface::MacroSurfaceDtos| -> Vec<String> {
+        dtos.prop_fields().iter().map(|p| p.name.clone()).collect()
     };
 
     // Base-view read (no overlay): only the base prop `a`.
@@ -9396,7 +9396,7 @@ fn overlay_session_vue_macro_dtos_sees_overlay_prop_without_leaking_to_base() {
     // The overlay session's own whole-hash hint (resolved through the session
     // ctx) keys the overlay DTO slot; the core re-derives + validates it.
     let overlay_hash = ResolverContext::get_whole_hash(&session_ctx, SFC).unwrap_or([0u8; 16]);
-    let overlay_dtos = crate::typeinfo::adapters::vue::surface::vue_macro_dtos_with_ctx(
+    let overlay_dtos = crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx(
         &session_ctx,
         &request_for(overlay_hash),
     );
@@ -9485,8 +9485,8 @@ fn overlay_session_vue_macro_dtos_define_model_reads_overlay_without_leaking_to_
         root_identity,
         level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
     };
-    let prop_names = |dtos: &crate::typeinfo::adapters::vue::store::VueMacroDtos| -> Vec<String> {
-        dtos.props.iter().map(|p| p.name.clone()).collect()
+    let prop_names = |dtos: &crate::typeinfo::framework_surface::MacroSurfaceDtos| -> Vec<String> {
+        dtos.prop_fields().iter().map(|p| p.name.clone()).collect()
     };
 
     // Base-view read (no overlay): only the base model prop `old`.
@@ -9518,7 +9518,7 @@ fn overlay_session_vue_macro_dtos_define_model_reads_overlay_without_leaking_to_
     );
 
     let overlay_hash = ResolverContext::get_whole_hash(&session_ctx, SFC).unwrap_or([0u8; 16]);
-    let overlay_dtos = crate::typeinfo::adapters::vue::surface::vue_macro_dtos_with_ctx(
+    let overlay_dtos = crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx(
         &session_ctx,
         &request_for(overlay_hash),
     );
@@ -9621,8 +9621,8 @@ fn overlay_session_vue_macro_slot_bindings_read_overlay_carrier_without_leaking_
     };
     // Binding names on the `default` slot.
     let default_binding_names =
-        |dtos: &crate::typeinfo::adapters::vue::store::VueMacroDtos| -> Vec<String> {
-            dtos.slots
+        |dtos: &crate::typeinfo::framework_surface::MacroSurfaceDtos| -> Vec<String> {
+            dtos.slot_fields()
                 .iter()
                 .find(|s| s.name == "default")
                 .map(|s| s.bindings.iter().map(|b| b.name.clone()).collect())
@@ -9661,7 +9661,7 @@ fn overlay_session_vue_macro_slot_bindings_read_overlay_carrier_without_leaking_
     // overlaid), so the overlay read keys on the same SFC hash — the binding
     // must still reflect the OVERLAY carrier through the ctx-bound resolution.
     let overlay_hash = ResolverContext::get_whole_hash(&session_ctx, SFC).unwrap_or([0u8; 16]);
-    let overlay_dtos = crate::typeinfo::adapters::vue::surface::vue_macro_dtos_with_ctx(
+    let overlay_dtos = crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx(
         &session_ctx,
         &request_for(overlay_hash),
     );

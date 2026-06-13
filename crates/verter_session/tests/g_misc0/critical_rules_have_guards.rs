@@ -381,6 +381,39 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             "every_registry_entry_lists_at_least_one_guard",
         ],
     ),
+    (
+        // The framework-adapter substrate: one shared registry +
+        // facts/carrier-only ctx + validation-first framework-surface
+        // executor + two-pass script-fact seam + parse-domain synth +
+        // descriptor-owned virtual-file naming + Vue re-housing.
+        "Framework Adapter Substrate",
+        &[
+            // Validation-first wire entry: validation precedes registry
+            // lookup / selector resolution.
+            "framework_surface_wire_executor_validates_first",
+            // Registry dispatch + per-kind status + Vue parity +
+            // unknown-adapter rejection (the executor integration suite,
+            // which exercises `framework_registry_complete`'s dispatch).
+            "framework_surface_executor",
+            // Facts/carrier-only ctx: exactly two pub ops, no resolver
+            // tokens.
+            "framework_adapter_ctx_closed_surface",
+            // Parse-domain synth ctx: no resolved-validation fact types.
+            "component_default_synth_parse_domain_only",
+            // Syntax-capture half is syntax-only (no import resolution /
+            // capability reads in the capture surface).
+            "script_fact_capture_is_syntax_only",
+            // Empty active-provider set is byte-identical zero-cost.
+            "script_fact_providers_zero_cost_on_miss",
+            // Generated virtual-file naming mirror is byte-equal to the
+            // rendered descriptor column.
+            "virtual_file_naming_ts_freshness",
+            // Vue re-housing: no re-export shim, deleted files stay
+            // deleted, retired stores absent from production.
+            "vue_relocation_no_shim",
+            "retired_symbols_absent_from_production_source",
+        ],
+    ),
     // ──────────────────── SKILL.md additions ──────────────────────
     (
         "Component-Meta Heuristic Prevention",

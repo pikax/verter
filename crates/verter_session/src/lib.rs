@@ -519,13 +519,21 @@ pub struct VerterHost {
     /// `typeinfo::scratch_cache::DEFAULT_CAPACITY` (64).
     pub(crate) typeinfo_scratch_cache:
         parking_lot::Mutex<crate::typeinfo::scratch_cache::ScratchCache>,
-    /// Host-owned cache of `.vue` SFC macro-surface normalized DTOs
-    /// (the typeinfo Vue adapter's shallow-metadata home). Materialized
-    /// once per `(canonical, content, macro, level)` per the Shallow File
-    /// Processing Core Invariant. See
-    /// `typeinfo::adapters::vue::store::VueShallowMetadataStore`.
-    pub(crate) vue_shallow_metadata_store:
-        crate::typeinfo::adapters::vue::store::VueShallowMetadataStore,
+    /// The framework adapter registry — the single hub binding each
+    /// framework's descriptor, carrier leg, synthesis leg, public-API
+    /// projector, and surface-resolution disposition. Built ONCE at host
+    /// construction and immutable thereafter; the framework-surface executor,
+    /// the neutral synth injection, and the public-API projection all dispatch
+    /// through it. See `framework::registry::FrameworkAdapterRegistry`.
+    pub(crate) framework_registry: std::sync::Arc<crate::framework::FrameworkAdapterRegistry>,
+    /// Host-owned framework script-fact caches — the resolved-validation half
+    /// of the script-fact seam. The content-addressed candidate store + the
+    /// resolved-fact store the registry's active providers write through.
+    /// Empty for every adapter in this program (no production provider
+    /// registers; the fixture provider exercises the path). See
+    /// `framework::script_facts::FrameworkScriptCaches`.
+    pub(crate) framework_script_caches:
+        std::sync::Arc<crate::framework::script_facts::FrameworkScriptCaches>,
     /// Host-owned CPU pool for every host batch API's outer coordinator
     /// — both `compile_many` and the component-meta batch fan their
     /// outer wait out on it through the host batch coordinator. Distinct

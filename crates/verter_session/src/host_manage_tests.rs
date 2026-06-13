@@ -4094,7 +4094,7 @@ fn macro_dtos_for_resolved(
     host: &VerterHost,
     owner: &str,
     resolved: &crate::meta_resolve::ResolvedMacroMeta,
-) -> std::sync::Arc<crate::typeinfo::adapters::vue::store::VueMacroDtos> {
+) -> std::sync::Arc<crate::typeinfo::framework_surface::MacroSurfaceDtos> {
     host.vue_macro_dtos(&crate::typeinfo::types::VueMacroSurfaceRequest {
         owner_canonical: std::sync::Arc::from(owner),
         macro_index: resolved.macro_index,
@@ -4110,7 +4110,7 @@ fn macro_dtos_by_type(
     owner: &str,
     state: &crate::meta_resolve::ResolvedComponentMetaState,
     type_name: &str,
-) -> std::sync::Arc<crate::typeinfo::adapters::vue::store::VueMacroDtos> {
+) -> std::sync::Arc<crate::typeinfo::framework_surface::MacroSurfaceDtos> {
     macro_dtos_for_resolved(host, owner, resolved_macro_by_type(state, type_name))
 }
 
@@ -4121,7 +4121,7 @@ fn dtos_for_kind(
     owner: &str,
     state: &crate::meta_resolve::ResolvedComponentMetaState,
     kind: verter_semantic::analysis::AnalyzedMacroKind,
-) -> Vec<std::sync::Arc<crate::typeinfo::adapters::vue::store::VueMacroDtos>> {
+) -> Vec<std::sync::Arc<crate::typeinfo::framework_surface::MacroSurfaceDtos>> {
     let mut seen = rustc_hash::FxHashSet::default();
     state
         .resolved_macros
@@ -4139,7 +4139,7 @@ fn names_for_kind(
     owner: &str,
     state: &crate::meta_resolve::ResolvedComponentMetaState,
     kind: verter_semantic::analysis::AnalyzedMacroKind,
-    pick: fn(&crate::typeinfo::adapters::vue::store::VueMacroDtos) -> Vec<String>,
+    pick: fn(&crate::typeinfo::framework_surface::MacroSurfaceDtos) -> Vec<String>,
 ) -> Vec<String> {
     let mut seen = rustc_hash::FxHashSet::default();
     state
@@ -4161,7 +4161,7 @@ fn hm_prop_names(
         owner,
         state,
         verter_semantic::analysis::AnalyzedMacroKind::DefineProps,
-        |d| d.props.iter().map(|p| p.name.clone()).collect(),
+        |d| d.prop_fields().iter().map(|p| p.name.clone()).collect(),
     )
 }
 
@@ -4175,7 +4175,7 @@ fn hm_slot_names(
         owner,
         state,
         verter_semantic::analysis::AnalyzedMacroKind::DefineSlots,
-        |d| d.slots.iter().map(|s| s.name.clone()).collect(),
+        |d| d.slot_fields().iter().map(|s| s.name.clone()).collect(),
     )
 }
 
@@ -4200,7 +4200,11 @@ defineProps<ButtonProps>()
 
     let state = resolve_expanded_state(&host, "/Button.vue");
     let dtos = macro_dtos_by_type(&host, "/Button.vue", &state, "ButtonProps");
-    let props: Vec<&str> = dtos.props.iter().map(|prop| prop.name.as_str()).collect();
+    let props: Vec<&str> = dtos
+        .prop_fields()
+        .iter()
+        .map(|prop| prop.name.as_str())
+        .collect();
 
     assert!(
         props.contains(&"label"),
@@ -4248,7 +4252,11 @@ fn resolve_imported_type_from_vue_dep() {
     let state = resolve_expanded_state(&host, "/Comp.vue");
     let resolved = resolved_macro_by_type(&state, "Props");
     let dtos = macro_dtos_for_resolved(&host, "/Comp.vue", resolved);
-    let props: Vec<&str> = dtos.props.iter().map(|prop| prop.name.as_str()).collect();
+    let props: Vec<&str> = dtos
+        .prop_fields()
+        .iter()
+        .map(|prop| prop.name.as_str())
+        .collect();
     assert!(
         props.contains(&"label"),
         "expanded props should contain 'label', got: {:?}",
@@ -4282,7 +4290,11 @@ fn resolve_imported_type_from_dual_script_vue_dep() {
 
     let state = resolve_expanded_state(&host, "/Comp.vue");
     let dtos = macro_dtos_by_type(&host, "/Comp.vue", &state, "DualProps");
-    let props: Vec<&str> = dtos.props.iter().map(|prop| prop.name.as_str()).collect();
+    let props: Vec<&str> = dtos
+        .prop_fields()
+        .iter()
+        .map(|prop| prop.name.as_str())
+        .collect();
     assert!(
         props.contains(&"title"),
         "expanded props should contain 'title' from companion script, got: {:?}",
@@ -4316,7 +4328,11 @@ fn resolve_imported_type_from_vue_dep_without_vue_suffix_uses_file_kind() {
     let state = resolve_expanded_state(&host, "/Comp.vue");
     let resolved = resolved_macro_by_type(&state, "Props");
     let dtos = macro_dtos_for_resolved(&host, "/Comp.vue", resolved);
-    let props: Vec<&str> = dtos.props.iter().map(|prop| prop.name.as_str()).collect();
+    let props: Vec<&str> = dtos
+        .prop_fields()
+        .iter()
+        .map(|prop| prop.name.as_str())
+        .collect();
     assert!(
         props.contains(&"label"),
         "expanded props should contain 'label', got: {:?}",
@@ -4370,7 +4386,11 @@ fn resolve_component_meta_uses_workspace_type_resolution_for_package_declaration
 
     let state = resolve_expanded_state(&host, "/workspace/src/Consumer.vue");
     let dtos = macro_dtos_by_type(&host, "/workspace/src/Consumer.vue", &state, "FancyProps");
-    let props: Vec<&str> = dtos.props.iter().map(|prop| prop.name.as_str()).collect();
+    let props: Vec<&str> = dtos
+        .prop_fields()
+        .iter()
+        .map(|prop| prop.name.as_str())
+        .collect();
     assert!(
         props.contains(&"open"),
         "expanded props should contain fields from the package declaration entrypoint, got: {:?}",
@@ -4484,7 +4504,10 @@ defineEmits<Events>()
         &state,
         verter_semantic::analysis::AnalyzedMacroKind::DefineEmits,
     );
-    let emits: Vec<_> = emit_dtos.iter().flat_map(|d| d.emits.iter()).collect();
+    let emits: Vec<_> = emit_dtos
+        .iter()
+        .flat_map(|d| d.emit_fields().iter())
+        .collect();
     let change = emits.iter().find(|e| e.name == "change");
     assert!(change.is_some(), "should have 'change' emit");
     let payload = change.unwrap().payload_type.as_deref().unwrap_or("");
@@ -4522,7 +4545,10 @@ defineSlots<Slots>()
         &state,
         verter_semantic::analysis::AnalyzedMacroKind::DefineSlots,
     );
-    let slots: Vec<_> = slot_dtos.iter().flat_map(|d| d.slots.iter()).collect();
+    let slots: Vec<_> = slot_dtos
+        .iter()
+        .flat_map(|d| d.slot_fields().iter())
+        .collect();
     let default_slot = slots.iter().find(|s| s.name == "default");
     assert!(default_slot.is_some(), "should have 'default' slot");
     let bindings = &default_slot.unwrap().bindings;
@@ -4644,7 +4670,10 @@ defineSlots<Slots>()
         &state,
         verter_semantic::analysis::AnalyzedMacroKind::DefineSlots,
     );
-    let slots: Vec<_> = slot_dtos.iter().flat_map(|d| d.slots.iter()).collect();
+    let slots: Vec<_> = slot_dtos
+        .iter()
+        .flat_map(|d| d.slot_fields().iter())
+        .collect();
 
     let default_slot = slots.iter().find(|s| s.name == "default").unwrap();
     assert_eq!(

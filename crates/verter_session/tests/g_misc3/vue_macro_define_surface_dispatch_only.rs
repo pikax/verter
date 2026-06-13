@@ -686,7 +686,7 @@ fn p2a_aliased_union_define_props_enumerates_both_arms() {
         root_identity: [0u8; 16],
         level: TypeInfoQueryLevel::FullMetadata,
     });
-    let dto_names: Vec<&str> = dtos.props.iter().map(|p| p.name.as_str()).collect();
+    let dto_names: Vec<&str> = dtos.prop_fields().iter().map(|p| p.name.as_str()).collect();
     // The common member is always present (it is in both arms).
     assert!(
         dto_names.contains(&"tag"),
@@ -782,7 +782,7 @@ fn open_conditional_props_root_enumerates_both_branches() {
         root_identity: [0u8; 16],
         level: TypeInfoQueryLevel::FullMetadata,
     });
-    let dto_names: Vec<&str> = dtos.props.iter().map(|p| p.name.as_str()).collect();
+    let dto_names: Vec<&str> = dtos.prop_fields().iter().map(|p| p.name.as_str()).collect();
     for required in ["a", "b"] {
         assert!(
             dto_names.contains(&required),
@@ -800,7 +800,7 @@ fn open_conditional_props_root_enumerates_both_branches() {
     // the merged macro surface (`declaring_arms < arm_count`).
     for required in ["a", "b"] {
         let prop = dtos
-            .props
+            .prop_fields()
             .iter()
             .find(|p| p.name == required)
             .unwrap_or_else(|| panic!("prop `{required}` must be present"));

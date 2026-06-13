@@ -10747,23 +10747,6 @@ fn every_consumer_has_production_call_site() {
              host-driven bundler-summary publisher) requires removing this exemption in the \
              same change.",
         ),
-        // The typeinfo graph audit envelope is the contract surface that
-        // typeinfo `_with_audit` entry-points populate. The substrate
-        // (`RequestKind::TypeInfoGraph`, `RequestKindPayload::TypeInfoGraph`,
-        // `TypeInfoGraphPayload`, `StructuredAuditEvent::TypeInfoGraphPublished`
-        // / `TypeInfoGraphDegraded` / `TypeInfoGraphCacheHit`) lands as the
-        // contract layer; the production producers
-        // (`resolve_symbol_graph_with_audit` and the other typeinfo
-        // graph entry-points) land in the subsequent typeinfo substrate
-        // phase and remove this exemption in the same change that wires
-        // the producers.
-        (
-            "TypeInfoGraph",
-            "typeinfo graph wire-contract substrate landed without producers; the typeinfo \
-             session entry-points (`resolve_symbol_graph_with_audit` and siblings) wire the \
-             producers in the typeinfo runtime phase and remove this exemption in the same \
-             change.",
-        ),
     ];
 
     // Step 1: enumerate every `RequestKind` variant from
@@ -16644,8 +16627,8 @@ pub fn after() {}\n";
 /// synthesise-then-reparse direction (a consumer parsing the stored string).
 ///
 /// This guard parses the typeinfo surface files — the core
-/// `typeinfo/surface.rs` AND the Vue-adapter surface
-/// `typeinfo/adapters/vue/surface.rs` (which carries the `.vue`-macro
+/// `typeinfo/surface.rs` AND the relocated Vue-adapter surface
+/// `typeinfo/framework_surface/vue_exec.rs` (which carries the `.vue`-macro
 /// `VueMacroSurface`) — and asserts NO surface struct (a name containing
 /// `Surface` or starting with `TypeInfo`: the surface + member + signature +
 /// index-signature + adapter-macro-surface types) has a `String` /
@@ -16668,7 +16651,7 @@ fn typeinfo_surface_carries_spans_not_rendered_strings() {
             "TypeInfoSurface",
         ),
         (
-            "crates/verter_session/src/typeinfo/adapters/vue/surface.rs",
+            "crates/verter_session/src/typeinfo/framework_surface/vue_exec.rs",
             "VueMacroSurface",
         ),
     ];

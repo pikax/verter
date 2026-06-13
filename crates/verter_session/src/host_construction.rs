@@ -173,6 +173,17 @@ impl VerterHost {
             crate::framework::ProjectCapabilitySnapshot::empty(),
         );
 
+        // The framework adapter registry, built ONCE here. The Vue carrier leg
+        // receives a clone of the SAME minted carrier proof the blessed
+        // `vue_parse()` accessor holds (received just above) — one mint channel,
+        // value-equal receipt, no second mint.
+        let framework_registry =
+            std::sync::Arc::new(crate::framework::FrameworkAdapterRegistry::built_in(
+                crate::typeinfo::adapters::vue::vue_carrier_token_clone(),
+            ));
+        let framework_script_caches =
+            std::sync::Arc::new(crate::framework::script_facts::FrameworkScriptCaches::new());
+
         let scheduler = {
             let executor = Arc::new(host_executor::HostStageExecutor::new(
                 config.clone(),
@@ -333,8 +344,8 @@ impl VerterHost {
                 Some(cap) => crate::typeinfo::scratch_cache::ScratchCache::with_capacity(cap),
                 None => crate::typeinfo::scratch_cache::ScratchCache::with_default_capacity(),
             }),
-            vue_shallow_metadata_store:
-                crate::typeinfo::adapters::vue::store::VueShallowMetadataStore::new(),
+            framework_registry,
+            framework_script_caches,
             #[cfg(not(target_arch = "wasm32"))]
             host_cpu_pool,
             compile_force_overflow_observations: std::sync::atomic::AtomicUsize::new(0),
@@ -650,15 +661,106 @@ impl VerterHost {
         &self.typeinfo_scratch_cache
     }
 
-    /// Host-owned cache of `.vue` macro-surface normalized DTOs (the
-    /// typeinfo Vue adapter's shallow-metadata store). Used by
-    /// [`crate::typeinfo::adapters::vue::resolve_vue_macro_surface`] and the
-    /// normalizer entry points to materialize each `.vue` macro surface once
-    /// per `(canonical, content, macro, level)`.
-    pub(crate) fn vue_shallow_metadata_store(
+    /// The Vue adapter's typed framework-surface DTO store — the host-owned
+    /// cache of `.vue` macro-surface normalized DTOs.
+    ///
+    /// The store lives erased on the Vue registration row
+    /// ([`crate::framework::registry::FrameworkRegistration::surface_store`]);
+    /// this accessor performs the ONE downcast at store acquisition to the typed
+    /// [`FrameworkSurfaceStore<VueSurfaceKey, MacroSurfaceDtos>`](crate::framework::surface_store::FrameworkSurfaceStore),
+    /// exactly the public-hidden downcast doctrine the carriers use. Used by the
+    /// relocated [`crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx`]
+    /// to materialize each `.vue` macro surface once per `(canonical, content,
+    /// macro, level)`.
+    ///
+    /// Panics only on a build defect (the Vue registration absent, or its
+    /// surface store erased to the wrong concrete type) — neither is reachable
+    /// on a correctly-constructed host (`framework_registry_complete` +
+    /// `vue_registration_carries_every_leg` pin the registration).
+    pub(crate) fn vue_surface_store(
         &self,
-    ) -> &crate::typeinfo::adapters::vue::store::VueShallowMetadataStore {
-        &self.vue_shallow_metadata_store
+    ) -> &crate::framework::surface_store::FrameworkSurfaceStore<
+        crate::typeinfo::framework_surface::VueSurfaceKey,
+        crate::typeinfo::framework_surface::MacroSurfaceDtos,
+    > {
+        self.framework_registry()
+            .get(&verter_language::FrameworkAdapterId::vue())
+            .expect("the Vue adapter is registered")
+            .surface_store
+            .as_any()
+            .downcast_ref()
+            .expect(
+                "the Vue surface store is FrameworkSurfaceStore<VueSurfaceKey, MacroSurfaceDtos>",
+            )
+    }
+
+    /// The framework adapter registry — the executor / synth-injection /
+    /// public-API-projection dispatch authority. Built once at host
+    /// construction and immutable thereafter.
+    pub(crate) fn framework_registry(&self) -> &crate::framework::FrameworkAdapterRegistry {
+        &self.framework_registry
+    }
+
+    /// The framework script-fact caches — the resolved-validation half's
+    /// content-addressed candidate store + resolved-fact store. Empty for every
+    /// adapter in this program (no production provider registers).
+    pub(crate) fn framework_script_caches(
+        &self,
+    ) -> &crate::framework::script_facts::FrameworkScriptCaches {
+        &self.framework_script_caches
+    }
+
+    /// Inject the framework-synthesized `default` value symbol into a file's
+    /// shallow state, dispatched through the registry's synthesis leg.
+    ///
+    /// The synth leg is selected by the canonical's resolved framework adapter
+    /// id. A typeinfo evaluation scratch (`verter://typeinfo/…`) is a
+    /// host-internal surface that inlines an arbitrary scope's eval-source as a
+    /// prelude; it classifies by its own `.ts` suffix yet must synthesize the
+    /// inlined scope's `default`, so it routes to the synthesizing framework's
+    /// leg — Vue is the only framework that synthesizes a `default` in this
+    /// program. A no-op when the canonical has no synth leg, when synthesis
+    /// returns `None`, or when a userland `default` already exists (userland
+    /// always wins).
+    pub(crate) fn inject_component_default_into_shallow_state(
+        &self,
+        canonical_id: &str,
+        state: &mut crate::resolver_core::ShallowFileState,
+        macros: &[verter_semantic::analysis::types::AnalyzedMacro],
+    ) {
+        // Userland `default` always wins — never overwrite it.
+        if state.value_symbol("default").is_some() {
+            return;
+        }
+        let language = self.language_classifier.classify(canonical_id);
+        let adapter_id = match language.adapter_id() {
+            Some(id) => id.clone(),
+            // A typeinfo evaluation scratch inlines its scope's eval-source; it
+            // has no resolved framework language, so route it to the registry's
+            // synthesizing framework leg (REGISTRY DATA, not a `vue()` literal).
+            // No synthesizing adapter ⇒ no-op (no `default` to inject).
+            None if crate::resolver_core::vue_default_synth::is_typeinfo_scratch(canonical_id) => {
+                match self.framework_registry().synthesizing_adapter_id() {
+                    Some(id) => id,
+                    None => return,
+                }
+            }
+            None => return,
+        };
+        let Some(synth) = self.framework_registry().synth_for(&adapter_id) else {
+            return;
+        };
+        let candidates =
+            verter_semantic::analysis::framework_facts::FrameworkScriptCandidateSet::default();
+        let cx = crate::framework::synth::ComponentDefaultSynthCtx {
+            canonical_id,
+            language: &language,
+            macros,
+            script_candidates: &candidates,
+        };
+        if let Some(default_symbol) = synth.synthesise(cx) {
+            state.insert_synthesised_value_symbol("default", default_symbol);
+        }
     }
 
     // ──────────────────────────────────────────────────────────────────

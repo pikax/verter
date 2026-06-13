@@ -6,7 +6,7 @@
 //! cluster) has been retired — `define_*` macro shapes are produced by the
 //! dispatch projectors (`crate::meta_resolve::projectors::define_shapes`),
 //! and the `.vue` macro DTO surface is resolved directly through
-//! `crate::typeinfo::adapters::vue::surface::vue_macro_dtos_with_ctx`.
+//! `crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx`.
 //!
 //! The single surviving helper collects the set of `Ref` names reachable
 //! through a `TypeExpr`, used by the host-side registry-name closure in

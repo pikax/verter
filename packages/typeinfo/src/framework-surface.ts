@@ -1,0 +1,155 @@
+/**
+ * Typed decode of the framework-surface wire payload.
+ *
+ * The native binding `VerterHost.resolveFrameworkSurfaceWithAudit`
+ * returns a protobuf-encoded `TypeInfoGraphResponse` (the
+ * `framework_surface` arm on success, the `error` arm on a typed
+ * rejection). This module decodes those bytes into an ergonomic
+ * TypeScript surface:
+ *
+ * - {@link FrameworkSurface} — `framework` tag + a per-kind map carrying
+ *   each kind's support status and resolved members (member names are
+ *   resolved through the graph string table here, so consumers never
+ *   touch the interned id space).
+ * - {@link FrameworkSurfaceError} — the typed wire error arm.
+ *
+ * **Status semantics (D-s).** Per-kind status is surfaced VERBATIM from
+ * the wire `FrameworkSurfaceKindStatus`: a SUPPORTED kind with zero
+ * members is supported-empty (a real-but-empty surface), DISTINCT from
+ * an UNSUPPORTED kind (which also carries zero members). The decoded
+ * `isSupported` / `isUnsupported` flags preserve that distinction so a
+ * consumer never has to infer support from member-count emptiness.
+ *
+ * Kept free of any `@verter/native` import so the decode can be
+ * unit-tested without loading the native host binary — the input is raw
+ * wire bytes, exactly as the binding emits them.
+ */
+
+import { fromBinary } from "@bufbuild/protobuf";
+import {
+  type FrameworkSurfaceKind,
+  FrameworkSurfaceKindSupport,
+  type FrameworkSurfacePayload,
+  type FrameworkTag,
+  TypeInfoGraphResponseSchema,
+  type TypeInfoRequestError,
+} from "@verter/proto";
+
+/** One resolved member of a framework surface (props/emits/slots/…). */
+export interface FrameworkSurfaceMember {
+  /** The member name, resolved through the graph string table. */
+  readonly name: string;
+  /** Whether the member is required (non-optional). */
+  readonly required: boolean;
+  /** Whether the member is readonly. */
+  readonly readonly: boolean;
+}
+
+/** A single framework-surface kind's resolved status and members. */
+export interface FrameworkSurfaceKindResult {
+  /** The wire support status (SUPPORTED / UNSUPPORTED / PARTIAL / …). */
+  readonly support: FrameworkSurfaceKindSupport;
+  /**
+   * `true` when the kind is SUPPORTED. A SUPPORTED kind with zero
+   * {@link members} is supported-empty — a real surface that is empty,
+   * NOT unsupport.
+   */
+  readonly isSupported: boolean;
+  /** `true` when the kind is UNSUPPORTED. */
+  readonly isUnsupported: boolean;
+  /** `true` when the kind is PARTIAL (a usable subset). */
+  readonly isPartial: boolean;
+  /** The resolved members (empty for supported-empty / unsupported). */
+  readonly members: readonly FrameworkSurfaceMember[];
+  /** Per-kind diagnostics, resolved through the graph string table. */
+  readonly diagnostics: readonly string[];
+}
+
+/** The decoded `framework_surface` response arm. */
+export interface FrameworkSurface {
+  /** The wire framework tag (e.g. `FrameworkTag.VUE`). */
+  readonly framework: FrameworkTag;
+  /**
+   * Per-kind resolved surfaces. A v3 payload carries exactly one entry
+   * per known {@link FrameworkSurfaceKind}.
+   */
+  readonly kinds: ReadonlyMap<FrameworkSurfaceKind, FrameworkSurfaceKindResult>;
+}
+
+/** The decoded `error` response arm — the TYPED wire error variant. */
+export interface FrameworkSurfaceError {
+  /**
+   * The typed error discriminant. `error.case` is the wire
+   * `TypeInfoRequestError` oneof variant name (e.g. `"malformedPayload"`);
+   * `error.value` is its typed payload (e.g. `{ detail: string }`). This is
+   * the structural error, never a stringified display.
+   */
+  readonly error: TypeInfoRequestError["kind"];
+}
+
+/**
+ * Decode the protobuf-encoded `TypeInfoGraphResponse` bytes returned by
+ * `VerterHost.resolveFrameworkSurfaceWithAudit` into a
+ * {@link FrameworkSurface} (the `framework_surface` arm) or a
+ * {@link FrameworkSurfaceError} (the `error` arm).
+ *
+ * The native binding always produces a typed response (validation-first
+ * executor), so this never throws on a well-formed buffer; a malformed
+ * buffer surfaces as a `fromBinary` decode error.
+ */
+export function decodeFrameworkSurfaceResponse(
+  bytes: Uint8Array,
+): FrameworkSurface | FrameworkSurfaceError {
+  const response = fromBinary(TypeInfoGraphResponseSchema, bytes);
+  const kind = response.kind;
+
+  if (kind.case === "frameworkSurface") {
+    return decodePayload(kind.value);
+  }
+  if (kind.case === "error") {
+    // Surface the TYPED error oneof (`{ case, value }`) verbatim — never a
+    // stringified display. The framework-surface operation never produces
+    // the `graph` arm, so this is the only error path.
+    return { error: kind.value.kind };
+  }
+  // The `graph` arm is never produced for a framework-surface request, and
+  // an empty `kind` is malformed — both surface as a typed-unspecified
+  // error variant rather than a fabricated string.
+  return { error: { case: undefined } as TypeInfoRequestError["kind"] };
+}
+
+function decodePayload(payload: FrameworkSurfacePayload): FrameworkSurface {
+  const strings = payload.graph?.strings?.entries ?? [];
+
+  const kinds = new Map<FrameworkSurfaceKind, FrameworkSurfaceKindResult>();
+  for (const entry of payload.surfaces) {
+    const support = entry.status?.support ?? FrameworkSurfaceKindSupport.UNSPECIFIED;
+    const members: FrameworkSurfaceMember[] = entry.members.map((m) => ({
+      name: resolveString(strings, m.nameId),
+      required: m.required,
+      readonly: m.readonly,
+    }));
+    const diagnostics: string[] =
+      entry.status?.diagnostics.map((d) => resolveString(strings, d.messageNameId)) ?? [];
+
+    kinds.set(entry.kind, {
+      support,
+      isSupported: support === FrameworkSurfaceKindSupport.SUPPORTED,
+      isUnsupported: support === FrameworkSurfaceKindSupport.UNSUPPORTED,
+      isPartial: support === FrameworkSurfaceKindSupport.PARTIAL,
+      members,
+      diagnostics,
+    });
+  }
+
+  return { framework: payload.framework, kinds };
+}
+
+/**
+ * Resolve an interned string-table index to its string, or the empty
+ * string when out of range — the decode never throws on a malformed
+ * index (a structurally-broken payload).
+ */
+function resolveString(strings: readonly string[], id: number): string {
+  return strings[id] ?? "";
+}

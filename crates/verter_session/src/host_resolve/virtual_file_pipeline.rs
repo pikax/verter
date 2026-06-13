@@ -1492,22 +1492,73 @@ impl VerterHost {
         mode: PublicApiMode,
         profile: Option<&CompileProfile>,
     ) -> Option<TscResponse> {
+        // Dispatch through the framework registry's component-API projector
+        // leg, selected by the canonical's framework adapter id. The
+        // classification AUTHORITY is the RUNTIME-loaded source language (the
+        // explicit `UpsertRequest.file_language` the file was loaded with),
+        // resolved over the ALIAS-resolved canonical — exactly what the
+        // pre-registry Vue gate consulted, so aliases and explicit
+        // load-language stay byte-faithful. A canonical whose source is not
+        // loaded, whose language has no framework adapter id, or whose adapter
+        // registers no api-projector leg, projects no public-API surface —
+        // the pre-registry non-Vue behavior. The host method stays the single
+        // entry every consumer calls.
         let canonical = self.resolve_alias_or_canonical(canonical_id);
+        let file_language = self.scheduler.try_get_source(&canonical).and_then(|snap| {
+            snap.downcast_data::<crate::host_executor::HostSourceData>()
+                .map(|hd| hd.file_language.clone())
+        })?;
+        let adapter_id = file_language.adapter_id()?;
+        let projector = self.framework_registry().api_projector_for(adapter_id)?;
+        projector.render_api(crate::framework::api_projector::ComponentApiProjectorCtx {
+            host: self,
+            resolved_canonical: &canonical,
+            file_language: &file_language,
+            mode,
+            profile,
+        })
+    }
+
+    /// The Vue public-API extraction body — the EXEMPT legacy producer the
+    /// `vue` component-API projector leg delegates to.
+    ///
+    /// Consumes deep pipeline internals (`cached_tsc_extract` /
+    /// `extract_tsc_state` / `generate_tsc_from_state` /
+    /// `collect_external_types_from_loaded_files` /
+    /// `sync_transitive_macro_type_dependencies`) so it stays in this module.
+    /// Both [`Self::get_public_api_with_mode`] and the registry's `vue`
+    /// component-API projector leg
+    /// ([`crate::framework::api_projectors::VueComponentApiProjector`])
+    /// converge on this one body. The caller passes the ALREADY-alias-resolved
+    /// canonical (the host classified it against the same resolution), so this
+    /// body renders that exact target without re-resolving — classification
+    /// and rendering stay coherent under concurrent alias relabels.
+    pub(crate) fn render_vue_public_api_legacy(
+        &self,
+        resolved_canonical: &str,
+        mode: PublicApiMode,
+        profile: Option<&CompileProfile>,
+    ) -> Option<TscResponse> {
+        // Already alias-resolved by the caller; own it for the body's
+        // existing `&canonical` / `.clone()` consumers without re-resolving.
+        let canonical = resolved_canonical.to_string();
         let profile_hash = profile.map(compile_profile_hash);
 
         if self.is_canonical_evicted(&canonical) {
             return None;
         }
 
-        let (source, file_language, macro_type_deps, script_imports, cached_extract, whole_hash) = {
+        let (source, macro_type_deps, script_imports, cached_extract, whole_hash) = {
             let efs = self.effective_file_state(&canonical, profile_hash)?;
-            let file_language = self.scheduler.try_get_source(&canonical).and_then(|snap| {
+            // Require the source to be loaded — the rest of the flow reads
+            // its derived state. (Framework classification is decided once,
+            // up-front, by the registry dispatch in `get_public_api_with_mode`
+            // that selected this Vue projector leg; this body carries no
+            // framework gate of its own.)
+            self.scheduler.try_get_source(&canonical).and_then(|snap| {
                 snap.downcast_data::<crate::host_executor::HostSourceData>()
                     .map(|hd| hd.file_language.clone())
             })?;
-            if !file_language.is_vue() {
-                return None;
-            }
             // cached_tsc_extract lives on DerivedRawState (D48 split).
             let cached = self.derived_raw_cache().get(&canonical).and_then(|cc| {
                 cc.cached_tsc_extract.as_ref().and_then(|(hash, extract)| {
@@ -1520,7 +1571,6 @@ impl VerterHost {
             });
             (
                 efs.source,
-                file_language,
                 efs.script_analysis.macro_type_deps.clone(),
                 efs.script_analysis.imports.clone(),
                 cached,
@@ -1528,9 +1578,6 @@ impl VerterHost {
             )
         };
 
-        if !file_language.is_vue() {
-            return None;
-        }
         // Derive component name from canonical_id: last path segment, strip .vue extension.
         let component_name = canonical
             .rsplit('/')

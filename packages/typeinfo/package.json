@@ -39,7 +39,9 @@
     "test": "vitest --run --passWithNoTests"
   },
   "dependencies": {
+    "@bufbuild/protobuf": "2.12.0",
     "@verter/native": "workspace:^",
+    "@verter/proto": "workspace:^",
     "@verter/type-ir": "workspace:^"
   },
   "devDependencies": {

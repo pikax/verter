@@ -1034,6 +1034,42 @@ impl WasmVerterHost {
             to_wasm_value(&result)
         }))?
     }
+
+    /// Resolve a component's framework surfaces, returning the wire
+    /// `TypeInfoGraphResponse` (as protobuf bytes) plus the per-request
+    /// audit record. Mirrors the NAPI `resolveFrameworkSurfaceWithAudit`.
+    ///
+    /// `request` is the protobuf-encoded
+    /// `verter_protocol::typeinfo::graph::TypeInfoGraphRequest` envelope
+    /// carrying the `GRAPH_OPERATION_FRAMEWORK_SURFACES` operation. The
+    /// host runs the envelope validator FIRST, so a malformed envelope
+    /// returns the typed wire `error` arm BEFORE any registry lookup or
+    /// semantic dispatch.
+    ///
+    /// Returns `{ response, auditRecord }` — `response` is the
+    /// protobuf-encoded `TypeInfoGraphResponse` byte array (always
+    /// present); `auditRecord` is the JSON `RequestAuditRecord` or `null`.
+    #[wasm_bindgen(js_name = "resolveFrameworkSurfaceWithAudit")]
+    pub fn resolve_framework_surface_with_audit(&self, request: &[u8]) -> Result<JsValue, JsValue> {
+        let envelope = crate::typeinfo::decode_type_info_graph_request(request)?;
+        let host = std::sync::Arc::clone(&self.inner);
+        catch_panic(AssertUnwindSafe(move || {
+            let (outcome, record) = host
+                .resolve_framework_surface_with_audit(envelope)
+                .into_parts();
+            let response = match outcome {
+                Ok(response) => response,
+                Err(error) => crate::typeinfo::framework_error_response(error),
+            };
+            let response_bytes = crate::typeinfo::encode_type_info_graph_response(&response);
+            let audit_json = crate::typeinfo::encode_stored_audit_record(&record)?;
+            let result = crate::typeinfo::WasmFrameworkSurfaceResult {
+                response: response_bytes,
+                audit_record: audit_json,
+            };
+            to_wasm_value(&result)
+        }))?
+    }
 }
 
 // =============================================================================

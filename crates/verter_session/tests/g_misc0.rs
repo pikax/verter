@@ -58,6 +58,8 @@ mod env_hash_isolation;
 mod env_hashes_swap_atomically_on_snapshot_bump;
 #[path = "g_misc0/eviction_policy.rs"]
 mod eviction_policy;
+#[path = "g_misc0/framework_adapter_guards.rs"]
+mod framework_adapter_guards;
 #[path = "g_misc0/framework_carrier_confinement.rs"]
 mod framework_carrier_confinement;
 #[path = "g_misc0/getcomponentmeta_fallthrough_audit_cleanliness.rs"]
@@ -146,6 +148,8 @@ mod tls_harness_in_crate;
 mod tracer_stack_reentrant_observe_safe;
 #[path = "g_misc0/uniqueness_check_release_active.rs"]
 mod uniqueness_check_release_active;
+#[path = "g_misc0/vue_relocation_no_shim.rs"]
+mod vue_relocation_no_shim;
 #[path = "g_misc0/walker_parity_baselines_have_full_coverage.rs"]
 mod walker_parity_baselines_have_full_coverage;
 #[path = "g_misc0/workspace_audit_production_callsite.rs"]
