@@ -1254,8 +1254,11 @@ single host dispatch, with Vue wrapped by delegation (never edited). Establishes
   `VueParseCarrier` exist since B4): `trait CarrierCompiler: Send + Sync` — `adapter_id()`,
   `parse(source, opts) -> FrameworkParseArtifact`, `eval_source(source, artifact) -> Arc<str>`
   (the position-preserving blanking contract: script bytes at raw offsets, every other byte
-  whitespace-blanked), `compile_ide(artifact, ct: &mut CodeTransform, opts) -> Result<IdeOutput,
-  CompileUnsupported>`, `template_data(artifact) -> TemplateFacts`. There is NO
+  whitespace-blanked), `compile_ide(source, artifact, opts) -> Result<IdeOutput,
+  CompileUnsupported>` (NO borrowed `CodeTransform`: each adapter owns its own `CodeTransform`
+  internally and derives both `code` and `source_map` from it — a shared host-level transform
+  would be a second, coarse, non-authoritative map spanning adapters, violating the
+  CodeTransform-single-source-of-truth rule), `template_data(artifact) -> TemplateFacts`. There is NO
   `analyze_script_facts` method and NO `CarrierScriptFacts` type — script-fact extraction for
   EVERY framework (carrier or not) goes through the one `ScriptFactProvider` seam (D-o, landed in
   B5); the carrier compiler is parse/eval/IDE/template only. Unsupported `CompileTarget` bits →
