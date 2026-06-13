@@ -155,15 +155,29 @@ impl StageExecutor for HostStageExecutor {
         content: Arc<str>,
         generation: u64,
     ) -> Result<SourceSnapshot, StageError> {
-        // Carrier dispatch: the Vue carrier is the registered parse
-        // implementation; any OTHER framework carrier (or framework
-        // template) is a KNOWN language row without a registered
-        // carrier behind it — the typed unsupported-language state, by
-        // construction from the row-without-carrier (never a silent
-        // empty result, never a panic). Plain scripts take the script
-        // parse path.
-        let is_vue = file_language.is_vue();
-        if let (false, Some(adapter_id)) = (is_vue, file_language.adapter_id()) {
+        // Carrier dispatch: a framework CARRIER file whose carrier language
+        // the registry serves routes its parse through the compiler-side
+        // carrier registry — the SINGLE carrier parse path, with Vue served
+        // by its bridge. EVERY OTHER framework row (a framework TEMPLATE, an
+        // unregistered carrier adapter, a same-adapter NON-carrier language)
+        // is the typed unsupported-language state — never a silent empty,
+        // never a panic. Plain scripts take the script parse path. The
+        // dispatchable predicate is keyed on the FULL `(adapter_id, carrier
+        // language id)` row, never adapter id alone.
+        let dispatchable_carrier = match (
+            file_language.adapter_id(),
+            file_language.carrier_language_id(),
+        ) {
+            (Some(adapter_id), Some(carrier_language_id)) => {
+                crate::parse::carrier_compiler_registry()
+                    .compiler_for_carrier_language(adapter_id, carrier_language_id)
+                    .is_some()
+            }
+            _ => false,
+        };
+        if let (false, Some(adapter_id)) = (dispatchable_carrier, file_language.adapter_id()) {
+            // A framework row that is NOT a dispatchable carrier (template,
+            // unregistered carrier, same-adapter non-carrier) is unsupported.
             return Err(StageError::unsupported_language(adapter_id.clone()));
         }
 
@@ -176,12 +190,14 @@ impl StageExecutor for HostStageExecutor {
 
         let parse_start = Instant::now();
 
-        let snapshot = if is_vue {
-            let (parse_snapshot, framework_parse) = crate::parse::parse_vue_snapshot(
+        let snapshot = if dispatchable_carrier {
+            let (parse_snapshot, framework_parse) = crate::parse::carrier_parse_snapshot(
                 canonical_id,
                 &content,
                 self.config.effective_scope(),
-            );
+                &file_language,
+            )
+            .expect("a registered carrier compiler produces a snapshot for its own carrier file");
             let parse_duration_ms = parse_start.elapsed().as_secs_f64() * 1000.0;
             let source_type =
                 imported_eval_source_type(&file_language, Some(framework_parse.as_ref()));

@@ -60,6 +60,8 @@ mod env_hashes_swap_atomically_on_snapshot_bump;
 mod eviction_policy;
 #[path = "g_misc0/framework_adapter_guards.rs"]
 mod framework_adapter_guards;
+#[path = "g_misc0/framework_carrier_compiler_guards.rs"]
+mod framework_carrier_compiler_guards;
 #[path = "g_misc0/framework_carrier_confinement.rs"]
 mod framework_carrier_confinement;
 #[path = "g_misc0/getcomponentmeta_fallthrough_audit_cleanliness.rs"]

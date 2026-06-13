@@ -9,7 +9,6 @@ use oxc_ast::ast::Program;
 use oxc_parser::{ParseOptions, Parser};
 use oxc_span::SourceType;
 
-use verter_compiler::compile::parse_sfc;
 use verter_compiler::diagnostics::DiagnosticSeverity;
 use verter_compiler::parser::types::ParsedSfc;
 use verter_compiler::types::NodeProp;
@@ -97,33 +96,102 @@ pub(crate) fn try_resolve_src_block(
     }
 }
 
+/// The process-wide compiler-side carrier-compiler registry.
+///
+/// The carrier parse dispatch (`execute_source` → [`carrier_parse_snapshot`])
+/// looks the file's adapter compiler up here. The registry is stateless
+/// (it owns the per-framework [`CarrierCompiler`](verter_compiler::framework_common::CarrierCompiler)
+/// implementations), so one process-wide instance serves every host.
+pub(crate) fn carrier_compiler_registry(
+) -> &'static verter_compiler::framework_common::CarrierCompilerRegistry {
+    use std::sync::OnceLock;
+    static REGISTRY: OnceLock<verter_compiler::framework_common::CarrierCompilerRegistry> =
+        OnceLock::new();
+    REGISTRY.get_or_init(verter_compiler::framework_common::CarrierCompilerRegistry::built_in)
+}
+
+/// Produce a carrier file's `ParseSnapshot` + framework-neutral artifact by
+/// dispatching the parse through the compiler-side carrier registry.
+///
+/// The SINGLE carrier parse dispatch the host executor reaches: it interns the
+/// file's adapter id, looks up its [`CarrierCompiler`](verter_compiler::framework_common::CarrierCompiler)
+/// (Vue via the bridge), and produces the framework-neutral artifact through
+/// it. The host then reaches the artifact's typed carrier back out (the blessed
+/// `vue_parse` accessor — the one carrier type today) to build the Vue-shaped
+/// `ParseSnapshot`. Routing the parse through the registry keeps Vue's compile
+/// output byte-identical (the bridge calls `parse_sfc(source, None, None)` and
+/// stamps the same parser version) while a later carrier vertical's compiler
+/// drops in without a second dispatch branch.
+pub(crate) fn carrier_parse_snapshot(
+    canonical_id: &str,
+    source: &str,
+    analysis_scope: verter_semantic::analysis::AnalysisScope,
+    file_language: &verter_language::FileLanguage,
+) -> Option<(ParseSnapshot, Arc<verter_language::FrameworkParseArtifact>)> {
+    // The row must be a true CARRIER (it carries a carrier language id) AND
+    // the registry must serve THAT carrier language — a same-adapter
+    // non-carrier row (an external template) is NOT dispatched by adapter
+    // id alone.
+    let adapter_id = file_language.adapter_id()?;
+    let carrier_language_id = file_language.carrier_language_id()?;
+    let compiler = carrier_compiler_registry()
+        .compiler_for_carrier_language(adapter_id, carrier_language_id)?;
+    let artifact = compiler.parse(
+        source,
+        &verter_compiler::framework_common::ParseOptions::default(),
+    );
+    // The only carrier type today is Vue; the host reaches its parsed SFC
+    // through the blessed accessor to build the Vue-shaped snapshot.
+    let parsed = crate::typeinfo::adapters::vue::vue_parse(&artifact)?;
+    let snapshot = build_vue_snapshot_from_parsed(canonical_id, source, analysis_scope, parsed);
+    Some((snapshot, artifact))
+}
+
+/// Produce a Vue carrier file's `ParseSnapshot` + artifact.
+///
+/// A thin Vue-pinned entry over [`carrier_parse_snapshot`]: every Vue parse
+/// routes through the carrier registry (the bridge) — there is no second Vue
+/// direct-parse path. The dispatch is infallible for Vue (the registry always
+/// registers the Vue bridge, the produced artifact is always a Vue carrier),
+/// so an unexpected miss is a build defect, surfaced loudly rather than
+/// silently re-parsed.
 pub(crate) fn parse_vue_snapshot(
     canonical_id: &str,
     source: &str,
     analysis_scope: verter_semantic::analysis::AnalysisScope,
 ) -> (ParseSnapshot, Arc<verter_language::FrameworkParseArtifact>) {
-    let parsed = Arc::new(parse_sfc(source, None, None));
-    let snapshot = build_vue_snapshot_from_parsed(canonical_id, source, analysis_scope, &parsed);
-    let artifact = verter_compiler::framework_common::vue_bridge::build_vue_parse_artifact(
+    carrier_parse_snapshot(
+        canonical_id,
         source,
-        parsed,
-        crate::file_artifact_store::LEGACY_PARSER_VERSION,
-    );
-
-    (snapshot, artifact)
+        analysis_scope,
+        &verter_language::FileLanguage::vue(),
+    )
+    .expect("the carrier registry registers the Vue bridge; Vue parse cannot miss")
 }
 
 /// Parse Vue SFC source straight into the framework-neutral parse
 /// artifact (the route-owned cold-parse producer's entry — no
 /// `ParseSnapshot` is needed there).
+///
+/// Routes through the carrier registry (the Vue bridge) — the SAME single
+/// dispatch path as [`carrier_parse_snapshot`], so there is no second
+/// session-side Vue direct-parse producer. The dispatch is infallible for
+/// Vue (the registry always registers the Vue bridge serving the `vue`
+/// carrier language).
 pub(crate) fn build_vue_parse_artifact_from_source(
     source: &str,
 ) -> Arc<verter_language::FrameworkParseArtifact> {
-    let parsed = Arc::new(parse_sfc(source, None, None));
-    verter_compiler::framework_common::vue_bridge::build_vue_parse_artifact(
+    let vue = verter_language::FileLanguage::vue();
+    let adapter_id = vue.adapter_id().expect("the Vue row carries an adapter id");
+    let carrier_language_id = vue
+        .carrier_language_id()
+        .expect("the Vue row carries a carrier language id");
+    let compiler = carrier_compiler_registry()
+        .compiler_for_carrier_language(adapter_id, carrier_language_id)
+        .expect("the carrier registry registers the Vue bridge serving the vue carrier language");
+    compiler.parse(
         source,
-        parsed,
-        crate::file_artifact_store::LEGACY_PARSER_VERSION,
+        &verter_compiler::framework_common::ParseOptions::default(),
     )
 }
 
@@ -913,9 +981,27 @@ pub(crate) fn compile_vue_template_data(
     } else {
         None
     };
+    // The non-reuse path produces a fresh parse through the carrier
+    // registry (the Vue bridge) — the SAME single dispatch path — rather
+    // than a second session-side `parse_sfc` producer. The freshly built
+    // artifact owns the `Arc<ParsedSfc>` reached through the blessed
+    // accessor.
+    let fresh_artifact = if cached.is_none() {
+        Some(build_vue_parse_artifact_from_source(compile_source))
+    } else {
+        None
+    };
     let parsed = match cached {
         Some(parsed) => std::borrow::Cow::Borrowed(parsed.as_ref()),
-        None => std::borrow::Cow::Owned(parse_sfc(compile_source, None, None)),
+        None => std::borrow::Cow::Borrowed(
+            crate::typeinfo::adapters::vue::vue_parse(
+                fresh_artifact
+                    .as_ref()
+                    .expect("fresh artifact built when no carrier parse is reused"),
+            )
+            .expect("the freshly built Vue artifact opens as a Vue carrier")
+            .as_ref(),
+        ),
     };
 
     let alloc = Allocator::new();

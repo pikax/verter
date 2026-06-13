@@ -26,6 +26,13 @@ use verter_span::Span;
 use verter_parser::parser::types::ParsedSfc;
 use verter_parser::types::NodeProp;
 
+use crate::compile::types::{CodegenOptions, CompileTarget, VerterCompileOptions};
+use crate::compile::{compile_from_parsed, parse_sfc};
+use crate::framework_common::carrier_compiler::{
+    CarrierCompiler, CompileUnsupported, IdeCompileOptions, IdeOutput, ParseOptions, TemplateFacts,
+};
+use crate::framework_common::ctx::{receive_vue_carrier_token, CarrierCompilerCtx};
+
 /// The concrete Vue carrier: the full parsed SFC behind the erasure
 /// seam.
 #[derive(Debug)]
@@ -216,10 +223,175 @@ pub fn build_vue_parse_artifact(
     ))
 }
 
+/// The Vue carrier parser version stamped on the produced artifact's
+/// `parser_version` field. Bumps invalidate every Vue artifact whose
+/// post-parse shape this producer owns.
+///
+/// The session's `LEGACY_PARSER_VERSION` (the `FileArtifactStore` legacy
+/// key dimension) and this constant are conceptually distinct — one keys
+/// the store, the other stamps the artifact — and currently agree by
+/// value, so the rehoused dispatch produces byte-identical artifacts.
+pub const VUE_CARRIER_PARSER_VERSION: u32 = 3;
+
+/// The Vue carrier compiler — the reference [`CarrierCompiler`].
+///
+/// Delegates call-for-call to the existing Vue pipeline (`parse_sfc` +
+/// `compile_from_parsed`): it edits NO Vue parser or codegen module and
+/// reaches the parsed SFC back out of the type-erased artifact through
+/// the compiler-side blessed [`CarrierCompilerCtx`] downcast (D-m).
+pub struct VueCarrierCompiler {
+    ctx: CarrierCompilerCtx,
+}
+
+impl std::fmt::Debug for VueCarrierCompiler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VueCarrierCompiler").finish_non_exhaustive()
+    }
+}
+
+impl Default for VueCarrierCompiler {
+    fn default() -> Self {
+        Self {
+            ctx: CarrierCompilerCtx::new(receive_vue_carrier_token()),
+        }
+    }
+}
+
+impl VueCarrierCompiler {
+    /// Reach the parsed SFC back out of a Vue artifact, or `None` when the
+    /// artifact is not a Vue carrier (foreign adapter id or non-Vue
+    /// erased payload). The blessed downcast home for the Vue bridge.
+    fn parsed_sfc<'a>(&self, artifact: &'a FrameworkParseArtifact) -> Option<&'a ParsedSfc> {
+        self.ctx
+            .carrier_for::<VueParseCarrier>(artifact)
+            .map(|carrier| carrier.parsed())
+    }
+}
+
+impl CarrierCompiler for VueCarrierCompiler {
+    fn adapter_id(&self) -> FrameworkAdapterId {
+        FrameworkAdapterId::vue()
+    }
+
+    fn carrier_language_id(&self) -> LanguageId {
+        // The `.vue` SFC carrier language. A same-adapter non-carrier row
+        // (e.g. an external Vue template) is NOT this language and is not
+        // routed through the SFC parse path.
+        LanguageId::new("vue")
+    }
+
+    fn parse(&self, source: &str, opts: &ParseOptions) -> Arc<FrameworkParseArtifact> {
+        let delimiters = opts
+            .delimiters
+            .as_ref()
+            .map(|(open, close)| (open.as_str(), close.as_str()));
+        let parsed = Arc::new(parse_sfc(
+            source,
+            delimiters,
+            opts.custom_elements.as_deref(),
+        ));
+        build_vue_parse_artifact(source, parsed, VUE_CARRIER_PARSER_VERSION)
+    }
+
+    fn eval_source(&self, source: &str, artifact: &FrameworkParseArtifact) -> Arc<str> {
+        // Position-preserving blanking from the artifact's own typed
+        // script regions: every byte starts blanked (line terminators
+        // preserved so line/column geometry is unchanged), then each
+        // script region's RAW bytes are stamped over their carrier-
+        // absolute offsets. Output length == input length by
+        // construction.
+        let src = source.as_bytes();
+        let mut out: Vec<u8> = src
+            .iter()
+            .map(|&b| if b == b'\n' || b == b'\r' { b } else { b' ' })
+            .collect();
+        for region in &artifact.common.script_regions {
+            let start = region.span.start as usize;
+            let end = region.span.end as usize;
+            if start <= end && end <= src.len() {
+                out[start..end].copy_from_slice(&src[start..end]);
+            }
+        }
+        // Every replaced byte is single-byte ASCII and every preserved
+        // range is copied wholesale from valid UTF-8, so `out` is valid
+        // UTF-8 and exactly `source.len()` bytes long.
+        Arc::from(
+            String::from_utf8(out)
+                .unwrap_or_else(|_| source.to_string())
+                .as_str(),
+        )
+    }
+
+    fn compile_ide(
+        &self,
+        source: &str,
+        artifact: &FrameworkParseArtifact,
+        opts: &IdeCompileOptions,
+    ) -> Result<IdeOutput, CompileUnsupported> {
+        let Some(parsed) = self.parsed_sfc(artifact) else {
+            return Err(CompileUnsupported::NoIdeProjection {
+                adapter_id: self.adapter_id(),
+            });
+        };
+
+        // The Vue IDE pipeline owns its own unified `CodeTransform`
+        // internally and produces the token-precise TSX/JSX + source map.
+        // The bridge delegates and lifts the result verbatim — no caller
+        // CodeTransform, no post-build string munging.
+        let core_opts = CodegenOptions {
+            filename: opts.filename.clone(),
+            target: CompileTarget::IDE,
+            skip_source_map: opts.skip_source_map,
+            embed_ambient_types: opts.embed_ambient_types,
+            ..Default::default()
+        };
+        let verter_opts = VerterCompileOptions {
+            source_map: !opts.skip_source_map,
+            ..Default::default()
+        };
+        let alloc = oxc_allocator::Allocator::new();
+        let result = compile_from_parsed(source, parsed, &core_opts, &verter_opts, &alloc);
+
+        match result.tsx {
+            Some(tsx) => Ok(IdeOutput {
+                code: tsx.code,
+                source_map: tsx.source_map,
+                is_jsx: tsx.is_jsx,
+                duration_ms: tsx.duration_ms,
+                destructured_block: tsx.destructured_block,
+            }),
+            // `CompileTarget::IDE` always sets `TSX`, so a missing `tsx`
+            // block means the codegen produced no IDE artifact for this
+            // carrier — the typed unsupported answer, never a silent empty.
+            None => Err(CompileUnsupported::TargetMissingIde(core_opts.target)),
+        }
+    }
+
+    fn template_data(&self, source: &str, artifact: &FrameworkParseArtifact) -> TemplateFacts {
+        let Some(parsed) = self.parsed_sfc(artifact) else {
+            return TemplateFacts::default();
+        };
+        let core_opts = CodegenOptions {
+            target: CompileTarget::TEMPLATE_DATA,
+            skip_source_map: true,
+            ..Default::default()
+        };
+        let verter_opts = VerterCompileOptions {
+            extract_template_data: true,
+            source_map: false,
+            ..Default::default()
+        };
+        let alloc = oxc_allocator::Allocator::new();
+        let result = compile_from_parsed(source, parsed, &core_opts, &verter_opts, &alloc);
+        TemplateFacts {
+            data: result.template_data.unwrap_or_default(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compile::parse_sfc;
 
     fn artifact_for(source: &str) -> Arc<FrameworkParseArtifact> {
         let parsed = Arc::new(parse_sfc(source, None, None));
@@ -327,5 +499,96 @@ mod tests {
         assert_eq!(artifact.language_id.as_str(), "vue");
         assert_eq!(artifact.parser_version, 1);
         assert!(artifact.common.diagnostics.is_empty());
+    }
+
+    // ── Vue CarrierCompiler impl ───────────────────────────────────
+
+    #[test]
+    fn vue_compiler_parse_stamps_the_carrier_parser_version_and_vue_identity() {
+        let compiler = VueCarrierCompiler::default();
+        assert!(compiler.adapter_id().is_vue());
+        let source = "<script setup lang=\"ts\">const a = 1</script>\n<template><div /></template>";
+        let artifact = compiler.parse(source, &ParseOptions::default());
+        assert!(artifact.adapter_id.is_vue());
+        assert_eq!(artifact.parser_version, VUE_CARRIER_PARSER_VERSION);
+        assert_eq!(artifact.common.script_regions.len(), 1);
+        assert_eq!(artifact.common.template_regions.len(), 1);
+    }
+
+    #[test]
+    fn vue_compiler_eval_source_is_position_preserving_with_script_at_raw_offsets() {
+        let compiler = VueCarrierCompiler::default();
+        let source = "<template><div/></template>\n<script setup lang=\"ts\">const a = 1</script>";
+        let artifact = compiler.parse(source, &ParseOptions::default());
+        let eval = compiler.eval_source(source, &artifact);
+        // Length invariant.
+        assert_eq!(
+            eval.len(),
+            source.len(),
+            "eval source must equal SFC length"
+        );
+        // The script region's bytes sit at their raw offsets.
+        let region = artifact.common.script_regions[0].span;
+        let (s, e) = (region.start as usize, region.end as usize);
+        assert_eq!(&eval[s..e], "const a = 1");
+        // The `<template>` markup is blanked (no `<` survives outside script).
+        assert!(
+            !eval[..s].contains('<'),
+            "markup before the script must be blanked"
+        );
+    }
+
+    #[test]
+    fn vue_compiler_compile_ide_produces_tsx_for_a_typescript_sfc() {
+        let compiler = VueCarrierCompiler::default();
+        let source = "<script setup lang=\"ts\">const a: number = 1</script>\n<template><div>{{ a }}</div></template>";
+        let artifact = compiler.parse(source, &ParseOptions::default());
+        let opts = IdeCompileOptions {
+            filename: Some("App.vue".to_string()),
+            ..Default::default()
+        };
+        let out = compiler
+            .compile_ide(source, &artifact, &opts)
+            .expect("a TS SFC compiles to a TSX IDE artifact");
+        assert!(!out.is_jsx, "a lang=ts SFC yields TSX, not JSX");
+        assert!(!out.code.is_empty(), "IDE code must be produced");
+    }
+
+    #[test]
+    fn vue_compiler_compile_ide_rejects_a_foreign_artifact_with_typed_unsupported() {
+        let compiler = VueCarrierCompiler::default();
+        // An artifact stamped for another adapter cannot be opened by the
+        // Vue ctx — the bridge returns the typed unsupported answer.
+        let foreign = Arc::new(FrameworkParseArtifact::new(
+            FrameworkAdapterId::new("svelte"),
+            LanguageId::new("svelte"),
+            1,
+            FrameworkParseCommon::default(),
+            Arc::new(VueParseCarrier::new(Arc::new(parse_sfc(
+                "<script>a</script>",
+                None,
+                None,
+            )))),
+        ));
+        let err = compiler
+            .compile_ide(
+                "<script>a</script>",
+                &foreign,
+                &IdeCompileOptions::default(),
+            )
+            .expect_err("a foreign artifact has no Vue carrier to open");
+        assert!(matches!(err, CompileUnsupported::NoIdeProjection { .. }));
+    }
+
+    #[test]
+    fn vue_compiler_template_data_extracts_component_usages() {
+        let compiler = VueCarrierCompiler::default();
+        let source = "<script setup lang=\"ts\">import Child from './Child.vue'</script>\n<template><Child :foo=\"1\" /></template>";
+        let artifact = compiler.parse(source, &ParseOptions::default());
+        let facts = compiler.template_data(source, &artifact);
+        assert!(
+            facts.data.components.iter().any(|c| c.tag_name == "Child"),
+            "template_data must surface the <Child> component usage"
+        );
     }
 }

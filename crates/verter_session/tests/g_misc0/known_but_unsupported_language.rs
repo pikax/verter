@@ -238,3 +238,73 @@ fn byte_identical_relabel_reports_changed() {
         "a language relabel must not fast-path as unchanged"
     );
 }
+
+/// A framework TEMPLATE row (an external template owned by a component)
+/// is NOT a carrier — it carries an adapter id but no carrier language —
+/// so the carrier parse dispatch must reject it as the typed
+/// `UnsupportedLanguage` state, never route it through the SFC parse path.
+///
+/// DISCRIMINATING: a dispatch keyed on `adapter_id()` alone (or one that
+/// skips the registry carrier-language check) would route a Vue-adapter
+/// template through the SFC parse path or fall it through to the
+/// plain-script parse — both regressions surface here.
+#[test]
+fn vue_framework_template_row_is_typed_unsupported_not_routed_to_sfc_parse() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let template_row = FileLanguage::FrameworkTemplate {
+        adapter_id: verter_session::FrameworkAdapterId::vue(),
+        owner_hint: None,
+    };
+    let err = host
+        .upsert(UpsertRequest {
+            canonical_id: Some("/src/Widget.html".to_string()),
+            input_id: "/src/Widget.html".to_string(),
+            source: Arc::from("<div>{{ x }}</div>"),
+            file_language: template_row,
+            aliases: Vec::new(),
+        })
+        .expect_err("a framework template is not a carrier and must not parse silently");
+    match err {
+        HostError::Scheduler(verter_scheduler::job::SchedulerError::UnsupportedLanguage {
+            adapter_id,
+            ..
+        }) => {
+            assert_eq!(adapter_id, verter_session::FrameworkAdapterId::vue());
+        }
+        other => panic!("expected typed UnsupportedLanguage for a template row, got: {other:?}"),
+    }
+}
+
+/// A SAME-ADAPTER NON-CARRIER `Framework` row — the Vue adapter id but a
+/// language id that is NOT the `vue` SFC carrier language — must be typed
+/// unsupported. Dispatch is keyed on the FULL `(adapter_id, carrier
+/// language id)` row, so a Vue-adapter row in a non-SFC language is not
+/// routed through the SFC parse path.
+#[test]
+fn vue_adapter_non_carrier_language_row_is_typed_unsupported() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let non_carrier_row = FileLanguage::Framework {
+        adapter_id: verter_session::FrameworkAdapterId::vue(),
+        language_id: verter_session::LanguageId::new("vue_template"),
+    };
+    let err = host
+        .upsert(UpsertRequest {
+            canonical_id: Some("/src/Inline.vue_template".to_string()),
+            input_id: "/src/Inline.vue_template".to_string(),
+            source: Arc::from("<div/>"),
+            file_language: non_carrier_row,
+            aliases: Vec::new(),
+        })
+        .expect_err("a same-adapter non-carrier language must not parse through the SFC path");
+    match err {
+        HostError::Scheduler(verter_scheduler::job::SchedulerError::UnsupportedLanguage {
+            adapter_id,
+            ..
+        }) => {
+            assert_eq!(adapter_id, verter_session::FrameworkAdapterId::vue());
+        }
+        other => panic!(
+            "expected typed UnsupportedLanguage for a same-adapter non-carrier row, got: {other:?}"
+        ),
+    }
+}

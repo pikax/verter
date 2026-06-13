@@ -350,3 +350,104 @@ fn component_meta_props_surface_is_stable() {
         "published events surface drifted"
     );
 }
+
+// ─────────────────── carrier dispatch rehousing byte-identity ───────────────────
+
+/// The Vue carrier parse dispatch now routes through the compiler-side
+/// carrier registry (the bridge). This pins that the rehoused dispatch
+/// produces an artifact whose parsed SFC drives `compile()` to bytes
+/// IDENTICAL to the compiler's own untouched public `compile()` entry —
+/// the byte-identity crux of the session-dispatch rehousing.
+///
+/// Discriminating: if the bridge ever drifted from `parse_sfc(source,
+/// None, None)` (different delimiters, custom-element prefixes, or a
+/// re-parse with different options), the rehoused-dispatch parsed SFC
+/// would diverge and `compile_from_parsed` on it would produce different
+/// bytes than the direct `compile()`.
+#[test]
+fn rehoused_carrier_dispatch_drives_compile_byte_identical_to_direct_compile() {
+    use verter_compiler::compile::types::{CodegenOptions, CompileTarget, VerterCompileOptions};
+    use verter_compiler::compile::{compile, compile_from_parsed};
+
+    // A spread of fixture SFCs covering script-setup, plain script,
+    // template, styles, and JS dialect.
+    let fixtures = [
+        "<script setup lang=\"ts\">const a: number = 1</script>\n<template><div>{{ a }}</div></template>",
+        "<script>export default { name: 'X' }</script>\n<template><span class=\"c\">hi</span></template>\n<style scoped>.c{color:red}</style>",
+        "<script setup>const n = 1</script>\n<template><p>{{ n }}</p></template>",
+        "<template><button @click=\"go\">{{ label }}</button></template>\n<script setup lang=\"ts\">const label='x'; function go(){}</script>",
+    ];
+
+    for source in fixtures {
+        let core_opts = CodegenOptions {
+            filename: Some("App.vue".to_string()),
+            target: CompileTarget::BUNDLER | CompileTarget::TSX,
+            ..Default::default()
+        };
+        let verter_opts = VerterCompileOptions {
+            source_map: true,
+            ..Default::default()
+        };
+
+        // Direct path: the compiler's untouched public `compile()`.
+        let alloc_a = oxc_allocator::Allocator::new();
+        let direct = compile(source, &core_opts, &verter_opts, &alloc_a);
+
+        // Rehoused path: the session's carrier dispatch produces the
+        // framework-neutral artifact, the host reaches its parsed SFC back
+        // out, and `compile_from_parsed` drives the SAME compile.
+        let (_snapshot, artifact) = crate::parse::carrier_parse_snapshot(
+            "App.vue",
+            source,
+            verter_semantic::analysis::AnalysisScope::LSP,
+            &FileLanguage::vue(),
+        )
+        .expect("Vue carrier dispatch yields a snapshot");
+        let parsed = crate::typeinfo::adapters::vue::vue_parse(&artifact)
+            .expect("the rehoused Vue artifact carries a ParsedSfc");
+        let alloc_b = oxc_allocator::Allocator::new();
+        let rehoused = compile_from_parsed(source, parsed, &core_opts, &verter_opts, &alloc_b);
+
+        assert_eq!(
+            direct.tsx.as_ref().map(|t| &t.code),
+            rehoused.tsx.as_ref().map(|t| &t.code),
+            "TSX code drifted between direct compile and rehoused-dispatch compile for:\n{source}"
+        );
+        assert_eq!(
+            direct.script.as_ref().map(|s| &s.code),
+            rehoused.script.as_ref().map(|s| &s.code),
+            "script code drifted between direct and rehoused-dispatch compile for:\n{source}"
+        );
+        assert_eq!(
+            direct.template.as_ref().map(|t| &t.code),
+            rehoused.template.as_ref().map(|t| &t.code),
+            "template code drifted between direct and rehoused-dispatch compile for:\n{source}"
+        );
+        let direct_styles: Vec<&String> = direct.styles.iter().map(|s| &s.code).collect();
+        let rehoused_styles: Vec<&String> = rehoused.styles.iter().map(|s| &s.code).collect();
+        assert_eq!(
+            direct_styles, rehoused_styles,
+            "style code drifted between direct and rehoused-dispatch compile for:\n{source}"
+        );
+    }
+}
+
+/// The rehoused-dispatch artifact's `parser_version` stamp equals the
+/// version the legacy direct producer stamped, so the
+/// `FileArtifactStore` legacy key dimension is unchanged — a stale
+/// artifact cannot serve nor be evicted spuriously by the rehousing.
+#[test]
+fn rehoused_carrier_artifact_stamps_unchanged_parser_version() {
+    let (_snapshot, artifact) = crate::parse::carrier_parse_snapshot(
+        "App.vue",
+        "<script setup lang=\"ts\">const a = 1</script>",
+        verter_semantic::analysis::AnalysisScope::LSP,
+        &FileLanguage::vue(),
+    )
+    .expect("Vue carrier dispatch yields a snapshot");
+    assert_eq!(
+        artifact.parser_version,
+        crate::file_artifact_store::LEGACY_PARSER_VERSION,
+        "the rehoused dispatch must stamp the same parser version the legacy producer did"
+    );
+}

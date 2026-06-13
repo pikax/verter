@@ -33,6 +33,11 @@ skill is the module map + contract reference behind it.
 | `verter_semantic/.../framework_facts.rs` | The syntax-capture half: `ScriptFactProvider` trait, closed `ScriptFactSyntaxGate`, candidate set, the zero-cost dispatcher param. |
 | `typeinfo/framework_surface/{executor,plan,results,graph_export,vue_exec}.rs` | The executor entry, the closed plan/result vocabulary, the first `SemanticTypeGraph` encoder, and the relocated Vue resolution delegates. |
 | `typeinfo/adapters/vue/adapter.rs` | `VueFrameworkAdapter` — plan/normalize only. |
+| `verter_compiler/src/framework_common/carrier_compiler.rs` | The `CarrierCompiler` trait (compiler-domain: `adapter_id`, `parse`, `eval_source`, `compile_ide`, `template_data`) + its neutral I/O vocabulary (`ParseOptions`, `IdeCompileOptions`, `IdeOutput`, `CompileUnsupported`, `TemplateFacts`). NO script-fact method — script facts go through the one `ScriptFactProvider` seam. |
+| `verter_compiler/src/framework_common/registry.rs` | `CarrierCompilerRegistry` (built once; the host's carrier parse dispatch looks the file's adapter compiler up here). |
+| `verter_compiler/src/framework_common/ctx.rs` | `CarrierCompilerCtx` — the compiler-side blessed carrier downcast (D-m) + `receive_vue_carrier_token` (the compiler's sanctioned carrier-proof receipt site). |
+| `verter_compiler/src/framework_common/vue_bridge.rs` | `VueCarrierCompiler` — the reference `CarrierCompiler`, delegating call-for-call to `parse_sfc` + `compile_from_parsed`; ZERO edits to any Vue parser/codegen module. |
+| `verter_compiler/src/framework_common/sourcemap_e2e_helpers.rs` | Reusable (test-only) framework IDE sourcemap-correctness assertions every carrier vertical re-runs against its own `compile_ide` output. |
 
 ## Descriptor + virtual-file naming column
 
@@ -123,6 +128,52 @@ exposes EXACTLY two ops:
 It never resolves types, indexes a file, runs OXC, calls
 `ProjectSemanticDispatch`, or reads a `StoreView`. Pinned by
 `framework_adapter_ctx_closed_surface`.
+
+## Compiler-side carrier substrate (`verter_compiler::framework_common`)
+
+The compiler-domain mirror of the session registry: where the session
+registry owns the carrier ACCESS token + the semantic legs, the
+compiler-side `CarrierCompilerRegistry` owns the carrier COMPILER per
+adapter. `CarrierCompiler` is one trait every carrier framework
+implements, exposing EXACTLY four compiler-domain ops:
+
+- `parse(source, opts) -> Arc<FrameworkParseArtifact>` — produce the
+  framework-neutral artifact (infallible; tokenizers collect diagnostics
+  inline).
+- `eval_source(source, artifact) -> Arc<str>` — the position-preserving
+  blank: script bytes at raw offsets, every other byte whitespace-blanked,
+  line terminators preserved; output length == input length.
+- `compile_ide(source, artifact, opts) -> Result<IdeOutput, CompileUnsupported>`
+  — the rendered TSX/JSX IDE artifact. The adapter's IDE codegen owns its
+  OWN `CodeTransform` (the single source of truth for generated-code
+  edits) and returns the rendered output verbatim — NO borrowed caller
+  `CodeTransform` (a shared one would be a second, coarse, non-authoritative
+  map). An unsupported `CompileTarget` bit → typed `CompileUnsupported`
+  (invariant 4), never a silent empty.
+- `template_data(source, artifact) -> TemplateFacts` — neutral template
+  facts (wraps `RawTemplateData`).
+
+There is NO `analyze_script_facts` method — script-fact extraction for
+EVERY framework goes through the one `ScriptFactProvider` seam; the carrier
+compiler is parse / eval / IDE / template only.
+
+The host's carrier PARSE dispatch is rehoused through this registry: the
+`FileLanguage::Framework` branch in `host_executor::execute_source` routes
+EVERY carrier's parse through `parse::carrier_parse_snapshot` (which looks
+the adapter's `CarrierCompiler` up in the process-wide registry — Vue via
+`VueCarrierCompiler`) — a single dispatch path, no `is_vue` branch, no dual
+Vue direct-parse path. A carrier row whose adapter has no registered
+compiler is the typed unsupported-language state. `VueCarrierCompiler`
+delegates call-for-call to `parse_sfc` + `compile_from_parsed` with ZERO
+edits to any Vue parser/codegen module, so Vue compile output stays
+byte-identical pre/post the rehousing (pinned by
+`rehoused_carrier_dispatch_drives_compile_byte_identical_to_direct_compile`
+and the unchanged `ide_virtual_output_for_fixture_sfc_is_byte_stable` hash).
+
+The compiler-side `CarrierCompilerCtx::carrier_for::<T>` is the third
+blessed carrier-downcast home (D-m); `receive_vue_carrier_token` is the
+compiler's sanctioned carrier-proof receipt site (the bridge reaches its
+own `VueParseCarrier` back out of the type-erased artifact through it).
 
 ## Two-pass script-fact seam
 
@@ -225,3 +276,7 @@ runtime-loaded `FileLanguage` and routes through
 | `vue_relocation_no_shim` | no re-export shim for relocated Vue resolution; deleted files stay deleted |
 | `retired_symbols_absent_from_production_source` | `VueShallowMetadataStore` / `VueMacroDtoKey` / `VueMacroDtos` / `VueMacroDtosEntry` retired |
 | `framework_surface_executor` (suite) | executor behavior: validation-first, unknown-adapter rejection, Vue parity, per-kind status |
+| `framework_codegen_uses_code_transform` | the carrier-compiler IDE codegen path delegates to the CodeTransform-backed pipeline and never post-hoc string-munges built output (+ negative self-test) |
+| `carrier_descriptors_have_compilers` | every carrier-bearing session descriptor has a registered `CarrierCompiler` (Vue-through-the-bridge) |
+| `framework_known_bug_ledger_bijection` | 1:1 between framework known-bug ledger entries and their `#[ignore]`d characterizing tests (empty ledger ⇒ trivially green; non-empty enforcement self-tested) |
+| `rehoused_carrier_dispatch_drives_compile_byte_identical_to_direct_compile` | the rehoused carrier parse dispatch drives Vue `compile()` byte-identical to the compiler's direct `compile()` |
