@@ -1302,3 +1302,156 @@ fn static_style_duplicate_keys_last_wins() {
         "First value 'absolute' should be overwritten, got:\n{code}"
     );
 }
+
+// ── Merge-prescan output invariants + gate ────────────────────────────────
+//
+// The merge prescans are gated/allocation-optimized for the no-merge case. The
+// emitted render function must be byte-identical regardless: duplicate event
+// handlers, v-model + explicit `@update:*`, and class/style static+dynamic must
+// still array-merge exactly as before, and the single-handler fast path must
+// emit the same code while skipping the grouping maps.
+
+#[test]
+fn duplicate_event_handlers_array_merge_byte_identical() {
+    let code =
+        gen_vdom_template("<template><button @click=\"a\" @click=\"b\">x</button></template>");
+    let expected = [
+        r#"const _hoisted_1 = ["onClick"]"#,
+        r#""#,
+        r#"function render(_ctx, _cache, $props, $setup, $data, $options) {"#,
+        r#"return (_openBlock(), _createElementBlock("button", { onClick: [_ctx.a, _ctx.b] }, "x", 8 /* PROPS */, _hoisted_1))"#,
+        r#"}"#,
+    ]
+    .join("\n");
+    assert_eq!(code, expected);
+    // Positive: the two handlers collapse into one array-valued key.
+    assert!(
+        code.contains("onClick: [_ctx.a, _ctx.b]"),
+        "duplicate @click must array-merge, got:\n{code}"
+    );
+    // Negative: no un-merged first handler, no duplicate `onClick` key.
+    assert!(
+        !code.contains("onClick: _ctx.a,"),
+        "first handler must not be emitted un-merged, got:\n{code}"
+    );
+    assert_eq!(
+        code.matches("onClick:").count(),
+        1,
+        "merged handlers must produce exactly one onClick key, got:\n{code}"
+    );
+}
+
+#[test]
+fn vmodel_with_explicit_update_handler_byte_identical() {
+    let code = gen_vdom_template(
+        "<template><MyComp v-model=\"val\" @update:modelValue=\"onUp\"/></template>\n<script setup>\nimport MyComp from './MyComp.vue'\nconst val = 1\nconst onUp = () => {}\n</script>",
+    );
+    let expected = [
+        r#"const _hoisted_1 = ["modelValue", "onUpdate:modelValue"]"#,
+        r#""#,
+        r#"function render(_ctx, _cache, $props, $setup, $data, $options) {"#,
+        r#"return (_openBlock(), _createBlock($setup.MyComp, { modelValue: $setup.val, "onUpdate:modelValue": [$event => (($setup.val) = $event), $setup.onUp] }, null, 8 /* PROPS */, _hoisted_1))"#,
+        r#"}"#,
+    ]
+    .join("\n");
+    assert_eq!(code, expected);
+    // Positive: the v-model writer and the explicit handler merge into one array.
+    assert!(
+        code.contains(r#""onUpdate:modelValue": [$event => (($setup.val) = $event), $setup.onUp]"#),
+        "v-model + explicit @update:* must array-merge, got:\n{code}"
+    );
+    // Negative: the explicit handler must not also appear as its own key.
+    assert_eq!(
+        code.matches("onUpdate:modelValue").count(),
+        2,
+        "onUpdate:modelValue should appear once as a key and once in the hoisted array, got:\n{code}"
+    );
+}
+
+#[test]
+fn class_style_static_dynamic_merge_byte_identical() {
+    let code = gen_vdom_template(
+        "<template><div class=\"a\" :class=\"b\" style=\"color: red\" :style=\"s\">x</div></template>",
+    );
+    let expected = [
+        r#"function render(_ctx, _cache, $props, $setup, $data, $options) {"#,
+        r#"return (_openBlock(), _createElementBlock("div", { class: _normalizeClass(["a", _ctx.b]), style: _normalizeStyle([{ color: "red" }, _ctx.s]) }, "x", 6 /* CLASS, STYLE */))"#,
+        r#"}"#,
+    ]
+    .join("\n");
+    assert_eq!(code, expected);
+    // Positive: static + dynamic are folded into the normalize helpers.
+    assert!(
+        code.contains(r#"class: _normalizeClass(["a", _ctx.b])"#),
+        "static + dynamic class must merge via _normalizeClass, got:\n{code}"
+    );
+    assert!(
+        code.contains(r#"style: _normalizeStyle([{ color: "red" }, _ctx.s])"#),
+        "static + dynamic style must merge via _normalizeStyle, got:\n{code}"
+    );
+    // Negative: the static class/style must not also be emitted as bare props.
+    assert!(
+        !code.contains(r#"class: "a""#),
+        "static class must be merged, not emitted bare, got:\n{code}"
+    );
+}
+
+#[test]
+fn single_event_handler_no_merge_byte_identical() {
+    let code = gen_vdom_template("<template><button @click=\"a\">x</button></template>");
+    let expected = [
+        r#"const _hoisted_1 = ["onClick"]"#,
+        r#""#,
+        r#"function render(_ctx, _cache, $props, $setup, $data, $options) {"#,
+        r#"return (_openBlock(), _createElementBlock("button", { onClick: _ctx.a }, "x", 8 /* PROPS */, _hoisted_1))"#,
+        r#"}"#,
+    ]
+    .join("\n");
+    assert_eq!(code, expected);
+    // Positive: a single handler stays a scalar value.
+    assert!(
+        code.contains("onClick: _ctx.a "),
+        "single @click must stay a scalar handler, got:\n{code}"
+    );
+    // Negative: no array-merge wrapping for a lone handler.
+    assert!(
+        !code.contains("onClick: ["),
+        "single handler must not be array-wrapped, got:\n{code}"
+    );
+}
+
+#[test]
+fn event_merge_prescan_gated_when_no_duplicate_possible() {
+    // A single event handler cannot collide, so the grouping maps must never be
+    // built. (Discriminating: against the always-build prescan this count is 1.)
+    element::reset_event_merge_full_scan_count();
+    let single = gen_vdom_template("<template><button @click=\"a\">x</button></template>");
+    assert_eq!(
+        element::event_merge_full_scan_count(),
+        0,
+        "single handler must skip the grouping maps, got code:\n{single}"
+    );
+
+    // No event handlers at all: still skipped.
+    element::reset_event_merge_full_scan_count();
+    let none = gen_vdom_template("<template><div id=\"x\">y</div></template>");
+    assert_eq!(
+        element::event_merge_full_scan_count(),
+        0,
+        "element without handlers must skip the grouping maps, got code:\n{none}"
+    );
+
+    // Two handlers for the same event CAN collide, so the grouping path must run
+    // and still produce the merged array.
+    element::reset_event_merge_full_scan_count();
+    let dup =
+        gen_vdom_template("<template><button @click=\"a\" @click=\"b\">x</button></template>");
+    assert!(
+        element::event_merge_full_scan_count() > 0,
+        "duplicate handlers must build the grouping maps, got code:\n{dup}"
+    );
+    assert!(
+        dup.contains("onClick: [_ctx.a, _ctx.b]"),
+        "duplicate @click must still array-merge after gating, got:\n{dup}"
+    );
+}

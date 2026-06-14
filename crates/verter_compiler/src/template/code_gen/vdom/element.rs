@@ -15,6 +15,7 @@ use crate::template::code_gen::vapor::interpolation::build_prefixed_expr;
 use crate::template::oxc::types::{
     Dynamism, ExpressionFlag, OxcParsedElement, OxcParsedExpression,
 };
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::super::shared::helpers::{self, is_member_expression, VdomHelper};
 use super::super::types::{ChildKind, ChildRecord, CodeGenOutput};
@@ -514,13 +515,20 @@ fn pre_scan_class_style_merge<'a>(
 /// Pre-scan for v-model directives paired with explicit `@update:<name>` handlers.
 /// Returns `(vmodel_prop_idx, handler_prop_idx)` pairs that need merging into arrays.
 fn pre_scan_vmodel_handler_merge(element: &ElementNode, source: &str) -> Vec<(usize, usize)> {
-    let mut vmodel_keys: Vec<(usize, String)> = Vec::with_capacity(2);
+    // `v-model` expands to a paired `onUpdate:*` handler only on component
+    // elements; native `v-model` never merges with an explicit `@update:*`.
+    // Bail before touching props when no component v-model is possible.
+    if !element.tag_type.is_component() {
+        return Vec::new();
+    }
+
+    let mut vmodel_keys: Vec<(usize, String)> = Vec::new();
     for (idx, prop) in element.props.iter().enumerate() {
         if !prop.is_directive {
             continue;
         }
         let dname = &source[prop.start as usize..prop.name_end as usize];
-        if dname != "v-model" || !element.tag_type.is_component() {
+        if dname != "v-model" {
             continue;
         }
         let event_key = if let (Some(as_), Some(ae)) = (prop.arg_start, prop.arg_end) {
@@ -532,7 +540,13 @@ fn pre_scan_vmodel_handler_merge(element: &ElementNode, source: &str) -> Vec<(us
         vmodel_keys.push((idx, event_key));
     }
 
-    let mut targets = Vec::with_capacity(2);
+    // No v-model directive ⇒ nothing for an `@update:*` handler to pair with.
+    // Returning early skips the second scan's per-handler key formatting.
+    if vmodel_keys.is_empty() {
+        return Vec::new();
+    }
+
+    let mut targets = Vec::new();
     for (idx, prop) in element.props.iter().enumerate() {
         if !prop.is_directive {
             continue;
@@ -557,12 +571,81 @@ fn pre_scan_vmodel_handler_merge(element: &ElementNode, source: &str) -> Vec<(us
     targets
 }
 
+/// Test-only instrumentation: counts how many times the duplicate-handler
+/// grouping maps are actually built. The merge gate is meant to skip that work
+/// whenever fewer than two candidate handlers exist (a collision is impossible),
+/// and this counter lets a test assert the gate directly rather than only
+/// through emitted shape. Compiled out of production builds.
+#[cfg(test)]
+thread_local! {
+    static EVENT_MERGE_FULL_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Record that the duplicate-handler grouping path ran (gate did not short-circuit).
+#[cfg(test)]
+fn record_event_merge_full_scan() {
+    EVENT_MERGE_FULL_SCANS.with(|c| c.set(c.get() + 1));
+}
+
+/// Reset the grouping-path counter on the current thread.
+#[cfg(test)]
+pub(crate) fn reset_event_merge_full_scan_count() {
+    EVENT_MERGE_FULL_SCANS.with(|c| c.set(0));
+}
+
+/// Number of times the duplicate-handler grouping maps were built on the current
+/// thread since the last [`reset_event_merge_full_scan_count`].
+#[cfg(test)]
+pub(crate) fn event_merge_full_scan_count() -> usize {
+    EVENT_MERGE_FULL_SCANS.with(|c| c.get())
+}
+
 /// Result of pre-scanning for duplicate event handler keys.
 struct EventHandlerMerge {
     /// First handler index → all handler indices with the same key.
-    first_to_group: std::collections::HashMap<usize, Vec<usize>>,
+    first_to_group: FxHashMap<usize, Vec<usize>>,
     /// Handler indices that are secondary (should be skipped in main loop).
-    secondary: std::collections::HashSet<usize>,
+    secondary: FxHashSet<usize>,
+}
+
+/// Count directive props that could contribute a static handler key to the
+/// duplicate-merge grouping (`v-on`, or `v-bind` whose camelized arg becomes an
+/// `onX` key). Cheap and allocation-free: it never builds the handler key, so a
+/// `v-bind` whose arg would *not* camelize to `onX` is counted optimistically.
+///
+/// Over-counting only triggers a redundant grouping pass that yields the same
+/// (empty) result; it never under-counts a real collision, because every prop
+/// that the grouping path would insert also satisfies these cheaper predicates.
+fn count_merge_candidates(
+    element: &ElementNode,
+    source: &str,
+    skip_prop_index: Option<usize>,
+    merged_handler_indices: &FxHashSet<usize>,
+) -> usize {
+    let mut count = 0usize;
+    for (idx, prop) in element.props.iter().enumerate() {
+        if !prop.is_directive
+            || skip_prop_index == Some(idx)
+            || merged_handler_indices.contains(&idx)
+        {
+            continue;
+        }
+        let dname = &source[prop.start as usize..prop.name_end as usize];
+        if !super::is_v_on(dname) && !super::is_v_bind(dname) {
+            continue;
+        }
+        if prop.arg_start.is_none() || prop.arg_end.is_none() {
+            continue;
+        }
+        if prop.is_dynamic == Some(true) {
+            continue;
+        }
+        count += 1;
+        if count >= 2 {
+            return count;
+        }
+    }
+    count
 }
 
 /// Pre-scan for duplicate event handler keys that need array merging.
@@ -571,10 +654,22 @@ fn pre_scan_event_handler_merge(
     element: &ElementNode,
     source: &str,
     skip_prop_index: Option<usize>,
-    merged_handler_indices: &std::collections::HashSet<usize>,
+    merged_handler_indices: &FxHashSet<usize>,
 ) -> EventHandlerMerge {
-    let mut event_key_groups: std::collections::HashMap<String, Vec<usize>> =
-        std::collections::HashMap::new();
+    // A duplicate handler key needs at least two candidate directives; with fewer
+    // than two, `dedupeProperties` can never merge and the grouping maps would
+    // always come back empty. Skip building them entirely in that common case.
+    if count_merge_candidates(element, source, skip_prop_index, merged_handler_indices) < 2 {
+        return EventHandlerMerge {
+            first_to_group: FxHashMap::default(),
+            secondary: FxHashSet::default(),
+        };
+    }
+
+    #[cfg(test)]
+    record_event_merge_full_scan();
+
+    let mut event_key_groups: FxHashMap<String, Vec<usize>> = FxHashMap::default();
     for (idx, prop) in element.props.iter().enumerate() {
         if !prop.is_directive
             || skip_prop_index == Some(idx)
@@ -622,8 +717,8 @@ fn pre_scan_event_handler_merge(
         event_key_groups.entry(key).or_default().push(idx);
     }
 
-    let mut first_to_group = std::collections::HashMap::new();
-    let mut secondary = std::collections::HashSet::new();
+    let mut first_to_group = FxHashMap::default();
+    let mut secondary = FxHashSet::default();
     for indices in event_key_groups.into_values() {
         if indices.len() > 1 {
             for &idx in &indices[1..] {
@@ -755,7 +850,7 @@ pub(crate) fn build_props_object_into(
         }
 
         let vmodel_merge_targets = pre_scan_vmodel_handler_merge(element, source);
-        let merged_handler_indices: std::collections::HashSet<usize> =
+        let merged_handler_indices: FxHashSet<usize> =
             vmodel_merge_targets.iter().map(|&(_, hi)| hi).collect();
 
         let EventHandlerMerge {
