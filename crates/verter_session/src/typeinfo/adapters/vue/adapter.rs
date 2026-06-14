@@ -189,6 +189,7 @@ mod tests {
         let host = crate::VerterHost::new_standalone(crate::HostConfig::default());
         let registry = crate::framework::FrameworkAdapterRegistry::built_in(
             crate::typeinfo::adapters::vue::vue_carrier_token_clone(),
+            crate::typeinfo::adapters::svelte::svelte_carrier_token_clone(),
         );
         let registration = registry
             .get(&crate::framework::FrameworkAdapterId::vue())

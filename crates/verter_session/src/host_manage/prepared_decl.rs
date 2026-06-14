@@ -1750,6 +1750,7 @@ impl VerterHost {
                 canonical_id,
                 &mut shallow_state_inner,
                 &snapshot.macros,
+                Some(eval_source.as_ref()),
             );
             let shallow_state = Arc::new(shallow_state_inner);
 

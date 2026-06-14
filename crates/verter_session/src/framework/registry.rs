@@ -65,8 +65,8 @@ impl std::fmt::Debug for SurfaceRegistration {
 /// Binds the adapter's descriptor to its optional carrier leg, its optional
 /// synthesis leg, its optional public-API projector, its script-fact providers,
 /// and its surface disposition. Every leg is `Option` (a framework need not
-/// supply every capability); `script_fact_providers` is empty for every adapter
-/// in this program (Vue's macro analysis stays in the shallow pass).
+/// supply every capability); `script_fact_providers` is empty for Vue (its macro
+/// analysis stays in the shallow pass) and carries one provider for Svelte.
 pub struct FrameworkRegistration {
     /// The adapter's static descriptor row.
     pub descriptor: crate::framework::descriptor::FrameworkAdapterDescriptor,
@@ -77,8 +77,8 @@ pub struct FrameworkRegistration {
     /// The public-API projector leg, when the adapter projects a public-API
     /// virtual file.
     pub api_projector: Option<Arc<dyn ComponentApiProjector>>,
-    /// The adapter's syntax-capture script-fact providers (empty in this
-    /// program).
+    /// The adapter's syntax-capture script-fact providers (empty for Vue; the
+    /// Svelte carrier registers one).
     pub script_fact_providers: Vec<Arc<dyn ScriptFactProvider>>,
     /// How the adapter resolves its component surfaces.
     pub surface: SurfaceRegistration,
@@ -128,9 +128,11 @@ pub enum TagDisposition {
 /// and the providers whose import-specifier gate matches one of the file's
 /// imports.
 ///
-/// EMPTY (the steady state of this program — no production provider registers)
-/// is a zero-cost fast path: [`Self::is_empty`] short-circuits before any
-/// per-file lookup, so the seam adds nothing on the no-provider path.
+/// EMPTY (when no carrier registers a provider) is a zero-cost fast path:
+/// [`Self::is_empty`] short-circuits before any per-file lookup. The Svelte
+/// carrier registers one provider (carrier-language gated on `svelte`), so the
+/// index is non-empty — but a NON-Svelte file (e.g. a `.vue`) still selects zero
+/// providers, keeping its path byte-identical.
 #[derive(Default, Clone)]
 pub struct ActiveProviderIndex {
     by_carrier_language: FxHashMap<LanguageId, Vec<Arc<dyn ScriptFactProvider>>>,
@@ -272,16 +274,22 @@ pub struct FrameworkAdapterRegistry {
 impl FrameworkAdapterRegistry {
     /// Build the registry with the production adapter rows.
     ///
-    /// `vue_carrier_token` is the Vue carrier registration proof RECEIVED from
-    /// `verter_language`'s carrier-row channel (cloned from the blessed
-    /// `vue_parse()` accessor's held token — the same minted value, never a
-    /// second mint).
+    /// The carrier tokens are the carrier registration proofs RECEIVED from
+    /// `verter_language`'s carrier-row channel (cloned from the blessed carrier
+    /// accessors' held tokens — the same minted values, never a second mint).
     #[must_use]
-    pub fn built_in(vue_carrier_token: CarrierAccessToken) -> Self {
+    pub fn built_in(
+        vue_carrier_token: CarrierAccessToken,
+        svelte_carrier_token: CarrierAccessToken,
+    ) -> Self {
         let mut registrations = FxHashMap::default();
         registrations.insert(
             FrameworkAdapterId::vue(),
             vue_registration(vue_carrier_token),
+        );
+        registrations.insert(
+            FrameworkAdapterId::svelte(),
+            svelte_registration(svelte_carrier_token),
         );
         Self::finish(registrations)
     }
@@ -309,8 +317,9 @@ impl FrameworkAdapterRegistry {
     }
 
     /// The active-provider index derived from this registry's script-fact
-    /// providers (the resolved-validation half's per-file lookup). Empty for
-    /// every adapter in this program (no production provider registers).
+    /// providers (the resolved-validation half's per-file lookup). The Svelte
+    /// carrier contributes one carrier-language-gated provider; Vue contributes
+    /// none (its macro analysis stays in the shallow pass).
     #[must_use]
     pub fn active_provider_index(&self) -> &ActiveProviderIndex {
         &self.active_provider_index
@@ -326,6 +335,30 @@ impl FrameworkAdapterRegistry {
     #[must_use]
     pub fn contains(&self, adapter_id: &FrameworkAdapterId) -> bool {
         self.registrations.contains_key(adapter_id)
+    }
+
+    /// Whether ANY registration carries a syntax-capture script-fact provider —
+    /// the registry-wide oracle the [`ActiveProviderIndex`] emptiness mirrors
+    /// (the index is empty IFF this is `false`).
+    #[must_use]
+    pub fn any_provider_registered(&self) -> bool {
+        self.registrations
+            .values()
+            .any(|r| !r.script_fact_providers.is_empty())
+    }
+
+    /// Every registered adapter's descriptor, in adapter-id order. The
+    /// compiler-completeness guard iterates these to assert every
+    /// carrier-bearing descriptor has a registered `CarrierCompiler`.
+    #[must_use]
+    pub fn descriptors(&self) -> Vec<crate::framework::descriptor::FrameworkAdapterDescriptor> {
+        let mut rows: Vec<_> = self
+            .registrations
+            .values()
+            .map(|r| r.descriptor.clone())
+            .collect();
+        rows.sort_by(|a, b| a.id.cmp(&b.id));
+        rows
     }
 
     /// The disposition of a wire framework tag — the completeness oracle.
@@ -347,8 +380,18 @@ impl FrameworkAdapterRegistry {
                     None
                 }
             }
-            // Svelte's adapter id registers in a later framework vertical.
-            FrameworkTag::Svelte => Some(TagDisposition::DeferredVertical),
+            // Svelte's adapter id is registered (carrier legs + a Deferred
+            // surface arm); its surface resolution is the deferred half, but the
+            // adapter ID itself is REGISTERED — the completeness oracle keys on
+            // registration, not on the surface arm.
+            FrameworkTag::Svelte => {
+                let id = FrameworkAdapterId::svelte();
+                if self.contains(&id) {
+                    Some(TagDisposition::Registered(id))
+                } else {
+                    Some(TagDisposition::DeferredVertical)
+                }
+            }
             // React / Solid are out of scope (no adapter planned).
             FrameworkTag::React | FrameworkTag::Solid => Some(TagDisposition::OutOfScope),
             // The structural non-tags are not framework-adapter tags.
@@ -385,15 +428,12 @@ impl FrameworkAdapterRegistry {
     /// The adapter id of the unique registered adapter that SYNTHESIZES a
     /// `default` component value (carries a [`ComponentDefaultSynth`] leg).
     ///
-    /// A typeinfo-evaluation scratch (`verter://typeinfo/…`) classifies by its
-    /// own `.ts` suffix — it has NO resolved framework language — yet must
-    /// synthesize the inlined scope's `default`. The neutral default-injection
-    /// selector routes it to the synthesizing framework's leg by REGISTRY DATA,
-    /// never a hardcoded `FrameworkAdapterId::vue()` literal. Exactly one adapter
-    /// registers a synth leg in this program; `None` when none does (the
-    /// injection then no-ops rather than fabricating an id). Deterministic: when
-    /// more than one ever registers, the lowest adapter id wins so the selection
-    /// is map-order-independent.
+    /// Exactly one adapter registers a synth leg when Vue is the only carrier;
+    /// `None` when none does. Deterministic: when more than one registers, the
+    /// lowest adapter id wins so the selection is map-order-independent. The
+    /// scratch-injection path uses [`Self::scratch_synthesizing_adapter_id`]
+    /// instead — it needs the SPECIFIC carrier-macro inliner, not an arbitrary
+    /// `.min()` across every synth-bearing adapter.
     #[must_use]
     pub fn synthesizing_adapter_id(&self) -> Option<FrameworkAdapterId> {
         self.registrations
@@ -401,6 +441,23 @@ impl FrameworkAdapterRegistry {
             .filter(|(_, registration)| registration.synth.is_some())
             .map(|(id, _)| id.clone())
             .min()
+    }
+
+    /// The adapter id whose synth leg fabricates the `default` for a typeinfo
+    /// EVALUATION SCRATCH (`verter://typeinfo/…`).
+    ///
+    /// A scratch inlines a `.vue` scope's eval-source as a `.vue`-MACRO prelude
+    /// and classifies by its own `.ts` suffix — it has NO resolved framework
+    /// language. The macro surface it inlines is Vue's, so the scratch routes to
+    /// the VUE synth leg specifically (the carrier-MACRO inliner). This is
+    /// REGISTRY DATA (the registered Vue adapter id), not a hardcoded literal,
+    /// and not an arbitrary `.min()` over every synth adapter — a `.min()` would
+    /// (mis)route the Vue-macro scratch to Svelte once Svelte registers a synth
+    /// leg (`"svelte" < "vue"`). `None` when Vue registers no synth leg.
+    #[must_use]
+    pub fn scratch_synthesizing_adapter_id(&self) -> Option<FrameworkAdapterId> {
+        let vue = FrameworkAdapterId::vue();
+        self.synth_for(&vue).map(|_| vue)
     }
 }
 
@@ -428,12 +485,52 @@ fn vue_registration(carrier_token: CarrierAccessToken) -> FrameworkRegistration 
     }
 }
 
+/// The Svelte adapter registration row.
+///
+/// Registers the carrier LEGS — carrier + synth + script-fact provider + api
+/// projector — with the STRUCTURAL `SurfaceRegistration::Deferred` arm (D-ag):
+/// the executor serves every Svelte surface request as one entry per known kind
+/// with `UNSUPPORTED` + `GRAPH_EXACTNESS_UNSUPPORTED` + the
+/// surfaces-not-yet-registered diagnostic until B8b replaces the arm with the
+/// real `SvelteFrameworkAdapter` (one field flip, no dual path).
+fn svelte_registration(carrier_token: CarrierAccessToken) -> FrameworkRegistration {
+    // The surface store mirrors the wire surface shape (`MacroSurfaceDtos`)
+    // so the B8b arm flip reuses it without a store change. A `Deferred`
+    // registration never populates it (the executor short-circuits to
+    // structural UNSUPPORTED before any surface materialization).
+    let store: Arc<dyn ErasedFrameworkSurfaceStore> =
+        Arc::new(crate::framework::surface_store::FrameworkSurfaceStore::<
+            crate::typeinfo::framework_surface::VueSurfaceKey,
+            crate::typeinfo::framework_surface::MacroSurfaceDtos,
+        >::new());
+    FrameworkRegistration {
+        descriptor: crate::framework::descriptor::svelte_descriptor(),
+        carrier: Some(CarrierLeg {
+            token: carrier_token,
+        }),
+        synth: Some(Arc::new(
+            crate::framework::synth::SvelteComponentDefaultSynth,
+        )),
+        api_projector: Some(Arc::new(
+            crate::framework::api_projectors::SvelteComponentApiProjector,
+        )),
+        script_fact_providers: vec![Arc::new(
+            verter_semantic::analysis::framework_facts::svelte::SvelteScriptProvider,
+        )],
+        surface: SurfaceRegistration::Deferred,
+        surface_store: store,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn built_in() -> FrameworkAdapterRegistry {
-        FrameworkAdapterRegistry::built_in(crate::typeinfo::adapters::vue::vue_carrier_token_clone())
+        FrameworkAdapterRegistry::built_in(
+            crate::typeinfo::adapters::vue::vue_carrier_token_clone(),
+            crate::typeinfo::adapters::svelte::svelte_carrier_token_clone(),
+        )
     }
 
     /// COMPLETENESS GUARD: every wire framework tag maps to a registered
@@ -462,9 +559,16 @@ mod tests {
                         "Vue must resolve to a registered adapter"
                     );
                 }
-                // Svelte is a deferred vertical.
+                // Svelte's adapter id is now REGISTERED (carrier legs + a
+                // Deferred surface arm). The completeness oracle keys on
+                // registration, not the surface arm.
                 FrameworkTag::Svelte => {
-                    assert_eq!(disposition, Some(TagDisposition::DeferredVertical));
+                    assert_eq!(
+                        disposition,
+                        Some(TagDisposition::Registered(FrameworkAdapterId::svelte())),
+                        "Svelte's adapter id is registered (carrier legs); only its surface \
+                         resolution is deferred"
+                    );
                 }
                 // React / Solid are out of scope.
                 FrameworkTag::React | FrameworkTag::Solid => {
@@ -539,17 +643,29 @@ mod tests {
     }
 
     #[test]
-    fn synthesizing_adapter_id_is_the_unique_synth_bearing_adapter() {
+    fn scratch_synthesizing_adapter_id_is_vue_the_macro_inliner() {
         // The host's typeinfo-scratch default-injection routes a no-language
-        // scratch canonical to the framework that SYNTHESIZES a `default`. That
-        // id is REGISTRY-DERIVED (the unique adapter carrying a synth leg), NOT a
-        // hardcoded `FrameworkAdapterId::vue()` literal in the host body.
+        // scratch canonical to the framework whose MACRO surface it inlines —
+        // Vue (a scratch inlines a `.vue` macro prelude). That id is
+        // REGISTRY-DERIVED (the registered Vue adapter id), NOT a `.min()` over
+        // every synth adapter: with Svelte now ALSO registering a synth leg, a
+        // `.min()` would (mis)route the Vue-macro scratch to Svelte
+        // (`"svelte" < "vue"`).
         let registry = built_in();
         assert_eq!(
-            registry.synthesizing_adapter_id(),
+            registry.scratch_synthesizing_adapter_id(),
             Some(FrameworkAdapterId::vue()),
-            "Vue is the only adapter that registers a synth leg, so it is the \
-             synthesizing adapter the scratch injection routes to"
+            "the typeinfo scratch inlines a Vue macro prelude, so it routes to \
+             the Vue synth leg specifically"
+        );
+        // The generic `.min()` selector now returns Svelte (the lowest synth
+        // adapter id) — DISCRIMINATING: it proves the scratch path uses the
+        // dedicated selector, not `.min()`, since the two now differ.
+        assert_eq!(
+            registry.synthesizing_adapter_id(),
+            Some(FrameworkAdapterId::svelte()),
+            "with two synth adapters the `.min()` selector is Svelte, distinct \
+             from the scratch path's Vue routing"
         );
     }
 
@@ -570,19 +686,72 @@ mod tests {
     }
 
     #[test]
-    fn built_in_active_provider_index_is_empty_zero_cost() {
-        // No production provider registers — the index is empty, so the
-        // resolved-validation half does zero per-file work (the steady state).
+    fn built_in_active_provider_index_gates_svelte_only() {
+        // The Svelte carrier registers a syntax-capture script-fact provider
+        // (carrier-language gated on `svelte`); Vue registers none (its macro
+        // analysis stays in the shallow pass). So the index is NON-empty but a
+        // Vue file selects ZERO providers — the Vue path stays byte-identical
+        // zero-cost.
         let registry = built_in();
         assert!(
-            registry.active_provider_index().is_empty(),
-            "the built-in registry registers no script-fact provider, so its \
-             active-provider index is empty (the zero-cost path)"
+            !registry.active_provider_index().is_empty(),
+            "the Svelte carrier registers a script-fact provider"
         );
-        assert!(registry
+        // A `.vue` file's carrier language selects no provider (Vue is
+        // provider-less).
+        assert!(
+            registry
+                .active_provider_index()
+                .active_for(Some(&LanguageId::new("vue")), std::iter::empty())
+                .is_empty(),
+            "a Vue file selects no provider — the Vue path is unchanged"
+        );
+        // A `.svelte` file's carrier language selects the Svelte provider.
+        let active = registry
             .active_provider_index()
-            .active_for(Some(&LanguageId::new("vue")), std::iter::empty())
-            .is_empty());
+            .active_for(Some(&LanguageId::new("svelte")), std::iter::empty());
+        assert_eq!(
+            active.len(),
+            1,
+            "a Svelte file selects its one syntax-capture provider"
+        );
+        assert_eq!(active[0].adapter_id(), FrameworkAdapterId::svelte());
+    }
+
+    #[test]
+    fn svelte_registration_carries_carrier_legs_and_a_deferred_surface() {
+        // B8a: the Svelte carrier registers carrier + synth + script-fact
+        // provider + api-projector legs, with a Deferred SURFACE arm (its
+        // surface resolution lands in B8b).
+        let registry = built_in();
+        let svelte = registry
+            .get(&FrameworkAdapterId::svelte())
+            .expect("Svelte is registered");
+        assert!(svelte.carrier.is_some(), "Svelte is carrier-backed");
+        assert!(svelte.synth.is_some(), "Svelte synthesizes a default");
+        assert!(
+            svelte.api_projector.is_some(),
+            "Svelte projects a public API"
+        );
+        assert_eq!(
+            svelte.script_fact_providers.len(),
+            1,
+            "Svelte registers its one syntax-capture provider"
+        );
+        assert!(
+            matches!(svelte.surface, SurfaceRegistration::Deferred),
+            "Svelte's SURFACE resolution is deferred to B8b (the carrier legs land now)"
+        );
+        // The api-leg clause holds: api_suffix Some -> api_projector Some.
+        assert_eq!(
+            svelte
+                .descriptor
+                .virtual_file_naming
+                .as_ref()
+                .unwrap()
+                .api_suffix,
+            Some(".ts")
+        );
     }
 
     #[test]

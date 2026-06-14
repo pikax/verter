@@ -20,9 +20,10 @@
 //! (zero capture work, zero allocation — the
 //! `script_fact_providers_zero_cost_on_miss` guard).
 //!
-//! NO production provider registers in this program — Vue's macro analysis
-//! stays inside the shallow pass. The seam exists for later framework verticals
-//! and is exercised by an in-tree fixture provider.
+//! Vue registers no provider — its macro analysis stays inside the shallow pass.
+//! The Svelte carrier (the [`svelte`] submodule) registers a production provider
+//! (carrier-language gated on `svelte`) capturing its runes inventory. The seam
+//! is also exercised by an in-tree fixture provider.
 
 use std::any::Any;
 use std::sync::Arc;
@@ -30,6 +31,8 @@ use std::sync::Arc;
 use oxc_ast::ast::Program;
 
 use verter_language::{FrameworkAdapterId, LanguageId};
+
+pub mod svelte;
 
 /// The marker + `Any`-bridge a resolved framework-script-fact payload carries.
 ///
@@ -159,14 +162,22 @@ pub struct ResolvedValidationCx<'a> {
 
 /// The syntax-only capture context handed to a [`ScriptFactProvider::capture`].
 ///
-/// Carries ONLY the parse-domain inputs (source text + OXC program). No host
-/// handle, no resolver, no capability snapshot, no `StoreView` — those belong
-/// to the session-side resolved-validation half.
+/// Carries ONLY the parse-domain inputs (source text + OXC program + the
+/// optional module-script byte region). No host handle, no resolver, no
+/// capability snapshot, no `StoreView` — those belong to the session-side
+/// resolved-validation half.
 pub struct ScriptCandidateCx<'a> {
-    /// The file's full source text.
+    /// The file's full (eval-source) text — script bytes at raw carrier offsets.
     pub source: &'a str,
-    /// The OXC program for the file's script.
+    /// The OXC program for the file's (combined) script.
     pub program: &'a Program<'a>,
+    /// The byte range of the MODULE script block (`<script module>` /
+    /// `context="module"`) in `source`, when the carrier has one. A carrier
+    /// whose producer records script-region KINDS supplies it so a provider can
+    /// classify a declaration's owning block (module vs instance); `None` means
+    /// no module split is available (every top-level export is an instance
+    /// export — the conservative default).
+    pub module_script_region: Option<(u32, u32)>,
 }
 
 /// One provider's syntax candidates for one file.
@@ -282,12 +293,30 @@ pub fn capture_script_candidates(
     source: &str,
     program: &Program<'_>,
 ) -> FrameworkScriptCandidateSet {
+    capture_script_candidates_with_module_region(active_providers, source, program, None)
+}
+
+/// As [`capture_script_candidates`], but supplies the module-script byte region
+/// so a provider can classify a declaration's owning block (module vs instance).
+/// `None` ⇒ no module split (the conservative default — every top-level export
+/// is an instance export).
+#[must_use]
+pub fn capture_script_candidates_with_module_region(
+    active_providers: &[Arc<dyn ScriptFactProvider>],
+    source: &str,
+    program: &Program<'_>,
+    module_script_region: Option<(u32, u32)>,
+) -> FrameworkScriptCandidateSet {
     if active_providers.is_empty() {
         return FrameworkScriptCandidateSet::default();
     }
     let mut per_provider = Vec::new();
     for provider in active_providers {
-        let cx = ScriptCandidateCx { source, program };
+        let cx = ScriptCandidateCx {
+            source,
+            program,
+            module_script_region,
+        };
         if let Some(candidates) = provider.capture(cx) {
             per_provider.push(candidates);
         }

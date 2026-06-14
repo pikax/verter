@@ -95,10 +95,9 @@ impl DocumentRegistry {
     /// language classifier — the same authority the workspace-scan
     /// ingress uses, so one file resolves one `FileLanguage` row
     /// regardless of which ingress loaded it. A registered carrier row
-    /// without a parser behind it (`.svelte`) resolves to its framework
-    /// row here, and the host upsert surfaces the typed
-    /// unsupported-language error instead of silently parsing the
-    /// document as a plain script.
+    /// (`.svelte`) resolves to its framework row here and the host upsert
+    /// parses it through the registered carrier — never silently as a
+    /// plain script.
     fn document_file_language(&self, language_id: &str, canonical_id: &str) -> FileLanguage {
         if language_id == "vue" {
             FileLanguage::vue()
@@ -877,13 +876,14 @@ mod tests {
         );
     }
 
-    /// A known-but-unsupported framework carrier (`.svelte`) opened in
-    /// the editor must route through the language classifier: the host
-    /// rejects the upsert with the typed unsupported-language error
-    /// instead of silently parsing the document as a plain TypeScript
-    /// script.
+    /// A `.svelte` framework carrier opened in the editor routes through the
+    /// language classifier to the REGISTERED Svelte carrier (B8a): the upsert
+    /// succeeds and the host holds a Svelte carrier source snapshot — it is NOT
+    /// silently misparsed as a plain TypeScript script, and the B2-era
+    /// known-but-unsupported rejection has gone dead naturally now the carrier
+    /// is registered.
     #[test]
-    fn did_open_svelte_rejects_typed_instead_of_misparsing_as_script() {
+    fn did_open_svelte_parses_through_the_registered_carrier() {
         let host = Arc::new(verter_session::VerterHost::new_standalone(
             verter_session::HostConfig::default(),
         ));
@@ -894,7 +894,9 @@ mod tests {
             uri: uri.clone(),
             language_id: "svelte".to_string(),
             version: 1,
-            text: "<script>let x = 1;</script>".to_string(),
+            text:
+                "<script lang=\"ts\">let { x }: { x: number } = $props();</script>\n<div>{x}</div>"
+                    .to_string(),
         });
 
         // The editor document stays tracked…
@@ -902,16 +904,14 @@ mod tests {
             registry.open_uris().contains(&uri.as_str().to_string()),
             "the opened document must stay tracked in the registry"
         );
-        // …but the host must NOT hold a silently-misparsed script
-        // artifact: the carrier-without-parser upsert fails with the
-        // typed unsupported-language error and produces no source
-        // snapshot.
+        // …AND the host holds a Svelte carrier source snapshot: the registered
+        // carrier parses it (positive routing), never a misparsed script.
         assert!(
             registry
                 .host()
                 .get_source("/home/user/App.svelte")
-                .is_none(),
-            "a known-but-unsupported carrier must not be parsed as a plain script"
+                .is_some(),
+            "the registered Svelte carrier must parse the .svelte document"
         );
     }
 

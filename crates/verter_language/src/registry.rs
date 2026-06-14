@@ -294,9 +294,8 @@ mod tests {
 
     #[test]
     fn svelte_is_a_known_carrier_row_not_an_unknown_extension() {
-        // D-ao: `.svelte` classifies through a landed registry row. The
-        // row has NO carrier implementation behind it — dispatch serves
-        // the typed unsupported-language state — but classification is
+        // D-ao: `.svelte` classifies through a landed registry row, and (since
+        // B8a) the carrier implementation registers behind it. Classification is
         // KNOWN, never unknown-extension fallthrough.
         let registry = LanguageRegistry::built_in();
         match registry.classify_static("/src/Box.svelte") {
@@ -309,6 +308,50 @@ mod tests {
             }
             other => panic!("expected the svelte framework row, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn svelte_ts_and_svelte_js_are_plain_scripts_not_carriers() {
+        // D-bg: `.svelte.ts` / `.svelte.js` rune modules are NOT carriers — they
+        // classify STRUCTURALLY as a plain script (the path ends with `.ts` /
+        // `.js`, so it matches the plain-script row, NEVER the `.svelte` carrier
+        // row). DISCRIMINATING: a naive `contains("svelte")` classifier would
+        // (mis)route them to the carrier. They serve the REAL file; no carrier
+        // participates.
+        let registry = LanguageRegistry::built_in();
+
+        // `.svelte.ts` → Script(Ts), NOT a framework carrier.
+        let ts = registry
+            .classify_static("/src/store.svelte.ts")
+            .static_resolution();
+        assert!(
+            !ts.is_framework_carrier(),
+            "a `.svelte.ts` rune module must NOT classify as a framework carrier, got {ts:?}"
+        );
+        assert_eq!(
+            ts,
+            FileLanguage::script(ScriptSourceType::Ts),
+            "`.svelte.ts` resolves to the plain TS script row"
+        );
+
+        // `.svelte.js` → Script(Js), NOT a framework carrier.
+        let js = registry
+            .classify_static("/src/store.svelte.js")
+            .static_resolution();
+        assert!(
+            !js.is_framework_carrier(),
+            "a `.svelte.js` rune module must NOT classify as a framework carrier, got {js:?}"
+        );
+
+        // The bare `.svelte` component DOES classify as the carrier (proves the
+        // discrimination is real — not a blanket non-carrier verdict).
+        assert!(
+            registry
+                .classify_static("/src/Box.svelte")
+                .static_resolution()
+                .is_framework_carrier(),
+            "a bare `.svelte` component IS a carrier"
+        );
     }
 
     #[test]

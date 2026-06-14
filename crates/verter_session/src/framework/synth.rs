@@ -72,6 +72,39 @@ impl ComponentDefaultSynth for VueComponentDefaultSynth {
     }
 }
 
+/// The Svelte synthesized-default leg.
+///
+/// Consumes the PARSE-DOMAIN
+/// [`SvelteScriptCandidates`](verter_semantic::analysis::framework_facts::svelte::SvelteScriptCandidates)
+/// captured by the Svelte script-fact provider's syntax-capture half — never the
+/// resolved-validation facts. The candidate payload rides on the ctx's
+/// `script_candidates` set keyed by the Svelte adapter id.
+///
+/// EVERY `.svelte` file is a component, so this leg ALWAYS synthesizes a
+/// default — even a pure-markup component with no `$props()` and no exports gets
+/// a class-shaped default whose instance carries `$props: {}`. The leg is only
+/// invoked for a `.svelte`-classified canonical (the host selects it by adapter
+/// id), so an empty candidate set is the empty-default case, never a no-op.
+#[derive(Debug, Default)]
+pub struct SvelteComponentDefaultSynth;
+
+impl ComponentDefaultSynth for SvelteComponentDefaultSynth {
+    fn synthesise(&self, cx: ComponentDefaultSynthCtx<'_>) -> Option<ShallowValueSymbol> {
+        use verter_semantic::analysis::framework_facts::svelte::SvelteScriptCandidates;
+        let empty = SvelteScriptCandidates::default();
+        let candidates = cx
+            .script_candidates
+            .for_adapter(&verter_language::FrameworkAdapterId::svelte())
+            .and_then(|entry| entry.payload.downcast_ref::<SvelteScriptCandidates>())
+            .unwrap_or(&empty);
+        Some(
+            crate::resolver_core::svelte_default_synth::synthesise_svelte_default_value_symbol(
+                candidates,
+            ),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

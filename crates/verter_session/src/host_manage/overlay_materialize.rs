@@ -351,7 +351,16 @@ impl VerterHost {
         // candidate is published as a multi-candidate sibling of the
         // base via `insert_artifacts`.
         let raw_source: Arc<str> = Arc::clone(&overlay_source);
-        let framework_parse: Option<Arc<verter_language::FrameworkParseArtifact>> = None;
+        // Build the carrier artifact for a framework-carrier overlay (a `.vue` /
+        // `.svelte` overlay source) through the CARRIER-NEUTRAL producer, so its
+        // eval-source carries the script blocks at raw offsets — never a
+        // raw-markup misparse. A plain-script overlay resolves to `None`.
+        let overlay_file_language = self.language_classifier.classify(analysis_canonical_id);
+        let framework_parse: Option<Arc<verter_language::FrameworkParseArtifact>> =
+            crate::parse::build_carrier_parse_artifact_from_source(
+                &overlay_file_language,
+                raw_source.as_ref(),
+            );
         let whole_hash = overlay_whole_hash;
         let snapshot = Arc::new(self.build_snapshot_from_source_state(
             analysis_canonical_id,
@@ -534,6 +543,7 @@ impl VerterHost {
             analysis_canonical_id,
             &mut shallow_state_inner,
             &snapshot.macros,
+            Some(eval_source.as_ref()),
         );
         let shallow_state = Arc::new(shallow_state_inner);
 

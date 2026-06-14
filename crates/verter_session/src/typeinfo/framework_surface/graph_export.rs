@@ -262,6 +262,24 @@ pub(crate) fn encode_framework_surfaces(
     all_kinds: &[FrameworkSurfaceKind],
     supported_surfaces: &[FrameworkSurfaceKind],
 ) -> EncodedFrameworkSurfaces {
+    encode_framework_surfaces_with_unsupported_message(
+        normalized,
+        all_kinds,
+        supported_surfaces,
+        "surface kind not supported by this adapter",
+    )
+}
+
+/// As [`encode_framework_surfaces`], but with a caller-supplied UNSUPPORTED
+/// diagnostic message — a `Deferred` registration passes the
+/// surfaces-not-yet-registered message (D-ag), distinct from a supported
+/// adapter's per-kind unsupport.
+pub(crate) fn encode_framework_surfaces_with_unsupported_message(
+    normalized: &NormalizedSurfaces,
+    all_kinds: &[FrameworkSurfaceKind],
+    supported_surfaces: &[FrameworkSurfaceKind],
+    unsupported_message: &str,
+) -> EncodedFrameworkSurfaces {
     let mut arena = GraphArena::new();
 
     // Index the normalized surfaces by kind for a single-pass per-kind fill.
@@ -276,11 +294,7 @@ pub(crate) fn encode_framework_surfaces(
         let entry = if !supported {
             // A kind outside the adapter's supported set is filled structurally
             // as UNSUPPORTED — never a bare empty SUPPORTED entry.
-            unsupported_entry(
-                &mut arena,
-                kind,
-                "surface kind not supported by this adapter",
-            )
+            unsupported_entry(&mut arena, kind, unsupported_message)
         } else {
             match by_kind.get(&(kind as i32)) {
                 Some(surface) => encode_kind(&mut arena, kind, &surface.outcome),

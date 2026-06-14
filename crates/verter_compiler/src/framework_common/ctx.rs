@@ -95,6 +95,21 @@ pub(crate) fn receive_vue_carrier_token() -> CarrierAccessToken {
         .expect("the built-in registry mints a Vue carrier registration proof")
 }
 
+/// Receive the Svelte carrier registration proof from `verter_language`.
+///
+/// The compiler-side receipt site for the Svelte bridge's ctx — the sibling of
+/// [`receive_vue_carrier_token`]. The proof is selected by adapter identity
+/// (the `.svelte` carrier row), never by positional assumption. CRATE-PRIVATE:
+/// only the in-crate Svelte bridge constructs its `CarrierCompilerCtx` from it.
+#[must_use]
+pub(crate) fn receive_svelte_carrier_token() -> CarrierAccessToken {
+    let (_registry, tokens) = verter_language::LanguageRegistry::__built_in_with_carrier_tokens();
+    tokens
+        .into_iter()
+        .find(|token| *token.adapter_id() == verter_language::FrameworkAdapterId::svelte())
+        .expect("the built-in registry mints a Svelte carrier registration proof")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

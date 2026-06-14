@@ -151,6 +151,54 @@ pub fn vue_descriptor() -> FrameworkAdapterDescriptor {
     }
 }
 
+/// Every built-in framework-adapter descriptor, in a stable order.
+///
+/// The single enumeration the compiler-completeness guard
+/// (`carrier_descriptors_have_compilers`) iterates: it filters the
+/// carrier-bearing rows (`carrier_language.is_some()`) and asserts each has a
+/// registered `CarrierCompiler`. A new carrier vertical adds its descriptor here
+/// and the guard automatically covers it.
+#[must_use]
+pub fn built_in_descriptors() -> Vec<FrameworkAdapterDescriptor> {
+    vec![vue_descriptor(), svelte_descriptor()]
+}
+
+/// The Svelte adapter descriptor row.
+///
+/// The single source of truth for the Svelte carrier's identity, carrier
+/// language, and virtual-file naming. The surface RESOLUTION is a later vertical
+/// (B8b registers the real `FrameworkSurfaceAdapter`); until then the carrier
+/// registers a `SurfaceRegistration::Deferred` arm, so the executor answers
+/// every kind structurally UNSUPPORTED regardless of `supported_surfaces`. The
+/// descriptor still advertises the full kind set so the wire contract is stable
+/// across the B8b arm flip. `api_suffix: Some(".ts")` is matched by the
+/// registered Svelte api-projector leg (the `framework_registry_complete`
+/// api-leg clause).
+#[must_use]
+pub fn svelte_descriptor() -> FrameworkAdapterDescriptor {
+    FrameworkAdapterDescriptor {
+        id: FrameworkAdapterId::svelte(),
+        tag: FrameworkTag::Svelte,
+        supported_surfaces: ALL_FRAMEWORK_SURFACE_KINDS,
+        carrier_language: Some(LanguageId::new("svelte")),
+        virtual_file_naming: Some(VirtualFileNaming {
+            ide: Some(IdeSuffixPolicy::JsxConditional {
+                jsx: ".jsx",
+                non_jsx: ".tsx",
+            }),
+            api_suffix: Some(".ts"),
+            // No testing-API surface for Svelte (the testing surface is
+            // Vue-only, D-ak/D-al).
+            testing_api_suffix: None,
+            sidecar_suffixes: &[],
+        }),
+        // The Svelte carrier resolves the default-export component surface only
+        // (a `.svelte` file is one component); a named-export framework surface
+        // is not a distinct resolution for it.
+        supports_named_export_surfaces: false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

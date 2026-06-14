@@ -301,11 +301,14 @@ impl VerterHost {
                 }
 
                 // STEP 6 — cold parse + analysis. The cold parse routes
-                // through the Vue carrier producer (wrapping into the
-                // framework-neutral artifact at parse time).
-                let framework_parse = canonical_id
-                    .ends_with(".vue")
-                    .then(|| crate::parse::build_vue_parse_artifact_from_source(&raw_source));
+                // through the CARRIER-NEUTRAL producer (the carrier registry),
+                // wrapping into the framework-neutral artifact at parse time —
+                // so a `.svelte` cold parse yields a Svelte artifact, not `None`.
+                let cold_file_language = self.language_classifier.classify(canonical_id);
+                let framework_parse = crate::parse::build_carrier_parse_artifact_from_source(
+                    &cold_file_language,
+                    &raw_source,
+                );
                 let eval_source = Arc::<str>::from(Self::build_eval_script_source(
                     raw_source.as_ref(),
                     framework_parse.as_deref(),

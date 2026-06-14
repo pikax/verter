@@ -20,6 +20,7 @@ use verter_language::FrameworkAdapterId;
 
 use super::carrier_compiler::CarrierCompiler;
 use super::vue_bridge::VueCarrierCompiler;
+use crate::svelte::SvelteCarrierCompiler;
 
 /// The compiler-side carrier-compiler registry.
 ///
@@ -42,12 +43,15 @@ impl CarrierCompilerRegistry {
     /// Build the registry with the production carrier compilers.
     ///
     /// Vue is the keystone carrier: its compiler is the bridge around the
-    /// existing Vue pipeline. A new carrier vertical adds its row here.
+    /// existing Vue pipeline. Svelte is the second carrier (its parser produces
+    /// the framework-neutral artifact through the Svelte bridge). A new carrier
+    /// vertical adds its row here.
     #[must_use]
     pub fn built_in() -> Self {
         let mut compilers: FxHashMap<FrameworkAdapterId, Arc<dyn CarrierCompiler>> =
             FxHashMap::default();
         Self::register(&mut compilers, Arc::new(VueCarrierCompiler::default()));
+        Self::register(&mut compilers, Arc::new(SvelteCarrierCompiler::default()));
         Self { compilers }
     }
 
@@ -178,12 +182,24 @@ mod tests {
             "a same-adapter non-carrier language must NOT dispatch through the SFC parse path"
         );
 
-        // An unregistered adapter resolves to nothing.
+        // The Svelte carrier language (`svelte`) resolves to the Svelte
+        // compiler — the second registered carrier.
         assert!(
             registry
                 .compiler_for_carrier_language(
-                    &FrameworkAdapterId::new("svelte"),
+                    &FrameworkAdapterId::svelte(),
                     &LanguageId::new("svelte")
+                )
+                .is_some(),
+            "the svelte carrier language resolves to the Svelte compiler"
+        );
+
+        // A truly unregistered adapter resolves to nothing.
+        assert!(
+            registry
+                .compiler_for_carrier_language(
+                    &FrameworkAdapterId::new("not-a-framework"),
+                    &LanguageId::new("not-a-framework")
                 )
                 .is_none(),
             "an unregistered adapter has no carrier compiler"

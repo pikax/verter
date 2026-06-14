@@ -39,8 +39,8 @@ use oxc_parser::{ParseOptions, Parser};
 use oxc_span::SourceType;
 use verter_language::FrameworkAdapterId;
 use verter_semantic::analysis::framework_facts::{
-    capture_script_candidates, FrameworkScriptCandidates, FrameworkScriptFactPayload,
-    ResolvedImportTarget, ResolvedValidationCx, ScriptFactProvider,
+    FrameworkScriptCandidates, FrameworkScriptFactPayload, ResolvedImportTarget,
+    ResolvedValidationCx, ScriptFactProvider,
 };
 
 use crate::cache_runtime::SignatureAdmission;
@@ -305,25 +305,45 @@ pub(crate) fn resolve_script_facts<T: FrameworkScriptFactPayload>(
     // Zero-cost fast path: this registration registers NO provider ⇒ no
     // candidates ⇒ no facts, so the resolved-validation half does ZERO per-file
     // work — no `current_eval_state`, no classification, no `get_analysis`, no
-    // import resolution. In this program EVERY registration's provider list is
-    // empty (no production provider registers), so the host registry's
-    // `ActiveProviderIndex` is empty too — the two gates coincide in the
-    // steady state. (The host index keys the registry-wide is_empty oracle; the
-    // per-registration list keys this registration's own facts.)
+    // import resolution. (The Vue registration is provider-less; the Svelte
+    // registration carries one.) The host registry's `ActiveProviderIndex`
+    // aggregates EVERY registration's providers, so it is empty IFF no
+    // registration carries any provider — a registry-wide oracle, NOT a
+    // per-registration mirror. The per-registration list below keys THIS
+    // registration's own facts.
     debug_assert!(
         host.framework_registry().active_provider_index().is_empty()
-            == host
-                .framework_registry()
-                .get(&registration.descriptor.id)
-                .is_none_or(|r| r.script_fact_providers.is_empty()),
-        "the host index emptiness must agree with the registered adapter's provider list"
+            != host.framework_registry().any_provider_registered(),
+        "the host index emptiness must agree with the registry-wide provider presence"
     );
     if registration.script_fact_providers.is_empty() {
         return None;
     }
-    let (source, _framework_parse, whole_hash) = host.current_eval_state(canonical)?;
+    let (raw_source, framework_parse, whole_hash) = host.current_eval_state(canonical)?;
     let file_language = host.language_classifier().classify(canonical);
     let carrier_language = file_language.carrier_language_id();
+
+    // A framework carrier's runes/macros live in its script block(s). The
+    // provider captures over the POSITION-PRESERVING eval-source (script bytes at
+    // raw carrier offsets, markup/styles blanked) — the SAME source the synth
+    // injection captures from — so a `.svelte` capture parses valid TS, never the
+    // raw markup. A non-carrier file's raw source is already script.
+    let source: Arc<str> = if file_language.is_framework_carrier() {
+        Arc::from(
+            crate::VerterHost::build_eval_script_source(
+                raw_source.as_ref(),
+                framework_parse.as_deref(),
+            )
+            .as_str(),
+        )
+    } else {
+        raw_source
+    };
+    // The module-script region (so the provider classifies module vs instance
+    // exports) — read from the carrier's neutral script regions.
+    let module_region = framework_parse
+        .as_deref()
+        .and_then(crate::parse::module_script_region);
 
     // The file's imports (specifier + the session-resolved canonical) — the
     // resolved data the provider's validation inspects. The session resolves
@@ -375,7 +395,8 @@ pub(crate) fn resolve_script_facts<T: FrameworkScriptFactPayload>(
         .candidates
         .get(&candidate_key)
         .or_else(|| {
-            capture_candidates_for(&provider, &source, &file_language).map(|c| {
+            let source_type = crate::parse::carrier_eval_source_type(framework_parse.as_deref());
+            capture_candidates_for(&provider, &source, source_type, module_region).map(|c| {
                 host.framework_script_caches()
                     .candidates
                     .insert(candidate_key.clone(), c)
@@ -493,9 +514,9 @@ pub(crate) fn resolve_script_facts<T: FrameworkScriptFactPayload>(
 fn capture_candidates_for(
     provider: &Arc<dyn ScriptFactProvider>,
     source: &str,
-    file_language: &verter_language::FileLanguage,
+    source_type: SourceType,
+    module_script_region: Option<(u32, u32)>,
 ) -> Option<FrameworkScriptCandidates> {
-    let source_type = source_type_for_language(file_language);
     let alloc = Allocator::new();
     let parser = Parser::new(&alloc, source, source_type).with_options(ParseOptions {
         parse_regular_expression: false,
@@ -505,15 +526,14 @@ fn capture_candidates_for(
     if result.panicked {
         return None;
     }
-    let set = capture_script_candidates(std::slice::from_ref(provider), source, &result.program);
+    let set =
+        verter_semantic::analysis::framework_facts::capture_script_candidates_with_module_region(
+            std::slice::from_ref(provider),
+            source,
+            &result.program,
+            module_script_region,
+        );
     set.per_provider.into_iter().next()
-}
-
-fn source_type_for_language(file_language: &verter_language::FileLanguage) -> SourceType {
-    // Framework carrier files expose a TS script block; plain script files use
-    // their own source type. Default to TS — the fixture seam parses TS.
-    let _ = file_language;
-    SourceType::ts()
 }
 
 fn capability_bits_hash(host: &VerterHost, consumed: &[&'static str]) -> Hash16 {
@@ -527,6 +547,32 @@ fn capability_bits_hash(host: &VerterHost, consumed: &[&'static str]) -> Hash16 
         buf.push(0);
     }
     crate::hash::hash_16(&buf)
+}
+
+impl VerterHost {
+    /// Drive the Svelte adapter's resolved-validation half for `canonical`,
+    /// returning the validated
+    /// [`SvelteScriptFacts`](verter_semantic::analysis::framework_facts::svelte::SvelteScriptFacts)
+    /// — the snippet-typed members whose `Snippet`-candidate import RESOLVED to
+    /// the `svelte` package (a userland look-alike is rejected). `None` when the
+    /// Svelte registration is absent or the candidates do not validate.
+    ///
+    /// The resolved-validation surface seam consumers (B8b SLOTS) reach this through the
+    /// shared `script_facts_for` path; this entry exposes it for the Svelte
+    /// vertical's resolved-validation coverage.
+    #[must_use]
+    pub fn resolve_svelte_script_facts(
+        &self,
+        canonical: &str,
+    ) -> Option<Arc<verter_semantic::analysis::framework_facts::svelte::SvelteScriptFacts>> {
+        let registration = self
+            .framework_registry()
+            .get(&verter_language::FrameworkAdapterId::svelte())?;
+        let ctx = crate::framework::ctx::FrameworkAdapterCtx::new(registration, self);
+        ctx.script_facts_for::<verter_semantic::analysis::framework_facts::svelte::SvelteScriptFacts>(
+            canonical,
+        )
+    }
 }
 
 /// Shared in-tree fixture seam — a `ScriptFactProvider` and registration

@@ -180,6 +180,7 @@ impl VerterHost {
         let framework_registry =
             std::sync::Arc::new(crate::framework::FrameworkAdapterRegistry::built_in(
                 crate::typeinfo::adapters::vue::vue_carrier_token_clone(),
+                crate::typeinfo::adapters::svelte::svelte_carrier_token_clone(),
             ));
         let framework_script_caches =
             std::sync::Arc::new(crate::framework::script_facts::FrameworkScriptCaches::new());
@@ -727,6 +728,7 @@ impl VerterHost {
         canonical_id: &str,
         state: &mut crate::resolver_core::ShallowFileState,
         macros: &[verter_semantic::analysis::types::AnalyzedMacro],
+        eval_source: Option<&str>,
     ) {
         // Userland `default` always wins — never overwrite it.
         if state.value_symbol("default").is_some() {
@@ -734,13 +736,17 @@ impl VerterHost {
         }
         let language = self.language_classifier.classify(canonical_id);
         let adapter_id = match language.adapter_id() {
+            // A typeinfo evaluation scratch inlines a Vue scope's eval-source
+            // (`.vue`-macro prelude); it has no resolved framework language, so
+            // route it to the registry's synthesizing framework leg. When a
+            // single adapter synthesizes a default the registry returns it; when
+            // more than one does (Svelte joined Vue), the scratch is the Vue
+            // macro inliner, so it routes to the Vue leg specifically (REGISTRY
+            // DATA — the carrier-macro synthesizer for the inlined surface, not
+            // a `.min()` over all synth adapters).
             Some(id) => id.clone(),
-            // A typeinfo evaluation scratch inlines its scope's eval-source; it
-            // has no resolved framework language, so route it to the registry's
-            // synthesizing framework leg (REGISTRY DATA, not a `vue()` literal).
-            // No synthesizing adapter ⇒ no-op (no `default` to inject).
             None if crate::resolver_core::vue_default_synth::is_typeinfo_scratch(canonical_id) => {
-                match self.framework_registry().synthesizing_adapter_id() {
+                match self.framework_registry().scratch_synthesizing_adapter_id() {
                     Some(id) => id,
                     None => return,
                 }
@@ -750,8 +756,34 @@ impl VerterHost {
         let Some(synth) = self.framework_registry().synth_for(&adapter_id) else {
             return;
         };
-        let candidates =
-            verter_semantic::analysis::framework_facts::FrameworkScriptCandidateSet::default();
+        // Capture the adapter's parse-domain script candidates from the
+        // eval-source (the position-preserving blank that carries BOTH script
+        // blocks at their raw offsets) through the registry's active providers
+        // for this file. The capture is SYNTAX-ONLY (no resolver, no capability
+        // bits) and runs once per content hash inside shallow-state
+        // construction. With no active provider (Vue's steady state) the set is
+        // empty and synthesis falls back to `macros`. The OXC parse is owned by
+        // the scheduler-bound `crate::parse` module.
+        let active = self
+            .framework_registry()
+            .active_provider_index()
+            .active_for(language.carrier_language_id(), std::iter::empty());
+        // The MODULE-script byte region (so the provider classifies module vs
+        // instance exports) + the carrier's resolved script dialect — read from
+        // the carrier's neutral script regions.
+        let framework_parse = self
+            .current_eval_state(canonical_id)
+            .and_then(|(_, fp, _)| fp);
+        let module_region = framework_parse
+            .as_deref()
+            .and_then(crate::parse::module_script_region);
+        let source_type = crate::parse::carrier_eval_source_type(framework_parse.as_deref());
+        let candidates = crate::parse::capture_synth_script_candidates(
+            &active,
+            eval_source,
+            module_region,
+            source_type,
+        );
         let cx = crate::framework::synth::ComponentDefaultSynthCtx {
             canonical_id,
             language: &language,

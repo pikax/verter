@@ -293,14 +293,14 @@ impl VerterHost {
                 "build_snapshot_from_parse_artifact",
                 format!("owner={} bytes={}", canonical, source.len()),
             );
-            if let Some(parse) = crate::parse::build_vue_snapshot_from_artifact(
+            if let Some(parse) = crate::parse::build_carrier_snapshot_from_artifact(
                 canonical,
                 source.as_ref(),
                 self.config.effective_scope(),
                 artifact,
             ) {
                 component_meta_trace_custom!(
-                    "parse_vue_snapshot_cached_result",
+                    "parse_carrier_snapshot_cached_result",
                     format!(
                         "owner={} imports={} macros={} export_signatures={}",
                         canonical,

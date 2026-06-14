@@ -27,6 +27,7 @@ pub mod shallow_file_state;
 pub(crate) mod surface_projector;
 #[cfg(test)]
 mod surface_projector_tests;
+pub mod svelte_default_synth;
 pub mod symbol_resolver;
 pub mod type_expansion;
 pub mod type_expansion_host;

@@ -9139,12 +9139,10 @@ fn test_carrier_language_for() {
 }
 
 /// The watcher glob is registry-derived: it covers every carrier row,
-/// including `.svelte` (whose row has no registered carrier behind it).
-/// Watching `.svelte` is INERT by construction — `resync` routes the
-/// event through `ensure_compiled`, which fails with the typed
-/// unsupported-language error before any provider sync state is
-/// created (see `tests/g_misc0/known_but_unsupported_language.rs` for
-/// the host half).
+/// including `.svelte` (a registered carrier since B8a). The IDE TSX
+/// projection for `.svelte` is a later vertical (B8c), so `resync` still
+/// produces no provider sync state for it — the watcher coverage is the
+/// load-bearing assertion here.
 #[test]
 fn test_carrier_watch_glob_covers_registry_carrier_rows() {
     let glob = crate::capabilities::carrier_watch_glob();
@@ -10576,14 +10574,11 @@ fn standalone_host_cannot_resolve_disk_files() {
 }
 
 /// Watcher-glob inertness at the LSP routing layer: the watcher glob
-/// includes `.svelte` (a registered carrier extension), so a watched
-/// `.svelte` change routes through the carrier resync path — and stays
-/// completely inert. No provider sync state is created, nothing syncs
-/// to the type provider, and no IDE virtual-file state exists: a
-/// carrier without a registered implementation produces no provider
-/// sync state (its compile gate fails with the typed
-/// unsupported-language error), and only direct requests surface that
-/// typed error.
+/// includes `.svelte` (a registered carrier extension since B8a), so a
+/// watched `.svelte` change routes through the carrier resync path. The
+/// IDE TSX projection for `.svelte` is a later vertical (B8c) — until it
+/// lands the compile gate produces no IDE virtual file, so no provider
+/// sync state is created and nothing syncs to the type provider.
 #[tokio::test]
 async fn watched_svelte_change_produces_no_provider_sync_state() {
     let mock = Arc::new(MockTypeProvider::new());
@@ -10628,7 +10623,7 @@ async fn watched_svelte_change_produces_no_provider_sync_state() {
 /// queued snapshot provider sync, no provider sync state, no provider
 /// calls. DISCRIMINATING: when the routing layer admits every carrier
 /// row into the Vue resync, the unresolved-owner branch queues a
-/// snapshot provider sync for the carrier-less file.
+/// snapshot provider sync for the (non-Vue) carrier file.
 #[tokio::test]
 async fn watched_svelte_outside_project_roots_queues_no_provider_sync() {
     let mock = Arc::new(MockTypeProvider::new());

@@ -4,11 +4,15 @@
 //! semantic / typeinfo bug (NOT introduced by a framework vertical) is
 //! recorded here as a known-bug ENTRY and characterized by an
 //! `#[ignore = "..."]`d regression test naming the same id. The bijection
-//! guard pins a 1:1 correspondence between ledger entries and the
-//! `#[ignore]`d regression tests that characterize them — neither an
-//! orphan ledger entry (a documented bug with no characterizing test) nor
-//! an orphan ignored framework-bug test (a parked test with no ledger
-//! entry) may exist.
+//! guard pins a BIDIRECTIONAL 1:1 correspondence between ledger entries and the
+//! `#[ignore]`d regression tests that characterize them:
+//! - FORWARD: every ledger entry has a matching `#[ignore = "<id>: ..."]` test
+//!   (no orphan ledger entry — a documented bug with no characterizing test);
+//! - REVERSE: every FRAMEWORK-SHAPED `#[ignore = "<framework>-...: ..."]` marker
+//!   has a ledger entry (no orphan ignored framework-bug test — a parked test
+//!   with no ledger row). The reverse scan is ledger-independent (it matches the
+//!   `<framework>-` id prefix), so it catches a gap the forward direction alone
+//!   cannot.
 //!
 //! The ledger is EMPTY at the compiler-scaffold's landing — no framework
 //! vertical has surfaced a parked bug yet — so the bijection is trivially
@@ -113,6 +117,56 @@ fn extract_ignore_bug_ids(text: &str, known_ids: &[&str]) -> Vec<String> {
     found
 }
 
+/// The framework name prefixes a known-bug id begins with (`<framework>-...`).
+/// A `#[ignore = "<framework>-...: ..."]` marker carrying one of these prefixes
+/// is a FRAMEWORK-bug tracker — the REVERSE-direction discriminator the
+/// bidirectional bijection uses to catch an orphan ignored test with no ledger
+/// entry. Adding a framework vertical adds its prefix here.
+const FRAMEWORK_BUG_ID_PREFIXES: &[&str] = &["vue-", "svelte-", "react-", "solid-"];
+
+/// Whether an ignore id is FRAMEWORK-SHAPED (begins with a known framework
+/// prefix). The reverse-direction filter — an unrelated `#[ignore = "flaky"]`
+/// is not framework-shaped and is excluded.
+fn is_framework_shaped_bug_id(id: &str) -> bool {
+    FRAMEWORK_BUG_ID_PREFIXES
+        .iter()
+        .any(|prefix| id.starts_with(prefix))
+}
+
+/// Extract EVERY framework-shaped `#[ignore = "<id>: ..."]` id from `text` (the
+/// reverse-direction scan — independent of the ledger). The `<id>: <text>` shape
+/// is required (a bare `#[ignore = "flaky"]` has no `:` and is not a tracker).
+fn extract_framework_shaped_ignore_ids(text: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let needle = "#[ignore = \"";
+    let mut cursor = 0;
+    while let Some(rel) = text[cursor..].find(needle) {
+        let start = cursor + rel + needle.len();
+        if let Some(end_rel) = text[start..].find('"') {
+            let reason = &text[start..start + end_rel];
+            if let Some((id, _rest)) = reason.split_once(':') {
+                let id = id.trim();
+                if is_framework_shaped_bug_id(id) {
+                    found.push(id.to_string());
+                }
+            }
+            cursor = start + end_rel + 1;
+        } else {
+            break;
+        }
+    }
+    found
+}
+
+/// Every framework-shaped ignored-bug id across the crate's `src` + `tests`
+/// trees — the reverse-direction set the bijection checks against the ledger.
+fn all_framework_shaped_ignore_ids() -> Vec<String> {
+    let root = workspace_root();
+    let mut sources = read_rs_recursive(&root.join("crates/verter_session/src"));
+    sources.extend(read_rs_recursive(&root.join("crates/verter_session/tests")));
+    extract_framework_shaped_ignore_ids(&sources.join("\n"))
+}
+
 #[test]
 fn framework_known_bug_ledger_bijection() {
     let known_ids: Vec<&str> = FRAMEWORK_KNOWN_BUGS.iter().map(|e| e.id).collect();
@@ -132,25 +186,41 @@ fn framework_known_bug_ledger_bijection() {
     let ledger: std::collections::BTreeSet<String> =
         known_ids.iter().map(|s| s.to_string()).collect();
 
-    // Bijection: every ledger entry is characterized by a matching
-    // `#[ignore = "<id>: ..."]` test, and every framework-bug-id ignore
-    // marker has a ledger entry.
+    // FORWARD direction: every ledger entry is characterized by a matching
+    // `#[ignore = "<id>: ..."]` test.
     let orphan_ledger: Vec<&String> = ledger.difference(&referenced).collect();
     assert!(
         orphan_ledger.is_empty(),
         "known-bug ledger entries with NO characterizing #[ignore] test: {orphan_ledger:?}. \
          Add the `#[ignore = \"<id>: ...\"]`d regression test, or remove the ledger entry."
     );
-    // (The reverse direction — an ignore marker with a framework-bug id but
-    // no ledger entry — cannot occur by construction here because
-    // `referenced` is filtered to `known_ids`; the self-test below pins
-    // that an UNKNOWN id is NOT silently swallowed.)
 
-    // EMPTY ledger ⇒ trivially green.
+    // REVERSE direction (bidirectional bijection): every FRAMEWORK-SHAPED
+    // `#[ignore = "<framework>-...: ..."]` marker MUST have a ledger entry. This
+    // catches an ORPHAN ignored framework-bug test parked with no ledger row —
+    // a gap the forward direction alone (which filters `referenced` to
+    // `known_ids`) cannot detect. The framework-shape scan is ledger-independent.
+    let framework_shaped: std::collections::BTreeSet<String> =
+        all_framework_shaped_ignore_ids().into_iter().collect();
+    let orphan_ignored: Vec<&String> = framework_shaped.difference(&ledger).collect();
+    assert!(
+        orphan_ignored.is_empty(),
+        "framework-shaped #[ignore] markers with NO ledger entry: {orphan_ignored:?}. \
+         Add the matching `FRAMEWORK_KNOWN_BUGS` ledger entry, or fix the bug so the test \
+         un-ignores. (OUT-OF-SCOPE matrix rows are NOT known-bug rows — they must NOT be \
+         parked as `<framework>-...`-prefixed ignored tests.)"
+    );
+
+    // EMPTY ledger ⇒ trivially green (no framework-shaped ignore markers exist).
     if FRAMEWORK_KNOWN_BUGS.is_empty() {
         assert!(
             referenced.is_empty(),
             "the ledger is empty, so no framework-bug #[ignore] marker should be referenced"
+        );
+        assert!(
+            framework_shaped.is_empty(),
+            "the ledger is empty, so no framework-shaped #[ignore] marker may exist: \
+             {framework_shaped:?}"
         );
     }
 }

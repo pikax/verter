@@ -83,18 +83,54 @@ impl VerterHost {
 
     /// Central caller for the `IndexedReady.eval_source` body.
     ///
-    /// For a `.vue` SFC this returns the **position-preserving** script-only
-    /// source (script content at its raw SFC byte offsets, non-script bytes
-    /// whitespace-blanked) so every OXC-produced span — eval-env decls,
-    /// external-type analysis, member/signature spans — is SFC-absolute by
-    /// construction. For a non-SFC file the source is returned unchanged (its
-    /// offsets are already file-absolute).
+    /// For a framework CARRIER (any adapter — Vue, Svelte, …) this returns the
+    /// **position-preserving** script-only source: each script block's content
+    /// sits at its RAW carrier byte offsets and every other byte is
+    /// whitespace-blanked (line terminators preserved), so every OXC-produced
+    /// span — eval-env decls, external-type analysis, member/signature spans —
+    /// is carrier-absolute by construction. The blanking is CARRIER-NEUTRAL: it
+    /// reads the neutral `FrameworkParseCommon.script_regions` the carrier's
+    /// producer populated (BOTH the instance and module script blocks), so a new
+    /// carrier needs no per-adapter eval-source branch here. For a non-carrier
+    /// file the source is returned unchanged (its offsets are already
+    /// file-absolute).
     pub(crate) fn build_eval_script_source(
         source: &str,
         framework_parse: Option<&verter_language::FrameworkParseArtifact>,
     ) -> String {
+        // A NON-Vue framework carrier blanks NEUTRALLY from the producer's
+        // recorded `script_regions` (BOTH the instance and module script blocks)
+        // — so a `.svelte` eval-source carries both scripts at their raw carrier
+        // offsets with the markup/styles whitespace-blanked. A new carrier needs
+        // no per-adapter branch here.
+        if let Some(artifact) = framework_parse {
+            let is_vue = crate::typeinfo::adapters::vue::vue_parse(artifact).is_some();
+            if !is_vue {
+                let mut spans: Vec<(u32, u32)> = artifact
+                    .common
+                    .script_regions
+                    .iter()
+                    .map(|region| (region.span.start, region.span.end))
+                    .filter(|(start, end)| end > start)
+                    .collect();
+                spans.sort_by_key(|(start, _)| *start);
+                // Even with NO script regions (a pure-markup `.svelte`) the
+                // eval-source is the FULLY-BLANKED, line-preserving source — never
+                // the raw markup. `build_position_preserving_script_source` over an
+                // empty span set blanks every non-line-terminator byte, so a shared
+                // eval-source consumer parses an empty TS program, not HTML.
+                return crate::host_resolve::build_position_preserving_script_source(
+                    source, &spans,
+                );
+            }
+        }
+        // Vue (and the no-artifact fallback) keep the EXACT existing extraction:
+        // the parser-vs-raw-scan agreement + the forgiving raw scan when no
+        // parsed SFC is available + the inter-script `\n` injection. This is the
+        // byte-identical pre-existing behaviour (a Vue file arriving without a
+        // framework_parse still extracts its `<script>` from the raw markup).
         let parsed = framework_parse.and_then(crate::typeinfo::adapters::vue::vue_parse);
-        crate::host_resolve::extract_vue_script_content(source, parsed.map(Arc::as_ref))
+        crate::host_resolve::extract_vue_script_content(source, parsed.map(|p| p.as_ref()))
             .unwrap_or_else(|| source.to_string())
     }
 

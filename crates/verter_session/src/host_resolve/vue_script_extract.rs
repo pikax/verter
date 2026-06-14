@@ -217,7 +217,10 @@ fn script_content_spans_from_source(source: &str) -> Option<Vec<(u32, u32)>> {
 /// UTF-8 safety: every replaced byte is a single-byte ASCII value and every
 /// preserved range is copied wholesale from valid UTF-8, so the result is valid
 /// UTF-8 and exactly `source.len()` bytes long.
-fn build_position_preserving_script_source(source: &str, spans: &[(u32, u32)]) -> String {
+pub(crate) fn build_position_preserving_script_source(
+    source: &str,
+    spans: &[(u32, u32)],
+) -> String {
     let src = source.as_bytes();
     // Blank every byte first (line terminators preserved), then stamp script
     // content over its raw range.

@@ -88,17 +88,18 @@ const TOKEN_MINTING_ALLOWLIST: &[&str] = &[
 /// The carrier-row REGISTRATION channel (`LanguageRow::carrier` /
 /// `LanguageRegistry::__built_in_with_carrier_tokens`) is itself
 /// confined: tokens flow only to verter_language internals and the
-/// sanctioned receipt sites — the session's Vue adapter accessor
-/// (`receive_vue_carrier_token`) and the compiler-side blessed carrier
-/// ctx (D-m: the Vue bridge's `CarrierCompilerCtx` receives the Vue
-/// carrier proof through this channel to downcast its own carrier back
-/// out of the type-erased artifact). Any OTHER production call site would
-/// let an arbitrary crate mint an adapter's token through the public row
-/// constructor — the same forging vector D-ba bans for a public
-/// arbitrary-id constructor.
+/// sanctioned receipt sites — the session's per-carrier adapter accessors
+/// (`receive_vue_carrier_token` / the Svelte `svelte_carrier_token`) and
+/// the compiler-side blessed carrier ctx (D-m: each carrier bridge's
+/// `CarrierCompilerCtx` receives its carrier proof through this channel to
+/// downcast its own carrier back out of the type-erased artifact). Any
+/// OTHER production call site would let an arbitrary crate mint an
+/// adapter's token through the public row constructor — the same forging
+/// vector D-ba bans for a public arbitrary-id constructor.
 const TOKEN_RECEIPT_ALLOWLIST: &[&str] = &[
     "crates/verter_language/src/",
     "crates/verter_session/src/typeinfo/adapters/vue/parse_access.rs",
+    "crates/verter_session/src/typeinfo/adapters/svelte/parse_access.rs",
     "crates/verter_compiler/src/framework_common/ctx.rs",
 ];
 

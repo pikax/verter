@@ -56,7 +56,9 @@ use crate::host_audit_runtime::AuditRequestRegistration;
 use crate::instant::Instant;
 use crate::request_context::{RequestContext, RequestContextGuard};
 use crate::semantic_query::ProjectionMode;
-use crate::typeinfo::framework_surface::graph_export::encode_framework_surfaces;
+use crate::typeinfo::framework_surface::graph_export::{
+    encode_framework_surfaces, encode_framework_surfaces_with_unsupported_message,
+};
 use crate::typeinfo::framework_surface::plan::{
     ComponentExport, PlannedDemand, ResolvedComponentSelector, ResolvedDemand, ResolvedItem,
     ResolvedSurfaces,
@@ -342,8 +344,20 @@ impl VerterHost {
             SurfaceRegistration::Adapter(_) => registration.descriptor.supported_surfaces,
         };
 
-        let encoded =
-            encode_framework_surfaces(&normalized, ALL_FRAMEWORK_SURFACE_KINDS, supported);
+        // A Deferred adapter's per-kind UNSUPPORTED diagnostic names the
+        // intermediate state explicitly (D-ag) — the surfaces are not yet
+        // registered, distinct from a supported adapter's per-kind unsupport.
+        let encoded = match &registration.surface {
+            SurfaceRegistration::Deferred => encode_framework_surfaces_with_unsupported_message(
+                &normalized,
+                ALL_FRAMEWORK_SURFACE_KINDS,
+                supported,
+                "framework surfaces are not yet registered for this adapter",
+            ),
+            SurfaceRegistration::Adapter(_) => {
+                encode_framework_surfaces(&normalized, ALL_FRAMEWORK_SURFACE_KINDS, supported)
+            }
+        };
 
         let payload = framework_payload(&encoded.surfaces);
         let response = framework_surface_response(

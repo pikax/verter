@@ -1,13 +1,15 @@
-//! Known-but-unsupported language semantics (structural).
+//! Known-but-unsupported language semantics (structural) + the Svelte carrier
+//! positive-routing tests that superseded the B2-era Svelte rejection assertions.
 //!
-//! `.svelte` classifies through a LANDED `LanguageRegistry` row — a
-//! known language, never unknown-extension fallthrough — but no carrier
-//! implementation is registered behind its adapter id. The
-//! row-without-carrier is the STRUCTURAL source of the typed
-//! `UnsupportedLanguage` state: host dispatch finds the row, finds no
-//! carrier, and returns the typed error. Never a silent empty result,
-//! never a panic; when a carrier implementation registers for the
-//! adapter, this error path goes dead naturally.
+//! The typed `UnsupportedLanguage` state is the STRUCTURAL pre-vertical state for
+//! EVERY carrier-less row: host dispatch finds the registry row, finds no
+//! carrier, and returns the typed error (never a silent empty, never a panic).
+//! `.svelte` USED to exercise it (B2's row-without-carrier); now that the Svelte
+//! carrier registers (B8a), the `.svelte` upsert SUCCEEDS — the B2-era rejection
+//! assertions are superseded by the positive parse/routing tests below, and the
+//! typed `UnsupportedLanguage` path STAYS in the substrate (exercised by the Vue
+//! framework-template + same-adapter-non-carrier rows further down — the
+//! structural pre-vertical state for every FUTURE row).
 
 use std::sync::Arc;
 
@@ -16,7 +18,7 @@ use verter_session::{
 };
 
 const SVELTE_FIXTURE: &str =
-    "<script lang=\"ts\">\n  export let name: string;\n</script>\n\n<h1>Hello {name}</h1>\n";
+    "<script lang=\"ts\">\n  let { name }: { name: string } = $props();\n</script>\n\n<h1>Hello {name}</h1>\n";
 
 fn upsert_svelte(host: &VerterHost, file_language: FileLanguage) -> Result<(), HostError> {
     host.upsert(UpsertRequest {
@@ -29,67 +31,39 @@ fn upsert_svelte(host: &VerterHost, file_language: FileLanguage) -> Result<(), H
     .map(|_| ())
 }
 
-fn assert_typed_unsupported(err: &HostError) {
-    match err {
-        HostError::Scheduler(verter_scheduler::job::SchedulerError::UnsupportedLanguage {
-            file_id,
-            adapter_id,
-        }) => {
-            assert_eq!(file_id, "/src/Box.svelte");
-            assert_eq!(
-                adapter_id,
-                &verter_session::FrameworkAdapterId::svelte(),
-                "the typed error must carry the carrier-less row's adapter id"
-            );
-        }
-        other => panic!(
-            "expected the typed UnsupportedLanguage scheduler error, got: {other:?} \
-             (a stringly StageFailed or a silent success would break the \
-             row-without-carrier contract)"
-        ),
-    }
-}
-
-/// An explicit-kind request (the FFI `"svelte"` string maps to this
-/// language) surfaces the typed error from dispatch — asserting the
-/// ERROR KIND, not just non-success.
+/// An explicit-kind request (the FFI `"svelte"` string maps to this language)
+/// now PARSES through the registered Svelte carrier — the B2-era typed-rejection
+/// is dead. DISCRIMINATING: the upsert SUCCEEDS and a source snapshot exists.
 #[test]
-fn explicit_svelte_kind_surfaces_typed_unsupported_language() {
+fn explicit_svelte_kind_parses_through_the_registered_carrier() {
     let host = VerterHost::new_standalone(HostConfig::default());
-    let err = upsert_svelte(&host, FileLanguage::svelte())
-        .expect_err("a carrier-less framework language must not parse silently");
-    assert_typed_unsupported(&err);
+    upsert_svelte(&host, FileLanguage::svelte())
+        .expect("the registered Svelte carrier parses the .svelte upsert");
+    assert!(
+        host.get_source("/src/Box.svelte").is_some(),
+        "the Svelte carrier produces a source snapshot"
+    );
 }
 
-/// A path-classified request (no explicit kind — the host classifier
-/// resolves `.svelte` through the registry row) reaches the same typed
-/// state. DISCRIMINATING vs the retired routing: `.svelte` used to be
-/// an unknown extension routed as a plain script, which would have
-/// "succeeded" by parsing Svelte source as TypeScript.
+/// A path-classified request (no explicit kind — the host classifier resolves
+/// `.svelte` through the registry row) routes to the same registered carrier.
 #[test]
-fn path_classified_svelte_surfaces_typed_unsupported_language() {
+fn path_classified_svelte_parses_through_the_registered_carrier() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let classified = host.language_classifier().classify("/src/Box.svelte");
     assert_eq!(classified, FileLanguage::svelte());
-    let err = upsert_svelte(&host, classified)
-        .expect_err("path-classified .svelte must not parse silently");
-    assert_typed_unsupported(&err);
+    upsert_svelte(&host, classified).expect("path-classified .svelte parses through the carrier");
+    assert!(host.get_source("/src/Box.svelte").is_some());
 }
 
-/// Cross-file import of a carrier-less language: an importer that
-/// references a `.svelte` file keeps working. The `.svelte` upsert
-/// fails typed (DISCRIMINATING vs the retired routing, where `.svelte`
-/// parsed silently as TypeScript and the import "succeeded" with
-/// garbage), and the importer's own upsert, compile, and meta queries
-/// complete without hanging — the dependency failure stays typed and
-/// local, never poisoning subsequent requests.
+/// Cross-file import of a `.svelte` from a `.vue` importer: BOTH parse, and the
+/// importer's own props resolve — the carrier import no longer fails typed.
 #[test]
-fn importer_of_svelte_file_degrades_typed_without_poisoning() {
+fn vue_importer_of_svelte_file_resolves_both() {
     let host = VerterHost::new_standalone(HostConfig::default());
 
-    let err = upsert_svelte(&host, FileLanguage::svelte())
-        .expect_err("the carrier-less dependency itself must fail typed");
-    assert_typed_unsupported(&err);
+    upsert_svelte(&host, FileLanguage::svelte())
+        .expect("the .svelte dependency parses through its carrier");
 
     let importer = "<script setup lang=\"ts\">\n\
                     import Widget from './Box.svelte';\n\
@@ -104,7 +78,7 @@ fn importer_of_svelte_file_degrades_typed_without_poisoning() {
             file_language: FileLanguage::vue(),
             aliases: Vec::new(),
         })
-        .expect("an importer of a carrier-less file must keep working");
+        .expect("the Vue importer upserts");
     assert!(
         update.changed,
         "the importer upsert must register fresh content"
@@ -115,54 +89,31 @@ fn importer_of_svelte_file_degrades_typed_without_poisoning() {
         ..CompileProfile::default()
     };
     host.ensure_compiled("/src/App.vue", &profile)
-        .expect("importer compile must not be poisoned by the failed dependency");
+        .expect("importer compile resolves");
     assert!(
         host.get_ide("/src/App.vue", &profile).is_some(),
         "the importer's IDE virtual file must exist"
     );
 
     // Meta resolution over the importer terminates and reflects the
-    // importer's own surface — no hang, no panic, no dependency bleed.
+    // importer's own surface — no hang, the `.svelte` import resolves cleanly.
     let meta = host
         .get_component_meta("/src/App.vue")
         .expect("component meta over the importer must resolve");
     assert!(
         meta.props.iter().any(|p| p.name == "label"),
-        "the importer's own props must resolve despite the carrier-less import"
+        "the importer's own props must resolve"
     );
 }
 
-/// LSP-exposure inertness, host half: a watched `.svelte` file produces
-/// no virtual-file state — compile requests fail typed, and the IDE
-/// virtual-file pipeline yields nothing to sync to a type provider.
-#[test]
-fn svelte_produces_no_virtual_file_state() {
-    let host = VerterHost::new_standalone(HostConfig::default());
-    let _ = upsert_svelte(&host, FileLanguage::svelte());
-
-    let profile = CompileProfile {
-        target: verter_compiler::compile::CompileTarget::IDE,
-        ..CompileProfile::default()
-    };
-    assert!(
-        host.ensure_compiled("/src/Box.svelte", &profile).is_err(),
-        "compile of a carrier-less language must fail typed, not succeed empty"
-    );
-    assert!(
-        host.get_ide("/src/Box.svelte", &profile).is_none(),
-        "no IDE virtual file may exist for a carrier-less language"
-    );
-}
-
-/// A re-upsert that carries a DIFFERENT resolved language re-homes the
-/// file onto the new language — the scheduler must not keep executing
-/// the Source stage with the stale language of the first upsert.
-/// DISCRIMINATING both ways: with a stale-node scheduler, the second
-/// upsert silently parses `.svelte` as TypeScript (first direction) or
-/// keeps failing a now-plain-script request (second direction).
+/// A re-upsert that carries a DIFFERENT resolved language re-homes the file onto
+/// the new language — the scheduler must not keep executing the Source stage
+/// with the stale language of the first upsert. Both rows now parse (script and
+/// the Svelte carrier); the discriminator is that each upsert produces the
+/// row-appropriate source state, never the stale one's artifact.
 #[test]
 fn relabelled_upsert_reroutes_to_the_new_language() {
-    // Direction 1: script first, then the carrier-less framework row.
+    // Direction 1: a plain script first, then the Svelte carrier row.
     let host = VerterHost::new_standalone(HostConfig::default());
     let update = host
         .upsert(UpsertRequest {
@@ -174,15 +125,16 @@ fn relabelled_upsert_reroutes_to_the_new_language() {
         })
         .expect("an explicit plain-script upsert parses as a script");
     assert!(update.changed, "the script upsert registers fresh content");
-    let err = upsert_svelte(&host, FileLanguage::svelte())
-        .expect_err("re-upserting as the carrier-less language must fail typed");
-    assert_typed_unsupported(&err);
+    upsert_svelte(&host, FileLanguage::svelte())
+        .expect("re-upserting as the Svelte carrier parses through the carrier");
+    assert!(
+        host.get_source("/src/Box.svelte").is_some(),
+        "the re-homed Svelte upsert produces source state"
+    );
 
-    // Direction 2: the carrier-less row first, then a plain script.
+    // Direction 2: the Svelte carrier row first, then a plain script.
     let host = VerterHost::new_standalone(HostConfig::default());
-    let err = upsert_svelte(&host, FileLanguage::svelte())
-        .expect_err("the carrier-less upsert fails typed");
-    assert_typed_unsupported(&err);
+    upsert_svelte(&host, FileLanguage::svelte()).expect("the Svelte carrier upsert parses");
     let update = host
         .upsert(UpsertRequest {
             canonical_id: Some("/src/Box.svelte".to_string()),

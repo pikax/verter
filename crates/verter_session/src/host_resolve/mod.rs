@@ -67,8 +67,9 @@ pub(crate) use test_guards::{
     RouteFrontierGuard,
 };
 pub(crate) use vue_script_extract::{
-    apply_sfc_script_setup_type_params, extract_vue_script_content, populate_sfc_blocks_sidecar,
-    sfc_script_setup_type_params, template_converter_inputs,
+    apply_sfc_script_setup_type_params, build_position_preserving_script_source,
+    extract_vue_script_content, populate_sfc_blocks_sidecar, sfc_script_setup_type_params,
+    template_converter_inputs,
 };
 
 // Test-only knob: arm the compile-tier producer's fact-injection slot.

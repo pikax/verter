@@ -59,7 +59,6 @@ const CARRIER_LITERAL_ALLOWLIST: &[&str] = &[
     "crates/verter_session/src/host_manage/analysis_io.rs",
     "crates/verter_session/src/host_manage/prepared_decl.rs",
     "crates/verter_session/src/host_resolve/frontier_engine.rs",
-    "crates/verter_session/src/host_resolve/route_owned_shallow.rs",
     "crates/verter_session/src/host_resolve/virtual_file_pipeline.rs",
     "crates/verter_session/src/resolver_core/component_meta/direct_macro.rs",
     "crates/verter_session/src/resolver_core/fallthrough.rs",

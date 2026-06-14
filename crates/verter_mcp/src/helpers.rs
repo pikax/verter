@@ -98,24 +98,23 @@ mod tests {
         VerterHost::new(HostConfig::default(), workspace)
     }
 
-    /// `ensure_loaded` must propagate the typed unsupported-language
-    /// failure instead of reporting a carrier-less file as loaded.
-    /// DISCRIMINATING: with the swallowed upsert result, this returned
-    /// `Ok(())` while no source state existed, and downstream tools
-    /// proceeded against a file the host never loaded.
+    /// `ensure_loaded` loads a `.svelte` carrier through the registered Svelte
+    /// carrier (B8a): the path classifies to the carrier row and the load
+    /// produces source state. The B2-era carrier-less rejection on `.svelte`
+    /// is dead now the carrier registers; the typed unsupported-language
+    /// propagation stays exercised at the session layer (the Vue
+    /// framework-template / same-adapter non-carrier rows).
     #[test]
-    fn ensure_loaded_propagates_unsupported_language() {
-        let host = host_with_file("/ws/src/Box.svelte", "<script>let x = 1;</script>");
-        let err = ensure_loaded(&host, "/ws/src/Box.svelte")
-            .expect_err("a readable carrier-less file must surface the typed load failure");
-        assert!(
-            err.message.contains("Box.svelte"),
-            "the error names the file: {}",
-            err.message
+    fn ensure_loaded_loads_svelte_through_the_registered_carrier() {
+        let host = host_with_file(
+            "/ws/src/Box.svelte",
+            "<script lang=\"ts\">let { x }: { x: number } = $props();</script>",
         );
+        ensure_loaded(&host, "/ws/src/Box.svelte")
+            .expect("the registered Svelte carrier loads the .svelte file");
         assert!(
-            host.get_source("/ws/src/Box.svelte").is_none(),
-            "no source state may exist for the failed load"
+            host.get_source("/ws/src/Box.svelte").is_some(),
+            "source state exists after the Svelte carrier load"
         );
     }
 
