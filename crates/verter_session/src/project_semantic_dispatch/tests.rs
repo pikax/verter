@@ -18178,3 +18178,590 @@ fn reexported_class_static_surface_revalidates_on_origin_edit() {
         "an origin-file edit must miss the warm composed surface and re-lower"
     );
 }
+
+/// Collect the string-literal members of a keyspace node, EXACTLY: returns
+/// `Some(names)` ONLY when the node is a PURE keyspace — a `Union` whose
+/// every member is a string `Literal`, or a lone string `Literal`. Any
+/// extra / rogue arm (a widened `string` `Primitive`, a non-string literal,
+/// a deferred carrier) makes it `None`, so a caller asserting
+/// `Some(expected)` fails instead of silently dropping the rogue arm a
+/// lenient `filter_map` would. This is what discriminates an EXACT keyspace
+/// (`"A" | "B"`) from a fail-closed widening (`"A" | "B" | string`).
+fn exact_keyspace_string_literals(
+    graph: &Arc<crate::semantic_query_memo::SemanticGraphStore>,
+    id: SemanticNodeId,
+) -> Option<Vec<String>> {
+    match graph.node_data(id).as_deref() {
+        Some(SemanticNodeData::Union(members)) => members
+            .iter()
+            .map(|member| match graph.node_data(*member).as_deref() {
+                Some(SemanticNodeData::Literal(LiteralValue::String(text))) => {
+                    Some(text.to_string())
+                }
+                _ => None,
+            })
+            .collect::<Option<Vec<String>>>(),
+        Some(SemanticNodeData::Literal(LiteralValue::String(text))) => Some(vec![text.to_string()]),
+        _ => None,
+    }
+}
+
+/// F8 (direct): `keyof` over a bare [`SemanticNodeData::MergedDecl`] carrier
+/// routes through the single peer-merge reducer
+/// ([`Self::reduce_merged_decl`]) and enumerates the merged keyspace. Before
+/// the `MergedDecl` arm existed, `build_key_of` fell to its `_ => Opaque(Miss)`
+/// fallback for a bare `MergedDecl` operand — the keyspace bug that, nested
+/// under a string intrinsic, widened `Uppercase<keyof I>` to the broad
+/// `string` (see the end-to-end guard below).
+#[test]
+fn keyof_over_merged_decl_enumerates_peer_merged_keyspace() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let num = primitive(&graph, PrimitiveKind::Number);
+    let str_ = primitive(&graph, PrimitiveKind::String);
+    // interface I { a: number } + interface I { b: string }
+    let c1 = simple_object(&graph, &[("a", num)]);
+    let c2 = simple_object(&graph, &[("b", str_)]);
+    let contributors: Arc<[SemanticNodeId]> = Arc::from(vec![c1, c2].into_boxed_slice());
+    let merged = graph.intern_node(SemanticNodeData::MergedDecl { contributors });
+
+    let keyof = dispatch.execute_type_node(SemanticQueryKey::KeyOf {
+        base: merged,
+        context: ProjectionReductionContext::published(ProjectionMode::Expanded),
+    });
+    let id = match keyof {
+        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+        other => panic!("expected Value, got {other:?}"),
+    };
+    let data = graph.node_data(id).unwrap();
+    // Negative: must NOT fall to the missing-arm `Opaque(Miss)` fallback.
+    assert!(
+        !matches!(&*data, SemanticNodeData::Opaque(_)),
+        "keyof(MergedDecl) must not fall to Opaque(Miss); got {data:?}"
+    );
+    // Positive (EXACT): the peer-merged keyspace is EXACTLY the union
+    // {"a", "b"} — a pure union of string literals, no widened `string`
+    // arm and no extra members (the strict helper returns `None` on any
+    // rogue arm, so this discriminates an exact keyspace from a fail-closed
+    // widening).
+    let mut keys = exact_keyspace_string_literals(&graph, id).unwrap_or_else(|| {
+        panic!("keyof(MergedDecl) keyspace must be a PURE union of string literals, got {data:?}")
+    });
+    keys.sort();
+    assert_eq!(
+        keys,
+        vec!["a".to_string(), "b".to_string()],
+        "keyof(MergedDecl) must enumerate EXACTLY the peer-merged keyspace, got {data:?}"
+    );
+}
+
+/// F8 (end-to-end): a `keyof` of a same-file merged interface, NESTED under a
+/// string intrinsic (`Uppercase<keyof I>`), must resolve to the transformed
+/// keyspace `"A" | "B"` — not widen to the broad `string`. The nesting is
+/// load-bearing: a top-level `type K = keyof I` takes the typeinfo
+/// materializer's empty-path `KeyOf` bridge (which surfaces the merged base
+/// through `Object` first), so it does NOT exercise the bare-`MergedDecl`
+/// arm; only a nested publication reducer (here, `Uppercase`'s argument
+/// evaluation) re-dispatches `KeyOf { base: MergedDecl }` directly.
+#[test]
+fn nested_uppercase_keyof_merged_interface_resolves_to_transformed_keyspace() {
+    let host = host();
+    upsert_ts(
+        &host,
+        "/w/f8.ts",
+        "interface I { a: number }\ninterface I { b: string }\nexport type K = Uppercase<keyof I>;",
+    );
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let k = host
+        .resolve_named_symbol("/w/f8.ts", "K", &[], Some(ProjectionMode::Expanded))
+        .expect("K resolves");
+    let data = graph.node_data(k).unwrap();
+    // Negative: must NOT widen to the broad `string` primitive (the fail-closed
+    // result of the string intrinsic over an `Opaque(Miss)` keyspace).
+    assert!(
+        !matches!(&*data, SemanticNodeData::Primitive(PrimitiveKind::String)),
+        "Uppercase<keyof I> must not widen to `string`; got {data:?}"
+    );
+    // Positive (EXACT): the transformed keyspace is EXACTLY the union
+    // {"A", "B"} — no widened `string` arm hiding behind the lenient
+    // filter (the strict helper returns `None` if any non-string-literal
+    // arm is present).
+    let mut keys = exact_keyspace_string_literals(&graph, k).unwrap_or_else(|| {
+        panic!("Uppercase<keyof I> must be a PURE union of string literals, got {data:?}")
+    });
+    keys.sort();
+    assert_eq!(
+        keys,
+        vec!["A".to_string(), "B".to_string()],
+        "Uppercase<keyof merged interface> must resolve to EXACTLY \"A\" | \"B\", got {data:?}"
+    );
+}
+
+/// F8 (peer-merge discrimination): `keyof` over a merged declaration whose
+/// contributors CONFLICT on a shared key AND carry a same-name METHOD must
+/// (a) union+dedup the keyspace and (b) route through the peer-merge
+/// reducer (`reduce_merged_decl`), NOT an ad-hoc bare `Intersection`.
+///
+/// This is the "not just distinct simple keys" discriminator: a naive
+/// reducer that concatenated contributor member names would surface
+/// `shared` / `f` twice; the peer-merge reducer unions them to a single
+/// literal each. The method member exercises the declaration-merge
+/// reducer's overload-accumulation branch (`merge_declaration_surfaces`,
+/// `is_method && values.len() > 1` → an ordered `Intersection` overload
+/// group) that distinct-key contributors never reach — the structural
+/// signature of routing through `reduce_merged_decl` rather than treating
+/// the carrier as a bare intersection.
+#[test]
+fn keyof_over_merged_decl_with_conflicting_and_overload_keys_unions_keyspace() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let num = primitive(&graph, PrimitiveKind::Number);
+    let str_ = primitive(&graph, PrimitiveKind::String);
+    let bool_ = primitive(&graph, PrimitiveKind::Boolean);
+    let bigint_ = primitive(&graph, PrimitiveKind::BigInt);
+
+    // Contributor surface builder with a method member `f` plus a property
+    // set. `f` is `is_method: true` so the peer-merge reducer accumulates
+    // its per-contributor value into an ordered overload group.
+    let contributor = |props: &[(&str, SemanticNodeId)], f_sig: SemanticNodeId| {
+        let mut members: Vec<SurfaceMember> = props
+            .iter()
+            .map(|(n, v)| SurfaceMember {
+                visibility: verter_type_expr::MemberVisibility::Public,
+                name: Arc::from(*n),
+                value: *v,
+                optional: false,
+                readonly: false,
+                is_method: false,
+                declared_in_macro_type_arg: false,
+                merge_role: crate::semantic_query::MemberMergeRole::OwnBody,
+                spans: Default::default(),
+                declaration_origin: None,
+            })
+            .collect();
+        members.push(SurfaceMember {
+            visibility: verter_type_expr::MemberVisibility::Public,
+            name: Arc::from("f"),
+            value: f_sig,
+            optional: false,
+            readonly: false,
+            is_method: true,
+            declared_in_macro_type_arg: false,
+            merge_role: crate::semantic_query::MemberMergeRole::OwnBody,
+            spans: Default::default(),
+            declaration_origin: None,
+        });
+        graph.intern_node(SemanticNodeData::Object(SurfaceView {
+            members: Arc::from(members.into_boxed_slice()),
+            call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
+            keyspace: None,
+            has_index_signature: false,
+        }))
+    };
+    // interface I { shared: number; only1: boolean; f(): sig_a }
+    // interface I { shared: string; only2: bigint;  f(): sig_b }
+    let c1 = contributor(&[("shared", num), ("only1", bool_)], num);
+    let c2 = contributor(&[("shared", str_), ("only2", bigint_)], str_);
+    let contributors: Arc<[SemanticNodeId]> = Arc::from(vec![c1, c2].into_boxed_slice());
+    let merged = graph.intern_node(SemanticNodeData::MergedDecl {
+        contributors: Arc::clone(&contributors),
+    });
+
+    // (a) keyof EXACTLY unions+dedups the keyspace: `shared` and `f` appear
+    // ONCE each (deduped), no widened `string` arm.
+    let keyof = dispatch.execute_type_node(SemanticQueryKey::KeyOf {
+        base: merged,
+        context: ProjectionReductionContext::published(ProjectionMode::Expanded),
+    });
+    let keyof_id = match keyof {
+        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+        other => panic!("expected Value, got {other:?}"),
+    };
+    let mut keys = exact_keyspace_string_literals(&graph, keyof_id).unwrap_or_else(|| {
+        panic!(
+            "keyof over a conflicting/overload merged decl must be a PURE union of string \
+             literals, got {:?}",
+            graph.node_data(keyof_id).as_deref()
+        )
+    });
+    keys.sort();
+    assert_eq!(
+        keys,
+        vec![
+            "f".to_string(),
+            "only1".to_string(),
+            "only2".to_string(),
+            "shared".to_string()
+        ],
+        "keyof must union+dedup the merged keyspace (shared & f once each), got {:?}",
+        graph.node_data(keyof_id).as_deref()
+    );
+
+    // (b) The reducer keyof routes through produces a peer-merged `Object`
+    // (no-heritage contributors collapse to a single Object — NOT a bare
+    // `Intersection`), and the method `f` accumulates BOTH signatures into
+    // an ordered overload group. A bare-intersection representation of the
+    // merged decl would not be an `Object` here.
+    let surface = dispatch.reduce_merged_decl(&contributors);
+    let surface_data = graph.node_data(surface).expect("merged surface");
+    let view = match &*surface_data {
+        SemanticNodeData::Object(view) => view,
+        other => panic!(
+            "reduce_merged_decl over no-heritage contributors must yield a peer-merged Object, \
+             not {other:?}"
+        ),
+    };
+    let f_member = view
+        .members
+        .iter()
+        .find(|m| m.name.as_ref() == "f")
+        .expect("merged surface must carry the `f` method member");
+    assert!(f_member.is_method, "the merged `f` member stays a method");
+    match graph.node_data(f_member.value).as_deref() {
+        Some(SemanticNodeData::Intersection(group)) => {
+            assert_eq!(
+                group.as_ref(),
+                [num, str_].as_slice(),
+                "the `f` overload group accumulates both contributor signatures in source order"
+            );
+        }
+        other => panic!(
+            "the merged `f` method must carry an accumulated overload group (Intersection of \
+             both signatures), got {other:?}"
+        ),
+    }
+    // `shared` survives as a single merged member (deduped), never duplicated.
+    assert_eq!(
+        view.members
+            .iter()
+            .filter(|m| m.name.as_ref() == "shared")
+            .count(),
+        1,
+        "the conflicting `shared` key merges to a single member"
+    );
+}
+
+/// F7 (producer side / no-poison): a budget-tainted deferred evaluation —
+/// one whose nested read tripped `BudgetExceeded` and raised the
+/// request-scoped materialization suppress sticky — must NOT publish a warm
+/// entry into the shared `evaluate_deferred_memo`. The publish gate
+/// previously consulted ONLY the depth-guard TLS flag (`evaluator_truncated`),
+/// so a nested `BudgetExceeded` with depth below the ceiling published a
+/// tainted result that a later roomier request warm-served (the
+/// `ComputeAdmission::ReturnOnly` / no-poison hole).
+#[test]
+fn evaluate_deferred_memo_does_not_publish_budget_tainted_result() {
+    use crate::request_context::{
+        current_materialization_cache_suppress, RequestContext, RequestContextGuard,
+    };
+    let host = host();
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+
+    // Nested `keyof keyof string`. Each `KeyOf` re-dispatch counts toward the
+    // projection budget; a tight cap of 1 trips `BudgetExceeded` on the OUTER
+    // (second) read, raising the request suppress sticky. `leaf`/`inner`
+    // complete BEFORE the trip, so they remain legitimately cacheable.
+    let leaf = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let inner = graph.intern_node(SemanticNodeData::KeyOf { base: leaf });
+    let outer = graph.intern_node(SemanticNodeData::KeyOf { base: inner });
+    let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
+
+    let tight = RequestContext::with_kind_timing_and_projection_budget(
+        1,
+        Arc::from("/budget.vue"),
+        verter_audit::RequestKind::ComponentMeta,
+        false,
+        false,
+        None,
+        1,
+    );
+    let suppress_after_tight;
+    {
+        let _g = RequestContextGuard::install(Arc::clone(&tight));
+        let _ = dispatch.evaluate_deferred_semantic_node_with_context_for_tests(outer, context);
+        suppress_after_tight = current_materialization_cache_suppress();
+    }
+    // Fixture validity: the tight run MUST have tripped `BudgetExceeded` (else
+    // the test characterizes nothing).
+    assert!(
+        suppress_after_tight,
+        "FIXTURE INVALID: tight budget=1 did not trip BudgetExceeded over nested keyof"
+    );
+    // No-poison: the budget-tainted `(outer, ctx)` evaluation must NOT have
+    // published a warm entry into the shared memo.
+    assert!(
+        graph.evaluate_deferred_memo_get(outer, context).is_none(),
+        "POISON: budget-tainted evaluate result published (outer, ctx) into evaluate_deferred_memo"
+    );
+    // Precision: the gate is targeted at the tainted entry only — `inner`
+    // completed before the budget trip and stays legitimately warm.
+    assert!(
+        graph.evaluate_deferred_memo_get(inner, context).is_some(),
+        "the clean sub-evaluation (inner) must remain cached; only the tainted entry is withheld"
+    );
+}
+
+/// F7 (consumer side / no-poison): a later roomy-budget request on the SAME
+/// `(node, context)` that a tight-budget request truncated must MISS the
+/// memo and recompute — never warm-hit the budget-tainted entry. This is the
+/// cross-request harm the producer-side gate prevents, asserted from the
+/// consumer side via the memo miss counter (the empirically-reproduced F7
+/// repro, hardened into a permanent guard).
+#[test]
+fn roomy_request_misses_budget_tainted_evaluate_deferred_entry() {
+    use crate::request_context::{
+        current_materialization_cache_suppress, RequestContext, RequestContextGuard,
+    };
+    let host = host();
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+
+    let leaf = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let inner = graph.intern_node(SemanticNodeData::KeyOf { base: leaf });
+    let outer = graph.intern_node(SemanticNodeData::KeyOf { base: inner });
+    let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
+
+    // TIGHT budget=1 trips BudgetExceeded on the outer read.
+    let tight = RequestContext::with_kind_timing_and_projection_budget(
+        1,
+        Arc::from("/budget.vue"),
+        verter_audit::RequestKind::ComponentMeta,
+        false,
+        false,
+        None,
+        1,
+    );
+    let suppress_after_tight;
+    {
+        let _g = RequestContextGuard::install(Arc::clone(&tight));
+        let _ = dispatch.evaluate_deferred_semantic_node_with_context_for_tests(outer, context);
+        suppress_after_tight = current_materialization_cache_suppress();
+    }
+    assert!(
+        suppress_after_tight,
+        "FIXTURE INVALID: tight budget=1 did not trip BudgetExceeded over nested keyof"
+    );
+    let misses_after_tight = graph.stats_snapshot().evaluate_deferred_memo_misses;
+
+    // ROOMY budget=16 on the SAME (outer, context): must recompute (miss), not
+    // warm-hit the tainted entry the tight run would have published.
+    let roomy = RequestContext::with_kind_timing_and_projection_budget(
+        2,
+        Arc::from("/budget.vue"),
+        verter_audit::RequestKind::ComponentMeta,
+        false,
+        false,
+        None,
+        16,
+    );
+    {
+        let _g = RequestContextGuard::install(Arc::clone(&roomy));
+        let _ = dispatch.evaluate_deferred_semantic_node_with_context_for_tests(outer, context);
+    }
+    let misses_after_roomy = graph.stats_snapshot().evaluate_deferred_memo_misses;
+    assert!(
+        misses_after_roomy > misses_after_tight,
+        "POISON: roomy re-run warm-hit the budget-tainted (outer, ctx) entry instead of \
+         recomputing (misses {misses_after_tight} -> {misses_after_roomy})"
+    );
+}
+
+/// F7 (wrong-value demonstration / no-poison): the cross-request harm made
+/// observable as a STALE WRONG VALUE, not just a memo hit/miss count.
+/// `{ a: { k: number } }["a"]["k"]` evaluates as two deferred `IndexedAccess`
+/// hops: the intermediate `["a"]` hop charges projection-budget op 1; the
+/// terminal `["k"]` hop is op 2. Under a tight cap of 1 the terminal hop trips
+/// `BudgetExceeded`, so `outer` truncates to `Opaque(Miss)`; under a roomy cap
+/// the SAME `(outer, context)` completes to the real terminal member type
+/// `number`. Pre-fix the tight run published the truncated `Miss`, so the
+/// roomy re-run warm-SERVED that stale, WRONG value; the publish gate must
+/// withhold the budget-tainted result so the roomy run recomputes `number`.
+#[test]
+fn roomy_request_recomputes_correct_value_after_budget_truncation() {
+    use crate::request_context::{
+        current_materialization_cache_suppress, RequestContext, RequestContextGuard,
+    };
+    let host = host();
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+
+    let num = primitive(&graph, PrimitiveKind::Number);
+    let inner_obj = simple_object(&graph, &[("k", num)]); // { k: number }
+    let o2 = simple_object(&graph, &[("a", inner_obj)]); // { a: { k: number } }
+    let mid = graph.intern_node(SemanticNodeData::IndexedAccess {
+        object: o2,
+        index: crate::semantic_query::IndexKey::String(Arc::from("a")),
+    });
+    let outer = graph.intern_node(SemanticNodeData::IndexedAccess {
+        object: mid,
+        index: crate::semantic_query::IndexKey::String(Arc::from("k")),
+    });
+    let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
+
+    // TIGHT budget=1 → the terminal hop trips BudgetExceeded; `outer` truncates.
+    let tight = RequestContext::with_kind_timing_and_projection_budget(
+        1,
+        Arc::from("/budget.vue"),
+        verter_audit::RequestKind::ComponentMeta,
+        false,
+        false,
+        None,
+        1,
+    );
+    let (v_tight, suppress_after_tight);
+    {
+        let _g = RequestContextGuard::install(Arc::clone(&tight));
+        v_tight = dispatch.evaluate_deferred_semantic_node_with_context_for_tests(outer, context);
+        suppress_after_tight = current_materialization_cache_suppress();
+    }
+    // Fixture validity: the tight run truncated to Opaque(Miss) AND raised the
+    // suppress sticky (else the test characterizes nothing).
+    assert!(
+        suppress_after_tight,
+        "FIXTURE INVALID: tight budget=1 did not trip BudgetExceeded"
+    );
+    assert!(
+        matches!(
+            graph.node_data(v_tight).as_deref(),
+            Some(SemanticNodeData::Opaque(_))
+        ),
+        "FIXTURE INVALID: tight run should truncate the terminal hop to Opaque(Miss), got {:?}",
+        graph.node_data(v_tight).as_deref()
+    );
+
+    // ROOMY budget=64 on the SAME (outer, context): must recompute the real
+    // terminal member type, never warm-serve the tight run's truncated Miss.
+    let roomy = RequestContext::with_kind_timing_and_projection_budget(
+        2,
+        Arc::from("/budget.vue"),
+        verter_audit::RequestKind::ComponentMeta,
+        false,
+        false,
+        None,
+        64,
+    );
+    let v_roomy;
+    {
+        let _g = RequestContextGuard::install(Arc::clone(&roomy));
+        v_roomy = dispatch.evaluate_deferred_semantic_node_with_context_for_tests(outer, context);
+    }
+    // Negative: must NOT warm-serve the budget-tainted Opaque(Miss).
+    assert!(
+        !matches!(
+            graph.node_data(v_roomy).as_deref(),
+            Some(SemanticNodeData::Opaque(_))
+        ),
+        "POISON: roomy re-run warm-served the tight run's budget-truncated Opaque(Miss)"
+    );
+    // Positive: the roomy recompute yields the real member type `number`.
+    assert!(
+        matches!(
+            graph.node_data(v_roomy).as_deref(),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Number))
+        ),
+        "roomy re-run must recompute the real member type `number`, got {:?}",
+        graph.node_data(v_roomy).as_deref()
+    );
+}
+
+/// F7 (no-`RequestContext` no-poison hole): a PARTIAL deferred evaluation
+/// must NOT publish a warm entry into the shared `evaluate_deferred_memo`
+/// EVEN when no `RequestContext` is installed.
+///
+/// The admission authority for this shared memo is the evaluated entry's
+/// OWN completeness (`EvaluateDeferredOutcome.result_is_partial`), NOT the
+/// request-global `current_materialization_cache_suppress()` sticky. That
+/// sticky is `RequestContext`-scoped: with NO request context installed
+/// (the reachable `audit Noop` path, where the audit consumer filter
+/// rejects the request kind so `evaluate_type_expression_with_audit` runs
+/// without a `RequestContextGuard`) it returns `false` — so a request-sticky
+/// gate would PUBLISH a partial result, violating the cache hard rule that
+/// budget-exhausted / partial results never enter warm shared caches.
+///
+/// This fixture reproduces that hole WITHOUT a `RequestContext` using a
+/// `RequestContext`-INDEPENDENT partiality source: a template-literal
+/// whose interpolated unions' cartesian product exceeds the fixed
+/// `TEMPLATE_LITERAL_KEYSPACE_CAP`. That carrier-stops with
+/// `result_is_partial = true` regardless of any request budget. The
+/// entry-scoped gate withholds it; a request-sticky gate would not.
+#[test]
+fn evaluate_deferred_memo_withholds_partial_without_request_context() {
+    use crate::request_context::current_materialization_cache_suppress;
+
+    let host = host();
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+
+    // Two wide string-literal unions whose product exceeds the keyspace cap.
+    let cap = crate::project_semantic_dispatch::build::TEMPLATE_LITERAL_KEYSPACE_CAP;
+    let union_side = 40usize;
+    assert!(
+        union_side * union_side > cap,
+        "fixture invariant: the {union_side}x{union_side} product must exceed the keyspace \
+         cap ({cap}) so the reduce carrier-stops as a budget-tainted partial"
+    );
+    let make_union = |prefix: &str| -> SemanticNodeId {
+        let members: Vec<SemanticNodeId> = (0..union_side)
+            .map(|i| {
+                graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(format!(
+                    "{prefix}{i}"
+                ))))
+            })
+            .collect();
+        graph.intern_node(SemanticNodeData::Union(Arc::from(
+            members.into_boxed_slice(),
+        )))
+    };
+    let a = make_union("a");
+    let b = make_union("b");
+    // `` `cell:${A}-${B}` `` — one quasi prefix per interpolated expression.
+    let quasis: Arc<[Arc<str>]> =
+        Arc::from(vec![Arc::from("cell:"), Arc::from("-"), Arc::from("")].into_boxed_slice());
+    let expressions: Arc<[SemanticNodeId]> = Arc::from(vec![a, b].into_boxed_slice());
+    let template = graph.intern_node(SemanticNodeData::TemplateLiteral {
+        quasis,
+        expressions,
+    });
+    let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
+
+    // NO RequestContext installed — the reachable `audit Noop` state.
+    let result = dispatch.evaluate_deferred_semantic_node_with_context_for_tests(template, context);
+
+    // Fixture invariant 1: with no request context the request sticky is
+    // false — so a request-sticky gate (`!current_materialization_cache_suppress()`)
+    // would PUBLISH. This is the exact condition that makes the hole reachable.
+    assert!(
+        !current_materialization_cache_suppress(),
+        "fixture invariant: no RequestContext ⇒ the request sticky must be false (the \
+         request-sticky authority that would wrongly permit the publish)"
+    );
+    // Fixture invariant 2: the keyspace cap actually tripped — the evaluation
+    // carrier-stopped to the `TemplateLiteral` shell (a partial), it did NOT
+    // fold to a fully-enumerated `Union`.
+    assert!(
+        matches!(
+            graph.node_data(result).as_deref(),
+            Some(SemanticNodeData::TemplateLiteral { .. })
+        ),
+        "FIXTURE INVALID: the over-cap product must carrier-stop to the TemplateLiteral shell, \
+         got {:?}",
+        graph.node_data(result).as_deref()
+    );
+    // No-poison: the entry-scoped gate withholds the partial regardless of the
+    // (absent) request context.
+    assert!(
+        graph
+            .evaluate_deferred_memo_get(template, context)
+            .is_none(),
+        "POISON: a partial deferred evaluation published into evaluate_deferred_memo with NO \
+         RequestContext installed — the publish gate must use the evaluated entry's OWN \
+         completeness, not the request-global suppress sticky"
+    );
+}

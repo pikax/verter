@@ -129,12 +129,60 @@ fn evaluator_truncated() -> bool {
     EVALUATE_DEFERRED_TRUNCATED.with(|flag| flag.get())
 }
 
+/// Entry-scoped outcome of a deferred-shell evaluation: the resolved
+/// `node` PLUS whether the evaluation that produced it was PARTIAL — a
+/// nested read tripped `BudgetExceeded` / recursion / a fatal walker
+/// miss, OR a recursive sub-evaluation was itself partial. The
+/// `result_is_partial` bit is the entry-scoped admission authority for
+/// `evaluate_deferred_memo`: only a complete result is published, so a
+/// budget-tainted result is withheld REGARDLESS of whether a
+/// `RequestContext` is installed (the request-global suppress sticky is
+/// NOT the authority — see [`ProjectSemanticDispatch::evaluate_deferred_outcome`]).
+#[derive(Clone, Copy)]
+struct EvaluateDeferredOutcome {
+    node: SemanticNodeId,
+    result_is_partial: bool,
+}
+
+impl EvaluateDeferredOutcome {
+    /// A complete (warm-admissible) result.
+    fn complete(node: SemanticNodeId) -> Self {
+        Self {
+            node,
+            result_is_partial: false,
+        }
+    }
+
+    /// A partial (never-published) carrier-stop result.
+    fn partial(node: SemanticNodeId) -> Self {
+        Self {
+            node,
+            result_is_partial: true,
+        }
+    }
+}
+
 impl<'a> ProjectSemanticDispatch<'a> {
     pub(super) fn normalized_index_key_node(&self, node: SemanticNodeId) -> IndexKey {
-        let resolved = self.evaluate_deferred_semantic_node(node);
+        self.normalized_index_key_node_outcome(node).0
+    }
+
+    /// Outcome variant of [`Self::normalized_index_key_node`] threading the
+    /// entry-scoped partiality of the index-node evaluation. Resolving the
+    /// index expression is a nested deferred call, so a
+    /// budget-/recursion-truncated index resolution makes the enclosing
+    /// `IndexedAccess` reduction partial — the bool propagates up to the
+    /// caller's [`Self::evaluate_deferred_outcome`] admission gate.
+    fn normalized_index_key_node_outcome(&self, node: SemanticNodeId) -> (IndexKey, bool) {
+        let outcome = self.evaluate_deferred_outcome(
+            node,
+            ProjectionReductionContext::published(ProjectionMode::Expanded),
+        );
+        let partial = outcome.result_is_partial;
+        let resolved = outcome.node;
         match self.graph().node_data(resolved).as_deref() {
             Some(SemanticNodeData::Literal(LiteralValue::String(text))) => {
-                IndexKey::String(Arc::from(text.as_str()))
+                (IndexKey::String(Arc::from(text.as_str())), partial)
             }
             Some(SemanticNodeData::Literal(LiteralValue::Number(number))) => {
                 // Bounded integer-convention fold: `IndexKey::Number`
@@ -144,13 +192,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // `build::integer_convention_index_key`). Everything
                 // else stays `TypeNode` for the walker's G4.5
                 // canonical-needle recovery.
-                match super::build::integer_convention_index_key(*number) {
+                let key = match super::build::integer_convention_index_key(*number) {
                     Some(integer) => IndexKey::Number(integer),
                     None => IndexKey::TypeNode(resolved),
-                }
+                };
+                (key, partial)
             }
-            Some(SemanticNodeData::Alias(target)) => self.normalized_index_key_node(*target),
-            _ => IndexKey::TypeNode(resolved),
+            Some(SemanticNodeData::Alias(target)) => {
+                let (key, inner_partial) = self.normalized_index_key_node_outcome(*target);
+                (key, partial | inner_partial)
+            }
+            _ => (IndexKey::TypeNode(resolved), partial),
         }
     }
 
@@ -180,9 +232,34 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// per-member edges along its evaluation path.
     pub(super) fn evaluate_deferred_semantic_node_with_context(
         &self,
-        mut node: SemanticNodeId,
+        node: SemanticNodeId,
         reduction_context: ProjectionReductionContext,
     ) -> SemanticNodeId {
+        self.evaluate_deferred_outcome(node, reduction_context).node
+    }
+
+    /// Entry-scoped workhorse for the deferred-shell evaluator. Returns the
+    /// resolved node PLUS whether THIS evaluation was partial (see
+    /// [`EvaluateDeferredOutcome`]).
+    ///
+    /// The publish gate is ENTRY-scoped: it admits into the shared
+    /// `evaluate_deferred_memo` ONLY when the evaluated entry is itself
+    /// complete (`!result_is_partial && !evaluator_truncated()`). The
+    /// `result_is_partial` accumulator OR-folds every nested
+    /// `execute_read`'s `result_is_partial` and every recursive
+    /// sub-evaluation's partial flag, so a budget-/recursion-/fatal-tainted
+    /// result is withheld REGARDLESS of whether a `RequestContext` is
+    /// installed — closing the no-`RequestContext` (`audit Noop`) hole where
+    /// the request-global suppress sticky reads `false`. The request sticky
+    /// (`current_materialization_cache_suppress`) is NOT the admission
+    /// authority here; `observe_component_meta_read_suppress` is retained
+    /// PURELY to propagate the same partiality to the request /
+    /// cold-compute scope (the component-meta / materialize warm gates).
+    fn evaluate_deferred_outcome(
+        &self,
+        mut node: SemanticNodeId,
+        reduction_context: ProjectionReductionContext,
+    ) -> EvaluateDeferredOutcome {
         // Hash-cons memo. The store-owned `evaluate_deferred_memo`
         // collapses repeated `(node, context)` evaluations across
         // call sites. The evaluator's fix-point walk is a pure
@@ -199,7 +276,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .graph()
             .evaluate_deferred_memo_get(entry_node, reduction_context)
         {
-            return cached;
+            // A memo hit is COMPLETE by construction: only complete entries
+            // are ever admitted by the publish gate below, so a hit carries
+            // `result_is_partial = false`.
+            return EvaluateDeferredOutcome::complete(cached);
         }
         // Cooperative fail-fast rail: pathological mapped-type per-K
         // loops (e.g. `ChatMessagesSlots<T>` whose per-K body produces
@@ -213,10 +293,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // policy applied at this layer).
         let _depth_guard = DepthGuard::enter();
         if _depth_guard.over_ceiling {
-            return entry_node;
+            // Depth-truncated carrier-stop is a partial result.
+            return EvaluateDeferredOutcome::partial(entry_node);
         }
         let mut visited = rustc_hash::FxHashSet::default();
         visited.insert(node);
+        // Entry-scoped partiality accumulator: OR-folds every nested read's
+        // `result_is_partial` and every recursive sub-evaluation's partial
+        // flag. This is the admission authority for the shared memo below.
+        let mut result_is_partial = false;
         let result = loop {
             let Some(data) = self.graph().node_data(node) else {
                 break self.opaque(QueryError::Miss);
@@ -224,12 +309,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
             let next = match data.as_ref() {
                 SemanticNodeData::Alias(target) => *target,
                 SemanticNodeData::KeyOf { base } => {
-                    let base =
-                        self.evaluate_deferred_semantic_node_with_context(*base, reduction_context);
+                    let base_outcome = self.evaluate_deferred_outcome(*base, reduction_context);
+                    result_is_partial |= base_outcome.result_is_partial;
                     let read = self.execute_read(SemanticQueryKey::KeyOf {
-                        base,
+                        base: base_outcome.node,
                         context: reduction_context,
                     });
+                    result_is_partial |= read.result_is_partial;
                     // Two-signal fold: the deferred-shell evaluator returns a
                     // bare node (hash-cons memoised), so it folds a genuinely
                     // incomplete nested read onto the request's sticky partial
@@ -252,20 +338,26 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     // caller demanded `Expanded`), while the terminal
                     // single-hop projection runs in the CALLER's mode so
                     // a demanded `Expanded` terminal resolves its carrier.
-                    let object = self.evaluate_deferred_semantic_node_with_context(
+                    let object_outcome = self.evaluate_deferred_outcome(
                         *object,
                         reduction_context.with_mode(ProjectionMode::Navigate),
                     );
+                    result_is_partial |= object_outcome.result_is_partial;
                     let index = match index {
                         IndexKey::String(text) => IndexKey::String(Arc::clone(text)),
                         IndexKey::Number(number) => IndexKey::Number(*number),
-                        IndexKey::TypeNode(node) => self.normalized_index_key_node(*node),
+                        IndexKey::TypeNode(node) => {
+                            let (key, partial) = self.normalized_index_key_node_outcome(*node);
+                            result_is_partial |= partial;
+                            key
+                        }
                     };
                     let read = self.execute_read(SemanticQueryKey::IndexedAccess {
-                        base: object,
+                        base: object_outcome.node,
                         index,
                         mode: reduction_context.mode,
                     });
+                    result_is_partial |= read.result_is_partial;
                     crate::request_context::observe_component_meta_read_suppress(&read);
                     match read.value {
                         QueryResult::Value(id) => id,
@@ -278,6 +370,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         mapper: mapper.clone(),
                         context: reduction_context,
                     });
+                    result_is_partial |= read.result_is_partial;
                     crate::request_context::observe_component_meta_read_suppress(&read);
                     match read.value {
                         QueryResult::Value(id) => id,
@@ -290,6 +383,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     // carrier past the caller's mode.
                     let read = self
                         .execute_read(self.typeof_key_for(value_root.clone(), reduction_context));
+                    result_is_partial |= read.result_is_partial;
                     crate::request_context::observe_component_meta_read_suppress(&read);
                     let root = match read.value {
                         QueryResult::Value(id) => id,
@@ -311,6 +405,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 ProjectionMode::Navigate,
                             ),
                         });
+                        result_is_partial |= read.result_is_partial;
                         crate::request_context::observe_component_meta_read_suppress(&read);
                         match read.value {
                             QueryResult::Value(id) => id,
@@ -332,6 +427,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         false_branch: *false_branch_ref,
                         distributive: *distributive,
                     });
+                    result_is_partial |= read.result_is_partial;
                     crate::request_context::observe_component_meta_read_suppress(&read);
                     match read.value {
                         QueryResult::Value(id) => id,
@@ -351,7 +447,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     // template to one `Literal`, returns `never` for an empty
                     // product, and carrier-stops to this same hash-consed shell
                     // (so `next == node` and the loop terminates) when any
-                    // expression is non-finite. Dispatching here is what makes
+                    // expression is non-finite. A finite-but-over-cap product
+                    // carrier-stops with `result_is_partial`, which the
+                    // accumulator below folds so the partial is never
+                    // warm-admitted. Dispatching here is what makes
                     // `TemplateLiteralReduce` appear in the request trace.
                     let pattern = Arc::clone(quasis);
                     let args = Arc::clone(expressions);
@@ -361,6 +460,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         args,
                         context: self.template_literal_reduce_context(),
                     });
+                    result_is_partial |= read.result_is_partial;
                     crate::request_context::observe_component_meta_read_suppress(&read);
                     match read.value {
                         QueryResult::Value(id) => id,
@@ -387,6 +487,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
                         context: self.instantiate_context_for(&owner_canonical, reduction_context),
                     });
+                    result_is_partial |= read.result_is_partial;
                     crate::request_context::observe_component_meta_read_suppress(&read);
                     match read.value {
                         QueryResult::Value(id) => id,
@@ -420,30 +521,41 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             node = next;
         };
-        // Budget-tainted-publish gate. If the depth guard fired
-        // anywhere on the current call chain (even in a transitive
-        // sub-evaluation), every publish along the unwinding path
-        // is suppressed. A parent frame that consumed a truncated
-        // child's input-node carrier may have dispatched downstream
-        // operators that returned `Opaque(Miss)` or a partial
-        // reduction; admitting that derivative into the warm memo
-        // would let a stale, budget-exhausted answer survive across
-        // queries. The carrier-stop contract from the over-ceiling
-        // arm extends here: on truncation we also return the
-        // ENTRY node (a structural-transit carrier-stop) rather
-        // than the partially-reduced `result`, so downstream
-        // re-dispatch starts from the same surface the cache would
-        // observe on a future cold call (Opaque-fallback contract
-        // applied consistently across the call chain).
+        // Depth-truncation carrier-stop. If the depth guard fired anywhere on
+        // the current call chain (even in a transitive sub-evaluation), every
+        // result along the unwinding path is budget-tainted. A parent frame
+        // that consumed a truncated child's input-node carrier may have
+        // dispatched downstream operators that returned `Opaque(Miss)` or a
+        // partial reduction; admitting that derivative into the warm memo
+        // would let a stale, budget-exhausted answer survive across queries.
+        // Return the ENTRY node (a structural-transit carrier-stop) rather
+        // than the partially-reduced `result`, so downstream re-dispatch
+        // starts from the same surface the cache would observe on a future
+        // cold call (Opaque-fallback contract applied consistently across the
+        // call chain), and propagate partial so the caller withholds too.
         if evaluator_truncated() {
-            return entry_node;
+            return EvaluateDeferredOutcome::partial(entry_node);
         }
-        // Publish the entry-node → result mapping. Concurrent
-        // publishers for the same `(entry_node, context)` resolve to
-        // structurally identical results (the evaluator is pure on
-        // those two inputs), so first-writer-wins is correct.
-        self.graph()
-            .evaluate_deferred_memo_publish(entry_node, reduction_context, result);
-        result
+        // Entry-scoped no-poison admission gate (`ComputeAdmission::ReturnOnly`).
+        // Publish ONLY when THIS evaluated entry is itself complete — the
+        // `result_is_partial` accumulator OR-folded every nested read's
+        // `result_is_partial` and every recursive sub-evaluation's partial
+        // flag, so a budget-/recursion-/fatal-tainted result is withheld here
+        // independent of any `RequestContext`. The request sticky propagation
+        // (`observe_component_meta_read_suppress` at the arms above) feeds the
+        // request / cold-compute warm gates, but the admission authority for
+        // THIS shared memo is the evaluated entry's OWN completeness.
+        if !result_is_partial {
+            // Publish the entry-node → result mapping. Concurrent
+            // publishers for the same `(entry_node, context)` resolve to
+            // structurally identical results (the evaluator is pure on
+            // those two inputs), so first-writer-wins is correct.
+            self.graph()
+                .evaluate_deferred_memo_publish(entry_node, reduction_context, result);
+        }
+        EvaluateDeferredOutcome {
+            node: result,
+            result_is_partial,
+        }
     }
 }

@@ -944,6 +944,111 @@ fn key_of_same_canonical_edit_rejects_warm_entry() {
     );
 }
 
+/// `KeyOf` over a CROSS-FILE merged declaration — a content edit to an
+/// AUGMENTER file (not the base file) rejects the warm `KeyOf` memo entry.
+///
+/// Discriminating property: the `build_key_of` `MergedDecl` arm must root
+/// self-roots on the merged carrier PLUS every contributor. That carrier
+/// is scoped to the base/importing file, but an AUGMENTED `MergedDecl`
+/// (cross-file `declare module` / `declare global`) carries contributor
+/// nodes lowered in AUGMENTER file scopes. Rooting on the carrier ALONE
+/// records only the base file's `FileWholeHash`, so an augmenter content
+/// edit (which leaves the base file untouched) leaves the warm `KeyOf`
+/// entry VALID and warm-serves a stale keyspace. Rooting on the carrier
+/// PLUS every contributor node (deduped) records the augmenter's
+/// `FileWholeHash`, so the edit rejects the entry.
+///
+/// The merged carrier here is assembled from two REAL file-derived
+/// `Object` contributors (one per upserted file) and interned in the base
+/// file's scope — exactly the scope structure the production augmentation
+/// stitch (`build.rs`) produces. Reverting the fix (rooting on `[base]`
+/// only) leaves the augmenter self-root unrecorded and this test FAILS:
+/// the augmenter edit no longer rejects the entry.
+#[test]
+fn key_of_over_cross_file_merged_decl_rejects_warm_entry_on_augmenter_edit() {
+    let host = host();
+    let base_c = "/sg_self_root/merged_base.ts";
+    let aug_c = "/sg_self_root/merged_augmenter.ts";
+    upsert(&host, base_c, "export type Foo = { a: number };\n");
+    upsert(&host, aug_c, "export type Foo = { b: string };\n");
+
+    let graph = host.project_type_store().semantic_graph();
+    // Two REAL file-derived `Object` contributors, each scoped to its own
+    // originating file (the augmenter contributor carries the augmenter
+    // file's `FileWholeHash` in its origin scope).
+    let base_node = file_derived_object_node(&host, base_c);
+    let aug_node = file_derived_object_node(&host, aug_c);
+    // Sanity: the contributors genuinely originate in DIFFERENT files, so a
+    // base-only self-root truly omits the augmenter version.
+    let base_scope = graph
+        .node_scope(base_node)
+        .expect("base contributor is file-scoped");
+    let aug_scope = graph
+        .node_scope(aug_node)
+        .expect("augmenter contributor is file-scoped");
+    assert_ne!(
+        base_scope, aug_scope,
+        "fixture invariant: the two contributors must originate in different files"
+    );
+
+    // Assemble the merged carrier in the BASE file's scope — the exact
+    // shape the production stitch interns (`intern_node_with_scope(MergedDecl,
+    // base_scope)`), with contributor nodes spanning two files.
+    let contributors: Arc<[SemanticNodeId]> =
+        Arc::from(vec![base_node, aug_node].into_boxed_slice());
+    let merged =
+        graph.intern_node_with_scope(SemanticNodeData::MergedDecl { contributors }, base_scope);
+
+    let dispatch = host.semantic_dispatch();
+    let key = SemanticQueryKey::KeyOf {
+        base: merged,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            crate::semantic_query::ProjectionMode::Expanded,
+        ),
+    };
+    let primed = dispatch.execute_type_node(key.clone());
+    assert!(
+        matches!(primed, crate::semantic_query::QueryResult::Value(_)),
+        "KeyOf over a cross-file merged declaration must resolve before the edit"
+    );
+    let ctx: &dyn ResolverContext = &host;
+    // Fixture invariant: the warm `KeyOf` entry exists AND validates BEFORE
+    // any edit — the discrimination is the validator rejecting it after the
+    // augmenter edit, not its absence.
+    assert!(
+        graph.get_unvalidated(&key).is_some(),
+        "fixture invariant: the warm KeyOf memo entry must exist after priming"
+    );
+    assert!(
+        graph.get_validated(&key, ctx).is_some(),
+        "fixture invariant: the warm KeyOf entry must validate before any edit"
+    );
+
+    // Edit ONLY the augmenter file. The base file is untouched, so a
+    // carrier-only (base) self-root would still validate. The
+    // upsert performs no own-canonical drain on the KeyOf slot, so the
+    // entry physically survives and the warm read exercises self-root
+    // validation directly.
+    upsert(
+        &host,
+        aug_c,
+        "export type Foo = { b: string; c: boolean };\n",
+    );
+
+    assert!(
+        graph.get_unvalidated(&key).is_some(),
+        "the physical KeyOf memo entry must still be present after the augmenter edit \
+         — the discrimination is the validator rejecting it, not its absence"
+    );
+    assert!(
+        graph.get_validated(&key, ctx).is_none(),
+        "KeyOf over a cross-file merged declaration MUST reject the warm entry on an \
+         AUGMENTER edit — the entry must root on the carrier PLUS every contributor node, \
+         so the augmenter contributor's FileWholeHash is recorded; rooting on the base \
+         carrier alone warm-serves a stale keyspace",
+    );
+}
+
 /// `ProjectPath` — a same-canonical content edit to the base node's
 /// originating file rejects the warm query-node memo entry.
 ///

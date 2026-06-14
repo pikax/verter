@@ -5262,6 +5262,35 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .or_else(|| self.key_names_from_base_node(base))
                 .map(|names| self.intern_keyspace_names(base, names, &fence))
                 .unwrap_or_else(|| self.graph().intern_node(SemanticNodeData::KeyOf { base })),
+            // Declaration Merging (CRITICAL): `keyof <merged decl>` routes
+            // through the single peer-merge reducer to the merged
+            // `Object`/`Intersection` surface, then re-runs THIS keyspace
+            // reducer on it — `keyof` is a `MergedDecl` consumer of
+            // `reduce_merged_decl` (a bare `Intersection` is forbidden as the
+            // merged-decl representation, so the Intersection arm must not own
+            // the merge). The reduced surface is freshly interned with no file
+            // scope of its own, and the `MergedDecl` carrier is scoped only to
+            // its base/importing file — but an AUGMENTED `MergedDecl`
+            // (cross-file `declare module` / `declare global`) carries
+            // contributor nodes lowered in AUGMENTER file scopes (Declaration
+            // Augmentation CRITICAL). Root the entry on `base` PLUS every
+            // contributor node, deduped — the same self-root collection the
+            // peer-merge surface roots on. A SAME-FILE merge's contributors are
+            // all base-scoped, so this folds back to `[base]`; for a cross-file
+            // augmented merge it additionally records each augmenter's
+            // `FileWholeHash`, so an edit to ANY contributor file (base OR
+            // augmenter) misses the warm keyof entry. Nested-read partiality
+            // (an incomplete heritage projection) folds through the
+            // re-dispatched output verbatim.
+            Some(SemanticNodeData::MergedDecl { contributors }) => {
+                let merged = self.reduce_merged_decl(contributors);
+                let observed_self_roots = self.observed_self_roots_from_nodes(
+                    std::iter::once(base).chain(contributors.iter().copied()),
+                );
+                return self
+                    .build_key_of(merged, context)
+                    .with_observed_self_roots(observed_self_roots);
+            }
             Some(
                 SemanticNodeData::TypeParam { .. }
                 | SemanticNodeData::IndexedAccess { .. }
