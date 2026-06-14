@@ -42,8 +42,10 @@ impl SchedulerDag {
         let key = (Arc::clone(owner), generation);
         if set.is_empty() {
             self.artifact_blocker_deps.remove(&key);
+            self.canonical_index.remove_blocker_owner(owner, generation);
         } else {
             self.artifact_blocker_deps.insert(key, set);
+            self.canonical_index.add_blocker_owner(owner, generation);
         }
     }
 
@@ -61,7 +63,11 @@ impl SchedulerDag {
         generation: u64,
     ) -> PendingBlockerSet {
         let key = (Arc::clone(owner), generation);
-        self.artifact_blocker_deps.remove(&key).unwrap_or_default()
+        let removed = self.artifact_blocker_deps.remove(&key);
+        if removed.is_some() {
+            self.canonical_index.remove_blocker_owner(owner, generation);
+        }
+        removed.unwrap_or_default()
     }
 
     /// Peek at the blocker set for `(owner, generation)` without
@@ -89,7 +95,9 @@ impl SchedulerDag {
     /// believes there are no late blockers).
     pub(crate) fn clear_artifact_blockers(&mut self, owner: &Arc<str>, generation: u64) {
         let key = (Arc::clone(owner), generation);
-        self.artifact_blocker_deps.remove(&key);
+        if self.artifact_blocker_deps.remove(&key).is_some() {
+            self.canonical_index.remove_blocker_owner(owner, generation);
+        }
     }
 
     /// Scrub every recorded blocker entry for any `DepKey` (live or
@@ -98,13 +106,26 @@ impl SchedulerDag {
     /// an Artifact at another file forever. Empty entries (no live
     /// deps AND no failed records) are dropped.
     pub(crate) fn scrub_artifact_blockers_referencing(&mut self, canonical: &str) {
-        self.artifact_blocker_deps.retain(|_owner, set| {
+        // An emptied entry may belong to ANY owner (the scrub keys off
+        // the entry's deps, not its owner), so collect the owner keys
+        // that drop out and prune the reverse index by their owner.
+        let mut removed: Vec<(Arc<str>, u64)> = Vec::new();
+        self.artifact_blocker_deps.retain(|key, set| {
             set.deps
                 .retain(|dep| !dep_references_canonical(dep, canonical));
             set.failed
                 .retain(|record| !dep_references_canonical(&record.dep_key, canonical));
-            !set.is_empty()
+            if set.is_empty() {
+                removed.push((Arc::clone(&key.0), key.1));
+                false
+            } else {
+                true
+            }
         });
+        for (owner, generation) in removed {
+            self.canonical_index
+                .remove_blocker_owner(&owner, generation);
+        }
     }
 
     /// Drop every recorded blocker entry whose OWNER is `canonical`.
@@ -116,6 +137,7 @@ impl SchedulerDag {
     pub(crate) fn artifact_blocker_deps_remove_owner(&mut self, canonical: &str) {
         self.artifact_blocker_deps
             .retain(|(owner, _gen), _| owner.as_ref() != canonical);
+        self.canonical_index.remove_blocker_owner_all(canonical);
     }
 }
 

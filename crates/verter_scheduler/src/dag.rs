@@ -34,7 +34,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::cache_id::SchedulerCacheId;
 use crate::job::{CompletionSender, CompletionState, RequestResult, SchedulerError};
@@ -665,6 +665,13 @@ pub struct SchedulerDag {
     /// `pub(in crate::dag)` so the `terminal_failures` child module
     /// owns the typed API around this map.
     pub(in crate::dag) terminal_dep_failures: FxHashMap<DepKey, FailedDepRecord>,
+    /// Per-canonical reverse indices over the four state surfaces a
+    /// source bump must sweep ([`Self::file_waiters`], [`Self::nodes`],
+    /// [`Self::artifact_blocker_deps`], [`Self::terminal_dep_failures`]).
+    /// Maintained at every typed mutation funnel touching those surfaces
+    /// so [`Self::supersede_old_file_generations`] can drive off the
+    /// bumped canonical's buckets alone. See [`CanonicalReverseIndex`].
+    canonical_index: CanonicalReverseIndex,
     /// Dispatch-ready tokens, sharded by `(Priority, ResourceClass)`.
     /// Outer index is the [`Priority`] ordinal (`Critical`=0 ..
     /// `Maintenance`=3), inner index is the [`ResourceClass`] ordinal
@@ -720,6 +727,213 @@ struct FileGenKey {
     generation: u64,
 }
 
+/// The canonical file id carried by a node identity, or `None` for a
+/// `CacheNode` (which is not tied to any canonical file).
+fn identity_canonical(identity: &WorkNodeIdentity) -> Option<&Arc<str>> {
+    match identity {
+        WorkNodeIdentity::FileStage { canonical, .. }
+        | WorkNodeIdentity::Artifact { canonical, .. } => Some(canonical),
+        WorkNodeIdentity::CacheNode { .. } => None,
+    }
+}
+
+/// The canonical file id a [`DepKey`] references, or `None` for a
+/// `CacheNode` dep (never tied to a canonical file).
+fn dep_canonical(dep: &DepKey) -> Option<&Arc<str>> {
+    match dep {
+        DepKey::FileStage { canonical, .. } | DepKey::Artifact { canonical, .. } => Some(canonical),
+        DepKey::CacheNode { .. } => None,
+    }
+}
+
+/// Per-canonical reverse indices for the four state surfaces a source
+/// bump must sweep, so [`SchedulerDag::supersede_old_file_generations`]
+/// does work proportional to the entries affected for the bumped
+/// canonical instead of scanning every surface crate-wide.
+///
+/// **One structure, four maps.** The surfaces share the canonical
+/// `Arc<str>` key and are populated/pruned at the same typed mutation
+/// funnels, so grouping them keeps the "every funnel updates the index"
+/// invariant auditable in a single place. Their value shapes genuinely
+/// differ per surface — generation sets for the two generation-keyed
+/// maps, live submission tokens for DAG nodes, full [`DepKey`]s for
+/// terminal failures — so each surface keeps the value type its own
+/// cleanup needs rather than a forced common shape.
+///
+/// Every map holds ONLY entries with at least one live member; the
+/// remove helpers drop a canonical bucket the moment it empties, so the
+/// per-canonical bucket size stays proportional to that canonical's
+/// live state (never the crate-wide total). Only `FileStage` / `Artifact`
+/// identities and deps are indexed; `CacheNode` work carries no
+/// canonical and is intentionally absent.
+#[derive(Debug, Default)]
+struct CanonicalReverseIndex {
+    /// canonical → generations present in [`SchedulerDag::file_waiters`].
+    file_waiter_gens: FxHashMap<Arc<str>, FxHashSet<u64>>,
+    /// canonical → tokens of live `FileStage` / `Artifact` nodes in
+    /// [`SchedulerDag::nodes`] (across every generation for that file).
+    node_tokens: FxHashMap<Arc<str>, FxHashSet<SubmissionToken>>,
+    /// owner canonical → generations present in
+    /// [`SchedulerDag::artifact_blocker_deps`].
+    blocker_owner_gens: FxHashMap<Arc<str>, FxHashSet<u64>>,
+    /// canonical → the `FileStage` / `Artifact` [`DepKey`]s referencing
+    /// it in [`SchedulerDag::terminal_dep_failures`].
+    terminal_failure_keys: FxHashMap<Arc<str>, FxHashSet<DepKey>>,
+}
+
+impl CanonicalReverseIndex {
+    /// Index a freshly-installed node by its identity's canonical.
+    fn add_node(&mut self, identity: &WorkNodeIdentity, token: SubmissionToken) {
+        if let Some(canonical) = identity_canonical(identity) {
+            self.node_tokens
+                .entry(Arc::clone(canonical))
+                .or_default()
+                .insert(token);
+        }
+    }
+
+    /// Drop a removed node's token from its canonical bucket, dropping
+    /// the bucket entirely once it empties.
+    fn remove_node(&mut self, identity: &WorkNodeIdentity, token: SubmissionToken) {
+        if let Some(canonical) = identity_canonical(identity) {
+            if let Some(set) = self.node_tokens.get_mut(canonical.as_ref()) {
+                set.remove(&token);
+                if set.is_empty() {
+                    self.node_tokens.remove(canonical.as_ref());
+                }
+            }
+        }
+    }
+
+    /// Record a `(canonical, generation)` file-waiter key.
+    fn add_file_waiter(&mut self, key: &FileGenKey) {
+        self.file_waiter_gens
+            .entry(Arc::clone(&key.canonical))
+            .or_default()
+            .insert(key.generation);
+    }
+
+    /// Drop a removed file-waiter key from its canonical bucket.
+    fn remove_file_waiter(&mut self, key: &FileGenKey) {
+        if let Some(set) = self.file_waiter_gens.get_mut(key.canonical.as_ref()) {
+            set.remove(&key.generation);
+            if set.is_empty() {
+                self.file_waiter_gens.remove(key.canonical.as_ref());
+            }
+        }
+    }
+
+    /// Record an artifact-blocker entry keyed by `(owner, generation)`.
+    fn add_blocker_owner(&mut self, owner: &Arc<str>, generation: u64) {
+        self.blocker_owner_gens
+            .entry(Arc::clone(owner))
+            .or_default()
+            .insert(generation);
+    }
+
+    /// Drop a single `(owner, generation)` artifact-blocker entry.
+    fn remove_blocker_owner(&mut self, owner: &str, generation: u64) {
+        if let Some(set) = self.blocker_owner_gens.get_mut(owner) {
+            set.remove(&generation);
+            if set.is_empty() {
+                self.blocker_owner_gens.remove(owner);
+            }
+        }
+    }
+
+    /// Drop every artifact-blocker entry whose owner is `owner`.
+    fn remove_blocker_owner_all(&mut self, owner: &str) {
+        self.blocker_owner_gens.remove(owner);
+    }
+
+    /// Record a terminal-failure entry under its dep key's canonical.
+    fn add_terminal_failure(&mut self, dep_key: &DepKey) {
+        if let Some(canonical) = dep_canonical(dep_key) {
+            self.terminal_failure_keys
+                .entry(Arc::clone(canonical))
+                .or_default()
+                .insert(dep_key.clone());
+        }
+    }
+
+    /// Drop a single terminal-failure dep key from its canonical bucket.
+    fn remove_terminal_failure(&mut self, dep_key: &DepKey) {
+        if let Some(canonical) = dep_canonical(dep_key) {
+            if let Some(set) = self.terminal_failure_keys.get_mut(canonical.as_ref()) {
+                set.remove(dep_key);
+                if set.is_empty() {
+                    self.terminal_failure_keys.remove(canonical.as_ref());
+                }
+            }
+        }
+    }
+
+    /// Drop every terminal-failure dep key referencing `canonical`.
+    fn remove_terminal_failures_for_canonical(&mut self, canonical: &str) {
+        self.terminal_failure_keys.remove(canonical);
+    }
+
+    /// File-waiter generations strictly below `current_gen` for
+    /// `canonical` — the keys a supersede must signal `Superseded`.
+    fn file_waiter_gens_below(&self, canonical: &str, current_gen: u64) -> Vec<u64> {
+        self.file_waiter_gens
+            .get(canonical)
+            .map(|set| set.iter().copied().filter(|g| *g < current_gen).collect())
+            .unwrap_or_default()
+    }
+
+    /// Live node tokens for `canonical` (every generation) — the
+    /// candidate set a supersede filters by generation and cancels.
+    fn node_tokens_for(&self, canonical: &str) -> Vec<SubmissionToken> {
+        self.node_tokens
+            .get(canonical)
+            .map(|set| set.iter().copied().collect())
+            .unwrap_or_default()
+    }
+
+    /// Artifact-blocker owner generations strictly below `current_gen`
+    /// for `canonical` — the entries a supersede must drop.
+    fn blocker_owner_gens_below(&self, canonical: &str, current_gen: u64) -> Vec<u64> {
+        self.blocker_owner_gens
+            .get(canonical)
+            .map(|set| set.iter().copied().filter(|g| *g < current_gen).collect())
+            .unwrap_or_default()
+    }
+
+    /// Terminal-failure dep keys for `canonical` whose generation is
+    /// strictly below `current_gen` — the records a supersede scrubs so
+    /// a fresh generation is never pinned `Failed` by a stale failure.
+    fn terminal_failure_keys_below(&self, canonical: &str, current_gen: u64) -> Vec<DepKey> {
+        self.terminal_failure_keys
+            .get(canonical)
+            .map(|set| {
+                set.iter()
+                    .filter(|dep| match dep {
+                        DepKey::FileStage { generation, .. }
+                        | DepKey::Artifact { generation, .. } => *generation < current_gen,
+                        DepKey::CacheNode { .. } => false,
+                    })
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Drop the file-waiter portion of the index (the other surfaces
+    /// retain their entries). Used by the global waiter drain.
+    fn clear_file_waiters(&mut self) {
+        self.file_waiter_gens.clear();
+    }
+
+    /// Drop all four maps. Used by the DAG reset path.
+    fn clear(&mut self) {
+        self.file_waiter_gens.clear();
+        self.node_tokens.clear();
+        self.blocker_owner_gens.clear();
+        self.terminal_failure_keys.clear();
+    }
+}
+
 impl Default for SchedulerDag {
     fn default() -> Self {
         Self::new()
@@ -741,6 +955,7 @@ impl SchedulerDag {
             file_waiters: FxHashMap::default(),
             artifact_blocker_deps: FxHashMap::default(),
             terminal_dep_failures: FxHashMap::default(),
+            canonical_index: CanonicalReverseIndex::default(),
             ready_lanes: Default::default(),
             credit: [0; PRIORITY_LANE_COUNT],
             next_token: 1,
@@ -1214,7 +1429,12 @@ impl SchedulerDag {
         };
 
         self.nodes.insert(token, node);
+        self.canonical_index.add_node(&identity, token);
         self.by_identity.insert(identity, token);
+        // The dedup-merge and in-flight paths above keep the same token
+        // and identity, so they leave `canonical_index.node_tokens`
+        // already correct — only this fresh install adds a token, and
+        // `complete` / `cancel` are the only paths that remove one.
         // A fresh node with no deps is immediately dispatch-ready and
         // must enter its lane; a gated node stays out until its last
         // dep clears.
@@ -1486,6 +1706,9 @@ impl SchedulerDag {
         // Drop any lane entry for this token before the node is
         // removed (the lane mirror lives on the node).
         self.remove_from_lane(tok);
+        // Drop this node's token from the per-canonical reverse index in
+        // lock-step with its removal from `nodes`.
+        self.canonical_index.remove_node(identity, tok);
         if let Some(mut node) = self.nodes.remove(&tok) {
             // Release the dispatched-node's capacity reservation.
             // The by-value `release(self)` consume in
@@ -1571,6 +1794,9 @@ impl SchedulerDag {
             .map(|n| n.deps_remaining.clone())
             .unwrap_or_default();
         self.remove_incoming_edges(tok, &outgoing_deps);
+        // Drop this node's token from the per-canonical reverse index in
+        // lock-step with its removal from `nodes`.
+        self.canonical_index.remove_node(identity, tok);
         // Drop the cancelled node entry after releasing waiters and
         // returning the permit (by-value release on the parked
         // reservation).
@@ -1906,6 +2132,7 @@ impl SchedulerDag {
         }
         self.artifact_blocker_deps.clear();
         self.terminal_dep_failures.clear();
+        self.canonical_index.clear();
         // Drop every ready-lane entry and reset the credit
         // accumulators — there is no work left to be fair between.
         for lane in &mut self.ready_lanes {
@@ -1960,6 +2187,10 @@ impl SchedulerDag {
             canonical: Arc::clone(canonical),
             generation,
         };
+        // Index the file-waiter generation before the `entry` consumes
+        // the key (idempotent — the set absorbs a join onto an existing
+        // group).
+        self.canonical_index.add_file_waiter(&key);
         let state = self.file_waiters.entry(key).or_default();
         for group in state.groups.iter_mut() {
             if group.target == target {
@@ -2030,6 +2261,7 @@ impl SchedulerDag {
             });
             if state.groups.is_empty() {
                 self.file_waiters.remove(&key);
+                self.canonical_index.remove_file_waiter(&key);
             }
         }
         // Same-generation recovery: clear any terminal failure
@@ -2054,63 +2286,82 @@ impl SchedulerDag {
     /// linger in `nodes` / `by_identity` and could still be dispatched
     /// by `next_ready`, racing the live-generation work.
     pub fn supersede_old_file_generations(&mut self, canonical: &Arc<str>, current_gen: u64) {
-        let stale_keys: Vec<FileGenKey> = self
-            .file_waiters
-            .keys()
-            .filter(|k| k.canonical.as_ref() == canonical.as_ref() && k.generation < current_gen)
-            .cloned()
-            .collect();
-        for key in stale_keys {
+        // Every surface below is driven off the per-canonical reverse
+        // index for the bumped `canonical` alone, so the sweep does work
+        // proportional to that file's stale entries rather than scanning
+        // the whole DAG. The cleanups are identical in observable effect
+        // to a crate-global scan over the same surfaces.
+
+        // 1. Stale file waiters → `Superseded`.
+        for gen in self
+            .canonical_index
+            .file_waiter_gens_below(canonical, current_gen)
+        {
+            let key = FileGenKey {
+                canonical: Arc::clone(canonical),
+                generation: gen,
+            };
             if let Some(mut state) = self.file_waiters.remove(&key) {
                 for mut group in state.groups.drain(..) {
                     group.signal_all(CompletionState::Superseded);
                 }
             }
+            self.canonical_index.remove_file_waiter(&key);
         }
-        // Cancel every DAG node for this canonical at an older
-        // generation. The cancel sweep covers both file-stage and
-        // artifact identities so no work for the stale generation
-        // dispatches after the bump.
-        let canonical_for_match = Arc::clone(canonical);
-        let (_count, _stranded) = self.cancel_matching(|identity| match identity {
-            WorkNodeIdentity::FileStage {
-                canonical: c,
-                generation,
-                ..
-            }
-            | WorkNodeIdentity::Artifact {
-                canonical: c,
-                generation,
-                ..
-            } => c.as_ref() == canonical_for_match.as_ref() && *generation < current_gen,
-            WorkNodeIdentity::CacheNode { .. } => false,
-        });
-        // Drop any stale per-(owner, generation) Artifact blocker
-        // entries from the superseded generations; the new
-        // generation needs its own `record_artifact_blockers` call
-        // to record its own blockers.
-        self.artifact_blocker_deps.retain(|(owner, gen), _| {
-            !(owner.as_ref() == canonical.as_ref() && *gen < current_gen)
-        });
-        // Drop any persistent terminal-dep-failure entries whose
-        // DepKey references this canonical at a superseded
-        // generation. Without this scrub a stale failure record
-        // would pin a future admission as `Failed` even though the
-        // invalidation produced a fresh generation that may yet
-        // succeed.
-        self.terminal_dep_failures.retain(|key, _record| match key {
-            DepKey::FileStage {
-                canonical: c,
-                generation: g,
-                ..
-            }
-            | DepKey::Artifact {
-                canonical: c,
-                generation: g,
-                ..
-            } => !(c.as_ref() == canonical.as_ref() && *g < current_gen),
-            DepKey::CacheNode { .. } => true,
-        });
+
+        // 2. Stale DAG nodes → cancelled so no stale-generation work
+        // dispatches after the bump. The candidate tokens come from the
+        // canonical's node bucket (every generation); filter to the
+        // older generations and collect identities BEFORE cancelling —
+        // `cancel` mutably prunes both `nodes` and the reverse index.
+        // The bucket covers both file-stage and artifact identities, so
+        // the cancel set matches the former global predicate exactly.
+        let stale_node_ids: Vec<WorkNodeIdentity> = self
+            .canonical_index
+            .node_tokens_for(canonical)
+            .into_iter()
+            .filter_map(|tok| {
+                let node = self.nodes.get(&tok)?;
+                if node.cancelled {
+                    return None;
+                }
+                let stale = match &node.identity {
+                    WorkNodeIdentity::FileStage { generation, .. }
+                    | WorkNodeIdentity::Artifact { generation, .. } => *generation < current_gen,
+                    WorkNodeIdentity::CacheNode { .. } => false,
+                };
+                stale.then(|| node.identity.clone())
+            })
+            .collect();
+        for identity in stale_node_ids {
+            self.cancel(&identity);
+        }
+
+        // 3. Drop any stale per-(owner, generation) Artifact blocker
+        // entries from the superseded generations; the new generation
+        // needs its own `record_artifact_blockers` call to record its
+        // own blockers.
+        for gen in self
+            .canonical_index
+            .blocker_owner_gens_below(canonical, current_gen)
+        {
+            let key = (Arc::clone(canonical), gen);
+            self.artifact_blocker_deps.remove(&key);
+            self.canonical_index.remove_blocker_owner(canonical, gen);
+        }
+
+        // 4. Drop any persistent terminal-dep-failure entries whose
+        // DepKey references this canonical at a superseded generation.
+        // Without this scrub a stale failure record would pin a future
+        // admission as `Failed` even though the invalidation produced a
+        // fresh generation that may yet succeed.
+        for dep_key in self
+            .canonical_index
+            .terminal_failure_keys_below(canonical, current_gen)
+        {
+            self.terminal_dep_failures.remove(&dep_key);
+            self.canonical_index.remove_terminal_failure(&dep_key);
+        }
     }
 
     /// Signal `Failed(error)` to every waiter group at
@@ -2130,6 +2381,7 @@ impl SchedulerDag {
                 group.signal_all(CompletionState::Failed(error.clone()));
             }
         }
+        self.canonical_index.remove_file_waiter(&key);
     }
 
     /// Signal `Failed(error)` to only the waiter groups whose target
@@ -2158,6 +2410,7 @@ impl SchedulerDag {
             });
             if state.groups.is_empty() {
                 self.file_waiters.remove(&key);
+                self.canonical_index.remove_file_waiter(&key);
             }
         }
     }
@@ -2165,18 +2418,26 @@ impl SchedulerDag {
     /// Signal `Shutdown` to every waiter group for `canonical` across
     /// all generations.
     pub fn signal_file_shutdown(&mut self, canonical: &Arc<str>) {
-        let keys: Vec<FileGenKey> = self
-            .file_waiters
-            .keys()
-            .filter(|k| k.canonical.as_ref() == canonical.as_ref())
-            .cloned()
-            .collect();
-        for key in keys {
+        // The canonical's full generation set lives in the reverse
+        // index, so this drains only that file's waiter keys rather than
+        // scanning the whole `file_waiters` map.
+        let gens: Vec<u64> = self
+            .canonical_index
+            .file_waiter_gens
+            .get(canonical.as_ref())
+            .map(|set| set.iter().copied().collect())
+            .unwrap_or_default();
+        for gen in gens {
+            let key = FileGenKey {
+                canonical: Arc::clone(canonical),
+                generation: gen,
+            };
             if let Some(mut state) = self.file_waiters.remove(&key) {
                 for mut group in state.groups.drain(..) {
                     group.signal_all(CompletionState::Shutdown);
                 }
             }
+            self.canonical_index.remove_file_waiter(&key);
         }
     }
 
@@ -2188,6 +2449,7 @@ impl SchedulerDag {
                 group.signal_all(CompletionState::Shutdown);
             }
         }
+        self.canonical_index.clear_file_waiters();
     }
 
     /// Highest priority among waiter groups at `(canonical, generation)`.
@@ -2313,3 +2575,7 @@ mod dag_tests;
 #[cfg(test)]
 #[path = "dag_lanes_tests.rs"]
 mod dag_lanes_tests;
+
+#[cfg(test)]
+#[path = "dag_supersede_index_tests.rs"]
+mod dag_supersede_index_tests;

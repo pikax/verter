@@ -202,6 +202,7 @@ impl SchedulerDag {
     /// Re-insertion replaces the prior record — the latest terminal
     /// cause is authoritative.
     pub fn insert_terminal_dep_failure(&mut self, record: FailedDepRecord) {
+        self.canonical_index.add_terminal_failure(&record.dep_key);
         self.terminal_dep_failures
             .insert(record.dep_key.clone(), record);
     }
@@ -263,6 +264,8 @@ impl SchedulerDag {
             }
             DepKey::CacheNode { .. } => true,
         });
+        self.canonical_index
+            .remove_terminal_failures_for_canonical(canonical);
     }
 
     /// Drop the persistent terminal-dep-failure entry for
@@ -279,6 +282,8 @@ impl SchedulerDag {
             generation,
             stage: FileStageKey::Analysis,
         };
-        self.terminal_dep_failures.remove(&analysis_key);
+        if self.terminal_dep_failures.remove(&analysis_key).is_some() {
+            self.canonical_index.remove_terminal_failure(&analysis_key);
+        }
     }
 }
