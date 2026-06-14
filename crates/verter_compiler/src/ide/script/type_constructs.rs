@@ -325,7 +325,11 @@ fn emit_helper_imports_inner(
             .expect("write to String is infallible");
     }
 
-    out.prepend_alloc(pos, &imports);
+    // Emit as the recorded helper-import preamble: the imports stay unmapped synthetic text, but
+    // the transform remembers this insertion so source-map generation can publish the typed
+    // preamble-end boundary (the generated-TSX position immediately after these imports) that the
+    // LSP auto-import classifier gates on.
+    out.prepend_helper_preamble(pos, &imports);
 }
 
 /// Emit all type constructs to the `buf` string (no sourcemap).

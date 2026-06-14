@@ -138,6 +138,13 @@ pub struct CodeTransform<'a> {
     /// population) directly against the production map path.
     #[cfg(test)]
     last_reserved_token_capacity: std::cell::Cell<usize>,
+    /// The exact content reference of the leading helper-import preamble insertion, when one was
+    /// recorded (IDE script codegen, via `CodeGenOutput::prepend_helper_preamble`). Identity is by
+    /// bump-allocated pointer: the same `&'a str` flows from the insertion into its `Inserted`
+    /// chunk, so source-map generation can locate it and report the generated-TSX position
+    /// immediately AFTER it — the typed helper-import-preamble end boundary. `None` when no
+    /// preamble was recorded (non-IDE transforms, or codegen that emitted no helper imports).
+    helper_preamble_content: Option<&'a str>,
 }
 
 #[allow(dead_code)] // Many API methods only exercised by tests currently
@@ -172,6 +179,7 @@ impl<'a> CodeTransform<'a> {
             resolver: OnceCell::new(),
             #[cfg(test)]
             last_reserved_token_capacity: std::cell::Cell::new(0),
+            helper_preamble_content: None,
         }
     }
 
@@ -210,6 +218,21 @@ impl<'a> CodeTransform<'a> {
     #[cfg(test)]
     pub(crate) fn last_reserved_token_capacity_for_test(&self) -> usize {
         self.last_reserved_token_capacity.get()
+    }
+
+    /// Record the content reference of the helper-import preamble insertion (called by
+    /// [`CodeGenOutput::apply_to`](crate::template::code_gen::types::CodeGenOutput::apply_to) after
+    /// the IDE script codegen prepends the preamble). The same `&'a str` ends up as an `Inserted`
+    /// chunk, so [`generate_map_with_preamble`](Self::generate_map_with_preamble) can locate it by
+    /// pointer identity and report the generated-TSX position immediately after it.
+    pub fn set_helper_preamble_content(&mut self, content: &'a str) {
+        self.helper_preamble_content = Some(content);
+    }
+
+    /// The recorded helper-import preamble insertion content, if any. Used by source-map
+    /// generation to compute the typed preamble-end boundary.
+    pub(super) fn helper_preamble_content(&self) -> Option<&'a str> {
+        self.helper_preamble_content
     }
 
     /// Whether the original source is pure ASCII (byte length == UTF-16 length).

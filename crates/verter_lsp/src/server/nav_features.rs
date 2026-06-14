@@ -30,6 +30,9 @@ use crate::features::hover;
 use crate::features::hover::hover_at_position;
 use crate::features::references::references_at_position;
 use crate::features::rename::{prepare_rename, rename_at_position};
+use crate::tsgo::auto_import::{
+    resolve_script_import_anchor, translate_completion_import_edits, ProviderImportEdit,
+};
 use crate::tsgo::merge;
 
 use super::handler_guard::HandlerGuard;
@@ -734,38 +737,34 @@ pub(super) async fn handle_completion_resolve(
                             tp.resolve_completion(tsx_path, original_data.clone()).await
                         {
                             if !resolve_result.additional_text_edits.is_empty() {
-                                // Map TSX positions to Vue positions
-                                if let Some((_, tsx_content, mapper)) =
-                                    server.ide_context_by_path(tsx_path)
-                                {
-                                    let tsx_li =
-                                        LineIndex::new(&tsx_content, server.documents.encoding());
-                                    // Find the Vue URI from tsx_path
-                                    if let Some(vue_uri) = server.vue_uri_from_ide_path(tsx_path) {
-                                        if let Some(doc) = server.documents.get(&vue_uri) {
-                                            let edits: Vec<TextEdit> = resolve_result
-                                                .additional_text_edits
-                                                .iter()
-                                                .filter_map(|e| {
-                                                    let range = merge::tsx_range_to_vue_range(
-                                                        e.start,
-                                                        e.end,
-                                                        &tsx_li,
-                                                        &mapper,
-                                                        &doc.line_index,
-                                                    )?;
-                                                    Some(TextEdit {
-                                                        range,
-                                                        new_text: e.new_text.clone(),
-                                                    })
-                                                })
-                                                .collect();
-                                            if !edits.is_empty() {
-                                                item.additional_text_edits = Some(edits);
-                                            }
-                                        }
-                                    }
-                                }
+                                // The provider returned auto-import edits that MUST be placed. From
+                                // here on, missing IDE context / Vue URI / document OR an
+                                // unplaceable edit returns a STRUCTURED resolve error — never an
+                                // apparently-successful item with the import edits silently dropped
+                                // (which recreates "accepted completion but no import"). Map
+                                // completely or reject.
+                                let provider_edits: Vec<ProviderImportEdit> = resolve_result
+                                    .additional_text_edits
+                                    .iter()
+                                    .map(|e| ProviderImportEdit {
+                                        start: e.start,
+                                        end: e.end,
+                                        new_text: e.new_text.clone(),
+                                    })
+                                    .collect();
+                                let edits = resolve_tsgo_auto_import_edits(
+                                    server,
+                                    tsx_path,
+                                    &provider_edits,
+                                )
+                                .map_err(|reason| {
+                                    tracing::warn!(
+                                        "completion_resolve: rejecting auto-import for \
+                                                 {tsx_path}: {reason}"
+                                    );
+                                    completion_resolve_error(&reason)
+                                })?;
+                                item.additional_text_edits = Some(edits);
                             }
                         }
                     }
@@ -774,6 +773,68 @@ pub(super) async fn handle_completion_resolve(
         }
     }
     Ok(item)
+}
+
+/// Translate a TSGO completion-resolve's `additionalTextEdits` (generated-TSX byte offsets) into
+/// Vue-source [`TextEdit`]s, or fail with a human-readable reason.
+///
+/// Called only once the provider has returned a NON-EMPTY auto-import edit set, so every failure
+/// here is a hard rejection: missing IDE context / Vue URI / open document, or an edit that cannot
+/// be placed (see [`translate_completion_import_edits`]). The caller turns the reason into a
+/// structured resolve error rather than returning a successful item with the edits dropped.
+fn resolve_tsgo_auto_import_edits(
+    server: &VerterLanguageServer,
+    tsx_path: &str,
+    provider_edits: &[ProviderImportEdit],
+) -> std::result::Result<Vec<TextEdit>, String> {
+    let (_, tsx_content, mapper) = server
+        .ide_context_by_path(tsx_path)
+        .ok_or_else(|| format!("no IDE context for {tsx_path}"))?;
+    let vue_uri = server
+        .vue_uri_from_ide_path(tsx_path)
+        .ok_or_else(|| format!("no Vue URI for {tsx_path}"))?;
+    let doc = server
+        .documents
+        .get(&vue_uri)
+        .ok_or_else(|| format!("no open document for {}", vue_uri.as_str()))?;
+
+    let tsx_li = LineIndex::new(&tsx_content, server.documents.encoding());
+    // `AnalyzedImport.span` is SFC-absolute; pass the spans straight through. The anchor authority
+    // consumes them in that coordinate space and filters to the selected `<script setup>` block.
+    let user_import_spans: Vec<(u32, u32)> = server
+        .documents
+        .get_analysis(&vue_uri)
+        .map(|a| {
+            a.imports
+                .iter()
+                .map(|imp| (imp.span.start, imp.span.end))
+                .collect()
+        })
+        .unwrap_or_default();
+    let anchor = resolve_script_import_anchor(&doc.source, &user_import_spans);
+
+    let edits = translate_completion_import_edits(
+        provider_edits,
+        Some(&anchor),
+        &tsx_li,
+        &mapper,
+        &doc.line_index,
+    )
+    .map_err(|e| e.to_string())?;
+
+    if edits.is_empty() {
+        return Err("translation produced no edits".to_string());
+    }
+    Ok(edits)
+}
+
+/// Build a structured JSON-RPC error for a failed completion resolve.
+fn completion_resolve_error(reason: &str) -> tower_lsp_server::jsonrpc::Error {
+    tower_lsp_server::jsonrpc::Error {
+        code: tower_lsp_server::jsonrpc::ErrorCode::InternalError,
+        message: std::borrow::Cow::Owned(format!("completion resolve: {reason}")),
+        data: None,
+    }
 }
 
 pub(super) async fn handle_goto_definition(

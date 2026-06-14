@@ -1319,7 +1319,10 @@ fn compile_inner(
                 file: options.filename.as_deref(),
                 include_content: true,
             };
-            tsx_ct.generate_map(sm_opts).to_json_string()
+            // Carry the typed helper-import-preamble end boundary on the IDE source map so the LSP
+            // auto-import classifier can re-anchor preamble insertions and reject trailing-synthetic
+            // edits even when the file has no mapped runs (an empty `<script setup>`).
+            tsx_ct.generate_map_json_with_preamble(sm_opts)
         } else {
             String::new()
         };

@@ -123,6 +123,30 @@ pub struct PositionMapper {
     by_dst_line: Vec<Vec<u32>>,
     /// Per source line: indices into `runs`, sorted by `src_col`. Index = src line.
     by_src_line: Vec<Vec<u32>>,
+    /// The generated-TSX position immediately AFTER Verter's helper-import preamble — the typed
+    /// boundary emitted by IDE codegen as the `x_verter_helper_preamble_end` source-map metadata
+    /// member (see [`crate::tsgo::auto_import`]). Everything in `[start-of-file, helper_preamble_end]`
+    /// is the synthetic helper-import preamble, the only generated region a TypeProvider auto-import
+    /// insertion may legitimately land in unmapped. `None` when the map carries no such boundary
+    /// (a non-Verter map, or an older artifact) — the classifier then rejects unmapped edits rather
+    /// than guessing. This is the AUTHORITATIVE preamble gate; it does not depend on mapped runs, so
+    /// it is correct even for an empty `<script setup>` whose generated file has no mapped run.
+    helper_preamble_end: Option<TsPosition>,
+}
+
+/// Minimal deserialization shape for the `x_verter_helper_preamble_end` source-map metadata member
+/// (ignored by `oxc_sourcemap`). Only this one member is materialized; every other source-map field
+/// is skipped (no `deny_unknown_fields`).
+#[derive(serde::Deserialize)]
+struct PreambleEnvelope {
+    #[serde(rename = "x_verter_helper_preamble_end")]
+    helper_preamble_end: Option<PreambleEndPos>,
+}
+
+#[derive(serde::Deserialize)]
+struct PreambleEndPos {
+    line: u32,
+    character: u32,
 }
 
 /// Result of [`PositionMapper::tsx_to_vue`]: an original-`.vue` position plus the identity of
@@ -162,12 +186,20 @@ impl PositionMapper {
     pub fn from_json(json: &str) -> Result<Self, String> {
         let map = OwnedSourceMap::from_json_string(json)
             .map_err(|e| format!("invalid source map: {e}"))?;
+        // Recover the typed helper-import-preamble end boundary emitted by IDE codegen, if present.
+        // `oxc_sourcemap` drops this unknown member on parse, so it is read separately. A malformed
+        // or absent member simply yields `None` (the classifier then rejects unmapped edits).
+        let helper_preamble_end = serde_json::from_str::<PreambleEnvelope>(json)
+            .ok()
+            .and_then(|e| e.helper_preamble_end)
+            .map(|p| TsPosition::new(p.line, p.character));
         let (runs, by_dst_line, by_src_line) = Self::precompute_runs(&map);
         Ok(Self {
             map,
             runs,
             by_dst_line,
             by_src_line,
+            helper_preamble_end,
         })
     }
 
@@ -512,6 +544,21 @@ impl PositionMapper {
             },
             run: run_id,
         })
+    }
+
+    /// The generated-TSX position immediately AFTER Verter's helper-import preamble — the typed
+    /// boundary emitted by IDE codegen as the `x_verter_helper_preamble_end` source-map metadata
+    /// member. `None` when the map carries no such boundary.
+    ///
+    /// This is the AUTHORITATIVE gate for classifying a TypeProvider auto-import insertion: a
+    /// zero-width edit at or before this position lands in the synthetic helper-import preamble
+    /// (re-anchorable into the Vue `<script setup>` import block); anything past it is trailing
+    /// synthetic component/export code (rejected). Unlike a mapped-run heuristic, it is exact even
+    /// when the generated file has NO mapped runs (an empty `<script setup>`) and is robust to user
+    /// imports that precede the helper preamble (a companion `<script>`). See
+    /// [`crate::tsgo::auto_import`] for the structural classifier that consumes this.
+    pub fn helper_preamble_end(&self) -> Option<TsPosition> {
+        self.helper_preamble_end
     }
 
     /// Map a generated TSX **range** `[start, end)` back to a Vue source range `(start, end)`,
