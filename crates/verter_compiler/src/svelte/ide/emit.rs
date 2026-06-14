@@ -24,12 +24,6 @@ pub enum UnsupportedKind {
     /// dimension, and readonly bindings. The diagnostic NAMES the binding (the
     /// matrix requires a "typed-unsupported diagnostic naming the binding").
     UnsupportedBinding,
-    /// A `style:` directive (out-of-scope v1) — recorded + stripped, value
-    /// void-checked.
-    StyleDirective,
-    /// A `transition:` / `in:` / `out:` / `animate:` directive (out-of-scope
-    /// v1) — stripped, params void-checked.
-    TransitionDirective,
     /// An unrecognised construct parsed without crash.
     Unknown,
 }
@@ -44,8 +38,6 @@ impl UnsupportedKind {
             Self::LegacyFragment => "svelte-legacy-fragment",
             Self::FunctionBinding => "svelte-function-binding",
             Self::UnsupportedBinding => "svelte-unsupported-binding",
-            Self::StyleDirective => "svelte-unsupported-style-directive",
-            Self::TransitionDirective => "svelte-unsupported-transition-directive",
             Self::Unknown => "svelte-unsupported-construct",
         }
     }
@@ -68,13 +60,6 @@ impl UnsupportedKind {
                 "this `bind:` binding is out of scope (v1); only `bind:value`, \
                  `bind:checked`, and component `bind:prop` for `$bindable` props \
                  are supported"
-            }
-            Self::StyleDirective => {
-                "the `style:` directive is out of scope (v1); the value is void-checked"
-            }
-            Self::TransitionDirective => {
-                "`transition:`/`in:`/`out:`/`animate:` directives are out of scope \
-                 (v1); the params are void-checked"
             }
             Self::Unknown => "unsupported Svelte construct",
         }

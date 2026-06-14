@@ -83,6 +83,8 @@ fn typecheck_projected(
             "index.d.ts",
             "elements.d.ts",
             "attachments.d.ts",
+            "transition.d.ts",
+            "animate.d.ts",
             "package.json",
         ] {
             std::fs::copy(gate_dir().join("vendor_svelte").join(f), dst.join(f))
@@ -693,22 +695,204 @@ fn bind_value_shorthand_type_checks_clean() {
 }
 
 #[test]
-fn out_of_scope_style_directive_void_checks_and_type_checks_clean() {
-    // P2-1: a `style:` directive must be stripped + void-checked (NOT left as a
-    // bare invalid `style:color` attribute) and produce valid TSX.
-    let projected =
+fn style_directive_strips_void_checks_and_surfaces_value_type_errors() {
+    // F1: a `style:color={c}` directive is SUPPORTED — stripped from the JSX
+    // position (no invalid `style:color` attribute), value void-checked, clean
+    // TSX.
+    let good =
         project("<script lang=\"ts\">let c = \"red\";</script>\n<div style:color={c}>x</div>");
-    assert!(
-        !projected.contains("style:color"),
-        "no style: residue: {projected}"
-    );
-    let Some((ok, out)) = typecheck_projected(&projected, "StyleDir.svelte.tsx", &[], true) else {
-        skip_note("out-of-scope style: directive");
+    assert!(!good.contains("style:color"), "no style: residue: {good}");
+    let Some((ok, out)) = typecheck_projected(&good, "StyleDir.svelte.tsx", &[], true) else {
+        skip_note("style: directive");
         return;
     };
     assert!(
         ok,
-        "an out-of-scope style: directive must void-check + produce valid TSX:\n{out}"
+        "a supported style: directive must void-check + produce valid TSX:\n{out}"
+    );
+
+    // DISCRIMINATING: a type error INSIDE the value surfaces (the value is
+    // genuinely checked, not dropped).
+    let bad = project(
+        "<script lang=\"ts\">let c: number = 1;</script>\n<div style:color={c.nope}>x</div>",
+    );
+    let Some((bad_ok, _)) = typecheck_projected(&bad, "StyleDirBad.svelte.tsx", &[], true) else {
+        return;
+    };
+    assert!(
+        !bad_ok,
+        "a type error in the void-checked style: value must surface"
+    );
+}
+
+#[test]
+fn transition_directive_type_checks_clean_and_discriminates_params_and_non_function() {
+    // F2: a `transition:fly={{ delay: 200 }}` projects to a REAL CALL
+    // `__verter_transition(fly((null! as HostEl), { delay: 200 }))` and
+    // type-checks CLEAN against the vendored `svelte/transition`. The fixture
+    // imports `fly` so the called function resolves.
+    let good = project(
+        "<script lang=\"ts\">import { fly } from \"svelte/transition\";</script>\n\
+         <div transition:fly={{ delay: 200 }}>x</div>",
+    );
+    let Some((ok, out)) = typecheck_projected(&good, "TransOk.svelte.tsx", &[], true) else {
+        skip_note("transition fly clean");
+        return;
+    };
+    assert!(
+        ok,
+        "transition:fly={{ delay: 200 }} must type-check clean (host-element call):\n{out}"
+    );
+
+    // DISCRIMINATING (wrong params): a `{ delay: "200" }` (string where number is
+    // expected) must FAIL — the params are genuinely checked at the `fly` call.
+    let bad_params = project(
+        "<script lang=\"ts\">import { fly } from \"svelte/transition\";</script>\n\
+         <div transition:fly={{ delay: \"200\" }}>x</div>",
+    );
+    let Some((bp_ok, bp_out)) =
+        typecheck_projected(&bad_params, "TransBadParams.svelte.tsx", &[], true)
+    else {
+        return;
+    };
+    assert!(
+        !bp_ok,
+        "a wrong-typed transition param (`delay: \"200\"`) must be REJECTED:\n{bp_out}"
+    );
+
+    // DISCRIMINATING (non-function value): a `transition:fn` whose `fn` is NOT a
+    // transition function (a plain number) must FAIL — the projected `fn(...)`
+    // call is not callable.
+    let non_fn = project(
+        "<script lang=\"ts\">const notAFn = 5;</script>\n\
+         <div transition:notAFn={{ delay: 1 }}>x</div>",
+    );
+    let Some((nf_ok, nf_out)) = typecheck_projected(&non_fn, "TransNonFn.svelte.tsx", &[], true)
+    else {
+        return;
+    };
+    assert!(
+        !nf_ok,
+        "a non-function `transition:` value must be REJECTED (not callable):\n{nf_out}"
+    );
+}
+
+#[test]
+fn animate_directive_type_checks_clean_and_discriminates_wrong_params() {
+    // F3: an `animate:flip={{ delay: 0 }}` projects to a REAL CALL
+    // `__verter_animate(flip((null! as HostEl), DIRECTIONS, { delay: 0 }))` and
+    // type-checks CLEAN.
+    let good = project(
+        "<script lang=\"ts\">import { flip } from \"svelte/animate\";</script>\n\
+         {#each [] as _ (_)}<div animate:flip={{ delay: 0 }}>x</div>{/each}",
+    );
+    let Some((ok, out)) = typecheck_projected(&good, "AnimOk.svelte.tsx", &[], true) else {
+        skip_note("animate flip clean");
+        return;
+    };
+    assert!(
+        ok,
+        "animate:flip={{ delay: 0 }} must type-check clean:\n{out}"
+    );
+
+    // DISCRIMINATING (wrong params): a `{ delay: "0" }` (string where number is
+    // expected) must FAIL.
+    let bad = project(
+        "<script lang=\"ts\">import { flip } from \"svelte/animate\";</script>\n\
+         {#each [] as _ (_)}<div animate:flip={{ delay: \"0\" }}>x</div>{/each}",
+    );
+    let Some((b_ok, b_out)) = typecheck_projected(&bad, "AnimBad.svelte.tsx", &[], true) else {
+        return;
+    };
+    assert!(
+        !b_ok,
+        "a wrong-typed animate param (`delay: \"0\"`) must be REJECTED:\n{b_out}"
+    );
+}
+
+#[test]
+fn transition_missing_required_params_fails_via_arg_count() {
+    // F2 (required params): a `transition:fn` whose `fn` REQUIRES a params object,
+    // written WITHOUT `={…}`, must FAIL — the projected `fn(node)` call is missing
+    // the required 2nd argument (arg-count error). DISCRIMINATING: the same `fn`
+    // WITH the params type-checks clean.
+    let bad = project(
+        "<script lang=\"ts\">\n\
+         import type { TransitionConfig } from \"svelte/transition\";\n\
+         function spin(node: Element, params: { turns: number }): TransitionConfig { void node; void params; return {}; }\n\
+         </script>\n\
+         <div transition:spin>x</div>",
+    );
+    let Some((ok, out)) = typecheck_projected(&bad, "TransNoParams.svelte.tsx", &[], true) else {
+        skip_note("transition required params arg-count");
+        return;
+    };
+    assert!(
+        !ok,
+        "a `transition:` whose fn REQUIRES params must FAIL without params \
+         (arg-count error):\n{out}"
+    );
+
+    let good = project(
+        "<script lang=\"ts\">\n\
+         import type { TransitionConfig } from \"svelte/transition\";\n\
+         function spin(node: Element, params: { turns: number }): TransitionConfig { void node; void params; return {}; }\n\
+         </script>\n\
+         <div transition:spin={{ turns: 2 }}>x</div>",
+    );
+    let Some((g_ok, g_out)) = typecheck_projected(&good, "TransWithParams.svelte.tsx", &[], true)
+    else {
+        return;
+    };
+    assert!(
+        g_ok,
+        "the same `transition:spin` WITH its required params must type-check clean:\n{g_out}"
+    );
+}
+
+#[test]
+fn custom_transition_with_optional_options_and_factory_return_type_checks_clean() {
+    // F2 (custom transition shape): a userland transition with an OPTIONAL third
+    // `options` param (the Svelte transition-fn shape — built-ins omit it; custom
+    // transitions that DECLARE it must keep it optional so the projected
+    // `fn(node, params)` 2-arg call applies) AND a DEFERRED-FACTORY return
+    // (`() => TransitionConfig` / `(options?) => TransitionConfig`) must
+    // type-check clean through the `__verter_transition` result-shape checker.
+    let factory_arrow = project(
+        "<script lang=\"ts\">\n\
+         import type { TransitionConfig } from \"svelte/transition\";\n\
+         function spin(node: Element, params: { turns: number }, options?: { direction: \"in\" | \"out\" | \"both\" }): () => TransitionConfig { void node; void params; void options; return () => ({}); }\n\
+         </script>\n\
+         <div transition:spin={{ turns: 2 }}>x</div>",
+    );
+    let Some((ok, out)) = typecheck_projected(&factory_arrow, "TransCustom.svelte.tsx", &[], true)
+    else {
+        skip_note("custom transition optional-options + factory return");
+        return;
+    };
+    assert!(
+        ok,
+        "a custom transition with an optional options param + factory return must \
+         type-check clean (2-arg call + factory result shape):\n{out}"
+    );
+
+    // DISCRIMINATING: a custom transition that returns the WRONG shape (a number,
+    // not a TransitionConfig or factory) must FAIL the result-shape checker.
+    let wrong_return = project(
+        "<script lang=\"ts\">\n\
+         function broken(node: Element, params: { turns: number }): number { void node; void params; return 5; }\n\
+         </script>\n\
+         <div transition:broken={{ turns: 2 }}>x</div>",
+    );
+    let Some((wr_ok, wr_out)) =
+        typecheck_projected(&wrong_return, "TransWrongRet.svelte.tsx", &[], true)
+    else {
+        return;
+    };
+    assert!(
+        !wr_ok,
+        "a transition fn returning a non-TransitionConfig must be REJECTED by the \
+         result-shape checker:\n{wr_out}"
     );
 }
 

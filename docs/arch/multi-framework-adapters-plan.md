@@ -1975,13 +1975,29 @@ OUT-OF-SCOPE→SUPPORTED (D-bl). All three are IDE-projection-only — no typein
   identifier — mirror the existing CSS-custom-property pass-through), value expression void-checked;
   shorthand `style:color` projects the implied `color` identifier only when the name is a valid
   binding identifier; `|important` presentational. F2 `transition:fn={p}` / `in:`/`out:` (+
-  `|local`/`|global`) → `__verter_transition(fn, p)` (directive stripped + spread-merged like
-  `__verter_attach`); F3 `animate:fn={p}` → `__verter_animate(fn, p)`.
-- The rune prelude (D-ae) gains TWO new checkers:
-  `__verter_transition<E extends Element, P>(node_hint: E, fn: (node: E, params: P, options: { direction: "in"|"out"|"both" }) => import("svelte/transition").TransitionConfig | (() => import("svelte/transition").TransitionConfig), params?: P): void`
-  (the node param is the HOST ELEMENT instance type — `E extends Element`, fallback `Element` for
-  unknown/dynamic hosts; required/omitted-param OVERLOADS so a missing required `params` FAILS), and
-  `__verter_animate<P>(fn: (node: Element, directions: { from: DOMRect; to: DOMRect }, params: P) => import("svelte/animate").AnimationConfig, params?: P): void`.
+  `|local`/`|global`) → `{...(__verter_transition(fn((null! as HOST_EL), p)), {})}` — the directive is
+  stripped + spread-merged like `__verter_attach`, and the transition function `fn` (the directive
+  local) is CALLED on the host element instance with the params `p`. The real call site is the
+  soundest check (TSGO checks the host-node type, the params type, the arg count, and that `fn` is
+  callable). The call is 2-arg `fn(node, params)`: Svelte invokes transitions at runtime as
+  `fn(node, params, { direction })`, but the PUBLIC types of built-in + idiomatic transitions declare
+  only `(node, params?)` — passing a 3rd arg would break every 2-param built-in. F3 `animate:fn={p}`
+  → `{...(__verter_animate(fn((null! as HOST_EL), DIRECTIONS, p)), {})}` (animate fns take the
+  from/to-rect `DIRECTIONS` descriptor as their 2nd arg).
+- The rune prelude (D-ae) gains the `__VerterHostEl<Tag>` host-node helper (a known HTML/SVG tag → its
+  precise DOM instance type, fallback `Element` for unknown/custom/dynamic hosts; the projector emits
+  the host node as `(null! as __VerterHostEl<"tag">)`) plus the `__verter_transition`/`__verter_animate`
+  RESULT-SHAPE checkers:
+  `__verter_transition(config: import("svelte/transition").TransitionConfig | ((options?: { direction: "in"|"out" }) => import("svelte/transition").TransitionConfig)): void`
+  and the analogous `__verter_animate` over `import("svelte/animate").AnimationConfig`. They assert the
+  CALL RESULT is a config (or a deferred factory of one — Svelte invokes deferred factories with the
+  runtime `{ direction }` descriptor, hence the optional-options factory shape). The host-node / params
+  / arity / non-function checks happen at the real `fn(...)` call site the projector emits, not in the
+  checker. NOTE: an earlier draft mandated a GENERIC `__verter_transition<E, P>(node, fn, params)`
+  checker with required/omitted-param overloads; empirically (tsgo native-preview) the generic checker
+  CANNOT discriminate a wrong-typed `params` — contravariant optional-param inference passes a wrong
+  `{ y: "200" }` (NoInfer / Parameters<F>[1] / DropFirst rest-tuple all fail), so the landed design is
+  the direct call above, with the checker reduced to a result-shape assertion.
 - `@verter/svelte-jsx` shim (D-av) EXTENDED: ensure `svelte/transition` (`TransitionConfig`) +
   `svelte/animate` (`AnimationConfig`) type imports resolve — they ride the same per-owner-project
   `svelte`/`svelte/*` paths injection (D-ay) the existing `svelte/elements`/`svelte/attachments`
@@ -1993,10 +2009,16 @@ OUT-OF-SCOPE→SUPPORTED (D-bl). All three are IDE-projection-only — no typein
 **Tests (failing first).**
 1. TSX projection snapshots: no `style:`/`transition:`/`animate:` residue in the projected JSX
    (negative); the value expressions present + void-checked.
-2. Type-check validity (TSGO gate, hermetic vendored `svelte`): a `transition:fly={{ y: 200 }}`
-   fixture type-checks CLEAN; a wrong `params` object FAILS (`@ts-expect-error`); a non-function
-   `transition:` value FAILS; an `animate:flip` with a wrong params FAILS; a `style:` with a value
-   type error surfaces the error.
+2. Type-check validity (TSGO gate, hermetic vendored `svelte` — `svelte/transition` +
+   `svelte/animate` d.ts with NAMED param interfaces): a `transition:fly={{ delay: 200 }}` fixture
+   type-checks CLEAN; a wrong `params` object (`{ delay: "200" }`) FAILS; a non-function `transition:`
+   value FAILS (not callable); a `transition:` whose fn requires params written without `={…}` FAILS
+   (arg-count); an `animate:flip` with a wrong params FAILS; a custom transition with an optional
+   options param + factory return type-checks clean while a wrong-return transition FAILS; a `style:`
+   with a value type error surfaces the error. NOTE: the wrong-params fixtures assert on the `delay`
+   property — under tsgo native-preview a wrong value on a param-interface property NOT shared with
+   `TransitionConfig`/`AnimationConfig` (e.g. fly's `y`) is not flagged when the file carries the
+   `@jsxImportSource @verter/svelte-jsx` pragma; `delay` is shared and discriminates reliably.
 3. Sourcemap e2e: hover inside a `transition:` params expression lands correctly.
 
 **Verification.** The gate (TS touched, TSGO).

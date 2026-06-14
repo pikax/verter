@@ -350,6 +350,42 @@ mod tests {
     }
 
     #[test]
+    fn ide_sourcemap_maps_transition_params_expression_back_to_source() {
+        // F2 sourcemap e2e: the `transition:` PARAMS expression is moved into the
+        // projected `__verter_transition(fly(node, <params>))` call but stays a
+        // mapped Original chunk — a hover inside the params identifier lands on
+        // the matching ORIGINAL `.svelte` byte (the directive prefix strip /
+        // checker injection went through CodeTransform, so the map stays
+        // token-precise). DISCRIMINATING: the params identifier `flyParam` is
+        // unique to the directive value, so its mapped token can only come from
+        // the original `transition:fly={flyParam}` position.
+        let compiler = SvelteCarrierCompiler::default();
+        let source = "<script lang=\"ts\">import { fly } from \"svelte/transition\";\n\
+             const flyParam = { delay: 0 };</script>\n\
+             <div transition:fly={flyParam}>x</div>";
+        let artifact = compiler.parse(source, &ParseOptions::default());
+        let ide = compiler
+            .compile_ide(
+                source,
+                &artifact,
+                &IdeCompileOptions {
+                    filename: Some("Comp.svelte".to_string()),
+                    ..Default::default()
+                },
+            )
+            .expect("svelte ide projection");
+        let (code, sm) = parse_ide_output(&ide);
+        let lookup = build_lookup_table(&sm);
+
+        // The `flyParam` declaration in the script maps back (line granularity).
+        assert_token_maps_to_source_line(&sm, &lookup, &code, source, "flyParam", 0);
+        // The `transition:fly={flyParam}` PARAMS occurrence (the SECOND source
+        // occurrence) maps back to its exact original column — the moved params
+        // expression kept its source span.
+        assert_token_maps_to_source(&sm, &lookup, &code, source, "flyParam", 1);
+    }
+
+    #[test]
     fn artifact_identity_names_the_svelte_adapter() {
         let artifact = artifact_for("<script>let a = 1;</script>");
         assert!(!artifact.adapter_id.is_vue());

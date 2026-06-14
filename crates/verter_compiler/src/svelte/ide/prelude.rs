@@ -86,6 +86,33 @@ declare function $host<El extends HTMLElement = HTMLElement>(): El;
 declare function __verter_attach<E extends EventTarget>(attachment: Attachment<E>): void;
 declare function __verter_snippet<Params extends unknown[]>(render: (...args: Params) => unknown): Snippet<Params>;
 declare function __verter_void(...values: unknown[]): void;
+// The host-element instance type for a projected tag (the `transition:`/`in:`/
+// `out:`/`animate:` host node, D-ae). A known HTML/SVG tag resolves to its
+// precise DOM instance type; an unknown/custom-element/dynamic host falls back
+// to `Element`. The projector emits the host node as `(null! as
+// __VerterHostEl<"tag">)` and CALLS the directive's transition/animate function
+// on it — a real call site is the soundest check (TSGO checks the host-node
+// type, the params type, the arg count, and that the value is callable; the
+// generic-checker indirection loses params discrimination under contravariant
+// optional-param inference, so the projection calls the function directly).
+type __VerterHostEl<Tag extends string> =
+  Tag extends keyof HTMLElementTagNameMap ? HTMLElementTagNameMap[Tag] :
+  Tag extends keyof SVGElementTagNameMap ? SVGElementTagNameMap[Tag] :
+  Element;
+// `transition:fn={p}` / `in:` / `out:` — the RESULT-SHAPE checker. The projector
+// CALLS the transition function `fn(node, params)` (the host-node / params /
+// arity / non-function checks happen at that real call site) and routes the call
+// RESULT through this checker, which asserts `fn` returned a `TransitionConfig`
+// or a DEFERRED transition factory. Svelte invokes a deferred factory with the
+// runtime `{ direction }` descriptor, so the factory shape accepts an OPTIONAL
+// options argument (`(options?: { direction }) => TransitionConfig`) — a
+// zero-arg `() => TransitionConfig` and a direction-consuming factory both
+// satisfy it. A `fn` returning the wrong shape FAILS.
+declare function __verter_transition(config: import("svelte/transition").TransitionConfig | ((options?: { direction: "in" | "out" }) => import("svelte/transition").TransitionConfig)): void;
+// `animate:fn={p}` — the RESULT-SHAPE checker. The projector CALLS the animate
+// function on the host node + from/to rects + params and asserts the result is
+// an `AnimationConfig` (or a deferred factory of one).
+declare function __verter_animate(config: import("svelte/animate").AnimationConfig | ((options?: { direction: "in" | "out" }) => import("svelte/animate").AnimationConfig)): void;
 "#;
 
 #[cfg(test)]
@@ -135,5 +162,35 @@ mod tests {
         // `class?: ClassValue` in the intrinsic table — no dead
         // `__verter_class` declarator (NIT-1).
         assert!(!p.contains("__verter_class"), "dead declarator removed");
+    }
+
+    #[test]
+    fn prelude_declares_the_transition_and_animate_checkers() {
+        // F2/F3: the `transition:`/`in:`/`out:` and `animate:` RESULT-SHAPE
+        // checkers are declared referencing the `svelte/transition`/
+        // `svelte/animate` config types, plus the `__VerterHostEl<Tag>` host-node
+        // helper the projector uses for the real call site.
+        let p = render_prelude();
+        assert!(p.contains("declare function __verter_transition"));
+        assert!(p.contains("declare function __verter_animate"));
+        assert!(p.contains("type __VerterHostEl"));
+        assert!(
+            p.contains("import(\"svelte/transition\").TransitionConfig"),
+            "transition config referenced"
+        );
+        assert!(
+            p.contains("import(\"svelte/animate\").AnimationConfig"),
+            "animate config referenced"
+        );
+        // The host-node helper maps a known tag to its precise DOM instance type
+        // and falls back to `Element` for unknown/dynamic hosts.
+        assert!(
+            p.contains("Tag extends keyof HTMLElementTagNameMap"),
+            "host-node helper resolves known HTML tags"
+        );
+        assert!(
+            p.contains("Tag extends keyof SVGElementTagNameMap"),
+            "host-node helper resolves known SVG tags"
+        );
     }
 }

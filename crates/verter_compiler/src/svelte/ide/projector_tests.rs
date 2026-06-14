@@ -14,6 +14,15 @@ fn project(source: &str) -> String {
     project_svelte_ide(source, &parsed, Some("Comp.svelte"), false).code
 }
 
+/// The projected render body (everything AFTER the unmapped prelude) — residue
+/// assertions on directive prefixes target the body, not the prelude's own
+/// `// transition:fn` / `// animate:fn` doc comments.
+fn render_body(code: &str) -> &str {
+    code.find("function __verter_render()")
+        .map(|i| &code[i..])
+        .unwrap_or(code)
+}
+
 #[test]
 fn prelude_opens_the_projection_and_no_script_tag_survives() {
     let code = project("<script lang=\"ts\">let a = 1;</script>\n<div>{a}</div>");
@@ -296,23 +305,25 @@ fn component_bind_prop_stays_supported_no_diagnostic() {
 }
 
 #[test]
-fn style_directive_is_out_of_scope_with_a_typed_diagnostic_and_void_check() {
-    // P2-1: `style:` is out-of-scope v1. Stripped, value void-checked, typed
-    // diagnostic on the directive span.
+fn style_directive_strips_and_void_checks_its_value_no_residue() {
+    // F1: `style:color={c}` — SUPPORTED. Stripped from the JSX position (no
+    // `style:` residue, a `style:`-prefixed name is invalid JSX), the value
+    // void-checked. No typed-unsupported diagnostic (the row is now supported).
     let source = "<div style:color={c}>x</div>";
     let parsed = parse_svelte(source);
     let projection = project_svelte_ide(source, &parsed, Some("C.svelte"), false);
     assert!(
-        projection
+        !projection
             .diagnostics
             .iter()
             .any(|d| d.code == "svelte-unsupported-style-directive"),
-        "style-directive diagnostic present: {:?}",
+        "the supported style: directive must NOT emit an out-of-scope diagnostic: {:?}",
         projection.diagnostics
     );
     assert!(
         !projection.code.contains("style:color"),
-        "no style: residue"
+        "no style: residue: {}",
+        projection.code
     );
     assert!(
         projection.code.contains("__verter_void(c)"),
@@ -322,41 +333,150 @@ fn style_directive_is_out_of_scope_with_a_typed_diagnostic_and_void_check() {
 }
 
 #[test]
-fn transition_in_out_animate_directives_emit_typed_diagnostics_and_void_check() {
-    // P2-1: transition/in/out/animate — stripped, params void-checked, typed
-    // diagnostic on the directive span.
-    for (src, name) in [
-        ("<div transition:fade={{ duration: d }}>x</div>", "d"),
-        ("<div in:fly={{ y: a }}>x</div>", "a"),
-        ("<div out:slide={{ x: b }}>x</div>", "b"),
-        ("<div animate:flip={{ delay: e }}>x</div>", "e"),
+fn style_directive_with_important_modifier_strips_and_void_checks() {
+    // F1: `style:color|important={c}` — the `|important` modifier is
+    // presentational; the directive still strips + void-checks the value.
+    let source = "<div style:color|important={c}>x</div>";
+    let parsed = parse_svelte(source);
+    let projection = project_svelte_ide(source, &parsed, Some("C.svelte"), false);
+    assert!(
+        !projection.code.contains("style:color") && !projection.code.contains("|important"),
+        "no style:/modifier residue: {}",
+        projection.code
+    );
+    assert!(
+        projection.code.contains("__verter_void(c)"),
+        "value void-checked: {}",
+        projection.code
+    );
+}
+
+#[test]
+fn style_directive_shorthand_projects_the_implied_binding() {
+    // F1: shorthand `style:color` (no value) projects the implied `color`
+    // binding identifier (valid identifier) — void-checked, no residue.
+    let source = "<div style:color>x</div>";
+    let parsed = parse_svelte(source);
+    let projection = project_svelte_ide(source, &parsed, Some("C.svelte"), false);
+    assert!(
+        !projection.code.contains("style:color"),
+        "no style: residue: {}",
+        projection.code
+    );
+    assert!(
+        projection.code.contains("__verter_void(color)"),
+        "implied binding void-checked: {}",
+        projection.code
+    );
+}
+
+#[test]
+fn transition_directive_projects_to_the_transition_checker_no_residue() {
+    // F2: `transition:fn={p}` / `in:` / `out:` (+`|local`/`|global`) →
+    // `{...(__verter_transition(NODE_HINT, fn, p), {})}` — stripped + spread-
+    // merged, the fn + params checked against the host element instance type.
+    for (src, fn_name, param) in [
+        (
+            "<div transition:fade={{ duration: d }}>x</div>",
+            "fade",
+            "d",
+        ),
+        ("<div in:fly={{ y: a }}>x</div>", "fly", "a"),
+        ("<div out:slide={{ x: b }}>x</div>", "slide", "b"),
+        (
+            "<div transition:fade|local={{ duration: d }}>x</div>",
+            "fade",
+            "d",
+        ),
     ] {
         let parsed = parse_svelte(src);
         let projection = project_svelte_ide(src, &parsed, Some("C.svelte"), false);
+        let body = render_body(&projection.code);
         assert!(
-            projection
-                .diagnostics
-                .iter()
-                .any(|d| d.code == "svelte-unsupported-transition-directive"),
-            "transition-directive diagnostic for {src}: {:?}",
-            projection.diagnostics
-        );
-        assert!(
-            !projection.code.contains("transition:")
-                && !projection.code.contains("in:")
-                && !projection.code.contains("out:")
-                && !projection.code.contains("animate:"),
-            "no directive residue for {src}: {}",
+            !body.contains("transition:")
+                && !body.contains("in:")
+                && !body.contains("out:")
+                && !body.contains("|local")
+                && !body.contains("|global"),
+            "no directive/modifier residue for {src}: {}",
             projection.code
         );
-        // The directive params object is void-checked (the inner var checks
-        // through it): `{...(__verter_void({ … name }), {})}`.
+        // The directive is projected to a REAL CALL of the transition function on
+        // the host element instance + the params expression: the call result is
+        // routed through the `__verter_transition` result-shape checker.
         assert!(
-            projection.code.contains("__verter_void(") && projection.code.contains(name),
-            "params void-checked for {src}: {}",
+            projection.code.contains(&format!(
+                "__verter_transition({fn_name}((null! as __VerterHostEl<\"div\">), "
+            )),
+            "transition function called on host element for {src}: {}",
+            projection.code
+        );
+        assert!(
+            projection.code.contains(param),
+            "params present for {src}: {}",
             projection.code
         );
     }
+}
+
+#[test]
+fn transition_on_a_component_falls_back_to_the_element_node_hint() {
+    // F2: a `transition:` on a COMPONENT (unknown host element) falls back to the
+    // `Element` node hint (no precise DOM instance type).
+    let source = "<MyComp transition:fade={p} />";
+    let parsed = parse_svelte(source);
+    let projection = project_svelte_ide(source, &parsed, Some("C.svelte"), false);
+    assert!(
+        projection
+            .code
+            .contains("__verter_transition(fade((null! as Element), "),
+        "component host falls back to Element hint: {}",
+        projection.code
+    );
+}
+
+#[test]
+fn animate_directive_projects_to_the_animate_checker_no_residue() {
+    // F3: `animate:flip={p}` →
+    // `{...(__verter_animate(flip(HINT, DIRECTIONS, p)), {})}`.
+    let source = "<div animate:flip={{ delay: e }}>x</div>";
+    let parsed = parse_svelte(source);
+    let projection = project_svelte_ide(source, &parsed, Some("C.svelte"), false);
+    assert!(
+        !render_body(&projection.code).contains("animate:"),
+        "no animate: residue: {}",
+        projection.code
+    );
+    assert!(
+        projection
+            .code
+            .contains("__verter_animate(flip((null! as __VerterHostEl<\"div\">), (null! as { from: DOMRect; to: DOMRect }), "),
+        "animate function called on host element + directions: {}",
+        projection.code
+    );
+    assert!(
+        projection.code.contains('e'),
+        "params present: {}",
+        projection.code
+    );
+}
+
+#[test]
+fn valueless_transition_and_animate_call_the_function_without_params() {
+    // F2/F3: a valueless `transition:fade` / `animate:flip` (no `={…}`) calls the
+    // function on the host node (and directions for animate) without a params arg.
+    let t = project("<div transition:fade>x</div>");
+    assert!(
+        t.contains("__verter_transition(fade((null! as __VerterHostEl<\"div\">)))"),
+        "valueless transition calls fn without params: {t}"
+    );
+    let a = project("<div animate:flip>x</div>");
+    assert!(
+        a.contains(
+            "__verter_animate(flip((null! as __VerterHostEl<\"div\">), (null! as { from: DOMRect; to: DOMRect })))"
+        ),
+        "valueless animate calls fn without params: {a}"
+    );
 }
 
 #[test]

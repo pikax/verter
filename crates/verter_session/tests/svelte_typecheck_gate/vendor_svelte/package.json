@@ -5,6 +5,8 @@
   "exports": {
     ".": { "types": "./index.d.ts" },
     "./elements": { "types": "./elements.d.ts" },
-    "./attachments": { "types": "./attachments.d.ts" }
+    "./attachments": { "types": "./attachments.d.ts" },
+    "./transition": { "types": "./transition.d.ts" },
+    "./animate": { "types": "./animate.d.ts" }
   }
 }

@@ -677,11 +677,14 @@ impl TemplateProjector<'_, '_> {
                 self.rewrite_class_directive_to_data(attr, dir);
             }
             SvelteDirectiveKind::Style => {
-                // `style:` is out-of-scope v1 (the matrix): strip from the JSX
-                // position, void-check the value, record the diagnostic on the
-                // directive span.
-                self.push_diag(attr.span, UnsupportedKind::StyleDirective);
-                self.strip_directive_void_checking_value(attr, dir);
+                // `style:color={c}` / `style:color|important` (F1) — SUPPORTED.
+                // A `style:`-prefixed name is not a valid JSX attribute
+                // identifier, so the directive is STRIPPED from the JSX position
+                // (mirroring the CSS-custom-property pass-through) and its value
+                // is void-checked. The `|important` modifier is presentational.
+                // The shorthand `style:color` (no value) projects the implied
+                // `color` binding only when the name is a valid binding identifier.
+                self.rewrite_style_directive(attr, dir);
             }
             SvelteDirectiveKind::Use => {
                 // `use:action` (+ parameter) — SUPPORTED (basic action parameter
@@ -691,13 +694,20 @@ impl TemplateProjector<'_, '_> {
             }
             SvelteDirectiveKind::Transition
             | SvelteDirectiveKind::In
-            | SvelteDirectiveKind::Out
-            | SvelteDirectiveKind::Animate => {
-                // Transitions / animations — out-of-scope v1 (the matrix): strip
-                // from the JSX position, void-check the params, record the
-                // typed-unsupported diagnostic on the directive span.
-                self.push_diag(attr.span, UnsupportedKind::TransitionDirective);
-                self.strip_directive_void_checking_value(attr, dir);
+            | SvelteDirectiveKind::Out => {
+                // `transition:fn={p}` / `in:fn={p}` / `out:fn={p}` (+`|local`/
+                // `|global`) (F2) — SUPPORTED. Stripped from the JSX position and
+                // spread-merged into a `__verter_transition(node_hint, fn, p)`
+                // check (like `__verter_attach`): the transition function `fn`
+                // (the directive local) and the params `p` are checked against the
+                // host element's instance type. The `|local`/`|global` modifiers
+                // are presentational.
+                self.rewrite_transition_directive(el, attr, dir);
+            }
+            SvelteDirectiveKind::Animate => {
+                // `animate:fn={p}` (F3) — SUPPORTED. Stripped + spread-merged into
+                // `__verter_animate(fn(NODE_HINT, DIRECTIONS, p))`.
+                self.rewrite_animate_directive(el, attr, dir);
             }
             SvelteDirectiveKind::Unknown => {
                 remove_span(self.ct, attr.span);
@@ -748,6 +758,157 @@ impl TemplateProjector<'_, '_> {
             return;
         }
         remove_span(self.ct, attr.span);
+    }
+
+    /// Project a `style:` directive (F1).
+    ///
+    /// `style:color={c}` / `style:color|important` — a `style:`-prefixed name is
+    /// not a valid JSX attribute identifier, so the directive is STRIPPED from
+    /// the JSX position (mirroring the CSS-custom-property pass-through) and its
+    /// value is void-checked: `{...(__verter_void(c), {})}` (the value stays
+    /// mapped/checkable, contributes no prop). The `|important` modifier is
+    /// presentational. The valueless SHORTHAND `style:color` projects the implied
+    /// `color` binding identifier (`{...(__verter_void(color), {})}`) ONLY when
+    /// `color` is a valid JS binding identifier; otherwise the attribute is
+    /// removed outright (no type surface, no invalid identifier residue).
+    fn rewrite_style_directive(
+        &mut self,
+        attr: &SvelteAttribute,
+        dir: &crate::svelte::parser::SvelteDirective,
+    ) {
+        if let Some(SvelteAttributeValue::Expression(expr)) = dir.value {
+            // `style:NAME[|mods]={` → `{...(__verter_void(` ; trailing `}` →
+            // `), {})}`. The whole directive name+modifiers prefix becomes the
+            // spread opener — no `style:` residue survives, the value is mapped.
+            self.ct
+                .overwrite(attr.span.start, expr.start, "{...(__verter_void(");
+            self.ct.overwrite(expr.end, attr.span.end, "), {})}");
+            return;
+        }
+        // Shorthand `style:color` (no `={…}`): project the implied `color`
+        // binding when it is a valid identifier so its type errors / hover
+        // survive — `{...(__verter_void(color), {})}`.
+        if is_valid_binding_identifier(&dir.local) {
+            self.ct.overwrite(
+                attr.span.start,
+                attr.span.end,
+                &format!("{{...(__verter_void({}), {{}})}}", dir.local),
+            );
+            return;
+        }
+        remove_span(self.ct, attr.span);
+    }
+
+    /// Project a `transition:` / `in:` / `out:` directive (F2).
+    ///
+    /// `transition:fn={p}` (+`|local`/`|global`) → a spread-merged
+    /// `{...(__verter_transition(fn(NODE_HINT, p)), {})}` — the directive is
+    /// stripped from the JSX position and the transition function `fn` (the
+    /// directive local, an imported function identifier) is CALLED on the host
+    /// element instance (`NODE_HINT`, a typed `null!` cast keyed off the host
+    /// tag) with the params `p`. A real call site is the soundest projection:
+    /// TSGO checks the host-node type, the params type, the arg count (a
+    /// non-function `fn` is not callable, a missing required `params` is an
+    /// arg-count error, a wrong `params` is a type error), and the result is
+    /// asserted to be a `TransitionConfig` through `__verter_transition` (a thin
+    /// result-shape checker). The `|local`/`|global` modifiers are
+    /// presentational. A valueless `transition:fn` (no params) calls
+    /// `fn(NODE_HINT)`. A non-identifier local emits no call (the attribute is
+    /// removed — no invalid identifier residue).
+    fn rewrite_transition_directive(
+        &mut self,
+        el: &SvelteElement,
+        attr: &SvelteAttribute,
+        dir: &crate::svelte::parser::SvelteDirective,
+    ) {
+        if !is_valid_binding_identifier(&dir.local) {
+            remove_span(self.ct, attr.span);
+            return;
+        }
+        let node_hint = self.host_element_hint(el);
+        let fn_name = dir.local.clone();
+        if let Some(SvelteAttributeValue::Expression(expr)) = dir.value {
+            // `transition:fn[|mods]={` →
+            // `{...(__verter_transition({fn}({hint}, ` ; trailing `}` →
+            // `)), {})}`. The params expression `p` stays mapped (its inner type
+            // errors + hover survive). A Svelte transition function is invoked at
+            // RUNTIME as `fn(node, params, { direction })`, but the PUBLIC TYPES of
+            // the built-in transitions (`fly`/`fade`/`slide`/…) and idiomatic
+            // userland transitions declare only `(node, params?)` — the trailing
+            // `options` is always optional/absent in the type surface. Passing a
+            // third arg would therefore break every two-param built-in, so the
+            // projected call is `fn(node, params)` (host node + params): a custom
+            // transition that DECLARES an `options` param keeps it optional (the
+            // `custom_transition_with_optional_options_…` gate fixture pins this).
+            self.ct.overwrite(
+                attr.span.start,
+                expr.start,
+                &format!("{{...(__verter_transition({fn_name}({node_hint}, "),
+            );
+            self.ct.overwrite(expr.end, attr.span.end, ")), {})}");
+            return;
+        }
+        // No params: call `fn(NODE_HINT)`.
+        self.ct.overwrite(
+            attr.span.start,
+            attr.span.end,
+            &format!("{{...(__verter_transition({fn_name}({node_hint})), {{}})}}"),
+        );
+    }
+
+    /// Project an `animate:` directive (F3).
+    ///
+    /// `animate:fn={p}` →
+    /// `{...(__verter_animate(fn(NODE_HINT, DIRECTIONS, p)), {})}` — the directive
+    /// is stripped and the animate function `fn` is CALLED on the host element
+    /// with a synthetic from/to-rect `DIRECTIONS` descriptor and the params `p`.
+    /// As for transitions, the real call site is the soundest check (host node +
+    /// params + arity + non-function), and the result is asserted to be an
+    /// `AnimationConfig` through `__verter_animate`. A valueless `animate:fn`
+    /// calls `fn(NODE_HINT, DIRECTIONS)`; a non-identifier local emits no call.
+    fn rewrite_animate_directive(
+        &mut self,
+        el: &SvelteElement,
+        attr: &SvelteAttribute,
+        dir: &crate::svelte::parser::SvelteDirective,
+    ) {
+        if !is_valid_binding_identifier(&dir.local) {
+            remove_span(self.ct, attr.span);
+            return;
+        }
+        let node_hint = self.host_element_hint(el);
+        let fn_name = dir.local.clone();
+        let directions = "(null! as { from: DOMRect; to: DOMRect })";
+        if let Some(SvelteAttributeValue::Expression(expr)) = dir.value {
+            self.ct.overwrite(
+                attr.span.start,
+                expr.start,
+                &format!("{{...(__verter_animate({fn_name}({node_hint}, {directions}, "),
+            );
+            self.ct.overwrite(expr.end, attr.span.end, ")), {})}");
+            return;
+        }
+        self.ct.overwrite(
+            attr.span.start,
+            attr.span.end,
+            &format!("{{...(__verter_animate({fn_name}({node_hint}, {directions})), {{}})}}"),
+        );
+    }
+
+    /// The typed node-hint expression for a `transition:`/`animate:`-host element.
+    ///
+    /// For an INTRINSIC element the hint resolves the precise DOM instance type
+    /// via the prelude's `__VerterHostEl<Tag>` (known HTML/SVG tag → its element
+    /// type, unknown/custom → `Element`). For a component / `<svelte:*>` /
+    /// dynamic host the host element type is unknown, so the hint falls back to
+    /// the `Element` bound.
+    fn host_element_hint(&self, el: &SvelteElement) -> String {
+        match el.kind {
+            SvelteElementKind::Intrinsic => {
+                format!("(null! as __VerterHostEl<\"{}\">)", el.name)
+            }
+            _ => "(null! as Element)".to_string(),
+        }
     }
 
     /// Whether a `bind:` directive value is a function binding
@@ -1198,4 +1359,21 @@ fn node_span(node: &SvelteNode) -> Option<Span> {
         SvelteNode::Block(b) => b.span,
         SvelteNode::Tag(t) => t.span,
     })
+}
+
+/// Whether `name` is a valid JS binding identifier — used to decide whether a
+/// shorthand `style:color` / a `transition:`/`animate:` local can be projected
+/// as a bare identifier reference. Conservative ASCII rule: a leading
+/// `A-Za-z_$`, then `A-Za-z0-9_$`. A name failing this (empty, hyphenated, …)
+/// is NOT emitted as an identifier (the directive is removed — no invalid
+/// identifier residue in the projected TSX).
+fn is_valid_binding_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first.is_ascii_alphabetic() || first == '_' || first == '$') {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
 }
