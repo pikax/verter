@@ -96,6 +96,7 @@ pub(super) async fn handle_hover(
         )
     })();
     let vue_kind_label = verter_full.as_ref().and_then(|r| r.vue_kind_label.clone());
+    let source_token = verter_full.as_ref().and_then(|r| r.source_token.clone());
     let verter_result = verter_full.map(|r| r.hover);
 
     let child_hover_target = (|| {
@@ -187,6 +188,7 @@ pub(super) async fn handle_hover(
                     &ctx.tsx_line_index,
                     &ctx.vue_line_index,
                     vue_kind_label.as_deref(),
+                    source_token.as_ref(),
                 ));
             }
 
@@ -224,6 +226,7 @@ pub(super) async fn handle_hover(
                                         &ctx.tsx_line_index,
                                         &ctx.vue_line_index,
                                         vue_kind_label.as_deref(),
+                                        source_token.as_ref(),
                                     ));
                                 }
                             }
@@ -239,6 +242,7 @@ pub(super) async fn handle_hover(
                 &ctx.tsx_line_index,
                 &ctx.vue_line_index,
                 vue_kind_label.as_deref(),
+                source_token.as_ref(),
             ));
         } else {
             tracing::info!("hover: no ide_context for {}", uri.as_str());

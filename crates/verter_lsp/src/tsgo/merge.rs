@@ -11,6 +11,7 @@ use verter_span::{LspPosition, TsPosition};
 
 use crate::documents::line_index::LineIndex;
 use crate::documents::position_map::PositionMapper;
+use crate::features::hover::HoverSourceToken;
 #[cfg(test)]
 use crate::tsgo::protocol::Completion;
 use crate::tsgo::protocol::{
@@ -206,6 +207,7 @@ pub fn merge_hover(
     _tsx_line_index: &LineIndex,
     _vue_line_index: &LineIndex,
     vue_kind_label: Option<&str>,
+    source_token: Option<&HoverSourceToken>,
 ) -> Option<Hover> {
     match (verter_hover, type_hover) {
         (Some(verter), Some(type_info)) => {
@@ -217,8 +219,11 @@ pub fn merge_hover(
             if let Some(label) = vue_kind_label {
                 type_block = replace_kind_prefix(&type_block, label);
             }
-            if let Some(vue_attr) = extract_vue_attr_label(&verter_text) {
-                type_block = replace_primary_label_with_vue_attr(&type_block, &vue_attr);
+            // Rewrite the primary label to Vue source syntax ONLY when the verter
+            // hover carries TYPED event-directive provenance — never by reparsing
+            // rendered hover text and never by `on*` name-suffix sniffing.
+            if let Some(HoverSourceToken::EventDirective { vue_attr }) = source_token {
+                type_block = replace_primary_label_with_vue_attr(&type_block, vue_attr);
             }
             let merged = if context.trim().is_empty() {
                 type_block
@@ -349,21 +354,6 @@ fn replace_kind_prefix(content: &str, vue_label: &str) -> String {
         }
     }
     content.to_string()
-}
-
-fn extract_vue_attr_label(text: &str) -> Option<String> {
-    let mut rest = text;
-    while let Some(start) = rest.find('`') {
-        rest = &rest[start + 1..];
-        let end = rest.find('`')?;
-        let candidate = &rest[..end];
-        if candidate.starts_with('@') {
-            let label_end = candidate.find('(').unwrap_or(candidate.len());
-            return Some(candidate[..label_end].trim().to_string());
-        }
-        rest = &rest[end + 1..];
-    }
-    None
 }
 
 fn replace_primary_label_with_vue_attr(content: &str, vue_attr: &str) -> String {
@@ -1621,6 +1611,7 @@ mod tests {
             &tsx_li,
             &vue_li,
             None,
+            None,
         );
         let text = extract_hover_text(&result.unwrap());
         assert!(text.contains("const msg: string"));
@@ -1633,7 +1624,7 @@ mod tests {
         let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
         let verter = make_verter_hover("**msg** (SetupConst)");
 
-        let result = merge_hover(Some(verter), None, &mapper, &tsx_li, &vue_li, None);
+        let result = merge_hover(Some(verter), None, &mapper, &tsx_li, &vue_li, None, None);
         assert!(result.is_some());
         let text = extract_hover_text(&result.unwrap());
         assert!(text.contains("SetupConst"));
@@ -1649,7 +1640,15 @@ mod tests {
             range_end: None,
         };
 
-        let result = merge_hover(None, Some(type_hover), &mapper, &tsx_li, &vue_li, None);
+        let result = merge_hover(
+            None,
+            Some(type_hover),
+            &mapper,
+            &tsx_li,
+            &vue_li,
+            None,
+            None,
+        );
         assert!(result.is_some());
         let text = extract_hover_text(&result.unwrap());
         assert!(text.contains("const msg: string"));
@@ -1659,7 +1658,7 @@ mod tests {
     #[test]
     fn merge_hover_neither() {
         let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
-        let result = merge_hover(None, None, &mapper, &tsx_li, &vue_li, None);
+        let result = merge_hover(None, None, &mapper, &tsx_li, &vue_li, None, None);
         assert!(result.is_none());
     }
 
@@ -2903,7 +2902,7 @@ mod tests {
             contents: "const count: Ref<number>".to_string(),
         });
 
-        let result = merge_hover(verter, tsgo, &mapper, &tsx_li, &vue_li, None);
+        let result = merge_hover(verter, tsgo, &mapper, &tsx_li, &vue_li, None, None);
         assert!(result.is_some());
 
         let text = match result.unwrap().contents {
@@ -2937,7 +2936,7 @@ mod tests {
             contents: "const x: string".to_string(),
         });
 
-        let result = merge_hover(verter, tsgo, &mapper, &tsx_li, &vue_li, None);
+        let result = merge_hover(verter, tsgo, &mapper, &tsx_li, &vue_li, None, None);
         assert!(result.is_some());
 
         let text = match result.unwrap().contents {
@@ -2962,7 +2961,7 @@ mod tests {
             contents: "```typescript\n(property) msg: string\n```\nThe message.".to_string(),
         });
 
-        let result = merge_hover(None, tsgo, &mapper, &tsx_li, &vue_li, None);
+        let result = merge_hover(None, tsgo, &mapper, &tsx_li, &vue_li, None, None);
         assert!(result.is_some());
 
         let text = match result.unwrap().contents {
@@ -2999,7 +2998,7 @@ mod tests {
             contents: "(property) msg: string".to_string(),
         });
 
-        let result = merge_hover(None, tsgo, &mapper, &tsx_li, &vue_li, None);
+        let result = merge_hover(None, tsgo, &mapper, &tsx_li, &vue_li, None, None);
         assert!(result.is_some());
 
         let text = match result.unwrap().contents {
@@ -3021,7 +3020,7 @@ mod tests {
             contents: "```typescript\n(property) select: (action: Action) => true\n```\nEmitted when selected.\n当选择时触发。".to_string(),
         });
 
-        let result = merge_hover(None, tsgo, &mapper, &tsx_li, &vue_li, None);
+        let result = merge_hover(None, tsgo, &mapper, &tsx_li, &vue_li, None, None);
         assert!(result.is_some());
 
         let text = match result.unwrap().contents {
@@ -3063,7 +3062,7 @@ mod tests {
             contents: "```typescript\nconst count: Ref<number>\n```\nA counter.".to_string(),
         });
 
-        let result = merge_hover(verter, tsgo, &mapper, &tsx_li, &vue_li, None);
+        let result = merge_hover(verter, tsgo, &mapper, &tsx_li, &vue_li, None, None);
         assert!(result.is_some());
 
         let text = match result.unwrap().contents {
@@ -3101,7 +3100,7 @@ mod tests {
                 .to_string(),
         });
 
-        let result = merge_hover(None, tsgo, &mapper, &tsx_li, &vue_li, None);
+        let result = merge_hover(None, tsgo, &mapper, &tsx_li, &vue_li, None, None);
         let text = match result.unwrap().contents {
             HoverContents::Markup(m) => m.value,
             _ => panic!("expected markup"),
@@ -3140,7 +3139,7 @@ mod tests {
             contents: "(property) game: GameVo\nThe game data.".to_string(),
         });
 
-        let result = merge_hover(None, tsgo, &mapper, &tsx_li, &vue_li, None);
+        let result = merge_hover(None, tsgo, &mapper, &tsx_li, &vue_li, None, None);
         let text = match result.unwrap().contents {
             HoverContents::Markup(m) => m.value,
             _ => panic!("expected markup"),
@@ -3173,7 +3172,7 @@ mod tests {
             contents: "(property) msg: string".to_string(),
         });
 
-        let result = merge_hover(None, tsgo, &mapper, &tsx_li, &vue_li, None);
+        let result = merge_hover(None, tsgo, &mapper, &tsx_li, &vue_li, None, None);
         let text = match result.unwrap().contents {
             HoverContents::Markup(m) => m.value,
             _ => panic!("expected markup"),
@@ -3216,6 +3215,7 @@ mod tests {
             &tsx_li,
             &vue_li,
             Some("ref"),
+            None,
         );
         let text = match result.unwrap().contents {
             HoverContents::Markup(m) => m.value,
@@ -3232,15 +3232,21 @@ mod tests {
     }
 
     #[test]
-    fn merge_hover_component_event_rewrites_primary_label_to_vue_syntax() {
+    fn merge_hover_rewrites_primary_label_from_typed_event_provenance() {
+        // The `onCustom` → `@custom` rewrite is driven by the TYPED
+        // `HoverSourceToken::EventDirective` provenance, never by reparsing the
+        // rendered verter hover text.
         let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
-        let verter = make_verter_hover("**Component event** â€” `@custom(payload: string)`");
+        let verter = make_verter_hover("`@custom`\n\nListens for the `custom` event.");
         let type_hover = HoverInfo {
             contents: "(property) onCustom: (payload: string) => void".to_string(),
             range_start: None,
             range_end: None,
         };
 
+        let token = HoverSourceToken::EventDirective {
+            vue_attr: "@custom".to_string(),
+        };
         let result = merge_hover(
             Some(verter),
             Some(type_hover),
@@ -3248,6 +3254,7 @@ mod tests {
             &tsx_li,
             &vue_li,
             None,
+            Some(&token),
         );
         let text = match result.unwrap().contents {
             HoverContents::Markup(m) => m.value,
@@ -3261,6 +3268,44 @@ mod tests {
         assert!(
             !first_content_line.contains("onCustom"),
             "primary hover label must not expose TSX on* naming, got: {text}"
+        );
+    }
+
+    #[test]
+    fn merge_hover_does_not_rewrite_label_without_typed_provenance() {
+        // Discriminating: even when the verter hover TEXT contains a backticked
+        // `@custom` token, the merge layer must NOT rewrite the TypeProvider label
+        // unless TYPED provenance is supplied. This proves the markdown side-channel
+        // (the former `extract_vue_attr_label` text reparse) is gone.
+        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+        let verter = make_verter_hover("`@custom`\n\nSome descriptive context.");
+        let type_hover = HoverInfo {
+            contents: "(property) onCustom: (payload: string) => void".to_string(),
+            range_start: None,
+            range_end: None,
+        };
+
+        let result = merge_hover(
+            Some(verter),
+            Some(type_hover),
+            &mapper,
+            &tsx_li,
+            &vue_li,
+            None,
+            None,
+        );
+        let text = match result.unwrap().contents {
+            HoverContents::Markup(m) => m.value,
+            _ => panic!("expected markup"),
+        };
+        let first_content_line = text.lines().nth(1).unwrap_or_default();
+        assert!(
+            first_content_line.contains("onCustom"),
+            "without typed provenance the generated label must be preserved, got: {text}"
+        );
+        assert!(
+            !first_content_line.contains("@custom"),
+            "no text-based rewrite may occur without typed provenance, got: {text}"
         );
     }
 

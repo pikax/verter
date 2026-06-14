@@ -25,9 +25,9 @@ use crate::utils::oxc::vue::{parse_script_with_companion, ScriptItem, ScriptMode
 
 use super::{
     apply_event_handler_param_inference, apply_template_ref_call_inference,
-    build_binding_source_info, collect_binding_names, detect_get_current_instance,
-    detect_use_attrs_calls, directive_accessor_declaration, emit_attrs_type_aliases,
-    emit_comp_functions_to_string, emit_get_root_component_to_string,
+    build_binding_source_info, collect_binding_names, collect_global_component_fallbacks,
+    detect_get_current_instance, detect_use_attrs_calls, directive_accessor_declaration,
+    emit_attrs_type_aliases, emit_comp_functions_to_string, emit_get_root_component_to_string,
     emit_global_component_fallbacks, emit_helper_imports, emit_minimal_wrapper,
     emit_type_constructs, instance_declaration, instance_probe_line, kebab_to_pascal_case,
     process_companion_for_tsx, process_macros, rewrite_ts_type_assertions,
@@ -50,6 +50,7 @@ pub(super) fn process_tsx_script_setup<'alloc>(
     options: &IdeScriptOptions<'_>,
     builtin_components: &[&str],
     template_end: Option<u32>,
+    template_component_fallbacks: &mut Vec<String>,
 ) -> (Option<String>, Option<DestructuredBlockMeta>) {
     let content_span = match &setup.content {
         Some(span) => span,
@@ -604,17 +605,17 @@ pub(super) fn process_tsx_script_setup<'alloc>(
             .map(|(name, bt)| (*name, *bt))
             .collect();
 
-        // Emit global component fallback consts BEFORE the block scope.
+        // Collect, then emit, global component fallback consts BEFORE the block scope.
         // These provide types for globally registered components (e.g. RouterLink,
         // RouterView) that aren't imported. They must be declared before the block
         // scope so the template JSX inside can reference them without TDZ errors.
-        emit_global_component_fallbacks(
-            &mut wrapper_end,
-            template_ast,
-            source,
-            bindings,
-            options.is_jsx,
-        );
+        // The collected list is also handed back to the template-typing inventory so a
+        // global component's `@event` payload resolves through the same `InstanceType<typeof
+        // Pascal>["$props"]` const that is emitted here.
+        let global_fallbacks =
+            collect_global_component_fallbacks(template_ast, source, |n| bindings.contains_key(n));
+        emit_global_component_fallbacks(&mut wrapper_end, &global_fallbacks, options.is_jsx);
+        *template_component_fallbacks = global_fallbacks;
 
         // Emit self-referencing component declaration (#28).
         // When a component's template uses its own name (e.g., <TreeNode /> inside

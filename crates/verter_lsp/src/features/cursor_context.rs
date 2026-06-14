@@ -301,21 +301,17 @@ fn classify_in_opening_tag(
             };
 
             let after_name = dir_text.get(modifier_region_start..).unwrap_or("");
-            if after_name.contains('.') {
-                let existing: Vec<String> = dir.modifiers.clone();
-                if dir.name == "model" {
-                    return CursorContext::Template(TemplateCursorContext::VModelModifier {
-                        existing_modifiers: existing,
-                    });
-                } else {
-                    return CursorContext::Template(TemplateCursorContext::EventModifier {
-                        event_name: dir.argument.clone().unwrap_or_default(),
-                        existing_modifiers: existing,
-                    });
-                }
-            }
-            // Also check if the byte right at cursor is a dot (just typed)
-            if source.as_bytes().get(offset as usize) == Some(&b'.') {
+            // Modifiers live strictly between the argument/name and the `=` value
+            // assignment (`@click.stop="…"`). Once the cursor is inside the value a
+            // `.` is member access in the handler expression
+            // (`@click="handle($event.x)"`), NOT a modifier separator — clipping the
+            // scan at `=` keeps the value routed to expression/member completion
+            // instead of leaking event-modifier completions.
+            let in_modifier_region = !after_name.contains('=');
+            let at_modifier_dot = in_modifier_region
+                && (after_name.contains('.')
+                    || source.as_bytes().get(offset as usize) == Some(&b'.'));
+            if at_modifier_dot {
                 let existing: Vec<String> = dir.modifiers.clone();
                 if dir.name == "model" {
                     return CursorContext::Template(TemplateCursorContext::VModelModifier {

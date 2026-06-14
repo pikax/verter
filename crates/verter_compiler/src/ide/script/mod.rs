@@ -59,13 +59,13 @@ use crate::parser::types::RootNodeScript;
 use crate::template::code_gen::binding::BindingType;
 use crate::template::code_gen::types::CodeGenOutput;
 
-use crate::ide::IdeScriptOptions;
+use crate::ide::{IdeScriptOptions, TemplateComponentBindings};
 
 use crate::compile::types::DestructuredBlockMeta;
 
 mod comp_emit;
 mod detectors;
-mod event_inference;
+pub(crate) mod event_inference;
 mod macros;
 mod options_api;
 mod recovery;
@@ -94,9 +94,10 @@ use type_constructs::{
     emit_helper_imports, emit_helper_imports_with_define_component, emit_type_constructs,
 };
 use wrapper::{
-    directive_accessor_declaration, emit_global_component_fallbacks, emit_minimal_wrapper,
-    instance_declaration, instance_declaration_ambient, instance_probe_line,
-    should_infer_function_types, to_pascal_case, PREFIX,
+    collect_global_component_fallbacks, directive_accessor_declaration,
+    emit_global_component_fallbacks, emit_minimal_wrapper, instance_declaration,
+    instance_declaration_ambient, instance_probe_line, should_infer_function_types, to_pascal_case,
+    PREFIX,
 };
 
 pub use type_constructs::{VERTER_TYPES_AMBIENT_MODULE, VERTER_TYPES_STANDALONE_DTS};
@@ -123,6 +124,10 @@ pub struct IdeScriptGenResult<'alloc> {
     pub return_close_pos: Option<u32>,
     /// Structured metadata for the destructured block, if present.
     pub destructured_block: Option<DestructuredBlockMeta>,
+    /// Inventory of GlobalComponents fallback consts emitted into the templateBindingFN,
+    /// shared with template event typing so a globally-registered component's `@event`
+    /// payload resolves through the same in-scope const that was emitted for it.
+    pub template_component_bindings: TemplateComponentBindings,
 }
 
 /// Generate TSX script output from script blocks.
@@ -147,6 +152,9 @@ pub fn generate_ide_script<'alloc>(
     let mut return_close: Option<String> = None;
 
     let mut destructured_block: Option<DestructuredBlockMeta> = None;
+    // GlobalComponents fallback consts emitted into the templateBindingFN. Only the
+    // `<script setup>` arm emits them; the options-API and no-script arms emit none.
+    let mut global_component_fallbacks: Vec<String> = Vec::new();
 
     match (script, script_setup) {
         (_, Some(setup)) => {
@@ -163,6 +171,7 @@ pub fn generate_ide_script<'alloc>(
                 options,
                 &builtin_components,
                 template_end,
+                &mut global_component_fallbacks,
             );
             return_close = result.0;
             destructured_block = result.1;
@@ -226,6 +235,7 @@ pub fn generate_ide_script<'alloc>(
         return_close,
         return_close_pos,
         destructured_block,
+        template_component_bindings: TemplateComponentBindings::new(global_component_fallbacks),
     }
 }
 

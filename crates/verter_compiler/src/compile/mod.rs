@@ -1253,6 +1253,7 @@ fn compile_inner(
                         &tsx_alloc,
                         &tsx_script_result.bindings,
                         &tsx_t_opts,
+                        &tsx_script_result.template_component_bindings,
                     );
                     tsx_out.apply_to(&mut tsx_ct);
                 }

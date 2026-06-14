@@ -8633,11 +8633,12 @@ const a = {}
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let tsx = result.tsx.as_ref().expect("tsx block");
     let normalized: String = tsx.code.chars().filter(|c| !c.is_whitespace()).collect();
+    // `$event` is bound as the handler's sole parameter so it is contextually typed
+    // by the JSX event prop, and stays inside the callback scope (never
+    // context-prefixed).
     assert!(
-        normalized.contains(
-            "onClick={(...___VERTER___eventArgs)=>___VERTER___eventCallbacks(___VERTER___eventArgs,($event)=>{$event})}"
-        ),
-        "Bare $event should be emitted via eventCallbacks with a typed callback scope, got:\n{}",
+        normalized.contains("onClick={($event)=>{$event}}"),
+        "Bare $event should be emitted as a contextually-typed ($event) => callback, got:\n{}",
         tsx.code
     );
     assert!(
@@ -8646,8 +8647,8 @@ const a = {}
         tsx.code
     );
     assert!(
-        !normalized.contains("onClick={($event)=>{$event}}"),
-        "$event handlers should not regress to the bare callback form, got:\n{}",
+        !tsx.code.contains("___VERTER___eventCallbacks("),
+        "$event handler should not call the generic eventCallbacks wrapper, got:\n{}",
         tsx.code
     );
 }
@@ -8665,11 +8666,11 @@ const a = {}
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let tsx = result.tsx.as_ref().expect("tsx block");
     let normalized: String = tsx.code.chars().filter(|c| !c.is_whitespace()).collect();
+    // `$event` member access stays inside the contextually-typed ($event) =>
+    // callback scope, never context-prefixed.
     assert!(
-        normalized.contains(
-            "onInput={(...___VERTER___eventArgs)=>___VERTER___eventCallbacks(___VERTER___eventArgs,($event)=>{$event.target})}"
-        ),
-        "$event member expressions must stay inside the eventCallbacks callback scope, got:\n{}",
+        normalized.contains("onInput={($event)=>{$event.target}}"),
+        "$event member expressions stay inside the ($event) => callback scope, got:\n{}",
         tsx.code
     );
     assert!(
@@ -8678,8 +8679,8 @@ const a = {}
         tsx.code
     );
     assert!(
-        !normalized.contains("onInput={($event)=>{$event.target}}"),
-        "$event member handlers should not regress to the bare callback form, got:\n{}",
+        !tsx.code.contains("___VERTER___eventCallbacks("),
+        "$event member handler should not call the generic eventCallbacks wrapper, got:\n{}",
         tsx.code
     );
 }
@@ -14898,4 +14899,165 @@ fn malformed_template_expression_diagnostic_identical_across_shared_overlay() {
         tsx_only.tsx.as_ref().expect("tsx-only").code,
         "shared overlay changed the TSX output for a malformed interpolation"
     );
+}
+
+// ── Spread-path component event typing: end-to-end through compile() ────────
+//
+// These exercise the FULL pipeline — script generation builds the shared component
+// inventory (local bindings + GlobalComponents fallback consts) and threads it through
+// `IdeScriptGenResult` into template generation, where the `@event` spread path consumes
+// it. The unit tests in `ide/template/tests.rs` supply the inventory manually; these
+// prove it is actually produced and consumed across the script/template boundary.
+//
+// `result.errors.is_empty()` here asserts the Rust-side compile diagnostic set is empty
+// (the generated TSX is syntactically well-formed); the `tsx.code.contains` checks assert
+// the byte-exact formula string the codegen must emit. This is the string-exact codegen
+// contract — NOT a tsgo type-check of that formula resolving to the payload.
+
+/// Assert the generated TSX is free of every spread-event-typing antipattern the shared
+/// component-binding inventory exists to prevent. Every spread-event compile() test calls
+/// this so the negative contract is uniform and discriminating — it FAILS if codegen
+/// regresses to an untyped `$event`, the intrinsic-attribute surface, the retired
+/// `eventCallbacks` helper, or the tsgo-unresolvable `GlobalComponents[...]` indexed event
+/// type.
+fn assert_no_spread_event_antipatterns(code: &str) {
+    assert!(
+        !code.contains("$event: any"),
+        "spread $event must be precisely typed, never `any`: {code}"
+    );
+    assert!(
+        !code.contains("IntrinsicElementAttributes"),
+        "spread event typing must not fall back to the IntrinsicElementAttributes surface: {code}"
+    );
+    assert!(
+        !code.contains("___VERTER___eventCallbacks"),
+        "spread event typing must not use the retired eventCallbacks helper: {code}"
+    );
+    assert!(
+        !code.contains("GlobalComponents["),
+        "spread event typing must not use the tsgo-unresolvable GlobalComponents[...] indexed event type: {code}"
+    );
+}
+
+#[test]
+fn tsx_global_component_spread_event_resolves_via_fallback_const() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+function onPing(s: string) { void s; }
+</script>
+<template>
+  <GlobalEmitComp @ping="onPing($event)" @ping="onPing($event)" />
+</template>
+"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    // Script generation emits the GlobalComponents fallback const for the unimported
+    // component (the only place `import('vue').GlobalComponents` is allowed — a
+    // `extends ... infer` conditional, NEVER an indexed event-type query).
+    assert!(
+        tsx.code.contains(
+            "const GlobalEmitComp = {} as import('vue').GlobalComponents extends { GlobalEmitComp: infer C } ? C : unknown;"
+        ),
+        "must emit the GlobalComponents fallback const: {}",
+        tsx.code
+    );
+    // The duplicate-spread `$event` resolves through that same fallback const.
+    assert!(
+        tsx.code.contains(
+            r#"$event: Parameters<NonNullable<Required<InstanceType<typeof GlobalEmitComp>["$props"]>["onPing"]>>[0]"#
+        ),
+        "spread $event must resolve via InstanceType<typeof GlobalEmitComp>: {}",
+        tsx.code
+    );
+    // No spread-event antipattern — untyped `$event`, the intrinsic-attribute surface,
+    // the retired eventCallbacks helper, or the tsgo-unresolvable `GlobalComponents[...]`
+    // indexed event type (the fallback const's `GlobalComponents extends` is distinct).
+    assert_no_spread_event_antipatterns(&tsx.code);
+}
+
+#[test]
+fn tsx_global_component_spread_arrow_satisfies_via_fallback_const() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+function onPing(s: string) { void s; }
+</script>
+<template>
+  <GlobalEmitComp @some-event="(e) => onPing(e)" />
+</template>
+"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        tsx.code.contains(
+            r#"((e) => onPing(e)) satisfies (...___VERTER___eventArgs: Parameters<NonNullable<Required<InstanceType<typeof GlobalEmitComp>["$props"]>["onSome-event"]>>) => unknown"#
+        ),
+        "spread arrow must satisfies-wrap via InstanceType<typeof GlobalEmitComp>: {}",
+        tsx.code
+    );
+    assert_no_spread_event_antipatterns(&tsx.code);
+}
+
+#[test]
+fn tsx_local_component_spread_event_resolves_via_binding_no_fallback() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+import EmitChild from './EmitChild.vue';
+function onPick(n: number) { void n; }
+</script>
+<template>
+  <EmitChild @pick="onPick($event)" @pick="onPick($event)" />
+</template>
+"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        tsx.code.contains(
+            r#"$event: Parameters<NonNullable<Required<InstanceType<typeof EmitChild>["$props"]>["onPick"]>>[0]"#
+        ),
+        "spread $event must resolve via the imported binding InstanceType<typeof EmitChild>: {}",
+        tsx.code
+    );
+    // An imported component must NOT also get a GlobalComponents fallback const.
+    assert!(
+        !tsx.code
+            .contains("const EmitChild = {} as import('vue').GlobalComponents"),
+        "imported component must NOT get a fallback const: {}",
+        tsx.code
+    );
+    assert_no_spread_event_antipatterns(&tsx.code);
+}
+
+#[test]
+fn tsx_global_component_simple_handler_param_inference_via_fallback() {
+    // event_inference consumes the SAME inventory: a global component's simple-ident
+    // handler types its function-declaration parameter via the fallback const, with no
+    // implicit-any left behind.
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+function handlePing(e) { void e; }
+</script>
+<template>
+  <GlobalEmitComp @ping="handlePing" />
+</template>
+"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        tsx.code
+            .contains("const GlobalEmitComp = {} as import('vue').GlobalComponents"),
+        "must emit the fallback const: {}",
+        tsx.code
+    );
+    assert!(
+        tsx.code.contains(
+            r#"Parameters<NonNullable<Required<InstanceType<typeof GlobalEmitComp>["$props"]>["onPing"]>>"#
+        ),
+        "simple-handler param inference must resolve via the fallback const: {}",
+        tsx.code
+    );
+    assert_no_spread_event_antipatterns(&tsx.code);
 }

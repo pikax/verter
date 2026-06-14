@@ -133,7 +133,6 @@ declare module "@verter/types" {
   export declare function strictRenderSlot<T extends (...args: any[]) => any, U>(slot: T, child: ReturnType<T> extends infer R ? R extends Array<any> ? never : R extends string ? [R] : R extends U ? [U] : R : ReturnType<T>): any;
   export declare function strictRenderSlot<T extends (...args: any[]) => any, U>(slot: T, children: ReturnType<T> extends infer R ? R extends readonly [any, ...any[]] ? R : R extends Array<infer E> ? U extends Array<infer UE> ? [UE] extends [never] ? U : E extends string | number | boolean | symbol | bigint | null | undefined ? E extends UE ? U : never : UE extends E ? IsExactlyEqual<UE, E> extends true ? U : never : never : never : never : ReturnType<T>): any;
   export declare function checkRequiredSlots<T>(slots: T, provided: { [K in keyof T as undefined extends T[K] ? never : K]: true }): void;
-  export declare function eventCallbacks<TArgs extends Array<any>, R extends ($event: TArgs[0]) => any>(event: TArgs, cb: R): R;
 }
 "#;
 
@@ -173,7 +172,6 @@ export type IsExactlyEqual<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() 
 export declare function strictRenderSlot<T extends (...args: any[]) => any, U>(slot: T, child: ReturnType<T> extends infer R ? R extends Array<any> ? never : R extends string ? [R] : R extends U ? [U] : R : ReturnType<T>): any;
 export declare function strictRenderSlot<T extends (...args: any[]) => any, U>(slot: T, children: ReturnType<T> extends infer R ? R extends readonly [any, ...any[]] ? R : R extends Array<infer E> ? U extends Array<infer UE> ? [UE] extends [never] ? U : E extends string | number | boolean | symbol | bigint | null | undefined ? E extends UE ? U : never : UE extends E ? IsExactlyEqual<UE, E> extends true ? U : never : never : never : never : ReturnType<T>): any;
 export declare function checkRequiredSlots<T>(slots: T, provided: { [K in keyof T as undefined extends T[K] ? never : K]: true }): void;
-export declare function eventCallbacks<TArgs extends Array<any>, R extends ($event: TArgs[0]) => any>(event: TArgs, cb: R): R;
 "#;
 
 /// Collect Vue built-in component names used in the template AST.
@@ -279,7 +277,7 @@ fn emit_helper_imports_inner(
     // Runtime imports from @verter/types
     writeln!(
         imports,
-        "import {{ shallowUnwrapRef as {P}shallowUnwrapRef, enhanceElementWithProps as {P}enhanceElementWithProps, extractRenderComponent as {P}extractRenderComponent, instantiateComponent as {P}instantiateComponent, extractArgumentsFromRenderSlot as {P}extractArgumentsFromRenderSlot, runCustomDirective as {P}runCustomDirective, retrieveSetupDirectives as {P}retrieveSetupDirectives, strictRenderSlot as {P}strictRenderSlot, checkRequiredSlots as {P}checkRequiredSlots, eventCallbacks as {P}eventCallbacks }} from \"{}\";",
+        "import {{ shallowUnwrapRef as {P}shallowUnwrapRef, enhanceElementWithProps as {P}enhanceElementWithProps, extractRenderComponent as {P}extractRenderComponent, instantiateComponent as {P}instantiateComponent, extractArgumentsFromRenderSlot as {P}extractArgumentsFromRenderSlot, runCustomDirective as {P}runCustomDirective, retrieveSetupDirectives as {P}retrieveSetupDirectives, strictRenderSlot as {P}strictRenderSlot, checkRequiredSlots as {P}checkRequiredSlots }} from \"{}\";",
         options.types_module_name,
         P = PREFIX,
     )

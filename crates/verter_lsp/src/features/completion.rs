@@ -1086,57 +1086,18 @@ fn binding_detail(binding: &verter_semantic::analysis::AnalyzedBinding) -> Strin
 // Event Modifier Completions
 // =============================================================================
 
-/// Runtime modifiers available for all events.
-const RUNTIME_MODIFIERS: &[(&str, &str)] = &[
-    ("stop", "Call event.stopPropagation()"),
-    ("prevent", "Call event.preventDefault()"),
-    ("self", "Only trigger if event.target is the element itself"),
-    ("once", "Trigger at most once"),
-    ("capture", "Use capture mode for addEventListener"),
-    ("passive", "Mark addEventListener as passive"),
-];
-
-/// System modifier keys (available for all events).
-const SYSTEM_MODIFIERS: &[(&str, &str)] = &[
-    ("ctrl", "Require Ctrl key"),
-    ("shift", "Require Shift key"),
-    ("alt", "Require Alt key"),
-    ("meta", "Require Meta/Command key"),
-    ("exact", "Require exact modifier combination"),
-];
-
-/// Key modifiers for keyboard events (keydown, keyup, keypress).
-const KEY_MODIFIERS: &[(&str, &str)] = &[
-    ("enter", "Enter key"),
-    ("tab", "Tab key"),
-    ("delete", "Delete or Backspace key"),
-    ("esc", "Escape key"),
-    ("space", "Space key"),
-    ("up", "Arrow Up"),
-    ("down", "Arrow Down"),
-    ("left", "Arrow Left (key)"),
-    ("right", "Arrow Right (key)"),
-    ("page-down", "Page Down"),
-    ("page-up", "Page Up"),
-    ("home", "Home key"),
-    ("end", "End key"),
-];
-
-/// Mouse button modifiers (for click, mousedown, mouseup).
-const MOUSE_BUTTON_MODIFIERS: &[(&str, &str)] = &[
-    ("left", "Left mouse button"),
-    ("right", "Right mouse button"),
-    ("middle", "Middle mouse button"),
-];
+use crate::features::event_modifiers::{
+    is_keyboard_event, is_mouse_button_event, KEY_MODIFIERS, MOUSE_BUTTON_MODIFIERS,
+    RUNTIME_MODIFIERS, SYSTEM_MODIFIERS,
+};
 
 /// Provide event modifier completions for a given event name.
 /// The event name is determined by the cursor context module.
 fn event_modifier_completions_for(event_name: &str) -> CompletionResult {
-    let is_keyboard = event_name.starts_with("key");
-    let is_mouse_button = matches!(
-        event_name,
-        "click" | "dblclick" | "mousedown" | "mouseup" | "contextmenu"
-    );
+    // Event-family classification is shared with hover (see `event_modifiers`) so the
+    // two surfaces never disagree on which modifiers apply to which events.
+    let is_keyboard = is_keyboard_event(event_name);
+    let is_mouse_button = is_mouse_button_event(event_name);
 
     let mut items = Vec::new();
 
