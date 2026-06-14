@@ -1,6 +1,9 @@
+use std::cell::OnceCell;
+
 use smallvec::SmallVec;
 
 use super::chunk::Chunk;
+use crate::cursor::position::PositionResolver;
 use oxc_allocator::Allocator;
 
 /// Result of scanning chunks for a target position.
@@ -68,6 +71,16 @@ pub struct CodeTransform<'a> {
     /// Precomputed once in `new()` to let source map generation skip `utf16_len()`
     /// calls (where byte length == UTF-16 length) for Original/Moved chunks.
     is_ascii: bool,
+    /// Lazily-built position resolver for the original source, shared across
+    /// every source map produced from this transform. Built once on first map
+    /// demand (one resolver per original source), never rebuilt per map.
+    resolver: OnceCell<PositionResolver<'a>>,
+    /// Test-only: the token-buffer capacity reserved by the most recent
+    /// `generate_map`, captured at the reservation point. Lets tests assert the
+    /// reservation covers every emitted token (no reallocation during
+    /// population) directly against the production map path.
+    #[cfg(test)]
+    last_reserved_token_capacity: std::cell::Cell<usize>,
 }
 
 #[allow(dead_code)] // Many API methods only exercised by tests currently
@@ -99,12 +112,47 @@ impl<'a> CodeTransform<'a> {
             cursor_hint: 0,
             output_delta: 0,
             is_ascii: source.is_ascii(),
+            resolver: OnceCell::new(),
+            #[cfg(test)]
+            last_reserved_token_capacity: std::cell::Cell::new(0),
         }
     }
 
     /// Get the original source text
     pub fn original(&self) -> &str {
         self.original
+    }
+
+    /// Position resolver for the original source, built once and shared across
+    /// every source map generated from this transform. Uses the
+    /// sourcemap-optimized constructor that skips the UTF-16 cumulative offset
+    /// cache (only line/column are needed here).
+    pub(super) fn sourcemap_resolver(&self) -> &PositionResolver<'a> {
+        self.resolver
+            .get_or_init(|| PositionResolver::new_for_sourcemap(self.original))
+    }
+
+    /// Test accessor: the cached resolver, or `None` if no map has demanded it
+    /// yet. Used to assert lazy, build-once-and-reuse semantics.
+    #[cfg(test)]
+    pub(crate) fn sourcemap_resolver_for_test(&self) -> Option<&PositionResolver<'a>> {
+        self.resolver.get()
+    }
+
+    /// Record the source-map token-buffer capacity reserved by `generate_map`,
+    /// captured at the reservation point. Called only from the map path under
+    /// test configuration.
+    #[cfg(test)]
+    pub(super) fn record_reserved_token_capacity(&self, capacity: usize) {
+        self.last_reserved_token_capacity.set(capacity);
+    }
+
+    /// Test accessor: the token-buffer capacity reserved by the most recent
+    /// `generate_map`. Used to assert the reservation covers every emitted
+    /// token, so the buffer never reallocates during population.
+    #[cfg(test)]
+    pub(crate) fn last_reserved_token_capacity_for_test(&self) -> usize {
+        self.last_reserved_token_capacity.get()
     }
 
     /// Whether the original source is pure ASCII (byte length == UTF-16 length).

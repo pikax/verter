@@ -1,8 +1,11 @@
+use std::borrow::Cow;
+
 use memchr::memchr_iter;
 
+use super::chunk::Chunk;
 use super::code_transform::CodeTransform;
 use crate::cursor::position::{utf16_len, PositionResolver};
-use oxc_sourcemap::{SourceMap, SourceMapBuilder};
+use oxc_sourcemap::{SourceMap, Token};
 
 /// Options for source map generation
 #[derive(Debug, Clone)]
@@ -69,36 +72,54 @@ impl<'a> CodeTransform<'a> {
     #[allow(unused_assignments)] // generated_line/column updated in outro but intentionally not read after
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn generate_map(&self, options: SourceMapOptions) -> SourceMap<'static> {
-        let mut builder = SourceMapBuilder::default();
-
-        // Set up source file
-        let source_id = if let Some(source) = options.source {
-            let id = if options.include_content {
-                builder.set_source_and_content(source, self.original())
+        // Set up source file. Our usage never duplicates sources or adds names,
+        // so the tokens accumulate into a single locally-owned, pre-reserved Vec
+        // that is handed directly to `SourceMap::new` — avoiding both the
+        // builder's incremental token-Vec regrowth and a dedup hash map.
+        let (sources, source_contents, source_id) = if let Some(source) = options.source {
+            let content = if options.include_content {
+                self.original()
             } else {
-                builder.set_source_and_content(source, "")
+                ""
             };
-            Some(id)
+            (
+                vec![Cow::Owned(source.to_owned())],
+                vec![Some(Cow::Owned(content.to_owned()))],
+                Some(0u32),
+            )
         } else {
-            None
+            (Vec::new(), Vec::new(), None)
         };
 
-        // Set output file name
-        if let Some(file) = options.file {
-            builder.set_file(file);
-        }
+        let file = options.file.map(|f| Cow::Owned(f.to_owned()));
 
-        // Build position resolver for O(log N) byte-offset → (line, UTF-16 column) lookups.
-        // Uses the sourcemap-optimized constructor that skips the UTF-16 cumulative offset
-        // cache (not needed here — we only use line and column).
-        let resolver = PositionResolver::new_for_sourcemap(self.original());
+        // One resolver per original source, built once and reused across maps.
+        let resolver = self.sourcemap_resolver();
+
+        // Reserve the token vector up front from a chunk/newline upper bound so
+        // it never reallocates during population.
+        let mut tokens: Vec<Token> = Vec::with_capacity(self.estimate_sourcemap_token_capacity());
+
+        // Capture the reserved capacity at the reservation point so tests can
+        // assert the buffer covers the full emitted token count — proving the
+        // reservation exists (a missing one collapses this to 0) without
+        // reallocating during population.
+        #[cfg(test)]
+        self.record_reserved_token_capacity(tokens.capacity());
 
         let mut generated_line = 0u32;
         let mut generated_column = 0u32;
 
         // Add intro (no source mapping for inserted content)
         if !self.intro().is_empty() {
-            builder.add_token(generated_line, generated_column, 0, 0, None, None);
+            tokens.push(Token::new(
+                generated_line,
+                generated_column,
+                0,
+                0,
+                None,
+                None,
+            ));
             Self::advance_generated_position(
                 self.intro(),
                 &mut generated_line,
@@ -110,18 +131,16 @@ impl<'a> CodeTransform<'a> {
 
         // Process chunks
         for chunk in self.chunks() {
-            use super::chunk::Chunk;
-
             match chunk {
                 Chunk::Original { start, end } => {
                     if let Some(source_id) = source_id {
                         let slice = &self.original()[*start as usize..*end as usize];
 
                         Self::emit_mapped_content(
-                            &mut builder,
+                            &mut tokens,
                             slice,
                             source_id,
-                            &resolver,
+                            resolver,
                             *start,
                             &mut generated_line,
                             &mut generated_column,
@@ -140,10 +159,10 @@ impl<'a> CodeTransform<'a> {
                     // Moved content — line-by-line mappings like Original chunks
                     if let Some(source_id) = source_id {
                         Self::emit_mapped_content(
-                            &mut builder,
+                            &mut tokens,
                             content,
                             source_id,
-                            &resolver,
+                            resolver,
                             *orig_start,
                             &mut generated_line,
                             &mut generated_column,
@@ -169,14 +188,14 @@ impl<'a> CodeTransform<'a> {
                         let source_line = (src_line_1 - 1) as u32;
                         let source_column = (src_col_1 - 1) as u32;
 
-                        builder.add_token(
+                        tokens.push(Token::new(
                             generated_line,
                             generated_column,
                             source_line,
                             source_column,
                             Some(source_id),
                             None,
-                        );
+                        ));
                     }
 
                     Self::advance_generated_position(
@@ -190,7 +209,14 @@ impl<'a> CodeTransform<'a> {
                         continue;
                     }
                     // Pure insertion — unmapped
-                    builder.add_token(generated_line, generated_column, 0, 0, None, None);
+                    tokens.push(Token::new(
+                        generated_line,
+                        generated_column,
+                        0,
+                        0,
+                        None,
+                        None,
+                    ));
 
                     Self::advance_generated_position(
                         content,
@@ -214,7 +240,14 @@ impl<'a> CodeTransform<'a> {
                     if offset > 0 {
                         // Unmapped prefix (e.g., the `(` and binding prefix)
                         let prefix = &content[..offset];
-                        builder.add_token(generated_line, generated_column, 0, 0, None, None);
+                        tokens.push(Token::new(
+                            generated_line,
+                            generated_column,
+                            0,
+                            0,
+                            None,
+                            None,
+                        ));
                         Self::advance_generated_position(
                             prefix,
                             &mut generated_line,
@@ -226,14 +259,14 @@ impl<'a> CodeTransform<'a> {
                     if !rest.is_empty() {
                         if let Some(source_id) = source_id {
                             let (sl, sc) = resolver.offset_to_line_and_col(*source_start as usize);
-                            builder.add_token(
+                            tokens.push(Token::new(
                                 generated_line,
                                 generated_column,
                                 (sl - 1) as u32,
                                 (sc - 1) as u32,
                                 Some(source_id),
                                 None,
-                            );
+                            ));
                         }
                         Self::advance_generated_position(
                             rest,
@@ -247,7 +280,14 @@ impl<'a> CodeTransform<'a> {
 
         // Add outro (no source mapping)
         if !self.outro().is_empty() {
-            builder.add_token(generated_line, generated_column, 0, 0, None, None);
+            tokens.push(Token::new(
+                generated_line,
+                generated_column,
+                0,
+                0,
+                None,
+                None,
+            ));
             Self::advance_generated_position(
                 self.outro(),
                 &mut generated_line,
@@ -255,7 +295,53 @@ impl<'a> CodeTransform<'a> {
             );
         }
 
-        builder.into_sourcemap()
+        SourceMap::new(
+            file,
+            Vec::new(),
+            None,
+            sources,
+            source_contents,
+            tokens.into_boxed_slice(),
+            None,
+        )
+    }
+
+    /// Upper bound on the number of source-map tokens `generate_map` will emit,
+    /// used to reserve the token vector before population so it never
+    /// reallocates while being populated.
+    ///
+    /// Each term covers a distinct source of emitted tokens:
+    /// - Every chunk emits at least one token at its start — `self.chunks().len()`.
+    /// - An `Original` chunk emits one extra token after each interior newline.
+    ///   Original chunks are disjoint slices of the source, so the original's
+    ///   total newline count bounds them collectively — `original_newlines`.
+    /// - A `Moved` chunk likewise emits one extra token per interior newline, but
+    ///   a moved overwrite carries *replacement* text whose newlines are absent
+    ///   from the original source; those are counted per chunk —
+    ///   `moved_content_newlines`.
+    /// - An `InsertedMapped` chunk can emit a second token for its unmapped
+    ///   prefix — `inserted_mapped`.
+    /// - The optional intro and outro each emit at most one token — the `+ 2`.
+    ///
+    /// Over-counting (a `Moved` slice of the original is counted in both
+    /// `original_newlines` and `moved_content_newlines`) only enlarges the
+    /// reserve; the result stays a true upper bound, never an under-estimate.
+    pub(super) fn estimate_sourcemap_token_capacity(&self) -> usize {
+        let original_newlines = memchr_iter(b'\n', self.original().as_bytes()).count();
+
+        let mut moved_content_newlines = 0usize;
+        let mut inserted_mapped = 0usize;
+        for chunk in self.chunks() {
+            match chunk {
+                Chunk::Moved { content, .. } => {
+                    moved_content_newlines += memchr_iter(b'\n', content.as_bytes()).count();
+                }
+                Chunk::InsertedMapped { .. } => inserted_mapped += 1,
+                _ => {}
+            }
+        }
+
+        self.chunks().len() + original_newlines + moved_content_newlines + inserted_mapped + 2
     }
 
     /// Emit line-by-line source map tokens for content that maps back to original source.
@@ -267,7 +353,7 @@ impl<'a> CodeTransform<'a> {
     /// is always from the original source (either in-place or moved).
     #[allow(clippy::too_many_arguments)]
     fn emit_mapped_content(
-        builder: &mut SourceMapBuilder,
+        tokens: &mut Vec<Token>,
         content: &str,
         source_id: u32,
         resolver: &PositionResolver,
@@ -283,14 +369,14 @@ impl<'a> CodeTransform<'a> {
         let (sl, sc) = resolver.offset_to_line_and_col(original_start as usize);
         let mut source_line = (sl - 1) as u32;
 
-        builder.add_token(
+        tokens.push(Token::new(
             *generated_line,
             *generated_column,
             source_line,
             (sc - 1) as u32,
             Some(source_id),
             None,
-        );
+        ));
 
         // Scan for newlines — O(1) manual tracking per newline (no binary search)
         let mut prev = 0usize;
@@ -303,14 +389,14 @@ impl<'a> CodeTransform<'a> {
 
             // After a newline, source column is always 0
             if prev < content_len {
-                builder.add_token(
+                tokens.push(Token::new(
                     *generated_line,
                     *generated_column,
                     source_line,
                     0,
                     Some(source_id),
                     None,
-                );
+                ));
             }
         }
 
