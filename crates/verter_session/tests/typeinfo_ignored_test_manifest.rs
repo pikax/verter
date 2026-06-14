@@ -2,12 +2,12 @@
 //!
 //! Two tables live in this one module:
 //!
-//! - `IgnoredTestRow` — EXACTLY 362 test-site rows total. 320 carry
+//! - `IgnoredTestRow` — EXACTLY 362 test-site rows total. 318 carry
 //!   `status: Ignored` (one per live `#[ignore = "..."]` annotation inside
 //!   `crates/verter_session/src/typeinfo/typeinfo_tests/**/*.rs`, bijective
 //!   with the source `#[ignore]`s); the remainder carry `status: Lifted` (no
 //!   live `#[ignore]`, each backed by an oracle row). The table length is
-//!   count-guarded at 362; the live-ignore count is count-guarded at 320.
+//!   count-guarded at 362; the live-ignore count is count-guarded at 318.
 //!   Each row carries the full 13-column schema: `file`, `function`,
 //!   `substrate`, `capability`, `organ`, `owning_u_block`, `block_id`,
 //!   `semantic_queries`, `proof`, `status`, `mechanism_id`,
@@ -36,7 +36,7 @@
 //! `count(IgnoredTestRow where status == Ignored)`, not a
 //! frozen literal; it tracks the live ignore set as blocks lift rows
 //! (and as same-file overload retention adds new ones) and currently
-//! resolves to 320 (362 rows total − 42 lifted).
+//! resolves to 318 (362 rows total − 44 lifted).
 //!
 //! Guards:
 //!
@@ -164,7 +164,7 @@ enum TargetSubstrate {
 // The two-table manifest ledger schema.
 //
 // `IgnoredTestRow` carries EXACTLY 362 test-site rows total (count-guarded):
-// 320 `Ignored` (bijective with the source `#[ignore]`s) + 42 `Lifted`.
+// 318 `Ignored` (bijective with the source `#[ignore]`s) + 44 `Lifted`.
 // `AdditionalProofRow` carries the CLOSED set of 7 coverage-only rows
 // (6 JSX no-new-key submatrix + 1 mapped companion) — excluded from the
 // ignored count + bijection. Both tables and the `TYPEINFO_PARITY_BLOCKS`
@@ -531,7 +531,7 @@ enum ProofRequirement {
 }
 
 /// One manifest row per typeinfo test-site — EXACTLY 362 rows total
-/// (320 `Ignored` + 42 `Lifted`). 13 fields.
+/// (318 `Ignored` + 44 `Lifted`). 13 fields.
 #[derive(Clone, Copy, Debug)]
 #[allow(dead_code)]
 struct IgnoredTestRow {
@@ -734,9 +734,9 @@ const fn count_ignored_rows(rows: &[IgnoredTestRow]) -> usize {
 
 /// Total ignored typeinfo test sites — DERIVED as
 /// `count(IgnoredTestRow where status == Ignored)`, NOT a frozen
-/// literal. It tracks the live ignore set — currently 320 (the 362-row
-/// table minus the 42 `Lifted` rows), recomputed as blocks lift more
-/// rows and as same-file overload retention adds new ones. The 42 lifted
+/// literal. It tracks the live ignore set — currently 318 (the 362-row
+/// table minus the 44 `Lifted` rows), recomputed as blocks lift more
+/// rows and as same-file overload retention adds new ones. The 44 lifted
 /// rows carry `status: Lifted { .. }` and no live `#[ignore]`; every
 /// other `IgnoredTestRow` carries `status: Ignored`.
 ///
@@ -748,7 +748,7 @@ const fn count_ignored_rows(rows: &[IgnoredTestRow]) -> usize {
 /// those describe how the macro expands, not the test sites
 /// themselves. The macro-defined raw count includes 22 such
 /// in-macro-body lines that are not test sites; the live tree has
-/// 320 expanded test-site ignores + 42 lifted rows = the 362-row table
+/// 318 expanded test-site ignores + 44 lifted rows = the 362-row table
 /// every guard below operates against.
 const EXPECTED_TOTAL_IGNORED_COUNT: usize = count_ignored_rows(EXPECTED_IGNORE_MANIFEST);
 
@@ -1333,8 +1333,8 @@ fn ignored_test_row_table_holds_exactly_362_rows() {
         EXPECTED_IGNORE_MANIFEST.len(),
     );
 
-    // The derived live-ignore count is 320: the table holds 362 rows, of which
-    // 42 are `Lifted` (the 19 pre-class-surface lifts — 2 index-signature
+    // The derived live-ignore count is 318: the table holds 362 rows, of which
+    // 44 are `Lifted` (the 19 pre-class-surface lifts — 2 index-signature
     // publication rows at U2.QUERY_VALUE_DOMAIN + 2 built-in modifier-utility
     // rows at U2.MAPPED_TEMPLATE + 2 terminal indexed-access projection rows
     // at U2.INDEXED_ACCESS + 1 wide/deep literal-union projection row at
@@ -1349,27 +1349,29 @@ fn ignored_test_row_table_holds_exactly_362_rows() {
     // the `typeof import(...)["default"]` default-export value projection +
     // the `typeof import(...)["leafName"]` named-value projection) at
     // U2.INDEXED_ACCESS and 1 namespace alias-chain row at
-    // U2.QUERY_VALUE_DOMAIN) and 320 remain `Ignored`.
+    // U2.QUERY_VALUE_DOMAIN — plus the 2 JSX-era lifts: the two
+    // `IntrinsicPropsFor<"div">` / `IntrinsicPropsFor<"span">` parametric
+    // intrinsic-lookup rows at U2.INDEXED_ACCESS) and 318 remain `Ignored`.
     // `EXPECTED_TOTAL_IGNORED_COUNT` is DERIVED as count(status == Ignored),
     // so it tracks lifts automatically.
     assert_eq!(
-        EXPECTED_TOTAL_IGNORED_COUNT, 320,
+        EXPECTED_TOTAL_IGNORED_COUNT, 318,
         "EXPECTED_TOTAL_IGNORED_COUNT is DERIVED as count(status == \
-         Ignored); with 42 rows lifted it must equal 320. Got {}.",
+         Ignored); with 44 rows lifted it must equal 318. Got {}.",
         EXPECTED_TOTAL_IGNORED_COUNT,
     );
-    // Exactly 42 rows are `Lifted` (the 19 pre-class-surface lifts + the 19
-    // class-surface-era lifts + the 4 module-augmentation-era lifts enumerated
-    // above).
+    // Exactly 44 rows are `Lifted` (the 19 pre-class-surface lifts + the 19
+    // class-surface-era lifts + the 4 module-augmentation-era lifts + the 2
+    // JSX-era lifts enumerated above).
     let lifted = EXPECTED_IGNORE_MANIFEST
         .iter()
         .filter(|r| matches!(r.status, IgnoreStatus::Lifted { .. }))
         .count();
     assert_eq!(
-        lifted, 42,
-        "exactly 42 IgnoredTestRows are Lifted (the 19 pre-class-surface lifts \
+        lifted, 44,
+        "exactly 44 IgnoredTestRows are Lifted (the 19 pre-class-surface lifts \
          + the 19 class-surface-era lifts + the 4 module-augmentation-era \
-         lifts); got {lifted}",
+         lifts + the 2 JSX-era lifts); got {lifted}",
     );
 
     // Disjointness: no `(file, function)` in both tables. A
@@ -2904,7 +2906,7 @@ fn lifted_row_audit_query_mode_matches_spec() {
         );
     }
 
-    // Independent expected fact: all forty-two seated rows are
+    // Independent expected fact: all forty-four seated rows are
     // Expanded-mode oracle identities (every lift to date was verified in the
     // original `Expanded` projection mode).
     let expanded = ORACLE_QUERY_SPECS
@@ -2912,8 +2914,8 @@ fn lifted_row_audit_query_mode_matches_spec() {
         .filter(|s| matches!(spec_mode(&s.query_helper), ProjectionModeSpec::Expanded))
         .count();
     assert_eq!(
-        expanded, 42,
-        "all forty-two seated lifted rows must be Expanded-mode oracle identities",
+        expanded, 44,
+        "all forty-four seated lifted rows must be Expanded-mode oracle identities",
     );
 }
 

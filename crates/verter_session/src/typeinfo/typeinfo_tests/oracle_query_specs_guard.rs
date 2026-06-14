@@ -3,7 +3,7 @@
 //! registry `include!`-compiles WITHOUT the unit-test `support` module
 //! (`oracle_query_specs_is_pure_data`); this src-side half proves the structural
 //! well-formedness validation is genuinely discriminating, with SYNTHETIC specs.
-//! The real table seats the 42 lifted rows — the authoritative enumeration
+//! The real table seats the 44 lifted rows — the authoritative enumeration
 //! lives on `ORACLE_QUERY_SPECS`' doc comment and is pinned exactly by
 //! `oracle_query_specs_registry_holds_the_lifted_rows_and_is_well_formed`.
 
@@ -11,7 +11,7 @@ use super::oracle::query_specs::{
     registry_well_formed, HostProjectSpec, HostSetupKindSpec, OracleValueKindSpec, ProbeRhsSpec,
     ProjectionModeSpec, QueryHelperSpec, QuerySpec, RegistryError, SourceLocatorSpec, SymbolSpace,
     BRANDED_TYPES_SOURCE, CLASS_FEATURES_SOURCE, DECORATORS_SOURCE, DEEP_PATH_SOURCE,
-    FUNCTION_ADVANCED_SOURCE, INDEX_SIGNATURES_SOURCE, MAPPED_MODIFIERS_SOURCE,
+    FUNCTION_ADVANCED_SOURCE, INDEX_SIGNATURES_SOURCE, JSX_SOURCE, MAPPED_MODIFIERS_SOURCE,
     MODERN_TS_FEATURES_SOURCE, MODE_BOUNDARY_REEXPORT_BARREL_SOURCE,
     MODE_BOUNDARY_REEXPORT_LEAF_SOURCE, MODE_BOUNDARY_REEXPORT_LINK_1_SOURCE,
     MODE_BOUNDARY_REEXPORT_LINK_2_SOURCE, MODE_BOUNDARY_REEXPORT_LINK_3_SOURCE,
@@ -71,6 +71,12 @@ fn inlined_registry_source_is_byte_identical_to_fixture_files() {
         include_str!("fixtures/index_signatures.ts"),
         "INDEX_SIGNATURES_SOURCE (inlined in the registry) drifted from \
          fixtures/index_signatures.ts (read by the sibling #[ignore]d tests)",
+    );
+    assert_eq!(
+        JSX_SOURCE,
+        include_str!("fixtures/jsx.ts"),
+        "JSX_SOURCE (inlined in the registry) drifted from \
+         fixtures/jsx.ts (read by the sibling #[ignore]d tests)",
     );
     assert_eq!(
         UTILITY_EDGE_SOURCE,
@@ -256,7 +262,7 @@ fn spec(row_function: &'static str, query_ordinal: u16, oracle_family: &'static 
 
 #[test]
 fn oracle_query_specs_registry_holds_the_lifted_rows_and_is_well_formed() {
-    // The lifts seat 42 queries: the two index-signature publication
+    // The lifts seat 44 queries: the two index-signature publication
     // queries, the two built-in modifier-utility queries, the three U2
     // IndexedAccess-reduction carve-out queries, the U2.MAPPED_TEMPLATE
     // `-?` optional-remover query, the three keyof-expansion carve-out
@@ -266,14 +272,16 @@ fn oracle_query_specs_registry_holds_the_lifted_rows_and_is_well_formed() {
     // three class-features static rows, nine function-advanced
     // signature-bucket/prototype/overload rows, the sb15 bare-generic
     // ReturnType row, two typescript-rules construct-signature rows, and
-    // two decoration-invariance rows), and the four U2.MODULE_AUGMENTATION-era
+    // two decoration-invariance rows), the four U2.MODULE_AUGMENTATION-era
     // lifts (the `as const` typeof indexed member + the two `typeof import(...)`
     // value-member projections [named-value + default-shape] + the namespace
-    // alias-chain projection); the
-    // table is well-formed (non-empty `oracle_family`, contiguous ordinals).
+    // alias-chain projection), and the two U2.INDEXED_ACCESS JSX parametric
+    // intrinsic-lookup lifts (`IntrinsicPropsFor<"div">` /
+    // `IntrinsicPropsFor<"span">`); the table is well-formed (non-empty
+    // `oracle_family`, contiguous ordinals).
     assert_eq!(registry_well_formed(ORACLE_QUERY_SPECS), Ok(()));
 
-    // The seated set is EXACTLY those 42 rows, one query each. A stray
+    // The seated set is EXACTLY those 44 rows, one query each. A stray
     // addition / removal FAILS here (discriminating).
     let seated: Vec<(&str, &str, u16)> = ORACLE_QUERY_SPECS
         .iter()
@@ -490,6 +498,16 @@ fn oracle_query_specs_registry_holds_the_lifted_rows_and_is_well_formed() {
             (
                 "module_features.rs",
                 "module_features_typeof_import_default_resolves_value_shape",
+                0
+            ),
+            (
+                "jsx.rs",
+                "jsx_intrinsic_via_generic_lookup_div_resolves_to_div_shape",
+                0
+            ),
+            (
+                "jsx.rs",
+                "jsx_intrinsic_via_generic_lookup_span_resolves_to_span_shape",
                 0
             ),
         ],

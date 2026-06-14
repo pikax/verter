@@ -21,7 +21,7 @@
 // cleanly into the `tests/` guard — an inner doc comment is illegal in an
 // `include!`d position.)
 //
-// The registry seats the 42 lifted rows; the authoritative enumeration lives
+// The registry seats the 44 lifted rows; the authoritative enumeration lives
 // on `ORACLE_QUERY_SPECS`' doc comment and is pinned exactly by
 // `oracle_query_specs_registry_holds_the_lifted_rows_and_is_well_formed`. The
 // types + validation are additionally exercised with synthetic specs by the
@@ -977,8 +977,18 @@ export type DeepUtilityConfig = Required<
 
 include!("oracle_query_specs_vendored_sources.rs");
 include!("oracle_query_specs_vendored_sources_module_aug.rs");
+include!("oracle_query_specs_vendored_sources_jsx.rs");
 
-/// The closed registry table. Holds the 42 lifted rows — the two
+/// The single-file workspace the JSX lift rows upsert (the `jsx.ts` fixture
+/// declares the global `JSX` namespace through `declare global { namespace JSX
+/// { ... } }` blocks; every JSX lift row resolves a standalone alias against it).
+#[allow(dead_code)]
+const JSX_FILES: &[WorkspaceFileSpec] = &[WorkspaceFileSpec {
+    path: "/fixtures/jsx.ts",
+    source: JSX_SOURCE,
+}];
+
+/// The closed registry table. Holds the 44 lifted rows — the two
 /// index-signature publication queries, the two built-in modifier-utility
 /// queries, the three U2 IndexedAccess-reduction carve-out queries (two
 /// terminal indexed-access projections + one wide/deep literal-union
@@ -994,7 +1004,10 @@ include!("oracle_query_specs_vendored_sources_module_aug.rs");
 /// queries (the `as const` typeof indexed member + the two `typeof import(...)`
 /// value-member projections [named-value + default-export shape] at
 /// `U2.INDEXED_ACCESS`, plus the namespace alias-chain projection at
-/// `U2.QUERY_VALUE_DOMAIN`)
+/// `U2.QUERY_VALUE_DOMAIN`), and the two U2.JSX-era queries (the two
+/// parametric `IntrinsicPropsFor<"div">` / `IntrinsicPropsFor<"span">`
+/// intrinsic-lookup rows whose `JSX.IntrinsicElements[Tag]` reduction
+/// terminates at `IndexedAccess` and sits under `U2.INDEXED_ACCESS`)
 /// (`docs/arch/ts-compat-two-mode-model.md`, `docs/arch/u0-oracle-harness-design.md`).
 #[allow(dead_code)]
 pub(crate) const ORACLE_QUERY_SPECS: &[QuerySpec] = &[
@@ -1324,6 +1337,32 @@ pub(crate) const ORACLE_QUERY_SPECS: &[QuerySpec] = &[
         MODULE_FEATURES_CONSUMER_FILES,
         "/fixtures/module_features_consumer.ts",
         "LeafDefault",
+    ),
+    // U2.JSX-era lifts. The two parametric intrinsic-lookup rows
+    // (`IntrinsicPropsFor<"div">` / `IntrinsicPropsFor<"span">`) whose source
+    // body is a bare `Ref` carrying a string-literal type argument — the source
+    // side admits (the walk does NOT descend the alias body) and tsgo expands
+    // the alias to the declared intrinsic shape. The seven sibling JSX rows are
+    // honest-deferred: rows 1/2/4/8 reject `DeferredConstruct("indexed-access")`,
+    // row 6 rejects `DeferredConstruct("keyof")`, row 9 rejects
+    // `EnumMemberOrQualified`, and row 3 fails the resolver preflight (the
+    // `typeof createElement<…>` value-side generic instantiation is a U6
+    // `ResolveCall` gap). Re-homed per the measured dispatch trace.
+    carve_out_spec(
+        "jsx.rs",
+        "jsx_intrinsic_via_generic_lookup_div_resolves_to_div_shape",
+        "jsx",
+        JSX_FILES,
+        "/fixtures/jsx.ts",
+        "DivPropsViaIndex",
+    ),
+    carve_out_spec(
+        "jsx.rs",
+        "jsx_intrinsic_via_generic_lookup_span_resolves_to_span_shape",
+        "jsx",
+        JSX_FILES,
+        "/fixtures/jsx.ts",
+        "SpanPropsViaIndex",
     ),
 ];
 

@@ -2436,6 +2436,61 @@ resolution engine.
 Guards: **`jsx_resolution_uses_existing_semantic_queries`**,
 **`jsx_intrinsic_elements_project_via_indexed_access`**, **`jsx_no_dedicated_graph_type_node`**.
 
+**Implementation status (landed).** The ambient `declare global { namespace JSX { ... } }`
+extraction is complete. A `namespace` nested in an ambient augmentation block now registers its
+inner members under their qualified `JSX.X` names in that block's augmentation scope: a
+`declare global { namespace … }` registers under the GLOBAL scope, while a
+`declare module "X" { namespace … }` registers under that module's `Module("X")` scope — the
+enclosing block's `AugmentationScopeKind` is threaded through, not collapsed to Global. The body
+builder's `extract_augmentation_block` and the header index's `index_augmentation_block` each
+gained a `TSModuleDeclaration` arm mirroring the file-scope namespace path
+(`extract_namespaced_statement` / `index_namespaced_statement`) but routing to
+`add_augmentation_type` under the active scope. Two `declare global { namespace JSX { interface IntrinsicElements } }`
+blocks therefore fold into one ordered `TypeDeclGroup` and the existing `MergedDecl` peer-merge
+stitch unions the intrinsic-element surfaces (`div` ∪ `span` ∪ `customCard`). Query time flows
+through the SHARED resolver only: `JSX.IntrinsicElements` / `JSX.Element` resolve as a qualified
+`Ref` through `ResolveDecl`'s global-augmentation fallback (the `has_global_augmentation`
+identity rail) — there is NO distinct *producing* `ResolveAmbientNamespace` dispatch; that key
+stays non-producing — then `IndexedAccess` / `KeyOf` / `Instantiate` reduce the projection.
+
+Of the 9 `JsxResolution` rows, 8 resolve correctly under `--include-ignored` (every
+`JSX.IntrinsicElements["k"]` / `keyof JSX.IntrinsicElements` / cross-block-merged `customCard` /
+`JSX.Element` / `Parameters<FC<...>>[0]` shape). The lone exception,
+`jsx_factory_inferred_props_for_component_resolves`
+(`Parameters<typeof createElement<{ label: string }>>[1]`), does NOT resolve: its
+`typeof createElement<{ label: string }>` explicit-type-argument instantiation of a generic
+function VALUE needs `ResolveCall` / `InferTypeArgs`, owned by `U6.CALL_RESOLVE` (which
+`U2.JSX_FOUNDATIONS` precedes and cannot consume), so the engine returns a clean `semanticMiss`
+(no hang) — a measured U6 gap, deferred until `ResolveCall` lands.
+
+Two rows are oracle-LIFTED (`oracle_snapshots/jsx/`): the parametric
+`IntrinsicPropsFor<"div">` / `IntrinsicPropsFor<"span">` lookups. Their source body is a bare
+`Ref` carrying a string-literal type argument (the oracle source-walk does not descend the
+`IntrinsicPropsFor<Tag> = JSX.IntrinsicElements[Tag]` alias body, so the source side admits),
+and tsgo expands the alias to the declared intrinsic shape. Their MEASURED dispatch trace is
+`{ResolveDecl, Instantiate, IndexedAccess}`, whose unique DAG-terminal block is
+`U2.INDEXED_ACCESS` (mechanism `IndexedAccessUnionDistribution`) — so both rows are RE-HOMED to
+`U2.INDEXED_ACCESS` in §10.4.1, NOT owned by `U2.JSX_FOUNDATIONS` (the family lifted them, but
+the trace-terminal producer owns them). The remaining 7 rows are honest-deferred at oracle
+admission, and split into two kinds. SIX of them ENGINE-RESOLVE correctly under
+`--include-ignored` and are oracle-REJECTED over the already-resolved surface (a snapshot cannot
+be seated without an out-of-scope oracle-infra carve-out): the qualified
+`JSX.IntrinsicElements["k"]` and numeric `Parameters<...>[n]` indexed-access bodies →
+`Reject(DeferredConstruct("indexed-access"))`; the qualified `keyof JSX.IntrinsicElements` body →
+`Reject(DeferredConstruct("keyof"))`; and `JSX.Element`'s qualified-name hover →
+`Reject(EnumMemberOrQualified)`. The 7th — the factory row
+`Parameters<typeof createElement<{ label: string }>>[1]` — is NOT an oracle reject: it does NOT
+engine-resolve at all, returning the clean preflight/semantic MISS described above (the U6
+`ResolveCall` / `InferTypeArgs` gap, surfacing as an unreduced `Parameters<...>` object →
+`PreflightUnclean`). The §10.4.1 partition therefore lists
+`U2.JSX_FOUNDATIONS` with 7 rows and `U2.INDEXED_ACCESS` with 23 (the 2 JSX lifts re-homed in).
+The two U2 subplan docs (`native-typeinfo-parity-u2-reducers.md` §U2.JSX_FOUNDATIONS and
+`native-typeinfo-parity-adapters-final-lift.md`) still carry the forward-declared prediction that
+all nine `jsx.rs` rows are lifted by `U2.JSX_FOUNDATIONS`; reconciling them to the measured
+7 JSX-foundation + 2 `U2.INDEXED_ACCESS` partition (and the row-3 U6 `ResolveCall` miss) is
+DEFERRED to the U2-close doc-currency reconciliation per lead-architect ruling (codex round-2
+Q3 = DEFER).
+
 **No-new-key completeness submatrix** (full TS-checker parity). The five mechanisms above
 cover a subset of the TS JSX checker; full parity resolves the remaining rules still
 through the existing query surface. Each is an oracle/guard row in the `JsxResolution`
@@ -2951,13 +3006,13 @@ fixes the single owning block. The per-block counts (summing to 362) are:
 |---|---:|---|---:|
 | `U2.RELATION_INFER` | 20 | `U6.NARROW_*` (8 sub-blocks, below) | 104 |
 | `U2.UTILITIES` | 32 | `U6.PREDICATE_ASSERTION` | 3 |
-| `U2.INDEXED_ACCESS` | 21 | `U6.CALL_RESOLVE` | 21 |
+| `U2.INDEXED_ACCESS` | 23 | `U6.CALL_RESOLVE` | 21 |
 | `U2.MAPPED_TEMPLATE` | 19 | `U6.CONTEXTUAL_CALLBACK` | 15 |
 | `U2.QUERY_VALUE_DOMAIN` | 21 | `U6.VALUE_INFERENCE` | 1 |
 | `U2.CLASS_SURFACES` | 38 | `U6.ASYNC_GENERATOR` | 1 |
 | `U2.ENUMS` | 7 | `U6.CROSS_FILE` | 6 |
 | `U2.MODULE_AUGMENTATION` | 4 | `U6.LOOP_CLOSURE` | 3 |
-| `U2.JSX_FOUNDATIONS` | 9 | `U3.CACHE_FACT_MODEL` | 3 |
+| `U2.JSX_FOUNDATIONS` | 7 | `U3.CACHE_FACT_MODEL` | 3 |
 | `U6.FLOW_RETURN_SUBSTRATE` | 7 | `U11.PUBLIC_RELATION_SESSION` | 9 |
 | `U10.RESULT_DB` | 12 | `U15.FINAL_LIFT` | 5 |
 | `U14.MACRO_ADAPTER` | 1 | | |
@@ -3175,7 +3230,7 @@ The complete partition (each entry `file::function — substrate`):
 - `variadic_tuples.rs::variadic_tuple_tail_of_sample_resolves_to_remaining_tuple` — `TupleFeatures`
 - `variadic_tuples.rs::variadic_tuple_variadic_function_with_explicit_type_args_concatenates_tuples` — `TupleFeatures`
 
-**`U2.INDEXED_ACCESS`** (21 rows):
+**`U2.INDEXED_ACCESS`** (23 rows):
 
 - `branded_types.rs::branded_key_access_projects_boolean_literal_brand_tag` — `ApparentTypes`
 - `branded_types.rs::branded_key_access_projects_literal_brand_tag` — `ApparentTypes`
@@ -3186,6 +3241,8 @@ The complete partition (each entry `file::function — substrate`):
 - `index_signatures.rs::index_signatures_dual_string_key_returns_string_signature_value` — `IndexSignatures`
 - `index_signatures.rs::index_signatures_numeric_lookup_returns_signature_value` — `IndexSignatures`
 - `index_signatures.rs::index_signatures_symbol_lookup_returns_signature_value` — `IndexSignatures`
+- `jsx.rs::jsx_intrinsic_via_generic_lookup_div_resolves_to_div_shape` — `JsxResolution`
+- `jsx.rs::jsx_intrinsic_via_generic_lookup_span_resolves_to_span_shape` — `JsxResolution`
 - `mode_boundary_invariants.rs::mode_boundary_keyof_across_reexport_chain_resolves_all_keys` — `ModeBoundary`
 - `modern_ts_features.rs::import_attribute_simulated_string_literal_indexed_member` — `ModernTsFeatures`
 - `module_features.rs::module_features_typeof_import_default_resolves_value_shape` — `ModuleFeatures`
@@ -3279,7 +3336,7 @@ The complete partition (each entry `file::function — substrate`):
 - `module_features.rs::module_features_namespace_interface_merge_namespace_value_resolves_to_literal` — `ModuleFeatures`
 - `module_features.rs::module_features_typeof_import_named_shape_resolves_to_interface` — `ModuleFeatures`
 
-**`U2.JSX_FOUNDATIONS`** (9 rows):
+**`U2.JSX_FOUNDATIONS`** (7 rows):
 
 - `jsx.rs::jsx_element_resolves_to_declared_interface_shape` — `JsxResolution`
 - `jsx.rs::jsx_factory_inferred_props_for_component_resolves` — `JsxResolution`
@@ -3288,8 +3345,6 @@ The complete partition (each entry `file::function — substrate`):
 - `jsx.rs::jsx_intrinsic_div_resolves_to_declared_shape` — `JsxResolution`
 - `jsx.rs::jsx_intrinsic_keys_resolves_to_string_literal_union` — `JsxResolution`
 - `jsx.rs::jsx_intrinsic_span_resolves_to_declared_shape` — `JsxResolution`
-- `jsx.rs::jsx_intrinsic_via_generic_lookup_div_resolves_to_div_shape` — `JsxResolution`
-- `jsx.rs::jsx_intrinsic_via_generic_lookup_span_resolves_to_span_shape` — `JsxResolution`
 
 **`U6.FLOW_RETURN_SUBSTRATE`** (7 rows):
 

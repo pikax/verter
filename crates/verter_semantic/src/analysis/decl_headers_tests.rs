@@ -181,6 +181,40 @@ type FileScope = { f: 1 };
 }
 
 #[test]
+fn declare_global_namespace_jsx_augmentation_parity() {
+    // A `namespace` nested inside `declare global` registers its inner members
+    // under their qualified `JSX.X` names in the GLOBAL augmentation scope. The
+    // header index and the env walk must register the SAME qualified keys
+    // (`JSX.IntrinsicElements`, `JSX.Element`) — otherwise `has_global_
+    // augmentation` (header-driven) and the lazy body memo (env-driven) would
+    // disagree on the `(scope, name)` identity. A second block re-targeting
+    // `JSX.IntrinsicElements` must fold into the same key on both sides.
+    assert_name_parity(
+        r#"
+export {};
+declare global {
+    namespace JSX {
+        interface IntrinsicElements {
+            div: { id?: string; className?: string };
+            span: { title?: string };
+        }
+        interface Element {
+            __element_brand__: true;
+        }
+    }
+}
+declare global {
+    namespace JSX {
+        interface IntrinsicElements {
+            customCard: { variant?: "primary" | "secondary" };
+        }
+    }
+}
+"#,
+    );
+}
+
+#[test]
 fn jsdoc_typedef_names_obey_ts_decl_precedence() {
     let source = r#"
 /** @typedef {{a: number}} OnlyTypedef */

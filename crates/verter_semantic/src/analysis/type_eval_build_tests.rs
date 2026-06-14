@@ -596,6 +596,257 @@ fn extracts_namespace_qualified_interfaces() {
     }
 }
 
+#[test]
+fn extracts_declare_global_namespace_jsx_into_global_augmentation_scope() {
+    // `declare global { namespace JSX { interface IntrinsicElements {...} } }`
+    // registers the inner interfaces under their QUALIFIED `JSX.X` names in the
+    // GLOBAL augmentation scope — never file-scope `type_symbols` — so a later
+    // `JSX.IntrinsicElements["div"]` / `JSX.Element` lookup resolves through the
+    // global-augmentation fallback. Discriminating: were the nested namespace not
+    // registered under its qualified name, the `(Global, "JSX.IntrinsicElements")`
+    // key would be absent and this assertion would fail.
+    let env = parse_and_build_env(
+        r#"
+        export {};
+        declare global {
+          namespace JSX {
+            interface IntrinsicElements {
+              div: { id?: string; className?: string };
+              span: { title?: string };
+            }
+            interface Element {
+              __element_brand__: true;
+            }
+          }
+        }
+        "#,
+    );
+
+    let key_intrinsic = (
+        AugmentationScopeKind::Global,
+        "JSX.IntrinsicElements".to_string(),
+    );
+    let key_element = (AugmentationScopeKind::Global, "JSX.Element".to_string());
+
+    assert!(
+        env.augmentation_scopes.contains_key(&key_intrinsic),
+        "nested `namespace JSX` interfaces must register under their qualified \
+         name in the global augmentation scope"
+    );
+    assert!(
+        env.augmentation_scopes.contains_key(&key_element),
+        "`JSX.Element` must register under the global augmentation scope"
+    );
+
+    // The members are global-augmentation declarations, NOT file-surface
+    // symbols — they must not leak into file-scope `type_symbols`.
+    assert!(
+        !env.type_symbols.contains_key("JSX.IntrinsicElements"),
+        "declare-global namespace members must NOT enter file-scope type_symbols"
+    );
+    assert!(
+        !env.type_symbols.contains_key("JSX.Element"),
+        "declare-global namespace members must NOT enter file-scope type_symbols"
+    );
+
+    // A single block contributes exactly one decl whose body lowers the two
+    // intrinsic members structurally.
+    let group = &env.augmentation_scopes[&key_intrinsic];
+    assert_eq!(
+        group.contributors.len(),
+        1,
+        "a single declare-global block contributes one decl"
+    );
+    match &group.primary().body {
+        TypeExpr::Object(obj) => {
+            let names: Vec<&str> = obj
+                .properties
+                .iter()
+                .filter_map(|m| match m {
+                    ObjectMember::Property(p) => Some(p.name.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert!(names.contains(&"div"), "div member present, got {names:?}");
+            assert!(
+                names.contains(&"span"),
+                "span member present, got {names:?}"
+            );
+        }
+        other => panic!("expected object body for JSX.IntrinsicElements, got {other:?}"),
+    }
+}
+
+#[test]
+fn merges_repeated_declare_global_namespace_jsx_intrinsic_elements() {
+    // Two `declare global { namespace JSX { interface IntrinsicElements {...} } }`
+    // declarations fold into ONE ordered group under the same `(Global,
+    // "JSX.IntrinsicElements")` key, so the existing `MergedDecl` peer-merge
+    // unions the `div` member from the first declaration with the `customCard`
+    // member from the second downstream. Discriminating: a walk that drops the
+    // nested namespace would leave the key absent entirely (zero contributors).
+    let env = parse_and_build_env(
+        r#"
+        export {};
+        declare global {
+          namespace JSX {
+            interface IntrinsicElements {
+              div: { id?: string };
+            }
+          }
+        }
+        declare global {
+          namespace JSX {
+            interface IntrinsicElements {
+              customCard: { variant?: "primary" | "secondary" };
+            }
+          }
+        }
+        "#,
+    );
+
+    let key = (
+        AugmentationScopeKind::Global,
+        "JSX.IntrinsicElements".to_string(),
+    );
+    let group = &env.augmentation_scopes[&key];
+    assert_eq!(
+        group.contributors.len(),
+        2,
+        "two declare-global blocks targeting JSX.IntrinsicElements must append \
+         to ONE ordered group (got {})",
+        group.contributors.len()
+    );
+
+    // The ordered group must carry BOTH blocks' members so the downstream
+    // `MergedDecl` peer-merge can union them: the first block's `div` and the
+    // second block's `customCard`. Asserting only `len() == 2` would pass even
+    // if both contributors carried identical (or empty) bodies — collect every
+    // contributor's object members and require the union surface.
+    let union_members: Vec<&str> = group
+        .contributors
+        .iter()
+        .flat_map(|decl| match &decl.body {
+            TypeExpr::Object(obj) => obj
+                .properties
+                .iter()
+                .filter_map(|m| match m {
+                    ObjectMember::Property(p) => Some(p.name.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        })
+        .collect();
+    assert!(
+        union_members.contains(&"div"),
+        "the first block's `div` member must be retained in the ordered group, \
+         got {union_members:?}"
+    );
+    assert!(
+        union_members.contains(&"customCard"),
+        "the second block's `customCard` member must be retained in the ordered \
+         group, got {union_members:?}"
+    );
+}
+
+/// Build the shallow declaration-header index for `source` (mirrors the
+/// private `index_for` in `decl_headers_tests`), so a body-builder test can
+/// assert header↔body parity on the VALUE-augmentation table without reaching
+/// into a sibling test module.
+fn header_index_for(source: &str) -> crate::analysis::decl_headers::DeclHeaderIndex {
+    use oxc_allocator::Allocator;
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+
+    let allocator = Allocator::default();
+    let ret = Parser::new(&allocator, source, SourceType::ts()).parse();
+    assert!(!ret.panicked, "fixture must parse");
+    crate::analysis::decl_headers::build_decl_header_index(&ret.program, source)
+}
+
+#[test]
+fn extracts_declare_global_namespace_jsx_value_into_global_value_augmentation_scope() {
+    // `declare global { namespace JSX { export const VERSION: string } }`
+    // registers the inner EXPORTED value member under its QUALIFIED `JSX.VERSION`
+    // name in the GLOBAL value-augmentation scope — never file-scope
+    // `value_symbols` — mirroring the type-side interface/alias path. The JSX
+    // typeinfo fixture is interface-only, so this is the discriminating cover for
+    // the VALUE arm (`ExportNamedDeclaration` → `VariableDeclaration` in
+    // `extract_namespaced_declaration_into_augmentation`, plus its header-index
+    // mirror): were that arm removed, `(Global, "JSX.VERSION")` would be absent
+    // and these assertions would fail.
+    let source = r#"
+        export {};
+        declare global {
+          namespace JSX {
+            export const VERSION: string;
+          }
+        }
+        "#;
+    let env = parse_and_build_env(source);
+
+    let key = (AugmentationScopeKind::Global, "JSX.VERSION".to_string());
+
+    // (a) registers in the global VALUE-augmentation scope, with the const's
+    //     declared body type intact.
+    let group = env.augmentation_value_scopes.get(&key).expect(
+        "declare-global namespace exported VALUE member must register under its \
+         qualified name in the global value-augmentation scope",
+    );
+    let decl = group.primary();
+    assert_eq!(decl.kind, ValueDeclKind::Const);
+    assert_eq!(
+        decl.type_annotation,
+        Some(TypeExpr::Primitive(PrimitiveName::String)),
+        "the augmented const must retain its declared `string` body"
+    );
+
+    // (b) does NOT leak into the file-scope value surface (neither the
+    //     qualified nor the bare member name).
+    assert!(
+        !env.value_symbols.contains_key("JSX.VERSION"),
+        "declare-global namespace VALUE members must NOT enter file-scope value_symbols"
+    );
+    assert!(
+        !env.value_symbols.contains_key("VERSION"),
+        "the unqualified member name must NOT enter file-scope value_symbols either"
+    );
+
+    // (c) header↔body parity on the VALUE side: the shallow header index
+    //     inventories EXACTLY the same value-augmentation name the whole-env walk
+    //     registers — non-trivially (the singleton `JSX.VERSION`, not an empty
+    //     set). Mirrors `assert_name_parity`'s augmentation-VALUE table and
+    //     discriminates the header-index value mirror independently of the body
+    //     builder.
+    let index = header_index_for(source);
+    let mut env_value_aug: Vec<(String, &str)> = env
+        .augmentation_value_scopes
+        .keys()
+        .map(|(scope, name)| (format!("{scope:?}"), name.as_str()))
+        .collect();
+    let mut index_value_aug: Vec<(String, &str)> = index
+        .augmentation_value_headers
+        .iter()
+        .flat_map(|(scope, names)| {
+            names
+                .keys()
+                .map(move |name| (format!("{scope:?}"), name.as_str()))
+        })
+        .collect();
+    env_value_aug.sort();
+    index_value_aug.sort();
+    assert_eq!(
+        env_value_aug,
+        vec![("Global".to_string(), "JSX.VERSION")],
+        "the value-augmentation env walk must be exactly the JSX.VERSION singleton"
+    );
+    assert_eq!(
+        env_value_aug, index_value_aug,
+        "augmentation VALUE names must match between the env walk and the header index"
+    );
+}
+
 // =============================================================================
 // Function extraction
 // =============================================================================

@@ -1722,6 +1722,32 @@ LIFTED_ROW_OVERRIDES: dict[tuple[str, str], dict[str, object]] = {
             "lifted by U2.MODULE_AUGMENTATION: `(typeof import(\"./module_features_leaf\"))[\"default\"]` reduces the default-export typeof-import index chain to the value shape `{ tag: \"leaf-default\"; count: number }` (the `as const` initialiser narrows `tag`'s value to a literal but does NOT mark the property readonly), proven against the checked-in tsgo oracle snapshot via oracle::run_row"
         ),
     },
+    # U2.JSX-era lifts. The two parametric intrinsic-lookup rows whose source
+    # body is a bare `Ref` carrying a string-literal type argument (the oracle
+    # source-walk does NOT descend the `IntrinsicPropsFor<Tag> =
+    # JSX.IntrinsicElements[Tag]` alias body, so the source side admits and tsgo
+    # expands the alias to the declared intrinsic shape). The MEASURED dispatch
+    # trace is `{ResolveDecl, Instantiate, IndexedAccess}` whose unique
+    # DAG-terminal block is `U2.INDEXED_ACCESS` (mechanism
+    # `IndexedAccessUnionDistribution`); the row is re-homed there in §10.4.1.
+    ("jsx.rs", "jsx_intrinsic_via_generic_lookup_div_resolves_to_div_shape"): {
+        "mech": "IndexedAccessUnionDistribution",
+        "proof": "ProofRequirement::Ts7Oracle(OracleId::JsxResolution)",
+        "semantic_queries": ["ResolveDecl", "Instantiate", "IndexedAccess"],
+        "consumed_mechanisms": ["QueryValueDomainFoundation"],
+        "unblocker": (
+            "lifted (JSX family; re-homed to U2.INDEXED_ACCESS per measured trace): `IntrinsicPropsFor<\"div\">` (alias for `JSX.IntrinsicElements[Tag]`) instantiates `Tag = \"div\"` and reduces the indexed access over the global-augmented `JSX.IntrinsicElements` to the declared `div` shape `{ id?: string; className?: string }`, proven against the checked-in tsgo oracle snapshot via oracle::run_row"
+        ),
+    },
+    ("jsx.rs", "jsx_intrinsic_via_generic_lookup_span_resolves_to_span_shape"): {
+        "mech": "IndexedAccessUnionDistribution",
+        "proof": "ProofRequirement::Ts7Oracle(OracleId::JsxResolution)",
+        "semantic_queries": ["ResolveDecl", "Instantiate", "IndexedAccess"],
+        "consumed_mechanisms": ["QueryValueDomainFoundation"],
+        "unblocker": (
+            "lifted (JSX family; re-homed to U2.INDEXED_ACCESS per measured trace): `IntrinsicPropsFor<\"span\">` (alias for `JSX.IntrinsicElements[Tag]`) instantiates `Tag = \"span\"` and reduces the indexed access over the global-augmented `JSX.IntrinsicElements` to the declared `span` shape `{ title?: string }`, proven against the checked-in tsgo oracle snapshot via oracle::run_row"
+        ),
+    },
 }
 
 

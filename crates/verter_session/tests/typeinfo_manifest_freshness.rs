@@ -158,8 +158,9 @@ fn typeinfo_manifest_files_are_byte_equal_to_regenerated_generator_output() {
 /// the 2 index-signature publications, the 8 utility-reducer lifts, the
 /// 10 class-surface-era pure-reduction lifts, and the 1 module-augmentation
 /// namespace alias-chain lift, whose measured trace terminates at
-/// {ResolveDecl, Instantiate(, TypeOf)}); `U2.INDEXED_ACCESS` owns 21 (12
-/// lifted); `U2.UTILITIES` owns 32; `U2.MAPPED_TEMPLATE` owns 19 (4 lifted);
+/// {ResolveDecl, Instantiate(, TypeOf)}); `U2.INDEXED_ACCESS` owns 23 (14
+/// lifted — incl. the 2 JSX parametric intrinsic-lookup rows re-homed in from
+/// `U2.JSX_FOUNDATIONS`); `U2.UTILITIES` owns 32; `U2.MAPPED_TEMPLATE` owns 19 (4 lifted);
 /// `U2.CLASS_SURFACES` owns 38 (5 lifted — the class typeof-path rows whose
 /// trace dispatches `ResolveClassSurface` + `ProjectPath`);
 /// `U2.MODULE_AUGMENTATION` owns 4 (0 lifted — the 4 remaining rows whose
@@ -188,14 +189,17 @@ fn manifest_block_counts_reflect_lifts() {
     );
     assert_eq!(
         count("block_id: TypeInfoParityBlockId::U2IndexedAccess,"),
-        21,
-        "U2.INDEXED_ACCESS must own 21 rows after the 2 brand-tag index chains \
+        23,
+        "U2.INDEXED_ACCESS must own 23 rows after the 2 brand-tag index chains \
          and the 2 decoration-invariance indexed-access rows moved IN from \
-         U2.CLASS_SURFACES (14 → 18) and the 3 module-augmentation indexed-member \
+         U2.CLASS_SURFACES (14 → 18), the 3 module-augmentation indexed-member \
          projection rows (the `as const` typeof indexed member + the `typeof \
          import(...)[\"default\"]` default-export value projection + the `typeof \
          import(...)[\"leafName\"]` named-value projection) moved IN from \
-         U2.MODULE_AUGMENTATION on their measured-trace lifts (18 → 21)",
+         U2.MODULE_AUGMENTATION (18 → 21), and the 2 JSX parametric \
+         intrinsic-lookup rows (`IntrinsicPropsFor<\"div\">` / \
+         `IntrinsicPropsFor<\"span\">`) moved IN from U2.JSX_FOUNDATIONS on their \
+         measured-trace lifts (21 → 23)",
     );
     assert_eq!(
         count("block_id: TypeInfoParityBlockId::U2Utilities,"),
@@ -228,10 +232,10 @@ fn manifest_block_counts_reflect_lifts() {
     // Lifted-status counts.
     assert_eq!(
         count("status: IgnoreStatus::Lifted {"),
-        42,
-        "exactly 42 IgnoredTestRows must carry `status: Lifted` (the 19 \
+        44,
+        "exactly 44 IgnoredTestRows must carry `status: Lifted` (the 19 \
          pre-class-surface lifts + the 19 class-surface-era lifts + the 4 \
-         module-augmentation-era lifts)",
+         module-augmentation-era lifts + the 2 JSX-era lifts)",
     );
     assert_eq!(
         count(
@@ -245,11 +249,12 @@ fn manifest_block_counts_reflect_lifts() {
     );
     assert_eq!(
         count("status: IgnoreStatus::Lifted { block_id: TypeInfoParityBlockId::U2IndexedAccess }"),
-        12,
+        14,
         "the 2 terminal indexed-access projection lifts, the 3 keyof-expansion \
          lifts, the 2 brand-tag index-chain lifts, the 2 \
-         decoration-invariance lifts, and the 3 module-augmentation \
-         indexed-member projection lifts must record their lifting block as \
+         decoration-invariance lifts, the 3 module-augmentation \
+         indexed-member projection lifts, and the 2 JSX parametric \
+         intrinsic-lookup lifts must record their lifting block as \
          U2.INDEXED_ACCESS",
     );
     assert_eq!(
@@ -269,10 +274,10 @@ fn manifest_block_counts_reflect_lifts() {
          lifting block as U2.CLASS_SURFACES",
     );
 
-    // Total ignored (status: Ignored) rows after 42 lifts.
+    // Total ignored (status: Ignored) rows after 44 lifts.
     assert_eq!(
         count("status: IgnoreStatus::Ignored"),
-        320,
-        "exactly 320 IgnoredTestRows must remain `Ignored` (362 total − 42 lifted)",
+        318,
+        "exactly 318 IgnoredTestRows must remain `Ignored` (362 total − 44 lifted)",
     );
 }

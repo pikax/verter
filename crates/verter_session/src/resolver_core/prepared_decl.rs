@@ -98,26 +98,34 @@ pub fn prepare_local_type_decl(
     symbol_name: &str,
     dep_edges: Option<&FxHashMap<String, String>>,
 ) -> Option<PreparedTypeDecl> {
+    use verter_semantic::analysis::type_eval::AugmentationScopeKind;
     // A name absent from the file surface but present in the file's own
     // `declare global { ... }` inventory resolves to the merged global
     // declaration. Global augmentations are visible from any scope, so a bare
     // reference (`type Alias = GlobalContract`) reaches the merged surface
     // through the same prepared-decl → `MergedDecl` machinery as a file symbol.
-    // Resolve the lowered body (and, for a file-scope symbol, its
-    // classified dependency edges): file-scope symbol first, then the
-    // global-augmentation fallback (which carries no classified deps —
-    // its body stitches onto another module's surface).
-    let (lowered, deps) = if state.has_type_symbol(symbol_name) {
-        (state.type_decl(symbol_name)?, state.type_deps(symbol_name))
-    } else {
-        (
-            state.augmentation_type_decl(
-                &verter_semantic::analysis::type_eval::AugmentationScopeKind::Global,
-                symbol_name,
-            )?,
-            None,
-        )
-    };
+    // Resolve the lowered body (and, for a file-scope symbol, its classified
+    // dependency edges) plus the declaration's ORIGIN scope — which
+    // namespace-sibling inventory is visible to a namespaced member of this
+    // decl: a file-scope symbol (`None` origin → file-scope siblings) first,
+    // then the global-augmentation fallback (`Global` origin → global
+    // TYPE-augmentation siblings; the body carries no classified deps — it
+    // stitches onto another module's surface).
+    let global_scope = AugmentationScopeKind::Global;
+    let (lowered, deps, origin): (_, _, Option<&AugmentationScopeKind>) =
+        if state.has_type_symbol(symbol_name) {
+            (
+                state.type_decl(symbol_name)?,
+                state.type_deps(symbol_name),
+                None,
+            )
+        } else {
+            (
+                state.augmentation_type_decl(&global_scope, symbol_name)?,
+                None,
+                Some(&global_scope),
+            )
+        };
     if state.is_import_local(symbol_name) {
         return None;
     }
@@ -129,6 +137,7 @@ pub fn prepare_local_type_decl(
         lowered.as_ref(),
         deps.as_deref(),
         dep_edges,
+        origin,
     ))
 }
 
@@ -159,6 +168,7 @@ pub fn prepare_augmentation_type_decl(
         lowered.as_ref(),
         None,
         dep_edges,
+        Some(scope),
     ))
 }
 
@@ -169,6 +179,11 @@ pub fn prepare_augmentation_type_decl(
 /// categories lower their body through the identical name-resolution +
 /// merged-contributor path, differing only in WHERE the body was looked
 /// up (augmentation bodies carry no classified deps; `deps` is `None`).
+///
+/// `origin` is the declaration's ambient-augmentation scope (`None` for a
+/// file-scope symbol), threaded to [`add_namespace_sibling_resolutions`] so a
+/// namespaced member binds bare sibling names ONLY from the inventory visible
+/// for that origin.
 fn prepare_type_decl_from_lowered(
     canonical_id: &str,
     state: &ShallowFileState,
@@ -176,6 +191,7 @@ fn prepare_type_decl_from_lowered(
     lowered: &LoweredTypeDecl,
     deps: Option<&ClassifiedTypeDeps>,
     dep_edges: Option<&FxHashMap<String, String>>,
+    origin: Option<&verter_semantic::analysis::type_eval::AugmentationScopeKind>,
 ) -> PreparedTypeDecl {
     #[cfg(test)]
     PREPARED_TYPE_DECL_BUILD_COUNT.with(|count| {
@@ -233,7 +249,8 @@ fn prepare_type_decl_from_lowered(
     // scope). The shallow inventory indexes the member under its QUALIFIED name
     // (`NS.M`), so a sibling body `Ref("M")` would otherwise miss. For a
     // namespaced decl (whose `symbol_name` carries an `NS.` prefix), map each
-    // DIRECT sibling's bare name to its qualified identity. Inserted AFTER the
+    // DIRECT sibling's bare name to its qualified identity, drawn from the
+    // inventory visible for the decl's `origin` scope. Inserted AFTER the
     // unqualified loops so the sibling binding takes precedence over an outer
     // same-named type — the TS namespace-scope rule.
     add_namespace_sibling_resolutions(
@@ -241,6 +258,7 @@ fn prepare_type_decl_from_lowered(
         state,
         symbol_name,
         canonical_id,
+        origin,
     );
     // External deps resolve through import bindings → canonical_id
     for (local_name, target) in state.import_targets.iter() {
@@ -273,31 +291,82 @@ fn prepare_type_decl_from_lowered(
 /// `NS.M`. A no-op for a non-namespaced declaration (`symbol_name` has no `.`).
 /// Only single-segment direct siblings bind (a deeper-nested `NS.Sub.X` is not
 /// reachable as a bare name from `NS`'s own member bodies).
+///
+/// Siblings are drawn from the inventory visible for the declaration's `origin`
+/// scope, and ONLY where that sibling has a buildable prepared decl — binding a
+/// sibling the dispatch cannot resolve would dangle, and binding one from a
+/// different scope would leak across scopes:
+///
+/// - File-scope decl (`origin = None`): file-scope `namespace NS { ... }` TYPE
+///   and VALUE members, indexed under their qualified `NS.M` name in the
+///   file-scope inventory. Both are consumable — a type sibling through the
+///   prepared-type cache, a value sibling through `prepare_local_value_decl`.
+/// - Global-augmentation decl (`origin = Global`): global `declare global {
+///   namespace NS { ... } }` TYPE members, retained under `(Global, "NS.M")`
+///   and never in file-scope `type_symbols`. TYPE-only: a `(Global, "NS.M")`
+///   type key is consumable through [`prepare_local_type_decl`]'s global
+///   fallback, but a global VALUE sibling has no prepared-value slot or
+///   fallback, so binding it would dangle. Without this scan an unqualified
+///   reference inside a global-augmented namespace (e.g. `interface
+///   IntrinsicElements { div: Common }` referencing the sibling `Common`)
+///   would not resolve — the valid global `JSX` namespace form.
+/// - Module-augmentation decl (`origin = Module(spec)`): a `(Module(spec),
+///   "NS.M")` sibling has no prepared-decl slot today (the prepared-decl caches
+///   index file-scope + Global-augmentation symbols only), so no module sibling
+///   is consumable. Bind nothing — binding a Global sibling here would leak
+///   across scopes. When module-scope prepared decls become addressable, the
+///   matching `(Module(spec), …)` siblings bind here.
 fn add_namespace_sibling_resolutions(
     name_resolution: &mut FxHashMap<String, ResolvedRootIdentity>,
     state: &ShallowFileState,
     symbol_name: &str,
     canonical_id: &str,
+    origin: Option<&verter_semantic::analysis::type_eval::AugmentationScopeKind>,
 ) {
+    use verter_semantic::analysis::type_eval::AugmentationScopeKind;
     let Some((namespace_prefix, _)) = symbol_name.rsplit_once('.') else {
         return;
     };
     let dotted_prefix = format!("{namespace_prefix}.");
-    let mut bind_sibling = |dep_name: &str| {
-        if let Some(member) = dep_name.strip_prefix(&dotted_prefix) {
-            if !member.contains('.') {
-                name_resolution.insert(
-                    member.to_string(),
-                    ResolvedRootIdentity::new(canonical_id, dep_name),
-                );
+
+    match origin {
+        // File-scope decl: bind file-scope TYPE + VALUE siblings (both
+        // consumable through the prepared-type / prepared-value caches).
+        None => {
+            for dep_name in state.type_symbol_names().chain(state.value_symbol_names()) {
+                if let Some(member) = dep_name.strip_prefix(&dotted_prefix) {
+                    if !member.contains('.') {
+                        name_resolution.insert(
+                            member.to_string(),
+                            ResolvedRootIdentity::new(canonical_id, dep_name),
+                        );
+                    }
+                }
             }
         }
-    };
-    for dep_name in state.type_symbol_names() {
-        bind_sibling(dep_name);
-    }
-    for dep_name in state.value_symbol_names() {
-        bind_sibling(dep_name);
+        // Global-augmentation decl: bind global TYPE siblings ONLY — a global
+        // VALUE sibling is not consumable (no prepared-value slot/fallback), so
+        // binding it would dangle (RESTRICT). The key set spans every
+        // augmentation scope, so filter to `Global`.
+        Some(AugmentationScopeKind::Global) => {
+            for (scope, name) in state.augmentation_type_keys() {
+                if !matches!(scope, AugmentationScopeKind::Global) {
+                    continue;
+                }
+                if let Some(member) = name.strip_prefix(&dotted_prefix) {
+                    if !member.contains('.') {
+                        name_resolution.insert(
+                            member.to_string(),
+                            ResolvedRootIdentity::new(canonical_id, name),
+                        );
+                    }
+                }
+            }
+        }
+        // Module-augmentation decl: no consumable module-scope sibling exists
+        // today, so bind nothing rather than dangle a module sibling or leak a
+        // global one across scopes.
+        Some(AugmentationScopeKind::Module(_)) => {}
     }
 }
 
@@ -881,6 +950,90 @@ export const defaults: Props = { label: 'ok' }
         assert_eq!(
             other_thread_count, 0,
             "prepared decl build counters should not leak across test threads",
+        );
+    }
+
+    // Scope-matched namespace-sibling binding: a namespaced decl binds bare
+    // sibling names ONLY from the inventory visible for its declaration ORIGIN,
+    // and only where that sibling has a buildable prepared decl. The two tests
+    // below pin the two regressions the shared (origin-blind) helper introduced.
+
+    #[test]
+    fn module_augmentation_namespace_decl_does_not_bind_global_sibling() {
+        // A `declare module "ext" { namespace NS { ... } }` decl resolves its
+        // OWN module siblings — NEVER a global-augmentation `namespace NS`
+        // sibling of the same namespace name. The origin-blind helper scanned
+        // `Global` augmentation keys unconditionally and leaked the sibling
+        // `GlobalOnly` (declared in `declare global { namespace NS }`) into the
+        // Module-scope decl's `name_resolution`, crossing scopes. Module
+        // siblings are not consumable today (no Module-scope prepared-decl
+        // slot), so the Module arm binds NOTHING.
+        use verter_semantic::analysis::type_eval::AugmentationScopeKind;
+        let source = r#"
+export {};
+declare global { namespace NS { type GlobalOnly = { g: string } } }
+declare module "ext" { namespace NS { interface Foo { x: GlobalOnly } } }
+"#;
+        let analysis = make_analysis(source);
+        let env = parse_and_build_env(source);
+        let state = ShallowFileState::from_analysis(Hash16::default(), analysis, Some(&env));
+
+        // Harness invariant the leak depends on: the module namespace member is
+        // retained under `(Module("ext"), "NS.Foo")` and a global sibling under
+        // `(Global, "NS.GlobalOnly")`, distinct scopes sharing the `NS.` prefix.
+        let prepared = prepare_augmentation_type_decl(
+            "/src/aug.ts",
+            &state,
+            &AugmentationScopeKind::Module("ext".into()),
+            "NS.Foo",
+            None,
+        )
+        .expect("NS.Foo should prepare");
+
+        assert!(
+            prepared.name_resolution.get("GlobalOnly").is_none(),
+            "a module-augmentation namespace decl must NOT bind a \
+             global-augmentation sibling of the same namespace name"
+        );
+    }
+
+    #[test]
+    fn global_augmentation_namespace_type_decl_binds_type_sibling_not_value_sibling() {
+        // A global-augmentation namespace TYPE decl binds its global TYPE
+        // siblings (consumable through `prepare_local_type_decl`'s global
+        // fallback) but NOT its global VALUE siblings: no prepared-value slot or
+        // value fallback exists for a `(Global, "NS.member")` value key, so a
+        // binding would dangle. The origin-blind helper chained the value keys
+        // and bound the dangling `VERSION`; the Global arm is TYPE-only.
+        let source = r#"
+export {};
+declare global { namespace JSX {
+  type Common = { id?: string };
+  export const VERSION: string;
+  interface El { x: Common }
+} }
+"#;
+        let analysis = make_analysis(source);
+        let env = parse_and_build_env(source);
+        let state = ShallowFileState::from_analysis(Hash16::default(), analysis, Some(&env));
+
+        let prepared = prepare_local_type_decl("/src/aug.ts", &state, "JSX.El", None)
+            .expect("JSX.El should prepare");
+
+        // Positive control: the global TYPE sibling still binds (proves the
+        // Global TYPE scan is retained, not gutted along with the value scan).
+        assert_eq!(
+            prepared
+                .name_resolution
+                .get("Common")
+                .map(|i| (i.canonical_id.as_str(), i.symbol_name.as_str())),
+            Some(("/src/aug.ts", "JSX.Common")),
+        );
+        // Restrict: the non-consumable global VALUE sibling must NOT be bound.
+        assert!(
+            prepared.name_resolution.get("VERSION").is_none(),
+            "a non-consumable global-augmentation VALUE sibling must NOT be \
+             bound into name_resolution"
         );
     }
 }

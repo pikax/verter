@@ -759,8 +759,157 @@ fn index_augmentation_block(
             Statement::ClassDeclaration(cls) => {
                 index_augmentation_class_value(cls, stmt_index, index, scope);
             }
+            // A namespace nested inside an ambient augmentation block
+            // (`declare global { namespace JSX { ... } }`) registers its inner
+            // members under their qualified `Ns.Member` names into the SAME
+            // augmentation scope. Mirror of
+            // `extract_augmentation_module_declaration` (the body builder); the
+            // two MUST agree on the qualified key so `has_global_augmentation`
+            // and the lazy body memo resolve the same `(scope, name)` identity.
+            Statement::TSModuleDeclaration(module) => {
+                index_augmentation_module_declaration(module, stmt_index, index, scope, None);
+            }
             _ => {}
         }
+    }
+}
+
+/// Mirror of `extract_augmentation_module_declaration`: a `namespace N { ... }`
+/// nested inside an ambient augmentation block registers its inner type/value
+/// members under their qualified `Ns.Member` names in the augmentation
+/// inventory. A string-literal module name nested here contributes nothing.
+fn index_augmentation_module_declaration(
+    decl: &TSModuleDeclaration<'_>,
+    stmt_index: u32,
+    index: &mut DeclHeaderIndex,
+    scope: &AugmentationScopeKind,
+    prefix: Option<&str>,
+) {
+    let namespace = match &decl.id {
+        TSModuleDeclarationName::Identifier(id) => match prefix {
+            Some(prefix) => format!("{prefix}.{}", id.name),
+            None => id.name.to_string(),
+        },
+        TSModuleDeclarationName::StringLiteral(_) => return,
+    };
+    let Some(body) = decl.body.as_ref() else {
+        return;
+    };
+    match body {
+        TSModuleDeclarationBody::TSModuleDeclaration(inner) => {
+            index_augmentation_module_declaration(
+                inner,
+                stmt_index,
+                index,
+                scope,
+                Some(namespace.as_str()),
+            );
+        }
+        TSModuleDeclarationBody::TSModuleBlock(block) => {
+            for stmt in &block.body {
+                index_namespaced_statement_into_augmentation(
+                    stmt,
+                    stmt_index,
+                    index,
+                    namespace.as_str(),
+                    scope,
+                );
+            }
+        }
+    }
+}
+
+/// Augmentation-scope mirror of `index_namespaced_statement`.
+fn index_namespaced_statement_into_augmentation(
+    stmt: &Statement<'_>,
+    stmt_index: u32,
+    index: &mut DeclHeaderIndex,
+    namespace: &str,
+    scope: &AugmentationScopeKind,
+) {
+    match stmt {
+        Statement::TSTypeAliasDeclaration(alias) => {
+            let name = format!("{namespace}.{}", alias.id.name);
+            let scoped = index
+                .augmentation_type_headers
+                .entry(scope.clone())
+                .or_default();
+            index_type_alias(alias, name.as_str(), stmt_index, scoped);
+        }
+        Statement::TSInterfaceDeclaration(iface) => {
+            let name = format!("{namespace}.{}", iface.id.name);
+            let scoped = index
+                .augmentation_type_headers
+                .entry(scope.clone())
+                .or_default();
+            index_interface(iface, name.as_str(), stmt_index, scoped);
+        }
+        Statement::TSModuleDeclaration(module) => {
+            index_augmentation_module_declaration(
+                module,
+                stmt_index,
+                index,
+                scope,
+                Some(namespace),
+            );
+        }
+        // Export-only namespace value indexing (mirror of
+        // `index_namespaced_statement`).
+        Statement::ExportNamedDeclaration(export) => {
+            if let Some(ref decl) = export.declaration {
+                index_namespaced_declaration_into_augmentation(
+                    decl, stmt_index, index, namespace, scope,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Augmentation-scope mirror of `index_namespaced_declaration`.
+fn index_namespaced_declaration_into_augmentation(
+    decl: &Declaration<'_>,
+    stmt_index: u32,
+    index: &mut DeclHeaderIndex,
+    namespace: &str,
+    scope: &AugmentationScopeKind,
+) {
+    match decl {
+        Declaration::TSTypeAliasDeclaration(alias) => {
+            let name = format!("{namespace}.{}", alias.id.name);
+            let scoped = index
+                .augmentation_type_headers
+                .entry(scope.clone())
+                .or_default();
+            index_type_alias(alias, name.as_str(), stmt_index, scoped);
+        }
+        Declaration::TSInterfaceDeclaration(iface) => {
+            let name = format!("{namespace}.{}", iface.id.name);
+            let scoped = index
+                .augmentation_type_headers
+                .entry(scope.clone())
+                .or_default();
+            index_interface(iface, name.as_str(), stmt_index, scoped);
+        }
+        Declaration::TSModuleDeclaration(module) => {
+            index_augmentation_module_declaration(
+                module,
+                stmt_index,
+                index,
+                scope,
+                Some(namespace),
+            );
+        }
+        Declaration::VariableDeclaration(var_decl) => {
+            let scoped = index
+                .augmentation_value_headers
+                .entry(scope.clone())
+                .or_default();
+            for d in &var_decl.declarations {
+                index_variable(d, var_decl.kind, stmt_index, scoped, Some(namespace));
+            }
+        }
+        _ => {}
     }
 }
 

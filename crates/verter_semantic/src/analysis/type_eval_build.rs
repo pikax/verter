@@ -468,6 +468,18 @@ fn extract_augmentation_block(
             | Statement::ClassDeclaration(_) => {
                 retain_value_statement_into_augmentation(stmt, source, env, &scope);
             }
+            // A namespace nested inside an ambient augmentation block
+            // (`declare global { namespace JSX { ... } }` /
+            // `declare module "X" { namespace N { ... } }`) contributes its
+            // inner type/value members under their QUALIFIED `Ns.Member` names
+            // into the SAME augmentation scope. Because
+            // [`EvalEnv::add_augmentation_type`] keys on `(scope, qualified
+            // name)` and APPENDS, a repeated `declare global { namespace JSX {
+            // ... } }` block folds into the same ordered group and the existing
+            // `MergedDecl` peer-merge stitch unions the surfaces.
+            Statement::TSModuleDeclaration(module) => {
+                extract_augmentation_module_declaration(module, source, env, &scope, None);
+            }
             _ => {}
         }
     }
@@ -502,6 +514,163 @@ fn extract_augmentation_declaration(
         | Declaration::ClassDeclaration(_) => {
             let mut tmp = EvalEnv::new();
             extract_from_declaration(decl, source, &mut tmp);
+            move_value_symbols_into_augmentation(tmp, env, scope);
+        }
+        Declaration::TSModuleDeclaration(module) => {
+            extract_augmentation_module_declaration(module, source, env, scope, None);
+        }
+        _ => {}
+    }
+}
+
+/// Retain a `namespace N { ... }` nested inside an ambient augmentation block
+/// (`declare global { namespace JSX { ... } }` /
+/// `declare module "X" { namespace N { ... } }`) into the scoped augmentation
+/// inventory. Inner interfaces / type-aliases register under their QUALIFIED
+/// `Ns.Member` name (`JSX.IntrinsicElements`) — a consumer references the member
+/// as `JSX.IntrinsicElements`, never a bare `IntrinsicElements` — and never
+/// enter file-scope `type_symbols`. Because [`EvalEnv::add_augmentation_type`]
+/// keys on `(scope, qualified name)` and APPENDS, a repeated `declare global {
+/// namespace JSX { ... } }` block folds its members into the same ordered
+/// `TypeDeclGroup`, so the existing `MergedDecl` peer-merge stitch unions the
+/// surfaces.
+///
+/// This is the augmentation-scope mirror of [`extract_module_declaration`]'s
+/// identifier-name branch (which routes a file-scope namespace's members to
+/// `env.add_type` under the same qualified names).
+fn extract_augmentation_module_declaration(
+    decl: &TSModuleDeclaration<'_>,
+    source: &str,
+    env: &mut EvalEnv,
+    scope: &AugmentationScopeKind,
+    prefix: Option<&str>,
+) {
+    // A string-literal module name (`declare module "X"`) nested inside another
+    // augmentation block is not a namespace-member contributor; only
+    // identifier-named namespaces (`namespace JSX`) qualify members here.
+    let Some(namespace) = qualified_module_name(prefix, &decl.id) else {
+        return;
+    };
+    let Some(body) = decl.body.as_ref() else {
+        return;
+    };
+    match body {
+        TSModuleDeclarationBody::TSModuleDeclaration(inner) => {
+            extract_augmentation_module_declaration(
+                inner,
+                source,
+                env,
+                scope,
+                Some(namespace.as_str()),
+            );
+        }
+        TSModuleDeclarationBody::TSModuleBlock(block) => {
+            for stmt in &block.body {
+                extract_namespaced_statement_into_augmentation(
+                    stmt,
+                    source,
+                    env,
+                    namespace.as_str(),
+                    scope,
+                );
+            }
+        }
+    }
+}
+
+/// Augmentation-scope mirror of [`extract_namespaced_statement`]: register a
+/// namespace member nested inside an ambient augmentation block under its
+/// qualified `Ns.Member` name in the augmentation inventory (never file scope).
+fn extract_namespaced_statement_into_augmentation(
+    stmt: &Statement<'_>,
+    source: &str,
+    env: &mut EvalEnv,
+    namespace: &str,
+    scope: &AugmentationScopeKind,
+) {
+    match stmt {
+        Statement::TSTypeAliasDeclaration(alias) => {
+            env.add_augmentation_type(
+                scope.clone(),
+                build_named_type_alias_decl(
+                    alias,
+                    source,
+                    qualified_name(namespace, &alias.id.name),
+                ),
+            );
+        }
+        Statement::TSInterfaceDeclaration(iface) => {
+            env.add_augmentation_type(
+                scope.clone(),
+                build_named_interface_decl(
+                    iface,
+                    source,
+                    qualified_name(namespace, &iface.id.name),
+                ),
+            );
+        }
+        Statement::TSModuleDeclaration(module) => {
+            extract_augmentation_module_declaration(module, source, env, scope, Some(namespace));
+        }
+        // Namespace VALUE indexing is EXPORT-ONLY (mirrors
+        // `extract_namespaced_statement`): a non-exported `const hidden = …` is
+        // private to the namespace body, so a DIRECT `VariableDeclaration` is
+        // intentionally not indexed. Only the exported path registers a
+        // qualified value member such as `JSX.VERSION`.
+        Statement::ExportNamedDeclaration(export) => {
+            if let Some(ref decl) = export.declaration {
+                extract_namespaced_declaration_into_augmentation(
+                    decl, source, env, namespace, scope,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Augmentation-scope mirror of [`extract_namespaced_declaration`]: an exported
+/// namespace member nested in an ambient augmentation block registers under its
+/// qualified `Ns.Member` name (types into the type scope, values into the value
+/// scope).
+fn extract_namespaced_declaration_into_augmentation(
+    decl: &Declaration<'_>,
+    source: &str,
+    env: &mut EvalEnv,
+    namespace: &str,
+    scope: &AugmentationScopeKind,
+) {
+    match decl {
+        Declaration::TSTypeAliasDeclaration(alias) => {
+            env.add_augmentation_type(
+                scope.clone(),
+                build_named_type_alias_decl(
+                    alias,
+                    source,
+                    qualified_name(namespace, &alias.id.name),
+                ),
+            );
+        }
+        Declaration::TSInterfaceDeclaration(iface) => {
+            env.add_augmentation_type(
+                scope.clone(),
+                build_named_interface_decl(
+                    iface,
+                    source,
+                    qualified_name(namespace, &iface.id.name),
+                ),
+            );
+        }
+        Declaration::TSModuleDeclaration(module) => {
+            extract_augmentation_module_declaration(module, source, env, scope, Some(namespace));
+        }
+        Declaration::VariableDeclaration(var_decl) => {
+            // A namespaced value member registers under its qualified `NS.M`
+            // name into the augmentation VALUE scope (built via a throwaway env
+            // exactly as the file-scope namespaced-value path does).
+            let mut tmp = EvalEnv::new();
+            for declarator in &var_decl.declarations {
+                extract_variable(declarator, var_decl.kind, source, &mut tmp, Some(namespace));
+            }
             move_value_symbols_into_augmentation(tmp, env, scope);
         }
         _ => {}
