@@ -259,6 +259,35 @@ pub(super) async fn handle_hover(
     ))
 }
 
+/// Where the completion cursor sits in the SFC, as a first-class context.
+///
+/// Replaces the historical `(is_template_attr_context, in_expression_context)`
+/// boolean pair so that `<script setup>` positions are classified explicitly.
+/// Both `TemplateExpression` and `Script` compute an [`ExpressionContext`] (so
+/// member-access completion works in scripts), but the template-only
+/// `IdentifierExpected` TypeProvider suppression stays fenced to
+/// `TemplateExpression` — ordinary script identifier completions (TS globals,
+/// imports) must NOT be suppressed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompletionSourceContext {
+    /// Template attribute-name position (`<div cla|`).
+    TemplateAttr,
+    /// Template expression / interpolation (`:prop="x|"`, `{{ x| }}`).
+    TemplateExpression,
+    /// Inside `<script>` / `<script setup>`.
+    Script,
+    /// Anywhere else (tag name, text, style, root level, …).
+    Other,
+}
+
+impl CompletionSourceContext {
+    /// Whether this context should compute an [`ExpressionContext`] from the
+    /// mapped TSX (member access, literal, type position, …).
+    fn computes_expression_context(self) -> bool {
+        matches!(self, Self::TemplateExpression | Self::Script)
+    }
+}
+
 pub(super) async fn handle_completion(
     server: &VerterLanguageServer,
     params: CompletionParams,
@@ -461,23 +490,27 @@ pub(super) async fn handle_completion(
         .unwrap_or(false);
     let verter_items = verter_result.map(|r| r.items);
 
-    // Compute cursor context once — derive attribute vs expression context
-    let (is_template_attr_context, in_expression_context) = (|| {
+    // Compute the cursor's source context once — template attribute, template
+    // expression, script, or other.
+    let source_ctx = (|| {
         let doc = server.documents.get(uri)?;
         let analysis = server.documents.get_analysis(uri);
         let blocks = scan_sfc_blocks(&doc.source);
         let offset = doc.line_index.position_to_offset(position)?;
         let context = classify_cursor_context(offset, &doc.source, &blocks, analysis.as_ref());
         Some(match &context {
-            CursorContext::Template(TemplateCursorContext::AttributeName { .. }) => (true, false),
+            CursorContext::Template(TemplateCursorContext::AttributeName { .. }) => {
+                CompletionSourceContext::TemplateAttr
+            }
             CursorContext::Template(
                 TemplateCursorContext::Expression { .. } | TemplateCursorContext::Interpolation,
-            ) => (false, true),
-            CursorContext::Template(_) => (false, false),
-            _ => (false, false),
+            ) => CompletionSourceContext::TemplateExpression,
+            CursorContext::Script => CompletionSourceContext::Script,
+            _ => CompletionSourceContext::Other,
         })
     })()
-    .unwrap_or((false, false));
+    .unwrap_or(CompletionSourceContext::Other);
+    let is_template_attr_context = matches!(source_ctx, CompletionSourceContext::TemplateAttr);
 
     // Enhance with TypeProvider if available.
     // Extract all context synchronously — no DashMap guard held across await.
@@ -532,7 +565,10 @@ pub(super) async fn handle_completion(
             // | MemberAccess         | true            | false              |
             // | Literal/Type/PropKey | true            | false              |
             // | Unknown              | false           | false (filtered)   |
-            let expr_context = if in_expression_context {
+            // Compute the expression sub-context for BOTH template expressions
+            // and `<script setup>` positions, so member-access completion works
+            // in scripts (`a.` → MemberAccess → dot-trigger + member filtering).
+            let expr_context = if source_ctx.computes_expression_context() {
                 tsx_offset.map(|off| {
                     classify_expression_context_with_trigger(
                         &ctx.tsx_content,
@@ -568,13 +604,20 @@ pub(super) async fn handle_completion(
                     .map(str::to_string)
                 });
 
-                let skip_type_provider = expr_context
-                    .as_ref()
-                    .map(|ec| {
-                        matches!(ec, ExpressionContext::IdentifierExpected)
-                            && identifier_prefix.is_none()
-                    })
-                    .unwrap_or(false);
+                // FENCED to template expressions only: the template render proxy
+                // exposes only script bindings, so verter's own completions are
+                // the correct set and the TypeProvider's globals are noise. In
+                // SCRIPT, by contrast, TS globals and imports ARE valid — never
+                // suppress the TypeProvider for a bare script identifier position.
+                let skip_type_provider =
+                    matches!(source_ctx, CompletionSourceContext::TemplateExpression)
+                        && expr_context
+                            .as_ref()
+                            .map(|ec| {
+                                matches!(ec, ExpressionContext::IdentifierExpected)
+                                    && identifier_prefix.is_none()
+                            })
+                            .unwrap_or(false);
 
                 if skip_type_provider {
                     tracing::debug!(

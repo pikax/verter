@@ -199,9 +199,8 @@ fn validate_imported_macro_type(
                 );
             }
         }
-        "defineEmits" => {
-            if type_params.resolved.emits.is_empty() {
-                push_invalid_macro_type_diagnostic(
+        "defineEmits" if type_params.resolved.emits.is_empty() => {
+            push_invalid_macro_type_diagnostic(
                     diagnostics,
                     format!(
                         "defineEmits() type argument '{}' must resolve to emit call signatures or a named-tuple emits object.",
@@ -210,7 +209,6 @@ fn validate_imported_macro_type(
                     type_params,
                     content_start,
                 );
-            }
         }
         _ => {}
     }

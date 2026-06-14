@@ -595,7 +595,7 @@ function increment() {
 }
 </script>"#,
     );
-    // In error mode, script body is at file scope
+    // The recovery path hoists the import to module scope just like the clean path.
     assert!(
         code.contains("import { ref } from 'vue'"),
         "import must be present:\n{}",

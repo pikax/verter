@@ -165,10 +165,10 @@ fn detect_gci_in_expr(expr: &Expression<'_>) -> bool {
                 return true;
             }
         }
-        Expression::LogicalExpression(l) => {
-            if detect_gci_in_expr(&l.left) || detect_gci_in_expr(&l.right) {
-                return true;
-            }
+        Expression::LogicalExpression(l)
+            if (detect_gci_in_expr(&l.left) || detect_gci_in_expr(&l.right)) =>
+        {
+            return true;
         }
         _ => {}
     }

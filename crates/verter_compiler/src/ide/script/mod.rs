@@ -6,17 +6,16 @@
 //!
 //! ## Error Recovery
 //!
-//! When OXC encounters parse errors (common during typing), a truncate-and-reparse
-//! strategy recovers as much IDE functionality as possible:
-//!
-//! 1. Find the earliest error offset from OXC diagnostics.
-//! 2. Truncate source at the last newline before that offset — the "clean prefix".
-//! 3. Re-parse only the clean prefix (which succeeds since the error is removed).
-//! 4. Use the clean prefix AST for normal codegen (import hoisting, binding extraction,
-//!    macro processing), while the broken tail passes through unchanged.
-//!
-//! A lightweight token scanner ([`script_recover::ScriptTokenScanner`]) recovers
-//! macro binding names from the broken tail so template resolution still works.
+//! OXC parses the original `<script setup>` content exactly ONCE. When it parses
+//! cleanly, the full codegen path runs. When it has a genuine syntax error
+//! (common while typing — e.g. an incomplete `a.`), there is NO reparse: a single
+//! token scan of the REAL source ([`script_recover::ScriptTokenScanner::recover_plan`])
+//! produces a [`script_recover::ScriptSetupRecoveryPlan`] whose original-span
+//! import / macro / variable / function facts feed hoisting and binding
+//! registration, and whose OUTPUT-ONLY member / expression holes and scope closers
+//! keep the user's body valid TSX while it stays inside the `TemplateBindingFN`
+//! wrapper. Synthetic recovery chunks are never treated as bindings, macros,
+//! imports, or any other source fact.
 //!
 //! ## Output structure
 //!

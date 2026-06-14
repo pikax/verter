@@ -691,7 +691,7 @@ fn element_css_hover(offset: u32, analysis: &FileAnalysisSnapshot) -> Option<Hov
     }
 
     // Sort by specificity (highest first)
-    matches.sort_by(|a, b| b.1.cmp(&a.1));
+    matches.sort_by_key(|m| std::cmp::Reverse(m.1));
 
     let classes: Vec<&str> = element.static_classes().collect();
     let class_info = if classes.is_empty() {

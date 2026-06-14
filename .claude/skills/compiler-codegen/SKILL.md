@@ -202,16 +202,23 @@ Parser extracts structural directives from `el.props` via `prop.take()` and cach
 
 ## IDE Script Error Recovery
 
-When OXC encounters parse errors during typing (e.g. `count.` mid-expression), the IDE script codegen (`ide/script.rs`) uses a **truncate-and-reparse** strategy instead of falling back to degraded file-scope output:
+OXC parses the original `<script setup>` content exactly ONCE (`ide/script/setup.rs`). There is a single recovery surface — no truncate-and-reparse, no clean-prefix reparse authority, no file-scope error mode.
 
-1. Find the earliest error offset from OXC diagnostics.
-2. Truncate source at the last newline before that offset -- the "clean prefix".
-3. Re-parse only the clean prefix (succeeds since the broken code is removed).
-4. Use the clean prefix AST for normal codegen (import hoisting, binding extraction, macro processing). The broken tail passes through unchanged in the CodeTransform.
+- **Clean parse** → the full codegen path runs unchanged (import/type-decl hoisting, binding extraction, macro lowering, the `___VERTER___TemplateBindingFN` wrapper).
+- **Genuine syntax error** (both the TSX parse AND a TS-mode parse fail — a TSX-only failure is an angle-bracket assertion already handled by `rewrite_ts_type_assertions`) → a single token scan of the REAL source produces a `ScriptSetupRecoveryPlan` (`ide/script_recover.rs`, `ScriptTokenScanner::recover_plan`). The plan carries **top-level (bracket depth 0)** original-span `imports` / `macros` / `functions` / `variables` (reused for hoisting + binding registration) plus OUTPUT-ONLY recovery chunks (detected over the WHOLE source at any depth):
+  - **member holes** — a dangling `a.` / `a?.` gets a universal member placeholder (`valueOf`) right after the operator so the dot cannot absorb the following token;
+  - **expression holes** — a trailing operator / assignment RHS / conditional arm / arrow body gets an operand placeholder (`(undefined)`);
+  - **scope closers** + a statement terminator at the recovery boundary (the `</script>` overwrite) — close the brackets the user left open so the generated scaffolding starts cleanly. A delimiter that requires a non-empty body but was left empty (a grouping/arrow-body paren `const x = (`, a computed-member bracket `foo[`) gets a placeholder operand BEFORE its closer (`undefined)`, `undefined]`); call args `foo()`, array literals `[]`, and blocks/objects `{}` are valid empty and get a bare closer.
 
-A lightweight token scanner (`ide/script_recover.rs`) recovers macro binding names from the broken tail so template bindings still resolve. So typing `count.` at the end of a script preserves hover, completions, and go-to-definition for all declarations above the cursor.
+**Top-level fact gate.** Recovered facts are gated to bracket depth 0, mirroring the clean top-level parser's `block_depth == 0` rule. A block-local declaration (`function f(){ const inner = 1; }`) is NEVER recovered as a setup binding/import; only the whole-source holes/closers fire inside nested scopes.
 
-**Fallback**: When the clean prefix is empty (error on first line) or the clean prefix itself fails to parse, the system falls back to file-scope error recovery mode (`process_tsx_script_setup_error_mode`).
+**Recovered macro = clean-lowering parity.** A recovered `defineProps`/`withDefaults` binding is registered `Props` AND emits the same `const __props = <binding>;` alias as clean macro lowering, so a template `props.x` (lowered to `__props.x`) resolves instead of dangling against a `__props` that was never declared.
+
+The user's body STAYS inside the `___VERTER___TemplateBindingFN` wrapper in both cases; the broken-tail member access (`count.`) keeps hover/completion/go-to-definition working for declarations above the cursor.
+
+**No synthesize-then-reparse.** Synthetic recovery chunks are output-only and unmapped; they are NEVER bindings, macros, imports, or any other source fact. Recovery metadata comes only from the original clean OXC AST or from original-span token recovery over the real source — a reparsed synthetic view is never an authority.
+
+Guard: `crates/verter_compiler/tests/ide_script_recovery_guard.rs` (scans `ide/script/setup.rs` for the deleted dual-recovery identifiers and the synthesize-then-reparse anti-pattern), plus `crates/verter_compiler/tests/repro_member_access_ide_codegen.rs` (recovery shapes + clean-path preservation) and the negative-metadata tests in `script_recover.rs`.
 
 ## Style Preprocessing in Bundler Mode
 
