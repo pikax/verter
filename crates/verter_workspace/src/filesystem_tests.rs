@@ -311,6 +311,117 @@ fn realpath_nonexistent() {
     );
 }
 
+#[test]
+fn apply_changes_file_deleted_evicts_realpath_memo() {
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = dir.path().join("warm.txt");
+    std::fs::write(&file_path, "x").unwrap();
+    let canonical = file_path.to_string_lossy().replace('\\', "/");
+
+    let ws = FilesystemWorkspace::new(FilesystemOptions::default());
+
+    // Warm the realpath memo against disk.
+    let first = ws.realpath(&canonical);
+    assert!(first.is_some(), "realpath of an existing file resolves");
+
+    // Remove the file: the memo keeps serving the cached value (proving the
+    // cache is live and the deletion is not yet observed).
+    std::fs::remove_file(&file_path).unwrap();
+    assert_eq!(
+        ws.realpath(&canonical),
+        first,
+        "memo serves the cached value before the change is applied"
+    );
+
+    // The authoritative external-change channel must evict the memo entry.
+    ws.apply_changes(vec![WorkspaceChange::FileDeleted {
+        canonical_id: canonical.clone(),
+    }]);
+    assert_eq!(
+        ws.realpath(&canonical),
+        None,
+        "FileDeleted via apply_changes evicts the realpath memo so it reflects the deletion"
+    );
+}
+
+#[test]
+fn apply_changes_directory_tree_dirty_evicts_realpath_memo() {
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = dir.path().join("under_dirty.txt");
+    std::fs::write(&file_path, "x").unwrap();
+    let canonical = file_path.to_string_lossy().replace('\\', "/");
+    let parent = canonical.rsplit_once('/').unwrap().0.to_string();
+
+    let ws = FilesystemWorkspace::new(FilesystemOptions::default());
+
+    let first = ws.realpath(&canonical);
+    assert!(first.is_some());
+
+    std::fs::remove_file(&file_path).unwrap();
+    assert_eq!(
+        ws.realpath(&canonical),
+        first,
+        "memo serves the cached value before the change is applied"
+    );
+
+    ws.apply_changes(vec![WorkspaceChange::DirectoryTreeDirty { prefix: parent }]);
+    assert_eq!(
+        ws.realpath(&canonical),
+        None,
+        "DirectoryTreeDirty via apply_changes evicts the realpath memo for the subtree"
+    );
+}
+
+/// A symlink-addressed memo entry (key = link path, value = real target) must
+/// be evicted when the change arrives under the RESOLVED real path — exactly the
+/// pnpm `node_modules/<pkg>` (symlink) vs `.pnpm/<pkg>` (real) split. Gated to
+/// Unix: creating directory symlinks on Windows needs elevated privileges and is
+/// unreliable on CI.
+#[cfg(unix)]
+#[test]
+fn apply_changes_evicts_symlink_entry_by_resolved_value() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempfile::tempdir().unwrap();
+    let real_dir = dir.path().join("real");
+    std::fs::create_dir(&real_dir).unwrap();
+    let real_file = real_dir.join("f.txt");
+    std::fs::write(&real_file, "x").unwrap();
+    let link_dir = dir.path().join("link");
+    symlink(&real_dir, &link_dir).unwrap();
+
+    let link_canonical = link_dir.join("f.txt").to_string_lossy().replace('\\', "/");
+
+    let ws = FilesystemWorkspace::new(FilesystemOptions::default());
+
+    // Warm: realpath through the symlink resolves to the real target.
+    let resolved = ws
+        .realpath(&link_canonical)
+        .expect("symlinked path resolves");
+    assert!(
+        resolved.contains("/real/"),
+        "realpath resolves through the symlink to the real target, got {resolved}"
+    );
+    assert!(
+        !resolved.contains("/link/"),
+        "the resolved value is the real target, not the link spelling, got {resolved}"
+    );
+
+    // Delete the real target and report the change under its REAL path.
+    std::fs::remove_file(&real_file).unwrap();
+    ws.apply_changes(vec![WorkspaceChange::FileDeleted {
+        canonical_id: resolved.clone(),
+    }]);
+
+    // The entry keyed by the link path must be evicted because its resolved
+    // VALUE fell under the changed prefix — otherwise it serves a stale path.
+    assert_eq!(
+        ws.realpath(&link_canonical),
+        None,
+        "an entry whose resolved value is under the changed prefix is evicted"
+    );
+}
+
 // ── FilesystemWorkspace::apply_changes ──
 
 #[test]

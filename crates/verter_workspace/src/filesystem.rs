@@ -156,6 +156,16 @@ impl FilesystemWorkspace {
             }
         };
 
+        // A dirty parent about to be rescanned may have had a path component
+        // relinked or removed, so any realpath memo entry under it is suspect.
+        // Evicting here (in addition to the explicit `apply_changes` wiring)
+        // closes the gap for any dir-index dirty source whose refresh consumes
+        // the dirtiness — a refresh must never clear the dirty mark while stale
+        // realpath entries survive.
+        if was_dirty {
+            self.native_fs.invalidate_realpath_under(parent);
+        }
+
         self.engine
             .vfs_provenance
             .native_fs_read_dir_count
@@ -212,7 +222,31 @@ impl FilesystemWorkspace {
     }
 
     /// Apply a batch of workspace changes.
+    ///
+    /// This is the authoritative external-change channel (watcher batches land
+    /// here). Each change carries a dir-index dirty signal that
+    /// `Engine::apply_changes` fires; the realpath memo lives on `NativeFs`
+    /// (owned here, NOT on the shared `Engine` that also backs
+    /// `MemoryWorkspace`), so `FilesystemWorkspace` drives its eviction
+    /// explicitly from the same signals before delegating: `FileChanged` /
+    /// `FileDeleted` evict the changed path, `DirectoryTreeDirty` evicts the
+    /// subtree.
     pub fn apply_changes(&self, changes: Vec<WorkspaceChange>) -> ChangeResult {
+        #[cfg(not(target_arch = "wasm32"))]
+        for change in &changes {
+            match change {
+                WorkspaceChange::FileChanged { canonical_id, .. }
+                | WorkspaceChange::FileDeleted { canonical_id } => {
+                    self.native_fs.invalidate_realpath_under(canonical_id);
+                }
+                WorkspaceChange::DirectoryTreeDirty { prefix } => {
+                    self.native_fs.invalidate_realpath_under(prefix);
+                }
+                WorkspaceChange::OverlaySet { .. }
+                | WorkspaceChange::OverlayClear { .. }
+                | WorkspaceChange::ConfigChanged { .. } => {}
+            }
+        }
         self.engine.apply_changes(changes)
     }
 
@@ -604,6 +638,8 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
         if let Some((parent, _)) = split_parent_basename(canonical_id) {
             self.engine.dir_index.write().mark_dirty(parent);
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        self.native_fs.invalidate_realpath_under(canonical_id);
         self.engine.overlay.write().clear(canonical_id);
         self.engine.snapshot.write().remove(canonical_id);
         self.engine.edges.write().remove_file(canonical_id);
