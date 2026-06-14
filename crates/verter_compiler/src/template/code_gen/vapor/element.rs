@@ -14,18 +14,20 @@ use crate::template::code_gen::types::{
     CodeGenOutput, VaporCounters, VaporEffect, VaporElementState, VaporRootElement,
 };
 
-/// Build the HTML open tag from an element node.
+/// Build the HTML open tag from an element node into the current scope buffer.
 ///
-/// Appends `<tag_name` plus static attributes to the parent's HTML buffer.
-/// Dynamic attributes (`:class`, `@click`, etc.) are skipped — they become effects.
+/// Appends `<tag_name` plus static attributes to `html` — the single HTML
+/// buffer for the element's template scope, into which every plain descendant
+/// writes directly. Dynamic attributes (`:class`, `@click`, etc.) are skipped —
+/// they become effects.
 ///
 /// Vue 3.6 Vapor HTML minimization rules:
 /// - Self-closing tags like `<br/>` become `<br>` (no slash)
 /// - Attribute values without spaces are unquoted: `id=app` not `id="app"`
-pub fn build_open_tag(element: &ElementNode, source: &str, state: &mut VaporElementState<'_>) {
-    state.html.push('<');
+pub fn build_open_tag(element: &ElementNode, source: &str, html: &mut String) {
+    html.push('<');
     let tag_name = &source[element.tag_open.start as usize + 1..element.tag_open.name_end as usize];
-    state.html.push_str(tag_name);
+    html.push_str(tag_name);
 
     // Add static attributes to HTML
     for prop in &element.props {
@@ -37,24 +39,24 @@ pub fn build_open_tag(element: &ElementNode, source: &str, state: &mut VaporElem
         if name == "ref" {
             continue;
         }
-        state.html.push(' ');
-        state.html.push_str(name);
+        html.push(' ');
+        html.push_str(name);
         if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
             let value = &source[vs as usize..ve as usize];
             // Vue 3.6: unquote attr values that don't contain spaces or special chars
             if needs_attr_quoting(value) {
-                state.html.push_str("=\"");
-                state.html.push_str(value);
-                state.html.push('"');
+                html.push_str("=\"");
+                html.push_str(value);
+                html.push('"');
             } else {
-                state.html.push('=');
-                state.html.push_str(value);
+                html.push('=');
+                html.push_str(value);
             }
         }
     }
 
     // Vue 3.6: self-closing tags always use `>` not ` />` in Vapor HTML
-    state.html.push('>');
+    html.push('>');
 }
 
 /// Check if an attribute value needs quoting in HTML.
@@ -129,40 +131,6 @@ pub fn finalize_text_parts(state: &mut VaporElementState<'_>, has_dynamic_text: 
     }
 }
 
-/// Build navigation instructions for accessing a child element's node.
-///
-/// Returns the navigation instruction string and the variable name for the child.
-/// Uses `_child(parent)` for the first child, `_next(prev_sibling)` for subsequent.
-pub fn build_child_nav(
-    parent_var: &str,
-    child_index: u32,
-    counters: &mut VaporCounters,
-) -> (String, String) {
-    use crate::template::code_gen::shared::helpers::push_u32;
-
-    let path_idx = counters.next_path();
-    let mut var = String::with_capacity(4);
-    var.push('p');
-    push_u32(&mut var, path_idx);
-
-    let mut nav = String::with_capacity(32);
-    nav.push_str("const ");
-    nav.push_str(&var);
-    if child_index == 0 {
-        nav.push_str(" = _child(");
-        nav.push_str(parent_var);
-        nav.push(')');
-    } else {
-        nav.push_str(" = _next(");
-        nav.push_str(parent_var);
-        nav.push_str(", ");
-        push_u32(&mut nav, child_index);
-        nav.push(')');
-    }
-
-    (nav, var)
-}
-
 /// Process a completed root element, producing a `VaporRootElement`.
 ///
 /// This is called when a root-level element's leave phase completes.
@@ -218,13 +186,15 @@ pub fn finalize_root_element<'a>(
     }
 }
 
-/// Merge a child element's state into its parent when the child is not a root element.
+/// Bubble a non-root child element's render-side state into its parent.
 ///
-/// The child's HTML is appended to the parent's HTML buffer.
-/// The child's effects, navigation, and text creations bubble up to the parent.
+/// The child's static HTML has already been written straight into the shared
+/// scope buffer during the DFS, so nothing is copied here. What bubbles up is
+/// the render-side work: navigation to reach a dynamic child, its text-node
+/// creation, and the child's (and grandchildren's) effects and nav.
 ///
 /// `dom_child_index` is the child's 0-based DOM index within the parent,
-/// computed from the AST by `compute_dom_child_index`.
+/// taken from the parent's running child cursor (`observe_dom_element`).
 /// `child_has_dynamic_text` is derived from `ChildrenFlags::HasInterpolation`.
 /// Returns the consumed child state for optional recycling into a pool.
 pub fn merge_into_parent<'a>(
@@ -233,35 +203,32 @@ pub fn merge_into_parent<'a>(
     counters: &mut VaporCounters,
     dom_child_index: u32,
     child_has_dynamic_text: bool,
-    out: &CodeGenOutput<'a>,
+    out: &mut CodeGenOutput<'a>,
 ) -> VaporElementState<'a> {
-    // Append child's HTML to parent
-    parent.html.push_str(&child.html);
-
     // If child has dynamic content, we need navigation to reach it
     if child_has_dynamic_text || !child.own_effects.is_empty() || !child.child_effects.is_empty() {
-        use crate::template::code_gen::shared::helpers::push_u32;
-
-        // Build parent_var without format!
+        // Navigation and text-creation lines are assembled directly through
+        // the reusable format-sink scratch (`alloc_fmt` → one bump per line),
+        // instead of a fresh heap `String` per line plus a separate arena copy.
         let ref_idx = parent
             .node_ref
             .unwrap_or_else(|| parent.ensure_node_ref(counters));
-        let mut parent_var = String::with_capacity(4);
-        parent_var.push('n');
-        push_u32(&mut parent_var, ref_idx);
+        // First child reaches via `_child(parent)`, later siblings via
+        // `_next(parent, dom_index)` — `pN` is the navigation path variable.
+        let path_idx = counters.next_path();
+        let nav = if dom_child_index == 0 {
+            out.alloc_fmt(format_args!("const p{path_idx} = _child(n{ref_idx})"))
+        } else {
+            out.alloc_fmt(format_args!(
+                "const p{path_idx} = _next(n{ref_idx}, {dom_child_index})"
+            ))
+        };
+        parent.child_nav.push(nav);
 
-        let (nav_instruction, child_var) = build_child_nav(&parent_var, dom_child_index, counters);
-        parent.child_nav.push(out.alloc_str(&nav_instruction));
-
-        // If child has dynamic text, create _txt() call (avoid format!)
+        // If child has dynamic text, create its `_txt()` text node off `pN`.
         if let Some(text_ref) = child.text_node_ref {
-            let mut tc = String::with_capacity(24);
-            tc.push_str("const x");
-            push_u32(&mut tc, text_ref);
-            tc.push_str(" = _txt(");
-            tc.push_str(&child_var);
-            tc.push(')');
-            parent.child_text_creations.push(out.alloc_str(&tc));
+            let tc = out.alloc_fmt(format_args!("const x{text_ref} = _txt(p{path_idx})"));
+            parent.child_text_creations.push(tc);
         }
 
         // Bubble up child's own effects (append drains child vec, capacity retained)
@@ -326,10 +293,10 @@ mod tests {
             children_mode: ChildrenMode::Empty,
             is_fully_static: false,
         };
-        let mut state = VaporElementState::new();
-        build_open_tag(&element, source, &mut state);
+        let mut html = String::new();
+        build_open_tag(&element, source, &mut html);
 
-        assert_eq!(state.html, "<div>");
+        assert_eq!(html, "<div>");
     }
 
     #[test]
@@ -367,10 +334,10 @@ mod tests {
             children_mode: ChildrenMode::Empty,
             is_fully_static: false,
         };
-        let mut state = VaporElementState::new();
-        build_open_tag(&element, source, &mut state);
+        let mut html = String::new();
+        build_open_tag(&element, source, &mut html);
 
-        assert_eq!(state.html, "<div class=foo>");
+        assert_eq!(html, "<div class=foo>");
     }
 
     #[test]
@@ -393,10 +360,10 @@ mod tests {
             children_mode: ChildrenMode::Empty,
             is_fully_static: false,
         };
-        let mut state = VaporElementState::new();
-        build_open_tag(&element, source, &mut state);
+        let mut html = String::new();
+        build_open_tag(&element, source, &mut html);
 
-        assert_eq!(state.html, "<br>");
+        assert_eq!(html, "<br>");
     }
 
     #[test]
@@ -449,11 +416,11 @@ mod tests {
             children_mode: ChildrenMode::Empty,
             is_fully_static: false,
         };
-        let mut state = VaporElementState::new();
-        build_open_tag(&element, source, &mut state);
+        let mut html = String::new();
+        build_open_tag(&element, source, &mut html);
 
         // Only static id should be in HTML, not :class
-        assert_eq!(state.html, "<div id=x>");
+        assert_eq!(html, "<div id=x>");
     }
 
     // ==================== close_html_tag ====================
@@ -502,24 +469,6 @@ mod tests {
         assert!(state.own_effects.is_empty());
     }
 
-    // ==================== build_child_nav ====================
-
-    #[test]
-    fn nav_first_child() {
-        let mut counters = VaporCounters::default();
-        let (nav, var) = build_child_nav("n0", 0, &mut counters);
-        assert_eq!(nav, "const p0 = _child(n0)");
-        assert_eq!(var, "p0");
-    }
-
-    #[test]
-    fn nav_nth_child() {
-        let mut counters = VaporCounters::default();
-        let (nav, var) = build_child_nav("p0", 2, &mut counters);
-        assert_eq!(nav, "const p0 = _next(p0, 2)");
-        assert_eq!(var, "p0");
-    }
-
     // ==================== finalize_root_element ====================
 
     #[test]
@@ -561,46 +510,48 @@ mod tests {
     // ==================== merge_into_parent ====================
 
     #[test]
-    fn merge_static_child_into_parent() {
+    fn merge_static_child_does_not_copy_html_or_emit_nav() {
         let alloc = Allocator::default();
-        let out = CodeGenOutput::new(&alloc);
+        let mut out = CodeGenOutput::new(&alloc);
         let mut counters = VaporCounters::default();
         let mut parent = VaporElementState::new();
         parent.html = "<div>".to_string();
 
+        // The child's HTML lives in the shared scope buffer already; its own
+        // `html` field is irrelevant to the merge. Set it to a sentinel to
+        // prove the merge never appends it into the parent.
         let mut child = VaporElementState::new();
         child.html = "<span>text</span>".to_string();
 
         // dom_child_index=0 (first child), no dynamic text
-        let _ = merge_into_parent(child, &mut parent, &mut counters, 0, false, &out);
+        let _ = merge_into_parent(child, &mut parent, &mut counters, 0, false, &mut out);
 
-        assert_eq!(parent.html, "<div><span>text</span>");
+        // Negative: the merge must NOT copy child HTML into the parent.
+        assert_eq!(parent.html, "<div>");
         assert!(parent.child_nav.is_empty()); // No navigation needed for static
     }
 
     #[test]
     fn merge_dynamic_child_uses_dom_index_for_nav() {
         let alloc = Allocator::default();
-        let out = CodeGenOutput::new(&alloc);
+        let mut out = CodeGenOutput::new(&alloc);
         let mut counters = VaporCounters::default();
         let mut parent = VaporElementState::new();
         parent.html = "<div>".to_string();
 
-        // First static child at dom_child_index=0
-        let mut static_child = VaporElementState::new();
-        static_child.html = "<p>text</p>".to_string();
-        let _ = merge_into_parent(static_child, &mut parent, &mut counters, 0, false, &out);
+        // First static child at dom_child_index=0 (no nav contribution).
+        let static_child = VaporElementState::new();
+        let _ = merge_into_parent(static_child, &mut parent, &mut counters, 0, false, &mut out);
 
         // Second dynamic child at dom_child_index=1
         let mut dynamic_child = VaporElementState::new();
-        dynamic_child.html = "<span> </span>".to_string();
         dynamic_child.text_node_ref = Some(counters.next_text());
         dynamic_child.own_effects = vec![VaporEffect::SetText {
             text_ref: 0,
             parts: vec![VaporTextPart::Dynamic("_toDisplayString(_ctx.msg)")],
         }];
 
-        let _ = merge_into_parent(dynamic_child, &mut parent, &mut counters, 1, true, &out);
+        let _ = merge_into_parent(dynamic_child, &mut parent, &mut counters, 1, true, &mut out);
 
         assert!(!parent.child_nav.is_empty());
         // dom_child_index=1 → _next(n0, 1)
@@ -609,12 +560,14 @@ mod tests {
             "Expected _next with index 1, got: {}",
             parent.child_nav[0]
         );
+        // The merge bubbles render-side work only, never HTML.
+        assert_eq!(parent.html, "<div>");
     }
 
     #[test]
-    fn merge_dynamic_child_into_parent() {
+    fn merge_dynamic_child_bubbles_nav_text_and_effects() {
         let alloc = Allocator::default();
-        let out = CodeGenOutput::new(&alloc);
+        let mut out = CodeGenOutput::new(&alloc);
         let mut counters = VaporCounters::default();
         let mut parent = VaporElementState::new();
         parent.html = "<div>".to_string();
@@ -628,9 +581,11 @@ mod tests {
         }];
 
         // dom_child_index=0 (first child), has dynamic text
-        let _ = merge_into_parent(child, &mut parent, &mut counters, 0, true, &out);
+        let _ = merge_into_parent(child, &mut parent, &mut counters, 0, true, &mut out);
 
-        assert_eq!(parent.html, "<div><span> </span>");
+        // Negative: HTML is untouched (it lives in the shared scope buffer).
+        assert_eq!(parent.html, "<div>");
+        // Render-side state bubbles up: nav, text-node creation, and effects.
         assert!(!parent.child_nav.is_empty());
         assert!(!parent.child_text_creations.is_empty());
         assert!(!parent.child_effects.is_empty());

@@ -165,8 +165,21 @@ impl<'alloc> CodeGenOutput<'alloc> {
     /// result once. The buffer is cleared first and its capacity is retained
     /// for the next emission, so repeated formatted emissions reuse one
     /// allocation instead of allocating a fresh `String` per call.
+    ///
+    /// This is the arena-string companion to the op-recording format sinks
+    /// (`overwrite_fmt` / `prepend_fmt` / …): those record a `CodeTransform`
+    /// operation, whereas this returns the bump-allocated `&'alloc str` for
+    /// content that is stored and assembled later rather than applied at a
+    /// source position — e.g. the Vapor navigation (`const pN = _child(nM)`)
+    /// and text-creation (`const xN = _txt(pP)`) lines accumulated for the
+    /// render-function body. It produces a string through the SAME reusable
+    /// scratch + single-bump path, never by editing already-emitted output in
+    /// place.
     #[inline]
-    fn alloc_fmt(&mut self, args: std::fmt::Arguments<'_>) -> &'alloc str {
+    pub(in crate::template::code_gen) fn alloc_fmt(
+        &mut self,
+        args: std::fmt::Arguments<'_>,
+    ) -> &'alloc str {
         use std::fmt::Write as _;
         self.scratch.clear();
         // Appending to a `String` never fails; `write_fmt` can only return
@@ -698,13 +711,18 @@ impl VaporEffect<'_> {
 
 /// Per-element state for Vapor codegen.
 ///
-/// Pushed onto the stack when entering an element, popped on leave.
-/// Contains only genuine output buffers — metadata like tag name, is_root,
-/// is_void, depth, child_index, and has_dynamic_text are derived from the
-/// AST on-demand in the caller.
+/// Pushed onto the stack when entering an element, popped on leave. Holds this
+/// element's render-side output buffers plus the traversal-local DOM child
+/// cursor used to index its children. Static facts about the element itself
+/// (tag name, is_root, is_void, depth, has_dynamic_text) are derived from the
+/// AST on demand in the caller rather than stored here.
 #[derive(Debug)]
 pub struct VaporElementState<'a> {
-    /// Accumulated static HTML for this element's subtree.
+    /// Finalized static HTML for this element's subtree. Only template-scope
+    /// roots (root elements, components, slot outlets, slot templates) carry
+    /// content here, handed over once when the shared scope buffer is closed;
+    /// plain descendants append into that shared buffer directly, so their own
+    /// field stays empty and is never read.
     pub html: String,
     /// Dynamic text parts for the current text group.
     pub text_parts: Vec<VaporTextPart<'a>>,
@@ -725,6 +743,17 @@ pub struct VaporElementState<'a> {
     /// Named slot closure entries built from `<template v-slot>` children.
     /// Each string is a complete slot entry (e.g., `header: () => { ... }`).
     pub named_slots: Vec<String>,
+    /// Running count of this element's DOM children observed so far during the
+    /// DFS — i.e. the DOM index the next element child will occupy. Adjacent
+    /// text/interpolation nodes coalesce into a single DOM child, comments
+    /// count only when rendered, and every element counts once. Maintained
+    /// incrementally as each child is walked, replacing a per-child rescan of
+    /// the preceding siblings.
+    pub dom_child_cursor: u32,
+    /// Whether the most recently observed child was part of a text/
+    /// interpolation run, so the next adjacent text/interpolation coalesces
+    /// into the same DOM child rather than advancing the cursor.
+    pub dom_in_text_run: bool,
 }
 
 impl Default for VaporElementState<'_> {
@@ -736,7 +765,7 @@ impl Default for VaporElementState<'_> {
 impl VaporElementState<'_> {
     pub fn new() -> Self {
         Self {
-            html: String::with_capacity(128),
+            html: String::new(),
             text_parts: Vec::new(),
             node_ref: None,
             text_node_ref: None,
@@ -746,6 +775,8 @@ impl VaporElementState<'_> {
             child_effects: Vec::new(),
             child_statements: Vec::new(),
             named_slots: Vec::new(),
+            dom_child_cursor: 0,
+            dom_in_text_run: false,
         }
     }
 
@@ -762,6 +793,35 @@ impl VaporElementState<'_> {
         self.child_effects.clear();
         self.child_statements.clear();
         self.named_slots.clear();
+        self.dom_child_cursor = 0;
+        self.dom_in_text_run = false;
+    }
+
+    /// Observe an adjacent text or interpolation child while walking this
+    /// element's children: adjacent text/interpolation nodes coalesce into a
+    /// single DOM child, so only the first of a run advances the cursor.
+    pub fn observe_dom_text_run(&mut self) {
+        if !self.dom_in_text_run {
+            self.dom_in_text_run = true;
+            self.dom_child_cursor += 1;
+        }
+    }
+
+    /// Observe a rendered comment child: it breaks any text run and counts as
+    /// one DOM child. Callers invoke this only when comment rendering is on.
+    pub fn observe_dom_comment(&mut self) {
+        self.dom_in_text_run = false;
+        self.dom_child_cursor += 1;
+    }
+
+    /// Observe an element child, returning its 0-based DOM index within this
+    /// element and advancing the cursor past it. An element breaks any text
+    /// run and counts as one DOM child.
+    pub fn observe_dom_element(&mut self) -> u32 {
+        let index = self.dom_child_cursor;
+        self.dom_in_text_run = false;
+        self.dom_child_cursor += 1;
+        index
     }
 
     /// Ensure a node ref is allocated for this element.

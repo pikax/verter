@@ -17,23 +17,25 @@ use crate::template::oxc::types::OxcParsedExpression;
 
 /// Process an interpolation node in Vapor mode.
 ///
-/// - Appends a space placeholder to the parent's HTML buffer.
+/// - Appends a space placeholder to `html`, the shared scope buffer for the
+///   enclosing template (it represents the text DOM node).
 /// - Wraps the expression in `_toDisplayString()`.
 /// - Uses OXC binding data for compound expressions, falling back to
 ///   `resolve_simple_expr` for single identifiers.
-/// - Marks the parent as having dynamic text.
-/// - Allocates a text node ref if not already present.
+/// - Records the dynamic text part on `parent` and allocates its text node ref.
+#[allow(clippy::too_many_arguments)]
 pub fn process_interpolation<'a>(
     interp: &InterpolationNode,
     source: &str,
     oxc: &OxcParsedExpression<'_>,
     resolver: &BindingResolver<'_>,
+    html: &mut String,
     parent: &mut VaporElementState<'a>,
     counters: &mut VaporCounters,
     out: &mut CodeGenOutput<'a>,
 ) {
     // Append space placeholder to HTML (represents the text DOM node)
-    parent.html.push(' ');
+    html.push(' ');
 
     // Extract expression content (untrimmed — build_prefixed_expr handles trimming internally
     // and needs the raw range to correctly compute binding offsets relative to inner_start)
@@ -235,6 +237,7 @@ mod tests {
     fn interpolation_appends_space_to_html() {
         let alloc = oxc_allocator::Allocator::default();
         let mut out = CodeGenOutput::new(&alloc);
+        let mut html = String::new();
         let mut parent = make_parent();
         let mut counters = VaporCounters::default();
         let resolver = make_resolver_empty();
@@ -251,18 +254,20 @@ mod tests {
             "{{ msg }}",
             &oxc,
             &resolver,
+            &mut html,
             &mut parent,
             &mut counters,
             &mut out,
         );
 
-        assert_eq!(parent.html, " ");
+        assert_eq!(html, " ");
     }
 
     #[test]
     fn interpolation_records_dynamic_part() {
         let alloc = oxc_allocator::Allocator::default();
         let mut out = CodeGenOutput::new(&alloc);
+        let mut html = String::new();
         let mut parent = make_parent();
         let mut counters = VaporCounters::default();
         let resolver = make_resolver_with_ctx();
@@ -279,6 +284,7 @@ mod tests {
             "{{ msg }}",
             &oxc,
             &resolver,
+            &mut html,
             &mut parent,
             &mut counters,
             &mut out,
@@ -294,6 +300,7 @@ mod tests {
     fn interpolation_allocates_text_ref() {
         let alloc = oxc_allocator::Allocator::default();
         let mut out = CodeGenOutput::new(&alloc);
+        let mut html = String::new();
         let mut parent = make_parent();
         let mut counters = VaporCounters::default();
         let resolver = make_resolver_empty();
@@ -310,6 +317,7 @@ mod tests {
             "{{ msg }}",
             &oxc,
             &resolver,
+            &mut html,
             &mut parent,
             &mut counters,
             &mut out,
@@ -323,6 +331,7 @@ mod tests {
     fn interpolation_adds_import() {
         let alloc = oxc_allocator::Allocator::default();
         let mut out = CodeGenOutput::new(&alloc);
+        let mut html = String::new();
         let mut parent = make_parent();
         let mut counters = VaporCounters::default();
         let resolver = make_resolver_empty();
@@ -339,6 +348,7 @@ mod tests {
             "{{ msg }}",
             &oxc,
             &resolver,
+            &mut html,
             &mut parent,
             &mut counters,
             &mut out,
