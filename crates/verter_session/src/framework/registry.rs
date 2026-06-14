@@ -487,20 +487,14 @@ fn vue_registration(carrier_token: CarrierAccessToken) -> FrameworkRegistration 
 
 /// The Svelte adapter registration row.
 ///
-/// Registers the carrier LEGS — carrier + synth + script-fact provider + api
-/// projector — with the STRUCTURAL `SurfaceRegistration::Deferred` arm (D-ag):
-/// the executor serves every Svelte surface request as one entry per known kind
-/// with `UNSUPPORTED` + `GRAPH_EXACTNESS_UNSUPPORTED` + the
-/// surfaces-not-yet-registered diagnostic until B8b replaces the arm with the
-/// real `SvelteFrameworkAdapter` (one field flip, no dual path).
+/// Registers ALL legs — carrier + synth + script-fact provider + api projector +
+/// the real `SvelteFrameworkAdapter` SURFACE leg. The surface store is keyed by
+/// the Svelte adapter remainder ([`SvelteSurfaceKey`](crate::typeinfo::framework_surface::SvelteSurfaceKey)
+/// — one source family per row, D-bc).
 fn svelte_registration(carrier_token: CarrierAccessToken) -> FrameworkRegistration {
-    // The surface store mirrors the wire surface shape (`MacroSurfaceDtos`)
-    // so the B8b arm flip reuses it without a store change. A `Deferred`
-    // registration never populates it (the executor short-circuits to
-    // structural UNSUPPORTED before any surface materialization).
     let store: Arc<dyn ErasedFrameworkSurfaceStore> =
         Arc::new(crate::framework::surface_store::FrameworkSurfaceStore::<
-            crate::typeinfo::framework_surface::VueSurfaceKey,
+            crate::typeinfo::framework_surface::SvelteSurfaceKey,
             crate::typeinfo::framework_surface::MacroSurfaceDtos,
         >::new());
     FrameworkRegistration {
@@ -517,7 +511,9 @@ fn svelte_registration(carrier_token: CarrierAccessToken) -> FrameworkRegistrati
         script_fact_providers: vec![Arc::new(
             verter_semantic::analysis::framework_facts::svelte::SvelteScriptProvider,
         )],
-        surface: SurfaceRegistration::Deferred,
+        surface: SurfaceRegistration::Adapter(Arc::new(
+            crate::typeinfo::adapters::svelte::adapter::SvelteFrameworkAdapter::default(),
+        )),
         surface_store: store,
     }
 }
@@ -719,10 +715,10 @@ mod tests {
     }
 
     #[test]
-    fn svelte_registration_carries_carrier_legs_and_a_deferred_surface() {
-        // B8a: the Svelte carrier registers carrier + synth + script-fact
-        // provider + api-projector legs, with a Deferred SURFACE arm (its
-        // surface resolution lands in B8b).
+    fn svelte_registration_carries_all_legs_and_a_real_surface_adapter() {
+        // The Svelte carrier registers carrier + synth + script-fact provider +
+        // api-projector legs PLUS the real `SvelteFrameworkAdapter` SURFACE arm
+        // (the executor resolves Svelte surfaces, no longer a Deferred stub).
         let registry = built_in();
         let svelte = registry
             .get(&FrameworkAdapterId::svelte())
@@ -739,8 +735,8 @@ mod tests {
             "Svelte registers its one syntax-capture provider"
         );
         assert!(
-            matches!(svelte.surface, SurfaceRegistration::Deferred),
-            "Svelte's SURFACE resolution is deferred to B8b (the carrier legs land now)"
+            matches!(svelte.surface, SurfaceRegistration::Adapter(_)),
+            "Svelte registers a real surface adapter (the Deferred arm is superseded)"
         );
         // The api-leg clause holds: api_suffix Some -> api_projector Some.
         assert_eq!(

@@ -22,7 +22,7 @@
 //! 5. A [`SurfaceRegistration::Adapter`] adapter PLANS its demands against the
 //!    facts/carrier-only [`FrameworkAdapterCtx`], the executor RESOLVES each
 //!    [`PlannedDemand`] through the module-private [`ExecutorResolveCtx`] (an
-//!    EXHAUSTIVE match — no wildcard arm — over the closed 4-variant taxonomy),
+//!    EXHAUSTIVE match — no wildcard arm — over the closed 5-variant taxonomy),
 //!    the adapter NORMALIZES the resolved data, and [`graph_export`] encodes the
 //!    `FrameworkSurfacePayload`.
 //!
@@ -424,7 +424,7 @@ impl ExecutorResolveCtx<'_> {
 
     /// Resolve ONE planned demand through the shared engine.
     ///
-    /// EXHAUSTIVE match over the closed 4-variant [`PlannedDemand`] taxonomy —
+    /// EXHAUSTIVE match over the closed 5-variant [`PlannedDemand`] taxonomy —
     /// NO wildcard arm. Adding a variant breaks this match (the closed-vocabulary
     /// discipline).
     fn resolve_demand(
@@ -446,6 +446,11 @@ impl ExecutorResolveCtx<'_> {
             PlannedDemand::ShallowSurface { node } => {
                 ResolvedDemand::ShallowSurface(self.resolve_shallow_surface(&node))
             }
+            PlannedDemand::SvelteSurface { owner, source } => ResolvedDemand::SvelteSurface(
+                crate::typeinfo::framework_surface::svelte_exec::resolve_svelte_surface(
+                    self.host, self.ctx, &owner, source,
+                ),
+            ),
         }
     }
 

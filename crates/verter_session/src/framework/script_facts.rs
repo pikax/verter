@@ -39,7 +39,7 @@ use oxc_parser::{ParseOptions, Parser};
 use oxc_span::SourceType;
 use verter_language::FrameworkAdapterId;
 use verter_semantic::analysis::framework_facts::{
-    FrameworkScriptCandidates, FrameworkScriptFactPayload, ResolvedImportTarget,
+    FrameworkScriptCandidates, FrameworkScriptFactPayload, ResolvedImportTarget, ResolvedPackage,
     ResolvedValidationCx, ScriptFactProvider,
 };
 
@@ -297,10 +297,89 @@ impl FrameworkScriptCaches {
 ///
 /// Returns `None` honestly when no active provider produces a `T` payload.
 #[must_use]
+/// The TYPED resolved-package identity of `specifier` → `resolved_canonical`,
+/// computed SESSION-side where the package-backed classification authority lives.
+///
+/// `Some(ResolvedPackage)` IFF the import resolved to a canonical the session's
+/// classifier reports as PACKAGE-BACKED (`ResolverContext::workspace_is_package_backed`
+/// — NOT a `/node_modules/` path substring) AND the specifier is a BARE package
+/// specifier (so its package name is the specifier's leading package segment).
+/// A relative / workspace-owned / unresolved import returns `None` — a userland
+/// `./fake-svelte` look-alike never claims a package identity even when it
+/// resolves to a real file.
+fn resolved_package_for_import(
+    host: &VerterHost,
+    specifier: &str,
+    resolved_canonical: Option<&str>,
+) -> Option<ResolvedPackage> {
+    let canonical = resolved_canonical?;
+    // Structural package-backing test (the classification authority), never a
+    // path substring.
+    if !ResolverContext::workspace_is_package_backed(host, canonical) {
+        return None;
+    }
+    let name = bare_specifier_package_name(specifier)?;
+    Some(ResolvedPackage::named(name))
+}
+
+/// The package name of a BARE import specifier, or `None` for a relative /
+/// absolute specifier.
+///
+/// `"svelte"` → `"svelte"`; `"svelte/elements"` → `"svelte"`;
+/// `"@scope/pkg/sub"` → `"@scope/pkg"`. A specifier beginning with `.` or `/` is
+/// not a bare package specifier and returns `None`.
+fn bare_specifier_package_name(specifier: &str) -> Option<String> {
+    if specifier.starts_with('.') || specifier.starts_with('/') || specifier.is_empty() {
+        return None;
+    }
+    let mut parts = specifier.split('/');
+    let first = parts.next()?;
+    if let Some(scope) = first.strip_prefix('@') {
+        // A scoped package is `@scope/name`; the name is the second segment.
+        if scope.is_empty() {
+            return None;
+        }
+        let name = parts.next()?;
+        if name.is_empty() {
+            return None;
+        }
+        return Some(format!("{first}/{name}"));
+    }
+    if first.is_empty() {
+        return None;
+    }
+    Some(first.to_string())
+}
+
 pub(crate) fn resolve_script_facts<T: FrameworkScriptFactPayload>(
     host: &VerterHost,
     registration: &FrameworkRegistration,
     canonical: &str,
+) -> Option<Arc<T>> {
+    resolve_script_facts_inner::<T>(host, registration, canonical, None)
+}
+
+/// Like [`resolve_script_facts`], but warm-reads + generation-gates against the
+/// CALLER's request view (`ctx`) instead of opening a fresh
+/// `current_store_view_for_query`. The framework-surface executor's Svelte arm
+/// uses this so the facts read shares the ONE coherent request view the rest of
+/// the response resolves under (D-bh) — a fact validated/published against a
+/// newer view can never warm an entry keyed under the executor's older content
+/// view.
+pub(crate) fn resolve_script_facts_with_ctx<T: FrameworkScriptFactPayload>(
+    host: &VerterHost,
+    registration: &FrameworkRegistration,
+    canonical: &str,
+    ctx: &dyn ResolverContext,
+) -> Option<Arc<T>> {
+    resolve_script_facts_inner::<T>(host, registration, canonical, Some(ctx))
+}
+
+fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
+    host: &VerterHost,
+    registration: &FrameworkRegistration,
+    canonical: &str,
+    request_ctx: Option<&dyn ResolverContext>,
 ) -> Option<Arc<T>> {
     // Zero-cost fast path: this registration registers NO provider ⇒ no
     // candidates ⇒ no facts, so the resolved-validation half does ZERO per-file
@@ -355,9 +434,23 @@ pub(crate) fn resolve_script_facts<T: FrameworkScriptFactPayload>(
     let resolved_import_targets: Vec<ResolvedImportTarget> = snapshot
         .imports
         .iter()
-        .map(|imp| ResolvedImportTarget {
-            specifier: imp.source.clone(),
-            resolved_canonical: imp.resolved_canonical_id.clone(),
+        .map(|imp| {
+            // The TYPED resolved-package identity (P2): a bare specifier whose
+            // resolved canonical is PACKAGE-BACKED per the session's classifier
+            // (`workspace_is_package_backed` — NOT a path substring) names its
+            // package; a relative / workspace-owned / unresolved import carries
+            // no package identity, so a userland `./fake-svelte` look-alike never
+            // claims to be the `svelte` package.
+            let package = resolved_package_for_import(
+                host,
+                &imp.source,
+                imp.resolved_canonical_id.as_deref(),
+            );
+            ResolvedImportTarget {
+                specifier: imp.source.clone(),
+                resolved_canonical: imp.resolved_canonical_id.clone(),
+                package,
+            }
         })
         .collect();
 
@@ -414,9 +507,36 @@ pub(crate) fn resolve_script_facts<T: FrameworkScriptFactPayload>(
         project_identity,
         resolve_env_hash: env.resolve_env_hash,
     };
-    let generation = host.project_type_store().project_generation();
+    // The generation gate: the CALLER's request-view generation when threaded
+    // (so the warm read + publish gate on the SAME generation the executor's
+    // surface entry validates under), else the live project generation.
+    let generation = match request_ctx {
+        Some(ctx) => ctx.project_type_store().current_project_generation(),
+        None => host.project_type_store().project_generation(),
+    };
 
-    if let Some(current_view) = crate::typeinfo::current_store_view_for_query(host) {
+    // Warm read against the CALLER's request view when one is supplied (the
+    // framework-surface executor's Svelte arm threads its single captured view,
+    // D-bh); otherwise open a proven-current view for the standalone facts
+    // entry-point. Either way the read validates the recorded fact signature +
+    // generation, so a stale entry misses.
+    if let Some(ctx) = request_ctx {
+        if let Some(stored) = host.framework_script_caches().facts.get_with_view(
+            &fact_key,
+            ctx.store_view(),
+            generation,
+        ) {
+            // Bubble the facts entry's import-route / package-provenance fact
+            // signature into any OUTER fact tracer (the Svelte surface-store cold
+            // trace), so a later source row consuming these cached facts inherits
+            // their cross-file facts and a same-content reroute invalidates the
+            // surface entry too.
+            stored.read_set_signature.bubble_via_tls();
+            return verter_semantic::analysis::framework_facts::downcast_fact_payload::<T>(
+                Arc::clone(&stored.payload),
+            );
+        }
+    } else if let Some(current_view) = crate::typeinfo::current_store_view_for_query(host) {
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
         let host_ctx =
             crate::resolver_core::HostResolverContext::from_current(host, &current_view, overlay);
@@ -425,6 +545,7 @@ pub(crate) fn resolve_script_facts<T: FrameworkScriptFactPayload>(
             host_ctx.store_view(),
             generation,
         ) {
+            stored.read_set_signature.bubble_via_tls();
             return verter_semantic::analysis::framework_facts::downcast_fact_payload::<T>(
                 Arc::clone(&stored.payload),
             );
@@ -489,6 +610,15 @@ pub(crate) fn resolve_script_facts<T: FrameworkScriptFactPayload>(
     });
 
     let payload = payload_opt?;
+    // Bubble the cold-computed facts signature (the owner whole-hash + every
+    // resolved import contributor + the import-route rail) into any OUTER fact
+    // tracer (the Svelte surface-store cold trace) so the surface entry's
+    // ReadSetSignature carries the SAME cross-file facts — a same-content import
+    // reroute that flips the facts then misses the warm surface entry too. The
+    // facts are bubbled BEFORE `finalise` is consumed by the admission check.
+    if let crate::resolver_core::FactReadSetFinalise::Ok(facts) = &finalise {
+        crate::fact_signature_helpers::bubble_fact_signature_via_tls(facts);
+    }
     let admission = SignatureAdmission::from_finalise(finalise);
     // An import-dependent validation whose owner import-route rail could NOT be
     // produced must NOT warm the store (it would stale-serve on a re-route).
@@ -557,7 +687,7 @@ impl VerterHost {
     /// the `svelte` package (a userland look-alike is rejected). `None` when the
     /// Svelte registration is absent or the candidates do not validate.
     ///
-    /// The resolved-validation surface seam consumers (B8b SLOTS) reach this through the
+    /// The Svelte surface adapter's SLOTS seam consumers reach this through the
     /// shared `script_facts_for` path; this entry exposes it for the Svelte
     /// vertical's resolved-validation coverage.
     #[must_use]
@@ -572,6 +702,24 @@ impl VerterHost {
         ctx.script_facts_for::<verter_semantic::analysis::framework_facts::svelte::SvelteScriptFacts>(
             canonical,
         )
+    }
+
+    /// Drive the Svelte resolved-validation half against the CALLER's request
+    /// view `ctx` — the framework-surface executor's Svelte arm uses this so the
+    /// facts read shares the ONE coherent request view the rest of the response
+    /// resolves under (D-bh), never a second `current_store_view_for_query`.
+    #[must_use]
+    pub(crate) fn resolve_svelte_script_facts_with_ctx(
+        &self,
+        ctx: &dyn ResolverContext,
+        canonical: &str,
+    ) -> Option<Arc<verter_semantic::analysis::framework_facts::svelte::SvelteScriptFacts>> {
+        let registration = self
+            .framework_registry()
+            .get(&verter_language::FrameworkAdapterId::svelte())?;
+        resolve_script_facts_with_ctx::<
+            verter_semantic::analysis::framework_facts::svelte::SvelteScriptFacts,
+        >(self, registration, canonical, ctx)
     }
 }
 

@@ -127,12 +127,39 @@ pub trait ScriptFactProvider: Send + Sync {
         -> Option<Arc<dyn FrameworkScriptFactPayload>>;
 }
 
+/// The TYPED resolved-package identity of an import — the package the session's
+/// resolver classified the import as backed by, NOT a path-substring derivation.
+///
+/// A provider tests `target.package == ResolvedPackage::named("svelte")`
+/// STRUCTURALLY instead of re-deriving the package from the resolved canonical's
+/// `/node_modules/<name>/` shape. The session computes this where the
+/// package-backed classification authority lives
+/// (`ResolverContext::workspace_is_package_backed`): a bare specifier whose
+/// resolved canonical is package-backed carries the specifier's package name; a
+/// relative / unresolved / workspace-owned import carries no package identity.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ResolvedPackage {
+    /// The installed package's name (`"svelte"`, `"@scope/pkg"`).
+    pub name: String,
+}
+
+impl ResolvedPackage {
+    /// A resolved package by name.
+    #[must_use]
+    pub fn named(name: impl Into<String>) -> Self {
+        Self { name: name.into() }
+    }
+}
+
 /// One resolved import target the session hands the provider's
 /// [`ScriptFactProvider::validate`].
 ///
 /// The session resolved `specifier` through its own import resolver; the
-/// resolved canonical (if any) is data the provider inspects to reject userland
-/// look-alikes. Neutral — carries no resolver handle.
+/// resolved canonical (if any) is data the provider inspects, and the typed
+/// [`ResolvedPackage`] (if any) is the structural package identity the session
+/// computed where the package-backed classification authority lives — a provider
+/// tests `target.package` structurally rather than re-deriving a package from the
+/// canonical's path. Neutral — carries no resolver handle.
 #[derive(Debug, Clone)]
 pub struct ResolvedImportTarget {
     /// The candidate import specifier the provider captured.
@@ -140,6 +167,11 @@ pub struct ResolvedImportTarget {
     /// The canonical the session resolved `specifier` to, or `None` when the
     /// specifier did not resolve (an unresolved / userland look-alike).
     pub resolved_canonical: Option<String>,
+    /// The TYPED resolved-package identity (`Some` only when the import resolved
+    /// to a package-backed canonical that names an installed package), or `None`
+    /// for a relative / workspace-owned / unresolved import — a userland
+    /// look-alike from `./fake-svelte` carries `None`.
+    pub package: Option<ResolvedPackage>,
 }
 
 /// The NEUTRAL resolved-validation context handed to
@@ -379,13 +411,12 @@ mod tests {
                 return None;
             }
             // Reject a userland look-alike: the candidate's import must have
-            // resolved INTO the framework's own installed package directory,
-            // not merely to a file that mentions the name.
-            let resolved_to_framework = cx.resolved_import_targets.iter().any(|t| {
-                t.resolved_canonical
-                    .as_deref()
-                    .is_some_and(|c| c.contains("/node_modules/fixture-fw/"))
-            });
+            // resolved to the framework's own installed PACKAGE — tested via the
+            // session-computed typed package identity, NOT a path substring.
+            let resolved_to_framework = cx
+                .resolved_import_targets
+                .iter()
+                .any(|t| t.package.as_ref().is_some_and(|p| p.name == "fixture-fw"));
             if !resolved_to_framework {
                 return None;
             }
@@ -462,6 +493,7 @@ mod tests {
         let targets = vec![ResolvedImportTarget {
             specifier: "fixture-fw".to_string(),
             resolved_canonical: Some("/node_modules/fixture-fw/index.d.ts".to_string()),
+            package: Some(ResolvedPackage::named("fixture-fw")),
         }];
         // Capability bit OFF ⇒ the resolved-validation refuses (None), even
         // though the import resolved to the framework package.
@@ -482,6 +514,9 @@ mod tests {
         let targets = vec![ResolvedImportTarget {
             specifier: "fixture-fw".to_string(),
             resolved_canonical: Some("/src/my-own-fixture-fw-shim.ts".to_string()),
+            // A userland shim is workspace-owned, not package-backed ⇒ no typed
+            // package identity.
+            package: None,
         }];
         let cx = ResolvedValidationCx {
             candidates: &candidates,
@@ -498,6 +533,7 @@ mod tests {
         let targets = vec![ResolvedImportTarget {
             specifier: "fixture-fw".to_string(),
             resolved_canonical: Some("/node_modules/fixture-fw/index.d.ts".to_string()),
+            package: Some(ResolvedPackage::named("fixture-fw")),
         }];
         let cx = ResolvedValidationCx {
             candidates: &candidates,

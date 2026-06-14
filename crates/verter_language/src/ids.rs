@@ -67,6 +67,11 @@ impl FrameworkAdapterId {
         self.0.as_ref() == "vue"
     }
 
+    /// `true` when this id is the built-in Svelte adapter.
+    pub fn is_svelte(&self) -> bool {
+        self.0.as_ref() == "svelte"
+    }
+
     /// The interned string form.
     pub fn as_str(&self) -> &str {
         &self.0

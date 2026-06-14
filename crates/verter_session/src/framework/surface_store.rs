@@ -227,6 +227,47 @@ mod tests {
         assert_eq!(adapter_key.macro_index, 0);
     }
 
+    /// The Svelte adapter remainder (D-bc): a `FullKey` carrying the
+    /// `SvelteSurfaceKey { source }` remainder destructures whole-struct, and
+    /// two distinct source families never alias. Pins the Svelte adapter's one
+    /// key column (the program's flagship non-Vue vertical).
+    #[test]
+    fn full_key_with_svelte_remainder_is_structural() {
+        use crate::typeinfo::framework_surface::{SvelteSurfaceKey, SvelteSurfaceSource};
+        let key = FullKey {
+            kind: FrameworkSurfaceKind::Slots,
+            query_level: TypeInfoQueryLevel::FullMetadata,
+            canonical: Arc::from("/App.svelte"),
+            owner_whole_hash: [0u8; 16],
+            adapter_key: SvelteSurfaceKey {
+                source: SvelteSurfaceSource::SnippetProps,
+            },
+        };
+        let FullKey {
+            kind,
+            query_level,
+            canonical,
+            owner_whole_hash,
+            adapter_key,
+        } = &key;
+        assert_eq!(*kind, FrameworkSurfaceKind::Slots);
+        assert_eq!(*query_level, TypeInfoQueryLevel::FullMetadata);
+        assert_eq!(canonical.as_ref(), "/App.svelte");
+        assert_eq!(*owner_whole_hash, [0u8; 16]);
+        // The whole-struct destructure of the Svelte remainder — a new source
+        // family column would force this to acknowledge it.
+        let SvelteSurfaceKey { source } = adapter_key;
+        assert_eq!(*source, SvelteSurfaceSource::SnippetProps);
+        // The two SLOTS source families never alias under the same kind/owner.
+        let legacy = FullKey {
+            adapter_key: SvelteSurfaceKey {
+                source: SvelteSurfaceSource::LegacySlotInventory,
+            },
+            ..key.clone()
+        };
+        assert_ne!(key, legacy);
+    }
+
     #[test]
     fn distinct_columns_never_alias() {
         let base = FullKey {

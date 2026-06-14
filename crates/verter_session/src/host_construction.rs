@@ -695,6 +695,32 @@ impl VerterHost {
             )
     }
 
+    /// The Svelte adapter's typed framework-surface DTO store — the host-owned
+    /// cache of `.svelte` per-source-family normalized DTOs.
+    ///
+    /// The ONE downcast at store acquisition to the typed
+    /// [`FrameworkSurfaceStore<SvelteSurfaceKey, MacroSurfaceDtos>`](crate::framework::surface_store::FrameworkSurfaceStore),
+    /// keyed by the Svelte adapter remainder (one source family per row, D-bc).
+    /// Used by [`crate::typeinfo::framework_surface::svelte_exec::resolve_svelte_surface`]
+    /// to materialize each Svelte source surface once per `(canonical, content,
+    /// source, level)`.
+    pub(crate) fn svelte_surface_store(
+        &self,
+    ) -> &crate::framework::surface_store::FrameworkSurfaceStore<
+        crate::typeinfo::framework_surface::SvelteSurfaceKey,
+        crate::typeinfo::framework_surface::MacroSurfaceDtos,
+    > {
+        self.framework_registry()
+            .get(&verter_language::FrameworkAdapterId::svelte())
+            .expect("the Svelte adapter is registered")
+            .surface_store
+            .as_any()
+            .downcast_ref()
+            .expect(
+                "the Svelte surface store is FrameworkSurfaceStore<SvelteSurfaceKey, MacroSurfaceDtos>",
+            )
+    }
+
     /// The framework adapter registry — the executor / synth-injection /
     /// public-API-projection dispatch authority. Built once at host
     /// construction and immutable thereafter.

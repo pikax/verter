@@ -33,6 +33,19 @@ pub const ALL_FRAMEWORK_SURFACE_KINDS: &[FrameworkSurfaceKind] = &[
     FrameworkSurfaceKind::Model,
 ];
 
+/// The framework-surface kinds the Svelte adapter supports (§9).
+///
+/// OPTIONS is OMITTED — Svelte has no options surface, so the executor fills
+/// OPTIONS structurally UNSUPPORTED. Every other kind maps to a Svelte source
+/// family.
+pub const SVELTE_SUPPORTED_SURFACE_KINDS: &[FrameworkSurfaceKind] = &[
+    FrameworkSurfaceKind::Props,
+    FrameworkSurfaceKind::Emits,
+    FrameworkSurfaceKind::Slots,
+    FrameworkSurfaceKind::Expose,
+    FrameworkSurfaceKind::Model,
+];
+
 /// Static description of one framework adapter's identity + capabilities.
 ///
 /// The descriptor is the registry row's immutable identity half: it names the
@@ -166,20 +179,18 @@ pub fn built_in_descriptors() -> Vec<FrameworkAdapterDescriptor> {
 /// The Svelte adapter descriptor row.
 ///
 /// The single source of truth for the Svelte carrier's identity, carrier
-/// language, and virtual-file naming. The surface RESOLUTION is a later vertical
-/// (B8b registers the real `FrameworkSurfaceAdapter`); until then the carrier
-/// registers a `SurfaceRegistration::Deferred` arm, so the executor answers
-/// every kind structurally UNSUPPORTED regardless of `supported_surfaces`. The
-/// descriptor still advertises the full kind set so the wire contract is stable
-/// across the B8b arm flip. `api_suffix: Some(".ts")` is matched by the
-/// registered Svelte api-projector leg (the `framework_registry_complete`
-/// api-leg clause).
+/// language, and virtual-file naming. `supported_surfaces` is the §9 Svelte set
+/// ([`SVELTE_SUPPORTED_SURFACE_KINDS`] — OPTIONS omitted), so the executor fills
+/// OPTIONS structurally UNSUPPORTED and every other kind supported-empty-or-
+/// resolved once the real `SvelteFrameworkAdapter` is registered.
+/// `api_suffix: Some(".ts")` is matched by the registered Svelte api-projector
+/// leg (the `framework_registry_complete` api-leg clause).
 #[must_use]
 pub fn svelte_descriptor() -> FrameworkAdapterDescriptor {
     FrameworkAdapterDescriptor {
         id: FrameworkAdapterId::svelte(),
         tag: FrameworkTag::Svelte,
-        supported_surfaces: ALL_FRAMEWORK_SURFACE_KINDS,
+        supported_surfaces: SVELTE_SUPPORTED_SURFACE_KINDS,
         carrier_language: Some(LanguageId::new("svelte")),
         virtual_file_naming: Some(VirtualFileNaming {
             ide: Some(IdeSuffixPolicy::JsxConditional {

@@ -1,7 +1,7 @@
 #![deny(missing_docs)]
 //! The closed framework-surface PLAN + RESOLVED vocabulary.
 //!
-//! An adapter PLANS its surfaces as typed [`PlannedDemand`] — a CLOSED four-arm
+//! An adapter PLANS its surfaces as typed [`PlannedDemand`] — a CLOSED five-arm
 //! taxonomy carrying ONLY typed demand data (a canonical id, a typed macro
 //! selector, a stable node handle, a path + projection mode). No arm carries
 //! source text, raw byte ranges standing in for source, OXC handles, closures,
@@ -35,6 +35,34 @@ pub struct TypeNodeHandle {
     pub owner_canonical: Arc<str>,
     /// A stable symbol name identifying the node within its owner.
     pub symbol_name: Arc<str>,
+}
+
+/// The CLOSED Svelte source-family discriminant (D-bc).
+///
+/// A Svelte component has at most ONE declaration site per source family
+/// (derived from the §9 mapping), so the family alone is the minimal structural
+/// remainder — no index column. It is the [`PlannedDemand::SvelteSurface`] demand
+/// discriminant AND the Svelte adapter's
+/// [`crate::framework::surface_store::FullKey`] key remainder. SLOTS is composed
+/// from TWO families ([`SvelteSurfaceSource::SnippetProps`] +
+/// [`SvelteSurfaceSource::LegacySlotInventory`]) merged at normalise time, so
+/// each cached bundle stays single-source and collision-free.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SvelteSurfaceSource {
+    /// Runes `$props()` type members → PROPS.
+    RunesProps,
+    /// Legacy `export let` props → PROPS.
+    LegacyExportLet,
+    /// `$bindable()` props → MODEL.
+    Bindable,
+    /// Snippet-typed `$props()` members → SLOTS (validated `Snippet` members).
+    SnippetProps,
+    /// Legacy `<slot>` inventory → SLOTS.
+    LegacySlotInventory,
+    /// Legacy `createEventDispatcher<E>` event map → EMITS.
+    LegacyDispatcher,
+    /// Exported instance-script members → EXPOSE.
+    InstanceExports,
 }
 
 /// A typed macro-payload selector — typed demand data, NOT a query key.
@@ -90,6 +118,19 @@ pub enum PlannedDemand {
         /// The node handle.
         node: TypeNodeHandle,
     },
+    /// Resolve one Svelte source family's surface (D-bh).
+    ///
+    /// The executor's resolve arm reads the owner's typed Svelte facts for
+    /// `source`, dispatches the captured `TypeExpr`(s) through the SHARED
+    /// resolver, and produces a single-source [`ResolvedMacroPayload`]. NOT the
+    /// Vue-coupled [`PlannedDemand::MacroPayload`] arm — Svelte surfaces are not
+    /// Vue macros.
+    SvelteSurface {
+        /// The owner component's canonical id.
+        owner: Arc<str>,
+        /// The Svelte source family this demand resolves.
+        source: SvelteSurfaceSource,
+    },
 }
 
 /// One planned surface: the wire kind plus its typed demand.
@@ -123,6 +164,8 @@ pub enum ResolvedDemand {
     PathProjection(ResolvedOutcome<TypeInfoSurface>),
     /// A resolved shallow surface.
     ShallowSurface(ResolvedOutcome<TypeInfoSurface>),
+    /// A resolved Svelte source-family surface (single-source DTO bundle).
+    SvelteSurface(ResolvedMacroPayload),
 }
 
 /// One resolved surface: the wire kind plus its resolved demand.
@@ -198,6 +241,10 @@ mod tests {
                     symbol_name: Arc::from("default"),
                 },
             },
+            PlannedDemand::SvelteSurface {
+                owner: Arc::from("/App.svelte"),
+                source: SvelteSurfaceSource::RunesProps,
+            },
         ];
         for d in &demands {
             // Exhaustive match, no wildcard — adding a variant breaks this.
@@ -206,8 +253,42 @@ mod tests {
                 PlannedDemand::MacroPayload { .. } => 1,
                 PlannedDemand::PathProjection { .. } => 2,
                 PlannedDemand::ShallowSurface { .. } => 3,
+                PlannedDemand::SvelteSurface { .. } => 4,
             };
-            assert!(tag < 4);
+            assert!(tag < 5);
+        }
+    }
+
+    /// The Svelte source-family discriminant is CLOSED and `Eq + Hash` (the
+    /// D-bc store-key remainder + the demand discriminant). Every variant is
+    /// matched explicitly here so a new family forces an acknowledgement.
+    #[test]
+    fn svelte_surface_source_is_closed_and_hashable() {
+        use std::collections::HashSet;
+        let all = [
+            SvelteSurfaceSource::RunesProps,
+            SvelteSurfaceSource::LegacyExportLet,
+            SvelteSurfaceSource::Bindable,
+            SvelteSurfaceSource::SnippetProps,
+            SvelteSurfaceSource::LegacySlotInventory,
+            SvelteSurfaceSource::LegacyDispatcher,
+            SvelteSurfaceSource::InstanceExports,
+        ];
+        // Distinct families never alias under Hash/Eq.
+        let set: HashSet<_> = all.iter().copied().collect();
+        assert_eq!(set.len(), 7);
+        for source in &all {
+            // Exhaustive match — adding a family breaks this.
+            let tag = match source {
+                SvelteSurfaceSource::RunesProps => 0,
+                SvelteSurfaceSource::LegacyExportLet => 1,
+                SvelteSurfaceSource::Bindable => 2,
+                SvelteSurfaceSource::SnippetProps => 3,
+                SvelteSurfaceSource::LegacySlotInventory => 4,
+                SvelteSurfaceSource::LegacyDispatcher => 5,
+                SvelteSurfaceSource::InstanceExports => 6,
+            };
+            assert!(tag < 7);
         }
     }
 

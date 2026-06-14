@@ -12,6 +12,7 @@ mod executor;
 mod graph_export;
 pub mod plan;
 pub mod results;
+pub(crate) mod svelte_exec;
 pub mod vue_exec;
 
 pub use executor::FRAMEWORK_SURFACE_AUDIT_OPERATION;
@@ -23,7 +24,8 @@ use crate::framework::descriptor::FrameworkAdapterDescriptor;
 
 pub use plan::{
     ComponentExport, FrameworkSurfacePlan, MacroPayloadSelector, PlannedDemand, PlannedResolve,
-    ResolvedComponentSelector, ResolvedDemand, ResolvedItem, ResolvedSurfaces, TypeNodeHandle,
+    ResolvedComponentSelector, ResolvedDemand, ResolvedItem, ResolvedSurfaces, SvelteSurfaceSource,
+    TypeNodeHandle,
 };
 pub use results::{
     EmitsSurface, ExposeSurface, MacroSurfaceDtos, ModelBinding, ModelSurface, NamedTypeMember,
@@ -76,4 +78,21 @@ pub struct VueSurfaceKey {
     pub macro_index: usize,
     /// The macro kind the cached DTO bundle was normalized for.
     pub macro_kind: verter_semantic::analysis::types::AnalyzedMacroKind,
+}
+
+/// The Svelte adapter's typed [`crate::framework::surface_store::FullKey`]
+/// remainder (D-bc).
+///
+/// The four framework-neutral identity columns live on `FullKey`; this is the
+/// Svelte adapter's typed remainder — the CLOSED source-family discriminant. A
+/// Svelte component has at most ONE declaration site per source family, so the
+/// family alone is the minimal structural remainder (no index column). SLOTS is
+/// composed from TWO families ([`SvelteSurfaceSource::SnippetProps`] +
+/// [`SvelteSurfaceSource::LegacySlotInventory`]); each occupies its OWN store row
+/// (one source per key), kept collision-free by the `source` column, and merged
+/// at normalise time.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SvelteSurfaceKey {
+    /// The Svelte source family the cached DTO bundle was normalized for.
+    pub source: SvelteSurfaceSource,
 }

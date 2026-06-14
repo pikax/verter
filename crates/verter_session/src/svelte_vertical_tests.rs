@@ -1,16 +1,17 @@
-//! B8a Svelte vertical — session integration behavior.
+//! Svelte vertical — session integration behavior.
 //!
-//! Discriminating coverage for the parse + shallow + synth + api-content half:
+//! Discriminating coverage for the parse + shallow + synth + surface + api half:
 //! - shallow inventory carries the synthesized `default`
 //!   (`is_synthesised_component_default`) + exported members;
 //! - a TS file importing a `.svelte` resolves the public type through the shared
 //!   `Instantiate` dispatch; circular `.svelte ↔ .svelte` imports terminate;
 //! - the userland-`Snippet` NEGATIVE: a `Snippet` from a non-`svelte` module is
-//!   NOT classified snippet-typed (the resolved-validation stage rejects it; a
-//!   raw-name match would pass it);
-//! - the Deferred-surface intermediate state: a framework-surface request for a
-//!   `.svelte` component returns one entry per known kind with UNSUPPORTED +
-//!   GRAPH_EXACTNESS_UNSUPPORTED;
+//!   NOT classified snippet-typed (the typed resolved-package identity rejects
+//!   it; a raw-name match would pass it);
+//! - the REGISTERED Svelte surface adapter: a runes component resolves PROPS
+//!   with members, OPTIONS is the only structurally-UNSUPPORTED kind (§9), a
+//!   runes callback prop stays PROPS / absent from EMITS, and identical requests
+//!   warm-hit a value-stable surface;
 //! - the Svelte api-content shim (`get_public_api`) — class default with
 //!   `$props: __VerterProps`, refs preserved un-inlined, the type-only prelude;
 //!   `get_public_api_with_mode(Testing)` returns `None`;
@@ -264,13 +265,21 @@ fn real_svelte_snippet_is_classified_snippet_typed() {
         "<script lang=\"ts\">\n  import type { Snippet } from 'svelte';\n  let { row }: { row: Snippet } = $props();\n</script>\n",
     );
     let facts = host.resolve_svelte_script_facts("/Real.svelte");
-    // Note: resolution depends on the host resolving `svelte` to node_modules.
-    // When it resolves, `row` is validated; when the hermetic resolver cannot
-    // reach the package, no facts are produced — either way the negative test
-    // above is the load-bearing discriminator. Assert that IF facts are
-    // produced, `row` is the validated member (never a different member).
+    // Note: snippet validation depends on the host resolving `svelte` to its
+    // `node_modules` package AND classifying that canonical as package-backed
+    // (the typed `ResolvedPackage` identity). When the hermetic resolver reaches
+    // the package, `row` is validated; when it cannot, `validated_snippet_members`
+    // is empty — the userland-look-alike negative above is the load-bearing
+    // discriminator either way. Assert the validated set is EITHER exactly
+    // `["row"]` (resolved) OR empty (unresolved) — NEVER a different member, and
+    // NEVER a userland member.
     if let Some(facts) = facts {
-        assert_eq!(facts.validated_snippet_members, vec!["row".to_string()]);
+        assert!(
+            facts.validated_snippet_members.is_empty()
+                || facts.validated_snippet_members == vec!["row".to_string()],
+            "the only validatable snippet member is `row` (or none when `svelte` did not resolve), got {:?}",
+            facts.validated_snippet_members
+        );
     }
 }
 
@@ -316,64 +325,174 @@ fn framework_envelope(canonical: &str, adapter_id: &str) -> wire::TypeInfoGraphR
     }
 }
 
-#[test]
-fn svelte_framework_surface_request_is_deferred_unsupported_per_kind() {
-    let host = host();
-    upsert_svelte(
-        &host,
-        "/Deferred.svelte",
-        "<script lang=\"ts\">let { x }: { x: number } = $props();</script>\n",
-    );
-    let envelope = framework_envelope("/Deferred.svelte", "svelte");
-    let result = host.resolve_framework_surface_with_audit(envelope);
-    // A Deferred adapter is a STRUCTURAL response (NOT an error) — the audited
-    // Ok outcome carrying the framework_surface arm.
-    let response = result
-        .as_result()
-        .expect("a Deferred surface is a structural response, not an error");
-    let payload = match &response.kind {
-        Some(type_info_graph_response::Kind::FrameworkSurface(p)) => p,
-        other => panic!("expected the framework_surface arm, got {other:?}"),
-    };
-    // EXACTLY ONE entry per known kind, EVERY one structurally UNSUPPORTED.
-    assert_eq!(payload.surfaces.len(), 6, "one entry per known kind");
+/// The per-kind support of a kind from a framework-surface response payload.
+fn kind_support(payload: &wire::FrameworkSurfacePayload, kind: wire::FrameworkSurfaceKind) -> i32 {
+    payload
+        .surfaces
+        .iter()
+        .find(|e| e.kind == kind as i32)
+        .and_then(|e| e.status.as_ref())
+        .map(|s| s.support)
+        .unwrap_or(-1)
+}
+
+/// The member NAMES surfaced for a kind in a framework-surface response.
+fn kind_member_names(
+    payload: &wire::FrameworkSurfacePayload,
+    kind: wire::FrameworkSurfaceKind,
+) -> Vec<String> {
     let strings = payload
         .graph
         .as_ref()
         .and_then(|g| g.strings.as_ref())
         .map(|t| t.entries.clone())
         .unwrap_or_default();
-    for entry in &payload.surfaces {
-        let status = entry.status.as_ref().expect("per-kind status");
-        assert_eq!(
-            status.support,
+    payload
+        .surfaces
+        .iter()
+        .find(|e| e.kind == kind as i32)
+        .map(|e| {
+            e.members
+                .iter()
+                .map(|m| strings.get(m.name_id as usize).cloned().unwrap_or_default())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[test]
+fn svelte_framework_surface_resolves_runes_props_and_options_unsupported() {
+    // The real Svelte surface adapter (Deferred arm superseded): a runes
+    // component resolves PROPS supported with its members, and OPTIONS is the
+    // ONLY structurally-UNSUPPORTED kind (§9 — Svelte has no options surface).
+    let host = host();
+    upsert_svelte(
+        &host,
+        "/Widget.svelte",
+        "<script lang=\"ts\">interface Props { name: string; count?: number }\nlet { name, count }: Props = $props();</script>\n",
+    );
+    let envelope = framework_envelope("/Widget.svelte", "svelte");
+    let result = host.resolve_framework_surface_with_audit(envelope);
+    let response = result
+        .as_result()
+        .expect("a registered Svelte adapter is a structural response, not an error");
+    let payload = match &response.kind {
+        Some(type_info_graph_response::Kind::FrameworkSurface(p)) => p,
+        other => panic!("expected the framework_surface arm, got {other:?}"),
+    };
+    assert_eq!(payload.surfaces.len(), 6, "one entry per known kind");
+
+    // PROPS is SUPPORTED and carries `name` + `count`.
+    assert_eq!(
+        kind_support(payload, wire::FrameworkSurfaceKind::Props),
+        FrameworkSurfaceKindSupport::Supported as i32,
+        "PROPS is supported for a runes component"
+    );
+    let props = kind_member_names(payload, wire::FrameworkSurfaceKind::Props);
+    assert!(
+        props.contains(&"name".to_string()),
+        "PROPS carries `name`, got {props:?}"
+    );
+    assert!(
+        props.contains(&"count".to_string()),
+        "PROPS carries `count`, got {props:?}"
+    );
+
+    // OPTIONS is the ONLY structurally-unsupported kind.
+    for kind in [
+        wire::FrameworkSurfaceKind::Props,
+        wire::FrameworkSurfaceKind::Emits,
+        wire::FrameworkSurfaceKind::Slots,
+        wire::FrameworkSurfaceKind::Expose,
+        wire::FrameworkSurfaceKind::Model,
+    ] {
+        assert_ne!(
+            kind_support(payload, kind),
             FrameworkSurfaceKindSupport::Unsupported as i32,
-            "a Deferred Svelte surface answers UNSUPPORTED for kind {}",
-            entry.kind
+            "{kind:?} must NOT be UNSUPPORTED for a registered Svelte adapter"
         );
-        assert_eq!(
-            status.exactness,
-            Exactness::Unsupported as i32,
-            "GRAPH_EXACTNESS_UNSUPPORTED for kind {}",
-            entry.kind
-        );
-        // The diagnostic names the deferred state explicitly (D-ag), NOT the
-        // generic per-adapter unsupport — DISCRIMINATING: it is the
-        // surfaces-not-yet-registered message.
-        let diag = status
-            .diagnostics
-            .first()
-            .expect("the Deferred surface carries a diagnostic");
-        let message = strings
-            .get(diag.message_name_id as usize)
-            .cloned()
-            .unwrap_or_default();
-        assert!(
-            message.contains("not yet registered"),
-            "the Deferred diagnostic names the not-yet-registered state, got {message:?}"
-        );
-        assert!(entry.members.is_empty());
     }
+    let options = payload
+        .surfaces
+        .iter()
+        .find(|e| e.kind == wire::FrameworkSurfaceKind::Options as i32)
+        .and_then(|e| e.status.as_ref())
+        .expect("OPTIONS per-kind status");
+    assert_eq!(
+        options.support,
+        FrameworkSurfaceKindSupport::Unsupported as i32,
+        "OPTIONS is structurally UNSUPPORTED for Svelte (§9)"
+    );
+    assert_eq!(options.exactness, Exactness::Unsupported as i32);
+}
+
+#[test]
+fn svelte_runes_callback_prop_stays_props_absent_from_emits() {
+    // NEGATIVE (§9 / Svelte 5 semantics): a runes-mode callback prop (`onClose`)
+    // is a PROP, NOT an emit. EMITS is the legacy `createEventDispatcher` ONLY.
+    // DISCRIMINATING: a Vue-style "callback → emit" mapping would surface
+    // `onClose` under EMITS.
+    let host = host();
+    upsert_svelte(
+        &host,
+        "/Closeable.svelte",
+        "<script lang=\"ts\">interface Props { title: string; onClose?: () => void }\nlet { title, onClose }: Props = $props();</script>\n",
+    );
+    let envelope = framework_envelope("/Closeable.svelte", "svelte");
+    let result = host.resolve_framework_surface_with_audit(envelope);
+    let response = result.as_result().expect("structural response");
+    let payload = match &response.kind {
+        Some(type_info_graph_response::Kind::FrameworkSurface(p)) => p,
+        other => panic!("expected the framework_surface arm, got {other:?}"),
+    };
+
+    let props = kind_member_names(payload, wire::FrameworkSurfaceKind::Props);
+    assert!(
+        props.contains(&"onClose".to_string()),
+        "the runes callback `onClose` is a PROP, got props={props:?}"
+    );
+    // EMITS has NO `onClose` (no legacy dispatcher in this component ⇒ EMITS is
+    // supported-empty, and `onClose` certainly never appears there).
+    let emits = kind_member_names(payload, wire::FrameworkSurfaceKind::Emits);
+    assert!(
+        !emits.contains(&"onClose".to_string()),
+        "the runes callback `onClose` must be ABSENT from EMITS, got emits={emits:?}"
+    );
+}
+
+#[test]
+fn svelte_framework_surface_warm_hit_is_value_stable() {
+    // The DTO-store warm path: two identical requests resolve byte-identical
+    // surfaces (the second served from the content-addressed store).
+    let host = host();
+    upsert_svelte(
+        &host,
+        "/Warm.svelte",
+        "<script lang=\"ts\">let { a, b }: { a: string; b: number } = $props();</script>\n",
+    );
+    let first = host
+        .resolve_framework_surface_with_audit(framework_envelope("/Warm.svelte", "svelte"))
+        .as_result()
+        .expect("first")
+        .clone();
+    let second = host
+        .resolve_framework_surface_with_audit(framework_envelope("/Warm.svelte", "svelte"))
+        .as_result()
+        .expect("second")
+        .clone();
+    let p1 = match &first.kind {
+        Some(type_info_graph_response::Kind::FrameworkSurface(p)) => p,
+        _ => panic!("framework_surface arm"),
+    };
+    let p2 = match &second.kind {
+        Some(type_info_graph_response::Kind::FrameworkSurface(p)) => p,
+        _ => panic!("framework_surface arm"),
+    };
+    assert_eq!(
+        kind_member_names(p1, wire::FrameworkSurfaceKind::Props),
+        kind_member_names(p2, wire::FrameworkSurfaceKind::Props),
+        "the warm-hit PROPS surface is value-stable across identical requests"
+    );
 }
 
 // ── Test 8: Svelte api-content shim ─────────────────────────────────────

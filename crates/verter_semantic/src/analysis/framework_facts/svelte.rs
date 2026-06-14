@@ -112,6 +112,13 @@ pub struct SvelteScriptCandidates {
     /// The `createEventDispatcher<E>()` type argument, lowered once (legacy
     /// emits). `None` when no dispatcher is declared.
     pub dispatcher_events: Option<TypeExpr>,
+    /// The module specifier `createEventDispatcher` was imported from (raw,
+    /// un-validated). The resolved-validation half emits `dispatcher_events`
+    /// ONLY when this source resolves to the `svelte` package — a userland
+    /// `createEventDispatcher` look-alike does NOT contribute EMITS. `None` when
+    /// the component declares no dispatcher (or imports it without a recordable
+    /// specifier).
+    pub dispatcher_import_source: Option<String>,
 }
 
 impl SvelteScriptCandidates {
@@ -124,6 +131,7 @@ impl SvelteScriptCandidates {
             && self.module_exports.is_empty()
             && self.legacy_props.is_empty()
             && self.dispatcher_events.is_none()
+            && self.dispatcher_import_source.is_none()
     }
 }
 
@@ -136,14 +144,37 @@ impl FrameworkScriptFactPayload for SvelteScriptCandidates {
     }
 }
 
-/// The Svelte resolved facts (resolved-validation output): the snippet-validated subset of
-/// the captured candidates plus the validated props/exports inventory.
+/// The Svelte resolved facts (resolved-validation output) — the full per-source
+/// inventory the typeinfo surface adapter reads, with package-provenance applied
+/// where it matters.
+///
+/// The parse-domain inventory (`props_type`, `bindable_members`, `legacy_props`,
+/// `instance_exports`) passes through verbatim — those carry no package
+/// provenance. The provenance-gated members are structurally validated against
+/// the typed [`ResolvedPackage`](super::ResolvedPackage) identity (NEVER a
+/// path/name substring): `validated_snippet_members` keep only the members whose
+/// `Snippet` import resolved to the `svelte` package, and `dispatcher_events` is
+/// `Some` only when `createEventDispatcher` resolved to the `svelte` package. A
+/// userland look-alike never contributes to either.
 #[derive(Debug, Clone, Default)]
 pub struct SvelteScriptFacts {
+    /// The runes `$props()` type, lowered once (shallow-by-default — a bare
+    /// `Ref` is preserved). `None` for a legacy or props-less component.
+    pub props_type: Option<TypeExpr>,
+    /// The `$bindable()` member names (the MODEL bindings).
+    pub bindable_members: Vec<String>,
     /// The member names whose `Snippet`-candidate import RESOLVED to the
     /// `svelte` package — the snippet-typed props (structurally validated). A
     /// userland look-alike never appears here.
     pub validated_snippet_members: Vec<String>,
+    /// The legacy `export let` props (legacy-mode PROPS).
+    pub legacy_props: Vec<SvelteLegacyProp>,
+    /// The `createEventDispatcher<E>()` event-map type — PRESENT only when the
+    /// `createEventDispatcher` import resolved to the `svelte` package
+    /// (provenance-validated; a userland look-alike contributes `None`).
+    pub dispatcher_events: Option<TypeExpr>,
+    /// The exported instance-script members (the EXPOSE surface).
+    pub instance_exports: Vec<String>,
 }
 
 impl FrameworkScriptFactPayload for SvelteScriptFacts {
@@ -201,43 +232,71 @@ impl ScriptFactProvider for SvelteScriptProvider {
             .candidates
             .payload
             .downcast_ref::<SvelteScriptCandidates>()?;
-        if candidates.snippet_candidates.is_empty() {
-            // No snippet-candidate members to validate — no resolved facts.
+        if candidates.is_empty() {
+            // Nothing captured ⇒ no resolved facts.
             return None;
         }
-        // A snippet-candidate member is REAL only when its import source
-        // resolved to the `svelte` PACKAGE. Structural — never a name-string
-        // match: a `Snippet` imported from `./fake-svelte` is rejected even
+
+        // A snippet-candidate member is REAL only when its import source resolved
+        // to the `svelte` PACKAGE — tested via the session-computed TYPED
+        // [`ResolvedPackage`](super::ResolvedPackage) identity, NEVER a
+        // name/path substring: a `Snippet` from `./fake-svelte` is rejected even
         // though its local binding name is `Snippet`.
         let mut validated_snippet_members = Vec::new();
         for candidate in &candidates.snippet_candidates {
-            let resolved_to_svelte = cx.resolved_import_targets.iter().any(|t| {
-                t.specifier == candidate.import_source
-                    && t.resolved_canonical
-                        .as_deref()
-                        .is_some_and(import_resolves_to_svelte_package)
-            });
-            if resolved_to_svelte {
+            if specifier_resolves_to_svelte(&cx, &candidate.import_source) {
                 validated_snippet_members.push(candidate.member_name.clone());
             }
         }
-        if validated_snippet_members.is_empty() {
+
+        // The legacy dispatcher contributes EMITS only when its
+        // `createEventDispatcher` import resolved to the `svelte` package (the
+        // SAME typed-package provenance test) — a userland look-alike does not.
+        let dispatcher_events = candidates
+            .dispatcher_import_source
+            .as_deref()
+            .filter(|src| specifier_resolves_to_svelte(&cx, src))
+            .and(candidates.dispatcher_events.clone());
+
+        let facts = SvelteScriptFacts {
+            props_type: candidates.props.as_ref().and_then(|p| p.props_type.clone()),
+            bindable_members: candidates
+                .props
+                .as_ref()
+                .map(|p| p.bindable_members.clone())
+                .unwrap_or_default(),
+            validated_snippet_members,
+            legacy_props: candidates.legacy_props.clone(),
+            dispatcher_events,
+            instance_exports: candidates.instance_exports.clone(),
+        };
+
+        // The honest answer: emit facts whenever the component carries ANY
+        // resolved-surface-relevant inventory. A pure-markup component with no
+        // props / exports / dispatcher / snippets produces no facts (the synth
+        // still synthesises its empty `$props`).
+        if facts.props_type.is_none()
+            && facts.bindable_members.is_empty()
+            && facts.validated_snippet_members.is_empty()
+            && facts.legacy_props.is_empty()
+            && facts.dispatcher_events.is_none()
+            && facts.instance_exports.is_empty()
+        {
             return None;
         }
-        Some(Arc::new(SvelteScriptFacts {
-            validated_snippet_members,
-        }))
+        Some(Arc::new(facts))
     }
 }
 
-/// Whether a resolved import canonical lands inside the installed `svelte`
-/// package (the structural `svelte`-package membership test). The resolver
-/// hands the canonical it resolved the specifier to; a `node_modules/svelte/…`
-/// canonical is the package, a userland file is not.
-fn import_resolves_to_svelte_package(resolved_canonical: &str) -> bool {
-    // A `svelte` package import resolves into the installed package directory.
-    resolved_canonical.contains("/node_modules/svelte/")
-        || resolved_canonical.contains("\\node_modules\\svelte\\")
+/// Whether `specifier` resolved to the installed `svelte` PACKAGE, tested via the
+/// session-computed typed [`ResolvedPackage`](super::ResolvedPackage) identity —
+/// NEVER a path / name substring. A specifier whose resolved target is
+/// workspace-owned (a userland `./fake-svelte`) carries no `svelte` package
+/// identity and is rejected.
+fn specifier_resolves_to_svelte(cx: &ResolvedValidationCx<'_>, specifier: &str) -> bool {
+    cx.resolved_import_targets.iter().any(|t| {
+        t.specifier == specifier && t.package.as_ref().is_some_and(|p| p.name == SVELTE_PACKAGE)
+    })
 }
 
 /// Capture the Svelte candidates from a parsed (combined eval-source) program.
@@ -251,26 +310,81 @@ fn capture_svelte_candidates(
     // mapped to their import source. Built first so the props destructuring can
     // pair annotated members to a candidate import.
     let mut snippet_imports: Vec<(String, String)> = Vec::new();
+    // The local binding `createEventDispatcher` was imported under, mapped to its
+    // import source — so the resolved-validation half can provenance-check the
+    // dispatcher against the `svelte` package.
+    let mut dispatcher_imports: Vec<(String, String)> = Vec::new();
+    // INSTANCE-region top-level `let`/`var` binding names — the PROP-kind locals.
+    // A re-export specifier (`export { x as y }`) of one of these is a re-exported
+    // PROP, NOT an instance EXPOSE member; built first so the specifier loop can
+    // classify. Scoped to the instance region (a module-script `let` is not a
+    // prop), and a same-name `const`/function/class wins (it is an EXPOSE member).
+    let prop_kind_locals = collect_prop_kind_local_names(program, module_region);
 
     for stmt in &program.body {
         match stmt {
             Statement::ImportDeclaration(import) => {
                 collect_snippet_imports(import, &mut snippet_imports);
+                collect_dispatcher_imports(import, &mut dispatcher_imports);
             }
             Statement::ExportNamedDeclaration(export) => {
+                // A whole-statement type-only export (`export type { Foo }` /
+                // `export type Foo = ...`) is NOT a runtime instance member — it
+                // carries no value binding, so it must never surface as an EXPOSE
+                // member. Skip the entire statement.
+                if export.export_kind.is_type() {
+                    continue;
+                }
                 // An export's owning script block: MODULE when its statement
                 // start falls inside the module-script byte region, else
                 // INSTANCE. With no module region (the trait `capture` entry,
                 // conservative) every export is an instance export.
-                let exports = if statement_in_module(export.span.start, module_region) {
+                let in_module_block = statement_in_module(export.span.start, module_region);
+                let exports = if in_module_block {
                     &mut out.module_exports
                 } else {
                     &mut out.instance_exports
                 };
                 if let Some(decl) = &export.declaration {
-                    collect_declaration_exports(decl, exports);
+                    // In the INSTANCE block a legacy `export let` / `export var`
+                    // is a PROP, NOT an instance-script EXPOSE member, so it must
+                    // not enter `instance_exports` (it is captured separately as a
+                    // legacy prop below). In the MODULE block such a binding is a
+                    // plain module binding and IS an export. `export const` /
+                    // `export function` / `export class` are instance EXPOSE
+                    // members in both blocks.
+                    let skip_legacy_prop_vars = !in_module_block;
+                    collect_declaration_exports(decl, exports, skip_legacy_prop_vars);
                 }
                 for spec in &export.specifiers {
+                    // An inline `type` specifier (`export { type Bar, baz }`) is a
+                    // type-only re-export — not a runtime instance member. Drop it
+                    // (the sibling value specifiers in the same statement stay).
+                    if spec.export_kind.is_type() {
+                        continue;
+                    }
+                    // A re-export of a top-level `let`/`var` local in the INSTANCE
+                    // block is a re-exported PROP, not an EXPOSE member — skip it
+                    // (and record it as a legacy prop below). `const` / function /
+                    // class re-exports ARE instance EXPOSE members.
+                    let local_name = spec.local.name();
+                    if !in_module_block && prop_kind_locals.contains(local_name.as_ref()) {
+                        if !out
+                            .legacy_props
+                            .iter()
+                            .any(|p| p.name == spec.exported.name().as_ref())
+                        {
+                            out.legacy_props.push(SvelteLegacyProp {
+                                name: spec.exported.name().to_string(),
+                                // A re-export carries no initializer of its own;
+                                // optionality follows the underlying binding,
+                                // which this layer does not resolve — default to
+                                // required (a conservative, non-optional prop).
+                                has_default: false,
+                            });
+                        }
+                        continue;
+                    }
                     exports.push(spec.exported.name().to_string());
                 }
                 // Props / legacy-`export let` capture is INSTANCE-ONLY semantics:
@@ -292,7 +406,12 @@ fn capture_svelte_candidates(
                     &snippet_imports,
                     &mut out,
                 );
-                capture_dispatcher_from_var_decls(&decl.declarations, source, &mut out);
+                capture_dispatcher_from_var_decls(
+                    &decl.declarations,
+                    source,
+                    &dispatcher_imports,
+                    &mut out,
+                );
             }
             Statement::FunctionDeclaration(_) | Statement::ClassDeclaration(_) => {}
             _ => {}
@@ -333,11 +452,125 @@ fn collect_snippet_imports(
     }
 }
 
+/// The names of every INSTANCE-region top-level `let`/`var` binding in the
+/// program — the PROP-kind locals. A re-export specifier (`export { x as y }`) of
+/// one of these is a re-exported prop, not an instance EXPOSE member. Covers both
+/// a bare top-level `let x` and an `export let x`. Scoped to the instance region
+/// (a `module_region` binding is a module-script binding, NOT a prop), and a
+/// same-name `const`/function/class binding is SUBTRACTED (it is an EXPOSE member,
+/// so a re-export of that name is exposed, not a prop).
+fn collect_prop_kind_local_names(
+    program: &Program<'_>,
+    module_region: Option<(u32, u32)>,
+) -> std::collections::HashSet<String> {
+    use oxc_ast::ast::VariableDeclarationKind;
+    let mut prop_names = std::collections::HashSet::new();
+    let mut expose_names = std::collections::HashSet::new();
+
+    // A top-level statement is INSTANCE-region when it does NOT start inside the
+    // module-script byte region.
+    let is_instance = |start: u32| !statement_in_module(start, module_region);
+
+    fn record_var(
+        var: &oxc_ast::ast::VariableDeclaration<'_>,
+        instance: bool,
+        prop_names: &mut std::collections::HashSet<String>,
+        expose_names: &mut std::collections::HashSet<String>,
+    ) {
+        let prop_kind = matches!(
+            var.kind,
+            VariableDeclarationKind::Let | VariableDeclarationKind::Var
+        );
+        for d in &var.declarations {
+            if let Some(name) = binding_name(&d.id) {
+                if prop_kind && instance {
+                    prop_names.insert(name);
+                } else if !prop_kind && instance {
+                    // An INSTANCE-region `const` binding is an EXPOSE member. A
+                    // module-region const must NOT subtract an instance prop-local
+                    // of the same name (region-scoped subtraction).
+                    expose_names.insert(name);
+                }
+            }
+        }
+    }
+
+    for stmt in &program.body {
+        match stmt {
+            Statement::VariableDeclaration(var) => {
+                record_var(
+                    var,
+                    is_instance(var.span.start),
+                    &mut prop_names,
+                    &mut expose_names,
+                );
+            }
+            Statement::ExportNamedDeclaration(export) => {
+                let instance = is_instance(export.span.start);
+                match &export.declaration {
+                    Some(Declaration::VariableDeclaration(var)) => {
+                        record_var(var, instance, &mut prop_names, &mut expose_names);
+                    }
+                    // An INSTANCE function / class declaration is an EXPOSE member
+                    // — subtract its name from the prop set (region-scoped).
+                    Some(Declaration::FunctionDeclaration(func)) if instance => {
+                        if let Some(id) = &func.id {
+                            expose_names.insert(id.name.as_str().to_string());
+                        }
+                    }
+                    Some(Declaration::ClassDeclaration(class)) if instance => {
+                        if let Some(id) = &class.id {
+                            expose_names.insert(id.name.as_str().to_string());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Statement::FunctionDeclaration(func) if is_instance(func.span.start) => {
+                if let Some(id) = &func.id {
+                    expose_names.insert(id.name.as_str().to_string());
+                }
+            }
+            Statement::ClassDeclaration(class) if is_instance(class.span.start) => {
+                if let Some(id) = &class.id {
+                    expose_names.insert(id.name.as_str().to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    // A name that ALSO has an INSTANCE const/function/class declaration is an
+    // EXPOSE member, not a prop — subtract it.
+    prop_names.retain(|n| !expose_names.contains(n));
+    prop_names
+}
+
 /// Collect top-level export names contributed by an exported declaration into
 /// `exports` (the caller chose instance vs module by the export's owning block).
-fn collect_declaration_exports(decl: &Declaration<'_>, exports: &mut Vec<String>) {
+///
+/// When `skip_legacy_prop_vars` is set (the instance block), a `let`/`var`-kind
+/// variable declaration is a legacy PROP — captured separately — and is NOT
+/// collected as an instance EXPOSE member, so a legacy prop never surfaces under
+/// both PROPS and EXPOSE. `const`-kind variable declarations, functions, and
+/// classes are instance members and are always collected.
+fn collect_declaration_exports(
+    decl: &Declaration<'_>,
+    exports: &mut Vec<String>,
+    skip_legacy_prop_vars: bool,
+) {
+    use oxc_ast::ast::VariableDeclarationKind;
     match decl {
         Declaration::VariableDeclaration(var) => {
+            // A `let`/`var`-kind export in the instance block is a legacy prop,
+            // not an EXPOSE member (`const` stays an instance member).
+            if skip_legacy_prop_vars
+                && matches!(
+                    var.kind,
+                    VariableDeclarationKind::Let | VariableDeclarationKind::Var
+                )
+            {
+                return;
+            }
             for d in &var.declarations {
                 if let Some(name) = binding_name(&d.id) {
                     exports.push(name);
@@ -354,6 +587,21 @@ fn collect_declaration_exports(decl: &Declaration<'_>, exports: &mut Vec<String>
                 exports.push(id.name.as_str().to_string());
             }
         }
+        // Runtime-emit follows the TS stripper (`strip_types::typescript`): a
+        // non-ambient `enum` is the ONE TS-syntax declaration the stripper LOWERS
+        // to a runtime JS object (`convert_enum`), so `export enum E` IS an
+        // instance EXPOSE member. An ambient `declare enum` has no runtime emit.
+        Declaration::TSEnumDeclaration(en) if !en.declare => {
+            exports.push(en.id.name.as_str().to_string());
+        }
+        // Everything else is NOT a runtime instance member and contributes no
+        // export name: pure type-space declarations (`export type Foo = ...`,
+        // `export interface Foo {}`, `declare enum`) carry no value binding, and
+        // `namespace`/`module` declarations (`TSModuleDeclaration`) are FULLY
+        // stripped by the stripper (no runtime emit — unlike `enum`). (Whole-
+        // statement type-only exports also short-circuit at the
+        // `export_kind.is_type()` gate above; this arm keeps the helper correct
+        // in isolation.)
         _ => {}
     }
 }
@@ -415,20 +663,38 @@ fn capture_props_from_var_decls(
 }
 
 /// Capture `createEventDispatcher<E>()` type argument (legacy emits).
+///
+/// Records the dispatcher's import SOURCE (paired by the local binding the
+/// dispatcher factory was imported under) so the resolved-validation half can
+/// provenance-check it against the `svelte` package — a userland
+/// `createEventDispatcher` look-alike must NOT contribute EMITS.
 fn capture_dispatcher_from_var_decls(
     declarators: &[VariableDeclarator<'_>],
     source: &str,
+    dispatcher_imports: &[(String, String)],
     out: &mut SvelteScriptCandidates,
 ) {
     for d in declarators {
         let Some(init) = &d.init else { continue };
         if let Expression::CallExpression(call) = init {
             if let Expression::Identifier(ident) = &call.callee {
-                if ident.name == "createEventDispatcher" {
-                    if let Some(args) = &call.type_arguments {
-                        if let Some(first) = args.params.first() {
-                            out.dispatcher_events = Some(lower_ts_type(first, source));
-                        }
+                // Match the LOCAL binding the dispatcher factory was imported
+                // under (handles `import { createEventDispatcher as mk }`).
+                let local = ident.name.as_str();
+                let import_source = dispatcher_imports
+                    .iter()
+                    .find(|(binding, _)| binding == local)
+                    .map(|(_, src)| src.clone());
+                if import_source.is_none() {
+                    // Not a tracked `createEventDispatcher` import binding — skip
+                    // (an untracked global / re-export is not provenance-checkable
+                    // and therefore not a Svelte dispatcher for our purposes).
+                    continue;
+                }
+                if let Some(args) = &call.type_arguments {
+                    if let Some(first) = args.params.first() {
+                        out.dispatcher_events = Some(lower_ts_type(first, source));
+                        out.dispatcher_import_source = import_source;
                     }
                 }
             }
@@ -436,17 +702,47 @@ fn capture_dispatcher_from_var_decls(
     }
 }
 
-/// Capture legacy `export let name = default;` props.
+/// Collect the local binding `createEventDispatcher` was imported under, paired
+/// with its import source (`(local_binding, import_source)`).
+fn collect_dispatcher_imports(
+    import: &oxc_ast::ast::ImportDeclaration<'_>,
+    out: &mut Vec<(String, String)>,
+) {
+    let source = import.source.value.as_str().to_string();
+    let Some(specifiers) = &import.specifiers else {
+        return;
+    };
+    for spec in specifiers {
+        if let ImportDeclarationSpecifier::ImportSpecifier(named) = spec {
+            // Keyed on the IMPORTED name `createEventDispatcher`; the local
+            // binding may be aliased. The resolved-validation decides whether the
+            // SOURCE is the `svelte` package (the structural test).
+            if named.imported.name() == "createEventDispatcher" {
+                out.push((named.local.name.as_str().to_string(), source.clone()));
+            }
+        }
+    }
+}
+
+/// Capture legacy `export let name = default;` / `export var name` props.
+///
+/// Both `let` and `var` instance exports are legacy props (Svelte treats them
+/// identically); a `const` export is a read-only instance member (EXPOSE), not a
+/// prop, so it is NOT captured here.
 fn capture_legacy_export_let(
     decl: &Declaration<'_>,
     out: &mut SvelteScriptCandidates,
     is_export: bool,
 ) {
+    use oxc_ast::ast::VariableDeclarationKind;
     if !is_export {
         return;
     }
     if let Declaration::VariableDeclaration(var) = decl {
-        if !matches!(var.kind, oxc_ast::ast::VariableDeclarationKind::Let) {
+        if !matches!(
+            var.kind,
+            VariableDeclarationKind::Let | VariableDeclarationKind::Var
+        ) {
             return;
         }
         for d in &var.declarations {
@@ -589,6 +885,8 @@ fn stable_candidate_hash(candidates: &SvelteScriptCandidates) -> [u8; 16] {
         p.name.hash(&mut hasher);
         p.has_default.hash(&mut hasher);
     }
+    candidates.dispatcher_import_source.hash(&mut hasher);
+    format!("{:?}", candidates.dispatcher_events).hash(&mut hasher);
     let h = hasher.finish();
     let mut out = [0u8; 16];
     out[..8].copy_from_slice(&h.to_le_bytes());
@@ -701,6 +999,89 @@ mod tests {
     }
 
     #[test]
+    fn exported_runtime_enum_is_an_instance_export() {
+        // A plain `export enum E { ... }` is a RUNTIME value binding (the TS
+        // stripper lowers it to a runtime JS object), so it IS an instance EXPOSE
+        // member. An ambient `export declare enum D` has no runtime emit and is
+        // NOT a member; `export type Foo = ...` (type-space) is never a member.
+        // DISCRIMINATING: a blanket "all leftover declarations are type-only"
+        // wildcard would drop `E`.
+        let src = "export enum E { A, B }\nexport declare enum D { X }\nexport type Foo = number;";
+        let c = capture(src);
+        assert!(
+            c.instance_exports.contains(&"E".to_string()),
+            "the runtime enum `E` must surface as an instance export, got {:?}",
+            c.instance_exports
+        );
+        assert!(
+            !c.instance_exports.contains(&"D".to_string()),
+            "the ambient `declare enum D` has no runtime emit and must NOT be a member, got {:?}",
+            c.instance_exports
+        );
+        assert!(
+            !c.instance_exports.contains(&"Foo".to_string()),
+            "the type alias `Foo` must NOT be a member, got {:?}",
+            c.instance_exports
+        );
+    }
+
+    #[test]
+    fn exported_namespace_is_not_an_instance_export() {
+        // `export namespace N { ... }` (a `TSModuleDeclaration`) is FULLY stripped
+        // by the TS stripper (`strip_types::typescript` removes every
+        // `TSModuleDeclaration`, unlike `enum` which it converts to runtime JS),
+        // so it produces NO runtime binding and is NOT an instance EXPOSE member.
+        // A sibling runtime `export const` in the same script stays. This pins the
+        // stripper-aligned rule: enum → member, namespace/module → no member.
+        let src = "export namespace N { export const x = 1; }\nexport const real = 2;";
+        let c = capture(src);
+        assert!(
+            c.instance_exports.contains(&"real".to_string()),
+            "the runtime `const real` must be an instance export, got {:?}",
+            c.instance_exports
+        );
+        assert!(
+            !c.instance_exports.contains(&"N".to_string()),
+            "a stripped `namespace N` must NOT surface as a runtime member, got {:?}",
+            c.instance_exports
+        );
+    }
+
+    #[test]
+    fn type_only_exports_are_not_instance_exports() {
+        // Type-only exports are NOT runtime instance members and must not surface
+        // as phantom EXPOSE members:
+        //   - `export type { Foo }`   — the whole-statement type-only re-export.
+        //   - `export { type Bar, baz }` — an inline `type` specifier (`Bar` is
+        //     type-only and dropped; `baz` is a value re-export and stays).
+        //   - `export const qux`      — a real value export (stays).
+        // DISCRIMINATING: without the `export_kind.is_type()` filter, `Foo` and
+        // `Bar` would wrongly enter `instance_exports`.
+        let src = "type Foo = number;\nconst Bar = 1;\nconst baz = 2;\nexport type { Foo };\nexport { type Bar, baz };\nexport const qux = 3;";
+        let c = capture(src);
+        assert!(
+            c.instance_exports.contains(&"baz".to_string()),
+            "the value re-export `baz` must surface as an instance export, got {:?}",
+            c.instance_exports
+        );
+        assert!(
+            c.instance_exports.contains(&"qux".to_string()),
+            "the value export `qux` must surface as an instance export, got {:?}",
+            c.instance_exports
+        );
+        assert!(
+            !c.instance_exports.contains(&"Foo".to_string()),
+            "the type-only re-export `Foo` must NOT surface as an instance member, got {:?}",
+            c.instance_exports
+        );
+        assert!(
+            !c.instance_exports.contains(&"Bar".to_string()),
+            "the inline `type Bar` specifier must NOT surface as an instance member, got {:?}",
+            c.instance_exports
+        );
+    }
+
+    #[test]
     fn module_exports_are_split_from_instance_exports_by_region() {
         // `export const meta` in the MODULE script region is a module export
         // (NOT an instance member); `export const ready` in the instance region
@@ -737,9 +1118,149 @@ mod tests {
     }
 
     #[test]
+    fn legacy_export_let_and_var_are_props_not_instance_exports() {
+        // A legacy `export let` / `export var` is a PROP, NOT an instance-script
+        // EXPOSE member — it must NOT enter `instance_exports` (it would otherwise
+        // surface under both PROPS and EXPOSE). `export const` / `export function`
+        // ARE instance members. DISCRIMINATING: a kind-blind capture put `name` /
+        // `legacyVar` in BOTH.
+        let c = capture(
+            "export let name;\nexport var legacyVar;\nexport const ready = true;\nexport function focus() {}",
+        );
+        assert!(
+            c.legacy_props.iter().any(|p| p.name == "name"),
+            "`export let name` is a legacy prop"
+        );
+        assert!(
+            c.legacy_props.iter().any(|p| p.name == "legacyVar"),
+            "`export var legacyVar` is a legacy prop"
+        );
+        assert!(
+            !c.instance_exports.contains(&"name".to_string()),
+            "`export let name` must NOT be an instance EXPOSE member, got {:?}",
+            c.instance_exports
+        );
+        assert!(
+            !c.instance_exports.contains(&"legacyVar".to_string()),
+            "`export var legacyVar` must NOT be an instance EXPOSE member, got {:?}",
+            c.instance_exports
+        );
+        // `export const` / `export function` ARE instance members.
+        assert!(c.instance_exports.contains(&"ready".to_string()));
+        assert!(c.instance_exports.contains(&"focus".to_string()));
+    }
+
+    #[test]
+    fn reexport_specifier_of_a_prop_local_is_a_prop_not_an_instance_export() {
+        // `let local; export { local as leaked }` re-exports a PROP-kind local —
+        // it is a re-exported prop, NOT an instance EXPOSE member. A `const`
+        // re-export IS an instance member. DISCRIMINATING: an unconditional
+        // specifier push put `leaked` into instance_exports.
+        let c = capture(
+            "let local = 1;\nconst stable = 2;\nexport { local as leaked, stable as exposed };",
+        );
+        assert!(
+            c.legacy_props.iter().any(|p| p.name == "leaked"),
+            "the re-exported prop-local `leaked` is a prop, got legacy_props={:?}",
+            c.legacy_props
+        );
+        assert!(
+            !c.instance_exports.contains(&"leaked".to_string()),
+            "the re-exported prop-local `leaked` must NOT be an instance EXPOSE member, got {:?}",
+            c.instance_exports
+        );
+        // A `const` re-export IS an instance member.
+        assert!(
+            c.instance_exports.contains(&"exposed".to_string()),
+            "the re-exported const `exposed` IS an instance member, got {:?}",
+            c.instance_exports
+        );
+        assert!(!c.legacy_props.iter().any(|p| p.name == "exposed"));
+    }
+
+    #[test]
+    fn module_region_let_does_not_misclassify_an_instance_const_reexport() {
+        // A MODULE-script `let conf` must NOT cause an INSTANCE-script
+        // `const conf; export { conf as exposed }` to be mis-routed to props. The
+        // prop-local scan is INSTANCE-region scoped AND subtracts const names.
+        // DISCRIMINATING: an unscoped scan would route `exposed` to legacy_props.
+        let src = "let conf = 1;\nconst conf2 = 2;\nexport { conf2 as exposed };";
+        // The module region covers ONLY the first line (`let conf`).
+        let module_end = src.find('\n').unwrap() as u32;
+        let c = capture_with_module_region(src, Some((0, module_end)));
+        assert!(
+            c.instance_exports.contains(&"exposed".to_string()),
+            "an instance `const` re-export is an EXPOSE member, got instance={:?} props={:?}",
+            c.instance_exports,
+            c.legacy_props
+        );
+        assert!(
+            !c.legacy_props.iter().any(|p| p.name == "exposed"),
+            "the instance `const` re-export must NOT be a prop"
+        );
+    }
+
+    #[test]
+    fn const_local_reexport_is_expose_even_with_same_name_let_absent() {
+        // Subtraction rule: a `const x; export { x as y }` is EXPOSE (no `let x`
+        // exists to mark it prop-kind).
+        let c = capture("const x = 1;\nexport { x as y };");
+        assert!(c.instance_exports.contains(&"y".to_string()));
+        assert!(!c.legacy_props.iter().any(|p| p.name == "y"));
+    }
+
+    #[test]
+    fn module_const_does_not_subtract_an_instance_prop_let_reexport() {
+        // A MODULE-region `const value` must NOT subtract an INSTANCE-region
+        // `let value; export { value as propValue }` from props (the subtraction
+        // is INSTANCE-region scoped). DISCRIMINATING: an all-region subtraction
+        // dropped `value` from prop-locals and routed `propValue` to EXPOSE.
+        let src = "const value = 1;\nlet value2 = 2;\nexport { value2 as propValue };";
+        let module_end = src.find('\n').unwrap() as u32;
+        let c = capture_with_module_region(src, Some((0, module_end)));
+        assert!(
+            c.legacy_props.iter().any(|p| p.name == "propValue"),
+            "an instance prop-let re-export is a PROP even with a module const of a different name, got props={:?} instance={:?}",
+            c.legacy_props,
+            c.instance_exports
+        );
+        assert!(
+            !c.instance_exports.contains(&"propValue".to_string()),
+            "the instance prop-let re-export must NOT be EXPOSE"
+        );
+    }
+
+    #[test]
     fn captures_dispatcher_event_type_argument() {
-        let c = capture("const dispatch = createEventDispatcher<{ change: number }>();");
+        // The dispatcher factory MUST be imported (so its source is recordable
+        // for provenance) — an untracked global `createEventDispatcher` is not a
+        // capturable Svelte dispatcher.
+        let c = capture(
+            "import { createEventDispatcher } from 'svelte';\nconst dispatch = createEventDispatcher<{ change: number }>();",
+        );
         assert!(c.dispatcher_events.is_some());
+        assert_eq!(c.dispatcher_import_source.as_deref(), Some("svelte"));
+    }
+
+    #[test]
+    fn records_dispatcher_import_source_for_userland_lookalike() {
+        // A `createEventDispatcher` imported from a userland module records its
+        // source so resolved-validation can reject it (provenance, not name).
+        let c = capture(
+            "import { createEventDispatcher } from './fake-svelte';\nconst dispatch = createEventDispatcher<{ change: number }>();",
+        );
+        assert!(c.dispatcher_events.is_some());
+        assert_eq!(c.dispatcher_import_source.as_deref(), Some("./fake-svelte"));
+    }
+
+    #[test]
+    fn untracked_global_dispatcher_is_not_captured() {
+        // No import of `createEventDispatcher` ⇒ not a provenance-checkable Svelte
+        // dispatcher ⇒ not captured (discriminating: the old name-only capture
+        // would record it).
+        let c = capture("const dispatch = createEventDispatcher<{ change: number }>();");
+        assert!(c.dispatcher_events.is_none());
+        assert!(c.dispatcher_import_source.is_none());
     }
 
     #[test]
@@ -765,6 +1286,9 @@ mod tests {
         let targets = vec![super::super::ResolvedImportTarget {
             specifier: "./fake-svelte".to_string(),
             resolved_canonical: Some("/src/fake-svelte.ts".to_string()),
+            // A userland relative import is workspace-owned, not package-backed ⇒
+            // no typed package identity (the structural rejection signal).
+            package: None,
         }];
         let cx = ResolvedValidationCx {
             candidates: &envelope,
@@ -797,6 +1321,9 @@ mod tests {
         let targets = vec![super::super::ResolvedImportTarget {
             specifier: "svelte".to_string(),
             resolved_canonical: Some("/project/node_modules/svelte/src/index.d.ts".to_string()),
+            // The session classified the import as the `svelte` PACKAGE (the
+            // typed identity the provider tests structurally).
+            package: Some(super::super::ResolvedPackage::named("svelte")),
         }];
         let cx = ResolvedValidationCx {
             candidates: &envelope,
@@ -811,5 +1338,104 @@ mod tests {
             .downcast_ref::<SvelteScriptFacts>()
             .expect("svelte facts");
         assert_eq!(facts.validated_snippet_members, vec!["row".to_string()]);
+    }
+
+    #[test]
+    fn validate_emits_dispatcher_only_when_resolved_to_svelte_package() {
+        // A real `svelte`-resolved `createEventDispatcher` contributes
+        // `dispatcher_events`; a userland look-alike does NOT (provenance, not a
+        // name match). DISCRIMINATING: a name-only test would accept both.
+        let provider = SvelteScriptProvider;
+        let make_candidates = |src: &str| SvelteScriptCandidates {
+            dispatcher_events: Some(TypeExpr::Object(std::sync::Arc::new(
+                verter_type_expr::ObjectExpr {
+                    properties: Vec::new(),
+                },
+            ))),
+            dispatcher_import_source: Some(src.to_string()),
+            ..Default::default()
+        };
+        let envelope = |c: SvelteScriptCandidates| FrameworkScriptCandidates {
+            adapter_id: FrameworkAdapterId::svelte(),
+            provider_version: SvelteScriptProvider::VERSION,
+            stable_hash: [0u8; 16],
+            payload: Arc::new(c),
+        };
+
+        // (1) Real svelte dispatcher ⇒ EMITS facts present.
+        let real_env = envelope(make_candidates("svelte"));
+        let real_targets = vec![super::super::ResolvedImportTarget {
+            specifier: "svelte".to_string(),
+            resolved_canonical: Some("/project/node_modules/svelte/index.d.ts".to_string()),
+            package: Some(super::super::ResolvedPackage::named("svelte")),
+        }];
+        let real = provider
+            .validate(ResolvedValidationCx {
+                candidates: &real_env,
+                resolved_import_targets: &real_targets,
+                capability_on: &|_| true,
+            })
+            .expect("real svelte dispatcher validates");
+        let real = real.as_any().downcast_ref::<SvelteScriptFacts>().unwrap();
+        assert!(
+            real.dispatcher_events.is_some(),
+            "a svelte-resolved dispatcher contributes EMITS"
+        );
+
+        // (2) Userland look-alike ⇒ NO EMITS facts (and no other inventory ⇒ no
+        // facts at all).
+        let fake_env = envelope(make_candidates("./fake-svelte"));
+        let fake_targets = vec![super::super::ResolvedImportTarget {
+            specifier: "./fake-svelte".to_string(),
+            resolved_canonical: Some("/src/fake-svelte.ts".to_string()),
+            package: None,
+        }];
+        let fake = provider.validate(ResolvedValidationCx {
+            candidates: &fake_env,
+            resolved_import_targets: &fake_targets,
+            capability_on: &|_| true,
+        });
+        assert!(
+            fake.is_none(),
+            "a userland createEventDispatcher look-alike must NOT contribute EMITS"
+        );
+    }
+
+    #[test]
+    fn validate_passes_through_parse_domain_inventory() {
+        // props_type / bindable / legacy / instance exports pass through verbatim
+        // (no package provenance needed for those).
+        let provider = SvelteScriptProvider;
+        let candidates = SvelteScriptCandidates {
+            props: Some(SveltePropsCandidate {
+                props_type: Some(TypeExpr::Ref {
+                    name: Arc::from("Props"),
+                    type_arguments: Arc::from(Vec::new().into_boxed_slice()),
+                }),
+                bindable_members: vec!["value".to_string()],
+                ..Default::default()
+            }),
+            instance_exports: vec!["focus".to_string()],
+            ..Default::default()
+        };
+        let envelope = FrameworkScriptCandidates {
+            adapter_id: FrameworkAdapterId::svelte(),
+            provider_version: SvelteScriptProvider::VERSION,
+            stable_hash: [0u8; 16],
+            payload: Arc::new(candidates),
+        };
+        let facts = provider
+            .validate(ResolvedValidationCx {
+                candidates: &envelope,
+                resolved_import_targets: &[],
+                capability_on: &|_| true,
+            })
+            .expect("props/exports inventory validates");
+        let facts = facts.as_any().downcast_ref::<SvelteScriptFacts>().unwrap();
+        assert!(
+            matches!(&facts.props_type, Some(TypeExpr::Ref { name, .. }) if name.as_ref() == "Props")
+        );
+        assert_eq!(facts.bindable_members, vec!["value".to_string()]);
+        assert_eq!(facts.instance_exports, vec!["focus".to_string()]);
     }
 }
