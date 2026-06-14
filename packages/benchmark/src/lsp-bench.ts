@@ -5,12 +5,15 @@
  * hover latency for both Verter LSP and Volar.
  */
 
-import { spawn, type ChildProcess } from "node:child_process";
 import { readFileSync, readdirSync } from "node:fs";
 import { resolve, join, dirname } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
 
+import { LspClient, type LspClientOptions } from "@verter/lsp-test-client";
+
 import { parseLspBenchConfig } from "./lsp-bench.config";
+import { initializeBenchmarkClient } from "./lsp-bench.init";
+import { toNegotiatedPosition } from "./lsp-bench.position";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -47,246 +50,25 @@ const PHASE_TIMEOUT = 120_000; // 120s for workspace scan
 const SHORT_TIMEOUT = 30_000; // 30s for other phases
 const WARM_HOVER_ITERATIONS = 5;
 
-// ─── JSON-RPC over stdio ────────────────────────────────────────────
+// ─── Shared LSP client options ─────────────────────────────────
 
-class LspClient {
-  private process: ChildProcess;
-  private buffer = "";
-  private nextId = 1;
-  private pendingRequests = new Map<
-    number,
-    {
-      resolve: (v: any) => void;
-      reject: (e: Error) => void;
-      timer?: ReturnType<typeof setTimeout>;
-    }
-  >();
-  private notificationHandlers = new Map<string, ((params: any) => void)[]>();
-  private requestHandlers = new Map<string, (params: any) => unknown>();
-  private name: string;
-
-  constructor(name: string, command: string, args: string[], cwd?: string) {
-    this.name = name;
-    this.process = spawn(command, args, {
-      stdio: ["pipe", "pipe", "pipe"],
-      cwd,
-      env: { ...process.env },
-      detached: process.platform !== "win32",
-    });
-
-    this.process.stdout!.on("data", (chunk: Buffer) => {
-      this.buffer += chunk.toString("utf-8");
-      this.drainMessages();
-    });
-
-    this.process.stderr!.on("data", (chunk: Buffer) => {
-      // Suppress stderr — some servers log here
-    });
-
-    this.process.on("error", (err) => {
-      console.error(`[${this.name}] Process error:`, err.message);
-    });
-
-    this.process.on("exit", (code) => {
-      // Clear timers and reject all pending requests
-      for (const [, pending] of this.pendingRequests) {
-        if (pending.timer) clearTimeout(pending.timer);
-        pending.reject(new Error(`${this.name} process exited with code ${code}`));
-      }
-      this.pendingRequests.clear();
-    });
-  }
-
-  private drainMessages() {
-    while (true) {
-      const headerEnd = this.buffer.indexOf("\r\n\r\n");
-      if (headerEnd === -1) break;
-
-      const header = this.buffer.slice(0, headerEnd);
-      const match = header.match(/Content-Length:\s*(\d+)/i);
-      if (!match) {
-        // Skip malformed header
-        this.buffer = this.buffer.slice(headerEnd + 4);
-        continue;
-      }
-
-      const contentLength = parseInt(match[1], 10);
-      const bodyStart = headerEnd + 4;
-      const bodyEnd = bodyStart + contentLength;
-
-      if (this.buffer.length < bodyEnd) break; // Incomplete body
-
-      const body = this.buffer.slice(bodyStart, bodyEnd);
-      this.buffer = this.buffer.slice(bodyEnd);
-
-      try {
-        const msg = JSON.parse(body);
-        this.handleMessage(msg);
-      } catch {
-        // Skip malformed JSON
-      }
-    }
-  }
-
-  private handleMessage(msg: any) {
-    if ("id" in msg && !("method" in msg)) {
-      // Response
-      const pending = this.pendingRequests.get(msg.id);
-      if (pending) {
-        this.pendingRequests.delete(msg.id);
-        if (pending.timer) clearTimeout(pending.timer);
-        if (msg.error) {
-          pending.reject(new Error(`${this.name} LSP error: ${JSON.stringify(msg.error)}`));
-        } else {
-          pending.resolve(msg.result);
-        }
-      }
-    } else if ("method" in msg && !("id" in msg)) {
-      // Notification
-      if (process.env.LSP_BENCH_DEBUG) {
-        const summary =
-          msg.method === "textDocument/publishDiagnostics"
-            ? ` uri=${msg.params?.uri} diags=${msg.params?.diagnostics?.length ?? 0}`
-            : "";
-        console.log(`  [${this.name}] notification: ${msg.method}${summary}`);
-      }
-      const handlers = this.notificationHandlers.get(msg.method);
-      if (handlers) {
-        for (const handler of handlers) {
-          handler(msg.params);
-        }
-      }
-    } else if ("method" in msg && "id" in msg) {
-      // Server-to-client request — check registered handlers first
-      const handler = this.requestHandlers.get(msg.method);
-      if (handler) {
-        try {
-          const result = handler(msg.params);
-          const body = JSON.stringify({ jsonrpc: "2.0", id: msg.id, result });
-          const header = `Content-Length: ${Buffer.byteLength(body)}\r\n\r\n`;
-          this.process.stdin!.write(header + body);
-        } catch (err: any) {
-          const body = JSON.stringify({
-            jsonrpc: "2.0",
-            id: msg.id,
-            error: { code: -32603, message: err.message },
-          });
-          const header = `Content-Length: ${Buffer.byteLength(body)}\r\n\r\n`;
-          this.process.stdin!.write(header + body);
-        }
-      } else if (
-        msg.method === "window/workDoneProgress/create" ||
-        msg.method === "client/registerCapability"
-      ) {
-        const body = JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: null });
-        const header = `Content-Length: ${Buffer.byteLength(body)}\r\n\r\n`;
-        this.process.stdin!.write(header + body);
-      }
-    }
-  }
-
-  sendRequest<T = any>(method: string, params?: any, timeout = SHORT_TIMEOUT): Promise<T> {
-    return new Promise<T>((resolve, reject) => {
-      const id = this.nextId++;
-
-      const timer = setTimeout(() => {
-        if (this.pendingRequests.has(id)) {
-          this.pendingRequests.delete(id);
-          reject(new Error(`${this.name} request '${method}' timed out after ${timeout}ms`));
-        }
-      }, timeout);
-      timer.unref();
-
-      this.pendingRequests.set(id, { resolve, reject, timer });
-
-      const body = JSON.stringify({ jsonrpc: "2.0", id, method, params });
-      const header = `Content-Length: ${Buffer.byteLength(body)}\r\n\r\n`;
-      this.process.stdin!.write(header + body);
-    });
-  }
-
-  sendNotification(method: string, params?: any) {
-    const body = JSON.stringify({ jsonrpc: "2.0", method, params });
-    const header = `Content-Length: ${Buffer.byteLength(body)}\r\n\r\n`;
-    this.process.stdin!.write(header + body);
-  }
-
-  onNotification(method: string, handler: (params: any) => void) {
-    const handlers = this.notificationHandlers.get(method) || [];
-    handlers.push(handler);
-    this.notificationHandlers.set(method, handlers);
-  }
-
-  /** Register a handler for server-to-client requests. */
-  onRequest(method: string, handler: (params: any) => unknown) {
-    this.requestHandlers.set(method, handler);
-  }
-
-  waitForNotification(
-    method: string,
-    timeout = SHORT_TIMEOUT,
-    predicate?: (params: any) => boolean,
-  ): Promise<any> {
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        reject(new Error(`${this.name} notification '${method}' timed out after ${timeout}ms`));
-      }, timeout);
-
-      const handler = (params: any) => {
-        if (predicate && !predicate(params)) return;
-        clearTimeout(timer);
-        // Remove this handler
-        const handlers = this.notificationHandlers.get(method);
-        if (handlers) {
-          const idx = handlers.indexOf(handler);
-          if (idx >= 0) handlers.splice(idx, 1);
-        }
-        resolve(params);
-      };
-      this.onNotification(method, handler);
-    });
-  }
-
-  async kill() {
-    return new Promise<void>((resolve) => {
-      // Already exited
-      if (this.process.exitCode !== null) {
-        resolve();
-        return;
-      }
-
-      const pid = this.process.pid;
-      const forceTimer = setTimeout(() => {
-        // Grace period expired — hard kill the process tree
-        if (process.platform === "win32") {
-          const killer = spawn("taskkill", ["/PID", String(pid), "/T", "/F"], {
-            stdio: "ignore",
-            windowsHide: true,
-          });
-          killer.once("close", () => {});
-        } else {
-          // Negative PID kills the process group (requires detached spawn)
-          try {
-            process.kill(-pid!, "SIGKILL");
-          } catch {
-            try {
-              process.kill(pid!, "SIGKILL");
-            } catch {}
-          }
-        }
-      }, 2000);
-      forceTimer.unref();
-
-      this.process.once("exit", () => {
-        clearTimeout(forceTimer);
-        resolve();
-      });
-
-      try {
-        this.process.kill("SIGTERM");
-      } catch {}
-    });
-  }
+// The shared @verter/lsp-test-client client buffers child stderr (instead of
+// dropping it) and adopts the negotiated positionEncoding. These options keep
+// the benchmark observably identical to its former inline client: surface
+// child-process errors on the console, and trace every inbound notification
+// when LSP_BENCH_DEBUG is set.
+function clientOptions(name: string): LspClientOptions {
+  return {
+    onError: (err) => console.error(`[${name}] Process error:`, err.message),
+    onAnyNotification: (method, params) => {
+      if (!process.env.LSP_BENCH_DEBUG) return;
+      const summary =
+        method === "textDocument/publishDiagnostics"
+          ? ` uri=${params?.uri} diags=${params?.diagnostics?.length ?? 0}`
+          : "";
+      console.log(`  [${name}] notification: ${method}${summary}`);
+    },
+  };
 }
 
 // ─── Timing helpers ──────────────────────────────────────────────────
@@ -307,40 +89,6 @@ function formatMs(ms: number): string {
   return `${Math.round(ms)}ms`;
 }
 
-// ─── Initialize params ───────────────────────────────────────────────
-
-function makeInitializeParams(rootUri: string, workspaceName: string, initializationOptions?: any) {
-  return {
-    processId: process.pid,
-    capabilities: {
-      textDocument: {
-        publishDiagnostics: {
-          relatedInformation: true,
-        },
-        hover: {
-          contentFormat: ["markdown", "plaintext"],
-        },
-        completion: {
-          completionItem: {
-            snippetSupport: false,
-          },
-        },
-      },
-      workspace: {
-        workspaceFolders: true,
-      },
-    },
-    rootUri,
-    workspaceFolders: [
-      {
-        uri: rootUri,
-        name: workspaceName,
-      },
-    ],
-    ...(initializationOptions ? { initializationOptions } : {}),
-  };
-}
-
 // ─── Benchmark runner ────────────────────────────────────────────────
 
 interface BenchmarkResult {
@@ -353,7 +101,7 @@ interface BenchmarkResult {
 
 async function benchmarkVerter(label: string, typeProvider: string): Promise<BenchmarkResult> {
   const args = [WORKSPACE_ROOT, `--type-provider=${typeProvider}`];
-  const client = new LspClient(label, VERTER_BIN, args);
+  const client = new LspClient(label, VERTER_BIN, args, undefined, clientOptions(label));
 
   // For extension type provider, the benchmark runner acts as the extension host.
   // Register a $/verter/tsQuery handler backed by an in-process TS language service.
@@ -373,15 +121,26 @@ async function benchmarkVerter(label: string, typeProvider: string): Promise<Ben
   const fileContent = readFileSync(TEST_FILE, "utf-8");
 
   try {
-    // Phase 1: Initialize
+    // Phase 1: Initialize (routed through LspClient.initialize so the client
+    // advertises general.positionEncodings and adopts the server's encoding).
     const t0 = hrMs();
-    await client.sendRequest(
-      "initialize",
-      makeInitializeParams(rootUri, PROJECT_NAME),
-      SHORT_TIMEOUT,
-    );
+    await initializeBenchmarkClient(client, rootUri, PROJECT_NAME, SHORT_TIMEOUT);
     client.sendNotification("initialized", {});
     const initTime = hrMs() - t0;
+
+    // With the encoding now negotiated, re-express the configured probe target in
+    // it: the config column is a 1-based UTF-16 code unit (lsp-bench.config makes
+    // it 0-based), but the server reads Position.character in the negotiated
+    // encoding (Verter picks utf-8). A non-ASCII prefix on the target line shifts
+    // the utf-8 byte offset off the raw UTF-16 column, so every position-send is
+    // routed through this conversion. ASCII targets / a utf-16 server are
+    // unaffected (the conversion is the identity). Computed outside every timed
+    // region so the measurements are unchanged.
+    const hoverPosition = toNegotiatedPosition(
+      fileContent,
+      { line: HOVER_LINE, character: HOVER_CHAR },
+      client.positionEncoding,
+    );
 
     // Phase 2: Workspace Scan — wait for $/verter/ready which fires after
     // project registry, workspace scanner, and type provider are all ready.
@@ -403,7 +162,7 @@ async function benchmarkVerter(label: string, typeProvider: string): Promise<Ben
       "textDocument/hover",
       {
         textDocument: { uri: fileUri },
-        position: { line: HOVER_LINE, character: HOVER_CHAR },
+        position: hoverPosition,
       },
       SHORT_TIMEOUT,
     );
@@ -415,7 +174,7 @@ async function benchmarkVerter(label: string, typeProvider: string): Promise<Ben
       "textDocument/hover",
       {
         textDocument: { uri: fileUri },
-        position: { line: HOVER_LINE, character: HOVER_CHAR },
+        position: hoverPosition,
       },
       SHORT_TIMEOUT,
     );
@@ -429,7 +188,7 @@ async function benchmarkVerter(label: string, typeProvider: string): Promise<Ben
         "textDocument/hover",
         {
           textDocument: { uri: fileUri },
-          position: { line: HOVER_LINE, character: HOVER_CHAR },
+          position: hoverPosition,
         },
         SHORT_TIMEOUT,
       );
@@ -459,7 +218,13 @@ async function benchmarkVolar(): Promise<BenchmarkResult> {
   if (!volarScript || !tsdkPath) {
     throw new Error("Volar benchmark requires a resolved Volar script and TypeScript SDK.");
   }
-  const client = new LspClient("Volar", process.execPath, [volarScript, "--stdio"]);
+  const client = new LspClient(
+    "Volar",
+    process.execPath,
+    [volarScript, "--stdio"],
+    undefined,
+    clientOptions("Volar"),
+  );
 
   const rootUri = pathToFileURL(resolve(WORKSPACE_ROOT)).toString();
   const fileUri = pathToFileURL(resolve(TEST_FILE)).toString();
@@ -472,15 +237,20 @@ async function benchmarkVolar(): Promise<BenchmarkResult> {
       },
     };
 
-    // Phase 1: Initialize
+    // Phase 1: Initialize (routed through LspClient.initialize so the client
+    // advertises general.positionEncodings and adopts the server's encoding).
     const t0 = hrMs();
-    await client.sendRequest(
-      "initialize",
-      makeInitializeParams(rootUri, PROJECT_NAME, volarInitOptions),
-      SHORT_TIMEOUT,
-    );
+    await initializeBenchmarkClient(client, rootUri, PROJECT_NAME, SHORT_TIMEOUT, volarInitOptions);
     client.sendNotification("initialized", {});
     const initTime = hrMs() - t0;
+
+    // Re-express the configured probe target in the negotiated encoding (see the
+    // Verter path for the full rationale). Computed outside every timed region.
+    const hoverPosition = toNegotiatedPosition(
+      fileContent,
+      { line: HOVER_LINE, character: HOVER_CHAR },
+      client.positionEncoding,
+    );
 
     // Phase 2: Workspace Scan — Volar doesn't have a scan-complete signal.
     // We skip this phase for Volar (set to 0) since it's bundled into init.
@@ -500,7 +270,7 @@ async function benchmarkVolar(): Promise<BenchmarkResult> {
       "textDocument/hover",
       {
         textDocument: { uri: fileUri },
-        position: { line: HOVER_LINE, character: HOVER_CHAR },
+        position: hoverPosition,
       },
       SHORT_TIMEOUT,
     );
@@ -512,7 +282,7 @@ async function benchmarkVolar(): Promise<BenchmarkResult> {
       "textDocument/hover",
       {
         textDocument: { uri: fileUri },
-        position: { line: HOVER_LINE, character: HOVER_CHAR },
+        position: hoverPosition,
       },
       SHORT_TIMEOUT,
     );
@@ -526,7 +296,7 @@ async function benchmarkVolar(): Promise<BenchmarkResult> {
         "textDocument/hover",
         {
           textDocument: { uri: fileUri },
-          position: { line: HOVER_LINE, character: HOVER_CHAR },
+          position: hoverPosition,
         },
         SHORT_TIMEOUT,
       );
