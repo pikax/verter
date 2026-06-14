@@ -401,6 +401,28 @@ fn hash_type_expr_structurally<H: Hasher>(root: &TypeExpr, hasher: &mut H) {
                 21u8.hash(hasher);
                 raw.hash(hasher);
             }
+            // Mirrors the `Ref` arm: a distinct discriminant (`23`, the next
+            // free tag after `ConstructorType`'s `22`) then the leaf
+            // `specifier`/`qualifier`/`typeof_query`, then the nested
+            // `type_arguments` are pushed onto the worklist.
+            TypeExpr::ImportType {
+                specifier,
+                qualifier,
+                typeof_query,
+                type_arguments,
+            } => {
+                23u8.hash(hasher);
+                specifier.hash(hasher);
+                (qualifier.len() as u64).hash(hasher);
+                for q in qualifier.iter() {
+                    q.hash(hasher);
+                }
+                (*typeof_query as u8).hash(hasher);
+                (type_arguments.len() as u64).hash(hasher);
+                for arg in type_arguments.iter() {
+                    worklist.push(arg);
+                }
+            }
         }
     }
 }

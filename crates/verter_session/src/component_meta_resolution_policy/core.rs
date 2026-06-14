@@ -380,6 +380,29 @@ pub(super) fn rewrite_expr(expr: &TypeExpr, ctx: &mut PolicyCtx<'_, '_>) -> Opti
             let new_inner = rewrite_expr(inner, ctx)?;
             Some(TypeExpr::Parenthesized(Arc::new(new_inner)))
         }
+        // Mirrors the `Ref` arm's recursion (Rule 5): `specifier`/`qualifier`
+        // are leaf strings (like a `Ref`'s `name`); the only nested exprs are
+        // `type_arguments`, which rewrite and rebuild the same carrier.
+        TypeExpr::ImportType {
+            specifier,
+            qualifier,
+            typeof_query,
+            type_arguments,
+        } => {
+            let mut next: Option<Vec<TypeExpr>> = None;
+            for (idx, arg) in type_arguments.iter().enumerate() {
+                if let Some(rewritten) = rewrite_expr(arg, ctx) {
+                    let cloned = next.get_or_insert_with(|| type_arguments.to_vec());
+                    cloned[idx] = rewritten;
+                }
+            }
+            next.map(|args| TypeExpr::ImportType {
+                specifier: specifier.clone(),
+                qualifier: qualifier.clone(),
+                typeof_query: *typeof_query,
+                type_arguments: Arc::from(args),
+            })
+        }
 
         // Terminals — no rewrite possible.
         TypeExpr::Primitive(_)
@@ -675,6 +698,10 @@ pub(super) fn body_is_resolvable(body: &TypeExpr, ctx: &PolicyCtx<'_, '_>) -> bo
     match body {
         TypeExpr::Parenthesized(inner) => body_is_resolvable(inner, ctx),
         TypeExpr::Ref { .. } => false,
+        // An import-type is a cross-file symbolic reference (like a bare
+        // `Ref`), not a concrete structural shape — chasing it would just
+        // resolve to another symbolic, so it is NOT resolvable here.
+        TypeExpr::ImportType { .. } => false,
         TypeExpr::IndexedAccess { object, .. } => {
             !indexed_access_targets_macro_participating(object, ctx)
         }

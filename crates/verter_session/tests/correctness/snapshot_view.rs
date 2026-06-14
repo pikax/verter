@@ -586,6 +586,32 @@ fn write_type_expr(buf: &mut String, expr: &TypeExpr) {
             // matching the TS bridge's display contract.
             buf.push_str(key.binding_name.as_ref());
         }
+        TypeExpr::ImportType {
+            specifier,
+            qualifier,
+            typeof_query,
+            type_arguments,
+        } => {
+            // Canonical TS surface: `typeof import("spec")` for a value-space
+            // query, `import("spec")` otherwise, with the dotted qualifier and
+            // any applied type arguments appended.
+            if *typeof_query {
+                buf.push_str("typeof ");
+            }
+            buf.push_str("import(\"");
+            buf.push_str(specifier);
+            buf.push_str("\")");
+            for q in qualifier.iter() {
+                buf.push('.');
+                buf.push_str(q);
+            }
+            if !type_arguments.is_empty() {
+                buf.push('<');
+                let parts: Vec<String> = type_arguments.iter().map(render_type_signature).collect();
+                buf.push_str(&parts.join(", "));
+                buf.push('>');
+            }
+        }
         TypeExpr::Unknown { raw } => {
             // For Unknown, fall back to the raw source so the gate
             // can still distinguish "Verter could not lower X" from

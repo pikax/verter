@@ -117,6 +117,32 @@ pub fn type_expr_from_json(v: &serde_json::Value) -> Option<TypeExpr> {
                 type_arguments: Arc::from(args),
             })
         }
+        "importType" => {
+            let specifier = v.get("specifier")?.as_str()?;
+            let qualifier: Vec<Arc<str>> = v
+                .get("qualifier")
+                .and_then(|q| q.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|s| s.as_str().map(Arc::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let typeof_query = v
+                .get("typeofQuery")
+                .and_then(|b| b.as_bool())
+                .unwrap_or(false);
+            let type_arguments = v
+                .get("typeArguments")
+                .and_then(json_array_to_type_exprs)
+                .unwrap_or_default();
+            Some(TypeExpr::ImportType {
+                specifier: Arc::from(specifier),
+                qualifier: Arc::from(qualifier),
+                typeof_query,
+                type_arguments: Arc::from(type_arguments),
+            })
+        }
         "typeParameter" => Some(TypeExpr::TypeParameter(json_to_type_param(v)?)),
         "keyOf" => {
             let operand = type_expr_from_json(v.get("operand")?)?;
@@ -528,6 +554,18 @@ impl TypeExpr {
             } => json!({
                 "kind": "ref",
                 "name": name,
+                "typeArguments": type_arguments.iter().map(|a| a.to_json_value()).collect::<Vec<_>>()
+            }),
+            Self::ImportType {
+                specifier,
+                qualifier,
+                typeof_query,
+                type_arguments,
+            } => json!({
+                "kind": "importType",
+                "specifier": specifier.as_ref(),
+                "qualifier": qualifier.iter().map(|q| q.as_ref()).collect::<Vec<_>>(),
+                "typeofQuery": typeof_query,
                 "typeArguments": type_arguments.iter().map(|a| a.to_json_value()).collect::<Vec<_>>()
             }),
             Self::TypeParameter(param) => {

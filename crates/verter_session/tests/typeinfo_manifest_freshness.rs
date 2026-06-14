@@ -154,13 +154,20 @@ fn typeinfo_manifest_files_are_byte_equal_to_regenerated_generator_output() {
 /// Discriminating per-block-count pin for the lifted rows. Each assertion is
 /// pinned to the exact committed lift partition — so reverting (or
 /// mis-counting) any lift's manifest re-partition breaks this test. The
-/// committed partition: `U2.QUERY_VALUE_DOMAIN` owns 20 rows (all lifted —
-/// the 2 index-signature publications, the 8 utility-reducer lifts, and the
-/// 10 class-surface-era pure-reduction lifts whose measured trace terminates
-/// at {ResolveDecl, Instantiate(, TypeOf)}); `U2.INDEXED_ACCESS` owns 18 (9
+/// committed partition: `U2.QUERY_VALUE_DOMAIN` owns 21 rows (all lifted —
+/// the 2 index-signature publications, the 8 utility-reducer lifts, the
+/// 10 class-surface-era pure-reduction lifts, and the 1 module-augmentation
+/// namespace alias-chain lift, whose measured trace terminates at
+/// {ResolveDecl, Instantiate(, TypeOf)}); `U2.INDEXED_ACCESS` owns 21 (12
 /// lifted); `U2.UTILITIES` owns 32; `U2.MAPPED_TEMPLATE` owns 19 (4 lifted);
 /// `U2.CLASS_SURFACES` owns 38 (5 lifted — the class typeof-path rows whose
-/// trace dispatches `ResolveClassSurface` + `ProjectPath`).
+/// trace dispatches `ResolveClassSurface` + `ProjectPath`);
+/// `U2.MODULE_AUGMENTATION` owns 4 (0 lifted — the 4 remaining rows whose
+/// `as const` / bare `typeof` / `typeof import` / `import("…").X` source
+/// bodies are gate-rejected by the oracle source-walk stay `Ignored`; the
+/// `typeof import(...)["default"]` row RE-LIFTED to `U2.INDEXED_ACCESS` once
+/// the readonly was fixed by decoupling per-property `as const` from
+/// readonly).
 #[test]
 fn manifest_block_counts_reflect_lifts() {
     let rows = workspace_root()
@@ -172,18 +179,23 @@ fn manifest_block_counts_reflect_lifts() {
     // Per-block generated row counts (the honest override distribution).
     assert_eq!(
         count("block_id: TypeInfoParityBlockId::U2QueryValueDomain,"),
-        20,
-        "U2.QUERY_VALUE_DOMAIN must own 20 rows: the 2 lifted index-signature \
-         publication rows, the 8 U2.UTILITIES reducer rows, and the 10 \
-         class-surface-era pure-reduction rows — every row whose measured trace \
-         terminates at {{ResolveDecl, Instantiate(, TypeOf)}}",
+        21,
+        "U2.QUERY_VALUE_DOMAIN must own 21 rows: the 2 lifted index-signature \
+         publication rows, the 8 U2.UTILITIES reducer rows, the 10 \
+         class-surface-era pure-reduction rows, and the 1 module-augmentation \
+         namespace alias-chain row — every row whose measured trace terminates \
+         at {{ResolveDecl, Instantiate(, TypeOf)}}",
     );
     assert_eq!(
         count("block_id: TypeInfoParityBlockId::U2IndexedAccess,"),
-        18,
-        "U2.INDEXED_ACCESS must own 18 rows after the 2 brand-tag index chains \
+        21,
+        "U2.INDEXED_ACCESS must own 21 rows after the 2 brand-tag index chains \
          and the 2 decoration-invariance indexed-access rows moved IN from \
-         U2.CLASS_SURFACES on their measured-trace lifts (14 → 18)",
+         U2.CLASS_SURFACES (14 → 18) and the 3 module-augmentation indexed-member \
+         projection rows (the `as const` typeof indexed member + the `typeof \
+         import(...)[\"default\"]` default-export value projection + the `typeof \
+         import(...)[\"leafName\"]` named-value projection) moved IN from \
+         U2.MODULE_AUGMENTATION on their measured-trace lifts (18 → 21)",
     );
     assert_eq!(
         count("block_id: TypeInfoParityBlockId::U2Utilities,"),
@@ -200,28 +212,44 @@ fn manifest_block_counts_reflect_lifts() {
          the IndexedAccess-reduction lift (18 → 19)",
     );
 
+    assert_eq!(
+        count("block_id: TypeInfoParityBlockId::U2ModuleAugmentation,"),
+        4,
+        "U2.MODULE_AUGMENTATION must own 4 rows after the 4 lifted rows (the \
+         `as const` typeof indexed member + the `typeof import(...)[\"default\"]` \
+         default-export value projection + the `typeof import(...)[\"leafName\"]` \
+         named-value projection + the namespace alias-chain row) re-homed OUT on \
+         their measured-trace lifts (8 → 4); the remaining 4 rows stay `Ignored` \
+         (all gate-rejected at the oracle source-walk: `Reject(ConstAssertion)`, \
+         two `Reject(DeferredConstruct(\"typeof\"/\"typeof-import\"))`, and \
+         `Reject(DeferredConstruct(\"import-type\"))`)",
+    );
+
     // Lifted-status counts.
     assert_eq!(
         count("status: IgnoreStatus::Lifted {"),
-        38,
-        "exactly 38 IgnoredTestRows must carry `status: Lifted` (the 19 \
-         pre-class-surface lifts plus the 19 class-surface-era lifts)",
+        42,
+        "exactly 42 IgnoredTestRows must carry `status: Lifted` (the 19 \
+         pre-class-surface lifts + the 19 class-surface-era lifts + the 4 \
+         module-augmentation-era lifts)",
     );
     assert_eq!(
         count(
             "status: IgnoreStatus::Lifted { block_id: TypeInfoParityBlockId::U2QueryValueDomain }"
         ),
-        20,
-        "the 2 index-signature lifts, the 8 utility-reducer lifts, and the 10 \
-         class-surface-era pure-reduction lifts must record their lifting block \
+        21,
+        "the 2 index-signature lifts, the 8 utility-reducer lifts, the 10 \
+         class-surface-era pure-reduction lifts, and the 1 module-augmentation \
+         namespace alias-chain lift must record their lifting block \
          as U2.QUERY_VALUE_DOMAIN",
     );
     assert_eq!(
         count("status: IgnoreStatus::Lifted { block_id: TypeInfoParityBlockId::U2IndexedAccess }"),
-        9,
+        12,
         "the 2 terminal indexed-access projection lifts, the 3 keyof-expansion \
-         lifts, the 2 brand-tag index-chain lifts, and the 2 \
-         decoration-invariance lifts must record their lifting block as \
+         lifts, the 2 brand-tag index-chain lifts, the 2 \
+         decoration-invariance lifts, and the 3 module-augmentation \
+         indexed-member projection lifts must record their lifting block as \
          U2.INDEXED_ACCESS",
     );
     assert_eq!(
@@ -241,10 +269,10 @@ fn manifest_block_counts_reflect_lifts() {
          lifting block as U2.CLASS_SURFACES",
     );
 
-    // Total ignored (status: Ignored) rows after 38 lifts.
+    // Total ignored (status: Ignored) rows after 42 lifts.
     assert_eq!(
         count("status: IgnoreStatus::Ignored"),
-        324,
-        "exactly 324 IgnoredTestRows must remain `Ignored` (362 total − 38 lifted)",
+        320,
+        "exactly 320 IgnoredTestRows must remain `Ignored` (362 total − 42 lifted)",
     );
 }

@@ -175,6 +175,7 @@ fn variant_index(expr: &TypeExpr) -> isize {
         // Added after the original derive: a new variant takes the next free
         // discriminant (NOT its declaration-order index) so 0..=21 stay frozen.
         TypeExpr::ConstructorType(_) => 22,
+        TypeExpr::ImportType { .. } => 23,
     }
 }
 
@@ -266,6 +267,20 @@ fn ref_hash<H: Hasher>(expr: &TypeExpr, h: &mut H) {
             }
         }
         TypeExpr::SyntheticSlotBinding(carrier) => carrier.hash(h),
+        // ImportType: specifier / qualifier / typeof_query leaves, then the
+        // type_arguments slice LAST (mirrors `Ref`). `qualifier` (an
+        // `Arc<[Arc<str>]>`) hashes as a slice (len then each `Arc<str>`).
+        TypeExpr::ImportType {
+            specifier,
+            qualifier,
+            typeof_query,
+            type_arguments,
+        } => {
+            specifier.hash(h);
+            qualifier.hash(h);
+            typeof_query.hash(h);
+            ref_hash_slice(type_arguments, h);
+        }
         TypeExpr::Unknown { raw } => raw.hash(h),
     }
 }
@@ -634,6 +649,32 @@ fn corpus() -> Vec<(&'static str, TypeExpr)> {
                 TypeExpr::named("V"),
             ]),
         },
+    ));
+
+    // ImportType — bare `typeof import("…")` (empty qualifier / args), a
+    // qualified `import("…").A.B` (multi-segment qualifier, no typeof), and a
+    // generic `import("…").Gen<Arg>` (non-empty type_arguments, the recursive
+    // child block). Exercises the new variant through the live iterative
+    // `hash_node` and the frozen `ref_hash` mirror.
+    v.push((
+        "import-type-bare-typeof",
+        TypeExpr::import_type("./m", vec![], true, vec![]),
+    ));
+    v.push((
+        "import-type-qualified",
+        TypeExpr::import_type("./m", vec![Arc::from("A"), Arc::from("B")], false, vec![]),
+    ));
+    v.push((
+        "import-type-generic-args",
+        TypeExpr::import_type(
+            "./m",
+            vec![Arc::from("Gen")],
+            false,
+            vec![
+                TypeExpr::Primitive(PrimitiveName::Number),
+                TypeExpr::named("Arg"),
+            ],
+        ),
     ));
 
     // TypeParameter — constraint Some/None, default Some/None.

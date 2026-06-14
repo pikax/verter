@@ -276,6 +276,9 @@ impl TypeExpr {
             Self::Ref { type_arguments, .. } => {
                 shift_arc_slice(type_arguments, delta);
             }
+            Self::ImportType { type_arguments, .. } => {
+                shift_arc_slice(type_arguments, delta);
+            }
             Self::RecursiveRef {
                 type_arguments,
                 conditional_context,
@@ -369,6 +372,9 @@ impl TypeExpr {
                 Arc::make_mut(function).clear_spans();
             }
             Self::Ref { type_arguments, .. } => {
+                clear_arc_slice(type_arguments);
+            }
+            Self::ImportType { type_arguments, .. } => {
                 clear_arc_slice(type_arguments);
             }
             Self::RecursiveRef {

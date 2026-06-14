@@ -168,6 +168,12 @@ fn type_expr_has_direct_macro_reference(expr: &TypeExpr, needle: &str) -> bool {
         }
         TypeExpr::TypeParameter(param) => param.name == needle,
         TypeExpr::Infer { name } => name == needle,
+        // Mirrors the `Ref` arm's recursion into `type_arguments`. The
+        // `specifier`/`qualifier` are a module path, not the workspace macro
+        // symbol `needle`, so only the nested type-argument exprs are searched.
+        TypeExpr::ImportType { type_arguments, .. } => type_arguments
+            .iter()
+            .any(|arg| type_expr_has_direct_macro_reference(arg, needle)),
         TypeExpr::Object(_)
         | TypeExpr::Primitive(_)
         | TypeExpr::Literal(_)

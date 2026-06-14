@@ -212,6 +212,11 @@ fn runtime_constructors_at_depth(ty: &TypeExpr, depth: usize) -> Vec<RuntimeCtor
         //    Vue-internal carrier; an object surface is the structural truth. --
         TypeExpr::SyntheticSlotBinding(_) => vec![RuntimeCtorKind::Object],
 
+        // -- An import-type is a cross-file reference whose runtime constructor
+        //    is not reducible at this leaf adapter; like the `IndexedAccess` /
+        //    `Infer` / `Unknown` arms, it yields the safe `[Unknown]` fallback. --
+        TypeExpr::ImportType { .. } => vec![RuntimeCtorKind::Unknown],
+
         // -- A type the lowering could not represent => Unknown (the catch-all
         //    at infer.rs:154). --
         TypeExpr::Unknown { .. } => vec![RuntimeCtorKind::Unknown],

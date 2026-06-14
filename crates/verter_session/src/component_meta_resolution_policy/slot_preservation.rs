@@ -93,6 +93,10 @@ fn type_expr_contains_imported_ref(expr: &TypeExpr, ctx: &mut PolicyCtx<'_, '_>)
                 .iter()
                 .any(|arg| type_expr_contains_imported_ref(arg, ctx))
         }
+        // An `import("…")` reference is, by construction, a reference to an
+        // imported (cross-file) declaration — the same condition the `Ref`
+        // arm reports `true` for when its declaration resolves off-owner.
+        TypeExpr::ImportType { .. } => true,
         TypeExpr::Union(types) | TypeExpr::Intersection(types) => types
             .iter()
             .any(|ty| type_expr_contains_imported_ref(ty, ctx)),

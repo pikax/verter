@@ -2951,12 +2951,12 @@ fixes the single owning block. The per-block counts (summing to 362) are:
 |---|---:|---|---:|
 | `U2.RELATION_INFER` | 20 | `U6.NARROW_*` (8 sub-blocks, below) | 104 |
 | `U2.UTILITIES` | 32 | `U6.PREDICATE_ASSERTION` | 3 |
-| `U2.INDEXED_ACCESS` | 18 | `U6.CALL_RESOLVE` | 21 |
+| `U2.INDEXED_ACCESS` | 21 | `U6.CALL_RESOLVE` | 21 |
 | `U2.MAPPED_TEMPLATE` | 19 | `U6.CONTEXTUAL_CALLBACK` | 15 |
-| `U2.QUERY_VALUE_DOMAIN` | 20 | `U6.VALUE_INFERENCE` | 1 |
+| `U2.QUERY_VALUE_DOMAIN` | 21 | `U6.VALUE_INFERENCE` | 1 |
 | `U2.CLASS_SURFACES` | 38 | `U6.ASYNC_GENERATOR` | 1 |
 | `U2.ENUMS` | 7 | `U6.CROSS_FILE` | 6 |
-| `U2.MODULE_AUGMENTATION` | 8 | `U6.LOOP_CLOSURE` | 3 |
+| `U2.MODULE_AUGMENTATION` | 4 | `U6.LOOP_CLOSURE` | 3 |
 | `U2.JSX_FOUNDATIONS` | 9 | `U3.CACHE_FACT_MODEL` | 3 |
 | `U6.FLOW_RETURN_SUBSTRATE` | 7 | `U11.PUBLIC_RELATION_SESSION` | 9 |
 | `U10.RESULT_DB` | 12 | `U15.FINAL_LIFT` | 5 |
@@ -3042,6 +3042,44 @@ as a dedicated follow-up block. The `ResolveEnum` query key stays non-producing
 by design — enum resolution reuses the existing `ResolveDecl` / `TypeOf` /
 `KeyOf` / `TemplateLiteralReduce` / `IndexedAccess` reducers (no second engine).
 
+The module-augmentation family (`U2.MODULE_AUGMENTATION`) reducer is likewise
+complete — all eight parity rows resolve correctly (namespace alias-chains and
+deep qualified-name lookup, `declare global` / `declare module` interface merge,
+`typeof import(...)` default/named-shape/named-value projection, `export =`
+CommonJS interop, and the merged interface+namespace value member). FOUR of the
+eight oracle-lift and follow the same measured-trace re-homing — because
+`ResolveDeclarationAugmentation` is NOT itself a dispatched mechanism, a lifted
+row CANNOT remain classified in `U2.MODULE_AUGMENTATION`; it re-homes to its
+trace-terminal block: the `as const` typeof indexed member
+(`import_attribute_simulated_string_literal_indexed_member`), the
+`typeof import(...)["default"]` default-export value projection
+(`module_features_typeof_import_default_resolves_value_shape`), and the
+`typeof import(...)["leafName"]` named-value projection
+(`module_features_typeof_import_named_value_resolves_to_literal`) dispatch
+`ResolveDecl`/`Instantiate`/`TypeOf` (→ `QueryValueDomainFoundation`,
+non-owning) then terminate at `IndexedAccess` and sit under `U2.INDEXED_ACCESS`;
+the namespace alias-chain row
+(`module_features_namespace_geometry_vector_aliases_point`) dispatches only
+`ResolveDecl` + `Instantiate` and sits under `U2.QUERY_VALUE_DOMAIN`. The other
+FOUR rows deferred honestly (engine complete, oracle proof pending) — all
+gate-rejected at the closed positive-allowlist admission source-walk: the
+`as const` value root of `typeof importedJsonConfig`
+(`import_attribute_simulated_resolves_imported_json_shape`,
+`Reject(ConstAssertion)`); the bare `typeof import("…")` against the `export =`
+ambient module (`module_features_cjs_export_equals_resolves_to_carrier`,
+`Reject(DeferredConstruct("typeof-import"))`); the bare `typeof Connector.VERSION`
+merged-namespace value member
+(`module_features_namespace_interface_merge_namespace_value_resolves_to_literal`,
+`Reject(DeferredConstruct("typeof"))`); and the `import("…").LeafShape` import-type
+(`module_features_typeof_import_named_shape_resolves_to_interface`,
+`Reject(DeferredConstruct("import-type"))`). The
+`ResolveDeclarationAugmentation` mechanism is the block's NOMINAL owner of the
+augmentation index/merge semantics (a forward-planned, deferred `MechanismId`,
+NOT a live `SemanticQueryKey`): the four lifted rows reuse the shared
+`ResolveDecl` / `Instantiate` / `TypeOf` / `IndexedAccess` reducers (no second
+engine), which is exactly why their measured trace re-homes them to
+`U2.INDEXED_ACCESS` / `U2.QUERY_VALUE_DOMAIN`.
+
 The complete partition (each entry `file::function — substrate`):
 <!-- BEGIN U0 row→block coverage table (362 rows). [Marker name is a fixed parse contract
      consumed by scripts/gen-typeinfo-ignore-manifest.py parse_partition — do NOT rename.
@@ -3055,7 +3093,7 @@ The complete partition (each entry `file::function — substrate`):
      DAG (typeinfo_parity_blocks.rs) come from the generator's own Python maps, NOT from this
      partition. Edit block_id assignments HERE, then regenerate. -->
 
-**`U2.QUERY_VALUE_DOMAIN`** (20 rows):
+**`U2.QUERY_VALUE_DOMAIN`** (21 rows):
 
 - `function_advanced.rs::function_advanced_call_construct_hybrid_constructor_parameters_uses_construct_signature` — `CallResolution`
 - `function_advanced.rs::function_advanced_call_construct_hybrid_instance_type_uses_construct_signature` — `CallResolution`
@@ -3066,6 +3104,7 @@ The complete partition (each entry `file::function — substrate`):
 - `function_advanced.rs::function_advanced_return_type_of_overloaded_function_uses_last_overload` — `CallResolution`
 - `index_signatures.rs::index_signatures_numeric_index_publishes_signature` — `IndexSignatures`
 - `index_signatures.rs::index_signatures_symbol_index_publishes_signature` — `IndexSignatures`
+- `module_features.rs::module_features_namespace_geometry_vector_aliases_point` — `ModuleFeatures`
 - `substitution_types.rs::substitution_types_sb15_recursive_generic_substitution` — `TypeParameterFeatures`
 - `typescript_rules.rs::typescript_rules_awaited_recursively_unwraps_promises` — `TypeScriptRules`
 - `typescript_rules.rs::typescript_rules_constructor_parameters_resolve_tuple` — `TypeScriptRules`
@@ -3136,7 +3175,7 @@ The complete partition (each entry `file::function — substrate`):
 - `variadic_tuples.rs::variadic_tuple_tail_of_sample_resolves_to_remaining_tuple` — `TupleFeatures`
 - `variadic_tuples.rs::variadic_tuple_variadic_function_with_explicit_type_args_concatenates_tuples` — `TupleFeatures`
 
-**`U2.INDEXED_ACCESS`** (18 rows):
+**`U2.INDEXED_ACCESS`** (21 rows):
 
 - `branded_types.rs::branded_key_access_projects_boolean_literal_brand_tag` — `ApparentTypes`
 - `branded_types.rs::branded_key_access_projects_literal_brand_tag` — `ApparentTypes`
@@ -3148,6 +3187,9 @@ The complete partition (each entry `file::function — substrate`):
 - `index_signatures.rs::index_signatures_numeric_lookup_returns_signature_value` — `IndexSignatures`
 - `index_signatures.rs::index_signatures_symbol_lookup_returns_signature_value` — `IndexSignatures`
 - `mode_boundary_invariants.rs::mode_boundary_keyof_across_reexport_chain_resolves_all_keys` — `ModeBoundary`
+- `modern_ts_features.rs::import_attribute_simulated_string_literal_indexed_member` — `ModernTsFeatures`
+- `module_features.rs::module_features_typeof_import_default_resolves_value_shape` — `ModuleFeatures`
+- `module_features.rs::module_features_typeof_import_named_value_resolves_to_literal` — `ModuleFeatures`
 - `typescript_rules.rs::typescript_rules_indexed_access_reduces_terminal_property` — `TypeScriptRules`
 - `typescript_rules.rs::typescript_rules_keyof_materializes_literal_key_union` — `TypeScriptRules`
 - `typescript_rules.rs::typescript_rules_tuple_rest_element_resolves_array_element_type` — `TypeScriptRules`
@@ -3230,16 +3272,12 @@ The complete partition (each entry `file::function — substrate`):
 - `enums.rs::enum_string_member_resolves_to_branded_string_literal` — `EnumResolution`
 - `enums.rs::enum_template_literal_over_string_enum_produces_value_union` — `EnumResolution`
 
-**`U2.MODULE_AUGMENTATION`** (8 rows):
+**`U2.MODULE_AUGMENTATION`** (4 rows):
 
 - `modern_ts_features.rs::import_attribute_simulated_resolves_imported_json_shape` — `ModernTsFeatures`
-- `modern_ts_features.rs::import_attribute_simulated_string_literal_indexed_member` — `ModernTsFeatures`
 - `module_features.rs::module_features_cjs_export_equals_resolves_to_carrier` — `ModuleFeatures`
-- `module_features.rs::module_features_namespace_geometry_vector_aliases_point` — `ModuleFeatures`
 - `module_features.rs::module_features_namespace_interface_merge_namespace_value_resolves_to_literal` — `ModuleFeatures`
-- `module_features.rs::module_features_typeof_import_default_resolves_value_shape` — `ModuleFeatures`
 - `module_features.rs::module_features_typeof_import_named_shape_resolves_to_interface` — `ModuleFeatures`
-- `module_features.rs::module_features_typeof_import_named_value_resolves_to_literal` — `ModuleFeatures`
 
 **`U2.JSX_FOUNDATIONS`** (9 rows):
 

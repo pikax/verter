@@ -164,7 +164,7 @@ pub fn lower_top_level_statement(stmt: &Statement<'_>, source: &str, env: &mut E
         }
         Statement::VariableDeclaration(var_decl) => {
             for decl in &var_decl.declarations {
-                extract_variable(decl, var_decl.kind, source, env);
+                extract_variable(decl, var_decl.kind, source, env, None);
             }
         }
         Statement::ExportNamedDeclaration(export) => {
@@ -284,7 +284,7 @@ fn extract_from_declaration(decl: &Declaration<'_>, source: &str, env: &mut Eval
         }
         Declaration::VariableDeclaration(var_decl) => {
             for d in &var_decl.declarations {
-                extract_variable(d, var_decl.kind, source, env);
+                extract_variable(d, var_decl.kind, source, env, None);
             }
         }
         _ => {}
@@ -523,7 +523,7 @@ fn retain_value_statement_into_augmentation(
         Statement::FunctionDeclaration(func) => extract_function(func, source, &mut tmp),
         Statement::VariableDeclaration(var_decl) => {
             for decl in &var_decl.declarations {
-                extract_variable(decl, var_decl.kind, source, &mut tmp);
+                extract_variable(decl, var_decl.kind, source, &mut tmp, None);
             }
         }
         _ => {}
@@ -577,6 +577,13 @@ fn extract_namespaced_statement(
         Statement::TSModuleDeclaration(module) => {
             extract_module_declaration(module, source, env, Some(namespace));
         }
+        // Namespace value indexing is EXPORT-ONLY: a non-exported
+        // `namespace N { const hidden = … }` is private to the namespace body
+        // (TS: `N.hidden` does not exist on `typeof N`), so a DIRECT
+        // `Statement::VariableDeclaration` is intentionally NOT indexed under
+        // its qualified name. Only the exported path below
+        // (`export const VERSION = …` → `extract_namespaced_declaration`)
+        // registers a qualified value member such as `N.VERSION`.
         Statement::ExportNamedDeclaration(export) => {
             if let Some(ref decl) = export.declaration {
                 extract_namespaced_declaration(decl, source, env, namespace);
@@ -609,6 +616,13 @@ fn extract_namespaced_declaration(
         }
         Declaration::TSModuleDeclaration(module) => {
             extract_module_declaration(module, source, env, Some(namespace));
+        }
+        // A namespaced value member (`namespace NS { export const M = … }`)
+        // registers under its QUALIFIED name `NS.M` so `typeof NS.M` binds.
+        Declaration::VariableDeclaration(var_decl) => {
+            for declarator in &var_decl.declarations {
+                extract_variable(declarator, var_decl.kind, source, env, Some(namespace));
+            }
         }
         _ => {}
     }
@@ -1307,9 +1321,20 @@ fn extract_variable(
     kind: VariableDeclarationKind,
     source: &str,
     env: &mut EvalEnv,
+    namespace: Option<&str>,
 ) {
     let (name, name_offset) = match &decl.id {
-        BindingPattern::BindingIdentifier(id) => (id.name.to_string(), id.span.start),
+        // A namespaced value member is added under its QUALIFIED name
+        // (`NS.M`), mirroring the qualified TYPE member registration, so
+        // `typeof NS.M` binds the value root. The JSDoc `@type` offset stays
+        // the real declaration-site offset (used for source lookups).
+        BindingPattern::BindingIdentifier(id) => {
+            let name = match namespace {
+                Some(ns) => qualified_name(ns, &id.name),
+                None => id.name.to_string(),
+            };
+            (name, id.span.start)
+        }
         _ => return,
     };
 
@@ -1344,7 +1369,7 @@ fn extract_variable(
 
     if let Some(ref init) = decl.init {
         function_signature = extract_initializer_function_signature(init, source);
-        object_shape = extract_initializer_object_shape(init, source);
+        object_shape = extract_initializer_object_shape(init, source, MemberLiteralPolicy::Widen);
 
         // An arrow / function-expression VALUE documents its parameter / return
         // types the same way a `function` declaration does: a leading JSDoc
@@ -1391,7 +1416,7 @@ fn extract_variable(
 
 fn extract_default_expression(expr: &Expression<'_>, source: &str, env: &mut EvalEnv) {
     let function_signature = extract_initializer_function_signature(expr, source);
-    let object_shape = extract_initializer_object_shape(expr, source);
+    let object_shape = extract_initializer_object_shape(expr, source, MemberLiteralPolicy::Widen);
     let type_annotation = Some(lower_value_expression(expr, source));
 
     env.add_value(ValueDeclInfo {
@@ -1447,17 +1472,36 @@ fn initializer_has_ts_return_annotation(expr: &Expression<'_>) -> bool {
     }
 }
 
-fn extract_initializer_object_shape(expr: &Expression<'_>, source: &str) -> Option<ObjectExpr> {
+fn extract_initializer_object_shape(
+    expr: &Expression<'_>,
+    source: &str,
+    policy: MemberLiteralPolicy,
+) -> Option<ObjectExpr> {
     match expr {
-        Expression::ObjectExpression(obj) => Some(extract_object_literal(obj, source)),
+        Expression::ObjectExpression(obj) => Some(extract_object_literal(obj, source, policy)),
         Expression::TSAsExpression(ts_as) => {
-            extract_initializer_object_shape(&ts_as.expression, source)
+            // `… as const` establishes a const context for the underlying
+            // object shape (properties keep literals + become `readonly`).
+            let inner_policy =
+                if is_const_assertion_type_expr(&lower_ts_type(&ts_as.type_annotation, source)) {
+                    MemberLiteralPolicy::ConstAssert
+                } else {
+                    policy
+                };
+            extract_initializer_object_shape(&ts_as.expression, source, inner_policy)
         }
         Expression::TSSatisfiesExpression(sat) => {
-            extract_initializer_object_shape(&sat.expression, source)
+            // `satisfies` preserves members without widening, unless an
+            // enclosing `as const` already pinned the readonly context.
+            let inner_policy = if policy == MemberLiteralPolicy::ConstAssert {
+                MemberLiteralPolicy::ConstAssert
+            } else {
+                MemberLiteralPolicy::Preserve
+            };
+            extract_initializer_object_shape(&sat.expression, source, inner_policy)
         }
         Expression::ParenthesizedExpression(paren) => {
-            extract_initializer_object_shape(&paren.expression, source)
+            extract_initializer_object_shape(&paren.expression, source, policy)
         }
         _ => None,
     }
@@ -1527,13 +1571,17 @@ fn extract_arrow_signature(arrow: &ArrowFunctionExpression<'_>, source: &str) ->
     }
 }
 
-fn extract_object_literal(obj: &ObjectExpression<'_>, source: &str) -> ObjectExpr {
+fn extract_object_literal(
+    obj: &ObjectExpression<'_>,
+    source: &str,
+    policy: MemberLiteralPolicy,
+) -> ObjectExpr {
     let mut members = Vec::new();
     for prop in &obj.properties {
         match prop {
             ObjectPropertyKind::ObjectProperty(p) => {
                 if let Some(name) = property_key_name(&p.key) {
-                    let ty = infer_expression_type(&p.value, source);
+                    let (ty, readonly) = object_member_value(&p.value, source, policy);
                     let spans = MemberSpans {
                         declaration: Some(p.span.into()),
                         name: Some(p.key.span().into()),
@@ -1544,7 +1592,7 @@ fn extract_object_literal(obj: &ObjectExpression<'_>, source: &str) -> ObjectExp
                     push_object_property_with_override(
                         &mut members,
                         verter_type_expr::ObjectProperty::with_spans_public(
-                            name, ty, false, false, spans,
+                            name, ty, false, readonly, spans,
                         ),
                     );
                 }
@@ -1562,14 +1610,22 @@ fn extract_object_literal(obj: &ObjectExpression<'_>, source: &str) -> ObjectExp
 
 /// Like `extract_object_literal`, but returns a `TypeExpr` directly so it can
 /// represent intersections when the object contains spread of non-literal sources.
-fn extract_object_literal_as_type(obj: &ObjectExpression<'_>, source: &str) -> TypeExpr {
+///
+/// `policy` carries the enclosing object-literal context (see
+/// [`MemberLiteralPolicy`]): a property widens / preserves / preserves+readonly
+/// per the policy, with a per-property `as const` overriding to `ConstAssert`.
+fn extract_object_literal_as_type(
+    obj: &ObjectExpression<'_>,
+    source: &str,
+    policy: MemberLiteralPolicy,
+) -> TypeExpr {
     let mut members = Vec::new();
     let mut spread_types: Vec<TypeExpr> = Vec::new();
     for prop in &obj.properties {
         match prop {
             ObjectPropertyKind::ObjectProperty(p) => {
                 if let Some(name) = property_key_name(&p.key) {
-                    let ty = infer_expression_type(&p.value, source);
+                    let (ty, readonly) = object_member_value(&p.value, source, policy);
                     let spans = MemberSpans {
                         declaration: Some(p.span.into()),
                         name: Some(p.key.span().into()),
@@ -1580,13 +1636,13 @@ fn extract_object_literal_as_type(obj: &ObjectExpression<'_>, source: &str) -> T
                     push_object_property_with_override(
                         &mut members,
                         verter_type_expr::ObjectProperty::with_spans_public(
-                            name, ty, false, false, spans,
+                            name, ty, false, readonly, spans,
                         ),
                     );
                 }
             }
             ObjectPropertyKind::SpreadProperty(spread) => {
-                let spread_ty = infer_expression_type(&spread.argument, source);
+                let spread_ty = infer_expression_type_ctx(&spread.argument, source, policy);
                 match spread_ty {
                     TypeExpr::Object(ref obj_expr) => {
                         for member in &obj_expr.properties {
@@ -1688,7 +1744,119 @@ fn collect_return_types(
 }
 
 /// Infer a simple type from an expression literal.
+/// How fresh object-literal MEMBER values are treated during value inference.
+/// The three states are the only object-literal widening contexts:
+///
+/// - [`Widen`](MemberLiteralPolicy::Widen): a plain object literal — a fresh
+///   literal member widens to its primitive (`{ count: 0 }` → `{ count: number }`).
+/// - [`Preserve`](MemberLiteralPolicy::Preserve): a `satisfies`-constrained
+///   object — members keep their literal types (the engine performs no
+///   contextual typing; the deeper contextual-widening behaviour is a separate
+///   deferred contract) and are NOT `readonly`.
+/// - [`ConstAssert`](MemberLiteralPolicy::ConstAssert): an `as const` object —
+///   members keep their literals AND are `readonly`.
+///
+/// A per-property `as const` (`{ tag: "x" as const }`) overrides the enclosing
+/// policy to `ConstAssert` for that one member.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MemberLiteralPolicy {
+    Widen,
+    Preserve,
+    ConstAssert,
+}
+
 fn infer_expression_type(expr: &Expression<'_>, source: &str) -> TypeExpr {
+    infer_expression_type_ctx(expr, source, MemberLiteralPolicy::Widen)
+}
+
+/// Whether an expression is a `… as const` assertion (seen through a
+/// parenthesised wrapper). Drives object-literal property widening: an
+/// `as const`-asserted property keeps its literal type and is `readonly`; a
+/// bare-literal property widens to its primitive.
+fn expr_is_const_asserted(expr: &Expression<'_>, source: &str) -> bool {
+    match expr {
+        Expression::TSAsExpression(ts_as) => {
+            is_const_assertion_type_expr(&lower_ts_type(&ts_as.type_annotation, source))
+        }
+        Expression::ParenthesizedExpression(paren) => {
+            expr_is_const_asserted(&paren.expression, source)
+        }
+        _ => false,
+    }
+}
+
+/// Widen a TOP-LEVEL fresh literal (`"x"` / `1` / `true` / `1n`) to its
+/// primitive — the TS object-literal property widening rule applied to one
+/// member-value position. Objects / arrays / refs pass through unchanged
+/// (their own members were already widened recursively at their own
+/// inference level), so an `as const` member nested inside a widened object
+/// is never re-widened.
+fn widen_shallow_literal(ty: TypeExpr) -> TypeExpr {
+    match ty {
+        TypeExpr::Literal(verter_type_expr::LiteralValue::String(_)) => {
+            TypeExpr::Primitive(PrimitiveName::String)
+        }
+        TypeExpr::Literal(verter_type_expr::LiteralValue::Number(_)) => {
+            TypeExpr::Primitive(PrimitiveName::Number)
+        }
+        TypeExpr::Literal(verter_type_expr::LiteralValue::Boolean(_)) => {
+            TypeExpr::Primitive(PrimitiveName::Boolean)
+        }
+        TypeExpr::Literal(verter_type_expr::LiteralValue::BigInt(_)) => {
+            TypeExpr::Primitive(PrimitiveName::BigInt)
+        }
+        other => other,
+    }
+}
+
+/// Compute one object-literal member's `(type, readonly)` under `policy`. A
+/// per-property `as const` (`{ tag: "x" as const }`) overrides to
+/// `ConstAssert` for that member; otherwise `policy` decides: `Widen` widens a
+/// fresh top-level literal to its primitive, `Preserve` keeps it, `ConstAssert`
+/// keeps it AND marks it `readonly`. The member value is inferred under the
+/// effective policy so nested objects inherit it.
+fn object_member_value(
+    value: &Expression<'_>,
+    source: &str,
+    policy: MemberLiteralPolicy,
+) -> (TypeExpr, bool) {
+    let per_prop_const = expr_is_const_asserted(value, source);
+    // `readonly` comes ONLY from a WHOLE-OBJECT `as const` (the enclosing
+    // `policy`). A per-property `as const` (`{ tag: "x" as const }`) narrows the
+    // VALUE to a literal but does NOT add the `readonly` modifier — TS leaves
+    // `tag` mutable; only `{ … } as const` makes the properties `readonly`.
+    let readonly = policy == MemberLiteralPolicy::ConstAssert;
+    // The value (and its NESTED members) is inferred under a const context when
+    // the whole object is `as const` OR this property carries its own `as const`,
+    // so a nested object under a per-property `as const`
+    // (`{ tag: { x: 1 } as const }`) still yields readonly + literal members.
+    let value_policy = if per_prop_const {
+        MemberLiteralPolicy::ConstAssert
+    } else {
+        policy
+    };
+    let raw = infer_expression_type_ctx(value, source, value_policy);
+    // Widen a fresh TOP-LEVEL literal only under a plain `Widen` context (no
+    // per-property `as const`); `Preserve` (satisfies) and `ConstAssert` keep it.
+    let ty = if value_policy == MemberLiteralPolicy::Widen {
+        widen_shallow_literal(raw)
+    } else {
+        raw
+    };
+    (ty, readonly)
+}
+
+/// Infer the type of a value expression. `policy` governs how fresh
+/// object-literal MEMBER values are treated (see [`MemberLiteralPolicy`]):
+/// a plain object literal widens its members, a `satisfies`-constrained one
+/// preserves them, an `as const` one preserves + marks them `readonly`.
+/// Standalone literals never widen (a `const x = 0` is `0`); only
+/// OBJECT-PROPERTY positions are affected.
+fn infer_expression_type_ctx(
+    expr: &Expression<'_>,
+    source: &str,
+    policy: MemberLiteralPolicy,
+) -> TypeExpr {
     match expr {
         Expression::Identifier(ident) => TypeExpr::TypeOf(ValueRef {
             path: vec![ident.name.as_str().to_string()],
@@ -1699,11 +1867,11 @@ fn infer_expression_type(expr: &Expression<'_>, source: &str) -> TypeExpr {
         Expression::BooleanLiteral(b) => TypeExpr::boolean_literal(b.value),
         Expression::NullLiteral(_) => TypeExpr::Primitive(PrimitiveName::Null),
         Expression::ConditionalExpression(cond) => TypeExpr::union(vec![
-            infer_expression_type(&cond.consequent, source),
-            infer_expression_type(&cond.alternate, source),
+            infer_expression_type_ctx(&cond.consequent, source, policy),
+            infer_expression_type_ctx(&cond.alternate, source, policy),
         ]),
         Expression::ParenthesizedExpression(paren) => {
-            infer_expression_type(&paren.expression, source)
+            infer_expression_type_ctx(&paren.expression, source, policy)
         }
         Expression::ArrayExpression(arr) => {
             let mut element_types = Vec::new();
@@ -1721,7 +1889,7 @@ fn infer_expression_type(expr: &Expression<'_>, source: &str) -> TypeExpr {
                         if let Some(expr) = element.as_expression() {
                             append_union_members(
                                 &mut element_types,
-                                infer_expression_type(expr, source),
+                                infer_expression_type_ctx(expr, source, policy),
                             );
                         }
                     }
@@ -1738,7 +1906,7 @@ fn infer_expression_type(expr: &Expression<'_>, source: &str) -> TypeExpr {
                 readonly: false,
             }
         }
-        Expression::ObjectExpression(obj) => extract_object_literal_as_type(obj, source),
+        Expression::ObjectExpression(obj) => extract_object_literal_as_type(obj, source, policy),
         Expression::TemplateLiteral(tpl) if tpl.expressions.is_empty() => {
             let mut value = String::new();
             for quasi in &tpl.quasis {
@@ -1765,18 +1933,32 @@ fn infer_expression_type(expr: &Expression<'_>, source: &str) -> TypeExpr {
         }
         Expression::TSAsExpression(ts_as) => {
             // `as const` should preserve the underlying literal/object surface
-            // instead of degrading the inferred type to an opaque `const` marker.
+            // instead of degrading the inferred type to an opaque `const`
+            // marker — AND it establishes a const context, so nested object
+            // properties keep their literals + become `readonly`.
             let asserted = lower_ts_type(&ts_as.type_annotation, source);
             if is_const_assertion_type_expr(&asserted) {
-                infer_expression_type(&ts_as.expression, source)
+                infer_expression_type_ctx(
+                    &ts_as.expression,
+                    source,
+                    MemberLiteralPolicy::ConstAssert,
+                )
             } else {
                 asserted
             }
         }
         Expression::TSSatisfiesExpression(sat) => {
-            // const x = value satisfies SomeType → infer from the underlying value expression,
-            // not the annotation. `satisfies` validates but doesn't widen.
-            infer_expression_type(&sat.expression, source)
+            // const x = value satisfies SomeType → infer from the underlying
+            // value expression, not the annotation. `satisfies` validates but
+            // does NOT widen the value's members (the engine performs no
+            // contextual typing) — Preserve, unless an enclosing `as const`
+            // already pinned a stronger (readonly) context.
+            let inner_policy = if policy == MemberLiteralPolicy::ConstAssert {
+                MemberLiteralPolicy::ConstAssert
+            } else {
+                MemberLiteralPolicy::Preserve
+            };
+            infer_expression_type_ctx(&sat.expression, source, inner_policy)
         }
         Expression::StaticMemberExpression(member) => {
             // obj.foo → typeof obj.foo (build a dotted path)

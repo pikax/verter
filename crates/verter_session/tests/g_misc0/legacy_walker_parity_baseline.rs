@@ -185,6 +185,7 @@ fn typeexpr_kind(ty: &TypeExpr) -> &'static str {
         TypeExpr::Parenthesized(_) => "Parenthesized",
         TypeExpr::Rest(_) => "Rest",
         TypeExpr::SyntheticSlotBinding(_) => "SyntheticSlotBinding",
+        TypeExpr::ImportType { .. } => "ImportType",
         TypeExpr::Unknown { .. } => "Unknown",
     }
 }
@@ -832,16 +833,6 @@ fn compute_pairwise_equivalences() -> Vec<(usize, usize)> {
 ///
 /// Halt-on-deviation if > 3 pairs OR a cluster of 3+ fixtures.
 const DISCRIMINATION_EXEMPT: &[(usize, usize)] = &[
-    // Pair (8, 15) symmetric: fixtures 09 (decl_ref_to_local_alias)
-    // and 16 (typeof_value_ref) both produce Unresolved on the
-    // hermetic AuditedRequest path. The fixtures characterise
-    // distinct policy-table arms (DeclRef vs TypeOf) but in the
-    // hermetic environment neither produces a concrete value type.
-    // The Unresolved assertion is by design tolerant — it cannot
-    // discriminate between two fixtures that both fail to produce
-    // evaluated_types.
-    (8, 15),
-    (15, 8),
     // Pair (13, 14) symmetric: fixtures 14
     // (`Partial<Foo>`) and 15 (`Required<Foo>`) both reduce to
     // `TypeExpr::Mapped`. The kind-only assertion cannot
@@ -1058,11 +1049,25 @@ fn expected_assertions_per_fixture() -> Vec<ParityAssertion<'static>> {
                 expected_index_signature_count: 0,
             },
         },
-        // 16: typeof exotic — produces no evaluated_types in hermetic
-        // env.
+        // 16: `typeof valueRef` now resolves through the value-domain
+        // reducer to the value's structural shape — the const object
+        // `{ mode: "idle" }`, a single required string-literal member
+        // (the sibling `fixture_16_typeof_value_ref_resolves_to_value_type`
+        // pins the same resolved contract). The prior `Unresolved`
+        // characterization predated typeof value-domain resolution.
         ParityAssertion {
             fixture: "16_typeof_value_ref",
-            expected_value_kind: ResolvedValueKind::Unresolved,
+            expected_value_kind: ResolvedValueKind::Object {
+                must_contain: &["mode"],
+                must_not_contain: &[],
+                member_kinds: &[("mode", "Literal")],
+                optional_members: &[],
+                required_members: &["mode"],
+                expected_named_member_count: 1,
+                expected_call_signature_count: 0,
+                expected_construct_signature_count: 0,
+                expected_index_signature_count: 0,
+            },
         },
     ]
 }

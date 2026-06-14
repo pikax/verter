@@ -15187,6 +15187,335 @@ fn constructor_type_lowers_function_like_not_opaque_miss() {
     }
 }
 
+/// Discriminating regression for the `TypeExpr::ImportType` MULTI-SEGMENT
+/// qualifier + generic-arguments lowering in `lower_import_type_member`
+/// (lower.rs).
+///
+/// `import("./m").NS.Box<string>` (qualifier `["NS","Box"]`, type_arguments
+/// `[string]`) binds `<string>` to the TERMINAL segment `Box`. The multi-hop
+/// tail projects through `ProjectPath`, which models only plain member
+/// projection — so before the fail-loud guard, `head_args` collapsed to
+/// `empty_type_args()` and the whole expression SILENTLY reduced as the bare
+/// `import("./m").NS.Box`, dropping `<string>` and folding two distinct
+/// typed-IR identities (with-args vs no-args) onto one semantic node.
+///
+/// Discrimination: the guard now returns
+/// `Opaque(QueryError::Other("…multi-segment qualifier…"))` for the
+/// multi-segment-WITH-args case. Pre-fix that same input produced the bare
+/// `NS.Box` member result — a `Miss` carrier or the resolved namespace-member
+/// surface, NEVER an `Other` carrier with this message — so assertion (1) FAILS
+/// pre-fix and PASSES post-fix. Verified red→green by stashing the guard.
+#[test]
+fn multi_segment_import_type_with_generic_args_fails_loud_not_silent_drop() {
+    use crate::semantic_query::QueryError;
+    use verter_type_expr::{PrimitiveName, TypeExpr};
+
+    let host = host();
+    // `/m.ts` exports BOTH a top-level `Box<T>` and a namespaced `NS.Box<T>`,
+    // so the test contrasts the single-segment (guard NOT triggered) and
+    // multi-segment (guard triggered) shapes against the same module.
+    upsert_ts(
+        &host,
+        "/m.ts",
+        "export interface Box<T> { value: T }\n\
+         export namespace NS { export interface Box<T> { value: T } }",
+    );
+    // `/consumer.ts` imports `./m`, so the authoritative import route resolves
+    // `./m` from the consumer scope deterministically (we lower in this scope).
+    upsert_ts(
+        &host,
+        "/consumer.ts",
+        "import type { Box } from './m';\nexport type Use = Box<number>;",
+    );
+
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let origin = "/consumer.ts";
+    let env: rustc_hash::FxHashMap<String, SemanticNodeId> = rustc_hash::FxHashMap::default();
+    let name_resolution: rustc_hash::FxHashMap<String, ResolvedRootIdentity> =
+        rustc_hash::FxHashMap::default();
+    let scope = NodeScopeId::File {
+        canonical_id: Arc::from(origin),
+        whole_hash: [0u8; 16],
+        local_scope: None,
+    };
+    let shadowing = crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(None);
+    let context =
+        crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Shallow);
+
+    // Lower one `ImportType` shape and return its interned node data.
+    let lower = |expr: &TypeExpr| -> Arc<SemanticNodeData> {
+        let mut subs: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
+        let id = dispatch.shallow_lower_type_expr_with_context(
+            expr,
+            &env,
+            &scope,
+            &name_resolution,
+            None,
+            &shadowing,
+            &mut subs,
+            context,
+        );
+        graph
+            .node_data(id)
+            .expect("import-type lowering interned a node")
+    };
+
+    // Is this node the honest fail-loud carrier the multi-segment guard emits?
+    let is_fail_loud_carrier = |data: &SemanticNodeData| -> bool {
+        matches!(
+            data,
+            SemanticNodeData::Opaque(QueryError::Other(text))
+                if text.contains("multi-segment qualifier")
+        )
+    };
+
+    // (1) DISCRIMINATING — multi-segment + generic args MUST fail loud as
+    //     Opaque(Other). Pre-fix this produced the bare `NS.Box` member result
+    //     (Miss or the resolved surface), never this `Other` carrier.
+    let with_args = lower(&TypeExpr::import_type(
+        "./m",
+        vec![Arc::from("NS"), Arc::from("Box")],
+        false,
+        vec![TypeExpr::Primitive(PrimitiveName::String)],
+    ));
+    assert!(
+        is_fail_loud_carrier(with_args.as_ref()),
+        "`import(\"./m\").NS.Box<string>` (multi-segment qualifier + generic args) \
+         MUST fail loud as Opaque(QueryError::Other(..)) instead of silently \
+         dropping `<string>`; got {with_args:?}",
+    );
+
+    // (2) NEGATIVE — the SAME multi-segment qualifier WITHOUT args (the
+    //     un-instantiated `import("./m").NS.Box` shape) is NOT the fail-loud
+    //     carrier, so the with-args result does NOT equal the un-instantiated
+    //     shape. Proves the fix is a genuine divergence, not a blanket Opaque.
+    let no_args = lower(&TypeExpr::import_type(
+        "./m",
+        vec![Arc::from("NS"), Arc::from("Box")],
+        false,
+        Vec::new(),
+    ));
+    assert!(
+        !is_fail_loud_carrier(no_args.as_ref()),
+        "the un-instantiated `import(\"./m\").NS.Box` (no type args) must NOT be the \
+         fail-loud carrier — the guard fires ONLY when generic args are present, so \
+         the with-args result must differ from this shape; got {no_args:?}",
+    );
+
+    // (3) SCOPING CONTROL — a SINGLE-segment qualifier WITH args
+    //     (`import("./m").Box<string>`, rest empty) carries the args on the head
+    //     and must NOT trip the multi-segment guard.
+    let single_with_args = lower(&TypeExpr::import_type(
+        "./m",
+        vec![Arc::from("Box")],
+        false,
+        vec![TypeExpr::Primitive(PrimitiveName::String)],
+    ));
+    assert!(
+        !is_fail_loud_carrier(single_with_args.as_ref()),
+        "a single-segment `import(\"./m\").Box<string>` carries args on the head and \
+         must NOT trip the multi-segment fail-loud guard; got {single_with_args:?}",
+    );
+}
+
+/// Discriminating regression for the VALUE-space `typeof import("./m").make<T>`
+/// instantiation-argument lowering in the `ImportType` `typeof_query` branch
+/// (lower.rs).
+///
+/// OXC lowers `typeof import("./m").make<string>` to
+/// `ImportType { typeof_query: true, qualifier: ["make"], type_arguments: [string] }`.
+/// Before the fix the `typeof_query` branch built/projected the value namespace
+/// member but DROPPED `type_arguments` entirely, so `typeof import("./m").make<string>`,
+/// `typeof import("./m").make<number>`, and the bare `typeof import("./m").make`
+/// all reduced to the SAME un-instantiated generic signature — two distinct
+/// typed-IR identities collapsed onto one semantic shape.
+///
+/// The fix mirrors the `TypeExpr::TypeOf(ValueRef)` arm: after projecting the
+/// namespace member it lowers `type_arguments` to `arg_nodes` and applies the
+/// shared `apply_typeof_instantiation_args` helper, which substitutes the
+/// positional binders and strips the consumed type parameters.
+///
+/// Discrimination (compared by node DATA, never node id — `intern_node` does
+/// no structural dedup so equal shapes get distinct ids):
+///  * `make<string>` / `make<number>` instantiate to NON-generic Functions
+///    (`type_parameters` stripped to empty) whose sole parameter is
+///    `Primitive(String)` / `Primitive(Number)` respectively — these assertions
+///    FAIL pre-fix (the param stays the free `TypeParam(T)` and the signature
+///    stays generic) and PASS post-fix.
+///  * the bare `typeof import("./m").make` stays a GENERIC Function (non-empty
+///    `type_parameters`) — the control proving the instantiated results do NOT
+///    collapse back onto the un-instantiated signature.
+///
+/// Verified red→green by stashing the `lower.rs` change.
+#[test]
+fn typeof_import_value_member_applies_generic_instantiation_args() {
+    use verter_type_expr::{PrimitiveName, TypeExpr};
+
+    let host = host();
+    // `/m.ts` exports a GENERIC value (a generic function declaration), so
+    // `typeof import("./m").make` projects a generic `Function` signature that
+    // `make<string>` / `make<number>` instantiate to distinct concrete shapes.
+    upsert_ts(
+        &host,
+        "/m.ts",
+        "export const make = <T>(x: T): { v: T } => ({ v: x });",
+    );
+    // `/consumer.ts` imports `./m`, anchoring the authoritative import route so
+    // the specifier resolves deterministically from the consumer scope we lower
+    // in (mirrors the sibling multi-segment regression).
+    upsert_ts(
+        &host,
+        "/consumer.ts",
+        "import { make } from './m';\nexport const reExport = make;",
+    );
+
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let origin = "/consumer.ts";
+    let env: rustc_hash::FxHashMap<String, SemanticNodeId> = rustc_hash::FxHashMap::default();
+    let name_resolution: rustc_hash::FxHashMap<String, ResolvedRootIdentity> =
+        rustc_hash::FxHashMap::default();
+    let scope = NodeScopeId::File {
+        canonical_id: Arc::from(origin),
+        whole_hash: [0u8; 16],
+        local_scope: None,
+    };
+    let shadowing = crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(None);
+    // Expanded so the generic `Function` signature (and its substituted
+    // parameter) is fully materialised for `apply_typeof_instantiation_args`.
+    let context =
+        crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded);
+
+    // Lower one `ImportType` shape and return its interned node data.
+    let lower = |expr: &TypeExpr| -> Arc<SemanticNodeData> {
+        let mut subs: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
+        let id = dispatch.shallow_lower_type_expr_with_context(
+            expr,
+            &env,
+            &scope,
+            &name_resolution,
+            None,
+            &shadowing,
+            &mut subs,
+            context,
+        );
+        graph
+            .node_data(id)
+            .expect("typeof-import lowering interned a node")
+    };
+
+    // For a `Function` node return `(type_parameter_count, param0_ty_data)`.
+    // `None` when the node is not a Function (an honest miss / wrong carrier).
+    let function_shape =
+        |data: &SemanticNodeData| -> Option<(usize, Option<Arc<SemanticNodeData>>)> {
+            match data {
+                SemanticNodeData::Function {
+                    params,
+                    type_parameters,
+                    ..
+                } => {
+                    let param0 = params.first().and_then(|p| graph.node_data(p.ty));
+                    Some((type_parameters.len(), param0))
+                }
+                _ => None,
+            }
+        };
+
+    // CONTROL — the bare `typeof import("./m").make` (no type args) stays a
+    // GENERIC Function. Unchanged by the fix (empty `type_arguments` is a
+    // no-op); the baseline the instantiated results must diverge from.
+    let bare = lower(&TypeExpr::import_type(
+        "./m",
+        vec![Arc::from("make")],
+        true,
+        Vec::new(),
+    ));
+    let (bare_tp, _) = function_shape(&bare).unwrap_or_else(|| {
+        panic!("`typeof import(\"./m\").make` must resolve to a Function, got {bare:?}")
+    });
+    assert!(
+        bare_tp >= 1,
+        "the un-instantiated `typeof import(\"./m\").make` must stay a GENERIC Function \
+         (non-empty type_parameters); got {bare_tp} type params",
+    );
+
+    // (1) DISCRIMINATING — `typeof import("./m").make<string>` instantiates: the
+    //     signature becomes NON-generic (type params stripped) and its sole
+    //     parameter is substituted to `Primitive(String)`. Pre-fix the args were
+    //     dropped, so this stayed the generic signature with a `TypeParam(T)`
+    //     parameter → both assertions FAIL pre-fix.
+    let with_string = lower(&TypeExpr::import_type(
+        "./m",
+        vec![Arc::from("make")],
+        true,
+        vec![TypeExpr::Primitive(PrimitiveName::String)],
+    ));
+    let (string_tp, string_p0) = function_shape(&with_string).unwrap_or_else(|| {
+        panic!(
+            "`typeof import(\"./m\").make<string>` must resolve to a Function, got {with_string:?}"
+        )
+    });
+    assert_eq!(
+        string_tp, 0,
+        "`typeof import(\"./m\").make<string>` must be INSTANTIATED (type parameters \
+         stripped); a non-zero count means `<string>` was dropped and the signature \
+         stayed generic",
+    );
+    assert!(
+        matches!(
+            string_p0.as_deref(),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::String))
+        ),
+        "`typeof import(\"./m\").make<string>` parameter must be substituted to \
+         Primitive(String); got {string_p0:?}",
+    );
+
+    // (2) DISCRIMINATING — `<number>` produces a DIFFERENT instantiation. The
+    //     `<string>` vs `<number>` results must reflect the distinct arg.
+    let with_number = lower(&TypeExpr::import_type(
+        "./m",
+        vec![Arc::from("make")],
+        true,
+        vec![TypeExpr::Primitive(PrimitiveName::Number)],
+    ));
+    let (number_tp, number_p0) = function_shape(&with_number).unwrap_or_else(|| {
+        panic!(
+            "`typeof import(\"./m\").make<number>` must resolve to a Function, got {with_number:?}"
+        )
+    });
+    assert_eq!(
+        number_tp, 0,
+        "`typeof import(\"./m\").make<number>` must be INSTANTIATED (type parameters stripped)",
+    );
+    assert!(
+        matches!(
+            number_p0.as_deref(),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Number))
+        ),
+        "`typeof import(\"./m\").make<number>` parameter must be substituted to \
+         Primitive(Number); got {number_p0:?}",
+    );
+
+    // (3) The two instantiations are DISTINCT semantic results (string vs number
+    //     parameter), AND neither collapses onto the un-instantiated generic
+    //     `make` (which keeps its type parameters). Pre-fix all three were the
+    //     same generic signature.
+    assert_ne!(
+        format!("{string_p0:?}"),
+        format!("{number_p0:?}"),
+        "`make<string>` and `make<number>` must produce DIFFERENT instantiated \
+         parameter types, not the same dropped-args shape",
+    );
+    assert!(
+        bare_tp >= 1 && string_tp == 0 && number_tp == 0,
+        "the instantiated `make<string>` / `make<number>` (non-generic) must NOT \
+         collapse onto the un-instantiated generic `make` (still generic)",
+    );
+}
+
 /// Discriminating: when a HERITAGE arm is a cross-file
 /// `Omit<Base, K>` (`interface Derived extends Omit<Base, K>`), `Base` is
 /// reached through `object_filter_source_surface`'s CARRIER branch (a

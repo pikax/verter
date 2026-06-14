@@ -96,6 +96,111 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .map(|(_, value)| value.projected_type().clone())
     }
 
+    /// Resolve `import("./m").Member` (a dynamic-import reference in TYPE
+    /// position) to the named TYPE export `Member` of the module
+    /// `dep_canonical`. The qualifier's FIRST segment resolves through the
+    /// SHARED `Ref` resolution path (carrier in Navigate/Skeleton/Shallow,
+    /// `ResolveDecl` / `Instantiate` in Expanded) by injecting a synthetic
+    /// name-resolution entry over a clone of the caller's map; any remaining
+    /// qualifier segments project as a member path. A bare `import("./m")`
+    /// with no qualifier is the whole module-namespace TYPE — not a single
+    /// addressable declaration — and resolves to an honest `Miss`.
+    ///
+    /// A MULTI-SEGMENT qualifier carrying generic arguments
+    /// (`import("./m").NS.Box<string>`) resolves to an honest
+    /// `Opaque(QueryError::Other(..))` carrier rather than silently dropping
+    /// `<string>` — the terminal-segment instantiation is a documented
+    /// follow-up (see the guard below).
+    #[allow(clippy::too_many_arguments)]
+    fn lower_import_type_member(
+        &self,
+        dep_canonical: &str,
+        qualifier: &Arc<[Arc<str>]>,
+        type_arguments: &Arc<[TypeExpr]>,
+        env: &FxHashMap<String, SemanticNodeId>,
+        scope: &NodeScopeId,
+        name_resolution: &FxHashMap<String, ResolvedRootIdentity>,
+        scope_payload: Option<&DeclarationScopePayload>,
+        shadowing: &ScopeShadowing,
+        substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
+        reduction_context: ProjectionReductionContext,
+    ) -> SemanticNodeId {
+        let Some((first, rest)) = qualifier.split_first() else {
+            return self.opaque(QueryError::Miss);
+        };
+        // Fail-loud on a MULTI-SEGMENT qualifier carrying generic arguments
+        // (`import("./m").NS.Box<string>` — qualifier `["NS","Box"]`, args
+        // `[string]`). Those args bind to the TERMINAL segment (`Box`), but the
+        // multi-hop tail below projects through `ProjectPath`, which models only
+        // plain member projection — it has no slot to carry `<string>` onto the
+        // terminal hop. Routing the bare `import("./m").NS.Box` here would
+        // SILENTLY DROP `<string>` and collapse two distinct typed-IR
+        // identities onto one semantic node. Per
+        // `macro_impacting_constructs_fail_lowering_not_silent_skip`, emit an
+        // HONEST error carrier rather than the uninstantiated member.
+        //
+        // TODO(follow-up): full terminal-segment generic instantiation for
+        // multi-segment import types requires ProjectPath to model
+        // member-with-type-args projection (currently plain member projection);
+        // see codex ADOPT-NOW ruling 2026-06-14.
+        if !rest.is_empty() && !type_arguments.is_empty() {
+            return self.opaque(QueryError::Other(Arc::from(
+                "import-type generic args on a multi-segment qualifier are not yet instantiated",
+            )));
+        }
+        // Inject `first -> (dep, first)` over a CLONE of the caller's map so any
+        // type-argument references still resolve in the caller's scope, then
+        // route the head segment through the shared `Ref` path (its
+        // `name_resolution.get(first)` short-circuit targets the module's
+        // TYPE-export space directly).
+        let mut injected = name_resolution.clone();
+        injected.insert(
+            first.as_ref().to_string(),
+            ResolvedRootIdentity::new(dep_canonical, first.as_ref()),
+        );
+        // The instantiation arguments bind to the TERMINAL segment only: a
+        // single-segment qualifier carries them on the head; a multi-hop
+        // resolves the head bare and projects the tail as a member path.
+        let head_args = if rest.is_empty() {
+            Arc::clone(type_arguments)
+        } else {
+            verter_type_expr::empty_type_args()
+        };
+        let head = TypeExpr::Ref {
+            name: Arc::clone(first),
+            type_arguments: head_args,
+        };
+        let head_node = self.shallow_lower_type_expr_with_context(
+            &head,
+            env,
+            scope,
+            &injected,
+            scope_payload,
+            shadowing,
+            substitutions,
+            reduction_context,
+        );
+        if rest.is_empty() {
+            return head_node;
+        }
+        let path: Arc<[PathSegment]> = Arc::from(
+            rest.iter()
+                .map(|seg| PathSegment::Member(Arc::clone(seg)))
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        );
+        match self.execute_type_node(SemanticQueryKey::ProjectPath {
+            base: head_node,
+            path,
+            context: crate::semantic_query::ProjectionReductionContext::published(
+                ProjectionMode::Navigate,
+            ),
+        }) {
+            QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+            _ => self.opaque(QueryError::Miss),
+        }
+    }
+
     /// Shallow-lower a [`TypeExpr`] under `env` (type-parameter bindings)
     /// into a [`SemanticNodeId`]. "Shallow" means one structural level:
     /// object members, union/intersection arms, and function / conditional
@@ -2110,6 +2215,102 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 },
                 scope.clone(),
             ),
+            // `import("./m")` / `import("./m").Member` / `typeof import("./m")`
+            // — a dynamic-import type reference. Resolve the module specifier
+            // to a canonical file id (TS-first, workspace-bounded) through the
+            // SHARED module resolver, then route to the value-namespace
+            // (`typeof_query`) or TYPE-export (bare import) rail. No raw-text
+            // reparsing — the typed-IR carrier drives the whole resolution.
+            TypeExpr::ImportType {
+                specifier,
+                qualifier,
+                typeof_query,
+                type_arguments,
+            } => {
+                let NodeScopeId::File {
+                    canonical_id: owner_canonical,
+                    ..
+                } = scope
+                else {
+                    return self.opaque(QueryError::Miss);
+                };
+                let Some(dep_canonical) = self.ctx.resolve_type_dependency_canonical(
+                    owner_canonical.as_ref(),
+                    specifier.as_ref(),
+                ) else {
+                    return self.opaque(QueryError::Miss);
+                };
+                if *typeof_query {
+                    // `typeof import("./m")` — the module's VALUE-export
+                    // namespace. A trailing qualifier (`typeof import("m").x`)
+                    // projects a member path INTO that namespace.
+                    let namespace =
+                        self.build_import_value_namespace(&dep_canonical, reduction_context);
+                    let mut result = if qualifier.is_empty() {
+                        namespace
+                    } else {
+                        let path: Arc<[PathSegment]> = Arc::from(
+                            qualifier
+                                .iter()
+                                .map(|seg| PathSegment::Member(Arc::clone(seg)))
+                                .collect::<Vec<_>>()
+                                .into_boxed_slice(),
+                        );
+                        match self.execute_type_node(SemanticQueryKey::ProjectPath {
+                            base: namespace,
+                            path,
+                            context: crate::semantic_query::ProjectionReductionContext::published(
+                                ProjectionMode::Navigate,
+                            ),
+                        }) {
+                            QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+                            _ => self.opaque(QueryError::Miss),
+                        }
+                    };
+                    // Instantiation expression: `typeof import("./m").make<string>`
+                    // applies the lowered type arguments to the resolved generic
+                    // value signature — the SAME positional binder substitution the
+                    // `TypeExpr::TypeOf(ValueRef)` arm performs for
+                    // `typeof C.make<string>`. A non-generic target or an arity
+                    // failure returns an honest miss/opaque from
+                    // `apply_typeof_instantiation_args`; an empty `type_arguments`
+                    // is a no-op (the common `typeof import("m").x` shape).
+                    if !type_arguments.is_empty() {
+                        let arg_nodes: Vec<SemanticNodeId> = type_arguments
+                            .iter()
+                            .map(|arg| {
+                                self.shallow_lower_type_expr_with_context(
+                                    arg,
+                                    env,
+                                    scope,
+                                    name_resolution,
+                                    scope_payload,
+                                    shadowing,
+                                    substitutions,
+                                    reduction_context,
+                                )
+                            })
+                            .collect();
+                        result = self.apply_typeof_instantiation_args(result, &arg_nodes);
+                    }
+                    result
+                } else {
+                    // `import("./m").Member` in TYPE position — resolve the
+                    // qualifier as a TYPE export of the module.
+                    self.lower_import_type_member(
+                        &dep_canonical,
+                        qualifier,
+                        type_arguments,
+                        env,
+                        scope,
+                        name_resolution,
+                        scope_payload,
+                        shadowing,
+                        substitutions,
+                        reduction_context,
+                    )
+                }
+            }
             // Conditionals, rest, recursive-ref, and unknown
             // constructs remain out of this pass's scope — they route
             // through their own dispatch builders (conditional /

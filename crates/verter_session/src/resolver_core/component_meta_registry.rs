@@ -649,7 +649,10 @@ fn contains_nested_resolution_targets(expr: &TypeExpr) -> bool {
         | TypeExpr::TypeOf(_)
         | TypeExpr::IndexedAccess { .. }
         | TypeExpr::Conditional { .. }
-        | TypeExpr::Mapped { .. } => true,
+        | TypeExpr::Mapped { .. }
+        // An import-type IS a cross-file resolution target — grouped with the
+        // other nested-resolution-target carriers (`Ref` / `TypeOf` / …).
+        | TypeExpr::ImportType { .. } => true,
         TypeExpr::Parenthesized(inner)
         | TypeExpr::Array { element: inner, .. }
         | TypeExpr::KeyOf(inner)
@@ -788,6 +791,9 @@ fn method_surface_specificity_score(expr: &TypeExpr) -> usize {
         | TypeExpr::TypeParameter(_)
         // Synthetic carriers carry no method surface — score 0.
         | TypeExpr::SyntheticSlotBinding(_)
+        // An import-type is a symbolic reference (like a bare `Ref`); it
+        // carries no method surface — score 0.
+        | TypeExpr::ImportType { .. }
         | TypeExpr::Infer { .. } => 0,
     }
 }
@@ -815,6 +821,15 @@ fn bound_generic_ref_penalty(expr: &TypeExpr) -> usize {
                     .unwrap_or_default()
         }
         TypeExpr::Ref { type_arguments, .. } => {
+            usize::from(!type_arguments.is_empty())
+                + type_arguments
+                    .iter()
+                    .map(bound_generic_ref_penalty)
+                    .sum::<usize>()
+        }
+        // Mirrors the `Ref` arm: an `import("m").Generic<Arg>` is a bound
+        // generic reference, penalised identically over its `type_arguments`.
+        TypeExpr::ImportType { type_arguments, .. } => {
             usize::from(!type_arguments.is_empty())
                 + type_arguments
                     .iter()
@@ -1020,6 +1035,16 @@ fn imported_type_body_specificity_score(expr: &TypeExpr) -> usize {
                     .unwrap_or_default()
         }
         TypeExpr::Ref { type_arguments, .. } => {
+            SPECIFICITY_REF_BASE
+                + type_arguments
+                    .iter()
+                    .map(imported_type_body_specificity_score)
+                    .sum::<usize>()
+        }
+        // Mirrors the `Ref` arm: an import-type is a symbolic reference, scored
+        // at the same `SPECIFICITY_REF_BASE` plus the sum over its
+        // `type_arguments`.
+        TypeExpr::ImportType { type_arguments, .. } => {
             SPECIFICITY_REF_BASE
                 + type_arguments
                     .iter()
@@ -1322,6 +1347,12 @@ pub(crate) fn component_meta_registry_expr_references_name(
                     .iter()
                     .any(|arg| component_meta_registry_expr_references_name(arg, target_name))
         }
+        // Mirrors the `Ref` arm's recursion into `type_arguments`. The
+        // `specifier`/`qualifier` are a module path, not the registry
+        // `target_name`, so only the nested type-argument exprs are searched.
+        TypeExpr::ImportType { type_arguments, .. } => type_arguments
+            .iter()
+            .any(|arg| component_meta_registry_expr_references_name(arg, target_name)),
         TypeExpr::Array { element, .. }
         | TypeExpr::Parenthesized(element)
         | TypeExpr::Rest(element)
@@ -1530,6 +1561,9 @@ pub(crate) fn component_meta_registry_indexed_ref_penalty(
         | TypeExpr::TypeParameter(_)
         // Synthetic carriers carry no indexed-ref penalty.
         | TypeExpr::SyntheticSlotBinding(_)
+        // An import-type is a symbolic reference (like a bare `Ref`), a
+        // terminal here — no indexed-ref penalty.
+        | TypeExpr::ImportType { .. }
         | TypeExpr::Infer { .. } => 0,
     }
 }
@@ -1935,6 +1969,10 @@ pub(crate) fn collect_component_meta_registry_refs(
         // reference; its `binding_name` is intrinsic, not a workspace
         // alias.
         | TypeExpr::SyntheticSlotBinding(_)
+        // An import-type carries no enqueue-able workspace registry NAME
+        // (only a cross-file module path resolved by the shared dispatch);
+        // like the `TypeOf` / `Unknown` terminals, it enqueues nothing here.
+        | TypeExpr::ImportType { .. }
         | TypeExpr::Infer { .. } => {}
     }
 }
@@ -2353,6 +2391,10 @@ pub(crate) fn collect_component_meta_registry_public_surface_refs(
         | TypeExpr::TypeParameter(_)
         // Synthetic carrier — never enqueues as a public surface ref.
         | TypeExpr::SyntheticSlotBinding(_)
+        // An import-type carries no enqueue-able workspace NAME (only a
+        // cross-file module path) — like the `TypeOf` / `Unknown` terminals,
+        // it enqueues no top-level public-surface ref here.
+        | TypeExpr::ImportType { .. }
         | TypeExpr::Infer { .. } => {}
     }
 }
@@ -2629,6 +2671,10 @@ pub(crate) fn collect_component_meta_registry_member_surface_refs(
         | TypeExpr::Infer { .. }
         // Synthetic carrier — never enqueues as a member surface ref.
         | TypeExpr::SyntheticSlotBinding(_)
+        // An import-type carries no enqueue-able workspace NAME (only a
+        // cross-file module path) — like the terminal `Ref` arm here, it
+        // enqueues no member surface ref.
+        | TypeExpr::ImportType { .. }
         | TypeExpr::Ref { .. } => {}
     }
 }

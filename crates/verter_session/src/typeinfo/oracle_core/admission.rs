@@ -772,6 +772,19 @@ pub(crate) fn admit_type_expr(expr: &TypeExpr) -> AdmissionVerdict {
         TypeExpr::Infer { .. } => {
             AdmissionVerdict::Reject(RejectReason::DeferredConstruct("infer"))
         }
+        // A dynamic-import type carrier (`typeof import("…")` /
+        // `import("…").X`) resolves cross-file in the ENGINE, but its
+        // hover/source SHAPE is a deferred construct the oracle gate does NOT
+        // admit — default-REJECT, the same class as the other deferred
+        // constructs above (admitting it would require an out-of-scope
+        // oracle-infra carve-out).
+        TypeExpr::ImportType { typeof_query, .. } => {
+            AdmissionVerdict::Reject(RejectReason::DeferredConstruct(if *typeof_query {
+                "typeof-import"
+            } else {
+                "import-type"
+            }))
+        }
         // E3 (loss-based, per-signature): a function / bare constructor type
         // admits when its full signature walks clean — the construct-vs-call
         // distinction and the signature itself are retained losslessly.

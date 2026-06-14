@@ -137,6 +137,11 @@ pub struct AnalyzedExternalTypeSource {
     /// item G), keyed by `(name, symbol_space)` within this file. Captured while
     /// the OXC arena is live, before lowering erases the §Q2 facts.
     raw_source_surfaces: FxHashMap<(String, SymbolSpace), Vec<RawSourceSurface>>,
+    /// The local value name a CommonJS-style `export = X` assigns the whole
+    /// module to, when present. `typeof import("./m")` against such a module
+    /// resolves to `typeof X` (the export-assignment value), not an object
+    /// wrapping the named exports. `None` for an ordinary ESM module.
+    export_assignment_target: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -196,6 +201,12 @@ impl AnalyzedExternalTypeSource {
         self.local_export_symbol_targets
             .get(exported_name)
             .map(|name| name.as_str())
+    }
+
+    /// The local value name a CommonJS `export = X` assigns the whole module
+    /// to (`Some("X")`), or `None` for an ordinary ESM module.
+    pub fn export_assignment_target(&self) -> Option<&str> {
+        self.export_assignment_target.as_deref()
     }
 
     pub fn exported_local_type_names(&self) -> impl Iterator<Item = &str> {
@@ -705,6 +716,16 @@ fn analyze_external_type_program_impl(
                     .wildcard_reexport_sources
                     .push(export_all.source.value.to_string());
             }
+            // `export = X` — a CommonJS-style export assignment. Capture the
+            // assigned local VALUE name so `typeof import("./m")` can resolve
+            // the whole module to `typeof X`. Only a bare identifier target is
+            // captured (the `export = SomeValue` form); a non-identifier
+            // expression has no addressable value root and is left `None`.
+            Statement::TSExportAssignment(assignment) => {
+                if let Expression::Identifier(ident) = &assignment.expression {
+                    result.export_assignment_target = Some(ident.name.to_string());
+                }
+            }
             Statement::TSTypeAliasDeclaration(type_alias) => {
                 let deps = if with_bodies {
                     type_alias_dependency_names(type_alias)
@@ -788,6 +809,17 @@ fn analyze_external_type_program_impl(
                                 structural_dependency_names: deps.structural_dependency_names,
                             },
                         );
+                    }
+                    // `export default <ident>` (e.g. `export default leafDefault`)
+                    // — the default export's VALUE is the referenced local
+                    // binding. Map the `default` export name to that local value
+                    // name so `typeof import("./m").default` resolves to
+                    // `typeof <ident>` (the export-target chase reaches the
+                    // local value decl).
+                    ExportDefaultDeclarationKind::Identifier(ident) => {
+                        result
+                            .local_export_symbol_targets
+                            .insert("default".to_string(), ident.name.to_string());
                     }
                     _ => {}
                 }

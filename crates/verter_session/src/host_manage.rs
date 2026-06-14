@@ -1458,6 +1458,15 @@ pub(crate) fn collect_type_expr_symbol_refs(
                 collect_type_expr_symbol_refs(arg, refs);
             }
         }
+        // Mirrors the `Ref` arm's recursion over `type_arguments`. The
+        // `specifier`/`qualifier` are a module path, not local symbol names,
+        // so they are NOT inserted; only the nested type-argument exprs are
+        // walked for symbol refs.
+        TypeExpr::ImportType { type_arguments, .. } => {
+            for arg in type_arguments.iter() {
+                collect_type_expr_symbol_refs(arg, refs);
+            }
+        }
         TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
             for ty in types.iter() {
                 collect_type_expr_symbol_refs(ty, refs);

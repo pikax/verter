@@ -1204,7 +1204,12 @@ fn object_spread_later_property_overrides_spread_property() {
         1,
         "later explicit properties should replace earlier spread properties"
     );
-    assert_eq!(props[0], &TypeExpr::string_literal("override"));
+    // The later explicit `a: "override"` wins (a STRING, not the spread's
+    // number `a: 1`) and — as a fresh object-literal property with no
+    // `as const` — widens to its primitive `string` (TS object-literal
+    // widening). The string-vs-number discrimination still proves override
+    // precedence.
+    assert_eq!(props[0], &TypeExpr::Primitive(PrimitiveName::String));
 }
 
 #[test]
@@ -1233,7 +1238,12 @@ fn object_spread_later_spread_overrides_earlier_property() {
         1,
         "later spread properties should replace earlier explicit properties"
     );
-    assert_eq!(props[0], &TypeExpr::string_literal("override"));
+    // The later spread's `a: "override"` wins (a STRING, not the earlier
+    // explicit number `a: 1`) and — as a fresh object-literal property with no
+    // `as const` — widens to its primitive `string` (TS object-literal
+    // widening). The string-vs-number discrimination still proves override
+    // precedence.
+    assert_eq!(props[0], &TypeExpr::Primitive(PrimitiveName::String));
 }
 
 // =============================================================================

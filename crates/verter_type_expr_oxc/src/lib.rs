@@ -19,10 +19,10 @@
 //! - Source text is required for `Unknown` fallback and literal extraction.
 
 use oxc_ast::ast::{
-    BindingPattern, FormalParameters, PropertyKey, TSFunctionType, TSMappedType,
-    TSMappedTypeModifierOperator, TSQualifiedName, TSSignature, TSTupleElement, TSType, TSTypeName,
-    TSTypeOperatorOperator, TSTypeParameterDeclaration, TSTypeQuery, TSTypeQueryExprName,
-    TSTypeReference, UnaryOperator,
+    BindingPattern, FormalParameters, PropertyKey, TSFunctionType, TSImportType,
+    TSImportTypeQualifier, TSMappedType, TSMappedTypeModifierOperator, TSQualifiedName,
+    TSSignature, TSTupleElement, TSType, TSTypeName, TSTypeOperatorOperator,
+    TSTypeParameterDeclaration, TSTypeQuery, TSTypeQueryExprName, TSTypeReference, UnaryOperator,
 };
 use oxc_span::GetSpan;
 
@@ -212,13 +212,11 @@ pub fn lower_ts_type(ts_type: &TSType<'_>, source: &str) -> TypeExpr {
             name: infer.type_parameter.name.to_string(),
         },
 
-        // -- Import type: import("...").Type --
-        TSType::TSImportType(import) => {
-            let span = import.span;
-            TypeExpr::Unknown {
-                raw: span_text(source, span),
-            }
-        }
+        // -- Import type in TYPE position: `import("./m")` /
+        //    `import("./m").Member`. Lowered to the typed-IR `ImportType`
+        //    carrier (NOT the raw-text `Unknown` fallback) — the shared
+        //    dispatch resolves the module + TYPE-export member cross-file.
+        TSType::TSImportType(import) => lower_import_type(import, source, false),
 
         // -- this type --
         TSType::TSThisType(_) => TypeExpr::named("this"),
@@ -347,6 +345,50 @@ fn lower_type_reference(type_ref: &TSTypeReference<'_>, source: &str) -> TypeExp
     }
 }
 
+/// Lower a `TSImportType` (`import("./m")` / `import("./m").A.B` /
+/// `typeof import("./m")`) into the typed-IR [`TypeExpr::ImportType`]
+/// carrier. `typeof_query` is `true` when the node sits under a
+/// `typeof` query (the module's VALUE-export namespace) and `false`
+/// for a bare `import(...)` in type position (the TYPE-export space).
+/// The qualifier and instantiation type-arguments are captured so the
+/// node is FULLY consumed — no raw-text reparsing downstream.
+fn lower_import_type(import: &TSImportType<'_>, source: &str, typeof_query: bool) -> TypeExpr {
+    let specifier: Arc<str> = Arc::from(import.source.value.as_str());
+    let mut qualifier: Vec<Arc<str>> = Vec::new();
+    if let Some(q) = &import.qualifier {
+        collect_import_qualifier_parts(q, &mut qualifier);
+    }
+    let type_arguments: Vec<TypeExpr> = import
+        .type_arguments
+        .as_ref()
+        .map(|params| {
+            params
+                .params
+                .iter()
+                .map(|p| lower_ts_type(p, source))
+                .collect()
+        })
+        .unwrap_or_default();
+    TypeExpr::ImportType {
+        specifier,
+        qualifier: Arc::from(qualifier),
+        typeof_query,
+        type_arguments: Arc::from(type_arguments),
+    }
+}
+
+/// Flatten an import-type qualifier (`.a.b.c` in `import("./m").a.b.c`)
+/// into ordered segments `["a", "b", "c"]`.
+fn collect_import_qualifier_parts(q: &TSImportTypeQualifier<'_>, parts: &mut Vec<Arc<str>>) {
+    match q {
+        TSImportTypeQualifier::Identifier(id) => parts.push(Arc::from(id.name.as_str())),
+        TSImportTypeQualifier::QualifiedName(qualified) => {
+            collect_import_qualifier_parts(&qualified.left, parts);
+            parts.push(Arc::from(qualified.right.name.as_str()));
+        }
+    }
+}
+
 fn lower_type_query(query: &TSTypeQuery<'_>, source: &str) -> TypeExpr {
     let path = match &query.expr_name {
         TSTypeQueryExprName::IdentifierReference(id) => {
@@ -356,6 +398,13 @@ fn lower_type_query(query: &TSTypeQuery<'_>, source: &str) -> TypeExpr {
             let mut segments = Vec::new();
             collect_qualified_parts(qualified, &mut segments);
             segments
+        }
+        // `typeof import("./m")` / `typeof import("./m").member`: the type
+        // query targets a dynamic-import VALUE namespace. Lower to the
+        // typed-IR `ImportType` carrier (`typeof_query == true`) — the
+        // shared dispatch resolves the module's value exports cross-file.
+        TSTypeQueryExprName::TSImportType(import) => {
+            return lower_import_type(import, source, true);
         }
         _ => {
             return TypeExpr::Unknown {
@@ -739,6 +788,25 @@ fn normalize_type_parameter_refs(expr: &TypeExpr, scope: &[TypeParam]) -> TypeEx
             type_arguments,
         } => TypeExpr::Ref {
             name: Arc::clone(name),
+            type_arguments: Arc::from(
+                type_arguments
+                    .iter()
+                    .map(|arg| normalize_type_parameter_refs(arg, scope))
+                    .collect::<Vec<_>>(),
+            ),
+        },
+        // `import("m").Gen<T>` — only the instantiation type-arguments can
+        // reference the enclosing generic scope; specifier / qualifier /
+        // typeof_query are leaves. Normalise the arguments exactly as `Ref`.
+        TypeExpr::ImportType {
+            specifier,
+            qualifier,
+            typeof_query,
+            type_arguments,
+        } => TypeExpr::ImportType {
+            specifier: Arc::clone(specifier),
+            qualifier: Arc::clone(qualifier),
+            typeof_query: *typeof_query,
             type_arguments: Arc::from(
                 type_arguments
                     .iter()

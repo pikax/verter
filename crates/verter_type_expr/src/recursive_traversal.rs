@@ -173,6 +173,10 @@ fn drain_children(node: &mut TypeExpr, worklist: &mut Vec<TypeExpr>) {
 
         TypeExpr::Ref { type_arguments, .. } => drain_slice(type_arguments, worklist),
 
+        // `import("m").X<Arg>` — `type_arguments` are the only owned
+        // recursive children; `specifier` / `qualifier` are leaf strings.
+        TypeExpr::ImportType { type_arguments, .. } => drain_slice(type_arguments, worklist),
+
         TypeExpr::TypeParameter(tp) => {
             drain_opt_arc(&mut tp.constraint, worklist);
             drain_opt_arc(&mut tp.default, worklist);
@@ -415,6 +419,9 @@ fn type_expr_discriminant(node: &TypeExpr) -> isize {
         TypeExpr::SyntheticSlotBinding(_) => 20,
         TypeExpr::Unknown { .. } => 21,
         TypeExpr::ConstructorType(_) => 22,
+        // Added after the original derive: a new variant takes the next free
+        // discriminant (NOT its declaration-order index) so 0..=22 stay frozen.
+        TypeExpr::ImportType { .. } => 23,
     }
 }
 
@@ -483,6 +490,22 @@ fn hash_node<'a, H: Hasher>(node: &'a TypeExpr, state: &mut H, stack: &mut Vec<H
             type_arguments,
         } => {
             name.hash(state);
+            type_arguments.len().hash(state);
+            push_nodes_reverse(type_arguments, stack);
+        }
+
+        // -- ImportType: specifier / qualifier / typeof_query leaves, then
+        //    the type_arguments slice LAST (mirrors `Ref` so the iterative
+        //    stream is byte-identical to the recursive reference mirror). --
+        TypeExpr::ImportType {
+            specifier,
+            qualifier,
+            typeof_query,
+            type_arguments,
+        } => {
+            specifier.hash(state);
+            qualifier.hash(state);
+            typeof_query.hash(state);
             type_arguments.len().hash(state);
             push_nodes_reverse(type_arguments, stack);
         }

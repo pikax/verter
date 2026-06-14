@@ -166,6 +166,13 @@ fn count_type_expr_nodes(ty: &TypeExpr) -> usize {
                     walk(arg, n);
                 }
             }
+            // `import("m").Gen<Arg>` — only the instantiation arguments are
+            // nested nodes (mirrors the `Ref` arm; specifier/qualifier leaves).
+            TypeExpr::ImportType { type_arguments, .. } => {
+                for arg in type_arguments.iter() {
+                    walk(arg, n);
+                }
+            }
             TypeExpr::KeyOf(inner) | TypeExpr::Rest(inner) | TypeExpr::Parenthesized(inner) => {
                 walk(inner, n)
             }

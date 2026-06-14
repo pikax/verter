@@ -21,14 +21,11 @@
 // cleanly into the `tests/` guard — an inner doc comment is illegal in an
 // `include!`d position.)
 //
-// The registry seats the 19 lifted rows (the two index-signature
-// publication queries + the two built-in modifier-utility queries + the three
-// U2 IndexedAccess-reduction carve-out queries + the mapped-modifier `-?`
-// carve-out query at U2.MAPPED_TEMPLATE + the three keyof-expansion carve-out
-// queries captured through the distributive-identity scaffold + the eight
-// U2.UTILITIES reducer queries: five Awaited rows, two NonNullable rows, and
-// the variadic-spread Concat row). The types + validation are additionally
-// exercised with synthetic specs by the discriminating guards.
+// The registry seats the 42 lifted rows; the authoritative enumeration lives
+// on `ORACLE_QUERY_SPECS`' doc comment and is pinned exactly by
+// `oracle_query_specs_registry_holds_the_lifted_rows_and_is_well_formed`. The
+// types + validation are additionally exercised with synthetic specs by the
+// discriminating guards.
 
 /// The content id of the CURRENT closed vendored oracle-env corpus — the
 /// pinned-env constant the registry + every guard read to derive a
@@ -979,20 +976,25 @@ export type DeepUtilityConfig = Required<
 "#;
 
 include!("oracle_query_specs_vendored_sources.rs");
+include!("oracle_query_specs_vendored_sources_module_aug.rs");
 
-/// The closed registry table. Holds the 38 lifted rows — the two
+/// The closed registry table. Holds the 42 lifted rows — the two
 /// index-signature publication queries, the two built-in modifier-utility
 /// queries, the three U2 IndexedAccess-reduction carve-out queries (two
 /// terminal indexed-access projections + one wide/deep literal-union
 /// projection), the mapped-modifier `-?` query, the three keyof-expansion
 /// carve-out queries captured through the distributive-identity scaffold,
 /// the eight U2.UTILITIES reducer queries (five Awaited rows, two
-/// NonNullable rows, and the variadic-spread Concat row), and the nineteen
+/// NonNullable rows, and the variadic-spread Concat row), the nineteen
 /// U2.CLASS_SURFACES-era queries (two brand-tag index chains, three
 /// class-features static rows, nine function-advanced
 /// signature-bucket/prototype/overload rows, the sb15 bare-generic
 /// ReturnType row, two typescript-rules construct-signature rows, two
-/// decoration-invariance rows)
+/// decoration-invariance rows), and the four U2.MODULE_AUGMENTATION-era
+/// queries (the `as const` typeof indexed member + the two `typeof import(...)`
+/// value-member projections [named-value + default-export shape] at
+/// `U2.INDEXED_ACCESS`, plus the namespace alias-chain projection at
+/// `U2.QUERY_VALUE_DOMAIN`)
 /// (`docs/arch/ts-compat-two-mode-model.md`, `docs/arch/u0-oracle-harness-design.md`).
 #[allow(dead_code)]
 pub(crate) const ORACLE_QUERY_SPECS: &[QuerySpec] = &[
@@ -1283,6 +1285,45 @@ pub(crate) const ORACLE_QUERY_SPECS: &[QuerySpec] = &[
         DECORATORS_FILES,
         "/fixtures/decorators.ts",
         "MetadataAwareDescribeReturn",
+    ),
+    // U2.MODULE_AUGMENTATION-era lifts. The four rows whose measured dispatch
+    // trace re-homes them OUT of `U2.MODULE_AUGMENTATION`: the `as const`
+    // typeof indexed member + the two `typeof import(...)["…"]` value-member
+    // projections terminate at `IndexedAccess` (`U2.INDEXED_ACCESS`); the
+    // namespace alias-chain row dispatches only `ResolveDecl` + `Instantiate`
+    // (`U2.QUERY_VALUE_DOMAIN`). Each resolves a single declared type alias
+    // through the shared five-mode dispatch; tsgo expands the same alias.
+    carve_out_spec(
+        "modern_ts_features.rs",
+        "import_attribute_simulated_string_literal_indexed_member",
+        "modern_ts_features",
+        MODERN_TS_FEATURES_FILES,
+        "/fixtures/modern_ts_features.ts",
+        "ImportedJsonName",
+    ),
+    carve_out_spec(
+        "module_features.rs",
+        "module_features_namespace_geometry_vector_aliases_point",
+        "module_features",
+        MODULE_FEATURES_MAIN_FILES,
+        "/fixtures/module_features.ts",
+        "GeometryVector",
+    ),
+    carve_out_spec(
+        "module_features.rs",
+        "module_features_typeof_import_named_value_resolves_to_literal",
+        "module_features",
+        MODULE_FEATURES_CONSUMER_FILES,
+        "/fixtures/module_features_consumer.ts",
+        "LeafNamedValue",
+    ),
+    carve_out_spec(
+        "module_features.rs",
+        "module_features_typeof_import_default_resolves_value_shape",
+        "module_features",
+        MODULE_FEATURES_CONSUMER_FILES,
+        "/fixtures/module_features_consumer.ts",
+        "LeafDefault",
     ),
 ];
 

@@ -174,7 +174,10 @@ pub(crate) fn type_expr_contains_reducible_operator(expr: &TypeExpr) -> bool {
         | TypeExpr::TypeOf(_)
         | TypeExpr::Conditional { .. }
         | TypeExpr::Mapped { .. }
-        | TypeExpr::Infer { .. } => true,
+        | TypeExpr::Infer { .. }
+        // An import-type is a cross-file resolution carrier the reducer
+        // must resolve — grouped with the operator-shape arms.
+        | TypeExpr::ImportType { .. } => true,
         TypeExpr::Ref {
             name,
             type_arguments,

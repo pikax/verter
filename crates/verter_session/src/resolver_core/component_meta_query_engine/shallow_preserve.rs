@@ -978,6 +978,10 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             // shallow-alias rewriter (the carrier is never resolved as a
             // type alias).
             | TypeExpr::SyntheticSlotBinding(_)
+            // An import-type is a cross-file symbolic carrier — like the
+            // `Unknown` terminal, the fast shallow-alias rewriter passes it
+            // through verbatim rather than resolving it as a type alias.
+            | TypeExpr::ImportType { .. }
             | TypeExpr::TypeParameter(_) => Some(expr.clone()),
             TypeExpr::Parenthesized(inner) => Some(TypeExpr::Parenthesized(std::sync::Arc::new(
                 self.rewrite_fast_shallow_alias_body(scope_canonical_id, inner, active_aliases)?,

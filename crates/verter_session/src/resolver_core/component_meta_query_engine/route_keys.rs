@@ -1086,6 +1086,13 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                             )
                     })
             }
+            // Mirrors the `Ref` arm's recursion into `type_arguments`. The
+            // `specifier`/`qualifier` name a cross-file module path, not a
+            // prepared declaration within `scope_canonical_id`, so only the
+            // nested type-argument exprs are searched.
+            TypeExpr::ImportType { type_arguments, .. } => type_arguments
+                .iter()
+                .any(|arg| self.expr_references_prepared_scope_symbol(scope_canonical_id, arg)),
             TypeExpr::Primitive(_)
             | TypeExpr::Literal(_)
             | TypeExpr::TypeOf(_)

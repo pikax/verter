@@ -71,6 +71,14 @@ pub(crate) fn count_symbolic_carriers_in_expr(expr: &verter_type_expr::TypeExpr)
                     stack.push(argument);
                 }
             }
+            // Mirrors the `Ref` arm: an import-type is a symbolic carrier
+            // (count +1) and its nested `type_arguments` are recursed.
+            TypeExpr::ImportType { type_arguments, .. } => {
+                score += 1;
+                for argument in type_arguments.iter().rev() {
+                    stack.push(argument);
+                }
+            }
             TypeExpr::IndexedAccess { object, index } => {
                 score += 1;
                 stack.push(index);
@@ -225,7 +233,10 @@ fn count_generic_detail_in_expr(expr: &verter_type_expr::TypeExpr) -> usize {
                 }
             }
             TypeExpr::Ref { type_arguments, .. }
-            | TypeExpr::RecursiveRef { type_arguments, .. } => {
+            | TypeExpr::RecursiveRef { type_arguments, .. }
+            // An import-type carries no generic detail of its own; like a
+            // `Ref`, only its nested `type_arguments` are recursed.
+            | TypeExpr::ImportType { type_arguments, .. } => {
                 for argument in type_arguments.iter().rev() {
                     stack.push(argument);
                 }
@@ -290,6 +301,9 @@ fn type_expr_has_structural_top_level(expr: &verter_type_expr::TypeExpr) -> bool
         // Synthetic carriers are intrinsic terminal carriers, not a
         // concrete structural shape — treat as non-structural.
         | TypeExpr::SyntheticSlotBinding(_)
+        // An import-type is a symbolic cross-file reference (like a `Ref`),
+        // not a concrete structural shape — non-structural.
+        | TypeExpr::ImportType { .. }
         | TypeExpr::Infer { .. } => false,
         TypeExpr::Primitive(_)
         | TypeExpr::Literal(_)
@@ -365,6 +379,9 @@ pub(crate) fn component_meta_registry_prefers_structural_materialization(
         // Synthetic carriers are intrinsic terminals — already final at
         // the projector surface; no structural materialisation needed.
         | TypeExpr::SyntheticSlotBinding(_)
+        // An import-type is a symbolic cross-file reference (like a `Ref`);
+        // it does not prefer structural materialisation.
+        | TypeExpr::ImportType { .. }
         | TypeExpr::Infer { .. } => false,
     }
 }

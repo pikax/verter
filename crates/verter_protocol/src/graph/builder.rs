@@ -266,6 +266,17 @@ enum ExprMemoKey {
     SyntheticSlotBinding {
         key: Arc<verter_type_expr::SyntheticCarrierKey>,
     },
+    /// Dynamic-import type carrier — identity is the specifier + ordered
+    /// qualifier segments + typeof flag (all owned, by value) plus the
+    /// instantiation-argument slice pointer/len. Two import-types with a
+    /// different specifier or qualifier never share a memo entry.
+    ImportType {
+        specifier: Arc<str>,
+        qualifier: Arc<[Arc<str>]>,
+        typeof_query: bool,
+        type_arguments_ptr: usize,
+        type_arguments_len: usize,
+    },
     Unknown {
         raw: String,
     },
@@ -373,6 +384,18 @@ impl ExprMemoKey {
             },
             TypeExpr::SyntheticSlotBinding(key) => Self::SyntheticSlotBinding {
                 key: Arc::clone(key),
+            },
+            TypeExpr::ImportType {
+                specifier,
+                qualifier,
+                typeof_query,
+                type_arguments,
+            } => Self::ImportType {
+                specifier: Arc::clone(specifier),
+                qualifier: Arc::clone(qualifier),
+                typeof_query: *typeof_query,
+                type_arguments_ptr: slice_ptr_id(type_arguments),
+                type_arguments_len: type_arguments.len(),
             },
             TypeExpr::Unknown { raw } => Self::Unknown { raw: raw.clone() },
         }
@@ -576,6 +599,9 @@ impl ExprPtrKey {
             | TypeExpr::Mapped { .. }
             | TypeExpr::TemplateLiteral { .. }
             | TypeExpr::Infer { .. }
+            // Import-type identity depends on owned specifier / qualifier
+            // strings — fall back to the slower `ExprMemoKey` path.
+            | TypeExpr::ImportType { .. }
             | TypeExpr::Unknown { .. } => return None,
         })
     }
@@ -810,6 +836,33 @@ impl GraphBuilder {
             TypeExpr::Unknown { raw } => GraphNode::Unknown {
                 raw: self.string_id(raw),
             },
+            // An import-type carrier resolves in the dispatch before reaching
+            // the wire surface; the closed typeinfo schema has no dedicated
+            // import-type node (adding one would bump the schema version). On
+            // the defensive path where an unresolved carrier reaches here, emit
+            // the opaque `Unknown` wire node with a display-only diagnostic raw
+            // (never re-parsed).
+            TypeExpr::ImportType {
+                specifier,
+                qualifier,
+                typeof_query,
+                ..
+            } => {
+                let mut raw = String::new();
+                if *typeof_query {
+                    raw.push_str("typeof ");
+                }
+                raw.push_str("import(\"");
+                raw.push_str(specifier);
+                raw.push_str("\")");
+                for seg in qualifier.iter() {
+                    raw.push('.');
+                    raw.push_str(seg);
+                }
+                GraphNode::Unknown {
+                    raw: self.string_id(&raw),
+                }
+            }
             TypeExpr::Infer { name } => GraphNode::Infer {
                 name: self.string_id(name),
             },

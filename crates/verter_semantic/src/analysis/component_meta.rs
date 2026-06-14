@@ -1969,6 +1969,11 @@ fn type_expr_exceeds_node_limit(type_expr: &TypeExpr, limit: usize) -> bool {
             TypeExpr::Ref { type_arguments, .. } => {
                 type_arguments.iter().any(|inner| visit(inner, seen, limit))
             }
+            // `import("m").Gen<Arg>` — only the instantiation arguments are
+            // nested nodes (specifier / qualifier are leaf strings).
+            TypeExpr::ImportType { type_arguments, .. } => {
+                type_arguments.iter().any(|inner| visit(inner, seen, limit))
+            }
             TypeExpr::IndexedAccess { object, index } => {
                 visit(object, seen, limit) || visit(index, seen, limit)
             }

@@ -376,7 +376,13 @@ fn index_top_level_statement(stmt: &Statement<'_>, stmt_index: u32, index: &mut 
         }
         Statement::VariableDeclaration(var_decl) => {
             for decl in &var_decl.declarations {
-                index_variable(decl, var_decl.kind, stmt_index, &mut index.value_headers);
+                index_variable(
+                    decl,
+                    var_decl.kind,
+                    stmt_index,
+                    &mut index.value_headers,
+                    None,
+                );
             }
         }
         Statement::TSEnumDeclaration(enum_decl) => {
@@ -469,7 +475,7 @@ fn index_declaration(decl: &Declaration<'_>, stmt_index: u32, index: &mut DeclHe
         }
         Declaration::VariableDeclaration(var_decl) => {
             for d in &var_decl.declarations {
-                index_variable(d, var_decl.kind, stmt_index, &mut index.value_headers);
+                index_variable(d, var_decl.kind, stmt_index, &mut index.value_headers, None);
             }
         }
         Declaration::TSEnumDeclaration(enum_decl) => {
@@ -594,9 +600,12 @@ fn index_module_declaration(
     }
 }
 
-/// Mirror of `extract_namespaced_statement`: only type aliases, interfaces
-/// and nested modules register (namespaced VALUE declarations are not
-/// extracted by the env walk).
+/// Mirror of `extract_namespaced_statement`: type aliases, interfaces and
+/// nested modules register under their qualified `Ns.Name`. Namespace VALUE
+/// indexing is EXPORT-ONLY — only an `export const`/`let`/`var` (routed via the
+/// `ExportNamedDeclaration` path to `index_namespaced_declaration`) registers a
+/// qualified value member such as `N.VERSION`; a non-exported `const hidden = …`
+/// is private to the namespace body and is intentionally NOT indexed.
 fn index_namespaced_statement(
     stmt: &Statement<'_>,
     stmt_index: u32,
@@ -615,6 +624,10 @@ fn index_namespaced_statement(
         Statement::TSModuleDeclaration(module) => {
             index_module_declaration(module, stmt_index, index, Some(namespace));
         }
+        // Export-only: a DIRECT (non-exported) `VariableDeclaration` is private
+        // to the namespace body and is intentionally NOT indexed. Only the
+        // exported path below (`export const VERSION = …` →
+        // `index_namespaced_declaration`) registers a qualified value member.
         Statement::ExportNamedDeclaration(export) => {
             if let Some(ref decl) = export.declaration {
                 index_namespaced_declaration(decl, stmt_index, index, namespace);
@@ -641,6 +654,17 @@ fn index_namespaced_declaration(
         }
         Declaration::TSModuleDeclaration(module) => {
             index_module_declaration(module, stmt_index, index, Some(namespace));
+        }
+        Declaration::VariableDeclaration(var_decl) => {
+            for decl in &var_decl.declarations {
+                index_variable(
+                    decl,
+                    var_decl.kind,
+                    stmt_index,
+                    &mut index.value_headers,
+                    Some(namespace),
+                );
+            }
         }
         _ => {}
     }
@@ -699,7 +723,7 @@ fn index_augmentation_block(
                                 .entry(scope.clone())
                                 .or_default();
                             for d in &var_decl.declarations {
-                                index_variable(d, var_decl.kind, stmt_index, scoped);
+                                index_variable(d, var_decl.kind, stmt_index, scoped, None);
                             }
                         }
                         Declaration::FunctionDeclaration(func) => {
@@ -722,7 +746,7 @@ fn index_augmentation_block(
                     .entry(scope.clone())
                     .or_default();
                 for d in &var_decl.declarations {
-                    index_variable(d, var_decl.kind, stmt_index, scoped);
+                    index_variable(d, var_decl.kind, stmt_index, scoped, None);
                 }
             }
             Statement::FunctionDeclaration(func) => {
@@ -941,6 +965,7 @@ fn index_variable(
     kind: VariableDeclarationKind,
     stmt_index: u32,
     table: &mut FxHashMap<String, ValueDeclHeader>,
+    namespace: Option<&str>,
 ) {
     let oxc_ast::ast::BindingPattern::BindingIdentifier(id) = &decl.id else {
         return;
@@ -957,15 +982,20 @@ fn index_variable(
         .as_ref()
         .map(|init| object_literal_member_headers(init))
         .unwrap_or_default();
-    let entry = table
-        .entry(id.name.to_string())
-        .or_insert_with(|| ValueDeclHeader {
-            kind: var_kind,
-            span: decl.span.into(),
-            name_span: id.span.into(),
-            object_member_headers: Vec::new(),
-            contributors: Vec::new(),
-        });
+    // A namespaced value member (`namespace NS { export const M = … }`) is
+    // indexed under its QUALIFIED name `NS.M`, mirroring the qualified TYPE
+    // member index (`NS.Point`), so `typeof NS.M` binds the value root.
+    let key = match namespace {
+        Some(ns) => format!("{ns}.{}", id.name),
+        None => id.name.to_string(),
+    };
+    let entry = table.entry(key).or_insert_with(|| ValueDeclHeader {
+        kind: var_kind,
+        span: decl.span.into(),
+        name_span: id.span.into(),
+        object_member_headers: Vec::new(),
+        contributors: Vec::new(),
+    });
     entry.kind = var_kind;
     entry.span = decl.span.into();
     entry.name_span = id.span.into();

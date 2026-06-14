@@ -251,6 +251,38 @@ pub enum TypeExpr {
     /// mode)`. See `[[component-meta-shallow-by-default-rule]]`.
     SyntheticSlotBinding(Arc<SyntheticCarrierKey>),
 
+    /// A dynamic-import type reference, resolved cross-file by the shared
+    /// type-resolution dispatch (NEVER by reparsing the raw text — this is
+    /// the typed-IR carrier the producer lowers `import("…")` /
+    /// `typeof import("…")` into, replacing the former `Unknown { raw }`
+    /// fallthrough).
+    ///
+    /// Three syntactic shapes lower here:
+    /// - `import("./m")` (bare, type position) → the module's TYPE-export
+    ///   namespace (`typeof_query == false`, empty `qualifier`).
+    /// - `import("./m").Member` (type position) → the named TYPE export
+    ///   `Member` of the module (`typeof_query == false`, `qualifier ==
+    ///   ["Member"]`).
+    /// - `typeof import("./m")` → the module's VALUE-export namespace
+    ///   (type-only exports excluded; an ambient `export =` module reduces
+    ///   to the export-assignment value's type). `typeof_query == true`.
+    ImportType {
+        /// The module specifier written inside `import("…")` — e.g.
+        /// `"./module_features_leaf"`. Resolved to a canonical file id at
+        /// dispatch time via TS-first, workspace-bounded module resolution.
+        specifier: Arc<str>,
+        /// The dotted qualifier path after the import: `import("m").A.B`
+        /// → `["A", "B"]`. Empty for a bare module reference.
+        qualifier: Arc<[Arc<str>]>,
+        /// `true` for `typeof import("…")` (the module's VALUE-export
+        /// namespace), `false` for `import("…")` in type position (the
+        /// module's TYPE-export space).
+        typeof_query: bool,
+        /// Type arguments applied at the import-type site
+        /// (`import("m").Generic<Arg>`). Empty for the common case.
+        type_arguments: Arc<[TypeExpr]>,
+    },
+
     /// A type the lowering could not represent.
     /// Carries the raw source text for diagnostics.
     Unknown { raw: String },
@@ -1126,6 +1158,24 @@ impl TypeExpr {
     /// See [`SyntheticCarrierKey`] for identity semantics.
     pub fn synthetic_slot_binding(key: SyntheticCarrierKey) -> Self {
         Self::SyntheticSlotBinding(Arc::new(key))
+    }
+
+    /// Create a dynamic-import type reference. `qualifier` segments and
+    /// `type_arguments` default to empty; `typeof_query` distinguishes
+    /// `typeof import("…")` (value-export namespace) from `import("…")` in
+    /// type position. See [`TypeExpr::ImportType`].
+    pub fn import_type(
+        specifier: impl Into<Arc<str>>,
+        qualifier: Vec<Arc<str>>,
+        typeof_query: bool,
+        type_arguments: Vec<TypeExpr>,
+    ) -> Self {
+        Self::ImportType {
+            specifier: specifier.into(),
+            qualifier: Arc::from(qualifier),
+            typeof_query,
+            type_arguments: Arc::from(type_arguments),
+        }
     }
 
     /// Returns `true` if this is a `RecursiveRef` node.

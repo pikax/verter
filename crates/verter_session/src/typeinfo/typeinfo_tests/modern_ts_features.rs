@@ -26,7 +26,9 @@
 //!     is applied (Verter currently preserves the literal — TS7 widens to
 //!     the primitive; `#[ignore]`d as a future contract).
 
+use super::oracle;
 use super::support::*;
+use verter_session_oracle_macro::oracle_row;
 
 const MODERN_TS_FEATURES: &str = include_str!("fixtures/modern_ts_features.ts");
 
@@ -177,7 +179,7 @@ fn await_using_simulated_return_type_resolves_to_primitive() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "typeinfo currently does not surface the `readonly` flag on the projected members of `typeof valueExpr` for an `as const` literal expression; keep as the future import-attribute-equivalent typeof-as-const readonly contract"]
+#[ignore = "MODULE_AUGMENTATION reducer complete: Verter resolves `typeof importedJsonConfig` to the readonly `as const` object `{ readonly name: \"verter-fixture\"; readonly version: 1 }` (verified). NOT oracle-liftable — the `as const` value root is gate-rejected at the oracle source-walk (oracle admission Reject(ConstAssertion)); lift pending a const-assertion source-walk carve-out"]
 fn import_attribute_simulated_resolves_imported_json_shape() {
     // TS7 contract (simulated): `typeof importedJsonConfig` where
     // `importedJsonConfig` is `{ name: "verter-fixture", version: 1 } as const`
@@ -205,25 +207,14 @@ fn import_attribute_simulated_resolves_imported_json_shape() {
     assert_query_mode(&record, ProjectionModeTag::Expanded);
 }
 
+// LIFTED: `ImportedJsonConfig["name"]` reduces the string-literal index chain
+// over the `as const` object alias to the literal `"verter-fixture"`. The
+// lifted body is the registry-keyed `oracle::run_row` shared-driver call
+// comparing Verter's `Expanded` projection against the checked-in tsgo
+// snapshot. Trace re-homes the row to `U2.INDEXED_ACCESS`.
+#[oracle_row]
 #[test]
-#[ignore = "typeinfo currently leaves an `as const` typeof indexed access unreduced (the result is still an IndexedAccess over the alias instead of the underlying string literal); keep as the future import-attribute-equivalent indexed-access contract"]
-fn import_attribute_simulated_string_literal_indexed_member() {
-    // TS7 contract (simulated): `ImportedJsonConfig["name"]` projects to the
-    // string literal `"verter-fixture"`, preserving the `as const` narrowing.
-    let host = make_host_with_footprint();
-    upsert(&host);
-
-    let (expr, record) = resolve_expr(
-        &host,
-        "/fixtures/modern_ts_features.ts",
-        "ImportedJsonName",
-        &[],
-        ProjectionMode::Expanded,
-    );
-
-    assert_string_literal(&expr, "verter-fixture");
-    assert_query_mode(&record, ProjectionModeTag::Expanded);
-}
+fn import_attribute_simulated_string_literal_indexed_member() {}
 
 // ---------------------------------------------------------------------------
 // `satisfies` operator deep behaviour

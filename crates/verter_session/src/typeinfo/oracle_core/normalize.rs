@@ -65,6 +65,10 @@ pub(crate) enum NormalizeReject {
     /// until the spike proves + versions a lossless template-literal
     /// canonicalization (a `normalizer_version` bump).
     TemplateLiteralCosmetic,
+    /// A `TypeExpr::ImportType` (`typeof import("…")` / `import("…").X`) — an
+    /// unresolved dynamic-import carrier with no hover-comparable canonical
+    /// form (the resolver, not the normalizer, resolves it cross-file).
+    ImportTypeCarrier,
 }
 
 /// Normalize `expr` to its canonical form, then emit the pinned canonical JSON
@@ -207,6 +211,8 @@ fn normalize_node(
         // Step 7: Unknown is a comparison failure, not normalized away.
         TypeExpr::Unknown { .. } => Err(NormalizeReject::UnknownNode),
         TypeExpr::SyntheticSlotBinding(_) => Err(NormalizeReject::SyntheticSlotBinding),
+        // A dynamic-import carrier has no hover-comparable canonical form.
+        TypeExpr::ImportType { .. } => Err(NormalizeReject::ImportTypeCarrier),
 
         // Step 6: TemplateLiteral cosmetic axis is default-rejected in the
         // initial scope (un-enumerated canonicalization).

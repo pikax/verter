@@ -1670,6 +1670,58 @@ LIFTED_ROW_OVERRIDES: dict[tuple[str, str], dict[str, object]] = {
             "lifted by U2.CLASS_SURFACES: `ReturnType<MetadataAware[\"describe\"]>` is decoration-invariant — the metadata-reading class decorator does not rewrite the surface, so the literal union `\"ready\" | \"pending\"` survives, proven against the checked-in tsgo oracle snapshot via oracle::run_row"
         ),
     },
+    # U2.MODULE_AUGMENTATION-era lifts (Part BC). The MODULE_AUGMENTATION reducer
+    # is complete, but `ResolveDeclarationAugmentation` is NOT a dispatched
+    # mechanism, so each lifted row re-homes to its trace-terminal block. The
+    # `as const` typeof indexed member, the `typeof import(...)["default"]`
+    # default-export value projection, and the `typeof import(...)["leafName"]`
+    # named-value projection terminate at `IndexedAccess` (mechanism
+    # `IndexedAccessUnionDistribution`, owning `U2.INDEXED_ACCESS`; trace
+    # `ResolveDecl`/`Instantiate`/`TypeOf` → `QueryValueDomainFoundation`,
+    # non-owning consumed, then the terminal `IndexedAccess`). The namespace
+    # alias-chain row dispatches only `ResolveDecl` + `Instantiate`
+    # (`QueryValueDomainFoundation`, owning `U2.QUERY_VALUE_DOMAIN`; nothing
+    # consumed). The FOUR DEFERRED rows (1, 3, 5, 7) stay in
+    # `U2.MODULE_AUGMENTATION` — they are not oracle-liftable: the `as const`
+    # value root + the bare `typeof` / `typeof import` / `import("…").X`
+    # constructs are gate-rejected at the oracle source-walk. All four remain
+    # live `#[ignore]` rows, so they do NOT appear here.
+    ("modern_ts_features.rs", "import_attribute_simulated_string_literal_indexed_member"): {
+        "mech": "IndexedAccessUnionDistribution",
+        "proof": "ProofRequirement::Ts7Oracle(OracleId::ModuleAugmentation)",
+        "semantic_queries": ["ResolveDecl", "Instantiate", "IndexedAccess", "TypeOf"],
+        "consumed_mechanisms": ["QueryValueDomainFoundation"],
+        "unblocker": (
+            "lifted by U2.MODULE_AUGMENTATION: `ImportedJsonConfig[\"name\"]` reduces the string-literal index chain over the `as const` object alias to the literal `\"verter-fixture\"`, proven against the checked-in tsgo oracle snapshot via oracle::run_row"
+        ),
+    },
+    ("module_features.rs", "module_features_namespace_geometry_vector_aliases_point"): {
+        "mech": "QueryValueDomainFoundation",
+        "proof": "ProofRequirement::Ts7Oracle(OracleId::ModuleAugmentation)",
+        "semantic_queries": ["ResolveDecl", "Instantiate"],
+        "consumed_mechanisms": [],
+        "unblocker": (
+            "lifted by U2.MODULE_AUGMENTATION: `Geometry.Vector` (aliasing `Geometry.Point`) collapses the namespace-qualified alias chain to the underlying `{ x: number; y: number }` shape, proven against the checked-in tsgo oracle snapshot via oracle::run_row"
+        ),
+    },
+    ("module_features.rs", "module_features_typeof_import_named_value_resolves_to_literal"): {
+        "mech": "IndexedAccessUnionDistribution",
+        "proof": "ProofRequirement::Ts7Oracle(OracleId::ModuleAugmentation)",
+        "semantic_queries": ["ResolveDecl", "Instantiate", "IndexedAccess", "TypeOf"],
+        "consumed_mechanisms": ["QueryValueDomainFoundation"],
+        "unblocker": (
+            "lifted by U2.MODULE_AUGMENTATION: `(typeof import(\"./module_features_leaf\"))[\"leafName\"]` reduces the named-value typeof-import index chain to the const-narrowed literal `\"leaf\"`, proven against the checked-in tsgo oracle snapshot via oracle::run_row"
+        ),
+    },
+    ("module_features.rs", "module_features_typeof_import_default_resolves_value_shape"): {
+        "mech": "IndexedAccessUnionDistribution",
+        "proof": "ProofRequirement::Ts7Oracle(OracleId::ModuleAugmentation)",
+        "semantic_queries": ["ResolveDecl", "Instantiate", "IndexedAccess", "TypeOf"],
+        "consumed_mechanisms": ["QueryValueDomainFoundation"],
+        "unblocker": (
+            "lifted by U2.MODULE_AUGMENTATION: `(typeof import(\"./module_features_leaf\"))[\"default\"]` reduces the default-export typeof-import index chain to the value shape `{ tag: \"leaf-default\"; count: number }` (the `as const` initialiser narrows `tag`'s value to a literal but does NOT mark the property readonly), proven against the checked-in tsgo oracle snapshot via oracle::run_row"
+        ),
+    },
 }
 
 

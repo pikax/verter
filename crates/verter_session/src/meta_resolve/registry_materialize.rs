@@ -560,6 +560,11 @@ pub(crate) fn materialize_component_meta_registry_structural_expr(
                 // the structural materialiser passes them through
                 // unchanged.
                 | TypeExpr::SyntheticSlotBinding(_)
+                // An import-type is a cross-file resolution carrier, passed
+                // through unchanged here like the other operator terminals
+                // (`IndexedAccess` / `TypeOf`) — its shallow carrier is
+                // preserved through structural materialisation.
+                | TypeExpr::ImportType { .. }
                 | TypeExpr::Infer { .. } => expr.clone(),
             }
         };
@@ -1050,6 +1055,11 @@ pub(crate) fn type_expr_contains_public_member_route(expr: &verter_type_expr::Ty
         TypeExpr::Ref { type_arguments, .. } => type_arguments
             .iter()
             .any(type_expr_contains_public_member_route),
+        // Mirrors the `Ref` arm: recurse the nested `type_arguments` (which
+        // may carry member routes); the specifier/qualifier are leaf strings.
+        TypeExpr::ImportType { type_arguments, .. } => type_arguments
+            .iter()
+            .any(type_expr_contains_public_member_route),
         TypeExpr::IndexedAccess { object, index } => {
             type_expr_contains_public_member_route(object)
                 || type_expr_contains_public_member_route(index)
@@ -1140,6 +1150,11 @@ pub(crate) fn type_expr_needs_nested_symbolic_route_preservation(
             .iter()
             .any(type_expr_needs_nested_symbolic_route_preservation),
         TypeExpr::Ref { type_arguments, .. } => type_arguments
+            .iter()
+            .any(type_expr_needs_nested_symbolic_route_preservation),
+        // Mirrors the `Ref` arm: recurse the nested `type_arguments`; the
+        // specifier/qualifier are leaf strings.
+        TypeExpr::ImportType { type_arguments, .. } => type_arguments
             .iter()
             .any(type_expr_needs_nested_symbolic_route_preservation),
         TypeExpr::IndexedAccess { object, index } => {
@@ -1350,6 +1365,17 @@ pub(crate) fn component_meta_registry_should_keep_raw_symbolic_non_object_alias(
                     )
                 })
         }
+        // Mirrors the `Ref` arm: an import-type is a cross-file symbolic
+        // reference the registry keeps verbatim — like a `Ref` that stays
+        // symbolic — provided its nested `type_arguments` also stay symbolic.
+        // The specifier/qualifier are leaf strings.
+        TypeExpr::ImportType { type_arguments, .. } => type_arguments.iter().all(|arg| {
+            component_meta_registry_should_keep_raw_symbolic_non_object_alias(
+                arg,
+                scope_canonical_id,
+                engine,
+            )
+        }),
         TypeExpr::Array { element, .. }
         | TypeExpr::Parenthesized(element)
         | TypeExpr::KeyOf(element)

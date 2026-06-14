@@ -137,6 +137,15 @@ pub fn count_operator_nodes(expr: &verter_type_expr::TypeExpr) -> u64 {
                 walk(object, acc);
                 walk(index, acc);
             }
+            // Mirrors the `Ref` arm: an import-type dispatches a cross-file
+            // resolution operation, so it is operator-bearing (+1) and its
+            // nested `type_arguments` are recursed.
+            TypeExpr::ImportType { type_arguments, .. } => {
+                *acc += 1;
+                for ta in type_arguments.iter() {
+                    walk(ta, acc);
+                }
+            }
             TypeExpr::Conditional {
                 check,
                 extends,

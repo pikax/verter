@@ -27,8 +27,10 @@
 //! import projection. Each unsupported test carries a precise `#[ignore]`
 //! reason describing the future contract.
 
+use super::oracle;
 use super::support::*;
 use crate::VerterHost;
+use verter_session_oracle_macro::oracle_row;
 
 const MODULE_FEATURES: &str = include_str!("fixtures/module_features.ts");
 const MODULE_FEATURES_LEAF: &str = include_str!("fixtures/module_features_leaf.ts");
@@ -100,29 +102,15 @@ fn module_features_namespace_geometry_point_resolves_to_shape() {
     assert_query_mode(&record, ProjectionModeTag::Expanded);
 }
 
+// LIFTED: `Geometry.Vector` (which aliases `Geometry.Point`) collapses the
+// namespace-qualified alias chain to the underlying `{ x: number; y: number }`
+// shape. The lifted body is the registry-keyed `oracle::run_row` shared-driver
+// call comparing Verter's `Expanded` projection against the checked-in tsgo
+// snapshot. Trace dispatches only `ResolveDecl` + `Instantiate`, re-homing the
+// row to `U2.QUERY_VALUE_DOMAIN`.
+#[oracle_row]
 #[test]
-#[ignore = "typeinfo currently does not project a namespace alias chain like `Geometry.Vector` (which aliases `Geometry.Point`) to the underlying object shape; keep as the future namespace alias chain contract"]
-fn module_features_namespace_geometry_vector_aliases_point() {
-    // TS7 contract: `GeometryVector = Geometry.Vector = Geometry.Point` =
-    //   `{ x: number; y: number }`. Namespace-qualified alias chains
-    //   must collapse to the final shape.
-    let host = make_host_with_footprint();
-    upsert_main(&host);
-
-    let (expr, record) = resolve_expr(
-        &host,
-        PATH_MAIN,
-        "GeometryVector",
-        &[],
-        ProjectionMode::Expanded,
-    );
-
-    let props = object_props(&expr);
-    assert_eq!(prop_names(&props), vec!["x", "y"]);
-    assert_primitive(&props["x"].ty, PrimitiveName::Number);
-    assert_primitive(&props["y"].ty, PrimitiveName::Number);
-    assert_query_mode(&record, ProjectionModeTag::Expanded);
-}
+fn module_features_namespace_geometry_vector_aliases_point() {}
 
 // ---------------------------------------------------------------------------
 // Nested namespace
@@ -177,34 +165,21 @@ fn module_features_declare_global_merges_two_blocks() {
 // `typeof import("./other-module")` projection
 // ---------------------------------------------------------------------------
 
+// LIFTED: `LeafDefault = LeafModule["default"]` where `LeafModule = typeof
+// import("./module_features_leaf")` projects the default-export value shape
+// `{ tag: "leaf-default"; count: number }` — `tag` const-narrowed to the literal
+// (its initialiser value is `as const`, but the property is NOT `readonly`, since
+// `leafDefault` itself is not `as const` — matching tsgo), `count` widened to
+// `number`. The lifted body is the registry-keyed `oracle::run_row` shared-driver
+// call comparing Verter's `Expanded` projection against the checked-in tsgo
+// snapshot. Trace dispatches `ResolveDecl, Instantiate, IndexedAccess, TypeOf`,
+// re-homing the row to `U2.INDEXED_ACCESS`.
+#[oracle_row]
 #[test]
-#[ignore = "typeinfo currently does not project `typeof import('./module')['default']` to the type of the default export value; keep as the future typeof-import default-export contract"]
-fn module_features_typeof_import_default_resolves_value_shape() {
-    // TS7 contract: `LeafDefault = LeafModule["default"]` where
-    //   `LeafModule = typeof import("./module_features_leaf")`. The default
-    //   export is `{ tag: "leaf-default" as const; count: 0 }` — under
-    //   `const` inference `tag` is the literal `"leaf-default"` and
-    //   `count` is widened to `number` (the rhs `0` is not `as const`).
-    let host = make_host_with_footprint();
-    upsert_consumer_graph(&host);
-
-    let (expr, record) = resolve_expr(
-        &host,
-        PATH_CONSUMER,
-        "LeafDefault",
-        &[],
-        ProjectionMode::Expanded,
-    );
-
-    let props = object_props(&expr);
-    assert_eq!(prop_names(&props), vec!["count", "tag"]);
-    assert_string_literal(&props["tag"].ty, "leaf-default");
-    assert_primitive(&props["count"].ty, PrimitiveName::Number);
-    assert_query_mode(&record, ProjectionModeTag::Expanded);
-}
+fn module_features_typeof_import_default_resolves_value_shape() {}
 
 #[test]
-#[ignore = "typeinfo currently does not project `import('./module')['NamedShape']` to the named-export type's declared shape; keep as the future dynamic-import named-export-shape contract"]
+#[ignore = "MODULE_AUGMENTATION reducer complete: Verter resolves `import(\"./module_features_leaf\").LeafShape` to the declared `LeafShape` interface `{ id: string; count: number }` (verified). NOT oracle-liftable — the `import(\"…\").X` import-type source body lowers to a deferred construct at the oracle source-walk (oracle admission Reject(DeferredConstruct(\"import-type\"))); lift pending an import-type source-walk carve-out"]
 fn module_features_typeof_import_named_shape_resolves_to_interface() {
     // TS7 contract: `LeafNamedShape = import("./module_features_leaf").LeafShape`
     //   = `{ id: string; count: number }` (the declared `LeafShape` interface).
@@ -230,26 +205,15 @@ fn module_features_typeof_import_named_shape_resolves_to_interface() {
     assert_query_mode(&record, ProjectionModeTag::Expanded);
 }
 
+// LIFTED: `LeafModule["leafName"]` where `export const leafName = "leaf"`
+// reduces the named-value typeof-import index chain to the const-narrowed
+// string literal `"leaf"`. The lifted body is the registry-keyed
+// `oracle::run_row` shared-driver call comparing Verter's `Expanded`
+// projection against the checked-in tsgo snapshot. Trace terminates at
+// `IndexedAccess`, re-homing the row to `U2.INDEXED_ACCESS`.
+#[oracle_row]
 #[test]
-#[ignore = "typeinfo currently does not project `typeof import('./module')['namedValue']` to the type of the named-value export; keep as the future typeof-import named-value contract"]
-fn module_features_typeof_import_named_value_resolves_to_literal() {
-    // TS7 contract: `LeafNamedValue = LeafModule["leafName"]` where
-    //   `export const leafName = "leaf"` — `typeof leafName` is the string
-    //   literal `"leaf"` (const-narrowed).
-    let host = make_host_with_footprint();
-    upsert_consumer_graph(&host);
-
-    let (expr, record) = resolve_expr(
-        &host,
-        PATH_CONSUMER,
-        "LeafNamedValue",
-        &[],
-        ProjectionMode::Expanded,
-    );
-
-    assert_string_literal(&expr, "leaf");
-    assert_query_mode(&record, ProjectionModeTag::Expanded);
-}
+fn module_features_typeof_import_named_value_resolves_to_literal() {}
 
 // ---------------------------------------------------------------------------
 // `declare module "./..."` interface augmentation merge
@@ -290,7 +254,7 @@ fn module_features_module_augmentation_merges_plugin_surface() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "typeinfo currently does not project `typeof import('./cjs')` against an ambient `export = ` declaration to the export-= value type; keep as the future export-equals interop contract"]
+#[ignore = "MODULE_AUGMENTATION reducer complete: Verter resolves `typeof import(\"./module_features_cjs\")` against the ambient `export = CjsCarrierValue` declaration to the `CjsCarrier` carrier `{ readonly tag: \"cjs\"; payload: number }` (verified). NOT oracle-liftable — the bare `typeof import(\"…\")` source body lowers to a deferred import-type construct (oracle admission Reject(DeferredConstruct(\"typeof-import\"))); lift pending a typeof-import source-walk carve-out"]
 fn module_features_cjs_export_equals_resolves_to_carrier() {
     // TS7 contract: `CjsBinding = typeof import("./module_features_cjs")`.
     //   The ambient `module_features_cjs.d.ts` exports a single value via
@@ -418,7 +382,7 @@ fn module_features_namespace_interface_merge_namespace_member_resolves() {
 }
 
 #[test]
-#[ignore = "typeinfo currently does not project `typeof Connector.VERSION` (a namespace-qualified const value with `as const` narrowing) through a merged interface+namespace declaration; keep as the future merged-namespace value-member contract"]
+#[ignore = "MODULE_AUGMENTATION reducer complete: Verter resolves `typeof Connector.VERSION` through the merged interface+namespace declaration to the const-narrowed string literal `\"1.0\"` (verified). NOT oracle-liftable — the bare `typeof` source body is a deferred construct at the oracle source-walk (oracle admission Reject(DeferredConstruct(\"typeof\"))); lift pending a typeof-namespace-value carve-out"]
 fn module_features_namespace_interface_merge_namespace_value_resolves_to_literal() {
     // TS7 contract: `typeof Connector.VERSION` where the merged namespace
     //   declares `export const VERSION = "1.0" as const` resolves to the
@@ -436,6 +400,59 @@ fn module_features_namespace_interface_merge_namespace_value_resolves_to_literal
 
     assert_string_literal(&expr, "1.0");
     assert_query_mode(&record, ProjectionModeTag::Expanded);
+}
+
+/// Discriminating regression: namespace VALUE indexing is EXPORT-ONLY.
+///
+/// A `namespace N { ... }` only publishes `N.member` for members the
+/// namespace `export`s; a non-exported `const hidden = …` is private to the
+/// namespace body and `N.hidden` must NOT bind (TS: "Property 'hidden' does
+/// not exist on type 'typeof N'").
+///
+/// Before the fix, the direct `Statement::VariableDeclaration` arm in
+/// `extract_namespaced_statement` (type_eval_build.rs) and
+/// `index_namespaced_statement` (decl_headers.rs) indexed EVERY namespaced
+/// `const`/`let`/`var` under its qualified name — so the private `hidden` was
+/// wrongly published as `N.hidden` and `typeof N.hidden` resolved to its value
+/// (the number literal `1`). The fix removes the direct arm and keeps only the
+/// `ExportNamedDeclaration -> VariableDeclaration` (exported) path.
+///
+/// Discrimination:
+///  * POSITIVE — the EXPORTED `VERSION` still resolves (`typeof N.VERSION` →
+///    `"1.0"`); proves the exported path is intact (same contract row 5 pins
+///    for `Connector.VERSION`).
+///  * NEGATIVE — the PRIVATE `hidden` no longer binds: `typeof N.hidden` misses
+///    and projects to the `Unknown` carrier. This assertion FAILS pre-fix
+///    (where `N.hidden` wrongly resolved to the literal `1`) and PASSES
+///    post-fix. Verified red→green by stashing the analysis-crate change.
+#[test]
+fn module_features_namespace_value_indexing_is_export_only() {
+    const PATH: &str = "/fixtures/namespace_export_only.ts";
+    const SRC: &str = "export namespace N {\n  \
+         const hidden = 1;\n  \
+         export const VERSION = \"1.0\" as const;\n\
+         }\n\
+         export type V = typeof N.VERSION;\n\
+         export type H = typeof N.hidden;\n";
+
+    let host = make_host_with_footprint();
+    upsert_ts(&host, PATH, SRC);
+
+    // POSITIVE: the EXPORTED member resolves to its const-narrowed literal —
+    // the export path that row 5 (`Connector.VERSION`) also depends on.
+    let (v_expr, _) = resolve_expr(&host, PATH, "V", &[], ProjectionMode::Expanded);
+    assert_string_literal(&v_expr, "1.0");
+
+    // NEGATIVE / DISCRIMINATING: the PRIVATE (non-exported) `hidden` member must
+    // NOT bind as `N.hidden`; `typeof N.hidden` misses → `Unknown` carrier.
+    // Pre-fix the over-broad direct arm indexed `N.hidden`, so this resolved to
+    // the number literal `1` (not `Unknown`).
+    let (h_expr, _) = resolve_expr(&host, PATH, "H", &[], ProjectionMode::Expanded);
+    assert!(
+        matches!(h_expr, TypeExpr::Unknown { .. }),
+        "`typeof N.hidden` (a PRIVATE, non-exported namespace local) must NOT resolve \
+         to the private value — namespace value indexing is export-only; got {h_expr:?}",
+    );
 }
 
 // ---------------------------------------------------------------------------

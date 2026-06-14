@@ -140,6 +140,12 @@ fn visit_expr(
                 .iter()
                 .any(|arg| visit_expr(arg, is_active, shadow))
         }
+        // `import("m").Gen<Arg>` — the specifier / qualifier are leaf strings
+        // (never type-parameter references); only the instantiation arguments
+        // can reference an active type parameter.
+        TypeExpr::ImportType { type_arguments, .. } => type_arguments
+            .iter()
+            .any(|arg| visit_expr(arg, is_active, shadow)),
         TypeExpr::TypeParameter(param) => {
             // A first-class TypeParameter reference matches when its
             // name is active and not shadowed. The constraint/default

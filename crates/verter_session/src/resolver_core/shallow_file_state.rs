@@ -85,6 +85,12 @@ pub struct ShallowFileState {
     /// dedicated body map rather than hidden inside the header symbol —
     /// `value_decl(name)` routes through it before the lazy memo.
     synthesised_value_bodies: FxHashMap<String, Arc<LoweredValueDecl>>,
+
+    /// The local value name a CommonJS `export = X` assigns the whole module
+    /// to, when present (part of the shallow EXPORT inventory). `typeof
+    /// import("./m")` against such a module resolves to `typeof X`, not an
+    /// object of named exports. `None` for an ordinary ESM module.
+    export_assignment: Option<String>,
 }
 
 /// A wildcard `export * from ‘...’` reexport with its resolved canonical target.
@@ -643,6 +649,7 @@ impl ShallowFileState {
             exports,
             wildcard_reexports,
             import_locals,
+            export_assignment: analysis.export_assignment_target().map(str::to_string),
             import_targets,
             analysis,
             decl_bodies,
@@ -901,6 +908,13 @@ impl ShallowFileState {
     /// exported (may still be available through wildcard reexports).
     pub fn export_target(&self, name: &str) -> Option<&ExportTarget> {
         self.exports.get(name)
+    }
+
+    /// The local value name a CommonJS `export = X` assigns the whole module
+    /// to (`Some("X")`), or `None` for an ordinary ESM module. Part of the
+    /// shallow EXPORT inventory; consumed by `typeof import("./m")` resolution.
+    pub fn export_assignment_target(&self) -> Option<&str> {
+        self.export_assignment.as_deref()
     }
 
     /// Get the narrow type-resolution view over this file state.
@@ -1953,6 +1967,35 @@ impl ShallowFileState {
                 }
                 true
             }
+            // Mirrors the `Ref` arm's recursion into `type_arguments`. The
+            // `specifier`/`qualifier` are leaf strings naming the cross-file
+            // module path (not a local route symbol to follow), so only the
+            // nested type-argument exprs are walked for further refs.
+            //
+            // TODO(follow-up): the `specifier` names a cross-file module that
+            // `typeof import("X")` / `import("X").T` depends on, but it is NOT
+            // yet recorded as a cross-file dependency EDGE here — so a content
+            // edit to module "X" does not invalidate this file's read-set
+            // through the import-type path. The architect DEFERRED wiring this
+            // into the cross-file invalidation/read-set bucket; do NOT stuff the
+            // specifier into the local-ref accumulator as a fake local name — it
+            // needs its own dependency-edge channel.
+            TypeExpr::ImportType { type_arguments, .. } => {
+                for argument in type_arguments.iter() {
+                    if !self.collect_whole_route_refs(
+                        argument,
+                        context,
+                        visited,
+                        local_used,
+                        external_refs,
+                        steps,
+                        budget,
+                    ) {
+                        return false;
+                    }
+                }
+                true
+            }
             TypeExpr::Primitive(_)
             | TypeExpr::Literal(_)
             | TypeExpr::TypeParameter(_)
@@ -2516,6 +2559,14 @@ pub(crate) fn collect_type_refs(expr: &TypeExpr, out: &mut Vec<String>) {
         TypeExpr::KeyOf(inner) | TypeExpr::Rest(inner) | TypeExpr::Parenthesized(inner) => {
             collect_type_refs(inner, out);
         }
+        // Mirrors the `Ref` arm's recursion into `type_arguments`. The
+        // `specifier`/`qualifier` are a module path, not a collectable local
+        // type-ref name, so only the nested type-argument exprs are walked.
+        TypeExpr::ImportType { type_arguments, .. } => {
+            for arg in type_arguments.iter() {
+                collect_type_refs(arg, out);
+            }
+        }
         TypeExpr::TypeOf { .. }
         | TypeExpr::TypeParameter(_)
         | TypeExpr::Primitive(_)
@@ -2618,6 +2669,10 @@ pub(crate) fn collect_typeof_roots(expr: &TypeExpr, out: &mut FxHashSet<String>)
         | TypeExpr::RecursiveRef { .. }
         // Synthetic carriers carry no `typeof` operand — terminal leaves.
         | TypeExpr::SyntheticSlotBinding(_)
+        // An import-type carries no `typeof X` operand of its own — like the
+        // terminal `Ref` arm here, it is a no-op leaf (its module-path
+        // qualifier is not a `typeof` root).
+        | TypeExpr::ImportType { .. }
         | TypeExpr::Unknown { .. } => {}
     }
 }

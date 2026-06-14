@@ -518,6 +518,34 @@ impl<'a> Walker<'a> {
                 self.buf.push(0xFF);
                 self.buf.extend_from_slice(&key.value_node.to_le_bytes());
             }
+            TypeExpr::ImportType {
+                specifier,
+                qualifier,
+                typeof_query,
+                type_arguments,
+            } => {
+                // Distinct tag (0x3A) so an import-type node hashes apart from
+                // every other variant. The specifier + ordered qualifier
+                // segments + typeof flag + instantiation arguments fully
+                // discriminate two import-types (a content edit to the
+                // module specifier or member path changes the fact stream).
+                self.buf.push(0x3A);
+                self.buf.extend_from_slice(specifier.as_bytes());
+                self.buf.push(0xFF);
+                self.buf
+                    .extend_from_slice(&(qualifier.len() as u32).to_le_bytes());
+                for seg in qualifier.iter() {
+                    self.buf.extend_from_slice(seg.as_bytes());
+                    self.buf.push(0xFF);
+                }
+                self.buf.push(u8::from(*typeof_query));
+                self.buf
+                    .extend_from_slice(&(type_arguments.len() as u32).to_le_bytes());
+                for ta in type_arguments.iter() {
+                    self.walk_node(ta);
+                    self.buf.push(0xFE);
+                }
+            }
             TypeExpr::Unknown { raw } => {
                 self.buf.push(0x3F);
                 self.buf.extend_from_slice(raw.as_bytes());
@@ -973,6 +1001,27 @@ impl<'a> Walker<'a> {
                 // carriers (the cycle-detection key never recurses).
                 key.push(0xB4);
                 key.extend_from_slice(&(Arc::as_ptr(arc_key) as usize).to_le_bytes());
+            }
+            TypeExpr::ImportType {
+                specifier,
+                qualifier,
+                typeof_query,
+                type_arguments,
+            } => {
+                // Non-recursive identity: leaf data (specifier + typeof flag)
+                // plus the `Arc` pointers + lengths of the qualifier and
+                // type-argument slices — two physically identical slices ARE
+                // the same node and re-enter as `CycleRef`.
+                key.push(0xB6);
+                key.extend_from_slice(specifier.as_bytes());
+                key.push(0xFF);
+                key.push(u8::from(*typeof_query));
+                key.extend_from_slice(&(qualifier.as_ptr() as *const () as usize).to_le_bytes());
+                key.extend_from_slice(&(qualifier.len() as u32).to_le_bytes());
+                key.extend_from_slice(
+                    &(type_arguments.as_ptr() as *const () as usize).to_le_bytes(),
+                );
+                key.extend_from_slice(&(type_arguments.len() as u32).to_le_bytes());
             }
             TypeExpr::Unknown { raw } => {
                 key.push(0xBF);

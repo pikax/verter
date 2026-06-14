@@ -612,6 +612,149 @@ impl<'a> ProjectSemanticDispatch<'a> {
         output
     }
 
+    /// The local value name a dependency module's CommonJS `export = X`
+    /// assigns the whole module to, read from the dependency's shallow export
+    /// inventory. `None` for an ordinary ESM module (or an unloadable dep).
+    fn import_export_assignment_target(&self, dep_canonical: &str) -> Option<Arc<str>> {
+        self.ctx
+            .shallow_file_state(dep_canonical)?
+            .export_assignment_target()
+            .map(Arc::<str>::from)
+    }
+
+    /// Build the VALUE-export namespace object for `typeof import("./m")`.
+    ///
+    /// The produced [`SemanticNodeData::Object`] surface carries one member
+    /// per VALUE export of the dependency module — each member's type
+    /// resolved through the SHARED `TypeOf` dispatch (`build_typeof`) in the
+    /// dependency's own scope, the SAME `effective_prepared_value_decl →
+    /// resolve_value_export_target` rail every other value-root consumer uses
+    /// (no forked resolver). A TYPE-only export (`interface`, `type`) resolves
+    /// to no value decl, so its per-export `TypeOf` misses and the name is
+    /// naturally EXCLUDED from the value namespace — matching TS, where
+    /// `typeof import("…")` surfaces only the runtime value bindings.
+    ///
+    /// An ambient `export = X` module reduces instead to the type of the
+    /// export-assignment target `X` (the CommonJS value-namespace identity):
+    /// the whole module IS that single value, not an object wrapping it.
+    ///
+    /// Member order is the lexicographically-sorted export-name order so the
+    /// interned surface is deterministic across the non-deterministic
+    /// `exports` map iteration order.
+    ///
+    /// Read-set NOTE (lead-architect ruled, shared with the cross-file
+    /// value-export rail — see the Enums block's identical carry-forward): the
+    /// per-export `TypeOf` chase resolves each visible leaf correctly but does
+    /// not bubble every resolved leaf decl into the consuming query's
+    /// read-set / reverse index. That is a PRE-EXISTING property of the shared
+    /// cross-file value-export rail (identical to bare `typeof E`), NOT an
+    /// import-type-local defect; the clean fix is system-wide read-set / fact
+    /// bubbling, deferred with the rest of that work.
+    pub(super) fn build_import_value_namespace(
+        &self,
+        dep_canonical: &str,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> SemanticNodeId {
+        let Some(indexed) = self
+            .ctx
+            .ensure_indexed_ready_serve(dep_canonical)
+            .map(|serve| serve.indexed)
+        else {
+            return self.opaque(QueryError::Miss);
+        };
+        let dep_scope = NodeScopeId::File {
+            canonical_id: Arc::from(dep_canonical),
+            whole_hash: indexed.whole_hash,
+            local_scope: None,
+        };
+
+        // Ambient `export = X`: the value namespace IS `typeof X` (the
+        // CommonJS whole-module value). Resolved through the SAME `TypeOf`
+        // rail as a named export.
+        if let Some(assign_target) = self.import_export_assignment_target(dep_canonical) {
+            return match self
+                .execute_read(self.typeof_key_for(
+                    ValueRootKey {
+                        scope: crate::semantic_query::ScopeId {
+                            canonical_id: Arc::from(dep_canonical),
+                            local_scope: None,
+                        },
+                        name: assign_target,
+                    },
+                    context,
+                ))
+                .value
+            {
+                QueryResult::Value(id) => id,
+                _ => self.opaque(QueryError::Miss),
+            };
+        }
+
+        // ESM module: object of value exports, lex-sorted for determinism.
+        let mut export_names: Vec<Arc<str>> = indexed
+            .shallow_state
+            .exports
+            .keys()
+            .map(|name| Arc::<str>::from(name.as_str()))
+            .collect();
+        export_names.sort();
+
+        let mut members: Vec<SurfaceMember> = Vec::new();
+        for name in &export_names {
+            let node = match self
+                .execute_read(self.typeof_key_for(
+                    ValueRootKey {
+                        scope: crate::semantic_query::ScopeId {
+                            canonical_id: Arc::from(dep_canonical),
+                            local_scope: None,
+                        },
+                        name: Arc::clone(name),
+                    },
+                    context,
+                ))
+                .value
+            {
+                QueryResult::Value(id) => id,
+                // A TYPE-only export (no value decl) misses the value rail —
+                // it is genuinely absent from the value namespace.
+                _ => continue,
+            };
+            // Defensive: an opaque sentinel is not a real value-export type.
+            if matches!(
+                self.graph().node_data(node).as_deref(),
+                Some(SemanticNodeData::Opaque(_)) | None
+            ) {
+                continue;
+            }
+            members.push(SurfaceMember {
+                name: Arc::clone(name),
+                value: node,
+                optional: false,
+                readonly: false,
+                is_method: false,
+                visibility: verter_type_expr::MemberVisibility::Public,
+                // Synthesised namespace member — no single source decl site;
+                // its declaration lives in the dependency module.
+                spans: verter_type_expr::MemberSpans::default(),
+                declaration_origin: Some(Arc::from(dep_canonical)),
+                declared_in_macro_type_arg: false,
+                merge_role: crate::semantic_query::MemberMergeRole::Authored,
+            });
+        }
+
+        self.graph().intern_node_with_scope(
+            SemanticNodeData::Object(SurfaceView {
+                members: Arc::from(members.into_boxed_slice()),
+                call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
+                keyspace: None,
+                has_index_signature: false,
+            }),
+            dep_scope,
+        )
+    }
+
     /// Build a `.vue` SFC's synthesized `default` PUBLIC INSTANCE surface for
     /// `Instantiate{ .vue, "default", [] }`.
     ///

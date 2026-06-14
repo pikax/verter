@@ -2922,7 +2922,29 @@ divergence (`(props?: mapped): string` vs vcm's arrow form).
      rows — which resolve to the in-process `SemanticQueryValue::DeclarationAnalysis`
      value domain — land together later in `U2.MODULE_AUGMENTATION`
      (`native-typeinfo-parity-u2-reducers.md`, the `U2.MODULE_AUGMENTATION` block); the rows do NOT lift without
-     that new key. Every variant routes through
+     that new key.
+
+     > **DEFERRED — codex STEP-0 ruling (SPINEMODAUG, 2026-06-14):** This
+     > forward-plan was SUPERSEDED by what `U2.MODULE_AUGMENTATION` actually landed
+     > (branch `mom/u2-module-aug`). The block delivered a COMPLETE value-space
+     > `typeof` / module-augmentation reducer through the EXISTING shared dispatch
+     > (`ResolveDecl` / `IndexedAccess` / `TypeOf` / `ProjectPath` via
+     > `ProjectSemanticDispatch::execute`) with **NO new query keys**: 4 parity rows
+     > LIFTED (2, 4, 6, 8), each RE-HOMED to its measured-trace terminal block
+     > (`U2.INDEXED_ACCESS` rows 2/6/8, `U2.QUERY_VALUE_DOMAIN` row 4), and 4
+     > honest-DEFERRED (1, 3, 5, 7) with measured oracle `Reject(...)` reasons;
+     > manifest total UNCHANGED at 362. The claim immediately above — "**the rows do
+     > NOT lift without that new key**" — is therefore DISPROVED: the rows lift
+     > through the existing dispatch. The forward-planned `ResolveMergedDeclaration`
+     > / `ResolveDeclarationAugmentation` query keys AND the
+     > `SemanticQueryValue::DeclarationAnalysis` value-domain producer are
+     > **DEFERRED, NOT landed** — codex STEP-0 ruled them STALE (making them live
+     > would require editing CLAUDE.md's CRITICAL Declaration Merging / Declaration
+     > Augmentation rules, which is out of scope); the live `MergedDecl` peer-merge
+     > architecture already serves the merged / augmented type-value surfaces today.
+     > Source: `/tmp/mom/SPINEMODAUG/codex-step0-RULING.md` Q2 (Query Keys).
+
+     Every variant routes through
      `ProjectSemanticDispatch::execute` (the one-engine rule). This finalizes the
      identity SHAPE — later ADDITIVE variants land in that same slot-identity shape
      with NO cache re-key; adding a later variant is additive, not a second

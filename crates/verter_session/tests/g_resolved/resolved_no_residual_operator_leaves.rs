@@ -183,6 +183,12 @@ fn contains_free_type_parameter(expr: &TypeExpr) -> bool {
         TypeExpr::RecursiveRef { type_arguments, .. } => {
             type_arguments.iter().any(contains_free_type_parameter)
         }
+        // An import-type site carries free type parameters only through its
+        // applied type arguments (`import("m").Generic<T>`); the specifier and
+        // qualifier are plain strings.
+        TypeExpr::ImportType { type_arguments, .. } => {
+            type_arguments.iter().any(contains_free_type_parameter)
+        }
     }
 }
 
@@ -313,6 +319,14 @@ fn walk(expr: &TypeExpr, path: &str, out: &mut Vec<String>) {
         TypeExpr::Ref { type_arguments, .. } => {
             for (i, ty) in type_arguments.iter().enumerate() {
                 walk(ty, &format!("{path}<arg{i}>"), out);
+            }
+        }
+        // An import-type site is walked like a `Ref`: its applied type
+        // arguments are the only operator-bearing descendants (the specifier
+        // and qualifier are plain strings).
+        TypeExpr::ImportType { type_arguments, .. } => {
+            for (i, ty) in type_arguments.iter().enumerate() {
+                walk(ty, &format!("{path}<import-arg{i}>"), out);
             }
         }
         TypeExpr::Parenthesized(inner) => {

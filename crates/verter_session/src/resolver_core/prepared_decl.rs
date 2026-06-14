@@ -228,6 +228,20 @@ fn prepare_type_decl_from_lowered(
             ResolvedRootIdentity::new(canonical_id, dep_name),
         );
     }
+    // Namespace-member scoping: inside `namespace NS { ... }`, an unqualified
+    // reference to a sibling member `M` resolves to `NS.M` (TS namespace
+    // scope). The shallow inventory indexes the member under its QUALIFIED name
+    // (`NS.M`), so a sibling body `Ref("M")` would otherwise miss. For a
+    // namespaced decl (whose `symbol_name` carries an `NS.` prefix), map each
+    // DIRECT sibling's bare name to its qualified identity. Inserted AFTER the
+    // unqualified loops so the sibling binding takes precedence over an outer
+    // same-named type — the TS namespace-scope rule.
+    add_namespace_sibling_resolutions(
+        &mut prepared.name_resolution,
+        state,
+        symbol_name,
+        canonical_id,
+    );
     // External deps resolve through import bindings → canonical_id
     for (local_name, target) in state.import_targets.iter() {
         let resolved_id = resolve_import_target(
@@ -251,6 +265,40 @@ fn prepare_type_decl_from_lowered(
     prepared.classify_wrapper_shape();
     prepared.classify_projection();
     prepared
+}
+
+/// Map each DIRECT sibling member of a namespaced declaration's enclosing
+/// namespace to its qualified identity in `name_resolution`, so an unqualified
+/// body reference (`Ref("M")` inside `namespace NS { type V = M }`) resolves to
+/// `NS.M`. A no-op for a non-namespaced declaration (`symbol_name` has no `.`).
+/// Only single-segment direct siblings bind (a deeper-nested `NS.Sub.X` is not
+/// reachable as a bare name from `NS`'s own member bodies).
+fn add_namespace_sibling_resolutions(
+    name_resolution: &mut FxHashMap<String, ResolvedRootIdentity>,
+    state: &ShallowFileState,
+    symbol_name: &str,
+    canonical_id: &str,
+) {
+    let Some((namespace_prefix, _)) = symbol_name.rsplit_once('.') else {
+        return;
+    };
+    let dotted_prefix = format!("{namespace_prefix}.");
+    let mut bind_sibling = |dep_name: &str| {
+        if let Some(member) = dep_name.strip_prefix(&dotted_prefix) {
+            if !member.contains('.') {
+                name_resolution.insert(
+                    member.to_string(),
+                    ResolvedRootIdentity::new(canonical_id, dep_name),
+                );
+            }
+        }
+    };
+    for dep_name in state.type_symbol_names() {
+        bind_sibling(dep_name);
+    }
+    for dep_name in state.value_symbol_names() {
+        bind_sibling(dep_name);
+    }
 }
 
 /// Prepare a named exported type declaration after routing has selected the

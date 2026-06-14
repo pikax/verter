@@ -288,6 +288,9 @@ pub(super) fn dispatch_route_expr_is_materialized(expr: &TypeExpr) -> bool {
         // Synthetic carriers are fully materialised at the projector
         // surface — they ARE the published leaf, not a deferred token.
         | TypeExpr::SyntheticSlotBinding(_)
+        // An import-type is a published shallow carrier (like a bare `Ref`),
+        // not an unmaterialised dispatch sentinel — count it as materialised.
+        | TypeExpr::ImportType { .. }
         | TypeExpr::RecursiveRef { .. } => true,
     }
 }
@@ -598,6 +601,12 @@ pub(super) fn type_expr_references_names(
             } => {
                 contains_name(name.as_ref())
                     || type_arguments.iter().any(|arg| visit(arg, contains_name))
+            }
+            // Mirrors the `Ref` arm's recursion into `type_arguments`. The
+            // `specifier`/`qualifier` are a module path, not substitutable
+            // names, so only the nested type-argument exprs are visited.
+            TypeExpr::ImportType { type_arguments, .. } => {
+                type_arguments.iter().any(|arg| visit(arg, contains_name))
             }
             TypeExpr::TypeParameter(param) => {
                 contains_name(param.name.as_str())
