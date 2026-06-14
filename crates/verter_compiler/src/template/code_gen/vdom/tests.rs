@@ -1455,3 +1455,161 @@ fn event_merge_prescan_gated_when_no_duplicate_possible() {
         "duplicate @click must still array-merge after gating, got:\n{dup}"
     );
 }
+
+// ── condition prefix segmented mapping ──────────────────────────────
+
+use crate::template::code_gen::binding::BindingType;
+
+/// Build a binding resolver for the condition tests.
+fn cond_resolver(
+    entries: &[(&'static str, BindingType)],
+    inline: bool,
+) -> BindingResolver<'static> {
+    let mut map = FxHashMap::default();
+    for &(n, bt) in entries {
+        map.insert(n as &str, bt);
+    }
+    BindingResolver::new(map, inline)
+}
+
+/// `(dst_col, src_col, has_source)` for every source-map token.
+fn token_dump(ct: &crate::code_transform::CodeTransform<'_>) -> Vec<(u32, u32, bool)> {
+    let map = ct.generate_map(crate::code_transform::SourceMapOptions::new().with_source("t.vue"));
+    map.get_tokens()
+        .map(|t| {
+            (
+                t.get_dst_col(),
+                t.get_src_col(),
+                t.get_source_id().is_some(),
+            )
+        })
+        .collect()
+}
+
+/// Assert no token in the generated column range `[lo, hi)` carries a source id.
+fn assert_unmapped_region(tokens: &[(u32, u32, bool)], lo: u32, hi: u32) {
+    assert!(
+        !tokens
+            .iter()
+            .any(|&(dst, _, has_src)| dst >= lo && dst < hi && has_src),
+        "no source token may map the synthetic region [{lo}, {hi}); tokens: {tokens:?}"
+    );
+}
+
+/// Discriminating — an inline `SetupRef` v-if (`count`) emits `(count.value) ? `;
+/// `count` maps to source while the synthetic `.value` suffix AND the `) ? `
+/// wrapper stay unmapped. A flat single-token map would cover `.value` with the
+/// `count` token (mapping bleed); the `.value`-region negative assertion fails on that.
+#[test]
+fn condition_prefix_inline_setup_ref_keeps_value_unmapped() {
+    let alloc = Allocator::default();
+    // `count` lives at byte 4 in the source.
+    let source = "abc count";
+    let resolver = cond_resolver(&[("count", BindingType::SetupRef)], true);
+    let cond = resolve_simple_expr_segments(&resolver, "count", 4).wrapped("(", ") ? ");
+    assert_eq!(cond.text, "(count.value) ? ");
+
+    let mut out = CodeGenOutput::new(&alloc);
+    children::emit_condition_prefix_mapped(&mut out, 0, &cond);
+    let mut ct = crate::code_transform::CodeTransform::new(source, &alloc);
+    out.apply_to(&mut ct);
+
+    // Bytes unchanged — segmentation only refines the source map.
+    assert_eq!(ct.build_string(), "(count.value) ? abc count");
+
+    let tokens = token_dump(&ct);
+    // `count` body: token at gen col 1 (after `(`) → src col 4.
+    let body = tokens.iter().find(|&&(dst, _, has)| dst == 1 && has);
+    assert!(body.is_some(), "`count` must map; tokens: {tokens:?}");
+    assert_eq!(body.unwrap().1, 4, "`count` must map to src col 4");
+
+    // `.value` occupies gen cols [6, 12) — entirely unmapped, with its own
+    // unmapped token starting at col 6.
+    assert!(
+        tokens.iter().any(|&(dst, _, has)| dst == 6 && !has),
+        "synthetic `.value` must start an unmapped segment at col 6; tokens: {tokens:?}"
+    );
+    assert_unmapped_region(&tokens, 6, 12);
+    // `) ? ` wrapper [12, 16) stays unmapped.
+    assert_unmapped_region(&tokens, 12, 16);
+}
+
+/// Build an OXC condition expression with two prop bindings.
+fn two_prop_cond_oxc(
+    inner_start: u32,
+    a: (&'static str, u32),
+    b: (&'static str, u32),
+) -> crate::template::oxc::types::OxcParsedExpression<'static> {
+    use crate::utils::oxc::{Binding, BindingExtractionResult, Dynamism};
+    let mk = |name: &'static str, pos: u32| Binding {
+        name,
+        span: crate::common::RelativeSpan::new(
+            pos - inner_start,
+            pos - inner_start + name.len() as u32,
+        ),
+        pos,
+        ignore: false,
+        is_shorthand: false,
+    };
+    crate::template::oxc::types::OxcParsedExpression {
+        offset: inner_start,
+        expression: None,
+        errors: None,
+        bindings: Some(BindingExtractionResult {
+            bindings: vec![mk(a.0, a.1), mk(b.0, b.1)],
+            functions: vec![],
+            literals: vec![],
+            has_errors: false,
+            dynamism: Dynamism::Dynamic,
+        }),
+        dynamism: Dynamism::Dynamic,
+    }
+}
+
+/// Discriminating — a compound v-if `foo && bar` (both props) emits
+/// `(__props.foo && __props.bar) ? `; `foo` AND `bar` each get their own source
+/// token while every synthetic `__props.` run stays unmapped. Mapping the whole
+/// body to one token at the leading `__props.` would leave `bar` with no token.
+#[test]
+fn condition_prefix_compound_props_map_each_identifier() {
+    let alloc = Allocator::default();
+    // Source `x foo && bar`: foo at byte 2, bar at byte 9.
+    let source = "x foo && bar";
+    let resolver = cond_resolver(
+        &[("foo", BindingType::Props), ("bar", BindingType::Props)],
+        true,
+    );
+    let oxc = two_prop_cond_oxc(2, ("foo", 2), ("bar", 9));
+    let cond =
+        build_prefixed_expr_segments("foo && bar", 2, &oxc, &resolver, &[]).wrapped("(", ") ? ");
+    assert_eq!(cond.text, "(__props.foo && __props.bar) ? ");
+
+    let mut out = CodeGenOutput::new(&alloc);
+    children::emit_condition_prefix_mapped(&mut out, 0, &cond);
+    let mut ct = crate::code_transform::CodeTransform::new(source, &alloc);
+    out.apply_to(&mut ct);
+    assert_eq!(
+        ct.build_string(),
+        "(__props.foo && __props.bar) ? x foo && bar"
+    );
+
+    let tokens = token_dump(&ct);
+    // `foo` token at gen col 9 (`(` + `__props.`) → src col 2.
+    let foo = tokens.iter().find(|&&(dst, _, has)| dst == 9 && has);
+    assert!(foo.is_some(), "`foo` must map; tokens: {tokens:?}");
+    assert_eq!(foo.unwrap().1, 2, "`foo` must map to src col 2");
+    // `bar` token at gen col 24 (after the second `__props.`) → src col 9.
+    let bar = tokens.iter().find(|&&(dst, _, has)| dst == 24 && has);
+    assert!(
+        bar.is_some(),
+        "`bar` must have its OWN source token; tokens: {tokens:?}"
+    );
+    assert_eq!(bar.unwrap().1, 9, "`bar` must map to src col 9");
+
+    // Both `__props.` runs are unmapped: `(__props.` body region [1, 9) and the
+    // second `__props.` region [16, 24).
+    assert_unmapped_region(&tokens, 1, 9);
+    assert_unmapped_region(&tokens, 16, 24);
+    // `) ? ` wrapper stays unmapped.
+    assert_unmapped_region(&tokens, 27, 31);
+}

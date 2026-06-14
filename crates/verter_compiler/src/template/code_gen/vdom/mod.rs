@@ -65,16 +65,19 @@ pub mod text;
 use rustc_hash::FxHashMap;
 
 use crate::ast::types::{
-    AstNodeKind, CommentNode, ElementNode, ElementNodeConditionKind, InterpolationNode, TagType,
-    TemplateAst, TextNode,
+    AstNodeKind, CommentNode, ElementNode, ElementNodeCondition, ElementNodeConditionKind,
+    InterpolationNode, TagType, TemplateAst, TextNode,
 };
 use crate::parser::types::RootNodeTemplate;
 use crate::template::oxc::types::{OxcParsedElement, OxcParsedExpression};
 use crate::types::NodeId;
 
 use super::binding::BindingResolver;
+use super::expression::{build_prefixed_expr_segments, resolve_simple_expr_segments};
 use super::shared::helpers::{self, VdomHelper};
-use super::types::{ChildKind, ChildRecord, CodeGenOutput, ConditionChainRole, ScopeClose};
+use super::types::{
+    ChildKind, ChildRecord, CodeGenOutput, ConditionChainRole, MappedGeneratedText, ScopeClose,
+};
 use super::{TemplateCodeGen, TemplateCodeGenOptions};
 
 /// VDOM code generation backend.
@@ -101,11 +104,14 @@ pub struct VdomCodeGen<'ast, 'alloc> {
     /// position as the v-for element starts.
     /// Tuple: (prefix_string, iterable_source_start) for source map mapping.
     v_for_prefixes: Vec<Option<(String, Option<u32>)>>,
-    /// Pre-computed condition prefixes with binding resolution.
+    /// Pre-computed condition expressions with binding resolution, carried as
+    /// segment plans so the ternary head maps authored identifiers to source
+    /// while leaving synthetic scaffolding unmapped.
     /// Populated during `enter_element` (where OXC data is available) and
     /// consumed by `build_child_records` (which only sees AST data).
-    /// Keyed by AST node index.
-    resolved_condition_prefixes: FxHashMap<usize, String>,
+    /// Keyed by AST node index. Holds the bare resolved expression (no `(` …
+    /// `) ? ` wrapper); `build_child_records` wraps it per element.
+    resolved_condition_prefixes: FxHashMap<usize, MappedGeneratedText>,
     /// Whether the template has a single effective root element (not multi-root).
     /// Set in `enter_template`, used by `leave_element` to determine if a root
     /// element should be a block root (`_createElementBlock` / `_createBlock`).
@@ -173,8 +179,6 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                             kind,
                             condition: None,
                             condition_prefix: None,
-                            condition_expr_start: None,
-                            condition_binding_prefix_len: 0,
                         });
                     }
                 }
@@ -185,8 +189,6 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                         kind: ChildKind::Interpolation,
                         condition: None,
                         condition_prefix: None,
-                        condition_expr_start: None,
-                        condition_binding_prefix_len: 0,
                     });
                 }
                 AstNodeKind::Element(el) => {
@@ -196,62 +198,36 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                         .map(|tc| tc.end)
                         .unwrap_or(el.tag_open.end);
 
-                    let (condition, condition_prefix, condition_expr_start, cond_prefix_len) =
-                        match el.v_condition.as_ref() {
-                            Some(c) => {
-                                let role = match c.kind {
-                                    ElementNodeConditionKind::If => ConditionChainRole::Start,
-                                    ElementNodeConditionKind::ElseIf
-                                    | ElementNodeConditionKind::Else => {
-                                        ConditionChainRole::Continuation
-                                    }
-                                };
-                                // Build condition prefix for v-if/v-else-if (not v-else).
-                                // Uses pre-resolved expression from enter_element (which has
-                                // OXC binding data for correct $setup./$props. prefixes).
-                                let (prefix, expr_start, binding_prefix_len) = match c.kind {
-                                    ElementNodeConditionKind::If
-                                    | ElementNodeConditionKind::ElseIf => {
-                                        // Use pre-resolved expression (avoids clone + format!):
-                                        // borrow from the HashMap if available, else compute.
-                                        let resolved =
-                                            self.resolved_condition_prefixes.get(&child_id.0);
-                                        let raw_expr =
-                                            helpers::extract_directive_value(&c.prop, source);
-                                        let expr_str = match resolved {
-                                            Some(s) => s.as_str(),
-                                            None => {
-                                                if raw_expr.is_empty() {
-                                                    "true"
-                                                } else {
-                                                    raw_expr
-                                                }
-                                            }
-                                        };
-                                        // Compute binding prefix length so we can split
-                                        // the condition prefix into unmapped + mapped
-                                        // segments for accurate source mapping.
-                                        let bp_len = self.resolver.simple_expr_prefix_len(raw_expr);
-                                        let mut s = String::with_capacity(expr_str.len() + 5);
-                                        s.push('(');
-                                        s.push_str(expr_str);
-                                        s.push_str(") ? ");
-                                        (Some(s), c.prop.value_start, bp_len)
-                                    }
-                                    ElementNodeConditionKind::Else => (None, None, 0),
-                                };
-                                (Some(role), prefix, expr_start, binding_prefix_len)
-                            }
-                            None => (None, None, None, 0),
-                        };
+                    let (condition, condition_prefix) = match el.v_condition.as_ref() {
+                        Some(c) => {
+                            let role = match c.kind {
+                                ElementNodeConditionKind::If => ConditionChainRole::Start,
+                                ElementNodeConditionKind::ElseIf
+                                | ElementNodeConditionKind::Else => {
+                                    ConditionChainRole::Continuation
+                                }
+                            };
+                            // Build the ternary head for v-if/v-else-if (not v-else).
+                            // Wrap the pre-resolved expression plan from
+                            // `enter_element` (the only place with OXC binding data
+                            // for correct $setup./$props. prefixes) in the synthetic
+                            // `(` … `) ? ` so only authored identifiers map to source.
+                            let prefix = match c.kind {
+                                ElementNodeConditionKind::If | ElementNodeConditionKind::ElseIf => {
+                                    Some(self.condition_prefix_segments(child_id.0, c, source))
+                                }
+                                ElementNodeConditionKind::Else => None,
+                            };
+                            (Some(role), prefix)
+                        }
+                        None => (None, None),
+                    };
                     records.push(ChildRecord {
                         start: el.tag_open.start,
                         end,
                         kind: ChildKind::Element,
                         condition,
                         condition_prefix,
-                        condition_expr_start,
-                        condition_binding_prefix_len: cond_prefix_len,
                     });
                 }
                 AstNodeKind::Comment(comment) => {
@@ -262,8 +238,6 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                             kind: ChildKind::Comment,
                             condition: None,
                             condition_prefix: None,
-                            condition_expr_start: None,
-                            condition_binding_prefix_len: 0,
                         });
                     }
                 }
@@ -271,6 +245,33 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
         }
 
         records
+    }
+
+    /// Build the `(` … `) ? ` ternary head plan for a v-if/v-else-if element.
+    ///
+    /// Wraps the pre-resolved expression plan stored by `enter_element` (keyed
+    /// by AST node index) in the synthetic ternary head, so only authored
+    /// identifiers carry source-map tokens. `enter_element` always populates the
+    /// map for If/ElseIf; the raw-expression branch is a defensive fallback.
+    fn condition_prefix_segments(
+        &self,
+        node_idx: usize,
+        c: &ElementNodeCondition,
+        source: &str,
+    ) -> MappedGeneratedText {
+        match self.resolved_condition_prefixes.get(&node_idx) {
+            Some(expr) => expr.wrapped("(", ") ? "),
+            None => {
+                let raw_expr = helpers::extract_directive_value(&c.prop, source);
+                let value_start = c.prop.value_start.unwrap_or(0);
+                let expr = if raw_expr.is_empty() {
+                    MappedGeneratedText::synthetic("true")
+                } else {
+                    MappedGeneratedText::source(raw_expr, value_start)
+                };
+                expr.wrapped("(", ") ? ")
+            }
+        }
     }
 }
 
@@ -484,36 +485,16 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
                     prefix.push_str("return ");
                     out.overwrite(tag_open.start, child.start, &prefix);
 
-                    // Emit the v-if condition prefix with source mapping
+                    // Emit the v-if condition prefix with per-segment source mapping.
                     if let Some(ref cond) = child.condition_prefix {
-                        if let Some(expr_start) = child.condition_expr_start {
-                            children::emit_condition_prefix_mapped(
-                                out,
-                                child.start,
-                                expr_start,
-                                cond,
-                                child.condition_binding_prefix_len,
-                            );
-                        } else {
-                            out.prepend_alloc(child.start, cond);
-                        }
+                        children::emit_condition_prefix_mapped(out, child.start, cond);
                     }
 
                     // Emit condition prefixes for continuation children
                     // (v-else-if elements in the chain) with source mapping.
                     for cont in children.iter().skip(1) {
                         if let Some(ref cond) = cont.condition_prefix {
-                            if let Some(expr_start) = cont.condition_expr_start {
-                                children::emit_condition_prefix_mapped(
-                                    out,
-                                    cont.start,
-                                    expr_start,
-                                    cond,
-                                    cont.condition_binding_prefix_len,
-                                );
-                            } else {
-                                out.prepend_alloc(cont.start, cond);
-                            }
+                            children::emit_condition_prefix_mapped(out, cont.start, cond);
                         }
                     }
 
@@ -614,9 +595,9 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
                 ElementNodeConditionKind::If | ElementNodeConditionKind::ElseIf
             ) {
                 let raw_expr = helpers::extract_directive_value(&condition.prop, source);
+                let value_start = condition.prop.value_start.unwrap_or(0);
                 let resolved = if let Some(oxc_el) = oxc {
                     if let Some(oxc_cond) = &oxc_el.condition {
-                        use crate::template::code_gen::vapor::interpolation::build_prefixed_expr;
                         let ts_skip = if self.options.force_js {
                             oxc_cond
                                 .expression
@@ -628,18 +609,18 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
                         } else {
                             Vec::new()
                         };
-                        build_prefixed_expr(
+                        build_prefixed_expr_segments(
                             raw_expr,
-                            condition.prop.value_start.unwrap_or(0),
+                            value_start,
                             oxc_cond,
                             &self.resolver,
                             &ts_skip,
                         )
                     } else {
-                        self.resolver.resolve_simple_expr(raw_expr)
+                        resolve_simple_expr_segments(&self.resolver, raw_expr, value_start)
                     }
                 } else {
-                    self.resolver.resolve_simple_expr(raw_expr)
+                    resolve_simple_expr_segments(&self.resolver, raw_expr, value_start)
                 };
                 self.resolved_condition_prefixes.insert(id.0, resolved);
             }

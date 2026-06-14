@@ -49,6 +49,22 @@ pub fn condition_scope_close(kind: &ElementNodeConditionKind) -> ScopeClose {
 ///
 /// When `oxc` and `resolver` are provided, the iterable expression is resolved
 /// through the binding resolver for correct `$setup.`/`$props.` prefixes.
+///
+/// # Source-map invariant
+///
+/// The prefix is a single flat string carrying ONE source anchor —
+/// `iterable_source_start` — for the whole iterable expression, so the v-for
+/// iterable maps as a single source span. The iterable's bytes are resolved
+/// through the binding resolver (the generated `$setup.`/`$props.` text is
+/// correct), but the resolver-injected prefixes are NOT broken out into a
+/// per-identifier `MappedGeneratedText` segment plan the way v-if/v-else-if
+/// conditions are. Standalone-prepend consumers (the `<slot>` outlet) map the
+/// iterable at that single anchor; the open-tag consumers (element, `<template>`
+/// fragment, and component-with-slots paths) splice the prefix into one open-tag
+/// overwrite, where a multi-segment plan cannot be lowered without restructuring
+/// the overwrite emission and reordering the prefix against sibling prepends at
+/// the same anchor. Per-identifier source mapping of resolver scaffolding is
+/// applied at the condition sites only.
 pub fn build_for_prefix<'alloc>(
     v_for: &NodeProp,
     source: &str,

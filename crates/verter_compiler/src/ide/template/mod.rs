@@ -36,6 +36,9 @@ use crate::ast::types::{
 use crate::ide::condition::{self, ConditionScope};
 use crate::ide::template::emit::emit_synthesized_shorthand_value;
 use crate::template::code_gen::binding::{BindingResolver, BindingType};
+use crate::template::code_gen::expression::{
+    build_prefixed_expr_segments, resolve_simple_expr_segments,
+};
 use crate::template::code_gen::types::CodeGenOutput;
 use crate::template::oxc::types::{
     ComponentSlotSummary, OxcNodeData, OxcParsedAst, OxcParsedElement, SlotChildFact, SlotChildKind,
@@ -1566,18 +1569,20 @@ fn rewrite_component_is<'alloc>(
         return false;
     }
 
-    // All dynamic :is expressions use extractRenderComponent wrapper.
-    // Resolve binding prefixes (e.g., _ctx. for Data bindings)
+    // All dynamic :is expressions use the extractRenderComponent wrapper. The
+    // raw `:is` expression resolves through the shared segmented producer so the
+    // authored identifiers carry their source offsets while the resolver
+    // scaffolding (`_ctx.` / `__props.` prefixes, `.value` suffixes) stays
+    // unmapped.
     let oxc_prop = oxc_el.and_then(|el| el.prop(bind_is_index));
-    let resolved_expr = if let Some(oxc_p) = oxc_prop {
+    let resolved = if let Some(oxc_p) = oxc_prop {
         if let Some(ref exp) = oxc_p.exp {
-            use crate::template::code_gen::vapor::interpolation::build_prefixed_expr;
-            build_prefixed_expr(value_expr, value_start, exp, resolver, &[])
+            build_prefixed_expr_segments(value_expr, value_start, exp, resolver, &[])
         } else {
-            resolver.resolve_simple_expr(value_expr)
+            resolve_simple_expr_segments(resolver, value_expr, value_start)
         }
     } else {
-        resolver.resolve_simple_expr(value_expr)
+        resolve_simple_expr_segments(resolver, value_expr, value_start)
     };
 
     // Wrap in IIFE so the `const` declaration is valid in any context.
@@ -1608,18 +1613,14 @@ fn rewrite_component_is<'alloc>(
         }
         buf
     };
-    let content = format!(
-        "{}{});{} return ",
-        iife_prefix, resolved_expr, ts_comment_text
-    );
-    // Use mapped emission so the expression gets a source map token.
-    // This allows TSGO to map hover positions back to the Vue template.
-    out.prepend_alloc_mapped_with_offset(
-        el.tag_open.start,
-        value_start,
-        iife_prefix.len() as u32,
-        &content,
-    );
+    // Assemble the IIFE scaffolding around the mapped expression into one plan:
+    // `iife_prefix` opens the wrapper call, the suffix closes it (`);`), emits any
+    // TS directive comments, then ` return `. Both wrappers are synthetic, so only
+    // the authored `:is` identifiers carry source-map tokens — TSGO maps hover
+    // positions back to the Vue template through them.
+    let suffix = format!(");{} return ", ts_comment_text);
+    let plan = resolved.wrapped(&iife_prefix, &suffix);
+    out.prepend_mapped_generated_text(el.tag_open.start, &plan);
     rewrite_component_tag_name(el, temp_name, out);
 
     // Remove `:is="..."`

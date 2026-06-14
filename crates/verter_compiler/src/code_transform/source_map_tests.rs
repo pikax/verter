@@ -1049,3 +1049,84 @@ fn test_content_offset_clamped_if_exceeds_length() {
     let map = ct.generate_map(SourceMapOptions::new().with_source("test.vue"));
     let _tokens: Vec<_> = map.get_tokens().collect();
 }
+
+// ── segmented mapped insertions ─────────────────────────────
+
+/// A segmented mapped insertion — multiple `InsertedMapped` items at ONE anchor,
+/// mixing synthetic runs (content_offset == len → no source token) with a
+/// source-derived run (offset 0 → token at its start) — places exactly one
+/// source token per source segment and NONE for the synthetic runs. This is the
+/// chunk-level shape `CodeGenOutput::prepend_mapped_generated_text` lowers to; it
+/// pins the source-map emission the segmented op depends on.
+///
+/// The suffix negative assertion is the key segmented guarantee: emitting one
+/// concatenated token for the whole insertion would bleed the `count` mapping
+/// across the synthetic ` + 1)` suffix.
+#[test]
+fn segmented_mapped_insertion_emits_one_token_per_source_segment() {
+    let allocator = Allocator::default();
+    // Source: "abc count def" — "count" starts at byte 4.
+    let source = "abc count def";
+    let mut ct = CodeTransform::new(source, &allocator);
+    // Insert "(__props.count + 1)" before "def" (pos 10) as three segments:
+    //   synthetic "(__props." (offset 9 == len → no token),
+    //   source    "count"     (offset 0 → token → src 4),
+    //   synthetic " + 1)"      (offset 5 == len → no token).
+    ct.batch_prepend_left_with_source_map(&[
+        (10, Some((0, 9)), "(__props."),
+        (10, Some((4, 0)), "count"),
+        (10, Some((0, 5)), " + 1)"),
+    ]);
+
+    assert_eq!(ct.build_string(), "abc count (__props.count + 1)def");
+
+    let map = ct.generate_map(SourceMapOptions::new().with_source("test.vue"));
+    let tokens: Vec<_> = map.get_tokens().collect();
+    let dump: Vec<_> = tokens
+        .iter()
+        .map(|t| {
+            (
+                t.get_dst_col(),
+                t.get_src_col(),
+                t.get_source_id().is_some(),
+            )
+        })
+        .collect();
+
+    // The source segment "count" → token at gen col 19 (10 + len "(__props.")
+    // mapping to src col 4.
+    let count = tokens
+        .iter()
+        .find(|t| t.get_dst_col() == 19 && t.get_source_id().is_some())
+        .unwrap_or_else(|| panic!("count segment must map to a source token; tokens: {dump:?}"));
+    assert_eq!(count.get_src_col(), 4, "count must map to src col 4");
+    assert_eq!(count.get_src_line(), 0);
+
+    // Negative: the synthetic prefix region [10, 19) carries NO source token.
+    assert!(
+        !tokens
+            .iter()
+            .any(|t| t.get_dst_col() >= 10 && t.get_dst_col() < 19 && t.get_source_id().is_some()),
+        "synthetic prefix must emit no source token; tokens: {dump:?}"
+    );
+    // Discriminating: the synthetic suffix ` + 1)` must START its OWN unmapped
+    // segment at gen col 24 (its own token, source_id none). A single
+    // concatenated `InsertedMapped` chunk emits the mapped token at the content
+    // offset and then advances through the whole rest, so NO token would start
+    // at col 24 and the `count` mapping would silently cover the suffix — this
+    // positive assertion fails on that bleed where a "no token starts here"
+    // check would not.
+    assert!(
+        tokens
+            .iter()
+            .any(|t| t.get_dst_col() == 24 && t.get_source_id().is_none()),
+        "synthetic suffix must start an unmapped segment at col 24; tokens: {dump:?}"
+    );
+    // Negative: the synthetic suffix region [24, 29) carries NO source token.
+    assert!(
+        !tokens
+            .iter()
+            .any(|t| t.get_dst_col() >= 24 && t.get_dst_col() < 29 && t.get_source_id().is_some()),
+        "synthetic suffix must emit no source token (no mapping bleed); tokens: {dump:?}"
+    );
+}
