@@ -1,6 +1,6 @@
 use super::*;
 
-fn parse(source: &str) -> VForParseResult<'static> {
+fn parse(source: &'static str) -> VForParseResult<'static> {
     let allocator = Box::leak(Box::new(Allocator::default()));
     parse_vfor(allocator, source, SourceType::tsx())
 }
@@ -490,4 +490,225 @@ fn test_bindings_references_sorted_by_position() {
             pair[1].slice(source),
         );
     }
+}
+
+// ── Exact absolute-span characterization (refactor must not shift any span) ──
+
+fn label_offsets(errs: &[oxc_diagnostics::OxcDiagnostic]) -> Vec<usize> {
+    let mut out = Vec::new();
+    for err in errs {
+        if let Some(labels) = &err.labels {
+            for label in labels.iter() {
+                out.push(label.offset());
+            }
+        }
+    }
+    out
+}
+
+/// Pins the EXACT file-relative positions of the parsed `left`/`right` AST spans,
+/// the destructured locals, and the (sorted) references for a non-zero-offset
+/// v-for with `(pattern) in member[expr].path`. Any one-byte drift in how the
+/// left/right slices are parsed or shifted moves one of these and fails.
+#[test]
+fn exact_spans_destructuring_and_member_references() {
+    let allocator = Box::leak(Box::new(Allocator::default()));
+    //               0         1         2         3
+    //               0123456789012345678901234567890123456789
+    let input = r#"<li v-for="(row, i) in data[k].cells">"#;
+    // value `(row, i) in data[k].cells` spans [11, 36)
+    let wb = parse_vfor_with_bindings_sliced(
+        allocator,
+        Span::new(11, 36),
+        input,
+        SourceType::tsx(),
+        &[],
+    );
+
+    assert!(wb.is_ok());
+    assert!(!wb.is_of());
+    assert_eq!(wb.left_offset(), 11);
+    assert_eq!(wb.right_offset(), 23); // 11 + 12 ("(row, i) in " = 12 chars)
+
+    // Left `(row, i)` ParenthesizedExpression spans exactly [11, 19).
+    match wb.left() {
+        Some(Expression::ParenthesizedExpression(paren)) => {
+            assert_eq!(paren.span.start, 11);
+            assert_eq!(paren.span.end, 19);
+        }
+        other => panic!("Expected ParenthesizedExpression, got {other:?}"),
+    }
+
+    // Right `data[k].cells` StaticMemberExpression spans exactly [23, 36).
+    match wb.right() {
+        Some(Expression::StaticMemberExpression(mem)) => {
+            assert_eq!(mem.span.start, 23);
+            assert_eq!(mem.span.end, 36);
+        }
+        other => panic!("Expected StaticMemberExpression, got {other:?}"),
+    }
+
+    // Locals in source order: row [12,15), i [17,18).
+    assert_eq!(wb.locals.len(), 2);
+    assert_eq!((wb.locals[0].start, wb.locals[0].end), (12, 15));
+    assert_eq!(wb.locals[0].slice(input), "row");
+    assert_eq!((wb.locals[1].start, wb.locals[1].end), (17, 18));
+    assert_eq!(wb.locals[1].slice(input), "i");
+
+    // References sorted by start: data [23,27), k [28,29). `cells` is a property.
+    assert_eq!(wb.references.len(), 2);
+    assert_eq!((wb.references[0].start, wb.references[0].end), (23, 27));
+    assert_eq!(wb.references[0].slice(input), "data");
+    assert_eq!((wb.references[1].start, wb.references[1].end), (28, 29));
+    assert_eq!(wb.references[1].slice(input), "k");
+}
+
+/// Pins that a v-for parse error's diagnostic label lands at the file-relative
+/// position — i.e. the sliced label equals the raw (offset-0) label shifted by
+/// exactly the slice start. Independent of OXC's internal label placement.
+#[test]
+fn exact_diagnostic_offset_shift_on_malformed_right() {
+    let allocator = Box::leak(Box::new(Allocator::default()));
+    let bad = "item of foo(";
+
+    let raw = parse_vfor(allocator, bad, SourceType::tsx());
+    assert!(raw.has_right_errors(), "expected a right-side parse error");
+    let raw_off = label_offsets(&raw.right_errors);
+    assert!(!raw_off.is_empty(), "expected a labeled right-side error");
+
+    let input = format!("<li v-for=\"{bad}\">");
+    let start = "<li v-for=\"".len() as u32;
+    let sliced = parse_vfor_sliced(
+        allocator,
+        Span::new(start, start + bad.len() as u32),
+        &input,
+        SourceType::tsx(),
+    );
+    assert!(sliced.has_right_errors());
+    let sliced_off = label_offsets(&sliced.right_errors);
+
+    assert_eq!(sliced_off.len(), raw_off.len());
+    for (raw_label, sliced_label) in raw_off.iter().zip(&sliced_off) {
+        assert_eq!(
+            *sliced_label,
+            *raw_label + start as usize,
+            "diagnostic label must shift by exactly the slice start"
+        );
+    }
+}
+
+/// Pins exact nested right-expression inner spans (call args, member access) so a
+/// recursive span-walk regression on the right side is caught.
+#[test]
+fn exact_nested_right_expression_spans() {
+    let allocator = Box::leak(Box::new(Allocator::default()));
+    //               0         1         2         3
+    //               0123456789012345678901234567890123456789
+    let input = r#"prefix__item of fn(a, b.c)__suffix"#;
+    let start = "prefix__".len() as u32; // 8
+    let end = start + "item of fn(a, b.c)".len() as u32;
+    let result = parse_vfor_sliced(allocator, Span::new(start, end), input, SourceType::tsx());
+
+    assert!(result.is_ok());
+    assert_eq!(result.left_offset, 8);
+    assert_eq!(result.right_offset, 16); // 8 + 8 ("item of " = 8 chars)
+
+    // Right `fn(a, b.c)` is a CallExpression; inner identifiers must be file-relative.
+    match &result.right {
+        Some(Expression::CallExpression(call)) => {
+            // `fn` callee at [16, 18)
+            match &call.callee {
+                Expression::Identifier(id) => {
+                    assert_eq!((id.span.start, id.span.end), (16, 18));
+                    assert_eq!(id.name.as_str(), "fn");
+                }
+                other => panic!("Expected callee Identifier, got {other:?}"),
+            }
+            assert_eq!(call.arguments.len(), 2);
+            // arg `a` at [19, 20)
+            match call.arguments[0].as_expression() {
+                Some(Expression::Identifier(id)) => {
+                    assert_eq!((id.span.start, id.span.end), (19, 20));
+                }
+                other => panic!("Expected arg Identifier, got {other:?}"),
+            }
+            // arg `b.c` StaticMember at [22, 25), object `b` at [22, 23)
+            match call.arguments[1].as_expression() {
+                Some(Expression::StaticMemberExpression(mem)) => {
+                    assert_eq!((mem.span.start, mem.span.end), (22, 25));
+                    match &mem.object {
+                        Expression::Identifier(id) => {
+                            assert_eq!((id.span.start, id.span.end), (22, 23));
+                        }
+                        other => panic!("Expected member object Identifier, got {other:?}"),
+                    }
+                }
+                other => panic!("Expected StaticMemberExpression, got {other:?}"),
+            }
+        }
+        other => panic!("Expected CallExpression, got {other:?}"),
+    }
+}
+
+/// Pins exact file-relative spans for shorthand object destructuring at a
+/// non-zero offset. The left `{ id, name }` parses as an object EXPRESSION whose
+/// shorthand keys are the binding sites.
+///
+/// Discrimination: the single-pass slice parse shifts the AST static-identifier
+/// KEY spans straight to file-relative, then reads locals from that shifted tree.
+/// The prior two-pass path left those key spans substring-relative (the file-only
+/// walk skipped non-`Expression` keys) and only manually shifted the extracted
+/// LOCAL copies afterward — so a locals-only assertion passes on both. Asserting
+/// the raw `result.left` key spans below fails on that prior path (keys at 2/6)
+/// and passes only once the key span moves with the rest of the tree (13/17).
+#[test]
+fn exact_spans_shorthand_object_destructuring_locals() {
+    let allocator = Box::leak(Box::new(Allocator::default()));
+    //               0         1         2         3
+    //               0123456789012345678901234567890123
+    let input = r#"<li v-for="{ id, name } of items">"#;
+    // value `{ id, name } of items` spans [11, 32)
+    let wb = parse_vfor_with_bindings_sliced(
+        allocator,
+        Span::new(11, 32),
+        input,
+        SourceType::tsx(),
+        &[],
+    );
+
+    assert!(wb.is_ok());
+    assert!(wb.is_of());
+    assert_eq!(wb.left_offset(), 11);
+    assert_eq!(wb.right_offset(), 27); // 11 + 16 ("{ id, name } of " = 16 chars)
+
+    // The raw AST shorthand-key spans are file-relative — the position that
+    // actually changed under slice-parsing. Substring-relative keys (2/6) fail here.
+    match wb.left() {
+        Some(Expression::ObjectExpression(obj)) => {
+            assert_eq!(obj.properties.len(), 2);
+            let key_span = |i: usize| match &obj.properties[i] {
+                ObjectPropertyKind::ObjectProperty(p) => match &p.key {
+                    PropertyKey::StaticIdentifier(id) => (id.span.start, id.span.end),
+                    other => panic!("Expected StaticIdentifier key, got {other:?}"),
+                },
+                other => panic!("Expected ObjectProperty, got {other:?}"),
+            };
+            assert_eq!(key_span(0), (13, 15));
+            assert_eq!(key_span(1), (17, 21));
+        }
+        other => panic!("Expected left ObjectExpression, got {other:?}"),
+    }
+
+    // Locals in source order: id [13,15), name [17,21) — file-relative.
+    assert_eq!(wb.locals.len(), 2);
+    assert_eq!((wb.locals[0].start, wb.locals[0].end), (13, 15));
+    assert_eq!(wb.locals[0].slice(input), "id");
+    assert_eq!((wb.locals[1].start, wb.locals[1].end), (17, 21));
+    assert_eq!(wb.locals[1].slice(input), "name");
+
+    // Single reference `items` [27,32) — file-relative, and the locals are not
+    // mistakenly collected as references.
+    assert_eq!(wb.references.len(), 1);
+    assert_eq!((wb.references[0].start, wb.references[0].end), (27, 32));
+    assert_eq!(wb.references[0].slice(input), "items");
 }

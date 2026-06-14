@@ -8,6 +8,7 @@
 
 mod script_generic;
 mod span;
+mod span_shift;
 mod vfor;
 mod vslot;
 
@@ -19,8 +20,9 @@ pub use script_generic::{
 };
 pub use span::{
     adjust_diagnostics_spans, adjust_expression_spans, adjust_formal_parameters_spans,
-    adjust_program_spans, subtract_formal_parameters_spans,
+    adjust_program_spans,
 };
+pub use span_shift::shift_formal_parameters_spans;
 pub use vfor::{
     extract_vfor_positions, parse_vfor, parse_vfor_sliced, parse_vfor_with_bindings,
     parse_vfor_with_bindings_sliced, VForParseResult, VForWithBindings,

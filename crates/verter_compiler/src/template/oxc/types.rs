@@ -395,26 +395,27 @@ impl<'alloc> OxcParsedAst<'alloc> {
     /// and directive prop values/args. Useful for applying bulk transforms
     /// (e.g., TypeScript stripping) across all template expressions.
     pub fn iter_expressions(&self) -> impl Iterator<Item = &OxcParsedExpression<'alloc>> {
-        self.data.iter().flat_map(|node| match node {
-            OxcNodeData::Interpolation(expr) => {
-                vec![expr]
-            }
-            OxcNodeData::Element(el) => {
-                let mut exprs = Vec::new();
-                if let Some(ref cond) = el.condition {
-                    exprs.push(cond);
-                }
-                for prop in &el.props {
-                    if let Some(ref arg) = prop.arg {
-                        exprs.push(arg);
-                    }
-                    if let Some(ref exp) = prop.exp {
-                        exprs.push(exp);
-                    }
-                }
-                exprs
-            }
-            OxcNodeData::None => Vec::new(),
+        self.data.iter().flat_map(|node| {
+            // Each node contributes a "primary" optional expression (interpolation
+            // body or element condition) followed by every prop's arg then exp.
+            // Expressing this as borrowed option/slice iterator chains keeps the
+            // traversal allocation-free — no per-node `Vec` is materialized — while
+            // preserving the exact yield order (condition, then each prop arg/exp
+            // in source order).
+            let (primary, props): (
+                Option<&OxcParsedExpression<'alloc>>,
+                &[OxcParsedProp<'alloc>],
+            ) = match node {
+                OxcNodeData::Interpolation(expr) => (Some(expr), &[]),
+                OxcNodeData::Element(el) => (el.condition.as_ref(), el.props.as_slice()),
+                OxcNodeData::None => (None, &[]),
+            };
+
+            primary.into_iter().chain(
+                props
+                    .iter()
+                    .flat_map(|prop| prop.arg.as_ref().into_iter().chain(prop.exp.as_ref())),
+            )
         })
     }
 }
@@ -479,5 +480,88 @@ mod expression_flag_tests {
             ExpressionFlags::AllInterpolationsStatic.name(),
             "ALL_INTERPOLATIONS_STATIC"
         );
+    }
+}
+
+#[cfg(test)]
+mod iter_expressions_tests {
+    //! Characterization locks for the public yield contract of [`OxcParsedAst::iter_expressions`].
+    //!
+    //! The allocation-free option/slice-chain implementation is output-identical to
+    //! a per-node `Vec`, so these assertions pass on either form by design — they
+    //! are not regression tests that distinguish the two. Their purpose is to pin
+    //! the exact yield contract (order, interleaving, empty-skipping) so any FUTURE
+    //! drift in the lazy traversal is caught.
+    use super::*;
+
+    /// Build a minimal parsed expression carrying only a distinct `offset` so the
+    /// yield sequence can be identified unambiguously by offset.
+    fn expr(offset: u32) -> OxcParsedExpression<'static> {
+        OxcParsedExpression {
+            offset,
+            expression: None,
+            errors: None,
+            bindings: None,
+            dynamism: Dynamism::Static,
+        }
+    }
+
+    fn element(
+        condition: Option<u32>,
+        props: &[(Option<u32>, Option<u32>)],
+    ) -> OxcNodeData<'static> {
+        OxcNodeData::Element(Box::new(OxcParsedElement {
+            condition: condition.map(expr),
+            v_for: None,
+            v_slot: None,
+            props: props
+                .iter()
+                .enumerate()
+                .map(|(i, (arg, exp))| OxcParsedProp {
+                    prop_index: i,
+                    arg: arg.map(expr),
+                    exp: exp.map(expr),
+                })
+                .collect(),
+            prop_lookup: Vec::new(),
+            provided_locals: None,
+            expression_flag: ExpressionFlag::empty(),
+        }))
+    }
+
+    /// Pins the yield contract: interpolation bodies, then per element the
+    /// condition followed by each prop's arg then exp, in source order. A future
+    /// reordering or omission changes this offset sequence and fails the test.
+    #[test]
+    fn yields_interleaved_expressions_in_source_order() {
+        let ast = OxcParsedAst::new(vec![
+            OxcNodeData::Interpolation(expr(10)),
+            OxcNodeData::Interpolation(expr(20)),
+            element(
+                Some(30),
+                &[(Some(40), Some(50)), (None, Some(60)), (Some(70), None)],
+            ),
+            OxcNodeData::None,
+            OxcNodeData::Interpolation(expr(80)),
+        ]);
+
+        let got: Vec<u32> = ast.iter_expressions().map(|e| e.offset).collect();
+        assert_eq!(got, vec![10, 20, 30, 40, 50, 60, 70, 80]);
+    }
+
+    /// `None` nodes and elements without a condition or expression-bearing props
+    /// contribute nothing — and an all-empty AST yields an empty sequence.
+    #[test]
+    fn skips_nodes_without_expressions() {
+        let empty = OxcParsedAst::new(vec![
+            OxcNodeData::None,
+            element(None, &[(None, None)]),
+            OxcNodeData::None,
+        ]);
+        assert_eq!(empty.iter_expressions().count(), 0);
+
+        let only_exp = OxcParsedAst::new(vec![element(None, &[(None, Some(7))])]);
+        let got: Vec<u32> = only_exp.iter_expressions().map(|e| e.offset).collect();
+        assert_eq!(got, vec![7]);
     }
 }
