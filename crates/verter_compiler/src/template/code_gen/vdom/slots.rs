@@ -878,8 +878,7 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                     if ei > 0 {
                         if is_continuation {
                             if let Some(ref prefix) = child.condition_prefix {
-                                let sep = format!(" : {prefix}");
-                                out.prepend_alloc(child.start, &sep);
+                                out.prepend_fmt(child.start, format_args!(" : {prefix}"));
                             } else {
                                 out.prepend_static(child.start, " : ");
                             }
@@ -900,8 +899,10 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                     let has_vfor = slot_vfor_info.contains_key(&child.start);
                     if has_vfor {
                         let (params, iterable) = slot_vfor_info.get(&child.start).unwrap();
-                        let vfor_open = format!("_renderList({iterable}, ({params}) => {{return ");
-                        out.prepend_alloc(child.start, &vfor_open);
+                        out.prepend_fmt(
+                            child.start,
+                            format_args!("_renderList({iterable}, ({params}) => {{return "),
+                        );
                         out.add_vdom_import(VdomHelper::RenderList);
                     }
 
@@ -1303,14 +1304,18 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                     if child.kind == ChildKind::Text {
                         // Single static text: wrap in _createTextVNode inside cache
                         out.add_vdom_import(VdomHelper::CreateTextVNode);
-                        let prefix = format!(
-                            "_cache[{cache_idx}] || (_cache[{cache_idx}] = _createTextVNode(\""
+                        out.prepend_fmt(
+                            child.start,
+                            format_args!(
+                                "_cache[{cache_idx}] || (_cache[{cache_idx}] = _createTextVNode(\""
+                            ),
                         );
-                        out.prepend_alloc(child.start, &prefix);
                         out.prepend_static(child.end, "\"))");
                     } else {
-                        let prefix = format!("_cache[{cache_idx}] || (_cache[{cache_idx}] = ");
-                        out.prepend_alloc(child.start, &prefix);
+                        out.prepend_fmt(
+                            child.start,
+                            format_args!("_cache[{cache_idx}] || (_cache[{cache_idx}] = "),
+                        );
                         out.prepend_static(child.end, ")");
                     }
                 } else {
@@ -1318,8 +1323,10 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                     let first = &children[run_start];
                     let last = &children[run_end - 1];
 
-                    let prefix = format!("...(_cache[{cache_idx}] || (_cache[{cache_idx}] = [");
-                    out.prepend_alloc(first.start, &prefix);
+                    out.prepend_fmt(
+                        first.start,
+                        format_args!("...(_cache[{cache_idx}] || (_cache[{cache_idx}] = ["),
+                    );
 
                     // Emit inner items: separators + text wrapping within the cache group.
                     // All items are static, so no v-if/interpolation to handle.

@@ -60,6 +60,13 @@ pub struct CodeGenOutput<'alloc> {
 
     /// Allocator reference for bump-allocating generated strings.
     alloc: &'alloc Allocator,
+
+    /// One reusable scratch buffer for the `write!`-style format sinks
+    /// (`overwrite_fmt`, `prepend_fmt`, and the mapped variants). Each sink
+    /// clears and reuses it, so a formatted emission costs the retained heap
+    /// capacity plus one bump copy — never a fresh `String` per call. It is
+    /// an operation-construction helper only; it never holds built output.
+    scratch: String,
 }
 
 impl<'alloc> CodeGenOutput<'alloc> {
@@ -76,6 +83,7 @@ impl<'alloc> CodeGenOutput<'alloc> {
             moves: Vec::new(),
             wrapped_moves: Vec::new(),
             alloc,
+            scratch: String::new(),
         }
     }
 
@@ -153,6 +161,84 @@ impl<'alloc> CodeGenOutput<'alloc> {
             .push((pos, source_pos, content_offset, allocated));
     }
 
+    /// Write `args` into the reusable scratch buffer and bump-allocate the
+    /// result once. The buffer is cleared first and its capacity is retained
+    /// for the next emission, so repeated formatted emissions reuse one
+    /// allocation instead of allocating a fresh `String` per call.
+    #[inline]
+    fn alloc_fmt(&mut self, args: std::fmt::Arguments<'_>) -> &'alloc str {
+        use std::fmt::Write as _;
+        self.scratch.clear();
+        // Appending to a `String` never fails; `write_fmt` can only return
+        // `Err` if a `Display`/`Debug` impl inside `args` does. Surface that
+        // as a panic rather than silently recording partial content.
+        self.scratch
+            .write_fmt(args)
+            .expect("CodeGenOutput format sink: Display impl must not fail");
+        self.alloc.alloc_str(&self.scratch)
+    }
+
+    /// Push an overwrite whose content is produced by a `write!`-style format
+    /// directly into the reusable scratch buffer, then bump-allocated once.
+    ///
+    /// Output-equivalent to `overwrite(start, end, &format!(...))` but avoids
+    /// the intermediate per-call `String` allocation. The recorded operation
+    /// is an ordinary overwrite — only the string PRODUCTION changes.
+    #[inline]
+    pub fn overwrite_fmt(&mut self, start: u32, end: u32, args: std::fmt::Arguments<'_>) {
+        let allocated = self.alloc_fmt(args);
+        self.overwrites.push((start, end, allocated));
+    }
+
+    /// Push a prepend-left whose content is produced by a `write!`-style
+    /// format into the reusable scratch buffer, then bump-allocated once.
+    ///
+    /// Output-equivalent to `prepend_alloc(pos, &format!(...))`.
+    #[inline]
+    pub fn prepend_fmt(&mut self, pos: u32, args: std::fmt::Arguments<'_>) {
+        let allocated = self.alloc_fmt(args);
+        self.prepends.push((pos, allocated));
+    }
+
+    /// Push a source-mapped prepend-left whose content is produced by a
+    /// `write!`-style format into the reusable scratch buffer. The source map
+    /// token is placed at the start of the content (offset 0).
+    ///
+    /// Output-equivalent to `prepend_alloc_mapped(pos, source_pos, &format!(...))`.
+    ///
+    /// Rounds out the format-sink family alongside its `*_with_offset` peer;
+    /// exercised by the format-sink equivalence tests.
+    #[allow(dead_code)]
+    #[inline]
+    pub fn prepend_fmt_mapped(&mut self, pos: u32, source_pos: u32, args: std::fmt::Arguments<'_>) {
+        let allocated = self.alloc_fmt(args);
+        self.mapped_prepends.push((pos, source_pos, 0, allocated));
+    }
+
+    /// Push a source-mapped prepend-left with an explicit content offset whose
+    /// content is produced by a `write!`-style format into the reusable
+    /// scratch buffer. Characters before `content_offset` are unmapped; the
+    /// source map token is placed at `content_offset`, pointing to `source_pos`.
+    ///
+    /// Output-equivalent to
+    /// `prepend_alloc_mapped_with_offset(pos, source_pos, content_offset, &format!(...))`.
+    ///
+    /// Rounds out the format-sink family alongside its zero-offset peer;
+    /// exercised by the format-sink equivalence tests.
+    #[allow(dead_code)]
+    #[inline]
+    pub fn prepend_fmt_mapped_with_offset(
+        &mut self,
+        pos: u32,
+        source_pos: u32,
+        content_offset: u32,
+        args: std::fmt::Arguments<'_>,
+    ) {
+        let allocated = self.alloc_fmt(args);
+        self.mapped_prepends
+            .push((pos, source_pos, content_offset, allocated));
+    }
+
     /// Push a move operation: move source range [start, end) to target position.
     #[inline]
     pub fn move_slice(&mut self, start: u32, end: u32, target: u32) {
@@ -214,6 +300,15 @@ impl<'alloc> CodeGenOutput<'alloc> {
     #[inline]
     pub fn vapor_imports(&self) -> VaporHelperFlags {
         self.vapor_imports
+    }
+
+    /// Current capacity of the reusable format-sink scratch buffer.
+    /// Lets tests prove the buffer is reused (capacity retained) across
+    /// formatted emissions rather than reallocated per call.
+    #[cfg(test)]
+    #[inline]
+    pub fn scratch_capacity(&self) -> usize {
+        self.scratch.capacity()
     }
 
     /// Sort and apply all accumulated operations to a CodeTransform.
@@ -1112,5 +1207,164 @@ mod tests {
             mapped.is_some(),
             "should have source-mapped token at src col 20"
         );
+    }
+
+    // ==================== Format-sink emission APIs ====================
+
+    /// `overwrite_fmt` must produce a byte-identical operation to
+    /// `overwrite(start, end, &format!(...))`: same content string, same
+    /// range, same built output. The format sink only changes how the
+    /// operation's string is PRODUCED (reusable scratch + one bump copy),
+    /// never the edit semantics.
+    #[test]
+    fn overwrite_fmt_matches_overwrite_with_format() {
+        let alloc = Allocator::default();
+        let source = "0123456789ABCDE";
+
+        let mut via_format = CodeGenOutput::new(&alloc);
+        via_format.overwrite(0, 5, &format!("x{}y{}", 1, "z"));
+
+        let mut via_fmt = CodeGenOutput::new(&alloc);
+        via_fmt.overwrite_fmt(0, 5, format_args!("x{}y{}", 1, "z"));
+
+        // Same recorded operation (range + content bytes).
+        assert_eq!(via_format.overwrites, via_fmt.overwrites);
+
+        // Same built output.
+        let mut ct_a = crate::code_transform::CodeTransform::new(source, &alloc);
+        via_format.apply_to(&mut ct_a);
+        let mut ct_b = crate::code_transform::CodeTransform::new(source, &alloc);
+        via_fmt.apply_to(&mut ct_b);
+        assert_eq!(ct_a.build_string(), ct_b.build_string());
+        assert_eq!(ct_b.build_string(), "x1yz56789ABCDE");
+    }
+
+    /// `prepend_fmt` must produce a byte-identical operation to
+    /// `prepend_alloc(pos, &format!(...))`.
+    #[test]
+    fn prepend_fmt_matches_prepend_alloc_with_format() {
+        let alloc = Allocator::default();
+        let source = "ABCDEFGHIJ";
+
+        let mut via_format = CodeGenOutput::new(&alloc);
+        via_format.prepend_alloc(5, &format!("{}: ", "foo"));
+
+        let mut via_fmt = CodeGenOutput::new(&alloc);
+        via_fmt.prepend_fmt(5, format_args!("{}: ", "foo"));
+
+        assert_eq!(via_format.prepends, via_fmt.prepends);
+
+        let mut ct_a = crate::code_transform::CodeTransform::new(source, &alloc);
+        via_format.apply_to(&mut ct_a);
+        let mut ct_b = crate::code_transform::CodeTransform::new(source, &alloc);
+        via_fmt.apply_to(&mut ct_b);
+        assert_eq!(ct_a.build_string(), ct_b.build_string());
+        assert_eq!(ct_b.build_string(), "ABCDEfoo: FGHIJ");
+    }
+
+    /// `prepend_fmt_mapped` records the same mapped operation as
+    /// `prepend_alloc_mapped` (content_offset 0), and both paths build
+    /// byte-identical output.
+    #[test]
+    fn prepend_fmt_mapped_matches_prepend_alloc_mapped() {
+        let alloc = Allocator::default();
+        let source = "0123456789ABCDEFGHIJ";
+
+        let mut via_alloc = CodeGenOutput::new(&alloc);
+        via_alloc.prepend_alloc_mapped(10, 20, &format!("({}) ? ", "show"));
+
+        let mut via_fmt = CodeGenOutput::new(&alloc);
+        via_fmt.prepend_fmt_mapped(10, 20, format_args!("({}) ? ", "show"));
+
+        // Same recorded operation (mapped-prepend vec, content_offset 0).
+        assert_eq!(via_alloc.mapped_prepends, via_fmt.mapped_prepends);
+        assert_eq!(via_fmt.mapped_prepends[0].2, 0); // content_offset
+
+        // Both paths build byte-identical output.
+        let mut ct_alloc = crate::code_transform::CodeTransform::new(source, &alloc);
+        via_alloc.apply_to(&mut ct_alloc);
+        let mut ct_fmt = crate::code_transform::CodeTransform::new(source, &alloc);
+        via_fmt.apply_to(&mut ct_fmt);
+        assert_eq!(ct_alloc.build_string(), ct_fmt.build_string());
+        assert_eq!(ct_fmt.build_string(), "0123456789(show) ? ABCDEFGHIJ");
+    }
+
+    /// `prepend_fmt_mapped_with_offset` records the same mapped operation
+    /// (explicit source offset) as `prepend_alloc_mapped_with_offset`, both
+    /// paths build byte-identical output, and the resulting source map emits a
+    /// token at the requested source position offset within the formatted
+    /// content.
+    #[test]
+    fn prepend_fmt_mapped_with_offset_matches_and_maps() {
+        let alloc = Allocator::default();
+        let source = "0123456789ABCDEFGHIJKLMNOP";
+
+        let mut via_alloc = CodeGenOutput::new(&alloc);
+        via_alloc.prepend_alloc_mapped_with_offset(5, 20, 1, &format!("({}", "show"));
+
+        let mut via_fmt = CodeGenOutput::new(&alloc);
+        via_fmt.prepend_fmt_mapped_with_offset(5, 20, 1, format_args!("({}", "show"));
+
+        // Same recorded operation.
+        assert_eq!(via_alloc.mapped_prepends, via_fmt.mapped_prepends);
+
+        // Both paths build byte-identical output.
+        let mut ct_alloc = crate::code_transform::CodeTransform::new(source, &alloc);
+        via_alloc.apply_to(&mut ct_alloc);
+        let mut ct_fmt = crate::code_transform::CodeTransform::new(source, &alloc);
+        via_fmt.apply_to(&mut ct_fmt);
+        assert_eq!(ct_alloc.build_string(), ct_fmt.build_string());
+        assert_eq!(ct_fmt.build_string(), "01234(show56789ABCDEFGHIJKLMNOP");
+
+        // The format-sink path emits a source-mapped token at src col 20.
+        let map = ct_fmt
+            .generate_map(crate::code_transform::SourceMapOptions::new().with_source("test.vue"));
+        let tokens: Vec<_> = map.get_tokens().collect();
+        let mapped = tokens
+            .iter()
+            .find(|t| t.get_src_col() == 20 && t.get_source_id().is_some());
+        assert!(
+            mapped.is_some(),
+            "format-sink mapped prepend should emit a source-mapped token at src col 20"
+        );
+    }
+
+    /// Allocation-reduction invariant: the format sinks share ONE reusable
+    /// scratch buffer that is cleared and reused per emission. A large emission
+    /// grows the buffer; every subsequent smaller emission reuses the retained
+    /// capacity instead of allocating a fresh `String`. Pinning the retained
+    /// capacity across many emissions discriminates the one-reused-buffer sink
+    /// from a per-call fresh-`String` sink (which carries no capacity between
+    /// calls).
+    #[test]
+    fn format_sinks_reuse_one_scratch_buffer() {
+        let alloc = Allocator::default();
+        let mut out = CodeGenOutput::new(&alloc);
+
+        // A long emission forces the scratch buffer to grow.
+        let long = "y".repeat(256);
+        out.overwrite_fmt(0, 1, format_args!("{}", long));
+        let cap_after_long = out.scratch_capacity();
+        assert!(
+            cap_after_long >= 256,
+            "scratch buffer should hold the long emission (cap {cap_after_long})"
+        );
+
+        // Many subsequent short emissions must reuse the retained capacity —
+        // the buffer is never reallocated smaller, and no fresh String is
+        // created per call.
+        for i in 0..1000u32 {
+            out.prepend_fmt(i, format_args!("{}", i % 10));
+        }
+        assert_eq!(
+            out.scratch_capacity(),
+            cap_after_long,
+            "scratch capacity must be retained across emissions (one reused buffer, \
+             not a fresh String per call)"
+        );
+
+        // The operations were still recorded correctly (1 overwrite + 1000 prepends).
+        assert_eq!(out.overwrites.len(), 1);
+        assert_eq!(out.prepends.len(), 1000);
     }
 }

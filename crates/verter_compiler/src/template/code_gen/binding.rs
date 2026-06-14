@@ -329,7 +329,7 @@ impl<'alloc> BindingResolver<'alloc> {
             // it to `{ foo: $setup.foo }` to keep valid JS. We prepend "foo: "
             // at the same position before the prefix; stable sort preserves order.
             if binding.is_shorthand && (!prefix.is_empty() || !suffix.is_empty()) {
-                out.prepend_alloc(binding.pos, &format!("{}: ", binding.name));
+                out.prepend_fmt(binding.pos, format_args!("{}: ", binding.name));
             }
 
             if !prefix.is_empty() {

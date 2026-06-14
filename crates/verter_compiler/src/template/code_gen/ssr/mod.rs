@@ -4568,8 +4568,11 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
                     if self.in_push {
                         out.overwrite(el.tag_open.start, el.tag_open.end, &self.buf);
                     } else {
-                        let s = format!("_push(`{}`)\n", self.buf);
-                        out.overwrite(el.tag_open.start, el.tag_open.end, &s);
+                        out.overwrite_fmt(
+                            el.tag_open.start,
+                            el.tag_open.end,
+                            format_args!("_push(`{}`)\n", self.buf),
+                        );
                     }
                     self.elem_ctx.push(ElemCtx::TransitionGroupTag(tg_tag));
                     return super::WalkAction::Continue;
@@ -5738,13 +5741,15 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
             }
             ElemCtx::TransitionGroupTag(ref tg_tag) => {
                 // Emit closing tag for TransitionGroup: `</ul>`
-                let closing = format!("</{}>", tg_tag);
                 if let Some(ref tc) = el.tag_close {
                     if self.in_push {
-                        out.overwrite(tc.start, tc.end, &closing);
+                        out.overwrite_fmt(tc.start, tc.end, format_args!("</{}>", tg_tag));
                     } else {
-                        let s = format!("_push(`{}`)\n", closing);
-                        out.overwrite(tc.start, tc.end, &s);
+                        out.overwrite_fmt(
+                            tc.start,
+                            tc.end,
+                            format_args!("_push(`</{}>`)\n", tg_tag),
+                        );
                     }
                 }
             }
