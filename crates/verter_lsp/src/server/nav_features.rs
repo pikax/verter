@@ -800,6 +800,7 @@ pub(super) async fn handle_goto_definition(
         if let Some((tsx_path, vf_li)) = server.virtual_file_context(uri) {
             if let Some(offset) = vf_li.position_to_offset(position) {
                 if let Ok(type_defs) = tp.get_definition(&tsx_path, offset).await {
+                    let encoding = server.position_encoding.read().clone();
                     let locations: Vec<Location> = type_defs
                         .into_iter()
                         .filter_map(|d| {
@@ -809,15 +810,25 @@ pub(super) async fn handle_goto_definition(
                             let target_path =
                                 merge::normalize_vue_path_owned(&d.path, &vue_source_exists);
                             let target_uri: Uri = merge::file_path_to_uri(&target_path)?;
-                            // Convert byte offsets to positions using vf LineIndex for
-                            // same-file refs; for external files, fall back to 0:0
+                            // Same-file refs use the virtual-file LineIndex. When path
+                            // normalization is a no-op the emitted URI IS the file the
+                            // provider's byte offsets index, so read it back and convert.
+                            // Fail closed otherwise — never manufacture a line-0 range.
                             let range = if d.path == tsx_path {
                                 Range {
-                                    start: vf_li.offset_to_position(d.start).unwrap_or_default(),
-                                    end: vf_li.offset_to_position(d.end).unwrap_or_default(),
+                                    start: vf_li.offset_to_position(d.start)?,
+                                    end: vf_li.offset_to_position(d.end)?,
                                 }
+                            } else if target_path == d.path {
+                                merge::resolve_external_target_range(
+                                    &d.path,
+                                    d.start,
+                                    d.end,
+                                    encoding.clone(),
+                                    &|p: &str| server.documents.host().workspace_read_file(p),
+                                )?
                             } else {
-                                Range::default()
+                                return None;
                             };
                             Some(Location {
                                 uri: target_uri,
@@ -961,9 +972,11 @@ pub(super) async fn handle_goto_definition(
                             |path: &str, start: u32, end: u32| -> Option<Location> {
                                 server.resolve_barrel_type_provider_location(path, start, end)
                             };
+                        let negotiated_encoding = server.position_encoding.read().clone();
                         let merged = merge::merge_definitions_with_barrel_resolver(
                             verter_result,
                             type_defs,
+                            &ctx.tsx_path,
                             &ctx.tsx_line_index,
                             &ctx.mapper,
                             &ctx.vue_line_index,
@@ -971,6 +984,8 @@ pub(super) async fn handle_goto_definition(
                             uri,
                             &vue_source_exists,
                             Some(&barrel_resolver),
+                            negotiated_encoding,
+                            &|p: &str| server.documents.host().workspace_read_file(p),
                         );
                         // Post-process: if type provider resolved to a barrel file,
                         // follow re-exports to the terminal declaration.
@@ -1018,6 +1033,7 @@ pub(super) async fn handle_goto_type_definition(
         if let Some((tsx_path, vf_li)) = server.virtual_file_context(uri) {
             if let Some(offset) = vf_li.position_to_offset(position) {
                 if let Ok(type_defs) = tp.get_type_definition(&tsx_path, offset).await {
+                    let encoding = server.position_encoding.read().clone();
                     let locations: Vec<Location> = type_defs
                         .into_iter()
                         .filter_map(|d| {
@@ -1031,13 +1047,25 @@ pub(super) async fn handle_goto_type_definition(
                             let target_path =
                                 merge::normalize_vue_path_owned(&d.path, &vue_source_exists);
                             let target_uri: Uri = merge::file_path_to_uri(&target_path)?;
+                            // Same-file refs use the virtual-file LineIndex. When path
+                            // normalization is a no-op the emitted URI IS the file the
+                            // provider's byte offsets index, so read it back and convert.
+                            // Fail closed otherwise — never manufacture a line-0 range.
                             let range = if d.path == tsx_path {
                                 Range {
-                                    start: vf_li.offset_to_position(d.start).unwrap_or_default(),
-                                    end: vf_li.offset_to_position(d.end).unwrap_or_default(),
+                                    start: vf_li.offset_to_position(d.start)?,
+                                    end: vf_li.offset_to_position(d.end)?,
                                 }
+                            } else if target_path == d.path {
+                                merge::resolve_external_target_range(
+                                    &d.path,
+                                    d.start,
+                                    d.end,
+                                    encoding.clone(),
+                                    &|p: &str| server.documents.host().workspace_read_file(p),
+                                )?
                             } else {
-                                Range::default()
+                                return None;
                             };
                             Some(Location {
                                 uri: target_uri,
@@ -1079,9 +1107,11 @@ pub(super) async fn handle_goto_type_definition(
                             |path: &str, start: u32, end: u32| -> Option<Location> {
                                 server.resolve_barrel_type_provider_location(path, start, end)
                             };
+                        let negotiated_encoding = server.position_encoding.read().clone();
                         return Ok(merge::merge_definitions_with_barrel_resolver(
                             None,
                             type_defs,
+                            &ctx.tsx_path,
                             &ctx.tsx_line_index,
                             &ctx.mapper,
                             &ctx.vue_line_index,
@@ -1089,6 +1119,8 @@ pub(super) async fn handle_goto_type_definition(
                             uri,
                             &vue_source_exists,
                             Some(&barrel_resolver),
+                            negotiated_encoding,
+                            &|p: &str| server.documents.host().workspace_read_file(p),
                         ));
                     }
                     Err(e) => {

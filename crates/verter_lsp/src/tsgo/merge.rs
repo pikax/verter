@@ -4,6 +4,8 @@
 //! producing enhanced output. All functions handle the case where either
 //! source may be absent (graceful fallback).
 
+use std::sync::Arc;
+
 use tower_lsp_server::ls_types::*;
 use verter_span::{LspPosition, TsPosition};
 
@@ -41,6 +43,16 @@ pub type ExternalIdeResolver<'a> = &'a dyn Fn(&str) -> Option<ExternalIdeContext
 /// re-export signature; otherwise returns `None` and merge logic keeps the
 /// original provider location unchanged.
 pub type BarrelResolver<'a> = &'a dyn Fn(&str, u32, u32) -> Option<Location>;
+
+/// Reader for a definition/type-definition target's OWN source, routed through the host's
+/// workspace (VFS) layer instead of direct disk I/O.
+///
+/// [`resolve_external_target_range`] converts the provider's byte offsets to line:col by
+/// reading the same source those offsets index; the read goes through this closure so the
+/// merge layer never touches `std::fs` directly — the workspace/VFS is the single source-read
+/// authority (host cache → snapshot → disk, an open editor's overlay winning over stale disk
+/// content). Returns `None` when the file cannot be read, and the caller then fails closed.
+pub type ExternalSourceReader<'a> = &'a dyn Fn(&str) -> Option<Arc<str>>;
 
 /// Map an LSP `Position` (in the Vue file) to a byte offset in the generated TSX.
 ///
@@ -694,6 +706,105 @@ fn resolve_vue_tsx_range(
     .unwrap_or_default()
 }
 
+/// Resolve a definition/type-definition target's byte-offset range to an LSP `Range` by
+/// reading the target's own source through the host workspace (VFS) and converting through
+/// [`LineIndex`].
+///
+/// The definition/type-definition providers produce `start`/`end` as REAL byte offsets into
+/// the target file. `read_source` hands back that same source — routed through
+/// `verter_workspace::WorkspaceRead::read_file` (host cache → snapshot → disk), so a cold
+/// target is read and cached once and an open editor buffer's overlay wins over stale disk
+/// content — and the offsets convert to line:col in the client-negotiated encoding. It is only
+/// called when the emitted URI is the very file those offsets index (path normalization was a
+/// no-op), so the offsets are valid.
+///
+/// The source read is the workspace layer's job, never `std::fs`: the VFS is the single
+/// source-read authority for the LSP, which is exactly what `no_std_fs_in_semantic_session_paths`
+/// enforces over this crate.
+///
+/// Returns `None` (FAIL-CLOSED) when the source cannot be read or an offset falls outside it.
+/// Callers MUST then drop the location — never substitute `Range::default()`, which silently
+/// sends the editor to line 0 of the wrong place (the original bug this replaces).
+///
+/// Interim double-read: the provider already read this file to compute the offsets, and this
+/// re-reads it (through the VFS) to convert them back. The lossless design is the typed range
+/// protocol (carry a resolved line:col `Range` on the location), which removes both the re-read
+/// and the byte-offset round trip; this narrow resolver only covers definition/type-definition,
+/// where the offsets are guaranteed to index the target's own source.
+pub(crate) fn resolve_external_target_range(
+    path: &str,
+    start: u32,
+    end: u32,
+    encoding: PositionEncodingKind,
+    read_source: ExternalSourceReader<'_>,
+) -> Option<Range> {
+    let source = read_source(path)?;
+    let line_index = LineIndex::new(&source, encoding);
+    Some(Range {
+        start: line_index.offset_to_position(start)?,
+        end: line_index.offset_to_position(end)?,
+    })
+}
+
+/// Resolve a definition/type-definition `.vue.tsx`/`.vue.jsx` target's byte offsets to a Vue
+/// source [`Range`], FAIL-CLOSED.
+///
+/// The provider's offsets index a generated IDE TSX file; mapping them back to the `.vue`
+/// source requires THAT file's own CodeTransform sourcemap, so the resolver is split by
+/// whether the target is the file currently being queried:
+///
+/// - **Current provider file** (`path == current_tsx_path`): the in-context `mapper` / line
+///   indexes passed by the handler already describe this exact TSX, so map through them.
+/// - **Foreign `.vue.tsx`** (another component's generated file): only the external resolver
+///   can supply the correct mapper. The current file's mapper describes a *different* file, so
+///   reusing it would land on the wrong token — and the old `.unwrap_or_default()` collapsed a
+///   failed reuse into a line-0 range pointing into the wrong file. There is deliberately NO
+///   current-mapper fallback for foreign targets.
+///
+/// Returns `None` whenever the correct sourcemap is unavailable (no/unknown external resolver)
+/// or the offsets do not map. The caller MUST drop the location — never substitute
+/// `Range::default()`, which silently sends the editor to line 0.
+///
+/// Scope: definition and type-definition only (both route through
+/// [`merge_definitions_with_barrel_resolver`]). References / rename / code actions keep their
+/// own packed-position handling until the gated `TypeLocation` range protocol lands.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "current-file context (path + indexes + mapper) plus the foreign-file resolver"
+)]
+fn resolve_definition_vue_tsx_range(
+    path: &str,
+    start: u32,
+    end: u32,
+    current_tsx_path: &str,
+    current_tsx_line_index: &LineIndex,
+    current_mapper: &PositionMapper,
+    current_vue_line_index: &LineIndex,
+    external_resolver: Option<ExternalIdeResolver<'_>>,
+) -> Option<Range> {
+    if path == current_tsx_path {
+        return tsx_range_to_vue_range(
+            start,
+            end,
+            current_tsx_line_index,
+            current_mapper,
+            current_vue_line_index,
+        );
+    }
+
+    // Foreign generated TSX: the in-context mapper describes a different file. Only its own
+    // sourcemap (via the external resolver) can map the offsets — fail closed otherwise.
+    let resolver = external_resolver?;
+    let ctx = resolver(path)?;
+    tsx_range_to_vue_range(
+        start,
+        end,
+        &ctx.tsx_line_index,
+        &ctx.mapper,
+        &ctx.vue_line_index,
+    )
+}
+
 /// Merge verter definition with TypeProvider definitions.
 ///
 /// Strategy:
@@ -711,16 +822,20 @@ fn resolve_vue_tsx_range(
 pub fn merge_definitions(
     verter_def: Option<GotoDefinitionResponse>,
     type_defs: Vec<TypeLocation>,
+    current_tsx_path: &str,
     tsx_line_index: &LineIndex,
     mapper: &PositionMapper,
     vue_line_index: &LineIndex,
     external_resolver: Option<ExternalIdeResolver<'_>>,
     document_uri: &Uri,
     vue_source_exists: &dyn Fn(&str) -> bool,
+    negotiated_encoding: PositionEncodingKind,
+    source_reader: ExternalSourceReader<'_>,
 ) -> Option<GotoDefinitionResponse> {
     merge_definitions_with_barrel_resolver(
         verter_def,
         type_defs,
+        current_tsx_path,
         tsx_line_index,
         mapper,
         vue_line_index,
@@ -728,6 +843,8 @@ pub fn merge_definitions(
         document_uri,
         vue_source_exists,
         None,
+        negotiated_encoding,
+        source_reader,
     )
 }
 
@@ -738,6 +855,7 @@ pub fn merge_definitions(
 pub fn merge_definitions_with_barrel_resolver(
     verter_def: Option<GotoDefinitionResponse>,
     type_defs: Vec<TypeLocation>,
+    current_tsx_path: &str,
     tsx_line_index: &LineIndex,
     mapper: &PositionMapper,
     vue_line_index: &LineIndex,
@@ -745,6 +863,8 @@ pub fn merge_definitions_with_barrel_resolver(
     document_uri: &Uri,
     vue_source_exists: &dyn Fn(&str) -> bool,
     barrel_resolver: Option<BarrelResolver<'_>>,
+    negotiated_encoding: PositionEncodingKind,
+    source_reader: ExternalSourceReader<'_>,
 ) -> Option<GotoDefinitionResponse> {
     // If verter provides a definition, prefer it when:
     // - TSGO returned nothing, or
@@ -768,37 +888,57 @@ pub fn merge_definitions_with_barrel_resolver(
         let mut locations: Vec<Location> = type_defs
             .into_iter()
             .filter_map(|loc| {
-                if !(loc.path.ends_with(".vue.tsx")
-                    || loc.path.ends_with(".vue.jsx")
-                    || loc.path.ends_with(".vue"))
-                {
+                // `.vue.tsx`/`.vue.jsx`: a generated IDE file. The provider's byte offsets
+                // index the generated TSX; map them back to the `.vue` source through that
+                // file's own CodeTransform sourcemap — the current file's in-context mapper for
+                // the file being queried, the external resolver for a foreign component. Fail
+                // closed (drop the location) when no sourcemap bridges the offsets; never
+                // collapse to a line-0 range pointing into the wrong file.
+                if loc.path.ends_with(".vue.tsx") || loc.path.ends_with(".vue.jsx") {
+                    let uri = path_to_uri(normalize_vue_path(&loc.path, vue_source_exists))?;
+                    let range = resolve_definition_vue_tsx_range(
+                        &loc.path,
+                        loc.start,
+                        loc.end,
+                        current_tsx_path,
+                        tsx_line_index,
+                        mapper,
+                        vue_line_index,
+                        external_resolver,
+                    )?;
+                    return Some(Location { uri, range });
+                }
+
+                // Every other target emits the normalized path's URI. When normalization
+                // is a no-op the emitted URI IS the file the provider's byte offsets index
+                // (`.d.ts`/`.ts`/`.js`/…, or a real `.vue.ts` with no backing `.vue`), so
+                // read that source and convert the offsets to a real `Range`. Barrel
+                // re-exports (terminal-decl follow) take priority for those real files; fail
+                // closed when the source can't be read — never collapse to line 0.
+                let normalized = normalize_vue_path(&loc.path, vue_source_exists);
+                if normalized == loc.path {
                     if let Some(resolver) = barrel_resolver {
                         if let Some(location) = resolver(&loc.path, loc.start, loc.end) {
                             return Some(location);
                         }
                     }
-                }
-
-                // TypeProvider returns paths; convert to URIs
-                // For .vue files, strip virtual suffixes (.tsx or .d.ts)
-                let file_path = normalize_vue_path(&loc.path, vue_source_exists);
-                let uri = path_to_uri(file_path)?;
-                // Map TSX byte offsets back to Vue positions for .vue.tsx targets
-                // (.vue.d.ts targets use Range::default — no position mapping available)
-                let range = if loc.path.ends_with(".vue.tsx") || loc.path.ends_with(".vue.jsx") {
-                    resolve_vue_tsx_range(
+                    let uri = path_to_uri(normalized)?;
+                    let range = resolve_external_target_range(
                         &loc.path,
                         loc.start,
                         loc.end,
-                        tsx_line_index,
-                        mapper,
-                        vue_line_index,
-                        external_resolver,
-                    )
-                } else {
-                    Range::default()
-                };
-                Some(Location { uri, range })
+                        negotiated_encoding.clone(),
+                        source_reader,
+                    )?;
+                    return Some(Location { uri, range });
+                }
+
+                // Normalization rewrote the path (`.vue.d.ts`/`.vue.ts` → `.vue`, or another
+                // file's `.vue.tsx` → `.vue`): the offsets index the generated declaration
+                // file, but the URI we emit is the `.vue` source and no in-context sourcemap
+                // bridges them. Fail closed rather than send the editor to line 0 of the
+                // wrong file.
+                None
             })
             .collect();
 
@@ -806,9 +946,19 @@ pub fn merge_definitions_with_barrel_resolver(
             return verter_def;
         }
 
-        // Deduplicate by URI (multiple .vue.tsx spans normalize to the same .vue)
+        // Deduplicate by (uri, range): distinct definitions in the same file (e.g. two
+        // overloads in one `.d.ts`) must survive, while spans that resolve to the exact
+        // same location collapse.
         let mut seen = std::collections::HashSet::new();
-        locations.retain(|loc| seen.insert(loc.uri.clone()));
+        locations.retain(|loc| {
+            seen.insert((
+                loc.uri.clone(),
+                loc.range.start.line,
+                loc.range.start.character,
+                loc.range.end.line,
+                loc.range.end.character,
+            ))
+        });
 
         // Prefer non-.vue definitions over .vue re-export sites.
         // When CTRL+CLICKing a library symbol (e.g., `onClickOutside` from @vueuse/core),
@@ -1759,6 +1909,27 @@ mod tests {
         "file:///test.vue".parse().unwrap()
     }
 
+    /// Build an in-memory external source fixture for the definition/type-definition merge
+    /// path: a synthetic forward-slash path (with `suffix`) plus an [`ExternalSourceReader`]
+    /// that returns the content for that exact path, modeling the host VFS the production
+    /// merge reads through (`LspHost::workspace_read_file` → `WorkspaceRead::read_file`).
+    /// Definition targets carry byte offsets into their own source, so the reader hands that
+    /// exact source back for the offset→line:col conversion — no disk I/O.
+    fn ext_source(suffix: &str, content: &str) -> (String, impl Fn(&str) -> Option<Arc<str>>) {
+        let path = format!("/virtual/external{suffix}");
+        let content: Arc<str> = Arc::from(content);
+        let reader_path = path.clone();
+        let reader = move |p: &str| (p == reader_path.as_str()).then(|| content.clone());
+        (path, reader)
+    }
+
+    /// Reader for cases that never reach the external-source path (empty type defs,
+    /// verter-preferred, or `.vue.tsx`/`.vue.d.ts` targets resolved before/without a source
+    /// read): always `None`. Passing it documents that no external source is consulted.
+    fn no_external_source(_path: &str) -> Option<Arc<str>> {
+        None
+    }
+
     /// @ai-generated — Verter definition is preferred when no type definitions
     #[test]
     fn merge_definitions_verter_only() {
@@ -1771,12 +1942,15 @@ mod tests {
         let result = merge_definitions(
             verter,
             vec![],
+            "",
             &tsx_li,
             &mapper,
             &vue_li,
             None,
             &test_doc_uri(),
             &vue_exists,
+            PositionEncodingKind::UTF16,
+            &no_external_source,
         );
         assert!(result.is_some());
     }
@@ -1785,23 +1959,40 @@ mod tests {
     #[test]
     fn merge_definitions_type_only() {
         let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+        // A real external `.ts` whose byte offsets index its own source. `sym` sits on
+        // line 1, so a faithful resolve lands on line 1 (not the old line-0 default).
+        let source = "export {}\nexport const sym = 1\n";
+        let off = source.find("sym").unwrap() as u32;
+        let (ts_path, read_source) = ext_source(".ts", source);
         let types = vec![TypeLocation {
-            path: "/project/utils.ts".to_string(),
-            start: 0,
-            end: 10,
+            path: ts_path.clone(),
+            start: off,
+            end: off + 3,
         }];
 
         let result = merge_definitions(
             None,
             types,
+            "",
             &tsx_li,
             &mapper,
             &vue_li,
             None,
             &test_doc_uri(),
             &vue_exists,
+            PositionEncodingKind::UTF16,
+            &read_source,
         );
-        assert!(result.is_some());
+        match result {
+            Some(GotoDefinitionResponse::Scalar(loc)) => {
+                assert!(loc.uri.as_str().ends_with(".ts"));
+                assert_eq!(
+                    loc.range.start.line, 1,
+                    "external target must resolve to the real symbol line, not line 0"
+                );
+            }
+            other => panic!("expected a resolved external definition, got {other:?}"),
+        }
     }
 
     /// @ai-generated — Neither source returns None
@@ -1811,12 +2002,15 @@ mod tests {
         let result = merge_definitions(
             None,
             vec![],
+            "",
             &tsx_li,
             &mapper,
             &vue_li,
             None,
             &test_doc_uri(),
             &vue_exists,
+            PositionEncodingKind::UTF16,
+            &no_external_source,
         );
         assert!(result.is_none());
     }
@@ -2124,19 +2318,18 @@ mod tests {
 
     // ── Definition merge tests (Bug 2) ───────────────────────────────
 
-    /// @ai-generated — merge_definitions maps .vue.tsx offsets to correct Vue positions
-    ///
-    /// This tests Bug 2: merge_definitions was returning Range::default() (0,0)-(0,0)
-    /// for all .vue.tsx targets instead of mapping TSX byte offsets back to Vue positions.
+    /// A `.vue.tsx` target that IS the file being queried (`loc.path == current_tsx_path`)
+    /// maps its byte offsets back to Vue through the in-context mapper — no external resolver
+    /// needed, and never the old `Range::default()` (0,0) collapse.
     #[test]
-    fn merge_definitions_maps_vue_tsx_to_vue_positions() {
+    fn merge_definitions_maps_current_file_vue_tsx_to_vue_positions() {
         let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
 
-        // Simulate TSGO returning a definition in App.vue.tsx
-        // TSX offset 6..9 = "msg" (in "const msg = ...")
-        // This should map back to Vue line 5, col 6..9
+        // The current document's generated TSX. TSX offset 6..9 = "msg" (in "const msg = ..."),
+        // which the in-context mapper carries back to Vue line 5, col 6..9.
+        let current_tsx_path = "/home/user/App.vue.tsx";
         let type_defs = vec![TypeLocation {
-            path: "/home/user/App.vue.tsx".to_string(),
+            path: current_tsx_path.to_string(),
             start: 6,
             end: 9,
         }];
@@ -2144,12 +2337,15 @@ mod tests {
         let result = merge_definitions(
             None,
             type_defs,
+            current_tsx_path,
             &tsx_li,
             &mapper,
             &vue_li,
             None,
             &test_doc_uri(),
             &vue_exists,
+            PositionEncodingKind::UTF16,
+            &no_external_source,
         );
         assert!(result.is_some(), "Expected definition response");
 
@@ -2161,54 +2357,75 @@ mod tests {
                     "URI should be .vue, got: {}",
                     loc.uri.as_str()
                 );
-                // Range should NOT be (0,0)-(0,0) — that's the bug
+                // Exact full range: "msg" at Vue line 5, cols 6..9 — not the (0,0) default,
+                // and not just "some non-zero line".
                 assert_ne!(
                     loc.range,
                     Range::default(),
-                    "Definition range should not be (0,0)-(0,0) — \
-                     TSX offsets must be mapped to Vue positions"
+                    "current-file .vue.tsx range must not collapse to (0,0)"
                 );
-                // The start should be on Vue line 5 (where "const msg = ..." is)
                 assert_eq!(
-                    loc.range.start.line, 5,
-                    "Expected Vue line 5 for 'msg', got line {}",
-                    loc.range.start.line
-                );
-            }
-            GotoDefinitionResponse::Array(locs) => {
-                assert_eq!(locs.len(), 1);
-                assert_ne!(
-                    locs[0].range,
-                    Range::default(),
-                    "Definition range should not be (0,0)-(0,0)"
+                    loc.range,
+                    Range {
+                        start: Position {
+                            line: 5,
+                            character: 6,
+                        },
+                        end: Position {
+                            line: 5,
+                            character: 9,
+                        },
+                    },
+                    "expected exact Vue range (5,6)..(5,9) for 'msg'"
                 );
             }
             _ => panic!("Unexpected definition response type"),
         }
     }
 
-    /// @ai-generated — merge_definitions passes through non-.vue targets unchanged
+    /// A non-`.vue` target keeps its own URI (no normalization) AND resolves its byte
+    /// offsets against its own source to a real `Range` — not the old line-0 default.
     #[test]
-    fn merge_definitions_non_vue_targets_unchanged() {
+    fn merge_definitions_non_vue_target_resolves_real_range() {
         let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
 
+        // `helper` is on line 2 of the fixture, so a faithful resolve lands on line 2.
+        let source = "export {}\n\nexport function helper() {}\n";
+        let off = source.find("helper").unwrap() as u32;
+        let (ts_path, read_source) = ext_source(".ts", source);
         let type_defs = vec![TypeLocation {
-            path: "/home/user/utils.ts".to_string(),
-            start: 0,
-            end: 10,
+            path: ts_path.clone(),
+            start: off,
+            end: off + 6,
         }];
 
         let result = merge_definitions(
             None,
             type_defs,
+            "",
             &tsx_li,
             &mapper,
             &vue_li,
             None,
             &test_doc_uri(),
             &vue_exists,
+            PositionEncodingKind::UTF16,
+            &read_source,
         );
-        assert!(result.is_some());
+        match result {
+            Some(GotoDefinitionResponse::Scalar(loc)) => {
+                // URI passes through unchanged (a non-`.vue` target is not normalized).
+                assert!(
+                    loc.uri.as_str().ends_with(".ts") && !loc.uri.as_str().contains(".vue"),
+                    "external .ts URI should pass through unchanged, got: {}",
+                    loc.uri.as_str()
+                );
+                // Range resolves to the real symbol line, not the old (0,0) default.
+                assert_eq!(loc.range.start.line, 2, "must land on the real symbol line");
+                assert_ne!(loc.range, Range::default(), "must not collapse to line 0");
+            }
+            other => panic!("expected a resolved external definition, got {other:?}"),
+        }
     }
 
     #[test]
@@ -2243,6 +2460,7 @@ mod tests {
         let result = merge_definitions_with_barrel_resolver(
             None,
             type_defs,
+            "",
             &tsx_li,
             &mapper,
             &vue_li,
@@ -2250,6 +2468,8 @@ mod tests {
             &test_doc_uri(),
             &vue_exists,
             Some(&resolver),
+            PositionEncodingKind::UTF16,
+            &no_external_source,
         );
 
         match result {
@@ -2280,31 +2500,43 @@ mod tests {
             },
         }));
 
-        // TSGO resolved to an external .d.ts file
+        // TSGO resolved to a real external .d.ts file (stands in for runtime-dom.d.ts).
+        // `defineProps` sits on line 1, so the cross-file result resolves to line 1.
+        let source = "export {}\nexport declare function defineProps(): void\n";
+        let off = source.find("defineProps").unwrap() as u32;
+        let (dts_path, read_source) = ext_source(".d.ts", source);
         let type_defs = vec![TypeLocation {
-            path: "/node_modules/@vue/runtime-dom/dist/runtime-dom.d.ts".to_string(),
-            start: 100,
-            end: 120,
+            path: dts_path.clone(),
+            start: off,
+            end: off + "defineProps".len() as u32,
         }];
 
         let result = merge_definitions(
             verter_def,
             type_defs,
+            "",
             &tsx_li,
             &mapper,
             &vue_li,
             None,
             &test_doc_uri(),
             &vue_exists,
+            PositionEncodingKind::UTF16,
+            &read_source,
         );
         assert!(result.is_some(), "should return TSGO's external definition");
 
         match result.unwrap() {
             GotoDefinitionResponse::Scalar(loc) => {
                 assert!(
-                    loc.uri.as_str().contains("runtime-dom.d.ts"),
+                    loc.uri.as_str().ends_with(".d.ts"),
                     "should navigate to external .d.ts file, got: {}",
                     loc.uri.as_str()
+                );
+                // The external result resolves to the real declaration line (not line 0).
+                assert_eq!(
+                    loc.range.start.line, 1,
+                    "must resolve to the real symbol line"
                 );
                 // Negative: must NOT be the same-file sentinel URI
                 assert!(
@@ -2340,12 +2572,15 @@ mod tests {
         let result = merge_definitions(
             verter_def,
             vec![],
+            "",
             &tsx_li,
             &mapper,
             &vue_li,
             None,
             &test_doc_uri(),
             &vue_exists,
+            PositionEncodingKind::UTF16,
+            &no_external_source,
         );
         assert!(result.is_some());
         match result.unwrap() {
@@ -2391,12 +2626,15 @@ mod tests {
         let result = merge_definitions(
             verter_def,
             type_defs,
+            "/test.vue.tsx",
             &tsx_li,
             &mapper,
             &vue_li,
             None,
             &test_doc_uri(),
             &vue_exists,
+            PositionEncodingKind::UTF16,
+            &no_external_source,
         );
         assert!(
             result.is_some(),
@@ -2528,9 +2766,12 @@ mod tests {
 
     // ── .vue.d.ts definition tests ──────────────────────────────────
 
-    /// TypeProvider returning .vue.d.ts should navigate to .vue
+    /// A `.vue.d.ts` definition target fails closed. Its byte offsets index the generated
+    /// declaration file, but the URI we would emit is the `.vue` source (path normalization
+    /// rewrites `.vue.d.ts` → `.vue`) and no in-context sourcemap bridges them. Rather than
+    /// manufacture a line-0 `Range` into the wrong file, the merge drops the location.
     #[test]
-    fn merge_definitions_vue_dts_maps_to_vue() {
+    fn merge_definitions_vue_dts_fails_closed_no_line_zero() {
         let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
 
         let type_defs = vec![TypeLocation {
@@ -2542,29 +2783,21 @@ mod tests {
         let result = merge_definitions(
             None,
             type_defs,
+            "",
             &tsx_li,
             &mapper,
             &vue_li,
             None,
             &test_doc_uri(),
             &vue_exists,
+            PositionEncodingKind::UTF16,
+            &no_external_source,
         );
-        assert!(result.is_some());
-        match result.unwrap() {
-            GotoDefinitionResponse::Scalar(loc) => {
-                assert!(
-                    loc.uri.as_str().ends_with("Button.vue"),
-                    "should navigate to .vue, got: {}",
-                    loc.uri.as_str()
-                );
-                // Negative: must NOT contain .d.ts
-                assert!(
-                    !loc.uri.as_str().contains(".d.ts"),
-                    "URI must not contain .d.ts suffix"
-                );
-            }
-            _ => panic!("Expected scalar definition"),
-        }
+        // No real range is available, so no location is produced — never a (0,0) default.
+        assert!(
+            result.is_none(),
+            "must fail closed for a `.vue.d.ts` target, got: {result:?}"
+        );
     }
 
     /// .vue.d.ts references should map to .vue
@@ -3031,15 +3264,22 @@ mod tests {
         );
     }
 
-    /// External resolver provides correct position mapping for cross-file definitions.
-    /// When TSGO returns a .vue.tsx target pointing to a *different* file,
-    /// the merge function should use the external resolver's mapper instead of the
-    /// current file's mapper.
+    /// Cross-file (foreign) `.vue.tsx` definition resolution is fail-closed and exact.
+    ///
+    /// When TSGO returns a `.vue.tsx` target that is NOT the file being queried, only that
+    /// target's own sourcemap (via the external resolver) can map its byte offsets back to the
+    /// Vue source. Without a resolver the location is DROPPED — never collapsed to a line-0
+    /// range pointing into the wrong file (the bug this guards). With the resolver it maps to
+    /// the exact Vue range.
     #[test]
-    fn merge_definitions_uses_external_resolver_for_cross_file() {
-        let (_mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+    fn merge_definitions_foreign_vue_tsx_fails_closed_without_resolver_else_exact() {
+        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
 
-        // Build target file's mapper: TSX line 0 col 0 → Vue line 1 col 0
+        // The file being queried (its in-context mapper) — distinct from the target, so the
+        // target is genuinely FOREIGN and the current mapper must never be used for it.
+        let current_tsx_path = "/src/components/Caller.vue.tsx";
+
+        // Build the target file's own mapper: TSX 0:0 → Vue 1:0, TSX 0:16 → Vue 1:16.
         let target_vue = "<script setup>\ndefineComponent({})\n</script>";
         let target_tsx = "defineComponent({});\n";
         let target_vue_li = LineIndex::new_utf16(target_vue);
@@ -3058,30 +3298,28 @@ mod tests {
             end: 16, // "defineComponent("
         }];
 
-        // Without resolver: current file's mapper can't resolve target's TSX offsets → default range
+        // Without a resolver the foreign target has no usable sourcemap → fail closed. The
+        // current file's mapper describes a DIFFERENT file and must NOT be reused, so the only
+        // location is dropped and the merge returns the (empty) verter result.
         let result_no_resolver = merge_definitions(
             None,
             type_defs.clone(),
+            current_tsx_path,
             &tsx_li,
-            &_mapper,
+            &mapper,
             &vue_li,
             None,
             &test_doc_uri(),
             &vue_exists,
+            PositionEncodingKind::UTF16,
+            &no_external_source,
         );
-        assert!(result_no_resolver.is_some());
-        match result_no_resolver.unwrap() {
-            GotoDefinitionResponse::Scalar(loc) => {
-                assert!(
-                    loc.uri.as_str().ends_with("Target.vue"),
-                    "should navigate to .vue: {}",
-                    loc.uri.as_str()
-                );
-            }
-            _ => panic!("expected scalar"),
-        }
+        assert!(
+            result_no_resolver.is_none(),
+            "foreign .vue.tsx with no resolver must be DROPPED, never a line-0 range: {result_no_resolver:?}"
+        );
 
-        // With resolver: external mapper resolves correctly
+        // With the resolver: the target's own mapper resolves the offsets to the exact range.
         let resolver = |ide_path: &str| -> Option<ExternalIdeContext> {
             if ide_path == "/src/components/Target.vue.tsx" {
                 Some(ExternalIdeContext {
@@ -3097,66 +3335,86 @@ mod tests {
         let result_with_resolver = merge_definitions(
             None,
             type_defs,
+            current_tsx_path,
             &tsx_li,
-            &_mapper,
+            &mapper,
             &vue_li,
             Some(&resolver),
             &test_doc_uri(),
             &vue_exists,
+            PositionEncodingKind::UTF16,
+            &no_external_source,
         );
-        assert!(result_with_resolver.is_some());
-        match result_with_resolver.unwrap() {
-            GotoDefinitionResponse::Scalar(loc) => {
+        match result_with_resolver {
+            Some(GotoDefinitionResponse::Scalar(loc)) => {
                 assert!(
                     loc.uri.as_str().ends_with("Target.vue"),
                     "should navigate to .vue: {}",
                     loc.uri.as_str()
                 );
-                // Position should map to Vue line 1 (inside <script setup>)
+                // Exact full range: "defineComponent(" at Vue (1,0)..(1,16) — both endpoints,
+                // not just "line 1", and never the (0,0) default.
                 assert_eq!(
-                    loc.range.start.line, 1,
-                    "with resolver, definition should map to Vue line 1, got: {:?}",
+                    loc.range,
+                    Range {
+                        start: Position {
+                            line: 1,
+                            character: 0,
+                        },
+                        end: Position {
+                            line: 1,
+                            character: 16,
+                        },
+                    },
+                    "with resolver, expected exact Vue range (1,0)..(1,16), got: {:?}",
                     loc.range
                 );
                 assert_ne!(
                     loc.range,
                     Range::default(),
-                    "with resolver, range should not be default (0,0)"
+                    "with resolver, range must not be the (0,0) default"
                 );
             }
-            _ => panic!("expected scalar"),
+            other => panic!("expected scalar definition, got: {other:?}"),
         }
     }
 
     // ── Definition deduplication and filtering tests ──────────────
 
     #[test]
-    fn merge_definitions_deduplicates_vue_locations() {
-        // Bug: multiple .vue.tsx targets for the same .vue file should deduplicate
+    fn merge_definitions_deduplicates_identical_vue_locations() {
+        // Two identical `.vue.tsx` spans for the file currently being queried map through the
+        // in-context mapper to the same Vue range, so they are true duplicates and collapse to
+        // a single location. (Distinct ranges in one file are kept; that is covered by the
+        // same-file multi-definition test.)
         let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
 
+        let current_tsx_path = "/src/components/Dropdown.vue.tsx";
         let type_defs = vec![
             TypeLocation {
-                path: "/src/components/Dropdown.vue.tsx".to_string(),
-                start: 0,
+                path: current_tsx_path.to_string(),
+                start: 6,
                 end: 10,
             },
             TypeLocation {
-                path: "/src/components/Dropdown.vue.tsx".to_string(),
-                start: 20,
-                end: 30,
+                path: current_tsx_path.to_string(),
+                start: 6,
+                end: 10,
             },
         ];
 
         let result = merge_definitions(
             None,
             type_defs,
+            current_tsx_path,
             &tsx_li,
             &mapper,
             &vue_li,
             None,
             &test_doc_uri(),
             &vue_exists,
+            PositionEncodingKind::UTF16,
+            &no_external_source,
         );
         match result {
             Some(GotoDefinitionResponse::Scalar(_)) => {
@@ -3178,11 +3436,16 @@ mod tests {
         // and .vue.tsx (consumer) are returned. Should filter out .vue targets.
         let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
 
+        // The real library definition lives in an on-disk `.d.mts` (its offsets index
+        // its own source); the two `.vue.tsx` consumer spans normalize to `.vue`.
+        let source = "export {}\nexport declare function onClickOutside(): void\n";
+        let off = source.find("onClickOutside").unwrap() as u32;
+        let (dmts_path, read_source) = ext_source(".d.mts", source);
         let type_defs = vec![
             TypeLocation {
-                path: "/node_modules/@vueuse/core/index.d.mts".to_string(),
-                start: 100,
-                end: 120,
+                path: dmts_path.clone(),
+                start: off,
+                end: off + "onClickOutside".len() as u32,
             },
             TypeLocation {
                 path: "/src/components/Dropdown.vue.tsx".to_string(),
@@ -3196,15 +3459,43 @@ mod tests {
             },
         ];
 
+        // Both foreign `.vue.tsx` consumers map back to real `.vue` ranges through the external
+        // resolver (their own sourcemaps), so the filter sees genuine `.vue` locations to drop —
+        // not the old line-0 fallback that fail-closed resolution removed.
+        let consumer_vue = "<script setup>\nconst x = 1;\n</script>";
+        let consumer_tsx = "const x = 1;\n";
+        let consumer_vue_li = LineIndex::new_utf16(consumer_vue);
+        let consumer_tsx_li = LineIndex::new_utf16(consumer_tsx);
+        let mut builder = oxc_sourcemap::SourceMapBuilder::default();
+        let sid = builder.set_source_and_content("Consumer.vue", consumer_vue);
+        builder.add_token(0, 0, 1, 0, Some(sid), None); // TSX 0:0 → Vue 1:0
+        builder.add_token(0, 10, 1, 10, Some(sid), None); // TSX 0:10 → Vue 1:10
+        let consumer_mapper =
+            PositionMapper::from_json(&builder.into_sourcemap().to_json_string()).unwrap();
+        let resolver = |ide_path: &str| -> Option<ExternalIdeContext> {
+            if ide_path.ends_with(".vue.tsx") {
+                Some(ExternalIdeContext {
+                    tsx_line_index: consumer_tsx_li.clone(),
+                    mapper: consumer_mapper.clone(),
+                    vue_line_index: consumer_vue_li.clone(),
+                })
+            } else {
+                None
+            }
+        };
+
         let result = merge_definitions(
             None,
             type_defs,
+            "",
             &tsx_li,
             &mapper,
             &vue_li,
-            None,
+            Some(&resolver),
             &test_doc_uri(),
             &vue_exists,
+            PositionEncodingKind::UTF16,
+            &read_source,
         );
         match result {
             Some(GotoDefinitionResponse::Scalar(loc)) => {

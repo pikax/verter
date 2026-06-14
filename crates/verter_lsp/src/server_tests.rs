@@ -3209,13 +3209,17 @@ async fn goto_type_definition_delegates_to_provider() {
             &ctx.mapper,
             &ctx.tsx_line_index,
         ) {
+            // Point the type-definition at the real `count` identifier in the generated TSX so
+            // its offsets map back to the `.vue` source. (Offsets in the synthetic preamble,
+            // e.g. 0..5, do not map and are correctly dropped fail-closed — they would have
+            // collapsed to a line-0 range under the old `.unwrap_or_default()` behavior.)
             provider.set_type_definitions(
                 &ctx.tsx_path,
                 tsx_offset,
                 vec![TypeLocation {
                     path: ctx.tsx_path.clone(),
-                    start: 0,
-                    end: 5,
+                    start: tsx_offset,
+                    end: tsx_offset + "count".len() as u32,
                 }],
             );
         }
