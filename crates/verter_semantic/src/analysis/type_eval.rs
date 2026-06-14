@@ -251,6 +251,56 @@ pub enum TypeDeclKind {
     Class,
 }
 
+/// The type-projected value of one `enum` member.
+///
+/// An enum member always has a NAME (recorded on the presence rail). Its VALUE
+/// is either statically FOLDED to a literal, or DEFERRED — a computed /
+/// expression / member-reference initializer the literal-enum reducer does not
+/// constant-fold (`B = 1 << 2`, `B = someFn()`, `~A`, or a bare member after an
+/// unknown running value). A deferred member is NEVER dropped and NEVER given a
+/// fabricated literal: it carries the narrowest SOUND primitive DOMAIN proven
+/// from its initializer-expression KIND, so every type/value projection surface
+/// (`typeof Enum`, `keyof typeof Enum`, `Enum.Member`, the enum type union) sees
+/// the member with an honest, never-under-approximating type.
+#[derive(Debug, Clone, PartialEq)]
+pub enum EnumMemberValue {
+    /// Statically folded to a literal (string / ±numeric / auto-increment).
+    /// This literal is BOTH the projected type AND the value-body fingerprint
+    /// basis — the only members the foldable rail observes.
+    Folded(TypeExpr),
+    /// Value deferred. Carries the narrowest SOUND primitive domain proven from
+    /// the initializer-expression kind — `number`, `string`, `number | string`,
+    /// or `unknown` — NEVER the enum self-reference and NEVER a fabricated
+    /// literal. The member's NAME stays on the presence rail; only its foldable
+    /// VALUE is absent (it is projected out of the fingerprint, NOT out of the
+    /// type surfaces).
+    Deferred(TypeExpr),
+}
+
+impl EnumMemberValue {
+    /// The type this member PROJECTS to on every type/value surface (`typeof
+    /// Enum`, `Enum.Member`, the enum type union): the folded literal for a
+    /// foldable member, or the degraded primitive domain for a deferred one.
+    /// ALWAYS present — a deferred member is degraded, never dropped.
+    pub fn projected_type(&self) -> &TypeExpr {
+        match self {
+            Self::Folded(ty) | Self::Deferred(ty) => ty,
+        }
+    }
+
+    /// The folded literal value, or `None` when the member's value is deferred.
+    /// This is the foldable-only view the value-body fingerprint
+    /// ([`crate`]-external `value_body_for_hash`) observes — a deferred member
+    /// MUST NOT enter the fingerprint, because its degraded domain is not a
+    /// value edit.
+    pub fn folded_literal(&self) -> Option<&TypeExpr> {
+        match self {
+            Self::Folded(ty) => Some(ty),
+            Self::Deferred(_) => None,
+        }
+    }
+}
+
 /// A value declaration in the evaluator's value symbol table.
 #[derive(Debug, Clone)]
 pub struct ValueDeclInfo {
@@ -265,6 +315,39 @@ pub struct ValueDeclInfo {
     pub signatures: Vec<FunctionSignature>,
     /// Object literal shape, if this is a const initialized with an object.
     pub object_shape: Option<ObjectExpr>,
+    /// The ordered member inventory of a [`ValueDeclKind::Enum`] declaration,
+    /// in SOURCE declaration order (TS enum members are ordered — the
+    /// auto-increment of a bare member depends on the preceding member, and the
+    /// `typeof Enum` object surfaces members in declaration order).
+    ///
+    /// This is the SINGLE source of truth for BOTH enum rails, so the two can
+    /// never diverge by construction: the member NAME is recorded for EVERY
+    /// statically-named member (all four `TSEnumMemberName` variants resolve to
+    /// a static name via the SAME `static_name` helper the production
+    /// `index_enum` header walk uses), while each member's [`EnumMemberValue`]
+    /// is [`Folded`](EnumMemberValue::Folded) when the value is statically
+    /// foldable (string / ±numeric / auto-increment) or
+    /// [`Deferred`](EnumMemberValue::Deferred) when it is unfoldable (a computed
+    /// `1 << 2`, a member-reference `B = A`, or a bare member after an unknown
+    /// running value). A deferred member carries its DEGRADED sound primitive
+    /// domain, so it is honestly typed on every surface, never dropped. The
+    /// `Folded` subset is therefore an intrinsic subset of the full member set:
+    /// - The NAME rail — [`ValueDeclGroup::merged_enum_member_names`] — is the
+    ///   member-presence authority (`enum_headers`, `parse_stable_hash`,
+    ///   enum `MemberPresence` facts); it must match `index_enum` exactly.
+    /// - The PROJECTION rail — every member's
+    ///   [`projected_type`](EnumMemberValue::projected_type) — drives the
+    ///   `typeof Enum` object, the `Enum.Member` projection, and the enum type
+    ///   union (folded literal for foldable members, degraded primitive for
+    ///   deferred ones), so NO known member ever vanishes from a type surface.
+    /// - The FOLDABLE rail — the [`folded_literal`](EnumMemberValue::folded_literal)
+    ///   subset, projected by [`ValueDeclGroup::merged_enum_members`] — is the
+    ///   value-body fact fingerprint basis ONLY; a deferred member's degraded
+    ///   domain is not a value edit and stays out of it.
+    ///
+    /// `Some(..)` exactly when this value decl is an enum (possibly an empty
+    /// member list); `None` for every non-enum value declaration.
+    pub enum_members: Option<Vec<(String, EnumMemberValue)>>,
 }
 
 /// An ordered group of same-name value declaration contributors, in
@@ -322,6 +405,101 @@ impl ValueDeclGroup {
             .iter()
             .flat_map(|decl| decl.signatures.iter().cloned())
             .collect()
+    }
+
+    /// The merged enum member inventory: every contributor's
+    /// [`enum_members`](ValueDeclInfo::enum_members) folded in source order, the
+    /// SHARED basis both enum rails derive from so they can never disagree on
+    /// which contributor owns a member. TS declaration merging lets
+    /// `enum E { A }` and a later `enum E { B = 1 }` contribute to one enum, so
+    /// the member set is the UNION of all same-name contributors — using only
+    /// the last (last-wins `primary()`) contributor would drop the earlier
+    /// declarations' members.
+    ///
+    /// TS forbids a duplicate member NAME across merged enum bodies, so the
+    /// collision path is defensive: on a name already seen, the FIRST
+    /// contributor's entry (name AND [`EnumMemberValue`]) wins deterministically,
+    /// so every derived rail agrees on every member's owning contributor.
+    /// Returns `None` when no contributor is an enum.
+    pub fn merged_enum_unified(&self) -> Option<Vec<(String, EnumMemberValue)>> {
+        let mut is_enum = false;
+        let mut merged: Vec<(String, EnumMemberValue)> = Vec::new();
+        for decl in &self.contributors {
+            let Some(members) = decl.enum_members.as_ref() else {
+                continue;
+            };
+            is_enum = true;
+            for (name, value) in members {
+                if !merged.iter().any(|(existing, _)| existing == name) {
+                    merged.push((name.clone(), value.clone()));
+                }
+            }
+        }
+        is_enum.then_some(merged)
+    }
+
+    /// The FULL ordered member-NAME set of the merged enum — EVERY
+    /// statically-named member, including ones whose VALUE is deferred. This is
+    /// the member-presence authority: it must match what the production
+    /// `index_enum` header walk records (both resolve names via `static_name`),
+    /// so a seeded `DeclHeaderIndex` reconstructs `enum_headers` identically and
+    /// the enum `MemberPresence` facts / `parse_stable_hash` enum-header fold
+    /// stay correct for seeded artifacts. Returns `None` when no contributor is
+    /// an enum.
+    pub fn merged_enum_member_names(&self) -> Option<Vec<String>> {
+        self.merged_enum_unified()
+            .map(|merged| merged.into_iter().map(|(name, _)| name).collect())
+    }
+
+    /// The merged enum's FOLDABLE rail: every member with a statically known
+    /// value-literal, in source order. Members whose value is DEFERRED are
+    /// projected out (their degraded domain is not a folded literal), so this
+    /// rail is reserved for the value-body fact fingerprint
+    /// (`value_body_for_hash`) — the ONLY consumer that must observe foldable
+    /// members alone. Type/value PROJECTION surfaces (`typeof Enum`,
+    /// `Enum.Member`, [`enum_type_union`](Self::enum_type_union)) read the FULL
+    /// member set via [`EnumMemberValue::projected_type`] instead, so a deferred
+    /// member is degraded, never dropped. Returns `None` when no contributor is
+    /// an enum.
+    pub fn merged_enum_members(&self) -> Option<Vec<(String, TypeExpr)>> {
+        self.merged_enum_unified().map(|merged| {
+            merged
+                .into_iter()
+                .filter_map(|(name, value)| value.folded_literal().cloned().map(|lit| (name, lit)))
+                .collect()
+        })
+    }
+
+    /// The enum's TYPE-space body: the UNION of EVERY member's projected type,
+    /// derived from the SAME full merged member set the name rail derives from.
+    /// An `enum` is dual-space — a VALUE (its `typeof` object / `Enum.Member`
+    /// projection) and a TYPE (the union used when the enum names a type) — and
+    /// BOTH spaces carry exactly the same member set so they can never diverge.
+    ///
+    /// Honesty floor: a deferred member contributes its DEGRADED sound primitive
+    /// arm ([`EnumMemberValue::projected_type`]), so a NON-EMPTY enum NEVER
+    /// collapses to `never` (an all-deferred enum is `number` / `string` /
+    /// `number | string` / `unknown`, never the empty bottom) and NEVER narrows
+    /// to the folded subset (a partial enum keeps both the folded literals and
+    /// the deferred members' degraded arms). Distinct arms are deduped, so an
+    /// all-`number`-degraded enum unwraps to `number` rather than `number |
+    /// number`.
+    ///
+    /// This is the SINGLE source of truth for the enum type body. The
+    /// per-declaration eval-env walk (`extract_enum`) cannot see same-name
+    /// merged contributors, so it registers only a non-served placeholder type
+    /// body and the lazily-served body memo defers to this derivation. Returns
+    /// `None` when the group is not an enum; an empty member list yields `never`.
+    pub fn enum_type_union(&self) -> Option<TypeExpr> {
+        let members = self.merged_enum_unified()?;
+        let mut arms: Vec<TypeExpr> = Vec::new();
+        for (_, value) in &members {
+            let arm = value.projected_type().clone();
+            if !arms.contains(&arm) {
+                arms.push(arm);
+            }
+        }
+        Some(TypeExpr::union(arms))
     }
 }
 

@@ -32,6 +32,70 @@ use crate::semantic_query::{
 };
 
 impl<'a> ProjectSemanticDispatch<'a> {
+    /// Project a dotted type-position reference `Enum.Member` to the named
+    /// member's projected type (a folded literal for a foldable member, the
+    /// degraded sound primitive for a deferred one), GATED strictly on the typed
+    /// [`ValueDeclKind::Enum`](verter_semantic::analysis::type_eval::ValueDeclKind::Enum)
+    /// fact. Returns `None` for any prefix that is not a proven enum value
+    /// declaration (so a non-enum `Ns.Member` reference is never
+    /// mis-projected) or an unknown member name. The prefix is resolved to
+    /// its declaring `(canonical, name)` through the prepared decl's
+    /// pre-resolved map first, then the shared bare-name resolver — so a
+    /// locally-declared OR an imported enum binding both resolve, with no
+    /// private drill-down path.
+    ///
+    /// LIMITATION: only a TOP-LEVEL `Enum.Member` is projected. The
+    /// `split_once('.')` below takes the FIRST dotted segment as the prefix, so
+    /// a namespace-nested enum member (`Ns.Enum.Member`) resolves the prefix
+    /// `Ns` — a namespace, not an enum — and returns `None` (a miss). Projecting
+    /// `Ns.Enum.Member` would require first walking the namespace to its inner
+    /// `Enum` binding.
+    fn resolve_enum_member_value(
+        &self,
+        scope_canonical: &str,
+        name_resolution: &FxHashMap<String, ResolvedRootIdentity>,
+        scope_payload: Option<&DeclarationScopePayload>,
+        dotted_name: &str,
+    ) -> Option<TypeExpr> {
+        let (prefix, member) = dotted_name.split_once('.')?;
+        let (canonical, name) = if let Some(direct) = name_resolution.get(prefix) {
+            (
+                Arc::<str>::from(direct.canonical_id.as_str()),
+                Arc::<str>::from(direct.symbol_name.as_str()),
+            )
+        } else {
+            let resolved =
+                resolve_bare_name_in_scope(self.ctx, scope_canonical, scope_payload, prefix)?;
+            (
+                Arc::<str>::from(resolved.canonical_id.as_str()),
+                Arc::<str>::from(resolved.symbol_name.as_str()),
+            )
+        };
+        // Resolve the prefix's enum VALUE decl through the SAME export-target
+        // chase `typeof Enum` uses ([`Self::effective_prepared_value_decl`]): a
+        // locally-declared enum resolves directly; a barrel re-export
+        // (`export { E } from "./leaf"`) chases to the declaring leaf's decl. So
+        // a re-exported enum projects its members exactly like a local one,
+        // matching `typeof E`'s cross-file behaviour — one shared chase, no
+        // forked resolution path.
+        let (_, _, prepared) =
+            self.effective_prepared_value_decl(canonical.as_ref(), name.as_ref())?;
+        if prepared.kind != verter_semantic::analysis::type_eval::ValueDeclKind::Enum {
+            return None;
+        }
+        // A DECLARED member projects to its type — the folded literal for a
+        // foldable member, the degraded sound primitive for a deferred one
+        // (`EnumMemberValue::projected_type`), never a miss. An UNDECLARED name
+        // is genuinely absent (`find` yields `None`) and stays a miss, so the
+        // member-existence gate is preserved.
+        prepared
+            .enum_members
+            .as_ref()?
+            .iter()
+            .find(|(name, _)| name == member)
+            .map(|(_, value)| value.projected_type().clone())
+    }
+
     /// Shallow-lower a [`TypeExpr`] under `env` (type-parameter bindings)
     /// into a [`SemanticNodeId`]. "Shallow" means one structural level:
     /// object members, union/intersection arms, and function / conditional
@@ -566,6 +630,35 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
                 }
                 let Some((resolved_canonical, resolved_name)) = resolved_root else {
+                    // Enum-member projection (typed, GATED fallback). A dotted
+                    // type-position reference `Enum.Member` whose PREFIX
+                    // resolves to an enum value declaration carrying
+                    // `enum_members` projects the named member's projected type
+                    // (folded literal or degraded primitive).
+                    // The gate is the typed `ValueDeclKind::Enum` fact — NOT a
+                    // dotted-name string heuristic: exact qualified resolution
+                    // (namespace member, etc.) already ran above and won for
+                    // every non-enum `Ns.Member`, so this only fires once that
+                    // missed and the prefix is proven to be an enum.
+                    if let NodeScopeId::File { canonical_id, .. } = scope {
+                        if let Some(member_value) = self.resolve_enum_member_value(
+                            canonical_id.as_ref(),
+                            name_resolution,
+                            scope_payload,
+                            name.as_ref(),
+                        ) {
+                            return self.shallow_lower_type_expr_with_context(
+                                &member_value,
+                                env,
+                                scope,
+                                name_resolution,
+                                scope_payload,
+                                shadowing,
+                                substitutions,
+                                reduction_context,
+                            );
+                        }
+                    }
                     return self.opaque(QueryError::Miss);
                 };
                 // Recursive-ref guard: if the resolved root is

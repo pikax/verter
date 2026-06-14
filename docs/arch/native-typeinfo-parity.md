@@ -3016,6 +3016,32 @@ surface those rows contract
 — lift pending an oracle probe/grammar extension that elicits structural
 display for class instance types).
 
+The enum-family reducer (`U2.ENUMS`) is likewise complete — the eval-env enum
+arm produces each member's ordered value inventory — a folded value literal, or a
+degraded sound primitive (`number` / `string` / `number | string` / `unknown`) for a
+member whose value is not statically foldable (value space) — and the type union of
+those literal + degraded arms (type space), registered as a dual-space type+value
+header, with the typed-gated `Enum.Member` projection — and all seven scoped
+projections resolve correctly (numeric/string/const member → its branded
+literal; `${Enum}` → the value union via `TemplateLiteralReduce`; `keyof typeof
+Enum` → the member-name union via `KeyOf`; the `Extract<…>[…]` discriminant →
+its arm payload). UNLIKE the families above, NONE of the seven oracle-lift, so
+`U2.ENUMS` keeps all seven rows `Ignored` with no measured-trace re-homing and
+no count change: the Ts7Oracle compares Verter's structural projection to tsgo's
+hover, which renders these enum shapes in forms the closed positive-allowlist
+admission gate rejects. Three (numeric/string/const member) are fundamentally
+non-liftable on the SAME hover-display limit as the two class rows above — tsgo
+prints an enum member NOMINALLY (`Color.Red`), never the structural literal `0`
+Verter correctly produces (`Reject(EnumMemberOrQualified)`). The other four
+(`${Enum}`, `keyof typeof Enum` ×2, the indexed-access discriminant) hit the
+gate's GLOBAL deferred-construct rejects (template-literal / keyof / typeof /
+indexed-access origins — deferred for every family, not enums); they lift only
+behind an oracle-infra extension (expansion probes + a `keyof typeof Enum`
+source-walk carve-out + `DistributiveIdentity` cross-check relaxation), tracked
+as a dedicated follow-up block. The `ResolveEnum` query key stays non-producing
+by design — enum resolution reuses the existing `ResolveDecl` / `TypeOf` /
+`KeyOf` / `TemplateLiteralReduce` / `IndexedAccess` reducers (no second engine).
+
 The complete partition (each entry `file::function — substrate`):
 <!-- BEGIN U0 row→block coverage table (362 rows). [Marker name is a fixed parse contract
      consumed by scripts/gen-typeinfo-ignore-manifest.py parse_partition — do NOT rename.

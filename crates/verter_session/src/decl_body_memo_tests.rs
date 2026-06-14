@@ -442,11 +442,58 @@ declare module "ext" {
         }
     }
 
-    // Enums are a HEADER-ONLY kind: their variant names emit
-    // header-level facts but there is NO lazy enum-body accessor, so
-    // `enum_headers` is intentionally NOT one of the four demand
-    // surfaces enumerated above (it is covered by the non-vacuity
-    // assertion that `Color` is indexed).
+    // An enum is a dual-space symbol: it ALSO registers a type header
+    // (the projected-type union) and a value header (the `typeof` object),
+    // so `Color` demand-resolves through BOTH the `type_decl` and
+    // `value_decl` loops above. The dedicated `enum_headers` table
+    // additionally carries the member NAMES for the member-presence facts
+    // rail — that name authority has no separate lazy-body accessor.
+}
+
+#[test]
+fn merged_same_name_enum_resolves_all_members_in_both_spaces_through_the_memo() {
+    // TS declaration merging: two same-name `enum E` bodies contribute to one
+    // enum. The lazily-served value body (`typeof E` / `E.member`) and type
+    // body (the projected-type union) must each carry the UNION of ALL
+    // contributors' members. A `primary()`-only value fold or a last-wins
+    // `merged_body()` type fold would drop the first declaration's `A`/`B`; the
+    // memo serves the merged set for both spaces instead.
+    let source = "enum E { A = 1, B = 2 }\nenum E { C = 3, D = 4 }\n";
+    let (memo, _) = memo_for(source);
+
+    // Value space: merged member set in source order, through `value_decl`.
+    let value = memo.value_decl("E").expect("enum value body resolves");
+    let names: Vec<&str> = value
+        .enum_members
+        .as_ref()
+        .expect("value body carries enum_members")
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect();
+    assert_eq!(
+        names,
+        vec!["A", "B", "C", "D"],
+        "merged enum value-space members must union all contributors in source order"
+    );
+
+    // Type space: the value-derived union, through `type_decl`.
+    let ty = memo.type_decl("E").expect("enum type body resolves");
+    match ty.body.primary() {
+        TypeExpr::Union(types) => {
+            assert_eq!(
+                types.len(),
+                4,
+                "type union must carry all 4 member literals"
+            );
+            for literal in [1.0, 2.0, 3.0, 4.0] {
+                assert!(
+                    types.contains(&TypeExpr::number_literal(literal)),
+                    "type union must contain literal {literal}; got {types:?}"
+                );
+            }
+        }
+        other => panic!("merged enum type body must be a 4-arm union, got {other:?}"),
+    }
 }
 
 #[test]

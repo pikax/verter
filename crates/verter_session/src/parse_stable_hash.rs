@@ -154,11 +154,15 @@ pub fn compute_parse_stable_hash(indexed: &IndexedReady) -> Hash16 {
     }
 
     // ── Section: enum symbols (HEADER inventory — member NAMES only) ──
-    // Enums live in their own header table (the eval-env walk never
-    // registers them as value symbols), so they must be folded in
-    // explicitly: a variant add/rename/remove is a decl-shape edit that
-    // MUST move this hash. Member order is preserved (auto-increment enum
-    // values are positional, so a reorder is a semantic change).
+    // An enum is registered dual-space (it ALSO appears as an `enum_v` value
+    // symbol in the section above), but the dedicated enum header table is
+    // the sole authority for the member (variant) NAMES — the type/value
+    // headers do not carry them — so they are folded in explicitly here: a
+    // variant add/rename/remove is a decl-shape edit that MUST move this
+    // hash. Member order is preserved (auto-increment enum values are
+    // positional, so a reorder is a semantic change). Member VALUES are body
+    // data (the value-body fact + `FileWholeHash` rail), deliberately not
+    // folded into this skeleton hash.
     write_section(&mut buf, b"enums");
     let mut enum_keys: Vec<&str> = shallow.enum_symbol_names().collect();
     enum_keys.sort_unstable();

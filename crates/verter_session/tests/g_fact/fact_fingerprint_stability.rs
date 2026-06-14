@@ -29,7 +29,7 @@
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
-use verter_semantic::analysis::type_eval::{TypeDeclKind, ValueDeclKind};
+use verter_semantic::analysis::type_eval::{EnumMemberValue, TypeDeclKind, ValueDeclKind};
 use verter_semantic::facts::{FactKey, FactRegistry, SymbolSpace};
 use verter_session::fact_emission::emit_parse_facts;
 use verter_session::file_artifact_store::InternedName;
@@ -101,6 +101,7 @@ fn build_indexed(
             type_annotation: None,
             signatures: Vec::new(),
             object_shape: None,
+            enum_members: None,
         });
     }
     let mut exports_map: FxHashMap<String, ExportTarget> = FxHashMap::default();
@@ -463,5 +464,95 @@ fn cosmetic_edit_comment_fixture_declares_documented_shape() {
     assert!(
         src.contains("This is a top-of-file standalone comment"),
         "cosmetic_edit_comment.ts MUST contain the documented standalone comment"
+    );
+}
+
+// ── enum member values fold into the value-body fingerprint ──
+
+/// Build a synthetic `IndexedReady` for a single exported `enum Color`,
+/// seeding the value symbol with the given (member name, value-literal) pairs
+/// as FOLDED members so the value-body fact fold (`value_body_for_hash`)
+/// observes them.
+fn build_indexed_enum(members: Vec<(&str, TypeExpr)>, raw_source: &str) -> Arc<IndexedReady> {
+    let mut env = verter_semantic::analysis::type_eval::EvalEnv::new();
+    env.add_value(verter_semantic::analysis::type_eval::ValueDeclInfo {
+        name: "Color".to_string(),
+        declaration_id: 0,
+        kind: ValueDeclKind::Enum,
+        type_annotation: None,
+        signatures: Vec::new(),
+        object_shape: None,
+        enum_members: Some(
+            members
+                .into_iter()
+                .map(|(name, ty)| (name.to_string(), EnumMemberValue::Folded(ty)))
+                .collect(),
+        ),
+    });
+    let mut exports_map: FxHashMap<String, ExportTarget> = FxHashMap::default();
+    exports_map.insert("Color".to_string(), export_local("Color"));
+    let mut shallow = ShallowFileState::from_analysis([0u8; 16], empty_external(), Some(&env));
+    shallow.exports = exports_map;
+    Arc::new(IndexedReady::new_for_test_with_state(
+        [0u8; 16],
+        Arc::new(shallow),
+        Arc::from(raw_source),
+        Arc::from(""),
+        empty_external(),
+    ))
+}
+
+#[test]
+fn enum_member_edit_moves_value_body_fingerprint() {
+    // The value-space `Export(Color, Value)` fact's `semantic_hash` is the
+    // enum's value-body fingerprint. It folds the FOLDABLE member set into a
+    // synthetic object, so a foldable member value / name / count edit moves the
+    // hash — a constant body would leave a warm `typeof Color` / `Color.Red`
+    // consumer serving STALE after an edit. It MUST discriminate every foldable
+    // member edit.
+    let num = TypeExpr::number_literal;
+    let key = FactKey::Export {
+        name: InternedName::from("Color"),
+        space: SymbolSpace::Value,
+    };
+    let hash = |indexed: &IndexedReady| {
+        facts_of(indexed)
+            .lookup_or_compute(&key)
+            .expect("enum value-body fact computes on observation")
+            .semantic_hash
+    };
+
+    let red0 = build_indexed_enum(vec![("Red", num(0.0))], "enum Color { Red = 0 }");
+    let red0_again = build_indexed_enum(vec![("Red", num(0.0))], "enum Color { Red = 0 }");
+    let red1 = build_indexed_enum(vec![("Red", num(1.0))], "enum Color { Red = 1 }");
+    let crimson0 = build_indexed_enum(vec![("Crimson", num(0.0))], "enum Color { Crimson = 0 }");
+    let red_green = build_indexed_enum(
+        vec![("Red", num(0.0)), ("Green", num(1.0))],
+        "enum Color { Red, Green }",
+    );
+
+    // Identical enums → identical fingerprint (no spurious churn).
+    assert_eq!(
+        hash(&red0),
+        hash(&red0_again),
+        "identical enums MUST produce the same value-body fingerprint"
+    );
+    // A member VALUE edit (`Red = 0` → `Red = 1`).
+    assert_ne!(
+        hash(&red0),
+        hash(&red1),
+        "a member value edit MUST move the value-body fingerprint"
+    );
+    // A member NAME edit (`Red` → `Crimson`), same value.
+    assert_ne!(
+        hash(&red0),
+        hash(&crimson0),
+        "a member name edit MUST move the value-body fingerprint"
+    );
+    // A member COUNT change (add `Green`).
+    assert_ne!(
+        hash(&red0),
+        hash(&red_green),
+        "adding a member MUST move the value-body fingerprint"
     );
 }

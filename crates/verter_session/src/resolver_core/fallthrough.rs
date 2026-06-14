@@ -897,6 +897,7 @@ pub fn inject_prop_type_overrides(
             type_annotation: Some(ty.clone()),
             signatures: Vec::new(),
             object_shape: None,
+            enum_members: None,
         });
     }
 }
@@ -1874,6 +1875,7 @@ mod tests {
             type_annotation: Some(TypeExpr::string_literal("input")),
             signatures: Vec::new(),
             object_shape: None,
+            enum_members: None,
         });
 
         let lowered = TypeExpr::TypeOf(verter_type_expr::ValueRef {
@@ -1912,6 +1914,7 @@ mod tests {
             type_annotation: Some(TypeExpr::string_literal("A")),
             signatures: Vec::new(),
             object_shape: None,
+            enum_members: None,
         });
         env.add_value(verter_semantic::analysis::type_eval::ValueDeclInfo {
             name: "b".to_string(),
@@ -1920,6 +1923,7 @@ mod tests {
             type_annotation: Some(TypeExpr::string_literal("B")),
             signatures: Vec::new(),
             object_shape: None,
+            enum_members: None,
         });
 
         let union = TypeExpr::union(vec![
@@ -1952,6 +1956,7 @@ mod tests {
             type_annotation: Some(TypeExpr::string_literal("ignored")),
             signatures: Vec::new(),
             object_shape: None,
+            enum_members: None,
         });
 
         let lowered = TypeExpr::TypeOf(verter_type_expr::ValueRef {

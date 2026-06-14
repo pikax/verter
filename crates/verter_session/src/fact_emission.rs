@@ -10,7 +10,9 @@
 //! - `MemberPresence.semantic_hash` (R28 header-only — `(name, kind,
 //!   exporter_salt)`; NO body). Emitted for type/value member headers
 //!   AND for each `enum` variant (a Value-space `EnumMember` of the enum
-//!   — enums live in their own header table, never as value symbols).
+//!   — variant names live in the dedicated enum header table, the
+//!   member-presence authority, distinct from the enum symbol's own
+//!   dual-space type/value header).
 //! - `SyntacticExportSet.semantic_hash` over the sorted local export
 //!   names + bare re-export specifiers.
 //! - `ImportRef` per syntactic import binding.
@@ -44,7 +46,7 @@ use verter_semantic::facts::{
     compute_member_presence_hash, compute_member_shape_hash, compute_semantic_hash, CrossDeclLens,
     CrossDeclRef, Fact, FactKey, FactRegistry, MemberKind, SymbolSpace,
 };
-use verter_type_expr::TypeExpr;
+use verter_type_expr::{ObjectExpr, ObjectMember, ObjectProperty, TypeExpr};
 
 use crate::decl_body_memo::{DeclBodyMemo, LoweredValueDecl};
 use crate::file_artifact_store::{
@@ -189,6 +191,7 @@ impl LazyBodyFactSource {
                     &lowered.signatures,
                     lowered.kind,
                     lowered.object_shape.as_ref(),
+                    lowered.enum_members.as_deref(),
                 )
             }
         };
@@ -209,12 +212,49 @@ impl LazyBodyFactSource {
 /// present, else a synthesised type-expression that captures the
 /// declaration kind / signature set. The structural representation MUST
 /// be distinct across edits.
+///
+/// An `enum` value decl carries no type annotation / signatures / object
+/// shape, so without the explicit member fold it would degrade to a
+/// constant `Enum::None` body — invisible to a member name / value / count
+/// edit, so a warm value-space consumer (`typeof Enum`, `Enum.Member`) would
+/// serve STALE after `Red = 0` → `Red = 1`. Fold the FOLDABLE members
+/// ([`EnumMemberValue::folded_literal`]) into a synthetic object (member NAME →
+/// value-literal) so any foldable member name, value, or count change moves the
+/// body hash. Deferred members are projected out — their degraded domain is not
+/// a value edit, and their NAME/count change is already tracked by the
+/// presence-rail (`parse_stable_hash` enum-header fold). This is the SOLE
+/// consumer of the foldable-only rail.
 fn value_body_for_hash(
     type_annotation: Option<&TypeExpr>,
     signatures: &[verter_semantic::analysis::type_eval::FunctionSignature],
     kind: verter_semantic::analysis::type_eval::ValueDeclKind,
-    object_shape: Option<&verter_type_expr::ObjectExpr>,
+    object_shape: Option<&ObjectExpr>,
+    enum_members: Option<
+        &[(
+            String,
+            verter_semantic::analysis::type_eval::EnumMemberValue,
+        )],
+    >,
 ) -> TypeExpr {
+    use verter_semantic::analysis::type_eval::ValueDeclKind;
+    if kind == ValueDeclKind::Enum {
+        if let Some(members) = enum_members {
+            let properties = members
+                .iter()
+                .filter_map(|(name, value)| {
+                    value.folded_literal().map(|literal| {
+                        ObjectMember::Property(ObjectProperty::synthetic_public(
+                            name.clone(),
+                            literal.clone(),
+                            false,
+                            true,
+                        ))
+                    })
+                })
+                .collect();
+            return TypeExpr::Object(Arc::new(ObjectExpr { properties }));
+        }
+    }
     match (type_annotation, signatures.first()) {
         (Some(ty), _) => ty.clone(),
         (None, Some(_)) => TypeExpr::Unknown {
@@ -410,8 +450,9 @@ fn emit_value_symbol_headers(registry: &mut FactRegistry, shallow: &ShallowFileS
 
 /// Emit header-level member-presence facts for each `enum` declaration.
 ///
-/// Enums are kept in their own header table (the eval-env walk never
-/// registers them as value symbols), so they need their own emitter —
+/// An enum's variant names are kept in the dedicated enum header table
+/// (the member-presence authority, distinct from the enum symbol's own
+/// dual-space type/value header), so they need their own emitter —
 /// each variant becomes a Value-space [`MemberKind::EnumMember`] of the
 /// enum, on the SAME `MemberShape` / `MemberPresence` rail as type/value
 /// member headers. Header-only: variant NAMES + kind, no initializer

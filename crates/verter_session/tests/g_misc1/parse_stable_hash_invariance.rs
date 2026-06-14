@@ -76,6 +76,7 @@ fn build_indexed(
             type_annotation: None,
             signatures: Vec::new(),
             object_shape: None,
+            enum_members: None,
         });
     }
     let mut exports_map: FxHashMap<

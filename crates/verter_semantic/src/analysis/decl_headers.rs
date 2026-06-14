@@ -104,10 +104,12 @@ pub struct ValueDeclHeader {
     pub contributors: Vec<u32>,
 }
 
-/// Header record for one `enum` declaration. Kept in its OWN table:
-/// the eval-env walk does not register enums as value symbols, so enum
-/// headers must not feed the value-symbol inventory — they exist for
-/// header-level facts (member presence) only.
+/// Header record for one `enum` declaration. The dedicated table carries
+/// the member NAMES + statement locators for the member-presence facts rail
+/// (each variant is a `MemberKind::EnumMember`). The enum is ALSO registered
+/// as a dual-space type + value header (see [`index_enum`]) so it resolves
+/// through the shared demand path; this table is the member-name authority,
+/// not a sign that enums are absent from the value/type inventory.
 #[derive(Debug, Clone)]
 pub struct EnumDeclHeader {
     pub span: Span,
@@ -253,6 +255,35 @@ impl DeclHeaderIndex {
             index
                 .value_headers
                 .insert(name.clone(), value_header_from_group(group));
+            // An `enum` is a dual-space symbol: post-merge it is a VALUE
+            // symbol (kind Enum) carrying its ordered member inventory. The
+            // production `index_enum` path ALSO records the member NAMES in
+            // the dedicated `enum_headers` table (the member-presence
+            // authority), so this env-seeded mirror must too — else a seeded
+            // `DeclHeaderIndex` UNDER-COUNTS `enum_symbol_names()` /
+            // `enum_member_names()` and the parse-stable-hash enum-header fold
+            // plus the enum `MemberPresence` fact emission go wrong for seeded
+            // artifacts. The presence rail is the FULL member-NAME set —
+            // `merged_enum_member_names`, EVERY statically-named member
+            // including unfoldable-VALUE ones — which is the SUPERSET the value
+            // rail (`merged_enum_members`) filters; both resolve names via the
+            // same `static_name` helper `index_enum` uses, so the seeded mirror
+            // reconstructs `index_enum`'s exact union (a value subset would drop
+            // unfoldable-value and computed-name members). `Some` exactly when a
+            // contributor is an enum. Locators/spans stay empty like every other
+            // seeded header (a seeded index never drives selective statement
+            // lowering — its memo is pre-filled).
+            if let Some(member_names) = group.merged_enum_member_names() {
+                index.enum_headers.insert(
+                    name.clone(),
+                    EnumDeclHeader {
+                        span: Span::default(),
+                        name_span: Span::default(),
+                        member_names,
+                        contributors: Vec::new(),
+                    },
+                );
+            }
         }
         for ((scope, name), group) in &env.augmentation_scopes {
             index
@@ -349,7 +380,7 @@ fn index_top_level_statement(stmt: &Statement<'_>, stmt_index: u32, index: &mut 
             }
         }
         Statement::TSEnumDeclaration(enum_decl) => {
-            index_enum(enum_decl, stmt_index, &mut index.enum_headers);
+            index_enum(enum_decl, stmt_index, index);
         }
         Statement::ExportNamedDeclaration(export) => {
             if let Some(ref decl) = export.declaration {
@@ -442,16 +473,19 @@ fn index_declaration(decl: &Declaration<'_>, stmt_index: u32, index: &mut DeclHe
             }
         }
         Declaration::TSEnumDeclaration(enum_decl) => {
-            index_enum(enum_decl, stmt_index, &mut index.enum_headers);
+            index_enum(enum_decl, stmt_index, index);
         }
         _ => {}
     }
 }
 
-/// Index one `enum` declaration's HEADER facts (member names + statement
-/// locator). The eval-env walk has no enum arm — enums never enter
-/// `value_symbols` — so enums live in their own header table for
-/// header-level member-presence facts only; no body lowering.
+/// Index one `enum` declaration's HEADER facts: the member-name inventory
+/// (in the dedicated `enum_headers` table — the member-presence authority)
+/// plus the dual-space resolution locators (an `enum` is both a type and a
+/// value, registered below). No body lowering here — the eval-env walk's
+/// enum arm lowers the bodies (the ordered member inventory — a folded literal
+/// or degraded primitive per member — and the projected-type union) lazily on
+/// demand.
 ///
 /// A MERGED enum (`enum E { A }` then `enum E { B }`, legal TS declaration
 /// merging) UNIONS every same-name declaration's members into the existing
@@ -461,13 +495,11 @@ fn index_declaration(decl: &Declaration<'_>, stmt_index: u32, index: &mut DeclHe
 /// double-counted. The representative spans are the FIRST contributor's
 /// (enum spans are not consumed downstream; only the member-name union and
 /// the contributor locators feed the parse-stable skeleton and facts).
-fn index_enum(
-    enum_decl: &TSEnumDeclaration<'_>,
-    stmt_index: u32,
-    table: &mut FxHashMap<String, EnumDeclHeader>,
-) {
-    let entry = table
-        .entry(enum_decl.id.name.to_string())
+fn index_enum(enum_decl: &TSEnumDeclaration<'_>, stmt_index: u32, index: &mut DeclHeaderIndex) {
+    let name = enum_decl.id.name.as_str();
+    let entry = index
+        .enum_headers
+        .entry(name.to_string())
         .or_insert_with(|| EnumDeclHeader {
             span: enum_decl.span.into(),
             name_span: enum_decl.id.span.into(),
@@ -475,12 +507,51 @@ fn index_enum(
             contributors: Vec::new(),
         });
     for member in &enum_decl.body.members {
-        let name = member.id.static_name().to_string();
-        if !entry.member_names.iter().any(|existing| existing == &name) {
-            entry.member_names.push(name);
+        let member_name = member.id.static_name().to_string();
+        if !entry
+            .member_names
+            .iter()
+            .any(|existing| existing == &member_name)
+        {
+            entry.member_names.push(member_name);
         }
     }
     push_contributor(&mut entry.contributors, stmt_index);
+
+    // Dual-space RESOLUTION headers (mirrors `index_class`): an `enum` is
+    // BOTH a type (its projected-type union) and a value (its `typeof`
+    // object), so it must be reachable through the shared type/value demand
+    // path like any other dual-space symbol — not invisible in a side table.
+    // The bodies lower lazily through the eval-env enum arm on demand; these
+    // headers carry only the locator + kind, with NO members (member names
+    // live on `enum_headers` for the member-presence facts rail; the
+    // value-space `enum_members` inventory — a folded literal or degraded
+    // primitive per member — and the type-space projected-type union are
+    // produced at lowering). The type side registers as the `Alias` it
+    // structurally is
+    // (there is no dedicated enum `TypeDeclKind`).
+    upsert_type_header(
+        &mut index.type_headers,
+        name,
+        TypeDeclKind::Alias,
+        enum_decl.span.into(),
+        enum_decl.id.span.into(),
+        Vec::new(),
+        Vec::new(),
+        stmt_index,
+    );
+    let value_entry = index
+        .value_headers
+        .entry(name.to_string())
+        .or_insert_with(|| ValueDeclHeader {
+            kind: ValueDeclKind::Enum,
+            span: enum_decl.span.into(),
+            name_span: enum_decl.id.span.into(),
+            object_member_headers: Vec::new(),
+            contributors: Vec::new(),
+        });
+    value_entry.kind = ValueDeclKind::Enum;
+    push_contributor(&mut value_entry.contributors, stmt_index);
 }
 
 /// Mirror of `extract_module_declaration`: a string-literal module name is

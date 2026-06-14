@@ -112,6 +112,11 @@ fn prepared_value_decl_to_value_decl_info(
         type_annotation: prepared.type_annotation.clone(),
         signatures: prepared.signatures.clone(),
         object_shape: prepared.object_shape.clone(),
+        // The prepared decl carries the FULL member inventory (every member's
+        // `EnumMemberValue` — foldable literal or deferred-and-degraded), so the
+        // round-trip into the importing env is a lossless copy: a deferred member
+        // of an imported enum keeps both its NAME and its degraded domain.
+        enum_members: prepared.enum_members.clone(),
     }
 }
 
@@ -193,6 +198,7 @@ mod tests {
             type_annotation: Some(verter_type_expr::TypeExpr::string_literal("dark")),
             signatures: Vec::new(),
             object_shape: None,
+            enum_members: None,
         });
 
         let mut resolver = TestResolver::default();
@@ -285,6 +291,7 @@ mod tests {
             type_annotation: Some(verter_type_expr::TypeExpr::string_literal("dark")),
             signatures: Vec::new(),
             object_shape: None,
+            enum_members: None,
         });
 
         let mut resolver = TestResolver::default();
@@ -300,6 +307,7 @@ mod tests {
             type_annotation: Some(verter_type_expr::TypeExpr::string_literal("local")),
             signatures: Vec::new(),
             object_shape: None,
+            enum_members: None,
         });
         materialize_imported_runtime_values_into_env(
             &imports,
@@ -351,6 +359,7 @@ mod tests {
             type_annotation: Some(verter_type_expr::TypeExpr::string_literal("dark")),
             signatures: Vec::new(),
             object_shape: None,
+            enum_members: None,
         });
         dep_env.add_value(ValueDeclInfo {
             name: "helper".to_string(),
@@ -359,6 +368,7 @@ mod tests {
             type_annotation: Some(verter_type_expr::TypeExpr::string_literal("helper")),
             signatures: Vec::new(),
             object_shape: None,
+            enum_members: None,
         });
 
         let mut resolver = TestResolver::default();
@@ -420,6 +430,7 @@ mod tests {
             type_annotation: Some(verter_type_expr::TypeExpr::string_literal("dark")),
             signatures: Vec::new(),
             object_shape: None,
+            enum_members: None,
         });
         let mut unused_env = EvalEnv::new();
         unused_env.add_value(ValueDeclInfo {
@@ -429,6 +440,7 @@ mod tests {
             type_annotation: Some(verter_type_expr::TypeExpr::string_literal("helper")),
             signatures: Vec::new(),
             object_shape: None,
+            enum_members: None,
         });
 
         let mut resolver = TestResolver::default();
@@ -497,6 +509,7 @@ mod tests {
             type_annotation: Some(verter_type_expr::TypeExpr::string_literal("primary")),
             signatures: Vec::new(),
             object_shape: None,
+            enum_members: None,
         });
         dep_env.add_value(ValueDeclInfo {
             name: "default".to_string(),
@@ -510,6 +523,7 @@ mod tests {
             )),
             signatures: Vec::new(),
             object_shape: None,
+            enum_members: None,
         });
 
         let mut resolver = TestResolver::default();
@@ -564,6 +578,7 @@ mod tests {
             type_annotation: Some(verter_type_expr::TypeExpr::string_literal("primary")),
             signatures: Vec::new(),
             object_shape: None,
+            enum_members: None,
         });
 
         let mut resolver = TestResolver::default();
@@ -598,6 +613,7 @@ mod tests {
                 type_annotation: Some(verter_type_expr::TypeExpr::string_literal("cached")),
                 signatures: Vec::new(),
                 object_shape: None,
+                enum_members: None,
             }),
         );
 

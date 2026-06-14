@@ -40,7 +40,8 @@ use verter_compiler::utils::oxc::vue::resolve_type::{
 };
 use verter_semantic::analysis::decl_headers::DeclHeaderIndex;
 use verter_semantic::analysis::type_eval::{
-    AugmentationScopeKind, EvalEnv, FunctionSignature, TypeDeclBody, TypeDeclKind, ValueDeclKind,
+    AugmentationScopeKind, EnumMemberValue, EvalEnv, FunctionSignature, TypeDeclBody, TypeDeclKind,
+    ValueDeclGroup, ValueDeclKind,
 };
 use verter_semantic::analysis::type_eval_build::{
     build_eval_env, lower_jsdoc_typedef_named, lower_top_level_statement,
@@ -83,11 +84,16 @@ pub struct LoweredValueDecl {
     /// The merged overload signature set, in source order.
     pub signatures: Vec<FunctionSignature>,
     pub object_shape: Option<ObjectExpr>,
-    /// Enum member values. The eval-env walk registers no enum value
-    /// symbols, so this is `None` on every lazily lowered entry; the
-    /// synthesised-`.vue`-default injection path is the only producer of
-    /// a populated variant.
-    pub enum_members: Option<FxHashMap<String, TypeExpr>>,
+    /// The full ordered member inventory (NAME → [`EnumMemberValue`]) for an
+    /// `enum` declaration, in source declaration order, UNIONED across every
+    /// same-name merged contributor (the eval-env enum arm produces each
+    /// contributor's members on demand; [`ValueDeclGroup::merged_enum_unified`]
+    /// folds the group). `Some` exactly when the lowered value decl is an enum.
+    /// Drives `typeof Enum` (an object keyed by the member NAMES) and the
+    /// `Enum.Member` projection via [`EnumMemberValue::projected_type`] — EVERY
+    /// member, foldable or deferred-and-degraded. The value-body fingerprint
+    /// reads the [`EnumMemberValue::folded_literal`] subset only.
+    pub enum_members: Option<Vec<(String, EnumMemberValue)>>,
 }
 
 type TypeCell = Arc<OnceLock<Option<Arc<LoweredTypeDecl>>>>;
@@ -224,7 +230,11 @@ impl DeclBodyMemo {
                     )
                 })
                 .unwrap_or_default();
-            let lowered = lowered_type_decl_from_group(group, deps.0, deps.1);
+            let enum_body = env
+                .value_symbols
+                .get(name)
+                .and_then(ValueDeclGroup::enum_type_union);
+            let lowered = lowered_type_decl_from_group(group, deps.0, deps.1, enum_body);
             memo.type_entries.insert(
                 name.clone(),
                 Arc::new(OnceLock::from(Some(Arc::new(lowered)))),
@@ -238,8 +248,12 @@ impl DeclBodyMemo {
             );
         }
         for ((scope, name), group) in &env.augmentation_scopes {
-            let lowered =
-                lowered_type_decl_from_group(group, FxHashSet::default(), FxHashSet::default());
+            let lowered = lowered_type_decl_from_group(
+                group,
+                FxHashSet::default(),
+                FxHashSet::default(),
+                None,
+            );
             memo.aug_type_entries.insert(
                 (scope.clone(), name.clone()),
                 Arc::new(OnceLock::from(Some(Arc::new(lowered)))),
@@ -500,8 +514,11 @@ impl DeclBodyMemo {
                 if let Some(header) = self.header_index.type_header(name) {
                     contributors.extend_from_slice(&header.contributors);
                 }
-                // Enum surfaces are TYPE-space captures with no env
-                // symbol — their locators live in the enum table.
+                // An enum is registered dual-space, so its TYPE header above
+                // already carries these locators; the dedicated enum table is
+                // the member-NAME authority, and folding its contributor
+                // locators in defensively keeps the capture complete even if a
+                // refactor ever decoupled the two (deduped below).
                 if let Some(header) = self.header_index.enum_headers.get(name) {
                     contributors.extend_from_slice(&header.contributors);
                 }
@@ -640,9 +657,16 @@ impl DeclBodyMemo {
                 for (decl_name, group) in &scratch.type_symbols {
                     let (deps, structural) =
                         dep_records.get(decl_name).cloned().unwrap_or_default();
+                    // An enum's type-space body is derived from its MERGED
+                    // value members (same name → matching value group), so the
+                    // type and value spaces never diverge.
+                    let enum_body = scratch
+                        .value_symbols
+                        .get(decl_name)
+                        .and_then(ValueDeclGroup::enum_type_union);
                     batch.types.push((
                         decl_name.clone(),
-                        lowered_type_decl_from_group(group, deps, structural),
+                        lowered_type_decl_from_group(group, deps, structural, enum_body),
                     ));
                 }
                 for (decl_name, group) in &scratch.value_symbols {
@@ -651,6 +675,8 @@ impl DeclBodyMemo {
                         .push((decl_name.clone(), lowered_value_decl_from_group(group)));
                 }
                 for ((scope, decl_name), group) in &scratch.augmentation_scopes {
+                    // Ambient augmentation blocks do not inventory enum
+                    // declarations, so no value-derived enum union applies here.
                     batch.aug_types.push((
                         scope.clone(),
                         decl_name.clone(),
@@ -658,6 +684,7 @@ impl DeclBodyMemo {
                             group,
                             FxHashSet::default(),
                             FxHashSet::default(),
+                            None,
                         ),
                     ));
                 }
@@ -776,13 +803,26 @@ impl DeclBodyMemo {
 /// Fold one same-name TYPE contributor group into the lazily-served
 /// per-symbol record — the same body merge / parameter union the eager
 /// shallow build performed per symbol.
+///
+/// `enum_type_body` is the enum's value-derived type union, supplied by the
+/// caller when this type name is an `enum` (see
+/// [`ValueDeclGroup::enum_type_union`]). When `Some`, it REPLACES the group's
+/// `merged_body()`: an enum's type-space body is the union of its member value
+/// literals, derived from the MERGED value members so the type and value
+/// spaces never diverge (a per-contributor `merged_body()` fold would be
+/// last-wins for the enum's `Alias`-kind group and drop earlier declarations'
+/// members).
 fn lowered_type_decl_from_group(
     group: &verter_semantic::analysis::type_eval::TypeDeclGroup,
     dep_names: FxHashSet<String>,
     structural_dep_names: FxHashSet<String>,
+    enum_type_body: Option<TypeExpr>,
 ) -> LoweredTypeDecl {
     let primary = group.primary();
-    let body = group.merged_body();
+    let body = match enum_type_body {
+        Some(union) => TypeDeclBody::Single(union),
+        None => group.merged_body(),
+    };
     let lookup = body.lookup_object();
 
     let mut type_parameters: Vec<TypeParam> = Vec::new();
@@ -813,17 +853,19 @@ fn lowered_type_decl_from_group(
 }
 
 /// Fold one same-name VALUE contributor group into the lazily-served
-/// per-symbol record.
-fn lowered_value_decl_from_group(
-    group: &verter_semantic::analysis::type_eval::ValueDeclGroup,
-) -> LoweredValueDecl {
+/// per-symbol record. An enum's FULL member set (every member's
+/// [`EnumMemberValue`]) is unioned across every same-name contributor via
+/// [`ValueDeclGroup::merged_enum_unified`] (NOT `primary()`-only, which would
+/// drop earlier merged declarations' members) so the type/value projection
+/// surfaces and the value-body fingerprint both read from one lossless rail.
+fn lowered_value_decl_from_group(group: &ValueDeclGroup) -> LoweredValueDecl {
     let primary = group.primary();
     LoweredValueDecl {
         kind: primary.kind,
         type_annotation: primary.type_annotation.clone(),
         signatures: group.merged_signatures(),
         object_shape: primary.object_shape.clone(),
-        enum_members: None,
+        enum_members: group.merged_enum_unified(),
     }
 }
 

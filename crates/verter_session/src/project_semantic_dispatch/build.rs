@@ -570,12 +570,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
             let object_expr = ObjectExpr {
                 properties: members
                     .iter()
-                    .map(|(name, ty)| {
-                        // Enum-member synthetic property — the prepared enum
-                        // member map carries no per-member source span.
+                    .map(|(name, value)| {
+                        // One synthetic property per member — EVERY member, not
+                        // just the foldable subset. A foldable member carries its
+                        // literal; a deferred member its degraded sound primitive
+                        // (`EnumMemberValue::projected_type`), so `keyof typeof
+                        // Enum` surfaces every declared name. The prepared enum
+                        // member inventory carries no per-member source span.
                         ObjectMember::Property(ObjectProperty::synthetic_public(
                             name.clone(),
-                            ty.clone(),
+                            value.projected_type().clone(),
                             false,
                             true,
                         ))
@@ -1111,10 +1115,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// symbol)` root: the root itself when its prepared value decl exists
     /// locally; otherwise the value-export-target walk's declaring identity
     /// (the post-fallback canonical) — the ONE shared fallback rail for
-    /// re-exported value roots (`build_typeof` and the class-surface Static
-    /// composer both consume it, so the two rails cannot drift). Returns
-    /// `None` when neither side has a prepared value decl.
-    fn effective_prepared_value_decl(
+    /// re-exported value roots (`build_typeof`, the class-surface Static
+    /// composer, and the `Enum.Member` projection hook all consume it, so the
+    /// rails cannot drift). Returns `None` when neither side has a prepared
+    /// value decl.
+    pub(super) fn effective_prepared_value_decl(
         &self,
         canonical: &str,
         symbol: &str,

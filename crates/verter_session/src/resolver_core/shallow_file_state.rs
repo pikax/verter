@@ -769,9 +769,13 @@ impl ShallowFileState {
     }
 
     /// Every `enum` declaration name in the shallow inventory
-    /// (header-level). Enums are kept in their OWN header table — the
-    /// eval-env walk does not register them as value symbols — so they
-    /// are NOT yielded by [`Self::value_symbol_names`].
+    /// (header-level). An enum symbol is registered DUAL-SPACE — it carries
+    /// both a type header (its projected-type union) and a value header (its
+    /// `typeof` object), so it IS yielded by both
+    /// [`Self::type_symbol_names`] and [`Self::value_symbol_names`]. This
+    /// dedicated enum table is the separate authority for the member
+    /// (variant) NAMES — the member-presence facts rail — which the
+    /// type/value headers do not carry.
     pub fn enum_symbol_names(&self) -> impl Iterator<Item = &str> {
         self.decl_bodies
             .header_index()

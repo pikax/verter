@@ -268,13 +268,33 @@ fn member_headers_match_lowered_lookup_object_names() {
 }
 
 #[test]
-fn enum_headers_live_in_their_own_table_not_value_headers() {
+fn enum_registers_dual_space_headers_with_members_in_enum_table() {
+    use crate::analysis::type_eval::{TypeDeclKind, ValueDeclKind};
+
     let source = "enum E { A, B }\nexport enum F { C = 'c' }\n";
     let index = index_for(source);
+
+    // An `enum` is a dual-space symbol (like a class): it resolves through
+    // the shared type + value demand path, so it registers BOTH a value
+    // header (kind Enum) and a type header (kind Alias — the projected-type
+    // union). The member NAMES live ONLY in the dedicated enum table (the
+    // member-presence facts rail); the value header's object-member list
+    // stays EMPTY so the facts rail never double-emits enum members as plain
+    // value-object members.
+    assert_eq!(index.value_headers["E"].kind, ValueDeclKind::Enum);
+    assert_eq!(index.value_headers["F"].kind, ValueDeclKind::Enum);
     assert!(
-        index.value_headers.is_empty(),
-        "env walk registers no enum value symbols"
+        index.value_headers["E"].object_member_headers.is_empty(),
+        "enum members live in enum_headers, never as value-object members"
     );
+    assert_eq!(index.type_headers["E"].kind, TypeDeclKind::Alias);
+    assert_eq!(index.type_headers["F"].kind, TypeDeclKind::Alias);
+    assert!(
+        index.type_headers["E"].member_headers.is_empty(),
+        "the enum's type is a projected-type union, not an object with members"
+    );
+
+    // The member-name authority remains the dedicated enum table.
     assert_eq!(index.enum_headers["E"].member_names, vec!["A", "B"]);
     assert_eq!(index.enum_headers["F"].member_names, vec!["C"]);
 }
@@ -318,6 +338,111 @@ fn merged_enum_dedups_repeated_member_name_defensively() {
         "a repeated member name across declarations is deduped, order preserved"
     );
     assert_eq!(index.enum_headers["E"].contributors, vec![0, 1]);
+}
+
+#[test]
+fn from_eval_env_populates_enum_headers_matching_index_enum() {
+    // Post-merge an `enum` is a VALUE symbol (kind Enum) carrying its
+    // `enum_members`, so the env-seeded `from_eval_env` mirror (the test/debug
+    // seeding path) must ALSO populate the dedicated `enum_headers` table with
+    // the SAME member-name inventory the production `index_enum` (AST) path
+    // records — including the UNIONED member set for a merged enum. An empty
+    // `enum_headers` would give a seeded `ShallowFileState` the enum's bodies
+    // but an empty `enum_symbol_names()`, breaking the parse-stable-hash
+    // enum-header fold and the enum `MemberPresence` fact emission for seeded
+    // artifacts.
+    let source =
+        "enum E { A, B }\nenum M { X }\nenum M { Y }\nexport enum S { Idle = 'idle', Active = 'active' }\n";
+    let env = parse_and_build_env(source);
+    let seeded = DeclHeaderIndex::from_eval_env(&env);
+    let production = index_for(source);
+
+    // Same enum-symbol key set (the `enum_symbol_names()` authority).
+    let mut seeded_keys: Vec<&str> = seeded.enum_headers.keys().map(String::as_str).collect();
+    let mut prod_keys: Vec<&str> = production.enum_headers.keys().map(String::as_str).collect();
+    seeded_keys.sort_unstable();
+    prod_keys.sort_unstable();
+    assert_eq!(
+        seeded_keys, prod_keys,
+        "from_eval_env must register the SAME enum symbols as index_enum"
+    );
+    assert!(
+        !seeded_keys.is_empty(),
+        "the seeded mirror must actually carry enum headers"
+    );
+
+    // Same member-name inventory per enum (the `enum_member_names()` authority),
+    // including the merged union.
+    for name in ["E", "M", "S"] {
+        assert_eq!(
+            seeded.enum_headers[name].member_names, production.enum_headers[name].member_names,
+            "seeded enum_headers[{name}].member_names must match index_enum"
+        );
+    }
+    // Concretely: single enum, merged enum (union of both declarations), and a
+    // string enum, all in source order.
+    assert_eq!(seeded.enum_headers["E"].member_names, vec!["A", "B"]);
+    assert_eq!(
+        seeded.enum_headers["M"].member_names,
+        vec!["X", "Y"],
+        "a merged enum must union both declarations' members in source order"
+    );
+    assert_eq!(
+        seeded.enum_headers["S"].member_names,
+        vec!["Idle", "Active"]
+    );
+
+    // The enum's members live ONLY in `enum_headers`, never double-registered
+    // as value-object members (consistent with the production path).
+    assert!(
+        seeded.value_headers["E"].object_member_headers.is_empty(),
+        "enum members must not leak into the value header's object members"
+    );
+}
+
+#[test]
+fn from_eval_env_enum_headers_include_unfoldable_and_computed_member_names() {
+    // The env-seeded `from_eval_env` mirror must seed `enum_headers` with the
+    // FULL member-NAME set the production `index_enum` records — EVERY
+    // statically-named member, INCLUDING members whose VALUE Verter cannot
+    // statically fold (`A = 1 << 2`, and the bare `B` after it whose
+    // auto-increment value is deferred) and computed STRING member names
+    // (`["X"]`). Seeding from the FOLDABLE value subset (`merged_enum_members`)
+    // would UNDER-COUNT: `E` would see only `C`/`D` (the unfoldable `A` and
+    // deferred `B` dropped) and `N` NOTHING (computed names dropped) — diverging
+    // from `index_enum` and under-emitting the seeded enum `MemberPresence`
+    // facts / `parse_stable_hash` enum-header fold. The member-NAME set is the
+    // PRESENCE-rail authority, independent of value foldability.
+    let source = "export enum E { A = 1 << 2, B, C = 5, D }\n\
+                  export enum N { [\"X\"] = 1, [\"Y\"] = 2 }\n";
+    let env = parse_and_build_env(source);
+    let seeded = DeclHeaderIndex::from_eval_env(&env);
+    let production = index_for(source);
+
+    // Same enum-symbol key set as the production walk.
+    let mut seeded_keys: Vec<&str> = seeded.enum_headers.keys().map(String::as_str).collect();
+    let mut prod_keys: Vec<&str> = production.enum_headers.keys().map(String::as_str).collect();
+    seeded_keys.sort_unstable();
+    prod_keys.sort_unstable();
+    assert_eq!(seeded_keys, prod_keys);
+
+    // The FULL member-name inventory per enum must match `index_enum` exactly —
+    // unfoldable-value members (`A`/`B`) and computed-string names (`X`/`Y`)
+    // included.
+    assert_eq!(
+        seeded.enum_headers["E"].member_names, production.enum_headers["E"].member_names,
+        "seeded enum_headers[E] must carry EVERY static member name (deferred-value A/B included), matching index_enum"
+    );
+    assert_eq!(
+        seeded.enum_headers["E"].member_names,
+        vec!["A", "B", "C", "D"],
+        "the presence rail carries all names regardless of value foldability"
+    );
+    assert_eq!(
+        seeded.enum_headers["N"].member_names, production.enum_headers["N"].member_names,
+        "seeded enum_headers[N] must carry computed-string member names (X/Y), matching index_enum"
+    );
+    assert_eq!(seeded.enum_headers["N"].member_names, vec!["X", "Y"]);
 }
 
 #[test]

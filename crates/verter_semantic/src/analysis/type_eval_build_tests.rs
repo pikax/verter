@@ -1993,3 +1993,598 @@ fn r21_c3_expand_macro_types_propagates_declared_in_macro_type_arg_per_field() {
          analyzer marked as heritage."
     );
 }
+
+// =============================================================================
+// Enum extraction (dual-space: value-side member name→value pairs + type-side value union)
+// =============================================================================
+
+fn enum_member_value<'a>(env: &'a EvalEnv, enum_name: &str, member: &str) -> &'a TypeExpr {
+    let value = env.value_symbols[enum_name].primary();
+    assert_eq!(
+        value.kind,
+        ValueDeclKind::Enum,
+        "value decl must be an enum"
+    );
+    // The member inventory carries the NAME for every member plus an
+    // `EnumMemberValue` (`Folded` = a statically folded literal, `Deferred` =
+    // degraded); this helper asserts the member has a FOLDABLE value, so it
+    // unwraps through `folded_literal`.
+    value
+        .enum_members
+        .as_ref()
+        .expect("enum value decl carries the ordered member inventory")
+        .iter()
+        .find(|(name, _)| name == member)
+        .and_then(|(_, value)| value.folded_literal())
+        .unwrap_or_else(|| panic!("enum {enum_name} has no foldable member {member}"))
+}
+
+/// The FOLDABLE member NAMES of an enum, in source order — the names whose
+/// value Verter statically folded (`EnumMemberValue::Folded`). A member whose
+/// value is deferred is OMITTED here, so this is the authority for which members
+/// survived value folding. (The FULL member-NAME set — including deferred-value
+/// members — is the presence rail; see `merged_enum_member_names`.)
+fn enum_member_names<'a>(env: &'a EvalEnv, enum_name: &str) -> Vec<&'a str> {
+    env.value_symbols[enum_name]
+        .primary()
+        .enum_members
+        .as_ref()
+        .expect("enum value decl carries the ordered member inventory")
+        .iter()
+        .filter(|(_, value)| value.folded_literal().is_some())
+        .map(|(name, _)| name.as_str())
+        .collect()
+}
+
+#[test]
+fn extracts_numeric_enum_member_map_with_auto_increment() {
+    let env = parse_and_build_env("export enum Color { Red, Green, Blue }");
+    assert!(
+        env.value_symbols.contains_key("Color"),
+        "enum registers a VALUE symbol (the eval-env enum arm is the producer)"
+    );
+    let members = env.value_symbols["Color"]
+        .primary()
+        .enum_members
+        .as_ref()
+        .expect("numeric enum carries enum_members");
+    assert_eq!(members.len(), 3);
+    assert_eq!(
+        *enum_member_value(&env, "Color", "Red"),
+        TypeExpr::number_literal(0.0)
+    );
+    assert_eq!(
+        *enum_member_value(&env, "Color", "Green"),
+        TypeExpr::number_literal(1.0)
+    );
+    assert_eq!(
+        *enum_member_value(&env, "Color", "Blue"),
+        TypeExpr::number_literal(2.0)
+    );
+}
+
+#[test]
+fn extracts_string_enum_member_map() {
+    let env = parse_and_build_env(
+        "export enum Status { Idle = \"idle\", Active = \"active\", Done = \"done\" }",
+    );
+    assert_eq!(
+        *enum_member_value(&env, "Status", "Idle"),
+        TypeExpr::string_literal("idle")
+    );
+    assert_eq!(
+        *enum_member_value(&env, "Status", "Active"),
+        TypeExpr::string_literal("active")
+    );
+    assert_eq!(
+        *enum_member_value(&env, "Status", "Done"),
+        TypeExpr::string_literal("done")
+    );
+}
+
+#[test]
+fn const_enum_members_lower_identically_to_a_regular_enum() {
+    let env = parse_and_build_env("export const enum Direction { Up = \"UP\", Down = \"DOWN\" }");
+    // The `const` modifier does NOT change the type-level value.
+    assert_eq!(
+        *enum_member_value(&env, "Direction", "Up"),
+        TypeExpr::string_literal("UP")
+    );
+    assert_eq!(
+        *enum_member_value(&env, "Direction", "Down"),
+        TypeExpr::string_literal("DOWN")
+    );
+}
+
+#[test]
+fn numeric_enum_resumes_auto_increment_after_explicit_value() {
+    // TS rule: a bare member is `previous numeric + 1`; an explicit numeric
+    // reseeds the counter. So A=5, B=6, C=10, D=11.
+    let env = parse_and_build_env("export enum E { A = 5, B, C = 10, D }");
+    assert_eq!(
+        *enum_member_value(&env, "E", "A"),
+        TypeExpr::number_literal(5.0)
+    );
+    assert_eq!(
+        *enum_member_value(&env, "E", "B"),
+        TypeExpr::number_literal(6.0)
+    );
+    assert_eq!(
+        *enum_member_value(&env, "E", "C"),
+        TypeExpr::number_literal(10.0)
+    );
+    assert_eq!(
+        *enum_member_value(&env, "E", "D"),
+        TypeExpr::number_literal(11.0)
+    );
+}
+
+#[test]
+fn enum_type_space_is_union_of_member_value_literals() {
+    let env = parse_and_build_env("export enum Color { Red, Green, Blue }");
+    // An enum is dual-space: it still registers a TYPE symbol (kind Alias) so
+    // it resolves through the shared type demand path.
+    assert!(
+        env.type_symbols.contains_key("Color"),
+        "enum registers a TYPE symbol"
+    );
+    let decl = env.type_symbols["Color"].primary();
+    assert_eq!(decl.kind, TypeDeclKind::Alias);
+    // The eager eval-env type body is a NON-SERVED placeholder, NOT the
+    // value-literal union: a per-declaration walk cannot see same-name merged
+    // contributors, so the union is derived ONCE from the value members by
+    // `ValueDeclGroup::enum_type_union` (the single source of truth) and the
+    // lazily-served body memo defers to it. (An eager body union here would be
+    // last-wins for merged enums — a divergence trap this placeholder avoids.)
+    assert!(
+        !matches!(decl.body, TypeExpr::Union(_)),
+        "the eager enum type body must be a non-served placeholder, not the value-literal \
+         union; got {:?}",
+        decl.body
+    );
+
+    // The PRODUCTION type-space derivation (the body the memo actually
+    // serves): the union of the member value literals, from the SAME merged
+    // value-space member set.
+    let union = env.value_symbols["Color"]
+        .enum_type_union()
+        .expect("enum value group derives a type union");
+    match &union {
+        TypeExpr::Union(types) => {
+            assert_eq!(types.len(), 3);
+            assert!(types.contains(&TypeExpr::number_literal(0.0)));
+            assert!(types.contains(&TypeExpr::number_literal(1.0)));
+            assert!(types.contains(&TypeExpr::number_literal(2.0)));
+            // Negative assertion: the union is the member VALUES, NOT the
+            // member NAMES (a value-from-name confusion would put "Red" here).
+            assert!(!types.contains(&TypeExpr::string_literal("Red")));
+        }
+        other => panic!("expected value-literal union, got {other:?}"),
+    }
+}
+
+#[test]
+fn string_enum_type_space_is_union_of_string_value_literals() {
+    let env = parse_and_build_env(
+        "export enum Status { Idle = \"idle\", Active = \"active\", Done = \"done\" }",
+    );
+    // The eager type body is the non-served placeholder; the served type union
+    // is derived from the value members by `ValueDeclGroup::enum_type_union`.
+    assert!(
+        !matches!(
+            env.type_symbols["Status"].primary().body,
+            TypeExpr::Union(_)
+        ),
+        "the eager enum type body must be a non-served placeholder, not the union"
+    );
+    let union = env.value_symbols["Status"]
+        .enum_type_union()
+        .expect("enum value group derives a type union");
+    match &union {
+        TypeExpr::Union(types) => {
+            assert_eq!(types.len(), 3);
+            assert!(types.contains(&TypeExpr::string_literal("idle")));
+            assert!(types.contains(&TypeExpr::string_literal("active")));
+            assert!(types.contains(&TypeExpr::string_literal("done")));
+        }
+        other => panic!("expected string value-literal union, got {other:?}"),
+    }
+}
+
+#[test]
+fn negative_numeric_enum_initializer_folds_signed_literal_and_reseeds_auto_increment() {
+    // TS represents `A = -1` as a unary `-` over a numeric literal. The
+    // member must fold to `number_literal(-1)` (NOT be skipped), and the
+    // auto-increment must continue from the signed value: after `B = -3`, a
+    // bare `C` is `-3 + 1 = -2`.
+    let env = parse_and_build_env("export enum E { A = -1, B = -3, C }");
+    assert_eq!(
+        *enum_member_value(&env, "E", "A"),
+        TypeExpr::number_literal(-1.0),
+        "negative initializer must fold to the signed literal, not be skipped"
+    );
+    assert_eq!(
+        *enum_member_value(&env, "E", "B"),
+        TypeExpr::number_literal(-3.0)
+    );
+    assert_eq!(
+        *enum_member_value(&env, "E", "C"),
+        TypeExpr::number_literal(-2.0),
+        "auto-increment resumes from the previous (negative) numeric"
+    );
+    // A leading unary `+` is also a numeric initializer.
+    let env_plus = parse_and_build_env("export enum P { A = +5, B }");
+    assert_eq!(
+        *enum_member_value(&env_plus, "P", "A"),
+        TypeExpr::number_literal(5.0)
+    );
+    assert_eq!(
+        *enum_member_value(&env_plus, "P", "B"),
+        TypeExpr::number_literal(6.0)
+    );
+}
+
+#[test]
+fn enum_members_preserve_source_declaration_order() {
+    // TS enum members are ordered. A non-alphabetical declaration order must
+    // be preserved verbatim (the value-space `enum_members` is a source-order
+    // `Vec`, not a hash-ordered map) so `typeof Enum` surfaces members in
+    // declaration order and auto-increment positions stay correct.
+    let env = parse_and_build_env("export enum E { Zed, Alpha, Mid }");
+    let members = env.value_symbols["E"]
+        .primary()
+        .enum_members
+        .as_ref()
+        .expect("enum carries enum_members");
+    let order: Vec<&str> = members.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(
+        order,
+        vec!["Zed", "Alpha", "Mid"],
+        "enum members must be in source declaration order, not sorted/hashed"
+    );
+}
+
+#[test]
+fn merged_same_name_enum_unions_all_contributor_members_in_both_spaces() {
+    // TS declaration merging: two same-name `enum E` bodies contribute to one
+    // enum. The resolver-visible member set MUST be the UNION of all
+    // contributors — using only the last (last-wins `primary()`) contributor
+    // would drop the earlier declaration's members (`A`, `B`).
+    let env = parse_and_build_env("export enum E { A = 1, B = 2 }\nexport enum E { C = 3, D = 4 }");
+
+    // Discriminator: `primary()` (the last contributor) sees ONLY its own
+    // members — the merge is exactly what recovers `A`, `B` from the earlier
+    // declaration.
+    let primary_only: Vec<&str> = env.value_symbols["E"]
+        .primary()
+        .enum_members
+        .as_ref()
+        .expect("enum")
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect();
+    assert_eq!(
+        primary_only,
+        vec!["C", "D"],
+        "primary() alone is last-contributor-only — the merge is what unions all four"
+    );
+
+    // Value space: the merged member set is the union, in source order.
+    let merged = env.value_symbols["E"]
+        .merged_enum_members()
+        .expect("merged enum members");
+    let merged_names: Vec<&str> = merged.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(
+        merged_names,
+        vec!["A", "B", "C", "D"],
+        "merged value-space enum_members must contain ALL contributors' members in source order"
+    );
+    assert_eq!(merged[0].1, TypeExpr::number_literal(1.0));
+    assert_eq!(merged[3].1, TypeExpr::number_literal(4.0));
+
+    // Type space: assert on the PRODUCTION derivation — `enum_type_union`, the
+    // single source of truth the lazily-served body memo serves — NOT a union
+    // rebuilt from `merged` inside the test, which would be tautological (it
+    // would exercise `TypeExpr::union` + the test's own data, not the
+    // production fold, and would still pass if `enum_type_union` were broken).
+    // The derived union must carry every contributor's value literal, never
+    // just the last declaration's.
+    let type_union = env.value_symbols["E"]
+        .enum_type_union()
+        .expect("merged enum value group derives a type union");
+    match &type_union {
+        TypeExpr::Union(types) => {
+            assert_eq!(
+                types.len(),
+                4,
+                "type union must carry all 4 member literals"
+            );
+            for literal in [1.0, 2.0, 3.0, 4.0] {
+                assert!(
+                    types.contains(&TypeExpr::number_literal(literal)),
+                    "type union must contain literal {literal}; got {types:?}"
+                );
+            }
+        }
+        other => panic!("expected a 4-arm value-literal union, got {other:?}"),
+    }
+}
+
+#[test]
+fn unsupported_initializer_makes_running_auto_increment_unknown_not_fabricated() {
+    // `1 << 2` is a computed (binary) initializer Verter cannot statically
+    // fold, so `A`'s value is DEFERRED AND the running auto-increment value
+    // becomes UNKNOWN. A bare member with an unknown running value (`B`) is
+    // therefore ALSO deferred — its foldable value must NOT be fabricated as
+    // `0` off a stale counter. An explicit literal (`C = 5`) RESEEDS the
+    // counter to KNOWN, so the following bare member `D` folds to `6`. The
+    // FOLDABLE rail (`enum_member_names`) therefore holds only `C`/`D`.
+    let env = parse_and_build_env("export enum E { A = 1 << 2, B, C = 5, D }");
+    let names = enum_member_names(&env, "E");
+    assert_eq!(
+        names,
+        vec!["C", "D"],
+        "A (unfoldable) and B (bare after an unknown running value) are deferred, not folded; \
+         C/D fold because C = 5 reseeds the counter"
+    );
+    // Negative: B must NOT be present in the FOLDABLE rail with a fabricated-0
+    // literal — its value is deferred, not invented.
+    assert!(
+        !names.contains(&"B"),
+        "a bare member after an unknown running value must NOT be fabricated into the foldable rail"
+    );
+    assert_eq!(
+        *enum_member_value(&env, "E", "C"),
+        TypeExpr::number_literal(5.0)
+    );
+    assert_eq!(
+        *enum_member_value(&env, "E", "D"),
+        TypeExpr::number_literal(6.0),
+        "auto-increment resumes from the explicit C = 5, not from the deferred A/B"
+    );
+}
+
+#[test]
+fn bitwise_not_initializer_defers_member_and_following_bare_members() {
+    // `~1` is a bitwise (unary, non-`±`) initializer — unfoldable. `B`'s value
+    // is deferred and the running value becomes UNKNOWN, so the following bare
+    // `C` is ALSO deferred: its value would be `previous + 1`, and the previous
+    // member's value is unknown. Only `A = 0` folds, so the FOLDABLE rail holds
+    // `A` alone; a deferred member's foldable value is never fabricated off a
+    // stale counter.
+    let env = parse_and_build_env("export enum F { A = 0, B = ~1, C }");
+    let names = enum_member_names(&env, "F");
+    assert_eq!(
+        names,
+        vec!["A"],
+        "B (~1 unfoldable) and C (bare after an unknown running value) are both deferred, not folded"
+    );
+    assert!(
+        !names.contains(&"C"),
+        "a bare member after an unknown running value must NOT be fabricated into the foldable rail"
+    );
+    assert_eq!(
+        *enum_member_value(&env, "F", "A"),
+        TypeExpr::number_literal(0.0)
+    );
+}
+
+#[test]
+fn computed_string_enum_member_names_resolve_via_static_name_and_fold_values() {
+    // A computed STRING member name (`["A"]`) carries a STATIC identity,
+    // resolved through the SAME `static_name` helper the production
+    // `index_enum` header walk uses (name resolution is SHARED, not forked, so
+    // the two construction paths can never disagree on the member-NAME set).
+    // With a foldable value it projects `E.A == 1` / `E.B == 2` — a computed
+    // name is recorded, never dropped, so the eval-env walk and `index_enum`
+    // agree on the member-NAME set.
+    let env = parse_and_build_env("export enum E { [\"A\"] = 1, [\"B\"] = 2 }");
+    let names = enum_member_names(&env, "E");
+    assert_eq!(
+        names,
+        vec!["A", "B"],
+        "computed-string member names resolve to their static identity (NOT dropped)"
+    );
+    assert_eq!(
+        *enum_member_value(&env, "E", "A"),
+        TypeExpr::number_literal(1.0)
+    );
+    assert_eq!(
+        *enum_member_value(&env, "E", "B"),
+        TypeExpr::number_literal(2.0)
+    );
+}
+
+#[test]
+fn computed_template_enum_member_name_resolves_to_static_single_quasi() {
+    // Template-name variant: a computed TEMPLATE member name with a single
+    // no-substitution quasi (`` [`X`] ``) ALSO carries a static identity via
+    // `static_name`, so it folds `T.X == 7` exactly as `index_enum` records it.
+    let env = parse_and_build_env("export enum T { [`X`] = 7 }");
+    assert_eq!(enum_member_names(&env, "T"), vec!["X"]);
+    assert_eq!(
+        *enum_member_value(&env, "T", "X"),
+        TypeExpr::number_literal(7.0)
+    );
+}
+
+#[test]
+fn enum_member_inventory_records_all_static_names_folding_or_degrading_each_value() {
+    // The member inventory carries the NAME of EVERY statically-named member —
+    // including ones whose VALUE is deferred — so the name rail is the SUPERSET
+    // the foldable rail filters. For `enum E { A = 1 << 2, B, C = 5, D }`: all
+    // four NAMES are recorded; `A` (unfoldable `1 << 2`) and `B` (bare after an
+    // unknown running value) are `Deferred`, each carrying the degraded `number`
+    // domain; `C = 5` reseeds and `D = 6` fold.
+    let env = parse_and_build_env("export enum E { A = 1 << 2, B, C = 5, D }");
+    let inventory = env.value_symbols["E"]
+        .primary()
+        .enum_members
+        .as_ref()
+        .expect("enum carries the member inventory");
+    let all_names: Vec<&str> = inventory.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(
+        all_names,
+        vec!["A", "B", "C", "D"],
+        "every statically-named member is recorded, even with a deferred value"
+    );
+    assert_eq!(
+        inventory[0].1,
+        EnumMemberValue::Deferred(TypeExpr::Primitive(PrimitiveName::Number)),
+        "A's value is DEFERRED and degrades to `number` (the numeric `1 << 2`)"
+    );
+    assert_eq!(
+        inventory[1].1,
+        EnumMemberValue::Deferred(TypeExpr::Primitive(PrimitiveName::Number)),
+        "B is DEFERRED (bare after an unknown running value) and degrades to `number`"
+    );
+    assert_eq!(
+        inventory[2].1,
+        EnumMemberValue::Folded(TypeExpr::number_literal(5.0)),
+        "C = 5 folds and reseeds the counter"
+    );
+    assert_eq!(
+        inventory[3].1,
+        EnumMemberValue::Folded(TypeExpr::number_literal(6.0)),
+        "D resumes auto-increment from the reseeded C"
+    );
+
+    // The rails derive consistently from this single inventory: the FOLDABLE
+    // rail (`merged_enum_members`) is the `Folded` subset, the NAME rail
+    // (`merged_enum_member_names`) is the full superset.
+    let value_rail = env.value_symbols["E"]
+        .merged_enum_members()
+        .expect("foldable rail");
+    let value_names: Vec<&str> = value_rail.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(
+        value_names,
+        vec!["C", "D"],
+        "the foldable rail filters out deferred members"
+    );
+    let presence_names = env.value_symbols["E"]
+        .merged_enum_member_names()
+        .expect("name rail");
+    assert_eq!(
+        presence_names,
+        vec!["A", "B", "C", "D"],
+        "the name rail is the full member-name superset"
+    );
+}
+
+#[test]
+fn all_deferred_numeric_enum_type_union_degrades_to_number_not_never() {
+    // `enum Flags { A = 1 << 0, B = 1 << 1 }` — BOTH members carry a computed
+    // (deferred) value, so NO member folds to a literal. The enum's TYPE body
+    // must NOT collapse to `never` (a confident-wrong bottom type) just because
+    // no value folded: a non-empty enum is inhabited. Each deferred
+    // numeric-expression member degrades to its narrowest sound domain
+    // (`number`), so the deduped union is exactly `number`.
+    let env = parse_and_build_env("export enum Flags { A = 1 << 0, B = 1 << 1 }");
+    let union = env.value_symbols["Flags"]
+        .enum_type_union()
+        .expect("enum value group derives a type union");
+    assert_ne!(
+        union,
+        TypeExpr::Primitive(PrimitiveName::Never),
+        "an all-deferred NON-EMPTY enum must NOT resolve to `never`"
+    );
+    assert_eq!(
+        union,
+        TypeExpr::Primitive(PrimitiveName::Number),
+        "two numeric-expression members both degrade to `number`; the deduped \
+         union is `number`, not `never` and not the empty bottom"
+    );
+}
+
+#[test]
+fn partial_deferred_enum_type_union_keeps_degraded_arm_for_deferred_member() {
+    // `enum P { A = "x", B = someFn() }` — `A` folds to `"x"`, `B`'s value is a
+    // computed call (deferred). The TYPE body must NOT narrow to just `"x"`
+    // (silently dropping `B` is false absence). It carries the folded `"x"` arm
+    // PLUS a DEGRADED arm for `B` — an unclassifiable call initializer proves no
+    // narrower domain than `unknown`.
+    let env = parse_and_build_env("export enum P { A = \"x\", B = someFn() }");
+    let union = env.value_symbols["P"]
+        .enum_type_union()
+        .expect("enum value group derives a type union");
+    match &union {
+        TypeExpr::Union(arms) => {
+            assert!(
+                arms.contains(&TypeExpr::string_literal("x")),
+                "the folded `A` literal must remain an arm: {arms:?}"
+            );
+            assert!(
+                arms.iter()
+                    .any(|arm| matches!(arm, TypeExpr::Primitive(PrimitiveName::Unknown))),
+                "the deferred `B` must contribute a DEGRADED arm, never vanish: {arms:?}"
+            );
+        }
+        other => panic!(
+            "the type body must NOT narrow to the single folded literal `\"x\"`; \
+             expected a union carrying a degraded arm for `B`, got {other:?}"
+        ),
+    }
+}
+
+#[test]
+fn deferred_members_degrade_into_enum_type_union_alongside_folded_literals() {
+    // `enum E { A = 1 << 2, B, C = 5, D }` — `A` (computed) and `B` (bare after
+    // a deferred running value) are deferred; `C = 5`, `D = 6` fold. The TYPE
+    // union must carry the folded literals `5`/`6` AND a degraded `number` arm
+    // for the deferred members — never drop `A`/`B`.
+    let env = parse_and_build_env("export enum E { A = 1 << 2, B, C = 5, D }");
+    let union = env.value_symbols["E"]
+        .enum_type_union()
+        .expect("enum value group derives a type union");
+    let arms = match &union {
+        TypeExpr::Union(arms) => arms.clone(),
+        other => panic!("expected a union of literal + degraded arms, got {other:?}"),
+    };
+    assert!(
+        arms.contains(&TypeExpr::number_literal(5.0)),
+        "the folded `C = 5` literal arm must be present: {arms:?}"
+    );
+    assert!(
+        arms.contains(&TypeExpr::number_literal(6.0)),
+        "the folded `D = 6` literal arm must be present: {arms:?}"
+    );
+    assert!(
+        arms.iter()
+            .any(|arm| matches!(arm, TypeExpr::Primitive(PrimitiveName::Number))),
+        "the deferred `A`/`B` members degrade to a `number` arm: {arms:?}"
+    );
+}
+
+#[test]
+fn tagged_template_enum_member_degrades_to_unknown_not_string() {
+    // A TAGGED template (`tag`...``) is a CALL — `tag` is invoked with the
+    // template parts and can return ANY type — so `string` is NOT a sound upper
+    // bound for its degraded domain; the narrowest sound bound is `unknown`. A
+    // PLAIN template literal (no tag) IS a string expression and keeps `string`.
+    // Both members are VALUE-deferred (neither folds to a literal), so
+    // `degraded_member_domain` classifies each from its initializer kind.
+    let env = parse_and_build_env("export enum E { A = tag`x`, B = `y` }");
+    let inventory = env.value_symbols["E"]
+        .primary()
+        .enum_members
+        .as_ref()
+        .expect("enum carries the member inventory");
+    let all_names: Vec<&str> = inventory.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(
+        all_names,
+        vec!["A", "B"],
+        "both statically-named members are recorded with deferred values"
+    );
+    assert_eq!(
+        inventory[0].1,
+        EnumMemberValue::Deferred(TypeExpr::Primitive(PrimitiveName::Unknown)),
+        "a TAGGED template is a call returning an arbitrary type; `string` would \
+         under-approximate, so `A` degrades to the sound `unknown`"
+    );
+    assert_eq!(
+        inventory[1].1,
+        EnumMemberValue::Deferred(TypeExpr::Primitive(PrimitiveName::String)),
+        "a PLAIN template literal (no tag) is a string expression; `B` keeps the \
+         `string` domain — the soundness fix touches only the tagged case"
+    );
+}

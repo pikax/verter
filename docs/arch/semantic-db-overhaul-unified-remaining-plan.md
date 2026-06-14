@@ -1126,6 +1126,43 @@ Deferred follow-ups (lead-architect ruled, tracked here):
   (1), and `admission.rs` (2) are visible, counted, allow-listed tracked debt
   rather than evasions. The remaining work is the migration itself, not guard
   coverage.
+- **Oracle-lift of the seven `U2.ENUMS` parity rows (typeinfo).** The
+  enum-family reducer is COMPLETE — all seven scoped enum projections resolve
+  correctly (numeric/string/const member → branded literal; `${Enum}` → value
+  union; `keyof typeof Enum` → member-name union; the `Extract<…>[…]`
+  discriminant → its arm payload) — but NONE oracle-lift: the Ts7Oracle
+  admission gate rejects every enum hover shape. Three (numeric/string/const
+  member) are fundamentally non-liftable under tsgo's nominal enum-member hover
+  (`Reject(EnumMemberOrQualified)` — the SAME class as the landed
+  `class_features.rs` generic-class-instance defer); four (`${Enum}`, `keyof
+  typeof Enum` ×2, the indexed-access discriminant) hit the gate's GLOBAL
+  deferred-construct rejects and need a dedicated oracle-infra block (expansion
+  probes + a `keyof typeof Enum` source-walk carve-out + `DistributiveIdentity`
+  cross-check relaxation) to lift at most four of seven. The seven rows stay
+  `Ignored` under `U2.ENUMS` (manifest total still 362). Lead-architect ruling
+  2026-06-13: DEFER — the oracle-harness extension is a separate block; it does
+  NOT block landing the complete reducer.
+- **Cross-file value-export read-set admission (shared rail; surfaced by the
+  `U2.ENUMS` cross-file `Enum.Member`).** The cross-file/barrel `Enum.Member`
+  projection (`E.A` for an enum re-exported through a barrel) resolves the value
+  through the SHARED `effective_prepared_value_decl` → `resolve_value_export_target`
+  chase that `typeof E` already uses. That chase resolves the visible value
+  correctly (verified, with an invalidation test) but does not visibly admit the
+  resolved leaf decl into the consuming semantic query's read-set / reverse index
+  (`build_instantiate` records consumer decl/args/augmenters; the value-export
+  chase + prepared-decl warm reads do not bubble the leaf fact), so a warm
+  consumer could in principle serve stale after a leaf-only member-value edit.
+  This is a PRE-EXISTING property of the shared cross-file value-export rail —
+  identical to `typeof E`'s pre-existing behavior, NOT enum-specific; the clean
+  fix is system-wide read-set/fact-bubbling for cross-file value-export chases,
+  not an enum-local patch. Lead-architect ruling 2026-06-14: DEFER — a dedicated
+  shared-rail follow-up; it does NOT block landing SPINEENUM (the enum `E.A` reuse
+  correctly matches `typeof E`). Residual nonblocking P3s tracked with it: the
+  shared `static_name` helper panics on a TS-invalid substituted computed-template
+  enum-member name (`` [`a${x}b`] ``) — pre-existing, shared by `index_enum` (sound
+  fix: return `Option` and skip on both rails in lockstep); and cross-file
+  enum-AS-A-TYPE (`${ImportedEnum}` / an imported enum in type position) is
+  mechanically covered but lacks a direct test.
 - `ResolvedImportFactsKey.known_miss_generation` carries a generation inside a
   cache key (R6-adjacent); move the negative-miss freshness to value-side
   validation semantics.

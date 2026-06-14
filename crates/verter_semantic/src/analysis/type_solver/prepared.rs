@@ -12,7 +12,7 @@
 use rustc_hash::FxHashMap;
 
 use super::host::ResolvedRootIdentity;
-use crate::analysis::type_eval::{FunctionSignature, TypeDeclKind, ValueDeclKind};
+use crate::analysis::type_eval::{EnumMemberValue, FunctionSignature, TypeDeclKind, ValueDeclKind};
 use verter_type_expr::{
     MappedModifier, ObjectExpr, ObjectMember, PrimitiveName, TypeExpr, TypeParam,
 };
@@ -343,8 +343,12 @@ pub struct PreparedValueDecl {
     /// Member index for dotted path lookup (e.g. `typeof ns.member`).
     pub member_index: FxHashMap<String, PreparedValueMember>,
 
-    /// For enum values: member name -> literal value mapping.
-    pub enum_members: Option<FxHashMap<String, TypeExpr>>,
+    /// For enum values: the full ordered member inventory (NAME →
+    /// [`EnumMemberValue`]), unioned across same-name merged enum contributors.
+    /// Every member is present — foldable members carry their literal, deferred
+    /// members their degraded sound primitive domain — so `typeof Enum` /
+    /// `Enum.Member` see EVERY member, never just the foldable subset.
+    pub enum_members: Option<Vec<(String, EnumMemberValue)>>,
 
     /// Cross-file dependencies.
     pub external_deps: Vec<PreparedExternalDep>,
@@ -1140,14 +1144,24 @@ mod tests {
             ValueDeclKind::Const,
         );
 
-        let mut members = FxHashMap::default();
-        members.insert("Red".into(), TypeExpr::Literal(LiteralValue::Number(0.0)));
-        members.insert("Green".into(), TypeExpr::Literal(LiteralValue::Number(1.0)));
+        let members = vec![
+            (
+                "Red".to_string(),
+                EnumMemberValue::Folded(TypeExpr::Literal(LiteralValue::Number(0.0))),
+            ),
+            (
+                "Green".to_string(),
+                EnumMemberValue::Folded(TypeExpr::Literal(LiteralValue::Number(1.0))),
+            ),
+        ];
         decl.enum_members = Some(members);
 
         let enum_members = decl.enum_members.as_ref().unwrap();
         assert_eq!(enum_members.len(), 2);
-        assert!(enum_members.contains_key("Red"));
+        assert!(enum_members.iter().any(|(name, _)| name == "Red"));
+        // Source order is preserved (TS enum members are ordered).
+        assert_eq!(enum_members[0].0, "Red");
+        assert_eq!(enum_members[1].0, "Green");
     }
 
     #[test]

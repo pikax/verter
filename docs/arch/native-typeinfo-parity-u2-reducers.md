@@ -704,6 +704,28 @@ Blocked until: all four prerequisites done — enum identity reads through `Rela
 
 Context: Enums carry value / type duality (PART 1 §1.1): a numeric member resolves to a branded literal, a string member to a branded string literal, a const-enum member inlines its literal. `keyof typeof Enum` yields the member-name union; a template-literal over a string enum produces the value union; discriminant extraction projects the matching arm payload. `ResolveEnum` is the dedicated key (PART 1 §2.8 — `EnumContext` carries no substitution axis since an enum declaration is not generic). This block exists now to land the enum value/type-duality substrate.
 
+Realized (2026-06-13, SPINEENUM): the enum value/type-duality reducer is
+COMPLETE, but realized WITHOUT a producing `ResolveEnum` reducer — `ResolveEnum`
+stays non-producing (no second engine). Enum resolution is the eval-env enum arm
+(the ordered member inventory — a folded literal or a degraded sound primitive per
+member — plus the type union of those literal + degraded arms, registered as a
+dual-space type+value header) plus the typed-gated `Enum.Member` projection,
+reusing the existing `ResolveDecl` / `TypeOf` / `KeyOf` / `TemplateLiteralReduce`
+/ `IndexedAccess` reducers. All seven projections resolve correctly, but NONE
+oracle-lift — the Ts7Oracle admission gate rejects every enum hover shape (three
+nominal enum-member displays are fundamentally non-liftable, the same class as
+the landed `class_features.rs` generic-class-instance defer; four operator-origin
+rows sit behind a deferred oracle-infra extension). The seven rows stay `Ignored`
+under `U2.ENUMS` (manifest total still 362); the lift is a lead-architect-DEFERRED
+follow-up block. Authority for the landed state: `native-typeinfo-parity.md`
+(the U2.ENUMS paragraph) + the unified plan's Deferred-follow-ups ledger.
+
+Everything below in this subplan — the Changes, Deliverables,
+SemanticQueryKey/facts, "Exact test rows lifted", and "Exit acceptance"
+sections — records the ORIGINAL plan and is SUPERSEDED by this Realized note:
+no producing `ResolveEnum` reducer was built (it stays non-producing), and zero
+rows lifted.
+
 Changes (exact files / functions):
 - `crates/verter_session/src/project_semantic_dispatch/build.rs` (+ enum reducer site) — the `ResolveEnum` reducer: branded numeric/string/const-enum literal members, value/type duality, `keyof typeof` member-name union (via `KeyOf`), template-over-string-enum value union (via `TemplateLiteralReduce`), discriminant extraction (via `Relate` bindings).
 - `crates/verter_session/src/semantic_query.rs` — `SemanticNodeData` enum carrier with value/type duality (PART 1 §1.1); the branded-literal identity used by relation.
