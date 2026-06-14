@@ -3844,6 +3844,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "verter_dx_baseline"
+version = "0.0.1-beta.1"
+dependencies = [
+ "oxc_sourcemap",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "verter_scheduler",
+ "verter_session",
+ "verter_span",
+ "verter_type_runtime",
+ "verter_workspace",
+]
+
+[[package]]
 name = "verter_ffi"
 version = "0.0.1-beta.1"
 dependencies = [

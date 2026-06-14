@@ -1,0 +1,43 @@
+[package]
+name = "verter_dx_baseline"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "DX harness differential-baseline bridge — owns tsgo/tsserver provider discovery, host-driven baseline materialization, and the versioned per-edit artifact overlay behind a newline-delimited JSON protocol"
+publish = false
+
+[dependencies]
+verter_session = { path = "../verter_session" }
+verter_type_runtime = { path = "../verter_type_runtime" }
+verter_workspace = { path = "../verter_workspace" }
+verter_scheduler = { path = "../verter_scheduler" }
+verter_span = { path = "../verter_span" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+oxc_sourcemap = "7.0.0"
+thiserror = "2.0"
+tokio = { version = "1.52", features = [
+  "rt",
+  "rt-multi-thread",
+  "macros",
+  "io-std",
+  "io-util",
+  "sync",
+  "process",
+  "time",
+] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+[dev-dependencies]
+tempfile = "3.27"
+
+# Test-infra differential-baseline bridge. `cargo nextest run --workspace`
+# builds this binary as part of the workspace but never runs it as a test
+# binary; the TS DX runner drives it over stdin/stdout.
+[[bin]]
+name = "verter-dx-baseline"
+path = "src/main.rs"
