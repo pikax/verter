@@ -945,31 +945,26 @@ fn extract_component_usage(
         let mut all_static = if is_bound { Some(true) } else { None };
 
         if is_bound {
-            if let Some(oxc_el) = oxc_el {
-                for oxc_prop in &oxc_el.props {
-                    if oxc_prop.prop_index == i {
-                        if let Some(ref exp) = oxc_prop.exp {
-                            if let Some(ref result) = exp.bindings {
-                                for b in &result.bindings {
-                                    if !b.ignore {
-                                        referenced.push(b.name.to_string());
-                                        if let Some(ref mut is_static) = all_static {
-                                            let bt = bindings.get(b.name);
-                                            let binding_is_static = bt.is_some_and(|bt| {
-                                                matches!(
-                                                    bt.reactivity_level(),
-                                                    crate::template::code_gen::binding::ReactivityLevel::Static
-                                                )
-                                            });
-                                            if !binding_is_static {
-                                                *is_static = false;
-                                            }
-                                        }
+            if let Some(oxc_prop) = oxc_el.and_then(|el| el.prop(i)) {
+                if let Some(ref exp) = oxc_prop.exp {
+                    if let Some(ref result) = exp.bindings {
+                        for b in &result.bindings {
+                            if !b.ignore {
+                                referenced.push(b.name.to_string());
+                                if let Some(ref mut is_static) = all_static {
+                                    let bt = bindings.get(b.name);
+                                    let binding_is_static = bt.is_some_and(|bt| {
+                                        matches!(
+                                            bt.reactivity_level(),
+                                            crate::template::code_gen::binding::ReactivityLevel::Static
+                                        )
+                                    });
+                                    if !binding_is_static {
+                                        *is_static = false;
                                     }
                                 }
                             }
                         }
-                        break;
                     }
                 }
             }

@@ -200,8 +200,20 @@ pub struct OxcParsedElement<'alloc> {
     pub v_slot: Option<OxcParsedVSlot<'alloc>>,
 
     /// Parsed regular props (only those with expressions to parse).
-    /// Indexed by `prop_index` back into `ElementNode.props`.
+    /// Sparse — static attributes and value-less directives are skipped.
+    /// Each entry's `prop_index` maps back into `ElementNode.props`.
     pub props: Vec<OxcParsedProp<'alloc>>,
+
+    /// Dense correlation table from `ElementNode.props` index to the slot in
+    /// [`props`] holding that prop's parsed expression, or `None` when the prop
+    /// has nothing to parse (static attribute or value-less directive).
+    ///
+    /// Length equals the FULL `ElementNode.props.len()` (NOT the sparse
+    /// [`props`] length), so [`OxcParsedElement::prop`] is an O(1) index rather
+    /// than a linear scan over `prop_index`.
+    ///
+    /// [`props`]: OxcParsedElement::props
+    pub prop_lookup: Vec<Option<u32>>,
 
     /// Additional ignored bindings from this element's v-for/v-slot locals.
     /// `None` means "same as parent — no locals added" (avoids Vec clone).
@@ -211,6 +223,22 @@ pub struct OxcParsedElement<'alloc> {
     /// Per-element expression analysis flags (static class/style/key/condition).
     /// Codegen combines with `PropFlag` in O(1) for final patch-flag decisions.
     pub expression_flag: ExpressionFlag,
+}
+
+impl<'alloc> OxcParsedElement<'alloc> {
+    /// O(1) lookup of the OXC-parsed prop for a given `ElementNode.props` index.
+    ///
+    /// Returns `None` when the prop carries no parsed expression (static attribute
+    /// or value-less directive) or when `prop_index` is out of range. This is the
+    /// indexed replacement for scanning `props` for a matching `prop_index`.
+    #[inline]
+    pub fn prop(&self, prop_index: usize) -> Option<&OxcParsedProp<'alloc>> {
+        self.prop_lookup
+            .get(prop_index)
+            .copied()
+            .flatten()
+            .map(|slot| &self.props[slot as usize])
+    }
 }
 
 // ======================== Node data enum ========================

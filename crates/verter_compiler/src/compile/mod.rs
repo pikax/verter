@@ -646,7 +646,8 @@ fn compile_inner(
         // This avoids the text-based heuristic and correctly handles TS type positions.
         early_oxc_ast = if !has_parse_errors {
             parsed.template_ast().map(|template_ast_ref| {
-                parse_template_expressions(template_ast_ref, input, allocator, source_type)
+                // Runtime (VDOM/Vapor) codegen — completion-prefix matching off.
+                parse_template_expressions(template_ast_ref, input, allocator, source_type, false)
             })
         } else {
             None
@@ -911,163 +912,166 @@ fn compile_inner(
     let needs_tpl_codegen = options.target.needs_template_codegen();
     let needs_tpl_data = options.target.needs_template_data();
 
-    let (template_block, extracted_template_data) =
-        if has_parse_errors || (!needs_tpl_codegen && !needs_tpl_data) {
-            // Template AST may be invalid after parse errors, or target
-            // doesn't need VDOM/template data — skip codegen.
+    let (template_block, extracted_template_data) = if has_parse_errors
+        || (!needs_tpl_codegen && !needs_tpl_data)
+    {
+        // Template AST may be invalid after parse errors, or target
+        // doesn't need VDOM/template data — skip codegen.
+        (None, None)
+    } else if let Some(template_ast) = template_ast_opt {
+        // Skip codegen for non-HTML template languages (e.g. Pug).
+        // The AST positions are from the raw source and don't represent HTML.
+        let is_non_html_lang = template_ast.root.lang.as_ref().is_some_and(|span| {
+            let lang_val = &input[span.start as usize..span.end as usize];
+            !lang_val.is_empty() && lang_val != "html"
+        });
+        if is_non_html_lang {
             (None, None)
-        } else if let Some(template_ast) = template_ast_opt {
-            // Skip codegen for non-HTML template languages (e.g. Pug).
-            // The AST positions are from the raw source and don't represent HTML.
-            let is_non_html_lang = template_ast.root.lang.as_ref().is_some_and(|span| {
-                let lang_val = &input[span.start as usize..span.end as usize];
-                !lang_val.is_empty() && lang_val != "html"
-            });
-            if is_non_html_lang {
-                (None, None)
+        } else {
+            let tpl_start = Instant::now();
+
+            // Reuse early-parsed OxcParsedAst if available, otherwise parse now
+            let oxc_ast = match early_oxc_ast {
+                Some(ast) => ast,
+                None => {
+                    parse_template_expressions(template_ast, input, allocator, source_type, false)
+                }
+            };
+
+            // Collect OXC expression parse errors as XInvalidExpression diagnostics
+            collect_expression_errors(&oxc_ast, &mut all_diagnostics);
+
+            // Extract raw template data for cross-file analysis (before bindings are moved)
+            let raw_template_data = if needs_tpl_data {
+                Some(template_data::extract_raw_template_data(
+                    template_ast,
+                    &oxc_ast,
+                    input,
+                    &script_bindings,
+                ))
             } else {
-                let tpl_start = Instant::now();
+                None
+            };
 
-                // Reuse early-parsed OxcParsedAst if available, otherwise parse now
-                let oxc_ast = match early_oxc_ast {
-                    Some(ast) => ast,
-                    None => parse_template_expressions(template_ast, input, allocator, source_type),
-                };
-
-                // Collect OXC expression parse errors as XInvalidExpression diagnostics
-                collect_expression_errors(&oxc_ast, &mut all_diagnostics);
-
-                // Extract raw template data for cross-file analysis (before bindings are moved)
-                let raw_template_data = if needs_tpl_data {
-                    Some(template_data::extract_raw_template_data(
-                        template_ast,
-                        &oxc_ast,
-                        input,
-                        &script_bindings,
-                    ))
-                } else {
-                    None
-                };
-
-                let template_block_inner = if needs_tpl_codegen {
-                    let tpl_alloc = Allocator::new();
-                    // Use the full SFC input so AST positions (which are absolute) align correctly.
-                    // The CT is initialized with the full SFC so AST positions
-                    // align. Remove the prefix (before <template>) and suffix
-                    // (after </template>) within the CT so build_string() produces
-                    // only the template region with correct sourcemap offsets.
-                    let mut tpl_ct = CodeTransform::new(input, &tpl_alloc);
-                    let tpl_tag_start = template_ast.root.tag_open.start as usize;
-                    let tpl_tag_end = template_ast
-                        .root
-                        .tag_close
-                        .as_ref()
-                        .map(|tc| tc.end as usize)
-                        .unwrap_or(
-                            template_ast
-                                .root
-                                .content
-                                .as_ref()
-                                .map(|c| c.end as usize)
-                                .unwrap_or(template_ast.root.tag_open.end as usize),
-                        );
-                    if tpl_tag_start > 0 {
-                        tpl_ct.remove(0, tpl_tag_start as u32);
-                    }
-                    if tpl_tag_end < input.len() {
-                        tpl_ct.remove(tpl_tag_end as u32, input.len() as u32);
-                    }
-
-                    let tpl_options = TemplateCodeGenOptions {
-                        mode: if verter_options.ssr {
-                            CodeGenMode::Ssr
-                        } else if use_vapor {
-                            CodeGenMode::Vapor
-                        } else {
-                            CodeGenMode::Vdom
-                        },
-                        is_inline: false,
-                        is_production: options.is_production,
-                        comments: options.comments.unwrap_or(!options.is_production),
-                        force_js: verter_options.force_js,
-                        self_name: to_pascal_case(&component_name),
-                        const_props: verter_options.prop_constness_overrides.clone(),
-                        has_scoped_style,
-                        hoist_static: options.resolve_hoist_static(),
-                        scope_id: if has_scoped_style {
-                            scope_id_full.clone()
-                        } else {
-                            String::new()
-                        },
-                    };
-
-                    let tpl_imports = generate_template(
-                        template_ast,
-                        &oxc_ast,
-                        input,
-                        &mut tpl_ct,
-                        &tpl_alloc,
-                        script_bindings,
-                        &tpl_options,
+            let template_block_inner = if needs_tpl_codegen {
+                let tpl_alloc = Allocator::new();
+                // Use the full SFC input so AST positions (which are absolute) align correctly.
+                // The CT is initialized with the full SFC so AST positions
+                // align. Remove the prefix (before <template>) and suffix
+                // (after </template>) within the CT so build_string() produces
+                // only the template region with correct sourcemap offsets.
+                let mut tpl_ct = CodeTransform::new(input, &tpl_alloc);
+                let tpl_tag_start = template_ast.root.tag_open.start as usize;
+                let tpl_tag_end = template_ast
+                    .root
+                    .tag_close
+                    .as_ref()
+                    .map(|tc| tc.end as usize)
+                    .unwrap_or(
+                        template_ast
+                            .root
+                            .content
+                            .as_ref()
+                            .map(|c| c.end as usize)
+                            .unwrap_or(template_ast.root.tag_open.end as usize),
                     );
+                if tpl_tag_start > 0 {
+                    tpl_ct.remove(0, tpl_tag_start as u32);
+                }
+                if tpl_tag_end < input.len() {
+                    tpl_ct.remove(tpl_tag_end as u32, input.len() as u32);
+                }
 
-                    // Strip TypeScript syntax from template expressions when force_js is set.
-                    if verter_options.force_js {
-                        for expr in oxc_ast.iter_expressions() {
-                            if let Some(ref expression) = expr.expression {
-                                crate::strip_types::typescript::strip_typescript_from_expression(
-                                    expression,
-                                    &mut tpl_ct,
-                                    expr.offset,
-                                    &input[expr.offset as usize..],
-                                );
-                            }
-                        }
-                    }
-
-                    // Prefix and suffix were removed via CT operations above,
-                    // so build_string() produces only the template region.
-                    let tpl_code = tpl_ct.build_string();
-                    let tpl_sourcemap_start = Instant::now();
-                    let tpl_source_map = if verter_options.source_map {
-                        let sm_opts = SourceMapOptions {
-                            source: options.filename.as_deref(),
-                            file: options.filename.as_deref(),
-                            include_content: true,
-                        };
-                        tpl_ct.generate_map_json(sm_opts)
+                let tpl_options = TemplateCodeGenOptions {
+                    mode: if verter_options.ssr {
+                        CodeGenMode::Ssr
+                    } else if use_vapor {
+                        CodeGenMode::Vapor
+                    } else {
+                        CodeGenMode::Vdom
+                    },
+                    is_inline: false,
+                    is_production: options.is_production,
+                    comments: options.comments.unwrap_or(!options.is_production),
+                    force_js: verter_options.force_js,
+                    self_name: to_pascal_case(&component_name),
+                    const_props: verter_options.prop_constness_overrides.clone(),
+                    has_scoped_style,
+                    hoist_static: options.resolve_hoist_static(),
+                    scope_id: if has_scoped_style {
+                        scope_id_full.clone()
                     } else {
                         String::new()
-                    };
-                    let tpl_sourcemap_ms = tpl_sourcemap_start.elapsed().as_secs_f64() * 1000.0;
-                    let tpl_duration_ms = tpl_start.elapsed().as_secs_f64() * 1000.0;
-                    if let Some(observer) = verter_audit::current_observer() {
-                        let codegen_only_ms = (tpl_duration_ms - tpl_sourcemap_ms).max(0.0);
-                        observer.record_phase_timing("compile.codegen", codegen_only_ms);
-                        if verter_options.source_map {
-                            observer.record_phase_timing("compile.sourcemap", tpl_sourcemap_ms);
-                        }
-                    }
-
-                    let tpl_attrs = extract_attrs(&template_ast.root.attributes, input);
-
-                    Some(VerterTemplateBlock {
-                        code: tpl_code,
-                        source_map: tpl_source_map,
-                        imports: tpl_imports.vue,
-                        ssr_imports: tpl_imports.ssr,
-                        duration_ms: tpl_duration_ms,
-                        attrs: tpl_attrs,
-                    })
-                } else {
-                    None
+                    },
                 };
 
-                (template_block_inner, raw_template_data)
-            } // close `else` for is_non_html_lang
-        } else {
-            (None, None)
-        };
+                let tpl_imports = generate_template(
+                    template_ast,
+                    &oxc_ast,
+                    input,
+                    &mut tpl_ct,
+                    &tpl_alloc,
+                    script_bindings,
+                    &tpl_options,
+                );
+
+                // Strip TypeScript syntax from template expressions when force_js is set.
+                if verter_options.force_js {
+                    for expr in oxc_ast.iter_expressions() {
+                        if let Some(ref expression) = expr.expression {
+                            crate::strip_types::typescript::strip_typescript_from_expression(
+                                expression,
+                                &mut tpl_ct,
+                                expr.offset,
+                                &input[expr.offset as usize..],
+                            );
+                        }
+                    }
+                }
+
+                // Prefix and suffix were removed via CT operations above,
+                // so build_string() produces only the template region.
+                let tpl_code = tpl_ct.build_string();
+                let tpl_sourcemap_start = Instant::now();
+                let tpl_source_map = if verter_options.source_map {
+                    let sm_opts = SourceMapOptions {
+                        source: options.filename.as_deref(),
+                        file: options.filename.as_deref(),
+                        include_content: true,
+                    };
+                    tpl_ct.generate_map_json(sm_opts)
+                } else {
+                    String::new()
+                };
+                let tpl_sourcemap_ms = tpl_sourcemap_start.elapsed().as_secs_f64() * 1000.0;
+                let tpl_duration_ms = tpl_start.elapsed().as_secs_f64() * 1000.0;
+                if let Some(observer) = verter_audit::current_observer() {
+                    let codegen_only_ms = (tpl_duration_ms - tpl_sourcemap_ms).max(0.0);
+                    observer.record_phase_timing("compile.codegen", codegen_only_ms);
+                    if verter_options.source_map {
+                        observer.record_phase_timing("compile.sourcemap", tpl_sourcemap_ms);
+                    }
+                }
+
+                let tpl_attrs = extract_attrs(&template_ast.root.attributes, input);
+
+                Some(VerterTemplateBlock {
+                    code: tpl_code,
+                    source_map: tpl_source_map,
+                    imports: tpl_imports.vue,
+                    ssr_imports: tpl_imports.ssr,
+                    duration_ms: tpl_duration_ms,
+                    attrs: tpl_attrs,
+                })
+            } else {
+                None
+            };
+
+            (template_block_inner, raw_template_data)
+        } // close `else` for is_non_html_lang
+    } else {
+        (None, None)
+    };
 
     // ── 6. TSX codegen (optional) ────────────────────────────────
     // Produces a single combined `.tsx` or `.jsx` file for LSP type checking.
@@ -1202,11 +1206,14 @@ fn compile_inner(
                     } else {
                         SourceType::tsx()
                     };
+                    // IDE/TSX codegen — enable completion-prefix matching so partial
+                    // identifiers inside v-for / v-slot scopes stay bare for completion.
                     let tsx_oxc = parse_template_expressions(
                         template_ast,
                         input,
                         &tsx_alloc,
                         tsx_source_type,
+                        true,
                     );
                     let mut tsx_out =
                         crate::template::code_gen::types::CodeGenOutput::new(&tsx_alloc);

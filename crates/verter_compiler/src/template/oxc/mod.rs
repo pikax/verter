@@ -30,6 +30,7 @@ fn parse_expression<'alloc>(
     alloc: &'alloc Allocator,
     source_type: SourceType,
     ignored: &[&'alloc str],
+    ide_completion: bool,
 ) -> OxcParsedExpression<'alloc> {
     if span.start >= span.end {
         return OxcParsedExpression {
@@ -49,7 +50,8 @@ fn parse_expression<'alloc>(
             // Don't adjust expression AST spans — keep substring-relative.
             // Bindings get file-relative positions via base_offset.
             // Dynamism is computed incrementally during extraction.
-            let binding_ctx = BindingContext::with_ignored(span.start, ignored.iter().copied());
+            let binding_ctx = BindingContext::with_ignored(span.start, ignored.iter().copied())
+                .completion_aware(ide_completion);
             let bindings = extract_bindings_from_expression(&expr, source_slice, binding_ctx);
 
             OxcParsedExpression {
@@ -92,14 +94,19 @@ fn parse_element<'alloc>(
     input: &'alloc str,
     alloc: &'alloc Allocator,
     source_type: SourceType,
+    ide_completion: bool,
 ) -> OxcParsedElement<'alloc> {
     // Fast path: plain element with no directives → empty result.
+    // Plain elements carry only static attributes, so no prop produces a parsed
+    // expression and the dense lookup is empty — `OxcParsedElement::prop` returns
+    // `None` for every index regardless.
     if element.is_plain() {
         return OxcParsedElement {
             condition: None,
             v_for: None,
             v_slot: None,
             props: Vec::new(),
+            prop_lookup: Vec::new(),
             provided_locals: None,
             expression_flag: ExpressionFlag::empty(),
         };
@@ -137,6 +144,7 @@ fn parse_element<'alloc>(
                     alloc,
                     source_type,
                     active_locals!(),
+                    ide_completion,
                 );
                 if parsed.dynamism == Dynamism::Static {
                     expression_flag = expression_flag.add(ExpressionFlags::StaticCondition);
@@ -198,7 +206,12 @@ fn parse_element<'alloc>(
     };
 
     // ── 4. Regular props ────────────────────────────────────────
+    // `oxc_props` is sparse (only directives with parsed expressions); `prop_lookup`
+    // is dense over the FULL `ElementNode.props`, mapping each prop index to its slot
+    // in `oxc_props` (or `None` for static attrs / value-less directives). This is the
+    // O(1) correlation table consumers query via `OxcParsedElement::prop`.
     let mut oxc_props: Vec<OxcParsedProp<'alloc>> = Vec::with_capacity(element.props.len());
+    let mut prop_lookup: Vec<Option<u32>> = vec![None; element.props.len()];
 
     for (i, prop) in element.props.iter().enumerate() {
         if !prop.is_directive {
@@ -215,6 +228,7 @@ fn parse_element<'alloc>(
                     alloc,
                     source_type,
                     active_locals!(),
+                    ide_completion,
                 );
 
                 // Check for expression flag based on arg name
@@ -252,12 +266,14 @@ fn parse_element<'alloc>(
                 alloc,
                 source_type,
                 active_locals!(),
+                ide_completion,
             )),
             _ => None,
         };
 
         // Only include props that have something parsed
         if exp.is_some() || arg.is_some() {
+            prop_lookup[i] = Some(oxc_props.len() as u32);
             oxc_props.push(OxcParsedProp {
                 prop_index: i,
                 arg,
@@ -271,6 +287,7 @@ fn parse_element<'alloc>(
         v_for,
         v_slot,
         props: oxc_props,
+        prop_lookup,
         provided_locals: owned_locals,
         expression_flag,
     }
@@ -288,12 +305,18 @@ fn parse_element<'alloc>(
 ///
 /// `AllInterpolationsStatic` is set optimistically on elements with
 /// interpolation children, then removed if any interpolation is non-Static.
+///
+/// `ide_completion` enables completion-prefix matching for v-for / v-slot scope
+/// locals (see [`BindingContext`]). IDE/TSX codegen passes `true`; runtime
+/// (VDOM / Vapor) codegen passes `false` so partial identifiers stay real
+/// references and the per-binding prefix scan is skipped.
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub fn parse_template_expressions<'alloc>(
     ast: &TemplateAst,
     input: &'alloc str,
     alloc: &'alloc Allocator,
     source_type: SourceType,
+    ide_completion: bool,
 ) -> OxcParsedAst<'alloc> {
     let mut data: Vec<OxcNodeData<'alloc>> = Vec::with_capacity(ast.nodes.len());
 
@@ -330,7 +353,8 @@ pub fn parse_template_expressions<'alloc>(
                     continue;
                 }
 
-                let mut parsed = parse_element(el, parent_locals, input, alloc, source_type);
+                let mut parsed =
+                    parse_element(el, parent_locals, input, alloc, source_type, ide_completion);
 
                 // Optimistically set AllInterpolationsStatic if element has
                 // interpolation children (from pre-computed children_flag).
@@ -349,6 +373,7 @@ pub fn parse_template_expressions<'alloc>(
                     alloc,
                     source_type,
                     parent_locals,
+                    ide_completion,
                 );
 
                 // If non-static, remove AllInterpolationsStatic from parent.

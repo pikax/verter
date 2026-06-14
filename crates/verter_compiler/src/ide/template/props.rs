@@ -135,7 +135,7 @@ pub fn process_element_props<'alloc>(
 
     for (i, prop) in el.props.iter().enumerate() {
         // Find corresponding OXC data for this prop
-        let oxc_prop = oxc_el.and_then(|el| el.props.iter().find(|p| p.prop_index == i));
+        let oxc_prop = oxc_el.and_then(|el| el.prop(i));
 
         // Skip structural directives (v-if, v-for, v-slot) — handled separately
         if is_structural_directive(prop, source) {

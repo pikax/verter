@@ -1558,7 +1558,7 @@ fn rewrite_component_is<'alloc>(
 
     // All dynamic :is expressions use extractRenderComponent wrapper.
     // Resolve binding prefixes (e.g., _ctx. for Data bindings)
-    let oxc_prop = oxc_el.and_then(|el| el.props.iter().find(|p| p.prop_index == bind_is_index));
+    let oxc_prop = oxc_el.and_then(|el| el.prop(bind_is_index));
     let resolved_expr = if let Some(oxc_p) = oxc_prop {
         if let Some(ref exp) = oxc_p.exp {
             use crate::template::code_gen::vapor::interpolation::build_prefixed_expr;
@@ -1755,8 +1755,7 @@ fn collect_slot_props(
                         let key = quote_prop_key_if_needed(arg);
                         if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
                             let raw = &source[vs as usize..ve as usize];
-                            let oxc_prop =
-                                oxc_el.and_then(|e| e.props.iter().find(|p| p.prop_index == i));
+                            let oxc_prop = oxc_el.and_then(|e| e.prop(i));
                             let resolved = if let Some(oxc_p) = oxc_prop {
                                 if let Some(ref exp) = oxc_p.exp {
                                     build_prefixed_expr(raw, vs, exp, resolver, &[])

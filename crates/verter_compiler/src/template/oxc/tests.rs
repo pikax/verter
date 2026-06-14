@@ -16,7 +16,7 @@ mod parse_expression_tests {
     #[test]
     fn empty_span_returns_static() {
         let alloc = Allocator::default();
-        let result = parse_expression(Span::new(0, 0), "", &alloc, tsx(), &[]);
+        let result = parse_expression(Span::new(0, 0), "", &alloc, tsx(), &[], false);
         assert!(result.expression.is_none());
         assert!(result.errors.is_none());
         assert!(result.bindings.is_none());
@@ -29,7 +29,7 @@ mod parse_expression_tests {
     fn simple_identifier_maybe_dynamic() {
         let alloc = Allocator::default();
         let input = "foo";
-        let result = parse_expression(Span::new(0, 3), input, &alloc, tsx(), &[]);
+        let result = parse_expression(Span::new(0, 3), input, &alloc, tsx(), &[], false);
 
         assert!(result.expression.is_some());
         assert!(result.errors.is_none());
@@ -45,7 +45,14 @@ mod parse_expression_tests {
     fn string_literal_static() {
         let alloc = Allocator::default();
         let input = "'hello'";
-        let result = parse_expression(Span::new(0, input.len() as u32), input, &alloc, tsx(), &[]);
+        let result = parse_expression(
+            Span::new(0, input.len() as u32),
+            input,
+            &alloc,
+            tsx(),
+            &[],
+            false,
+        );
 
         assert!(result.expression.is_some());
         assert!(result.errors.is_none());
@@ -62,7 +69,14 @@ mod parse_expression_tests {
     fn numeric_literal_static() {
         let alloc = Allocator::default();
         let input = "42";
-        let result = parse_expression(Span::new(0, input.len() as u32), input, &alloc, tsx(), &[]);
+        let result = parse_expression(
+            Span::new(0, input.len() as u32),
+            input,
+            &alloc,
+            tsx(),
+            &[],
+            false,
+        );
 
         assert!(result.expression.is_some());
         let bindings = result.bindings.as_ref().unwrap();
@@ -75,7 +89,14 @@ mod parse_expression_tests {
     fn boolean_literal_static() {
         let alloc = Allocator::default();
         let input = "true";
-        let result = parse_expression(Span::new(0, input.len() as u32), input, &alloc, tsx(), &[]);
+        let result = parse_expression(
+            Span::new(0, input.len() as u32),
+            input,
+            &alloc,
+            tsx(),
+            &[],
+            false,
+        );
 
         assert!(result.expression.is_some());
         let bindings = result.bindings.as_ref().unwrap();
@@ -98,7 +119,7 @@ mod parse_expression_tests {
     fn ignored_identifier_dynamic() {
         let alloc = Allocator::default();
         let input = "item";
-        let result = parse_expression(Span::new(0, 4), input, &alloc, tsx(), &["item"]);
+        let result = parse_expression(Span::new(0, 4), input, &alloc, tsx(), &["item"], false);
 
         assert!(result.expression.is_some());
         let bindings = result.bindings.as_ref().unwrap();
@@ -119,6 +140,7 @@ mod parse_expression_tests {
             &alloc,
             tsx(),
             &["item"],
+            false,
         );
 
         assert!(result.expression.is_some());
@@ -130,7 +152,14 @@ mod parse_expression_tests {
     fn binary_literals_static() {
         let alloc = Allocator::default();
         let input = "1 + 2";
-        let result = parse_expression(Span::new(0, input.len() as u32), input, &alloc, tsx(), &[]);
+        let result = parse_expression(
+            Span::new(0, input.len() as u32),
+            input,
+            &alloc,
+            tsx(),
+            &[],
+            false,
+        );
 
         assert!(result.expression.is_some());
         let bindings = result.bindings.as_ref().unwrap();
@@ -143,7 +172,14 @@ mod parse_expression_tests {
     fn script_level_identifier_maybe_dynamic() {
         let alloc = Allocator::default();
         let input = "cls";
-        let result = parse_expression(Span::new(0, input.len() as u32), input, &alloc, tsx(), &[]);
+        let result = parse_expression(
+            Span::new(0, input.len() as u32),
+            input,
+            &alloc,
+            tsx(),
+            &[],
+            false,
+        );
 
         assert!(result.expression.is_some());
         let bindings = result.bindings.as_ref().unwrap();
@@ -163,6 +199,7 @@ mod parse_expression_tests {
             &alloc,
             tsx(),
             &["item"],
+            false,
         );
 
         assert!(result.expression.is_some());
@@ -175,7 +212,14 @@ mod parse_expression_tests {
     fn invalid_syntax_errors() {
         let alloc = Allocator::default();
         let input = "if (";
-        let result = parse_expression(Span::new(0, input.len() as u32), input, &alloc, tsx(), &[]);
+        let result = parse_expression(
+            Span::new(0, input.len() as u32),
+            input,
+            &alloc,
+            tsx(),
+            &[],
+            false,
+        );
 
         assert!(result.expression.is_none());
         assert!(result.errors.is_some());
@@ -188,7 +232,7 @@ mod parse_expression_tests {
         let alloc = Allocator::default();
         let input = "prefix foo suffix";
         // "foo" at offset 7..10
-        let result = parse_expression(Span::new(7, 10), input, &alloc, tsx(), &[]);
+        let result = parse_expression(Span::new(7, 10), input, &alloc, tsx(), &[], false);
 
         assert_eq!(result.offset, 7);
         assert!(result.expression.is_some());
@@ -340,7 +384,7 @@ mod parse_element_tests {
             PropFlag::empty().add(PropFlags::HasStaticClass),
         );
         let alloc = Allocator::default();
-        let result = parse_element(&el, &[], input, &alloc, tsx());
+        let result = parse_element(&el, &[], input, &alloc, tsx(), false);
 
         assert!(result.condition.is_none());
         assert!(result.v_for.is_none());
@@ -371,7 +415,7 @@ mod parse_element_tests {
             PropFlag::empty().add(PropFlags::HasDynamicClass),
         );
         let alloc = Allocator::default();
-        let result = parse_element(&el, &[], input, &alloc, tsx());
+        let result = parse_element(&el, &[], input, &alloc, tsx(), false);
 
         assert_eq!(result.props.len(), 1);
         let exp = result.props[0]
@@ -383,6 +427,65 @@ mod parse_element_tests {
             !result.expression_flag.has(ExpressionFlags::StaticClassExpr),
             "MaybeDynamic class should NOT set StaticClassExpr"
         );
+    }
+
+    // ── Dense prop lookup invariant ─────────────────────────────
+
+    /// The dense `prop_lookup` table spans the FULL `ElementNode.props` (not the
+    /// sparse parsed `props`): static attributes leave `None` gaps at their exact
+    /// positions, directives with expressions point at their slot, and
+    /// `OxcParsedElement::prop` resolves each index to the prop whose `prop_index`
+    /// matches — with byte-exact expression offsets.
+    #[test]
+    fn dense_prop_lookup_spans_element_props_with_none_gaps() {
+        //  <div a="1" :b="v" c="2" :d="w">
+        //  0    5     11    18    24
+        //  a value "1" @8, :b value "v" @15, c value "2" @21, :d value "w" @28
+        let input = r#"<div a="1" :b="v" c="2" :d="w">"#;
+        let el = make_element(
+            TagType::Element,
+            vec![
+                plain_attr(5, 6, Some(8), Some(9)),
+                directive_prop(11, 13, Some(12), Some(13), Some(15), Some(16)),
+                plain_attr(18, 19, Some(21), Some(22)),
+                directive_prop(24, 26, Some(25), Some(26), Some(28), Some(29)),
+            ],
+            None,
+            None,
+            None,
+            None,
+            PropFlag::empty(),
+        );
+        let alloc = Allocator::default();
+        let result = parse_element(&el, &[], input, &alloc, tsx(), false);
+
+        // Dense table length matches the FULL element props, not the sparse parsed set.
+        assert_eq!(
+            result.prop_lookup.len(),
+            el.props.len(),
+            "prop_lookup must be dense over ElementNode.props"
+        );
+        assert_eq!(result.props.len(), 2, "only the two directives are parsed");
+        // None gaps at exactly the static-attr positions; Some at the directives.
+        assert_eq!(result.prop_lookup, vec![None, Some(0), None, Some(1)]);
+
+        // Static attrs resolve to nothing through the index.
+        assert!(result.prop(0).is_none(), "static attr → no parsed prop");
+        assert!(result.prop(2).is_none(), "static attr → no parsed prop");
+        // Out-of-range indices are safe and resolve to None.
+        assert!(result.prop(99).is_none());
+
+        // Directive props resolve to the slot whose prop_index matches, with the
+        // expression offset landing byte-exactly on the directive value.
+        let b = result.prop(1).expect(":b should resolve");
+        assert_eq!(b.prop_index, 1);
+        let b_exp = b.exp.as_ref().expect(":b has a parsed expression");
+        assert_eq!(b_exp.offset, 15, ":b value 'v' begins at byte 15");
+
+        let d = result.prop(3).expect(":d should resolve");
+        assert_eq!(d.prop_index, 3);
+        let d_exp = d.exp.as_ref().expect(":d has a parsed expression");
+        assert_eq!(d_exp.offset, 28, ":d value 'w' begins at byte 28");
     }
 
     // ── Test 3: :class with static expression ───────────────────
@@ -403,7 +506,7 @@ mod parse_element_tests {
             PropFlag::empty().add(PropFlags::HasDynamicClass),
         );
         let alloc = Allocator::default();
-        let result = parse_element(&el, &[], input, &alloc, tsx());
+        let result = parse_element(&el, &[], input, &alloc, tsx(), false);
 
         assert_eq!(result.props.len(), 1);
         let exp = result.props[0].exp.as_ref().unwrap();
@@ -432,7 +535,7 @@ mod parse_element_tests {
             PropFlag::empty().add(PropFlags::HasDynamicStyle),
         );
         let alloc = Allocator::default();
-        let result = parse_element(&el, &[], input, &alloc, tsx());
+        let result = parse_element(&el, &[], input, &alloc, tsx(), false);
 
         assert_eq!(result.props.len(), 1);
         let exp = result.props[0].exp.as_ref().unwrap();
@@ -461,7 +564,7 @@ mod parse_element_tests {
             PropFlag::empty().add(PropFlags::HasDynamicKey),
         );
         let alloc = Allocator::default();
-        let result = parse_element(&el, &[], input, &alloc, tsx());
+        let result = parse_element(&el, &[], input, &alloc, tsx(), false);
 
         assert_eq!(result.props.len(), 1);
         let exp = result.props[0].exp.as_ref().unwrap();
@@ -494,7 +597,7 @@ mod parse_element_tests {
             PropFlag::empty(),
         );
         let alloc = Allocator::default();
-        let result = parse_element(&el, &[], input, &alloc, tsx());
+        let result = parse_element(&el, &[], input, &alloc, tsx(), false);
 
         let condition = result.condition.as_ref().expect("should have condition");
         assert_eq!(condition.dynamism, Dynamism::MaybeDynamic);
@@ -526,7 +629,7 @@ mod parse_element_tests {
             PropFlag::empty(),
         );
         let alloc = Allocator::default();
-        let result = parse_element(&el, &[], input, &alloc, tsx());
+        let result = parse_element(&el, &[], input, &alloc, tsx(), false);
 
         let condition = result.condition.as_ref().expect("should have condition");
         assert_eq!(condition.dynamism, Dynamism::Static);
@@ -555,7 +658,7 @@ mod parse_element_tests {
             PropFlag::empty(),
         );
         let alloc = Allocator::default();
-        let result = parse_element(&el, &[], input, &alloc, tsx());
+        let result = parse_element(&el, &[], input, &alloc, tsx(), false);
 
         assert!(result.v_for.is_some(), "should have parsed v-for");
         let locals = result
@@ -588,7 +691,7 @@ mod parse_element_tests {
             PropFlag::empty(),
         );
         let alloc = Allocator::default();
-        let result = parse_element(&el, &[], input, &alloc, tsx());
+        let result = parse_element(&el, &[], input, &alloc, tsx(), false);
 
         assert!(result.v_slot.is_some(), "should have parsed v-slot");
         let locals = result
@@ -627,7 +730,7 @@ mod parse_element_tests {
                 .add(PropFlags::HasDynamicBinding), // :id is a generic dynamic binding
         );
         let alloc = Allocator::default();
-        let result = parse_element(&el, &[], input, &alloc, tsx());
+        let result = parse_element(&el, &[], input, &alloc, tsx(), false);
 
         assert_eq!(result.props.len(), 2);
 
@@ -660,7 +763,7 @@ mod parse_element_tests {
             PropFlag::empty(),
         );
         let alloc = Allocator::default();
-        let result = parse_element(&el, &[], input, &alloc, tsx());
+        let result = parse_element(&el, &[], input, &alloc, tsx(), false);
 
         assert!(result.condition.is_none());
         assert!(result.v_for.is_none());
@@ -692,7 +795,7 @@ mod parse_element_tests {
             PropFlag::empty(),
         );
         let alloc = Allocator::default();
-        let result = parse_element(&el, &[], input, &alloc, tsx());
+        let result = parse_element(&el, &[], input, &alloc, tsx(), false);
 
         assert!(
             result.condition.is_some(),
@@ -730,7 +833,7 @@ mod parse_element_tests {
             PropFlag::empty().add(PropFlags::HasDynamicClass),
         );
         let alloc = Allocator::default();
-        let result = parse_element(&el, &[], input, &alloc, tsx());
+        let result = parse_element(&el, &[], input, &alloc, tsx(), false);
 
         assert_eq!(result.props.len(), 1);
         let exp = result.props[0].exp.as_ref().unwrap();
@@ -765,7 +868,7 @@ mod parse_element_tests {
             PropFlag::empty(),
         );
         let alloc = Allocator::default();
-        let result = parse_element(&el, &[], input, &alloc, tsx());
+        let result = parse_element(&el, &[], input, &alloc, tsx(), false);
 
         assert!(
             result.v_for.is_some(),
@@ -805,7 +908,7 @@ mod parse_element_tests {
             PropFlag::empty(),
         );
         let alloc = Allocator::default();
-        let result = parse_element(&el, &[], input, &alloc, tsx());
+        let result = parse_element(&el, &[], input, &alloc, tsx(), false);
 
         assert!(
             result.condition.is_none(),
@@ -840,7 +943,7 @@ mod parse_element_tests {
             PropFlag::empty(),
         );
         let alloc = Allocator::default();
-        let result = parse_element(&el, &[], input, &alloc, tsx());
+        let result = parse_element(&el, &[], input, &alloc, tsx(), false);
 
         let condition = result.condition.as_ref().expect("should have condition");
         assert_eq!(condition.dynamism, Dynamism::MaybeDynamic);
@@ -879,7 +982,7 @@ mod parse_element_tests {
             PropFlag::empty(),
         );
         let alloc = Allocator::default();
-        let result = parse_element(&el, &[], input, &alloc, tsx());
+        let result = parse_element(&el, &[], input, &alloc, tsx(), false);
 
         assert_eq!(result.props.len(), 1);
         let prop = &result.props[0];
@@ -914,7 +1017,7 @@ mod parse_element_tests {
             PropFlag::empty().add(PropFlags::HasShow),
         );
         let alloc = Allocator::default();
-        let result = parse_element(&el, &[], input, &alloc, tsx());
+        let result = parse_element(&el, &[], input, &alloc, tsx(), false);
 
         assert_eq!(result.props.len(), 1);
         let prop = &result.props[0];
@@ -943,7 +1046,7 @@ mod parse_element_tests {
             PropFlag::empty(),
         );
         let alloc = Allocator::default();
-        let result = parse_element(&el, &[], input, &alloc, tsx());
+        let result = parse_element(&el, &[], input, &alloc, tsx(), false);
 
         assert!(
             result.props.is_empty(),
@@ -971,7 +1074,7 @@ mod parse_element_tests {
             PropFlag::empty().add(PropFlags::HasDynamicClass),
         );
         let alloc = Allocator::default();
-        let result = parse_element(&el, &["item"], input, &alloc, tsx());
+        let result = parse_element(&el, &["item"], input, &alloc, tsx(), false);
 
         assert_eq!(result.props.len(), 1);
         let exp = result.props[0].exp.as_ref().unwrap();
@@ -1056,7 +1159,7 @@ mod parse_template_expressions_tests {
         let ast = b.finish();
 
         let alloc = Allocator::default();
-        let result = parse_template_expressions(&ast, input, &alloc, tsx());
+        let result = parse_template_expressions(&ast, input, &alloc, tsx(), false);
 
         assert_eq!(result.data.len(), ast.nodes.len());
         match &result.data[0] {
@@ -1094,7 +1197,7 @@ mod parse_template_expressions_tests {
 
         let ast = b.finish();
         let alloc = Allocator::default();
-        let result = parse_template_expressions(&ast, input, &alloc, tsx());
+        let result = parse_template_expressions(&ast, input, &alloc, tsx(), false);
 
         // Node 0 = div, Node 1 = interpolation
         match &result.data[1] {
@@ -1110,6 +1213,88 @@ mod parse_template_expressions_tests {
                 std::mem::discriminant(other)
             ),
         }
+    }
+
+    /// Build a static (non-directive) attribute prop.
+    fn static_attr(
+        start: u32,
+        name_end: u32,
+        value_start: Option<u32>,
+        value_end: Option<u32>,
+    ) -> NodeProp {
+        NodeProp {
+            start,
+            name_end,
+            is_directive: false,
+            arg_start: None,
+            arg_end: None,
+            value_start,
+            value_end,
+            modifiers: SmallVec::new(),
+            is_dynamic: None,
+        }
+    }
+
+    /// Structural directives (v-for) and `ref` are removed into cached element
+    /// fields by the parser BEFORE ordinary props, so they never occupy a
+    /// `prop_index`. The dense lookup is built over `ElementNode.props` only, so
+    /// the remaining static/dynamic props still correlate to the correct indices
+    /// even when a v-for and a ref are present on the same element.
+    #[test]
+    fn prop_index_correlates_through_structural_directive_and_ref() {
+        //  <div v-for="x in xs" ref="r" a="1" :b="v"></div>
+        let input = r#"<div v-for="x in xs" ref="r" a="1" :b="v"></div>"#;
+        let v_for_val = (find_pos(input, "x in xs"), find_pos(input, "x in xs") + 7);
+        let a_val = (find_pos(input, r#""1""#) + 1, find_pos(input, r#""1""#) + 2);
+        let b_val = (find_pos(input, r#""v""#) + 1, find_pos(input, r#""v""#) + 2);
+
+        let mut b = TemplateAstBuilder::new(make_root());
+        let open_end = find_pos(input, ">") + 1;
+        b.open_element(make_tag(0, open_end, 4));
+        // v-for and ref go into cached fields, NOT into props.
+        b.set_v_for(directive_prop_no_arg(
+            5,
+            10,
+            Some(v_for_val.0),
+            Some(v_for_val.1),
+        ));
+        b.set_v_ref(static_attr(21, 24, Some(26), Some(27)));
+        // Ordinary props, in source order → prop_index 0 (static), 1 (dynamic).
+        b.push_prop_to_current(static_attr(29, 30, Some(a_val.0), Some(a_val.1)));
+        b.push_prop_to_current(directive_prop(
+            35,
+            37,
+            Some(36),
+            Some(37),
+            Some(b_val.0),
+            Some(b_val.1),
+        ));
+        let close_start = find_pos(input, "</div>");
+        b.mark_element_content_start(open_end);
+        b.close_element(
+            Some(make_tag(close_start, close_start + 6, close_start + 5)),
+            open_end,
+        );
+
+        let ast = b.finish();
+        let alloc = Allocator::default();
+        let result = parse_template_expressions(&ast, input, &alloc, tsx(), false);
+
+        let OxcNodeData::Element(el) = &result.data[0] else {
+            panic!("expected Element at node 0");
+        };
+
+        // Two ordinary props survive in ElementNode.props (v-for / ref excluded).
+        assert_eq!(el.prop_lookup.len(), 2);
+        assert_eq!(el.prop_lookup, vec![None, Some(0)]);
+
+        // The static attr resolves to nothing; the directive resolves to its slot
+        // with a byte-exact expression offset for the value "v".
+        assert!(el.prop(0).is_none(), "static attr a → None");
+        let dir = el.prop(1).expect(":b should resolve via the index");
+        assert_eq!(dir.prop_index, 1);
+        let exp = dir.exp.as_ref().expect(":b has a parsed expression");
+        assert_eq!(exp.offset, b_val.0, ":b value offset must be byte-exact");
     }
 
     // ── Test 3: v-slot scope cascades to interpolation child ─────
@@ -1144,7 +1329,7 @@ mod parse_template_expressions_tests {
 
         let ast = b.finish();
         let alloc = Allocator::default();
-        let result = parse_template_expressions(&ast, input, &alloc, tsx());
+        let result = parse_template_expressions(&ast, input, &alloc, tsx(), false);
 
         // Node 0 = template element, Node 1 = interpolation
         match &result.data[1] {
@@ -1225,7 +1410,7 @@ mod parse_template_expressions_tests {
 
         let ast = b.finish();
         let alloc = Allocator::default();
-        let result = parse_template_expressions(&ast, input, &alloc, tsx());
+        let result = parse_template_expressions(&ast, input, &alloc, tsx(), false);
 
         // Nodes: 0=div, 1=template, 2=interpolation
         // The interpolation should see both "item" (from v-for) and "data" (from v-slot)
@@ -1276,7 +1461,7 @@ mod parse_template_expressions_tests {
         let ast = b.finish();
 
         let alloc = Allocator::default();
-        let result = parse_template_expressions(&ast, input, &alloc, tsx());
+        let result = parse_template_expressions(&ast, input, &alloc, tsx(), false);
 
         assert_eq!(result.data.len(), 2);
         assert!(matches!(result.data[0], OxcNodeData::None));
@@ -1323,7 +1508,7 @@ mod parse_template_expressions_tests {
 
         let ast = b.finish();
         let alloc = Allocator::default();
-        let result = parse_template_expressions(&ast, input, &alloc, tsx());
+        let result = parse_template_expressions(&ast, input, &alloc, tsx(), false);
 
         // Nodes: 0=div (with v-for), 1=span, 2=interpolation (child of span)
         match &result.data[2] {
@@ -1367,7 +1552,7 @@ mod parse_template_expressions_tests {
 
         let ast = b.finish();
         let alloc = Allocator::default();
-        let result = parse_template_expressions(&ast, input, &alloc, tsx());
+        let result = parse_template_expressions(&ast, input, &alloc, tsx(), false);
 
         // Node 0 = div element — plain, so skipped (None)
         assert!(
@@ -1420,7 +1605,7 @@ mod parse_template_expressions_tests {
 
         let ast = b.finish();
         let alloc = Allocator::default();
-        let result = parse_template_expressions(&ast, input, &alloc, tsx());
+        let result = parse_template_expressions(&ast, input, &alloc, tsx(), false);
 
         // Node 0 = div element — plain, so skipped
         assert!(matches!(result.data[0], OxcNodeData::None));
@@ -1494,7 +1679,7 @@ mod parse_template_expressions_tests {
 
         let ast = b.finish();
         let alloc = Allocator::default();
-        let result = parse_template_expressions(&ast, input, &alloc, tsx());
+        let result = parse_template_expressions(&ast, input, &alloc, tsx(), false);
 
         // Nodes: 0=div, 1=span, 2=interpolation
         // Both div and span are plain → skipped
@@ -1540,7 +1725,7 @@ mod parse_template_expressions_tests {
 
         let ast = b.finish();
         let alloc = Allocator::default();
-        let result = parse_template_expressions(&ast, input, &alloc, tsx());
+        let result = parse_template_expressions(&ast, input, &alloc, tsx(), false);
 
         // Node 1 = interpolation
         match &result.data[1] {
@@ -1583,7 +1768,7 @@ mod parse_template_expressions_tests {
 
         let ast = b.finish();
         let alloc = Allocator::default();
-        let result = parse_template_expressions(&ast, input, &alloc, tsx());
+        let result = parse_template_expressions(&ast, input, &alloc, tsx(), false);
 
         // Plain div is skipped
         assert!(
@@ -1640,7 +1825,7 @@ mod parse_template_expressions_tests {
 
         let ast = b.finish();
         let alloc = Allocator::default();
-        let result = parse_template_expressions(&ast, input, &alloc, tsx());
+        let result = parse_template_expressions(&ast, input, &alloc, tsx(), false);
 
         // Node 0 = div (v-if), Node 1 = text "A", Node 2 = div (v-else), Node 3 = text "B"
         match &result.data[0] {

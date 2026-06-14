@@ -108,7 +108,7 @@ fn run_full_pipeline_mode(source: &str, mode: super::super::CodeGenMode) -> Stri
 
     let template_ast = syntax.take_template_ast();
     if let Some(ast) = &template_ast {
-        let oxc_ast = parse_template_expressions(ast, source, &alloc, SourceType::tsx());
+        let oxc_ast = parse_template_expressions(ast, source, &alloc, SourceType::tsx(), false);
         let mut ct2 = CodeTransform::new(source, &alloc);
         generate_template(
             ast,

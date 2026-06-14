@@ -421,7 +421,7 @@ pub fn emit_v_show<'alloc>(
         let show_range =
             SourceByteRange::new(SourceByteOffset(show_tvs), SourceByteOffset(show_tve));
         let show_bindings = oxc_el
-            .and_then(|e| e.props.iter().find(|p| p.prop_index == show_idx))
+            .and_then(|e| e.prop(show_idx))
             .and_then(|p| p.exp.as_ref())
             .and_then(|exp| exp.bindings.as_ref())
             .map(|b| b.bindings.as_slice());
@@ -453,7 +453,7 @@ pub fn emit_v_show<'alloc>(
                 let style_range =
                     SourceByteRange::new(SourceByteOffset(style_tvs), SourceByteOffset(style_tve));
                 let style_bindings = oxc_el
-                    .and_then(|e| e.props.iter().find(|p| p.prop_index == style_idx))
+                    .and_then(|e| e.prop(style_idx))
                     .and_then(|p| p.exp.as_ref())
                     .and_then(|exp| exp.bindings.as_ref())
                     .map(|b| b.bindings.as_slice());

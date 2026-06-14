@@ -108,17 +108,14 @@ fn extract_v_memo_expr(el: &ElementNode, source: &str) -> Option<String> {
 
 /// Look up the OXC-parsed expression data for a given prop index.
 ///
-/// `OxcParsedProp.prop_index` maps back to `ElementNode.props[prop_index]`,
-/// so this finds the OXC expression data corresponding to a specific directive.
+/// `OxcParsedProp.prop_index` maps back to `ElementNode.props[prop_index]`. This
+/// is an O(1) wrapper over the element's dense `prop_lookup` table
+/// ([`OxcParsedElement::prop`]) — no linear scan over the sparse `props` vec.
 pub(crate) fn find_prop_oxc_exp<'a, 'alloc>(
     oxc_el: Option<&'a OxcParsedElement<'alloc>>,
     prop_index: usize,
 ) -> Option<&'a OxcParsedExpression<'alloc>> {
-    oxc_el?
-        .props
-        .iter()
-        .find(|p| p.prop_index == prop_index)
-        .and_then(|p| p.exp.as_ref())
+    oxc_el?.prop(prop_index).and_then(|p| p.exp.as_ref())
 }
 
 /// Resolve an expression using OXC binding data when available, falling back

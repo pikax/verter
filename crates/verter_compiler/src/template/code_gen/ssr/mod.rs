@@ -5917,11 +5917,14 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
 // ======================== OXC lookup helper ========================
 
 /// Find the OXC parsed prop data for a given element prop index.
+///
+/// O(1) lookup through the element's dense `prop_lookup` table — no linear scan
+/// over the sparse `props` vec.
 fn find_oxc_prop<'a, 'alloc>(
     oxc: &'a OxcParsedElement<'alloc>,
     prop_index: usize,
 ) -> Option<&'a crate::template::oxc::types::OxcParsedProp<'alloc>> {
-    oxc.props.iter().find(|p| p.prop_index == prop_index)
+    oxc.prop(prop_index)
 }
 
 // ======================== Utility functions ========================

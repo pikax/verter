@@ -31,6 +31,7 @@ fn gen_tsx_template(source: &str) -> String {
         source,
         &alloc,
         source_type,
+        true,
     );
 
     let mut tpl_ct = CodeTransform::new(source, &alloc);
@@ -95,6 +96,7 @@ fn gen_tsx_template_with_bindings(source: &str, bindings: &[(&str, BindingType)]
         source,
         &alloc,
         source_type,
+        true,
     );
 
     let tpl_alloc = Allocator::new();
@@ -2121,6 +2123,7 @@ fn gen_tsx_template_with_map(
         source,
         &alloc,
         source_type,
+        true,
     );
 
     let tpl_alloc = Allocator::new();
@@ -5023,6 +5026,7 @@ fn gen_jsx_template(source: &str) -> String {
         source,
         &alloc,
         source_type,
+        true,
     );
 
     let mut tpl_ct = CodeTransform::new(source, &alloc);
@@ -5565,6 +5569,7 @@ fn gen_tsx_template_strict_slots_with_bindings(
         source,
         &alloc,
         source_type,
+        true,
     );
 
     let tpl_alloc = Allocator::new();
@@ -6025,6 +6030,7 @@ fn gen_tsx_template_strict_slots_with_map(
         source,
         &alloc,
         source_type,
+        true,
     );
 
     let tpl_alloc = Allocator::new();

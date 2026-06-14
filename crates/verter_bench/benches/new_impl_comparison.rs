@@ -119,7 +119,7 @@ fn compile_full(source: &str) -> String {
     // Step 4: template OXC expression parsing + codegen
     let template_ast = syntax.take_template_ast();
     if let Some(ast) = &template_ast {
-        let oxc_ast = parse_template_expressions(ast, source, &alloc, SourceType::tsx());
+        let oxc_ast = parse_template_expressions(ast, source, &alloc, SourceType::tsx(), false);
         generate_template(
             ast,
             &oxc_ast,
@@ -168,7 +168,7 @@ fn template_codegen(source: &str, mode: CodeGenMode) {
 
     let template_ast = syntax.take_template_ast();
     if let Some(ast) = &template_ast {
-        let oxc_ast = parse_template_expressions(ast, source, &alloc, SourceType::tsx());
+        let oxc_ast = parse_template_expressions(ast, source, &alloc, SourceType::tsx(), false);
         let mut ct = CodeTransform::new(source, &alloc);
         generate_template(
             ast,
