@@ -414,11 +414,15 @@ fn type_expr_mentions_budget_exceeded(expr: &verter_type_expr::TypeExpr) -> bool
     }
 
     match expr {
-        TypeExpr::Ref { type_arguments, .. } | TypeExpr::RecursiveRef { type_arguments, .. } => {
-            type_arguments
-                .iter()
-                .any(type_expr_mentions_budget_exceeded)
-        }
+        // `ImportType`'s only nested `TypeExpr`-bearing field is
+        // `type_arguments` (`specifier`/`qualifier` are strings,
+        // `typeof_query` is a bool) — so the carrier surface is identical to
+        // `Ref`/`RecursiveRef` and folds into the same recursion.
+        TypeExpr::Ref { type_arguments, .. }
+        | TypeExpr::RecursiveRef { type_arguments, .. }
+        | TypeExpr::ImportType { type_arguments, .. } => type_arguments
+            .iter()
+            .any(type_expr_mentions_budget_exceeded),
         // The leaked sentinel is recognized above via the shared
         // recognizer; a non-sentinel `Unknown` carries no nested
         // type-bearing surface.
@@ -562,6 +566,54 @@ fn gate4_walker_detects_production_sentinel_including_in_type_parameters() {
     assert!(
         !type_expr_mentions_budget_exceeded(&clean_fn),
         "walker MUST NOT fire on a clean function / clean type parameters"
+    );
+}
+
+/// Pins the gate-#4 walker to the `TypeExpr::ImportType` carrier (the
+/// dynamic-import variant). NON-hollow and discriminating: the
+/// sentinel-bearing assertion fails against a lazy `ImportType { .. } =>
+/// false` arm, and the clean assertion fails against a blanket
+/// `ImportType { .. } => true` arm — so it proves the arm RECURSES into
+/// `type_arguments` rather than returning a constant. (Pre-fix, the match
+/// had no `ImportType` arm at all and the file did not compile under
+/// `--features external-corpus`.)
+#[test]
+fn gate4_walker_detects_production_sentinel_in_import_type_arguments() {
+    use std::sync::Arc;
+    use verter_type_expr::TypeExpr;
+
+    let real_sentinel = || TypeExpr::Unknown {
+        raw: "budgetExceeded(ProjectionOperation)".into(),
+    };
+
+    // `import("./m").Generic<budgetExceeded(...)>` — the sentinel rides a
+    // nested type argument of an `ImportType` carrier. The walker MUST
+    // recurse into `type_arguments`, exactly as it does for
+    // `Ref`/`RecursiveRef`.
+    let import_with_sentinel = TypeExpr::ImportType {
+        specifier: "./module_features_leaf".into(),
+        qualifier: Arc::from(vec![Arc::<str>::from("Generic")]),
+        typeof_query: false,
+        type_arguments: Arc::from(vec![real_sentinel()]),
+    };
+    assert!(
+        type_expr_mentions_budget_exceeded(&import_with_sentinel),
+        "walker MUST detect a sentinel borne on an ImportType type argument"
+    );
+
+    // A clean `ImportType` (sentinel-free nested arg) must NOT fire — proves
+    // the arm walks the real surface instead of blanket-returning true.
+    let import_clean = TypeExpr::ImportType {
+        specifier: "./module_features_leaf".into(),
+        qualifier: Arc::from(Vec::<Arc<str>>::new()),
+        typeof_query: true,
+        type_arguments: Arc::from(vec![TypeExpr::Primitive(
+            verter_type_expr::PrimitiveName::String,
+        )]),
+    };
+    assert!(
+        !type_expr_mentions_budget_exceeded(&import_clean),
+        "walker MUST NOT fire on a clean ImportType carrier"
     );
 }
 
