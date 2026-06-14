@@ -1,0 +1,1 @@
+{"version":3,"file":"App.vue","names":[],"sources":["App.vue"],"sourcesContent":["<script setup lang=\"ts\">\nconst msg = 'hi'\n</script>\n<template>\n  <div class=\"a\"><span>{{ msg }}</span></div>\n</template>"],"mappings":"A;;AAAA;AAAwB;AACxB;AACA;;;;;;;;;;;;A,EACU;AACV,uBAAuB,CAAE,KAAK,CAAE;A,G;;;;;;;;;;;;;;;;;;;;;;A"}

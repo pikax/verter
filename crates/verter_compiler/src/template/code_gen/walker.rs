@@ -208,9 +208,7 @@ mod tests {
 
     /// Build OxcParsedAst with None entries (no expression parsing needed for walker tests).
     fn make_oxc_none(len: usize) -> OxcParsedAst<'static> {
-        OxcParsedAst {
-            data: (0..len).map(|_| OxcNodeData::None).collect(),
-        }
+        OxcParsedAst::new((0..len).map(|_| OxcNodeData::None).collect())
     }
 
     /// Build OxcParsedAst where one entry is an Interpolation.
@@ -223,7 +221,7 @@ mod tests {
             bindings: None,
             dynamism: Dynamism::Static,
         });
-        OxcParsedAst { data }
+        OxcParsedAst::new(data)
     }
 
     // ── Test 1: Empty template ──────────────────────────────────

@@ -5,6 +5,7 @@
 //! [`OxcNodeData`] entry with parsed expressions, extracted bindings, and
 //! dynamism classification.
 
+pub(crate) mod slot_summary;
 pub mod types;
 
 use oxc_allocator::Allocator;
@@ -407,7 +408,7 @@ pub fn parse_template_expressions<'alloc>(
         }
     }
 
-    OxcParsedAst { data }
+    OxcParsedAst::new(data)
 }
 
 #[cfg(test)]
@@ -446,6 +447,13 @@ pub(crate) fn parse_template_expressions_call_count() -> usize {
 pub(crate) fn parse_template_expressions_source_types() -> Vec<(bool, bool)> {
     PARSE_TEMPLATE_EXPRESSIONS_SOURCE_TYPES.with(|v| v.borrow().clone())
 }
+
+// Re-export the slot-summary build/read counters so tests can assert the
+// compute-once-consume-twice invariant without naming the private submodule path.
+#[cfg(test)]
+pub(crate) use slot_summary::{
+    reset_slot_summary_counts, slot_summary_build_count, slot_summary_read_count,
+};
 
 #[cfg(test)]
 mod tests;

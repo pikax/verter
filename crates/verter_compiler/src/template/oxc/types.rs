@@ -4,8 +4,13 @@
 //! `AstNode` in the arena, there is a corresponding [`OxcNodeData`] entry
 //! containing parsed OXC ASTs, extracted bindings, and static-analysis metadata.
 
+use std::cell::OnceCell;
+
 use oxc_ast::ast::Expression;
 use oxc_diagnostics::OxcDiagnostic;
+
+use crate::ast::types::TemplateAst;
+use crate::types::NodeId;
 
 // Re-export Dynamism so `use self::types::*` in mod.rs picks it up.
 pub use crate::utils::oxc::Dynamism;
@@ -260,6 +265,76 @@ pub enum OxcNodeData<'alloc> {
     None,
 }
 
+// ======================== Slot summary facts ========================
+
+/// Classification of a single slot child for IDE strict-slot checking.
+///
+/// Mirrors the four child shapes the IDE strict-slot emitter understands. The
+/// concrete source positions (tag-name span, text/interpolation start) are NOT
+/// stored here — they are resolved on demand from [`SlotChildFact::node_id`], so
+/// the fact stays a tiny `Copy` value and the byte offsets always come straight
+/// from the AST node the consumer is emitting for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlotChildKind {
+    /// A child Vue component (`<Foo>`); the constructor name is the tag name.
+    Component,
+    /// A child native HTML element (`<div>`); the tag name keys
+    /// `HTMLElementTagNameMap`.
+    HtmlElement,
+    /// A non-whitespace text child.
+    Text,
+    /// An interpolation child (`{{ expr }}`).
+    Interpolation,
+}
+
+/// One classified child inside a slot group.
+///
+/// Carries the originating [`NodeId`] so the strict-slot adapter resolves the
+/// exact tag-name / text source span from the AST node when it emits, rather
+/// than the slot scan eagerly slicing strings into the shared overlay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SlotChildFact {
+    /// AST node this child was classified from.
+    pub node_id: NodeId,
+    /// Which strict-slot child shape this node is.
+    pub kind: SlotChildKind,
+}
+
+/// A named slot group: the children a component receives for one slot name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlotGroup {
+    /// Slot name (`"default"`, `"header"`, …), in first-seen source order.
+    pub name: String,
+    /// Classified children for this slot, in source order. Always non-empty —
+    /// empty groups are never recorded.
+    pub children: Vec<SlotChildFact>,
+}
+
+/// Slot facts for one component element.
+///
+/// Built once per component, lazily, on the first strict-slot demand for that
+/// component (see [`OxcParsedAst::slot_summary`]) and read by the IDE
+/// strict-slot lane. The two fields intentionally model the two distinct
+/// downstream rules:
+///
+/// - `groups` drives `strictRenderSlot` — only NON-EMPTY slot groups, with each
+///   child classified by shape (a `<template #name>` contributes its inner
+///   classified children; direct non-template content contributes the
+///   `"default"` group).
+/// - `provided_slot_names` drives `checkRequiredSlots` — every declared slot
+///   name (including an empty `<template #name>`) plus a trailing `"default"`
+///   when any non-template content (including whitespace text) is present. This
+///   set is deliberately broader than `groups`: a component whose only content
+///   is a named template plus surrounding whitespace records `"default"` here
+///   yet has no default group.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ComponentSlotSummary {
+    /// Non-empty strict-slot groups in first-seen source order.
+    pub groups: Vec<SlotGroup>,
+    /// Provided slot names for `checkRequiredSlots`, in source order.
+    pub provided_slot_names: Vec<String>,
+}
+
 // ======================== Top-level result ========================
 
 /// The complete OXC-parsed overlay for a [`TemplateAst`].
@@ -269,9 +344,51 @@ pub enum OxcNodeData<'alloc> {
 #[derive(Debug)]
 pub struct OxcParsedAst<'alloc> {
     pub data: Vec<OxcNodeData<'alloc>>,
+    /// NodeId-aligned IDE slot summaries, each built lazily and independently on
+    /// first demand: `slot_summaries[id.0]` resolves to `Some` for a static
+    /// component eligible for slot checking and `None` otherwise (non-component
+    /// nodes and dynamic `<component :is>`). The outer cell allocates the
+    /// per-node slot vec once (no AST touch); each inner cell is filled the
+    /// first time the IDE strict-slot lane reaches that component via
+    /// [`OxcParsedAst::slot_summary`], so only components the lane actually
+    /// reaches are scanned and the runtime VDOM/Vapor and SSR lanes pay nothing.
+    /// Owned data (no allocator borrow), so it lives independently of the
+    /// parsed-expression arena.
+    slot_summaries: OnceCell<Vec<OnceCell<Option<ComponentSlotSummary>>>>,
 }
 
 impl<'alloc> OxcParsedAst<'alloc> {
+    /// Wrap the per-node parsed data, with slot summaries unbuilt.
+    pub fn new(data: Vec<OxcNodeData<'alloc>>) -> Self {
+        Self {
+            data,
+            slot_summaries: OnceCell::new(),
+        }
+    }
+
+    /// The IDE slot summary for the component at `id`, built once and memoized.
+    ///
+    /// Returns `Some` for a static, slot-checkable component and `None` for any
+    /// other node. The first call for a given `id` scans that component's direct
+    /// children and caches the result in its per-node cell; every later call for
+    /// the same `id` returns the cached value without rescanning. `ast` and
+    /// `source` are consulted only on the cold (first) call for each component.
+    pub fn slot_summary(
+        &self,
+        id: NodeId,
+        ast: &TemplateAst,
+        source: &str,
+    ) -> Option<&ComponentSlotSummary> {
+        let cells = self.slot_summaries.get_or_init(|| {
+            let mut cells = Vec::with_capacity(ast.nodes.len());
+            cells.resize_with(ast.nodes.len(), OnceCell::new);
+            cells
+        });
+        cells[id.0]
+            .get_or_init(|| super::slot_summary::build_slot_summary(id, ast, source))
+            .as_ref()
+    }
+
     /// Iterate all [`OxcParsedExpression`] references in the AST.
     ///
     /// Yields every expression from interpolations, element conditions,

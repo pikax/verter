@@ -13886,6 +13886,206 @@ import TabItem from './TabItem.vue'
     );
 }
 
+// ── Slot-summary representative SFCs (shared by counter + byte tests) ──
+
+const SLOT_SFC_NESTED: &str = r#"<script setup lang="ts">
+import Card from './Card.vue'
+import Panel from './Panel.vue'
+import Row from './Row.vue'
+</script>
+<template>
+  <Card>
+    <template #header="{ title }">
+      <Row>{{ title }}</Row>
+    </template>
+    <template #default>
+      <Panel />
+      leading text
+    </template>
+  </Card>
+</template>"#;
+
+const SLOT_SFC_NO_SLOT: &str = r#"<script setup lang="ts">
+const msg = 'hi'
+</script>
+<template>
+  <div class="a"><span>{{ msg }}</span></div>
+</template>"#;
+
+const SLOT_SFC_DEEP: &str = r#"<script setup lang="ts">
+import Outer from './Outer.vue'
+import Inner from './Inner.vue'
+import Leaf from './Leaf.vue'
+</script>
+<template>
+  <div>
+    <section>
+      <Outer>
+        <template #body>
+          <Inner>
+            <Leaf />
+          </Inner>
+        </template>
+      </Outer>
+    </section>
+  </div>
+</template>"#;
+
+/// Normalize line endings before a byte comparison. The repo is LF-only, but
+/// the cross-platform rule requires normalizing checked-out text before a
+/// byte-equality assertion.
+fn norm_eol(s: &str) -> String {
+    s.replace("\r\n", "\n")
+}
+
+/// Assert the compiled TSX's `code` AND `source_map` both equal their committed
+/// goldens (byte-for-byte after EOL normalization). Sharing one per-component
+/// slot summary between the two collectors is a pure compute change, so it must
+/// leave BOTH the emitted code and its source map identical to the output the
+/// two independent scans produced.
+fn assert_tsx_code_and_map_match(tsx: &VerterTsxBlock, code_golden: &str, map_golden: &str) {
+    assert_eq!(
+        norm_eol(&tsx.code),
+        norm_eol(code_golden),
+        "emitted TSX code must be byte-identical to its golden"
+    );
+    assert!(
+        !tsx.source_map.is_empty(),
+        "source maps are enabled, so a source map must be emitted"
+    );
+    assert_eq!(
+        norm_eol(&tsx.source_map),
+        norm_eol(map_golden),
+        "emitted TSX source map must be byte-identical to its golden"
+    );
+}
+
+#[test]
+fn strict_slots_nested_output_is_byte_identical() {
+    // Nested components with named (#header, scoped) + default slots. Routing
+    // both strict-slot and required-slot collection through the one shared
+    // per-component slot summary must leave the emitted TSX — code AND source
+    // map — byte-identical.
+    let result = compile_tsx_strict_slots(SLOT_SFC_NESTED);
+    let tsx = result.tsx.as_ref().expect("tsx output");
+    assert_tsx_code_and_map_match(
+        tsx,
+        include_str!("ide/template/fixtures/strict_slots_nested.tsx.golden"),
+        include_str!("ide/template/fixtures/strict_slots_nested.tsx.map.golden"),
+    );
+    // Negative: both slot checks present, no raw Vue directive leaked.
+    let code = &tsx.code;
+    assert!(
+        code.contains("strictRenderSlot(") && code.contains("checkRequiredSlots("),
+        "both slot checks must still be emitted, got:\n{code}"
+    );
+    assert!(
+        !code.contains("v-slot"),
+        "v-slot must not appear in TSX output, got:\n{code}"
+    );
+}
+
+#[test]
+fn strict_slots_deep_output_is_byte_identical() {
+    // A deeply nested slot (component inside section inside div, with a named
+    // slot wrapping a further-nested component) proves the per-component summary
+    // reaches arbitrarily deep components without changing output bytes.
+    let result = compile_tsx_strict_slots(SLOT_SFC_DEEP);
+    let tsx = result.tsx.as_ref().expect("tsx output");
+    assert_tsx_code_and_map_match(
+        tsx,
+        include_str!("ide/template/fixtures/strict_slots_deep.tsx.golden"),
+        include_str!("ide/template/fixtures/strict_slots_deep.tsx.map.golden"),
+    );
+    // The innermost components and the named slot must all surface.
+    let code = &tsx.code;
+    assert!(
+        code.contains("'body'") && code.contains("Inner") && code.contains("Leaf"),
+        "deep slot facts (body slot, Inner, Leaf) must survive, got:\n{code}"
+    );
+}
+
+#[test]
+fn strict_slots_no_slot_subtree_is_byte_identical_and_emits_no_checks() {
+    // A component-free subtree provides no slots: no summary is built and no
+    // slot check is emitted. Output (code AND source map) stays byte-identical.
+    let result = compile_tsx_strict_slots(SLOT_SFC_NO_SLOT);
+    let tsx = result.tsx.as_ref().expect("tsx output");
+    assert_tsx_code_and_map_match(
+        tsx,
+        include_str!("ide/template/fixtures/strict_slots_no_slot.tsx.golden"),
+        include_str!("ide/template/fixtures/strict_slots_no_slot.tsx.map.golden"),
+    );
+    // Negative: no slot-check call sites for a component-free template.
+    let code = &tsx.code;
+    assert!(
+        !code.contains("strictRenderSlot(") && !code.contains("checkRequiredSlots("),
+        "a component-free template must emit no slot checks, got:\n{code}"
+    );
+}
+
+#[test]
+fn slot_summary_built_once_consumed_twice() {
+    // The discriminating build-once assertion. The nested SFC has exactly three
+    // slot-checkable components (Card, Row, Panel). Each is consumed by BOTH the
+    // strict-slot and required-slot collectors, so the summaries are READ six
+    // times — yet each component's summary is BUILT exactly once (three builds)
+    // and the second consumption is served warm from its memoized overlay cell.
+    //
+    // This is the load-bearing invariant: a summary is built once per component
+    // regardless of how many collectors consume it, so reads scale with the
+    // collector count while builds stay fixed at one per component. With two
+    // collectors `reads == 2 * builds`: exactly half the consumptions trigger a
+    // build and the other half are warm cache hits. A per-collector rescan would
+    // build on every read instead, making builds equal reads (6) and failing this
+    // assertion.
+    use crate::template::oxc::{
+        reset_slot_summary_counts, slot_summary_build_count, slot_summary_read_count,
+    };
+
+    reset_slot_summary_counts();
+    let result = compile_tsx_strict_slots(SLOT_SFC_NESTED);
+    assert!(result.tsx.is_some(), "tsx output missing");
+
+    let builds = slot_summary_build_count();
+    let reads = slot_summary_read_count();
+    assert_eq!(
+        builds, 3,
+        "each slot-checkable component (Card, Row, Panel) must build its summary exactly once, got {builds}"
+    );
+    assert_eq!(
+        reads, 6,
+        "two collectors must each consume all three component summaries (3 x 2), got {reads}"
+    );
+    assert_eq!(
+        reads,
+        2 * builds,
+        "every summary must be consumed twice but built once: the second consumption is a warm cache hit, not a rebuild (builds {builds}, reads {reads})"
+    );
+}
+
+#[test]
+fn runtime_lane_builds_no_slot_summaries() {
+    // The IDE-only slot summary must never be built for a pure runtime (BUNDLER)
+    // compile: the VDOM/Vapor lane owns its own slot handling and pays nothing.
+    use crate::template::oxc::{
+        reset_slot_summary_counts, slot_summary_build_count, slot_summary_read_count,
+    };
+
+    reset_slot_summary_counts();
+    let _ = compile_with_target(SLOT_SFC_NESTED, CompileTarget::BUNDLER, false);
+    assert_eq!(
+        slot_summary_build_count(),
+        0,
+        "the runtime lane must not build IDE slot summaries"
+    );
+    assert_eq!(
+        slot_summary_read_count(),
+        0,
+        "the runtime lane must not read IDE slot summaries"
+    );
+}
+
 #[test]
 fn dual_script_tsx_does_not_leak_raw_template() {
     // Vuetify pattern: <script setup> + <script> (Options API) + <template>

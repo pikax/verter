@@ -27,6 +27,10 @@
 *.html      text eol=lf
 *.htm       text eol=lf
 *.svg       text eol=lf
+# Goldens capture emitted output byte-for-byte, including any trailing
+# whitespace the codegen produces; exempt them from whitespace linting so the
+# exact capture is preserved rather than corrupted to satisfy the lint.
+*.golden    text eol=lf whitespace=-trailing-space
 
 # Fixtures are part of the cache identity — strict LF
 tests/fixtures/**           text eol=lf

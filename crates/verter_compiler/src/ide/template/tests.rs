@@ -8077,3 +8077,73 @@ fn synthesized_core_not_found_falls_back_unmapped() {
          Tokens: {tokens:?}, built: {built:?}"
     );
 }
+
+#[test]
+fn slot_summary_memoized_warm_requery_builds_zero_extra() {
+    // The overlay builds a component's slot summary on the FIRST demand and
+    // serves every later demand for the same component warm from its memoized
+    // cell. A second query for an already-built component must trigger ZERO
+    // additional builds. Bypassing the cell (rebuilding per query) would make the
+    // second query bump the build count to 2 and fail here.
+    use crate::ast::types::{AstNodeKind, TagType};
+    use crate::template::oxc::{reset_slot_summary_counts, slot_summary_build_count};
+
+    let source = r#"<template>
+  <Card><Panel /></Card>
+</template>"#;
+    let alloc = Allocator::new();
+    let bytes = source.as_bytes();
+    let mut syntax = crate::parser::Syntax::new(false);
+    crate::tokenizer::byte::tokenize_sfc(bytes, |e| {
+        syntax.handle(
+            &e,
+            &crate::diagnostics::SyntaxPluginContext {
+                input: source,
+                bytes,
+                options: &crate::diagnostics::SyntaxPluginOptions::default(),
+                diagnostics: Vec::new(),
+            },
+        )
+    });
+    let template_ast = syntax.take_template_ast().expect("template ast");
+    let oxc_ast = crate::template::oxc::parse_template_expressions(
+        &template_ast,
+        source,
+        &alloc,
+        oxc_span::SourceType::tsx(),
+        true,
+    );
+
+    // First slot-checkable component in source order (`Card`).
+    let comp_id = template_ast
+        .nodes
+        .iter()
+        .enumerate()
+        .find_map(|(idx, node)| match &node.kind {
+            AstNodeKind::Element(el) if el.tag_type == TagType::Component => {
+                Some(crate::types::NodeId(idx))
+            }
+            _ => None,
+        })
+        .expect("a component node");
+
+    reset_slot_summary_counts();
+
+    // Cold demand: builds exactly one summary.
+    let first = oxc_ast.slot_summary(comp_id, &template_ast, source);
+    assert!(first.is_some(), "Card is a slot-checkable component");
+    assert_eq!(
+        slot_summary_build_count(),
+        1,
+        "the first demand for a component must build its summary once"
+    );
+
+    // Warm demand: same component, served from the memoized cell — ZERO rebuilds.
+    let second = oxc_ast.slot_summary(comp_id, &template_ast, source);
+    assert!(second.is_some(), "the warm summary must still resolve");
+    assert_eq!(
+        slot_summary_build_count(),
+        1,
+        "a warm re-query of an already-built component must build ZERO additional summaries"
+    );
+}
