@@ -318,6 +318,18 @@ pub fn parse_template_expressions<'alloc>(
     source_type: SourceType,
     ide_completion: bool,
 ) -> OxcParsedAst<'alloc> {
+    #[cfg(test)]
+    {
+        PARSE_TEMPLATE_EXPRESSIONS_CALLS.with(|c| c.set(c.get() + 1));
+        // Record the EXACT SourceType discriminant OXC parses with on this
+        // call, so tests can prove a JS SFC's TSX lane parses with `jsx()`
+        // (is_typescript = false) while its runtime lane uses `tsx()`.
+        PARSE_TEMPLATE_EXPRESSIONS_SOURCE_TYPES.with(|v| {
+            v.borrow_mut()
+                .push((source_type.is_typescript(), source_type.is_jsx()))
+        });
+    }
+
     let mut data: Vec<OxcNodeData<'alloc>> = Vec::with_capacity(ast.nodes.len());
 
     for node in &ast.nodes {
@@ -396,6 +408,43 @@ pub fn parse_template_expressions<'alloc>(
     }
 
     OxcParsedAst { data }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Counts invocations of [`parse_template_expressions`] on the current
+    /// thread. Lets tests assert that a combined TS-SFC compile parses its
+    /// template expressions exactly once (shared overlay) instead of twice.
+    static PARSE_TEMPLATE_EXPRESSIONS_CALLS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+
+    /// Records the `(is_typescript, is_jsx)` discriminant of the [`SourceType`]
+    /// each [`parse_template_expressions`] call parses with, in call order.
+    /// Lets tests prove a JS SFC's TSX lane parses with `jsx()` (not `tsx()`).
+    static PARSE_TEMPLATE_EXPRESSIONS_SOURCE_TYPES: std::cell::RefCell<Vec<(bool, bool)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Reset the per-thread `parse_template_expressions` invocation counter and the
+/// recorded source-type log.
+#[cfg(test)]
+pub(crate) fn reset_parse_template_expressions_calls() {
+    PARSE_TEMPLATE_EXPRESSIONS_CALLS.with(|c| c.set(0));
+    PARSE_TEMPLATE_EXPRESSIONS_SOURCE_TYPES.with(|v| v.borrow_mut().clear());
+}
+
+/// Read the per-thread `parse_template_expressions` invocation counter.
+#[cfg(test)]
+pub(crate) fn parse_template_expressions_call_count() -> usize {
+    PARSE_TEMPLATE_EXPRESSIONS_CALLS.with(|c| c.get())
+}
+
+/// Read the per-thread log of `(is_typescript, is_jsx)` source-type
+/// discriminants, one entry per [`parse_template_expressions`] call, in call
+/// order. `tsx()` records `(true, true)`; `jsx()` records `(false, true)`.
+#[cfg(test)]
+pub(crate) fn parse_template_expressions_source_types() -> Vec<(bool, bool)> {
+    PARSE_TEMPLATE_EXPRESSIONS_SOURCE_TYPES.with(|v| v.borrow().clone())
 }
 
 #[cfg(test)]

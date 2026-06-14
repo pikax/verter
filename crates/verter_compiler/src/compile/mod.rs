@@ -17,6 +17,7 @@
 mod helpers;
 pub mod macro_dto;
 pub mod template_data;
+mod template_expr_overlay;
 pub mod types;
 
 pub use helpers::*;
@@ -47,7 +48,6 @@ use crate::script::{generate_script, ScriptCodeGenOptions};
 use crate::style::generate_style;
 use crate::template::code_gen::vdom::element::to_pascal_case;
 use crate::template::code_gen::{generate_template, CodeGenMode, TemplateCodeGenOptions};
-use crate::template::oxc::parse_template_expressions;
 use crate::template::oxc::types::OxcParsedAst;
 use crate::tokenizer::byte::{tokenize_sfc, tokenize_sfc_with_delimiters};
 use crate::tsc;
@@ -203,6 +203,21 @@ fn validate_imported_macro_type(
         }
         _ => {}
     }
+}
+
+/// Byte span `[start, end)` of the `<template>` region in the SFC source.
+///
+/// Used as part of the shared template-expression overlay key so the parsed
+/// facts are identified by the region they cover.
+fn template_region_span(template_ast: &crate::ast::types::TemplateAst) -> (u32, u32) {
+    let root = &template_ast.root;
+    let end = root.tag_close.as_ref().map(|tc| tc.end).unwrap_or_else(|| {
+        root.content
+            .as_ref()
+            .map(|c| c.end)
+            .unwrap_or(root.tag_open.end)
+    });
+    (root.tag_open.start, end)
 }
 
 /// Collect OXC expression parse errors from template expressions and emit them
@@ -628,8 +643,25 @@ fn compile_inner(
     // ── 4. Script codegen ─────────────────────────────────────────
     // Script codegen is skipped when the target only needs TSX or TSC,
     // since those paths have their own independent codegen.
+    //
+    // The template expressions parse into a per-compile overlay store, shared
+    // read-only by every lane that requests identical parse facts. The runtime,
+    // template-data, and script-import-elision consumers all reuse the single
+    // `ide_completion = false` `tsx()` entry; the IDE/TSX lane keys
+    // `ide_completion = true` (its scoped-completion binding facts differ), so
+    // it never reuses the runtime overlay and stays a separate output owner. The
+    // key holds the full `SourceType` and `ide_completion` flag, so a `jsx()`
+    // lane or a `true` completion lane can never reuse a `tsx()`/`false` overlay.
+    // Built in the top compile allocator so the facts outlive every lane that
+    // borrows them.
     let source_type = SourceType::tsx();
-    let mut early_oxc_ast: Option<OxcParsedAst<'_>> = None;
+    // Exact parse-affecting options shared across every lane in this compile.
+    // Held by value (not hashed) so overlay reuse is an exact-content match.
+    let parse_options = template_expr_overlay::ParseOptionsKey::new(
+        options.delimiters.clone(),
+        options.custom_elements.clone(),
+    );
+    let mut expr_store = template_expr_overlay::TemplateExprStore::new();
     let mut script_bindings: rustc_hash::FxHashMap<
         &str,
         crate::template::code_gen::binding::BindingType,
@@ -644,19 +676,19 @@ fn compile_inner(
         // Parse template expressions early so we can collect the set of identifiers
         // actually used in the template (for import elision in script codegen).
         // This avoids the text-based heuristic and correctly handles TS type positions.
-        early_oxc_ast = if !has_parse_errors {
-            parsed.template_ast().map(|template_ast_ref| {
-                // Runtime (VDOM/Vapor) codegen — completion-prefix matching off.
-                parse_template_expressions(template_ast_ref, input, allocator, source_type, false)
-            })
-        } else {
-            None
-        };
-
         let template_used_vars: Option<FxHashSet<String>> =
-            if let (Some(ref oxc_ast), Some(template_ast_ref)) =
-                (&early_oxc_ast, parsed.template_ast())
-            {
+            if let (false, Some(template_ast_ref)) = (has_parse_errors, parsed.template_ast()) {
+                // Runtime / script-import-elision lane — completion-prefix
+                // matching off so partial identifiers stay real references.
+                let oxc_ast = expr_store.get_or_build(
+                    template_ast_ref,
+                    input,
+                    allocator,
+                    template_region_span(template_ast_ref),
+                    &parse_options,
+                    source_type,
+                    false,
+                );
                 let mut vars = FxHashSet::default();
 
                 // 1. Collect identifiers from all expression bindings
@@ -912,166 +944,172 @@ fn compile_inner(
     let needs_tpl_codegen = options.target.needs_template_codegen();
     let needs_tpl_data = options.target.needs_template_data();
 
-    let (template_block, extracted_template_data) = if has_parse_errors
-        || (!needs_tpl_codegen && !needs_tpl_data)
-    {
-        // Template AST may be invalid after parse errors, or target
-        // doesn't need VDOM/template data — skip codegen.
-        (None, None)
-    } else if let Some(template_ast) = template_ast_opt {
-        // Skip codegen for non-HTML template languages (e.g. Pug).
-        // The AST positions are from the raw source and don't represent HTML.
-        let is_non_html_lang = template_ast.root.lang.as_ref().is_some_and(|span| {
-            let lang_val = &input[span.start as usize..span.end as usize];
-            !lang_val.is_empty() && lang_val != "html"
-        });
-        if is_non_html_lang {
+    let (template_block, extracted_template_data) =
+        if has_parse_errors || (!needs_tpl_codegen && !needs_tpl_data) {
+            // Template AST may be invalid after parse errors, or target
+            // doesn't need VDOM/template data — skip codegen.
             (None, None)
-        } else {
-            let tpl_start = Instant::now();
-
-            // Reuse early-parsed OxcParsedAst if available, otherwise parse now
-            let oxc_ast = match early_oxc_ast {
-                Some(ast) => ast,
-                None => {
-                    parse_template_expressions(template_ast, input, allocator, source_type, false)
-                }
-            };
-
-            // Collect OXC expression parse errors as XInvalidExpression diagnostics
-            collect_expression_errors(&oxc_ast, &mut all_diagnostics);
-
-            // Extract raw template data for cross-file analysis (before bindings are moved)
-            let raw_template_data = if needs_tpl_data {
-                Some(template_data::extract_raw_template_data(
-                    template_ast,
-                    &oxc_ast,
-                    input,
-                    &script_bindings,
-                ))
+        } else if let Some(template_ast) = template_ast_opt {
+            // Skip codegen for non-HTML template languages (e.g. Pug).
+            // The AST positions are from the raw source and don't represent HTML.
+            let is_non_html_lang = template_ast.root.lang.as_ref().is_some_and(|span| {
+                let lang_val = &input[span.start as usize..span.end as usize];
+                !lang_val.is_empty() && lang_val != "html"
+            });
+            if is_non_html_lang {
+                (None, None)
             } else {
-                None
-            };
+                let tpl_start = Instant::now();
 
-            let template_block_inner = if needs_tpl_codegen {
-                let tpl_alloc = Allocator::new();
-                // Use the full SFC input so AST positions (which are absolute) align correctly.
-                // The CT is initialized with the full SFC so AST positions
-                // align. Remove the prefix (before <template>) and suffix
-                // (after </template>) within the CT so build_string() produces
-                // only the template region with correct sourcemap offsets.
-                let mut tpl_ct = CodeTransform::new(input, &tpl_alloc);
-                let tpl_tag_start = template_ast.root.tag_open.start as usize;
-                let tpl_tag_end = template_ast
-                    .root
-                    .tag_close
-                    .as_ref()
-                    .map(|tc| tc.end as usize)
-                    .unwrap_or(
-                        template_ast
-                            .root
-                            .content
-                            .as_ref()
-                            .map(|c| c.end as usize)
-                            .unwrap_or(template_ast.root.tag_open.end as usize),
-                    );
-                if tpl_tag_start > 0 {
-                    tpl_ct.remove(0, tpl_tag_start as u32);
-                }
-                if tpl_tag_end < input.len() {
-                    tpl_ct.remove(tpl_tag_end as u32, input.len() as u32);
-                }
-
-                let tpl_options = TemplateCodeGenOptions {
-                    mode: if verter_options.ssr {
-                        CodeGenMode::Ssr
-                    } else if use_vapor {
-                        CodeGenMode::Vapor
-                    } else {
-                        CodeGenMode::Vdom
-                    },
-                    is_inline: false,
-                    is_production: options.is_production,
-                    comments: options.comments.unwrap_or(!options.is_production),
-                    force_js: verter_options.force_js,
-                    self_name: to_pascal_case(&component_name),
-                    const_props: verter_options.prop_constness_overrides.clone(),
-                    has_scoped_style,
-                    hoist_static: options.resolve_hoist_static(),
-                    scope_id: if has_scoped_style {
-                        scope_id_full.clone()
-                    } else {
-                        String::new()
-                    },
-                };
-
-                let tpl_imports = generate_template(
+                // Reuse the runtime overlay — the single `ide_completion = false`
+                // `tsx()` entry the early script-elision lane built (or build it
+                // cold here when this is the first runtime consumer). Runtime
+                // (VDOM/Vapor) codegen keeps completion-prefix matching off so
+                // partial identifiers stay real references.
+                let oxc_ast = expr_store.get_or_build(
                     template_ast,
-                    &oxc_ast,
                     input,
-                    &mut tpl_ct,
-                    &tpl_alloc,
-                    script_bindings,
-                    &tpl_options,
+                    allocator,
+                    template_region_span(template_ast),
+                    &parse_options,
+                    source_type,
+                    false,
                 );
 
-                // Strip TypeScript syntax from template expressions when force_js is set.
-                if verter_options.force_js {
-                    for expr in oxc_ast.iter_expressions() {
-                        if let Some(ref expression) = expr.expression {
-                            crate::strip_types::typescript::strip_typescript_from_expression(
-                                expression,
-                                &mut tpl_ct,
-                                expr.offset,
-                                &input[expr.offset as usize..],
-                            );
+                // Collect OXC expression parse errors as XInvalidExpression diagnostics
+                collect_expression_errors(oxc_ast, &mut all_diagnostics);
+
+                // Extract raw template data for cross-file analysis (before bindings are moved)
+                let raw_template_data = if needs_tpl_data {
+                    Some(template_data::extract_raw_template_data(
+                        template_ast,
+                        oxc_ast,
+                        input,
+                        &script_bindings,
+                    ))
+                } else {
+                    None
+                };
+
+                let template_block_inner = if needs_tpl_codegen {
+                    let tpl_alloc = Allocator::new();
+                    // Use the full SFC input so AST positions (which are absolute) align correctly.
+                    // The CT is initialized with the full SFC so AST positions
+                    // align. Remove the prefix (before <template>) and suffix
+                    // (after </template>) within the CT so build_string() produces
+                    // only the template region with correct sourcemap offsets.
+                    let mut tpl_ct = CodeTransform::new(input, &tpl_alloc);
+                    let tpl_tag_start = template_ast.root.tag_open.start as usize;
+                    let tpl_tag_end = template_ast
+                        .root
+                        .tag_close
+                        .as_ref()
+                        .map(|tc| tc.end as usize)
+                        .unwrap_or(
+                            template_ast
+                                .root
+                                .content
+                                .as_ref()
+                                .map(|c| c.end as usize)
+                                .unwrap_or(template_ast.root.tag_open.end as usize),
+                        );
+                    if tpl_tag_start > 0 {
+                        tpl_ct.remove(0, tpl_tag_start as u32);
+                    }
+                    if tpl_tag_end < input.len() {
+                        tpl_ct.remove(tpl_tag_end as u32, input.len() as u32);
+                    }
+
+                    let tpl_options = TemplateCodeGenOptions {
+                        mode: if verter_options.ssr {
+                            CodeGenMode::Ssr
+                        } else if use_vapor {
+                            CodeGenMode::Vapor
+                        } else {
+                            CodeGenMode::Vdom
+                        },
+                        is_inline: false,
+                        is_production: options.is_production,
+                        comments: options.comments.unwrap_or(!options.is_production),
+                        force_js: verter_options.force_js,
+                        self_name: to_pascal_case(&component_name),
+                        const_props: verter_options.prop_constness_overrides.clone(),
+                        has_scoped_style,
+                        hoist_static: options.resolve_hoist_static(),
+                        scope_id: if has_scoped_style {
+                            scope_id_full.clone()
+                        } else {
+                            String::new()
+                        },
+                    };
+
+                    let tpl_imports = generate_template(
+                        template_ast,
+                        oxc_ast,
+                        input,
+                        &mut tpl_ct,
+                        &tpl_alloc,
+                        script_bindings,
+                        &tpl_options,
+                    );
+
+                    // Strip TypeScript syntax from template expressions when force_js is set.
+                    if verter_options.force_js {
+                        for expr in oxc_ast.iter_expressions() {
+                            if let Some(ref expression) = expr.expression {
+                                crate::strip_types::typescript::strip_typescript_from_expression(
+                                    expression,
+                                    &mut tpl_ct,
+                                    expr.offset,
+                                    &input[expr.offset as usize..],
+                                );
+                            }
                         }
                     }
-                }
 
-                // Prefix and suffix were removed via CT operations above,
-                // so build_string() produces only the template region.
-                let tpl_code = tpl_ct.build_string();
-                let tpl_sourcemap_start = Instant::now();
-                let tpl_source_map = if verter_options.source_map {
-                    let sm_opts = SourceMapOptions {
-                        source: options.filename.as_deref(),
-                        file: options.filename.as_deref(),
-                        include_content: true,
+                    // Prefix and suffix were removed via CT operations above,
+                    // so build_string() produces only the template region.
+                    let tpl_code = tpl_ct.build_string();
+                    let tpl_sourcemap_start = Instant::now();
+                    let tpl_source_map = if verter_options.source_map {
+                        let sm_opts = SourceMapOptions {
+                            source: options.filename.as_deref(),
+                            file: options.filename.as_deref(),
+                            include_content: true,
+                        };
+                        tpl_ct.generate_map_json(sm_opts)
+                    } else {
+                        String::new()
                     };
-                    tpl_ct.generate_map_json(sm_opts)
-                } else {
-                    String::new()
-                };
-                let tpl_sourcemap_ms = tpl_sourcemap_start.elapsed().as_secs_f64() * 1000.0;
-                let tpl_duration_ms = tpl_start.elapsed().as_secs_f64() * 1000.0;
-                if let Some(observer) = verter_audit::current_observer() {
-                    let codegen_only_ms = (tpl_duration_ms - tpl_sourcemap_ms).max(0.0);
-                    observer.record_phase_timing("compile.codegen", codegen_only_ms);
-                    if verter_options.source_map {
-                        observer.record_phase_timing("compile.sourcemap", tpl_sourcemap_ms);
+                    let tpl_sourcemap_ms = tpl_sourcemap_start.elapsed().as_secs_f64() * 1000.0;
+                    let tpl_duration_ms = tpl_start.elapsed().as_secs_f64() * 1000.0;
+                    if let Some(observer) = verter_audit::current_observer() {
+                        let codegen_only_ms = (tpl_duration_ms - tpl_sourcemap_ms).max(0.0);
+                        observer.record_phase_timing("compile.codegen", codegen_only_ms);
+                        if verter_options.source_map {
+                            observer.record_phase_timing("compile.sourcemap", tpl_sourcemap_ms);
+                        }
                     }
-                }
 
-                let tpl_attrs = extract_attrs(&template_ast.root.attributes, input);
+                    let tpl_attrs = extract_attrs(&template_ast.root.attributes, input);
 
-                Some(VerterTemplateBlock {
-                    code: tpl_code,
-                    source_map: tpl_source_map,
-                    imports: tpl_imports.vue,
-                    ssr_imports: tpl_imports.ssr,
-                    duration_ms: tpl_duration_ms,
-                    attrs: tpl_attrs,
-                })
-            } else {
-                None
-            };
+                    Some(VerterTemplateBlock {
+                        code: tpl_code,
+                        source_map: tpl_source_map,
+                        imports: tpl_imports.vue,
+                        ssr_imports: tpl_imports.ssr,
+                        duration_ms: tpl_duration_ms,
+                        attrs: tpl_attrs,
+                    })
+                } else {
+                    None
+                };
 
-            (template_block_inner, raw_template_data)
-        } // close `else` for is_non_html_lang
-    } else {
-        (None, None)
-    };
+                (template_block_inner, raw_template_data)
+            } // close `else` for is_non_html_lang
+        } else {
+            (None, None)
+        };
 
     // ── 6. TSX codegen (optional) ────────────────────────────────
     // Produces a single combined `.tsx` or `.jsx` file for LSP type checking.
@@ -1201,6 +1239,13 @@ fn compile_inner(
                     !v.is_empty() && v != "html"
                 });
                 if !is_non_html {
+                    // The IDE/TSX lane keys `ide_completion = true`, so even a TS
+                    // SFC — whose runtime and TSX lanes both use `tsx()` — parses
+                    // a distinct overlay entry from the runtime lane's `false`
+                    // entry, because their stored binding facts differ for scoped
+                    // completion. A JS SFC additionally parses with `jsx()`,
+                    // another distinct key. Built in the top compile allocator so
+                    // the facts outlive the lane that borrows them.
                     let tsx_source_type = if is_jsx {
                         SourceType::jsx()
                     } else {
@@ -1208,10 +1253,12 @@ fn compile_inner(
                     };
                     // IDE/TSX codegen — enable completion-prefix matching so partial
                     // identifiers inside v-for / v-slot scopes stay bare for completion.
-                    let tsx_oxc = parse_template_expressions(
+                    let tsx_oxc = expr_store.get_or_build(
                         template_ast,
                         input,
-                        &tsx_alloc,
+                        allocator,
+                        template_region_span(template_ast),
+                        &parse_options,
                         tsx_source_type,
                         true,
                     );
@@ -1225,7 +1272,7 @@ fn compile_inner(
                     };
                     ide::template::generate_ide_template(
                         template_ast,
-                        &tsx_oxc,
+                        tsx_oxc,
                         input,
                         &mut tsx_out,
                         &tsx_alloc,

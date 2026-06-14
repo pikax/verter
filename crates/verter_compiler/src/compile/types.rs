@@ -220,7 +220,7 @@ pub enum CompileDiagnosticSeverity {
 }
 
 /// A structured diagnostic emitted during compilation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompileDiagnostic {
     /// Severity level.
     pub severity: CompileDiagnosticSeverity,
