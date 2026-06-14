@@ -16,14 +16,6 @@ pub enum UnsupportedKind {
     DeprecatedSpecialElement,
     /// A `<svelte:fragment>` legacy slot construct.
     LegacyFragment,
-    /// A function-binding `bind:x={get, set}` (out-of-scope v1).
-    FunctionBinding,
-    /// An out-of-scope `bind:*` family member beyond the supported set
-    /// (`bind:value`, `bind:checked`, and component `bind:prop`). Covers
-    /// `bind:this`, `bind:group`, `bind:files`, and the contenteditable, media,
-    /// dimension, and readonly bindings. The diagnostic NAMES the binding (the
-    /// matrix requires a "typed-unsupported diagnostic naming the binding").
-    UnsupportedBinding,
     /// An unrecognised construct parsed without crash.
     Unknown,
 }
@@ -36,8 +28,6 @@ impl UnsupportedKind {
             Self::AwaitExperimental => "svelte-await-experimental",
             Self::DeprecatedSpecialElement => "svelte-deprecated-special-element",
             Self::LegacyFragment => "svelte-legacy-fragment",
-            Self::FunctionBinding => "svelte-function-binding",
-            Self::UnsupportedBinding => "svelte-unsupported-binding",
             Self::Unknown => "svelte-unsupported-construct",
         }
     }
@@ -53,14 +43,6 @@ impl UnsupportedKind {
                 "`<svelte:component>` / `<svelte:self>` are deprecated in runes mode and out of scope"
             }
             Self::LegacyFragment => "`<svelte:fragment>` is a legacy slot construct, out of scope",
-            Self::FunctionBinding => {
-                "function bindings `bind:x={get, set}` are out of scope (v1)"
-            }
-            Self::UnsupportedBinding => {
-                "this `bind:` binding is out of scope (v1); only `bind:value`, \
-                 `bind:checked`, and component `bind:prop` for `$bindable` props \
-                 are supported"
-            }
             Self::Unknown => "unsupported Svelte construct",
         }
     }

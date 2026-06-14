@@ -171,48 +171,193 @@ fn bind_value_projects_to_a_checkable_attribute() {
 }
 
 #[test]
-fn bind_this_is_out_of_scope_with_a_typed_diagnostic_and_void_check() {
-    // P1-2: `bind:this` is out-of-scope v1. It must be stripped from the JSX,
-    // the bound expression void-checked, and the typed-unsupported diagnostic
-    // pushed (naming the binding).
+fn bind_this_on_an_intrinsic_projects_a_host_instance_assignment_check() {
+    // F4: `bind:this={el}` on an intrinsic → a host-instance INVARIANT check via
+    // `(el = (null! as Host)), __verter_bind_this_assignable<Host, typeof el>()`.
+    // NO diagnostic, NO residue, NO bare `this={…}` attribute.
     let source = "<input bind:this={inputEl} />";
     let parsed = parse_svelte(source);
     let projection = project_svelte_ide(source, &parsed, Some("C.svelte"), false);
     assert!(
-        projection
-            .diagnostics
-            .iter()
-            .any(|d| d.code == "svelte-unsupported-binding"),
-        "unsupported-binding diagnostic present: {:?}",
+        projection.diagnostics.is_empty(),
+        "bind:this is now fully supported — no diagnostics: {:?}",
         projection.diagnostics
     );
     assert!(
-        !projection.code.contains("bind:this"),
+        !render_body(&projection.code).contains("bind:this"),
         "no bind:this residue: {}",
         projection.code
     );
     assert!(
-        projection.code.contains("__verter_void(inputEl)"),
-        "bound expression void-checked: {}",
+        !projection.code.contains("this={inputEl}"),
+        "must NOT leak a bare this={{…}} attribute: {}",
+        projection.code
+    );
+    assert!(
+        projection.code.contains(
+            "(inputEl = (null! as __VerterHostEl<\"input\">)), \
+             __verter_bind_this_assignable<__VerterHostEl<\"input\">, typeof inputEl>()"
+        ),
+        "host-instance invariant check present: {}",
         projection.code
     );
 }
 
 #[test]
-fn bind_group_is_out_of_scope_with_a_typed_diagnostic() {
+fn bind_this_on_an_element_access_lvalue_uses_the_read_bearing_invariant() {
+    // F4: a `bind:this={refs[i]}` element-access lvalue is NOT `typeof`-safe
+    // (`typeof refs[i]` parses `i` as a type), so it routes through the
+    // read-bearing invariant `refs[i] = __verter_bind_rw<Host>(refs[i])` — NOT
+    // the `typeof`-based assert.
+    let code = project("<input bind:this={refs[i]} />");
+    assert!(
+        !render_body(&code).contains("bind:this"),
+        "no residue: {code}"
+    );
+    assert!(
+        code.contains("(refs[i] = __verter_bind_rw<__VerterHostEl<\"input\">>(refs[i]))"),
+        "element-access bind:this uses the read-bearing invariant: {code}"
+    );
+    assert!(
+        !code.contains("typeof refs[i]"),
+        "must NOT emit an invalid `typeof refs[i]` type query: {code}"
+    );
+}
+
+#[test]
+fn bind_group_on_a_radio_input_projects_the_radio_checker() {
+    // F4: `bind:group` (default radio) → the radio array-shape checker, NO
+    // residue, NO `__verter_void`.
     let source = "<input bind:group={selected} />";
     let parsed = parse_svelte(source);
     let projection = project_svelte_ide(source, &parsed, Some("C.svelte"), false);
     assert!(
-        projection
+        !projection
             .diagnostics
             .iter()
-            .any(|d| d.code == "svelte-unsupported-binding"),
-        "unsupported-binding diagnostic: {:?}",
+            .any(|d| d.code.starts_with("svelte-unsupported")),
+        "no unsupported diagnostic for bind:group: {:?}",
         projection.diagnostics
     );
-    assert!(!projection.code.contains("bind:group"));
-    assert!(projection.code.contains("__verter_void(selected)"));
+    assert!(!render_body(&projection.code).contains("bind:group"));
+    assert!(
+        projection
+            .code
+            .contains("(selected = __verter_bind_group_radio(selected))"),
+        "radio group checker present: {}",
+        projection.code
+    );
+}
+
+#[test]
+fn bind_group_on_a_checkbox_input_projects_the_checkbox_checker() {
+    // F4: `bind:group` on a `type="checkbox"` → the checkbox array-shape checker.
+    let code = project("<input type=\"checkbox\" bind:group={selected} />");
+    assert!(
+        !render_body(&code).contains("bind:group"),
+        "no residue: {code}"
+    );
+    assert!(
+        code.contains("(selected = __verter_bind_group_checkbox(selected))"),
+        "checkbox group checker present: {code}"
+    );
+}
+
+#[test]
+fn bind_group_on_a_non_input_tag_falls_through_to_an_attribute() {
+    // F4: `bind:group` is special ONLY on an `<input>` (its contract tag). On a
+    // `<div>` it is an unknown binding — it must NOT take the group checker; it
+    // falls through to the plain attribute path (`group={x}`), which the
+    // intrinsic table then rejects naturally (no synthetic group checker).
+    let code = project("<div bind:group={x}></div>");
+    assert!(
+        !render_body(&code).contains("__verter_bind_group"),
+        "non-input bind:group must NOT use the group checker: {code}"
+    );
+    assert!(
+        code.contains("group={x}"),
+        "falls through to an attribute: {code}"
+    );
+}
+
+#[test]
+fn bind_this_with_a_comma_value_does_not_leak_the_host_placeholder() {
+    // A stray `bind:this={a, b}` is dispatched to the `this` handler FIRST (it is
+    // never a function binding), so the `{HOST}` placeholder never leaks through
+    // the generic F5 path as a literal type argument.
+    let code = project("<input bind:this={a, b} />");
+    assert!(!code.contains("{HOST}"), "no HOST placeholder leak: {code}");
+    assert!(
+        !render_body(&code).contains("__verter_bind_fn"),
+        "bind:this must not route through the F5 checker: {code}"
+    );
+}
+
+#[test]
+fn bind_current_time_projects_a_read_write_value_check() {
+    // F4 (writable media): `bind:currentTime` → an invariant value-type check.
+    let code = project("<video bind:currentTime={t}></video>");
+    assert!(!code.contains("bind:currentTime"), "no residue: {code}");
+    assert!(
+        code.contains("(t = __verter_bind_rw<HTMLMediaElement[\"currentTime\"]>(t))"),
+        "read-write media check present: {code}"
+    );
+}
+
+#[test]
+fn bind_duration_projects_a_read_direction_check() {
+    // F4 (readonly media): `bind:duration` → a read-direction assignment INTO the
+    // local (`__verter_bind_read<…>()`) — DOM → local, the write-rejection path.
+    let code = project("<video bind:duration={d}></video>");
+    assert!(!code.contains("bind:duration"), "no residue: {code}");
+    assert!(
+        code.contains("(d = __verter_bind_read<HTMLMediaElement[\"duration\"]>())"),
+        "read-direction media check present: {code}"
+    );
+}
+
+#[test]
+fn bind_client_width_projects_a_read_direction_number_check() {
+    // F4 (readonly dimension): `bind:clientWidth` → a read-direction `number`.
+    let code = project("<div bind:clientWidth={w}></div>");
+    assert!(!code.contains("bind:clientWidth"), "no residue: {code}");
+    assert!(
+        code.contains("(w = __verter_bind_read<number>())"),
+        "read-direction dimension check present: {code}"
+    );
+}
+
+#[test]
+fn bind_open_on_details_projects_a_boolean_read_write_check() {
+    // F4 (`<details bind:open>`): a boolean read-write check.
+    let code = project("<details bind:open={isOpen}></details>");
+    assert!(!code.contains("bind:open"), "no residue: {code}");
+    assert!(
+        code.contains("(isOpen = __verter_bind_rw<boolean>(isOpen))"),
+        "details open check present: {code}"
+    );
+}
+
+#[test]
+fn bind_inner_html_projects_a_string_read_write_check() {
+    // F4 (contenteditable): `bind:innerHTML` → a string read-write check.
+    let code = project("<div contenteditable bind:innerHTML={html}></div>");
+    assert!(!code.contains("bind:innerHTML"), "no residue: {code}");
+    assert!(
+        code.contains("(html = __verter_bind_rw<string>(html))"),
+        "contenteditable check present: {code}"
+    );
+}
+
+#[test]
+fn bind_files_projects_a_filelist_read_write_check() {
+    // F4 (`bind:files`): a `FileList | null` read-write check.
+    let code = project("<input type=\"file\" bind:files={fs} />");
+    assert!(!code.contains("bind:files"), "no residue: {code}");
+    assert!(
+        code.contains("(fs = __verter_bind_rw<FileList | null>(fs))"),
+        "files check present: {code}"
+    );
 }
 
 #[test]
@@ -223,11 +368,8 @@ fn bind_checked_stays_supported_no_diagnostic() {
     let parsed = parse_svelte(source);
     let projection = project_svelte_ide(source, &parsed, Some("C.svelte"), false);
     assert!(
-        !projection
-            .diagnostics
-            .iter()
-            .any(|d| d.code == "svelte-unsupported-binding"),
-        "no unsupported diagnostic for bind:checked: {:?}",
+        projection.diagnostics.is_empty(),
+        "no diagnostic for the supported bind:checked: {:?}",
         projection.diagnostics
     );
     assert!(
@@ -242,23 +384,23 @@ fn bind_checked_stays_supported_no_diagnostic() {
 }
 
 #[test]
-fn bind_this_on_a_component_is_out_of_scope_with_a_diagnostic() {
-    // `bind:this` is out-of-scope v1 in EVERY context — on a COMPONENT it binds
-    // the instance, NOT a $props-checkable surface. It must NOT take the
-    // component bind:prop supported path.
+fn bind_this_on_a_component_projects_an_instancetype_assignment_check() {
+    // F4: `bind:this` on a COMPONENT binds the instance — checked against
+    // `InstanceType<typeof MyComp>` (NOT the `$props` attribute path). NO bare
+    // `this={…}` attribute, NO residue, NO diagnostic.
     let source = "<MyComp bind:this={ref} />";
     let parsed = parse_svelte(source);
     let projection = project_svelte_ide(source, &parsed, Some("C.svelte"), false);
     assert!(
-        projection
+        !projection
             .diagnostics
             .iter()
-            .any(|d| d.code == "svelte-unsupported-binding"),
-        "bind:this on a component must be unsupported: {:?}",
+            .any(|d| d.code.starts_with("svelte-unsupported")),
+        "no unsupported diagnostic for component bind:this: {:?}",
         projection.diagnostics
     );
     assert!(
-        !projection.code.contains("bind:this"),
+        !render_body(&projection.code).contains("bind:this"),
         "no bind:this residue"
     );
     assert!(
@@ -267,8 +409,12 @@ fn bind_this_on_a_component_is_out_of_scope_with_a_diagnostic() {
         projection.code
     );
     assert!(
-        projection.code.contains("__verter_void(ref)"),
-        "void-checked"
+        projection.code.contains(
+            "(ref = (null! as InstanceType<typeof MyComp>)), \
+             __verter_bind_this_assignable<InstanceType<typeof MyComp>, typeof ref>()"
+        ),
+        "component instance invariant check present: {}",
+        projection.code
     );
 }
 
@@ -293,11 +439,8 @@ fn component_bind_prop_stays_supported_no_diagnostic() {
     let parsed = parse_svelte(source);
     let projection = project_svelte_ide(source, &parsed, Some("C.svelte"), false);
     assert!(
-        !projection
-            .diagnostics
-            .iter()
-            .any(|d| d.code == "svelte-unsupported-binding"),
-        "no unsupported diagnostic for component bind:prop: {:?}",
+        projection.diagnostics.is_empty(),
+        "no diagnostic for the supported component bind:prop: {:?}",
         projection.diagnostics
     );
     assert!(!projection.code.contains("bind:custom"), "no bind: residue");
@@ -555,20 +698,77 @@ fn await_block_out_of_scope_expression_emits_diagnostic_but_projects() {
 }
 
 #[test]
-fn function_binding_is_out_of_scope_with_a_typed_diagnostic() {
-    let source = "<input bind:value={get, set} />";
+fn function_binding_on_an_element_projects_the_fn_checker_with_the_table_type() {
+    // F5: `bind:value={get, set}` on an `<input>` → the get/set checker keyed by
+    // the element's bind-target type. `value`/`checked` are NOT in the wide-family
+    // table, so this element function-binding leaves `V` inferred (the checker
+    // enforces get/set mutual consistency alone). NO residue, NO diagnostic.
+    let source = "<input bind:files={getFiles, setFiles} />";
     let parsed = parse_svelte(source);
     let projection = project_svelte_ide(source, &parsed, Some("C.svelte"), false);
     assert!(
-        projection
-            .diagnostics
-            .iter()
-            .any(|d| d.code == "svelte-function-binding"),
-        "function-binding diagnostic present: {:?}",
+        projection.diagnostics.is_empty(),
+        "function bindings are now supported — no diagnostic: {:?}",
         projection.diagnostics
     );
-    // The binding is stripped from the JSX position (out of scope).
-    assert!(!projection.code.contains("bind:value"));
+    assert!(!projection.code.contains("bind:files"), "no residue");
+    // `bind:files` IS in the table → its value type pins the checker.
+    assert!(
+        projection
+            .code
+            .contains("__verter_bind_fn<FileList | null>(getFiles, setFiles)"),
+        "element function-binding checker present with the table type: {}",
+        projection.code
+    );
+}
+
+#[test]
+fn function_binding_on_a_component_projects_the_instancetype_props_target() {
+    // F5: a component function binding derives `V` in TS from
+    // `InstanceType<typeof Child>["$props"]["prop"]` — NO Rust resolver call.
+    let source = "<Child bind:size={getSize, setSize} />";
+    let parsed = parse_svelte(source);
+    let projection = project_svelte_ide(source, &parsed, Some("C.svelte"), false);
+    assert!(
+        projection.diagnostics.is_empty(),
+        "component function bindings are supported — no diagnostic: {:?}",
+        projection.diagnostics
+    );
+    assert!(!projection.code.contains("bind:size"), "no residue");
+    assert!(
+        projection.code.contains(
+            "__verter_bind_fn<InstanceType<typeof Child>[\"$props\"][\"size\"]>(getSize, setSize)"
+        ),
+        "component function-binding props-target checker present: {}",
+        projection.code
+    );
+}
+
+#[test]
+fn function_binding_write_only_projects_the_null_get_checker() {
+    // F5 (write-only `{null, set}`): the `null` get + the `set` are passed
+    // verbatim — `__verter_bind_fn` accepts `null` for `get`.
+    let code = project("<input bind:files={null, setFiles} />");
+    assert!(!code.contains("bind:files"), "no residue: {code}");
+    assert!(
+        code.contains("__verter_bind_fn<FileList | null>(null, setFiles)"),
+        "write-only function-binding checker present: {code}"
+    );
+}
+
+#[test]
+fn function_binding_on_value_derives_the_target_type_from_the_intrinsic_table() {
+    // F5: `bind:value={get,set}` (not in the wide-family table) derives `V` from
+    // `SvelteHTMLElements["input"]["value"]` so a DOM-wrong get/set pair fails —
+    // typed entirely in the projected TSX (no Rust resolver), NOT left inferred.
+    let code = project("<input bind:value={getV, setV} />");
+    assert!(!code.contains("bind:value"), "no residue: {code}");
+    assert!(
+        code.contains(
+            "__verter_bind_fn<import(\"svelte/elements\").SvelteHTMLElements[\"input\"][\"value\"]>(getV, setV)"
+        ),
+        "intrinsic-table-derived function-binding target present: {code}"
+    );
 }
 
 #[test]
@@ -845,14 +1045,12 @@ fn dotted_component_bind_prop_stays_supported() {
     let parsed = parse_svelte(source);
     let projection = project_svelte_ide(source, &parsed, Some("C.svelte"), false);
     assert!(
-        !projection
-            .diagnostics
-            .iter()
-            .any(|d| d.code == "svelte-unsupported-binding"),
+        projection.diagnostics.is_empty(),
         "dotted component bind:prop must be supported: {:?}",
         projection.diagnostics
     );
     assert!(!projection.code.contains("bind:custom"), "no bind: residue");
+    assert!(projection.code.contains("custom={v}"), "prop pair present");
 }
 
 #[test]

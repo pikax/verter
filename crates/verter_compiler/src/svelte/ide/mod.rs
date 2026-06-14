@@ -30,6 +30,8 @@
 //! silent drop).
 
 mod await_scan;
+mod bind_contract;
+mod bind_contract_data;
 mod emit;
 pub mod prelude;
 mod projector;

@@ -3838,6 +3838,7 @@ dependencies = [
  "serde_repr",
  "sha2",
  "smallvec",
+ "tempfile",
  "verter_audit",
  "verter_language",
  "verter_parser",

@@ -17,6 +17,7 @@ use verter_span::Span;
 use crate::code_transform::{CodeTransform, SourceMapOptions};
 
 use super::await_scan::scan_await_positions;
+use super::bind_contract::{lookup_bind_contract, BindContract, BindDirection};
 use super::emit::{is_css_custom_property, UnsupportedKind};
 use super::prelude::render_prelude;
 use crate::svelte::parser::{
@@ -24,6 +25,10 @@ use crate::svelte::parser::{
     SvelteBlockKind, SvelteClauseKind, SvelteDirectiveKind, SvelteElement, SvelteElementKind,
     SvelteNode, SvelteScript, SvelteSpecialKind, SvelteTag, SvelteTagKind,
 };
+
+/// The `bind:` directive projection (F4/F5) — a continuation of the
+/// `TemplateProjector` impl, extracted for file size.
+mod bind;
 
 /// A typed-unsupported diagnostic the projector emitted for an OUT-OF-SCOPE
 /// matrix construct (the construct was still void-checked, never dropped).
@@ -643,27 +648,7 @@ impl TemplateProjector<'_, '_> {
     ) {
         match dir.kind {
             SvelteDirectiveKind::Bind => {
-                // A function binding `bind:x={get, set}` is out of scope v1
-                // (D-ad): a top-level comma in the value distinguishes it from
-                // a plain `bind:value={v}`. Strip it (void-checking both
-                // expressions) and record the diagnostic.
-                if self.is_function_binding(dir) {
-                    self.push_diag(attr.span, UnsupportedKind::FunctionBinding);
-                    self.strip_directive_void_checking_value(attr, dir);
-                    return;
-                }
-                // SUPPORTED bindings (the matrix): `bind:value` / `bind:checked`
-                // on elements + component `bind:prop` for `$bindable` props.
-                // Every OTHER `bind:*` (`bind:this`/`bind:group`/`bind:files`/
-                // contenteditable/media/dimension/readonly bindings) is
-                // out-of-scope v1 — strip it, void-check the bound expression,
-                // and record the typed-unsupported diagnostic NAMING the binding.
-                if self.is_supported_binding(el, dir) {
-                    self.rewrite_supported_bind(attr, dir);
-                } else {
-                    self.push_diag(attr.span, UnsupportedKind::UnsupportedBinding);
-                    self.strip_directive_void_checking_value(attr, dir);
-                }
+                self.project_bind(el, attr, dir);
             }
             SvelteDirectiveKind::On => {
                 // Legacy `on:click={h}` → `onclick={h}` verbatim namespaced
@@ -713,32 +698,6 @@ impl TemplateProjector<'_, '_> {
                 remove_span(self.ct, attr.span);
             }
         }
-    }
-
-    /// Whether a `bind:` directive is a SUPPORTED form (the matrix): the
-    /// element bindings `bind:value` / `bind:checked`, OR a component
-    /// `bind:prop` (any local) on a COMPONENT tag (a capitalised name — the
-    /// `$bindable`-prop path). Every other element `bind:*` is out-of-scope v1.
-    fn is_supported_binding(
-        &self,
-        el: &SvelteElement,
-        dir: &crate::svelte::parser::SvelteDirective,
-    ) -> bool {
-        // `bind:this` is out-of-scope v1 in EVERY context — on an element it
-        // binds the DOM node, on a component the component instance. Neither is
-        // a `$props`-checkable surface, so it never takes the supported path.
-        if dir.local == "this" {
-            return false;
-        }
-        // Component tag: component `bind:prop` for a `$bindable` prop is
-        // supported regardless of the local name. The parser already classifies
-        // components (PascalCase OR dotted/namespaced `<ns.Widget>`), so route
-        // through `el.kind` rather than re-deriving the rule here.
-        if matches!(el.kind, SvelteElementKind::Component) {
-            return true;
-        }
-        // Intrinsic element: only `bind:value` / `bind:checked` are supported.
-        matches!(dir.local.as_str(), "value" | "checked")
     }
 
     /// Strip an out-of-scope directive from the JSX attribute position while
@@ -905,6 +864,16 @@ impl TemplateProjector<'_, '_> {
     fn host_element_hint(&self, el: &SvelteElement) -> String {
         match el.kind {
             SvelteElementKind::Intrinsic => {
+                // NIT-1: `el.name` is interpolated raw into a `__VerterHostEl<"…">`
+                // string literal. The parser only classifies a bare tag identifier
+                // as `Intrinsic`, so this is safe today; guard it so a future
+                // producer change that admits a `"`/newline into the name fails
+                // loudly here instead of emitting a broken type literal.
+                debug_assert!(
+                    is_bare_tag_identifier(&el.name),
+                    "intrinsic host tag must be a bare identifier with no quote/newline: {:?}",
+                    el.name
+                );
                 format!("(null! as __VerterHostEl<\"{}\">)", el.name)
             }
             _ => "(null! as Element)".to_string(),
@@ -932,14 +901,15 @@ impl TemplateProjector<'_, '_> {
         false
     }
 
-    /// Project a SUPPORTED `bind:` directive to a checkable attribute pair.
+    /// Project a `bind:` directive to a checkable JSX attribute pair (the
+    /// component `$bindable`-prop path + `bind:value`/`bind:checked`).
     ///
     /// `bind:value={v}` → `value={v}` (strip the `bind:` prefix, keep the
     /// `={v}` value mapped). The valueless SHORTHAND `bind:value` (no `={…}`)
     /// binds the same-named local, so it becomes `value={value}` — the whole
     /// `bind:local` run is overwritten with `local={local}` (a bare `value`
     /// attribute would be a boolean `true`, not the bound value).
-    fn rewrite_supported_bind(
+    fn rewrite_bind_to_attribute(
         &mut self,
         attr: &SvelteAttribute,
         dir: &crate::svelte::parser::SvelteDirective,
@@ -1376,4 +1346,41 @@ fn is_valid_binding_identifier(name: &str) -> bool {
         return false;
     }
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+}
+
+/// Whether `name` is a bare tag identifier safe to interpolate raw into a
+/// `__VerterHostEl<"…">` string literal (no `"`, no newline, no backslash).
+/// Used as a defensive guard at the `host_element_hint` interpolation site
+/// (NIT-1) — the parser only classifies a bare tag as `Intrinsic`, so this holds
+/// today; the guard hardens against a future producer change.
+fn is_bare_tag_identifier(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c != '"' && c != '\\' && c != '\n' && c != '\r' && c != '<' && c != '>')
+}
+
+/// Whether `name` is a valid component reference identifier to interpolate into
+/// `InstanceType<typeof Name>` / `InstanceType<typeof Name>["$props"][…]`. A
+/// component tag is PascalCase OR a dotted/namespaced member access
+/// (`ns.Widget`) — both are valid `typeof` operands. A name with any other
+/// character (a quote, a `<`, whitespace) is NOT emitted (the host falls back to
+/// `Element`).
+fn is_valid_component_reference(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    // Each dotted segment must be a valid identifier.
+    name.split('.').all(is_valid_binding_identifier)
+}
+
+/// Whether `expr` is a TYPE-QUERY-SAFE lvalue — a bare identifier or a dotted
+/// member chain (`el`, `refs.first`) — so `typeof expr` is a valid TS type
+/// query. An element-access (`refs[i]`), a call, or any other expression is NOT
+/// safe (`typeof refs[i]` parses `i` as a type), and the `bind:this` projection
+/// routes those through the read-bearing invariant form instead. Whitespace is
+/// trimmed first (a `{ el }`-style padded expression slice).
+fn is_type_query_safe_lvalue(expr: &str) -> bool {
+    let trimmed = expr.trim();
+    !trimmed.is_empty() && trimmed.split('.').all(is_valid_binding_identifier)
 }

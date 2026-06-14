@@ -66,4 +66,11 @@ export interface SvelteHTMLElements {
   ul: SvelteBaseAttributes<HTMLUListElement>;
   li: SvelteBaseAttributes<HTMLLIElement>;
   p: SvelteBaseAttributes<HTMLParagraphElement>;
+  // Media / dimension / details bindings (F4) need these intrinsic tags to be
+  // valid JSX elements (the bindings themselves are checked via the prelude
+  // `__verter_bind_*` helpers, not these attribute records).
+  video: SvelteBaseAttributes<HTMLVideoElement>;
+  audio: SvelteBaseAttributes<HTMLAudioElement>;
+  img: SvelteBaseAttributes<HTMLImageElement>;
+  details: SvelteBaseAttributes<HTMLDetailsElement>;
 }

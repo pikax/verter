@@ -113,6 +113,49 @@ declare function __verter_transition(config: import("svelte/transition").Transit
 // function on the host node + from/to rects + params and asserts the result is
 // an `AnimationConfig` (or a deferred factory of one).
 declare function __verter_animate(config: import("svelte/animate").AnimationConfig | ((options?: { direction: "in" | "out" }) => import("svelte/animate").AnimationConfig)): void;
+// --- F4 wide `bind:` family value-type checkers (the bind-contract table is the
+// AUTHORITY; these are implementation helpers). The projector emits an
+// assignment through one of these so the bound LOCAL is checked against the
+// binding's value type `V` from the table, in the binding's DIRECTION:
+//   read-write (invariant): `LOCAL = __verter_bind_rw<V>(LOCAL)` — the arg checks
+//     `LOCAL` assignable to `V` (local → DOM), the return `V` assigns back into
+//     `LOCAL` (DOM → local); together invariant, and a `const` target fails.
+//   read (readonly DOM → local): `LOCAL = __verter_bind_read<V>()` — `V` assigns
+//     into `LOCAL`; a `const`/wrong-typed target FAILS (the write-rejection the
+//     readonly fixture pins).
+declare function __verter_bind_rw<V>(local: V): V;
+declare function __verter_bind_read<V>(): V;
+// `bind:this={el}` invariance (F4). The local is commonly declared WITHOUT an
+// initializer (`let el: HTMLInputElement`), so the check must NOT read its
+// value. The projector emits `(LOCAL = (null! as Host))` (writes Host into the
+// local — the `Host extends typeof LOCAL` direction + definite assignment) paired
+// with `__verter_bind_this_assignable<Host, typeof LOCAL>()`, whose constraint
+// `To extends Host` asserts `typeof LOCAL extends Host` (the OTHER direction) at
+// the TYPE level — together invariant, discriminating a wrong element type
+// (DOM element instance types are largely mutually assignable, so a one-way
+// check would not), without reading the local's (possibly unassigned) value.
+declare function __verter_bind_this_assignable<Host, To extends Host>(): void;
+// `bind:group` — checkbox shares ONE array variable, radio shares ONE item
+// variable. The checkbox checker requires the local be an array (a loose
+// `T | T[]` union is NOT `extends readonly unknown[]` → rejected). The radio
+// checker requires the local be a NON-array: the DISTRIBUTIVE conditional
+// `L extends readonly unknown[] ? never : L` maps each union arm independently,
+// so a `T | T[]` union narrows the expected param to `T` and the `T[]` arm of
+// the supplied local is NOT assignable → rejected (a NON-distributive
+// `[L] extends [readonly unknown[]]` would wrongly accept the union). Both
+// round-trip (group is read-write), so a `const` target also fails.
+declare function __verter_bind_group_checkbox<L extends readonly unknown[]>(local: L): L;
+declare function __verter_bind_group_radio<L>(local: L extends readonly unknown[] ? never : L): L;
+// --- F5 function bindings `bind:x={get, set}` (and write-only `{null, set}`).
+// The checker enforces get/set mutual consistency against the bind-target type
+// `V`: `get` returns `V` (or `null` for write-only), `set` consumes `V`. For an
+// element bind the projector passes `V` from the bind-contract table; for a
+// component bind it passes `InstanceType<typeof Child>["$props"][K]` (the typing
+// is done in the PROJECTED TSX via TS — no Rust resolver call). A READONLY
+// element binding routes to `__verter_bind_fn_read`, whose `get` is `null`-only
+// (a readonly function binding must be the write-only `{null, set}` form).
+declare function __verter_bind_fn<V>(get: (() => V) | null, set: (value: V) => void): void;
+declare function __verter_bind_fn_read<V>(get: null, set: (value: V) => void): void;
 "#;
 
 #[cfg(test)]
@@ -192,5 +235,24 @@ mod tests {
             p.contains("Tag extends keyof SVGElementTagNameMap"),
             "host-node helper resolves known SVG tags"
         );
+    }
+
+    #[test]
+    fn prelude_declares_the_bind_family_checkers() {
+        // F4/F5: the wide `bind:` family value-type checkers (read-write / read /
+        // write), the `bind:group` checkbox/radio checkers, and the F5
+        // function-binding checker are all declared.
+        let p = render_prelude();
+        for needle in [
+            "declare function __verter_bind_rw",
+            "declare function __verter_bind_read",
+            "declare function __verter_bind_this_assignable",
+            "declare function __verter_bind_group_checkbox",
+            "declare function __verter_bind_group_radio",
+            "declare function __verter_bind_fn",
+            "declare function __verter_bind_fn_read",
+        ] {
+            assert!(p.contains(needle), "prelude missing bind checker: {needle}");
+        }
     }
 }

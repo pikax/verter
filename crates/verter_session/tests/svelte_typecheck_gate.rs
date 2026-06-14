@@ -141,6 +141,15 @@ fn project(source: &str) -> String {
     project_svelte_ide(source, &parsed, Some("Comp.svelte"), true).code
 }
 
+/// The projected render body (everything AFTER the unmapped prelude) — residue
+/// assertions on directive prefixes (`bind:this`, …) target the body, not the
+/// prelude's own checker doc comments.
+fn render_body(code: &str) -> &str {
+    code.find("function __verter_render()")
+        .map(|i| &code[i..])
+        .unwrap_or(code)
+}
+
 fn skip_note(name: &str) {
     eprintln!(
         "SKIP {name}: no tsgo/tsc in node_modules/.bin (hermetic machine); \
@@ -618,61 +627,27 @@ fn projected_attribute_shorthand_type_checks_clean() {
 }
 
 #[test]
-fn out_of_scope_bind_this_void_checks_and_type_checks_clean() {
-    // P1-2: an out-of-scope `bind:this` must be stripped + void-checked (NOT
-    // left as a bare invalid `this={…}` attribute) and produce valid TSX. A
-    // `bind:this` left as a bare attribute would be rejected by TSGO (no `this`
-    // on the input intrinsic).
+fn bind_this_on_an_intrinsic_produces_valid_tsx_for_a_normal_declaration() {
+    // F4: a normal `bind:this={el}` declaration (`let el: HTMLInputElement`, no
+    // initializer — the idiomatic Svelte form) projects to valid TSX that
+    // type-checks clean, with NO `bind:this` residue and NO bare `this={…}`
+    // attribute (which the intrinsic table would reject).
     let projected = project(
-        "<script lang=\"ts\">let el: HTMLInputElement | null = null;</script>\n\
+        "<script lang=\"ts\">let el: HTMLInputElement;</script>\n\
          <input bind:this={el} />",
     );
     assert!(
-        !projected.contains("bind:this"),
+        !render_body(&projected).contains("bind:this"),
         "no bind:this residue: {projected}"
     );
-    let Some((ok, out)) = typecheck_projected(&projected, "BindThis.svelte.tsx", &[], true) else {
-        skip_note("out-of-scope bind:this");
+    let Some((ok, out)) = typecheck_projected(&projected, "BindThisDecl.svelte.tsx", &[], true)
+    else {
+        skip_note("bind:this declaration");
         return;
     };
     assert!(
         ok,
-        "an out-of-scope bind:this must void-check + produce valid TSX:\n{out}"
-    );
-
-    // DISCRIMINATING: a type error INSIDE the void-checked bound expression
-    // surfaces (the expression is genuinely checked, not dropped).
-    let bad = project(
-        "<script lang=\"ts\">let el: HTMLInputElement | null = null;</script>\n\
-         <input bind:this={el.nope} />",
-    );
-    let Some((bad_ok, _)) = typecheck_projected(&bad, "BindThisBad.svelte.tsx", &[], true) else {
-        return;
-    };
-    assert!(
-        !bad_ok,
-        "a type error in the void-checked bound expression must surface"
-    );
-}
-
-#[test]
-fn function_binding_void_check_type_checks_clean_with_variadic_void() {
-    // A function binding `bind:x={get, set}` void-checks BOTH expressions as
-    // `__verter_void(get, set)` — the variadic `__verter_void` declaration must
-    // accept multiple args (a single-param decl would emit an extra-argument
-    // error under strict). Valid TSX, both exprs checked.
-    let projected = project(
-        "<script lang=\"ts\">const get = () => \"x\"; const set = (v: string) => { void v; };</script>\n\
-         <input bind:value={get, set} />",
-    );
-    let Some((ok, out)) = typecheck_projected(&projected, "FnBind.svelte.tsx", &[], true) else {
-        skip_note("function binding void-check arity");
-        return;
-    };
-    assert!(
-        ok,
-        "a function-binding void-check `__verter_void(get, set)` must type-check \
-         clean (variadic void):\n{out}"
+        "a normal bind:this declaration must produce valid, clean TSX:\n{out}"
     );
 }
 
@@ -893,6 +868,426 @@ fn custom_transition_with_optional_options_and_factory_return_type_checks_clean(
         !wr_ok,
         "a transition fn returning a non-TransitionConfig must be REJECTED by the \
          result-shape checker:\n{wr_out}"
+    );
+}
+
+#[test]
+fn bind_this_on_an_intrinsic_binds_the_dom_element_type_discriminating() {
+    // F4: `bind:this={el}` on an `<input>` checks the bound local against the
+    // DOM element instance type (`HTMLInputElement`). DISCRIMINATING: a correctly
+    // typed `HTMLInputElement` local checks clean; a `HTMLDivElement` local FAILS
+    // (the wrong element type) — guarded by a `@ts-expect-error` so the fixture
+    // discriminates BOTH ways under strict (an `any` leak would make the
+    // `@ts-expect-error` unused → TS errors).
+    let projected = project(
+        "<script lang=\"ts\">let el: HTMLInputElement;</script>\n\
+         <input bind:this={el} />",
+    );
+    let Some((ok, out)) = typecheck_projected(&projected, "BindThisOk.svelte.tsx", &[], true)
+    else {
+        skip_note("bind:this intrinsic");
+        return;
+    };
+    assert!(
+        ok,
+        "bind:this on <input> must bind HTMLInputElement clean:\n{out}"
+    );
+
+    // A wrong element type (`HTMLDivElement`) must FAIL the host-instance check.
+    let bad = project(
+        "<script lang=\"ts\">let el: HTMLDivElement;</script>\n\
+         <input bind:this={el} />",
+    );
+    let Some((bad_ok, bad_out)) = typecheck_projected(&bad, "BindThisBad.svelte.tsx", &[], true)
+    else {
+        return;
+    };
+    assert!(
+        !bad_ok,
+        "bind:this on <input> bound to HTMLDivElement must be REJECTED:\n{bad_out}"
+    );
+}
+
+#[test]
+fn bind_this_on_a_component_binds_the_instance_type_discriminating() {
+    // F4: `bind:this` on a component binds `InstanceType<typeof C>`. A local
+    // typed with the instance type checks clean; a mismatched local FAILS.
+    let good = "/** @jsxImportSource @verter/svelte-jsx */\n\
+        declare function __verter_bind_this_assignable<Host, To extends Host>(): void;\n\
+        declare class Child { $props: { label?: string }; method(): number; }\n\
+        ;function __verter_render() {\n\
+        let ref: InstanceType<typeof Child>;\n\
+        return (<><Child {...((ref = (null! as InstanceType<typeof Child>)), __verter_bind_this_assignable<InstanceType<typeof Child>, typeof ref>(), {})} /></>);\n\
+        }\nexport {};\n";
+    let Some((ok, out)) = typecheck_projected(good, "BindThisCompOk.svelte.tsx", &[], true) else {
+        skip_note("bind:this component");
+        return;
+    };
+    assert!(
+        ok,
+        "bind:this on a component must bind its InstanceType clean:\n{out}"
+    );
+
+    let bad = "/** @jsxImportSource @verter/svelte-jsx */\n\
+        declare function __verter_bind_this_assignable<Host, To extends Host>(): void;\n\
+        declare class Child { $props: { label?: string }; method(): number; }\n\
+        ;function __verter_render() {\n\
+        let ref: number;\n\
+        return (<><Child {...((ref = (null! as InstanceType<typeof Child>)), __verter_bind_this_assignable<InstanceType<typeof Child>, typeof ref>(), {})} /></>);\n\
+        }\nexport {};\n";
+    let Some((bad_ok, bad_out)) = typecheck_projected(bad, "BindThisCompBad.svelte.tsx", &[], true)
+    else {
+        return;
+    };
+    assert!(
+        !bad_ok,
+        "bind:this on a component bound to a `number` local must be REJECTED:\n{bad_out}"
+    );
+}
+
+#[test]
+fn bind_group_checkbox_requires_an_array_and_radio_requires_a_scalar() {
+    // F4: `bind:group` checkbox → array shape; radio → scalar; a loose `T | T[]`
+    // is rejected by both.
+    // Checkbox + array local: clean.
+    let cb_ok = project(
+        "<script lang=\"ts\">let selected: string[] = [];</script>\n\
+         <input type=\"checkbox\" bind:group={selected} />",
+    );
+    let Some((ok, out)) = typecheck_projected(&cb_ok, "GroupCbOk.svelte.tsx", &[], true) else {
+        skip_note("bind:group checkbox");
+        return;
+    };
+    assert!(ok, "checkbox bind:group on a string[] must check:\n{out}");
+
+    // Checkbox + scalar local: FAILS (not an array).
+    let cb_bad = project(
+        "<script lang=\"ts\">let selected: string = \"\";</script>\n\
+         <input type=\"checkbox\" bind:group={selected} />",
+    );
+    let Some((cb_bad_ok, cb_bad_out)) =
+        typecheck_projected(&cb_bad, "GroupCbBad.svelte.tsx", &[], true)
+    else {
+        return;
+    };
+    assert!(
+        !cb_bad_ok,
+        "checkbox bind:group on a scalar must be REJECTED (array required):\n{cb_bad_out}"
+    );
+
+    // Radio + scalar local: clean.
+    let radio_ok = project(
+        "<script lang=\"ts\">let picked: string = \"\";</script>\n\
+         <input type=\"radio\" bind:group={picked} />",
+    );
+    let Some((r_ok, r_out)) = typecheck_projected(&radio_ok, "GroupRadioOk.svelte.tsx", &[], true)
+    else {
+        return;
+    };
+    assert!(r_ok, "radio bind:group on a scalar must check:\n{r_out}");
+
+    // Radio + array local: FAILS (radio shares a scalar).
+    let radio_bad = project(
+        "<script lang=\"ts\">let picked: string[] = [];</script>\n\
+         <input type=\"radio\" bind:group={picked} />",
+    );
+    let Some((rb_ok, rb_out)) =
+        typecheck_projected(&radio_bad, "GroupRadioBad.svelte.tsx", &[], true)
+    else {
+        return;
+    };
+    assert!(
+        !rb_ok,
+        "radio bind:group on an array must be REJECTED (scalar required):\n{rb_out}"
+    );
+
+    // Loose `T | T[]` union local: rejected by BOTH (neither cleanly scalar nor
+    // array). The radio gate must use the DISTRIBUTIVE conditional — a
+    // non-distributive `[L] extends [readonly unknown[]]` would wrongly ACCEPT
+    // the union.
+    let radio_union = project(
+        "<script lang=\"ts\">let picked: string | string[] = \"\";</script>\n\
+         <input type=\"radio\" bind:group={picked} />",
+    );
+    let Some((ru_ok, ru_out)) =
+        typecheck_projected(&radio_union, "GroupRadioUnion.svelte.tsx", &[], true)
+    else {
+        return;
+    };
+    assert!(
+        !ru_ok,
+        "radio bind:group on a loose `T | T[]` union must be REJECTED:\n{ru_out}"
+    );
+    let cb_union = project(
+        "<script lang=\"ts\">let selected: string | string[] = [];</script>\n\
+         <input type=\"checkbox\" bind:group={selected} />",
+    );
+    let Some((cu_ok, cu_out)) =
+        typecheck_projected(&cb_union, "GroupCbUnion.svelte.tsx", &[], true)
+    else {
+        return;
+    };
+    assert!(
+        !cu_ok,
+        "checkbox bind:group on a loose `T | T[]` union must be REJECTED:\n{cu_out}"
+    );
+}
+
+#[test]
+fn readonly_function_binding_requires_null_get_and_rejects_a_getter() {
+    // F5 (readonly direction): a readonly element binding's function form must be
+    // the write-only `{null, set}` — `__verter_bind_fn_read` accepts a `null` get
+    // and a `set`. A NON-null getter FAILS (readonly cannot read into the DOM).
+    let null_get = project(
+        "<script lang=\"ts\">const setW = (v: number): void => { void v; };</script>\n\
+         <div bind:clientWidth={null, setW}></div>",
+    );
+    let Some((ok, out)) = typecheck_projected(&null_get, "RoFnOk.svelte.tsx", &[], true) else {
+        skip_note("readonly function binding null get");
+        return;
+    };
+    assert!(
+        ok,
+        "a readonly function binding `{{null, set}}` must check clean:\n{out}"
+    );
+
+    let with_getter = project(
+        "<script lang=\"ts\">const getW = (): number => 1; const setW = (v: number): void => { void v; };</script>\n\
+         <div bind:clientWidth={getW, setW}></div>",
+    );
+    let Some((g_ok, g_out)) = typecheck_projected(&with_getter, "RoFnBad.svelte.tsx", &[], true)
+    else {
+        return;
+    };
+    assert!(
+        !g_ok,
+        "a readonly function binding with a non-null getter must be REJECTED:\n{g_out}"
+    );
+}
+
+#[test]
+fn bind_current_time_binds_number_and_readonly_bind_duration_rejects_a_write() {
+    // F4: `bind:currentTime` binds a `number` (read-write); `bind:duration` is
+    // readonly — assigning to a `const` (a write target) FAILS.
+    let ct_ok = project(
+        "<script lang=\"ts\">let t: number = 0;</script>\n\
+         <video bind:currentTime={t}></video>",
+    );
+    let Some((ok, out)) = typecheck_projected(&ct_ok, "CurrentTime.svelte.tsx", &[], true) else {
+        skip_note("bind:currentTime");
+        return;
+    };
+    assert!(ok, "bind:currentTime must bind a number clean:\n{out}");
+
+    // A wrong-typed `currentTime` local (string) FAILS the invariant check.
+    let ct_bad = project(
+        "<script lang=\"ts\">let t: string = \"\";</script>\n\
+         <video bind:currentTime={t}></video>",
+    );
+    let Some((cb_ok, cb_out)) =
+        typecheck_projected(&ct_bad, "CurrentTimeBad.svelte.tsx", &[], true)
+    else {
+        return;
+    };
+    assert!(
+        !cb_ok,
+        "bind:currentTime on a string local must be REJECTED:\n{cb_out}"
+    );
+
+    // Readonly `bind:duration` to a `const` is a write-target the projection
+    // ASSIGNS into → must FAIL (cannot assign to a constant).
+    let dur_bad = project(
+        "<script lang=\"ts\">const d: number = 0;</script>\n\
+         <video bind:duration={d}></video>",
+    );
+    let Some((d_ok, d_out)) = typecheck_projected(&dur_bad, "DurationConst.svelte.tsx", &[], true)
+    else {
+        return;
+    };
+    assert!(
+        !d_ok,
+        "a readonly bind:duration written to a `const` target must be REJECTED:\n{d_out}"
+    );
+    // DISCRIMINATING: the same readonly binding to a writable `let number` checks.
+    let dur_ok = project(
+        "<script lang=\"ts\">let d: number = 0;</script>\n\
+         <video bind:duration={d}></video>",
+    );
+    let Some((do_ok, do_out)) = typecheck_projected(&dur_ok, "DurationLet.svelte.tsx", &[], true)
+    else {
+        return;
+    };
+    assert!(
+        do_ok,
+        "a readonly bind:duration into a writable `let number` must check:\n{do_out}"
+    );
+}
+
+#[test]
+fn function_binding_get_set_mismatch_fails_and_consistent_pair_checks() {
+    // F5: `bind:files={get, set}` — the checker enforces get/set consistency
+    // against the table type `FileList | null`. A consistent pair checks; a
+    // get/set type mismatch FAILS.
+    let ok_src = project(
+        "<script lang=\"ts\">\n\
+         const getFiles = (): FileList | null => null;\n\
+         const setFiles = (f: FileList | null): void => { void f; };\n\
+         </script>\n\
+         <input type=\"file\" bind:files={getFiles, setFiles} />",
+    );
+    let Some((ok, out)) = typecheck_projected(&ok_src, "FnBindOk.svelte.tsx", &[], true) else {
+        skip_note("function binding get/set");
+        return;
+    };
+    assert!(
+        ok,
+        "a consistent get/set pair against FileList | null must check:\n{out}"
+    );
+
+    // Mismatch: `set` consumes a `string` while the target type is FileList|null.
+    let bad_src = project(
+        "<script lang=\"ts\">\n\
+         const getFiles = (): FileList | null => null;\n\
+         const setFiles = (s: string): void => { void s; };\n\
+         </script>\n\
+         <input type=\"file\" bind:files={getFiles, setFiles} />",
+    );
+    let Some((b_ok, b_out)) = typecheck_projected(&bad_src, "FnBindBad.svelte.tsx", &[], true)
+    else {
+        return;
+    };
+    assert!(
+        !b_ok,
+        "a get/set type mismatch against the bind-target type must be REJECTED:\n{b_out}"
+    );
+}
+
+#[test]
+fn function_binding_on_value_intrinsic_type_checks_clean_for_a_correct_pair() {
+    // F5: `bind:value={get,set}` on an `<input>` (NOT in the wide-family table)
+    // derives `V` from `SvelteHTMLElements["input"]["value"]` (the producer-side
+    // fix; the emitted target type is pinned by the `projector_tests`
+    // `function_binding_on_value_derives_the_target_type_from_the_intrinsic_table`).
+    // A correct union-handling get/set type-checks CLEAN.
+    let ok_src = project(
+        "<script lang=\"ts\">\n\
+         const getV = (): string | number | undefined => \"x\";\n\
+         const setV = (v: string | number | undefined): void => { void v; };\n\
+         </script>\n\
+         <input bind:value={getV, setV} />",
+    );
+    let Some((ok, out)) = typecheck_projected(&ok_src, "FnValueOk.svelte.tsx", &[], true) else {
+        skip_note("function binding value intrinsic type");
+        return;
+    };
+    assert!(
+        ok,
+        "a value function binding handling the intrinsic value type must check:\n{out}"
+    );
+}
+
+#[test]
+#[ignore = "known tsgo native-preview gap (same family as B8d-P2-1): under the \
+            @jsxImportSource pragma, tsgo does NOT fully type-check a generic \
+            checker call whose type argument is an indexed-access into an \
+            imported interface (`SvelteHTMLElements[\"input\"][\"value\"]`) when it \
+            is wrapped in a `{...(call(...), {})}` JSX spread, so a wrong-typed \
+            get/set is silently accepted. The PRODUCER emits the correct type \
+            (pinned by the projector test); an EXPLICIT type argument (e.g. \
+            `FileList | null` for `bind:files`) discriminates reliably. Red \
+            against current tsgo; flips green when the upstream bug is fixed."]
+fn function_binding_on_value_rejects_a_wrong_typed_pair_known_tsgo_gap() {
+    // R10 ledger (DISCRIMINATING): a `set` whose param is NOT in the intrinsic
+    // value union (a `symbol`) SHOULD be REJECTED. Under tsgo native-preview the
+    // indexed-access type argument is not enforced inside the JSX spread, so it
+    // is silently accepted today.
+    let bad_src = project(
+        "<script lang=\"ts\">\n\
+         const getV = (): symbol => Symbol();\n\
+         const setV = (v: symbol): void => { void v; };\n\
+         </script>\n\
+         <input bind:value={getV, setV} />",
+    );
+    let Some((b_ok, b_out)) = typecheck_projected(&bad_src, "FnValueBad.svelte.tsx", &[], true)
+    else {
+        skip_note("function binding value wrong type known gap");
+        return;
+    };
+    assert!(
+        !b_ok,
+        "a `symbol` get/set for bind:value SHOULD be REJECTED via the intrinsic \
+         attribute type (currently a tsgo spread-context gap — see #[ignore]):\n{b_out}"
+    );
+}
+
+#[test]
+fn function_binding_on_a_component_checks_against_instancetype_props() {
+    // F5: a component function binding derives `V` from
+    // `InstanceType<typeof Child>["$props"]["value"]` — typed in the PROJECTED TSX
+    // via TS (no Rust resolver). A consistent get/set checks; a mismatch FAILS.
+    let good = "/** @jsxImportSource @verter/svelte-jsx */\n\
+        declare function __verter_bind_fn<V>(get: (() => V) | null, set: (value: V) => void): void;\n\
+        declare class Child { $props: { value?: number }; }\n\
+        ;function __verter_render() {\n\
+        const get = (): number | undefined => 1;\n\
+        const set = (v: number | undefined): void => { void v; };\n\
+        return (<><Child {...(__verter_bind_fn<InstanceType<typeof Child>[\"$props\"][\"value\"]>(get, set), {})} /></>);\n\
+        }\nexport {};\n";
+    let Some((ok, out)) = typecheck_projected(good, "FnBindCompOk.svelte.tsx", &[], true) else {
+        skip_note("component function binding");
+        return;
+    };
+    assert!(
+        ok,
+        "a component function binding against $props[\"value\"]: number must check:\n{out}"
+    );
+
+    let bad = "/** @jsxImportSource @verter/svelte-jsx */\n\
+        declare function __verter_bind_fn<V>(get: (() => V) | null, set: (value: V) => void): void;\n\
+        declare class Child { $props: { value?: number }; }\n\
+        ;function __verter_render() {\n\
+        const get = (): number => 1;\n\
+        const set = (v: string): void => { void v; };\n\
+        return (<><Child {...(__verter_bind_fn<InstanceType<typeof Child>[\"$props\"][\"value\"]>(get, set), {})} /></>);\n\
+        }\nexport {};\n";
+    let Some((b_ok, b_out)) = typecheck_projected(bad, "FnBindCompBad.svelte.tsx", &[], true)
+    else {
+        return;
+    };
+    assert!(
+        !b_ok,
+        "a component function binding whose set consumes the wrong type must be \
+         REJECTED via $props:\n{b_out}"
+    );
+}
+
+#[test]
+#[ignore = "B8d-P2-1 known gap: tsgo native-preview silently accepts a wrong-typed \
+            value on a transition-param property NOT shared with TransitionConfig \
+            (e.g. fly's `y`) under the @jsxImportSource pragma. Red against \
+            current tsgo; flips green when the upstream tsgo bug is fixed. \
+            Upstream: contravariant optional-param inference loses the param \
+            discrimination for non-shared interface members."]
+fn transition_specific_param_wrong_type_is_rejected_known_tsgo_gap() {
+    // B8d-P2-1 (R10 ledger, DISCRIMINATING): `transition:fly={{ y: "200" }}` — a
+    // wrong-typed `y` (string where number is expected) on the `fly`-SPECIFIC
+    // param SHOULD be rejected. Under tsgo native-preview it is silently ACCEPTED
+    // (the `delay` fixture — a TransitionConfig-SHARED member — discriminates
+    // reliably and is the live gate; this `y` case characterizes the gap). When
+    // tsgo fixes the upstream bug this test (asserting REJECTION) flips to green
+    // and the `#[ignore]` is removed.
+    let bad = project(
+        "<script lang=\"ts\">import { fly } from \"svelte/transition\";</script>\n\
+         <div transition:fly={{ y: \"200\" }}>x</div>",
+    );
+    let Some((ok, out)) = typecheck_projected(&bad, "TransFlyY.svelte.tsx", &[], true) else {
+        skip_note("transition fly y known gap");
+        return;
+    };
+    assert!(
+        !ok,
+        "a wrong-typed transition-specific param (`y: \"200\"`) SHOULD be REJECTED \
+         (currently a tsgo native-preview gap — see #[ignore]):\n{out}"
     );
 }
 
