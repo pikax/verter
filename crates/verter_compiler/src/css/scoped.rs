@@ -34,21 +34,6 @@ pub fn apply_scoped(css: &str, scope_id: &str) -> Result<String, super::CssError
     Ok(apply_scoped_normalized(&normalized, scope_id))
 }
 
-/// Apply scoped attribute selectors to raw CSS without lightningcss normalization.
-///
-/// This is a faster alternative to [`apply_scoped`] that skips the
-/// lightningcss parse/serialize step. The walker handles comments, strings,
-/// @-rules, and @keyframes directly.
-///
-/// **Trade-off:** CSS values are not normalized (colors, units, shorthand).
-/// CSS nesting (`&`) is not flattened. For scoped styles in Vue SFCs, this
-/// is typically fine — the browser handles nesting natively.
-pub fn apply_scoped_raw(css: &str, scope_id: &str) -> String {
-    let scope_attr = format!("[data-v-{}]", scope_id);
-    let slotted_attr = format!("[data-v-{}-s]", scope_id);
-    apply_scoped_to_normalized(css, &scope_attr, &slotted_attr)
-}
-
 /// Apply scoped selectors to normalized CSS (already parsed and serialized by lightningcss).
 ///
 /// This function handles:
@@ -908,78 +893,6 @@ mod tests {
         );
     }
 
-    // ===================================================================
-    // @ai-generated - CSS nesting tests (apply_scoped_raw path)
-    // ===================================================================
-
-    /// Native CSS nesting: nested `& .child` must be scoped.
-    #[test]
-    fn test_css_nesting_raw_basic() {
-        let css = ".parent { color: red; & .child { color: blue; } }";
-        let result = apply_scoped_raw(css, "a4f2eed6");
-        assert!(
-            result.contains(".parent[data-v-a4f2eed6]"),
-            "Parent must be scoped. Got: {}",
-            result
-        );
-        assert!(
-            result.contains(".child[data-v-a4f2eed6]"),
-            "Nested .child must be scoped. Got: {}",
-            result
-        );
-        assert!(
-            result.contains("color: red"),
-            "Parent declarations preserved. Got: {}",
-            result
-        );
-        assert!(
-            result.contains("color: blue"),
-            "Nested declarations preserved. Got: {}",
-            result
-        );
-    }
-
-    /// Native CSS nesting: `&:hover` pseudo-class.
-    #[test]
-    fn test_css_nesting_raw_pseudo() {
-        let css = ".btn { color: red; &:hover { color: blue; } }";
-        let result = apply_scoped_raw(css, "a4f2eed6");
-        assert!(
-            result.contains(".btn[data-v-a4f2eed6]"),
-            "Parent must be scoped. Got: {}",
-            result
-        );
-        // &:hover → &[data-v-xxx]:hover
-        assert!(
-            result.contains("[data-v-a4f2eed6]:hover"),
-            "Nested &:hover must have scope before :hover. Got: {}",
-            result
-        );
-    }
-
-    /// Native CSS nesting: multiple nested selectors.
-    #[test]
-    fn test_css_nesting_raw_multiple() {
-        let css =
-            ".card { padding: 1rem; & .title { font-size: 18px; } & .body { padding: 8px; } }";
-        let result = apply_scoped_raw(css, "a4f2eed6");
-        assert!(
-            result.contains(".card[data-v-a4f2eed6]"),
-            "Parent must be scoped. Got: {}",
-            result
-        );
-        assert!(
-            result.contains(".title[data-v-a4f2eed6]"),
-            ".title must be scoped. Got: {}",
-            result
-        );
-        assert!(
-            result.contains(".body[data-v-a4f2eed6]"),
-            ".body must be scoped. Got: {}",
-            result
-        );
-    }
-
     /// @font-face at-rule should not be scoped.
     #[test]
     fn test_font_face_not_scoped() {
@@ -1014,6 +927,7 @@ mod tests {
         )
         .unwrap()
         .code
+        .into_owned()
     }
 
     /// WS 5.1: :deep(.a, .b) — each comma-separated selector gets its own

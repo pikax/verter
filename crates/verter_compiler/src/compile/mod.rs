@@ -591,7 +591,7 @@ fn compile_inner(
                         sourcemap: false,
                     };
                     match process_style(&modified_css, &process_opts) {
-                        Ok(result) => result.code,
+                        Ok(result) => result.code.into_owned(),
                         Err(e) => {
                             all_diagnostics.push(Diagnostic {
                                 severity: DiagnosticSeverity::Error,

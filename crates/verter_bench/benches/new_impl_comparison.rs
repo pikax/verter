@@ -77,7 +77,7 @@ fn compile_full(source: &str) -> String {
                     },
                 );
                 if let Ok(result) = processed {
-                    style_outputs.push(result.code);
+                    style_outputs.push(result.code.into_owned());
                 }
             } else {
                 let processed = process_style(
@@ -92,7 +92,7 @@ fn compile_full(source: &str) -> String {
                     },
                 );
                 if let Ok(result) = processed {
-                    style_outputs.push(result.code);
+                    style_outputs.push(result.code.into_owned());
                 }
             }
         }

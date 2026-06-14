@@ -22,15 +22,50 @@ pub mod scoped;
 pub mod types;
 mod walk;
 
+#[cfg(test)]
+mod style_pipeline_tests;
+
 pub use types::{CssError, ProcessStyleOptions, ProcessStyleResult, VBindVar};
 
+use std::borrow::Cow;
+
 use lightningcss::stylesheet::{ParserOptions, PrinterOptions, StyleSheet};
+
+/// Test-only probe counting `normalize_css` invocations on the current thread.
+///
+/// Lets the owner-path suite pin that a transform normalizes exactly once (a
+/// single flattened AST feeds both the modules and scoped walkers) and that a
+/// marker-free or v-bind-only passthrough never normalizes. Thread-local so the
+/// parallel test runner never perturbs another test's count.
+#[cfg(test)]
+pub(crate) mod normalize_probe {
+    use std::cell::Cell;
+
+    thread_local! {
+        static CALLS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    pub(crate) fn reset() {
+        CALLS.with(|c| c.set(0));
+    }
+
+    pub(crate) fn count() -> usize {
+        CALLS.with(|c| c.get())
+    }
+
+    pub(crate) fn record() {
+        CALLS.with(|c| c.set(c.get() + 1));
+    }
+}
 
 /// Parse CSS with lightningcss and serialize back to normalize it.
 ///
 /// This normalizes comments, strings, at-rules, and nesting so downstream
 /// string-level transforms (scoped, modules) see well-formed CSS.
 fn normalize_css(css: &str) -> Result<String, CssError> {
+    #[cfg(test)]
+    normalize_probe::record();
+
     let stylesheet = StyleSheet::parse(css, ParserOptions::default())
         .map_err(|e| CssError::Parse(e.to_string()))?;
     let result = stylesheet
@@ -41,26 +76,50 @@ fn normalize_css(css: &str) -> Result<String, CssError> {
 
 /// Process a CSS style block: apply scoping, CSS modules, and v-bind replacement.
 ///
-/// This is the main entry point, called from:
+/// The single owner path for CSS style processing, called from:
 /// - The Rust `StyleCodegenPlugin` for plain CSS blocks (inline in compileForVite)
 /// - The NAPI `processStyle()` binding for preprocessed CSS (from vite-plugin)
+///
+/// Marker presence is decided structurally: the prepass borrows the input when
+/// it finds no `v-bind`/`:deep`/`:slotted` (returning [`Cow::Borrowed`]), and
+/// `scoped`/`is_module` are typed flags. When NO marker is present at all the
+/// input is returned borrowed verbatim — a zero-copy passthrough that neither
+/// copies nor normalizes. lightningcss normalization runs only when a transform
+/// (modules or scoping) actually requires the well-formed, nesting-flattened CSS
+/// its walker depends on.
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
-pub fn process_style(
-    css: &str,
+pub fn process_style<'a>(
+    css: &'a str,
     options: &ProcessStyleOptions<'_>,
-) -> Result<ProcessStyleResult, CssError> {
-    // Step 1: Pre-pass — replace v-bind() and Vue pseudo-selectors with valid CSS
+) -> Result<ProcessStyleResult<'a>, CssError> {
+    // Pre-pass — replace v-bind()/:deep()/:slotted(); borrows when none are present.
     let prepass_result = prepass::prepass(css, options.scope_id);
-    let mut current_css = prepass_result.css;
     let v_bind_vars = prepass_result.v_bind_vars;
+    let has_deep = prepass_result.has_deep;
+    let has_slotted = prepass_result.has_slotted;
+    let prepassed = prepass_result.css;
 
-    // Step 2: Normalize CSS once (if any transform needs it)
-    let needs_transform = options.is_module || options.scoped;
-    if needs_transform {
-        current_css = normalize_css(&current_css)?;
+    // No scoping or modules: the prepass output is the final surface. A fully
+    // marker-free input flows through as the borrowed input (zero-copy); a
+    // v-bind-only block is owned but intentionally left un-normalized.
+    if !(options.is_module || options.scoped) {
+        return Ok(ProcessStyleResult {
+            code: prepassed,
+            source_map: None, // TODO: source map support
+            module_classes: Vec::new(),
+            module_name: None,
+            v_bind_vars,
+            scoped: false,
+            has_deep,
+            has_slotted,
+            normalization_needed: false,
+        });
     }
 
-    // Step 3: Apply CSS modules (class name hashing) on normalized CSS
+    // A transform is present: normalize once so the modules/scoped walkers see
+    // well-formed, nesting-flattened CSS, then apply each requested transform.
+    let mut current_css = normalize_css(&prepassed)?;
+
     let mut module_classes = Vec::new();
     if options.is_module {
         let (modules_css, mapping) =
@@ -69,7 +128,6 @@ pub fn process_style(
         module_classes = mapping;
     }
 
-    // Step 4: Apply scoped selectors on normalized CSS
     if options.scoped {
         current_css = scoped::apply_scoped_normalized(&current_css, options.scope_id);
     }
@@ -81,59 +139,15 @@ pub fn process_style(
     };
 
     Ok(ProcessStyleResult {
-        code: current_css,
+        code: Cow::Owned(current_css),
         source_map: None, // TODO: source map support
         module_classes,
         module_name,
         v_bind_vars,
-    })
-}
-
-/// Fast CSS style processing: skip lightningcss normalization.
-///
-/// Uses the same walker-based scoping but directly on raw CSS (after prepass).
-/// Faster than [`process_style`] since it avoids the full CSS parse/serialize
-/// cycle. CSS values are not normalized — colors, units, and shorthand remain
-/// as authored.
-///
-/// **Trade-off:** CSS nesting (`&`) is not flattened. If the input uses native
-/// CSS nesting, the output may contain `&` selectors that need browser support.
-#[cfg_attr(feature = "hotpath", hotpath::measure)]
-pub fn process_style_fast(
-    css: &str,
-    options: &ProcessStyleOptions<'_>,
-) -> Result<ProcessStyleResult, CssError> {
-    // Step 1: Pre-pass — replace v-bind() and Vue pseudo-selectors with valid CSS
-    let prepass_result = prepass::prepass(css, options.scope_id);
-    let mut current_css = prepass_result.css;
-    let v_bind_vars = prepass_result.v_bind_vars;
-
-    // Step 2: Apply CSS modules directly on raw CSS (no normalization)
-    let mut module_classes = Vec::new();
-    if options.is_module {
-        let (modules_css, mapping) =
-            modules::apply_css_modules_normalized(&current_css, options.scope_id);
-        current_css = modules_css;
-        module_classes = mapping;
-    }
-
-    // Step 3: Apply scoped selectors directly on raw CSS (no normalization)
-    if options.scoped {
-        current_css = scoped::apply_scoped_raw(&current_css, options.scope_id);
-    }
-
-    let module_name = if options.is_module {
-        Some(options.module_name.unwrap_or("$style").to_string())
-    } else {
-        None
-    };
-
-    Ok(ProcessStyleResult {
-        code: current_css,
-        source_map: None,
-        module_classes,
-        module_name,
-        v_bind_vars,
+        scoped: options.scoped,
+        has_deep,
+        has_slotted,
+        normalization_needed: true,
     })
 }
 
@@ -625,314 +639,6 @@ mod tests {
             "box-shadow must be preserved. Got:\n{}",
             result.code
         );
-    }
-
-    // ===================================================================
-    // @ai-generated - Comparison tests: process_style vs process_style_fast
-    // Both paths must produce the same scoped selectors. Values may differ
-    // (lightningcss normalizes colors/units), but selectors must match.
-    // ===================================================================
-
-    /// Helper: count the number of scoped attribute occurrences in CSS.
-    fn count_scope_attrs(css: &str, scope_id: &str) -> usize {
-        let attr = format!("[data-v-{}]", scope_id);
-        css.matches(&attr).count()
-    }
-
-    /// Both paths scope simple classes identically.
-    #[test]
-    fn test_fast_vs_normal_simple_classes() {
-        let css = ".box { color: red; } .card { display: flex; }";
-        let opts = ProcessStyleOptions {
-            scope_id: "a4f2eed6",
-            scoped: true,
-            is_module: false,
-            module_name: None,
-            filename: None,
-            sourcemap: false,
-        };
-        let normal = process_style(css, &opts).unwrap();
-        let fast = process_style_fast(css, &opts).unwrap();
-
-        // Both must produce exactly 2 scoped selectors
-        assert_eq!(count_scope_attrs(&normal.code, "a4f2eed6"), 2);
-        assert_eq!(count_scope_attrs(&fast.code, "a4f2eed6"), 2);
-        // Both must scope the same selectors
-        assert!(normal.code.contains(".box[data-v-a4f2eed6]"));
-        assert!(fast.code.contains(".box[data-v-a4f2eed6]"));
-        assert!(normal.code.contains(".card[data-v-a4f2eed6]"));
-        assert!(fast.code.contains(".card[data-v-a4f2eed6]"));
-    }
-
-    /// Both paths scope descendant selectors identically.
-    #[test]
-    fn test_fast_vs_normal_descendant() {
-        let css = ".parent .child { color: red; } .a > .b { color: blue; }";
-        let opts = ProcessStyleOptions {
-            scope_id: "test1234",
-            scoped: true,
-            is_module: false,
-            module_name: None,
-            filename: None,
-            sourcemap: false,
-        };
-        let normal = process_style(css, &opts).unwrap();
-        let fast = process_style_fast(css, &opts).unwrap();
-
-        // Both should scope only the last compound selector
-        assert!(normal.code.contains(".child[data-v-test1234]"));
-        assert!(fast.code.contains(".child[data-v-test1234]"));
-        assert!(normal.code.contains(".b[data-v-test1234]"));
-        assert!(fast.code.contains(".b[data-v-test1234]"));
-        // Parent should NOT be scoped in either
-        assert!(!normal.code.contains(".parent[data-v-test1234]"));
-        assert!(!fast.code.contains(".parent[data-v-test1234]"));
-    }
-
-    /// Both paths scope selectors inside @media correctly.
-    #[test]
-    fn test_fast_vs_normal_media() {
-        let css = ".top { color: red; } @media (max-width: 768px) { .inner { color: blue; } } .bottom { color: green; }";
-        let opts = ProcessStyleOptions {
-            scope_id: "a4f2eed6",
-            scoped: true,
-            is_module: false,
-            module_name: None,
-            filename: None,
-            sourcemap: false,
-        };
-        let normal = process_style(css, &opts).unwrap();
-        let fast = process_style_fast(css, &opts).unwrap();
-
-        for (label, code) in [("normal", &normal.code), ("fast", &fast.code)] {
-            assert!(
-                code.contains(".top[data-v-a4f2eed6]"),
-                "{}: .top must be scoped. Got: {}",
-                label,
-                code
-            );
-            assert!(
-                code.contains(".inner[data-v-a4f2eed6]"),
-                "{}: .inner inside @media must be scoped. Got: {}",
-                label,
-                code
-            );
-            assert!(
-                code.contains(".bottom[data-v-a4f2eed6]"),
-                "{}: .bottom must be scoped. Got: {}",
-                label,
-                code
-            );
-        }
-    }
-
-    /// Both paths skip @keyframes selectors.
-    #[test]
-    fn test_fast_vs_normal_keyframes() {
-        let css =
-            "@keyframes fade { from { opacity: 1; } to { opacity: 0; } } .box { color: red; }";
-        let opts = ProcessStyleOptions {
-            scope_id: "a4f2eed6",
-            scoped: true,
-            is_module: false,
-            module_name: None,
-            filename: None,
-            sourcemap: false,
-        };
-        let normal = process_style(css, &opts).unwrap();
-        let fast = process_style_fast(css, &opts).unwrap();
-
-        for (label, code) in [("normal", &normal.code), ("fast", &fast.code)] {
-            assert!(
-                code.contains(".box[data-v-a4f2eed6]"),
-                "{}: .box must be scoped. Got: {}",
-                label,
-                code
-            );
-            assert!(
-                !code.contains("from[data-v"),
-                "{}: keyframe 'from' must NOT be scoped. Got: {}",
-                label,
-                code
-            );
-            assert!(
-                !code.contains("to[data-v"),
-                "{}: keyframe 'to' must NOT be scoped. Got: {}",
-                label,
-                code
-            );
-        }
-    }
-
-    /// Both paths handle pseudo-classes correctly.
-    #[test]
-    fn test_fast_vs_normal_pseudo() {
-        let css = ".btn:hover { color: red; } .item:not(.active) { opacity: 0.5; }";
-        let opts = ProcessStyleOptions {
-            scope_id: "a4f2eed6",
-            scoped: true,
-            is_module: false,
-            module_name: None,
-            filename: None,
-            sourcemap: false,
-        };
-        let normal = process_style(css, &opts).unwrap();
-        let fast = process_style_fast(css, &opts).unwrap();
-
-        for (label, code) in [("normal", &normal.code), ("fast", &fast.code)] {
-            assert!(
-                code.contains(".btn[data-v-a4f2eed6]:hover"),
-                "{}: .btn:hover must be scoped before :hover. Got: {}",
-                label,
-                code
-            );
-            assert!(
-                code.contains(".item[data-v-a4f2eed6]:not(.active)"),
-                "{}: .item:not must be scoped before :not. Got: {}",
-                label,
-                code
-            );
-        }
-    }
-
-    /// Both paths handle v-bind() replacement.
-    #[test]
-    fn test_fast_vs_normal_v_bind() {
-        let css = ".box { color: v-bind(primary); font-size: v-bind('theme.size'); }";
-        let opts = ProcessStyleOptions {
-            scope_id: "a4f2eed6",
-            scoped: true,
-            is_module: false,
-            module_name: None,
-            filename: None,
-            sourcemap: false,
-        };
-        let normal = process_style(css, &opts).unwrap();
-        let fast = process_style_fast(css, &opts).unwrap();
-
-        for (label, result) in [("normal", &normal), ("fast", &fast)] {
-            assert!(
-                result.code.contains("var(--a4f2eed6-primary)"),
-                "{}: v-bind(primary) must be replaced. Got: {}",
-                label,
-                result.code
-            );
-            assert!(
-                result.code.contains("[data-v-a4f2eed6]"),
-                "{}: must be scoped. Got: {}",
-                label,
-                result.code
-            );
-            assert_eq!(
-                result.v_bind_vars.len(),
-                2,
-                "{}: must have 2 v-bind vars",
-                label
-            );
-        }
-    }
-
-    /// Both paths handle CSS modules.
-    #[test]
-    fn test_fast_vs_normal_modules() {
-        let css = ".btn { color: red; } .card { display: flex; }";
-        let opts = ProcessStyleOptions {
-            scope_id: "a4f2eed6",
-            scoped: false,
-            is_module: true,
-            module_name: None,
-            filename: None,
-            sourcemap: false,
-        };
-        let normal = process_style(css, &opts).unwrap();
-        let fast = process_style_fast(css, &opts).unwrap();
-
-        for (label, result) in [("normal", &normal), ("fast", &fast)] {
-            assert_eq!(
-                result.module_classes.len(),
-                2,
-                "{}: must have 2 module classes",
-                label
-            );
-            // Content-hash format: {name}_{8-hex-chars}
-            assert!(
-                result.code.contains("btn_") && !result.code.contains(".btn{"),
-                "{}: btn must be hashed. Got: {}",
-                label,
-                result.code
-            );
-            assert!(
-                result.code.contains("card_") && !result.code.contains(".card{"),
-                "{}: card must be hashed. Got: {}",
-                label,
-                result.code
-            );
-        }
-        // Module class mappings should be identical
-        assert_eq!(
-            normal.module_classes, fast.module_classes,
-            "Module class mappings must match"
-        );
-    }
-
-    /// Both paths handle real-world template-heavy.vue CSS.
-    #[test]
-    fn test_fast_vs_normal_template_heavy() {
-        let sfc_source =
-            include_str!("../../../../packages/benchmark/src/fixtures/template-heavy.vue");
-        // Extract CSS from the style block
-        let style_start = sfc_source
-            .find("<style scoped>")
-            .expect("must have <style scoped>");
-        let css_start = style_start + "<style scoped>".len();
-        let css_end = sfc_source[css_start..]
-            .find("</style>")
-            .expect("must have </style>");
-        let css = &sfc_source[css_start..css_start + css_end];
-
-        let opts = ProcessStyleOptions {
-            scope_id: "0d04bfeb",
-            scoped: true,
-            is_module: false,
-            module_name: None,
-            filename: None,
-            sourcemap: false,
-        };
-        let normal = process_style(css, &opts).unwrap();
-        let fast = process_style_fast(css, &opts).unwrap();
-
-        let normal_count = count_scope_attrs(&normal.code, "0d04bfeb");
-        let fast_count = count_scope_attrs(&fast.code, "0d04bfeb");
-
-        eprintln!("Normal scoped attrs: {}", normal_count);
-        eprintln!("Fast scoped attrs: {}", fast_count);
-
-        assert_eq!(
-            normal_count, fast_count,
-            "Both paths must produce the same number of scoped attributes.\nNormal: {}\nFast: {}",
-            normal_count, fast_count
-        );
-
-        // Spot-check key selectors from template-heavy.vue
-        for sel in [
-            ".dashboard[data-v-0d04bfeb]",
-            ".stat-card[data-v-0d04bfeb]",
-            ".badge.success[data-v-0d04bfeb]",
-            ".indicator.online[data-v-0d04bfeb]",
-        ] {
-            assert!(
-                normal.code.contains(sel),
-                "Normal must contain {}. Got:\n{}",
-                sel,
-                normal.code
-            );
-            assert!(
-                fast.code.contains(sel),
-                "Fast must contain {}. Got:\n{}",
-                sel,
-                fast.code
-            );
-        }
     }
 
     /// @ai-generated - Selectors inside @media blocks MUST be scoped.

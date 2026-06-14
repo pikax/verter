@@ -158,7 +158,7 @@ pub fn process_style(css: Buffer, options: ProcessStyleOptions) -> Result<Proces
             .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))
     }))?
     .map(|result| ProcessStyleResult {
-        code: result.code,
+        code: result.code.into_owned(),
         sourceMap: result.source_map,
         moduleClasses: result
             .module_classes

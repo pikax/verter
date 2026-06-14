@@ -6,6 +6,8 @@
 //! - `:slotted(.inner)` → `.inner[__v_slotted__]`
 //! - `:global()` → left as-is (lightningcss handles natively)
 
+use std::borrow::Cow;
+
 use super::types::VBindVar;
 
 /// Marker attribute used to represent `:deep()` after pre-pass.
@@ -17,11 +19,23 @@ pub const DEEP_MARKER: &str = "[__v_deep__]";
 pub const SLOTTED_MARKER: &str = "[__v_slotted__]";
 
 /// Pre-pass result containing transformed CSS and extracted v-bind info.
-pub struct PrepassResult {
-    /// CSS with Vue syntax replaced by valid CSS markers
-    pub css: String,
+///
+/// `css` borrows the input when no Vue syntax was found (zero-copy); it is owned
+/// only when a `v-bind`/`:deep`/`:slotted` rewrite actually occurred.
+///
+/// `has_deep` / `has_slotted` are the structural facts the pre-pass discovered
+/// while scanning: each is `true` iff a `:deep()`/`::v-deep()` or
+/// `:slotted()`/`::v-slotted()` selector was actually rewritten. The owner path
+/// forwards these facts on its result instead of re-scanning the CSS.
+pub struct PrepassResult<'a> {
+    /// CSS with Vue syntax replaced by valid CSS markers — borrowed when untouched.
+    pub css: Cow<'a, str>,
     /// Extracted v-bind() replacements
     pub v_bind_vars: Vec<VBindVar>,
+    /// Whether a `:deep()` / `::v-deep()` selector was found and rewritten.
+    pub has_deep: bool,
+    /// Whether a `:slotted()` / `::v-slotted()` selector was found and rewritten.
+    pub has_slotted: bool,
 }
 
 /// Run the pre-pass on CSS, replacing Vue-specific syntax with valid CSS.
@@ -37,9 +51,16 @@ pub struct PrepassResult {
 ///    false matches inside multi-byte characters.
 /// 3. Segment boundaries (`seg_start`, `i`) are only set at positions that follow
 ///    ASCII pattern matches, which are always valid UTF-8 character boundaries.
-pub fn prepass(css: &str, scope_id: &str) -> PrepassResult {
-    let mut output = String::with_capacity(css.len() + 128);
+pub fn prepass<'a>(css: &'a str, scope_id: &str) -> PrepassResult<'a> {
+    // The output buffer is allocated lazily on the first rewrite. If the loop
+    // completes without touching anything, the input is returned borrowed.
+    let mut output: Option<String> = None;
     let mut v_bind_vars = Vec::new();
+    // Structural facts surfaced to the caller: set when an actual rewrite of the
+    // corresponding selector kind happens (an empty/malformed `:deep()` that
+    // passes through unchanged does not set the flag).
+    let mut has_deep = false;
+    let mut has_slotted = false;
     let bytes = css.as_bytes();
     let len = bytes.len();
     let mut i = 0;
@@ -75,14 +96,18 @@ pub fn prepass(css: &str, scope_id: &str) -> PrepassResult {
             continue;
         }
 
-        // Macro to flush the pending unchanged segment, write a replacement, and advance
+        // Macro to flush the pending unchanged segment, write a replacement,
+        // record the selector-kind fact, and advance.
         macro_rules! try_transform {
-            ($check_len:expr, $pattern:expr, $transform:expr) => {
+            ($check_len:expr, $pattern:expr, $transform:expr, $on_hit:expr) => {
                 if i + $check_len <= len && &bytes[i..i + $check_len] == $pattern {
                     if let Some(result) = $transform {
-                        // Flush unchanged text before this match
-                        output.push_str(&css[seg_start..i]);
-                        output.push_str(&result.0);
+                        // First rewrite allocates; flush unchanged text before this match
+                        let out =
+                            output.get_or_insert_with(|| String::with_capacity(css.len() + 128));
+                        out.push_str(&css[seg_start..i]);
+                        out.push_str(&result.0);
+                        $on_hit;
                         i = result.1;
                         seg_start = i;
                         continue;
@@ -94,8 +119,9 @@ pub fn prepass(css: &str, scope_id: &str) -> PrepassResult {
         // Check for v-bind(
         if i + 7 <= len && &bytes[i..i + 7] == b"v-bind(" {
             if let Some((replacement, new_pos, var)) = transform_v_bind(css, i, scope_id) {
-                output.push_str(&css[seg_start..i]);
-                output.push_str(&replacement);
+                let out = output.get_or_insert_with(|| String::with_capacity(css.len() + 128));
+                out.push_str(&css[seg_start..i]);
+                out.push_str(&replacement);
                 v_bind_vars.push(var);
                 i = new_pos;
                 seg_start = i;
@@ -104,24 +130,44 @@ pub fn prepass(css: &str, scope_id: &str) -> PrepassResult {
         }
 
         // Check for :deep( / ::v-deep(
-        try_transform!(6, b":deep(", transform_deep(css, i));
-        try_transform!(9, b"::v-deep(", transform_deep(css, i));
+        try_transform!(6, b":deep(", transform_deep(css, i), has_deep = true);
+        try_transform!(9, b"::v-deep(", transform_deep(css, i), has_deep = true);
 
         // Check for :slotted( / ::v-slotted(
-        try_transform!(9, b":slotted(", transform_slotted(css, i));
-        try_transform!(12, b"::v-slotted(", transform_slotted(css, i));
+        try_transform!(
+            9,
+            b":slotted(",
+            transform_slotted(css, i),
+            has_slotted = true
+        );
+        try_transform!(
+            12,
+            b"::v-slotted(",
+            transform_slotted(css, i),
+            has_slotted = true
+        );
 
         i += 1;
     }
 
-    // Flush any remaining unchanged segment
-    if seg_start < len {
-        output.push_str(&css[seg_start..]);
-    }
-
-    PrepassResult {
-        css: output,
-        v_bind_vars,
+    match output {
+        // At least one rewrite happened: flush the trailing unchanged segment.
+        Some(mut out) => {
+            out.push_str(&css[seg_start..]);
+            PrepassResult {
+                css: Cow::Owned(out),
+                v_bind_vars,
+                has_deep,
+                has_slotted,
+            }
+        }
+        // Nothing matched: borrow the input verbatim (zero-copy passthrough).
+        None => PrepassResult {
+            css: Cow::Borrowed(css),
+            v_bind_vars,
+            has_deep,
+            has_slotted,
+        },
     }
 }
 
@@ -329,7 +375,7 @@ mod tests {
     #[test]
     fn test_v_bind_simple() {
         let result = prepass(".box { color: v-bind(color); }", "a4f2eed6");
-        assert_eq!(result.css, ".box { color: var(--a4f2eed6-color); }");
+        assert_eq!(&*result.css, ".box { color: var(--a4f2eed6-color); }");
         assert_eq!(result.v_bind_vars.len(), 1);
         assert_eq!(result.v_bind_vars[0].expression, "color");
         assert_eq!(result.v_bind_vars[0].var_name, "--a4f2eed6-color");
@@ -338,7 +384,7 @@ mod tests {
     #[test]
     fn test_v_bind_quoted() {
         let result = prepass(".box { color: v-bind('theme.color'); }", "a4f2eed6");
-        assert_eq!(result.css, ".box { color: var(--a4f2eed6-theme_color); }");
+        assert_eq!(&*result.css, ".box { color: var(--a4f2eed6-theme_color); }");
         assert_eq!(result.v_bind_vars[0].expression, "theme.color");
     }
 
@@ -351,38 +397,38 @@ mod tests {
     #[test]
     fn test_deep_selector() {
         let result = prepass(":deep(.inner) { color: red; }", "a4f2eed6");
-        assert_eq!(result.css, "[__v_deep__] .inner { color: red; }");
+        assert_eq!(&*result.css, "[__v_deep__] .inner { color: red; }");
     }
 
     #[test]
     fn test_deep_with_prefix() {
         let result = prepass(".parent :deep(.inner) { color: red; }", "a4f2eed6");
-        assert_eq!(result.css, ".parent [__v_deep__] .inner { color: red; }");
+        assert_eq!(&*result.css, ".parent [__v_deep__] .inner { color: red; }");
     }
 
     #[test]
     fn test_v_deep_legacy() {
         let result = prepass("::v-deep(.inner) { color: red; }", "a4f2eed6");
-        assert_eq!(result.css, "[__v_deep__] .inner { color: red; }");
+        assert_eq!(&*result.css, "[__v_deep__] .inner { color: red; }");
     }
 
     #[test]
     fn test_slotted_selector() {
         let result = prepass(":slotted(.slot) { color: red; }", "a4f2eed6");
-        assert_eq!(result.css, ".slot[__v_slotted__] { color: red; }");
+        assert_eq!(&*result.css, ".slot[__v_slotted__] { color: red; }");
     }
 
     #[test]
     fn test_v_slotted_legacy() {
         let result = prepass("::v-slotted(.slot) { color: red; }", "a4f2eed6");
-        assert_eq!(result.css, ".slot[__v_slotted__] { color: red; }");
+        assert_eq!(&*result.css, ".slot[__v_slotted__] { color: red; }");
     }
 
     #[test]
     fn test_global_passthrough() {
         // :global() should be left as-is for lightningcss to handle
         let result = prepass(":global(.reset) { margin: 0; }", "a4f2eed6");
-        assert_eq!(result.css, ":global(.reset) { margin: 0; }");
+        assert_eq!(&*result.css, ":global(.reset) { margin: 0; }");
     }
 
     #[test]
@@ -414,7 +460,7 @@ mod tests {
     fn test_mixed_transforms() {
         let result = prepass(":deep(.inner) { color: v-bind(color); }", "a4f2eed6");
         assert_eq!(
-            result.css,
+            &*result.css,
             "[__v_deep__] .inner { color: var(--a4f2eed6-color); }"
         );
         assert_eq!(result.v_bind_vars.len(), 1);
@@ -462,38 +508,41 @@ mod tests {
     #[test]
     fn test_v_bind_optional_chaining() {
         let result = prepass(".box { color: v-bind(props?.color); }", "a4f2eed6");
-        assert_eq!(result.css, ".box { color: var(--a4f2eed6-props__color); }");
+        assert_eq!(
+            &*result.css,
+            ".box { color: var(--a4f2eed6-props__color); }"
+        );
         assert_eq!(result.v_bind_vars[0].expression, "props?.color");
     }
 
     #[test]
     fn test_v_bind_array_access() {
         let result = prepass(".box { color: v-bind(arr[0]); }", "a4f2eed6");
-        assert_eq!(result.css, ".box { color: var(--a4f2eed6-arr_0_); }");
+        assert_eq!(&*result.css, ".box { color: var(--a4f2eed6-arr_0_); }");
     }
 
     #[test]
     fn test_v_bind_arithmetic() {
         let result = prepass(".box { width: v-bind(a + b); }", "a4f2eed6");
-        assert_eq!(result.css, ".box { width: var(--a4f2eed6-a___b); }");
+        assert_eq!(&*result.css, ".box { width: var(--a4f2eed6-a___b); }");
     }
 
     #[test]
     fn test_v_bind_function_call() {
         let result = prepass(".box { color: v-bind(fn(x)); }", "a4f2eed6");
-        assert_eq!(result.css, ".box { color: var(--a4f2eed6-fn_x_); }");
+        assert_eq!(&*result.css, ".box { color: var(--a4f2eed6-fn_x_); }");
     }
 
     #[test]
     fn test_v_bind_dollar_sign() {
         let result = prepass(".box { color: v-bind($color); }", "a4f2eed6");
-        assert_eq!(result.css, ".box { color: var(--a4f2eed6-_color); }");
+        assert_eq!(&*result.css, ".box { color: var(--a4f2eed6-_color); }");
     }
 
     #[test]
     fn test_v_bind_hyphen_preserved() {
         let result = prepass(".box { color: v-bind(my-color); }", "a4f2eed6");
-        assert_eq!(result.css, ".box { color: var(--a4f2eed6-my-color); }");
+        assert_eq!(&*result.css, ".box { color: var(--a4f2eed6-my-color); }");
     }
 
     #[test]
@@ -509,7 +558,7 @@ mod tests {
         // WS 5.1: :deep(.a, .b) should expand each selector separately
         let result = prepass(":deep(.a, .b) { color: red; }", "a4f2eed6");
         assert_eq!(
-            result.css,
+            &*result.css,
             "[__v_deep__] .a, [__v_deep__] .b { color: red; }"
         );
     }
@@ -519,7 +568,7 @@ mod tests {
         // Comma inside :not() should NOT split
         let result = prepass(":deep(:not(.a), .b) { color: red; }", "a4f2eed6");
         assert_eq!(
-            result.css,
+            &*result.css,
             "[__v_deep__] :not(.a), [__v_deep__] .b { color: red; }"
         );
     }
