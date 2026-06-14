@@ -378,6 +378,39 @@ async fn publish_merged_diagnostics(deps: &SyncCoordinatorDeps, canonical_id: &s
         )
     };
 
+    // D-ae(d) / D-ay: a `.svelte` file whose owner workspace has NO `svelte`
+    // install fails CLOSED (module-not-found on the shim's `svelte` import) —
+    // surface the typed `svelte-package-missing` diagnostic on the source file
+    // so the failure is explained, not just a raw TS module-not-found. The
+    // owner root resolves through the published resolver snapshot.
+    if crate::server::carrier_language_for(canonical_id).is_some_and(|l| l.is_svelte()) {
+        let owner_root = {
+            let ws = deps.vfs_workspace.read();
+            ws.as_ref()
+                .and_then(|ws| ws.load_published())
+                .and_then(|p| {
+                    p.snapshot
+                        .resolver
+                        .owner_for_file(canonical_id)
+                        .map(|o| o.root.clone())
+                })
+        };
+        if let Some(owner_root) = owner_root {
+            let source = deps
+                .documents
+                .host
+                .get_source(canonical_id)
+                .unwrap_or_default();
+            if let Some(diag) = crate::svelte_assets::svelte_package_missing_diagnostic(
+                canonical_id,
+                &owner_root,
+                &source,
+            ) {
+                verter_diags.push(diag);
+            }
+        }
+    }
+
     // When a TypeProvider is active, suppress component usage diagnostics
     // (unknown-prop, unknown-model) since the TypeProvider validates props
     // via the generated TSX and is the source of truth.

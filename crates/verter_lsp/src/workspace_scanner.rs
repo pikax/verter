@@ -126,8 +126,9 @@ pub fn collect_vue_paths(
                 !is_excluded_dir(name)
             },
             &|file: &str| {
-                let name = file.rsplit('/').next().unwrap_or(file);
-                name.ends_with(".vue")
+                // Any framework CARRIER file (`.vue` / `.svelte`), from the
+                // registry carrier-extension set — not a `.vue`-literal.
+                verter_workspace::path_is_carrier(file)
             },
         )
         .unwrap_or_default()
@@ -1468,14 +1469,32 @@ import Child from '@/Child.vue'
             .iter()
             .position(|call| matches!(call, MockCall::ConfigurePaths { .. }))
             .expect("TSGO scanner sync should configure owner paths from tsconfig");
-        assert!(
-            matches!(
-                &calls[configure_index],
-                MockCall::ConfigurePaths { base_url, paths }
-                    if base_url == &expected_base_url && paths == &expected_paths
-            ),
-            "unexpected configure_paths payload, calls={calls:?}"
-        );
+        // The configured payload carries the tsconfig's own `paths` rows
+        // (base_url + every expected row PRESENT), PLUS the always-injected
+        // Svelte IDE-projection shim rows (`@verter/svelte-jsx/*`) — assert the
+        // expected tsconfig rows survive injection (subset), not byte-equality.
+        match &calls[configure_index] {
+            MockCall::ConfigurePaths { base_url, paths } => {
+                assert_eq!(base_url, &expected_base_url, "base_url, calls={calls:?}");
+                let expected_obj = expected_paths
+                    .as_object()
+                    .expect("expected paths is an object");
+                let actual_obj = paths.as_object().expect("actual paths is an object");
+                for (k, v) in expected_obj {
+                    assert_eq!(
+                        actual_obj.get(k),
+                        Some(v),
+                        "tsconfig path row `{k}` must survive svelte injection, calls={calls:?}"
+                    );
+                }
+                // The svelte-jsx shim rows are always injected.
+                assert!(
+                    actual_obj.contains_key("@verter/svelte-jsx/jsx-runtime"),
+                    "svelte-jsx shim row injected, calls={calls:?}"
+                );
+            }
+            other => panic!("expected ConfigurePaths, got {other:?}"),
+        }
         let first_open_index = calls
             .iter()
             .position(|call| matches!(call, MockCall::OpenFile { .. }))

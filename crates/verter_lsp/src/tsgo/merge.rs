@@ -768,9 +768,7 @@ pub fn merge_definitions_with_barrel_resolver(
         let mut locations: Vec<Location> = type_defs
             .into_iter()
             .filter_map(|loc| {
-                if !(loc.path.ends_with(".vue.tsx")
-                    || loc.path.ends_with(".vue.jsx")
-                    || loc.path.ends_with(".vue"))
+                if !(is_carrier_ide_path(&loc.path) || verter_workspace::path_is_carrier(&loc.path))
                 {
                     if let Some(resolver) = barrel_resolver {
                         if let Some(location) = resolver(&loc.path, loc.start, loc.end) {
@@ -780,12 +778,13 @@ pub fn merge_definitions_with_barrel_resolver(
                 }
 
                 // TypeProvider returns paths; convert to URIs
-                // For .vue files, strip virtual suffixes (.tsx or .d.ts)
+                // For carrier files, strip virtual suffixes (.tsx or .d.ts)
                 let file_path = normalize_vue_path(&loc.path, vue_source_exists);
                 let uri = path_to_uri(file_path)?;
-                // Map TSX byte offsets back to Vue positions for .vue.tsx targets
-                // (.vue.d.ts targets use Range::default — no position mapping available)
-                let range = if loc.path.ends_with(".vue.tsx") || loc.path.ends_with(".vue.jsx") {
+                // Map TSX byte offsets back to carrier positions for the IDE
+                // virtual file (`{carrier}.d.ts` targets use Range::default —
+                // no position mapping available)
+                let range = if is_carrier_ide_path(&loc.path) {
                     resolve_vue_tsx_range(
                         &loc.path,
                         loc.start,
@@ -810,12 +809,14 @@ pub fn merge_definitions_with_barrel_resolver(
         let mut seen = std::collections::HashSet::new();
         locations.retain(|loc| seen.insert(loc.uri.clone()));
 
-        // Prefer non-.vue definitions over .vue re-export sites.
+        // Prefer non-carrier definitions over carrier re-export sites.
         // When CTRL+CLICKing a library symbol (e.g., `onClickOutside` from @vueuse/core),
-        // TSGO may return both the real definition (.d.mts) and .vue consumer files.
-        let has_non_vue = locations.iter().any(|l| !l.uri.as_str().ends_with(".vue"));
-        if has_non_vue {
-            locations.retain(|l| !l.uri.as_str().ends_with(".vue"));
+        // TSGO may return both the real definition (.d.mts) and carrier consumer files.
+        let has_non_carrier = locations
+            .iter()
+            .any(|l| !verter_workspace::path_is_carrier(l.uri.as_str()));
+        if has_non_carrier {
+            locations.retain(|l| !verter_workspace::path_is_carrier(l.uri.as_str()));
         }
 
         return Some(if locations.len() == 1 {
@@ -840,21 +841,58 @@ pub fn merge_definitions_with_barrel_resolver(
 /// not exist in the host, the path is left unchanged. The `.vue.d.ts`
 /// case (from node_modules) has no collision risk and skips the check.
 fn normalize_vue_path<'a>(path: &'a str, vue_source_exists: &dyn Fn(&str) -> bool) -> &'a str {
-    if path.ends_with(".vue.tsx") || path.ends_with(".vue.jsx") {
+    // The IDE virtual file is `{carrier}.tsx`/`.jsx`; stripping the trailing
+    // `.tsx`/`.jsx` yields a carrier path (`Foo.vue.tsx` → `Foo.vue`,
+    // `Bar.svelte.tsx` → `Bar.svelte`). The carrier-extension set is the
+    // registry's (`path_is_carrier`), not a `.vue` literal.
+    if (path.ends_with(".tsx") || path.ends_with(".jsx"))
+        && verter_workspace::path_is_carrier(&path[..path.len() - 4])
+    {
         let candidate = &path[..path.len() - 4]; // strip .tsx/.jsx
         if vue_source_exists(candidate) {
             return candidate;
         }
-    } else if path.ends_with(".vue.ts") {
+    } else if path.ends_with(".d.ts") && verter_workspace::path_is_carrier(&path[..path.len() - 5])
+    {
+        // The `{carrier}.d.ts` accepted-spelling alias — from node_modules, no
+        // collision risk.
+        return &path[..path.len() - 5];
+    } else if path.ends_with(".ts") && verter_workspace::path_is_carrier(&path[..path.len() - 3]) {
         let candidate = &path[..path.len() - 3]; // strip .ts
         if vue_source_exists(candidate) {
             return candidate;
         }
-    } else if path.ends_with(".vue.d.ts") {
-        // .d.ts is from node_modules — no collision risk
-        return path.trim_end_matches(".d.ts");
     }
     path
+}
+
+/// Whether `path` is a carrier IDE virtual file (`{carrier}.tsx` / `.jsx`) —
+/// the TSGO IDE output that maps back to a carrier source through the source
+/// map. Generalized to the registry carrier-extension set (Vue + Svelte).
+fn is_carrier_ide_path(path: &str) -> bool {
+    (path.ends_with(".tsx") || path.ends_with(".jsx"))
+        && verter_workspace::path_is_carrier(&path[..path.len() - 4])
+}
+
+/// Whether `path` is a carrier API / DTS virtual file (`{carrier}.ts` /
+/// `{carrier}.d.ts`) — the declaration surface (default-range, no position map).
+///
+/// CRITICAL (D-bg): a `{carrier}.ts` form is AMBIGUOUS for Svelte — appending
+/// `.ts` to `Foo.svelte` is the api virtual file, but `store.svelte.ts` is also
+/// a REAL rune module (out-of-scope v1, classifies as plain Script). We
+/// disambiguate by the backing carrier source: a `{carrier}.ts` is the api
+/// virtual file ONLY when the backing `{carrier}` source EXISTS. A real rune
+/// module (no backing source) is NOT a carrier virtual file. The
+/// `{carrier}.d.ts` accepted-spelling alias (from node_modules) has no such
+/// collision and skips the check — matching `normalize_vue_path`'s guard.
+fn is_carrier_api_or_dts_path(path: &str, vue_source_exists: &dyn Fn(&str) -> bool) -> bool {
+    if path.ends_with(".d.ts") && verter_workspace::path_is_carrier(&path[..path.len() - 5]) {
+        return true;
+    }
+    if path.ends_with(".ts") && verter_workspace::path_is_carrier(&path[..path.len() - 3]) {
+        return vue_source_exists(&path[..path.len() - 3]);
+    }
+    false
 }
 
 /// Like `normalize_vue_path` but returns an owned String.
@@ -897,7 +935,7 @@ pub fn merge_references(
 
     for loc in &type_refs {
         // For .vue.tsx/.vue.jsx targets, map back to .vue positions
-        if loc.path.ends_with(".vue.tsx") || loc.path.ends_with(".vue.jsx") {
+        if is_carrier_ide_path(&loc.path) {
             let range = resolve_vue_tsx_range(
                 &loc.path,
                 loc.start,
@@ -917,7 +955,7 @@ pub fn merge_references(
                     result.push(Location { uri, range });
                 }
             }
-        } else if loc.path.ends_with(".vue.d.ts") || loc.path.ends_with(".vue.ts") {
+        } else if is_carrier_api_or_dts_path(&loc.path, vue_source_exists) {
             // DTS declarations (.vue.d.ts or .vue.ts): strip suffix, use default range
             let vue_path = normalize_vue_path(&loc.path, vue_source_exists);
             if let Some(uri) = path_to_uri(vue_path) {
@@ -973,7 +1011,7 @@ pub fn merge_rename_locations(
         .get_or_insert_with(std::collections::HashMap::new);
 
     for loc in &type_locations {
-        if loc.path.ends_with(".vue.tsx") || loc.path.ends_with(".vue.jsx") {
+        if is_carrier_ide_path(&loc.path) {
             let range = resolve_vue_tsx_range(
                 &loc.path,
                 loc.start,
@@ -994,7 +1032,7 @@ pub fn merge_rename_locations(
                     });
                 }
             }
-        } else if loc.path.ends_with(".vue.d.ts") || loc.path.ends_with(".vue.ts") {
+        } else if is_carrier_api_or_dts_path(&loc.path, vue_source_exists) {
             let vue_path = normalize_vue_path(&loc.path, vue_source_exists);
             if let Some(uri) = path_to_uri(vue_path) {
                 let edits = changes.entry(uri).or_default();
@@ -1126,7 +1164,7 @@ pub fn merge_code_actions(
                 std::collections::HashMap::new();
 
             for edit in action.edits {
-                if edit.path.ends_with(".vue.tsx") || edit.path.ends_with(".vue.jsx") {
+                if is_carrier_ide_path(&edit.path) {
                     if let Some(range) = tsx_range_to_vue_range(
                         edit.start,
                         edit.end,
@@ -1142,7 +1180,7 @@ pub fn merge_code_actions(
                             });
                         }
                     }
-                } else if edit.path.ends_with(".vue.d.ts") || edit.path.ends_with(".vue.ts") {
+                } else if is_carrier_api_or_dts_path(&edit.path, vue_source_exists) {
                     let vue_path = normalize_vue_path(&edit.path, vue_source_exists);
                     if let Some(uri) = path_to_uri(vue_path) {
                         changes.entry(uri).or_default().push(TextEdit {
@@ -2462,6 +2500,53 @@ mod tests {
         assert_eq!(
             normalize_vue_path("/src/App.vue.jsx", &vue_exists),
             "/src/App.vue"
+        );
+    }
+
+    #[test]
+    fn normalize_carrier_path_strips_svelte_virtual_suffixes() {
+        // Generalized to the carrier-extension set: a `.svelte` IDE/api/dts
+        // virtual file normalizes back to the `.svelte` source.
+        assert_eq!(
+            normalize_vue_path("/src/Comp.svelte.tsx", &vue_exists),
+            "/src/Comp.svelte"
+        );
+        assert_eq!(
+            normalize_vue_path("/src/Comp.svelte.ts", &vue_exists),
+            "/src/Comp.svelte"
+        );
+        assert_eq!(
+            normalize_vue_path("/node_modules/lib/C.svelte.d.ts", &vue_exists),
+            "/node_modules/lib/C.svelte"
+        );
+        assert!(is_carrier_ide_path("/src/Comp.svelte.tsx"));
+        // `Comp.svelte.ts` is the api virtual file ONLY when `Comp.svelte`
+        // EXISTS (D-bg disambiguation against a real `.svelte.ts` rune module).
+        assert!(is_carrier_api_or_dts_path(
+            "/src/Comp.svelte.ts",
+            &vue_exists
+        ));
+        // A plain `.ts`/`.tsx` is NOT a carrier virtual file (negative).
+        assert!(!is_carrier_ide_path("/src/plain.tsx"));
+        assert_eq!(
+            normalize_vue_path("/src/plain.ts", &vue_exists),
+            "/src/plain.ts"
+        );
+    }
+
+    #[test]
+    fn real_svelte_rune_module_is_not_a_carrier_virtual_file() {
+        // D-bg: `store.svelte.ts` with NO backing `store.svelte` is a REAL rune
+        // module (out-of-scope v1, plain Script) — NOT a carrier api virtual
+        // file. The existence guard disambiguates it from `Foo.svelte` + `.ts`.
+        assert!(!is_carrier_api_or_dts_path(
+            "/src/store.svelte.ts",
+            &vue_missing
+        ));
+        // And it is NOT normalized to a sibling `.svelte` (the strip is guarded).
+        assert_eq!(
+            normalize_vue_path("/src/store.svelte.ts", &vue_missing),
+            "/src/store.svelte.ts"
         );
     }
 

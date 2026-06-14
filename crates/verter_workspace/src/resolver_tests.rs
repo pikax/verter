@@ -574,6 +574,40 @@ fn provider_ide_id_appends_tsx_to_vue() {
 }
 
 #[test]
+fn provider_paths_derive_both_virtual_files_for_svelte_carriers() {
+    // The carrier-extension generalization: a `.svelte` file receives BOTH the
+    // api virtual file (`.svelte.ts`) and the IDE virtual file (`.svelte.tsx`),
+    // derived from the registry carrier-extension set — not a `.vue`-literal.
+    let resolver = ProjectResolver::new(vec![project(
+        "/workspace",
+        "/workspace",
+        Some("/workspace/tsconfig.app.json"),
+        ProjectMembership::MatchAll,
+    )]);
+
+    let api = resolver
+        .provider_id_for_source("/workspace/src/Comp.svelte")
+        .expect("svelte files receive an api provider path");
+    assert_eq!(api, "/workspace/src/Comp.svelte.ts");
+
+    // A `.svelte` carrier always projects `.tsx` (is_jsx = false → Fixed).
+    let ide = resolver
+        .provider_ide_id_for_source("/workspace/src/Comp.svelte", false)
+        .expect("svelte IDE files receive a provider path");
+    assert_eq!(ide, "/workspace/src/Comp.svelte.tsx");
+
+    // Both round-trip back to the `.svelte` source.
+    assert_eq!(
+        resolver.source_id_from_provider_id(&api).as_deref(),
+        Some("/workspace/src/Comp.svelte")
+    );
+    assert_eq!(
+        resolver.source_id_from_provider_id(&ide).as_deref(),
+        Some("/workspace/src/Comp.svelte")
+    );
+}
+
+#[test]
 fn provider_paths_round_trip_back_to_source_ids() {
     let resolver = ProjectResolver::new(vec![project(
         "/workspace",

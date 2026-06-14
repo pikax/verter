@@ -24,6 +24,7 @@ export interface VirtualFileIdeJsxConditional {
 export type VirtualFileIdePolicy = VirtualFileIdeFixed | VirtualFileIdeJsxConditional;
 
 export interface VirtualFileNaming {
+  carrierExtension: string | null;
   ide: VirtualFileIdePolicy | null;
   apiSuffix: string | null;
   testingApiSuffix: string | null;
@@ -32,9 +33,17 @@ export interface VirtualFileNaming {
 
 export const VIRTUAL_FILE_NAMING: Readonly<Record<string, VirtualFileNaming>> = {
   FRAMEWORK_TAG_VUE: {
+    carrierExtension: ".vue",
     ide: { kind: "jsxConditional", jsx: ".jsx", nonJsx: ".tsx" },
     apiSuffix: ".ts",
     testingApiSuffix: ".__verter_test.ts",
+    sidecarSuffixes: [],
+  },
+  FRAMEWORK_TAG_SVELTE: {
+    carrierExtension: ".svelte",
+    ide: { kind: "fixed", suffix: ".tsx" },
+    apiSuffix: ".ts",
+    testingApiSuffix: null,
     sidecarSuffixes: [],
   },
 };

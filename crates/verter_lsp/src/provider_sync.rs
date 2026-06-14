@@ -367,7 +367,11 @@ pub fn open_unresolved_vue_state(
     source_id: &str,
     is_jsx: bool,
 ) -> ProviderSyncState {
-    let desired_ide_path = format!("{source_id}{}", if is_jsx { ".jsx" } else { ".tsx" });
+    // Route the IDE-path naming through the shared column-backed derivation
+    // (D-x) rather than re-deriving the `{src}.tsx`/`.jsx` formula locally — the
+    // single naming authority, so a `.svelte` carrier projects `.tsx` exactly
+    // as the column dictates.
+    let desired_ide_path = verter_workspace::carrier_ide_provider_path(source_id, is_jsx);
     // Syncability hint: the desired path is already live ONLY when the prior IDE
     // path is the SAME desired-extension artifact AND was genuinely loaded. The
     // caller reads this to choose `sync_tsx` (update) vs `open_tsx` (first open).

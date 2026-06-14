@@ -1,0 +1,10 @@
+{
+  "name": "svelte",
+  "version": "5.56.3",
+  "types": "index.d.ts",
+  "exports": {
+    ".": { "types": "./index.d.ts" },
+    "./elements": { "types": "./elements.d.ts" },
+    "./attachments": { "types": "./attachments.d.ts" }
+  }
+}

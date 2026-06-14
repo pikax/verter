@@ -519,6 +519,18 @@ pub(crate) async fn configure_provider_paths_for_source(
         return;
     };
 
+    // Re-inject the Svelte IDE-projection assets (D-av / D-ay) on EVERY
+    // provider path-config — a subsequent owned sync sends the supplied `paths`
+    // verbatim, so without re-injection it would OVERWRITE the startup-injected
+    // `@verter/svelte-jsx` + `svelte/*` rows and strand `.svelte.tsx` module
+    // resolution. The owner project root is the per-project resolution anchor.
+    let owner_root = snapshot
+        .resolver
+        .owner_for_file(canonical_id)
+        .map(|o| o.root.clone())
+        .unwrap_or_default();
+    let paths = crate::svelte_assets::inject_svelte_paths(paths, &owner_root);
+
     let result = if background {
         sync.configure_paths_background(&base_url, paths).await
     } else {

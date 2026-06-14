@@ -348,6 +348,12 @@ pub struct SvelteBlockClause {
     /// The clause's expression/binding span, if any (the `{:else if expr}`
     /// condition, the `{:then v}` binding).
     pub expr: Option<Span>,
+    /// The clause-tag head span — the whole `{:else}` / `{:else if d}` /
+    /// `{:then v}` / `{:catch e}` head INCLUDING the braces. The projector
+    /// OVERWRITES this span directly (no source reverse-scan), so an empty
+    /// clause (`{:else}` / `{:then}` / `{:catch}` with no expr and no children)
+    /// is still rewritten and never leaks raw `{:…}` into the projected TSX.
+    pub tag_span: Span,
     /// The clause's children.
     pub children: Vec<SvelteNode>,
 }

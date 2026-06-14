@@ -130,7 +130,9 @@ impl DocumentRegistry {
         let source: Arc<str> = Arc::from(params.text.as_str());
 
         let file_language = self.document_file_language(&params.language_id, &canonical_id);
-        let is_vue = file_language.is_vue();
+        // Every framework CARRIER (Vue OR Svelte) projects an IDE TSX file +
+        // source map — the compile + position-mapper paths are carrier-general.
+        let is_carrier = file_language.is_framework_carrier();
 
         let result = self.host.upsert(UpsertRequest {
             canonical_id: Some(canonical_id.clone()),
@@ -142,7 +144,7 @@ impl DocumentRegistry {
 
         // Trigger compilation to populate TSX cache (upsert only parses).
         // ensure_compiled() compiles lazily and caches TSX + source map.
-        if is_vue {
+        if is_carrier {
             let _ = self
                 .host
                 .ensure_compiled(&canonical_id, &self.tsx_profile.read());
@@ -152,7 +154,7 @@ impl DocumentRegistry {
         // Always build on did_open — even if the host reports `changed: false`
         // (e.g., because scan_workspace already loaded the same content), we still
         // need the mapper for hover/definition/diagnostics.
-        let position_mapper = if is_vue {
+        let position_mapper = if is_carrier {
             self.host
                 .get_ide(&canonical_id, &self.tsx_profile.read())
                 .and_then(|tsx| PositionMapper::from_json(&tsx.source_map?).ok())
@@ -206,7 +208,9 @@ impl DocumentRegistry {
             .map(|d| d.language_id.clone())
             .unwrap_or_default();
         let file_language = self.document_file_language(&stored_language_id, &canonical_id);
-        let is_vue = file_language.is_vue();
+        // Carrier-general: every framework carrier (Vue OR Svelte) re-compiles
+        // its IDE TSX on change.
+        let is_carrier = file_language.is_framework_carrier();
 
         let upsert_start = std::time::Instant::now();
         let result = self.host.upsert(UpsertRequest {
@@ -228,8 +232,8 @@ impl DocumentRegistry {
         #[cfg(not(target_arch = "wasm32"))]
         self.host.notify_upsert(&canonical_id, source.clone());
 
-        // Trigger re-compilation for Vue SFCs
-        if is_vue {
+        // Trigger re-compilation for framework carriers (Vue / Svelte SFCs)
+        if is_carrier {
             let compile_start = std::time::Instant::now();
             let _ = self
                 .host
@@ -405,13 +409,16 @@ impl DocumentRegistry {
         }
 
         // Slow path: compile_slots were cleared (e.g., dependency invalidation).
-        // Lazily recompile to restore IDE output.
-        let is_vue = self
+        // Lazily recompile to restore IDE output. Carrier-general (Vue / Svelte).
+        let is_carrier = self
             .documents
             .get(uri.as_str())
-            .map(|d| d.language_id == "vue")
+            .map(|d| {
+                self.document_file_language(&d.language_id, &canonical_id)
+                    .is_framework_carrier()
+            })
             .unwrap_or(false);
-        if !is_vue {
+        if !is_carrier {
             return None;
         }
 
@@ -438,15 +445,19 @@ impl DocumentRegistry {
     /// that may have changed the TSX output. Without this, hover would query correct
     /// TSX with stale position offsets.
     pub fn recompile_and_refresh_mapper(&self, uri: &Uri) -> Option<IdeResponse> {
-        let is_vue = self
+        let canonical_id = self.get_canonical_id(uri)?;
+        // Carrier-general (Vue / Svelte) — every carrier projects an IDE TSX.
+        let is_carrier = self
             .documents
             .get(uri.as_str())
-            .map(|d| d.language_id == "vue")
+            .map(|d| {
+                self.document_file_language(&d.language_id, &canonical_id)
+                    .is_framework_carrier()
+            })
             .unwrap_or(false);
-        if !is_vue {
+        if !is_carrier {
             return None;
         }
-        let canonical_id = self.get_canonical_id(uri)?;
         let profile = self.tsx_profile.read().clone();
         self.host.ensure_compiled(&canonical_id, &profile).ok()?;
         let resp = self.host.get_ide(&canonical_id, &profile)?;
@@ -974,6 +985,36 @@ mod tests {
         assert!(svelte.is_framework_carrier());
         assert!(!svelte.is_vue());
         assert_ne!(svelte, FileLanguage::script_ts());
+    }
+
+    #[test]
+    fn did_open_svelte_builds_an_ide_position_mapper() {
+        // The carrier-general compile gate (is_framework_carrier, not is_vue)
+        // must reach the Svelte IDE projection on did_open — the source map
+        // yields a position mapper. A `.svelte` file with the Vue-only gate
+        // would build NO mapper (the bug this pins).
+        let host = Arc::new(verter_session::VerterHost::new_standalone(
+            verter_session::HostConfig::default(),
+        ));
+        let registry = DocumentRegistry::new(Arc::clone(&host));
+
+        let item = TextDocumentItem {
+            uri: "file:///x/Comp.svelte".parse().expect("uri"),
+            language_id: "svelte".to_string(),
+            version: 1,
+            text: "<script lang=\"ts\">let count = 0;</script>\n<div>{count}</div>".to_string(),
+        };
+        let _ = registry.did_open(&item);
+
+        let state = registry
+            .documents
+            .get("file:///x/Comp.svelte")
+            .expect("the .svelte document is registered");
+        assert!(
+            state.position_mapper.is_some(),
+            "did_open on a .svelte carrier must build an IDE position mapper \
+             (the carrier-general compile gate reaches the Svelte projection)"
+        );
     }
 
     /// get_ide() fast path should not overwrite an existing position mapper.

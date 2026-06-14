@@ -10,6 +10,7 @@ pub mod project_resolver;
 pub mod provider_sync;
 pub mod server;
 pub mod statistics;
+pub mod svelte_assets;
 pub mod sync_coordinator;
 pub mod tsgo;
 pub mod tsserver;

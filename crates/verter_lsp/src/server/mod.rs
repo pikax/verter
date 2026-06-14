@@ -115,7 +115,7 @@ pub use self::protocol_types::*;
 mod server_utils;
 use self::server_utils::*;
 pub(crate) use self::server_utils::{
-    compute_verter_diagnostics_for_with_views, prepare_non_vue_provider_sync,
+    carrier_language_for, compute_verter_diagnostics_for_with_views, prepare_non_vue_provider_sync,
 };
 
 #[path = "../background_drain.rs"]

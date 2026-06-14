@@ -243,6 +243,14 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
                     tsconfig_path,
                     base_url,
                 );
+                // Inject the Svelte IDE-projection assets (D-av / D-ay) HERE —
+                // the COMMON per-owner-project path-config call site, so EVERY
+                // provider (extension / TSGO / tsserver) receives the
+                // @verter/svelte-jsx shim rows + the transitive `svelte` rows
+                // resolved against THIS OWNER PROJECT's install (absent → fail
+                // closed). The owner project root is the per-project resolution
+                // anchor for multi-`svelte` monorepos.
+                let paths = crate::svelte_assets::inject_svelte_paths(paths, project_root);
                 if let Err(e) = tp.configure_paths(&base_url, paths).await {
                     tracing::warn!("failed to configure tsserver paths: {e}");
                 }

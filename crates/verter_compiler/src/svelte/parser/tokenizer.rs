@@ -813,10 +813,11 @@ impl<'a> SvelteParser<'a> {
         loop {
             match self.peek_clause_keyword() {
                 Some(kw) if kw == "else" => {
-                    let (clause_kind, expr, body) = self.parse_else_clause();
+                    let (clause_kind, expr, tag_span, body) = self.parse_else_clause();
                     clauses.push(SvelteBlockClause {
                         kind: clause_kind,
                         expr,
+                        tag_span,
                         children: body,
                     });
                     if matches!(clause_kind, SvelteClauseKind::Else) {
@@ -848,10 +849,11 @@ impl<'a> SvelteParser<'a> {
         let children = self.parse_block_children(&["else", "/each"]);
         let mut clauses = Vec::new();
         if matches!(self.peek_clause_keyword().as_deref(), Some("else")) {
-            let (_kind, _expr, body) = self.parse_else_clause();
+            let (_kind, _expr, tag_span, body) = self.parse_else_clause();
             clauses.push(SvelteBlockClause {
                 kind: SvelteClauseKind::Else,
                 expr: None,
+                tag_span,
                 children: body,
             });
         }
@@ -883,20 +885,22 @@ impl<'a> SvelteParser<'a> {
         loop {
             match self.peek_clause_keyword().as_deref() {
                 Some("then") => {
-                    let (binding, body) = self.parse_then_or_catch("then");
+                    let (binding, tag_span, body) = self.parse_then_or_catch("then");
                     then_binding = binding.or(then_binding);
                     clauses.push(SvelteBlockClause {
                         kind: SvelteClauseKind::Then,
                         expr: binding,
+                        tag_span,
                         children: body,
                     });
                 }
                 Some("catch") => {
-                    let (binding, body) = self.parse_then_or_catch("catch");
+                    let (binding, tag_span, body) = self.parse_then_or_catch("catch");
                     catch_binding = binding.or(catch_binding);
                     clauses.push(SvelteBlockClause {
                         kind: SvelteClauseKind::Catch,
                         expr: binding,
+                        tag_span,
                         children: body,
                     });
                 }
@@ -1033,12 +1037,18 @@ impl<'a> SvelteParser<'a> {
     }
 
     /// Parse an `{:else}` / `{:else if expr}` clause and its body.
-    fn parse_else_clause(&mut self) -> (SvelteClauseKind, Option<Span>, Vec<SvelteNode>) {
+    ///
+    /// Returns the clause kind, the optional condition span, the clause-tag head
+    /// span (`{:else…}` INCLUDING braces — overwritten verbatim by the
+    /// projector), and the body.
+    fn parse_else_clause(&mut self) -> (SvelteClauseKind, Option<Span>, Span, Vec<SvelteNode>) {
         // at `{:else...}`
+        let tag_start = self.pos;
         let inner_start = self.pos + 2;
         let head_end = self.find_matching_brace(inner_start);
         let head = self.slice(Span::new(inner_start as u32, head_end as u32));
         self.pos = (head_end + 1).min(self.len());
+        let tag_span = Span::new(tag_start as u32, self.pos as u32);
         let rest = head.trim_start_matches("else");
         let trimmed = rest.trim_start();
         let (kind, expr) = if let Some(after_if) = trimmed.strip_prefix("if") {
@@ -1056,22 +1066,28 @@ impl<'a> SvelteParser<'a> {
             (SvelteClauseKind::Else, None)
         };
         let body = self.parse_block_children(&["else", "/if", "/each"]);
-        (kind, expr, body)
+        (kind, expr, tag_span, body)
     }
 
     /// Parse a `{:then v}` / `{:catch e}` clause and its body.
-    fn parse_then_or_catch(&mut self, keyword: &str) -> (Option<Span>, Vec<SvelteNode>) {
+    ///
+    /// Returns the optional binding span, the clause-tag head span (`{:then…}` /
+    /// `{:catch…}` INCLUDING braces — overwritten verbatim by the projector),
+    /// and the body.
+    fn parse_then_or_catch(&mut self, keyword: &str) -> (Option<Span>, Span, Vec<SvelteNode>) {
+        let tag_start = self.pos;
         let inner_start = self.pos + 2;
         let head_end = self.find_matching_brace(inner_start);
         let head = self.slice(Span::new(inner_start as u32, head_end as u32));
         self.pos = (head_end + 1).min(self.len());
+        let tag_span = Span::new(tag_start as u32, self.pos as u32);
         let rest = head.trim_start().trim_start_matches(keyword);
         let binding_text = rest.trim();
         let offset =
             inner_start + (head.len() - rest.len()) + (rest.len() - rest.trim_start().len());
         let binding = nonempty_span(offset, binding_text);
         let body = self.parse_block_children(&["then", "catch", "/await"]);
-        (binding, body)
+        (binding, tag_span, body)
     }
 
     /// Consume the matching `{/keyword}` close, warning if it is missing.

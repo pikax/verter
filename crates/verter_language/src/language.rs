@@ -169,6 +169,21 @@ impl FileLanguage {
         )
     }
 
+    /// `true` when this language is the built-in Svelte component carrier.
+    ///
+    /// Mirrors [`Self::is_vue`] — checks the FULL row (adapter id AND carrier
+    /// language id) so only the Svelte CARRIER row matches, not a same-adapter
+    /// template row.
+    pub fn is_svelte(&self) -> bool {
+        matches!(
+            self,
+            Self::Framework {
+                adapter_id,
+                language_id,
+            } if adapter_id.is_svelte() && language_id.as_str() == "svelte"
+        )
+    }
+
     /// The owning adapter id, for framework carriers and templates.
     pub fn adapter_id(&self) -> Option<&FrameworkAdapterId> {
         match self {
@@ -212,8 +227,11 @@ mod tests {
         assert!(FileLanguage::vue().is_vue());
         assert!(FileLanguage::svelte().is_framework_carrier());
         assert!(!FileLanguage::svelte().is_vue());
+        assert!(FileLanguage::svelte().is_svelte());
+        assert!(!FileLanguage::vue().is_svelte());
         assert!(!FileLanguage::script_ts().is_framework_carrier());
         assert!(!FileLanguage::script_ts().is_vue());
+        assert!(!FileLanguage::script_ts().is_svelte());
 
         assert_eq!(
             FileLanguage::svelte().adapter_id(),

@@ -87,6 +87,17 @@
           "default": true,
           "description": "Enable/Disable Verter"
         },
+        "verter.frameworks": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "svelte"
+            ]
+          },
+          "default": [],
+          "description": "Opt-in framework carriers Verter attaches to beyond Vue (e.g. \"svelte\"). Svelte attaches to the existing svelte language id (no grammar contributed); requires a workspace svelte install for type-checking."
+        },
         "verter.lspBinaryPath": {
           "type": "string",
           "default": "",
@@ -654,6 +665,7 @@
     "onCommand:verter.showStatistics",
     "onLanguage:javascript",
     "onLanguage:javascriptreact",
+    "onLanguage:svelte",
     "onLanguage:typescript",
     "onLanguage:typescriptreact",
     "onLanguage:vue",

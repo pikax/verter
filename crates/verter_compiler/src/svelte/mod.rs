@@ -8,12 +8,13 @@
 //! operations.
 //!
 //! It performs NO type lowering (D-o; the thin-adapters guard). The IDE TSX
-//! projection (B8c) is NOT implemented here — `compile_ide` returns the typed
-//! [`CompileUnsupported`](crate::framework_common::CompileUnsupported) answer
-//! until that vertical lands.
+//! projection ([`ide`]) is a pure syntactic transform via `CodeTransform` —
+//! never type resolution.
 
 pub mod carrier;
+pub mod ide;
 pub mod parser;
 
 pub use carrier::SvelteCarrierCompiler;
+pub use ide::{project_svelte_ide, SvelteIdeProjection};
 pub use parser::{parse_svelte, ParsedSvelte};

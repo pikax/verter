@@ -7292,6 +7292,10 @@ mod foundations_guards {
             "writes Verter-generated `@verter/types` stub files into `node_modules` for tool setup; reads them back via marker detection. Test fixtures inside `#[cfg(test)] mod tests` use temp-dir scratch space.",
         ),
         (
+            "crates/verter_lsp/src/svelte_assets.rs",
+            "materializes the Verter-owned `@verter/svelte-jsx` shim into the host data directory for TSGO/inferred-project resolution (tool setup, not semantic input); reads it back via byte-compare; never the user workspace. Test fixtures use temp-dir scratch space.",
+        ),
+        (
             "crates/verter_lsp/src/config.rs",
             "test fixtures only (`#[cfg(test)] mod tests` blocks set up tmp directories for `discover_lint_config` tests). No production-path call.",
         ),

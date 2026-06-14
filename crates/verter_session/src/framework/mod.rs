@@ -19,6 +19,7 @@ pub mod project_capabilities;
 pub mod registry;
 pub mod script_facts;
 pub mod surface_store;
+pub mod svelte_jsx_assets;
 pub mod synth;
 pub mod virtual_file_naming_ts;
 

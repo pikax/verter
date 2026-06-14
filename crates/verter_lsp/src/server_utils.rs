@@ -43,7 +43,7 @@ pub(super) fn is_config_file(path: &str) -> bool {
 /// unknown extensions. A carrier row without a registered carrier
 /// implementation still classifies here — its requests surface the
 /// typed unsupported-language error and produce no provider sync state.
-pub(super) fn carrier_language_for(path: &str) -> Option<verter_session::FileLanguage> {
+pub(crate) fn carrier_language_for(path: &str) -> Option<verter_session::FileLanguage> {
     let language = verter_session::LanguageRegistry::global()
         .classify_static(path)
         .static_resolution();

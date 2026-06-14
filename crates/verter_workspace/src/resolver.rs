@@ -234,59 +234,71 @@ impl ProjectResolver {
 
     /// Map a source file path to the provider-graph path used by the type provider.
     ///
-    /// For `.vue` files this appends `.ts` (the public API shim); for non-Vue
-    /// files the source path is returned as-is. This is a pure path transform
-    /// that does not require project ownership — callers that need ownership
-    /// must check it separately via `owner_for_file()`.
+    /// For a framework CARRIER file (`.vue` / `.svelte`) this appends `.ts`
+    /// (the public API shim — the uniform api suffix from the
+    /// `VirtualFileNaming` column); for non-carrier files the source path is
+    /// returned as-is. The carrier-extension set is derived from the language
+    /// registry (the registry is the single classification authority), so a
+    /// new carrier needs no edit here. This is a pure path transform that does
+    /// not require project ownership — callers that need ownership must check
+    /// it separately via `owner_for_file()`.
     pub fn provider_id_for_source(&self, source_id: &str) -> Option<String> {
         let normalized_source = normalize_canonical_id(source_id);
-        if normalized_source.ends_with(".vue") {
+        if path_is_carrier(&normalized_source) {
             Some(format!("{}.ts", normalized_source))
         } else {
             Some(normalized_source)
         }
     }
 
-    /// Map a `.vue` source path to the IDE artifact path (`.vue.tsx` or `.vue.jsx`).
+    /// Map a framework CARRIER source path to the IDE artifact path
+    /// (`{src}.tsx` or `{src}.jsx`).
     ///
-    /// Returns `None` for non-Vue files. This is a pure path transform that
-    /// does not require project ownership — callers that need ownership must
-    /// check it separately via `owner_for_file()`.
-    /// `is_jsx` selects between `.tsx` (TypeScript) and `.jsx` (JavaScript) output.
+    /// Returns `None` for non-carrier files. The carrier-extension set is
+    /// derived from the language registry. `is_jsx` selects between `.tsx`
+    /// (TypeScript) and `.jsx` (JavaScript) output — a `.svelte` carrier always
+    /// reports `is_jsx = false`, so it always projects `.tsx` (the column's
+    /// `Fixed(".tsx")` policy), while a Vue `<script lang="jsx">` carrier
+    /// projects `.jsx` (the column's `JsxConditional` policy). This is a pure
+    /// path transform that does not require project ownership.
     pub fn provider_ide_id_for_source(&self, source_id: &str, is_jsx: bool) -> Option<String> {
         let normalized_source = normalize_canonical_id(source_id);
-        if !normalized_source.ends_with(".vue") {
+        if !path_is_carrier(&normalized_source) {
             return None;
         }
 
-        let ext = if is_jsx { ".jsx" } else { ".tsx" };
-        Some(format!("{}{}", normalized_source, ext))
+        Some(carrier_ide_provider_path(&normalized_source, is_jsx))
     }
 
     /// Reverse-map a provider-graph path back to its source file path.
     ///
-    /// Strips `.tsx`, `.jsx`, or `.ts` suffixes from Vue virtual paths
-    /// (e.g., `foo.vue.tsx` -> `foo.vue`). For non-Vue paths, returns the
-    /// path as-is if owned by a project.
+    /// Strips `.tsx`, `.jsx`, or `.ts` suffixes from a carrier virtual path
+    /// (e.g., `foo.vue.tsx` -> `foo.vue`, `Bar.svelte.ts` -> `Bar.svelte`).
+    /// The carrier-extension set is derived from the language registry. For
+    /// non-carrier paths, returns the path as-is if owned by a project.
     pub fn source_id_from_provider_id(&self, provider_id: &str) -> Option<String> {
         let normalized = normalize_canonical_id(provider_id);
 
-        // Vue virtual paths: strip .tsx/.jsx/.ts suffix to get the .vue source
-        if normalized.ends_with(".vue.tsx") || normalized.ends_with(".vue.jsx") {
-            let candidate = &normalized[..normalized.len() - 4]; // strip .tsx/.jsx
-                                                                 // Verify the candidate is owned by a project
+        // Carrier IDE virtual paths: strip the trailing `.tsx`/`.jsx` to get
+        // the carrier source (`foo.vue.tsx` -> `foo.vue`).
+        if (normalized.ends_with(".tsx") || normalized.ends_with(".jsx"))
+            && path_is_carrier(&normalized[..normalized.len() - 4])
+        {
+            let candidate = &normalized[..normalized.len() - 4];
             if self.owner_for_file(candidate).is_some() {
                 return Some(candidate.to_string());
             }
         }
-        if normalized.ends_with(".vue.ts") {
-            let candidate = &normalized[..normalized.len() - 3]; // strip .ts
+        // Carrier API virtual paths: strip the trailing `.ts` (`foo.vue.ts` ->
+        // `foo.vue`).
+        if normalized.ends_with(".ts") && path_is_carrier(&normalized[..normalized.len() - 3]) {
+            let candidate = &normalized[..normalized.len() - 3];
             if self.owner_for_file(candidate).is_some() {
                 return Some(candidate.to_string());
             }
         }
 
-        // Non-Vue: provider path == source path (if owned by a project)
+        // Non-carrier: provider path == source path (if owned by a project)
         if self.owner_for_file(&normalized).is_some() {
             return Some(normalized);
         }
@@ -365,7 +377,10 @@ impl ProjectResolver {
             .and_then(|_| self.provider_id_for_source(&source_id))
             .unwrap_or_else(|| source_id.clone());
         let provider_target = match target_owner {
-            Some(_) if normalize_canonical_id(&source_id).ends_with(".vue") => {
+            // Any framework CARRIER (`.vue` / `.svelte`) targets the public API
+            // virtual file (`{src}.ts`) for cross-file component typing — the
+            // carrier-extension set is the registry's, not a `.vue` literal.
+            Some(_) if path_is_carrier(&normalize_canonical_id(&source_id)) => {
                 ProviderTarget::VuePublicApi
             }
             Some(_) => ProviderTarget::ShadowSourceFile,
@@ -413,7 +428,10 @@ impl ProjectResolver {
             .and_then(|_| self.provider_id_for_source(&source_id))
             .unwrap_or_else(|| source_id.clone());
         let provider_target = match target_owner {
-            Some(_) if normalize_canonical_id(&source_id).ends_with(".vue") => {
+            // Any framework CARRIER (`.vue` / `.svelte`) targets the public API
+            // virtual file (`{src}.ts`) for cross-file component typing — the
+            // carrier-extension set is the registry's, not a `.vue` literal.
+            Some(_) if path_is_carrier(&normalize_canonical_id(&source_id)) => {
                 ProviderTarget::VuePublicApi
             }
             Some(_) => ProviderTarget::ShadowSourceFile,
@@ -747,6 +765,37 @@ impl ProjectResolver {
 }
 
 // ── Private helpers ──
+
+/// The IDE virtual-file suffix for a carrier source — the SINGLE naming
+/// derivation every consumer routes through (D-x). `is_jsx` selects `.jsx`
+/// (JavaScript carriers) vs `.tsx` (TypeScript carriers); a `.svelte` carrier
+/// always reports `is_jsx = false`, so it always projects `.tsx`. Appends to
+/// the FULL carrier canonical (`Foo.svelte` + `.tsx` → `Foo.svelte.tsx`).
+///
+/// This is the owner-independent transform; `provider_ide_id_for_source`
+/// additionally gates on carrier classification, and the LSP
+/// `open_unresolved_*` path (which already knows it holds an open carrier)
+/// routes through it rather than re-deriving the formula locally.
+#[must_use]
+pub fn carrier_ide_provider_path(source_id: &str, is_jsx: bool) -> String {
+    let ext = if is_jsx { ".jsx" } else { ".tsx" };
+    format!("{source_id}{ext}")
+}
+
+/// Whether `path` is a framework CARRIER file (`.vue` / `.svelte`), by the
+/// language registry's carrier-extension set (the single classification
+/// authority — a new carrier extends the registry, not this predicate).
+pub fn path_is_carrier(path: &str) -> bool {
+    verter_language::LanguageRegistry::global()
+        .carrier_extensions()
+        .iter()
+        .any(|ext| {
+            // Append-to-full-canonical semantics: a carrier file ends with
+            // `.{ext}` and the dot is preceded by at least one stem char.
+            let needle = format!(".{ext}");
+            path.len() > needle.len() && path.ends_with(&needle)
+        })
+}
 
 fn normalized_starts_with(path: &str, prefix: &str) -> bool {
     let normalized = normalize_canonical_id(path);

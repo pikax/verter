@@ -456,12 +456,17 @@ export async function activateVueLanguageServer(
     findStyleBlockAt(scanStyleBlocks(source), source, line, character) !== undefined;
   const hasStyleBlocks = (source: string) => scanStyleBlocks(source).length > 0;
 
+  // Opt-in framework carriers beyond Vue (`verter.frameworks`). Svelte attaches
+  // to the EXISTING `svelte` language id (no grammar contributed) when opted in.
+  const optInFrameworks = workspace.getConfiguration("verter").get<string[]>("frameworks", []);
+
   // Options to control the language client
   const clientOptions: LanguageClientOptions = {
     documentSelector: [
       { scheme: "file", language: "vue" },
       { scheme: "file", language: "javascript" },
       { scheme: "file", language: "typescript" },
+      ...(optInFrameworks.includes("svelte") ? [{ scheme: "file", language: "svelte" }] : []),
       // Virtual files from the Verter Analysis panel — route through the LSP
       // so it can provide position-mapped features (hover, definition, etc.)
       { scheme: VirtualFileContentProvider.scheme },
@@ -482,6 +487,8 @@ export async function activateVueLanguageServer(
         html: workspace.getConfiguration("html"),
       },
       statistics: getStatisticsInitialization(rootPath),
+      // The opt-in framework carriers the server should attach to beyond Vue.
+      frameworks: optInFrameworks,
       lint: {
         enabled: workspace.getConfiguration("verter").get<boolean>("lint.enabled", false),
         preset: workspace.getConfiguration("verter").get<string>("lint.preset", "recommended"),

@@ -77,8 +77,6 @@ const CARRIER_LITERAL_ALLOWLIST: &[&str] = &[
     "crates/verter_lsp/src/server/sync_orchestration.rs",
     "crates/verter_lsp/src/server_utils.rs",
     "crates/verter_lsp/src/test_harness.rs",
-    "crates/verter_lsp/src/tsgo/merge.rs",
-    "crates/verter_lsp/src/workspace_scanner.rs",
     "crates/verter_mcp/src/server.rs",
     "crates/verter_tsc/src/tsconfig.rs",
 ];

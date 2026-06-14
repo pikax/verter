@@ -1286,18 +1286,27 @@ impl TsgoTypeProvider {
     }
 }
 
-/// Rewrite `.vue` import specifiers to `.vue.ts` for TSGO cross-file resolution.
+/// Rewrite carrier import specifiers (`.vue` / `.svelte`) to their api `.ts`
+/// virtual file for TSGO cross-file resolution.
 ///
-/// TSGO resolves cross-file Vue imports through the public API output (`.vue.ts`),
-/// which has a proper `export default` for component types. The IDE output
-/// (`.vue.tsx`) is a full JSX file that can leak DOM/React types into importers.
+/// TSGO resolves cross-file carrier imports through the public API output
+/// (`Foo.vue.ts` / `Bar.svelte.ts`), which has a proper `export default` for
+/// component types. The IDE output (`.tsx`) is a full JSX file that can leak
+/// DOM types into importers. The carrier-extension set is the registry's
+/// (`LanguageRegistry::carrier_extensions()`) — the single classification
+/// authority — not a hand-matched literal.
 ///
-/// NOTE: We use `.vue.ts` (not `.d.vue.ts`) because TypeScript treats `.d.vue.ts`
-/// as a declaration file and forbids regular imports from it.
+/// NOTE: We use `.vue.ts` (not `.d.vue.ts`) because TypeScript treats
+/// `.d.vue.ts` as a declaration file and forbids regular imports from it.
 pub(crate) fn rewrite_vue_imports_for_tsgo(content: &str, _path: &str) -> String {
-    content
-        .replace(".vue'", ".vue.ts'")
-        .replace(".vue\"", ".vue.ts\"")
+    let mut out = content.to_string();
+    for ext in verter_language::LanguageRegistry::global().carrier_extensions() {
+        // `ext` is the bare extension WITHOUT a leading dot (`vue` / `svelte`).
+        out = out
+            .replace(&format!(".{ext}'"), &format!(".{ext}.ts'"))
+            .replace(&format!(".{ext}\""), &format!(".{ext}.ts\""));
+    }
+    out
 }
 
 /// Build the `workspace/didChangeConfiguration` payload for TSGO path aliases.
@@ -3030,6 +3039,31 @@ const x = 1;"#;
             !result.contains(".d.vue.ts"),
             ".vue imports must NOT be rewritten to .d.vue.ts (declaration file)"
         );
+    }
+
+    /// The carrier import rewrite covers `.svelte` too (generalized to the
+    /// carrier-extension set), while preserving Vue behavior exactly.
+    #[test]
+    fn test_rewrite_svelte_imports_to_svelte_ts() {
+        let input = r#"import C from './C.svelte'
+import D from "@/D.svelte"
+import V from './V.vue'"#;
+        let result = rewrite_vue_imports_for_tsgo(input, "App.svelte.tsx");
+        assert!(
+            result.contains("./C.svelte.ts'"),
+            "single-quote .svelte import rewritten to .svelte.ts: {result}"
+        );
+        assert!(
+            result.contains("@/D.svelte.ts\""),
+            "double-quote .svelte import rewritten: {result}"
+        );
+        // Vue behavior preserved exactly (negative — generalization didn't
+        // regress Vue).
+        assert!(
+            result.contains("./V.vue.ts'"),
+            "vue still rewritten: {result}"
+        );
+        assert!(!result.contains(".svelte.tsx"), "no .svelte.tsx");
     }
 
     /// rewrite_vue_imports_for_tsgo rewrites to .vue.ts for JSX files too

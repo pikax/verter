@@ -193,10 +193,11 @@ pub fn svelte_descriptor() -> FrameworkAdapterDescriptor {
         supported_surfaces: SVELTE_SUPPORTED_SURFACE_KINDS,
         carrier_language: Some(LanguageId::new("svelte")),
         virtual_file_naming: Some(VirtualFileNaming {
-            ide: Some(IdeSuffixPolicy::JsxConditional {
-                jsx: ".jsx",
-                non_jsx: ".tsx",
-            }),
+            // A `.svelte` file always projects a fixed `.tsx` IDE file (D-x):
+            // the projection emits TS with the `@jsxImportSource` pragma — it
+            // is never JSX-conditional the way a Vue `<script lang="jsx">`
+            // carrier is, so there is no `.jsx` alternative.
+            ide: Some(IdeSuffixPolicy::Fixed(".tsx")),
             api_suffix: Some(".ts"),
             // No testing-API surface for Svelte (the testing surface is
             // Vue-only, D-ak/D-al).
@@ -256,6 +257,34 @@ mod tests {
         );
         assert_eq!(naming.api_suffix, Some(".ts"));
         assert_eq!(naming.testing_api_suffix, Some(".__verter_test.ts"));
+        assert_eq!(naming.sidecar_suffixes, &[] as &[&str]);
+        assert!(naming.is_structurally_valid());
+    }
+
+    #[test]
+    fn svelte_descriptor_projects_a_fixed_tsx_ide_file_with_no_testing_surface() {
+        let d = svelte_descriptor();
+        assert_eq!(d.id, FrameworkAdapterId::svelte());
+        assert_eq!(d.tag, FrameworkTag::Svelte);
+        assert_eq!(d.carrier_language, Some(LanguageId::new("svelte")));
+
+        let naming = d
+            .virtual_file_naming
+            .as_ref()
+            .expect("the Svelte descriptor carries a virtual-file naming column");
+        // D-x: Svelte projects a FIXED `.tsx` IDE file, ships the api `.ts`
+        // surface, and has NO testing-API surface (Vue-only).
+        assert_eq!(naming.ide, Some(IdeSuffixPolicy::Fixed(".tsx")));
+        assert_ne!(
+            naming.ide,
+            Some(IdeSuffixPolicy::JsxConditional {
+                jsx: ".jsx",
+                non_jsx: ".tsx",
+            }),
+            "Svelte is NOT JSX-conditional"
+        );
+        assert_eq!(naming.api_suffix, Some(".ts"));
+        assert_eq!(naming.testing_api_suffix, None);
         assert_eq!(naming.sidecar_suffixes, &[] as &[&str]);
         assert!(naming.is_structurally_valid());
     }

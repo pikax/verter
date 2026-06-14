@@ -457,12 +457,12 @@ impl VerterHost {
                         canonical_id: canonical.clone(),
                     }
                 })?;
-                // Vue-only gate, matching the sibling gates in this
-                // pipeline: the compile path behind this validator is the
-                // Vue carrier's. A non-Vue carrier never reaches it — its
-                // source execution rejects with the typed
-                // unsupported-language error first.
-                if !hd.file_language.is_vue() {
+                // Framework-CARRIER gate: the compile path behind this
+                // validator is the carrier's IDE projection (Vue OR Svelte —
+                // every carrier with a registered compiler). A non-carrier
+                // (plain script) never reaches it — its source execution
+                // rejects with the typed unsupported-language error first.
+                if !hd.file_language.is_framework_carrier() {
                     return Ok(());
                 }
                 // TOP-LEVEL warm validator: a compile warm hit returns

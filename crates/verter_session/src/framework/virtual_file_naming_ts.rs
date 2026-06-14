@@ -16,7 +16,8 @@
 //! a descriptor-row change without a regen fails the gate.
 
 use crate::framework::descriptor::{
-    vue_descriptor, FrameworkAdapterDescriptor, IdeSuffixPolicy, VirtualFileNaming,
+    svelte_descriptor, vue_descriptor, FrameworkAdapterDescriptor, IdeSuffixPolicy,
+    VirtualFileNaming,
 };
 
 /// The committed path of the generated mirror, relative to the workspace
@@ -28,7 +29,7 @@ pub const VIRTUAL_FILE_NAMING_TS_PATH: &str =
 /// a deterministic order. Adding an adapter row here (and regenerating)
 /// is the only way to extend the mirror.
 fn descriptors_with_naming() -> Vec<FrameworkAdapterDescriptor> {
-    vec![vue_descriptor()]
+    vec![vue_descriptor(), svelte_descriptor()]
 }
 
 /// Render the canonical TypeScript mirror module from the descriptor
@@ -43,15 +44,36 @@ pub fn render_virtual_file_naming_ts() -> String {
         let Some(naming) = descriptor.virtual_file_naming.as_ref() else {
             continue;
         };
-        render_descriptor_entry(&mut out, descriptor.tag_const_name(), naming);
+        // The carrier extension (`.vue` / `.svelte`) is `.{carrier_language}`.
+        // It is the prefix every virtual-file suffix appends to, so the TS
+        // plugin builds its carrier-extension + per-suffix regexes from it.
+        let carrier_ext = descriptor
+            .carrier_language
+            .as_ref()
+            .map(|lang| format!(".{}", lang.as_str()));
+        render_descriptor_entry(
+            &mut out,
+            descriptor.tag_const_name(),
+            carrier_ext.as_deref(),
+            naming,
+        );
     }
 
     out.push_str(FOOTER);
     out
 }
 
-fn render_descriptor_entry(out: &mut String, tag: &str, naming: &VirtualFileNaming) {
+fn render_descriptor_entry(
+    out: &mut String,
+    tag: &str,
+    carrier_ext: Option<&str>,
+    naming: &VirtualFileNaming,
+) {
     out.push_str(&format!("  {tag}: {{\n"));
+    out.push_str(&format!(
+        "    carrierExtension: {},\n",
+        render_opt_str(carrier_ext)
+    ));
     out.push_str(&format!("    ide: {},\n", render_ide(naming.ide.as_ref())));
     out.push_str(&format!(
         "    apiSuffix: {},\n",
@@ -139,6 +161,7 @@ export interface VirtualFileIdeJsxConditional {
 export type VirtualFileIdePolicy = VirtualFileIdeFixed | VirtualFileIdeJsxConditional;
 
 export interface VirtualFileNaming {
+  carrierExtension: string | null;
   ide: VirtualFileIdePolicy | null;
   apiSuffix: string | null;
   testingApiSuffix: string | null;
@@ -162,10 +185,18 @@ mod tests {
 
         // The Vue row's live column must surface verbatim.
         assert!(a.contains("FRAMEWORK_TAG_VUE: {"));
+        assert!(a.contains("carrierExtension: \".vue\""));
+        assert!(a.contains("carrierExtension: \".svelte\""));
         assert!(a.contains("kind: \"jsxConditional\", jsx: \".jsx\", nonJsx: \".tsx\""));
         assert!(a.contains("apiSuffix: \".ts\""));
         assert!(a.contains("testingApiSuffix: \".__verter_test.ts\""));
         assert!(a.contains("sidecarSuffixes: []"));
+        // The Svelte row renders its FIXED `.tsx` IDE policy, the api `.ts`
+        // surface, and a NULL testing surface.
+        assert!(a.contains("FRAMEWORK_TAG_SVELTE: {"));
+        assert!(a.contains("kind: \"fixed\", suffix: \".tsx\""));
+        // The Svelte row's testing surface is null (no `.svelte.__verter_test`).
+        assert!(!a.contains(".svelte.__verter_test"));
         // No descriptor without naming leaks an empty entry.
         assert!(a.ends_with("};\n"));
     }
