@@ -12,7 +12,7 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { requireAnchor } from "../src/anchors.js";
+import { requireAnchor, type AnchorMap } from "../src/anchors.js";
 import type {
   MaterializeResult,
   MaterializeWireRequest,
@@ -94,10 +94,14 @@ describe("createMaterializedWorkspace", () => {
     // Anchors merged with their owning file + recomputed positions. The script
     // line-comment anchor occupied its own line (now empty) → column 0; the
     // template HTML-comment anchor lands where `{{ x }}` begins, after "<template>".
-    expect(requireAnchor(ws.anchorMap, "decl").file).toBe("A.vue");
-    expect(requireAnchor(ws.anchorMap, "use").file).toBe("A.vue");
-    expect(requireAnchor(ws.anchorMap, "decl")).toMatchObject({ line: 1, character: 0 });
-    expect(requireAnchor(ws.anchorMap, "use")).toMatchObject({ line: 4, character: 10 });
+    // `MaterializedWorkspace` publishes `anchorMap` as a frozen `ReadonlyMap`; the
+    // `requireAnchor` probe helper narrows to a mutable `AnchorMap`, so build a
+    // mutable probe view over the same (still-frozen) `Anchor` entries to look up.
+    const anchors: AnchorMap = new Map(ws.anchorMap);
+    expect(requireAnchor(anchors, "decl").file).toBe("A.vue");
+    expect(requireAnchor(anchors, "use").file).toBe("A.vue");
+    expect(requireAnchor(anchors, "decl")).toMatchObject({ line: 1, character: 0 });
+    expect(requireAnchor(anchors, "use")).toMatchObject({ line: 4, character: 10 });
 
     // Every anchorMap entry carries explicit column-encoding metadata so a raw-LSP
     // / extension consumer reads the unit (UTF-16) off the DTO, not a doc comment.
@@ -237,7 +241,10 @@ describe("createMaterializedWorkspace", () => {
 
     // The anchorMap is genuinely read-only: entries cannot be mutated, and the
     // map cannot gain or lose entries.
-    const a = requireAnchor(ws.anchorMap, "a");
+    // Same mutable probe view as above — entries stay the frozen `Anchor`s, so the
+    // immutability assertions below still hold on the looked-up entry.
+    const anchors: AnchorMap = new Map(ws.anchorMap);
+    const a = requireAnchor(anchors, "a");
     expect(Object.isFrozen(a)).toBe(true);
     expect(() => {
       (a as { line: number }).line = 99;
@@ -250,7 +257,7 @@ describe("createMaterializedWorkspace", () => {
     expect(() => (ws.anchorMap as Map<string, typeof a>).delete("a")).toThrow();
     expect(() => (ws.anchorMap as Map<string, typeof a>).clear()).toThrow();
     // The entry and lookups still read back correctly — incl. the column encoding.
-    expect(requireAnchor(ws.anchorMap, "a")).toEqual({
+    expect(requireAnchor(anchors, "a")).toEqual({
       file: "A.vue",
       line: 0,
       character: 10,

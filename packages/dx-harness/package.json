@@ -21,8 +21,9 @@
     "build": "npx shx rm -rf dist tsconfig.tsbuildinfo && tsc -b --force",
     "dev": "tsc -b --watch",
     "clean": "npx shx rm -rf .turbo dist tsconfig.tsbuildinfo",
-    "test": "vitest --run",
-    "test:unit": "vitest --run --exclude '**/*Integration.test.ts'"
+    "typecheck": "tsc -p tsconfig.test.json --noEmit",
+    "test": "pnpm run typecheck && vitest --run",
+    "test:unit": "pnpm run typecheck && vitest --run --exclude '**/*Integration.test.ts'"
   },
   "dependencies": {
     "@verter/lsp-test-client": "workspace:^"
