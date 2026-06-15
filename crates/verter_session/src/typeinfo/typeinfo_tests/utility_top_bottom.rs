@@ -90,7 +90,7 @@ fn utility_top_bottom_utb06_return_type_void_arrow_is_void() {
 // `(...args: any) => any`'s rest-args slot = `unknown[]`. This is one of
 // the well-known trap cases: it is NOT `any` and NOT `never`.
 #[test]
-#[ignore = "reducer resolves this correctly (covered by the non-ignored `parameters_utilities_absorb_any_to_unknown_array_and_never_to_never` dispatch regression); NOT oracle-liftable — the RESULT is a degenerate keyword the oracle's two-sided positive allowlist rejects (unknown[] carries UnknownKeyword). Lift pending an oracle admission extension for degenerate keyword results"]
+#[ignore = "reducer resolves this correctly (covered by the non-ignored `parameters_utilities_absorb_any_to_unknown_array_and_never_to_never` dispatch regression); NOT oracle-liftable — the SOURCE argument `any` in `Parameters<any>` is rejected by the oracle's two-sided positive allowlist (measured Reject(AnyKeyword) on the source body); the `unknown[]` RESULT is itself admissible. Lift pending oracle admission of the source-`any` utility-argument class"]
 fn utility_top_bottom_utb07_parameters_of_any_is_unknown_array() {
     let expr = resolve_alias("Utb07ParametersOfAny");
     assert_array_of_primitive(&expr, PrimitiveName::Unknown);
@@ -134,7 +134,7 @@ fn utility_top_bottom_utb10_parameters_never_arg_is_singleton_tuple_of_never() {
 // TS7: `ConstructorParameters<any>` = `unknown[]` (the inferred
 // rest-tuple slot of `new (...args: any) => any`).
 #[test]
-#[ignore = "reducer resolves this correctly (covered by the non-ignored `parameters_utilities_absorb_any_to_unknown_array_and_never_to_never` dispatch regression); NOT oracle-liftable — the RESULT is a degenerate keyword the oracle's two-sided positive allowlist rejects (unknown[] carries UnknownKeyword). Lift pending an oracle admission extension for degenerate keyword results"]
+#[ignore = "reducer resolves this correctly (covered by the non-ignored `parameters_utilities_absorb_any_to_unknown_array_and_never_to_never` dispatch regression); NOT oracle-liftable — the SOURCE argument `any` in `ConstructorParameters<any>` is rejected by the oracle's two-sided positive allowlist (measured Reject(AnyKeyword) on the source body); the `unknown[]` RESULT is itself admissible. Lift pending oracle admission of the source-`any` utility-argument class"]
 fn utility_top_bottom_utb11_constructor_parameters_any_is_unknown_array() {
     let expr = resolve_alias("Utb11ConstructorParametersAny");
     assert_array_of_primitive(&expr, PrimitiveName::Unknown);

@@ -91,7 +91,7 @@ fn template_literal_strip_returns_input_unchanged_when_prefix_missing() {
 }
 
 #[test]
-#[ignore = "reducer resolves this correctly (covered by the non-ignored `event_handler_key_remap_reducer_capitalises_keys` regression); NOT oracle-liftable — the reduced surface carries function/callable handler members that the oracle §Q2 positive-allowlist rejects (Reject(Callable)). Lift pending an oracle admission + hover-grammar extension for clean function values"]
+#[ignore = "reducer resolves this correctly (covered by the non-ignored `event_handler_key_remap_reducer_capitalises_keys` regression); LIFTABLE — the live two-sided oracle admission ADMITs both sides: the source body `EventHandlers<...>` is a clean `Ref` over a string-literal union argument and the reduced object surface's handler members are clean callables the §Q2 positive allowlist admits per-signature. The only remaining blocker is oracle snapshot generation via the tsgo driver (unavailable in this environment). Lift pending tsgo snapshot availability"]
 fn template_literal_key_remap_capitalises_each_event_key() {
     // TS7 contract: `EventHandlers<"inc" | "dec">` produces an object where
     // each key is remapped through `\`on${Capitalize<K>}\``, yielding
@@ -123,13 +123,15 @@ fn template_literal_key_remap_capitalises_each_event_key() {
 }
 
 /// Non-ignored reducer regression for the callable-result key-remap row
-/// `template_literal_key_remap_capitalises_each_event_key` (which stays
-/// `#[ignore]`d as an oracle-lift contract because its handler members are
-/// function surfaces the oracle §Q2 admission rejects). The SHARED resolver
-/// remaps each key through `` `on${Capitalize<K>}` `` correctly — the open-`K`
-/// string intrinsic stays a carrier until per-key substitution binds the key —
-/// so this runs the same assertions in the normal suite to keep the reducer
-/// path guarded.
+/// `template_literal_key_remap_capitalises_each_event_key`, which stays
+/// `#[ignore]`d only because its oracle snapshot needs the tsgo driver: the live
+/// two-sided admission ADMITs both sides — the `EventHandlers<…>` source is a
+/// clean `Ref` over a string-literal union argument and the reduced object's
+/// handler members are clean callables the §Q2 positive allowlist admits
+/// per-signature. The SHARED resolver remaps each key through
+/// `` `on${Capitalize<K>}` `` correctly — the open-`K` string intrinsic stays a
+/// carrier until per-key substitution binds the key — so this runs the same
+/// assertions in the normal suite to keep the reducer path guarded.
 #[test]
 fn event_handler_key_remap_reducer_capitalises_keys() {
     let host = make_host_with_footprint();

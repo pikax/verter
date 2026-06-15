@@ -66,7 +66,7 @@ fn mapped_type_with_template_literal_key_remap_resolves_item_slot() {
 }
 
 #[test]
-#[ignore = "reducer resolves this correctly (covered by the non-ignored `template_literal_key_reducer_projects_callable_slots` regression); NOT oracle-liftable — the reduced value is a function/callable renderer slot that the oracle §Q2 positive-allowlist rejects (Reject(Callable)). Lift pending an oracle admission + hover-grammar extension for clean function values"]
+#[ignore = "reducer resolves this correctly (covered by the non-ignored `template_literal_key_reducer_projects_callable_slots` regression); NOT oracle-liftable — the declared source body `StaticTemplateSlots[TemplateLiteralCellName]` is a non-carve-out indexed-access (the index is a template-literal alias `Ref`, not a same-file string-literal chain) the oracle source-side positive allowlist rejects (measured Reject(DeferredConstruct(indexed-access))); the reduced function value is itself admissible. Lift pending an oracle source-walk carve-out for template-literal-keyed indexed access"]
 fn template_literal_key_alias_projects_static_template_slot() {
     let host = make_host_with_footprint();
     upsert_ts(&host, "/fixtures/mapped-template.ts", MAPPED_TEMPLATE);
@@ -88,7 +88,7 @@ fn template_literal_key_alias_projects_static_template_slot() {
 }
 
 #[test]
-#[ignore = "reducer resolves this correctly (covered by the non-ignored `template_literal_key_reducer_projects_callable_slots` regression); NOT oracle-liftable — the reduced value is a function/callable Record value slot that the oracle §Q2 positive-allowlist rejects (Reject(Callable)). Lift pending an oracle admission + hover-grammar extension for clean function values"]
+#[ignore = "reducer resolves this correctly (covered by the non-ignored `template_literal_key_reducer_projects_callable_slots` regression); LIFTABLE — the live two-sided oracle admission ADMITs both sides: the source body indexes `RecordTemplateSlots` by the string-literal key `slot:root` (a same-file string-literal index-chain carve-out the source-side allowlist admits) and the reduced function value passes the §Q2 positive allowlist per-signature. The only remaining blocker is oracle snapshot generation via the tsgo driver (unavailable in this environment). Lift pending tsgo snapshot availability"]
 fn record_with_template_literal_key_union_projects_root_slot() {
     let host = make_host_with_footprint();
     upsert_ts(&host, "/fixtures/mapped-template.ts", MAPPED_TEMPLATE);
@@ -109,7 +109,7 @@ fn record_with_template_literal_key_union_projects_root_slot() {
 }
 
 #[test]
-#[ignore = "reducer resolves this correctly (covered by the non-ignored `template_literal_key_reducer_projects_callable_slots` regression); NOT oracle-liftable — the reduced value is a union of function/callable renderer slots that the oracle §Q2 positive-allowlist rejects (Reject(Callable)). Lift pending an oracle admission + hover-grammar extension for clean function values"]
+#[ignore = "reducer resolves this correctly (covered by the non-ignored `template_literal_key_reducer_projects_callable_slots` regression); NOT oracle-liftable — the declared source body indexes `StaticTemplateSlots` by a template-literal union key, a non-carve-out indexed-access the oracle source-side positive allowlist rejects (measured Reject(DeferredConstruct(indexed-access))); the reduced union of function values is itself admissible. Lift pending an oracle source-walk carve-out for template-literal-keyed indexed access"]
 fn template_literal_union_key_projects_static_slot_union() {
     let host = make_host_with_footprint();
     upsert_ts(&host, "/fixtures/mapped-template.ts", MAPPED_TEMPLATE);
@@ -132,11 +132,14 @@ fn template_literal_union_key_projects_static_slot_union() {
 /// Non-ignored reducer regression for the three callable-result template-literal
 /// key rows (`template_literal_key_alias_projects_static_template_slot`,
 /// `record_with_template_literal_key_union_projects_root_slot`,
-/// `template_literal_union_key_projects_static_slot_union`). Those rows stay
-/// `#[ignore]`d as oracle-lift contracts (their reduced values are function
-/// surfaces the oracle §Q2 admission rejects), but the SHARED resolver reduces
-/// each one correctly — this test runs the same assertions in the normal suite
-/// so the U2.MAPPED_TEMPLATE reducer paths (template-literal alias key, Record
+/// `template_literal_union_key_projects_static_slot_union`). All three reduce to
+/// admissible function values — none is blocked on a function surface — and stay
+/// `#[ignore]`d for two distinct verified reasons: the `record_*_root_slot` row
+/// admits both sides and is blocked only by tsgo oracle-snapshot generation,
+/// while the two `StaticTemplateSlots[…]` alias/union rows are blocked by their
+/// non-carve-out indexed-access source bodies. The SHARED resolver reduces each
+/// one correctly — this test runs the same assertions in the normal suite so the
+/// U2.MAPPED_TEMPLATE reducer paths (template-literal alias key, Record
 /// template-union keyspace enumeration, union-index distribution) stay guarded.
 #[test]
 fn template_literal_key_reducer_projects_callable_slots() {

@@ -1115,6 +1115,53 @@ fn every_manifest_row_unblocker_matches_live_ignore_reason() {
     );
 }
 
+/// Admission-honesty (manifest layer): no manifest row may cite a PHANTOM
+/// oracle reject reason — a rejection the live two-sided admission gate never
+/// emits. `every_manifest_row_unblocker_matches_live_ignore_reason` proves the
+/// manifest MIRRORS the source text; this proves the cited blocker is one the
+/// engine can actually produce.
+///
+/// Two phantom idioms are banned, each disproven by the engine-grounded guard
+/// `oracle_core ... admission_honesty::engine_admits_clean_callables_and_unknown_array`
+/// (which ASSERTS the live gate admits these constructs):
+///   * `Reject(Callable)` — `RejectReason::Callable` is enum-only, never
+///     constructed; a clean callable is admitted per-signature (it rejects only
+///     via its constituents — an `any` param, a `keyof` return, …).
+///   * `UnknownKeyword` — `unknown` / `unknown[]` is ON the positive allowlist;
+///     it is never a reject reason (the real blocker for `Parameters<any>` is
+///     the SOURCE `any` argument, `AnyKeyword`).
+///
+/// The engine-grounded counterpart in
+/// `src/typeinfo/typeinfo_tests/admission_honesty.rs` MEASURES the live verdict
+/// for each admission-claiming row through the shared resolver and requires the
+/// text to name the REAL blocker; this guard is the cheap manifest-table
+/// backstop that no row reintroduces a phantom citation.
+#[test]
+fn no_manifest_row_cites_a_phantom_oracle_reject_reason() {
+    const PHANTOM_IDIOMS: &[&str] = &["Reject(Callable)", "UnknownKeyword"];
+    let mut violations: Vec<String> = Vec::new();
+    for row in EXPECTED_IGNORE_MANIFEST {
+        for phantom in PHANTOM_IDIOMS {
+            if row.unblocker.contains(phantom) {
+                violations.push(format!(
+                    "{} :: {} cites phantom blocker {phantom:?} — the live oracle \
+                     admission gate never emits it (see admission_honesty.rs). \
+                     unblocker={:?}",
+                    row.file, row.function, row.unblocker
+                ));
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "ignored-test manifest: {} row(s) cite a phantom oracle reject reason. \
+         Name the REAL blocker the engine measures (or state the engine admits, \
+         for a liftable row). Violations:\n  {}",
+        violations.len(),
+        violations.join("\n  "),
+    );
+}
+
 #[test]
 fn every_manifest_row_lists_a_valid_substrate() {
     // The closed enum makes invalid substrate names a compile

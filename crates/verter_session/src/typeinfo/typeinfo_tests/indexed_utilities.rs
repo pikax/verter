@@ -159,7 +159,7 @@ fn nested_parameters_nonnullable_indexed_payload_resolves() {
 }
 
 #[test]
-#[ignore = "reducer publishes the surface with member-level alias refs kept SHALLOW (`Ref { NestedSubmitPayload }` etc.) per the Component-Meta Shallow-By-Default publication rule, so the row's eager member-inlining expectation stays open; NOT oracle-liftable regardless — the surface carries the callable `cancel` member (Reject(Callable)) and indexed-access source bodies. Lift pending a member-demand walk in the row plus an oracle admission extension"]
+#[ignore = "reducer publishes the surface with member-level alias refs kept SHALLOW (`Ref { NestedSubmitPayload }` etc.) per the Component-Meta Shallow-By-Default publication rule, so the row's eager member-inlining expectation stays open — that publication mismatch is the gating reason, NOT an oracle-admission limit (the published shallow surface itself ADMITs both sides, and the `cancel` member is a clean callable the allowlist admits). NOT oracle-liftable even after a member-demand walk: the terminal members `NestedSubmitPayload` / `NestedFirstItem` resolve through indexed-access source bodies the oracle source-side allowlist rejects (measured Reject(DeferredConstruct(indexed-access)) on those members). Lift pending a member-demand walk in the row plus an oracle source-walk carve-out for utility-rooted indexed-access chains"]
 fn nested_indexed_utility_surface_resolves_all_terminal_members() {
     let host = make_host_with_footprint();
     upsert_ts(&host, "/fixtures/indexed-utilities.ts", INDEXED_UTILITIES);

@@ -73,6 +73,7 @@ mod substitution_types;
 // can reach the shared test helpers it dispatches through — it is no longer a
 // descendant of `typeinfo_tests`, so the previously-private visibility no longer
 // covers it.
+mod admission_honesty;
 pub(crate) mod support;
 mod surface_jsdoc_provenance;
 mod surface_spans;
