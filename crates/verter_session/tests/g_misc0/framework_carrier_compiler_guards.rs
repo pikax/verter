@@ -268,6 +268,25 @@ fn non_vue_api_projector_has_no_dispatch_or_oxc() {
         projector.contains("ensure_indexed_ready") || projector.contains("shallow_state"),
         "the Svelte api-projector must render over the cached shallow state"
     );
+    // F13 + F9: the `$events` / `$slots` shim members are rendered as STATIC TYPE
+    // TEXT (a derived mapped type + an exact key map) — TSGO resolves them at
+    // check time. The render adds NO dispatch / OXC (covered by the detector scan
+    // above); these positive assertions pin that the new surfaces are present and
+    // dispatch-free string renders.
+    assert!(
+        projector.contains("__VerterEventsSurface") && projector.contains("__VerterSlotsSurface"),
+        "the Svelte api-projector must render the $events / $slots shim surfaces"
+    );
+    assert!(
+        projector.contains("__VerterCallbackEvents"),
+        "the $events surface is the DERIVED callback-prop mapped type (TSGO resolves it)"
+    );
+    // NEGATIVE: the shim must NOT emit a loose `CustomEvent<any>` / `Record<…>`
+    // placeholder for the event/slot surfaces.
+    assert!(
+        !projector.contains("CustomEvent<any>"),
+        "the Svelte api-projector must not emit a loose CustomEvent<any> event surface"
+    );
 }
 
 #[test]
@@ -286,5 +305,144 @@ fn non_vue_api_projector_dispatch_detector_discriminates() {
             .iter()
             .any(|p| stripped.contains(p)),
         "the detector must catch a render-time dispatch call"
+    );
+}
+
+#[test]
+fn svelte_component_on_directive_not_loose_rewrite() {
+    // F13: the IDE projector's `On` directive arm MUST disambiguate component vs
+    // intrinsic — a COMPONENT-kind element routes the checked `__verter_event`
+    // helper (payload-checked), while an INTRINSIC element keeps the verbatim DOM
+    // `onevent` rewrite. The loose `on:`→`onclick` verbatim rewrite must NOT be
+    // applied unconditionally to every element.
+    let projector = strip_line_comments(&read_src(
+        "crates/verter_compiler/src/svelte/ide/projector/mod.rs",
+    ));
+    // The `On` arm branches on `SvelteElementKind::Component` and routes the
+    // checked component-event helper for components.
+    assert!(
+        projector.contains("rewrite_component_on_event"),
+        "the projector must route a COMPONENT `on:` through the checked event helper"
+    );
+    assert!(
+        projector.contains("__verter_event("),
+        "the component `on:` projection must emit the `__verter_event` checked call"
+    );
+    // The intrinsic DOM rewrite is preserved (the `on:`→`onevent` overwrite).
+    assert!(
+        projector.contains("rewrite_legacy_on"),
+        "the projector must keep the intrinsic DOM `on:`→`onevent` rewrite"
+    );
+    // DISCRIMINATING: the `On` arm must consult the element kind — an
+    // unconditional `rewrite_legacy_on` for ALL elements (the retired loose path)
+    // is forbidden. The arm guards the component route on the element kind.
+    let on_arm = projector
+        .split("SvelteDirectiveKind::On =>")
+        .nth(1)
+        .and_then(|rest| rest.split("SvelteDirectiveKind::Class").next())
+        .unwrap_or("");
+    assert!(
+        on_arm.contains("SvelteElementKind::Component"),
+        "the `On` directive arm must disambiguate the COMPONENT element kind \
+         (not unconditionally apply the loose DOM rewrite):\n{on_arm}"
+    );
+}
+
+#[test]
+fn no_custom_event_any_or_record_string_any_in_svelte_surfaces() {
+    // F13 + F9: NO loose `CustomEvent<any>` / `Record<string, *>` placeholder may
+    // appear in the Svelte `$events` / `$slots` projection or resolution surfaces.
+    // The event/slot surfaces are precise (an exact event/slot map with typed
+    // payload/binding nodes), never an untyped bag. The legacy `$$props`/
+    // `$$restProps` magic objects are the ONLY documented `Record<string, any>`
+    // carve-out (F12) and live behind the `LEGACY_MAGIC_PRELUDE` — scanning the
+    // event/slot-bearing files here excludes them.
+    let svelte_surface_files = [
+        "crates/verter_session/src/typeinfo/framework_surface/svelte_exec.rs",
+        "crates/verter_session/src/framework/api_projectors/svelte.rs",
+        "crates/verter_session/src/resolver_core/svelte_default_synth.rs",
+    ];
+    for rel in svelte_surface_files {
+        let src = strip_line_comments(&read_src(rel));
+        assert!(
+            !src.contains("CustomEvent<any>"),
+            "{rel} must not emit a loose `CustomEvent<any>` event surface"
+        );
+        assert!(
+            !src.contains("Record<string, any>") && !src.contains("Record<string,any>"),
+            "{rel} must not emit a loose `Record<string, any>` event/slot surface"
+        );
+        assert!(
+            !src.contains("Record<string, boolean>"),
+            "{rel} must not emit a loose `Record<string, boolean>` slot-presence bag"
+        );
+    }
+}
+
+#[test]
+fn no_custom_event_any_detector_discriminates() {
+    // The loose-surface detector must catch a synthetic source emitting
+    // `CustomEvent<any>` / `Record<string, any>` — proving the guard
+    // discriminates rather than passing vacuously.
+    let offending = "fn render() -> String { \"$events: Record<string, any>\".to_string() }";
+    let stripped = strip_line_comments(offending);
+    assert!(
+        stripped.contains("Record<string, any>"),
+        "the detector must catch a loose Record<string, any> surface"
+    );
+    let offending2 = "fn render() -> String { \"on:select -> CustomEvent<any>\".to_string() }";
+    assert!(
+        strip_line_comments(offending2).contains("CustomEvent<any>"),
+        "the detector must catch a loose CustomEvent<any> surface"
+    );
+}
+
+#[test]
+fn svelte_surface_source_exhaustive() {
+    // The closed `SvelteSurfaceSource` enum (including the new `CallbackPropEvents`
+    // family) is matched EXHAUSTIVELY across the resolution leg — adding a family
+    // forces an acknowledgement at every match site. The `store_kind_for_source`
+    // mapping and the `compute_svelte_surface` dispatch both match without a
+    // wildcard, and every family maps to exactly one wire kind.
+    use verter_protocol::typeinfo::graph::FrameworkSurfaceKind;
+    use verter_session::typeinfo::framework_surface::SvelteSurfaceSource;
+
+    let all = [
+        SvelteSurfaceSource::RunesProps,
+        SvelteSurfaceSource::LegacyExportLet,
+        SvelteSurfaceSource::Bindable,
+        SvelteSurfaceSource::SnippetProps,
+        SvelteSurfaceSource::LegacySlotInventory,
+        SvelteSurfaceSource::LegacyDispatcher,
+        SvelteSurfaceSource::CallbackPropEvents,
+        SvelteSurfaceSource::InstanceExports,
+    ];
+    // Exhaustive match — adding a family breaks this (no wildcard).
+    for source in all {
+        let kind = match source {
+            SvelteSurfaceSource::RunesProps | SvelteSurfaceSource::LegacyExportLet => {
+                FrameworkSurfaceKind::Props
+            }
+            SvelteSurfaceSource::Bindable => FrameworkSurfaceKind::Model,
+            SvelteSurfaceSource::SnippetProps | SvelteSurfaceSource::LegacySlotInventory => {
+                FrameworkSurfaceKind::Slots
+            }
+            SvelteSurfaceSource::LegacyDispatcher | SvelteSurfaceSource::CallbackPropEvents => {
+                FrameworkSurfaceKind::Emits
+            }
+            SvelteSurfaceSource::InstanceExports => FrameworkSurfaceKind::Expose,
+        };
+        // The new callback-prop event source maps to EMITS (the derived index).
+        if matches!(source, SvelteSurfaceSource::CallbackPropEvents) {
+            assert_eq!(kind, FrameworkSurfaceKind::Emits);
+        }
+    }
+    // The source-leg dispatch matches the new family WITHOUT a wildcard.
+    let leg = strip_line_comments(&read_src(
+        "crates/verter_session/src/typeinfo/framework_surface/svelte_exec.rs",
+    ));
+    assert!(
+        leg.contains("SvelteSurfaceSource::CallbackPropEvents =>"),
+        "the resolution leg must dispatch the CallbackPropEvents family explicitly"
     );
 }

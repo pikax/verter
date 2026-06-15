@@ -61,6 +61,18 @@ pub enum SvelteSurfaceSource {
     LegacySlotInventory,
     /// Legacy `createEventDispatcher<E>` event map → EMITS.
     LegacyDispatcher,
+    /// Modern callback-prop events (`onEvent` props whose value is function-like)
+    /// → EMITS. A DERIVED, NON-AUTHORITATIVE compatibility index: Svelte 5's
+    /// `Component` type carries no Events generic — callback props replaced
+    /// dispatcher events — so `$props` stays the authoritative surface for modern
+    /// event correctness. This source structurally enumerates the `$props` object
+    /// surface, keeps the static keys matching the `on${E}` callback convention
+    /// (NON-EMPTY suffix + function-like value), and surfaces each as an EMITS
+    /// event whose payload is the callback's PARAMETERS directly (NO event-name
+    /// strip — that strip is dispatcher-only). It NEVER mines an arbitrary
+    /// non-`on` function prop. The legacy `LegacyDispatcher` source stays the
+    /// authoritative EMITS source for dispatcher-based components.
+    CallbackPropEvents,
     /// Exported instance-script members → EXPOSE.
     InstanceExports,
 }
@@ -272,11 +284,12 @@ mod tests {
             SvelteSurfaceSource::SnippetProps,
             SvelteSurfaceSource::LegacySlotInventory,
             SvelteSurfaceSource::LegacyDispatcher,
+            SvelteSurfaceSource::CallbackPropEvents,
             SvelteSurfaceSource::InstanceExports,
         ];
         // Distinct families never alias under Hash/Eq.
         let set: HashSet<_> = all.iter().copied().collect();
-        assert_eq!(set.len(), 7);
+        assert_eq!(set.len(), 8);
         for source in &all {
             // Exhaustive match — adding a family breaks this.
             let tag = match source {
@@ -286,9 +299,10 @@ mod tests {
                 SvelteSurfaceSource::SnippetProps => 3,
                 SvelteSurfaceSource::LegacySlotInventory => 4,
                 SvelteSurfaceSource::LegacyDispatcher => 5,
-                SvelteSurfaceSource::InstanceExports => 6,
+                SvelteSurfaceSource::CallbackPropEvents => 6,
+                SvelteSurfaceSource::InstanceExports => 7,
             };
-            assert!(tag < 7);
+            assert!(tag < 8);
         }
     }
 

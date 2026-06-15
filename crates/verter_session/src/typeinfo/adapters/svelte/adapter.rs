@@ -62,7 +62,10 @@ impl SvelteFrameworkAdapter {
                 SvelteSurfaceSource::RunesProps,
                 SvelteSurfaceSource::LegacyExportLet,
             ],
-            FrameworkSurfaceKind::Emits => &[SvelteSurfaceSource::LegacyDispatcher],
+            FrameworkSurfaceKind::Emits => &[
+                SvelteSurfaceSource::LegacyDispatcher,
+                SvelteSurfaceSource::CallbackPropEvents,
+            ],
             FrameworkSurfaceKind::Slots => &[
                 SvelteSurfaceSource::SnippetProps,
                 SvelteSurfaceSource::LegacySlotInventory,
@@ -260,10 +263,21 @@ mod tests {
     }
 
     #[test]
-    fn emits_draws_only_from_legacy_dispatcher() {
-        // Runes callbacks STAY props — EMITS is the legacy dispatcher ONLY.
+    fn emits_draws_from_dispatcher_and_callback_props() {
+        // EMITS draws from BOTH the authoritative legacy dispatcher AND the
+        // DERIVED modern callback-prop event index (F13). The dispatcher source
+        // is FIRST (authoritative); the callback-prop source is the derived
+        // compatibility surface. A runes callback prop ALSO stays a PROP (the
+        // callback-prop source does not move it out of PROPS — it is a derived
+        // index, not the authority).
         let sources = SvelteFrameworkAdapter::sources_for(FrameworkSurfaceKind::Emits);
-        assert_eq!(sources, &[SvelteSurfaceSource::LegacyDispatcher]);
+        assert_eq!(
+            sources,
+            &[
+                SvelteSurfaceSource::LegacyDispatcher,
+                SvelteSurfaceSource::CallbackPropEvents,
+            ]
+        );
     }
 
     #[test]

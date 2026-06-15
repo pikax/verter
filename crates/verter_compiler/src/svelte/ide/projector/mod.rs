@@ -837,9 +837,17 @@ impl TemplateProjector<'_, '_> {
                 self.project_bind(el, attr, dir);
             }
             SvelteDirectiveKind::On => {
-                // Legacy `on:click={h}` → `onclick={h}` verbatim namespaced
-                // lowercase (D-ae(b)) — rewrite `on:click` to `onclick`.
-                self.rewrite_legacy_on(attr, dir);
+                // F13: a COMPONENT-kind element routes `on:event={h}` to the
+                // checked `__verter_event(Child, "event", h)` helper (the handler
+                // is checked against the component's `$events["event"]` payload —
+                // an unknown event name / wrong payload FAILS). An INTRINSIC
+                // element keeps the verbatim DOM `onevent` rewrite (`on:click` →
+                // `onclick`, typed by `SvelteHTMLElements`).
+                if matches!(el.kind, SvelteElementKind::Component) {
+                    self.rewrite_component_on_event(el, attr, dir);
+                } else {
+                    self.rewrite_legacy_on(attr, dir);
+                }
             }
             SvelteDirectiveKind::Class => {
                 // `class:active={cond}` → keep as a checkable boolean attribute
@@ -1142,7 +1150,8 @@ impl TemplateProjector<'_, '_> {
         }
     }
 
-    /// Rewrite a legacy `on:event` to `onevent` (verbatim lowercase).
+    /// Rewrite an INTRINSIC element's legacy `on:event` to `onevent` (verbatim
+    /// lowercase, typed by `SvelteHTMLElements`).
     fn rewrite_legacy_on(
         &mut self,
         attr: &SvelteAttribute,
@@ -1157,6 +1166,48 @@ impl TemplateProjector<'_, '_> {
         if let Some(SvelteAttributeValue::Expression(expr)) = dir.value {
             self.rewrite_store_subs_in(expr);
         }
+    }
+
+    /// Rewrite a COMPONENT element's legacy `on:event={handler}` to the checked
+    /// `__verter_event` helper (F13).
+    ///
+    /// `<Child on:select={h}>` → `{...(__verter_event(Child, "select", h), {})}` —
+    /// a no-prop JSX spread that CALLS `__verter_event(component, name, handler)`.
+    /// The helper's `name` parameter is constrained to `keyof $events & string`
+    /// (an unknown event name FAILS) and its `handler` parameter is typed
+    /// `$events[name]` (a wrong payload type FAILS). The component reference is the
+    /// element's name; a non-identifier component reference (a dynamic
+    /// `<svelte:component>` routes through F8, not here) is not reachable on a
+    /// `Component`-kind element. A `<Child on:select>` with NO handler value is a
+    /// legacy event FORWARD (re-dispatch to the parent) — there is no local
+    /// handler to check, so the directive is stripped (no type surface).
+    fn rewrite_component_on_event(
+        &mut self,
+        el: &SvelteElement,
+        attr: &SvelteAttribute,
+        dir: &crate::svelte::parser::SvelteDirective,
+    ) {
+        let Some(SvelteAttributeValue::Expression(expr)) = dir.value else {
+            // Event forwarding (`on:select` with no value) — strip, no surface.
+            remove_span(self.ct, attr.span);
+            return;
+        };
+        // A component reference must be a valid identifier to index its `$events`.
+        if !is_valid_component_reference(&el.name) {
+            remove_span(self.ct, attr.span);
+            return;
+        }
+        // F11: a store-sub in the handler value (`on:select={$handler}`) is
+        // rewritten before the surrounding bytes are overwritten.
+        self.rewrite_store_subs_in(expr);
+        // `on:select={` → `{...(__verter_event(Child, "select", ` ; trailing `}` →
+        // `), {})}`. The handler bytes stay mapped between the two overwrites.
+        self.ct.overwrite(
+            attr.span.start,
+            expr.start,
+            &format!("{{...(__verter_event({}, \"{}\", ", el.name, dir.local),
+        );
+        self.ct.overwrite(expr.end, attr.span.end, "), {})}");
     }
 
     /// Rewrite a `class:` directive to a `data-class-*` attribute keeping the

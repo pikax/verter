@@ -347,6 +347,256 @@ fn component_tag_wrong_prop_is_rejected_via_element_attributes_property() {
 }
 
 #[test]
+fn component_on_event_correct_payload_type_checks() {
+    // F13 (PRECISION): a component `on:select={h}` whose handler payload MATCHES
+    // the child's `$events["select"]` type-checks clean through the
+    // `__verter_event` helper. The child is a class-shaped component carrying an
+    // exact `$events` map — the helper indexes it and checks the handler.
+    let projected = project(
+        "<script lang=\"ts\">\n\
+         declare class Child { $events: { select: (id: number) => void }; $props: {} }\n\
+         const handle = (id: number) => { void id; };\n\
+         </script>\n\
+         <Child on:select={handle} />",
+    );
+    let Some((ok, out)) = typecheck_projected(&projected, "OnEventOk.svelte.tsx", &[], true) else {
+        skip_note("component on:event correct payload");
+        return;
+    };
+    assert!(
+        ok,
+        "a correctly-typed component `on:` handler must check via $events:\n{out}"
+    );
+}
+
+#[test]
+fn component_on_event_wrong_payload_is_rejected() {
+    // F13 (PRECISION, discriminating): a component `on:select={h}` whose handler
+    // payload MISMATCHES the child's `$events["select"]` is REJECTED. A loose
+    // `CustomEvent<any>` projection would have WRONGLY accepted this — its
+    // rejection proves the payload is checked precisely.
+    let projected = project(
+        "<script lang=\"ts\">\n\
+         declare class Child { $events: { select: (id: number) => void }; $props: {} }\n\
+         const handle = (id: string) => { void id; };\n\
+         </script>\n\
+         <Child on:select={handle} />",
+    );
+    let Some((ok, out)) =
+        typecheck_projected(&projected, "OnEventBadPayload.svelte.tsx", &[], true)
+    else {
+        skip_note("component on:event wrong payload");
+        return;
+    };
+    assert!(
+        !ok,
+        "a wrong-payload component `on:` handler must be REJECTED via $events:\n{out}"
+    );
+}
+
+#[test]
+fn component_on_event_unknown_event_name_is_rejected() {
+    // F13 (PRECISION, discriminating): a component `on:nope={h}` whose event name
+    // is NOT in the child's `$events` map is REJECTED (the `K extends keyof
+    // $events` constraint fails). An unknown event silently treated as a prop /
+    // a loose projection would have accepted it.
+    let projected = project(
+        "<script lang=\"ts\">\n\
+         declare class Child { $events: { select: (id: number) => void }; $props: {} }\n\
+         const handle = (id: number) => { void id; };\n\
+         </script>\n\
+         <Child on:nope={handle} />",
+    );
+    let Some((ok, out)) = typecheck_projected(&projected, "OnEventUnknown.svelte.tsx", &[], true)
+    else {
+        skip_note("component on:event unknown name");
+        return;
+    };
+    assert!(
+        !ok,
+        "an unknown component `on:` event name must be REJECTED via keyof $events:\n{out}"
+    );
+}
+
+#[test]
+fn intrinsic_on_event_still_dom_rewrites_and_checks() {
+    // F13 (intrinsic disambiguation): an INTRINSIC element's `on:click` keeps the
+    // verbatim DOM `onclick` rewrite typed by `SvelteHTMLElements` — it does NOT
+    // route the component event helper. A correctly-typed DOM handler checks.
+    let projected = project(
+        "<script lang=\"ts\">\n\
+         const handle = (e: MouseEvent) => { void e; };\n\
+         </script>\n\
+         <button on:click={handle}>x</button>",
+    );
+    let Some((ok, out)) = typecheck_projected(&projected, "IntrinsicOn.svelte.tsx", &[], true)
+    else {
+        skip_note("intrinsic on:click DOM rewrite");
+        return;
+    };
+    assert!(
+        ok,
+        "an intrinsic `on:click` must DOM-rewrite to a checkable `onclick`:\n{out}"
+    );
+    // The projected body routes the DOM rewrite, NEVER the component helper.
+    assert!(
+        render_body(&projected).contains("onclick={handle}"),
+        "the intrinsic `on:click` projects to `onclick=`:\n{projected}"
+    );
+    assert!(
+        !render_body(&projected).contains("__verter_event("),
+        "an intrinsic `on:` must not route the component event helper:\n{projected}"
+    );
+}
+
+#[test]
+fn shim_events_index_checks_callback_and_dispatcher_payloads_precisely() {
+    // F13 (PRECISION end-to-end through the `.svelte.ts` shim shape): the derived
+    // `$events` index resolves callback-prop AND dispatcher events to their EXACT
+    // payloads. A correct handler against `["$events"]["select"]` checks; a
+    // wrong-typed handler FAILS. This mirrors the api-projector's shim render.
+    let good = "/** @jsxImportSource @verter/svelte-jsx */\n\
+        type __VerterFunction<T> = Extract<NonNullable<T>, (...a: any[]) => any>;\n\
+        type __VerterCallbackEvents<P> = {\n\
+          [K in keyof P as K extends `on${infer E}`\n\
+            ? (E extends \"\" ? never : __VerterFunction<P[K]> extends never ? never : E)\n\
+            : never]: __VerterFunction<P[K]>\n\
+        };\n\
+        type __VerterDispatcherEvents<E> = { [K in keyof E]: (e: CustomEvent<E[K]>) => void };\n\
+        type __VerterProps = { label: string; onselect: (id: number) => void };\n\
+        type __VerterEventsSurface = __VerterCallbackEvents<__VerterProps> & __VerterDispatcherEvents<{ save: string }>;\n\
+        ;function __verter_render() {\n\
+        // The callback-prop event `select` value is the callback handler ITSELF.\n\
+        const ev: __VerterEventsSurface[\"select\"] = (id: number) => { void id; };\n\
+        // The dispatcher event `save` value is the legacy CustomEvent handler with\n\
+        // the EXACT payload detail (CustomEvent<string>), never `string`/any.\n\
+        const sv: __VerterEventsSurface[\"save\"] = (e: CustomEvent<string>) => { void e.detail; };\n\
+        void ev; void sv;\n\
+        return (<></>);\n\
+        }\nexport {};\n";
+    let Some((ok, out)) = typecheck_projected(good, "ShimEventsOk.svelte.tsx", &[], true) else {
+        skip_note("shim $events precise index");
+        return;
+    };
+    assert!(
+        ok,
+        "the derived $events index must resolve callback + dispatcher payloads precisely:\n{out}"
+    );
+
+    // DISCRIMINATING: a wrong-typed handler against the derived event payload FAILS.
+    let bad = "/** @jsxImportSource @verter/svelte-jsx */\n\
+        type __VerterFunction<T> = Extract<NonNullable<T>, (...a: any[]) => any>;\n\
+        type __VerterCallbackEvents<P> = {\n\
+          [K in keyof P as K extends `on${infer E}`\n\
+            ? (E extends \"\" ? never : __VerterFunction<P[K]> extends never ? never : E)\n\
+            : never]: __VerterFunction<P[K]>\n\
+        };\n\
+        type __VerterProps = { onselect: (id: number) => void };\n\
+        type __VerterEventsSurface = __VerterCallbackEvents<__VerterProps>;\n\
+        ;function __verter_render() {\n\
+        // @ts-expect-error a string handler is not assignable to the (id: number) payload\n\
+        const ev: __VerterEventsSurface[\"select\"] = (id: string) => { void id; };\n\
+        void ev;\n\
+        return (<></>);\n\
+        }\nexport {};\n";
+    let Some((bad_ok, bad_out)) = typecheck_projected(bad, "ShimEventsBad.svelte.tsx", &[], true)
+    else {
+        return;
+    };
+    assert!(
+        bad_ok,
+        "the @ts-expect-error must match a REAL wrong-payload error (proving the \
+         derived event payload is precise, not any):\n{bad_out}"
+    );
+
+    // DISCRIMINATING (dispatcher handler shape): the dispatcher event `save`'s
+    // handler must be `(e: CustomEvent<string>) => void` — a WRONG detail type
+    // (`CustomEvent<number>`) FAILS, and a bare payload (`string`, not a handler)
+    // FAILS. This proves the dispatcher half wraps payloads into precise handler
+    // types (the gap a payload-typed `$events["save"]` would have hidden).
+    let wrong_detail = "/** @jsxImportSource @verter/svelte-jsx */\n\
+        type __VerterCallbackEvents<P> = {};\n\
+        type __VerterDispatcherEvents<E> = { [K in keyof E]: (e: CustomEvent<E[K]>) => void };\n\
+        type __VerterEventsSurface = __VerterCallbackEvents<{}> & __VerterDispatcherEvents<{ save: string }>;\n\
+        ;function __verter_render() {\n\
+        // @ts-expect-error a CustomEvent<number> handler is not assignable to CustomEvent<string>\n\
+        const sv: __VerterEventsSurface[\"save\"] = (e: CustomEvent<number>) => { void e.detail; };\n\
+        // @ts-expect-error a bare string is not a handler (the value is a CustomEvent handler)\n\
+        const raw: __VerterEventsSurface[\"save\"] = \"ok\";\n\
+        void sv; void raw;\n\
+        return (<></>);\n\
+        }\nexport {};\n";
+    let Some((wd_ok, wd_out)) = typecheck_projected(
+        wrong_detail,
+        "ShimEventsDispatcherBad.svelte.tsx",
+        &[],
+        true,
+    ) else {
+        return;
+    };
+    assert!(
+        wd_ok,
+        "the @ts-expect-errors must match REAL errors — the dispatcher event value \
+         is the precise CustomEvent<detail> HANDLER, not a payload / any:\n{wd_out}"
+    );
+}
+
+#[test]
+fn shim_slots_index_is_name_exact_and_binding_precise() {
+    // F9 (PRECISION end-to-end through the `.svelte.ts` shim shape): the `$slots`
+    // index is name-EXACT (an unknown slot name FAILS the `keyof` index) AND its
+    // binding type is PRECISE — the snippet slot is CALLED with its binding, and a
+    // WRONG-typed binding FAILS through tsgo while a correct binding PASSES. The
+    // shim renders `$slots` as `{ row: __VerterProps["row"] }` over the snippet
+    // prop's own type. This test FAILS if the slot binding surface were loosened
+    // to `any` (a wrong binding against `any` would NOT error).
+    let good = "/** @jsxImportSource @verter/svelte-jsx */\n\
+        import type { Snippet } from \"svelte\";\n\
+        type __VerterProps = { row: Snippet<[{ id: number }]> };\n\
+        type __VerterSlotsSurface = { row: __VerterProps[\"row\"] };\n\
+        ;function __verter_render(slots: __VerterSlotsSurface) {\n\
+        // CALL the snippet slot with a CORRECT binding — `{ id: number }` checks.\n\
+        slots.row({ id: 1 });\n\
+        // @ts-expect-error `missing` is not a slot key\n\
+        type _Missing = __VerterSlotsSurface[\"missing\"];\n\
+        return (<></>);\n\
+        }\nexport {};\n";
+    let Some((ok, out)) = typecheck_projected(good, "ShimSlotsOk.svelte.tsx", &[], true) else {
+        skip_note("shim $slots name-exact + binding-precise");
+        return;
+    };
+    assert!(
+        ok,
+        "the $slots index must be name-exact + binding-precise (a correct snippet \
+         binding checks; the @ts-expect-error matches the unknown-slot index error):\n{out}"
+    );
+
+    // DISCRIMINATING (binding precision, the real negative): calling the snippet
+    // slot with a WRONG-typed binding (`{ id: "bad" }` against `{ id: number }`)
+    // MUST FAIL through tsgo. If the binding surface were `any`, this would NOT
+    // error — the @ts-expect-error would then be unsatisfied and tsgo would FAIL
+    // the test from the other side, so this discriminates precise vs `any`.
+    let bad = "/** @jsxImportSource @verter/svelte-jsx */\n\
+        import type { Snippet } from \"svelte\";\n\
+        type __VerterProps = { row: Snippet<[{ id: number }]> };\n\
+        type __VerterSlotsSurface = { row: __VerterProps[\"row\"] };\n\
+        ;function __verter_render(slots: __VerterSlotsSurface) {\n\
+        // @ts-expect-error `{ id: string }` is not assignable to the `{ id: number }` binding\n\
+        slots.row({ id: \"bad\" });\n\
+        return (<></>);\n\
+        }\nexport {};\n";
+    let Some((bad_ok, bad_out)) = typecheck_projected(bad, "ShimSlotsBad.svelte.tsx", &[], true)
+    else {
+        return;
+    };
+    assert!(
+        bad_ok,
+        "the @ts-expect-error must match a REAL wrong-binding error (proving the \
+         snippet slot binding is PRECISE `{{ id: number }}`, NOT `any`):\n{bad_out}"
+    );
+}
+
+#[test]
 fn projected_snippet_ordering_fixture_type_checks_clean_discriminating_tdz() {
     // D-ap DISCRIMINATING: a `{@render mySnip()}` PRECEDING its `{#snippet}` in
     // the same scope type-checks clean. In-place declarator projection would

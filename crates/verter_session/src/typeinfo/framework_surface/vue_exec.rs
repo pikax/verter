@@ -141,19 +141,11 @@ impl VueMacroSurface {
         host: &VerterHost,
         member: &TypeInfoSurfaceMember,
     ) -> TypeExprScope {
-        host.project_type_store()
-            .semantic_graph()
-            .node_scope(member.value)
-            .and_then(|scope| scope.canonical_file())
-            .map(|canonical| TypeExprScope::new(canonical.as_ref()))
-            .or_else(|| {
-                member
-                    .origin
-                    .canonical_file
-                    .as_ref()
-                    .map(|canonical| TypeExprScope::new(canonical.as_ref()))
-            })
-            .unwrap_or_else(|| TypeExprScope::new(self.owner_canonical.as_ref()))
+        crate::typeinfo::framework_surface::scope::member_value_expr_scope(
+            host,
+            member,
+            self.owner_canonical.as_ref(),
+        )
     }
 
     /// The scope a call signature's stripped-payload `*_expr` should bind to —

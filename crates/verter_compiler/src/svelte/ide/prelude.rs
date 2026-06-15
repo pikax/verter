@@ -230,6 +230,24 @@ declare function __verter_bind_fn_read<V>(get: null, set: (value: V) => void): v
 declare function __verter_dynamic_component<P>(
   component: abstract new (...args: never[]) => { $props: P },
 ): (props: P & { children?: unknown }) => ReturnType<Snippet>;
+// --- F13 component `on:event={handler}` payload checking. A COMPONENT element's
+// `on:select={h}` projects to `{...(__verter_event(Child, "select", h), {})}` —
+// the helper extracts the component's `$events` map from its instance type and
+// constrains the event NAME to `keyof $events` (an unknown event name FAILS) and
+// the HANDLER to `$events[name]` (a wrong payload type FAILS). A component value
+// is class-shaped (`new (...) => { $events }`); a component WITHOUT a `$events`
+// member resolves to `{}` (no checkable events — every `on:` then FAILS the
+// `keyof {}` constraint, which is the correct behaviour for an event-less
+// component). This is the precise checked replacement for the rejected loose
+// `on:`→`onclick` verbatim projection on component elements (a payload-checked
+// event map, never an untyped event bag).
+type __VerterEventsOf<C> =
+  (C extends new (...args: any[]) => infer I ? I : never) extends { $events: infer E } ? E : {};
+declare function __verter_event<C, K extends keyof __VerterEventsOf<C> & string>(
+  component: C,
+  name: K,
+  handler: __VerterEventsOf<C>[K],
+): void;
 // --- F11 store auto-subscription (`$store`) helpers. The projector rewrites
 // ONLY the `$` byte / `=` operator spans of a classified store-sub, preserving
 // the original `store` identifier / RHS bytes (sourcemap accuracy). A READ
@@ -346,6 +364,27 @@ mod tests {
         assert!(
             p.contains("(props: P & { children?: unknown })"),
             "the returned function component is typed by the inferred $props"
+        );
+    }
+
+    #[test]
+    fn prelude_declares_the_component_event_helper() {
+        // F13: the component `on:event` payload checker is declared. It extracts
+        // the component's `$events` map and constrains the event name to
+        // `keyof __VerterEventsOf<C>` and the handler to its indexed payload type.
+        let p = render_prelude(SvelteJsxNamespace::Html, true);
+        assert!(p.contains("type __VerterEventsOf<C>"));
+        assert!(p.contains(
+            "declare function __verter_event<C, K extends keyof __VerterEventsOf<C> & string>"
+        ));
+        assert!(
+            p.contains("handler: __VerterEventsOf<C>[K]"),
+            "the handler is typed by the indexed event payload"
+        );
+        // The loose `CustomEvent<any>` projection is NOT present.
+        assert!(
+            !p.contains("CustomEvent<any>"),
+            "no loose CustomEvent<any> in the F13 event surface"
         );
     }
 

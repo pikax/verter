@@ -123,16 +123,52 @@ fn snippet_block_projects_to_a_branded_declarator_hoisted_to_scope_top() {
 }
 
 #[test]
-fn legacy_on_event_projects_verbatim_lowercase_never_oncamel() {
+fn legacy_on_event_on_intrinsic_element_dom_rewrites_verbatim_lowercase() {
+    // F13: an INTRINSIC element's `on:click` keeps the verbatim DOM `onclick`
+    // rewrite — only a COMPONENT-kind element routes to the checked event helper.
     let code = project("<button on:click={handle}>x</button>");
-    assert!(!code.contains("on:click"), "no on: residue: {code}");
+    let body = render_body(&code);
+    assert!(!body.contains("on:click"), "no on: residue: {body}");
     assert!(
-        code.contains("onclick={handle}"),
-        "verbatim lowercase: {code}"
+        body.contains("onclick={handle}"),
+        "intrinsic DOM rewrite: {body}"
     );
     assert!(
-        !code.contains("onClick"),
-        "the onClick rename is RETIRED: {code}"
+        !body.contains("onClick"),
+        "the onClick rename is RETIRED: {body}"
+    );
+    // An intrinsic element never routes through the component event helper
+    // (the prelude declares the helper; the render body must not CALL it).
+    assert!(
+        !body.contains("__verter_event("),
+        "intrinsic `on:` must NOT route the component event helper: {body}"
+    );
+}
+
+#[test]
+fn legacy_on_event_on_component_routes_the_checked_event_helper() {
+    // F13: a COMPONENT-kind element's `on:select={h}` routes through the checked
+    // `__verter_event(Child, "select", h)` helper (NOT the loose `on:`→`onclick`
+    // verbatim rewrite). The component reference (`Child`), the static event name,
+    // and the handler all flow into the call so TSGO checks the handler against
+    // the component's `$events["select"]` payload.
+    let code = project("<Child on:select={handle}>x</Child>");
+    let body = render_body(&code);
+    assert!(!body.contains("on:select"), "no on: residue: {body}");
+    // The loose `onselect`/`onclick` verbatim rewrite must NOT be emitted for a
+    // component element.
+    assert!(
+        !body.contains("onselect="),
+        "a component `on:` must NOT verbatim-rewrite to `onselect=`: {body}"
+    );
+    assert!(
+        body.contains("__verter_event(Child, \"select\", handle)"),
+        "component `on:` routes the checked event helper: {body}"
+    );
+    // The check is emitted as a no-prop JSX spread so it contributes no attribute.
+    assert!(
+        body.contains("{...(__verter_event(Child, \"select\", handle), {})}"),
+        "the event check is a no-prop spread: {body}"
     );
 }
 

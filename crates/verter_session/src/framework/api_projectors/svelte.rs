@@ -30,6 +30,29 @@ use crate::framework::api_projector::{ComponentApiProjector, ComponentApiProject
 use crate::resolver_core::surface_projector::render_type_expr_display;
 use crate::types::{PublicApiMode, TscResponse};
 
+/// The F13 derived-callback-event helper types rendered into every Svelte
+/// `.svelte.ts` shim.
+///
+/// The `$events` map values are HANDLER types uniformly (the component `on:`
+/// helper checks `handler: $events[K]`), produced from the TWO event models:
+/// - `__VerterCallbackEvents<P>` — the DERIVED mapped type over the props `P`:
+///   each static key matching the `on${E}` callback convention (NON-EMPTY suffix
+///   `E`) whose value is function-like remaps to event `E` whose handler type is
+///   the callback function ITSELF (already a handler). A non-`on` key, an empty
+///   suffix, or a non-function value drops out (`never` key).
+/// - `__VerterDispatcherEvents<E>` — over the legacy `createEventDispatcher<E>`
+///   map, each event `K` with payload `E[K]` becomes the Svelte legacy handler
+///   shape `(e: CustomEvent<E[K]>) => void` (a legacy `on:save` handler receives
+///   the dispatched `CustomEvent`). The detail type is EXACT (`CustomEvent<E[K]>`,
+///   never `CustomEvent<any>`).
+///
+/// `__VerterFunction<T>` extracts the function arm of a (possibly optional)
+/// callback-prop value. TSGO resolves the mapped types at check time — the
+/// projector performs NO type resolution here.
+const EVENTS_HELPER_PRELUDE: &str = "type __VerterFunction<T> = Extract<NonNullable<T>, (...a: any[]) => any>;
+type __VerterCallbackEvents<P> = {\n  [K in keyof P as K extends `on${infer E}`\n    ? (E extends \"\" ? never : __VerterFunction<P[K]> extends never ? never : E)\n    : never]: __VerterFunction<P[K]>\n};
+type __VerterDispatcherEvents<E> = { [K in keyof E]: (e: CustomEvent<E[K]>) => void };";
+
 /// The Svelte component-API projector.
 #[derive(Debug, Default)]
 pub struct SvelteComponentApiProjector;
@@ -78,26 +101,41 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
             return None;
         };
 
-        // Split the instance shape into the `$props` member type and the
-        // instance-script export members.
+        // Split the instance shape into the `$props` member type, the synthesized
+        // `$events` (legacy dispatcher map) / `$slots` (snippet member keys)
+        // surfaces, and the instance-script export members.
         let mut props_type: Option<&TypeExpr> = None;
+        let mut events_type: Option<&TypeExpr> = None;
+        let mut slot_keys: Vec<&str> = Vec::new();
         let mut export_members: Vec<(&str, &TypeExpr)> = Vec::new();
         for member in &instance_obj.properties {
             if let ObjectMember::Property(prop) = member {
-                if prop.name == "$props" {
-                    props_type = Some(&prop.ty);
-                } else {
-                    export_members.push((prop.name.as_str(), &prop.ty));
+                match prop.name.as_str() {
+                    "$props" => props_type = Some(&prop.ty),
+                    "$events" => events_type = Some(&prop.ty),
+                    "$slots" => {
+                        if let TypeExpr::Object(slots_obj) = &prop.ty {
+                            for slot in &slots_obj.properties {
+                                if let ObjectMember::Property(s) = slot {
+                                    slot_keys.push(s.name.as_str());
+                                }
+                            }
+                        }
+                    }
+                    _ => export_members.push((prop.name.as_str(), &prop.ty)),
                 }
             }
         }
 
         // Collect the PRESERVED type-reference names (top-level refs in the
-        // props type + export member types) so the prelude imports ONLY the
-        // referenced types (unused imports dropped).
+        // props type + the dispatcher event-map type + export member types) so
+        // the prelude imports ONLY the referenced types (unused imports dropped).
         let mut referenced: BTreeSet<String> = BTreeSet::new();
         if let Some(props) = props_type {
             collect_top_level_refs(props, &mut referenced);
+        }
+        if let Some(events) = events_type {
+            collect_top_level_refs(events, &mut referenced);
         }
         for (_, ty) in &export_members {
             collect_top_level_refs(ty, &mut referenced);
@@ -124,12 +162,53 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
             .unwrap_or_else(|| "{}".to_string());
         out.line(&format!("type __VerterProps = {props_text};"));
 
-        // 3. `interface __VerterInstance { $props: __VerterProps; …exports }`.
+        // The F13 derived-callback-event helpers. `$events` is a DERIVED,
+        // NON-AUTHORITATIVE compatibility index — `$props` stays authoritative for
+        // modern event correctness. The callback-prop events are a MAPPED type over
+        // `__VerterProps`: each `on${E}` key whose value is function-like maps to
+        // event `E` with the callback's parameters as the handler type. TSGO
+        // resolves the mapped type at check time (no projector-time dispatch).
+        out.line(EVENTS_HELPER_PRELUDE);
+        // The shim `$events` index: the derived callback-prop events UNIONed with
+        // the legacy dispatcher event map (when present). A consumer's
+        // `["$events"][K]` indexes the payload precisely; an unknown event name
+        // FAILS the `keyof` index.
+        let events_text = match events_type {
+            // The dispatcher map carries PAYLOAD types per event; wrap it in
+            // `__VerterDispatcherEvents` so its values become the legacy HANDLER
+            // shape `(e: CustomEvent<payload>) => void` — uniform with the
+            // callback-prop handlers so `$events[K]` is always a handler type.
+            Some(events) => format!(
+                "__VerterCallbackEvents<__VerterProps> & __VerterDispatcherEvents<{}>",
+                render_shim_type(events)
+            ),
+            None => "__VerterCallbackEvents<__VerterProps>".to_string(),
+        };
+        out.line(&format!("type __VerterEventsSurface = {events_text};"));
+
+        // The shim `$slots` index: an EXACT key map whose values are the snippet
+        // callables, rendered shallow as `__VerterProps[K]` (the snippet prop's own
+        // `Snippet<…>` type — the precise binding type the consumer re-resolves).
+        // A consumer's `["$slots"][K]` is name-exact; an unknown slot name FAILS.
+        let slots_text = if slot_keys.is_empty() {
+            "{}".to_string()
+        } else {
+            let entries: Vec<String> = slot_keys
+                .iter()
+                .map(|k| format!("{k}: __VerterProps[\"{k}\"]"))
+                .collect();
+            format!("{{ {} }}", entries.join("; "))
+        };
+        out.line(&format!("type __VerterSlotsSurface = {slots_text};"));
+
+        // 3. `interface __VerterInstance { $props; $events; $slots; …exports }`.
         //    Each exported instance-script binding is an instance member. Its
         //    VALUE type stays shallow (it is resolved on demand by a consumer);
         //    the load-bearing contract is the member's PRESENCE on the instance.
         out.line("interface __VerterInstance {");
         out.line("  $props: __VerterProps;");
+        out.line("  $events: __VerterEventsSurface;");
+        out.line("  $slots: __VerterSlotsSurface;");
         for (name, _ty) in &export_members {
             out.line(&format!("  {name}: unknown;"));
         }

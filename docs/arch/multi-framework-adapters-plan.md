@@ -2145,40 +2145,89 @@ assertions.
 
 **Dependencies.** B8c. Serialized after B8f.
 
-### B8h — Svelte precise legacy component events (F13, OWNER-GATED)
+### B8h — Svelte precise legacy component events + slot-name exactness (F13 + F9)
 
-**Context.** Flip the legacy component `on:` payload-checking row OUT-OF-SCOPE→SUPPORTED (D-bl) —
-but PAYLOAD-PRECISE, not the rejected loose `CustomEvent<any>`. OWNER-GATED: it requires a new
-API-surface extension.
+**Context.** Two surfaces become PAYLOAD/NAME-PRECISE. F13 flips the component `on:` payload-checking
+row to SUPPORTED — payload-precise, never the rejected loose `CustomEvent<any>`. F9's `$slots`
+slot-name-exactness contract is CONSOLIDATED here from §B8f (which deferred slot-NAME precision to an
+owner-gated `$slots` extension, the `$events` analogue). Both ride the EXISTING typeinfo wire kinds
+(`FRAMEWORK_SURFACE_KIND_EMITS` / `_SLOTS`) — NO proto variant, NO `SemanticTypeGraph.schema_version`
+bump (the EMITS/SLOTS graph nodes already carry the typed `payload_expr` / `binding_expr`). The only
+new Rust-internal type is the closed `SvelteSurfaceSource::CallbackPropEvents` enum arm.
 
-**Changes.**
-- Add an API-VISIBLE event map to the component API file (a `$events` contract on the
-  `ComponentApiProjector`-rendered `.svelte.ts` declaration shim, derived from the component's
-  `createEventDispatcher<E>` EMITS surface — already resolved by the B8b `SvelteSurface` EMITS arm,
-  so the api-projector renders the event map WITHOUT a projector-time resolver dispatch).
-- F13 `<Child on:event={handler}>` → a TS helper projection checking `handler` against
-  `EventsOf<typeof Child>[K]` (the `$events`-contract-indexed payload type) — sourced from the
-  imported `Child.svelte.ts` api file, NO projector-time resolver dispatch. A loose `CustomEvent<any>`
-  projection is REJECTED.
+**F13 — `$events` payload map (two models, one EmitsSurface).**
+- **Legacy `createEventDispatcher<E>()`** — authoritative; resolves the captured event-map `TypeExpr`
+  through the SHARED engine (`navigate_param_to_object_surface` → `emits_from_typeinfo_surface`,
+  dispatcher-only leading-event-name strip).
+- **Modern callback-prop events** (`SvelteSurfaceSource::CallbackPropEvents`) — captured STRUCTURALLY
+  by enumerating the `$props` object surface (shared `Navigate`): a static key matching the `on${E}`
+  convention (NON-EMPTY suffix `E`) whose value realises to FUNCTION-LIKE surfaces as event `E` whose
+  payload is the callback's PARAMETERS directly (NO event-name strip). An arbitrary non-`on` function
+  prop (`inflate`) is NEVER mined; the `on`-prefix test is a legitimate STRUCTURAL Svelte-language
+  rule, not banned nominal role inference.
+- **OWNER DECISION (derived-$events framing).** Callback-prop `$events` is a DERIVED, DOCUMENTED,
+  NON-AUTHORITATIVE compatibility index — `$props` stays authoritative for modern event correctness
+  (Svelte 5's `Component` type has no Events generic; callback props replaced dispatcher events).
+  Legacy dispatcher `$events` stays authoritative. There is ONE source of truth per model; arbitrary
+  function props are never mined.
+- **`.svelte.ts` shim `$events` member** (dispatch-free render): a derived mapped type
+  (`__VerterCallbackEvents<__VerterProps>`) UNIONed with the legacy dispatcher map (exact handler
+  types, never `CustomEvent<any>`); TSGO resolves the mapped type at check time. The synth carries a
+  parse-domain `$events` member (dispatcher map) on the component instance.
+- **Component `on:` projection** — a COMPONENT-kind element's `on:select={h}` projects to
+  `{...(__verter_event(Child, "select", h), {})}`, checking `h` against the component's
+  `__VerterEventsOf<C>["select"]` (unknown event name FAILS `K extends keyof $events`; wrong payload
+  FAILS). The loose `on:`→`onclick` verbatim rewrite is RETIRED for COMPONENT elements; an INTRINSIC
+  element keeps its DOM `onclick` rewrite (mandatory component-vs-intrinsic disambiguation).
 
-**Legacy Deletions.** The B8c legacy `on:` typed-unsupported diagnostic + its out-of-scope
-assertion.
+**F9 — `$slots` slot-name exactness.**
+- **Snippet-prop slots** — already precise (`resolve_snippet_props`; function-like only, first-param
+  object → bindings, return preserved).
+- **Legacy `<slot name=x let:b>`** — the typed template AST is walked structurally for EXACT slot
+  NAMES (precise). **OWNER DECISION:** the let:-binding VALUE types are typed `any` for now — a
+  documented deprecated-path carve-out scoped to legacy-`<slot>` bindings ONLY. Precise parse-domain
+  forwarded-expression capture is a NAMED FOLLOW-UP (ledgered as a discriminating `#[ignore]` test,
+  `legacy_slot_let_binding_value_precision_is_a_followup`, not a prose-only gap).
+- **`.svelte.ts` shim `$slots` member** — an exact key map rendered shallow from parse-domain (the
+  snippet member keys → `__VerterProps[K]`, the snippet's own type). A consumer's `["$slots"][K]` is
+  name-exact (unknown slot name FAILS); a snippet binding mismatch FAILS. The synth carries a
+  parse-domain `$slots` member (snippet keys).
 
-**Tests (failing first).**
-1. TSGO validity: a `<Child on:select={(e) => …}>` whose handler payload mismatches the child's
-   `createEventDispatcher<{ select: string }>` map FAILS (`@ts-expect-error`); a correct payload
-   checks; an `on:` event not in the child's map FAILS.
-2. A negative test that no `CustomEvent<any>` loose projection is emitted (the `$events` contract is
-   consulted).
-3. The api-projector renders the `$events` map with NO semantic dispatch at render time (static
-   guard scope).
+**Resolution path (one shared engine).** Every TYPE read routes through the ONE shared five-mode
+dispatch; the Svelte adapter only PLANS demands + thinly NORMALISES. LegacyDispatcher: captured
+`dispatcher_events` → shared Navigate → `emits_from_typeinfo_surface`. CallbackPropEvents: `$props` →
+shared Navigate object surface → thin callback-event normaliser over function-like `on*` members (no
+strip). SnippetProps: `$props` → shared Navigate → snippet normalise. LegacySlotInventory: typed
+parse carrier (template AST) → structural walk → exact names; `any` bindings.
 
-**Verification.** The gate (TS touched, TSGO).
+**IDE-TSX vs typeinfo split.** Two INDEPENDENT shallow-by-default surfaces: (a) typeinfo/
+component-meta resolves via the shared Rust engine; (b) IDE-TSX = TSGO checks the projected
+`.svelte.tsx` against the `.svelte.ts` shim — the api-projector renders `$events`/`$slots`
+DISPATCH-FREE; the IDE path NEVER calls the Rust framework-surface resolver. Precise ≠ eager-Expanded
+(publish at the requested Navigate demand; carriers preserved for open generics).
 
-**Dependencies.** B8c, B8b (the EMITS `SvelteSurface` arm). OWNER GO/NO-GO on funding the `$events`
-API-surface extension (D-bl Q5) — if the owner accepts projection-only support, this block ships the
-informational note instead; if payload-precision is required, this block lands as specified.
-Serialized after B8g.
+**Legacy Deletions.** The loose `on:`→`onclick` verbatim rewrite FOR COMPONENT-KIND elements (the
+intrinsic DOM rewrite is KEPT); any `Record<string,*>` / `CustomEvent<any>` placeholder for
+`$events` / `$slots`; any fallback silently treating an unknown component event as a prop. (The
+projector never emitted a typed-unsupported diagnostic for legacy `on:`, so there is no diagnostic /
+out-of-scope-row assertion to retire.)
+
+**Architecture guards.** `svelte_callback_prop_events_structural_not_nominal` (discriminating:
+`inflate` NOT an event, `onselect` IS); `svelte_component_on_directive_not_loose_rewrite`;
+`no_custom_event_any_or_record_string_any_in_svelte_surfaces`; `svelte_surface_source_exhaustive`;
+the EXTENDED `non_vue_api_projector_has_no_dispatch_or_oxc` (covers the `$events`/`$slots` render).
+
+**Tests.** TSGO validity (discriminating, through real tsgo): a component `on:select` whose handler
+payload mismatches the child's `$events["select"]` FAILS; a correct payload checks; an `on:` event
+not in the child's `$events` FAILS; an intrinsic `on:click` still DOM-rewrites and checks; the
+derived `$events` index and the name-exact `$slots` index check precisely (wrong payload / unknown
+slot name FAIL via `@ts-expect-error`). Plus the corpus structural-classification test and the
+api-projector shim-render test.
+
+**Verification.** The gate (Rust + TS touched, TSGO).
+
+**Dependencies.** B8c, B8b (the EMITS `SvelteSurface` arm). OWNER GO/NO-GO received: payload-precision
+(F13) + slot-name precision (F9) both funded and landed as specified. Serialized after B8g.
 
 ### B8i — Svelte await-expressions (F6, OWNER-GATED, D-bj)
 

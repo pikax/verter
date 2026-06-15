@@ -553,6 +553,80 @@ fn svelte_get_public_api_renders_the_declaration_shim() {
 }
 
 #[test]
+fn svelte_get_public_api_renders_the_events_and_slots_shim_members() {
+    // F13 + F9: the `.svelte.ts` shim renders precise `$events` and `$slots`
+    // members so a consumer's `["$events"][K]` / `["$slots"][K]` indexes exactly.
+    // `$events` is the DERIVED callback-prop mapped type (UNIONed with the legacy
+    // dispatcher map); `$slots` is the exact snippet-key map. NEITHER is a loose
+    // `CustomEvent<any>` / `Record<string, any>` placeholder.
+    let host = host();
+    let src = r#"<script lang="ts">
+  import type { Snippet } from 'svelte';
+  import { createEventDispatcher } from 'svelte';
+  let { label, onselect, row }: { label: string; onselect: (id: number) => void; row: Snippet<[{ id: number }]> } = $props();
+  const dispatch = createEventDispatcher<{ save: string }>();
+  void dispatch; void label; void onselect; void row;
+</script>
+"#;
+    upsert_svelte(&host, "/EventsSlots.svelte", src);
+
+    let api = host
+        .get_public_api("/EventsSlots.svelte")
+        .expect("a `.svelte` with props projects a public API");
+    let code = api.code.as_ref();
+
+    // The instance interface carries `$events` and `$slots` members.
+    assert!(
+        code.contains("$events: __VerterEventsSurface"),
+        "the instance interface carries $events:\n{code}"
+    );
+    assert!(
+        code.contains("$slots: __VerterSlotsSurface"),
+        "the instance interface carries $slots:\n{code}"
+    );
+    // `$events` is the DERIVED callback-prop mapped type (over __VerterProps).
+    assert!(
+        code.contains("__VerterCallbackEvents<__VerterProps>"),
+        "the $events surface derives callback events from the props:\n{code}"
+    );
+    // The legacy dispatcher event-map is UNIONed in as HANDLER types (wrapped in
+    // `__VerterDispatcherEvents` so each event value is `(e: CustomEvent<…>) =>
+    // void`, uniform with the callback-prop handlers).
+    assert!(
+        code.contains(
+            "type __VerterEventsSurface = __VerterCallbackEvents<__VerterProps> & \
+             __VerterDispatcherEvents<"
+        ),
+        "the legacy dispatcher map is unioned into $events as handler types:\n{code}"
+    );
+    assert!(
+        code.contains(
+            "__VerterDispatcherEvents<E> = { [K in keyof E]: (e: CustomEvent<E[K]>) => void }"
+        ),
+        "the dispatcher-events helper wraps each payload into a CustomEvent handler:\n{code}"
+    );
+    // `$slots` is the EXACT snippet key map (`row: __VerterProps["row"]`).
+    assert!(
+        code.contains("row: __VerterProps[\"row\"]"),
+        "the $slots surface maps the exact snippet key to its precise type:\n{code}"
+    );
+    // NEGATIVE: no loose placeholder leaks into either surface.
+    assert!(
+        !code.contains("CustomEvent<any>"),
+        "no loose CustomEvent<any> in the shim:\n{code}"
+    );
+    assert!(
+        !code.contains("Record<string, any>") && !code.contains("Record<string, boolean>"),
+        "no loose Record<string, *> placeholder in the shim:\n{code}"
+    );
+    // The mapped-type helper is declared dispatch-free (TSGO resolves it).
+    assert!(
+        code.contains("type __VerterFunction<T> = Extract<NonNullable<T>"),
+        "the callback-function extractor helper is declared:\n{code}"
+    );
+}
+
+#[test]
 fn svelte_get_public_api_testing_mode_returns_none() {
     // DISCRIMINATING: the testing surface is Vue-only — Svelte returns None for
     // Testing, distinct from Public mode's Some.

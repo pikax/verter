@@ -21,10 +21,19 @@ use std::sync::Arc;
 
 use verter_semantic::analysis::framework_facts::svelte::SvelteScriptCandidates;
 use verter_semantic::analysis::type_eval::{FunctionSignature, ValueDeclKind};
-use verter_type_expr::{ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName, TypeExpr};
+use verter_type_expr::{
+    FunctionExpr, FunctionParam, ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName, TypeExpr,
+};
 
 use super::shallow_file_state::ShallowValueSymbol;
-use super::vue_default_synth::VUE_INSTANCE_PROPS_MEMBER;
+use super::vue_default_synth::{VUE_INSTANCE_PROPS_MEMBER, VUE_INSTANCE_SLOTS_MEMBER};
+
+/// The synthesized instance member carrying the component's event map (the
+/// legacy `createEventDispatcher<E>` payload map). Mirrors Vue's `$emit` member
+/// role; the api-projector renders the shim `$events` index from it (UNIONed with
+/// the derived callback-prop events). A component with no dispatcher carries no
+/// `$events` member (the callback-prop events derive from `$props` at the shim).
+pub const SVELTE_INSTANCE_EVENTS_MEMBER: &str = "$events";
 
 /// Build the synthetic `default` value symbol for a `.svelte` scope from its
 /// parse-domain script candidates.
@@ -50,6 +59,40 @@ pub fn synthesise_svelte_default_value_symbol(
             false,
             false,
         ))];
+
+    // The legacy dispatcher event-map member, when the component declares a
+    // `createEventDispatcher<E>` (parse-domain; provenance validation is a
+    // query-time concern, never synth's). The shim renders the exact handler
+    // types from this map; the derived callback-prop events come from `$props`
+    // at the shim, so a dispatcher-less runes component carries no `$events`
+    // member here. Shallow-by-default — the event-map ref is preserved verbatim.
+    if let Some(events_type) = candidates.dispatcher_events.clone() {
+        members.push(ObjectMember::Property(ObjectProperty::synthetic_public(
+            SVELTE_INSTANCE_EVENTS_MEMBER.to_string(),
+            events_type,
+            false,
+            false,
+        )));
+    }
+
+    // The snippet-typed slot members, when the component declares snippet props
+    // (parse-domain candidate member names). Each becomes a callable slot member
+    // `(bindings) => any` (the binding precision lives in the snippet `Snippet<…>`
+    // type the consumer re-resolves on demand). A component with no snippet props
+    // carries no `$slots` member; the consumer's `$slots[K]` then fails the
+    // `keyof {}` index (the correct slot-less behaviour).
+    let slot_members = snippet_slot_members(candidates);
+    if !slot_members.is_empty() {
+        members.push(ObjectMember::Property(ObjectProperty::synthetic_public(
+            VUE_INSTANCE_SLOTS_MEMBER.to_string(),
+            TypeExpr::Object(Arc::new(ObjectExpr {
+                properties: slot_members,
+            })),
+            false,
+            false,
+        )));
+    }
+
     members.extend(exported);
 
     let instance_shape = TypeExpr::Object(Arc::new(ObjectExpr {
@@ -72,6 +115,44 @@ pub fn synthesise_svelte_default_value_symbol(
         // gate on (shared with the Vue synth's `default`).
         is_synthesised_component_default: true,
     }
+}
+
+/// The snippet-typed slot members for the synthesized `$slots` instance member.
+///
+/// Each parse-domain snippet candidate (`member_name`) becomes one slot key
+/// whose value is a callable carrier `(...args: any[]) => any`. The PRECISE
+/// binding type lives in the snippet prop's own `Snippet<[...]>` type on `$props`
+/// (the consumer re-resolves it on demand — shallow-by-default); the synth
+/// records the exact slot KEYS so the consumer's `$slots[K]` index is name-exact
+/// (an unknown slot name FAILS the `keyof` index). De-duplicated by member name.
+fn snippet_slot_members(candidates: &SvelteScriptCandidates) -> Vec<ObjectMember> {
+    let mut seen = std::collections::HashSet::new();
+    candidates
+        .snippet_candidates
+        .iter()
+        .filter(|c| seen.insert(c.member_name.clone()))
+        .map(|c| {
+            // A callable slot carrier — the slot member is function-like so a
+            // consumer can CALL `$slots.row(bindings)`. The precise binding/return
+            // types are recovered by the consumer from the snippet prop's own
+            // `Snippet<…>` type (shallow-by-default); this carrier records the KEY.
+            ObjectMember::Property(ObjectProperty::synthetic_public(
+                c.member_name.clone(),
+                TypeExpr::Function(Arc::new(FunctionExpr::synthetic(
+                    vec![FunctionParam::synthetic(
+                        Some("bindings".to_string()),
+                        TypeExpr::Primitive(PrimitiveName::Any),
+                        false,
+                        false,
+                    )],
+                    Some(Arc::new(TypeExpr::Primitive(PrimitiveName::Any))),
+                    Vec::new(),
+                ))),
+                false,
+                false,
+            ))
+        })
+        .collect()
 }
 
 /// The empty object type `{}` — the `$props` member type for a component that
@@ -293,10 +374,39 @@ mod tests {
     }
 
     #[test]
-    fn synth_is_parse_domain_pure_independent_of_snippet_validation() {
-        // D-au: synth output is identical regardless of snippet (resolved-validation)
-        // validation — the candidate set is parse-domain, and synth never reads
-        // resolved facts. The same candidates always synthesise the same symbol.
+    fn synth_reads_only_parse_domain_candidates_never_resolved_validation() {
+        // Synth is a pure function of the PARSE-DOMAIN candidate set: it never
+        // reads the resolved-validation facts (the snippet `svelte`-import
+        // validation, the dispatcher provenance). The SAME candidates always
+        // synthesise the SAME symbol regardless of any later validation outcome.
+        use verter_semantic::analysis::framework_facts::svelte::SvelteSnippetImportCandidate;
+        let candidates = SvelteScriptCandidates {
+            props: Some(SveltePropsCandidate {
+                props_type: Some(TypeExpr::Ref {
+                    name: Arc::from("Props"),
+                    type_arguments: Arc::from(Vec::new().into_boxed_slice()),
+                }),
+                ..Default::default()
+            }),
+            snippet_candidates: vec![SvelteSnippetImportCandidate {
+                local_binding: "Snippet".to_string(),
+                import_source: "svelte".to_string(),
+                member_name: "row".to_string(),
+            }],
+            ..Default::default()
+        };
+        // Two synth runs over the identical parse-domain candidates are identical.
+        let a = synthesise_svelte_default_value_symbol(&candidates);
+        let b = synthesise_svelte_default_value_symbol(&candidates);
+        assert_eq!(instance_members(&a), instance_members(&b));
+    }
+
+    #[test]
+    fn snippet_candidates_synthesise_a_slots_instance_member() {
+        // F9: the parse-domain snippet candidates contribute a `$slots` instance
+        // member (an exact key map of snippet callables) — the consumer's
+        // `$slots[K]` index is name-exact. A component with NO snippet props
+        // carries NO `$slots` member.
         use verter_semantic::analysis::framework_facts::svelte::SvelteSnippetImportCandidate;
         let with_snippet = SvelteScriptCandidates {
             props: Some(SveltePropsCandidate {
@@ -313,14 +423,52 @@ mod tests {
             }],
             ..Default::default()
         };
+        let sym = synthesise_svelte_default_value_symbol(&with_snippet);
+        assert!(
+            instance_members(&sym).contains(&"$slots".to_string()),
+            "a snippet prop synthesises a $slots member, got {:?}",
+            instance_members(&sym)
+        );
+
+        // No snippet candidates ⇒ no `$slots` member.
         let without_snippet = SvelteScriptCandidates {
             snippet_candidates: Vec::new(),
             ..with_snippet.clone()
         };
-        let a = synthesise_svelte_default_value_symbol(&with_snippet);
-        let b = synthesise_svelte_default_value_symbol(&without_snippet);
-        // Snippet candidates do NOT enter synth output — both produce the same
-        // instance member set.
-        assert_eq!(instance_members(&a), instance_members(&b));
+        let sym2 = synthesise_svelte_default_value_symbol(&without_snippet);
+        assert!(
+            !instance_members(&sym2).contains(&"$slots".to_string()),
+            "no snippet props ⇒ no $slots member, got {:?}",
+            instance_members(&sym2)
+        );
+    }
+
+    #[test]
+    fn dispatcher_events_synthesise_an_events_instance_member() {
+        // F13: a legacy `createEventDispatcher<E>` (parse-domain `dispatcher_events`)
+        // contributes a `$events` instance member carrying the event-map type. A
+        // component with NO dispatcher carries NO `$events` member (the derived
+        // callback-prop events come from `$props` at the shim).
+        let with_dispatcher = SvelteScriptCandidates {
+            dispatcher_events: Some(TypeExpr::Ref {
+                name: Arc::from("Events"),
+                type_arguments: Arc::from(Vec::new().into_boxed_slice()),
+            }),
+            ..Default::default()
+        };
+        let sym = synthesise_svelte_default_value_symbol(&with_dispatcher);
+        assert!(
+            instance_members(&sym).contains(&"$events".to_string()),
+            "a dispatcher synthesises a $events member, got {:?}",
+            instance_members(&sym)
+        );
+
+        let without = SvelteScriptCandidates::default();
+        let sym2 = synthesise_svelte_default_value_symbol(&without);
+        assert!(
+            !instance_members(&sym2).contains(&"$events".to_string()),
+            "no dispatcher ⇒ no $events member, got {:?}",
+            instance_members(&sym2)
+        );
     }
 }

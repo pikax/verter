@@ -25,7 +25,12 @@ struct CorpusCase {
     fixture: &'static str,
     /// Prop member names that MUST appear in PROPS.
     props_contains: &'static [&'static str],
-    /// Member names that MUST be ABSENT from EMITS (the runes-callback rule).
+    /// EMITS event names that MUST appear (the DERIVED callback-prop event index
+    /// — an `on${E}` callback prop surfaces as event `E`).
+    emits_contains: &'static [&'static str],
+    /// Member names that MUST be ABSENT from EMITS (the prop NAME itself stays a
+    /// PROP — `onClose` the prop name never appears in EMITS; the derived EVENT
+    /// is named `Close`).
     emits_excludes: &'static [&'static str],
     /// MODEL binding names that MUST appear.
     model_contains: &'static [&'static str],
@@ -40,8 +45,12 @@ struct CorpusCase {
 const CORPUS: &[CorpusCase] = &[
     CorpusCase {
         fixture: "runes_props.svelte",
-        // A runes callback prop stays a PROP and is absent from EMITS.
+        // A runes callback prop stays a PROP (authoritative surface) AND surfaces
+        // as a DERIVED event in EMITS: `onClose` → event `Close`.
         props_contains: &["title", "count", "onClose"],
+        // The DERIVED callback-prop event index: `onClose` → event `Close`.
+        emits_contains: &["Close"],
+        // The prop NAME `onClose` is NOT an EMITS member (the event is `Close`).
         emits_excludes: &["onClose"],
         model_contains: &[],
         expose_contains: &[],
@@ -50,6 +59,7 @@ const CORPUS: &[CorpusCase] = &[
     CorpusCase {
         fixture: "legacy_export_let.svelte",
         props_contains: &["name", "count"],
+        emits_contains: &[],
         emits_excludes: &[],
         model_contains: &[],
         expose_contains: &[],
@@ -59,6 +69,7 @@ const CORPUS: &[CorpusCase] = &[
     CorpusCase {
         fixture: "bindable_model.svelte",
         props_contains: &["value", "label"],
+        emits_contains: &[],
         emits_excludes: &[],
         model_contains: &["value"],
         expose_contains: &[],
@@ -67,6 +78,7 @@ const CORPUS: &[CorpusCase] = &[
     CorpusCase {
         fixture: "instance_expose.svelte",
         props_contains: &["name"],
+        emits_contains: &[],
         emits_excludes: &[],
         model_contains: &[],
         // `export function focus` / `export const ready` ARE instance EXPOSE
@@ -77,6 +89,7 @@ const CORPUS: &[CorpusCase] = &[
     CorpusCase {
         fixture: "pure_markup.svelte",
         props_contains: &[],
+        emits_contains: &[],
         emits_excludes: &[],
         model_contains: &[],
         expose_contains: &[],
@@ -162,6 +175,69 @@ fn envelope(canonical: &str) -> wire::TypeInfoGraphRequest {
 }
 
 #[test]
+fn svelte_callback_prop_events_structural_not_nominal() {
+    // F13 STRUCTURAL classification (discriminating): the derived callback-prop
+    // event index is STRUCTURAL, not nominal — an `on${E}` prop with a NON-EMPTY
+    // suffix AND a FUNCTION-LIKE value IS an event (`onselect` → event `select`);
+    // an arbitrary NON-`on` function prop (`inflate`) is NOT an event; an
+    // `on`-prefixed NON-function prop (`online: boolean`) is NOT an event. The
+    // `select` event's payload preserves the callback's PARAMETERS directly (NO
+    // event-name strip): `(row: Row) => void` → payload carries `row`.
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let path = corpus_dir().join("callback_events.svelte");
+    let source = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("read callback_events fixture: {e}"));
+    let canonical = "/callback_events.svelte".to_string();
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: Some(canonical.clone()),
+            input_id: canonical.clone(),
+            source: Arc::from(source.as_str()),
+            file_language: FileLanguage::svelte(),
+            aliases: Vec::new(),
+        })
+        .unwrap_or_else(|e| panic!("upsert: {e:?}"));
+
+    let result = host.resolve_framework_surface_with_audit(envelope(&canonical));
+    let response = result.as_result().expect("structural response");
+    let payload = match &response.kind {
+        Some(type_info_graph_response::Kind::FrameworkSurface(p)) => p,
+        other => panic!("expected framework_surface arm, got {other:?}"),
+    };
+
+    let emits = member_names(payload, FrameworkSurfaceKind::Emits);
+    // `onselect` (function-like) IS an event named `select`.
+    assert!(
+        emits.iter().any(|e| e == "select"),
+        "an `onselect` function prop must surface as event `select`, got {emits:?}"
+    );
+    // `inflate` (NOT `on`-prefixed) is NOT an event — arbitrary function props
+    // are never mined.
+    assert!(
+        !emits.iter().any(|e| e == "inflate"),
+        "an arbitrary non-`on` function prop must NOT be an event, got {emits:?}"
+    );
+    // `online: boolean` (`on`-prefixed but NOT function-like) is NOT an event.
+    assert!(
+        !emits.iter().any(|e| e == "line"),
+        "an `on`-prefixed NON-function prop must NOT be an event, got {emits:?}"
+    );
+    // `label` (a plain prop) is never an event.
+    assert!(
+        !emits.iter().any(|e| e == "label"),
+        "a plain prop must NOT be an event, got {emits:?}"
+    );
+    // The callback props ALSO stay PROPS (the derived index is non-authoritative).
+    let props = member_names(payload, FrameworkSurfaceKind::Props);
+    for want in ["label", "onselect", "inflate", "online"] {
+        assert!(
+            props.iter().any(|p| p == want),
+            "callback props stay PROPS — `{want}` must be in PROPS, got {props:?}"
+        );
+    }
+}
+
+#[test]
 fn svelte_surface_corpus_resolves_every_fixture() {
     for case in CORPUS {
         let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
@@ -228,10 +304,17 @@ fn svelte_surface_corpus_resolves_every_fixture() {
             );
         }
         let emits = member_names(payload, FrameworkSurfaceKind::Emits);
+        for want in case.emits_contains {
+            assert!(
+                emits.iter().any(|e| e == want),
+                "{}: EMITS must carry the derived callback event `{want}`, got {emits:?}",
+                case.fixture
+            );
+        }
         for forbidden in case.emits_excludes {
             assert!(
                 !emits.iter().any(|e| e == forbidden),
-                "{}: EMITS must NOT carry `{forbidden}` (runes callbacks stay PROPS), got {emits:?}",
+                "{}: EMITS must NOT carry `{forbidden}` (the prop name stays a PROP), got {emits:?}",
                 case.fixture
             );
         }
