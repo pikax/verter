@@ -22,7 +22,7 @@
     "dev": "tsc -b --watch",
     "clean": "npx shx rm -rf .turbo dist tsconfig.tsbuildinfo",
     "test": "vitest --run",
-    "test:unit": "vitest --run --exclude '**/baselineIntegration.test.ts'"
+    "test:unit": "vitest --run --exclude '**/*Integration.test.ts'"
   },
   "dependencies": {
     "@verter/lsp-test-client": "workspace:^"

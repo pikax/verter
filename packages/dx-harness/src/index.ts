@@ -122,3 +122,45 @@ export {
   type TsconfigSet,
   type VendorReference,
 } from "./materializedWorkspace.js";
+
+export {
+  GenerationGate,
+  evaluateGenerationGate,
+  type GenerationChannel,
+  type GenerationEvent,
+  type GenerationGateDecision,
+} from "./core/generationGate.js";
+
+export {
+  QUIESCENCE_COUNTER_KEYS,
+  QUIESCENCE_WARN_KEYWORDS,
+  REQUIRED_STABLE_INTERVALS,
+  countersEqual,
+  decideQuiescence,
+  extractQuiescenceCounters,
+  isQuiescenceWarnLine,
+  pollUntilQuiesced,
+  type PollUntilQuiescedOptions,
+  type QuiescenceCounters,
+  type QuiescenceDecision,
+  type QuiescenceObservation,
+  type QuiescenceResult,
+} from "./core/quiescence.js";
+
+export {
+  ExtensionStartupGate,
+  TYPE_PROVIDER_SYNC_COMPLETE_LOG_PATTERN,
+  VERTER_READY_LOG_PATTERN,
+  parseExtensionStartupLog,
+  parseStartupLogLine,
+} from "./core/extensionStartup.js";
+
+export {
+  GET_STATISTICS_METHOD,
+  TYPE_PROVIDER_SYNC_COMPLETE_METHOD,
+  VERTER_READY_METHOD,
+  awaitRawLspStartup,
+  type AwaitRawLspStartupOptions,
+  type RawLspStartupResult,
+  type StartupLspClient,
+} from "./core/startupGate.js";
