@@ -143,6 +143,13 @@ export type NativeEvaluatedField = NativeExpandedField;
 export type NativeEvaluatedMacroProps = NativeExpandedMacroProps;
 
 /**
+ * The native (raw-JSON) mapped-type modifier as the Rust producer serializes it
+ * (`MappedModifier` -> `modifier_str`): `"none"` (no modifier), `"add"` (`+?` /
+ * `+readonly`), or `"remove"` (`-?` / `-readonly`).
+ */
+export type MappedModifierName = "none" | "add" | "remove";
+
+/**
  * Mirrors the Rust `TypeExpr` enum serialized with `#[serde(tag = "kind")]`.
  *
  * Each variant has a `kind` field matching the Rust enum variant name (camelCase).
@@ -203,7 +210,21 @@ export type NativeTypeExpr =
       trueType: NativeTypeExpr;
       falseType: NativeTypeExpr;
     }
-  | { kind: "mapped"; parameter: string; source: NativeTypeExpr; value: NativeTypeExpr }
+  | {
+      kind: "mapped";
+      parameter: string;
+      source: NativeTypeExpr;
+      value: NativeTypeExpr;
+      // The Rust producer (`TypeExpr::Mapped` -> `to_json_value`) emits the
+      // optional / readonly modifier (`"none"` / `"add"` / `"remove"`) and the
+      // `as N` key-remap clause (`nameType`, a nested expr or `null`). They are
+      // optional on the wire — an absent field means "no-op" (`MappedModifier::
+      // None` / no remap). `readMappedInfo` reads them so a modifier- or
+      // remap-bearing native mapped bails out of the `Record` recovery.
+      optional?: MappedModifierName;
+      readonly?: MappedModifierName;
+      nameType?: NativeTypeExpr | null;
+    }
   | { kind: "templateLiteral"; quasis: string[]; expressions: NativeTypeExpr[] }
   | { kind: "parenthesized"; inner: NativeTypeExpr }
   | { kind: "unknown"; raw: string }
@@ -749,6 +770,8 @@ function collectDescriptorTypeParameterNames(descriptor: TypeDescriptor): string
       case "literal":
       case "enum":
       case "unknown":
+      case "syntheticSlotBinding":
+        // Leaf kinds carry no nested `TypeDescriptor` children to walk.
         return;
       case "union":
       case "intersection":
@@ -777,6 +800,12 @@ function collectDescriptorTypeParameterNames(descriptor: TypeDescriptor): string
       case "ref":
         current.typeArguments?.forEach(visit);
         return;
+      case "indexedAccess":
+        // A mapped key parameter can hide in EITHER position of an indexed
+        // access (`T[P]` is `{ objectType: T, indexType: P }`); walk both.
+        visit(current.objectType);
+        visit(current.indexType);
+        return;
       case "recursiveRef":
         current.typeArguments.forEach(visit);
         current.conditionalContext.forEach((frame) => {
@@ -801,6 +830,81 @@ function collectDescriptorTypeParameterNames(descriptor: TypeDescriptor): string
 
   visit(descriptor);
   return names;
+}
+
+/**
+ * Structural predicate: does `descriptor` contain an `unknown` node anywhere in
+ * its tree?
+ *
+ * An `unknown(...)` is the bridge's residue for a type it could NOT fully
+ * understand — e.g. an unsupported operator (`conditional` / `template literal`
+ * / `infer` / `rest`) that may itself reference a mapped key parameter the
+ * type-parameter collector cannot see through. The open-key-domain `Record`
+ * recovery uses this to refuse a value carrying any such residue: `Record<K, V>`
+ * is only sound when `V` is fully understood AND provably key-independent.
+ */
+function descriptorContainsUnknown(descriptor: TypeDescriptor): boolean {
+  switch (descriptor.kind) {
+    case "unknown":
+      return true;
+    case "primitive":
+    case "literal":
+    case "enum":
+    case "syntheticSlotBinding":
+      return false;
+    case "typeParameter":
+      // A type parameter is NOT a leaf: an `unknown(...)` residue (e.g. an
+      // unsupported operator such as a conditional `P extends … ? … : …`) can
+      // hide inside its `constraint` or `default` — `<Q = P extends X ? A : B>`
+      // lowers `Q.default` to `unknown(...)`. Recurse both sub-positions so the
+      // open-key-domain `Record` recovery refuses any value carrying such
+      // residue. (The `function` branch enumerates each `typeParameters` entry
+      // but relies on this case to inspect its constraint/default.)
+      return (
+        (descriptor.constraint !== undefined && descriptorContainsUnknown(descriptor.constraint)) ||
+        (descriptor.default !== undefined && descriptorContainsUnknown(descriptor.default))
+      );
+    case "union":
+    case "intersection":
+      return descriptor.types.some(descriptorContainsUnknown);
+    case "array":
+      return descriptorContainsUnknown(descriptor.element);
+    case "tuple":
+      return descriptor.elements.some(descriptorContainsUnknown);
+    case "object":
+      return (
+        descriptor.properties.some((property) => descriptorContainsUnknown(property.type)) ||
+        (descriptor.indexSignatures?.some(
+          (signature) =>
+            descriptorContainsUnknown(signature.keyType) ||
+            descriptorContainsUnknown(signature.valueType),
+        ) ??
+          false) ||
+        (descriptor.callSignatures?.some(descriptorContainsUnknown) ?? false) ||
+        (descriptor.constructSignatures?.some(descriptorContainsUnknown) ?? false)
+      );
+    case "function":
+      return (
+        descriptor.parameters.some((parameter) => descriptorContainsUnknown(parameter.type)) ||
+        descriptorContainsUnknown(descriptor.returnType) ||
+        (descriptor.typeParameters?.some(descriptorContainsUnknown) ?? false)
+      );
+    case "ref":
+      return descriptor.typeArguments?.some(descriptorContainsUnknown) ?? false;
+    case "indexedAccess":
+      return (
+        descriptorContainsUnknown(descriptor.objectType) ||
+        descriptorContainsUnknown(descriptor.indexType)
+      );
+    case "recursiveRef":
+      return (
+        descriptor.typeArguments.some(descriptorContainsUnknown) ||
+        descriptor.conditionalContext.some(
+          (frame) =>
+            descriptorContainsUnknown(frame.check) || descriptorContainsUnknown(frame.extends),
+        )
+      );
+  }
 }
 
 function maskTypeParameterBindings(
@@ -1256,7 +1360,11 @@ function resolveMappedDescriptor(
 
   const entries = resolveFiniteSourceEntries(mapped.source, registry, visiting, graphVisiting);
   if (!entries || entries.length === 0) {
-    return undefined;
+    // The source key domain is not a finite enumeration (e.g. `string`). A
+    // homomorphic mapping over an open `Record`-key domain is the
+    // `Record<K, V>` alias — recover it instead of degrading to
+    // `unknown("mapped")`.
+    return resolveOpenKeyDomainMappedDescriptor(mapped, registry, visiting, graphVisiting);
   }
 
   return object(
@@ -1273,6 +1381,111 @@ function resolveMappedDescriptor(
       optional: applyMappedOptionalModifier(entry.optional, mapped.optionalModifier),
     })),
   );
+}
+
+/**
+ * Recover the `Record<K, V>` alias for a mapped type `{ [P in K]: V }` whose
+ * key domain `K` is OPEN (no finite key enumeration).
+ *
+ * `Record<K, V>` is defined as `{ [P in K]: V }` where the key `K` is a
+ * `Record`-key primitive (`string` / `number` / `symbol`, or a union of those)
+ * and the value `V` does not reference the mapped parameter `P`. When the
+ * native producer surfaces `Record<string, any>` in its expanded mapped form,
+ * reconstruct the alias so the compat display layer renders
+ * `Record<string, any>` (matching `vue-component-meta`) rather than the lossy
+ * `unknown("mapped")` placeholder.
+ *
+ * Any other open-domain shape returns `undefined`, preserving the existing
+ * `unknown` fallback — this is a conservative recovery, not a blanket mapped
+ * collapse. The bail conditions are:
+ * - a key-remapping clause (`{ [P in K as N]: V }`) — `as` FILTERS (`as never`
+ *   drops keys) or TRANSFORMS (`as `prefix_${P}`` renames) the produced key
+ *   domain, so the surface is not a plain `Record<K, V>`;
+ * - an added/removed optional (`+?` / `-?`) OR readonly (`+readonly` /
+ *   `-readonly`) modifier — `Record` expresses neither;
+ * - a non-`Record`-key source (e.g. `keyof <generic>`);
+ * - a value that references the mapped parameter `P` (including `P` nested in
+ *   an indexed access such as `T[P]`); OR
+ * - a value carrying ANY `unknown` residue (e.g. an unsupported operator such
+ *   as a conditional `P extends … ? … : …` that lowered to `unknown(...)` and
+ *   may itself reference `P` in a way the collector cannot observe).
+ */
+function resolveOpenKeyDomainMappedDescriptor(
+  mapped: {
+    parameterName: string;
+    source: NativeTypeExprLike;
+    value: NativeTypeExprLike;
+    optionalModifier: number;
+    readonlyModifier: number;
+    nameTypeNodeId: number;
+  },
+  nativeRegistry: NativeTypeRegistry,
+  visiting: Set<string>,
+  graphVisiting: Set<number>,
+): TypeDescriptor | undefined {
+  // A key-remapping clause (`{ [P in K as N]: V }`) FILTERS (`as never` drops
+  // keys) or TRANSFORMS (`as `prefix_${P}`` renames) the produced key domain,
+  // so the result is NOT a plain `Record<K, V>`. Refuse the recovery whenever a
+  // name-type clause is present — the absent (no-remap) case is the sentinel
+  // `0` (the legacy `NativeTypeExpr` mapped form has no remap and reports `0`).
+  if (mapped.nameTypeNodeId !== 0) {
+    return undefined;
+  }
+  // `Record<K, V>` is a non-modifying homomorphic mapping. An added
+  // (`MappedModifier::Add`, 2) or removed (`MappedModifier::Remove`, 3) optional
+  // OR readonly modifier is a different type that `Record` cannot express.
+  if (mapped.optionalModifier === 2 || mapped.optionalModifier === 3) {
+    return undefined;
+  }
+  if (mapped.readonlyModifier === 2 || mapped.readonlyModifier === 3) {
+    return undefined;
+  }
+
+  const keyDescriptor = typeExprToDescriptor(
+    mapped.source,
+    nativeRegistry,
+    visiting,
+    graphVisiting,
+  );
+  if (!isRecordKeyDomainDescriptor(keyDescriptor)) {
+    return undefined;
+  }
+
+  const valueDescriptor = typeExprToDescriptor(
+    mapped.value,
+    nativeRegistry,
+    visiting,
+    graphVisiting,
+  );
+  // A `Record` value must be FULLY understood. Any `unknown` residue (e.g. an
+  // unsupported operator that lowered to `unknown(...)`) could hide a reference
+  // to the mapped key `P`, so refuse the recovery on any uncertainty.
+  if (descriptorContainsUnknown(valueDescriptor)) {
+    return undefined;
+  }
+  // A `Record` value is fixed — it does not reference the mapped key `P`
+  // anywhere (top-level OR nested, e.g. the index position of `T[P]`).
+  if (collectDescriptorTypeParameterNames(valueDescriptor).includes(mapped.parameterName)) {
+    return undefined;
+  }
+
+  return typeRef("Record", [keyDescriptor, valueDescriptor]);
+}
+
+/**
+ * Structural test: is `descriptor` a valid `Record` key domain — a
+ * `string` / `number` / `symbol` primitive, or a union of those?
+ */
+function isRecordKeyDomainDescriptor(descriptor: TypeDescriptor): boolean {
+  if (descriptor.kind === "primitive") {
+    return (
+      descriptor.name === "string" || descriptor.name === "number" || descriptor.name === "symbol"
+    );
+  }
+  if (descriptor.kind === "union") {
+    return descriptor.types.every(isRecordKeyDomainDescriptor);
+  }
+  return false;
 }
 
 function resolveMappedValueDescriptor(
@@ -1753,6 +1966,8 @@ function readMappedInfo(expr: NativeTypeExprLike):
       source: NativeTypeExprLike;
       value: NativeTypeExprLike;
       optionalModifier: number;
+      readonlyModifier: number;
+      nameTypeNodeId: number;
     }
   | undefined {
   if (isGraphTypeExprRef(expr)) {
@@ -1765,17 +1980,50 @@ function readMappedInfo(expr: NativeTypeExprLike):
       source: createGraphTypeExprRef(expr.graph, node.sourceNodeId),
       value: createGraphTypeExprRef(expr.graph, node.valueNodeId),
       optionalModifier: node.optionalModifier,
+      readonlyModifier: node.readonlyModifier,
+      // The `[P in K as N]` key-remap clause node id; `0` is the absent
+      // sentinel (a plain `{ [P in K]: V }` with no remapping).
+      nameTypeNodeId: node.nameTypeNodeId,
     };
   }
   if (expr.kind !== "mapped") {
     return undefined;
   }
+  // The native (raw-JSON) `NativeTypeExpr` mapped form DOES carry the optional /
+  // readonly modifier and the `as N` key-remap clause (the Rust producer emits
+  // `optional` / `readonly` / `nameType` on `TypeExpr::Mapped`). Read the actual
+  // values into the shared graph encoding so a modifier- or remap-bearing native
+  // mapped bails out of the `Record` recovery exactly like its graph
+  // counterpart — never hard-code them absent. A genuinely-plain native mapped
+  // (modifier absent / `"none"`, `nameType` null) decodes to the no-op encoding
+  // (`1` / `1` / `0`) and still recovers `Record`. `nameTypeNodeId` is a
+  // presence flag here (`1` = remap present) — the native form has no graph node
+  // id, and the recovery only tests it for `!== 0`.
   return {
     parameterName: expr.parameter,
     source: expr.source,
     value: expr.value,
-    optionalModifier: 1,
+    optionalModifier: mappedModifierToCode(expr.optional),
+    readonlyModifier: mappedModifierToCode(expr.readonly),
+    nameTypeNodeId: expr.nameType == null ? 0 : 1,
   };
+}
+
+/**
+ * Map the native (raw-JSON) mapped modifier string to the graph numeric
+ * encoding the modifier consumers share (`applyMappedOptionalModifier` and the
+ * `resolveOpenKeyDomainMappedDescriptor` bails): `1` = `MappedModifier::None`,
+ * `2` = `Add` (`+?` / `+readonly`), `3` = `Remove` (`-?` / `-readonly`). An
+ * absent or `"none"` modifier is the no-op encoding (`1`).
+ */
+function mappedModifierToCode(modifier: MappedModifierName | undefined): number {
+  if (modifier === "add") {
+    return 2;
+  }
+  if (modifier === "remove") {
+    return 3;
+  }
+  return 1;
 }
 
 function readIndexedAccessInfo(

@@ -121,6 +121,34 @@ const descriptorIncludesTopLevelUndefined = (t: TypeDescriptor): boolean =>
   t.kind === "union" && t.types.some(isUndefinedPrimitive);
 
 /**
+ * Structural predicate: is `t` ALREADY an `undefined`-bearing type for the
+ * purpose of an optional parameter's implicit `| undefined` arm?
+ *
+ * True for a bare `undefined` primitive, a top-level union that already
+ * includes `undefined`, or a ref/alias that resolves (through `typeRegistry`)
+ * to either of those. Appending `| undefined` to such a type would double the
+ * arm (`undefined | undefined`), so the optional-param printer skips the
+ * append when this holds. The `seen` set guards against a ref cycle.
+ */
+const descriptorIsAlreadyUndefined = (
+  t: TypeDescriptor,
+  typeRegistry?: Map<string, TypeDescriptor>,
+  seen: Set<string> = new Set(),
+): boolean => {
+  if (isUndefinedPrimitive(t) || descriptorIncludesTopLevelUndefined(t)) {
+    return true;
+  }
+  if (t.kind === "ref" && typeRegistry && !seen.has(t.name)) {
+    const resolved = typeRegistry.get(t.name);
+    if (resolved) {
+      seen.add(t.name);
+      return descriptorIsAlreadyUndefined(resolved, typeRegistry, seen);
+    }
+  }
+  return false;
+};
+
+/**
  * Structural predicate: does `t` (recursing into top-level union /
  * intersection arms) contain an `IndexedAccessType` whose `indexType` is a
  * string literal equal to `key`, OR a `RefType` named `ComponentSlots` /
@@ -1301,13 +1329,13 @@ function compatObjectTypeToString(
 
   for (const signature of descriptor.callSignatures ?? []) {
     members.push(
-      compatFunctionTypeToString(signature, typeRegistry, visited, registryResolutionDepth),
+      compatFunctionTypeToString(signature, typeRegistry, visited, registryResolutionDepth, "call"),
     );
   }
 
   for (const signature of descriptor.constructSignatures ?? []) {
     members.push(
-      `new ${compatFunctionTypeToString(signature, typeRegistry, visited, registryResolutionDepth)}`,
+      `new ${compatFunctionTypeToString(signature, typeRegistry, visited, registryResolutionDepth, "call")}`,
     );
   }
 
@@ -1323,6 +1351,9 @@ function compatFunctionTypeToString(
   typeRegistry?: Map<string, TypeDescriptor>,
   visited: Set<string> = new Set(),
   registryResolutionDepth = 0,
+  // A standalone function type renders as an arrow type (`(...) => R`); a call /
+  // construct signature inside an object renders in method form (`(...): R`).
+  style: "arrow" | "call" = "arrow",
 ): string {
   const typeParams = descriptor.typeParameters?.length
     ? `<${descriptor.typeParameters
@@ -1332,12 +1363,34 @@ function compatFunctionTypeToString(
         .join(", ")}>`
     : "";
   const params = descriptor.parameters
-    .map(
-      (param) =>
-        `${param.name}${param.optional ? "?" : ""}: ${typeDescriptorToCompatDisplay(param.type, typeRegistry, visited, registryResolutionDepth)}`,
-    )
+    .map((param) => {
+      const rendered = typeDescriptorToCompatDisplay(
+        param.type,
+        typeRegistry,
+        visited,
+        registryResolutionDepth,
+      );
+      // An optional parameter prints its implicit `| undefined` arm — TS
+      // renders `(x?: T)` as `(x?: T | undefined)`. Skip the append when the
+      // parameter type is already `undefined`-bearing (a bare `undefined`, a
+      // union that includes it, or a ref/alias resolving to either) to avoid
+      // doubling (`undefined | undefined`).
+      const renderedType =
+        param.optional && !descriptorIsAlreadyUndefined(param.type, typeRegistry)
+          ? `${rendered} | undefined`
+          : rendered;
+      return `${param.name}${param.optional ? "?" : ""}: ${renderedType}`;
+    })
     .join(", ");
-  return `${typeParams}(${params}): ${typeDescriptorToCompatDisplay(descriptor.returnType, typeRegistry, visited, registryResolutionDepth)}`;
+  const returnText = typeDescriptorToCompatDisplay(
+    descriptor.returnType,
+    typeRegistry,
+    visited,
+    registryResolutionDepth,
+  );
+  return style === "arrow"
+    ? `${typeParams}(${params}) => ${returnText}`
+    : `${typeParams}(${params}): ${returnText}`;
 }
 
 function compatTypeParameterToString(

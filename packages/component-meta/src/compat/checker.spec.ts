@@ -30,6 +30,7 @@ import {
   union,
   unknown,
 } from "@verter/type-ir";
+import { typeExprToDescriptor } from "../type-expr-bridge.js";
 import type { PropMeta, EventMeta, SlotMeta, ExposedMeta } from "../types.js";
 
 let nextProjectRootId = 1;
@@ -988,8 +989,91 @@ describe("mapSlotMeta", () => {
     const result = mapSlotMeta(slot);
 
     expect(result.type).toContain(
-      "ui: { root: (props?: Record<string, any> | undefined): string; label: (props?: Record<string, any> | undefined): string; }",
+      "ui: { root: (props?: Record<string, any> | undefined) => string; label: (props?: Record<string, any> | undefined) => string; }",
     );
+  });
+
+  it("renders a slot-binding function with a Record<string, any> mapped param as an arrow type (XP.5)", () => {
+    // A slot-binding function parameter typed `Record<string, any>` is surfaced
+    // by the native producer as a mapped type over the OPEN `string` key
+    // domain. The bridge (`resolveMappedDescriptor`) must resolve it to
+    // `Record<string, any>` (not `unknown("mapped")`), and the compat printer
+    // (`compatFunctionTypeToString`) must emit arrow syntax with the optional
+    // `| undefined` — matching vue-component-meta's
+    // `(props?: Record<string, any> | undefined) => string`.
+    const mappedRecordParam = typeExprToDescriptor({
+      kind: "mapped",
+      parameter: "P",
+      source: { kind: "primitive", name: "string" },
+      value: { kind: "primitive", name: "any" },
+    });
+
+    const slot: SlotMeta = {
+      name: "default",
+      isScoped: true,
+      bindings: [
+        {
+          name: "ui",
+          rawType: "{ root: (props?: Record<string, any>) => string; }",
+          type: object([
+            {
+              name: "root",
+              type: func(
+                [{ name: "props", optional: true, type: mappedRecordParam }],
+                primitive("string"),
+              ),
+              optional: false,
+            },
+          ]),
+        },
+      ],
+      isRequired: true,
+    };
+
+    const result = mapSlotMeta(slot);
+
+    // GREEN post-fix: arrow syntax + `Record<string, any> | undefined` param.
+    expect(result.type).toContain("root: (props?: Record<string, any> | undefined) => string");
+    // Negative (bridge fix): the lossy `mapped` token must be absent.
+    expect(result.type).not.toContain("mapped");
+    // Negative (printer fix): method-call syntax `): string` must be absent.
+    expect(result.type).not.toMatch(/\): string/);
+  });
+
+  it("renders an optional param of exactly `undefined` once, not `undefined | undefined` (idempotent append)", () => {
+    // An optional parameter whose type IS exactly `undefined` (a bare primitive,
+    // not a union) already carries the implicit optional arm. Appending another
+    // `| undefined` would double it (`undefined | undefined`). The printer must
+    // treat a bare `undefined` param as already-undefined and skip the append,
+    // rendering `(props?: undefined)`.
+    const slot: SlotMeta = {
+      name: "default",
+      isScoped: true,
+      bindings: [
+        {
+          name: "ui",
+          rawType: "{ root: (props?: undefined) => string; }",
+          type: object([
+            {
+              name: "root",
+              type: func(
+                [{ name: "props", optional: true, type: primitive("undefined") }],
+                primitive("string"),
+              ),
+              optional: false,
+            },
+          ]),
+        },
+      ],
+      isRequired: true,
+    };
+
+    const result = mapSlotMeta(slot);
+
+    // GREEN post-fix: a single `undefined` arm.
+    expect(result.type).toContain("root: (props?: undefined) => string");
+    // Negative (idempotence fix): the doubled `undefined | undefined` is absent.
+    expect(result.type).not.toContain("undefined | undefined");
   });
 
   // @ai-generated - Verifies slot schemas are structured objects and use the shared type registry.
