@@ -472,6 +472,34 @@ impl VerterHost {
         Some(meta)
     }
 
+    /// Canonical builder for the
+    /// [`crate::component_meta_result_db::ComponentMetaResultKey`] slot
+    /// key. Every warm-lookup and cold-publish site MUST route through
+    /// this one builder so the R21 split env axes are sourced identically
+    /// on both sides — the env hashes
+    /// (`host_view_env_hashes_for(canonical)`) and
+    /// `host_view_project_identity_for(canonical)` are view-independent
+    /// (they key on the owning project, not file content), so a lookup
+    /// and the publish that warmed it compute the same key and a
+    /// content-unchanged owner warm-hits. The owner content version stays
+    /// the value-side candidate discriminant (NOT a key field, R6).
+    pub(crate) fn component_meta_result_key(
+        &self,
+        canonical: &str,
+        options: &ComponentMetaOptions,
+    ) -> crate::component_meta_result_db::ComponentMetaResultKey {
+        let env = self.host_view_env_hashes_for(canonical);
+        crate::component_meta_result_db::ComponentMetaResultKey {
+            owner_canonical: Arc::from(canonical),
+            options_fingerprint: component_meta_options_fingerprint(options),
+            project_identity: self.host_view_project_identity_for(canonical),
+            parse_env_hash: env.parse_env_hash,
+            resolve_env_hash: env.resolve_env_hash,
+            type_env_hash: env.type_env_hash,
+            lib_env_hash: env.lib_env_hash,
+        }
+    }
+
     /// Look up the project-global final-result cache for the
     /// owner and return the warm payload only when its recorded fact
     /// signature revalidates against the live store view. Returns
@@ -482,12 +510,7 @@ impl VerterHost {
     ) -> Option<verter_semantic::analysis::component_meta::ComponentMetaAnalysis> {
         let shallow = self.shallow_file_state(canonical)?;
         let owner_whole_hash = shallow.whole_hash;
-        let key = crate::component_meta_result_db::ComponentMetaResultKey {
-            owner_canonical: Arc::from(canonical),
-            options_fingerprint: component_meta_options_fingerprint(
-                &ComponentMetaOptions::default(),
-            ),
-        };
+        let key = self.component_meta_result_key(canonical, &ComponentMetaOptions::default());
         // Fact-precise validation is the sole cache oracle:
         // `ComponentMetaResultDb::get_with_view` validates the entry's
         // `read_set_signature.facts` against the live `HostStoreView`
@@ -515,14 +538,17 @@ impl VerterHost {
 
     /// View-aware warm-cache fast path for component-meta queries.
     ///
-    /// Like [`try_component_meta_cache_hit`] but derives the cache key
+    /// Like [`try_component_meta_cache_hit`] but derives the owner
+    /// content version (the candidate DISCRIMINANT — NOT the cache key,
+    /// which is the content-free [`crate::component_meta_result_db::ComponentMetaResultKey`])
     /// from `view.content_hash_for(canonical)` instead of the base
     /// host's `shallow_file_state(canonical).whole_hash`. This is the
     /// R17 + R18 wiring: sessions construct an
     /// [`crate::session_view::SessionView`] over their overlay state
-    /// and the consumer path consults it for cache-key derivation, so
-    /// two sessions with conflicting overlays admit distinct cache
-    /// slots in the multi-candidate substrate.
+    /// and the consumer path consults it for the candidate discriminant,
+    /// so two sessions with conflicting overlays admit distinct
+    /// CANDIDATES in ONE content-free slot of the multi-candidate
+    /// substrate.
     ///
     /// The `view.content_hash_for(canonical)` lookup increments
     /// `provenance.view_aware_cache_key_lookups`. A `None` return
@@ -569,12 +595,7 @@ impl VerterHost {
             // canonicals the session never touched.
             self.shallow_file_state(canonical).map(|s| s.whole_hash)
         })?;
-        let key = crate::component_meta_result_db::ComponentMetaResultKey {
-            owner_canonical: Arc::from(canonical),
-            options_fingerprint: component_meta_options_fingerprint(
-                &ComponentMetaOptions::default(),
-            ),
-        };
+        let key = self.component_meta_result_key(canonical, &ComponentMetaOptions::default());
         // Fact-precise validation is the sole cache oracle:
         // `ComponentMetaResultDb::get_with_view` validates the entry's
         // `read_set_signature.facts` against the resolver-tier
@@ -831,12 +852,7 @@ impl VerterHost {
         else {
             return;
         };
-        let key = crate::component_meta_result_db::ComponentMetaResultKey {
-            owner_canonical: Arc::from(canonical),
-            options_fingerprint: component_meta_options_fingerprint(
-                &ComponentMetaOptions::default(),
-            ),
-        };
+        let key = self.component_meta_result_key(canonical, &ComponentMetaOptions::default());
         let resolution_template =
             crate::component_meta_result_db::ResolutionTemplate::from_resolved_state(resolved);
         let cached = crate::component_meta_result_db::CachedComponentMetaResult {
@@ -911,12 +927,7 @@ impl VerterHost {
             return;
         };
         let whole_hash = shallow.whole_hash;
-        let key = crate::component_meta_result_db::ComponentMetaResultKey {
-            owner_canonical: Arc::from(canonical),
-            options_fingerprint: component_meta_options_fingerprint(
-                &ComponentMetaOptions::default(),
-            ),
-        };
+        let key = self.component_meta_result_key(canonical, &ComponentMetaOptions::default());
         let resolution_template =
             crate::component_meta_result_db::ResolutionTemplate::from_resolved_state(resolved);
         let cached = crate::component_meta_result_db::CachedComponentMetaResult {

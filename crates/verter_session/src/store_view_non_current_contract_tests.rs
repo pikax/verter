@@ -394,8 +394,6 @@ fn cold_seed_context_fails_warm_probes_closed() {
 
 #[test]
 fn fenced_cold_component_meta_builder_does_not_publish_under_churn() {
-    use crate::component_meta_result_db::ComponentMetaResultKey;
-
     // A `.vue` owner whose component-meta is a fenced cold build.
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let owner = "/proj/Comp.vue".to_string();
@@ -411,12 +409,10 @@ fn fenced_cold_component_meta_builder_does_not_publish_under_churn() {
         })
         .expect("upsert Comp.vue must succeed");
 
-    let key = ComponentMetaResultKey {
-        owner_canonical: Arc::from(owner.as_str()),
-        options_fingerprint: crate::host_manage::component_meta_options_fingerprint(
-            &crate::host_manage::ComponentMetaOptions::default(),
-        ),
-    };
+    let key = host.component_meta_result_key(
+        owner.as_str(),
+        &crate::host_manage::ComponentMetaOptions::default(),
+    );
     let results = host.project_type_store().component_meta_results();
 
     // Under sustained churn the fenced cold builder may run, but its

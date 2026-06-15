@@ -417,12 +417,16 @@ pub(crate) fn declaration_body_prefers_inline_materialization_node(
 ///      falls back to an uncached recompute so the caller never sees
 ///      a publishing miss.
 ///
-/// The cache key is `DeclIdentity`; entries store `(result, dep_signature,
-/// validated_at_generation)`. `dep_signature` is built from every
-/// `Instantiate` dispatch's recorded fence accumulated during the BFS,
-/// so cache invalidation is precise per-canonical (via `RefCycleResultDb::
-/// invalidate_for_canonical`) and project-generation-wide (via
-/// `invalidate_all`).
+/// The cache key is the content-free `RefCycleResultKey`
+/// (`ResolvedDeclSlotIdentity` root slot + `resolve_env_hash` + version
+/// — R6: no `DeclIdentity`/`whole_hash` in the key); entries store
+/// `(result, read_set_signature.facts + self_root_canonicals,
+/// validated_at_generation)`. The fact rail is built from the BFS root's
+/// self-root plus every visited decl's `FileWholeHash` and the
+/// `Instantiate` dispatch fences accumulated during the BFS, so version
+/// rooting is value-side and cache invalidation is precise per-canonical
+/// (via `RefCycleResultDb::invalidate_for_canonical`) and
+/// project-generation-wide (via `invalidate_all`).
 ///
 /// Legacy parity rules carried into the
 /// inner BFS body unchanged:

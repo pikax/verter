@@ -25,7 +25,6 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
-use verter_session::component_meta_materialize::MaterializeStructureCacheKey;
 use verter_session::meta::MetaProject;
 use verter_session::{HostConfig, VerterHost};
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
@@ -225,10 +224,9 @@ fn n_owners_sharing_inner_type_materialise_once_in_production_flow() {
 /// runtime contract immediately.
 #[test]
 fn n_owners_via_materialize_surface_dispatch_collapse_to_one_entry() {
-    use verter_session::component_meta_materialize::{
-        MaterializationScope, MaterializeStructureCacheKey,
-    };
-    use verter_session::semantic_query::{ProjectionMode, SemanticNodeId};
+    use verter_session::component_meta_materialize::{MaterializationScope, MaterializeRuntimeKey};
+    use verter_session::semantic_query::ProjectionMode;
+    use verter_type_expr::TypeExpr;
 
     let owners = [
         "/workspace/src/Inbox.vue",
@@ -237,33 +235,37 @@ fn n_owners_via_materialize_surface_dispatch_collapse_to_one_entry() {
         "/workspace/src/Header.vue",
     ];
 
-    // A fresh hermetic project with only the substrate-bootstrap file.
-    // The N `materialize_surface` calls below all use the NULL base
-    // node `SemanticNodeId(0)`, whose origin is `Global` — a
-    // `MaterializeStructureDb` entry self-roots ONLY its `base` node's
-    // declaration-origin file, so a `Global`-origin base is a
-    // zero-self-root entry that is always `Cacheable`. The consumer
-    // materialise scope is NOT a self-root (R7 cross-owner reuse), so
-    // the owner scopes need not be observable files for the cold build
-    // to admit an entry; only the differing `scope_canonical_id` is
-    // exercised here.
-    let project = build_hermetic_project(&[("/workspace/x.ts", "export const x = 1;")]);
+    // A hermetic project carrying the shared type the `base` roots in.
+    let project = build_hermetic_project(&[("/workspace/src/chat-types.ts", SHARED_TYPE_TS)]);
     let host = project.host();
     let db = host.project_type_store().materialize_structure_db();
 
     let count_before = db.entry_count();
     assert_eq!(count_before, 0, "control: fresh DB has 0 entries");
 
-    // Note: we use `SemanticNodeId(0)` (the NULL node id). The
-    // materialiser fast-paths it to a no-op outcome, but the cache
-    // entry IS still recorded under the cache key. This is the
-    // structural property we want to discriminate: N keys differing
-    // ONLY in `scope_canonical_id` collapse to ONE entry.
-    let base = SemanticNodeId(0);
-
+    // A DECL-ROOTED `base`: lower `Ref { ChatMessageProps }` in its
+    // declaration scope (Navigate keeps it a `DeclRef` carrier). The
+    // materialiser canonicalises this to
+    // `slot(/workspace/src/chat-types.ts, ChatMessageProps)` — a
+    // content-free `MaterializationCacheKey` with NO consumer-scope
+    // dimension. (An anonymous `SemanticNodeId(0)` base would key no DB
+    // slot — it computes uncached — so it can no longer exercise this
+    // contract.) Lowering auto-loads the scope so the `DeclRef` carries
+    // the file's live whole hash, and the warm-read self-root validates.
     let dispatch = host.semantic_dispatch();
+    let base = dispatch
+        .lower_type_expr_in_scope_with_mode(
+            "/workspace/src/chat-types.ts",
+            &TypeExpr::Ref {
+                name: Arc::from("ChatMessageProps"),
+                type_arguments: Arc::from(Vec::new()),
+            },
+            ProjectionMode::Navigate,
+        )
+        .expect("lowering ChatMessageProps via Navigate must produce a DeclRef base");
+
     for scope in &owners {
-        let key = MaterializeStructureCacheKey {
+        let key = MaterializeRuntimeKey {
             scope_canonical_id: Arc::from(*scope),
             base,
             scope_axis: MaterializationScope::TopLevel,
@@ -279,18 +281,20 @@ fn n_owners_via_materialize_surface_dispatch_collapse_to_one_entry() {
          delta={delta}, N={}",
         owners.len()
     );
-    // R7 contract: N `materialize_surface` calls differing ONLY in
-    // `scope_canonical_id` (shared `(base, scope_axis, mode)`) MUST
-    // collapse to ONE new MaterializeStructureDb entry — the first
-    // cold-builds, the rest warm-hit. The legacy `scope_canonical_id`-
-    // included key would add N entries, one per owner scope.
+    // R7 cross-owner reuse: N `materialize_surface` calls differing ONLY
+    // in `scope_canonical_id` (shared canonical subject) MUST collapse to
+    // ONE new MaterializeStructureDb entry — the first cold-builds, the
+    // rest warm-hit. The canonical `MaterializationCacheKey` has NO
+    // consumer-scope dimension, so the slot is scope-independent by
+    // construction; a key that re-introduced the scope would add N
+    // entries, one per owner scope.
     assert_eq!(
         delta,
         1,
-        "R7 cross-owner reuse: {} dispatch calls with shared (base, scope_axis, mode) and \
+        "R7 cross-owner reuse: {} dispatch calls over a shared canonical subject with \
          different scope_canonical_id MUST add exactly ONE MaterializeStructureDb entry. \
-         got delta={} (count_before={}, count_after={}) — a value > 1 indicates \
-         scope_canonical_id leaked into the cache-key Hash/PartialEq impl.",
+         got delta={} (count_before={}, count_after={}) — a value > 1 indicates the \
+         consumer scope leaked into the canonical MaterializationCacheKey.",
         owners.len(),
         delta,
         count_before,
@@ -315,34 +319,30 @@ fn single_owner_baseline_entries() -> usize {
         .entry_count()
 }
 
-/// **Hash/PartialEq structural arch-guard.** This is the
-/// arch-guard companion to the production-flow test. It pins the
-/// cache key's `Hash`/`PartialEq` invariant:
-/// `scope_canonical_id` is EXCLUDED from equality and hashing, so
-/// keys with different scopes but identical `(base, scope_axis, mode)`
-/// must compare equal AND collide in a hasher.
-///
-/// This is NOT a "key-shape unit test" in the sense the user warned
-/// against — it's the architecture-guard, complementing the
-/// production-flow test above. The production-flow test exercises
-/// the CONSEQUENCE (entry-count collapse); this test pins the
-/// MECHANISM (the impl that produces the consequence). A regression
-/// in EITHER test signals a break.
+/// **Recursion-identity scope-exclusion arch-guard.** Pins that the
+/// per-thread recursion/depth identity [`MaterializeRuntimeKey`]
+/// excludes `scope_canonical_id` from `Hash`/`PartialEq`: two consumer
+/// scopes reaching the same `(base, scope_axis, mode)` share ONE
+/// recursion identity. (The DB cross-owner reuse is now STRUCTURAL — the
+/// canonical `MaterializationCacheKey` carries NO consumer-scope
+/// dimension at all — and is exercised end-to-end by the two
+/// entry-count tests above; this pins the runtime key's complementary
+/// scope-independence.)
 #[test]
-fn r7_cache_key_hash_partial_eq_excludes_scope_canonical_id() {
+fn r7_runtime_key_hash_partial_eq_excludes_scope_canonical_id() {
     use std::hash::{Hash, Hasher};
-    use verter_session::component_meta_materialize::MaterializationScope;
+    use verter_session::component_meta_materialize::{MaterializationScope, MaterializeRuntimeKey};
     use verter_session::semantic_query::{ProjectionMode, SemanticNodeId};
 
     let base = SemanticNodeId(42);
 
-    let k_a = MaterializeStructureCacheKey {
+    let k_a = MaterializeRuntimeKey {
         scope_canonical_id: Arc::from("/owner/A.vue"),
         base,
         scope_axis: MaterializationScope::TopLevel,
         mode: ProjectionMode::Expanded,
     };
-    let k_b = MaterializeStructureCacheKey {
+    let k_b = MaterializeRuntimeKey {
         scope_canonical_id: Arc::from("/owner/B.vue"),
         base,
         scope_axis: MaterializationScope::TopLevel,
@@ -352,9 +352,9 @@ fn r7_cache_key_hash_partial_eq_excludes_scope_canonical_id() {
     // PartialEq excludes scope_canonical_id.
     assert_eq!(
         k_a, k_b,
-        "R7 invariant: cache keys with different scope_canonical_id but identical \
-         (base, scope_axis, mode) MUST compare equal — this is the architectural \
-         contract that produces cross-owner reuse in MaterializeStructureDb."
+        "recursion identity: runtime keys with different scope_canonical_id but identical \
+         (base, scope_axis, mode) MUST compare equal — the recursion/depth identity does \
+         not depend on which consumer reached the node."
     );
 
     // Hash agrees with PartialEq (HashSet contract).
@@ -365,11 +365,11 @@ fn r7_cache_key_hash_partial_eq_excludes_scope_canonical_id() {
     assert_eq!(
         h_a.finish(),
         h_b.finish(),
-        "R7 invariant: keys that compare equal MUST hash to the same value."
+        "recursion identity: runtime keys that compare equal MUST hash to the same value."
     );
 
     // Distinct (base, scope_axis, mode) still produces distinct keys.
-    let k_distinct_base = MaterializeStructureCacheKey {
+    let k_distinct_base = MaterializeRuntimeKey {
         scope_canonical_id: Arc::from("/owner/A.vue"),
         base: SemanticNodeId(99),
         scope_axis: MaterializationScope::TopLevel,
@@ -377,7 +377,7 @@ fn r7_cache_key_hash_partial_eq_excludes_scope_canonical_id() {
     };
     assert_ne!(
         k_a, k_distinct_base,
-        "control: distinct base nodes MUST produce distinct cache keys"
+        "control: distinct base nodes MUST produce distinct runtime keys"
     );
 }
 

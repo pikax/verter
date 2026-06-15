@@ -28,13 +28,107 @@
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
+use verter_semantic::facts::registry::SymbolSpace;
 
+use crate::file_artifact_store::ProjectIdentity;
 use crate::resolver_core::{
     FactVersionRef, PermissiveStoreView, SingleflightGroup, SingleflightRole,
     SingleflightRunResult, StoreView, ValidatedFactCache,
 };
+use crate::types::Hash16;
 
 mod effective_export_set;
+
+/// Substrate version for the route/barrel resolution algorithm. A bump
+/// invalidates every `RouteNameKey` / `BarrelSurfaceKey` slot by changing
+/// the key (the entries are still validated value-side by their fact
+/// signature; the version is the coarse "the resolver itself changed
+/// shape" rail, mirroring `RESOLVED_IMPORT_FACTS_RESOLVER_VERSION`).
+pub const ROUTE_DB_RESOLVER_VERSION: u32 = 1;
+
+/// Query-identity key for a single named-export route lookup
+/// `(provider, exported_name)` (R5 query-identity family, R6 content-free,
+/// R21 split-env).
+///
+/// The route resolution is resolve-domain: it depends on `resolve_env_hash`
+/// (module resolution / paths / conditions) and `lib_env_hash` (module
+/// augmentations stitch into the visible surface), keyed under the owning
+/// `project_identity` so a route resolved in project A never satisfies a
+/// lookup in project B. `symbol_space` discriminates the type/value
+/// namespace. NO content/version hash lives on the key — route freshness
+/// rides the value-side `ValidatedFactCache` fact signature, revalidated
+/// against the live `StoreView` on every warm hit. `parse_env_hash` /
+/// `type_env_hash` do NOT key a route surface (R21 scoping).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RouteNameKey {
+    pub provider_canonical: Arc<str>,
+    pub exported_name: Arc<str>,
+    pub symbol_space: SymbolSpace,
+    pub project_identity: ProjectIdentity,
+    pub resolve_env_hash: Hash16,
+    pub lib_env_hash: Hash16,
+    pub resolver_version: u32,
+}
+
+impl RouteNameKey {
+    /// Build a route key, stamping the current [`ROUTE_DB_RESOLVER_VERSION`].
+    /// The env axes (`project_identity`, `resolve_env_hash`, `lib_env_hash`)
+    /// are sourced by the caller from the host
+    /// (`host_view_project_identity_for` / `host_view_env_hashes_for`) so a
+    /// single builder serves both the warm lookup and the cold publish.
+    #[must_use]
+    pub fn new(
+        provider_canonical: impl Into<Arc<str>>,
+        exported_name: impl Into<Arc<str>>,
+        symbol_space: SymbolSpace,
+        project_identity: ProjectIdentity,
+        resolve_env_hash: Hash16,
+        lib_env_hash: Hash16,
+    ) -> Self {
+        Self {
+            provider_canonical: provider_canonical.into(),
+            exported_name: exported_name.into(),
+            symbol_space,
+            project_identity,
+            resolve_env_hash,
+            lib_env_hash,
+            resolver_version: ROUTE_DB_RESOLVER_VERSION,
+        }
+    }
+}
+
+/// Query-identity key for a barrel file's pre-resolved wildcard route
+/// surface (R5 query-identity family, R6 content-free, R21 split-env). Same
+/// resolve/lib env discipline as [`RouteNameKey`]; a barrel surface is a
+/// whole-file surface, so it carries no `symbol_space`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct BarrelSurfaceKey {
+    pub barrel_canonical: Arc<str>,
+    pub project_identity: ProjectIdentity,
+    pub resolve_env_hash: Hash16,
+    pub lib_env_hash: Hash16,
+    pub resolver_version: u32,
+}
+
+impl BarrelSurfaceKey {
+    /// Build a barrel-surface key, stamping the current
+    /// [`ROUTE_DB_RESOLVER_VERSION`].
+    #[must_use]
+    pub fn new(
+        barrel_canonical: impl Into<Arc<str>>,
+        project_identity: ProjectIdentity,
+        resolve_env_hash: Hash16,
+        lib_env_hash: Hash16,
+    ) -> Self {
+        Self {
+            barrel_canonical: barrel_canonical.into(),
+            project_identity,
+            resolve_env_hash,
+            lib_env_hash,
+            resolver_version: ROUTE_DB_RESOLVER_VERSION,
+        }
+    }
+}
 
 pub(crate) use effective_export_set::build_module_augmentation_index_shape_fact_key;
 pub use effective_export_set::{
@@ -117,12 +211,15 @@ struct RouteFlightOutcome {
 /// Shared DB for canonical export routing facts.
 #[derive(Debug)]
 pub struct RouteDb {
-    /// `(provider_canonical, exported_name)` → route result.
-    routes: ValidatedFactCache<(String, String), RouteResult>,
-    route_singleflight: SingleflightGroup<(String, String), RouteFlightOutcome, ()>,
-    /// `barrel_canonical` → full wildcard route surface (lazy, built once).
-    barrel_surfaces: ValidatedFactCache<String, BarrelRouteSurface>,
-    barrel_singleflight: SingleflightGroup<String, Arc<BarrelRouteSurface>, ()>,
+    /// [`RouteNameKey`] → route result. The key carries the split env
+    /// axes (R21) so a route resolved under one project/env never
+    /// satisfies a lookup under another; value-side fact validation
+    /// carries content freshness (R6).
+    routes: ValidatedFactCache<RouteNameKey, RouteResult>,
+    route_singleflight: SingleflightGroup<RouteNameKey, RouteFlightOutcome, ()>,
+    /// [`BarrelSurfaceKey`] → full wildcard route surface (lazy, built once).
+    barrel_surfaces: ValidatedFactCache<BarrelSurfaceKey, BarrelRouteSurface>,
+    barrel_singleflight: SingleflightGroup<BarrelSurfaceKey, Arc<BarrelRouteSurface>, ()>,
     /// Per-provider effective export surface (post-augmentation
     /// stitching) keyed by `(provider, project_identity,
     /// resolve_env_hash, lib_env_hash, session_scope)` (R15 + R21 + R29).
@@ -206,15 +303,13 @@ impl RouteDb {
     // Route lookups
     // -----------------------------------------------------------------------
 
-    /// Look up a cached route for `(provider, name)` if valid in the view.
+    /// Look up a cached route for `key` if valid in the view.
     pub fn get_route<V: StoreView>(
         &self,
-        provider_canonical: &str,
-        exported_name: &str,
+        key: &RouteNameKey,
         view: &V,
     ) -> Option<Arc<RouteResult>> {
-        let key = (provider_canonical.to_owned(), exported_name.to_owned());
-        let result = self.routes.get_if_valid(&key, view);
+        let result = self.routes.get_if_valid(key, view);
         if let Some(ctx) = crate::request_context::current_request_context() {
             if result.is_some() {
                 ctx.cache_counters
@@ -232,13 +327,8 @@ impl RouteDb {
     }
 
     /// Permissive route lookup without store-view validation.
-    pub fn get_route_any(
-        &self,
-        provider_canonical: &str,
-        exported_name: &str,
-    ) -> Option<Arc<RouteResult>> {
-        let key = (provider_canonical.to_owned(), exported_name.to_owned());
-        let result = self.routes.get_if_valid(&key, &PermissiveStoreView);
+    pub fn get_route_any(&self, key: &RouteNameKey) -> Option<Arc<RouteResult>> {
+        let result = self.routes.get_if_valid(key, &PermissiveStoreView);
         if let Some(ctx) = crate::request_context::current_request_context() {
             if result.is_some() {
                 ctx.cache_counters
@@ -262,8 +352,7 @@ impl RouteDb {
     /// state (see [`Self::resolve_route_singleflight_inner`]).
     pub fn get_or_resolve_route<V, F>(
         &self,
-        provider_canonical: &str,
-        exported_name: &str,
+        key: RouteNameKey,
         view: &V,
         resolve: F,
     ) -> Option<Arc<RouteResult>>
@@ -271,16 +360,15 @@ impl RouteDb {
         V: StoreView + ?Sized,
         F: Fn() -> Option<RouteResult>,
     {
-        self.get_or_resolve_route_with_facts(provider_canonical, exported_name, view, || {
+        self.get_or_resolve_route_with_facts(key, view, || {
             resolve().map(|result| (result, Vec::new()))
         })
     }
 
-    /// Look up or materialize a route for `(provider, name)` with fact validation.
+    /// Look up or materialize a route for `key` with fact validation.
     pub fn get_or_resolve_route_with_facts<V, F>(
         &self,
-        provider_canonical: &str,
-        exported_name: &str,
+        key: RouteNameKey,
         view: &V,
         resolve: F,
     ) -> Option<Arc<RouteResult>>
@@ -288,8 +376,6 @@ impl RouteDb {
         V: StoreView + ?Sized,
         F: Fn() -> Option<(RouteResult, Vec<FactVersionRef>)>,
     {
-        let key = (provider_canonical.to_owned(), exported_name.to_owned());
-
         if let Some(result) = self.routes.get_if_valid(&key, view) {
             return Some(result);
         }
@@ -334,7 +420,7 @@ impl RouteDb {
     /// returns `None`.
     fn resolve_route_singleflight_inner<V, F>(
         &self,
-        key: (String, String),
+        key: RouteNameKey,
         view: &V,
         resolve: F,
     ) -> Option<SingleflightRunResult<RouteFlightOutcome>>
@@ -376,8 +462,8 @@ impl RouteDb {
                     // `ExportRouteResolved` with `augmented: true`
                     // when consumers walk its entries.
                     emit_export_route_resolved_event(
-                        &key.0,
-                        &key.1,
+                        &key.provider_canonical,
+                        &key.exported_name,
                         arc.as_ref(),
                         /* augmented = */ false,
                     );
@@ -440,13 +526,11 @@ impl RouteDb {
     #[cfg(any(test, debug_assertions))]
     pub fn test_route_inflight_strong_count<V: StoreView + ?Sized>(
         &self,
-        provider_canonical: &str,
-        exported_name: &str,
+        key: &RouteNameKey,
         view: &V,
     ) -> usize {
-        let key = (provider_canonical.to_owned(), exported_name.to_owned());
         self.route_singleflight
-            .test_flight_strong_count(&key, view.compat_token())
+            .test_flight_strong_count(key, view.compat_token())
     }
 
     /// Look up a route and return both the result and its recorded
@@ -459,12 +543,10 @@ impl RouteDb {
     /// second round-trip through the cache.
     pub fn get_route_with_facts<V: StoreView + ?Sized>(
         &self,
-        provider_canonical: &str,
-        exported_name: &str,
+        key: &RouteNameKey,
         view: &V,
     ) -> Option<(Arc<RouteResult>, Arc<[FactVersionRef]>)> {
-        let key = (provider_canonical.to_owned(), exported_name.to_owned());
-        self.routes.get_if_valid_with_facts(&key, view)
+        self.routes.get_if_valid_with_facts(key, view)
     }
 
     /// Look up or materialize a route, and bubble its fact-dep signature
@@ -487,8 +569,7 @@ impl RouteDb {
     /// available as low-level primitives for intra-RouteDb code).
     pub fn get_or_resolve_route_observing_facts<V, F>(
         &self,
-        provider_canonical: &str,
-        exported_name: &str,
+        key: RouteNameKey,
         view: &V,
         resolve: F,
     ) -> Option<Arc<RouteResult>>
@@ -497,9 +578,7 @@ impl RouteDb {
         F: Fn() -> Option<(RouteResult, Vec<FactVersionRef>)>,
     {
         // Warm-hit fast path: validated cache lookup with fact bubbling.
-        if let Some((value, facts)) =
-            self.get_route_with_facts(provider_canonical, exported_name, view)
-        {
+        if let Some((value, facts)) = self.get_route_with_facts(&key, view) {
             crate::fact_signature_helpers::observe_fact_signature(&facts);
             #[cfg(any(test, debug_assertions))]
             self.route_warm_fact_bubble_emissions
@@ -510,8 +589,7 @@ impl RouteDb {
         // Cold path: delegate to the shared singleflight helper, then
         // observe the leader / follower role and bump the matching
         // provenance counter on the post-admission re-read.
-        let key = (provider_canonical.to_owned(), exported_name.to_owned());
-        let run_result = self.resolve_route_singleflight_inner(key, view, resolve)?;
+        let run_result = self.resolve_route_singleflight_inner(key.clone(), view, resolve)?;
 
         // Post-admission re-read: fan the just-stored facts into the
         // current thread's tracer stack. Leader: the closure ran here
@@ -520,9 +598,7 @@ impl RouteDb {
         // this thread's re-read picks up the admitted entry and the
         // bubble fans the leader's facts into this thread's outer
         // tracer scope.
-        if let Some((_value, facts)) =
-            self.get_route_with_facts(provider_canonical, exported_name, view)
-        {
+        if let Some((_value, facts)) = self.get_route_with_facts(&key, view) {
             crate::fact_signature_helpers::observe_fact_signature(&facts);
             #[cfg(any(test, debug_assertions))]
             match run_result.role {
@@ -543,42 +619,50 @@ impl RouteDb {
     /// admits entries that would warm under any [`StoreView`] — production
     /// paths must use [`Self::insert_route_with_facts`].
     #[cfg(test)]
-    pub fn insert_route(
-        &self,
-        provider_canonical: String,
-        exported_name: String,
-        result: RouteResult,
-    ) {
-        let key = (provider_canonical, exported_name);
+    pub fn insert_route(&self, key: RouteNameKey, result: RouteResult) {
         self.routes.insert(key, result, Vec::new());
     }
 
     /// Insert a pre-resolved route with explicit fact validation.
     pub fn insert_route_with_facts(
         &self,
-        provider_canonical: String,
-        exported_name: String,
+        key: RouteNameKey,
         result: RouteResult,
         facts: Vec<FactVersionRef>,
     ) {
-        let key = (provider_canonical, exported_name);
         self.routes.insert(key, result, facts);
     }
 
-    /// Evict all routes for a provider.
+    /// Evict all routes for a provider, across every env / project / symbol-
+    /// space variant of the provider canonical (the typed keys carry those
+    /// dims, so the eviction snapshot-filters by `provider_canonical` rather
+    /// than removing a single bare-string key).
     pub fn evict_provider(&self, provider_canonical: &str) {
         let route_keys: Vec<_> = self
             .routes
             .snapshot_all()
             .into_iter()
             .map(|(key, _)| key)
-            .filter(|(provider, _)| provider == provider_canonical)
+            .filter(|key| key.provider_canonical.as_ref() == provider_canonical)
             .collect();
         for key in route_keys {
             self.routes.remove(&key);
         }
 
-        self.barrel_surfaces.remove(&provider_canonical.to_owned());
+        // Barrel surfaces are now keyed by the typed `BarrelSurfaceKey`
+        // (env dims included), so a bare-string `.remove` can no longer
+        // address them — snapshot-filter by barrel canonical across every
+        // env variant, mirroring the effective-export-set eviction below.
+        let barrel_keys: Vec<_> = self
+            .barrel_surfaces
+            .snapshot_all()
+            .into_iter()
+            .map(|(key, _)| key)
+            .filter(|key| key.barrel_canonical.as_ref() == provider_canonical)
+            .collect();
+        for key in barrel_keys {
+            self.barrel_surfaces.remove(&key);
+        }
 
         // Evict every effective-export-set candidate for this
         // provider across all `(project, resolve_env, lib_env)` keys.
@@ -601,17 +685,16 @@ impl RouteDb {
     /// Look up a cached barrel surface if valid in the view.
     pub fn get_barrel_surface<V: StoreView>(
         &self,
-        barrel_canonical: &str,
+        key: &BarrelSurfaceKey,
         view: &V,
     ) -> Option<Arc<BarrelRouteSurface>> {
-        self.barrel_surfaces
-            .get_if_valid(&barrel_canonical.to_owned(), view)
+        self.barrel_surfaces.get_if_valid(key, view)
     }
 
     /// Look up or build a barrel surface.
     pub fn get_or_build_barrel_surface<V, F>(
         &self,
-        barrel_canonical: &str,
+        key: BarrelSurfaceKey,
         view: &V,
         build: F,
     ) -> Option<Arc<BarrelRouteSurface>>
@@ -619,8 +702,6 @@ impl RouteDb {
         V: StoreView,
         F: FnOnce() -> Option<BarrelRouteSurface>,
     {
-        let key = barrel_canonical.to_owned();
-
         if let Some(surface) = self.barrel_surfaces.get_if_valid(&key, view) {
             return Some(surface);
         }
@@ -661,9 +742,8 @@ impl RouteDb {
         }
     }
 
-    /// Insert a pre-built barrel surface.
-    pub fn insert_barrel_surface(&self, surface: BarrelRouteSurface) {
-        let key = surface.barrel_canonical.clone();
+    /// Insert a pre-built barrel surface under `key`.
+    pub fn insert_barrel_surface(&self, key: BarrelSurfaceKey, surface: BarrelRouteSurface) {
         let facts = self.barrel_validation_facts(&surface);
         self.barrel_surfaces.insert(key, surface, facts);
     }
@@ -831,21 +911,42 @@ mod tests {
         }
     }
 
+    /// Build a zero-env route key. These unit tests exercise the cache /
+    /// singleflight mechanics in isolation, not env discrimination (that
+    /// is covered by the R21 guard in
+    /// `tests/g_cache/r6_r21_query_identity_keys.rs`), so a uniform zero
+    /// env keeps the focus on route behaviour. Zero `ProjectIdentity` is
+    /// permitted here because this is a `#[cfg(test)]` block.
+    fn rk(provider: &str, name: &str) -> RouteNameKey {
+        RouteNameKey::new(
+            provider,
+            name,
+            SymbolSpace::Type,
+            ProjectIdentity([0u8; 16]),
+            [0u8; 16],
+            [0u8; 16],
+        )
+    }
+
+    /// Build a zero-env barrel-surface key (see [`rk`]).
+    fn bk(barrel: &str) -> BarrelSurfaceKey {
+        BarrelSurfaceKey::new(barrel, ProjectIdentity([0u8; 16]), [0u8; 16], [0u8; 16])
+    }
+
     #[test]
     fn insert_and_get_route() {
         let db = RouteDb::new();
         let view = TestView::accepting_all(1);
 
         db.insert_route(
-            "index.ts".to_owned(),
-            "Foo".to_owned(),
+            rk("index.ts", "Foo"),
             RouteResult::Resolved {
                 defining_canonical: "foo.ts".to_owned(),
                 defining_symbol: "Foo".to_owned(),
             },
         );
 
-        let result = db.get_route("index.ts", "Foo", &view);
+        let result = db.get_route(&rk("index.ts", "Foo"), &view);
         assert!(result.is_some());
         let route = result.unwrap();
         assert!(
@@ -858,13 +959,9 @@ mod tests {
         let db = RouteDb::new();
         let view = TestView::accepting_all(1);
 
-        db.insert_route(
-            "index.ts".to_owned(),
-            "Missing".to_owned(),
-            RouteResult::Miss,
-        );
+        db.insert_route(rk("index.ts", "Missing"), RouteResult::Miss);
 
-        let result = db.get_route("index.ts", "Missing", &view);
+        let result = db.get_route(&rk("index.ts", "Missing"), &view);
         assert!(result.is_some());
         assert!(result.unwrap().is_miss());
     }
@@ -885,7 +982,7 @@ mod tests {
             canonical_id: "bar.ts".to_owned(),
             hash: [0u8; 16],
         };
-        let result = db.get_or_resolve_route_with_facts("index.ts", "Bar", &view, || {
+        let result = db.get_or_resolve_route_with_facts(rk("index.ts", "Bar"), &view, || {
             call_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Some((
                 RouteResult::Resolved {
@@ -899,7 +996,7 @@ mod tests {
 
         // Second call should hit cache because we admitted with a
         // non-empty fact signature on the first pass.
-        let result2 = db.get_or_resolve_route_with_facts("index.ts", "Bar", &view, || {
+        let result2 = db.get_or_resolve_route_with_facts(rk("index.ts", "Bar"), &view, || {
             call_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Some((RouteResult::Miss, vec![dummy_fact.clone()]))
         });
@@ -916,14 +1013,14 @@ mod tests {
         let view = TestView::accepting_all(1);
         let call_count = std::sync::atomic::AtomicU32::new(0);
 
-        let _result = db.get_or_resolve_route("index.ts", "Bar", &view, || {
+        let _result = db.get_or_resolve_route(rk("index.ts", "Bar"), &view, || {
             call_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Some(RouteResult::Resolved {
                 defining_canonical: "bar.ts".to_owned(),
                 defining_symbol: "Bar".to_owned(),
             })
         });
-        let _result2 = db.get_or_resolve_route("index.ts", "Bar", &view, || {
+        let _result2 = db.get_or_resolve_route(rk("index.ts", "Bar"), &view, || {
             call_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Some(RouteResult::Resolved {
                 defining_canonical: "bar.ts".to_owned(),
@@ -953,7 +1050,7 @@ mod tests {
     fn unadmitted_route_resolve_is_not_retained_as_a_joinable_rendezvous() {
         let db = RouteDb::new();
         let view = TestView::accepting_all(1);
-        let key = ("provider.ts".to_owned(), "Foo".to_owned());
+        let key = rk("provider.ts", "Foo");
 
         // A burst sibling's participation pin keeps the lane alive past
         // the leader's completion — the window in which a late claimant
@@ -979,7 +1076,7 @@ mod tests {
         // Call 1: the resolve returns the never-persisted empty-facts
         // shape (the carrier the fenced frontier walk produces). The
         // caller is still served its own result.
-        let first = db.get_or_resolve_route_with_facts("provider.ts", "Foo", &view, || {
+        let first = db.get_or_resolve_route_with_facts(rk("provider.ts", "Foo"), &view, || {
             resolves.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Some((superseded.clone(), Vec::new()))
         });
@@ -992,7 +1089,7 @@ mod tests {
         // Call 2 (a late claimant on the pinned lane): must NOT adopt
         // the unadmitted result — it re-resolves cold against fresh
         // state and its admitted result serves warm afterwards.
-        let second = db.get_or_resolve_route_with_facts("provider.ts", "Foo", &view, || {
+        let second = db.get_or_resolve_route_with_facts(rk("provider.ts", "Foo"), &view, || {
             resolves.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Some((live.clone(), vec![live_fact.clone()]))
         });
@@ -1009,7 +1106,7 @@ mod tests {
             "the late claimant must return its own fresh resolve's route",
         );
         assert_eq!(
-            db.get_route("provider.ts", "Foo", &view).as_deref(),
+            db.get_route(&rk("provider.ts", "Foo"), &view).as_deref(),
             Some(&live),
             "the late claimant's admitted re-resolve must serve warm",
         );
@@ -1047,9 +1144,9 @@ mod tests {
             ),
         };
 
-        db.insert_barrel_surface(surface);
+        db.insert_barrel_surface(bk("barrel.ts"), surface);
 
-        let result = db.get_barrel_surface("barrel.ts", &view);
+        let result = db.get_barrel_surface(&bk("barrel.ts"), &view);
         assert!(result.is_some());
         let s = result.unwrap();
         assert_eq!(s.wildcard_edges.len(), 2);
@@ -1062,7 +1159,7 @@ mod tests {
         let view = TestView::accepting_all(1);
         let call_count = std::sync::atomic::AtomicU32::new(0);
 
-        let result = db.get_or_build_barrel_surface("barrel.ts", &view, || {
+        let result = db.get_or_build_barrel_surface(bk("barrel.ts"), &view, || {
             call_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Some(BarrelRouteSurface {
                 barrel_canonical: "barrel.ts".to_owned(),
@@ -1078,7 +1175,7 @@ mod tests {
         });
         assert!(result.is_some());
 
-        let result2 = db.get_or_build_barrel_surface("barrel.ts", &view, || {
+        let result2 = db.get_or_build_barrel_surface(bk("barrel.ts"), &view, || {
             call_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             None
         });
@@ -1092,28 +1189,30 @@ mod tests {
         let view = TestView::accepting_all(1);
 
         db.insert_route(
-            "a.ts".to_owned(),
-            "X".to_owned(),
+            rk("a.ts", "X"),
             RouteResult::Resolved {
                 defining_canonical: "x.ts".to_owned(),
                 defining_symbol: "X".to_owned(),
             },
         );
-        db.insert_barrel_surface(BarrelRouteSurface {
-            barrel_canonical: "b.ts".to_owned(),
-            wildcard_edges: FxHashMap::default(),
-            fact_dep_signature: Arc::from(
-                vec![FactVersionRef::FileWholeHash {
-                    canonical_id: "b.ts".to_owned(),
-                    hash: [1; 16],
-                }]
-                .into_boxed_slice(),
-            ),
-        });
+        db.insert_barrel_surface(
+            bk("b.ts"),
+            BarrelRouteSurface {
+                barrel_canonical: "b.ts".to_owned(),
+                wildcard_edges: FxHashMap::default(),
+                fact_dep_signature: Arc::from(
+                    vec![FactVersionRef::FileWholeHash {
+                        canonical_id: "b.ts".to_owned(),
+                        hash: [1; 16],
+                    }]
+                    .into_boxed_slice(),
+                ),
+            },
+        );
 
         db.clear();
 
-        assert!(db.get_route("a.ts", "X", &view).is_none());
-        assert!(db.get_barrel_surface("b.ts", &view).is_none());
+        assert!(db.get_route(&rk("a.ts", "X"), &view).is_none());
+        assert!(db.get_barrel_surface(&bk("b.ts"), &view).is_none());
     }
 }

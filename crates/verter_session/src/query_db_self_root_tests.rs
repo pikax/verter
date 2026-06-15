@@ -3539,9 +3539,11 @@ fn imported_registry_coexisting_candidates_keep_live_counter_consistent() {
 // Structural carriers — `MaterializeStructureDb` and `RefCycleResultDb`.
 //
 // These two query-identity caches carry an explicit `self_root_canonicals`
-// set: `MaterializeStructureDb` roots ONLY the `base` node's
-// declaration-origin file (the consumer materialise scope is NOT a
-// self-root — R7 cross-owner reuse); `RefCycleResultDb` roots the BFS root
+// set: `MaterializeStructureDb` roots the materialise SUBJECT's
+// declaration-origin file — the extracted route root for a route-shaped
+// subject, the `base` node's origin for a non-route subject (the consumer
+// materialise scope is NEVER a self-root — R7 cross-owner reuse);
+// `RefCycleResultDb` roots the BFS root
 // file plus every visited declaration's file. Every warm read validates
 // those self-roots strictly via `ReadSetSignature::validate_with_self_roots`,
 // so a same-canonical / visited-canonical content edit — or an untracked
@@ -3577,8 +3579,10 @@ fn intern_global_object(host: &VerterHost) -> crate::semantic_query::SemanticNod
 ///
 /// This exercises the strict-validator MECHANISM in isolation: the
 /// production materialiser never roots the consumer materialise scope
-/// (it self-roots ONLY the `base` node's declaration-origin file — R7
-/// cross-owner reuse), so to drive the strict path deterministically a
+/// (it self-roots on the materialise SUBJECT's declaration-origin file —
+/// the extracted route root for a route-shaped subject, the `base` node's
+/// origin for a non-route subject — R7 cross-owner reuse), so to drive
+/// the strict path deterministically a
 /// synthetic entry is PLANTED with a `FileWholeHash` self-root for an
 /// untracked canonical and `self_root_canonicals = [canonical]`.
 ///
@@ -3593,9 +3597,9 @@ fn intern_global_object(host: &VerterHost) -> crate::semantic_query::SemanticNod
 #[test]
 fn materialize_structure_db_planted_untracked_self_root_rejects_warm_entry() {
     use crate::component_meta_materialize::{
-        MaterializationScope, MaterializeOutcome, MaterializeStructureCacheKey,
+        MaterializationCacheKey, MaterializationScope, MaterializeOutcome,
     };
-    use crate::semantic_query::ProjectionMode;
+    use crate::semantic_query::{ProjectionMode, ResolvedDeclSlotIdentity};
 
     let host = host_with_unrelated_file();
     let scope = "/struct_carrier_qdb/ms_never_loaded.ts";
@@ -3604,11 +3608,17 @@ fn materialize_structure_db_planted_untracked_self_root_rejects_warm_entry() {
     let db = host.project_type_store().materialize_structure_db();
 
     let base = intern_global_object(&host);
-    let key = MaterializeStructureCacheKey {
-        scope_canonical_id: Arc::from(scope),
-        base,
+    // Content-free canonical-subject key. The self-root under test lives in
+    // the planted carrier's facts + `self_root_canonicals` (the untracked
+    // `scope`), NOT in the key, so any well-formed slot addresses the
+    // planted candidate; seed the slot on `scope` for a stable identity.
+    let key = MaterializationCacheKey {
+        decl: ResolvedDeclSlotIdentity::type_slot_unscoped(Arc::from(scope), Arc::from("Probe")),
+        projection_path: crate::resolver_core::RouteDemand::Whole,
         scope_axis: MaterializationScope::TopLevel,
-        mode: ProjectionMode::Expanded,
+        projection_mode: ProjectionMode::Expanded,
+        normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+        resolve_env_hash: crate::semantic_query::HashValue::default(),
     };
 
     // Plant a synthetic candidate: the carrier's facts rail holds a
@@ -3639,39 +3649,111 @@ fn materialize_structure_db_planted_untracked_self_root_rejects_warm_entry() {
     );
 }
 
-/// Intern a `base` `Object` node whose origin scope is a
-/// `NodeScopeId::File` for `canonical` at `canonical`'s CURRENT observed
-/// whole hash — the file-derived-base shape the materialiser roots via
-/// `base_node_origin_self_root`. The `base` identity is stable across an
-/// edit to `canonical` (the node id and the cache key never shift); the
-/// only thing that shifts is the file's `whole_hash` the entry's
-/// `base_origin_self_root` `FileWholeHash` records.
-fn intern_file_derived_object(
+/// Intern a DECL-ROOTED `base` — a `DeclRef` to `canonical:name` with a
+/// `NodeScopeId::File` origin at `canonical`'s current whole hash. The
+/// materialiser canonicalises this to `slot(canonical, name)` (so it
+/// publishes a warm `MaterializeStructureDb` entry — an anonymous
+/// `Object` base keys no slot), and its `base_origin_self_root` is
+/// `canonical` (so a content edit to `canonical` rejects the entry, while
+/// an edit to an unrelated consumer scope does not). The `base` node id —
+/// hence the content-free cache key — is STABLE across an edit to
+/// `canonical` (only the file's `whole_hash` the carrier records shifts).
+fn intern_file_derived_decl_ref(
     host: &VerterHost,
     canonical: &str,
+    name: &str,
 ) -> crate::semantic_query::SemanticNodeId {
-    use crate::semantic_query::{NodeScopeId, SemanticNodeData, SurfaceView};
+    use crate::semantic_query::{DeclIdentity, NodeScopeId, SemanticNodeData};
     let whole_hash = host
         .shallow_file_state(canonical)
         .map(|s| s.whole_hash)
-        .expect("file-derived base fixture: canonical must be tracked with a whole hash");
+        .expect("decl-ref base fixture: canonical must be tracked with a whole hash");
     host.project_type_store()
         .semantic_graph()
         .intern_node_with_scope(
-            SemanticNodeData::Object(SurfaceView {
-                members: Arc::from(Vec::new().into_boxed_slice()),
-                call_signatures: Arc::from(Vec::new().into_boxed_slice()),
-                construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
-                index_signatures: Arc::from(Vec::new().into_boxed_slice()),
-                keyspace: None,
-                has_index_signature: false,
-            }),
+            SemanticNodeData::DeclRef {
+                identity: DeclIdentity {
+                    canonical_id: Arc::from(canonical),
+                    whole_hash,
+                    decl_name: Arc::from(name),
+                },
+            },
             NodeScopeId::File {
                 canonical_id: Arc::from(canonical),
                 whole_hash,
                 local_scope: None,
             },
         )
+}
+
+/// Intern a ROUTE-SHAPED `base` — a builtin `Pick<Root, 'key'>`
+/// `InstantiationRef` carrier interned at the `consumer_scope` file,
+/// MIRRORING production lowering: `lower.rs` interns a member-value
+/// `Pick<…>` carrier AND its inner `DeclRef{Root}` arg with
+/// `scope.clone()` — i.e. the CONSUMER file scope (the reference site),
+/// NOT `Root`'s declaration file. The carrier's extracted route root is
+/// `root_decl_file:root_name`, so the materialiser canonicalises it to
+/// `slot(root_decl_file, root_name)` + the `Pick('key')` route — and two
+/// distinct consumer scopes over the same `Pick<Root,'key'>` collapse to
+/// ONE entry (R7 cross-owner reuse). The materialised value is a pure
+/// function of `Root`'s `key` member; it never depends on the consumer
+/// wrapper file's content.
+fn intern_consumer_scoped_pick_carrier(
+    host: &VerterHost,
+    consumer_scope: &str,
+    root_decl_file: &str,
+    root_name: &str,
+    pick_key: &str,
+) -> crate::semantic_query::SemanticNodeId {
+    use crate::semantic_query::{DeclIdentity, NodeScopeId, SemanticNodeData};
+    use verter_type_expr::LiteralValue;
+
+    let consumer_hash = host
+        .shallow_file_state(consumer_scope)
+        .map(|s| s.whole_hash)
+        .expect("route carrier fixture: consumer scope must be tracked with a whole hash");
+    let root_hash = host
+        .shallow_file_state(root_decl_file)
+        .map(|s| s.whole_hash)
+        .expect("route carrier fixture: root decl file must be tracked with a whole hash");
+    let consumer_scope_id = NodeScopeId::File {
+        canonical_id: Arc::from(consumer_scope),
+        whole_hash: consumer_hash,
+        local_scope: None,
+    };
+    let graph = host.project_type_store().semantic_graph();
+    // Inner `DeclRef{Root}` — interned at the CONSUMER scope (the
+    // reference site), exactly as production lowering interns an imported
+    // name. Its `identity.canonical_id` points at `Root`'s declaration
+    // file; its NODE scope is the consumer wrapper file.
+    let root_ref = graph.intern_node_with_scope(
+        SemanticNodeData::DeclRef {
+            identity: DeclIdentity {
+                canonical_id: Arc::from(root_decl_file),
+                whole_hash: root_hash,
+                decl_name: Arc::from(root_name),
+            },
+        },
+        consumer_scope_id.clone(),
+    );
+    let key_literal = graph.intern_node_with_scope(
+        SemanticNodeData::Literal(LiteralValue::String(pick_key.to_string())),
+        consumer_scope_id.clone(),
+    );
+    // Builtin `Pick` carrier — interned at the CONSUMER scope. The
+    // `__builtin__`/`Pick` identity is what `extract_route_root_identity_node`
+    // matches; the whole_hash is irrelevant to that match.
+    graph.intern_node_with_scope(
+        SemanticNodeData::InstantiationRef {
+            base: DeclIdentity {
+                canonical_id: Arc::from("__builtin__"),
+                whole_hash: [0u8; 16],
+                decl_name: Arc::from("Pick"),
+            },
+            args: Arc::from(vec![root_ref, key_literal].into_boxed_slice()),
+        },
+        consumer_scope_id,
+    )
 }
 
 /// `MaterializeStructureDb` rejects a warm entry after a content edit
@@ -3694,7 +3776,9 @@ fn intern_file_derived_object(
 /// — see `..._unread_scope_edit_keeps_warm_entry`.)
 #[test]
 fn materialize_structure_db_base_origin_edit_rejects_warm_entry() {
-    use crate::component_meta_materialize::{MaterializationScope, MaterializeStructureCacheKey};
+    use crate::component_meta_materialize::{
+        derive_materialization_subject, MaterializationScope, MaterializeRuntimeKey,
+    };
     use crate::semantic_query::ProjectionMode;
 
     let host = VerterHost::new_standalone(HostConfig::default());
@@ -3706,19 +3790,26 @@ fn materialize_structure_db_base_origin_edit_rejects_warm_entry() {
     );
 
     let dispatch = host.semantic_dispatch();
-    // `base` origin scope is `NodeScopeId::File { edited_file }` at its
-    // current whole hash — the file-derived-base self-root.
-    let base = intern_file_derived_object(&host, edited_file);
-    let key = MaterializeStructureCacheKey {
+    // DECL-ROOTED `base` — a `DeclRef` to `edited_file:Probe` with origin
+    // scope `NodeScopeId::File { edited_file }`. The materialiser
+    // canonicalises it to `slot(edited_file, Probe)` (so the entry caches)
+    // and self-roots it on `edited_file`.
+    let base = intern_file_derived_decl_ref(&host, edited_file, "Probe");
+    let runtime_key = MaterializeRuntimeKey {
         scope_canonical_id: Arc::from(edited_file),
         base,
         scope_axis: MaterializationScope::TopLevel,
         mode: ProjectionMode::Expanded,
     };
+    // The content-free DB cache key, built by the SAME canonical builder
+    // the materialiser uses. The slot is content-free, so this key is
+    // STABLE across the content edit below.
+    let key = derive_materialization_subject(&host, &runtime_key)
+        .expect("a DeclRef base canonicalises to a MaterializationCacheKey subject");
 
     // Cold build — publishes a warm entry self-rooted on the `base`
     // node's declaration-origin file.
-    let _ = dispatch.materialize_surface(key.clone());
+    let _ = dispatch.materialize_surface(runtime_key);
     let db = host.project_type_store().materialize_structure_db();
     assert!(
         db.peek(&key, &host).is_some(),
@@ -3754,56 +3845,66 @@ fn materialize_structure_db_base_origin_edit_rejects_warm_entry() {
 /// depend on a given consumer scope MUST survive a content edit to that
 /// scope (the warm `peek` still hits).
 ///
-/// Discriminating property: the `base` is a `Global`-scoped `Object`
-/// (no `NodeScopeId::File` origin → no `base_origin_self_root`) with an
-/// empty surface (no traced facts). The consumer materialise scope is a
-/// SEPARATE file the materialisation never reads. The cache key excludes
-/// `scope_canonical_id` (R7 cross-owner reuse), so the cache key is
-/// stable across the scope edit.
+/// Discriminating property: the `base` is a DECL-ROOTED `DeclRef` to
+/// `decl_file:Probe`, so its declaration-origin self-root is `decl_file`
+/// (the slot's canonical, which the materialisation reads). The consumer
+/// materialise scope is a SEPARATE file the materialisation never reads.
+/// The cache key excludes `scope_canonical_id` (R7 cross-owner reuse), so
+/// the cache key is stable across the scope edit.
 ///
 /// - **Pre-fix tree:** `materialize_structure_read_set` seeds the
 ///   consumer scope into `self_root_hashes` as a strict self-root
-///   `FileWholeHash` and pushes the scope's `SyntacticExportSet` parse
-///   fact. A content edit to the scope shifts that `FileWholeHash`, so
-///   strict `validate_with_self_roots` REJECTS the entry — the warm
-///   `peek` misses.
-/// - **Post-fix tree:** the consumer scope is not a self-root and
-///   contributes no fact. A `Global` base with no traced facts admits as
-///   a zero-self-root, zero-fact entry; a scope edit leaves the entry's
-///   signature untouched, so the warm `peek` still HITS.
+///   `FileWholeHash`. A content edit to the scope shifts that
+///   `FileWholeHash`, so strict `validate_with_self_roots` REJECTS the
+///   entry — the warm `peek` misses.
+/// - **Post-fix tree:** the consumer scope is NOT a self-root; the entry
+///   self-roots on `decl_file` (the base node's declaration-origin file,
+///   the non-route subject case). A content edit to the consumer scope —
+///   which the materialisation never read — leaves the entry's signature
+///   untouched, so the warm `peek` still HITS.
 ///
 /// This test FAILS against the pre-fix tree (the artificial scope
 /// self-root invalidates the warm entry) and PASSES post-fix. It is the
-/// direct discriminator for the P1 over-rooting removal.
+/// direct discriminator for the consumer-scope over-rooting removal.
 #[test]
 fn materialize_structure_db_unread_scope_edit_keeps_warm_entry() {
-    use crate::component_meta_materialize::{MaterializationScope, MaterializeStructureCacheKey};
+    use crate::component_meta_materialize::{
+        derive_materialization_subject, MaterializationScope, MaterializeRuntimeKey,
+    };
     use crate::semantic_query::ProjectionMode;
 
     let host = VerterHost::new_standalone(HostConfig::default());
+    // The DECL file the `base` roots in, and a SEPARATE consumer scope the
+    // materialisation never reads.
+    let decl_file = "/struct_carrier_qdb/ms_unread_decl.ts";
     let scope = "/struct_carrier_qdb/ms_unread_scope.ts";
+    upsert(&host, decl_file, "export type Probe = { a: number };\n");
     upsert(&host, scope, "export const anchor = 1;\n");
     assert!(
-        host.ensure_indexed_ready(scope).is_some(),
-        "scope IndexedReady materialises",
+        host.ensure_indexed_ready(decl_file).is_some()
+            && host.ensure_indexed_ready(scope).is_some(),
+        "decl_file + scope IndexedReady materialise",
     );
 
     let dispatch = host.semantic_dispatch();
-    // `base` is a Global-scoped empty Object — no `NodeScopeId::File`
-    // origin (no `base_origin_self_root`) and no members (no traced
-    // facts). The materialisation is genuinely content-invariant and
-    // does NOT depend on the consumer scope.
-    let base = intern_global_object(&host);
-    let key = MaterializeStructureCacheKey {
+    // DECL-ROOTED `base` — a `DeclRef` to `decl_file:Probe`. Its
+    // declaration-origin self-root is `decl_file`, NOT the consumer
+    // `scope`: the materialisation reads `decl_file` (the slot's
+    // canonical), never the consumer scope. So an edit to `scope` must
+    // leave the entry's signature untouched.
+    let base = intern_file_derived_decl_ref(&host, decl_file, "Probe");
+    let runtime_key = MaterializeRuntimeKey {
         scope_canonical_id: Arc::from(scope),
         base,
         scope_axis: MaterializationScope::TopLevel,
         mode: ProjectionMode::Expanded,
     };
+    let key = derive_materialization_subject(&host, &runtime_key)
+        .expect("a DeclRef base canonicalises to a MaterializationCacheKey subject");
 
-    // Cold build — publishes a warm entry. Post-fix this entry carries
-    // no self-root and no fact (zero-self-root, zero-fact admission).
-    let _ = dispatch.materialize_surface(key.clone());
+    // Cold build — publishes a warm entry self-rooted on `decl_file`, NOT
+    // the consumer `scope`.
+    let _ = dispatch.materialize_surface(runtime_key);
     let db = host.project_type_store().materialize_structure_db();
     assert!(
         db.peek(&key, &host).is_some(),
@@ -3832,6 +3933,144 @@ fn materialize_structure_db_unread_scope_edit_keeps_warm_entry() {
          that seeds the consumer scope as a strict self-root over-roots the entry and \
          invalidates it on an edit the cached value never depended on, breaking R7 \
          cross-owner reuse.",
+    );
+}
+
+/// **Route-shaped cross-owner reuse — value self-roots at the EXTRACTED
+/// ROOT, never the first producer's consumer wrapper file.**
+///
+/// Binds the cx-revb blocker. A route-shaped subject (`Pick`/`Omit`/
+/// IndexedAccess) is keyed on the EXTRACTED ROOT slot + route path, so
+/// owners A and B both consuming `Pick<Shared,'id'>` collapse to ONE
+/// `MaterializeStructureDb` entry. The materialised value is a pure
+/// function of `Shared`'s `id` member — the route compute reads
+/// `Shared` (via `Instantiate`), NEVER either wrapper file. So the
+/// entry MUST self-root on `Shared`'s declaration file, NOT on the
+/// FIRST PRODUCER's (A's) consumer wrapper scope (where the `Pick`
+/// carrier was interned).
+///
+/// Two directions, both required:
+///
+/// - **Direction 1 (the false-miss blocker, RED pre-fix):** edit ONLY
+///   owner A's wrapper file (Shared + owner B untouched). Owner B's
+///   warm reuse MUST survive. Pre-fix the entry's
+///   `base_origin_self_root` is the wrapper carrier's CONSUMER scope
+///   (owner A) — so A's shifted `FileWholeHash` rejects B's read, a
+///   migration-induced R7 cross-owner false miss. Post-fix the
+///   self-root is `Shared`, so A's edit leaves the entry untouched and
+///   B HITs.
+/// - **Direction 2 (no stale reuse):** edit `Shared`'s `id` member. The
+///   value DOES depend on it, so the warm reuse MUST be invalidated on
+///   the extracted-root self-root.
+///
+/// The cache key is content-free (R6), so it is STABLE across both
+/// edits — invalidation rides on the value-side self-root, never the
+/// key.
+#[test]
+fn route_shaped_materialize_self_roots_at_extracted_root_not_consumer_wrapper() {
+    use crate::component_meta_materialize::{
+        derive_materialization_subject, MaterializationScope, MaterializeRuntimeKey,
+    };
+    use crate::semantic_query::ProjectionMode;
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let shared = "/route_self_root/shared.ts";
+    let owner_a = "/route_self_root/A.ts";
+    let owner_b = "/route_self_root/B.ts";
+    upsert(
+        &host,
+        shared,
+        "export interface Shared { id: string; body: string; }\n",
+    );
+    upsert(&host, owner_a, "export const a = 1;\n");
+    upsert(&host, owner_b, "export const b = 1;\n");
+    for f in [shared, owner_a, owner_b] {
+        assert!(
+            host.ensure_indexed_ready(f).is_some(),
+            "{f} IndexedReady materialises",
+        );
+    }
+
+    let dispatch = host.semantic_dispatch();
+    // Two ROUTE-SHAPED `Pick<Shared,'id'>` carriers, one interned at each
+    // owner's CONSUMER scope.
+    let carrier_a = intern_consumer_scoped_pick_carrier(&host, owner_a, shared, "Shared", "id");
+    let carrier_b = intern_consumer_scoped_pick_carrier(&host, owner_b, shared, "Shared", "id");
+
+    let runtime_a = MaterializeRuntimeKey {
+        scope_canonical_id: Arc::from(owner_a),
+        base: carrier_a,
+        scope_axis: MaterializationScope::TopLevel,
+        mode: ProjectionMode::Expanded,
+    };
+    let runtime_b = MaterializeRuntimeKey {
+        scope_canonical_id: Arc::from(owner_b),
+        base: carrier_b,
+        scope_axis: MaterializationScope::TopLevel,
+        mode: ProjectionMode::Expanded,
+    };
+    // The content-free DB key both owners canonicalise to — the extracted
+    // root (Shared) slot + the Pick route, with NO consumer-scope
+    // dimension. Identical for A and B; STABLE across the edits below.
+    let key_a = derive_materialization_subject(&host, &runtime_a)
+        .expect("route-shaped carrier canonicalises to a MaterializationCacheKey subject");
+    let key_b = derive_materialization_subject(&host, &runtime_b)
+        .expect("route-shaped carrier canonicalises to a MaterializationCacheKey subject");
+    assert_eq!(
+        key_a, key_b,
+        "fixture invariant: both owners' Pick<Shared,'id'> carriers MUST canonicalise to \
+         ONE shared content-free subject key (R7 cross-owner reuse) — the extracted root \
+         (Shared) slot + Pick route, with NO consumer-scope dimension",
+    );
+
+    // Owner A cold-builds the shared entry.
+    let _ = dispatch.materialize_surface(runtime_a);
+    let db = host.project_type_store().materialize_structure_db();
+    assert!(
+        db.peek(&key_b, &host).is_some(),
+        "fixture invariant: owner A's cold build admitted a warm entry that owner B \
+         (the SAME shared subject) reuses while all files are unedited",
+    );
+
+    // ── Direction 1: edit ONLY owner A's wrapper file. Shared + owner B
+    // are untouched.
+    upsert(
+        &host,
+        owner_a,
+        "export const a = 999;\nexport const extra = 2;\n",
+    );
+    assert!(
+        host.ensure_indexed_ready(owner_a).is_some(),
+        "owner A IndexedReady re-materialises after the edit",
+    );
+    assert!(
+        db.peek(&key_b, &host).is_some(),
+        "ROUTE-SHAPED CROSS-OWNER FALSE-MISS: editing owner A's wrapper file MUST NOT \
+         invalidate owner B's warm reuse of the shared `Pick<Shared,'id'>` entry. The \
+         entry's value is a pure function of Shared's `id` member and never read A's \
+         wrapper text; rooting it on the FIRST PRODUCER's (A's) consumer wrapper scope \
+         over-roots the shared entry and defeats R7 cross-owner reuse. Pre-fix \
+         `base_origin_self_root` = the wrapper carrier's consumer scope (owner A), so A's \
+         shifted FileWholeHash strictly rejects B's read.",
+    );
+
+    // ── Direction 2: edit Shared's `id` member — the value DOES depend on
+    // it, so the warm reuse MUST be invalidated.
+    upsert(
+        &host,
+        shared,
+        "export interface Shared { id: number; body: string; }\n",
+    );
+    assert!(
+        host.ensure_indexed_ready(shared).is_some(),
+        "Shared IndexedReady re-materialises after the edit",
+    );
+    assert!(
+        db.peek(&key_b, &host).is_none(),
+        "STALE REUSE: editing Shared's `id` member MUST invalidate the shared \
+         `Pick<Shared,'id'>` entry — the materialised value is a function of Shared's `id` \
+         member, so a content edit to Shared's declaration file rejects the warm entry on \
+         its extracted-root self-root.",
     );
 }
 
@@ -4031,7 +4270,8 @@ fn ref_cycle_db_untracked_self_root_rejects_warm_entry() {
         hash: PLANTED_HASH,
     }]);
     db.insert_for_test(
-        id.clone(),
+        &id,
+        ctx,
         true,
         crate::fact_signature_helpers::ReadSetSignature::new(facts),
         planted_self_root_canonicals(root),
@@ -4940,9 +5180,18 @@ fn component_meta_result_db_get_with_view_rejects_entry_from_superseded_generati
     upsert(&host, owner, "<script setup lang=\"ts\"></script>\n");
 
     let store = host.project_type_store();
+    // Synthetic insert+lookup with a hand-built key: the env axes only
+    // need to be CONSISTENT between the planted entry and the lookup
+    // (this test exercises the project-generation gate, not env
+    // discrimination), so uniform zeros are correct here.
     let key = ComponentMetaResultKey {
         owner_canonical: Arc::from(owner),
         options_fingerprint: [0u8; 16],
+        project_identity: crate::file_artifact_store::ProjectIdentity([0u8; 16]),
+        parse_env_hash: [0u8; 16],
+        resolve_env_hash: [0u8; 16],
+        type_env_hash: [0u8; 16],
+        lib_env_hash: [0u8; 16],
     };
     let owner_whole_hash = [0xCDu8; 16];
     let gen0 = store.current_project_generation();

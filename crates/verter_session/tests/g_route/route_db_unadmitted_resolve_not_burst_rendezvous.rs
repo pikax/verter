@@ -38,6 +38,17 @@ use std::time::{Duration, Instant};
 
 use verter_session::resolver_core::{FactVersionRef, PermissiveStoreView, RouteDb, RouteResult};
 
+fn rk(provider: &str, name: &str) -> verter_session::resolver_core::RouteNameKey {
+    verter_session::resolver_core::RouteNameKey::new(
+        provider,
+        name,
+        verter_semantic::facts::registry::SymbolSpace::Type,
+        verter_session::file_artifact_store::ProjectIdentity([0u8; 16]),
+        [0u8; 16],
+        [0u8; 16],
+    )
+}
+
 /// Strong-reference count of the route singleflight in-flight entry
 /// while only the leader is parked inside its resolve closure: the
 /// leader's local `state` binding plus the `flights` map entry. A
@@ -54,7 +65,9 @@ where
     V: verter_session::resolver_core::StoreView + ?Sized,
 {
     let deadline = Instant::now() + Duration::from_secs(10);
-    while db.test_route_inflight_strong_count(provider, name, view) <= LEADER_ONLY_INFLIGHT_REFS {
+    while db.test_route_inflight_strong_count(&rk(provider, name), view)
+        <= LEADER_ONLY_INFLIGHT_REFS
+    {
         assert!(
             Instant::now() < deadline,
             "timed out waiting for the follower to be admitted onto the \
@@ -120,23 +133,27 @@ fn burst_follower_reresolves_instead_of_adopting_unadmitted_route() {
     let leader_db = Arc::clone(&db);
     let leader = thread::spawn(move || {
         let view = PermissiveStoreView;
-        leader_db.get_or_resolve_route_observing_facts("burst_provider.ts", "Burst", &view, || {
-            tx_leader_in_closure
-                .send(())
-                .expect("leader: signal in-closure");
-            match rx_release_leader.recv_timeout(Duration::from_secs(10)) {
-                Ok(()) => {}
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    panic!("leader: timed out waiting for driver release (10s)")
+        leader_db.get_or_resolve_route_observing_facts(
+            rk("burst_provider.ts", "Burst"),
+            &view,
+            || {
+                tx_leader_in_closure
+                    .send(())
+                    .expect("leader: signal in-closure");
+                match rx_release_leader.recv_timeout(Duration::from_secs(10)) {
+                    Ok(()) => {}
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        panic!("leader: timed out waiting for driver release (10s)")
+                    }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        panic!("leader: driver dropped the release channel before releasing")
+                    }
                 }
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    panic!("leader: driver dropped the release channel before releasing")
-                }
-            }
-            // The never-persisted empty-facts shape — the carrier the
-            // fenced frontier walk hands the route singleflight.
-            Some((superseded_route(), Vec::new()))
-        })
+                // The never-persisted empty-facts shape — the carrier the
+                // fenced frontier walk hands the route singleflight.
+                Some((superseded_route(), Vec::new()))
+            },
+        )
     });
 
     match rx_leader_in_closure.recv_timeout(Duration::from_secs(10)) {
@@ -157,8 +174,7 @@ fn burst_follower_reresolves_instead_of_adopting_unadmitted_route() {
     let follower = thread::spawn(move || {
         let view = PermissiveStoreView;
         follower_db.get_or_resolve_route_observing_facts(
-            "burst_provider.ts",
-            "Burst",
+            rk("burst_provider.ts", "Burst"),
             &view,
             move || {
                 follower_resolves_in_closure.fetch_add(1, Ordering::SeqCst);
@@ -201,7 +217,7 @@ fn burst_follower_reresolves_instead_of_adopting_unadmitted_route() {
 
     // The follower's re-resolve carried a non-empty fact signature, so
     // it WAS admitted — the next read serves it warm.
-    let warm = db.get_route("burst_provider.ts", "Burst", &probe_view);
+    let warm = db.get_route(&rk("burst_provider.ts", "Burst"), &probe_view);
     assert_eq!(
         warm.as_deref(),
         Some(&live_route()),

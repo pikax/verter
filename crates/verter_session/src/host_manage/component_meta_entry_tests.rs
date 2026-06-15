@@ -96,12 +96,8 @@ fn published_facts(host: &VerterHost, owner: &str) -> Vec<FactVersionRef> {
         .ensure_indexed_ready(owner)
         .map(|ir| ir.whole_hash)
         .expect("owner must have an IndexedReady entry");
-    let key = crate::component_meta_result_db::ComponentMetaResultKey {
-        owner_canonical: Arc::from(owner),
-        options_fingerprint: crate::host_manage::component_meta_options_fingerprint(
-            &crate::host_manage::ComponentMetaOptions::default(),
-        ),
-    };
+    let key =
+        host.component_meta_result_key(owner, &crate::host_manage::ComponentMetaOptions::default());
     host.project_type_store()
         .component_meta_results()
         .get(&key, whole_hash)
@@ -286,12 +282,8 @@ fn published_entry_present(host: &VerterHost, owner: &str) -> bool {
     let Some(whole_hash) = host.ensure_indexed_ready(owner).map(|ir| ir.whole_hash) else {
         return false;
     };
-    let key = crate::component_meta_result_db::ComponentMetaResultKey {
-        owner_canonical: Arc::from(owner),
-        options_fingerprint: crate::host_manage::component_meta_options_fingerprint(
-            &crate::host_manage::ComponentMetaOptions::default(),
-        ),
-    };
+    let key =
+        host.component_meta_result_key(owner, &crate::host_manage::ComponentMetaOptions::default());
     host.project_type_store()
         .component_meta_results()
         .get(&key, whole_hash)

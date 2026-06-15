@@ -251,10 +251,10 @@ fn batch_scheduler_submit_count_is_o1() {
 /// the SAME inner type `ChatMessageProps` via
 /// `Pick<ChatMessageProps,'id'>`. The materialiser populates
 /// `MaterializeStructureDb` for the shared inner type. Under R7
-/// cross-owner reuse (the `MaterializeStructureCacheKey`'s
-/// `Hash`/`PartialEq` excludes `scope_canonical_id`), N owners
-/// collapse to the same slot — the entry count after the batch is
-/// bounded by the single-owner baseline plus N, not N× baseline.
+/// cross-owner reuse (the content-free `MaterializationCacheKey` carries
+/// NO consumer-scope dimension), N owners collapse to the same slot —
+/// the entry count after the batch is bounded by the single-owner
+/// baseline plus N, not N× baseline.
 #[test]
 fn batch_materialise_admissions_equal_unique_semantic_identities() {
     let inbox = owner_sfc("inbox_msg");

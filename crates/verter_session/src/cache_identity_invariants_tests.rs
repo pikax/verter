@@ -23,6 +23,17 @@ fn host() -> VerterHost {
     VerterHost::new_standalone(HostConfig::default())
 }
 
+fn rk(provider: &str, name: &str) -> crate::resolver_core::RouteNameKey {
+    crate::resolver_core::RouteNameKey::new(
+        provider,
+        name,
+        verter_semantic::facts::registry::SymbolSpace::Type,
+        crate::file_artifact_store::ProjectIdentity([0u8; 16]),
+        [0u8; 16],
+        [0u8; 16],
+    )
+}
+
 // ─── T1 — F3 Arc identity (lands in 6b.B2) ───────────────────────────────
 //
 // Discrimination: pre-migration the RouteDb / ImportedRootDb fields on
@@ -100,8 +111,7 @@ fn route_db_eviction_visible_via_both_handles_after_close() {
     // Seed an entry via the runtime handle.
     let runtime_routes = host.resolver.runtime.routes_handle();
     runtime_routes.insert_route(
-        "/seeded/provider.ts".to_string(),
-        "Seeded".to_string(),
+        rk("/seeded/provider.ts", "Seeded"),
         RouteResult::Resolved {
             defining_canonical: "/seeded/provider.ts".to_string(),
             defining_symbol: "Seeded".to_string(),
@@ -115,13 +125,13 @@ fn route_db_eviction_visible_via_both_handles_after_close() {
     let store_routes = store.routes_handle();
     assert!(
         runtime_routes
-            .get_route_any("/seeded/provider.ts", "Seeded")
+            .get_route_any(&rk("/seeded/provider.ts", "Seeded"))
             .is_some(),
         "PRE-CLEAR: entry must be present on the runtime handle",
     );
     assert!(
         store_routes
-            .get_route_any("/seeded/provider.ts", "Seeded")
+            .get_route_any(&rk("/seeded/provider.ts", "Seeded"))
             .is_some(),
         "PRE-CLEAR: same entry must be observable from the project-store \
          handle (proves Arc identity / project-shared semantics)",
@@ -135,13 +145,13 @@ fn route_db_eviction_visible_via_both_handles_after_close() {
     // Post-clear assertion: entry is gone, observable from BOTH handles.
     assert!(
         runtime_routes
-            .get_route_any("/seeded/provider.ts", "Seeded")
+            .get_route_any(&rk("/seeded/provider.ts", "Seeded"))
             .is_none(),
         "POST-CLEAR: runtime handle must report the entry evicted",
     );
     assert!(
         store_routes
-            .get_route_any("/seeded/provider.ts", "Seeded")
+            .get_route_any(&rk("/seeded/provider.ts", "Seeded"))
             .is_none(),
         "POST-CLEAR: project-store handle must observe the same eviction \
          (single project-shared RouteDb instance)",

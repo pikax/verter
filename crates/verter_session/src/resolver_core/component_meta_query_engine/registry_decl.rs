@@ -399,7 +399,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     ) -> verter_type_expr::TypeExpr {
         use crate::component_meta_materialize::{
             materialize_component_meta_structure, MaterializationScope, MaterializeOutcome,
-            MaterializeStructureCacheKey,
+            MaterializeRuntimeKey,
         };
         use crate::project_semantic_dispatch::ProjectSemanticDispatch;
         use crate::semantic_query::ProjectionMode;
@@ -424,7 +424,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         // re-resolves on demand. Open carriers survive either mode
         // through the shared L1 carrier-stop predicates (no
         // registry-local pre-walk runs here).
-        let key = MaterializeStructureCacheKey {
+        let key = MaterializeRuntimeKey {
             scope_canonical_id: std::sync::Arc::from(scope_canonical_id),
             base,
             scope_axis: if nested_surface {

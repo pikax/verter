@@ -2402,6 +2402,11 @@ mod tests {
             crate::component_meta_result_db::ComponentMetaResultKey {
                 owner_canonical: Arc::from("/w/o.vue"),
                 options_fingerprint: [0u8; 16],
+                project_identity: crate::file_artifact_store::ProjectIdentity([0u8; 16]),
+                parse_env_hash: [0u8; 16],
+                resolve_env_hash: [0u8; 16],
+                type_env_hash: [0u8; 16],
+                lib_env_hash: [0u8; 16],
             },
             hash,
             crate::component_meta_result_db::ComponentMetaResultEntry {

@@ -51,6 +51,48 @@ fn intern_empty_object(host: &VerterHost) -> SemanticNodeId {
         }))
 }
 
+/// Upsert a file exporting `type {name} = { a: number }` and intern a
+/// `DeclRef` to it with a `NodeScopeId::File` origin — a DECL-ROOTED
+/// `base` the materialiser canonicalises (via
+/// [`derive_materialization_subject`](crate::component_meta_materialize::derive_materialization_subject))
+/// to `slot(canonical, name)` and publishes a warm
+/// `MaterializeStructureDb` entry for. An anonymous `Object` base keys no
+/// DB slot (it computes uncached), so it can no longer drive the
+/// entry-count invariant — use this decl-rooted fixture instead.
+fn intern_decl_ref_base(host: &VerterHost, canonical: &str, name: &str) -> SemanticNodeId {
+    use crate::semantic_query::{DeclIdentity, NodeScopeId};
+    use crate::{FileKind, UpsertRequest};
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: None,
+        input_id: canonical.to_string(),
+        source: Arc::from(format!("export type {name} = {{ a: number }};\n")),
+        file_kind: FileKind::from_path(canonical),
+        aliases: Vec::new(),
+    });
+    host.ensure_indexed_ready(canonical)
+        .expect("decl-ref base fixture: canonical IndexedReady materialises");
+    let whole_hash = host
+        .shallow_file_state(canonical)
+        .map(|s| s.whole_hash)
+        .expect("decl-ref base fixture: canonical must be tracked with a whole hash");
+    host.project_type_store()
+        .semantic_graph()
+        .intern_node_with_scope(
+            SemanticNodeData::DeclRef {
+                identity: DeclIdentity {
+                    canonical_id: Arc::from(canonical),
+                    whole_hash,
+                    decl_name: Arc::from(name),
+                },
+            },
+            NodeScopeId::File {
+                canonical_id: Arc::from(canonical),
+                whole_hash,
+                local_scope: None,
+            },
+        )
+}
+
 /// Upsert a minimal `defineProps` SFC at `canonical` and build the
 /// content-free `ResolveMacroPayload` owner
 /// [`ResolvedDeclSlotIdentity`] slot for that file.
@@ -172,38 +214,24 @@ fn cache_discipline_resolve_macro_payload_repeated_keys_warm() {
     );
 }
 
-/// 5b §5.D.1 — `materialize_surface` dispatch helper: repeated
-/// identical `MaterializeStructureCacheKey` increments the live-entry
-/// counter EXACTLY once across N calls (the warm peek path returns
-/// the cached entry on every subsequent call).
+/// `materialize_surface` dispatch helper: repeated identical
+/// `MaterializeRuntimeKey`s — which canonicalise to ONE content-free
+/// `MaterializationCacheKey` subject — increment the live-entry counter
+/// EXACTLY once across N calls (the warm peek path returns the cached
+/// entry on every subsequent call).
 #[test]
 fn cache_discipline_materialize_surface_repeated_keys_warm() {
-    use crate::component_meta_materialize::{MaterializationScope, MaterializeStructureCacheKey};
-    use crate::{FileKind, UpsertRequest};
+    use crate::component_meta_materialize::{MaterializationScope, MaterializeRuntimeKey};
 
     let host = build_test_host();
-    // Load both scope files so the materialiser's dispatch reads have
-    // a real `IndexedReady` to walk. The `MaterializeStructureDb`
-    // entry does NOT self-root the consumer materialise scope (R7
-    // cross-owner reuse); a `Global`-origin `base` (here
-    // `intern_empty_object`) yields a zero-self-root entry that is
-    // always `Cacheable`.
-    for scope in ["/test.vue", "/other.vue"] {
-        let _ = host
-            .upsert(UpsertRequest {
-                canonical_id: None,
-                input_id: scope.to_string(),
-                source: Arc::from("<script setup lang=\"ts\">const x = 1;</script>\n"),
-                file_kind: FileKind::from_path(scope),
-                aliases: Vec::new(),
-            })
-            .expect("scope upsert succeeds");
-        host.ensure_indexed_ready(scope)
-            .expect("scope IndexedReady materialises");
-    }
-    let base = intern_empty_object(&host);
-    let key = MaterializeStructureCacheKey {
-        scope_canonical_id: Arc::from("/test.vue"),
+    // A DECL-ROOTED `base` (a `DeclRef` to `/props.ts:Props`) — the
+    // materialiser canonicalises it to `slot(/props.ts, Props)` and
+    // publishes a warm `MaterializeStructureDb` entry. (An anonymous
+    // `Object` base now keys no DB slot — it computes uncached — so it
+    // can no longer drive the cold-once / warm-N-1 entry-count invariant.)
+    let base = intern_decl_ref_base(&host, "/props.ts", "Props");
+    let key = MaterializeRuntimeKey {
+        scope_canonical_id: Arc::from("/props.ts"),
         base,
         scope_axis: MaterializationScope::TopLevel,
         mode: ProjectionMode::Expanded,
@@ -240,9 +268,11 @@ fn cache_discipline_materialize_surface_repeated_keys_warm() {
     );
 
     // Cross-owner reuse (R7): a different `scope_canonical_id`
-    // alone does NOT make the key distinct. Use a different
-    // `scope_axis` to force a distinct cache entry.
-    let distinct_key = MaterializeStructureCacheKey {
+    // alone does NOT make the key distinct (it is in neither the
+    // recursion key nor the canonical `MaterializationCacheKey`). Use a
+    // different `scope_axis` (a policy axis the canonical key DOES carry)
+    // to force a distinct cache entry.
+    let distinct_key = MaterializeRuntimeKey {
         scope_canonical_id: Arc::from("/other.vue"),
         base,
         scope_axis: MaterializationScope::Nested,

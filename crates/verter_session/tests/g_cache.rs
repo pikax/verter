@@ -14,5 +14,7 @@ mod cache_layer_per_request_attribution;
 mod cache_layer_regression_per_layer;
 #[path = "g_cache/cache_reuse_invariants.rs"]
 mod cache_reuse_invariants;
+#[path = "g_cache/r6_r21_query_identity_keys.rs"]
+mod r6_r21_query_identity_keys;
 #[path = "g_cache/read_set_signature_carrier.rs"]
 mod read_set_signature_carrier;

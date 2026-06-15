@@ -167,6 +167,35 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             "cache_satisfaction_is_materialized_point_not_nominal_demand",
             "cache_satisfaction_requires_path_exact_not_prefix",
             "backfill_writes_only_recorded_materialized_points",
+            // R6/R21 direct guards for the four migrated query-identity
+            // cache keys (`crates/verter_session/tests/g_cache/r6_r21_query_identity_keys.rs`):
+            // each key is a content-free slot (R6 — no whole_hash /
+            // content_hash / parse_stable_hash / fact_dep_signature / bundled
+            // project_config_hash) carrying the split env axes it depends on
+            // (R21). The shared `key_shape_violations` predicate has its own
+            // discriminator self-test so the source scans are not stubs.
+            "key_shape_predicate_discriminates",
+            // (1) ComponentMetaResultKey — split env axes, owner whole-hash
+            //     stays value-side candidate discriminant.
+            "component_meta_result_key_carries_split_env_and_no_content_hash",
+            "component_meta_result_key_env_axes_discriminate",
+            // (2) RouteDb per-name + barrel — typed env-bearing keys, never
+            //     bare-string `ValidatedFactCache` keys.
+            "route_name_key_carries_split_env_and_no_content_hash",
+            "barrel_surface_key_carries_split_env_and_no_content_hash",
+            "route_db_does_not_key_routes_or_barrels_on_bare_strings",
+            "route_keys_env_axes_discriminate",
+            // (3) RefCycleResultDb — content-free `ResolvedDeclSlotIdentity`
+            //     slot, never the versioned `DeclIdentity` (whole_hash).
+            "ref_cycle_result_key_is_content_free_slot_keyed",
+            "ref_cycle_db_is_keyed_on_content_free_slot_not_decl_identity",
+            "ref_cycle_result_key_is_content_free_and_env_discriminating",
+            // (4) MaterializeStructureDb — content-free canonical-subject
+            //     `MaterializationCacheKey`, never the graph-instance
+            //     `MaterializeRuntimeKey` (base: SemanticNodeId) subject.
+            "materialization_cache_key_is_content_free_subject_keyed",
+            "materialize_structure_db_is_keyed_on_canonical_subject_not_runtime_key",
+            "materialization_cache_key_is_content_free_and_env_discriminating",
         ],
     ),
     (

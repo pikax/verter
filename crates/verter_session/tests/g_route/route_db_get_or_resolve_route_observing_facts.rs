@@ -12,6 +12,17 @@ fn make_host() -> VerterHost {
     VerterHost::new_standalone(Default::default())
 }
 
+fn rk(provider: &str, name: &str) -> verter_session::resolver_core::RouteNameKey {
+    verter_session::resolver_core::RouteNameKey::new(
+        provider,
+        name,
+        verter_semantic::facts::registry::SymbolSpace::Type,
+        verter_session::file_artifact_store::ProjectIdentity([0u8; 16]),
+        [0u8; 16],
+        [0u8; 16],
+    )
+}
+
 fn route_fact() -> FactVersionRef {
     FactVersionRef::FileWholeHash {
         canonical_id: "route_dep.ts".to_string(),
@@ -34,17 +45,12 @@ fn warm_hit_bubbles_facts_into_active_tracer() {
     let fact = route_fact();
 
     // Pre-load the route with a known fact signature.
-    db.insert_route_with_facts(
-        "index.ts".to_string(),
-        "Bar".to_string(),
-        resolved_route(),
-        vec![fact.clone()],
-    );
+    db.insert_route_with_facts(rk("index.ts", "Bar"), resolved_route(), vec![fact.clone()]);
 
     // Install a tracer and call the observing variant — the warm hit must bubble
     // the stored fact into our tracer.
     let (result, finalise) = install_fact_tracer_for_tests(&host, || {
-        db.get_or_resolve_route_observing_facts("index.ts", "Bar", &view, || {
+        db.get_or_resolve_route_observing_facts(rk("index.ts", "Bar"), &view, || {
             unreachable!("resolve closure must not be called on warm hit")
         })
     });
@@ -71,7 +77,7 @@ fn cold_compute_bubbles_facts_after_resolve() {
 
     // Nothing pre-loaded — the resolve closure runs and returns facts.
     let (result, finalise) = install_fact_tracer_for_tests(&host, || {
-        db.get_or_resolve_route_observing_facts("index.ts", "Baz", &view, move || {
+        db.get_or_resolve_route_observing_facts(rk("index.ts", "Baz"), &view, move || {
             Some((resolved_route(), vec![fact_for_closure.clone()]))
         })
     });
@@ -96,7 +102,7 @@ fn cold_miss_returns_none_and_tracer_empty() {
 
     // Resolve closure returns None — the route is unresolvable.
     let (result, finalise) = install_fact_tracer_for_tests(&host, || {
-        db.get_or_resolve_route_observing_facts("index.ts", "Unknown", &view, || None)
+        db.get_or_resolve_route_observing_facts(rk("index.ts", "Unknown"), &view, || None)
     });
 
     assert!(result.is_none(), "unresolvable route must return None");
@@ -118,16 +124,11 @@ fn no_active_tracer_warm_hit_still_returns_value() {
     let view = PermissiveStoreView;
     let fact = route_fact();
 
-    db.insert_route_with_facts(
-        "index.ts".to_string(),
-        "Qux".to_string(),
-        resolved_route(),
-        vec![fact],
-    );
+    db.insert_route_with_facts(rk("index.ts", "Qux"), resolved_route(), vec![fact]);
 
     // No tracer installed — observe_fact_signature must be a no-op, but the
     // route must still be returned.
-    let result = db.get_or_resolve_route_observing_facts("index.ts", "Qux", &view, || {
+    let result = db.get_or_resolve_route_observing_facts(rk("index.ts", "Qux"), &view, || {
         unreachable!("resolve closure must not be called on warm hit")
     });
     assert!(

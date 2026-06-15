@@ -581,10 +581,12 @@ fn cooperative_return_only_not_shared_to_joiners() {
     // so the guard still proves overflow outcomes are modelled as
     // `ComputeAdmission::ReturnOnly` via the cooperative-admission API.
     assert!(
-        mat_src.contains("get_or_compute_admit(&key, ctx, compute)"),
-        "materialize_component_meta_structure must route through the \
-         cooperative-admission `MaterializeStructureDb::get_or_compute_admit` \
-         API so its cold build is a one-winner singleflight"
+        mat_src.contains("get_or_compute_admit(&cache_key, ctx, compute)"),
+        "materialize_component_meta_structure must route a canonical-keyed \
+         (decl-rooted) subject's cold build through the cooperative-admission \
+         `MaterializeStructureDb::get_or_compute_admit` API so it is a one-winner \
+         singleflight (a root-less anonymous subject keys no DB slot and computes \
+         uncached via `run_uncached_materialisation` — it is shared with no one)"
     );
     assert!(
         mat_src.contains("crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly("),

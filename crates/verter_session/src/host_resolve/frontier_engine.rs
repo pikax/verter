@@ -1062,6 +1062,24 @@ impl VerterHost {
             .resolve_eval_dependency_canonical(dep_canonical)
             .unwrap_or_else(|| dep_canonical.to_string());
 
+        // Build the R6/R21-compliant route key from the PROVIDER's project
+        // env (the route resolution is resolve-domain: it depends on the
+        // provider project's module-resolution + ambient-augmentation env).
+        // The same key serves the warm lookup and the cold publish inside
+        // `get_or_resolve_route_observing_facts`, so lookup and publish
+        // agree by construction. The named-type-export path is statically
+        // type-space.
+        let provider = normalized_canonical.as_str();
+        let env = self.host_view_env_hashes_for(provider);
+        let route_key = crate::resolver_core::route_db::RouteNameKey::new(
+            provider,
+            requested_name,
+            verter_semantic::facts::registry::SymbolSpace::Type,
+            self.host_view_project_identity_for(provider),
+            env.resolve_env_hash,
+            env.lib_env_hash,
+        );
+
         // Consume the route through the fact-observing entry-point so
         // the route's `fact_dep_signature` bubbles into any active
         // outer `with_fact_tracer` scope on the current thread (warm
@@ -1070,17 +1088,9 @@ impl VerterHost {
             .resolver
             .runtime
             .routes
-            .get_or_resolve_route_observing_facts(
-                normalized_canonical.as_str(),
-                requested_name,
-                view,
-                || {
-                    self.build_named_type_export_route_entry(
-                        normalized_canonical.as_str(),
-                        requested_name,
-                    )
-                },
-            )?;
+            .get_or_resolve_route_observing_facts(route_key, view, || {
+                self.build_named_type_export_route_entry(provider, requested_name)
+            })?;
         cached_route
             .resolved()
             .map(|(defining_canonical, defining_symbol)| {

@@ -786,12 +786,10 @@ fn cold_compute_artifact_publication_does_not_self_supersede_publish() {
         .ensure_indexed_ready("/A.vue")
         .map(|ir| ir.whole_hash)
         .expect("owner must have an IndexedReady");
-    let key = crate::component_meta_result_db::ComponentMetaResultKey {
-        owner_canonical: Arc::from("/A.vue"),
-        options_fingerprint: crate::host_manage::component_meta_options_fingerprint(
-            &crate::host_manage::ComponentMetaOptions::default(),
-        ),
-    };
+    let key = host.component_meta_result_key(
+        "/A.vue",
+        &crate::host_manage::ComponentMetaOptions::default(),
+    );
     assert!(
         host.project_type_store()
             .component_meta_results()

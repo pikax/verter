@@ -31,8 +31,8 @@
 //!
 //! - **MS-4** post_publish acceptance. Two distinct component-meta
 //!   resolutions that produce overlapping dep_signature entries each
-//!   produce a distinct cache row keyed by the
-//!   `MaterializeStructureCacheKey`; cooperative admission's reverse
+//!   produce a distinct cache row keyed by the content-free
+//!   `MaterializationCacheKey`; cooperative admission's reverse
 //!   index records both keys against the shared canonical.
 //!
 //! ### Dispatch-path refinement determinism (MM)
@@ -394,7 +394,7 @@ fn evicted_owner_reloads_after_dep_edit() {
 /// resolutions on the SAME canonical owner. Two resolutions of the
 /// same component yield identical dep_signatures and must collapse
 /// onto a single cache row (no duplicate entries published per
-/// `(MaterializeStructureCacheKey, dep_signature)` pair).
+/// `(MaterializationCacheKey, dep_signature)` pair).
 #[test]
 fn materialize_structure_db_post_publish_collapses_duplicates() {
     let host = build_host(&[
@@ -602,7 +602,8 @@ fn schema_bump_evicts_owner_import_surface_db_stale_entries() {
 
 #[test]
 fn schema_bump_evicts_component_meta_result_db_stale_entries() {
-    use verter_session::component_meta_result_db::ComponentMetaResultDb;
+    use verter_session::component_meta_result_db::{ComponentMetaResultDb, ComponentMetaResultKey};
+    use verter_session::file_artifact_store::ProjectIdentity;
 
     // The schema-cohort eviction invariant is independent of the cached
     // payload type — `ComponentMetaResultDb` is generic over `P`. Use
@@ -610,7 +611,19 @@ fn schema_bump_evicts_component_meta_result_db_stale_entries() {
     // construct a full `ComponentMetaAnalysis` (which lacks `Default`).
     let db: ComponentMetaResultDb<()> =
         ComponentMetaResultDb::new_with_schema_version_for_test(STALE_SCHEMA_VERSION);
-    db.insert_synthetic_for_schema_test_with_payload("/workspace/synthetic-meta.ts", ());
+    // Zero env axes are fine for a synthetic schema-eviction fixture (this
+    // exercises the schema-version cohort, not env discrimination); the
+    // placeholder lives in the test fixture, not in production source.
+    let key = ComponentMetaResultKey {
+        owner_canonical: std::sync::Arc::from("/workspace/synthetic-meta.ts"),
+        options_fingerprint: [0u8; 16],
+        project_identity: ProjectIdentity([0u8; 16]),
+        parse_env_hash: [0u8; 16],
+        resolve_env_hash: [0u8; 16],
+        type_env_hash: [0u8; 16],
+        lib_env_hash: [0u8; 16],
+    };
+    db.insert_synthetic_for_schema_test_with_payload(key, ());
 
     assert_eq!(db.len(), 1, "ComponentMetaResultDb pre-evict count");
     assert_eq!(db.schema_version(), STALE_SCHEMA_VERSION);

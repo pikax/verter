@@ -1,27 +1,25 @@
-//! R7 cross-owner `MaterializeStructureDb` reuse test.
+//! R7 cross-owner `MaterializeStructureDb` reuse — key-shape unit tests.
 //!
-//! Discriminating cross-owner reuse on `MaterializeStructureDb`:
-//! N consumer scopes must collapse onto 1 entry.
+//! Two layers carry the cross-owner-reuse property:
 //!
-//! **Discriminating contract:** the cache key's `Hash`/`PartialEq`
-//! must EXCLUDE `scope_canonical_id`. N concurrent materialise
-//! requests for the same `(base, scope_axis, mode)` reached from
-//! distinct consumer scopes must land in ONE cache entry, not N.
-//!
-//! A `#[derive(Hash, PartialEq)]` that included `scope_canonical_id`
-//! would yield N entries; the hand-rolled `Hash`/`PartialEq` excluding
-//! `scope_canonical_id` yields 1 entry.
+//! - The per-thread recursion/depth identity [`MaterializeRuntimeKey`]
+//!   excludes `scope_canonical_id` from `Hash`/`PartialEq` (the
+//!   recursion identity does not depend on which consumer reached the
+//!   node).
+//! - The DB cache key [`MaterializationCacheKey`] is content-free and
+//!   carries NO consumer-scope dimension at all — so N consumer scopes
+//!   reaching the same canonical subject structurally collapse onto ONE
+//!   slot. (The end-to-end / dispatch-level entry-count discrimination
+//!   lives in `cross_owner_materialise_reuse_production.rs`.)
 
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use verter_session::component_meta_materialize::{
-    MaterializationScope, MaterializeStructureCacheKey,
-};
+use verter_session::component_meta_materialize::{MaterializationScope, MaterializeRuntimeKey};
 use verter_session::semantic_query::{ProjectionMode, SemanticNodeId};
 
-fn key_for(scope: &str, base: SemanticNodeId) -> MaterializeStructureCacheKey {
-    MaterializeStructureCacheKey {
+fn key_for(scope: &str, base: SemanticNodeId) -> MaterializeRuntimeKey {
+    MaterializeRuntimeKey {
         scope_canonical_id: Arc::from(scope),
         base,
         scope_axis: MaterializationScope::TopLevel,
@@ -52,7 +50,7 @@ fn r7_cross_owner_keys_compare_equal_when_only_scope_differs() {
 
     // Hash equality follows from PartialEq equality (HashSet
     // contract): N distinct consumer scopes collapse to ONE bucket.
-    let mut set: HashSet<MaterializeStructureCacheKey> = HashSet::new();
+    let mut set: HashSet<MaterializeRuntimeKey> = HashSet::new();
     set.insert(key_a);
     set.insert(key_b);
     set.insert(key_c);
@@ -82,7 +80,7 @@ fn r7_distinct_bases_produce_distinct_entries() {
         "distinct base nodes must produce distinct cache keys"
     );
 
-    let mut set: HashSet<MaterializeStructureCacheKey> = HashSet::new();
+    let mut set: HashSet<MaterializeRuntimeKey> = HashSet::new();
     set.insert(key_1);
     set.insert(key_2);
     assert_eq!(set.len(), 2);
@@ -95,13 +93,13 @@ fn r7_distinct_scope_axis_produces_distinct_entries() {
     let base = SemanticNodeId(0);
     let scope = "/src/Consumer.vue";
 
-    let key_toplevel = MaterializeStructureCacheKey {
+    let key_toplevel = MaterializeRuntimeKey {
         scope_canonical_id: Arc::from(scope),
         base,
         scope_axis: MaterializationScope::TopLevel,
         mode: ProjectionMode::Expanded,
     };
-    let key_nested = MaterializeStructureCacheKey {
+    let key_nested = MaterializeRuntimeKey {
         scope_canonical_id: Arc::from(scope),
         base,
         scope_axis: MaterializationScope::Nested,
@@ -118,13 +116,13 @@ fn r7_distinct_projection_mode_produces_distinct_entries() {
     let base = SemanticNodeId(0);
     let scope = "/src/Consumer.vue";
 
-    let key_expanded = MaterializeStructureCacheKey {
+    let key_expanded = MaterializeRuntimeKey {
         scope_canonical_id: Arc::from(scope),
         base,
         scope_axis: MaterializationScope::TopLevel,
         mode: ProjectionMode::Expanded,
     };
-    let key_navigate = MaterializeStructureCacheKey {
+    let key_navigate = MaterializeRuntimeKey {
         scope_canonical_id: Arc::from(scope),
         base,
         scope_axis: MaterializationScope::TopLevel,
@@ -134,16 +132,16 @@ fn r7_distinct_projection_mode_produces_distinct_entries() {
     assert_ne!(key_expanded, key_navigate);
 }
 
-/// R7 — the richer `MaterializationCacheKey` coexists alongside the
-/// legacy key. This test pins the structural shape (5 fields).
+/// R6/R21 — the content-free canonical-subject `MaterializationCacheKey`
+/// is the DB cache key. This pins its field set (canonical subject slot +
+/// typed projection path + policy axis + mode + instantiation args +
+/// resolve_env_hash) and proves it carries NO consumer-scope dimension
+/// (cross-owner reuse is structural) and NO content/version hash (R6).
 #[test]
-fn r7_materialization_cache_key_has_5_fields() {
-    use verter_session::component_meta_materialize::{
-        MaterializationCacheKey, ProjectionPathHash, TypeArgsHash,
-    };
-    use verter_session::semantic_query::{
-        HashValue, ResolvedDeclSlotIdentity, SemanticSymbolSpace,
-    };
+fn r7_materialization_cache_key_is_content_free_canonical_subject() {
+    use verter_session::component_meta_materialize::MaterializationCacheKey;
+    use verter_session::resolver_core::RouteDemand;
+    use verter_session::semantic_query::{ResolvedDeclSlotIdentity, SemanticSymbolSpace};
 
     let slot = ResolvedDeclSlotIdentity::type_slot(
         Arc::from("/src/ChatMessageProps.ts"),
@@ -154,23 +152,56 @@ fn r7_materialization_cache_key_has_5_fields() {
     );
     let key = MaterializationCacheKey {
         decl: slot.clone(),
-        projection_path: ProjectionPathHash([3; 16]),
+        projection_path: RouteDemand::Pick(vec!["id".to_string()]),
+        scope_axis: MaterializationScope::TopLevel,
         projection_mode: ProjectionMode::Expanded,
-        normalized_type_args: TypeArgsHash([4; 16]),
-        options_hash: HashValue::default(),
+        normalized_type_args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        resolve_env_hash: [9; 16],
     };
 
-    // The five fields are accessible.
+    // The canonical subject + axes are accessible; the subject is the
+    // env-bearing slot (carrying project_identity / type_env / lib_env),
+    // never a graph-instance SemanticNodeId.
     assert_eq!(key.decl.merged_symbol_name.as_ref(), "ChatMessageProps");
     assert_eq!(key.decl.symbol_space, SemanticSymbolSpace::Type);
-    assert_eq!(key.projection_path.0, [3; 16]);
+    assert_eq!(
+        key.projection_path,
+        RouteDemand::Pick(vec!["id".to_string()])
+    );
+    assert_eq!(key.scope_axis, MaterializationScope::TopLevel);
     assert_eq!(key.projection_mode, ProjectionMode::Expanded);
-    assert_eq!(key.normalized_type_args.0, [4; 16]);
-    assert_eq!(key.options_hash, HashValue::default());
+    assert_eq!(key.resolve_env_hash, [9; 16]);
 
-    // The key hashes deterministically.
+    // The key hashes deterministically and is Eq.
     let mut s1: HashSet<MaterializationCacheKey> = HashSet::new();
     s1.insert(key.clone());
     s1.insert(key.clone());
     assert_eq!(s1.len(), 1);
+
+    // resolve_env_hash discriminates the slot (R21 split-env): the same
+    // subject under a different resolve env is a DISTINCT entry.
+    let mut env_variant = key.clone();
+    env_variant.resolve_env_hash = [7; 16];
+    assert_ne!(
+        hash_of(&key),
+        hash_of(&env_variant),
+        "resolve_env_hash must distinguish the MaterializationCacheKey slot",
+    );
+
+    // A different projection (Pick<'id'> vs Pick<'body'>) is a DISTINCT
+    // entry — path-precise, no over-share across projections.
+    let mut proj_variant = key.clone();
+    proj_variant.projection_path = RouteDemand::Pick(vec!["body".to_string()]);
+    assert_ne!(
+        hash_of(&key),
+        hash_of(&proj_variant),
+        "distinct projection paths must not alias onto one slot",
+    );
+}
+
+fn hash_of<T: std::hash::Hash>(value: &T) -> u64 {
+    use std::hash::Hasher;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    value.hash(&mut hasher);
+    hasher.finish()
 }

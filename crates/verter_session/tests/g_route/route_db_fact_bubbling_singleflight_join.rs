@@ -62,6 +62,17 @@ use verter_session::resolver_core::{
 };
 use verter_session::VerterHost;
 
+fn rk(provider: &str, name: &str) -> verter_session::resolver_core::RouteNameKey {
+    verter_session::resolver_core::RouteNameKey::new(
+        provider,
+        name,
+        verter_semantic::facts::registry::SymbolSpace::Type,
+        verter_session::file_artifact_store::ProjectIdentity([0u8; 16]),
+        [0u8; 16],
+        [0u8; 16],
+    )
+}
+
 /// Strong-reference count of the route singleflight in-flight entry
 /// while only the leader is parked inside its resolve closure: the
 /// leader's local `state` binding plus the `flights` map entry. A
@@ -86,7 +97,9 @@ where
     V: verter_session::resolver_core::StoreView + ?Sized,
 {
     let deadline = Instant::now() + Duration::from_secs(10);
-    while db.test_route_inflight_strong_count(provider, name, view) <= LEADER_ONLY_INFLIGHT_REFS {
+    while db.test_route_inflight_strong_count(&rk(provider, name), view)
+        <= LEADER_ONLY_INFLIGHT_REFS
+    {
         assert!(
             Instant::now() < deadline,
             "timed out waiting for the follower to be admitted onto the \
@@ -158,27 +171,31 @@ fn follower_bubbles_leader_facts_and_advances_coalesced_counter() {
     let leader_db = Arc::clone(&db);
     let leader = thread::spawn(move || {
         let view = PermissiveStoreView;
-        leader_db.get_or_resolve_route_observing_facts("join_provider.ts", "Joined", &view, || {
-            // We have claimed the singleflight slot and are
-            // inside the resolve closure. Signal the driver, then
-            // wait for the release before publishing.
-            tx_leader_in_closure
-                .send(())
-                .expect("leader: signal in-closure");
-            // Bounded wait for the driver's release. A bare `recv()` would
-            // hang forever if the driver stalled before releasing; the
-            // deadline makes a genuine stall PANIC within ~10s instead.
-            match rx_release_leader.recv_timeout(Duration::from_secs(10)) {
-                Ok(()) => {}
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    panic!("leader: timed out waiting for driver release (10s)")
+        leader_db.get_or_resolve_route_observing_facts(
+            rk("join_provider.ts", "Joined"),
+            &view,
+            || {
+                // We have claimed the singleflight slot and are
+                // inside the resolve closure. Signal the driver, then
+                // wait for the release before publishing.
+                tx_leader_in_closure
+                    .send(())
+                    .expect("leader: signal in-closure");
+                // Bounded wait for the driver's release. A bare `recv()` would
+                // hang forever if the driver stalled before releasing; the
+                // deadline makes a genuine stall PANIC within ~10s instead.
+                match rx_release_leader.recv_timeout(Duration::from_secs(10)) {
+                    Ok(()) => {}
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        panic!("leader: timed out waiting for driver release (10s)")
+                    }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        panic!("leader: driver dropped the release channel before releasing")
+                    }
                 }
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    panic!("leader: driver dropped the release channel before releasing")
-                }
-            }
-            Some((resolved_route(), vec![leader_fact()]))
-        })
+                Some((resolved_route(), vec![leader_fact()]))
+            },
+        )
     });
 
     // Wait until the leader is inside its resolve closure. This
@@ -206,8 +223,7 @@ fn follower_bubbles_leader_facts_and_advances_coalesced_counter() {
         let view = PermissiveStoreView;
         let (route_result, finalise) = install_fact_tracer_for_tests(&host, || {
             follower_db.get_or_resolve_route_observing_facts(
-                "join_provider.ts",
-                "Joined",
+                rk("join_provider.ts", "Joined"),
                 &view,
                 || {
                     // The follower's resolve closure MUST NOT run.

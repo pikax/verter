@@ -502,12 +502,12 @@ pub fn component_meta_result_signature_for_owner(
     let whole_hash = host
         .ensure_indexed_ready(owner_canonical)
         .map(|ir| ir.whole_hash)?;
-    let key = crate::component_meta_result_db::ComponentMetaResultKey {
-        owner_canonical: std::sync::Arc::from(owner_canonical),
-        options_fingerprint: crate::host_manage::component_meta_options_fingerprint(
-            &crate::host_manage::ComponentMetaOptions::default(),
-        ),
-    };
+    // Address the exact slot production published — same env axes via the
+    // canonical builder, not a hand-rolled 2-field key.
+    let key = host.component_meta_result_key(
+        owner_canonical,
+        &crate::host_manage::ComponentMetaOptions::default(),
+    );
     host.project_type_store()
         .component_meta_results()
         .get(&key, whole_hash)

@@ -13,13 +13,9 @@
 //! Public surface remains rooted at `crate::host_manage::*`; this file
 //! contributes a continuation `impl VerterHost { … }` block.
 
-use std::sync::Arc;
-
 use crate::VerterHost;
 
-use super::{
-    component_meta_options_fingerprint, extract_component_meta_from_resolved, ComponentMetaOptions,
-};
+use super::{extract_component_meta_from_resolved, ComponentMetaOptions};
 
 impl VerterHost {
     /// Combined query: resolves component-meta once and returns both the
@@ -326,12 +322,7 @@ impl VerterHost {
     )> {
         let shallow = self.shallow_file_state(canonical)?;
         let owner_whole_hash = shallow.whole_hash;
-        let key = crate::component_meta_result_db::ComponentMetaResultKey {
-            owner_canonical: Arc::from(canonical),
-            options_fingerprint: component_meta_options_fingerprint(
-                &ComponentMetaOptions::default(),
-            ),
-        };
+        let key = self.component_meta_result_key(canonical, &ComponentMetaOptions::default());
         // Fact-precise validation is the sole cache oracle:
         // `ComponentMetaResultDb::get_with_view` validates the entry's
         // `read_set_signature.facts` against the resolver-tier

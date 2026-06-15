@@ -13892,13 +13892,13 @@ fn execute_to_type_expr_preserves_dep_signature_on_success() {
 /// `MaterializeOutcome` shape the underlying function returns.
 #[test]
 fn materialize_surface_mirrors_materialize_component_meta_structure() {
-    use crate::component_meta_materialize::{MaterializationScope, MaterializeStructureCacheKey};
+    use crate::component_meta_materialize::{MaterializationScope, MaterializeRuntimeKey};
 
     let host = host();
     let graph = host.project_type_store().semantic_graph();
     let base = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
 
-    let key = MaterializeStructureCacheKey {
+    let key = MaterializeRuntimeKey {
         scope_canonical_id: Arc::from("/c.vue"),
         base,
         scope_axis: MaterializationScope::TopLevel,
@@ -13910,9 +13910,12 @@ fn materialize_surface_mirrors_materialize_component_meta_structure() {
     let read_direct =
         crate::component_meta_materialize::materialize_component_meta_structure(&host, key);
 
-    // Discriminating: both calls return the same MaterializeOutcome
-    // shape. The first call cold-caches; the second call (through
-    // the same db) is a warm hit. Compare carriers structurally.
+    // Discriminating: `materialize_surface` is a thin method wrapper over
+    // `materialize_component_meta_structure`, so both calls return the
+    // same `MaterializeOutcome` variant. (A `Primitive` base is a
+    // root-less anonymous subject — it keys no DB slot, so both calls
+    // compute uncached; this pins the wrapper's shape equivalence, not a
+    // warm hit.) Compare carriers structurally.
     let helper_disc = std::mem::discriminant(&read_via_helper.value);
     let direct_disc = std::mem::discriminant(&read_direct.value);
     assert_eq!(

@@ -36,6 +36,17 @@ use verter_session::resolver_core::{FactVersionRef, PermissiveStoreView, RouteDb
 use verter_session::{AnalysisLevel, HostConfig, VerterHost};
 use verter_type_expr::{ObjectMember, TypeExpr};
 
+fn rk(provider: &str, name: &str) -> verter_session::resolver_core::RouteNameKey {
+    verter_session::resolver_core::RouteNameKey::new(
+        provider,
+        name,
+        verter_semantic::facts::registry::SymbolSpace::Type,
+        verter_session::file_artifact_store::ProjectIdentity([0u8; 16]),
+        [0u8; 16],
+        [0u8; 16],
+    )
+}
+
 fn scheduler_config_one_thread() -> verter_scheduler::scheduler::SchedulerConfig {
     verter_scheduler::scheduler::SchedulerConfig {
         cpu_threads: 1,
@@ -496,7 +507,7 @@ fn per_key_route_builds_bounded() {
 
     // First resolve: cold path, runs the resolver closure exactly once
     // AND bumps the cold counter.
-    let first = db.get_or_resolve_route_observing_facts("o.ts", "X", &view, || {
+    let first = db.get_or_resolve_route_observing_facts(rk("o.ts", "X"), &view, || {
         cold_resolver_calls.fetch_add(1, Ordering::Relaxed);
         Some((route.clone(), vec![fact.clone()]))
     });
@@ -518,7 +529,7 @@ fn per_key_route_builds_bounded() {
     // in `get_or_resolve_route_observing_facts` short-circuits at
     // `get_route_with_facts`.
     for i in 0..3 {
-        let warm = db.get_or_resolve_route_observing_facts("o.ts", "X", &view, || {
+        let warm = db.get_or_resolve_route_observing_facts(rk("o.ts", "X"), &view, || {
             // This closure MUST NOT run on warm hits. If it does, the
             // warm-collapse contract is broken.
             cold_resolver_calls.fetch_add(1, Ordering::Relaxed);

@@ -1921,7 +1921,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     #[allow(dead_code)]
     pub fn materialize_surface(
         &self,
-        key: crate::component_meta_materialize::MaterializeStructureCacheKey,
+        key: crate::component_meta_materialize::MaterializeRuntimeKey,
     ) -> CacheRead<crate::component_meta_materialize::MaterializeOutcome> {
         crate::component_meta_materialize::materialize_component_meta_structure(self.ctx, key)
     }

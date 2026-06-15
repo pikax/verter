@@ -8,10 +8,13 @@
 //! ## Contract
 //!
 //! - **Slot key:** [`ComponentMetaResultKey`] =
-//!   `(owner_canonical, options_fingerprint)` — content-free, per the
+//!   `(owner_canonical, options_fingerprint, project_identity,
+//!   parse_env_hash, resolve_env_hash, type_env_hash, lib_env_hash)` —
+//!   content-free with the full R21 split env axes, per the
 //!   query-identity-cache model. The owner's content version
-//!   (`owner_whole_hash`) is NOT part of the slot key; it is carried by
-//!   the candidate and validated strictly on read.
+//!   (`owner_whole_hash`) is NOT part of the slot key; it is the
+//!   candidate discriminant, carried by the candidate and validated
+//!   strictly on read.
 //! - **Slot value:** a bounded candidate list. Concurrent overlay
 //!   variants of the same owner coexist as candidates in one slot,
 //!   capped at [`ComponentMetaResultDb::PER_SLOT_CANDIDATE_CAP`]; a
@@ -51,13 +54,36 @@ pub type ComponentMetaOptionsFingerprint = Hash16;
 
 /// Content-free slot key for the final component-meta result.
 ///
-/// The owner's content version is intentionally absent — concurrent
-/// content versions of the same owner coexist as candidates inside the
-/// slot this key addresses (the documented query-identity-cache model).
+/// "Content-free" per R6: the owner's content version
+/// (`owner_whole_hash`) is intentionally absent — concurrent content
+/// versions of the same owner coexist as candidates inside the slot this
+/// key addresses (the documented query-identity-cache model), discriminated
+/// value-side by the candidate's owner whole-hash.
+///
+/// The key DOES carry the split env axes (R21): `project_identity` plus
+/// the four `*_env_hash` dimensions. The final component-meta payload
+/// depends on parse/resolve/type/lib env and the owning project, so
+/// concurrent env or project variants of the same owner must occupy
+/// DISTINCT slots — without these axes a lookup under project/env A could
+/// alias onto a slot computed under project/env B. The axes are
+/// view-independent (they key on the owning project, not file content),
+/// so a single canonical builder
+/// ([`crate::VerterHost::component_meta_result_key`]) yields identical
+/// axes at both the lookup and publish sites.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ComponentMetaResultKey {
     pub owner_canonical: Arc<str>,
     pub options_fingerprint: ComponentMetaOptionsFingerprint,
+    /// Owning-project identity (R21). Prevents cross-project aliasing of
+    /// otherwise identical `(owner, options)` slots.
+    pub project_identity: crate::file_artifact_store::ProjectIdentity,
+    /// Split env axes (R21). The component-meta result depends on all
+    /// four — parse (SFC/compiler flags), resolve (module resolution),
+    /// type (semantic options), and lib (intrinsic corpus).
+    pub parse_env_hash: Hash16,
+    pub resolve_env_hash: Hash16,
+    pub type_env_hash: Hash16,
+    pub lib_env_hash: Hash16,
 }
 
 /// Cache entry — the payload plus the carrier holding the
@@ -598,16 +624,19 @@ impl<P> ComponentMetaResultDb<P> {
 
     /// Test-only synthetic-entry inserter used exclusively by
     /// `cache_invariant_migration` fixtures to verify the cache-cluster
-    /// schema-version eviction invariant. The caller supplies a payload
-    /// constructor so generic-parameter Dbs (`ComponentMetaResultDb<P>`)
-    /// can be exercised without binding the helper to a single payload
-    /// type.
+    /// schema-version eviction invariant. The caller supplies the slot
+    /// `key` (so the zero-env placeholder lives in the test fixture, not
+    /// in production source) and a payload, so generic-parameter Dbs
+    /// (`ComponentMetaResultDb<P>`) can be exercised without binding the
+    /// helper to a single payload type. The `read_set_signature` carrier
+    /// is crate-private, so the entry is assembled here rather than in the
+    /// integration-test fixture.
     #[cfg(any(test, debug_assertions))]
-    pub fn insert_synthetic_for_schema_test_with_payload(&self, marker: &str, payload: P) {
-        let key = ComponentMetaResultKey {
-            owner_canonical: Arc::from(marker),
-            options_fingerprint: [0u8; 16],
-        };
+    pub fn insert_synthetic_for_schema_test_with_payload(
+        &self,
+        key: ComponentMetaResultKey,
+        payload: P,
+    ) {
         let entry = ComponentMetaResultEntry {
             payload: Arc::new(payload),
             read_set_signature: crate::fact_signature_helpers::ReadSetSignature::empty(),
@@ -641,12 +670,15 @@ impl ComponentMetaResultDb<CachedComponentMetaResult> {
             .ensure_indexed_ready(owner_canonical)
             .map(|ir| ir.whole_hash)
             .unwrap_or_default();
-        let key = ComponentMetaResultKey {
-            owner_canonical: std::sync::Arc::from(owner_canonical),
-            options_fingerprint: crate::host_manage::component_meta_options_fingerprint(
-                &crate::host_manage::ComponentMetaOptions::default(),
-            ),
-        };
+        // Build the lookup key through the SAME production builder
+        // `publish_component_meta_cache_entry` writes, so these
+        // host-backed accessors address the exact published slot
+        // (env axes included). A hand-rolled 2-field key would silently
+        // miss every published entry after the R21 env-axis migration.
+        let key = host.component_meta_result_key(
+            owner_canonical,
+            &crate::host_manage::ComponentMetaOptions::default(),
+        );
         let backing = store.component_meta_results();
         match backing.get(&key, whole_hash) {
             Some(entry) => entry.read_set_signature.canonical_ids(),
@@ -669,12 +701,15 @@ impl ComponentMetaResultDb<CachedComponentMetaResult> {
             .ensure_indexed_ready(owner_canonical)
             .map(|ir| ir.whole_hash)
             .unwrap_or_default();
-        let key = ComponentMetaResultKey {
-            owner_canonical: std::sync::Arc::from(owner_canonical),
-            options_fingerprint: crate::host_manage::component_meta_options_fingerprint(
-                &crate::host_manage::ComponentMetaOptions::default(),
-            ),
-        };
+        // Build the lookup key through the SAME production builder
+        // `publish_component_meta_cache_entry` writes, so these
+        // host-backed accessors address the exact published slot
+        // (env axes included). A hand-rolled 2-field key would silently
+        // miss every published entry after the R21 env-axis migration.
+        let key = host.component_meta_result_key(
+            owner_canonical,
+            &crate::host_manage::ComponentMetaOptions::default(),
+        );
         store
             .component_meta_results()
             .get(&key, whole_hash)
@@ -753,15 +788,29 @@ mod tests {
         crate::fact_signature_helpers::ReadSetSignature::empty()
     }
 
+    /// Build a slot key with zero env axes — the substrate-level DB unit
+    /// tests exercise candidate/eviction mechanics, not env discrimination
+    /// (that is covered by the R21 guard in
+    /// `tests/g_cache/r6_r21_query_identity_keys.rs`), so a uniform zero
+    /// env keeps these tests focused on the bounded-candidate behaviour.
+    fn mk_result_key(owner: &str, options_fingerprint: Hash16) -> ComponentMetaResultKey {
+        ComponentMetaResultKey {
+            owner_canonical: Arc::from(owner),
+            options_fingerprint,
+            project_identity: crate::file_artifact_store::ProjectIdentity([0u8; 16]),
+            parse_env_hash: [0u8; 16],
+            resolve_env_hash: [0u8; 16],
+            type_env_hash: [0u8; 16],
+            lib_env_hash: [0u8; 16],
+        }
+    }
+
     #[test]
     fn insert_and_get_roundtrip() {
         #[derive(Clone, PartialEq, Eq, Debug)]
         struct MockPayload(u32);
         let db: ComponentMetaResultDb<MockPayload> = ComponentMetaResultDb::new();
-        let key = ComponentMetaResultKey {
-            owner_canonical: Arc::from("/w/Accordion.vue"),
-            options_fingerprint: [9u8; 16],
-        };
+        let key = mk_result_key("/w/Accordion.vue", [9u8; 16]);
         let entry = ComponentMetaResultEntry {
             payload: Arc::new(MockPayload(42)),
             read_set_signature: crate::fact_signature_helpers::ReadSetSignature::new(Arc::from(
@@ -781,14 +830,8 @@ mod tests {
     #[test]
     fn distinct_options_fingerprints_do_not_alias() {
         let db: ComponentMetaResultDb<u32> = ComponentMetaResultDb::new();
-        let k1 = ComponentMetaResultKey {
-            owner_canonical: Arc::from("/w/o.vue"),
-            options_fingerprint: [1u8; 16],
-        };
-        let k2 = ComponentMetaResultKey {
-            owner_canonical: Arc::from("/w/o.vue"),
-            options_fingerprint: [2u8; 16],
-        };
+        let k1 = mk_result_key("/w/o.vue", [1u8; 16]);
+        let k2 = mk_result_key("/w/o.vue", [2u8; 16]);
         db.insert(
             k1.clone(),
             [1u8; 16],
@@ -808,10 +851,7 @@ mod tests {
     #[test]
     fn distinct_owner_hashes_are_distinct_candidates() {
         let db: ComponentMetaResultDb<u32> = ComponentMetaResultDb::new();
-        let key = ComponentMetaResultKey {
-            owner_canonical: Arc::from("/w/o.vue"),
-            options_fingerprint: [9u8; 16],
-        };
+        let key = mk_result_key("/w/o.vue", [9u8; 16]);
         db.insert(
             key.clone(),
             [1u8; 16],
@@ -840,10 +880,7 @@ mod tests {
     #[test]
     fn remove_clears_entry() {
         let db: ComponentMetaResultDb<u32> = ComponentMetaResultDb::new();
-        let key = ComponentMetaResultKey {
-            owner_canonical: Arc::from("/w/o.vue"),
-            options_fingerprint: [0u8; 16],
-        };
+        let key = mk_result_key("/w/o.vue", [0u8; 16]);
         db.insert(
             key.clone(),
             [1u8; 16],
@@ -863,10 +900,7 @@ mod tests {
     #[test]
     fn per_slot_cap_bounds_owner_versions() {
         let db: ComponentMetaResultDb<u32> = ComponentMetaResultDb::new();
-        let key = ComponentMetaResultKey {
-            owner_canonical: Arc::from("/w/o.vue"),
-            options_fingerprint: [0u8; 16],
-        };
+        let key = mk_result_key("/w/o.vue", [0u8; 16]);
         // Insert one more version than the per-slot cap.
         let versions = ComponentMetaResultDb::<u32>::PER_SLOT_CANDIDATE_CAP + 3;
         for v in 0..versions {
@@ -917,10 +951,7 @@ mod tests {
     #[test]
     fn invalidate_owner_removes_all_keys_for_one_canonical() {
         let db: ComponentMetaResultDb<u32> = ComponentMetaResultDb::new();
-        let mk_key = |owner: &str| ComponentMetaResultKey {
-            owner_canonical: Arc::from(owner),
-            options_fingerprint: [0u8; 16],
-        };
+        let mk_key = |owner: &str| mk_result_key(owner, [0u8; 16]);
         let mk_entry = || ComponentMetaResultEntry {
             payload: Arc::new(1u32),
             read_set_signature: empty_sig(),
@@ -974,10 +1005,7 @@ mod tests {
         let counter = Arc::new(AtomicU64::new(0));
         let db: ComponentMetaResultDb<u32> =
             ComponentMetaResultDb::with_counters(Arc::clone(&counter), Arc::new(AtomicU64::new(0)));
-        let mk_key = |owner: &str| ComponentMetaResultKey {
-            owner_canonical: Arc::from(owner),
-            options_fingerprint: [0u8; 16],
-        };
+        let mk_key = |owner: &str| mk_result_key(owner, [0u8; 16]);
         let mk_entry = |v: u32| ComponentMetaResultEntry {
             payload: Arc::new(v),
             read_set_signature: empty_sig(),

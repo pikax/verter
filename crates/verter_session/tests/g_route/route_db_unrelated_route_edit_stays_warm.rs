@@ -42,6 +42,17 @@ fn make_host() -> VerterHost {
     VerterHost::new_standalone(Default::default())
 }
 
+fn rk(provider: &str, name: &str) -> verter_session::resolver_core::RouteNameKey {
+    verter_session::resolver_core::RouteNameKey::new(
+        provider,
+        name,
+        verter_semantic::facts::registry::SymbolSpace::Type,
+        verter_session::file_artifact_store::ProjectIdentity([0u8; 16]),
+        [0u8; 16],
+        [0u8; 16],
+    )
+}
+
 /// The fact signature carried by the original (preserved) route.
 /// Discrimination relies on this exact ref re-appearing in the
 /// post-edit tracer scope.
@@ -88,14 +99,12 @@ fn unrelated_route_eviction_keeps_original_warm() {
     // exists only so we can evict it and observe that the eviction
     // leaves the original untouched.
     db.insert_route_with_facts(
-        "orig_provider.ts".to_string(),
-        "OrigName".to_string(),
+        rk("orig_provider.ts", "OrigName"),
         original_route(),
         vec![original_fact()],
     );
     db.insert_route_with_facts(
-        "foreign_provider.ts".to_string(),
-        "ForeignName".to_string(),
+        rk("foreign_provider.ts", "ForeignName"),
         foreign_route(),
         vec![foreign_fact()],
     );
@@ -104,7 +113,7 @@ fn unrelated_route_eviction_keeps_original_warm() {
     // priming and locks in the baseline counter values for the
     // second-call delta.
     let _ = install_fact_tracer_for_tests(&host, || {
-        db.get_or_resolve_route_observing_facts("orig_provider.ts", "OrigName", &view, || {
+        db.get_or_resolve_route_observing_facts(rk("orig_provider.ts", "OrigName"), &view, || {
             unreachable!("first call: original route is pre-warmed")
         })
     });
@@ -130,7 +139,7 @@ fn unrelated_route_eviction_keeps_original_warm() {
     // here — the closure would run, the cold counter would advance,
     // and the `unreachable!` below would trip.
     let (result, finalise) = install_fact_tracer_for_tests(&host, || {
-        db.get_or_resolve_route_observing_facts("orig_provider.ts", "OrigName", &view, || {
+        db.get_or_resolve_route_observing_facts(rk("orig_provider.ts", "OrigName"), &view, || {
             unreachable!(
                 "second call: original route must STILL be warm after \
                  foreign-route eviction — closure must not run"

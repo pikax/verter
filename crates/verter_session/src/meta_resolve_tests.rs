@@ -6257,8 +6257,19 @@ defineProps<{ ui?: Button['ui'] }>()
     );
 }
 
+/// The structural materialiser caches the DECL-ROOTED member subjects of
+/// an anonymous inline object, but NOT the enclosing anonymous object
+/// itself: a `{ first: Inner; second: Inner }` surface keys no
+/// `MaterializeStructureDb` slot for the inline object (it is a root-less
+/// anonymous subject — `derive_materialization_subject` returns `None`, so
+/// it computes uncached), while its `Inner` member ref IS canonicalised to
+/// `slot(/src/types.ts, Inner)` and cached. Both `first` and `second`
+/// reference the SAME `Inner` decl, so they co-locate onto ONE slot —
+/// `live_count == 1`. The materialised surface is still deterministic and
+/// reused (`first == second`); reuse for the anonymous wrapper rides its
+/// decl-rooted members, not the wrapper itself.
 #[test]
-fn materialize_member_surface_expr_caches_safe_structural_objects() {
+fn materialize_member_surface_expr_caches_decl_rooted_members_not_anonymous_object() {
     let project = make_project();
     project
         .upsert_base(
@@ -6298,14 +6309,16 @@ defineProps<{ first: Inner; second: Inner }>()
         first, second,
         "structural cache reuse must preserve the materialized surface"
     );
-    assert!(
-        cache_len_after_first >= 2,
-        "first structural materialization should cache both the nested ref and the enclosing object expression",
+    assert_eq!(
+        cache_len_after_first, 1,
+        "the decl-rooted `Inner` member MUST cache onto ONE slot (both `first` and `second` \
+         reference the same `Inner`), while the enclosing ANONYMOUS inline object keys no \
+         MaterializeStructureDb slot (it is a root-less subject — uncached). got cache_len={cache_len_after_first}",
     );
     assert_eq!(
         query_engine.materialized_member_surface_cache_len(),
         cache_len_after_first,
-        "second structural materialization should reuse the existing request-local cache entry",
+        "second structural materialization should reuse the existing cache entry (no growth)",
     );
 }
 

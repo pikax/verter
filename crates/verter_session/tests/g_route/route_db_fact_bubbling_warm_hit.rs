@@ -39,6 +39,17 @@ fn make_host() -> VerterHost {
     VerterHost::new_standalone(Default::default())
 }
 
+fn rk(provider: &str, name: &str) -> verter_session::resolver_core::RouteNameKey {
+    verter_session::resolver_core::RouteNameKey::new(
+        provider,
+        name,
+        verter_semantic::facts::registry::SymbolSpace::Type,
+        verter_session::file_artifact_store::ProjectIdentity([0u8; 16]),
+        [0u8; 16],
+        [0u8; 16],
+    )
+}
+
 /// Build a `FactVersionRef` with a recognisable 16-byte pattern. The
 /// pattern reappears in the joiner's outer tracer when the bubble
 /// path fires, so the discrimination assertion can match the fact
@@ -69,8 +80,7 @@ fn warm_hit_advances_warm_counter_and_bubbles_route_facts() {
     // and for the warm-hit branch to bubble a non-empty fact set
     // into the tracer.
     db.insert_route_with_facts(
-        "warm_provider.ts".to_string(),
-        "Bar".to_string(),
+        rk("warm_provider.ts", "Bar"),
         resolved_route(),
         vec![fact.clone()],
     );
@@ -84,7 +94,7 @@ fn warm_hit_advances_warm_counter_and_bubbles_route_facts() {
     // branch MUST bubble the cached fact into the tracer AND advance
     // the warm counter by exactly one.
     let (result, finalise) = install_fact_tracer_for_tests(&host, || {
-        db.get_or_resolve_route_observing_facts("warm_provider.ts", "Bar", &view, || {
+        db.get_or_resolve_route_observing_facts(rk("warm_provider.ts", "Bar"), &view, || {
             unreachable!("resolve closure must not run on warm hit")
         })
     });

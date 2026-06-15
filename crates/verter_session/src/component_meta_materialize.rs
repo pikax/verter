@@ -11,7 +11,13 @@
 //! - [`MaterializeOutcome`] — materialiser-local result enum
 //!   (Value / Miss / Recursive / Tainted / Error).
 //! - [`MaterializationScope`] — TopLevel vs Nested axis.
-//! - [`MaterializeStructureCacheKey`] — final-result cache key.
+//! - [`MaterializeRuntimeKey`] — per-thread recursion/depth/gate
+//!   identity (the in-flight key). NOT the DB cache key.
+//! - [`MaterializationCacheKey`] — the content-free canonical-subject
+//!   DB cache key (`MaterializeStructureDb`). Derived from a
+//!   [`MaterializeRuntimeKey`] via [`derive_materialization_subject`];
+//!   `None` for genuinely root-less anonymous subjects (those compute
+//!   uncached, propagating their real dep facts to the canonical parent).
 //! - [`convert_dispatch_result`] — boundary that promotes
 //!   `QueryResult::Recursive` to `MaterializeOutcome::Tainted`.
 //!
@@ -130,60 +136,61 @@ impl From<MaterializationScope> for crate::component_meta_audit::Materialization
     }
 }
 
-/// Final-result cache key for the materialiser.
-/// `scope_canonical_id` is **NOT part of the cache key**.
+/// Per-thread recursion / depth / policy-gate identity for the
+/// materialiser — the **in-flight key**, NOT the DB cache key.
 ///
-/// **Cache-key semantics:** the cache key dimensions are
-/// `(base, scope_axis, mode)`. `scope_canonical_id` is retained
-/// on the struct as a fence-seed input that flows into the
-/// per-candidate `dep_signature` but is excluded from `Hash` and
-/// `PartialEq`. Cross-owner reuse: N consumer scopes that reach
-/// the same `(base, scope_axis, mode)` produce ONE cache entry.
+/// Identifies one materialise REQUEST on a thread: `(base, scope_axis,
+/// mode)` — the graph-instance `base: SemanticNodeId` is the right
+/// identity here because same-thread re-entry detection and the
+/// depth-fuse / package-ref / function-skip gates operate on the
+/// concrete interned node, including the anonymous structural nodes that
+/// have no canonical subject. `scope_canonical_id` is retained for
+/// child-key propagation and flows into the per-candidate `dep_signature`
+/// as a fence-seed input, but is excluded from `Hash`/`PartialEq` (the
+/// recursion identity does not depend on which consumer reached the node).
+///
+/// The DB cache key is the content-free [`MaterializationCacheKey`],
+/// derived from this runtime key via [`derive_materialization_subject`].
+/// A request whose subject cannot be canonicalised (a genuinely
+/// root-less anonymous node) keys NO DB slot — it computes uncached and
+/// returns its real dep facts to the canonical parent (R6: a
+/// graph-instance `SemanticNodeId` is never a query-identity cache key;
+/// R20: never a content-derived key fallback).
 ///
 /// **Rationale (R7 + R8):** see audit doc
-/// `docs/arch/materialize-owner-local-audit.md`. The audit confirmed
-/// the local_fence_seed is a derived function of `(defining_canonical,
-/// content_hash)`. `defining_canonical` lives inside `base`'s
-/// `NodeScopeId::File { canonical_id }` (recoverable via the
-/// semantic-graph store); `content_hash` lives in
-/// `VersionedDeclIdentity.content_hash` inside the cached value.
-/// The consumer-scope canonical id is NOT load-bearing.
-///
-/// The richer [`MaterializationCacheKey`] is the end-state form:
-/// `decl: ResolvedDeclSlotIdentity` + `projection_path` +
-/// `projection_mode` + `normalized_type_args` + `options_hash`.
-/// The cache-key behavior change is already in effect via the
-/// hand-rolled `Hash`/`PartialEq`; downstream consumers migrate
-/// to the explicit field form when adopting the richer key.
+/// `docs/arch/materialize-owner-local-audit.md`. The cached value's sole
+/// self-root is the materialise SUBJECT's declaration-origin file (the
+/// `base` node's `NodeScopeId::File` origin for a non-route subject, or
+/// the EXTRACTED ROUTE ROOT's declaration file for a route-shaped
+/// subject — see [`materialize_subject_origin_self_root`]); the
+/// consumer-scope canonical id is NOT load-bearing.
 #[derive(Debug, Clone)]
-pub struct MaterializeStructureCacheKey {
+pub struct MaterializeRuntimeKey {
     /// Owner scope — the canonical id the materialiser was
-    /// dispatched in. **NOT in the cache key.**
-    /// Retained as a fence-seed input only.
+    /// dispatched in. Excluded from the recursion identity; retained
+    /// for child-key propagation + as a fence-seed input only.
     pub scope_canonical_id: Arc<str>,
-    /// Input semantic node — the lowered TypeExpr that the
-    /// materialiser is asked to materialise. **Cache key
-    /// dimension.**
+    /// Input semantic node — the lowered TypeExpr the materialiser is
+    /// asked to materialise. **Recursion-identity dimension.**
     pub base: SemanticNodeId,
-    /// Axis the input was lowered at. **Cache key dimension.**
+    /// Axis the input was lowered at. **Recursion-identity dimension.**
     pub scope_axis: MaterializationScope,
     /// Caller-side projection mode the materialiser ran with.
-    /// **Cache key dimension.**
+    /// **Recursion-identity dimension.**
     pub mode: ProjectionMode,
 }
 
-impl PartialEq for MaterializeStructureCacheKey {
-    /// `scope_canonical_id` is intentionally excluded.
-    /// Cross-owner reuse: N consumer scopes reaching the same
-    /// `(base, scope_axis, mode)` produce ONE cache entry.
+impl PartialEq for MaterializeRuntimeKey {
+    /// `scope_canonical_id` is intentionally excluded — the recursion
+    /// identity does not depend on which consumer reached the node.
     fn eq(&self, other: &Self) -> bool {
         self.base == other.base && self.scope_axis == other.scope_axis && self.mode == other.mode
     }
 }
 
-impl Eq for MaterializeStructureCacheKey {}
+impl Eq for MaterializeRuntimeKey {}
 
-impl std::hash::Hash for MaterializeStructureCacheKey {
+impl std::hash::Hash for MaterializeRuntimeKey {
     /// `scope_canonical_id` is intentionally excluded.
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.base.hash(state);
@@ -192,59 +199,168 @@ impl std::hash::Hash for MaterializeStructureCacheKey {
     }
 }
 
-/// End-state form for the materialiser cache key:
+/// Content-free, canonical-subject DB cache key for the structural
+/// materialiser (R5 query-identity family, R6 content-free, R21
+/// split-env). Keys [`MaterializeStructureDb`].
 ///
-/// ```ignore
-/// struct MaterializationCacheKey {
-///     decl: ResolvedDeclSlotIdentity,
-///     projection_path: ProjectionPathHash,
-///     projection_mode: ProjectionMode,
-///     normalized_type_args: TypeArgsHash,
-///     options_hash: Hash16,
-/// }
-/// ```
+/// The subject is the env-bearing, content-free
+/// [`ResolvedDeclSlotIdentity`](crate::semantic_query::ResolvedDeclSlotIdentity)
+/// `decl` (which carries `project_identity` / `type_env_hash` /
+/// `lib_env_hash` as decl-site identity), plus the extra
+/// `resolve_env_hash` the materialiser's `Instantiate`/`ProjectPath`
+/// reads depend on (R21 — not carried by the slot), plus the
+/// `projection_path` (the typed Pick/Omit/MemberPath route — empty
+/// `RouteDemand::Whole` for a whole-surface subject), the policy axis
+/// (`scope_axis` — `Nested` differs from `TopLevel` via the
+/// function-shape skip, so the axis MUST key the slot), the
+/// `projection_mode`, and the instantiation `normalized_type_args`.
 ///
-/// Introduced alongside [`MaterializeStructureCacheKey`]. The
-/// existing key's `Hash`/`PartialEq` already deliver the cross-owner
-/// reuse contract (consumer scope excluded). Downstream consumers
-/// migrate from the legacy key to this explicit form when the
-/// richer dimensions (`projection_path`, `normalized_type_args`)
-/// become load-bearing.
+/// **`normalized_type_args` carries `SemanticNodeId`s.** This mirrors
+/// the already-compliant
+/// [`SemanticQueryKey::Instantiate { args: Arc<[SemanticNodeId]> }`](crate::semantic_query::SemanticQueryKey)
+/// — the SOLE type-resolution engine key — which keys generic
+/// instantiation on `Arc<[SemanticNodeId]>`. The R6 violation the
+/// migration fixes was a graph-instance `SemanticNodeId` *subject*
+/// (the retired `MaterializeRuntimeKey`-shaped DB key); the
+/// instantiation ARGS are query-identity arguments (semantic meaning),
+/// exactly as `Instantiate` keys them. Two consumers instantiating the
+/// same `Foo<string>` intern the same arg nodes within a generation, so
+/// cross-owner reuse holds; the store clears across generations.
 ///
-/// The discriminating test
-/// `tests/cross_owner_materialise_reuse.rs` verifies the cross-owner
-/// reuse invariant via the cache-entry count.
+/// **Per-content-version rooting is value-side.** The whole-hash never
+/// enters the key — concurrent content versions of one subject co-locate
+/// as candidates in one slot (R20), each rooted by its cached value's
+/// `ReadSetSignature.facts` + `self_root_canonicals` (the materialise
+/// SUBJECT's declaration-origin file — the `base` node's origin for a
+/// non-route subject, or the extracted route root's file for a
+/// route-shaped subject, NEVER the consumer wrapper scope) +
+/// `validated_at_generation`, validated strictly on every read. A
+/// content edit to the subject or any visited file rejects the stale
+/// candidate WITHOUT a key change.
+///
+/// Built by the single canonical builder
+/// [`derive_materialization_subject`]; lookup and publish both route
+/// through it, so they key on the identical slot. A request whose
+/// subject cannot be canonicalised yields `None` (uncached) rather than
+/// a content-derived key fallback. The cross-owner reuse invariant
+/// (`tests/g_misc0/cross_owner_materialise_reuse.rs`) holds: N consumer
+/// scopes reaching the same canonical subject share ONE slot.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MaterializationCacheKey {
-    /// Resolved declaration slot. Carries the content-free 6-field
-    /// identity (R7).
+    /// Resolved declaration slot — the env-bearing, content-free
+    /// canonical SUBJECT root (carries `project_identity` /
+    /// `type_env_hash` / `lib_env_hash`).
     pub decl: crate::semantic_query::ResolvedDeclSlotIdentity,
-    /// Hash of the projection path (`['a']['b']['c']` chain) for
-    /// path-precise materialisation. Empty path = whole-surface.
-    pub projection_path: ProjectionPathHash,
+    /// Typed projection path: the Pick / Omit / `['a']['b']` member
+    /// route the subject is projected along. `RouteDemand::Whole` =
+    /// whole-surface. Typed IR — no string-hash, no text matching.
+    pub projection_path: crate::resolver_core::RouteDemand,
+    /// Materialisation policy axis (TopLevel vs Nested). Nested differs
+    /// from TopLevel via the function-shape skip, so two axes for the
+    /// same subject must NOT alias onto one slot.
+    pub scope_axis: MaterializationScope,
     /// Caller-side projection mode the materialiser ran with.
     pub projection_mode: ProjectionMode,
-    /// Hash of the normalized type-argument list. Walks args in
-    /// declaration order, alpha-normalised as structural `TypeExpr`;
-    /// free type-params become `TypeParam(<binder-relative index>)`.
-    /// See `docs/arch/materialize-owner-local-audit.md` for the
-    /// normalisation rationale.
-    pub normalized_type_args: TypeArgsHash,
-    /// Caller-side options hash for fence options.
-    pub options_hash: crate::semantic_query::HashValue,
+    /// Instantiation type-argument list, as `SemanticNodeId`s —
+    /// identical representation to
+    /// [`SemanticQueryKey::Instantiate`](crate::semantic_query::SemanticQueryKey)`.args`.
+    /// Empty for a bare `DeclRef` subject; non-empty for an
+    /// `InstantiationRef` / generic route root.
+    pub normalized_type_args: Arc<[SemanticNodeId]>,
+    /// The `resolve_env_hash` the materialiser's reads depend on (R21 —
+    /// not carried by the slot).
+    pub resolve_env_hash: crate::semantic_query::HashValue,
 }
 
-/// Hash of a projection path. Computed from the typed-IR
-/// `TypeExpr` chain when the path becomes load-bearing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub struct ProjectionPathHash(pub [u8; 16]);
+/// Derive the content-free [`MaterializationCacheKey`] subject for a
+/// materialise request, or `None` when the subject is a genuinely
+/// root-less anonymous node.
+///
+/// A `None` request keys NO DB slot: it computes uncached (returning its
+/// real dep facts to the canonical parent) rather than fall back to a
+/// graph-instance `SemanticNodeId` key (R6: a query-identity cache key is
+/// content-free; R20: never a content-derived key fallback). The cached
+/// subjects are exactly the canonically-rooted ones — DeclRef bodies,
+/// route-rooted Pick/Omit/IndexedAccess, and generic instantiations — and
+/// those are also the cross-owner-reuse subjects (the anonymous nested
+/// sub-results live inside one cold build; a warm hit on the canonical
+/// parent skips the recursion entirely).
+///
+/// Derivation order:
+/// 1. Registry-route extraction (builtin `Pick`/`Omit`/`IndexedAccess`)
+///    via the shared [`extract_route_root_identity_node`] — the route's
+///    real root identity + the typed route as the projection path + the
+///    generic root's args.
+/// 2. A plain `DeclRef` carrier — slot, whole-surface, no args.
+/// 3. An `InstantiationRef` carrier (userland or builtin) — slot + its
+///    instantiation args.
+/// 4. Otherwise `None`.
+///
+/// **One canonical builder.** `materialize_component_meta_structure`'s
+/// warm peek AND its split-publish both call this, so they key on the
+/// identical slot. Env is sourced from the SUBJECT root's canonical via
+/// the shared U2-derived `type_slot_for` + `resolve_env_hash_for` (the
+/// SAME builders the reducer caches use, sourcing env from the live host).
+///
+/// [`extract_route_root_identity_node`]:
+/// crate::meta_resolve::extract_route_root_identity_node
+pub(crate) fn derive_materialization_subject(
+    ctx: &dyn ResolverContext,
+    runtime_key: &MaterializeRuntimeKey,
+) -> Option<MaterializationCacheKey> {
+    use crate::semantic_query::{DeclIdentity, SemanticNodeData};
 
-/// Hash of a normalized type-argument list. Computed from the
-/// alpha-normalised typed-IR argument list per the normalisation
-/// rules documented in
-/// `docs/arch/materialize-owner-local-audit.md` (b).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub struct TypeArgsHash(pub [u8; 16]);
+    let dispatch = ctx.dispatch();
+    let graph = ctx.project_type_store().semantic_graph();
+    let base = runtime_key.base;
+
+    // 1. Registry-route extraction — builtin Pick/Omit/IndexedAccess.
+    //    The route's actual root (Foo, recursed past the wrapping Pick)
+    //    is the canonical subject; the typed route is the projection
+    //    path; the generic root's args (e.g. `Pick<Foo<T>, k>`) are the
+    //    instantiation args.
+    if let Some(extraction) = crate::meta_resolve::extract_route_root_identity_node(graph, base, 0)
+    {
+        let root = &extraction.root_identity;
+        return Some(MaterializationCacheKey {
+            decl: dispatch
+                .type_slot_for(Arc::clone(&root.canonical_id), Arc::clone(&root.decl_name)),
+            projection_path: extraction.route.clone(),
+            scope_axis: runtime_key.scope_axis,
+            projection_mode: runtime_key.mode,
+            normalized_type_args: Arc::clone(&extraction.root_args),
+            resolve_env_hash: dispatch.resolve_env_hash_for(&root.canonical_id),
+        });
+    }
+
+    // 2/3. Plain DeclRef or InstantiationRef carrier — the carrier's
+    //      declaration identity is the canonical subject root.
+    let (identity, args): (DeclIdentity, Arc<[SemanticNodeId]>) = match graph
+        .node_data(base)
+        .as_deref()
+    {
+        Some(SemanticNodeData::DeclRef { identity }) => (
+            identity.clone(),
+            Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        ),
+        Some(SemanticNodeData::InstantiationRef { base, args }) => (base.clone(), Arc::clone(args)),
+        // 4. Genuinely root-less anonymous node (inline Object, Function,
+        //    Union, Global primitive, resolved DeclRef body, …) — no
+        //    canonical subject. Compute uncached.
+        _ => return None,
+    };
+    Some(MaterializationCacheKey {
+        decl: dispatch.type_slot_for(
+            Arc::clone(&identity.canonical_id),
+            Arc::clone(&identity.decl_name),
+        ),
+        projection_path: crate::resolver_core::RouteDemand::Whole,
+        scope_axis: runtime_key.scope_axis,
+        projection_mode: runtime_key.mode,
+        normalized_type_args: args,
+        resolve_env_hash: dispatch.resolve_env_hash_for(&identity.canonical_id),
+    })
+}
 
 /// Boundary that converts a dispatch
 /// `CacheRead<QueryResult<SemanticNodeId>>` to a
@@ -303,7 +419,7 @@ thread_local! {
     /// Per-thread stack of in-flight materialiser keys.
     /// Used for same-key recursion detection. Push on entry, pop on
     /// exit (RAII via `MaterializeInFlightGuard`).
-    static MATERIALIZE_IN_FLIGHT: RefCell<Vec<MaterializeStructureCacheKey>> =
+    static MATERIALIZE_IN_FLIGHT: RefCell<Vec<MaterializeRuntimeKey>> =
         const { RefCell::new(Vec::new()) };
 
     /// Per-thread depth counter. The materialiser's
@@ -330,13 +446,13 @@ pub const MAX_DEPTH: usize = 4096;
 /// stack and the `MATERIALIZE_DEPTH` counter. Push on construction,
 /// pop on `Drop`. Panic-safe.
 pub struct MaterializeInFlightGuard {
-    key: Option<MaterializeStructureCacheKey>,
+    key: Option<MaterializeRuntimeKey>,
 }
 
 impl MaterializeInFlightGuard {
     /// Push `key` onto the per-thread in-flight stack and increment
     /// the depth counter. Returns the guard.
-    pub fn push(key: MaterializeStructureCacheKey) -> Self {
+    pub fn push(key: MaterializeRuntimeKey) -> Self {
         MATERIALIZE_IN_FLIGHT.with(|stack| stack.borrow_mut().push(key.clone()));
         MATERIALIZE_DEPTH.with(|d| d.set(d.get().saturating_add(1)));
         Self { key: Some(key) }
@@ -349,7 +465,7 @@ impl MaterializeInFlightGuard {
     }
 
     /// Internal — does the per-thread stack already contain `key`?
-    fn contains_key(key: &MaterializeStructureCacheKey) -> bool {
+    fn contains_key(key: &MaterializeRuntimeKey) -> bool {
         MATERIALIZE_IN_FLIGHT.with(|stack| stack.borrow().contains(key))
     }
 }
@@ -423,15 +539,18 @@ impl Drop for MaterializeInFlightGuard {
 ///   fork + cold-recompute for their own view. The shared cache stays
 ///   empty so the next cold-miss recomputes.
 ///
-/// `base_origin_self_root` is the `base` node's declaration-origin
-/// file (`NodeScopeId::File`) when it is file-derived — the entry's
-/// strict self-root, pinned to the `whole_hash` baked into the node's
-/// origin sidecar at intern time. The consumer materialise scope is
-/// NOT a self-root: a `MaterializeStructureDb` value's identity does
-/// not depend on which consumer reached it (R7 cross-owner reuse). If
-/// the scope IS read during compute, that read is observed naturally
-/// through the tracer / local-dep path and appears as an ordinary
-/// dependency fact in `local_fence`.
+/// `base_origin_self_root` is the materialise SUBJECT's
+/// declaration-origin file — the entry's strict self-root (see
+/// [`materialize_subject_origin_self_root`]). For a non-route subject it
+/// is the `base` node's `NodeScopeId::File` origin; for a route-shaped
+/// subject it is the EXTRACTED ROOT's declaration file at its
+/// authoritative observed `whole_hash`, NOT the wrapper carrier's
+/// consumer scope. The consumer materialise scope is NEVER a self-root:
+/// a `MaterializeStructureDb` value's identity does not depend on which
+/// consumer reached it (R7 cross-owner reuse). If a non-self-root file
+/// IS read during compute, that read is observed naturally through the
+/// tracer / local-dep path and appears as an ordinary dependency fact in
+/// `local_fence`.
 ///
 /// `validated_at_generation` is the project generation snapshotted by
 /// the `compute` closure before it dispatched any work; it is stamped
@@ -558,19 +677,22 @@ fn finish_materialize_admission(
 /// Build the observed-root fact signature + self-root canonical set
 /// for a `MaterializeStructureDb` entry — **provenance-pure**.
 ///
-/// The signature leads with the `base` node's declaration-origin
-/// self-root `FileWholeHash` (when the base is file-derived), then
-/// merges the fence facts as cross-file dependency facts.
+/// The signature leads with the materialise SUBJECT's
+/// declaration-origin self-root `FileWholeHash` (when the subject is
+/// file-derived), then merges the fence facts as cross-file dependency
+/// facts.
 ///
-/// The single self-root is the `base` node's declaration-origin file
-/// (`base_origin_self_root`) — pinned to the `whole_hash` baked into
-/// the node's `NodeScopeId::File` origin at intern time. The consumer
-/// materialise scope is NOT a self-root: a `MaterializeStructureDb`
-/// value's identity does not depend on which consumer reached it (R7
-/// cross-owner reuse — N consumer scopes reaching the same
-/// `(base, scope_axis, mode)` share ONE entry). If the consumer scope
-/// IS read during compute, that read enters `local_fence` as an
-/// ordinary dependency fact through the normal tracer path.
+/// The single self-root is the SUBJECT's declaration-origin file
+/// (`base_origin_self_root`) — the `base` node's `NodeScopeId::File`
+/// origin for a non-route subject, or the EXTRACTED ROOT's declaration
+/// file for a route-shaped subject (see
+/// [`materialize_subject_origin_self_root`]). The consumer materialise
+/// scope is NEVER a self-root: a `MaterializeStructureDb` value's
+/// identity does not depend on which consumer reached it (R7 cross-owner
+/// reuse — N consumer scopes reaching the same content-free subject
+/// share ONE entry). If a non-self-root file IS read during compute,
+/// that read enters `local_fence` as an ordinary dependency fact through
+/// the normal tracer path.
 ///
 /// A `Global`-origin base with no traced fence facts and no
 /// `base_origin_self_root` is admissible as a zero-self-root,
@@ -600,7 +722,10 @@ fn materialize_structure_read_set(
 
     // Collapse observed self-roots into a per-canonical hash map; a
     // conflicting hash for the same canonical is a torn observation.
-    // The `base` node's declaration-origin file is the sole self-root.
+    // The materialise SUBJECT's declaration-origin file is the sole
+    // strict self-root (the extracted route root for a route-shaped
+    // subject, the `base` node's origin for a non-route subject — see
+    // `materialize_subject_origin_self_root`).
     let mut self_root_hashes: rustc_hash::FxHashMap<Arc<str>, crate::types::Hash16> =
         rustc_hash::FxHashMap::default();
     if let Some((origin_canonical, origin_hash)) = base_origin_self_root {
@@ -677,6 +802,47 @@ fn base_node_origin_self_root(
         } => Some((canonical_id, whole_hash)),
         crate::semantic_query::NodeScopeId::Global => None,
     }
+}
+
+/// The materialise SUBJECT's declaration-origin self-root — the entry's
+/// sole strict self-root. This is subject-aware, not node-scope-naive:
+///
+/// - **Route-shaped subject** (`Pick`/`Omit`/IndexedAccess carrier): the
+///   value is a pure function of the EXTRACTED ROOT (e.g. `Shared` in
+///   `Pick<Shared,'id'>`) — the route compute reads the extracted root
+///   via `Instantiate`, never the wrapper carrier's file. The wrapper
+///   carrier is interned at the CONSUMER scope (`lower.rs` interns the
+///   member-value carrier + its inner `DeclRef` arg with the lowering
+///   `scope`, i.e. the consumer file), so `base_node_origin_self_root`
+///   over the carrier would root the SHARED cross-owner entry on the
+///   FIRST PRODUCER's wrapper file — a later edit to that producer's
+///   wrapper then falsely rejects every OTHER owner's warm reuse (R7
+///   cross-owner false miss). The value's true self-root is the
+///   extracted root's declaration file; its observed hash comes from
+///   `authoritative_current_content_hash` (overlay-aware, no stale
+///   `get_any`) — the SAME hash the route compute's `Instantiate` read
+///   observes, so it never tears against the traced fact rail. When the
+///   extracted root has no authoritative content hash (untracked /
+///   evicted), no strict self-root is seeded; the route compute's
+///   `Instantiate` read still records the extracted root's `FileWholeHash`
+///   as an ordinary dependency fact, which a tracked content edit still
+///   rejects on the lazy rail.
+/// - **Non-route subject** (plain `DeclRef`/`InstantiationRef`, or a
+///   root-less anonymous node): the `base` node IS the subject, so the
+///   self-root is the base node's declaration-origin file — unchanged.
+fn materialize_subject_origin_self_root(
+    ctx: &dyn ResolverContext,
+    base: SemanticNodeId,
+) -> Option<(Arc<str>, crate::resolver_core::ResolverHash16)> {
+    let graph = ctx.project_type_store().semantic_graph();
+    if let Some(extraction) = crate::meta_resolve::extract_route_root_identity_node(graph, base, 0)
+    {
+        let root_canonical = Arc::clone(&extraction.root_identity.canonical_id);
+        return ctx
+            .authoritative_current_content_hash(&root_canonical)
+            .map(|hash| (root_canonical, hash));
+    }
+    base_node_origin_self_root(ctx, base)
 }
 
 /// Re-base a `MaterializeStructureDb` entry's fact rail on top of its
@@ -790,7 +956,7 @@ fn merge_traced_facts_into_materialize_carrier(
 /// `RegistryRouteCycleGuard`, or `RecursiveHelperCycleGuard`.
 pub(crate) fn materialize_component_meta_structure(
     ctx: &dyn ResolverContext,
-    key: MaterializeStructureCacheKey,
+    key: MaterializeRuntimeKey,
 ) -> crate::semantic_query::CacheRead<MaterializeOutcome> {
     let _loop8_timer = crate::loop5_instrumentation::TimerGuard::new(
         &crate::loop5_instrumentation::MATERIALIZE_STRUCTURE_CALLS,
@@ -800,11 +966,20 @@ pub(crate) fn materialize_component_meta_structure(
 
     let db = ctx.project_type_store().materialize_structure_db();
 
-    // Warm-hit peek: a stale candidate is skipped on read; reclamation is
-    // the FIFO budget / per-canonical drain / schema eviction / generation
-    // clear.
-    if let Some(cached) = db.peek(&key, ctx) {
-        return cached;
+    // Derive the content-free canonical-subject DB cache key (the single
+    // canonical builder used by BOTH the warm peek below and the
+    // split-publish at the tail). `None` ⇒ a genuinely root-less
+    // anonymous subject: it keys no DB slot and computes uncached,
+    // propagating its real dep facts to the canonical parent.
+    let cache_key = derive_materialization_subject(ctx, &key);
+
+    // Warm-hit peek (canonical-keyed subjects only): a stale candidate is
+    // skipped on read; reclamation is the FIFO budget / per-canonical
+    // drain / schema eviction / generation clear.
+    if let Some(cache_key) = cache_key.as_ref() {
+        if let Some(cached) = db.peek(cache_key, ctx) {
+            return cached;
+        }
     }
 
     // Same-key thread-local re-entry detection.
@@ -918,15 +1093,18 @@ pub(crate) fn materialize_component_meta_structure(
         // this onto the entry.
         let validated_at_generation = ctx.project_type_store().current_project_generation();
 
-        // The `base` node's declaration-origin file is the entry's
-        // sole self-root — pinned to the `whole_hash` baked into the
-        // node's origin sidecar at intern time. The consumer
-        // materialise scope is NOT a self-root (R7 cross-owner reuse):
-        // a `MaterializeStructureDb` value's identity does not depend
-        // on which consumer reached it. If the scope IS read during
-        // compute, that read enters `local_fence` as an ordinary
-        // dependency fact through the normal tracer path.
-        let base_origin_self_root = base_node_origin_self_root(ctx, key_for_compute.base);
+        // The SUBJECT's declaration-origin file is the entry's sole
+        // self-root. For a non-route subject the `base` node IS the
+        // subject; for a route-shaped subject (`Pick`/`Omit`/IndexedAccess)
+        // it is the EXTRACTED ROOT's declaration file — NOT the wrapper
+        // carrier's consumer scope, which would over-root the shared
+        // cross-owner entry on the first producer's wrapper file (R7
+        // false miss). The consumer materialise scope is NEVER a
+        // self-root: a `MaterializeStructureDb` value's identity does not
+        // depend on which consumer reached it. If a non-self-root file IS
+        // read during compute, that read enters `local_fence` as an
+        // ordinary dependency fact through the normal tracer path.
+        let base_origin_self_root = materialize_subject_origin_self_root(ctx, key_for_compute.base);
 
         // Test-only fact-injection hook. When the host's per-host
         // `materialize_force_overflow_observations` knob is non-zero,
@@ -1207,7 +1385,7 @@ pub(crate) fn materialize_component_meta_structure(
                         // typically an Object, which the recursive
                         // entry routes to `materialize_object_surface`
                         // — that walk applies the per-member policy.
-                        let body_key = MaterializeStructureCacheKey {
+                        let body_key = MaterializeRuntimeKey {
                             scope_canonical_id: Arc::clone(&key_for_compute.scope_canonical_id),
                             base: body_id,
                             scope_axis: key_for_compute.scope_axis,
@@ -1534,45 +1712,98 @@ pub(crate) fn materialize_component_meta_structure(
             }
         }
     };
-    // Route the cold materialisation through the Db's query-identity
-    // split-publish lifecycle over the shared reverse-indexed candidate
-    // store. The Db owns the warm-hit lookup, post-compute revalidation,
-    // publish-core (counter + reverse-index + retention-budget admission
-    // under the slot guard), the guard-free deferred FIFO eviction, and
-    // the publish fence (so a project-generation `clear` cannot interleave
-    // and the re-entrant eviction cannot self-deadlock).
-    let result = db.get_or_compute_admit(&key, ctx, compute);
-
-    match result {
-        Some(read) => read,
-        None => {
-            // Unreachable by construction. The cooperative runtime
-            // returns `None` only for a `ComputeFailed` slot — and this
-            // materialiser's compute never constructs
-            // `ComputeAdmission::Failed` (every other terminal lowers to
-            // `Cacheable` or `ReturnOnly`). An admission-REFUSED compute
-            // (post-compute revalidation rejection) returns the COMPUTED
-            // value through the node's `lower_unadmitted` hook
-            // (`cache_suppress = true`, `result_is_partial` clear), and a
-            // joiner on a panicked or admission-rejected winner forks and
-            // cold-recomputes instead of surfacing `None` — so neither
-            // path lands here. Defensive fallback only: a non-cacheable,
-            // never-partial `Tainted` child, so an unforeseen protocol
-            // regression degrades soft instead of panicking the request.
-            debug_assert!(
-                false,
-                "materialize_component_meta_structure: cooperative admission returned None — \
-                 the materialiser compute never constructs Failed and admission refusal \
-                 returns the computed value; a None here is a protocol regression"
-            );
-            crate::semantic_query::CacheRead {
-                value: MaterializeOutcome::Tainted(key.base),
-                dep_signature: empty_signature(),
-                walker_diagnostics: Arc::from([]),
-                cache_suppress: true,
-                result_is_partial: false,
+    match cache_key {
+        Some(cache_key) => {
+            // Canonical-keyed subject: route the cold materialisation
+            // through the Db's query-identity split-publish lifecycle over
+            // the shared reverse-indexed candidate store. The Db owns the
+            // warm-hit lookup, post-compute revalidation, publish-core
+            // (counter + reverse-index + retention-budget admission under
+            // the slot guard), the guard-free deferred FIFO eviction, and
+            // the publish fence (so a project-generation `clear` cannot
+            // interleave and the re-entrant eviction cannot self-deadlock).
+            match db.get_or_compute_admit(&cache_key, ctx, compute) {
+                Some(read) => read,
+                None => {
+                    // Unreachable by construction. The cooperative runtime
+                    // returns `None` only for a `ComputeFailed` slot — and
+                    // this materialiser's compute never constructs
+                    // `ComputeAdmission::Failed`. An admission-REFUSED
+                    // compute returns the COMPUTED value through the node's
+                    // `lower_unadmitted` hook, and a joiner on a
+                    // panicked/rejected winner forks + cold-recomputes — so
+                    // neither path lands here. Defensive soft-degrade.
+                    debug_assert!(
+                        false,
+                        "materialize_component_meta_structure: cooperative admission returned \
+                         None — the materialiser compute never constructs Failed and admission \
+                         refusal returns the computed value; a None here is a protocol regression"
+                    );
+                    crate::semantic_query::CacheRead {
+                        value: MaterializeOutcome::Tainted(key.base),
+                        dep_signature: empty_signature(),
+                        walker_diagnostics: Arc::from([]),
+                        cache_suppress: true,
+                        result_is_partial: false,
+                    }
+                }
             }
         }
+        None => {
+            // Root-less anonymous subject — keys NO DB slot (R6: a
+            // graph-instance `SemanticNodeId` is never a query-identity
+            // cache key; R20: never a content-derived key fallback). Run
+            // the same `install_fact_tracer`-wrapped compute (it drives the
+            // completeness scope and builds the dispatch dep signature), but
+            // return the outcome WITHOUT admitting it — propagating its real
+            // dep facts so the canonical parent roots correctly (the
+            // no-under-root invariant). No DB peek/publish and no
+            // singleflight: an anonymous node was going to recompute anyway,
+            // and nothing is shared.
+            run_uncached_materialisation(compute(), key.base)
+        }
+    }
+}
+
+/// Map an anonymous-subject materialise compute (a request that keys no
+/// `MaterializeStructureDb` slot — see [`derive_materialization_subject`])
+/// to the `CacheRead` returned to the caller.
+///
+/// **No-under-root invariant.** A complete `Cacheable` outcome returns its
+/// real `dispatch_dep_signature` (NOT an empty signature) so the canonical
+/// parent that merges this child read roots on the child's dep facts. The
+/// child carries `cache_suppress = true` (it was not admitted — the
+/// enclosing build's memo treats it as inner-non-cacheable) but
+/// `result_is_partial = false` (it is COMPLETE), so it does NOT suppress
+/// the parent's admission (`observe_component_meta_read_suppress` keys on
+/// `result_is_partial`, never `cache_suppress`). A `ReturnOnly` outcome is
+/// already the correct non-shareable shape (its empty dep_signature is the
+/// R20 contract for an intrinsically non-cacheable / overflow / partial
+/// result) and passes through unchanged.
+fn run_uncached_materialisation(
+    admission: crate::cache_runtime::singleflight::ComputeAdmission<
+        crate::semantic_query::CacheRead<MaterializeOutcome>,
+        MaterializeStructureEntry,
+    >,
+    fallback_base: SemanticNodeId,
+) -> crate::semantic_query::CacheRead<MaterializeOutcome> {
+    use crate::cache_runtime::singleflight::ComputeAdmission;
+    match admission {
+        ComputeAdmission::Cacheable(entry) => crate::semantic_query::CacheRead {
+            value: entry.outcome,
+            dep_signature: entry.dispatch_dep_signature,
+            walker_diagnostics: Arc::from([]),
+            cache_suppress: true,
+            result_is_partial: false,
+        },
+        ComputeAdmission::ReturnOnly(read) => read,
+        ComputeAdmission::Failed => crate::semantic_query::CacheRead {
+            value: MaterializeOutcome::Tainted(fallback_base),
+            dep_signature: empty_signature(),
+            walker_diagnostics: Arc::from([]),
+            cache_suppress: true,
+            result_is_partial: false,
+        },
     }
 }
 
@@ -1642,7 +1873,7 @@ pub(crate) fn is_package_backed_ref(ctx: &dyn ResolverContext, node: SemanticNod
 /// surface is unchanged).
 fn materialize_object_surface(
     ctx: &dyn ResolverContext,
-    key: &MaterializeStructureCacheKey,
+    key: &MaterializeRuntimeKey,
     surface: &crate::semantic_query::SurfaceView,
     local_fence: &mut Vec<(Arc<str>, DepVersion)>,
 ) -> MaterializeOutcome {
@@ -1736,11 +1967,11 @@ fn materialize_object_surface(
 /// Recursive / Error keep the symbolic form).
 fn materialize_child_at_nested(
     ctx: &dyn ResolverContext,
-    parent_key: &MaterializeStructureCacheKey,
+    parent_key: &MaterializeRuntimeKey,
     child: SemanticNodeId,
     local_fence: &mut Vec<(Arc<str>, DepVersion)>,
 ) -> (SemanticNodeId, bool) {
-    let sub_key = MaterializeStructureCacheKey {
+    let sub_key = MaterializeRuntimeKey {
         scope_canonical_id: Arc::clone(&parent_key.scope_canonical_id),
         base: child,
         scope_axis: MaterializationScope::Nested,
@@ -1972,19 +2203,19 @@ mod tests {
     fn cache_key_is_distinct_per_axis_and_mode() {
         let scope: Arc<str> = Arc::from("/w/c.vue");
         let base = dummy_node(5);
-        let k1 = MaterializeStructureCacheKey {
+        let k1 = MaterializeRuntimeKey {
             scope_canonical_id: Arc::clone(&scope),
             base,
             scope_axis: MaterializationScope::TopLevel,
             mode: ProjectionMode::Expanded,
         };
-        let k2 = MaterializeStructureCacheKey {
+        let k2 = MaterializeRuntimeKey {
             scope_canonical_id: Arc::clone(&scope),
             base,
             scope_axis: MaterializationScope::Nested,
             mode: ProjectionMode::Expanded,
         };
-        let k3 = MaterializeStructureCacheKey {
+        let k3 = MaterializeRuntimeKey {
             scope_canonical_id: Arc::clone(&scope),
             base,
             scope_axis: MaterializationScope::TopLevel,
@@ -2054,6 +2285,17 @@ mod tests {
             whole_hash,
             decl_name: StdArc::from(name),
         }
+    }
+
+    /// Derive the content-free `MaterializationCacheKey` for a runtime key
+    /// whose `base` is decl-rooted (a `DeclRef` / `InstantiationRef` /
+    /// route carrier) — the SAME canonical builder
+    /// `materialize_component_meta_structure` keys its DB peek/publish on.
+    /// Panics if the base is a root-less anonymous node (which keys no DB
+    /// slot); these fixtures all lower `Ref { name }` to a `DeclRef` base.
+    fn a0_ms_cache_key(host: &VerterHost, key: &MaterializeRuntimeKey) -> MaterializationCacheKey {
+        derive_materialization_subject(host, key)
+            .expect("decl-rooted base canonicalises to a MaterializationCacheKey subject")
     }
 
     /// Productive object recursion: `type Tree = { children: Tree[] }`.
@@ -2642,7 +2884,7 @@ export type GetItemKeys<I, T extends NestedItem<I> = NestedItem<I>> =
                 ProjectionMode::Navigate,
             )
             .expect("lowering Foo via Navigate must succeed");
-        let key = MaterializeStructureCacheKey {
+        let key = MaterializeRuntimeKey {
             scope_canonical_id: StdArc::from("/types.ts"),
             base: decl_ref_node,
             scope_axis: MaterializationScope::TopLevel,
@@ -2750,7 +2992,7 @@ export type C<T> = A<T>
                 ProjectionMode::Navigate,
             )
             .expect("lowering must succeed");
-        let key = MaterializeStructureCacheKey {
+        let key = MaterializeRuntimeKey {
             scope_canonical_id: StdArc::from("/types.ts"),
             base: decl_ref_node,
             scope_axis: MaterializationScope::TopLevel,
@@ -2772,7 +3014,7 @@ export type C<T> = A<T>
         // self-root happened to be content-invariant). A `None` result is
         // the stale candidate correctly skipped.
         let db = host.project_type_store().materialize_structure_db();
-        let _ = db.peek(&key, host);
+        let _ = db.peek(&a0_ms_cache_key(host, &key), host);
     }
 
     /// #5 — orphan entry inserted directly into the cache
@@ -2801,7 +3043,7 @@ export type C<T> = A<T>
                 ProjectionMode::Navigate,
             )
             .expect("lowering must succeed");
-        let key = MaterializeStructureCacheKey {
+        let key = MaterializeRuntimeKey {
             scope_canonical_id: StdArc::from("/types.ts"),
             base: decl_ref_node,
             scope_axis: MaterializationScope::TopLevel,
@@ -2820,7 +3062,7 @@ export type C<T> = A<T>
         ));
         let db = host.project_type_store().materialize_structure_db();
         db.insert_for_test(
-            key.clone(),
+            a0_ms_cache_key(host, &key),
             MaterializeOutcome::Value(decl_ref_node),
             stale_carrier,
             // `/types.ts` listed as a self-root so the strict validator
@@ -2834,7 +3076,7 @@ export type C<T> = A<T>
             host.project_type_store().current_project_generation(),
         );
         // Peek must return None (the candidate's strict self-root fails).
-        let peek_result = db.peek(&key, host);
+        let peek_result = db.peek(&a0_ms_cache_key(host, &key), host);
         assert!(
             peek_result.is_none(),
             "a candidate whose strict self-root fails must miss on peek"
@@ -3167,7 +3409,8 @@ export type C<T> = A<T>
             ));
         let db = host.project_type_store().ref_cycle_db();
         db.insert_for_test(
-            id.clone(),
+            &id,
+            host,
             false,
             stale_carrier,
             // `/nonexistent.ts` listed as a self-root so the strict
@@ -3261,7 +3504,7 @@ export type C<T> = A<T>
                 crate::semantic_query::ProjectionMode::Navigate,
             )
             .expect("lowering Foo via Navigate must succeed");
-        let key = MaterializeStructureCacheKey {
+        let key = MaterializeRuntimeKey {
             scope_canonical_id: StdArc::from("/types.ts"),
             base: decl_ref_node,
             scope_axis: MaterializationScope::TopLevel,
@@ -3322,7 +3565,7 @@ export type C<T> = A<T>
              the next request cold-recomputes"
         );
         assert!(
-            db.peek(&key, host).is_none(),
+            db.peek(&a0_ms_cache_key(host, &key), host).is_none(),
             "MaterializeStructureDb cache MUST NOT hold a candidate for the key \
              whose cold compute overflowed the fact tracer"
         );
@@ -3432,7 +3675,7 @@ export type C<T> = A<T>
                 ProjectionMode::Navigate,
             )
             .expect("lowering Foo via Navigate must succeed");
-        let key = MaterializeStructureCacheKey {
+        let key = MaterializeRuntimeKey {
             scope_canonical_id: StdArc::from("/m1_types.ts"),
             base: decl_ref_node,
             scope_axis: MaterializationScope::TopLevel,
@@ -3470,7 +3713,7 @@ export type C<T> = A<T>
              OR-in refuses ALL admission, leaving live_count unchanged at {entries_before})",
         );
         assert!(
-            db.peek(&key, host).is_some(),
+            db.peek(&a0_ms_cache_key(host, &key), host).is_some(),
             "MaterializeStructureDb MUST hold the complete candidate for the key \
              despite the outer sticky",
         );
@@ -3517,7 +3760,7 @@ export type C<T> = A<T>
                 ProjectionMode::Navigate,
             )
             .expect("lowering Foo via Navigate must succeed");
-        let key = MaterializeStructureCacheKey {
+        let key = MaterializeRuntimeKey {
             scope_canonical_id: StdArc::from("/m1_types.ts"),
             base: decl_ref_node,
             scope_axis: MaterializationScope::TopLevel,
@@ -3552,7 +3795,7 @@ export type C<T> = A<T>
             read.value,
         );
         assert!(
-            db.peek(&key, host).is_none(),
+            db.peek(&a0_ms_cache_key(host, &key), host).is_none(),
             "the rejected entry must NOT be admitted into MaterializeStructureDb",
         );
         assert!(
@@ -3616,7 +3859,7 @@ export type C<T> = A<T>
                 ProjectionMode::Navigate,
             )
             .expect("lowering Foo via Navigate must succeed");
-        let key = MaterializeStructureCacheKey {
+        let key = MaterializeRuntimeKey {
             scope_canonical_id: StdArc::from("/m_falsestale_types.ts"),
             base: decl_ref_node,
             scope_axis: MaterializationScope::TopLevel,
@@ -3640,7 +3883,7 @@ export type C<T> = A<T>
              rejection leaves the entry non-cacheable on every first request",
         );
         assert!(
-            db.peek(&key, host).is_some(),
+            db.peek(&a0_ms_cache_key(host, &key), host).is_some(),
             "the complete first-request materialise must be admitted into \
              MaterializeStructureDb — the mid-request-parsed contributor must not \
              fail the admission revalidation",
@@ -3710,7 +3953,7 @@ export type C<T> = A<T>
                 ProjectionMode::Navigate,
             )
             .expect("lowering Foo via Navigate must succeed");
-        let key = MaterializeStructureCacheKey {
+        let key = MaterializeRuntimeKey {
             scope_canonical_id: StdArc::from("/m1_partial_types.ts"),
             base: decl_ref_node,
             scope_axis: MaterializationScope::TopLevel,
@@ -3751,7 +3994,7 @@ export type C<T> = A<T>
              and live_count increases)",
         );
         assert!(
-            db.peek(&key, host).is_none(),
+            db.peek(&a0_ms_cache_key(host, &key), host).is_none(),
             "MaterializeStructureDb MUST NOT hold a candidate for a genuine partial \
              — a subsequent peek must MISS (flipping the gate to `false` makes this peek HIT \
              a poisoned partial replayed as complete)",
@@ -3788,7 +4031,7 @@ export type C<T> = A<T>
 
         // A concrete child node id; the parent key carries it as base.
         let child = SemanticNodeId(1);
-        let parent_key = MaterializeStructureCacheKey {
+        let parent_key = MaterializeRuntimeKey {
             scope_canonical_id: StdArc::from("/m2_types.ts"),
             base: SemanticNodeId(0),
             scope_axis: MaterializationScope::TopLevel,
@@ -3797,7 +4040,7 @@ export type C<T> = A<T>
         // The sub_key `materialize_child_at_nested` will construct for the
         // child — push it into the in-flight guard so the inner materialise
         // hits the same-key re-entry (`Recursive`, result_is_partial=true).
-        let sub_key = MaterializeStructureCacheKey {
+        let sub_key = MaterializeRuntimeKey {
             scope_canonical_id: StdArc::clone(&parent_key.scope_canonical_id),
             base: child,
             scope_axis: MaterializationScope::Nested,
@@ -3843,18 +4086,27 @@ export type C<T> = A<T>
         let host = project.host();
         let db = host.project_type_store().materialize_structure_db();
 
-        let key = MaterializeStructureCacheKey {
-            scope_canonical_id: StdArc::from("/gen_peek_owner.ts"),
-            base: SemanticNodeId(0),
+        // A content-free canonical-subject key built directly (this test
+        // exercises the generation gate, not subject derivation — the
+        // planted base `SemanticNodeId(0)` is a synthetic value node, not a
+        // canonicalisable subject).
+        let cache_key = MaterializationCacheKey {
+            decl: crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
+                StdArc::from("/gen_peek_owner.ts"),
+                StdArc::from("Probe"),
+            ),
+            projection_path: crate::resolver_core::RouteDemand::Whole,
             scope_axis: MaterializationScope::TopLevel,
-            mode: ProjectionMode::Shallow,
+            projection_mode: ProjectionMode::Shallow,
+            normalized_type_args: StdArc::from(Vec::new().into_boxed_slice()),
+            resolve_env_hash: crate::semantic_query::HashValue::default(),
         };
         // Plant a candidate with a VALID carrier (empty signature
         // validates vacuously — no self-root, no fact dep) tagged with the
         // CURRENT project generation.
         let gen0 = host.project_type_store().current_project_generation();
         db.insert_for_test(
-            key.clone(),
+            cache_key.clone(),
             MaterializeOutcome::Miss(SemanticNodeId(0)),
             crate::fact_signature_helpers::ReadSetSignature::empty(),
             StdArc::from(Vec::<StdArc<str>>::new()),
@@ -3864,7 +4116,7 @@ export type C<T> = A<T>
         // Same generation — the carrier validates and the generation
         // matches, so `peek` HITs.
         assert!(
-            db.peek(&key, host).is_some(),
+            db.peek(&cache_key, host).is_some(),
             "a candidate with a valid carrier and a matching project \
              generation must warm-hit",
         );
@@ -3881,7 +4133,7 @@ export type C<T> = A<T>
         // passes (no file content changed) and the stale candidate is
         // served.
         assert!(
-            db.peek(&key, host).is_none(),
+            db.peek(&cache_key, host).is_none(),
             "STALE-GENERATION READ: `MaterializeStructureDb::peek` served a \
              candidate whose `validated_at_generation` is superseded — a \
              `ProjectGeneration` reset bumps no file content, so the \
@@ -3904,7 +4156,8 @@ export type C<T> = A<T>
         let id = a0_make_decl_identity(host, "/gen_peek_cycle.ts", "Helper");
         let gen0 = host.project_type_store().current_project_generation();
         db.insert_for_test(
-            id.clone(),
+            &id,
+            host,
             true,
             crate::fact_signature_helpers::ReadSetSignature::empty(),
             StdArc::from(Vec::<StdArc<str>>::new()),

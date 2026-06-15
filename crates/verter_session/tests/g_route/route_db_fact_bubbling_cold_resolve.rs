@@ -46,6 +46,17 @@ fn make_host() -> VerterHost {
     VerterHost::new_standalone(Default::default())
 }
 
+fn rk(provider: &str, name: &str) -> verter_session::resolver_core::RouteNameKey {
+    verter_session::resolver_core::RouteNameKey::new(
+        provider,
+        name,
+        verter_semantic::facts::registry::SymbolSpace::Type,
+        verter_session::file_artifact_store::ProjectIdentity([0u8; 16]),
+        [0u8; 16],
+        [0u8; 16],
+    )
+}
+
 /// `FactVersionRef` with a recognisable 16-byte pattern. The pattern
 /// is what the closure stores via `insert_arc_with_kind` inside the
 /// singleflight, and what the re-read returns. The tracer assertion
@@ -83,7 +94,7 @@ fn cold_resolve_advances_cold_counter_and_bubbles_admitted_facts() {
     // closure runs and returns a non-empty fact signature. The
     // observing entry-point admits the entry, re-reads, and bubbles.
     let (result, finalise) = install_fact_tracer_for_tests(&host, || {
-        db.get_or_resolve_route_observing_facts("cold_provider.ts", "Baz", &view, || {
+        db.get_or_resolve_route_observing_facts(rk("cold_provider.ts", "Baz"), &view, || {
             calls.fetch_add(1, Ordering::Relaxed);
             Some((resolved_route(), vec![fact_for_closure.clone()]))
         })

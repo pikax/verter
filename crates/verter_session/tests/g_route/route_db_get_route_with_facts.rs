@@ -3,6 +3,17 @@
 
 use verter_session::resolver_core::{FactVersionRef, PermissiveStoreView, RouteDb, RouteResult};
 
+fn rk(provider: &str, name: &str) -> verter_session::resolver_core::RouteNameKey {
+    verter_session::resolver_core::RouteNameKey::new(
+        provider,
+        name,
+        verter_semantic::facts::registry::SymbolSpace::Type,
+        verter_session::file_artifact_store::ProjectIdentity([0u8; 16]),
+        [0u8; 16],
+        [0u8; 16],
+    )
+}
+
 fn make_route() -> RouteResult {
     RouteResult::Resolved {
         defining_canonical: "provider.ts".to_string(),
@@ -23,7 +34,7 @@ fn get_route_with_facts_cold_miss_returns_none() {
     let view = PermissiveStoreView;
 
     // Nothing inserted — must return None.
-    let result = db.get_route_with_facts("index.ts", "Foo", &view);
+    let result = db.get_route_with_facts(&rk("index.ts", "Foo"), &view);
     assert!(result.is_none(), "cold miss must return None");
 }
 
@@ -34,15 +45,10 @@ fn get_route_with_facts_warm_hit_returns_value_and_facts() {
     let fact = make_fact();
 
     // Insert a route with an explicit fact.
-    db.insert_route_with_facts(
-        "index.ts".to_string(),
-        "Foo".to_string(),
-        make_route(),
-        vec![fact.clone()],
-    );
+    db.insert_route_with_facts(rk("index.ts", "Foo"), make_route(), vec![fact.clone()]);
 
     // Warm hit must return Some((value, facts)).
-    let result = db.get_route_with_facts("index.ts", "Foo", &view);
+    let result = db.get_route_with_facts(&rk("index.ts", "Foo"), &view);
     assert!(result.is_some(), "warm hit must return Some");
 
     let (route, facts) = result.unwrap();
@@ -60,26 +66,24 @@ fn get_route_with_facts_different_key_still_misses() {
     let db = RouteDb::new();
     let view = PermissiveStoreView;
 
-    db.insert_route_with_facts(
-        "a.ts".to_string(),
-        "Alpha".to_string(),
-        make_route(),
-        vec![make_fact()],
-    );
+    db.insert_route_with_facts(rk("a.ts", "Alpha"), make_route(), vec![make_fact()]);
 
     // Different provider — must miss.
     assert!(
-        db.get_route_with_facts("b.ts", "Alpha", &view).is_none(),
+        db.get_route_with_facts(&rk("b.ts", "Alpha"), &view)
+            .is_none(),
         "different provider canonical must miss"
     );
     // Same provider, different exported name — must miss.
     assert!(
-        db.get_route_with_facts("a.ts", "Beta", &view).is_none(),
+        db.get_route_with_facts(&rk("a.ts", "Beta"), &view)
+            .is_none(),
         "different exported name must miss"
     );
     // Exact match — must hit.
     assert!(
-        db.get_route_with_facts("a.ts", "Alpha", &view).is_some(),
+        db.get_route_with_facts(&rk("a.ts", "Alpha"), &view)
+            .is_some(),
         "exact match must hit"
     );
 }

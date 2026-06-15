@@ -90,7 +90,11 @@ const TARGET_STRUCTS: &[(&str, &str)] = &[
         "crates/verter_session/src/component_meta_result_db.rs",
     ),
     (
-        "MaterializeStructureCacheKey",
+        "MaterializeRuntimeKey",
+        "crates/verter_session/src/component_meta_materialize.rs",
+    ),
+    (
+        "MaterializationCacheKey",
         "crates/verter_session/src/component_meta_materialize.rs",
     ),
     (

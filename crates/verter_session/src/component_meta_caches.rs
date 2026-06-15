@@ -1552,7 +1552,7 @@ impl crate::cache_schema::CacheSchemaVersioned for ShapeCacheDb {
 //
 // ===========================================================================
 
-use crate::component_meta_materialize::{MaterializeOutcome, MaterializeStructureCacheKey};
+use crate::component_meta_materialize::{MaterializationCacheKey, MaterializeOutcome};
 
 /// Entry stored in `MaterializeStructureDb`. Carries the
 /// cacheable `MaterializeOutcome` (`Value` or `Miss` only — `Recursive`
@@ -1563,13 +1563,16 @@ use crate::component_meta_materialize::{MaterializeOutcome, MaterializeStructure
 /// the cold build (the materialiser's traced read set) — the sole
 /// cache-validity rail. `self_root_canonicals` lists the canonicals
 /// whose `FileWholeHash` fact the warm-read validator must check
-/// **strictly** — ONLY the `base` node's declaration-origin file. The
-/// consumer materialise scope is NOT a self-root: a value's identity
-/// does not depend on which consumer reached it (R7 cross-owner
-/// reuse). A `Global`-origin base yields an empty
-/// `self_root_canonicals`. A same-canonical content edit, or a
-/// self-root canonical the live store view no longer tracks, rejects
-/// the entry through
+/// **strictly** — the materialise SUBJECT's declaration-origin file:
+/// the EXTRACTED ROUTE ROOT for a route-shaped subject (`Pick`/`Omit`/
+/// IndexedAccess), the `base` node's origin for a non-route subject.
+/// The consumer materialise scope is NEVER a self-root: a value's
+/// identity does not depend on which consumer reached it (R7 cross-owner
+/// reuse). A non-route `Global`-origin base (or a route-shaped subject
+/// whose extracted root has no authoritative content hash) yields an
+/// empty `self_root_canonicals`. A content edit to a self-root
+/// canonical, or a self-root canonical the live store view no longer
+/// tracks, rejects the entry through
 /// [`crate::fact_signature_helpers::ReadSetSignature::validate_with_self_roots`].
 #[derive(Clone)]
 pub struct MaterializeStructureEntry {
@@ -1593,11 +1596,14 @@ pub struct MaterializeStructureEntry {
     /// an internal sibling rail, not a public cache-carrier field.
     pub(crate) dispatch_dep_signature: DepSignature,
     /// Canonicals validated **strictly** as self-roots on every warm
-    /// read and post-compute revalidation: ONLY the `base` node's
-    /// declaration-origin file (empty for a `Global`-origin base). The
-    /// consumer materialise scope is NOT a self-root (R7 cross-owner
-    /// reuse). An untracked or hash-mismatched self-root rejects the
-    /// entry.
+    /// read and post-compute revalidation: the materialise SUBJECT's
+    /// declaration-origin file — the extracted route root for a
+    /// route-shaped subject, the `base` node's origin for a non-route
+    /// subject (empty for a non-route `Global`-origin base, or a
+    /// route-shaped subject whose extracted root has no authoritative
+    /// content hash). The consumer materialise scope is NEVER a
+    /// self-root (R7 cross-owner reuse). An untracked or hash-mismatched
+    /// self-root rejects the entry.
     pub self_root_canonicals: Arc<[Arc<str>]>,
     /// Project generation this entry was computed under, captured by the
     /// cold `compute` closure before it dispatched any work. The carrier
@@ -1622,24 +1628,28 @@ pub struct MaterializeStructureEntry {
 /// [`ReverseIndexedCandidateStore`](crate::cache_runtime::ReverseIndexedCandidateStore):
 /// the per-canonical reverse index enables O(K) invalidation cleanup, and
 /// the embedded FIFO retention budget is the routine memory-reclamation
-/// path (the cache key carries a content-derived `SemanticNodeId`, so each
-/// distinct content version of an owner produces a fresh candidate; the
-/// budget FIFO-evicts the oldest past [`Self::MAX_ENTRIES`] so a
-/// long-lived session does not accumulate stale per-version structural
-/// materialisations unbounded). Concurrent base/overlay variants of one
-/// content-free key coexist as candidates in one slot (R20).
+/// path. The cache key is the content-free
+/// [`MaterializationCacheKey`](crate::component_meta_materialize::MaterializationCacheKey)
+/// (canonical-subject slot + projection axes + resolve_env_hash — NO
+/// content/version hash), so concurrent content versions of one subject
+/// co-locate as candidates in ONE slot (R20), each rooted value-side by
+/// its `ReadSetSignature.facts` + `self_root_canonicals` +
+/// `validated_at_generation`; the budget FIFO-evicts the oldest past
+/// [`Self::MAX_ENTRIES`] so a long-lived session does not accumulate
+/// stale per-version candidates unbounded. Concurrent base/overlay
+/// variants of one content-free key coexist as candidates (R20).
 pub struct MaterializeStructureDb {
     /// The shared reverse-indexed multi-candidate store (budgeted form).
     /// Owns the slots, the per-canonical reverse index, the FIFO retention
     /// budget, the shared live counter, and the retention gate (the
     /// publish fence).
     store: crate::cache_runtime::ReverseIndexedCandidateStore<
-        MaterializeStructureCacheKey,
+        MaterializationCacheKey,
         crate::semantic_query::CacheRead<MaterializeOutcome>,
     >,
     /// Per-cache flight table keyed by the flight identity (cache key +
     /// store-view compat token) so two overlays on one key do not coalesce.
-    inflight: InflightTable<QueryFlightKey<MaterializeStructureCacheKey>>,
+    inflight: InflightTable<QueryFlightKey<MaterializationCacheKey>>,
     /// Cache-cluster schema version this Db was constructed under. See
     /// [`crate::cache_schema`] for the contract.
     schema_version: u32,
@@ -1708,17 +1718,19 @@ impl MaterializeStructureDb {
     /// any read-path decrement.
     pub(crate) fn peek(
         &self,
-        key: &MaterializeStructureCacheKey,
+        key: &MaterializationCacheKey,
         ctx: &dyn ResolverContext,
     ) -> Option<crate::semantic_query::CacheRead<MaterializeOutcome>> {
         if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
             return None;
         }
         // Warm-hit read-side validation through the store. The candidate's
-        // self-root canonicals (ONLY the `base` node's declaration-origin
-        // file — NOT the consumer materialise scope, R7 cross-owner reuse)
-        // validate **strictly**; every other fact keeps the lazy
-        // cross-file permissiveness. The generation gate is the
+        // self-root canonicals (ONLY the materialise SUBJECT's
+        // declaration-origin file — the `base` node's origin for a
+        // non-route subject, or the EXTRACTED ROOT's declaration file for
+        // a route-shaped subject; NEVER the consumer materialise scope, R7
+        // cross-owner reuse) validate **strictly**; every other fact keeps
+        // the lazy cross-file permissiveness. The generation gate is the
         // project-shape counterpart of the carrier check (a
         // `ProjectGeneration` reset bumps no file content). A stale
         // candidate never bubbles. The store skips a stale candidate on
@@ -1771,7 +1783,7 @@ impl MaterializeStructureDb {
     /// eviction cannot self-deadlock.
     pub(crate) fn get_or_compute_admit<F>(
         &self,
-        key: &MaterializeStructureCacheKey,
+        key: &MaterializationCacheKey,
         ctx: &dyn ResolverContext,
         compute: F,
     ) -> Option<crate::semantic_query::CacheRead<MaterializeOutcome>>
@@ -1882,9 +1894,9 @@ impl MaterializeStructureDb {
     /// Number of distinct cache candidates currently materialised.
     ///
     /// **R7 cross-owner reuse contract.** N consumer scopes that reach
-    /// the same `(base, scope_axis, mode)` collapse to ONE slot because
-    /// the cache key's `Hash`/`PartialEq` impls exclude
-    /// `scope_canonical_id`. Used by
+    /// the same content-free `MaterializationCacheKey` subject (the
+    /// canonical-subject slot + projection path/policy/mode axes — NO
+    /// consumer-scope dimension at all) collapse to ONE slot. Used by
     /// `tests/cross_owner_materialise_reuse_production.rs` to verify the
     /// production-flow contract: driving
     /// `materialize_component_meta_structure` from N owners with a shared
@@ -1902,12 +1914,29 @@ impl MaterializeStructureDb {
     #[cfg(any(test, debug_assertions))]
     pub fn insert_synthetic_for_schema_test(&self, marker: &str) {
         use crate::component_meta_materialize::MaterializationScope;
-        use crate::semantic_query::SemanticNodeId;
-        let key = MaterializeStructureCacheKey {
-            scope_canonical_id: Arc::from(marker),
-            base: SemanticNodeId(0),
+        use crate::semantic_query::{ResolvedDeclSlotIdentity, SemanticNodeId};
+        // Synthetic content-free canonical-subject key: `marker` seeds the
+        // slot's defining canonical so distinct markers produce distinct
+        // slots (the schema test needs distinguishable synthetic entries).
+        // Built via the canonical env-bearing `type_slot` constructor with
+        // explicit synthetic-zero env axes — this fixture has no live host
+        // to source env from, and the schema-eviction invariant under test
+        // is env-independent. (The zero-env `type_slot_unscoped` convenience
+        // constructor is test-fixture-only and rejected in this
+        // debug-visible function by `no_production_caller_of_zero_env_slot_constructors`.)
+        let key = MaterializationCacheKey {
+            decl: ResolvedDeclSlotIdentity::type_slot(
+                Arc::from(marker),
+                Arc::from("__schema_test__"),
+                0,
+                [0u8; 16],
+                [0u8; 16],
+            ),
+            projection_path: crate::resolver_core::RouteDemand::Whole,
             scope_axis: MaterializationScope::TopLevel,
-            mode: ProjectionMode::Shallow,
+            projection_mode: ProjectionMode::Shallow,
+            normalized_type_args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            resolve_env_hash: crate::semantic_query::HashValue::default(),
         };
         let value = crate::semantic_query::CacheRead {
             value: MaterializeOutcome::Miss(SemanticNodeId(0)),
@@ -1931,7 +1960,7 @@ impl MaterializeStructureDb {
     #[cfg(test)]
     pub(crate) fn insert_for_test(
         &self,
-        key: MaterializeStructureCacheKey,
+        key: MaterializationCacheKey,
         outcome: MaterializeOutcome,
         read_set_signature: crate::fact_signature_helpers::ReadSetSignature,
         self_root_canonicals: Arc<[Arc<str>]>,
@@ -1978,7 +2007,39 @@ impl crate::cache_schema::CacheSchemaVersioned for MaterializeStructureDb {
 // ===========================================================================
 
 use crate::cache_runtime::singleflight::ComputeAdmission;
-use crate::semantic_query::DeclIdentity;
+use crate::semantic_query::{DeclIdentity, ResolvedDeclSlotIdentity};
+
+/// Substrate version for the transitive-cycle BFS result. A bump
+/// invalidates every [`RefCycleResultKey`] slot by changing the key (the
+/// cached value is still validated by its self-root fact signature; the
+/// version is the coarse "the BFS algorithm changed shape" rail).
+pub const REF_CYCLE_RESULT_VERSION: u32 = 1;
+
+/// Content-free query-identity key for a transitive-cycle BFS result (R5
+/// query-identity family, R6 content-free, R21 split-env).
+///
+/// The BFS roots at one declaration; its identity is the env-bearing,
+/// content-free [`ResolvedDeclSlotIdentity`] slot (which carries
+/// `type_env_hash` / `lib_env_hash` / `project_identity` as decl-site
+/// identity), plus the extra `resolve_env_hash` the BFS's
+/// `Skeleton`-mode instantiation depends on, plus the substrate
+/// `version`. The versioned `DeclIdentity` (which embeds `whole_hash`) is
+/// intentionally NOT the key — concurrent content versions of the same
+/// root co-locate as candidates inside this one slot (R20
+/// multi-candidate), each rooted value-side by its
+/// `ReadSetSignature.facts` + `self_root_canonicals` and validated
+/// strictly on every read. So a content edit to the root or any visited
+/// file rejects the stale candidate WITHOUT a key change (R6).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RefCycleResultKey {
+    /// Env-bearing, content-free root declaration slot.
+    pub root: ResolvedDeclSlotIdentity,
+    /// The `resolve_env_hash` the BFS instantiation depends on (R21 — not
+    /// carried by the slot).
+    pub resolve_env_hash: crate::semantic_query::HashValue,
+    /// Substrate version ([`REF_CYCLE_RESULT_VERSION`]).
+    pub version: u32,
+}
 
 /// C — entry stored in `RefCycleResultDb`. Carries the
 /// boolean BFS result, the observed-root carrier, and the explicit
@@ -2037,8 +2098,10 @@ pub struct RefCycleEntry {
 ///
 /// Mirrors [`MaterializeStructureDb`]: a shared budgeted
 /// [`ReverseIndexedCandidateStore`](crate::cache_runtime::ReverseIndexedCandidateStore)
-/// keyed by `DeclIdentity`, whose per-canonical reverse index drains
-/// under `invalidate_for_canonical`, whose `FactCandidateDiscriminant`
+/// keyed by the content-free [`RefCycleResultKey`] slot, whose
+/// per-canonical reverse index drains under `invalidate_for_canonical`
+/// (the canonicals come from each candidate's value-side self-roots, not
+/// the key), whose `FactCandidateDiscriminant`
 /// (generation + facts) selects which candidate a re-publish replaces,
 /// and whose shared `live_counter` (an `Arc<AtomicU64>` across all
 /// sibling DBs) uses the saturating-subtract pattern on `invalidate_all`
@@ -2059,18 +2122,21 @@ pub struct RefCycleEntry {
 /// winner forks and cold-recomputes its own BFS against its own view.
 pub struct RefCycleResultDb {
     /// The shared reverse-indexed multi-candidate store (budgeted form).
-    /// The `DeclIdentity` key embeds the file whole-hash, so each distinct
-    /// content version produces a fresh candidate; the FIFO retention
-    /// budget is the routine reclamation path and the per-canonical
-    /// reverse index drains on per-canonical invalidation. Concurrent
-    /// base/overlay variants of one key coexist as candidates (R20).
+    /// The content-free [`RefCycleResultKey`] slot keys it: concurrent
+    /// content versions of the same root co-locate as candidates inside
+    /// one slot (each rooted value-side by its self-root fact signature),
+    /// the FIFO retention budget is the routine reclamation path, and the
+    /// per-canonical reverse index (derived from each candidate's
+    /// value-side canonicals, NOT the key) drains on per-canonical
+    /// invalidation. Concurrent base/overlay variants coexist as
+    /// candidates (R20).
     store: crate::cache_runtime::ReverseIndexedCandidateStore<
-        DeclIdentity,
+        RefCycleResultKey,
         crate::semantic_query::CacheRead<bool>,
     >,
     /// Per-cache flight table keyed by the flight identity (cache key +
     /// store-view compat token) so two overlays on one key do not coalesce.
-    inflight: InflightTable<QueryFlightKey<DeclIdentity>>,
+    inflight: InflightTable<QueryFlightKey<RefCycleResultKey>>,
 }
 
 impl RefCycleResultDb {
@@ -2130,6 +2196,22 @@ impl RefCycleResultDb {
     /// eviction cannot self-deadlock. A `ReturnOnly` outcome (overflow /
     /// unrootable / `RouteGeneration`) returns the computed bool to the
     /// winner without admitting; joiners fork and recompute.
+    /// Build the content-free [`RefCycleResultKey`] for a BFS root
+    /// `DeclIdentity` via the shared, U2-derived slot builders
+    /// (`type_slot_for` + `resolve_env_hash_for` — the SAME builders the
+    /// reducer caches use, sourcing env from the live host). The lookup
+    /// and the publish both route through this one builder, so they key on
+    /// the identical slot; the `DeclIdentity`'s `whole_hash` is dropped
+    /// (content rooting lives on the value).
+    fn key_for(id: &DeclIdentity, ctx: &dyn ResolverContext) -> RefCycleResultKey {
+        let dispatch = ctx.dispatch();
+        RefCycleResultKey {
+            root: dispatch.type_slot_for(Arc::clone(&id.canonical_id), Arc::clone(&id.decl_name)),
+            resolve_env_hash: dispatch.resolve_env_hash_for(&id.canonical_id),
+            version: REF_CYCLE_RESULT_VERSION,
+        }
+    }
+
     pub(crate) fn get_or_compute_admit<F>(
         &self,
         id: &DeclIdentity,
@@ -2182,7 +2264,7 @@ impl RefCycleResultDb {
             compute: std::cell::RefCell::new(Some(node_compute)),
             unadmitted: None,
         };
-        crate::cache_runtime::query::lookup(&node, id.clone(), ctx)
+        crate::cache_runtime::query::lookup(&node, Self::key_for(id, ctx), ctx)
     }
 
     /// Strict-validation peek.
@@ -2204,7 +2286,8 @@ impl RefCycleResultDb {
         ctx: &dyn ResolverContext,
     ) -> Option<crate::semantic_query::CacheRead<bool>> {
         let generation = ctx.project_type_store().current_project_generation();
-        let result = self.store.lookup(id, |candidate| {
+        let key = Self::key_for(id, ctx);
+        let result = self.store.lookup(&key, |candidate| {
             if candidate.validated_at_generation == generation
                 && candidate
                     .signature
@@ -2257,7 +2340,8 @@ impl RefCycleResultDb {
     #[cfg(test)]
     pub(crate) fn insert_for_test(
         &self,
-        id: DeclIdentity,
+        id: &DeclIdentity,
+        ctx: &dyn ResolverContext,
         result: bool,
         read_set_signature: crate::fact_signature_helpers::ReadSetSignature,
         self_root_canonicals: Arc<[Arc<str>]>,
@@ -2270,8 +2354,10 @@ impl RefCycleResultDb {
             cache_suppress: false,
             result_is_partial: false,
         };
+        // Plant under the SAME content-free key `peek` builds for `id`, so
+        // the planted candidate is addressable by a subsequent peek.
         self.store.insert_for_test(
-            id,
+            Self::key_for(id, ctx),
             value,
             read_set_signature,
             self_root_canonicals,

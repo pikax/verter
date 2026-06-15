@@ -36,6 +36,26 @@ use verter_session::resolver_core::{
     StoreViewCompatToken,
 };
 
+fn rk(provider: &str, name: &str) -> verter_session::resolver_core::RouteNameKey {
+    verter_session::resolver_core::RouteNameKey::new(
+        provider,
+        name,
+        verter_semantic::facts::registry::SymbolSpace::Type,
+        verter_session::file_artifact_store::ProjectIdentity([0u8; 16]),
+        [0u8; 16],
+        [0u8; 16],
+    )
+}
+
+fn bk(barrel: &str) -> verter_session::resolver_core::BarrelSurfaceKey {
+    verter_session::resolver_core::BarrelSurfaceKey::new(
+        barrel,
+        verter_session::file_artifact_store::ProjectIdentity([0u8; 16]),
+        [0u8; 16],
+        [0u8; 16],
+    )
+}
+
 /// Build an [`AugmenterEntry`] for `canonical` carrying the given
 /// `parse_stable_hash`. The exact `FileArtifactKey` is a `legacy`-shape
 /// key with a placeholder content hash — these tests never insert the
@@ -124,7 +144,7 @@ fn cross_consumer_route_hit_produces_one_entry() {
     // Two consumers query the same `(provider, name)`.
     let compute_count = std::sync::atomic::AtomicU32::new(0);
     let do_query = |_label: &str| {
-        db.get_or_resolve_route_with_facts("provider.ts", "Foo", &view, || {
+        db.get_or_resolve_route_with_facts(rk("provider.ts", "Foo"), &view, || {
             compute_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Some((
                 RouteResult::Resolved {
@@ -251,10 +271,10 @@ fn whole_hash_migration_audit_route_db_318_eliminated() {
         wildcard_edges: FxHashMap::default(),
         fact_dep_signature: Arc::clone(&signature),
     };
-    db.insert_barrel_surface(surface);
+    db.insert_barrel_surface(bk("barrel.ts"), surface);
 
     let fetched = db
-        .get_barrel_surface("barrel.ts", &view)
+        .get_barrel_surface(&bk("barrel.ts"), &view)
         .expect("barrel surface MUST round-trip");
     assert!(Arc::ptr_eq(&fetched.fact_dep_signature, &signature));
 }
@@ -593,7 +613,7 @@ impl RouteDbTestExt for RouteDb {
         let view = AcceptAllView::new(0);
         let mut out = Vec::new();
         let probe_key = ("provider.ts".to_owned(), "Foo".to_owned());
-        if let Some(r) = self.get_route(&probe_key.0, &probe_key.1, &view) {
+        if let Some(r) = self.get_route(&rk(probe_key.0.as_str(), probe_key.1.as_str()), &view) {
             out.push((probe_key, r));
         }
         out
