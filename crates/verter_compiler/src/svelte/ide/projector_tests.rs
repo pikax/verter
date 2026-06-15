@@ -1596,3 +1596,856 @@ fn component_close_tag_inside_a_descendant_string_literal_is_not_mistaken_for_th
         "sibling after the real close is preserved: {body}"
     );
 }
+
+// --- F11 store auto-subscription + F12 legacy magic objects ---
+
+/// Everything AFTER the ambient prelude — the hoisted script bodies + the render
+/// fn. The prelude's own doc comments / `declare`s reference the F11 helper names
+/// and the `$$`-magic names, so store/magic assertions must target the projected
+/// USER code, not the prelude. The F11 `__verter_store_update` declaration is the
+/// LAST F11-helper prelude line (its body mentions `__verter_store_get`, so the
+/// anchor must sit AFTER it); the legacy-magic block, when present, follows it but
+/// carries no store-rewrite tokens — only `declare const $$…` declarations the
+/// magic-decl tests check on the full `code`.
+fn after_prelude(code: &str) -> &str {
+    let marker = "declare function __verter_store_update";
+    match code
+        .find(marker)
+        .and_then(|i| code[i..].find('\n').map(|j| i + j + 1))
+    {
+        Some(start) => &code[start..],
+        None => code,
+    }
+}
+
+#[test]
+fn store_read_in_script_rewrites_only_the_dollar_byte() {
+    // F11: a `$count` READ in the script body becomes `__verter_store_get(count)`
+    // — the `$` byte is overwritten, the `count` identifier bytes are preserved
+    // (so hover lands on the original identifier). NO `$count` residue.
+    let body = project(
+        "<script lang=\"ts\">import { writable } from \"svelte/store\"; const count = writable(0); const v = $count + 1;</script>\n<div>{v}</div>",
+    );
+    assert!(
+        body.contains("__verter_store_get(count)"),
+        "the read sub is rewritten to the store-get helper preserving `count`: {body}"
+    );
+    assert!(
+        !body.contains("$count"),
+        "no `$count` residue (the `$` byte was rewritten): {body}"
+    );
+}
+
+#[test]
+fn store_write_in_script_rewrites_dollar_and_equals_only() {
+    // F11: a `$count = 5` WRITE becomes `__verter_store_set(count, 5)` — `$` and
+    // the `=` operator are overwritten, the `count` identifier and the `5` RHS
+    // bytes are preserved. NO `$count` residue.
+    let body = project(
+        "<script lang=\"ts\">import { writable } from \"svelte/store\"; const count = writable(0); $count = 5;</script>\n<div>x</div>",
+    );
+    // The `count` identifier + `5` RHS bytes are preserved (whitespace around the
+    // rewritten `=`→`,` is the original source whitespace).
+    assert!(
+        body.contains("__verter_store_set(count") && body.contains(", 5)"),
+        "the write sub is rewritten to the store-set helper preserving `count`/`5`: {body}"
+    );
+    assert!(!body.contains("$count"), "no `$count` residue: {body}");
+}
+
+#[test]
+fn store_read_in_markup_interpolation_rewrites() {
+    // F11: a `{$count}` markup interpolation rewrites the same way.
+    let body = project(
+        "<script lang=\"ts\">import { writable } from \"svelte/store\"; const count = writable(0);</script>\n<div>{$count}</div>",
+    );
+    assert!(
+        body.contains("__verter_store_get(count)"),
+        "a markup `{{$count}}` rewrites to the store-get helper: {body}"
+    );
+    assert!(
+        !render_body(&body).contains("$count"),
+        "no `$count` residue in body: {body}"
+    );
+}
+
+#[test]
+fn runes_are_not_rewritten_as_store_subs() {
+    // DISCRIMINATING negative: `$state`/`$props`/`$derived` rune call sites stay
+    // VERBATIM (the prelude types them) — they must NOT be rewritten as store
+    // subs (no `__verter_store_get($state`).
+    let code = project(
+        "<script lang=\"ts\">let s = $state(0); const p = $props(); let d = $derived(s);</script>\n<div>{s}</div>",
+    );
+    let body = after_prelude(&code);
+    assert!(
+        body.contains("$state(0)"),
+        "the $state rune call stays verbatim: {body}"
+    );
+    assert!(
+        body.contains("$props()"),
+        "the $props rune call stays verbatim: {body}"
+    );
+    assert!(
+        body.contains("$derived(s)"),
+        "the $derived rune call stays verbatim: {body}"
+    );
+    assert!(
+        !body.contains("__verter_store_get"),
+        "no rune was rewritten as a store-sub: {body}"
+    );
+    assert!(
+        !body.contains("__verter_store_set"),
+        "no store-set was emitted for a rune: {body}"
+    );
+}
+
+#[test]
+fn double_dollar_magic_is_not_rewritten_as_store_subs() {
+    // DISCRIMINATING negative: `$$props`/`$$slots` magic stays VERBATIM — they
+    // are F12 prelude declarations, NEVER store subs.
+    let code = project(
+        "<script lang=\"ts\">const a = $$props; const has = $$slots.foo;</script>\n<div>{a}</div>",
+    );
+    let body = after_prelude(&code);
+    // The USER's verbatim magic references survive (discriminating substrings not
+    // present in the prelude `declare const` lines).
+    assert!(
+        body.contains("const a = $$props"),
+        "the $$props magic stays verbatim: {body}"
+    );
+    assert!(
+        body.contains("const has = $$slots.foo"),
+        "the $$slots magic stays verbatim: {body}"
+    );
+    assert!(
+        !body.contains("__verter_store_get") && !body.contains("__verter_store_set"),
+        "no $$-magic was rewritten as a store-sub: {body}"
+    );
+}
+
+#[test]
+fn a_local_dollar_binding_is_not_rewritten() {
+    // DISCRIMINATING negative: a local `let $x` binding is an ordinary variable
+    // — its references stay verbatim (NOT a store-sub).
+    let code =
+        project("<script lang=\"ts\">let $x = 1; const y = $x + 1;</script>\n<div>{y}</div>");
+    let body = after_prelude(&code);
+    assert!(
+        body.contains("let $x = 1"),
+        "the local binding stays verbatim: {body}"
+    );
+    assert!(
+        body.contains("$x + 1"),
+        "the local reference stays verbatim: {body}"
+    );
+    assert!(
+        !body.contains("__verter_store_get") && !body.contains("__verter_store_set"),
+        "a local `$x` binding must NOT be rewritten as a store-sub: {body}"
+    );
+}
+
+#[test]
+fn legacy_component_emits_the_magic_object_declarations() {
+    // F12: a legacy (no-rune) component's prelude declares `$$props`/
+    // `$$restProps`/`$$slots`.
+    let code = project("<div>{$$props.x}</div>");
+    assert!(
+        code.contains("declare const $$props: Record<string, any>"),
+        "{code}"
+    );
+    assert!(
+        code.contains("declare const $$restProps: Record<string, any>"),
+        "{code}"
+    );
+    assert!(
+        code.contains("declare const $$slots: Record<string, boolean>"),
+        "{code}"
+    );
+}
+
+#[test]
+fn a_runes_component_omits_the_legacy_magic_object_declarations() {
+    // F12: a runes-mode component (uses a rune) is NOT legacy — the F12 magic
+    // declarations are OMITTED (they do not exist in runes mode; emitting their
+    // loose `any` surface would pollute a runes-mode file).
+    let code = project("<script lang=\"ts\">let s = $state(0);</script>\n<div>{s}</div>");
+    assert!(
+        !code.contains("declare const $$props"),
+        "a runes-mode component must NOT carry the legacy magic declarations: {code}"
+    );
+}
+
+#[test]
+fn store_sub_identifier_maps_back_to_the_original_source_byte() {
+    // F11 sourcemap e2e: a rewritten `$store` keeps the `store` identifier bytes
+    // as an Original chunk (only the `$` byte was overwritten), so hover /
+    // go-to-definition on the projected `store` lands on the ORIGINAL `store`
+    // identifier byte in the source. This is the sourcemap-accuracy guarantee of
+    // the `$`-span-only rewrite.
+    use oxc_sourcemap::SourceMap;
+
+    let source =
+        "<script lang=\"ts\">import { writable } from \"svelte/store\"; const count = writable(0); const v = $count;</script>\n<div>{v}</div>";
+    let parsed = parse_svelte(source);
+    let projection = project_svelte_ide(source, &parsed, Some("Comp.svelte"), false);
+    assert!(
+        !projection.source_map.is_empty(),
+        "the projection emits a source map"
+    );
+
+    // The original `count` identifier byte — the byte right AFTER the `$` in the
+    // `$count` READ (`const v = $count`). The `$` precedes it; the identifier
+    // `count` keeps its source span across the rewrite.
+    let read_at = source.find("$count").expect("$count read in source");
+    let src_off = (read_at + 1) as u32; // skip the `$`
+    let (src_line, src_col) = byte_offset_to_line_col(source, src_off);
+
+    // The `store` identifier in the projected output — inside
+    // `__verter_store_get(count)`.
+    let wrap_at = projection
+        .code
+        .find("__verter_store_get(count)")
+        .expect("the read was rewritten to the store-get helper");
+    let out_off = (wrap_at + "__verter_store_get(".len()) as u32;
+    let (out_line, out_col) = byte_offset_to_line_col(&projection.code, out_off);
+
+    let map = SourceMap::from_json_string(&projection.source_map).expect("decode map");
+    // The `count` Original chunk maps as a unit to its source origin; find the
+    // covering token and assert the within-chunk delta lands EXACTLY on the
+    // original `count` byte (the rewrite touched only the `$` span — the
+    // identifier kept its source position).
+    let token = map
+        .get_tokens()
+        .filter(|t| t.get_dst_line() == out_line && t.get_dst_col() <= out_col)
+        .max_by_key(|t| t.get_dst_col())
+        .expect("a token covering the store identifier");
+    assert_eq!(
+        token.get_src_line(),
+        src_line,
+        "the store identifier maps to the original source line"
+    );
+    let delta = out_col - token.get_dst_col();
+    assert_eq!(
+        token.get_src_col() + delta,
+        src_col,
+        "the rewritten `$store` maps back byte-accurately to the original `store` \
+         identifier (token src {}:{} + dst delta {delta} = expected src col {src_col})",
+        token.get_src_line(),
+        token.get_src_col()
+    );
+}
+
+#[test]
+fn store_sub_in_block_condition_and_attribute_is_rewritten() {
+    // F11: store-subs in markup expression positions BEYOND the bare
+    // interpolation — an `{#if $on}` condition, an `{#each $items as x}` iterable,
+    // and a plain attribute value `data-x={$flag}` — are all rewritten.
+    let if_body = project(
+        "<script lang=\"ts\">import { writable } from \"svelte/store\"; const on = writable(true);</script>\n<div>{#if $on}<span>y</span>{/if}</div>",
+    );
+    assert!(
+        if_body.contains("__verter_store_get(on)"),
+        "the `{{#if $on}}` condition store-sub is rewritten: {if_body}"
+    );
+
+    let each_body = project(
+        "<script lang=\"ts\">import { writable } from \"svelte/store\"; const items = writable([1]);</script>\n<ul>{#each $items as it}<li>{it}</li>{/each}</ul>",
+    );
+    assert!(
+        each_body.contains("__verter_store_get(items)"),
+        "the `{{#each $items}}` iterable store-sub is rewritten: {each_body}"
+    );
+
+    let attr_body = project(
+        "<script lang=\"ts\">import { writable } from \"svelte/store\"; const flag = writable(\"x\");</script>\n<div data-x={$flag}>y</div>",
+    );
+    assert!(
+        attr_body.contains("__verter_store_get(flag)"),
+        "the `data-x={{$flag}}` attribute store-sub is rewritten: {attr_body}"
+    );
+}
+
+#[test]
+fn store_sub_in_a_trailing_moved_script_is_rewritten_in_place() {
+    // A TRAILING `<script>` (after the markup) is MOVED above the render fn. The
+    // store rewrite runs BEFORE that move, so the store-sub is rewritten IN PLACE
+    // (the rewritten chunk moves WITH the body) — NOT dropped, and no stray
+    // `__verter_store_get()` chunk is appended at the output end.
+    let body = project(
+        "<div>{x}</div>\n<script lang=\"ts\">import { writable } from \"svelte/store\"; const count = writable(0); const x = $count;</script>",
+    );
+    assert!(
+        body.contains("const x = __verter_store_get(count);"),
+        "the trailing-script store-sub is rewritten in the moved body: {body}"
+    );
+    assert!(
+        !body.contains("$count"),
+        "no raw `$count` survives the move: {body}"
+    );
+    assert!(
+        !body.contains("__verter_store_get()"),
+        "no stray empty store-get chunk is stranded at the output end: {body}"
+    );
+}
+
+#[test]
+fn a_script_declared_dollar_binding_is_not_rewritten_in_markup() {
+    // DISCRIMINATING (cross-fragment lexical scope): a `let $x` declared in the
+    // SCRIPT makes `{$x}` in the markup an ORDINARY local, NOT a store-sub —
+    // even though the markup parses as a separate fragment. The script-declared
+    // `$`-names are threaded into the markup scan.
+    let code = project("<script lang=\"ts\">let $x = 1;</script>\n<div>{$x}</div>");
+    let body = after_prelude(&code);
+    assert!(
+        !body.contains("__verter_store_get"),
+        "a script-declared `$x` must NOT be store-rewritten in markup: {body}"
+    );
+    // The markup `{$x}` reference stays verbatim.
+    assert!(
+        body.contains("{$x}"),
+        "the markup `$x` reference stays verbatim: {body}"
+    );
+}
+
+#[test]
+fn store_sub_in_a_style_directive_value_is_rewritten() {
+    // F11: a store-sub in a void-checked directive value (`style:color={$c}`) is
+    // rewritten (no raw `$c` left in the projected void-check).
+    let code = project(
+        "<script lang=\"ts\">import { writable } from \"svelte/store\"; const c = writable(\"red\");</script>\n<div style:color={$c}>x</div>",
+    );
+    let body = after_prelude(&code);
+    assert!(
+        body.contains("__verter_store_get(c)"),
+        "the `style:color={{$c}}` store-sub is rewritten: {body}"
+    );
+    // Discriminating: NO raw `$c` identifier residue survives anywhere. (The
+    // previous `… || body.contains("get(c)")` escape hatch was always-true since
+    // the rewrite always emits `get(c)` — it passed even with raw `$c` residue.)
+    assert!(!body.contains("$c"), "no raw `$c` residue: {body}");
+}
+
+#[test]
+fn a_compound_store_assignment_projects_a_writable_read_set() {
+    // F11: `$count += 1` → `__verter_store_set(count, __verter_store_get(count) +
+    // (1))` — a Writable-checked read+set (NOT the invalid `__verter_store_get(
+    // count) += 1`). The original `count` keeps its source span; the second
+    // occurrence is injected read machinery.
+    let code = project(
+        "<script lang=\"ts\">import { writable } from \"svelte/store\"; const count = writable(0); $count += 1;</script>\n<div>x</div>",
+    );
+    let body = after_prelude(&code);
+    // Whitespace around the rewritten operator is the original source whitespace.
+    let normalized = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        normalized.contains("__verter_store_set(count , __verter_store_get(count) + ( 1))")
+            || normalized.contains("__verter_store_set(count, __verter_store_get(count) + (1))"),
+        "a compound store-assignment projects a writable read+set: {body}"
+    );
+    assert!(
+        !body.contains("__verter_store_get(count) +="),
+        "the compound target is NOT a bare read-wrap (invalid TS): {body}"
+    );
+    assert!(!body.contains("$count"), "no raw `$count` residue: {body}");
+}
+
+#[test]
+fn an_update_store_expression_projects_a_writable_read_set() {
+    // F11: `$count++` → `__verter_store_set(count, __verter_store_get(count) + 1)`.
+    let code = project(
+        "<script lang=\"ts\">import { writable } from \"svelte/store\"; const count = writable(0); $count++;</script>\n<div>x</div>",
+    );
+    let body = after_prelude(&code);
+    assert!(
+        body.contains(
+            "__verter_store_set(count, __verter_store_update(__verter_store_get(count)))"
+        ),
+        "an update store-expression projects a writable update read+set: {body}"
+    );
+    assert!(!body.contains("$count"), "no raw `$count` residue: {body}");
+}
+
+#[test]
+fn forced_runes_option_omits_the_legacy_magic_even_without_a_rune_call() {
+    // F12: an explicit `<svelte:options runes={true}>` forces RUNES mode even when
+    // the script uses NO rune — the legacy `$$props`/`$$restProps`/`$$slots` magic
+    // (and its `any`) must NOT be emitted.
+    let code = project(
+        "<svelte:options runes={true} />\n<script lang=\"ts\">let x = 1;</script>\n<div>{x}</div>",
+    );
+    assert!(
+        !code.contains("declare const $$props"),
+        "a forced-runes component must NOT carry the legacy magic: {code}"
+    );
+    // DISCRIMINATING: the SAME script WITHOUT the forced-runes option is legacy
+    // (no rune used) and DOES carry the magic.
+    let legacy = project("<script lang=\"ts\">let x = 1;</script>\n<div>{x}</div>");
+    assert!(
+        legacy.contains("declare const $$props"),
+        "the same script without the forced-runes option is legacy: {legacy}"
+    );
+}
+
+#[test]
+fn store_subs_in_tag_await_and_legacy_on_surfaces_are_rewritten() {
+    // F11: store-subs in `{@html $x}`, `{#await $p}`, and a legacy
+    // `on:click={$h}` value are all rewritten (no raw `$store` residue in those
+    // projected positions).
+    let html = project(
+        "<script lang=\"ts\">import { writable } from \"svelte/store\"; const m = writable(\"\");</script>\n<div>{@html $m}</div>",
+    );
+    assert!(
+        after_prelude(&html).contains("__verter_store_get(m)"),
+        "the @html tag store-sub is rewritten: {html}"
+    );
+
+    let awaited = project(
+        "<script lang=\"ts\">import { writable } from \"svelte/store\"; const p = writable(Promise.resolve(1));</script>\n<div>{#await $p}loading{:then v}{v}{/await}</div>",
+    );
+    assert!(
+        after_prelude(&awaited).contains("__verter_store_get(p)"),
+        "the #await head store-sub is rewritten: {awaited}"
+    );
+
+    let on = project(
+        "<script lang=\"ts\">import { writable } from \"svelte/store\"; const h = writable(() => {});</script>\n<button on:click={$h}>x</button>",
+    );
+    assert!(
+        after_prelude(&on).contains("__verter_store_get(h)"),
+        "the legacy on: handler store-sub is rewritten: {on}"
+    );
+}
+
+#[test]
+fn object_shorthand_store_sub_inserts_the_key() {
+    // F11: a shorthand `{ $count }` store-sub becomes
+    // `{ $count: __verter_store_get(count) }` (the key is inserted) — NOT the
+    // invalid bare `{ __verter_store_get(count) }`.
+    let code = project(
+        "<script lang=\"ts\">import { writable } from \"svelte/store\"; const count = writable(0); const o = { $count };</script>\n<div>{o}</div>",
+    );
+    let body = after_prelude(&code);
+    assert!(
+        body.contains("{ $count: __verter_store_get(count) }"),
+        "the shorthand store-sub inserts the key: {body}"
+    );
+    assert!(
+        !body.contains("{ __verter_store_get(count) }"),
+        "no invalid bare-call shorthand slot: {body}"
+    );
+}
+
+#[test]
+fn store_sub_in_a_bind_value_is_rewritten() {
+    // F11 (P1-1): a store-sub in a `bind:value={$store}` value is rewritten. The
+    // value stays a mapped chunk (the `bind:` prefix is stripped), so the
+    // `$`-span overwrite composes with the strip.
+    let code = project(
+        "<script lang=\"ts\">import { writable } from \"svelte/store\"; const name = writable(\"\");</script>\n<input bind:value={$name} />",
+    );
+    let body = after_prelude(&code);
+    assert!(
+        body.contains("value={__verter_store_get(name)}"),
+        "the bind:value store-sub is rewritten + the bind prefix stripped: {body}"
+    );
+    assert!(
+        !body.contains("bind:value") && !body.contains("$name"),
+        "no `bind:` residue and no raw `$name`: {body}"
+    );
+}
+
+#[test]
+fn store_sub_in_a_function_binding_value_is_rewritten() {
+    // F11 (P1-1): a store-sub in an F5 function-binding `get, set` pair
+    // (`bind:value={() => $name, v => v}`) is rewritten — the mapped pair composes
+    // with the `__verter_bind_fn(` wrap.
+    let code = project(
+        "<script lang=\"ts\">import { writable } from \"svelte/store\"; const name = writable(\"\");</script>\n<input bind:value={() => $name, (v) => { void v; }} />",
+    );
+    let body = after_prelude(&code);
+    assert!(
+        body.contains("__verter_store_get(name)") && body.contains("__verter_bind_fn"),
+        "the function-binding store-sub is rewritten inside the bind-fn wrap: {body}"
+    );
+}
+
+#[test]
+fn store_sub_in_a_declaration_tag_value_is_rewritten_move_safely() {
+    // F11 (P1-2): a store-sub in a `{@const x = $store}` value is rewritten
+    // MOVE-SAFELY — the hoisted `const x = __verter_store_get(count)` carries the
+    // store-get + closing paren WITH the move (no stranded `)` at the original,
+    // now-removed tag position).
+    let code = project(
+        "<script lang=\"ts\">import { writable } from \"svelte/store\"; const count = writable(0);</script>\n<div>{@const doubled = $count}{doubled}</div>",
+    );
+    let body = after_prelude(&code);
+    assert!(
+        body.contains("const doubled = __verter_store_get(count)"),
+        "the @const store value is rewritten move-safely (paren travels with the \
+         hoist): {body}"
+    );
+    assert!(
+        !body.contains("$count"),
+        "no raw `$count` survives the move: {body}"
+    );
+    assert!(
+        !body.contains("__verter_store_get(count));") && !body.contains("__verter_store_get()"),
+        "no stranded / empty store-get chunk at the original tag position: {body}"
+    );
+}
+
+#[test]
+fn store_sub_in_a_declaration_tag_with_trailing_store_is_rewritten_move_safely() {
+    // F11 (P1-2): the stranding-sensitive case — the store is the LAST token of
+    // the `{@const}` inner (`$count` ends the inner). The closing `)` must travel
+    // with the move, not strand at the original boundary.
+    let code = project(
+        "<script lang=\"ts\">import { writable } from \"svelte/store\"; const count = writable(0);</script>\n<div>{@const c = $count}{c}</div>",
+    );
+    let body = after_prelude(&code);
+    assert!(
+        body.contains("const c = __verter_store_get(count)"),
+        "the trailing-store @const value is rewritten with the paren moved: {body}"
+    );
+    assert!(
+        !body.contains("$count") && !body.contains("__verter_store_get()"),
+        "no raw `$count` and no stranded empty get: {body}"
+    );
+}
+
+#[test]
+fn store_sub_in_a_declaration_tag_with_multiple_and_nested_subs_is_rewritten() {
+    // F11 (P1-2): the text-path @const rewrite reuses the CodeTransform ops (not
+    // hand-rolled offset arithmetic), so MULTIPLE subs and a NESTED store-read
+    // inside a store-write both rewrite correctly (no offset drift / overlap bug).
+    // Two reads:
+    let two = project(
+        "<script lang=\"ts\">import { writable } from \"svelte/store\"; const a = writable(1); const b = writable(2);</script>\n<div>{@const s = $a + $b}{s}</div>",
+    );
+    let two_body = after_prelude(&two);
+    assert!(
+        two_body.contains("const s = __verter_store_get(a) + __verter_store_get(b)")
+            && !two_body.contains("$a")
+            && !two_body.contains("$b"),
+        "two @const reads both rewrite: {two_body}"
+    );
+}
+
+#[test]
+fn store_sub_in_a_dynamic_component_this_is_rewritten() {
+    // F11 (P1-3): a store-sub in `<svelte:component this={$Cmp}>` is rewritten —
+    // the F8 IIFE re-emits the `this` value as text, so the store-get is spliced
+    // into the interpolated component expression.
+    let code = project(
+        "<script lang=\"ts\">import { writable } from \"svelte/store\"; const Cmp = writable<any>(null);</script>\n<svelte:component this={$Cmp} />",
+    );
+    let body = after_prelude(&code);
+    assert!(
+        body.contains("__verter_dynamic_component((__verter_store_get(Cmp)))"),
+        "the dynamic-component `this={{$Cmp}}` store-sub is rewritten in the IIFE: \
+         {body}"
+    );
+    assert!(!body.contains("$Cmp"), "no raw `$Cmp` residue: {body}");
+}
+
+#[test]
+fn store_sub_in_a_bind_value_maps_back_to_the_original_source_byte() {
+    // F11 (P1-1) sourcemap accuracy: the `bind:value={$store}` rewrite keeps the
+    // `store` identifier bytes as an Original chunk (only the `$` byte was
+    // overwritten + the `bind:` prefix stripped), so hover on the projected
+    // `store` lands on the ORIGINAL identifier byte.
+    use oxc_sourcemap::SourceMap;
+
+    let source =
+        "<script lang=\"ts\">import { writable } from \"svelte/store\"; const name = writable(\"\");</script>\n<input bind:value={$name} />";
+    let parsed = parse_svelte(source);
+    let projection = project_svelte_ide(source, &parsed, Some("Comp.svelte"), false);
+    assert!(!projection.source_map.is_empty());
+
+    let read_at = source.find("$name}").expect("$name in bind value");
+    let src_off = (read_at + 1) as u32; // skip the `$`
+    let (src_line, src_col) = byte_offset_to_line_col(source, src_off);
+
+    let wrap_at = projection
+        .code
+        .find("__verter_store_get(name)")
+        .expect("the bind value was rewritten");
+    let out_off = (wrap_at + "__verter_store_get(".len()) as u32;
+    let (out_line, out_col) = byte_offset_to_line_col(&projection.code, out_off);
+
+    let map = SourceMap::from_json_string(&projection.source_map).expect("decode map");
+    let token = map
+        .get_tokens()
+        .filter(|t| t.get_dst_line() == out_line && t.get_dst_col() <= out_col)
+        .max_by_key(|t| t.get_dst_col())
+        .expect("a token covering the store identifier in the bind value");
+    assert_eq!(token.get_src_line(), src_line);
+    let delta = out_col - token.get_dst_col();
+    assert_eq!(
+        token.get_src_col() + delta,
+        src_col,
+        "the bind-value `$name` maps back byte-accurately to the original `name`"
+    );
+}
+
+#[test]
+fn member_write_on_a_store_sub_degrades_to_a_read_base() {
+    // F11 documented bounded boundary: `$obj.x = 1` projects the BASE `$obj` as a
+    // READ (`__verter_store_get(obj).x = 1`) — a relaxed safe-degrade (it mutates
+    // the read object's member; valid TSX, does not require `Writable`). NOT a
+    // whole-object store set.
+    let code = project(
+        "<script lang=\"ts\">import { writable } from \"svelte/store\"; const obj = writable({ x: 0 });</script>\n<div>{(() => { $obj.x = 1; })()}</div>",
+    );
+    let body = after_prelude(&code);
+    assert!(
+        body.contains("__verter_store_get(obj).x = 1"),
+        "a `$obj.x = 1` member write projects the base as a READ (relaxed \
+         safe-degrade): {body}"
+    );
+    assert!(
+        !body.contains("__verter_store_set(obj"),
+        "the member write does NOT emit a whole-object store set: {body}"
+    );
+}
+
+// --- store-subs in bind-TARGET (lvalue) positions (BLOCKER D) ---
+//
+// A `$store` as a `bind:this` / `bind:group` / readonly-table-bind TARGET is
+// invalid Svelte (you bind into a writable LOCAL, never into a store
+// auto-subscription). The projector must NEVER leak raw `$`-identifier residue —
+// a raw `$store` would surface a phantom `TS2304/2552 Cannot find name '$store'`.
+// The store-sub is therefore rewritten to its READ-helper form
+// (`__verter_store_get(store)`) so the round-trip assignment (`LOCAL =
+// checker(LOCAL)`) is SYNTACTICALLY VALID and surfaces the CORRECT lvalue error
+// (assignment to a call result), NOT a phantom name error. These were the three
+// previously-`#[ignore]`'d R10 ledger entries — now GREEN (real residue-free
+// handling), per the orchestrator no-raw-`$`-residue ruling.
+
+#[test]
+fn bind_this_store_target_emits_no_raw_dollar_residue() {
+    let code = project(
+        "<script lang=\"ts\">import { writable } from \"svelte/store\"; const el = writable<any>(null);</script>\n<input bind:this={$el} />",
+    );
+    let body = after_prelude(&code);
+    assert!(
+        !body.contains("$el"),
+        "a `bind:this={{$el}}` target must not leak raw `$el` residue: {body}"
+    );
+    // The store-sub is rewritten to the read-helper form (valid TSX surfacing a
+    // real lvalue error, not a phantom name error).
+    assert!(
+        body.contains("__verter_store_get(el)"),
+        "the `bind:this={{$el}}` target is rewritten to the read helper: {body}"
+    );
+}
+
+#[test]
+fn bind_group_store_target_emits_no_raw_dollar_residue() {
+    let code = project(
+        "<script lang=\"ts\">import { writable } from \"svelte/store\"; const g = writable<any>(null);</script>\n<input type=\"checkbox\" bind:group={$g} />",
+    );
+    let body = after_prelude(&code);
+    assert!(
+        !body.contains("$g"),
+        "a `bind:group={{$g}}` target must not leak raw `$g` residue: {body}"
+    );
+    assert!(
+        body.contains("__verter_store_get(g)"),
+        "the `bind:group={{$g}}` target is rewritten to the read helper: {body}"
+    );
+}
+
+#[test]
+fn table_bind_store_target_emits_no_raw_dollar_residue() {
+    let code = project(
+        "<script lang=\"ts\">import { writable } from \"svelte/store\"; const w = writable(0);</script>\n<div bind:clientWidth={$w}></div>",
+    );
+    let body = after_prelude(&code);
+    assert!(
+        !body.contains("$w"),
+        "a `bind:clientWidth={{$w}}` target must not leak raw `$w` residue: {body}"
+    );
+    assert!(
+        body.contains("__verter_store_get(w)"),
+        "the `bind:clientWidth={{$w}}` target is rewritten to the read helper: {body}"
+    );
+}
+
+// --- store-subs vs markup block bindings (BLOCKER A) ---
+//
+// A `$`-prefixed identifier INTRODUCED by a markup block binding (`{#each … as
+// $item}` / `{#await p then $v}` / `{:catch $e}` / `{#snippet n($p)}` / `let:$x`)
+// is an ORDINARY local in that block's subtree, NOT a store auto-subscription.
+// The classifier must NOT rewrite it to `__verter_store_get(item)` (which leaves
+// a raw `item` name reference and invalid TSX). A GENUINE store-sub in the SAME
+// template still rewrites. These DISCRIMINATE the block-binding scope split.
+
+#[test]
+fn an_each_block_dollar_binding_is_not_store_rewritten() {
+    let code = project("<ul>{#each list as $item}<li>{$item}</li>{/each}</ul>");
+    let body = render_body(&code);
+    assert!(
+        !body.contains("__verter_store_get(item)"),
+        "a `{{#each list as $item}}` binding must NOT be store-rewritten: {body}"
+    );
+    assert!(
+        body.contains("{$item}"),
+        "the `$item` block binding stays a verbatim reference: {body}"
+    );
+}
+
+#[test]
+fn an_each_index_dollar_binding_is_not_store_rewritten() {
+    let code = project("<ul>{#each list as item, $i}<li>{$i}</li>{/each}</ul>");
+    let body = render_body(&code);
+    assert!(
+        !body.contains("__verter_store_get(i)"),
+        "a `{{#each … as item, $i}}` index binding must NOT be store-rewritten: {body}"
+    );
+}
+
+#[test]
+fn a_destructured_each_dollar_binding_is_not_store_rewritten() {
+    let code = project("<ul>{#each rows as { $a, $b }}<li>{$a}{$b}</li>{/each}</ul>");
+    let body = render_body(&code);
+    assert!(
+        !body.contains("__verter_store_get(a)") && !body.contains("__verter_store_get(b)"),
+        "a destructured `{{#each rows as {{ $a, $b }}}}` binding must NOT be \
+         store-rewritten: {body}"
+    );
+}
+
+#[test]
+fn an_each_destructuring_pattern_close_brace_does_not_strand_the_block_tail() {
+    // An `{#each rows as { x }}` DESTRUCTURING pattern contains its OWN `}` — the
+    // each-open's closing `}` is AFTER it. The projector must search for the
+    // open-close `}` PAST the binding span, else it stops at the pattern's inner
+    // `}` and strands a malformed `(<>}` tail. Assert the well-formed
+    // `.map(({ x }) => (<>` head with the body directly after (no stray `}`).
+    let code = project("<ul>{#each rows as { x }}<li>{x}</li>{/each}</ul>");
+    let body = render_body(&code);
+    assert!(
+        body.contains(".map(({ x }) => (<>") && body.contains("<li>"),
+        "the each-destructuring head must be well-formed `.map(({{ x }}) => (<>`: {body}"
+    );
+    assert!(
+        !body.contains("(<>}"),
+        "the each-destructuring projection must NOT strand a `}}` after `(<>` (the \
+         close-brace search must skip the pattern's inner `}}`): {body}"
+    );
+}
+
+#[test]
+fn an_each_destructuring_store_default_is_read_rewritten_residue_free() {
+    // `{#each rows as { x = $store }}` — the binding NAME `x` stays a local, the
+    // DEFAULT `$store` is an ordinary READ rewritten to `__verter_store_get(store)`
+    // with NO raw `$store` residue and a well-formed head.
+    let code = project(
+        "<script lang=\"ts\">\n\
+         import { writable } from \"svelte/store\";\n\
+         const store = writable(0);\n\
+         </script>\n\
+         {#each rows as { x = $store }}<li>{x}</li>{/each}",
+    );
+    let body = render_body(&code);
+    assert!(
+        body.contains("__verter_store_get(store)") && !body.contains("$store"),
+        "the each block-binding default `$store` must be read-rewritten (no raw \
+         `$store`): {body}"
+    );
+    assert!(
+        !body.contains("(<>}"),
+        "the each-destructuring-with-default head must be well-formed (no stranded \
+         `}}`): {body}"
+    );
+}
+
+#[test]
+fn an_await_then_dollar_binding_is_not_store_rewritten() {
+    let code = project("{#await p then $v}<span>{$v}</span>{/await}");
+    let body = render_body(&code);
+    assert!(
+        !body.contains("__verter_store_get(v)"),
+        "a `{{#await p then $v}}` binding must NOT be store-rewritten: {body}"
+    );
+}
+
+#[test]
+fn an_await_catch_dollar_binding_is_not_store_rewritten() {
+    let code = project("{#await p}<span>x</span>{:catch $e}<span>{$e}</span>{/await}");
+    let body = render_body(&code);
+    assert!(
+        !body.contains("__verter_store_get(e)"),
+        "a `{{:catch $e}}` binding must NOT be store-rewritten: {body}"
+    );
+}
+
+#[test]
+fn a_snippet_param_dollar_binding_is_not_store_rewritten() {
+    // The snippet body is HOISTED to module scope (before the render fn), so
+    // assert against the post-prelude code (which includes the hoisted
+    // declarator), not just the render body.
+    let code = project("{#snippet row($item)}<li>{$item}</li>{/snippet}");
+    let body = after_prelude(&code);
+    assert!(
+        !body.contains("__verter_store_get(item)"),
+        "a `{{#snippet row($item)}}` param must NOT be store-rewritten: {body}"
+    );
+    assert!(
+        body.contains("{$item}"),
+        "the `$item` snippet param stays a verbatim reference: {body}"
+    );
+}
+
+#[test]
+fn a_let_directive_dollar_binding_is_not_store_rewritten() {
+    let code = project("<Comp let:item={$row}>{$row}</Comp>");
+    let body = render_body(&code);
+    assert!(
+        !body.contains("__verter_store_get(row)"),
+        "a `let:item={{$row}}` slot-prop binding must NOT be store-rewritten: {body}"
+    );
+}
+
+#[test]
+fn a_real_store_sub_in_a_block_with_a_dollar_binding_still_rewrites() {
+    // DISCRIMINATING: the `$item` each-binding is a local (NOT rewritten), while
+    // a genuine `$count` store-sub in the SAME each body IS rewritten. The
+    // block-binding scope must not over-suppress a real store-sub.
+    let code = project(
+        "<script lang=\"ts\">import { writable } from \"svelte/store\"; const count = writable(0);</script>\n<ul>{#each list as $item}<li>{$item}-{$count}</li>{/each}</ul>",
+    );
+    let body = render_body(&code);
+    assert!(
+        !body.contains("__verter_store_get(item)"),
+        "the `$item` each-binding is NOT rewritten: {body}"
+    );
+    assert!(
+        body.contains("__verter_store_get(count)"),
+        "a real `$count` store-sub in the SAME each body IS rewritten: {body}"
+    );
+}
+
+#[test]
+fn an_each_dollar_binding_does_not_leak_to_a_sibling_block() {
+    // The `$item` binding scopes to its OWN each block; a `$item` reference in a
+    // SIBLING block (where `item` is NOT bound) is a real store-sub and rewrites.
+    // DISCRIMINATING via the EXACT occurrence count: post-fix there is EXACTLY
+    // ONE `__verter_store_get(item)` (the sibling) — the each-body `$item` stays a
+    // verbatim local. Pre-fix BOTH `$item`s rewrite (count == 2), so this fails.
+    let code = project("<ul>{#each a as $item}<li>{$item}</li>{/each}</ul>\n<div>{$item}</div>");
+    let body = render_body(&code);
+    let helper_count = body.matches("__verter_store_get(item)").count();
+    assert_eq!(
+        helper_count, 1,
+        "EXACTLY ONE `$item` (the sibling outside the each) is a store-sub; the \
+         each-body `$item` is a local (no leak, no over-rewrite): {body}"
+    );
+    // The each-body `$item` stays a verbatim local reference inside the `.map`.
+    assert!(
+        body.contains("(<><li>{$item}</li></>)"),
+        "the each-body `$item` stays a verbatim local reference: {body}"
+    );
+}

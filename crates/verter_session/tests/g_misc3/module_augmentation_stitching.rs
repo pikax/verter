@@ -706,12 +706,10 @@ fn edit_augmenting_file_invalidates_consumer() {
         }
         fn validates(&self, fact: &FactVersionRef) -> bool {
             match fact {
-                FactVersionRef::FileWholeHash { canonical_id, hash } => {
-                    if canonical_id == &self.edited_canonical {
-                        hash == &self.new_hash
-                    } else {
-                        true
-                    }
+                FactVersionRef::FileWholeHash { canonical_id, hash }
+                    if canonical_id == &self.edited_canonical =>
+                {
+                    hash == &self.new_hash
                 }
                 // RouteSurface facts validate trivially in this test.
                 _ => true,
@@ -808,15 +806,11 @@ fn edit_unrelated_file_does_not_invalidate_consumer() {
         }
         fn validates(&self, fact: &FactVersionRef) -> bool {
             match fact {
-                FactVersionRef::FileWholeHash { canonical_id, hash } => {
+                FactVersionRef::FileWholeHash { canonical_id, hash }
                     // The augmenter's hash MUST still match (no edit to it).
-                    if canonical_id == &self.aug_canonical {
+                    if canonical_id == &self.aug_canonical => {
                         hash == &self.aug_hash
-                    } else {
-                        // Unrelated files default-accept.
-                        true
                     }
-                }
                 _ => true,
             }
         }

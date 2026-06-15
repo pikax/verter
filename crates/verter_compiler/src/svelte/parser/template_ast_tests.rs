@@ -387,6 +387,46 @@ fn use_transition_animate_and_legacy_on_parse_without_crash() {
 }
 
 #[test]
+fn let_slot_prop_directive_is_classified_as_the_let_kind() {
+    // The `let:` slot-prop directive is classified STRUCTURALLY as
+    // `SvelteDirectiveKind::Let` (the parser is the directive-prefix authority) —
+    // NOT lumped into `Unknown` for a downstream string-sniff. Both the aliased
+    // form (`let:item={alias}`) and the shorthand (`let:item`) classify as `Let`.
+    let src = "<C let:item={alias} let:row>x</C>";
+    let p = parse_clean(src);
+    let mut els = Vec::new();
+    elements(&p.template, &mut els);
+    let c = els.iter().find(|e| e.name == "C").unwrap();
+    let lets: Vec<&SvelteDirective> = c
+        .attributes
+        .iter()
+        .filter_map(|a| match &a.kind {
+            SvelteAttributeKind::Directive(d) if d.kind == SvelteDirectiveKind::Let => Some(d),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        lets.len(),
+        2,
+        "both `let:item={{alias}}` and `let:row` classify as `Let`: {:?}",
+        c.attributes
+    );
+    // DISCRIMINATING: neither `let:` directive is classified as `Unknown`.
+    let unknowns = c.attributes.iter().filter(|a| {
+        matches!(&a.kind, SvelteAttributeKind::Directive(d) if d.kind == SvelteDirectiveKind::Unknown)
+    });
+    assert_eq!(
+        unknowns.count(),
+        0,
+        "a `let:` directive must NOT classify as `Unknown` (the old string-sniff \
+         premise): {:?}",
+        c.attributes
+    );
+    assert_eq!(lets[0].local, "item");
+    assert_eq!(lets[1].local, "row");
+}
+
+#[test]
 fn style_directive_with_important_modifier_parses() {
     let src = "<div style:color|important={c}>x</div>";
     let p = parse_clean(src);

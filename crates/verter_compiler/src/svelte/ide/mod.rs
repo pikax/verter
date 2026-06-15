@@ -35,8 +35,11 @@ mod bind_contract_data;
 mod emit;
 pub mod prelude;
 mod projector;
+mod store_scan;
 
 #[cfg(test)]
 mod projector_tests;
+#[cfg(test)]
+mod store_scan_tests;
 
 pub use projector::{project_svelte_ide, SvelteIdeProjection, SvelteIdeUnsupportedDiagnostic};

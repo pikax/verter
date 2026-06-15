@@ -10,6 +10,29 @@
 use super::*;
 
 impl TemplateProjector<'_, '_> {
+    /// The bind-TARGET local text for a `bind:this` / `bind:group` / table-bind
+    /// target, with any F11 store auto-subscription rewritten to its READ-helper
+    /// form (`$store` → `__verter_store_get(store)`), plus whether a store-sub was
+    /// present.
+    ///
+    /// A `$store` as a bind TARGET is INVALID Svelte (you bind into a writable
+    /// LOCAL, never into a store auto-subscription). The governing invariant is
+    /// that the projection must never leak raw `$`-identifier residue — a raw
+    /// `$store` would surface a phantom `TS2304 Cannot find name '$store'`. By
+    /// rewriting the target to `__verter_store_get(store)` the projected TSX is
+    /// SYNTACTICALLY VALID and the round-trip assignment (`LOCAL = checker(LOCAL)`)
+    /// surfaces the CORRECT lvalue error — "The left-hand side of an assignment
+    /// must be a variable or property access" — on the actual invalid construct,
+    /// not a phantom name error. When a store-sub IS present, the target is no
+    /// longer a `typeof`-safe identifier (it is a call), so the `bind:this`
+    /// projection is forced onto the read-bearing (non-`typeof`) invariant form.
+    fn bind_target_local(&self, expr: Span) -> (String, bool) {
+        let raw = self.slice(expr);
+        let rewritten = self.rewrite_store_subs_in_text(raw);
+        let had_store_sub = rewritten != raw;
+        (rewritten, had_store_sub)
+    }
+
     /// Project a `bind:` directive (F4/F5).
     ///
     /// The dispatch (in order):
@@ -118,8 +141,24 @@ impl TemplateProjector<'_, '_> {
             return;
         };
         let host_ty = self.bind_this_host_type(el, is_component);
-        let local = self.slice(expr).to_string();
+        let (local, had_store_sub) = self.bind_target_local(expr);
         self.ct.overwrite(attr.span.start, expr.start, "{...((");
+        if had_store_sub {
+            // A `$store` bind TARGET (invalid Svelte) — replace the in-place bytes
+            // with the READ-helper rewrite and use the read-bearing (non-`typeof`)
+            // invariant: `__verter_store_get(store) = __verter_bind_rw<Host>(
+            // __verter_store_get(store))`. This is syntactically valid TSX and
+            // surfaces the correct lvalue error (assignment to a call result), NOT
+            // a phantom `Cannot find name '$store'`. The target is a call, so the
+            // `typeof LOCAL` form would be invalid — hence the read-bearing branch.
+            self.ct.overwrite(expr.start, expr.end, &local);
+            self.ct.overwrite(
+                expr.end,
+                attr.span.end,
+                &format!(" = __verter_bind_rw<{host_ty}>({local})), {{}})}}"),
+            );
+            return;
+        }
         if is_type_query_safe_lvalue(&local) {
             // `bind:this={` → `{...((` ; the LOCAL (mapped) is the assignment
             // target ; trailing `}` → ` = (null! as Host)),
@@ -187,7 +226,13 @@ impl TemplateProjector<'_, '_> {
         // ` = CHECKER(LOCAL)), {})}`. The round-trip assignment makes a const
         // target fail too.
         self.ct.overwrite(attr.span.start, expr.start, "{...((");
-        let local = self.slice(expr).to_string();
+        let (local, had_store_sub) = self.bind_target_local(expr);
+        if had_store_sub {
+            // A `$store` bind:group TARGET (invalid Svelte) — replace the in-place
+            // bytes with the READ-helper rewrite so the round-trip assignment
+            // surfaces the correct lvalue error, NOT a phantom name error.
+            self.ct.overwrite(expr.start, expr.end, &local);
+        }
         self.ct.overwrite(
             expr.end,
             attr.span.end,
@@ -237,10 +282,19 @@ impl TemplateProjector<'_, '_> {
             return;
         };
         let v = contract.value_type;
+        // A `$store` table-bind TARGET (e.g. `bind:clientWidth={$w}`) is INVALID
+        // Svelte — rewrite it to the READ-helper form so the round-trip assignment
+        // (`LOCAL = checker(LOCAL)`) is syntactically valid and surfaces the
+        // correct lvalue error, never a phantom `Cannot find name '$w'`. The
+        // in-place LOCAL bytes are the assignment LHS in BOTH directions, so they
+        // are overwritten with the rewrite when a store-sub is present.
+        let (local, had_store_sub) = self.bind_target_local(expr);
+        if had_store_sub {
+            self.ct.overwrite(expr.start, expr.end, &local);
+        }
         match contract.direction {
             BindDirection::ReadWrite => {
                 self.ct.overwrite(attr.span.start, expr.start, "{...((");
-                let local = self.slice(expr).to_string();
                 self.ct.overwrite(
                     expr.end,
                     attr.span.end,
@@ -332,6 +386,11 @@ impl TemplateProjector<'_, '_> {
             "__verter_bind_fn"
         };
         let type_arg = target_ty.map(|t| format!("<{t}>")).unwrap_or_default();
+        // F11 (P1-1): a store-sub in the `get, set` function-binding value pair
+        // (`bind:x={() => $store, v => ($store = v)}`) is rewritten — the pair
+        // stays a mapped chunk, so the `$`-span overwrite composes with the
+        // boundary `{...(CHECKER(` … `), {})}` wrap.
+        self.rewrite_store_subs_in(expr);
         // `bind:x={` → `{...(CHECKER<V>(` ; the `get, set` expression pair stays
         // mapped ; trailing `}` → `), {})}`.
         self.ct.overwrite(

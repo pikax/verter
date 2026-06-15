@@ -184,9 +184,7 @@ fn walk<C: ResolverContext>(
     // Snapshot the transitive next-hops before borrowing `acc`, so the recursive
     // re-entry does not alias the analysis Arc.
     let mut next_hops: Vec<SourceLocator> = Vec::new();
-    for (ordinal, (raw_surface, lowered_body)) in
-        surfaces.iter().zip(lowered_bodies.into_iter()).enumerate()
-    {
+    for (ordinal, (raw_surface, lowered_body)) in surfaces.iter().zip(lowered_bodies).enumerate() {
         for referent in &raw_surface.transitive_referents {
             // A `typeof x` referent resolves in VALUE space (the referent is a
             // value whose declaration carries the lossy provenance). The hop is

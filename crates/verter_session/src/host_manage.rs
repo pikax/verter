@@ -66,7 +66,6 @@ pub(crate) use self::component_meta_extract::{
 // `meta_tests.rs` via the `crate::host_manage::*` path. Gated `#[cfg(test)]`
 // so the non-test build surface stays minimal.
 #[cfg(test)]
-
 /// Resolve a relative import specifier to a canonical ID.
 ///
 /// If the specifier is relative (`./` or `../`), resolves it relative to

@@ -268,6 +268,8 @@ pub enum SvelteDirectiveKind {
     Animate,
     /// Legacy `on:` event listener.
     On,
+    /// `let:` slot-prop binding (`<C let:item={alias}>` / shorthand `let:item`).
+    Let,
     /// An unrecognised `name:` directive — parsed without crash.
     Unknown,
 }
@@ -286,6 +288,7 @@ impl SvelteDirectiveKind {
             "out" => Self::Out,
             "animate" => Self::Animate,
             "on" => Self::On,
+            "let" => Self::Let,
             _ => Self::Unknown,
         }
     }

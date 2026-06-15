@@ -2985,7 +2985,7 @@ fn registry_snapshot_fidelity_engine_is_discriminating() {
     );
 
     // (4) a registry entry with NO snapshot.
-    let f = registry_snapshot_fidelity_failures(&lifted, &registry, &snapshots[..1].to_vec());
+    let f = registry_snapshot_fidelity_failures(&lifted, &registry, &snapshots[..1]);
     assert!(
         f.iter().any(|m| m.contains("has NO matching snapshot")),
         "a registry entry without a snapshot must FAIL; got {f:?}",

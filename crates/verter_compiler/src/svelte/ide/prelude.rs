@@ -74,14 +74,29 @@ impl SvelteJsxNamespace {
 /// fixture's only un-checked names are the user's own script/template
 /// symbols. The leading `@jsxImportSource` pragma is the only part that varies
 /// by namespace (F10) — the rune surface + checkers are namespace-invariant.
+///
+/// `legacy_mode` selects whether the F12 legacy magic-object declarations
+/// (`$$props`/`$$restProps`/`$$slots`) are emitted. They exist ONLY in
+/// legacy (non-runes) mode — a runes-mode component never references them, and
+/// emitting their deliberately-loose `any`-typed surface there would pollute a
+/// runes-mode file. The F11 store-subscription helpers
+/// (`__verter_store_get`/`__verter_store_set`) are mode-INVARIANT (they are
+/// only reached when the projector rewrote a real store-sub) and always emitted.
 #[must_use]
-pub fn render_prelude(namespace: SvelteJsxNamespace) -> String {
+pub fn render_prelude(namespace: SvelteJsxNamespace, legacy_mode: bool) -> String {
     // One static block — the rune surface is fixed (the audited Svelte 5.56.x
     // surface), so a const string is exact and allocation-free to assemble.
     let pragma = namespace.pragma_line();
-    let mut out = String::with_capacity(pragma.len() + RUNE_AND_CHECKER_PRELUDE.len());
+    let legacy = if legacy_mode {
+        LEGACY_MAGIC_PRELUDE
+    } else {
+        ""
+    };
+    let mut out =
+        String::with_capacity(pragma.len() + RUNE_AND_CHECKER_PRELUDE.len() + legacy.len());
     out.push_str(pragma);
     out.push_str(RUNE_AND_CHECKER_PRELUDE);
+    out.push_str(legacy);
     out
 }
 
@@ -215,6 +230,57 @@ declare function __verter_bind_fn_read<V>(get: null, set: (value: V) => void): v
 declare function __verter_dynamic_component<P>(
   component: abstract new (...args: never[]) => { $props: P },
 ): (props: P & { children?: unknown }) => ReturnType<Snippet>;
+// --- F11 store auto-subscription (`$store`) helpers. The projector rewrites
+// ONLY the `$` byte / `=` operator spans of a classified store-sub, preserving
+// the original `store` identifier / RHS bytes (sourcemap accuracy). A READ
+// `$store` becomes `__verter_store_get(store)` — typed `T` from the store's
+// `Readable<T>` (a non-store `store` FAILS the constraint). A WRITE
+// `$store = v` becomes `__verter_store_set(store, v)` — `T` is the store's
+// `Writable<T>` value type and `v` is checked against it (a readonly
+// `Readable<T>` store FAILS, a wrong-typed `v` FAILS). `__verter_store_set`
+// returns `T` so the rewrite stays a valid expression in any assignment
+// position.
+declare function __verter_store_get<T>(store: import("svelte/store").Readable<T>): T;
+declare function __verter_store_set<T>(store: import("svelte/store").Writable<T>, value: T): T;
+// A `$store` in an lvalue DESTRUCTURING / `for`-of WRITE TARGET (`[$store] =
+// xs` / `({ x: $store } = obj)` / `for ($store of xs)`) projects to
+// `__verter_store_lvalue(store).value` — a VALID assignment-target member access
+// referencing only the `store` local. The `{ value: T }` carrier checks the
+// destructured / iterated element against the store's `Writable<T>` value type
+// (a non-`Writable` store FAILS the constraint, a wrong-typed element FAILS the
+// `.value` assignment) without raw `$store` residue. A function-call result is
+// not a valid lvalue, so the helper returns the carrier OBJECT whose `.value`
+// member IS the lvalue.
+declare function __verter_store_lvalue<T>(store: import("svelte/store").Writable<T>): { value: T };
+// `$store++` / `--$store` UPDATE: the increment/decrement operand must be
+// `number | bigint` (TS rejects `++` on a string/boolean). Modelling the update
+// as `get(store) + 1` would FALSELY reject a `bigint` store (`bigint + number`
+// is an error) and FALSELY accept a `string` store (string concatenation). This
+// helper enforces the exact `++`/`--` operand constraint while PRESERVING the
+// value type `T` (numeric literal / `number` / `bigint` / numeric enum) — the
+// projector emits `__verter_store_set(store, __verter_store_update(
+// __verter_store_get(store)))`.
+declare function __verter_store_update<T extends number | bigint>(current: T): T;
+"#;
+
+/// The F12 legacy magic-object declarations (`$$props`/`$$restProps`/`$$slots`).
+///
+/// Emitted ONLY in legacy (non-runes) mode — the magic objects do not exist in
+/// runes mode. The `Record<string, any>` typing of `$$props`/`$$restProps` is
+/// an EXPLICIT, OWNER-APPROVED anti-`any`-gate exception scoped to the legacy
+/// magic object itself: Svelte's legacy `$$props`/`$$restProps` are
+/// intrinsically untyped bags of forwarded attributes, so a precise type is not
+/// recoverable. This carve-out applies to NOTHING else — every other projected
+/// surface stays precisely typed. `$$slots` is `Record<string, boolean>`
+/// (`$$slots.foo` is `boolean`: whether the `foo` slot was filled), which is a
+/// precise type, not the `any` exception.
+const LEGACY_MAGIC_PRELUDE: &str = r#"// --- F12 legacy magic objects (legacy-mode only; ambient `declare const`).
+// ANTI-`any`-GATE EXCEPTION (owner-approved): `$$props`/`$$restProps` are the
+// legacy forwarded-attribute bag, intrinsically untyped — the deliberate `any`
+// is scoped to THESE TWO declarations ONLY. `$$slots` is precisely typed.
+declare const $$props: Record<string, any>;
+declare const $$restProps: Record<string, any>;
+declare const $$slots: Record<string, boolean>;
 "#;
 
 #[cfg(test)]
@@ -223,7 +289,7 @@ mod tests {
 
     #[test]
     fn prelude_opens_with_the_jsx_import_source_pragma() {
-        let prelude = render_prelude(SvelteJsxNamespace::Html);
+        let prelude = render_prelude(SvelteJsxNamespace::Html, true);
         assert!(prelude.starts_with("/** @jsxImportSource @verter/svelte-jsx */"));
     }
 
@@ -231,9 +297,9 @@ mod tests {
     fn prelude_pragma_varies_by_namespace() {
         // F10: the svg / mathml namespaces select the dedicated shim entrypoints
         // via the leading pragma; the rune surface stays namespace-invariant.
-        let html = render_prelude(SvelteJsxNamespace::Html);
-        let svg = render_prelude(SvelteJsxNamespace::Svg);
-        let mathml = render_prelude(SvelteJsxNamespace::MathMl);
+        let html = render_prelude(SvelteJsxNamespace::Html, true);
+        let svg = render_prelude(SvelteJsxNamespace::Svg, true);
+        let mathml = render_prelude(SvelteJsxNamespace::MathMl, true);
         assert!(html.starts_with("/** @jsxImportSource @verter/svelte-jsx */"));
         assert!(svg.starts_with("/** @jsxImportSource @verter/svelte-jsx/svg */"));
         assert!(mathml.starts_with("/** @jsxImportSource @verter/svelte-jsx/mathml */"));
@@ -271,7 +337,7 @@ mod tests {
         // inferring the props `P` DIRECTLY from the constructor's `{ $props: P }`
         // return member (NOT via `InstanceType<C>["$props"]` — see the prelude
         // comment for why that does not narrow over a generic `C`).
-        let p = render_prelude(SvelteJsxNamespace::Html);
+        let p = render_prelude(SvelteJsxNamespace::Html, true);
         assert!(p.contains("declare function __verter_dynamic_component"));
         assert!(
             p.contains("abstract new (...args: never[]) => { $props: P }"),
@@ -285,7 +351,7 @@ mod tests {
 
     #[test]
     fn prelude_declares_the_complete_rune_surface() {
-        let p = render_prelude(SvelteJsxNamespace::Html);
+        let p = render_prelude(SvelteJsxNamespace::Html, true);
         for needle in [
             "declare function $props",
             "function id()",
@@ -311,7 +377,7 @@ mod tests {
 
     #[test]
     fn prelude_declares_the_three_checkers_and_imports_snippet() {
-        let p = render_prelude(SvelteJsxNamespace::Html);
+        let p = render_prelude(SvelteJsxNamespace::Html, true);
         assert!(p.contains("import type { Snippet } from \"svelte\""));
         assert!(p.contains("declare function __verter_attach"));
         assert!(p.contains("declare function __verter_snippet"));
@@ -328,7 +394,7 @@ mod tests {
         // checkers are declared referencing the `svelte/transition`/
         // `svelte/animate` config types, plus the `__VerterHostEl<Tag>` host-node
         // helper the projector uses for the real call site.
-        let p = render_prelude(SvelteJsxNamespace::Html);
+        let p = render_prelude(SvelteJsxNamespace::Html, true);
         assert!(p.contains("declare function __verter_transition"));
         assert!(p.contains("declare function __verter_animate"));
         assert!(p.contains("type __VerterHostEl"));
@@ -357,7 +423,7 @@ mod tests {
         // F4/F5: the wide `bind:` family value-type checkers (read-write / read /
         // write), the `bind:group` checkbox/radio checkers, and the F5
         // function-binding checker are all declared.
-        let p = render_prelude(SvelteJsxNamespace::Html);
+        let p = render_prelude(SvelteJsxNamespace::Html, true);
         for needle in [
             "declare function __verter_bind_rw",
             "declare function __verter_bind_read",
@@ -369,5 +435,80 @@ mod tests {
         ] {
             assert!(p.contains(needle), "prelude missing bind checker: {needle}");
         }
+    }
+
+    #[test]
+    fn prelude_declares_the_f11_store_subscription_helpers() {
+        // F11: the store-get (`Readable<T>` → `T`) and store-set (`Writable<T>`
+        // checked) helpers are declared in BOTH modes (mode-invariant — they are
+        // only reached when the projector rewrote a real store-sub).
+        for legacy in [true, false] {
+            let p = render_prelude(SvelteJsxNamespace::Html, legacy);
+            assert!(
+                p.contains(
+                    "declare function __verter_store_get<T>(store: import(\"svelte/store\").Readable<T>): T;"
+                ),
+                "the store-get helper reads `T` from `Readable<T>`"
+            );
+            assert!(
+                p.contains(
+                    "declare function __verter_store_set<T>(store: import(\"svelte/store\").Writable<T>, value: T): T;"
+                ),
+                "the store-set helper checks `value` against the store's `Writable<T>`"
+            );
+            assert!(
+                p.contains(
+                    "declare function __verter_store_update<T extends number | bigint>(current: T): T;"
+                ),
+                "the store-update helper enforces the `++`/`--` `number | bigint` operand"
+            );
+            assert!(
+                p.contains(
+                    "declare function __verter_store_lvalue<T>(store: import(\"svelte/store\").Writable<T>): { value: T };"
+                ),
+                "the store-lvalue helper exposes a writable `{{ value: T }}` carrier for \
+                 destructuring / for-of write targets"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_mode_declares_the_f12_magic_objects_with_the_documented_any_exception() {
+        // F12: in LEGACY mode the magic objects are declared. The OWNER-APPROVED
+        // anti-`any`-gate exception is scoped to `$$props`/`$$restProps` ONLY;
+        // `$$slots` is the precise `Record<string, boolean>`.
+        let p = render_prelude(SvelteJsxNamespace::Html, true);
+        assert!(p.contains("declare const $$props: Record<string, any>;"));
+        assert!(p.contains("declare const $$restProps: Record<string, any>;"));
+        assert!(p.contains("declare const $$slots: Record<string, boolean>;"));
+        // The exception is DOCUMENTED at the declaration site.
+        assert!(
+            p.contains("ANTI-`any`-GATE EXCEPTION"),
+            "the legacy `any` carve-out is documented at the declaration site"
+        );
+    }
+
+    #[test]
+    fn runes_mode_omits_the_f12_magic_objects() {
+        // F12: in RUNES mode the magic objects do NOT exist — their declarations
+        // (and the loose `any`) are OMITTED so a runes-mode file stays clean.
+        let p = render_prelude(SvelteJsxNamespace::Html, false);
+        assert!(
+            !p.contains("declare const $$props"),
+            "no $$props in runes mode"
+        );
+        assert!(
+            !p.contains("declare const $$restProps"),
+            "no $$restProps in runes mode"
+        );
+        assert!(
+            !p.contains("declare const $$slots"),
+            "no $$slots in runes mode"
+        );
+        // And no stray `any` carve-out leaks into runes mode.
+        assert!(
+            !p.contains("ANTI-`any`-GATE EXCEPTION"),
+            "the legacy `any` carve-out is legacy-mode only"
+        );
     }
 }

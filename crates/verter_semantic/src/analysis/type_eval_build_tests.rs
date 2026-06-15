@@ -403,7 +403,7 @@ fn extracts_function_declaration() {
     assert!(env.value_symbols.contains_key("greet"));
     let decl = env.value_symbols["greet"].primary();
     assert_eq!(decl.kind, ValueDeclKind::Function);
-    assert!(decl.signatures.first().is_some());
+    assert!(!decl.signatures.is_empty());
 
     let sig = decl.signatures.first().unwrap();
     assert_eq!(sig.parameters.len(), 2);
@@ -447,7 +447,7 @@ fn extracts_const_with_type_annotation() {
 fn extracts_const_arrow_function() {
     let env = parse_and_build_env("const add = (a: number, b: number): number => a + b");
     let decl = env.value_symbols["add"].primary();
-    assert!(decl.signatures.first().is_some());
+    assert!(!decl.signatures.is_empty());
     let sig = decl.signatures.first().unwrap();
     assert_eq!(sig.parameters.len(), 2);
     assert_eq!(
@@ -1167,7 +1167,7 @@ fn extracts_class_as_type_and_value() {
 
     let value_decl = env.value_symbols["Widget"].primary();
     assert_eq!(value_decl.kind, ValueDeclKind::Class);
-    assert!(value_decl.signatures.first().is_some()); // constructor
+    assert!(!value_decl.signatures.is_empty()); // constructor
 }
 
 // =============================================================================

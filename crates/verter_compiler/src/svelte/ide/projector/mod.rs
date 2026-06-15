@@ -20,21 +20,43 @@ use super::await_scan::scan_await_positions;
 use super::bind_contract::{lookup_bind_contract, BindContract, BindDirection};
 use super::emit::{is_css_custom_property, UnsupportedKind};
 use super::prelude::{render_prelude, SvelteJsxNamespace};
+use super::store_scan::{
+    collect_declared_dollar_names, collect_pattern_dollar_names, scan_store_subscriptions,
+    text_uses_runes,
+};
 use crate::svelte::parser::{
     ParsedSvelte, SvelteAttribute, SvelteAttributeKind, SvelteAttributeValue, SvelteBlock,
     SvelteBlockKind, SvelteClauseKind, SvelteDirectiveKind, SvelteElement, SvelteElementKind,
     SvelteNode, SvelteScript, SvelteSpecialKind, SvelteTag, SvelteTagKind,
 };
+use store::rewrite_store_sub;
 
 /// The `bind:` directive projection (F4/F5) — a continuation of the
 /// `TemplateProjector` impl, extracted for file size.
 mod bind;
 
+/// The block-construct projection (`{#if}`/`{#each}`/`{#await}`/`{#key}`/
+/// `{#snippet}`) — a continuation of the `TemplateProjector` impl, extracted for
+/// file size.
+mod block;
+
 /// The `<svelte:*>` special-element + namespace projection (F8/F9/F10) — a
 /// continuation of the `TemplateProjector` impl, extracted for file size.
 mod special;
 
-use special::{detect_jsx_namespace, extract_props_annotation};
+/// The F11 store auto-subscription rewrite — a continuation of the projector,
+/// extracted for file size.
+mod store;
+
+/// Small syntactic identifier / literal-scanning helpers shared across the
+/// continuation modules — extracted for file size.
+mod ident;
+
+use ident::{
+    is_bare_tag_identifier, is_type_query_safe_lvalue, is_valid_binding_identifier,
+    is_valid_component_reference, skip_string_literal,
+};
+use special::{detect_forced_runes_option, detect_jsx_namespace, extract_props_annotation};
 
 /// A typed-unsupported diagnostic the projector emitted for an OUT-OF-SCOPE
 /// matrix construct (the construct was still void-checked, never dropped).
@@ -82,6 +104,33 @@ pub fn project_svelte_ide(
         .map(|s| s.start)
         .min();
 
+    // F11 store auto-subscription (`$store` / `$store = v`) in the SCRIPT bodies,
+    // applied BEFORE `strip_script_tags` (which may MOVE a trailing/interleaved
+    // script body via `move_*` — an overwrite on an already-moved chunk would be
+    // dropped or stranded). The classified store-subs are rewritten through the
+    // `$`-byte / `=`-operator CodeTransform overwrites only (the identifier / RHS
+    // bytes are preserved, so hover on the rewritten `$store` lands on the
+    // original identifier). The script's lexically-declared `$`-names are also
+    // collected here so the markup scans (a separate parse fragment) respect a
+    // `let $x` declared in the script.
+    let mut script_declared: Vec<String> = Vec::new();
+    for content in [parsed.module_content(), parsed.instance_content()]
+        .into_iter()
+        .flatten()
+    {
+        let text = &source[content.start as usize..content.end as usize];
+        script_declared.extend(collect_declared_dollar_names(text));
+    }
+    for content in [parsed.module_content(), parsed.instance_content()]
+        .into_iter()
+        .flatten()
+    {
+        let text = &source[content.start as usize..content.end as usize];
+        for sub in scan_store_subscriptions(text) {
+            rewrite_store_sub(&mut ct, content.start, &sub);
+        }
+    }
+
     // 1) Strip the `<script>` tags. A script BEFORE the first markup byte keeps
     //    its body in place (top-level, mapped). A script that falls AT/AFTER the
     //    first markup byte (interleaved or trailing) would land INSIDE the render
@@ -106,7 +155,23 @@ pub fn project_svelte_ide(
     //    a trailing-script MOVE relocates to the top. The pragma variant is
     //    selected by a top-level `<svelte:options namespace="svg|mathml">` (F10).
     let namespace = detect_jsx_namespace(source, &parsed.template);
-    let prelude = render_prelude(namespace);
+    // Runes-vs-legacy classification (F12). An EXPLICIT `<svelte:options
+    // runes={true|false}>` is authoritative (Svelte's own forced-mode switch);
+    // otherwise a component using ANY rune is RUNES mode and one using none is
+    // LEGACY mode. Only legacy mode carries the `$$props`/`$$restProps`/`$$slots`
+    // magic — so the F12 prelude declarations are emitted only when the component
+    // is legacy. The rune-usage classification is STRUCTURAL (OXC), per script.
+    let legacy_mode = match detect_forced_runes_option(source, &parsed.template) {
+        Some(forced_runes) => !forced_runes,
+        None => {
+            let uses_runes = [parsed.module_content(), parsed.instance_content()]
+                .into_iter()
+                .flatten()
+                .any(|c| text_uses_runes(&source[c.start as usize..c.end as usize]));
+            !uses_runes
+        }
+    };
+    let prelude = render_prelude(namespace, legacy_mode);
     ct.prepend(&prelude);
 
     // 3) The render scope function wrapping the template. With trailing/
@@ -129,6 +194,8 @@ pub fn project_svelte_ide(
         decl_moves: Vec::new(),
         needs_self_contract: false,
         self_props_type,
+        script_declared,
+        block_declared: Vec::new(),
     };
     projector.project_template(&parsed.template, region);
 
@@ -275,6 +342,17 @@ struct TemplateProjector<'ct, 'a> {
     /// `$props()` annotation (LOCAL — no resolver). `None` ⇒ a permissive
     /// `Record<string, unknown>` contract (untyped `$props()`).
     self_props_type: Option<String>,
+    /// The component SCRIPT's lexically-declared `$`-names (F11). A markup
+    /// expression parses as a separate fragment, so it must consult this set to
+    /// treat a script-declared `let $x` as an ORDINARY local (not a store-sub).
+    script_declared: Vec<String>,
+    /// The stack of `$`-names introduced by ENCLOSING markup block bindings
+    /// (`{#each … as $item}` / `{:then $v}` / `{:catch $e}` / `{#snippet
+    /// n($p)}` / `let:$prop`) currently in scope (F11). Each binding-introducer
+    /// pushes its `$`-names while projecting its subtree and pops them after —
+    /// so a `$`-named block binding is treated as an ORDINARY local (NOT a
+    /// store-sub) inside its block, and never leaks to a sibling.
+    block_declared: Vec<Vec<String>>,
 }
 
 /// A snippet declarator to hoist to the top of its scope function.
@@ -295,6 +373,16 @@ struct DeclMove {
     is_let: bool,
     /// The inner `x = e` declaration span (kept mapped when moved).
     inner_span: Span,
+    /// When the inner carries an F11 store-sub, the TEXT-rewritten inner (the
+    /// store-get/set helpers spliced in). A store-bearing inner cannot use the
+    /// mapped `move_wrapped` path: the store rewrite's trailing close-paren falls
+    /// at the move's END boundary, which `move_wrapped` classifies as OUTSIDE the
+    /// moved range (it strands at the original, now-removed tag position). So a
+    /// store-bearing inner is emitted as the rewritten TEXT at the hoist anchor
+    /// instead (a bounded mapping degrade for the rare store-subscribed
+    /// declaration value — the common non-store `{@const}` keeps full mapping via
+    /// `move_wrapped`). `None` ⇒ the mapped move path.
+    text_rewrite: Option<String>,
 }
 
 impl TemplateProjector<'_, '_> {
@@ -341,13 +429,30 @@ impl TemplateProjector<'_, '_> {
         let decl_moves = std::mem::take(&mut self.decl_moves);
         for decl in &decl_moves {
             let kw = if decl.is_let { "let " } else { "const " };
-            self.ct.move_wrapped(
-                decl.inner_span.start,
-                decl.inner_span.end,
-                first,
-                &format!("\n{kw}"),
-                ";\n",
-            );
+            match &decl.text_rewrite {
+                None => {
+                    // The mapped path — the original inner bytes are MOVED to the
+                    // anchor (kept mapped via `move_wrapped`).
+                    self.ct.move_wrapped(
+                        decl.inner_span.start,
+                        decl.inner_span.end,
+                        first,
+                        &format!("\n{kw}"),
+                        ";\n",
+                    );
+                }
+                Some(rewritten) => {
+                    // The store-bearing text path (F11, P1-2): the original inner
+                    // bytes do NOT travel (the store rewrite's trailing close-paren
+                    // would strand at the move boundary), so REMOVE them in place
+                    // and emit the rewritten declaration as text at the anchor.
+                    // `append_left(first, …)` stacks in source order and lands
+                    // ABOVE the render header (which is `prepend_left(first, …)` at
+                    // the very end — prepends sit before appends at the same index).
+                    self.ct.remove(decl.inner_span.start, decl.inner_span.end);
+                    self.ct.append_left(first, &format!("\n{kw}{rewritten};\n"));
+                }
+            }
         }
         self.ct.append_left(last, "\n</>);\n}\nexport {};\n");
         // F8 `<svelte:self>` LOCAL contract — emitted at MODULE scope ABOVE the
@@ -383,9 +488,13 @@ impl TemplateProjector<'_, '_> {
     /// snippet body to the scope top while branding it through
     /// `__verter_snippet`.
     fn emit_snippet_declarator(&mut self, scope_anchor: u32, snip: &SnippetMove) {
+        // The snippet PARAM list is sliced into the synthesised
+        // `__verter_snippet((PARAMS) => …)` head, so a store-READ DEFAULT inside a
+        // param (`($item = $store)`) is rewritten on the TEXT
+        // (`__verter_store_get(store)`) — the param names stay locals.
         let params = snip
             .params
-            .map(|p| self.slice(p).to_string())
+            .map(|p| self.rewrite_pattern_text_defaults(self.slice(p)))
             .unwrap_or_default();
         let header = format!(
             "const {} = __verter_snippet(({}) => (<>\n",
@@ -405,6 +514,50 @@ impl TemplateProjector<'_, '_> {
 
     fn slice(&self, span: Span) -> &str {
         &self.source[span.start as usize..span.end as usize]
+    }
+
+    /// Push a markup-block binding scope: the `$`-names introduced by the block's
+    /// binding fragment(s) (each item/index pattern, await then/catch binding,
+    /// snippet params, `let:` slot props) are treated as ORDINARY locals while
+    /// projecting the block's subtree (F11). The names are collected
+    /// STRUCTURALLY from the binding pattern via `collect_pattern_dollar_names`.
+    /// `pattern_spans` are the source spans of the binding fragments — each is
+    /// sliced and parsed; an empty resulting set still pushes a (cheap) frame so
+    /// the matching `pop_block_bindings` stays balanced.
+    fn push_block_bindings(&mut self, pattern_spans: &[Option<Span>]) {
+        let mut names = Vec::new();
+        for span in pattern_spans.iter().flatten() {
+            names.extend(collect_pattern_dollar_names(self.slice(*span)));
+        }
+        self.block_declared.push(names);
+    }
+
+    /// Rewrite the store-READ DEFAULT values inside a block-binding PATTERN TEXT
+    /// to the read helper (`__verter_store_get(store)`), returning the rewritten
+    /// text. A block-binding pattern (an `{#each … as PATTERN}` item, a snippet
+    /// PARAM list, a `{:then}`/`{:catch}` binding) is SLICED into a synthesised
+    /// projection string (a `.map((PARAMS) => …)` arrow head, a
+    /// `__verter_snippet((PARAMS) => …)` head, a `const BINDING: T = …`
+    /// declarator) — so its store-read defaults (`{ x = $store }` / `$item =
+    /// $store`) must be rewritten on the TEXT before it is emitted, NOT via
+    /// CodeTransform ops on the original (relocated / overwritten) span. The bound
+    /// NAMES stay locals; only the default initializers (ordinary read contexts)
+    /// are rewritten. The defaults are scanned against the currently-in-scope
+    /// declared names UNIONED with the names this pattern introduces (so a default
+    /// referencing a sibling binding stays a local).
+    fn rewrite_pattern_text_defaults(&self, pattern_text: &str) -> String {
+        if !pattern_text.contains('$') {
+            return pattern_text.to_string();
+        }
+        let mut declared = self.declared_dollar_names();
+        declared.extend(collect_pattern_dollar_names(pattern_text));
+        self.rewrite_pattern_default_store_subs_text(pattern_text, &declared)
+    }
+
+    /// Pop the most recent markup-block binding scope pushed by
+    /// `push_block_bindings`.
+    fn pop_block_bindings(&mut self) {
+        self.block_declared.pop();
     }
 
     /// Project one template node.
@@ -434,11 +587,20 @@ impl TemplateProjector<'_, '_> {
                 // and an `await` inside `$derived(await …)` in markup (all three
                 // markup forms). The expression still type-checks; the value
                 // remains a checked position.
-                let body = self.slice(*span);
-                for at in scan_await_positions(body) {
+                // Slice from the `'a`-lifetime source (copied out of `self` so
+                // the borrow is NOT tied to `&self` and does not block the mutable
+                // `self.ct` / `self.push_diag` uses below).
+                let source = self.source;
+                let body = &source[span.start as usize..span.end as usize];
+                let awaits = scan_await_positions(body);
+                for at in awaits {
                     let kw = Span::new(span.start + at, span.start + at + "await".len() as u32);
                     self.push_diag(kw, UnsupportedKind::AwaitExperimental);
                 }
+                // F11 store auto-subscription in a markup interpolation (`{$store}`)
+                // — rewritten through the same `$`-span CodeTransform overwrites as
+                // the script bodies (identifier/RHS bytes preserved).
+                self.rewrite_store_subs_in(*span);
             }
             SvelteNode::Element(el) => self.project_element(el),
             SvelteNode::Block(block) => self.project_block(block),
@@ -469,9 +631,53 @@ impl TemplateProjector<'_, '_> {
         for attr in &el.attributes {
             self.project_attribute(el, attr);
         }
+        // `let:` slot-prop directives introduce a binding scoped to this element's
+        // CHILDREN (`<C let:item={$row}>{$row}</C>`). Collect each `let:` binding's
+        // `$`-names and push them while projecting the children so a `$`-named
+        // slot-prop binding is not mis-rewritten as a store-sub. The
+        // binding is the value alias when present (`let:item={alias}`), else the
+        // bare local (shorthand `let:item`).
+        let let_binding_names = self.collect_let_directive_dollar_names(el);
+        let pushed = !let_binding_names.is_empty();
+        if pushed {
+            self.block_declared.push(let_binding_names);
+        }
         for child in &el.children {
             self.project_node(child);
         }
+        if pushed {
+            self.pop_block_bindings();
+        }
+    }
+
+    /// Collect the `$`-prefixed binding names introduced by the `let:` slot-prop
+    /// directives on `el`. The binding is the value alias (`let:item={$row}` →
+    /// `$row`, possibly a destructuring pattern) when present, else the bare local
+    /// (shorthand `let:item` → `item`). The `let:` form is identified
+    /// STRUCTURALLY by the parser-classified `SvelteDirectiveKind::Let` (the
+    /// parser is the directive-prefix authority), never by string-sniffing the
+    /// raw attribute name.
+    fn collect_let_directive_dollar_names(&self, el: &SvelteElement) -> Vec<String> {
+        let mut names = Vec::new();
+        for attr in &el.attributes {
+            if let SvelteAttributeKind::Directive(dir) = &attr.kind {
+                if dir.kind != SvelteDirectiveKind::Let {
+                    continue;
+                }
+                match &dir.value {
+                    Some(SvelteAttributeValue::Expression(span)) => {
+                        // `let:item={alias}` — the alias is the binding (an
+                        // identifier or a destructuring pattern).
+                        names.extend(collect_pattern_dollar_names(self.slice(*span)));
+                    }
+                    _ => {
+                        // Shorthand `let:item` — the local name IS the binding.
+                        names.extend(collect_pattern_dollar_names(&dir.local));
+                    }
+                }
+            }
+        }
+        names
     }
 
     /// Rewrite the MATCHING `</original-name>` close tag's NAME to `replacement`
@@ -532,15 +738,31 @@ impl TemplateProjector<'_, '_> {
                 // before the `{` (the `{value}` expression stays mapped).
                 if self.source.as_bytes().get(attr.span.start as usize) == Some(&b'{') {
                     self.ct.prepend_left(attr.span.start, &format!("{name}="));
-                    let _ = (name_span, value);
+                    // A `{$store}` shorthand still rewrites the store-sub interior.
+                    if let Some(SvelteAttributeValue::Expression(expr)) = value {
+                        self.rewrite_store_subs_in(*expr);
+                    }
+                    let _ = name_span;
                     return;
                 }
                 // Plain attribute / lowercase event attribute: kept verbatim.
-                // `onclick={fn}` stays `onclick` typed by SvelteHTMLElements.
-                let _ = (name_span, value);
+                // `onclick={fn}` stays `onclick` typed by SvelteHTMLElements — but
+                // a store-sub in the value expression (`prop={$store}`) is rewritten.
+                if let Some(SvelteAttributeValue::Expression(expr)) = value {
+                    self.rewrite_store_subs_in(*expr);
+                }
+                let _ = name_span;
             }
-            SvelteAttributeKind::Spread(_) => {
-                // `{...rest}` is valid JSX spread — kept.
+            SvelteAttributeKind::Spread(span) => {
+                // `{...rest}` is valid JSX spread — kept. A store-sub in the spread
+                // expression (`{...$attrs}`) is rewritten. The recorded span covers
+                // the leading `...` (a `...$attrs` does not parse as a standalone
+                // expression), so scan only the expression AFTER the `...`.
+                let inner = &self.source[span.start as usize..span.end as usize];
+                if let Some(rest_off) = inner.find("...").map(|i| i + 3) {
+                    let expr_start = span.start + rest_off as u32;
+                    self.rewrite_store_subs_in(Span::new(expr_start, span.end));
+                }
             }
             SvelteAttributeKind::Directive(dir) => {
                 self.project_directive(el, attr, dir);
@@ -563,6 +785,8 @@ impl TemplateProjector<'_, '_> {
             let rest_trimmed = rest.trim_start();
             let expr_offset = body.len() - rest_trimmed.len();
             let expr_start = inner.start + expr_offset as u32;
+            // F11: a store-sub in the attachment expression (`{@attach $a}`).
+            self.rewrite_store_subs_in(Span::new(expr_start, inner.end));
             // `{@attach ` → `{...(__verter_attach(`
             self.ct
                 .overwrite(attr.span.start, expr_start, "{...(__verter_attach(");
@@ -587,6 +811,8 @@ impl TemplateProjector<'_, '_> {
         value: Option<&SvelteAttributeValue>,
     ) {
         if let Some(SvelteAttributeValue::Expression(expr)) = value {
+            // F11: a store-sub in the void-checked CSS-custom-property value.
+            self.rewrite_store_subs_in(*expr);
             // `--name={` → `{...(__verter_void(` ; the trailing `}` → `), {})}`.
             // The whole prefix (attribute start through the expression start)
             // becomes the spread opener — no `--` residue survives.
@@ -654,6 +880,15 @@ impl TemplateProjector<'_, '_> {
                 // `__verter_animate(fn(NODE_HINT, DIRECTIONS, p))`.
                 self.rewrite_animate_directive(el, attr, dir);
             }
+            SvelteDirectiveKind::Let => {
+                // `let:item={alias}` slot-prop binding — its `$`-names are
+                // collected as block bindings (scoped to the element's children)
+                // by `collect_let_directive_dollar_names`. The directive itself is
+                // not a valid JSX attribute, so it is STRIPPED from the JSX
+                // position (the binding contributes a child-scope local, not a
+                // prop).
+                remove_span(self.ct, attr.span);
+            }
             SvelteDirectiveKind::Unknown => {
                 remove_span(self.ct, attr.span);
             }
@@ -671,6 +906,8 @@ impl TemplateProjector<'_, '_> {
         dir: &crate::svelte::parser::SvelteDirective,
     ) {
         if let Some(SvelteAttributeValue::Expression(expr)) = dir.value {
+            // F11: a store-sub in the void-checked value (`use:action={$store}`).
+            self.rewrite_store_subs_in(expr);
             self.ct
                 .overwrite(attr.span.start, expr.start, "{...(__verter_void(");
             self.ct.overwrite(expr.end, attr.span.end, "), {})}");
@@ -696,6 +933,8 @@ impl TemplateProjector<'_, '_> {
         dir: &crate::svelte::parser::SvelteDirective,
     ) {
         if let Some(SvelteAttributeValue::Expression(expr)) = dir.value {
+            // F11: a store-sub in the void-checked `style:color={$store}` value.
+            self.rewrite_store_subs_in(expr);
             // `style:NAME[|mods]={` → `{...(__verter_void(` ; trailing `}` →
             // `), {})}`. The whole directive name+modifiers prefix becomes the
             // spread opener — no `style:` residue survives, the value is mapped.
@@ -747,6 +986,8 @@ impl TemplateProjector<'_, '_> {
         let node_hint = self.host_element_hint(el);
         let fn_name = dir.local.clone();
         if let Some(SvelteAttributeValue::Expression(expr)) = dir.value {
+            // F11: a store-sub in the transition params (`transition:fn={$p}`).
+            self.rewrite_store_subs_in(expr);
             // `transition:fn[|mods]={` →
             // `{...(__verter_transition({fn}({hint}, ` ; trailing `}` →
             // `)), {})}`. The params expression `p` stays mapped (its inner type
@@ -799,6 +1040,8 @@ impl TemplateProjector<'_, '_> {
         let fn_name = dir.local.clone();
         let directions = "(null! as { from: DOMRect; to: DOMRect })";
         if let Some(SvelteAttributeValue::Expression(expr)) = dir.value {
+            // F11: a store-sub in the animate params (`animate:fn={$p}`).
+            self.rewrite_store_subs_in(expr);
             self.ct.overwrite(
                 attr.span.start,
                 expr.start,
@@ -874,8 +1117,17 @@ impl TemplateProjector<'_, '_> {
         attr: &SvelteAttribute,
         dir: &crate::svelte::parser::SvelteDirective,
     ) {
-        if dir.value.is_some() {
-            // Strip `bind:` (prefix + colon), keeping `local={value}`.
+        if let Some(SvelteAttributeValue::Expression(expr)) = dir.value {
+            // Strip `bind:` (prefix + colon), keeping `local={value}`. The value
+            // expression stays a mapped chunk, so a store-sub in it (`bind:value=
+            // {$store}`) is rewritten through the same `$`-span overwrite (F11,
+            // P1-1) — it composes with the prefix strip.
+            self.rewrite_store_subs_in(expr);
+            let prefix_len = "bind:".len() as u32;
+            self.ct
+                .overwrite(attr.span.start, attr.span.start + prefix_len, "");
+        } else if dir.value.is_some() {
+            // A non-expression value (static/quoted) — strip the prefix only.
             let prefix_len = "bind:".len() as u32;
             self.ct
                 .overwrite(attr.span.start, attr.span.start + prefix_len, "");
@@ -901,7 +1153,10 @@ impl TemplateProjector<'_, '_> {
         let start = attr.span.start;
         let prefix_len = "on:".len() as u32;
         self.ct.overwrite(start, start + prefix_len, "on");
-        let _ = dir;
+        // F11: a store-sub in the kept handler value (`on:click={$handler}`).
+        if let Some(SvelteAttributeValue::Expression(expr)) = dir.value {
+            self.rewrite_store_subs_in(expr);
+        }
     }
 
     /// Rewrite a `class:` directive to a `data-class-*` attribute keeping the
@@ -916,279 +1171,35 @@ impl TemplateProjector<'_, '_> {
         let name_end = attr.span.start + ("class:".len() + dir.local.len()) as u32;
         let replacement = format!("data-class-{}", dir.local);
         self.ct.overwrite(attr.span.start, name_end, &replacement);
-    }
-
-    /// Project a block construct.
-    fn project_block(&mut self, block: &SvelteBlock) {
-        match &block.kind {
-            SvelteBlockKind::If => self.project_if(block),
-            SvelteBlockKind::Each { item, index, key } => {
-                self.project_each(block, *item, *index, *key)
-            }
-            SvelteBlockKind::Await {
-                then_binding,
-                catch_binding,
-            } => self.project_await(block, *then_binding, *catch_binding),
-            SvelteBlockKind::Key => self.project_key(block),
-            SvelteBlockKind::Snippet {
-                name_text, params, ..
-            } => self.project_snippet(block, name_text, *params),
+        // F11: a store-sub in the kept `={$store}` condition value is rewritten.
+        if let Some(SvelteAttributeValue::Expression(expr)) = dir.value {
+            self.rewrite_store_subs_in(expr);
         }
-    }
-
-    /// `{#if c}A{:else if d}B{:else}C{/if}` → `{c ? (<>A</>) : d ? (<>B</>) : (<>C</>)}`.
-    fn project_if(&mut self, block: &SvelteBlock) {
-        let Some(head) = block.head_expr else { return };
-        // Overwrite `{#if ` (from block start to head start) with `{`.
-        self.ct.overwrite(block.span.start, head.start, "{");
-        // After the condition: `}` (the close of `{#if c}`) becomes ` ? (<>`.
-        // The body run follows. We overwrite the single `}` after head.
-        let after_head = head.end;
-        // Find the `}` closing the if-open.
-        let close = self.find_char_after(after_head, '}');
-        if let Some(close_idx) = close {
-            self.ct.overwrite(after_head, close_idx + 1, " ? (<>");
-        }
-        // Project children (the true branch body).
-        for child in &block.children {
-            self.project_node(child);
-        }
-        // Handle clauses.
-        self.project_if_clauses(block);
-        // Close the whole block: overwrite `{/if}` with `</>)}`.
-        let end_tag_start = self.find_str_before(block.span.end, "{/if}");
-        if let Some(s) = end_tag_start {
-            self.ct.overwrite(s, block.span.end, "</>)}");
-        }
-    }
-
-    fn project_if_clauses(&mut self, block: &SvelteBlock) {
-        for clause in &block.clauses {
-            match clause.kind {
-                SvelteClauseKind::ElseIf => {
-                    // `{:else if d}` → `</>) : d ? (<>`. The clause-tag head span
-                    // (`{:else if ` through the condition start) is rewritten
-                    // from the parser-provided `tag_span`, and the closing `}`
-                    // (tag_span.end-1..end) re-opens the body fragment.
-                    if let Some(expr) = clause.expr {
-                        self.ct
-                            .overwrite(clause.tag_span.start, expr.start, "</>) : ");
-                        self.ct.overwrite(expr.end, clause.tag_span.end, " ? (<>");
-                    } else {
-                        // A malformed `{:else if}` with no condition — rewrite the
-                        // whole tag to a falsy ternary arm so no raw `{:…}` leaks.
-                        self.ct.overwrite(
-                            clause.tag_span.start,
-                            clause.tag_span.end,
-                            "</>) : false ? (<>",
-                        );
-                    }
-                }
-                SvelteClauseKind::Else => {
-                    // `{:else}` → `</>) : (<>` — overwrite the WHOLE clause-tag
-                    // span (braces included). An empty `{:else}` (no expr, no
-                    // children) is still rewritten — the `tag_span` is always
-                    // present, so no raw `{:else}` leaks (P1-1).
-                    self.ct
-                        .overwrite(clause.tag_span.start, clause.tag_span.end, "</>) : (<>");
-                }
-                _ => {}
-            }
-            for child in &clause.children {
-                self.project_node(child);
-            }
-        }
-    }
-
-    /// `{#each xs as x, i (key)}BODY{/each}` → `{xs.map((x, i) => (<>BODY</>))}`.
-    fn project_each(
-        &mut self,
-        block: &SvelteBlock,
-        item: Option<Span>,
-        index: Option<Span>,
-        _key: Option<Span>,
-    ) {
-        let Some(head) = block.head_expr else { return };
-        // `{#each ` → `{`
-        self.ct.overwrite(block.span.start, head.start, "{");
-        // After the list expression, build `.map((item, index) => (<>`.
-        // The original ` as x, i (key)}` run (from head.end to the open `}`)
-        // is overwritten.
-        let open_close = self.find_char_after(head.end, '}');
-        if let Some(close_idx) = open_close {
-            let params = match (item, index) {
-                (Some(it), Some(ix)) => format!("{}, {}", self.slice(it), self.slice(ix)),
-                (Some(it), None) => self.slice(it).to_string(),
-                (None, _) => "__verter_item".to_string(),
-            };
-            self.ct
-                .overwrite(head.end, close_idx + 1, &format!(".map(({params}) => (<>"));
-        }
-        for child in &block.children {
-            self.project_node(child);
-        }
-        // `{:else}` (each-else): close the `.map(...)` items expression and open
-        // a SEPARATE sibling `{false && (<>ELSE</>)}` — the else body's
-        // expressions stay type-checked (and mapped) but render nothing. This
-        // is valid TSX (two sibling JSX expressions), unlike a patched `.map`
-        // close.
-        let has_else = block
-            .clauses
-            .iter()
-            .any(|c| c.kind == SvelteClauseKind::Else);
-        for clause in &block.clauses {
-            if clause.kind == SvelteClauseKind::Else {
-                // Overwrite the WHOLE `{:else}` clause-tag span (braces
-                // included) — an empty each-else still rewrites cleanly (P1-1).
-                self.ct.overwrite(
-                    clause.tag_span.start,
-                    clause.tag_span.end,
-                    "</>))}\n{false && (<>",
-                );
-                for child in &clause.children {
-                    self.project_node(child);
-                }
-            }
-        }
-        // `{/each}` → close the (items map) OR the (else sibling fragment).
-        if let Some(s) = self.find_str_before(block.span.end, "{/each}") {
-            if has_else {
-                // The else sibling fragment closes with `</>)}`.
-                self.ct.overwrite(s, block.span.end, "</>)}");
-            } else {
-                self.ct.overwrite(s, block.span.end, "</>))}");
-            }
-        }
-    }
-
-    /// `{#await p}P{:then v}T{:catch e}C{/await}` → ternary over a synthetic
-    /// promise-state holder. v1: await-expressions are out of scope (D-bg) only
-    /// for the EXPRESSION position; the `{#await}` BLOCK itself projects.
-    fn project_await(
-        &mut self,
-        block: &SvelteBlock,
-        then_binding: Option<Span>,
-        catch_binding: Option<Span>,
-    ) {
-        let Some(head) = block.head_expr else { return };
-        // Synthetic holder: `{((__verter_await) => __verter_await.pending ? (<>P</>) : __verter_await.error ? (<>C</>) : (<>T</>))(__verter_state(PROMISE))}`
-        // For a tractable, type-clean projection: resolve the promise value
-        // type via `Awaited<typeof PROMISE>` and bind it.
-        self.ct.overwrite(
-            block.span.start,
-            head.start,
-            "{((__verter_p) => { type __VA = Awaited<typeof __verter_p>; ",
-        );
-        // Bind then/catch and project branches as void-checked fragments.
-        let _ = (then_binding, catch_binding);
-        let open_close = self.find_char_after(head.end, '}');
-        if let Some(c) = open_close {
-            self.ct.overwrite(head.end, c + 1, "; return (<>");
-        }
-        for child in &block.children {
-            self.project_node(child);
-        }
-        // Project clauses (`:then`, `:catch`) as fragment continuations.
-        for clause in &block.clauses {
-            match clause.kind {
-                SvelteClauseKind::Then => {
-                    // Bind the value as a const of the awaited type. Overwrite the
-                    // WHOLE `{:then v}` clause-tag span — an empty `{:then}` (no
-                    // binding) still rewrites cleanly with a synthetic name (P1-1).
-                    let binding = clause
-                        .expr
-                        .map(|sp| self.slice(sp).to_string())
-                        .unwrap_or_else(|| "__verter_v".to_string());
-                    self.ct.overwrite(
-                        clause.tag_span.start,
-                        clause.tag_span.end,
-                        &format!("</>); const {binding}: __VA = (null as any); return (<>"),
-                    );
-                    for child in &clause.children {
-                        self.project_node(child);
-                    }
-                }
-                SvelteClauseKind::Catch => {
-                    // Declare the catch binding (`{:catch e}` → a typed
-                    // `const e: unknown`) so the catch body's `{e}` resolves.
-                    // Overwrite the WHOLE `{:catch e}` clause-tag span — an empty
-                    // `{:catch}` still rewrites cleanly (P1-1).
-                    let binding = clause
-                        .expr
-                        .map(|sp| self.slice(sp).to_string())
-                        .unwrap_or_else(|| "__verter_e".to_string());
-                    self.ct.overwrite(
-                        clause.tag_span.start,
-                        clause.tag_span.end,
-                        &format!("</>); const {binding}: unknown = (null as any); return (<>"),
-                    );
-                    for child in &clause.children {
-                        self.project_node(child);
-                    }
-                }
-                _ => {}
-            }
-        }
-        if let Some(s) = self.find_str_before(block.span.end, "{/await}") {
-            self.ct
-                .overwrite(s, block.span.end, "</>); })(null as any)}");
-        }
-    }
-
-    /// `{#key e}BODY{/key}` → `{(__verter_void(e), <>BODY</>)}` — the key
-    /// expression `e` stays mapped and type-checked (the comma operator's left
-    /// operand), the body renders. Valid TSX, no IIFE arity mismatch.
-    fn project_key(&mut self, block: &SvelteBlock) {
-        let Some(head) = block.head_expr else { return };
-        // `{#key ` → `{(__verter_void(` — the head `e` stays in place, mapped.
-        self.ct
-            .overwrite(block.span.start, head.start, "{(__verter_void(");
-        // The `}` closing `{#key e}` → `), <>` (close the void call, comma, open
-        // the body fragment).
-        if let Some(c) = self.find_char_after(head.end, '}') {
-            self.ct.overwrite(head.end, c + 1, "), <>");
-        }
-        for child in &block.children {
-            self.project_node(child);
-        }
-        // `{/key}` → `</>)}`
-        if let Some(s) = self.find_str_before(block.span.end, "{/key}") {
-            self.ct.overwrite(s, block.span.end, "</>)}");
-        }
-    }
-
-    /// `{#snippet name(params)}BODY{/snippet}` → hoisted branded declarator.
-    fn project_snippet(&mut self, block: &SvelteBlock, name: &str, params: Option<Span>) {
-        // Compute the body span: from the end of the `{#snippet ...}` head to
-        // the start of `{/snippet}`.
-        let head_close = self
-            .find_char_after(block.span.start, '}')
-            .map(|c| c + 1)
-            .unwrap_or(block.span.start);
-        let end_tag = self
-            .find_str_before(block.span.end, "{/snippet}")
-            .unwrap_or(block.span.end);
-        let body_span = Span::new(head_close, end_tag);
-        // Remove the original `{#snippet ...}` head and `{/snippet}` tail in
-        // place (the body is MOVED out, so its source bytes are relocated).
-        self.ct.remove(block.span.start, head_close);
-        self.ct.remove(end_tag, block.span.end);
-        // Project the body's children before moving (transforms apply to the
-        // moved bytes).
-        for child in &block.children {
-            self.project_node(child);
-        }
-        self.snippet_moves.push(SnippetMove {
-            block_span: block.span,
-            name: name.to_string(),
-            params,
-            body_span,
-        });
     }
 
     /// Remove a declaration tag (`{const ...}`/`{let ...}`/`{@const ...}`) in
     /// place and queue its inner `x = e` for hoisting to the render scope top.
     fn hoist_declaration_tag(&mut self, tag: &SvelteTag, is_let: bool) {
+        // F11 (P1-2): a store-sub in a `{@const x = $store}` / `{@let}` VALUE is
+        // rewritten MOVE-SAFELY. The declaration inner is MOVED to the scope top.
+        // A mapped `move_wrapped` over the original bytes CANNOT carry the store
+        // rewrite's trailing close-paren when the store is the inner's last token
+        // (`{@const c = $count}`): an `append_left(inner.end, ")")` falls at the
+        // move's END boundary, which `move_wrapped` classifies OUTSIDE the range —
+        // stranding the `)` at the original, now-removed tag position. So a
+        // store-bearing inner is TEXT-rewritten and emitted as text at the hoist
+        // anchor (bounded mapping degrade for the rare store-subscribed value);
+        // the common non-store `{@const}` keeps full mapping via `move_wrapped`.
+        let inner_text = self.slice(tag.inner);
+        let text_rewrite = if inner_text.contains('$') {
+            let rewritten = self.rewrite_store_subs_in_text(inner_text);
+            // Only divert to the text path when the rewrite actually changed the
+            // inner (a `$`-byte that was NOT a store-sub — a rune / `$$`-magic /
+            // local — leaves the inner untouched and stays on the mapped move).
+            (rewritten != inner_text).then_some(rewritten)
+        } else {
+            None
+        };
         // Remove the whole tag from the JSX position (`{const ` … `}`) — the
         // inner declaration is moved out, so its bytes are relocated.
         self.ct.remove(tag.span.start, tag.inner.start);
@@ -1196,11 +1207,28 @@ impl TemplateProjector<'_, '_> {
         self.decl_moves.push(DeclMove {
             is_let,
             inner_span: tag.inner,
+            text_rewrite,
         });
     }
 
     /// Project a standalone tag.
     fn project_tag(&mut self, tag: &SvelteTag) {
+        // F11: a store-sub in a tag's inner expression (`{@html $x}`,
+        // `{@render snip($x)}`, `{@debug $x}`, `{@attach $a}`, `{@const x = $s}`)
+        // is rewritten. The value-expression tags rewrite their inner HERE through
+        // the `$`-span overwrite (the overwrites below touch only the surrounding
+        // brace/prefix bytes, composing with the interior `$`-span rewrite). The
+        // declaration tags (`{@const}`/`{@let}`) MOVE their inner to the scope
+        // top, so they handle the store rewrite inside `hoist_declaration_tag`
+        // (a TEXT rewrite emitted at the hoist anchor — the trailing close-paren
+        // cannot travel with the mapped move boundary), NOT through the span
+        // overwrite here.
+        if !matches!(
+            tag.kind,
+            SvelteTagKind::Const | SvelteTagKind::LegacyConst | SvelteTagKind::Let
+        ) {
+            self.rewrite_store_subs_in(tag.inner);
+        }
         match tag.kind {
             SvelteTagKind::Render => {
                 // `{@render snippet(args)}` → `{snippet(args)}` — checks through
@@ -1289,76 +1317,4 @@ fn node_span(node: &SvelteNode) -> Option<Span> {
         SvelteNode::Block(b) => b.span,
         SvelteNode::Tag(t) => t.span,
     })
-}
-
-/// Advance `chars` past the body of a string / template / char literal opened
-/// by `quote`, honouring backslash escapes. Used by the function-binding
-/// top-level-comma scanner so a comma inside a literal is not mistaken for the
-/// `get, set` separator. (A template literal's `${…}` interpolation is not
-/// descended — a top-level comma cannot legally appear there at the binding
-/// expression's depth-0, so skipping the whole literal body is conservative and
-/// correct for this heuristic.)
-fn skip_string_literal(chars: &mut std::iter::Peekable<std::str::Chars>, quote: char) {
-    while let Some(c) = chars.next() {
-        if c == '\\' {
-            // Skip the escaped character.
-            chars.next();
-        } else if c == quote {
-            return;
-        }
-    }
-}
-
-/// Whether `name` is a valid JS binding identifier — used to decide whether a
-/// shorthand `style:color` / a `transition:`/`animate:` local can be projected
-/// as a bare identifier reference. Conservative ASCII rule: a leading
-/// `A-Za-z_$`, then `A-Za-z0-9_$`. A name failing this (empty, hyphenated, …)
-/// is NOT emitted as an identifier (the directive is removed — no invalid
-/// identifier residue in the projected TSX).
-fn is_valid_binding_identifier(name: &str) -> bool {
-    let mut chars = name.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    if !(first.is_ascii_alphabetic() || first == '_' || first == '$') {
-        return false;
-    }
-    chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
-}
-
-/// Whether `name` is a bare tag identifier safe to interpolate raw into a
-/// `__VerterHostEl<"…">` string literal (no `"`, no newline, no backslash).
-/// Used as a defensive guard at the `host_element_hint` interpolation site
-/// (NIT-1) — the parser only classifies a bare tag as `Intrinsic`, so this holds
-/// today; the guard hardens against a future producer change.
-fn is_bare_tag_identifier(name: &str) -> bool {
-    !name.is_empty()
-        && name
-            .chars()
-            .all(|c| c != '"' && c != '\\' && c != '\n' && c != '\r' && c != '<' && c != '>')
-}
-
-/// Whether `name` is a valid component reference identifier to interpolate into
-/// `InstanceType<typeof Name>` / `InstanceType<typeof Name>["$props"][…]`. A
-/// component tag is PascalCase OR a dotted/namespaced member access
-/// (`ns.Widget`) — both are valid `typeof` operands. A name with any other
-/// character (a quote, a `<`, whitespace) is NOT emitted (the host falls back to
-/// `Element`).
-fn is_valid_component_reference(name: &str) -> bool {
-    if name.is_empty() {
-        return false;
-    }
-    // Each dotted segment must be a valid identifier.
-    name.split('.').all(is_valid_binding_identifier)
-}
-
-/// Whether `expr` is a TYPE-QUERY-SAFE lvalue — a bare identifier or a dotted
-/// member chain (`el`, `refs.first`) — so `typeof expr` is a valid TS type
-/// query. An element-access (`refs[i]`), a call, or any other expression is NOT
-/// safe (`typeof refs[i]` parses `i` as a type), and the `bind:this` projection
-/// routes those through the read-bearing invariant form instead. Whitespace is
-/// trimmed first (a `{ el }`-style padded expression slice).
-fn is_type_query_safe_lvalue(expr: &str) -> bool {
-    let trimmed = expr.trim();
-    !trimmed.is_empty() && trimmed.split('.').all(is_valid_binding_identifier)
 }

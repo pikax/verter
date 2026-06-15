@@ -77,7 +77,12 @@ impl TemplateProjector<'_, '_> {
             self.neutralize_element(el);
             return;
         };
-        let component = self.slice(this_expr).trim().to_string();
+        // F11 (P1-3): a store-sub in the `this={$store}` value is rewritten. The
+        // F8 IIFE re-emits the `this` value as TEXT (interpolated into
+        // `__verter_dynamic_component((…))`), so the store rewrite is applied to
+        // the sliced text (the original `this` bytes are overwritten wholesale —
+        // no independent mapped chunk to compose with).
+        let component = self.rewrite_store_subs_in_text(self.slice(this_expr).trim());
         self.emit_dynamic_component(el, &component, Some(find_this_attr_span(el)));
     }
 
@@ -310,6 +315,50 @@ pub(super) fn detect_jsx_namespace(source: &str, nodes: &[SvelteNode]) -> Svelte
         }
     }
     SvelteJsxNamespace::Html
+}
+
+/// The explicit `runes` mode forced by a top-level `<svelte:options runes={…}>`
+/// (F12 legacy detection). Returns `Some(true)` for `runes` / `runes={true}`,
+/// `Some(false)` for `runes={false}`, and `None` when no `<svelte:options runes>`
+/// is present (the caller then falls back to rune-USAGE detection). Only a
+/// top-level options element counts (Svelte requires it at component root).
+pub(super) fn detect_forced_runes_option(source: &str, nodes: &[SvelteNode]) -> Option<bool> {
+    for node in nodes {
+        if let SvelteNode::Element(el) = node {
+            if matches!(
+                el.kind,
+                SvelteElementKind::Special(SvelteSpecialKind::Options)
+            ) {
+                if let Some(v) = find_runes_option(source, el) {
+                    return Some(v);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// The `runes` option value on a `<svelte:options>` element: a valueless
+/// `runes` boolean-shorthand is `true`; `runes={true}` / `runes={false}` read the
+/// literal; any other form is treated as absent (`None`).
+fn find_runes_option(source: &str, el: &SvelteElement) -> Option<bool> {
+    el.attributes.iter().find_map(|a| match &a.kind {
+        SvelteAttributeKind::Plain { name, value, .. } if name == "runes" => match value {
+            // `runes` (no value) — boolean shorthand ⇒ true.
+            None => Some(true),
+            // `runes={true}` / `runes={false}` — read the expression literal.
+            Some(SvelteAttributeValue::Expression(span)) => {
+                let text = source[span.start as usize..span.end as usize].trim();
+                match text {
+                    "true" => Some(true),
+                    "false" => Some(false),
+                    _ => None,
+                }
+            }
+            _ => None,
+        },
+        _ => None,
+    })
 }
 
 /// The `namespace="…"` literal value on a `<svelte:options>` element.

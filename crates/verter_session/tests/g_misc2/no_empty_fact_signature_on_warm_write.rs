@@ -340,11 +340,9 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
                     }
                 }
             }
-            "insert_arc_with_kind" => {
-                if receiver_is_known_validated_fact_cache_field(&c.receiver) {
-                    if let Some(pairings) = self.current_pairings() {
-                        pairings.saw_insert_arc_with_kind_on_known_cache = true;
-                    }
+            "insert_arc_with_kind" if receiver_is_known_validated_fact_cache_field(&c.receiver) => {
+                if let Some(pairings) = self.current_pairings() {
+                    pairings.saw_insert_arc_with_kind_on_known_cache = true;
                 }
             }
             _ => {}

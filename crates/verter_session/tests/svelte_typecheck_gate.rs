@@ -85,6 +85,7 @@ fn typecheck_projected(
             "attachments.d.ts",
             "transition.d.ts",
             "animate.d.ts",
+            "store.d.ts",
             "package.json",
         ] {
             std::fs::copy(gate_dir().join("vendor_svelte").join(f), dst.join(f))
@@ -1555,5 +1556,1352 @@ fn svg_namespace_component_type_checks_svg_intrinsics_and_rejects_html_only_attr
         !bad_ok,
         "an HTML-only attribute on an svg element must FAIL (svg table replaced \
          the HTML table):\n{bad_out}"
+    );
+}
+
+// --- B8g F11/F12 legacy store + magic-object TSGO fixtures ---
+
+#[test]
+fn store_read_checks_against_the_readable_value_type() {
+    // F11: a `$count` store-sub READ projects to `__verter_store_get(count)` —
+    // typed `number` from `Writable<number>` (a `Writable` IS a `Readable`). A
+    // wrong consumer type FAILS, proving the read is genuinely typed (not `any`).
+    let good = project(
+        "<script lang=\"ts\">\n\
+         import { writable } from \"svelte/store\";\n\
+         const count = writable(0);\n\
+         const n: number = $count;\n\
+         void n;\n\
+         </script>\n\
+         <div>{$count}</div>",
+    );
+    let Some((ok, out)) = typecheck_projected(&good, "StoreRead.svelte.tsx", &[], true) else {
+        skip_note("store read");
+        return;
+    };
+    assert!(
+        ok,
+        "a `$count` read must check `number` from `Writable<number>`:\n{out}"
+    );
+
+    // DISCRIMINATING (anti-`any`): assigning the read to a deliberately wrong type
+    // FAILS — the value is `number`, not `any`.
+    let bad = project(
+        "<script lang=\"ts\">\n\
+         import { writable } from \"svelte/store\";\n\
+         const count = writable(0);\n\
+         const s: string = $count;\n\
+         void s;\n\
+         </script>\n\
+         <div>x</div>",
+    );
+    let Some((bad_ok, bad_out)) = typecheck_projected(&bad, "StoreReadBad.svelte.tsx", &[], true)
+    else {
+        return;
+    };
+    assert!(
+        !bad_ok,
+        "a `$count` read typed `number` must NOT assign to `string` (proves the \
+         read is not `any`):\n{bad_out}"
+    );
+}
+
+#[test]
+fn store_write_checks_the_writable_contract() {
+    // F11: a `$count = 5` WRITE projects to `__verter_store_set(count, 5)` —
+    // checking `5` against the store's `Writable<number>` value type. A correct
+    // write checks clean; a wrong-typed write FAILS.
+    let good = project(
+        "<script lang=\"ts\">\n\
+         import { writable } from \"svelte/store\";\n\
+         const count = writable(0);\n\
+         $count = 5;\n\
+         </script>\n\
+         <div>x</div>",
+    );
+    let Some((ok, out)) = typecheck_projected(&good, "StoreWrite.svelte.tsx", &[], true) else {
+        skip_note("store write");
+        return;
+    };
+    assert!(
+        ok,
+        "a `$count = 5` write must check against `Writable<number>`:\n{out}"
+    );
+
+    // DISCRIMINATING: a wrong-typed write FAILS the writable value contract.
+    let bad = project(
+        "<script lang=\"ts\">\n\
+         import { writable } from \"svelte/store\";\n\
+         const count = writable(0);\n\
+         $count = \"not a number\";\n\
+         </script>\n\
+         <div>x</div>",
+    );
+    let Some((bad_ok, bad_out)) = typecheck_projected(&bad, "StoreWriteBad.svelte.tsx", &[], true)
+    else {
+        return;
+    };
+    assert!(
+        !bad_ok,
+        "a `$count = \"str\"` write must be REJECTED against `Writable<number>`:\n{bad_out}"
+    );
+}
+
+#[test]
+fn store_write_in_an_array_destructuring_target_emits_residue_free_valid_tsx() {
+    // F11: a `$count` in an array-DESTRUCTURING assignment TARGET (`[$count] =
+    // xs`) is a store WRITE leaf. It must project to the writable-lvalue form
+    // (`[__verter_store_lvalue(count).value] = xs`) — VALID TSX with NO raw
+    // `$count` residue. Suppressing it (leaving raw `$count`) would surface a
+    // spurious `Cannot find name '$count'`.
+    let good = project(
+        "<script lang=\"ts\">\n\
+         import { writable } from \"svelte/store\";\n\
+         const count = writable(0);\n\
+         const xs: number[] = [1, 2, 3];\n\
+         [$count] = xs;\n\
+         </script>\n\
+         <div>x</div>",
+    );
+    // No raw `$count` residue anywhere; rewritten to the writable lvalue.
+    assert!(
+        !good.contains("$count") && good.contains("__verter_store_lvalue(count).value"),
+        "the `[$count] = xs` target must be rewritten (no raw `$count`): {good}"
+    );
+    let Some((ok, out)) = typecheck_projected(&good, "StoreArrayDestructure.svelte.tsx", &[], true)
+    else {
+        skip_note("store array-destructure write");
+        return;
+    };
+    assert!(
+        ok,
+        "a `[$count] = xs` array-destructure store write must type-check clean \
+         (no phantom `Cannot find name '$count'`):\n{out}"
+    );
+    assert!(
+        !out.contains("Cannot find name '$count'") && !out.contains("Cannot find name \"$count\""),
+        "the `[$count] = xs` projection must NOT surface a phantom `$count` name \
+         error:\n{out}"
+    );
+
+    // DISCRIMINATING: a wrong-element-typed destructure FAILS the writable value
+    // contract — `string[]` elements are not assignable into a `number` lvalue.
+    let bad = project(
+        "<script lang=\"ts\">\n\
+         import { writable } from \"svelte/store\";\n\
+         const count = writable(0);\n\
+         const xs: string[] = [\"a\"];\n\
+         [$count] = xs;\n\
+         </script>\n\
+         <div>x</div>",
+    );
+    let Some((bad_ok, bad_out)) =
+        typecheck_projected(&bad, "StoreArrayDestructureBad.svelte.tsx", &[], true)
+    else {
+        return;
+    };
+    assert!(
+        !bad_ok,
+        "a `[$count] = (string[])` destructure must be REJECTED against the \
+         `Writable<number>` element value:\n{bad_out}"
+    );
+}
+
+#[test]
+fn store_write_in_an_object_destructuring_target_emits_residue_free_valid_tsx() {
+    // F11: a `$count` in an object-DESTRUCTURING assignment TARGET
+    // (`({ x: $count } = obj)`) is a store WRITE leaf. Residue-free valid TSX.
+    let good = project(
+        "<script lang=\"ts\">\n\
+         import { writable } from \"svelte/store\";\n\
+         const count = writable(0);\n\
+         const obj = { x: 0 };\n\
+         ({ x: $count } = obj);\n\
+         </script>\n\
+         <div>x</div>",
+    );
+    assert!(
+        !good.contains("$count") && good.contains("__verter_store_lvalue(count).value"),
+        "the `({{ x: $count }} = obj)` target must be rewritten (no raw `$count`): {good}"
+    );
+    let Some((ok, out)) =
+        typecheck_projected(&good, "StoreObjectDestructure.svelte.tsx", &[], true)
+    else {
+        skip_note("store object-destructure write");
+        return;
+    };
+    assert!(
+        ok,
+        "an `({{ x: $count }} = obj)` object-destructure store write must \
+         type-check clean (no phantom name error):\n{out}"
+    );
+    assert!(
+        !out.contains("Cannot find name '$count'") && !out.contains("Cannot find name \"$count\""),
+        "the object-destructure projection must NOT surface a phantom `$count` \
+         name error:\n{out}"
+    );
+}
+
+#[test]
+fn store_write_in_a_for_of_target_emits_residue_free_valid_tsx() {
+    // F11: a `$count` as a `for-of` assignment TARGET (`for ($count of xs)`) is a
+    // store WRITE leaf — residue-free valid TSX referencing only `count`.
+    let good = project(
+        "<script lang=\"ts\">\n\
+         import { writable } from \"svelte/store\";\n\
+         const count = writable(0);\n\
+         const xs: number[] = [1, 2, 3];\n\
+         for ($count of xs) {}\n\
+         </script>\n\
+         <div>x</div>",
+    );
+    assert!(
+        !good.contains("$count") && good.contains("__verter_store_lvalue(count).value"),
+        "the `for ($count of xs)` target must be rewritten (no raw `$count`): {good}"
+    );
+    let Some((ok, out)) = typecheck_projected(&good, "StoreForOf.svelte.tsx", &[], true) else {
+        skip_note("store for-of write");
+        return;
+    };
+    assert!(
+        ok,
+        "a `for ($count of xs)` store write target must type-check clean (no \
+         phantom name error):\n{out}"
+    );
+    assert!(
+        !out.contains("Cannot find name '$count'") && !out.contains("Cannot find name \"$count\""),
+        "the for-of projection must NOT surface a phantom `$count` name error:\n{out}"
+    );
+}
+
+#[test]
+fn store_read_default_in_an_each_block_binding_is_rewritten_residue_free() {
+    // F11: a store READ in a block-binding DEFAULT VALUE (`{#each rows as { x =
+    // $fallback }}`) is an ordinary READ context — it must be rewritten to
+    // `__verter_store_get(fallback)`, while the bound NAME `x` stays a local. NO
+    // raw `$fallback` residue.
+    let good = project(
+        "<script lang=\"ts\">\n\
+         import { writable } from \"svelte/store\";\n\
+         const fallback = writable(0);\n\
+         const rows: { x?: number }[] = [];\n\
+         </script>\n\
+         {#each rows as { x = $fallback }}{x}{/each}",
+    );
+    assert!(
+        !render_body(&good).contains("$fallback") && good.contains("__verter_store_get(fallback)"),
+        "the each block-binding default `$fallback` must be rewritten to the read \
+         helper (no raw `$fallback`): {good}"
+    );
+    let Some((ok, out)) = typecheck_projected(&good, "EachStoreDefault.svelte.tsx", &[], true)
+    else {
+        skip_note("each block-binding store default");
+        return;
+    };
+    assert!(
+        ok,
+        "an each block-binding store-read default must type-check clean:\n{out}"
+    );
+    assert!(
+        !out.contains("Cannot find name '$fallback'")
+            && !out.contains("Cannot find name \"$fallback\""),
+        "the each block-binding default projection must NOT surface a phantom \
+         `$fallback` name error:\n{out}"
+    );
+}
+
+#[test]
+fn store_read_default_in_a_snippet_param_is_rewritten_residue_free() {
+    // F11: a store READ in a snippet PARAM DEFAULT (`{#snippet row($item =
+    // $fallback)}`) is an ordinary READ context — `$fallback` is rewritten to
+    // the read helper while the param NAME `$item` stays a local. No raw
+    // `$fallback` residue.
+    let good = project(
+        "<script lang=\"ts\">\n\
+         import { writable } from \"svelte/store\";\n\
+         const fallback = writable(0);\n\
+         </script>\n\
+         {#snippet row($item = $fallback)}{$item}{/snippet}",
+    );
+    assert!(
+        good.contains("__verter_store_get(fallback)")
+            && !good.contains("= $fallback")
+            && !good.contains("$fallback)"),
+        "the snippet param default `$fallback` must be rewritten to the read \
+         helper (no raw `$fallback`): {good}"
+    );
+    let Some((ok, out)) = typecheck_projected(&good, "SnippetStoreDefault.svelte.tsx", &[], true)
+    else {
+        skip_note("snippet param store default");
+        return;
+    };
+    assert!(
+        ok,
+        "a snippet param store-read default must type-check clean:\n{out}"
+    );
+    assert!(
+        !out.contains("Cannot find name '$fallback'")
+            && !out.contains("Cannot find name \"$fallback\""),
+        "the snippet param default projection must NOT surface a phantom \
+         `$fallback` name error:\n{out}"
+    );
+}
+
+#[test]
+fn store_sub_against_a_non_store_is_rejected() {
+    // F11: a `$count` where `count` is NOT a store (a plain `number`) FAILS the
+    // `__verter_store_get` `Readable<T>` constraint — discriminating that the
+    // helper genuinely requires a store.
+    let bad = project(
+        "<script lang=\"ts\">\n\
+         const count = 0;\n\
+         const v = $count;\n\
+         void v;\n\
+         </script>\n\
+         <div>x</div>",
+    );
+    let Some((ok, out)) = typecheck_projected(&bad, "NonStore.svelte.tsx", &[], true) else {
+        skip_note("non-store sub");
+        return;
+    };
+    assert!(
+        !ok,
+        "a `$count` over a non-store `count: number` must FAIL the `Readable<T>` \
+         constraint:\n{out}"
+    );
+}
+
+#[test]
+fn store_write_against_a_readonly_store_is_rejected() {
+    // F11: a `$count = v` WRITE where `count` is a READONLY `Readable<number>`
+    // (no `.set`) FAILS — `__verter_store_set` requires a `Writable<T>`. The READ
+    // of the same readonly store checks clean (discriminating the direction).
+    let read_ok = project(
+        "<script lang=\"ts\">\n\
+         import { readable } from \"svelte/store\";\n\
+         const count = readable(0);\n\
+         const n: number = $count;\n\
+         void n;\n\
+         </script>\n\
+         <div>x</div>",
+    );
+    let Some((ok, out)) = typecheck_projected(&read_ok, "ReadonlyRead.svelte.tsx", &[], true)
+    else {
+        skip_note("readonly store read");
+        return;
+    };
+    assert!(
+        ok,
+        "a READ of a readonly `Readable<number>` store must check clean:\n{out}"
+    );
+
+    let write_bad = project(
+        "<script lang=\"ts\">\n\
+         import { readable } from \"svelte/store\";\n\
+         const count = readable(0);\n\
+         $count = 5;\n\
+         </script>\n\
+         <div>x</div>",
+    );
+    let Some((bad_ok, bad_out)) =
+        typecheck_projected(&write_bad, "ReadonlyWrite.svelte.tsx", &[], true)
+    else {
+        return;
+    };
+    assert!(
+        !bad_ok,
+        "a WRITE to a readonly `Readable<number>` store must be REJECTED (no \
+         `Writable` contract):\n{bad_out}"
+    );
+}
+
+#[test]
+fn legacy_props_magic_type_checks_with_the_documented_any_exception() {
+    // F12: a legacy `$$props` / `$$restProps` fixture type-checks — the magic
+    // objects are `Record<string, any>` (the OWNER-APPROVED anti-`any`-gate
+    // exception). NO `@ts-expect-error` anti-`any` guard on the magic object —
+    // the loose `any` is intentional for the legacy forwarded-attribute bag.
+    let projected = project(
+        "<script lang=\"ts\">\n\
+         const label = $$props.label;\n\
+         const rest = $$restProps;\n\
+         void label;\n\
+         void rest;\n\
+         </script>\n\
+         <div>{$$props.anything}</div>",
+    );
+    let Some((ok, out)) = typecheck_projected(&projected, "LegacyProps.svelte.tsx", &[], true)
+    else {
+        skip_note("legacy $$props magic");
+        return;
+    };
+    assert!(
+        ok,
+        "a legacy `$$props`/`$$restProps` fixture must type-check (the documented \
+         `any` exception — arbitrary member access is permitted):\n{out}"
+    );
+}
+
+#[test]
+fn legacy_slots_magic_checks_boolean() {
+    // F12: `$$slots.foo` is `boolean` (whether the `foo` slot was filled) — a
+    // PRECISE type, NOT the `any` exception. A boolean consumer checks clean; a
+    // non-boolean consumer FAILS, proving `$$slots` is `Record<string, boolean>`.
+    let good = project(
+        "<script lang=\"ts\">\n\
+         const hasFooter: boolean = $$slots.footer;\n\
+         void hasFooter;\n\
+         </script>\n\
+         <div>x</div>",
+    );
+    let Some((ok, out)) = typecheck_projected(&good, "SlotsBool.svelte.tsx", &[], true) else {
+        skip_note("legacy $$slots boolean");
+        return;
+    };
+    assert!(ok, "`$$slots.footer` must check as `boolean`:\n{out}");
+
+    // DISCRIMINATING: assigning `$$slots.foo` to a `number` FAILS (it is
+    // `boolean`, not `any`) — proving `$$slots` is NOT under the `any` exception.
+    let bad = project(
+        "<script lang=\"ts\">\n\
+         const n: number = $$slots.footer;\n\
+         void n;\n\
+         </script>\n\
+         <div>x</div>",
+    );
+    let Some((bad_ok, bad_out)) = typecheck_projected(&bad, "SlotsBoolBad.svelte.tsx", &[], true)
+    else {
+        return;
+    };
+    assert!(
+        !bad_ok,
+        "`$$slots.footer` (boolean) must NOT assign to `number` (it is precisely \
+         typed, NOT under the `any` exception):\n{bad_out}"
+    );
+}
+
+#[test]
+fn magic_and_store_coexist_without_the_magic_being_store_rewritten_discriminating() {
+    // F11/F12 DISCRIMINATING negative: a LEGACY component using BOTH a store
+    // `$count` AND the `$$props`/`$$slots` magic type-checks CLEAN — proving the
+    // magic was NOT store-rewritten. If the classifier wrongly rewrote `$$props`
+    // as `__verter_store_get($$props)`, that would FAIL (`$$props:
+    // Record<string, any>` is not a `Readable<T>`), so the clean type-check
+    // discriminates that the magic is EXCLUDED from the store rewrite while the
+    // real store `$count` IS rewritten and checked.
+    let projected = project(
+        "<script lang=\"ts\">\n\
+         import { writable } from \"svelte/store\";\n\
+         const count = writable(0);\n\
+         const n: number = $count;\n\
+         const label = $$props.label;\n\
+         const hasFooter: boolean = $$slots.footer;\n\
+         void n;\n\
+         void label;\n\
+         void hasFooter;\n\
+         </script>\n\
+         <div>{$count}</div>",
+    );
+    // RESIDUE: the magic stays verbatim (not wrapped in a store helper); the real
+    // store `$count` WAS rewritten (no `$count` residue in the body).
+    assert!(
+        !projected.contains("__verter_store_get($$props")
+            && !projected.contains("__verter_store_set($$props")
+            && !projected.contains("__verter_store_get($$slots"),
+        "the `$$`-magic must NOT be wrapped as a store-sub: {projected}"
+    );
+    assert!(
+        projected.contains("__verter_store_get(count)"),
+        "the real store `$count` WAS rewritten: {projected}"
+    );
+    let Some((ok, out)) = typecheck_projected(&projected, "MagicAndStore.svelte.tsx", &[], true)
+    else {
+        skip_note("magic + store coexist");
+        return;
+    };
+    assert!(
+        ok,
+        "a legacy component using BOTH a store `$count` and the `$$props`/`$$slots` \
+         magic must type-check CLEAN — proving the magic was NOT store-rewritten:\n{out}"
+    );
+}
+
+#[test]
+fn a_rune_is_not_store_rewritten_discriminating() {
+    // F11 DISCRIMINATING negative: a runes-mode component using `$state` — the
+    // rune stays VERBATIM (typed by the prelude, NOT wrapped in a store-get). A
+    // CLEAN type-check proves the rune was excluded from the store rewrite (a
+    // `__verter_store_get($state(0))` would be invalid — a call result is not a
+    // `Readable<T>`).
+    let projected = project(
+        "<script lang=\"ts\">\n\
+         let s = $state(0);\n\
+         const n: number = s;\n\
+         void n;\n\
+         </script>\n\
+         <div>{s}</div>",
+    );
+    // The rune `$state(0)` stays verbatim; it is NOT wrapped in a store-get (the
+    // prelude's own `__verter_store_get(store)` doc-comment / `<T>` declare are not
+    // a `($state` wrap, so probe the precise wrap form).
+    assert!(
+        projected.contains("$state(0)"),
+        "the `$state` rune call stays verbatim: {projected}"
+    );
+    assert!(
+        !projected.contains("__verter_store_get($state"),
+        "a rune must NOT be wrapped as a store-sub: {projected}"
+    );
+    let Some((ok, out)) = typecheck_projected(&projected, "RuneNotStore.svelte.tsx", &[], true)
+    else {
+        skip_note("rune not store-rewritten");
+        return;
+    };
+    assert!(
+        ok,
+        "a runes-mode `$state` component must type-check CLEAN (the rune was not \
+         store-rewritten):\n{out}"
+    );
+}
+
+#[test]
+fn store_sub_in_a_block_condition_type_checks_against_the_store_value() {
+    // F11: a store-sub in a markup BLOCK CONDITION (`{#if $ready}`) is rewritten
+    // and type-checks against the store's `Readable<boolean>` value — proving the
+    // expanded markup-expression coverage (beyond the bare interpolation) is in
+    // effect AND genuinely typed. A wrong-typed each-iterable store FAILS.
+    // (The `{#if}` carries an explicit `{:else}` — an else-LESS `{#if}` projects
+    // to an incomplete ternary `{cond ? (<>…</>)}`, a PRE-EXISTING `{#if}`
+    // projection gap unrelated to F11; the store-sub coverage is the same with
+    // the else arm present.)
+    let good = project(
+        "<script lang=\"ts\">\n\
+         import { writable } from \"svelte/store\";\n\
+         const ready = writable(false);\n\
+         const items = writable<number[]>([]);\n\
+         </script>\n\
+         {#if $ready}<ul>{#each $items as n}<li>{n}</li>{/each}</ul>{:else}<span>no</span>{/if}",
+    );
+    let Some((ok, out)) = typecheck_projected(&good, "BlockStore.svelte.tsx", &[], true) else {
+        skip_note("store-sub in block condition");
+        return;
+    };
+    assert!(
+        ok,
+        "a store-sub in a block condition / each iterable must type-check against \
+         the store value type:\n{out}"
+    );
+
+    // DISCRIMINATING: a non-store value in a `{#each}` iterable position FAILS the
+    // `Readable<T>` constraint (proving the each-iterable store-sub is checked).
+    let bad = project(
+        "<script lang=\"ts\">\n\
+         const items = 5;\n\
+         </script>\n\
+         <ul>{#each $items as n}<li>{n}</li>{/each}</ul>",
+    );
+    let Some((bad_ok, bad_out)) = typecheck_projected(&bad, "BlockStoreBad.svelte.tsx", &[], true)
+    else {
+        return;
+    };
+    assert!(
+        !bad_ok,
+        "a non-store `$items` in an each iterable must FAIL the `Readable<T>` \
+         constraint:\n{bad_out}"
+    );
+}
+
+#[test]
+fn store_sub_in_a_trailing_script_type_checks_clean() {
+    // F11 (move + rewrite ordering): a store-sub in a TRAILING `<script>` (after
+    // the markup, hence MOVED above the render fn) is rewritten BEFORE the move,
+    // so it type-checks CLEAN — proving the rewrite was not dropped/stranded by
+    // the script-body relocation.
+    let projected = project(
+        "<div>{label}</div>\n\
+         <script lang=\"ts\">\n\
+         import { writable } from \"svelte/store\";\n\
+         const name = writable(\"hi\");\n\
+         const label: string = $name;\n\
+         </script>",
+    );
+    let Some((ok, out)) = typecheck_projected(&projected, "TrailStore.svelte.tsx", &[], true)
+    else {
+        skip_note("trailing-script store-sub");
+        return;
+    };
+    assert!(
+        ok,
+        "a store-sub in a trailing (moved) script must type-check clean (rewrite \
+         applied before the move):\n{out}"
+    );
+}
+
+#[test]
+fn compound_store_assignment_type_checks_against_the_writable_value() {
+    // F11: `$count += 1` → `__verter_store_set(count, __verter_store_get(count) +
+    // (1))` type-checks against `Writable<number>`. A wrong-typed compound RHS
+    // FAILS the writable value contract.
+    let good = project(
+        "<script lang=\"ts\">\n\
+         import { writable } from \"svelte/store\";\n\
+         const count = writable(0);\n\
+         $count += 1;\n\
+         </script>\n\
+         <div>x</div>",
+    );
+    let Some((ok, out)) = typecheck_projected(&good, "CompoundStore.svelte.tsx", &[], true) else {
+        skip_note("compound store assignment");
+        return;
+    };
+    assert!(
+        ok,
+        "a `$count += 1` compound write must type-check against `Writable<number>`:\n{out}"
+    );
+
+    // DISCRIMINATING: a wrong-typed compound RHS (a string `+=`) FAILS — the set
+    // value `number + string` is `string`, which is not assignable to the store's
+    // `number`.
+    let bad = project(
+        "<script lang=\"ts\">\n\
+         import { writable } from \"svelte/store\";\n\
+         const count = writable(0);\n\
+         $count += \"x\";\n\
+         </script>\n\
+         <div>x</div>",
+    );
+    let Some((bad_ok, bad_out)) =
+        typecheck_projected(&bad, "CompoundStoreBad.svelte.tsx", &[], true)
+    else {
+        return;
+    };
+    assert!(
+        !bad_ok,
+        "a `$count += \"x\"` (string RHS) must be REJECTED against `Writable<number>`:\n{bad_out}"
+    );
+}
+
+#[test]
+fn update_store_expression_type_checks_against_the_writable() {
+    // F11: `$count++` → `__verter_store_set(count, __verter_store_get(count) + 1)`
+    // type-checks against `Writable<number>`. A NON-number store FAILS (you cannot
+    // `++` a string store value).
+    let good = project(
+        "<script lang=\"ts\">\n\
+         import { writable } from \"svelte/store\";\n\
+         const count = writable(0);\n\
+         $count++;\n\
+         </script>\n\
+         <div>x</div>",
+    );
+    let Some((ok, out)) = typecheck_projected(&good, "UpdateStore.svelte.tsx", &[], true) else {
+        skip_note("update store expression");
+        return;
+    };
+    assert!(
+        ok,
+        "a `$count++` update must type-check against `Writable<number>`:\n{out}"
+    );
+
+    // DISCRIMINATING: `$flag++` on a `Writable<boolean>` FAILS — the read+set
+    // body `__verter_store_get(flag) + 1` is `boolean + number`, a TS arithmetic
+    // error (the `+` operator rejects a boolean operand under strict). This proves
+    // the update body is genuinely type-checked against the store value type.
+    let bad = project(
+        "<script lang=\"ts\">\n\
+         import { writable } from \"svelte/store\";\n\
+         const flag = writable(false);\n\
+         $flag++;\n\
+         </script>\n\
+         <div>x</div>",
+    );
+    let Some((bad_ok, bad_out)) = typecheck_projected(&bad, "UpdateStoreBad.svelte.tsx", &[], true)
+    else {
+        return;
+    };
+    assert!(
+        !bad_ok,
+        "a `$flag++` on a `Writable<boolean>` must be REJECTED (arithmetic on a \
+         boolean store value):\n{bad_out}"
+    );
+
+    // DISCRIMINATING (bigint passes): `$big++` on a `Writable<bigint>` type-checks
+    // — the `__verter_store_update<T extends number | bigint>` helper PRESERVES the
+    // `bigint` type. A naive `get(big) + 1` model would FALSELY reject this
+    // (`bigint + number` is a TS error), so its acceptance proves the helper is the
+    // precise update contract.
+    let bigint_ok = project(
+        "<script lang=\"ts\">\n\
+         import { writable } from \"svelte/store\";\n\
+         const big = writable(0n);\n\
+         $big++;\n\
+         </script>\n\
+         <div>x</div>",
+    );
+    let Some((bok, bout)) =
+        typecheck_projected(&bigint_ok, "UpdateStoreBigint.svelte.tsx", &[], true)
+    else {
+        return;
+    };
+    assert!(
+        bok,
+        "a `$big++` on a `Writable<bigint>` must type-check (the update helper \
+         preserves `bigint`, not a `+ 1` number coercion):\n{bout}"
+    );
+}
+
+#[test]
+fn store_subs_in_spread_and_transition_param_surfaces_type_check() {
+    // F11 (P1-2 surfaces): store-subs in a spread attribute (`{...$attrs}`) and a
+    // `transition:fn={$params}` param are rewritten and type-check (no raw
+    // `$attrs`/`$params`).
+    let projected = project(
+        "<script lang=\"ts\">\n\
+         import { writable } from \"svelte/store\";\n\
+         import { fly } from \"svelte/transition\";\n\
+         const attrs = writable<{ id: string }>({ id: \"a\" });\n\
+         const params = writable({ delay: 100 });\n\
+         </script>\n\
+         <div {...$attrs} transition:fly={$params}>x</div>",
+    );
+    let Some((ok, out)) = typecheck_projected(&projected, "SpreadTrans.svelte.tsx", &[], true)
+    else {
+        skip_note("store-subs in spread/transition surfaces");
+        return;
+    };
+    assert!(
+        !projected.contains("$attrs") && !projected.contains("$params"),
+        "no raw `$attrs`/`$params` residue (both rewritten): {projected}"
+    );
+    assert!(
+        ok,
+        "store-subs in `{{...$attrs}}` and `transition:fly={{$params}}` must \
+         type-check (both rewritten):\n{out}"
+    );
+}
+
+#[test]
+fn object_shorthand_store_sub_type_checks() {
+    // F11: a shorthand `{ $count }` store-sub projects to
+    // `{ $count: __verter_store_get(count) }` — VALID TSX that type-checks (a bare
+    // `{ __verter_store_get(count) }` would be a syntax error). The `$count` key
+    // takes the store's `number` value.
+    let projected = project(
+        "<script lang=\"ts\">\n\
+         import { writable } from \"svelte/store\";\n\
+         const count = writable(0);\n\
+         const o: { $count: number } = { $count };\n\
+         void o;\n\
+         </script>\n\
+         <div>x</div>",
+    );
+    let Some((ok, out)) = typecheck_projected(&projected, "Shorthand.svelte.tsx", &[], true) else {
+        skip_note("object shorthand store-sub");
+        return;
+    };
+    assert!(
+        ok,
+        "a `{{ $count }}` shorthand store-sub must project valid, type-checking \
+         TSX (`{{ $count: __verter_store_get(count) }}`):\n{out}"
+    );
+}
+
+#[test]
+fn forced_runes_option_keeps_the_magic_undeclared_so_a_magic_reference_fails() {
+    // F12: an explicit `<svelte:options runes={true}>` forces RUNES mode — the
+    // `$$props` magic is NOT declared, so a `$$props` reference is an UNDECLARED
+    // name (a type error). DISCRIMINATING: the SAME reference in a legacy
+    // component (no forced option, no rune) type-checks (the magic is declared).
+    let forced_runes = project(
+        "<svelte:options runes={true} />\n\
+         <script lang=\"ts\">const x = $$props.foo; void x;</script>\n\
+         <div>y</div>",
+    );
+    let Some((ok, out)) = typecheck_projected(&forced_runes, "ForcedRunes.svelte.tsx", &[], true)
+    else {
+        skip_note("forced-runes magic undeclared");
+        return;
+    };
+    assert!(
+        !ok,
+        "under forced runes mode `$$props` is UNDECLARED — a reference must FAIL:\n{out}"
+    );
+
+    // DISCRIMINATING: the same reference in a legacy component type-checks (the
+    // magic IS declared there).
+    let legacy =
+        project("<script lang=\"ts\">const x = $$props.foo; void x;</script>\n<div>y</div>");
+    let Some((legacy_ok, legacy_out)) =
+        typecheck_projected(&legacy, "LegacyMagicRef.svelte.tsx", &[], true)
+    else {
+        return;
+    };
+    assert!(
+        legacy_ok,
+        "a legacy component's `$$props` reference must type-check (magic declared):\n{legacy_out}"
+    );
+}
+
+#[test]
+fn store_sub_in_an_html_tag_type_checks() {
+    // F11 (tag expression surface): a store-sub in `{@html $markup}` is rewritten
+    // and type-checks (the tag inner value expression is routed through the store
+    // rewrite).
+    let projected = project(
+        "<script lang=\"ts\">\n\
+         import { writable } from \"svelte/store\";\n\
+         const markup = writable(\"<b>hi</b>\");\n\
+         </script>\n\
+         <div>{@html $markup}</div>",
+    );
+    let Some((ok, out)) = typecheck_projected(&projected, "TagStore.svelte.tsx", &[], true) else {
+        skip_note("store-sub in @html tag");
+        return;
+    };
+    assert!(
+        ok,
+        "a store-sub in `{{@html $markup}}` must type-check (the tag inner \
+         expression is rewritten):\n{out}"
+    );
+}
+
+#[test]
+fn bind_value_with_a_store_sub_type_checks() {
+    // F11 (P1-1): a store-sub in a `bind:value={$store}` value is rewritten
+    // through the store-get and composes with the bind projection — the bound
+    // value is the store's `Readable<string>` value. A correct-typed store checks
+    // clean; a wrong-typed store value FAILS (proving the bind value is genuinely
+    // typed from the store, not raw `$store` residue / `any`).
+    let good = project(
+        "<script lang=\"ts\">\n\
+         import { writable } from \"svelte/store\";\n\
+         const name = writable(\"\");\n\
+         </script>\n\
+         <input bind:value={$name} />",
+    );
+    // RESIDUE: no raw `$name` survives in the bind value (it WAS rewritten).
+    assert!(
+        good.contains("__verter_store_get(name)") && !render_body(&good).contains("$name"),
+        "the `bind:value={{$name}}` store-sub was rewritten (no raw `$name`): {good}"
+    );
+    let Some((ok, out)) = typecheck_projected(&good, "BindStore.svelte.tsx", &[], true) else {
+        skip_note("bind:value store-sub");
+        return;
+    };
+    assert!(
+        ok,
+        "a `bind:value={{$name}}` store-sub (a `Writable<string>`) must type-check \
+         against the `<input>` value:\n{out}"
+    );
+
+    // DISCRIMINATING via a COMPONENT prop bind (strict `$props` typing — an
+    // intrinsic `<input value>` is loosely typed by SvelteHTMLElements, so a
+    // component bind is the discriminating surface). A `bind:label={$store}` over
+    // a `Writable<number>` store bound to a `label: string` component prop FAILS —
+    // proving the store-rewritten bind value is genuinely typed (the same
+    // `rewrite_bind_to_attribute` path as the intrinsic `bind:value`).
+    let comp_good = project(
+        "<script lang=\"ts\">\n\
+         import { writable } from \"svelte/store\";\n\
+         const Child = (null as any) as abstract new (...a: never[]) => \
+         { $props: { label: string } };\n\
+         const label = writable(\"hi\");\n\
+         </script>\n\
+         <Child bind:label={$label} />",
+    );
+    assert!(
+        comp_good.contains("__verter_store_get(label)"),
+        "the component `bind:label={{$label}}` store-sub was rewritten: {comp_good}"
+    );
+    let Some((cok, cout)) = typecheck_projected(&comp_good, "BindCompStore.svelte.tsx", &[], true)
+    else {
+        return;
+    };
+    assert!(
+        cok,
+        "a component `bind:label={{$label}}` (a `Writable<string>`) must check \
+         against the `label: string` prop:\n{cout}"
+    );
+
+    let bad = project(
+        "<script lang=\"ts\">\n\
+         import { writable } from \"svelte/store\";\n\
+         const Child = (null as any) as abstract new (...a: never[]) => \
+         { $props: { label: string } };\n\
+         const num = writable<number>(0);\n\
+         </script>\n\
+         <Child bind:label={$num} />",
+    );
+    let Some((bad_ok, bad_out)) = typecheck_projected(&bad, "BindStoreBad.svelte.tsx", &[], true)
+    else {
+        return;
+    };
+    assert!(
+        !bad_ok,
+        "a component `bind:label={{$num}}` over a `Writable<number>` store must be \
+         REJECTED against the `label: string` prop (proves the bind value is \
+         store-typed, not `any`):\n{bad_out}"
+    );
+}
+
+#[test]
+fn declaration_tag_value_with_a_store_sub_type_checks() {
+    // F11 (P1-2): a store-sub in a `{@const x = $store}` VALUE is rewritten
+    // MOVE-SAFELY (the store-bearing inner is TEXT-rewritten and emitted at the
+    // hoist anchor — the mapped-move boundary cannot carry the trailing
+    // close-paren), so the hoisted `const x = __verter_store_get(store)`
+    // declaration type-checks AND is visible to a following sibling. The
+    // TRAILING-store form (`= $count`, the store as the inner's LAST token) is the
+    // stranding-sensitive case — it must not strand a `)` at the original tag
+    // position. A correct consumer checks clean; a wrong-typed consumer FAILS.
+    let good = project(
+        "<script lang=\"ts\">\n\
+         import { writable } from \"svelte/store\";\n\
+         const count = writable(0);\n\
+         </script>\n\
+         <div>{@const c = $count}{@const doubled = c * 2}{doubled}</div>",
+    );
+    assert!(
+        good.contains("const c = __verter_store_get(count)") && !good.contains("$count"),
+        "the trailing-store `{{@const c = $count}}` was rewritten move-safely (no \
+         stranded paren, no raw `$count`): {good}"
+    );
+    let Some((ok, out)) = typecheck_projected(&good, "ConstStore.svelte.tsx", &[], true) else {
+        skip_note("@const store-sub");
+        return;
+    };
+    assert!(
+        ok,
+        "a trailing-store `{{@const c = $count}}` + a following sibling `{{@const \
+         doubled = c * 2}}` must type-check (move-safe rewrite, sibling-visible):\n{out}"
+    );
+
+    // DISCRIMINATING: a wrong-typed consumer of the store-derived const FAILS —
+    // the value is `number` (from `Writable<number>`), not `any`.
+    let bad = project(
+        "<script lang=\"ts\">\n\
+         import { writable } from \"svelte/store\";\n\
+         const count = writable(0);\n\
+         </script>\n\
+         <div>{@const doubled = $count}{@const s = doubled as string}{s}</div>",
+    );
+    let Some((bad_ok, bad_out)) = typecheck_projected(&bad, "ConstStoreBad.svelte.tsx", &[], true)
+    else {
+        return;
+    };
+    assert!(
+        !bad_ok,
+        "a `number`-typed store-derived `{{@const}}` value must NOT cast to \
+         `string` (proves it is store-typed, not `any`):\n{bad_out}"
+    );
+}
+
+#[test]
+fn dynamic_component_this_with_a_store_sub_type_checks() {
+    // F11 (P1-3): a store-sub in `<svelte:component this={$store}>` is rewritten
+    // through the store-get, so the dynamic-component checker sees the store's
+    // (component-typed) value. A store holding a valid component checks clean; a
+    // store holding a NON-component value FAILS the constructor constraint.
+    let good = project(
+        "<script lang=\"ts\">\n\
+         import { writable } from \"svelte/store\";\n\
+         type Dyn = abstract new (...a: never[]) => { $props: { label: string } };\n\
+         const Cmp = writable<Dyn>(null as any);\n\
+         </script>\n\
+         <svelte:component this={$Cmp} label=\"hi\" />",
+    );
+    assert!(
+        good.contains("__verter_store_get(Cmp)"),
+        "the dynamic-component `this={{$Cmp}}` store-sub was rewritten: {good}"
+    );
+    let Some((ok, out)) = typecheck_projected(&good, "DynStore.svelte.tsx", &[], true) else {
+        skip_note("dynamic-component this store-sub");
+        return;
+    };
+    assert!(
+        ok,
+        "a `<svelte:component this={{$Cmp}}>` store-sub holding a component must \
+         type-check (the `this` expression is store-rewritten):\n{out}"
+    );
+
+    // DISCRIMINATING: a store holding a NON-component value FAILS the
+    // `__verter_dynamic_component` constructor constraint — proving the `this`
+    // value is the store value (not raw `$Cmp` / `any`).
+    let bad = project(
+        "<script lang=\"ts\">\n\
+         import { writable } from \"svelte/store\";\n\
+         const Cmp = writable<number>(0);\n\
+         </script>\n\
+         <svelte:component this={$Cmp} />",
+    );
+    let Some((bad_ok, bad_out)) = typecheck_projected(&bad, "DynStoreBad.svelte.tsx", &[], true)
+    else {
+        return;
+    };
+    assert!(
+        !bad_ok,
+        "a `<svelte:component this={{$Cmp}}>` over a `Writable<number>` store must \
+         be REJECTED (the store value is not a component):\n{bad_out}"
+    );
+}
+
+#[test]
+fn a_nested_function_scope_store_sub_is_not_over_suppressed_end_to_end() {
+    // F11 (P1-4, end-to-end soundness): a top-level store `$count` used in markup
+    // STILL rewrites to the store-get and type-checks even when an UNRELATED
+    // nested function declares a local `let $count` — the over-suppression bug
+    // (lexically-scoped declared-name collection) is gone. A raw `$count` residue
+    // in the markup would be `Cannot find name '$count'`.
+    let projected = project(
+        "<script lang=\"ts\">\n\
+         import { writable } from \"svelte/store\";\n\
+         const count = writable(0);\n\
+         function unrelated() { let $count = 1; return $count; }\n\
+         void unrelated;\n\
+         </script>\n\
+         <div>{$count}</div>",
+    );
+    assert!(
+        projected.contains("__verter_store_get(count)"),
+        "the TOP-LEVEL store `$count` in markup WAS rewritten despite the nested \
+         `let $count`: {projected}"
+    );
+    // No raw `$count` reference survives in the render body (the markup `$count`
+    // was rewritten; the nested-fn `$count` lives in the hoisted script body, a
+    // valid local binding).
+    let Some((ok, out)) = typecheck_projected(&projected, "NestedScopeStore.svelte.tsx", &[], true)
+    else {
+        skip_note("nested-scope store-sub not over-suppressed");
+        return;
+    };
+    assert!(
+        ok,
+        "a markup store `$count` must rewrite + type-check even with an unrelated \
+         nested-function `let $count` (no over-suppression, no raw `$count` \
+         residue):\n{out}"
+    );
+}
+
+#[test]
+fn member_write_on_a_store_sub_degrades_safe_relaxed_write_check() {
+    // F11 documented bounded boundary: a MEMBER write rooted at a store-sub
+    // (`$obj.x = 1`) projects to `__verter_store_get(obj).x = 1` — it mutates the
+    // READ object's member (valid TSX, relaxed: it does not REQUIRE the store be
+    // `Writable`, since Svelte's `$obj.x = v` is a whole-object store set). This
+    // characterizes the SAFE-DEGRADE: the projection is VALID TSX and type-checks
+    // (the member write checks against the store VALUE's member type, a real
+    // check — not silently dropped), while the whole-object writable requirement
+    // is relaxed. A precise read→mutate→set projection is a follow-up.
+    let projected = project(
+        "<script lang=\"ts\">\n\
+         import { writable } from \"svelte/store\";\n\
+         const obj = writable({ x: 0 });\n\
+         $obj.x = 1;\n\
+         </script>\n\
+         <div>x</div>",
+    );
+    // RESIDUE: the base `$obj` is rewritten as a READ (`get(obj)`), and the `.x`
+    // member write stays verbatim (the relaxed-write degrade).
+    assert!(
+        projected.contains("__verter_store_get(obj).x")
+            && !projected.contains("__verter_store_set(obj"),
+        "a `$obj.x = 1` member write projects the base as a READ (relaxed): \
+         {projected}"
+    );
+    let Some((ok, out)) = typecheck_projected(&projected, "MemberWrite.svelte.tsx", &[], true)
+    else {
+        skip_note("member-write safe-degrade");
+        return;
+    };
+    assert!(
+        ok,
+        "a `$obj.x = 1` member write projects to valid TSX that type-checks (the \
+         relaxed safe-degrade — member type checked, whole-object writable \
+         relaxed):\n{out}"
+    );
+
+    // DISCRIMINATING: the member write is still a REAL check — a wrong-typed
+    // member value FAILS (the `.x` is `number` from the store value, not `any`).
+    let bad = project(
+        "<script lang=\"ts\">\n\
+         import { writable } from \"svelte/store\";\n\
+         const obj = writable({ x: 0 });\n\
+         $obj.x = \"not a number\";\n\
+         </script>\n\
+         <div>x</div>",
+    );
+    let Some((bad_ok, bad_out)) = typecheck_projected(&bad, "MemberWriteBad.svelte.tsx", &[], true)
+    else {
+        return;
+    };
+    assert!(
+        !bad_ok,
+        "a `$obj.x = \"str\"` member write must be REJECTED against the store \
+         value's `x: number` member (the member check is real):\n{bad_out}"
+    );
+}
+
+#[test]
+fn a_block_scoped_dollar_binding_does_not_over_suppress_a_markup_store_sub_end_to_end() {
+    // F11 (P1-4, second-pass soundness): a BLOCK-local `let $count` (inside a
+    // function body block, an unrelated lexical scope) must NOT suppress the
+    // top-level markup store `$count` — it still rewrites + type-checks. A raw
+    // `$count` residue would be `Cannot find name '$count'`. Covers the
+    // block/for/named-fn-expr scope precision (the classifier's lexical model is
+    // not merely function-boundary granular).
+    let projected = project(
+        "<script lang=\"ts\">\n\
+         import { writable } from \"svelte/store\";\n\
+         const count = writable(0);\n\
+         function unrelated() { { let $count = 1; return $count; } }\n\
+         void unrelated;\n\
+         </script>\n\
+         <div>{$count}</div>",
+    );
+    assert!(
+        projected.contains("__verter_store_get(count)"),
+        "the markup store `$count` rewrites despite a block-local `let $count`: \
+         {projected}"
+    );
+    let Some((ok, out)) = typecheck_projected(&projected, "BlockScopeStore.svelte.tsx", &[], true)
+    else {
+        skip_note("block-scope store-sub not over-suppressed");
+        return;
+    };
+    assert!(
+        ok,
+        "a markup store `$count` must rewrite + type-check even with an unrelated \
+         BLOCK-local `let $count` (no over-suppression, no raw residue):\n{out}"
+    );
+}
+
+#[test]
+fn an_imported_dollar_local_is_not_store_rewritten_in_markup_end_to_end() {
+    // F11 FALSE-POSITIVE guard: a `$`-prefixed IMPORT local (`import { x as $foo }`)
+    // is an ordinary value — a markup `{$foo}` must NOT be store-rewritten (it is
+    // NOT a store-sub). A `__verter_store_get($foo)` wrap would FAIL (`$foo` is a
+    // plain `number`, not a `Readable<T>`); the CLEAN type-check proves the import
+    // local was excluded from the store rewrite while the real store IS rewritten.
+    let projected = project(
+        "<script lang=\"ts\">\n\
+         import { writable } from \"svelte/store\";\n\
+         import { answer as $foo } from \"./vals\";\n\
+         const count = writable(0);\n\
+         </script>\n\
+         <div>{$foo}{$count}</div>",
+    );
+    // RESIDUE: the import local `$foo` stays verbatim (NOT wrapped); the real
+    // store `$count` IS rewritten.
+    assert!(
+        !projected.contains("__verter_store_get($foo")
+            && !projected.contains("__verter_store_get(foo)")
+            && projected.contains("__verter_store_get(count)"),
+        "the import local `$foo` must NOT be store-rewritten while `$count` is: \
+         {projected}"
+    );
+    let Some((ok, out)) = typecheck_projected(
+        &projected,
+        "ImportLocal.svelte.tsx",
+        &[("vals.ts", "export const answer: number = 42;\n")],
+        true,
+    ) else {
+        skip_note("import-local not store-rewritten");
+        return;
+    };
+    assert!(
+        ok,
+        "an imported `$foo` local must type-check (NOT store-rewritten) alongside a \
+         real store `$count`:\n{out}"
+    );
+}
+
+#[test]
+fn a_dollar_name_in_a_ts_type_position_is_not_store_rewritten_end_to_end() {
+    // F11 FALSE-POSITIVE guard: a `$`-prefixed identifier in a TYPE position
+    // (a type annotation / type-alias body) is a TYPE reference, NEVER a store-sub.
+    // No `__verter_store_get` may be injected in type space — that would be invalid
+    // TSX. A clean type-check with a real value-position store `$count` rewritten
+    // discriminates that ONLY the value `$count` was rewritten.
+    let projected = project(
+        "<script lang=\"ts\">\n\
+         import { writable } from \"svelte/store\";\n\
+         type $Foo = { a: number };\n\
+         const count = writable(0);\n\
+         const obj: $Foo = { a: 1 };\n\
+         void obj;\n\
+         </script>\n\
+         <div>{$count}</div>",
+    );
+    // RESIDUE: the type-position `$Foo` is NOT wrapped; the value `$count` IS.
+    assert!(
+        !projected.contains("__verter_store_get(Foo)")
+            && !projected.contains("__verter_store_get($Foo")
+            && projected.contains("__verter_store_get(count)"),
+        "a `$Foo` type reference must NOT be store-rewritten while `$count` is: \
+         {projected}"
+    );
+    let Some((ok, out)) = typecheck_projected(&projected, "TypePosition.svelte.tsx", &[], true)
+    else {
+        skip_note("type-position $-name not store-rewritten");
+        return;
+    };
+    assert!(
+        ok,
+        "a `$Foo` type reference must type-check (NOT store-rewritten) alongside a \
+         real value store `$count`:\n{out}"
+    );
+}
+
+#[test]
+fn a_dollar_name_in_an_implements_or_cast_type_position_is_not_store_rewritten_end_to_end() {
+    // F11 FALSE-POSITIVE guard (extended type-reference surfaces): a `$`-name
+    // reached through a class `implements` clause or an `as` cast type is a TYPE
+    // reference, NEVER a store-sub. These type positions do NOT pass through the
+    // `TSType` umbrella visitor — they reach the shared type-name bridge directly —
+    // so the classifier must intercept them via `visit_ts_type_name`. Injecting a
+    // `__verter_store_get` there would be invalid TSX (a call expression where a
+    // type name is required). A real value-position `$count` in the SAME component
+    // discriminates that ONLY the value store was rewritten.
+    let projected = project(
+        "<script lang=\"ts\">\n\
+         import { writable } from \"svelte/store\";\n\
+         interface $Shape { a: number }\n\
+         class Impl implements $Shape { a = 1; }\n\
+         const count = writable(0);\n\
+         const widened = ({ a: 1 } as $Shape);\n\
+         void new Impl(); void widened;\n\
+         </script>\n\
+         <div>{$count}</div>",
+    );
+    // RESIDUE: neither the `implements $Shape` nor the `as $Shape` cast is wrapped;
+    // the value `$count` IS.
+    assert!(
+        !projected.contains("__verter_store_get(Shape)")
+            && !projected.contains("__verter_store_get($Shape")
+            && projected.contains("__verter_store_get(count)"),
+        "a `$Shape` type reference (implements / as-cast) must NOT be store-rewritten \
+         while `$count` is: {projected}"
+    );
+    let Some((ok, out)) =
+        typecheck_projected(&projected, "ImplementsTypePosition.svelte.tsx", &[], true)
+    else {
+        skip_note("implements/cast type-position $-name not store-rewritten");
+        return;
+    };
+    assert!(
+        ok,
+        "a `$Shape` type reference in `implements` / `as` position must type-check \
+         (NOT store-rewritten) alongside a real value store `$count`:\n{out}"
+    );
+}
+
+#[test]
+fn an_each_dollar_binding_type_checks_clean_and_a_real_store_sub_still_rewrites() {
+    // BLOCKER A: a `$`-named markup block binding (`{#each list as $item}`) is an
+    // ORDINARY local in the each body, NOT a store-sub. Mis-classifying it would
+    // emit `__verter_store_get(item)` — referencing a non-existent `item` store →
+    // `Cannot find name 'item'`. The clean type-check proves the block binding is
+    // NOT store-rewritten. A genuine `$count` store-sub in the SAME body still
+    // rewrites and type-checks against the store value.
+    let good = project(
+        "<script lang=\"ts\">\n\
+         import { writable } from \"svelte/store\";\n\
+         const list: { id: number; label: string }[] = [];\n\
+         const count = writable(0);\n\
+         </script>\n\
+         <ul>{#each list as $item}<li>{$item.label}-{$count}</li>{/each}</ul>",
+    );
+    // RESIDUE: the `$item` binding is NOT store-rewritten; the `$count` store IS.
+    assert!(
+        !good.contains("__verter_store_get(item)") && good.contains("__verter_store_get(count)"),
+        "the `$item` each binding must NOT be store-rewritten while `$count` is: {good}"
+    );
+    let Some((ok, out)) = typecheck_projected(&good, "EachDollarBinding.svelte.tsx", &[], true)
+    else {
+        skip_note("each $-binding type-check");
+        return;
+    };
+    assert!(
+        ok,
+        "a `$`-named each binding must type-check clean (treated as a local, not a \
+         store-sub) alongside a real `$count` store:\n{out}"
+    );
+}
+
+#[test]
+fn an_await_then_and_catch_dollar_binding_type_check_clean() {
+    // BLOCKER A: `{#await p then $v}` / `{:catch $e}` bindings are locals, not
+    // store-subs. A clean type-check proves no false `__verter_store_get(v)` /
+    // `(e)` rewrite (which would reference non-existent stores).
+    let good = project(
+        "<script lang=\"ts\">\n\
+         const p: Promise<number> = Promise.resolve(1);\n\
+         </script>\n\
+         {#await p}<span>loading</span>{:then $v}<span>{$v}</span>{:catch $e}<span>{String($e)}</span>{/await}",
+    );
+    assert!(
+        !good.contains("__verter_store_get(v)") && !good.contains("__verter_store_get(e)"),
+        "the await then/catch `$v`/`$e` bindings must NOT be store-rewritten: {good}"
+    );
+    let Some((ok, out)) = typecheck_projected(&good, "AwaitDollarBinding.svelte.tsx", &[], true)
+    else {
+        skip_note("await then/catch $-binding type-check");
+        return;
+    };
+    assert!(
+        ok,
+        "the await then/catch `$`-bindings must type-check clean (locals, not \
+         store-subs):\n{out}"
+    );
+}
+
+#[test]
+fn a_bind_this_store_target_emits_valid_tsx_without_a_cannot_find_name_error() {
+    // BLOCKER D: a `$store` as a `bind:this` TARGET is invalid Svelte. The
+    // projection must be SYNTACTICALLY VALID and must NOT surface a phantom
+    // `Cannot find name '$el'` — it rewrites the target to the read-helper form so
+    // the (genuine) lvalue error is on the actual construct, not a name error.
+    let projected = project(
+        "<script lang=\"ts\">\n\
+         import { writable } from \"svelte/store\";\n\
+         const el = writable<HTMLInputElement | null>(null);\n\
+         </script>\n\
+         <input bind:this={$el} />",
+    );
+    // No raw `$el` residue anywhere; rewritten to the read helper. (`$el` is not
+    // a rune name, so the prelude never contains it.)
+    assert!(
+        !projected.contains("$el") && projected.contains("__verter_store_get(el)"),
+        "the `bind:this={{$el}}` target must be rewritten (no raw `$el`): {projected}"
+    );
+    let Some((ok, out)) = typecheck_projected(&projected, "BindThisStore.svelte.tsx", &[], true)
+    else {
+        skip_note("bind:this store-target valid TSX");
+        return;
+    };
+    // The projected TSX is INVALID Svelte input (a store as a `bind:this` target),
+    // so it does NOT type-check clean — DISCRIMINATING: assert it FAILS, and that
+    // the failure is the GENUINE lvalue error on the actual construct, NOT a
+    // phantom `Cannot find name` (TS2304/TS2552) for a raw `$el`.
+    assert!(
+        !ok,
+        "the `bind:this={{$el}}` projection (a store as a bind-target) is invalid \
+         Svelte and MUST NOT type-check clean — the genuine lvalue error must \
+         surface:\n{out}"
+    );
+    assert!(
+        !out.contains("Cannot find name '$el'") && !out.contains("Cannot find name \"$el\""),
+        "the `bind:this={{$el}}` projection must NOT surface a phantom `Cannot find \
+         name '$el'` — the store-sub is rewritten so the error lands on the real \
+         construct:\n{out}"
+    );
+    // The rewrite makes the LHS a call result (`__verter_store_get(el) = …`), so
+    // the genuine diagnostic is TS2364 (the left-hand side of an assignment must
+    // be a variable or a property access) — the real lvalue error on the actual
+    // construct, exactly what we want surfaced instead of a phantom name error.
+    assert!(
+        out.contains("TS2364"),
+        "the genuine lvalue error (TS2364 — LHS of assignment must be a variable \
+         or property access) must surface on the rewritten construct:\n{out}"
     );
 }
