@@ -6,27 +6,40 @@
 // byte-pinned by `virtual_file_naming_ts_freshness`. Regenerate via that
 // test's update path after any descriptor-row change.
 //
-// Keyed by the closed wire `FrameworkTag` name (`as_str_name`). All
-// suffixes append to the FULL carrier canonical (e.g. `App.vue` + `.ts`
-// => `App.vue.ts`).
+// Keyed by the closed wire `FrameworkTag` name (`as_str_name`) for component
+// carriers, plus `SVELTE_RUNE_MODULE` for the standalone rune-module naming.
+// Suffix policies append to the FULL carrier canonical (e.g. `App.vue` + `.ts`
+// => `App.vue.ts`); a `selfFile` policy means the file serves its own path.
 
-export interface VirtualFileIdeFixed {
-  kind: "fixed";
+export interface VirtualPathNone {
+  kind: "none";
+}
+
+export interface VirtualPathSelfFile {
+  kind: "selfFile";
+}
+
+export interface VirtualPathSuffix {
+  kind: "suffix";
   suffix: string;
 }
 
-export interface VirtualFileIdeJsxConditional {
+export interface VirtualPathJsxConditional {
   kind: "jsxConditional";
   jsx: string;
   nonJsx: string;
 }
 
-export type VirtualFileIdePolicy = VirtualFileIdeFixed | VirtualFileIdeJsxConditional;
+export type VirtualPathPolicy =
+  | VirtualPathNone
+  | VirtualPathSelfFile
+  | VirtualPathSuffix
+  | VirtualPathJsxConditional;
 
 export interface VirtualFileNaming {
   carrierExtension: string | null;
-  ide: VirtualFileIdePolicy | null;
-  apiSuffix: string | null;
+  ide: VirtualPathPolicy;
+  importSurface: VirtualPathPolicy;
   testingApiSuffix: string | null;
   sidecarSuffixes: string[];
 }
@@ -35,14 +48,21 @@ export const VIRTUAL_FILE_NAMING: Readonly<Record<string, VirtualFileNaming>> = 
   FRAMEWORK_TAG_VUE: {
     carrierExtension: ".vue",
     ide: { kind: "jsxConditional", jsx: ".jsx", nonJsx: ".tsx" },
-    apiSuffix: ".ts",
+    importSurface: { kind: "suffix", suffix: ".ts" },
     testingApiSuffix: ".__verter_test.ts",
     sidecarSuffixes: [],
   },
   FRAMEWORK_TAG_SVELTE: {
     carrierExtension: ".svelte",
-    ide: { kind: "fixed", suffix: ".tsx" },
-    apiSuffix: ".ts",
+    ide: { kind: "suffix", suffix: ".tsx" },
+    importSurface: { kind: "suffix", suffix: ".ts" },
+    testingApiSuffix: null,
+    sidecarSuffixes: [],
+  },
+  SVELTE_RUNE_MODULE: {
+    carrierExtension: ".svelte.ts",
+    ide: { kind: "selfFile" },
+    importSurface: { kind: "selfFile" },
     testingApiSuffix: null,
     sidecarSuffixes: [],
   },

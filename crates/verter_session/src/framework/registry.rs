@@ -581,8 +581,9 @@ mod tests {
         }
     }
 
-    /// API-LEG CLAUSE: a descriptor with an `api_suffix` (it projects a
-    /// public-API virtual file) MUST register a public-API projector leg.
+    /// API-LEG CLAUSE: a descriptor whose import surface is a distinct
+    /// suffix-appended API file (it projects a public-API virtual file) MUST
+    /// register a public-API projector leg.
     #[test]
     fn descriptor_with_api_suffix_has_a_projector_leg() {
         let registry = built_in();
@@ -591,7 +592,7 @@ mod tests {
                 .descriptor
                 .virtual_file_naming
                 .as_ref()
-                .and_then(|n| n.api_suffix)
+                .and_then(|n| n.api_surface_suffix())
                 .is_some();
             if projects_api {
                 assert!(
@@ -738,14 +739,15 @@ mod tests {
             matches!(svelte.surface, SurfaceRegistration::Adapter(_)),
             "Svelte registers a real surface adapter (the Deferred arm is superseded)"
         );
-        // The api-leg clause holds: api_suffix Some -> api_projector Some.
+        // The api-leg clause holds: import surface is a distinct `.ts` API
+        // file -> api_projector Some.
         assert_eq!(
             svelte
                 .descriptor
                 .virtual_file_naming
                 .as_ref()
                 .unwrap()
-                .api_suffix,
+                .api_surface_suffix(),
             Some(".ts")
         );
     }

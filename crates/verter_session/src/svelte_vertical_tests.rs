@@ -52,6 +52,15 @@ fn upsert_ts(host: &VerterHost, id: &str, src: &str) {
     upsert(host, id, src, FileLanguage::script_ts());
 }
 
+fn upsert_rune_module(host: &VerterHost, id: &str, src: &str) {
+    let lang = FileLanguage::adapter_module(
+        verter_language::ScriptSourceType::Ts,
+        verter_language::FrameworkAdapterId::svelte(),
+        verter_language::LanguageId::new(verter_language::SVELTE_RUNE_MODULE_LANGUAGE_ID),
+    );
+    upsert(host, id, src, lang);
+}
+
 // ── Test 3: shallow inventory carries the synthesized default ───────────
 
 #[test]
@@ -213,6 +222,61 @@ fn ts_importing_svelte_resolves_public_type_and_circular_terminates() {
     // The TS consumer indexes (resolving the `.svelte` import through the shared
     // dispatch); no hang.
     assert!(host.ensure_indexed_ready("/use.ts").is_some());
+}
+
+#[test]
+fn ts_consumer_resolves_rune_module_export_through_own_engine() {
+    // Channel A end-to-end through Verter's OWN engine (NOT tsgo): a `.svelte.ts`
+    // rune module's module-scope runes are merged into its eval env by the host's
+    // `apply_svelte_rune_ambient_env` (keyed off the host language classifier), so
+    // the rune module indexes and a TS consumer importing its rune-derived export
+    // resolves through the shared `Instantiate` dispatch without hanging.
+    //
+    // DISCRIMINATING: if the rune ambient merge did NOT fire on the real host
+    // path, `$state` would be an undefined free identifier in the rune module's
+    // env and the module would fail to build a coherent indexed shallow state.
+    let host = host();
+    upsert_rune_module(
+        &host,
+        "/store.svelte.ts",
+        "export const count = $state(0);\nexport const doubled = $derived(count * 2);\n",
+    );
+    upsert_ts(
+        &host,
+        "/use.ts",
+        "import { count, doubled } from './store.svelte.ts';\nexport const total = count + doubled;\n",
+    );
+
+    // The rune module indexes through the host (the rune ambient env merge fires
+    // on the real `eval_program` path) and carries its exported value symbols.
+    let indexed = host
+        .ensure_indexed_ready("/store.svelte.ts")
+        .expect("the .svelte.ts rune module indexes through the host");
+    assert!(
+        indexed.shallow_state.value_symbol("count").is_some(),
+        "the rune module's exported `count` is in the shallow inventory"
+    );
+    assert!(
+        indexed.shallow_state.value_symbol("doubled").is_some(),
+        "the rune module's exported `doubled` is in the shallow inventory"
+    );
+    // The rune module is NOT a synthesized component default (it is a
+    // non-component carrier — no `default` component symbol).
+    assert!(
+        indexed
+            .shallow_state
+            .value_symbol("default")
+            .is_none_or(|d| !d.is_synthesised_component_default),
+        "a rune module is a NON-component carrier — no synthesized component default"
+    );
+
+    // The TS consumer importing the rune-derived exports indexes through the
+    // shared dispatch — no hang, the `.svelte.ts` import resolves.
+    assert!(
+        host.ensure_indexed_ready("/use.ts").is_some(),
+        "a TS consumer importing the rune module's exports resolves through the \
+         shared engine without hanging"
+    );
 }
 
 // ── Test 5: userland-Snippet NEGATIVE (resolved-validation structural rejection) ─────

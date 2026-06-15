@@ -61,6 +61,19 @@ fn typecheck_projected(
     extra_files: &[(&str, &str)],
     vendor_svelte: bool,
 ) -> Option<(bool, String)> {
+    typecheck_projected_with_options(projected_tsx, file_name, extra_files, vendor_svelte, false)
+}
+
+/// Like [`typecheck_projected`] but with an explicit `check_js` flag. A
+/// `.svelte.js` rune module is checked under `allowJs` + `checkJs` (the live
+/// provider config enables both) so its JS-valid rune prelude types the module.
+fn typecheck_projected_with_options(
+    projected_tsx: &str,
+    file_name: &str,
+    extra_files: &[(&str, &str)],
+    vendor_svelte: bool,
+    check_js: bool,
+) -> Option<(bool, String)> {
     let (checker, _is_tsgo) = locate_type_checker()?;
     let tmp = tempfile::tempdir().expect("temp dir");
     let root = tmp.path();
@@ -98,6 +111,18 @@ fn typecheck_projected(
     // directly at the in-repo package (D-av — no npm install).
     let shim_dir = workspace_root().join("packages/svelte-jsx");
     let shim = shim_dir.to_string_lossy().replace('\\', "/");
+    // The live provider config enables `allowJs` + `checkJs` so a `.svelte.js`
+    // rune module is type-checked. Mirror that here for the JS rune-module gate.
+    let js_opts = if check_js {
+        "\n    \"allowJs\": true,\n    \"checkJs\": true,"
+    } else {
+        ""
+    };
+    let include = if check_js {
+        "[\"**/*.ts\", \"**/*.tsx\", \"**/*.js\"]"
+    } else {
+        "[\"**/*.ts\", \"**/*.tsx\"]"
+    };
     let tsconfig = format!(
         r#"{{
   "compilerOptions": {{
@@ -109,7 +134,7 @@ fn typecheck_projected(
     "strict": true,
     "noEmit": true,
     "skipLibCheck": true,
-    "allowImportingTsExtensions": true,
+    "allowImportingTsExtensions": true,{js_opts}
     "paths": {{
       "@verter/svelte-jsx/jsx-runtime": ["{shim}/jsx-runtime.d.ts"],
       "@verter/svelte-jsx/jsx-dev-runtime": ["{shim}/jsx-dev-runtime.d.ts"],
@@ -119,7 +144,7 @@ fn typecheck_projected(
       "@verter/svelte-jsx/mathml/jsx-dev-runtime": ["{shim}/mathml/jsx-dev-runtime.d.ts"]
     }}
   }},
-  "include": ["**/*.ts", "**/*.tsx"]
+  "include": {include}
 }}"#
     );
     std::fs::write(root.join("tsconfig.json"), tsconfig).expect("write tsconfig");
@@ -3495,5 +3520,274 @@ fn a_bind_this_store_target_emits_valid_tsx_without_a_cannot_find_name_error() {
         out.contains("TS2364"),
         "the genuine lvalue error (TS2364 — LHS of assignment must be a variable \
          or property access) must surface on the rewritten construct:\n{out}"
+    );
+}
+
+// ── D-bk: Svelte rune-module (`.svelte.ts`/`.svelte.js`) TSGO validity ──────
+//
+// A standalone rune module is a NON-COMPONENT carrier. Its provider surface
+// (Channel B) is `<module rune prelude> + <real module bytes>`, served from the
+// module's OWN canonical path so a consumer resolving disk bytes sees the
+// inferred rune-derived exported types. These fixtures model that provider
+// content exactly: the rune module written to disk IS the prelude-augmented
+// content the host feeds the provider.
+
+use verter_compiler::svelte::ide::prelude::{
+    render_rune_prelude, RuneModuleSourceType, RunePreludeMode,
+};
+
+/// Build the rune-module provider content (Channel B) for `module_src` under
+/// `source_type` — the SAME `<prelude> + <bytes>` the host feeds the provider.
+fn rune_module_provider_content(module_src: &str, source_type: RuneModuleSourceType) -> String {
+    let prelude = render_rune_prelude(RunePreludeMode::Module { source_type });
+    format!("{prelude}{module_src}")
+}
+
+#[test]
+fn ts_rune_module_with_module_scope_runes_type_checks_and_consumer_sees_inferred_type() {
+    // A `.svelte.ts` rune module uses module-scope runes; the provider content
+    // (prelude + bytes) type-checks, and a CONSUMER importing it sees the
+    // inferred rune-derived type (`$state(0)` ⇒ `number`).
+    let module_src = "export const s = $state(0);\n\
+        export const d = $derived(s * 2);\n\
+        export const by = $derived.by(() => s + 1);\n\
+        $effect(() => { void s; });\n\
+        $effect.pre(() => {});\n\
+        const tracking: boolean = $effect.tracking();\n\
+        void tracking;\n\
+        $inspect(s);\n";
+    let provider = rune_module_provider_content(module_src, RuneModuleSourceType::Ts);
+
+    // The consumer resolves the rune module by its disk path and checks the
+    // inferred export types. `@ts-expect-error` guards a WRONG assignment — if
+    // `s` leaked `any`/`never`, the guarded line would not error and TS would
+    // flag the UNUSED `@ts-expect-error` (discriminating both ways under strict).
+    let consumer = "import { s, d, by } from \"./store.svelte.ts\";\n\
+        const ok: number = s;\n\
+        void ok;\n\
+        const okd: number = d;\n\
+        void okd;\n\
+        const okby: number = by;\n\
+        void okby;\n\
+        // @ts-expect-error `s` is inferred `number`, not assignable to `string`\n\
+        const bad: string = s;\n\
+        void bad;\n";
+
+    let Some((ok, out)) = typecheck_projected(
+        &provider,
+        "store.svelte.ts",
+        &[("consumer.ts", consumer)],
+        false,
+    ) else {
+        skip_note("ts rune module + consumer");
+        return;
+    };
+    assert!(
+        ok,
+        "a `.svelte.ts` rune module (prelude + bytes) must type-check and the \
+         consumer must see `s: number` (the @ts-expect-error proves the type is \
+         number, not any/never):\n{out}"
+    );
+}
+
+#[test]
+fn js_rune_module_type_checks_under_checkjs_and_consumer_sees_inferred_type() {
+    // A `.svelte.js` rune module gets the JS-valid (JSDoc-typed) rune prelude.
+    // Under checkJs it type-checks and a consumer sees the inferred type.
+    let module_src = "export const s = $state(0);\n\
+        export const d = $derived(s * 2);\n";
+    let provider = rune_module_provider_content(module_src, RuneModuleSourceType::Js);
+
+    let consumer = "import { s, d } from \"./store.svelte.js\";\n\
+        const ok: number = s;\n\
+        void ok;\n\
+        const okd: number = d;\n\
+        void okd;\n\
+        // @ts-expect-error `s` is inferred `number`, not assignable to `string`\n\
+        const bad: string = s;\n\
+        void bad;\n";
+
+    // checkJs/allowJs are required for the .js module to be checked.
+    let Some((ok, out)) = typecheck_projected_with_options(
+        &provider,
+        "store.svelte.js",
+        &[("consumer.ts", consumer)],
+        false,
+        true,
+    ) else {
+        skip_note("js rune module + consumer");
+        return;
+    };
+    assert!(
+        ok,
+        "a `.svelte.js` rune module (JS-valid prelude + bytes) must type-check \
+         under checkJs and the consumer must see `s: number`:\n{out}"
+    );
+}
+
+#[test]
+fn rune_module_does_not_leak_runes_into_a_plain_ts_consumer() {
+    // DISCRIMINATING per-file scoping (Channel B `export {};` module-local): the
+    // rune prelude must NOT leak `$state` globally — a PLAIN `.ts` (no prelude)
+    // cannot see `$state`. The rune module's own provider content is module-local.
+    let module_src = "export const s = $state(0);\nvoid s;\n";
+    let provider = rune_module_provider_content(module_src, RuneModuleSourceType::Ts);
+
+    // A plain `.ts` file that tries to call `$state` — it must FAIL (no leak).
+    let plain = "const leak = $state(1);\nvoid leak;\n";
+
+    let Some((ok, out)) =
+        typecheck_projected(&provider, "store.svelte.ts", &[("plain.ts", plain)], false)
+    else {
+        skip_note("rune no-leak into plain ts");
+        return;
+    };
+    assert!(
+        !ok,
+        "a plain `.ts` must NOT see `$state` (the rune prelude is module-local — \
+         no global leak); the plain file's `$state` call must FAIL:\n{out}"
+    );
+    assert!(
+        out.contains("$state") || out.to_lowercase().contains("cannot find name"),
+        "the failure must name the undefined `$state` in the plain file:\n{out}"
+    );
+}
+
+#[test]
+fn rune_module_rejects_component_only_runes_and_projection_helpers() {
+    // DISCRIMINATING negative: a rune module's prelude EXCLUDES the
+    // component-only runes (`$props`/`$bindable`/`$host`) and every `__verter_*`
+    // projection helper, so referencing them in a rune module FAILS — they are
+    // not in scope outside a component.
+    for (label, bad_src) in [
+        ("$props", "export const p = $props();\nvoid p;\n"),
+        ("$host", "export const h = $host();\nvoid h;\n"),
+        ("$bindable", "export const b = $bindable();\nvoid b;\n"),
+        ("__verter_void", "__verter_void(1);\nexport const x = 1;\n"),
+    ] {
+        let provider = rune_module_provider_content(bad_src, RuneModuleSourceType::Ts);
+        let Some((ok, out)) = typecheck_projected(&provider, "store.svelte.ts", &[], false) else {
+            skip_note("rune module rejects component-only runes");
+            return;
+        };
+        assert!(
+            !ok,
+            "a rune module must REJECT the component-only / projection name `{label}` \
+             (not in scope outside a component):\n{out}"
+        );
+    }
+}
+
+#[test]
+fn ts_rune_module_zero_arg_state_type_checks_and_infers_optional() {
+    // PARITY (P1b): the TS rune prelude carries the zero-arg `$state()` overload
+    // (`$state<T>(): T | undefined`). A valid zero-arg rune module type-checks,
+    // a later value assigns, and a wrong-typed use still FAILS.
+    let module_src = "let count = $state<number>();\n\
+        count = 5;\n\
+        export const c = count;\n";
+    let provider = rune_module_provider_content(module_src, RuneModuleSourceType::Ts);
+
+    let Some((ok, out)) = typecheck_projected(&provider, "store.svelte.ts", &[], false) else {
+        skip_note("ts zero-arg $state");
+        return;
+    };
+    assert!(
+        ok,
+        "a zero-arg `$state<number>()` rune module must type-check (the zero-arg \
+         overload is present) and a later numeric assignment must work:\n{out}"
+    );
+}
+
+#[test]
+fn js_rune_module_zero_arg_state_type_checks() {
+    // PARITY (P1b) — the DISCRIMINATING arity test: a valid zero-arg `$state()`
+    // JS rune module under checkJs. PRE-FIX the JS prelude made the `initial`
+    // arg REQUIRED (no zero-arg overload), so this FAILED with "Expected 1
+    // arguments, but got 0"; POST-FIX the `@overload` zero-arg form is present
+    // and it type-checks.
+    let module_src = "export const count = $state();\nvoid count;\n";
+    let provider = rune_module_provider_content(module_src, RuneModuleSourceType::Js);
+
+    let Some((ok, out)) =
+        typecheck_projected_with_options(&provider, "store.svelte.js", &[], false, true)
+    else {
+        skip_note("js zero-arg $state");
+        return;
+    };
+    assert!(
+        ok,
+        "a zero-arg `$state()` JS rune module must type-check under checkJs (the \
+         JS prelude carries the zero-arg overload):\n{out}"
+    );
+}
+
+#[test]
+fn js_rune_module_zero_arg_state_is_unknown_not_any() {
+    // DISCRIMINATING anti-`any` WITHOUT a variable annotation (the gap codex
+    // flagged): an UNANNOTATED zero-arg `$state()` must infer `unknown` (the
+    // sound TS mirror), NOT `any`. A generic `T | undefined` JS overload would
+    // collapse the unbound `T` to the UNSOUND `any` (a JS call site has no place
+    // to bind `T`), and `any` IS assignable to `number` — so the consumer's
+    // `@ts-expect-error` would NOT fire and TS would flag the unused directive,
+    // FAILING this test. `unknown` is NOT assignable to `number` without
+    // narrowing, so the directive fires and the file type-checks clean. This
+    // discriminates `unknown` from `any` with no annotation crutch.
+    let module_src = "export const count = $state();\n";
+    let provider = rune_module_provider_content(module_src, RuneModuleSourceType::Js);
+
+    let consumer = "import { count } from \"./store.svelte.js\";\n\
+        // @ts-expect-error `count` is `unknown` (NOT `any`) — not assignable to `number`\n\
+        const n: number = count;\n\
+        void n;\n";
+
+    let Some((ok, out)) = typecheck_projected_with_options(
+        &provider,
+        "store.svelte.js",
+        &[("consumer.ts", consumer)],
+        false,
+        true,
+    ) else {
+        skip_note("js zero-arg $state unknown-not-any");
+        return;
+    };
+    assert!(
+        ok,
+        "an UNANNOTATED zero-arg `$state()` must infer `unknown` (not `any`): the \
+         `@ts-expect-error` on `const n: number = count` fires for `unknown` and \
+         the file type-checks clean; if it inferred `any` the directive would be \
+         unused and this would FAIL:\n{out}"
+    );
+}
+
+#[test]
+fn js_rune_module_explicitly_typed_state_use_still_fails() {
+    // DISCRIMINATING the other way (the `$state(initial)` first overload binds
+    // `T`): an explicitly-typed `$state(0)` must infer `number`, and a wrong
+    // assignment (to `string`) must still FAIL under checkJs — the JS surface is
+    // NOT a loose `any`.
+    let module_src = "export const count = $state(0);\n";
+    let provider = rune_module_provider_content(module_src, RuneModuleSourceType::Js);
+
+    let consumer = "import { count } from \"./store.svelte.js\";\n\
+        // @ts-expect-error `count` is `number`, not assignable to `string`\n\
+        const bad: string = count;\n\
+        void bad;\n";
+
+    let Some((ok, out)) = typecheck_projected_with_options(
+        &provider,
+        "store.svelte.js",
+        &[("consumer.ts", consumer)],
+        false,
+        true,
+    ) else {
+        skip_note("js explicitly-typed $state");
+        return;
+    };
+    assert!(
+        ok,
+        "the consumer's `@ts-expect-error` must fire (`$state(0)` is `number`, \
+         not `string`) — proving the JS first overload binds the generic, not a \
+         loose `any` surface:\n{out}"
     );
 }

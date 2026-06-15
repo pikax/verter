@@ -608,6 +608,50 @@ fn provider_paths_derive_both_virtual_files_for_svelte_carriers() {
 }
 
 #[test]
+fn rune_modules_are_not_carriers_and_serve_their_own_provider_path() {
+    // D-bk: `.svelte.ts` / `.svelte.js` rune modules are NOT carriers, so
+    // `path_is_carrier` MUST exclude them (the watcher-glob / virtual-file
+    // routing source) and `carrier_extensions` MUST NOT list them. A rune
+    // module serves its OWN canonical path (no `{carrier}.tsx`/`.ts` virtual
+    // dual-file model) so a consumer resolving it from disk finds it directly.
+    assert!(
+        !path_is_carrier("/workspace/src/store.svelte.ts"),
+        "a `.svelte.ts` rune module must NOT be a carrier path"
+    );
+    assert!(
+        !path_is_carrier("/workspace/src/store.svelte.js"),
+        "a `.svelte.js` rune module must NOT be a carrier path"
+    );
+    // The bare `.svelte` component IS a carrier (discrimination is real).
+    assert!(path_is_carrier("/workspace/src/Box.svelte"));
+
+    let extensions = verter_language::LanguageRegistry::global().carrier_extensions();
+    assert!(!extensions.contains(&"svelte.ts"));
+    assert!(!extensions.contains(&"svelte.js"));
+
+    let resolver = ProjectResolver::new(vec![project(
+        "/workspace",
+        "/workspace",
+        Some("/workspace/tsconfig.app.json"),
+        ProjectMembership::MatchAll,
+    )]);
+    // A rune module's provider id is its OWN path (NOT a `{carrier}.ts` dual
+    // file) and it has NO IDE virtual file (it is not a component carrier).
+    assert_eq!(
+        resolver
+            .provider_id_for_source("/workspace/src/store.svelte.ts")
+            .as_deref(),
+        Some("/workspace/src/store.svelte.ts"),
+        "a rune module serves its own canonical path"
+    );
+    assert_eq!(
+        resolver.provider_ide_id_for_source("/workspace/src/store.svelte.ts", false),
+        None,
+        "a rune module has no component IDE virtual file"
+    );
+}
+
+#[test]
 fn provider_paths_round_trip_back_to_source_ids() {
     let resolver = ProjectResolver::new(vec![project(
         "/workspace",

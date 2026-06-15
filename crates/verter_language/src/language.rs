@@ -71,11 +71,38 @@ impl ScriptSourceType {
     }
 }
 
+/// The flavor of a [`FileLanguage::Script`] file.
+///
+/// A script is either PLAIN (an ordinary `.ts`/`.js`/… file with no
+/// framework involvement) or an ADAPTER MODULE — a framework adapter's
+/// standalone, NON-COMPONENT module file (a Svelte 5 `.svelte.ts` /
+/// `.svelte.js` rune module). An adapter module is still a SCRIPT, not a
+/// carrier: it has no embedded template/style regions, no component API,
+/// and never dispatches through the carrier parse path. The flavor records
+/// the owning adapter so later stages can scope the adapter's module-level
+/// ambient typing (the rune surface) to exactly these files without
+/// classifying them as carriers.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ScriptFlavor {
+    /// An ordinary script with no framework involvement.
+    Plain,
+    /// A framework adapter's standalone non-component module file (e.g. a
+    /// Svelte `.svelte.ts` / `.svelte.js` rune module). NOT a carrier.
+    AdapterModule {
+        /// The owning adapter (open set).
+        adapter_id: FrameworkAdapterId,
+        /// The adapter's concrete module language id (open set), e.g.
+        /// `"svelte_rune_module"`.
+        language_id: LanguageId,
+    },
+}
+
 /// The single open language descriptor every Verter crate routes files
 /// through.
 ///
 /// * [`FileLanguage::Script`] — a plain script tracked for dependency,
-///   export, and type resolution.
+///   export, and type resolution, OR a framework adapter's standalone
+///   NON-COMPONENT module (a Svelte rune module — see [`ScriptFlavor`]).
 /// * [`FileLanguage::Framework`] — a framework CARRIER file (a file that
 ///   embeds script/template/style regions, e.g. a Vue SFC). The adapter
 ///   id is open; whether a registered carrier implementation exists
@@ -88,10 +115,13 @@ impl ScriptSourceType {
 ///   host level.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum FileLanguage {
-    /// A plain script file.
+    /// A script file — either plain or a framework adapter's standalone
+    /// non-component module (see [`ScriptFlavor`]).
     Script {
         /// Extension-derived source dialect.
         source_type: ScriptSourceType,
+        /// Whether this is a plain script or an adapter module.
+        flavor: ScriptFlavor,
     },
     /// A framework carrier file.
     Framework {
@@ -114,7 +144,33 @@ pub enum FileLanguage {
 impl FileLanguage {
     /// A plain script of the given dialect.
     pub fn script(source_type: ScriptSourceType) -> Self {
-        Self::Script { source_type }
+        Self::Script {
+            source_type,
+            flavor: ScriptFlavor::Plain,
+        }
+    }
+
+    /// A framework adapter's standalone NON-COMPONENT module script (a
+    /// Svelte rune module) of the given dialect.
+    ///
+    /// This is a SCRIPT, not a carrier — [`Self::is_framework_carrier`]
+    /// stays `false` and [`Self::carrier_language_id`] stays `None`, so the
+    /// row never dispatches through the carrier parse path, the component
+    /// synth, the component api-projector, the framework-surface executor,
+    /// or the carrier watcher globs. The owning adapter is exposed only via
+    /// [`Self::adapter_script_language`].
+    pub fn adapter_module(
+        source_type: ScriptSourceType,
+        adapter_id: FrameworkAdapterId,
+        language_id: LanguageId,
+    ) -> Self {
+        Self::Script {
+            source_type,
+            flavor: ScriptFlavor::AdapterModule {
+                adapter_id,
+                language_id,
+            },
+        }
     }
 
     /// The catch-all plain-script routing used when no registry row
@@ -208,10 +264,34 @@ impl FileLanguage {
         }
     }
 
-    /// The script dialect, for plain scripts.
+    /// The script dialect, for plain scripts AND adapter-module scripts.
     pub fn script_source_type(&self) -> Option<ScriptSourceType> {
         match self {
-            Self::Script { source_type } => Some(*source_type),
+            Self::Script { source_type, .. } => Some(*source_type),
+            _ => None,
+        }
+    }
+
+    /// The owning adapter id + module language id, for a framework adapter's
+    /// standalone NON-COMPONENT module script (a Svelte rune module) ONLY.
+    ///
+    /// This is the SOLE accessor that answers for the
+    /// [`ScriptFlavor::AdapterModule`] flavor. It deliberately does NOT widen
+    /// [`Self::adapter_id`] or [`Self::carrier_language_id`] — those answer
+    /// for CARRIER rows and route through carrier dispatch, which a rune
+    /// module must never enter. A consumer that wants to scope an adapter's
+    /// module-level ambient typing (the rune prelude) reads THIS accessor;
+    /// `None` for a plain script and for every framework carrier/template.
+    pub fn adapter_script_language(&self) -> Option<(&FrameworkAdapterId, &LanguageId)> {
+        match self {
+            Self::Script {
+                flavor:
+                    ScriptFlavor::AdapterModule {
+                        adapter_id,
+                        language_id,
+                    },
+                ..
+            } => Some((adapter_id, language_id)),
             _ => None,
         }
     }

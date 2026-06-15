@@ -234,10 +234,11 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
             virtualInfo.mode,
           );
         }
-        // D-bg: `{carrier}.ts` is AMBIGUOUS for Svelte — `store.svelte.ts` is a
-        // REAL rune module (out-of-scope v1, plain Script) when no backing
-        // `store.svelte` source exists. Fall through to the real file rather
-        // than returning a stub for the carrier source.
+        // `{carrier}.ts` is AMBIGUOUS for Svelte — `store.svelte.ts` is a REAL
+        // first-class rune module (a non-component carrier with its own rune
+        // surface) when no backing `store.svelte` source exists, NOT a component
+        // API virtual. Fall through to the real file rather than returning a
+        // synthesized carrier API for the phantom component.
         return _readFile(fileName);
       }
 
@@ -257,7 +258,8 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       const virtualInfo = getVueVirtualFileInfo(fileName);
       if (virtualInfo) {
         // The carrier virtual file exists iff its backing carrier source does;
-        // otherwise (a real `.svelte.ts` rune module, D-bg) check the real file.
+        // otherwise (a real `.svelte.ts` first-class rune module — a non-component
+        // carrier with its own rune surface) check the real file.
         return _fileExists(virtualInfo.sourceFileName) || _fileExists(fileName);
       }
 

@@ -127,6 +127,7 @@ pub use config::{
     load_project_membership, load_project_references, normalize_path_buf, parse_tsconfig_json,
     raw_paths_json, resolve_tsconfig_extends, strip_json_comments, ParsedTsConfig, TsConfigEntry,
 };
+pub use engine::SVELTE_RUNE_AMBIENT_PARSER_FLAG;
 pub use error::{DirEntry, VfsError};
 pub use exact_resolution::{DependencySnapshotView, EdgeStore};
 pub use filesystem::{FilesystemOptions, FilesystemWorkspace};

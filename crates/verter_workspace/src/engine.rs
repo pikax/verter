@@ -985,7 +985,21 @@ impl std::fmt::Debug for Engine {
 /// `parse_env_hash` regardless of tsconfig. Today the parser feature
 /// surface is a single fixed identifier; new flags extend this slice in
 /// declaration order without breaking determinism.
-const WORKSPACE_PARSER_FLAGS: &[&str] = &["verter-parser-v1"];
+// The rune-ambient prelude version is a parse-env input: a Svelte rune module
+// (`.svelte.ts`/`.svelte.js`) merges the module-valid runes into its eval env
+// (Channel A), so a prelude-surface change must invalidate that module's stale
+// inferred exports. Folding the version into `parser_flags` carries it into
+// `parse_env_hash` (the dimension the eval-env cache key uses). The literal is
+// kept in lockstep with `RUNE_AMBIENT_PRELUDE_VERSION` by a freshness guard.
+const WORKSPACE_PARSER_FLAGS: &[&str] = &["verter-parser-v1", SVELTE_RUNE_AMBIENT_PARSER_FLAG];
+
+/// The Svelte rune-ambient parse-env flag mixed into `parse_env_hash`. Its
+/// version suffix MUST track `verter_compiler`'s `RUNE_AMBIENT_PRELUDE_VERSION`
+/// so a rune-prelude surface change invalidates a rune module's stale inferred
+/// exports. A `verter_session` freshness guard pins the two in lockstep (the
+/// version constant lives in `verter_compiler`, which `verter_workspace` does
+/// not depend on, so the link is asserted from the crate that sees both).
+pub const SVELTE_RUNE_AMBIENT_PARSER_FLAG: &str = "svelte-rune-ambient-v1";
 
 /// Workspace-level ambient corpus fingerprint mixed into every project's
 /// `lib_env_hash`. Replaced with the real ambient-registry fingerprint

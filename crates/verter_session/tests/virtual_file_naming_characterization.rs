@@ -10,20 +10,29 @@
 //! the production formula fails here.
 
 use verter_session::framework::descriptor::{
-    svelte_descriptor, vue_descriptor, IdeSuffixPolicy, VirtualFileNaming,
+    svelte_descriptor, vue_descriptor, VirtualFileNaming, VirtualPathPolicy,
 };
 use verter_workspace::{IdeProjectConfig, NativeProjectResolver, ProjectMembership};
 
-/// Apply the column's api/ide suffixes to a carrier canonical (append-to-full
-/// semantics), returning `(api_path, ide_path_tsx)`.
+/// Apply a `VirtualPathPolicy` to a carrier canonical (append-to-full
+/// semantics, `is_jsx = false` — a TypeScript carrier — for the conditional
+/// arm). `SelfFile` yields the canonical itself; `None` yields `None`.
+fn apply_policy(policy: &VirtualPathPolicy, canonical: &str) -> Option<String> {
+    match policy {
+        VirtualPathPolicy::None => None,
+        VirtualPathPolicy::SelfFile => Some(canonical.to_string()),
+        VirtualPathPolicy::Suffix(s) => Some(format!("{canonical}{s}")),
+        VirtualPathPolicy::JsxConditional { non_jsx, .. } => Some(format!("{canonical}{non_jsx}")),
+    }
+}
+
+/// Apply the column's import-surface/ide policies to a carrier canonical,
+/// returning `(api_path, ide_path_tsx)`.
 fn column_paths(naming: &VirtualFileNaming, canonical: &str) -> (Option<String>, Option<String>) {
-    let api = naming.api_suffix.map(|s| format!("{canonical}{s}"));
-    let ide = naming.ide.as_ref().map(|policy| match policy {
-        IdeSuffixPolicy::Fixed(s) => format!("{canonical}{s}"),
-        // `is_jsx = false` (a TypeScript carrier) selects the non-JSX suffix.
-        IdeSuffixPolicy::JsxConditional { non_jsx, .. } => format!("{canonical}{non_jsx}"),
-    });
-    (api, ide)
+    (
+        apply_policy(&naming.import_surface, canonical),
+        apply_policy(&naming.ide, canonical),
+    )
 }
 
 fn single_project_resolver() -> NativeProjectResolver {
@@ -85,8 +94,12 @@ fn testing_api_suffix_implies_api_suffix_and_svelte_forms_no_testing_name() {
     let vue = vue_descriptor().virtual_file_naming.expect("vue naming");
     assert!(vue.is_structurally_valid());
     assert!(
-        vue.testing_api_suffix.is_none() || vue.api_suffix.is_some(),
-        "testing_api_suffix.is_some() => api_suffix.is_some()"
+        vue.testing_api_suffix.is_none()
+            || matches!(
+                vue.import_surface,
+                VirtualPathPolicy::Suffix(_) | VirtualPathPolicy::JsxConditional { .. }
+            ),
+        "testing_api_suffix.is_some() => import_surface is a distinct file"
     );
 
     // NEGATIVE: Svelte forms NO `.svelte.__verter_test.ts` name (testing

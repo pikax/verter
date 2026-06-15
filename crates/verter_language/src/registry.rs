@@ -2,9 +2,13 @@
 
 use std::sync::OnceLock;
 
-use crate::ids::CapabilityId;
+use crate::ids::{CapabilityId, FrameworkAdapterId, LanguageId};
 use crate::language::{FileLanguage, ScriptSourceType};
 use crate::parse_artifact::CarrierAccessToken;
+
+/// The Svelte rune-module language id (the [`FileLanguage::adapter_script_language`]
+/// id for a `.svelte.ts` / `.svelte.js` standalone rune module).
+pub const SVELTE_RUNE_MODULE_LANGUAGE_ID: &str = "svelte_rune_module";
 
 /// A project-gated candidate classification.
 ///
@@ -170,9 +174,31 @@ impl LanguageRegistry {
     pub fn __built_in_with_carrier_tokens() -> (Self, Vec<CarrierAccessToken>) {
         let (vue_row, vue_token) = LanguageRow::carrier("vue", FileLanguage::vue());
         let (svelte_row, svelte_token) = LanguageRow::carrier("svelte", FileLanguage::svelte());
+        // Svelte 5 standalone rune modules. These are NOT carriers — they are
+        // adapter-module SCRIPTS (`FileLanguage::adapter_module`), matched
+        // BEFORE the plain `.ts` / `.js` rows by the longest-suffix-first sort
+        // (`.svelte.ts` (8) beats `.ts` (3)), so a `.svelte.ts` path resolves
+        // to the rune-module row rather than falling through to a plain script.
+        let svelte_rune_lang = || LanguageId::new(SVELTE_RUNE_MODULE_LANGUAGE_ID);
         let registry = Self::new(vec![
             vue_row,
             svelte_row,
+            LanguageRow::fixed(
+                "svelte.ts",
+                FileLanguage::adapter_module(
+                    ScriptSourceType::Ts,
+                    FrameworkAdapterId::svelte(),
+                    svelte_rune_lang(),
+                ),
+            ),
+            LanguageRow::fixed(
+                "svelte.js",
+                FileLanguage::adapter_module(
+                    ScriptSourceType::js(),
+                    FrameworkAdapterId::svelte(),
+                    svelte_rune_lang(),
+                ),
+            ),
             LanguageRow::fixed("d.ts", FileLanguage::script(ScriptSourceType::Dts)),
             LanguageRow::fixed("d.mts", FileLanguage::script(ScriptSourceType::Dts)),
             LanguageRow::fixed("d.cts", FileLanguage::script(ScriptSourceType::Dts)),
@@ -311,46 +337,111 @@ mod tests {
     }
 
     #[test]
-    fn svelte_ts_and_svelte_js_are_plain_scripts_not_carriers() {
-        // D-bg: `.svelte.ts` / `.svelte.js` rune modules are NOT carriers — they
-        // classify STRUCTURALLY as a plain script (the path ends with `.ts` /
-        // `.js`, so it matches the plain-script row, NEVER the `.svelte` carrier
-        // row). DISCRIMINATING: a naive `contains("svelte")` classifier would
-        // (mis)route them to the carrier. They serve the REAL file; no carrier
-        // participates.
+    fn svelte_rune_modules_classify_as_non_component_adapter_modules() {
+        // D-bk (REVERSES the D-ad/D-bg ".svelte.ts is not a carrier" ruling):
+        // `.svelte.ts` / `.svelte.js` are first-class NON-COMPONENT rune-module
+        // carriers — adapter-module SCRIPTS, matched BEFORE the plain `.ts` /
+        // `.js` rows. They are NOT plain scripts and NOT component carriers.
         let registry = LanguageRegistry::built_in();
+        let svelte = FrameworkAdapterId::svelte();
+        let rune_lang = LanguageId::new(SVELTE_RUNE_MODULE_LANGUAGE_ID);
 
-        // `.svelte.ts` → Script(Ts), NOT a framework carrier.
+        // `.svelte.ts` → adapter-module Script(Ts) owned by the svelte adapter.
         let ts = registry
             .classify_static("/src/store.svelte.ts")
             .static_resolution();
-        assert!(
-            !ts.is_framework_carrier(),
-            "a `.svelte.ts` rune module must NOT classify as a framework carrier, got {ts:?}"
-        );
         assert_eq!(
             ts,
+            FileLanguage::adapter_module(ScriptSourceType::Ts, svelte.clone(), rune_lang.clone()),
+            "`.svelte.ts` resolves to the svelte rune-module row"
+        );
+        // It is NOT plain, and NOT a carrier.
+        assert_ne!(
+            ts,
             FileLanguage::script(ScriptSourceType::Ts),
-            "`.svelte.ts` resolves to the plain TS script row"
+            "a `.svelte.ts` rune module is NOT a plain script"
+        );
+        assert!(
+            !ts.is_framework_carrier(),
+            "a `.svelte.ts` rune module is NOT a framework carrier"
+        );
+        assert_eq!(
+            ts.carrier_language_id(),
+            None,
+            "a rune module has no carrier language id (it never dispatches through carrier parse)"
+        );
+        assert_eq!(
+            ts.adapter_id(),
+            None,
+            "adapter_id() must NOT answer for a rune module (that routes through carrier dispatch)"
+        );
+        assert_eq!(
+            ts.adapter_script_language(),
+            Some((&svelte, &rune_lang)),
+            "the owning adapter is exposed ONLY via adapter_script_language()"
         );
 
-        // `.svelte.js` → Script(Js), NOT a framework carrier.
+        // `.svelte.js` → adapter-module Script(Js) owned by the svelte adapter.
         let js = registry
             .classify_static("/src/store.svelte.js")
             .static_resolution();
-        assert!(
-            !js.is_framework_carrier(),
-            "a `.svelte.js` rune module must NOT classify as a framework carrier, got {js:?}"
+        assert_eq!(
+            js,
+            FileLanguage::adapter_module(ScriptSourceType::js(), svelte.clone(), rune_lang.clone()),
+            "`.svelte.js` resolves to the svelte rune-module row (Js dialect)"
+        );
+        assert!(!js.is_framework_carrier());
+        assert_eq!(js.adapter_script_language(), Some((&svelte, &rune_lang)));
+
+        // NEGATIVE: a plain `.ts` / `.js` stays a PLAIN script (no rune flavor).
+        assert_eq!(
+            registry.classify_static("/src/util.ts").static_resolution(),
+            FileLanguage::script(ScriptSourceType::Ts),
+            "a plain `.ts` stays a plain script"
+        );
+        assert_eq!(
+            registry
+                .classify_static("/src/util.ts")
+                .static_resolution()
+                .adapter_script_language(),
+            None,
+            "a plain `.ts` is NOT an adapter module"
+        );
+        assert_eq!(
+            registry.classify_static("/src/util.js").static_resolution(),
+            FileLanguage::script(ScriptSourceType::js()),
         );
 
-        // The bare `.svelte` component DOES classify as the carrier (proves the
-        // discrimination is real — not a blanket non-carrier verdict).
+        // NEGATIVE: the bare `.svelte` component still classifies as the
+        // component CARRIER (proves the discrimination is real).
+        let component = registry
+            .classify_static("/src/Box.svelte")
+            .static_resolution();
         assert!(
-            registry
-                .classify_static("/src/Box.svelte")
-                .static_resolution()
-                .is_framework_carrier(),
-            "a bare `.svelte` component IS a carrier"
+            component.is_framework_carrier(),
+            "a bare `.svelte` component IS a component carrier"
+        );
+        assert!(component.is_svelte());
+        assert_eq!(
+            component.adapter_script_language(),
+            None,
+            "a component carrier is not an adapter module"
+        );
+    }
+
+    #[test]
+    fn carrier_extensions_never_include_svelte_ts_or_svelte_js() {
+        // The rune-module rows are NOT carriers, so they must NEVER appear in
+        // the carrier-extension set (the watcher-glob / path_is_carrier source).
+        let registry = LanguageRegistry::built_in();
+        let extensions = registry.carrier_extensions();
+        assert!(
+            !extensions.contains(&"svelte.ts"),
+            "carrier_extensions must NOT include svelte.ts, got {extensions:?}"
+        );
+        assert!(
+            !extensions.contains(&"svelte.js"),
+            "carrier_extensions must NOT include svelte.js, got {extensions:?}"
         );
     }
 

@@ -192,10 +192,27 @@ pub(super) fn source_id_from_provider_vue_path(
     provider_path: &str,
 ) -> Option<String> {
     let candidate = resolver.source_id_from_provider_id(provider_path)?;
-    // Collision guard: verify backing .vue source exists in host.
-    // A real .vue.tsx on disk under a project root would incorrectly match
-    // project ownership for .vue even though no .vue file was compiled.
-    if candidate.ends_with(".vue") && host.get_source(&candidate).is_none() {
+    // Collision guard, generalized to every registry CARRIER extension
+    // (`.vue` / `.svelte` — never `.vue` hardcoded): a `{name}.{carrier-ext}`
+    // virtual/derived path is only valid when the backing `{name}.{carrier-ext}`
+    // SOURCE actually exists in the host. Ownership is decided by project
+    // membership, not file existence, so the resolver happily strips
+    // `store.svelte.ts` → `store.svelte` even when no `store.svelte` component
+    // was ever compiled. Without this guard a real `store.svelte.ts` rune module
+    // (or a real `weird.vue.tsx` on disk) reverse-maps to a phantom carrier.
+    if verter_workspace::path_is_carrier(&candidate) && host.get_source(&candidate).is_none() {
+        // The stripped carrier candidate is a phantom. If the ORIGINAL provider
+        // path is itself a real owned source (the `.svelte.ts`/`.svelte.js` rune
+        // module case, or any owned `{name}.{carrier-ext}.{x}` file with no
+        // backing carrier), it maps to ITSELF — never to the phantom carrier.
+        // We consult ownership + host directly here rather than re-stripping
+        // through `source_id_from_provider_id` (which would re-derive the same
+        // phantom carrier).
+        let normalized = verter_workspace::resolver::normalize_canonical_id(provider_path);
+        if host.get_source(&normalized).is_some() && resolver.owner_for_file(&normalized).is_some()
+        {
+            return Some(normalized);
+        }
         return None;
     }
     Some(candidate)
@@ -389,6 +406,20 @@ pub(crate) fn prepare_non_vue_provider_sync(
         source,
         module_references,
     );
+    // Channel B (D-bk): a standalone Svelte rune module (`.svelte.ts`/
+    // `.svelte.js`) serves `<module rune prelude> + <bytes>` from its OWN
+    // canonical path so a consumer resolving it from disk sees the inferred
+    // rune-derived exported types. The prelude is module-local (`export {};`),
+    // so it does NOT leak the runes into a plain `.ts`/`.js` (which is fed its
+    // bytes verbatim — `rune_module_provider_content` returns `None` for it).
+    let language = verter_session::LanguageRegistry::global()
+        .classify_static(importer_id)
+        .static_resolution();
+    let rewritten =
+        match verter_session::framework::rune_module_provider_content(&language, &rewritten) {
+            Some(built) => built.content,
+            None => rewritten,
+        };
     let resolved_dependencies = collect_resolved_provider_dependencies(
         &snapshot.resolver,
         reader,

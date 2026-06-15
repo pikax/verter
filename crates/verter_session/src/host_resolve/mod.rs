@@ -46,6 +46,7 @@ mod frontier_adapter;
 mod frontier_engine;
 mod frontier_helpers;
 mod route_owned_shallow;
+mod rune_ambient;
 mod test_guards;
 mod virtual_file_pipeline;
 mod vue_script_extract;
@@ -60,6 +61,9 @@ mod vue_script_extract;
 pub(crate) use frontier_adapter::HostFrontierAdapter;
 #[allow(unused_imports)]
 pub(crate) use frontier_helpers::RouteOwnedShallowStateSnapshot;
+pub(crate) use rune_ambient::apply_svelte_rune_ambient_env;
+#[allow(unused_imports)]
+pub(crate) use rune_ambient::is_svelte_rune_module;
 #[cfg(test)]
 #[allow(unused_imports)]
 pub(crate) use test_guards::{

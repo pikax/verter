@@ -89,43 +89,76 @@ pub struct FrameworkAdapterDescriptor {
     pub supports_named_export_surfaces: bool,
 }
 
-/// An adapter's virtual-file naming policy — the single authority for its
-/// IDE / API / testing-API / sidecar suffixes.
+/// An adapter's virtual-file naming policy — the single authority for how its
+/// files map to the IDE / import-resolution / testing-API / sidecar virtual
+/// surfaces the provider sees.
+///
+/// The `ide` and `import_surface` columns are explicit [`VirtualPathPolicy`]
+/// values. A COMPONENT carrier (`.vue`/`.svelte`) uses the dual-file model —
+/// a distinct `.tsx`/`.ts` virtual file ([`VirtualPathPolicy::Suffix`]). A
+/// standalone rune MODULE (`.svelte.ts`/`.svelte.js`) uses the same-file model:
+/// its ide and import surfaces are BOTH [`VirtualPathPolicy::SelfFile`] (it
+/// serves its own canonical path with prelude-augmented content; there is no
+/// distinct virtual file).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VirtualFileNaming {
-    /// The IDE virtual-file suffix policy (the suffix appended to a carrier
-    /// path to form the type-checked TSX/JSX virtual file). `None` when the
-    /// adapter has no IDE virtual file.
-    pub ide: Option<IdeSuffixPolicy>,
-    /// The API virtual-file suffix (the suffix the public-API extraction
-    /// virtual file uses). `None` when the adapter has no API virtual file.
-    pub api_suffix: Option<&'static str>,
+    /// How the IDE (type-checked) virtual surface is named relative to the
+    /// file: a suffix-appended distinct file (`.tsx`), the self file, a
+    /// JSX-conditional suffix, or none.
+    pub ide: VirtualPathPolicy,
+    /// How the IMPORT-RESOLUTION virtual surface (what a CONSUMING module
+    /// resolves the file to) is named: a suffix-appended distinct API file
+    /// (`.ts`) for a component carrier, or the self file for a rune module.
+    pub import_surface: VirtualPathPolicy,
     /// The testing-API virtual-file suffix. Structural rule: `Some` here
-    /// REQUIRES `api_suffix` to be `Some` (a testing-API file is a variant of
-    /// the API file).
+    /// REQUIRES `import_surface` to append a distinct file (a testing-API file
+    /// is a variant of the import-surface API file, not of a `SelfFile`).
     pub testing_api_suffix: Option<&'static str>,
     /// Additional sidecar virtual-file suffixes the adapter emits.
     pub sidecar_suffixes: &'static [&'static str],
 }
 
 impl VirtualFileNaming {
-    /// Whether this naming policy satisfies the structural invariant
-    /// (`testing_api_suffix.is_some() ⇒ api_suffix.is_some()`).
+    /// Whether this naming policy satisfies the structural invariant: a
+    /// `testing_api_suffix` requires the `import_surface` to be a distinct
+    /// suffix-appended file (a testing-API file is a variant of THAT file; a
+    /// `SelfFile`/`None` import surface has no API file to vary).
     #[must_use]
     pub fn is_structurally_valid(&self) -> bool {
-        self.testing_api_suffix.is_none() || self.api_suffix.is_some()
+        self.testing_api_suffix.is_none() || self.api_surface_suffix().is_some()
+    }
+
+    /// The fixed API-file suffix the import surface appends, when the import
+    /// surface is a DISTINCT-file (`Suffix`) policy — the component-carrier
+    /// dual-file API surface (`.ts`). `None` for a `SelfFile`/`None`/
+    /// `JsxConditional` import surface (a rune module serves its own file; a
+    /// JSX-conditional surface has no single fixed API suffix).
+    #[must_use]
+    pub fn api_surface_suffix(&self) -> Option<&'static str> {
+        match self.import_surface {
+            VirtualPathPolicy::Suffix(s) => Some(s),
+            _ => None,
+        }
     }
 }
 
-/// The IDE virtual-file suffix policy.
-///
-/// An adapter's IDE virtual file is either a fixed suffix or chosen between a
-/// JSX and a non-JSX suffix depending on whether the carrier script uses JSX.
+/// How a virtual surface (IDE or import-resolution) is named relative to a
+/// file. Explicit path policies (B5 / D-bk): a component carrier appends a
+/// distinct-file suffix; a standalone rune module serves its own file.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum IdeSuffixPolicy {
-    /// A single fixed suffix regardless of script content.
-    Fixed(&'static str),
-    /// Choose `jsx` when the carrier script uses JSX, else `non_jsx`.
+pub enum VirtualPathPolicy {
+    /// No virtual surface of this kind.
+    None,
+    /// The file IS its own virtual surface — no suffix, no distinct file. The
+    /// rune-module model: the same canonical path serves both the IDE and
+    /// import surfaces (with prelude-augmented content).
+    SelfFile,
+    /// A single fixed suffix appended to the canonical path forms a DISTINCT
+    /// virtual file (`App.vue` + `.ts` ⇒ `App.vue.ts`). The component-carrier
+    /// dual-file model.
+    Suffix(&'static str),
+    /// Choose `jsx` when the carrier script uses JSX, else `non_jsx` (the Vue
+    /// `<script lang="jsx">` IDE-file case). A distinct virtual file either way.
     JsxConditional {
         /// The suffix used when the carrier script uses JSX.
         jsx: &'static str,
@@ -149,11 +182,11 @@ pub fn vue_descriptor() -> FrameworkAdapterDescriptor {
         supported_surfaces: ALL_FRAMEWORK_SURFACE_KINDS,
         carrier_language: Some(LanguageId::new("vue")),
         virtual_file_naming: Some(VirtualFileNaming {
-            ide: Some(IdeSuffixPolicy::JsxConditional {
+            ide: VirtualPathPolicy::JsxConditional {
                 jsx: ".jsx",
                 non_jsx: ".tsx",
-            }),
-            api_suffix: Some(".ts"),
+            },
+            import_surface: VirtualPathPolicy::Suffix(".ts"),
             testing_api_suffix: Some(".__verter_test.ts"),
             sidecar_suffixes: &[],
         }),
@@ -183,7 +216,7 @@ pub fn built_in_descriptors() -> Vec<FrameworkAdapterDescriptor> {
 /// ([`SVELTE_SUPPORTED_SURFACE_KINDS`] — OPTIONS omitted), so the executor fills
 /// OPTIONS structurally UNSUPPORTED and every other kind supported-empty-or-
 /// resolved once the real `SvelteFrameworkAdapter` is registered.
-/// `api_suffix: Some(".ts")` is matched by the registered Svelte api-projector
+/// the `.ts` import-surface API file is matched by the registered Svelte api-projector
 /// leg (the `framework_registry_complete` api-leg clause).
 #[must_use]
 pub fn svelte_descriptor() -> FrameworkAdapterDescriptor {
@@ -193,12 +226,13 @@ pub fn svelte_descriptor() -> FrameworkAdapterDescriptor {
         supported_surfaces: SVELTE_SUPPORTED_SURFACE_KINDS,
         carrier_language: Some(LanguageId::new("svelte")),
         virtual_file_naming: Some(VirtualFileNaming {
-            // A `.svelte` file always projects a fixed `.tsx` IDE file (D-x):
-            // the projection emits TS with the `@jsxImportSource` pragma — it
-            // is never JSX-conditional the way a Vue `<script lang="jsx">`
-            // carrier is, so there is no `.jsx` alternative.
-            ide: Some(IdeSuffixPolicy::Fixed(".tsx")),
-            api_suffix: Some(".ts"),
+            // A `.svelte` COMPONENT always projects a fixed `.tsx` IDE file
+            // (D-x): the projection emits TS with the `@jsxImportSource`
+            // pragma — it is never JSX-conditional the way a Vue
+            // `<script lang="jsx">` carrier is, so there is no `.jsx`
+            // alternative. Its import surface is the `.ts` API file.
+            ide: VirtualPathPolicy::Suffix(".tsx"),
+            import_surface: VirtualPathPolicy::Suffix(".ts"),
             // No testing-API surface for Svelte (the testing surface is
             // Vue-only, D-ak/D-al).
             testing_api_suffix: None,
@@ -208,6 +242,26 @@ pub fn svelte_descriptor() -> FrameworkAdapterDescriptor {
         // (a `.svelte` file is one component); a named-export framework surface
         // is not a distinct resolution for it.
         supports_named_export_surfaces: false,
+    }
+}
+
+/// The Svelte standalone rune-module (`.svelte.ts`/`.svelte.js`) virtual-file
+/// naming (D-bk).
+///
+/// A rune module is NOT a component carrier — it has no dual-file model. Its
+/// IDE surface and its import-resolution surface are the SAME `SelfFile`: the
+/// module serves its own canonical path with prelude-augmented content
+/// (Channel B). It exposes NO component API and NO testing surface. This is a
+/// distinct column from any carrier descriptor (a rune module is a script, not
+/// a `FrameworkAdapterDescriptor` carrier row), recorded so the TS mirror and
+/// the LSP naming derivations share one authority.
+#[must_use]
+pub fn svelte_rune_module_naming() -> VirtualFileNaming {
+    VirtualFileNaming {
+        ide: VirtualPathPolicy::SelfFile,
+        import_surface: VirtualPathPolicy::SelfFile,
+        testing_api_suffix: None,
+        sidecar_suffixes: &[],
     }
 }
 
@@ -250,12 +304,12 @@ mod tests {
         // derivation disagree — a real defect.
         assert_eq!(
             naming.ide,
-            Some(IdeSuffixPolicy::JsxConditional {
+            VirtualPathPolicy::JsxConditional {
                 jsx: ".jsx",
                 non_jsx: ".tsx",
-            })
+            }
         );
-        assert_eq!(naming.api_suffix, Some(".ts"));
+        assert_eq!(naming.import_surface, VirtualPathPolicy::Suffix(".ts"));
         assert_eq!(naming.testing_api_suffix, Some(".__verter_test.ts"));
         assert_eq!(naming.sidecar_suffixes, &[] as &[&str]);
         assert!(naming.is_structurally_valid());
@@ -272,37 +326,68 @@ mod tests {
             .virtual_file_naming
             .as_ref()
             .expect("the Svelte descriptor carries a virtual-file naming column");
-        // D-x: Svelte projects a FIXED `.tsx` IDE file, ships the api `.ts`
-        // surface, and has NO testing-API surface (Vue-only).
-        assert_eq!(naming.ide, Some(IdeSuffixPolicy::Fixed(".tsx")));
+        // D-x: a `.svelte` COMPONENT projects a fixed `.tsx` IDE file and a
+        // `.ts` import surface, and has NO testing-API surface (Vue-only).
+        assert_eq!(naming.ide, VirtualPathPolicy::Suffix(".tsx"));
         assert_ne!(
             naming.ide,
-            Some(IdeSuffixPolicy::JsxConditional {
+            VirtualPathPolicy::JsxConditional {
                 jsx: ".jsx",
                 non_jsx: ".tsx",
-            }),
+            },
             "Svelte is NOT JSX-conditional"
         );
-        assert_eq!(naming.api_suffix, Some(".ts"));
+        assert_eq!(naming.import_surface, VirtualPathPolicy::Suffix(".ts"));
         assert_eq!(naming.testing_api_suffix, None);
         assert_eq!(naming.sidecar_suffixes, &[] as &[&str]);
         assert!(naming.is_structurally_valid());
     }
 
     #[test]
-    fn testing_api_suffix_requires_api_suffix() {
-        // A testing-API suffix without an API suffix is structurally invalid.
+    fn svelte_rune_module_naming_is_same_file_with_no_component_surface() {
+        // D-bk: a standalone rune module uses the SAME-FILE model (NOT the
+        // component dual-file model). Its IDE and import surfaces are BOTH
+        // `SelfFile` (it serves its own canonical path), and it has NO testing
+        // surface. This is the discriminating contrast with the component
+        // carrier's `Suffix(".tsx")`/`Suffix(".ts")` dual-file model.
+        let naming = svelte_rune_module_naming();
+        assert_eq!(naming.ide, VirtualPathPolicy::SelfFile);
+        assert_eq!(naming.import_surface, VirtualPathPolicy::SelfFile);
+        assert_ne!(
+            naming.ide,
+            VirtualPathPolicy::Suffix(".tsx"),
+            "a rune module is NOT the component dual-file model"
+        );
+        assert_eq!(naming.testing_api_suffix, None);
+        assert_eq!(naming.sidecar_suffixes, &[] as &[&str]);
+        assert!(naming.is_structurally_valid());
+    }
+
+    #[test]
+    fn testing_api_suffix_requires_a_distinct_import_surface_file() {
+        // A testing-API suffix requires a distinct suffix-appended import
+        // surface (a `SelfFile`/`None` import surface has no API file to vary).
         let invalid = VirtualFileNaming {
-            ide: None,
-            api_suffix: None,
+            ide: VirtualPathPolicy::None,
+            import_surface: VirtualPathPolicy::None,
             testing_api_suffix: Some(".__verter_test.ts"),
             sidecar_suffixes: &[],
         };
         assert!(!invalid.is_structurally_valid());
 
+        // A `SelfFile` import surface (rune module) also cannot carry a
+        // testing-API suffix — there is no distinct API file.
+        let invalid_self = VirtualFileNaming {
+            ide: VirtualPathPolicy::SelfFile,
+            import_surface: VirtualPathPolicy::SelfFile,
+            testing_api_suffix: Some(".__verter_test.ts"),
+            sidecar_suffixes: &[],
+        };
+        assert!(!invalid_self.is_structurally_valid());
+
         let valid = VirtualFileNaming {
-            ide: None,
-            api_suffix: Some(".ts"),
+            ide: VirtualPathPolicy::None,
+            import_surface: VirtualPathPolicy::Suffix(".ts"),
             testing_api_suffix: Some(".__verter_test.ts"),
             sidecar_suffixes: &[],
         };

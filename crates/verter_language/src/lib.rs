@@ -34,7 +34,7 @@ mod parse_artifact;
 mod registry;
 
 pub use ids::{CapabilityId, FrameworkAdapterId, LanguageId};
-pub use language::{FileLanguage, JsModuleKind, ScriptSourceType};
+pub use language::{FileLanguage, JsModuleKind, ScriptFlavor, ScriptSourceType};
 pub use parse_artifact::{
     __carrier_downcast_arc, __carrier_downcast_ref, CarrierAccessToken, CarrierParse, ExternalLink,
     ExternalLinkKind, FrameworkParseArtifact, FrameworkParseCommon, LanguageDiagnostic,
@@ -42,4 +42,5 @@ pub use parse_artifact::{
 };
 pub use registry::{
     GatedCandidate, LanguageRegistry, LanguageRow, RowClassification, StaticClassification,
+    SVELTE_RUNE_MODULE_LANGUAGE_ID,
 };

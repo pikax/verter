@@ -1597,6 +1597,90 @@ fn vue_tsx_collision_guard_rejects_when_host_missing_source() {
 }
 
 #[test]
+fn svelte_ts_rune_module_resolves_to_itself_not_phantom_component() {
+    // A REAL `store.svelte.ts` rune module (non-component carrier) is owned by
+    // the project. The resolver strips `.ts` → `store.svelte` (a carrier path),
+    // but no backing `store.svelte` component source exists in the host. The
+    // generalized collision guard must reject the phantom `store.svelte` and
+    // map the rune module to ITSELF.
+    let resolver = crate::project_resolver::NativeProjectResolver::new(vec![
+        crate::project_resolver::IdeProjectConfig::new(
+            "/workspace".to_string(),
+            "/workspace".to_string(),
+            Some("/workspace/tsconfig.app.json".to_string()),
+        ),
+    ]);
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let rune_language = verter_session::FileLanguage::adapter_module(
+        verter_session::ScriptSourceType::Ts,
+        verter_session::FrameworkAdapterId::svelte(),
+        verter_session::LanguageId::new(verter_session::SVELTE_RUNE_MODULE_LANGUAGE_ID),
+    );
+    host.upsert(verter_session::UpsertRequest {
+        canonical_id: Some("/workspace/src/store.svelte.ts".to_string()),
+        input_id: "/workspace/src/store.svelte.ts".to_string(),
+        source: "export const count = $state(0);\n".into(),
+        file_language: rune_language,
+        aliases: Vec::new(),
+    })
+    .unwrap();
+    // No `store.svelte` component is upserted — the only real source is the
+    // rune module itself.
+
+    let mapped =
+        source_id_from_provider_vue_path(&resolver, &host, "/workspace/src/store.svelte.ts");
+    assert_eq!(
+        mapped.as_deref(),
+        Some("/workspace/src/store.svelte.ts"),
+        "a real .svelte.ts rune module with no backing .svelte must map to ITSELF, \
+         not the phantom store.svelte component"
+    );
+    assert_ne!(
+        mapped.as_deref(),
+        Some("/workspace/src/store.svelte"),
+        "must NOT reverse-map to a phantom .svelte component"
+    );
+}
+
+#[test]
+fn svelte_component_virtual_still_resolves_to_carrier() {
+    // The genuine component-virtual case: a real `Foo.svelte` component source
+    // exists, and its `Foo.svelte.ts` API virtual must still reverse-map to the
+    // `Foo.svelte` carrier (the generalization must not break this).
+    let resolver = crate::project_resolver::NativeProjectResolver::new(vec![
+        crate::project_resolver::IdeProjectConfig::new(
+            "/workspace".to_string(),
+            "/workspace".to_string(),
+            Some("/workspace/tsconfig.app.json".to_string()),
+        ),
+    ]);
+    let host = VerterHost::new_standalone(HostConfig::default());
+    host.upsert(verter_session::UpsertRequest {
+        canonical_id: Some("/workspace/src/Foo.svelte".to_string()),
+        input_id: "/workspace/src/Foo.svelte".to_string(),
+        source: "<script>let x = 1;</script>".into(),
+        file_language: verter_session::FileLanguage::svelte(),
+        aliases: Vec::new(),
+    })
+    .unwrap();
+
+    assert_eq!(
+        source_id_from_provider_vue_path(&resolver, &host, "/workspace/src/Foo.svelte.ts")
+            .as_deref(),
+        Some("/workspace/src/Foo.svelte"),
+        "a Foo.svelte.ts API virtual with a backing Foo.svelte component must \
+         reverse-map to the carrier"
+    );
+    assert_eq!(
+        source_id_from_provider_vue_path(&resolver, &host, "/workspace/src/Foo.svelte.tsx")
+            .as_deref(),
+        Some("/workspace/src/Foo.svelte"),
+        "a Foo.svelte.tsx IDE virtual with a backing Foo.svelte component must \
+         reverse-map to the carrier"
+    );
+}
+
+#[test]
 fn import_resolved_matches_target_exact() {
     assert!(import_resolved_matches_target(
         "C:/project/src/components/Foo.vue",

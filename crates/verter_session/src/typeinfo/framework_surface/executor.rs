@@ -296,6 +296,49 @@ impl VerterHost {
 
         let framework_tag = registration.descriptor.tag;
 
+        // NOT-A-COMPONENT-CARRIER gate (default-export selector): the component
+        // surface of a default-export request only exists when the canonical is
+        // the requested adapter's COMPONENT CARRIER (a `.vue` / `.svelte`). A
+        // canonical that classifies as anything else under the SAME adapter — a
+        // Svelte rune module (`.svelte.ts`/`.svelte.js`, a NON-COMPONENT module of
+        // reactive values), a plain script, or a different framework's carrier —
+        // has NO component to resolve. Such a request resolves STRUCTURALLY (a
+        // registered adapter answered) with every component surface kind
+        // structurally UNSUPPORTED — distinct from a component carrier's
+        // supported-empty kind. This runs BEFORE planning so the adapter never
+        // resolves a rune module's value exports into a phantom Expose surface.
+        //
+        // A NAMED-export selector is already validated above (the named export
+        // exists AND the adapter supports per-export surfaces); the default-export
+        // component gate does not apply to it.
+        if matches!(resolved_selector.export, ComponentExport::Default) {
+            let classified = self
+                .language_classifier()
+                .classify(resolved_selector.canonical.as_ref());
+            let is_component_carrier = classified.is_framework_carrier()
+                && classified.adapter_id() == Some(&registration.descriptor.id)
+                && classified.carrier_language_id()
+                    == registration.descriptor.carrier_language.as_ref();
+            if !is_component_carrier {
+                let encoded = encode_framework_surfaces_with_unsupported_message(
+                    &NormalizedSurfaces::default(),
+                    ALL_FRAMEWORK_SURFACE_KINDS,
+                    &[] as &[FrameworkSurfaceKind],
+                    "canonical is not a component carrier for this adapter \
+                     (no component surface to resolve)",
+                );
+                let payload = framework_payload(&encoded.surfaces);
+                let response = framework_surface_response(
+                    framework_request.schema_version,
+                    selector,
+                    framework_tag,
+                    encoded.graph,
+                    encoded.surfaces,
+                );
+                return (response, payload);
+            }
+        }
+
         let normalized = match &registration.surface {
             // A Deferred adapter answers every kind structurally UNSUPPORTED — a
             // structural response, NOT an error.

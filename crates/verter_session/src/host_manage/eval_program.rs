@@ -720,6 +720,14 @@ impl VerterHost {
                 raw_source,
                 framework_parse,
             );
+            // Channel A: a Svelte rune module (`.svelte.ts`/`.svelte.js`) gets
+            // the module-valid runes merged into its eval env so its exported
+            // rune-derived types infer correctly — per-file scoped, no
+            // eval_source byte change.
+            crate::host_resolve::apply_svelte_rune_ambient_env(
+                &mut env,
+                &self.language_classifier.classify(canonical_id),
+            );
             return (
                 Arc::new(env),
                 Arc::new(
@@ -738,6 +746,12 @@ impl VerterHost {
             &mut env,
             raw_source,
             framework_parse,
+        );
+        // Channel A: merge the module-valid runes into a Svelte rune module's
+        // eval env (per-file scoped; eval_source bytes untouched).
+        crate::host_resolve::apply_svelte_rune_ambient_env(
+            &mut env,
+            &self.language_classifier.classify(canonical_id),
         );
         (
             Arc::new(env),

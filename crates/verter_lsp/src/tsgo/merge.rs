@@ -877,12 +877,13 @@ fn is_carrier_ide_path(path: &str) -> bool {
 /// Whether `path` is a carrier API / DTS virtual file (`{carrier}.ts` /
 /// `{carrier}.d.ts`) — the declaration surface (default-range, no position map).
 ///
-/// CRITICAL (D-bg): a `{carrier}.ts` form is AMBIGUOUS for Svelte — appending
-/// `.ts` to `Foo.svelte` is the api virtual file, but `store.svelte.ts` is also
-/// a REAL rune module (out-of-scope v1, classifies as plain Script). We
-/// disambiguate by the backing carrier source: a `{carrier}.ts` is the api
-/// virtual file ONLY when the backing `{carrier}` source EXISTS. A real rune
-/// module (no backing source) is NOT a carrier virtual file. The
+/// CRITICAL (D-bk): a `{carrier}.ts` form is AMBIGUOUS for Svelte — appending
+/// `.ts` to `Foo.svelte` is the component API virtual file, but `store.svelte.ts`
+/// is also a REAL first-class rune module (classifies as a non-component
+/// adapter-module Script). We disambiguate by the backing carrier source: a
+/// `{carrier}.ts` is the component API virtual file ONLY when the backing
+/// `{carrier}` source EXISTS. A real rune module (no backing source) is NOT a
+/// carrier virtual file — it serves its own canonical path directly. The
 /// `{carrier}.d.ts` accepted-spelling alias (from node_modules) has no such
 /// collision and skips the check — matching `normalize_vue_path`'s guard.
 fn is_carrier_api_or_dts_path(path: &str, vue_source_exists: &dyn Fn(&str) -> bool) -> bool {
@@ -2536,9 +2537,12 @@ mod tests {
 
     #[test]
     fn real_svelte_rune_module_is_not_a_carrier_virtual_file() {
-        // D-bg: `store.svelte.ts` with NO backing `store.svelte` is a REAL rune
-        // module (out-of-scope v1, plain Script) — NOT a carrier api virtual
-        // file. The existence guard disambiguates it from `Foo.svelte` + `.ts`.
+        // D-bk co-existence: `store.svelte.ts` with NO backing `store.svelte` is
+        // a REAL first-class rune module — NOT the `{carrier}.ts` component API
+        // virtual file. The existence guard disambiguates it from `Foo.svelte` +
+        // `.ts` (the component API virtual file exists ONLY when `Foo.svelte`
+        // backs it); the rune module's own provider surface is served from its
+        // own canonical path, never normalized to a sibling `.svelte` component.
         assert!(!is_carrier_api_or_dts_path(
             "/src/store.svelte.ts",
             &vue_missing

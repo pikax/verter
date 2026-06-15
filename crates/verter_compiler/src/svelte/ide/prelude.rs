@@ -67,7 +67,59 @@ impl SvelteJsxNamespace {
     }
 }
 
+/// The render mode for [`render_rune_prelude`] — the SINGLE rune-declaration
+/// source serves two surfaces.
+///
+/// * [`RunePreludeMode::Component`] — the full `.svelte` component IDE
+///   projection prelude (the `@jsxImportSource` pragma, the COMPLETE rune
+///   surface, every `__verter_*` projection checker, and — in legacy mode —
+///   the `$$props`/`$$restProps`/`$$slots` magic). Output is BYTE-IDENTICAL to
+///   the historical component prelude.
+/// * [`RunePreludeMode::Module`] — the standalone rune-MODULE
+///   (`.svelte.ts`/`.svelte.js`) prelude: ONLY the runes valid OUTSIDE a
+///   component (`$state`/`$derived`/`$effect`/`$inspect` + their namespace
+///   members). It EXCLUDES the component-only runes (`$props`/`$bindable`/
+///   `$host`), the `Snippet`/`Attachment` imports, the `@jsxImportSource`
+///   pragma, every `__verter_*` projection helper, and the legacy `$$` magic —
+///   none of which exist in a non-component module. It carries a leading
+///   `export {};` so the prepended declarations stay MODULE-LOCAL (a top-level
+///   ambient `declare` in a script-context file would leak globally and the
+///   runes would pollute every plain `.ts`/`.js`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunePreludeMode {
+    /// The `.svelte` component IDE projection prelude (byte-identical to the
+    /// historical component prelude).
+    Component {
+        /// The JSX namespace whose `@jsxImportSource` pragma opens the prelude.
+        namespace: SvelteJsxNamespace,
+        /// Whether to emit the F12 legacy magic objects (legacy/non-runes mode).
+        legacy_mode: bool,
+    },
+    /// The standalone rune-module prelude. `source_type` selects the ambient
+    /// form: a `.svelte.ts` module gets the TS `declare` form; a `.svelte.js`
+    /// module (checked under `checkJs`) gets the JS-valid JSDoc-typed-function
+    /// form, because TS `declare function` syntax is not valid JavaScript.
+    Module {
+        /// The module's script dialect.
+        source_type: RuneModuleSourceType,
+    },
+}
+
+/// The script dialect of a standalone rune module, selecting the JS-valid vs
+/// TS ambient form of the module rune prelude.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuneModuleSourceType {
+    /// A `.svelte.ts` module — the TS `declare`-form rune prelude.
+    Ts,
+    /// A `.svelte.js` module — the JS-valid JSDoc-typed-function rune prelude.
+    Js,
+}
+
 /// Render the complete UNMAPPED prelude text for a JSX `namespace`.
+///
+/// Thin wrapper over [`render_rune_prelude`] in [`RunePreludeMode::Component`]
+/// — the `.svelte` component IDE projector's entry point. Kept for call-site
+/// clarity; the output is byte-identical to the historical component prelude.
 ///
 /// The result is a single block of inserted text. It is deterministic and
 /// self-contained (every referenced type is imported or declared here), so a
@@ -84,39 +136,136 @@ impl SvelteJsxNamespace {
 /// only reached when the projector rewrote a real store-sub) and always emitted.
 #[must_use]
 pub fn render_prelude(namespace: SvelteJsxNamespace, legacy_mode: bool) -> String {
-    // One static block — the rune surface is fixed (the audited Svelte 5.56.x
-    // surface), so a const string is exact and allocation-free to assemble.
-    let pragma = namespace.pragma_line();
-    let legacy = if legacy_mode {
-        LEGACY_MAGIC_PRELUDE
-    } else {
-        ""
-    };
-    let mut out =
-        String::with_capacity(pragma.len() + RUNE_AND_CHECKER_PRELUDE.len() + legacy.len());
-    out.push_str(pragma);
-    out.push_str(RUNE_AND_CHECKER_PRELUDE);
-    out.push_str(legacy);
-    out
+    render_rune_prelude(RunePreludeMode::Component {
+        namespace,
+        legacy_mode,
+    })
 }
 
-/// The ambient rune surface + the three checkers/declarators.
+/// Render the rune prelude for the given [`RunePreludeMode`] — the SINGLE
+/// rune-declaration source for both the component IDE projection and the
+/// standalone rune-module surface.
 ///
-/// Ambient (`declare`) so it introduces no runtime binding. `$props` etc. are
-/// declared as functions with their namespace members attached via a merged
-/// `declare namespace`. The Svelte 5 surface is COMPLETE per the D-u/D-ad
-/// audit (5.56.x): `$state.raw`/`.snapshot`/`.eager`, `$derived.by`,
-/// `$effect.pre`/`.tracking`/`.root`/`.pending`, `$inspect(...).with`/`.trace`,
-/// `$props.id`, `$host`.
-const RUNE_AND_CHECKER_PRELUDE: &str = r#"import type { Snippet } from "svelte";
+/// The module-valid rune declarations (`$state`/`$derived`/`$effect`/
+/// `$inspect` + namespaces) are shared verbatim between the two modes; the
+/// component mode wraps them with the pragma, the component-only runes, the
+/// projection checkers, and the legacy magic, while the module mode emits ONLY
+/// the module-valid subset under a module-local `export {};`.
+#[must_use]
+pub fn render_rune_prelude(mode: RunePreludeMode) -> String {
+    match mode {
+        RunePreludeMode::Component {
+            namespace,
+            legacy_mode,
+        } => {
+            // Byte-identical to the historical component prelude: pragma +
+            // imports + component-only runes ($props/$bindable) + the shared
+            // module runes ($state/$derived/$effect/$inspect) + $host + the
+            // projection checkers + (legacy) magic objects.
+            let pragma = namespace.pragma_line();
+            let legacy = if legacy_mode {
+                LEGACY_MAGIC_PRELUDE
+            } else {
+                ""
+            };
+            let mut out = String::with_capacity(
+                pragma.len()
+                    + COMPONENT_RUNE_IMPORTS_AND_HEADER.len()
+                    + COMPONENT_ONLY_RUNES_PROPS_BINDABLE.len()
+                    + SHARED_MODULE_RUNES.len()
+                    + COMPONENT_ONLY_RUNE_HOST.len()
+                    + COMPONENT_PROJECTION_CHECKERS.len()
+                    + legacy.len(),
+            );
+            out.push_str(pragma);
+            out.push_str(COMPONENT_RUNE_IMPORTS_AND_HEADER);
+            out.push_str(COMPONENT_ONLY_RUNES_PROPS_BINDABLE);
+            out.push_str(SHARED_MODULE_RUNES);
+            out.push_str(COMPONENT_ONLY_RUNE_HOST);
+            out.push_str(COMPONENT_PROJECTION_CHECKERS);
+            out.push_str(legacy);
+            out
+        }
+        RunePreludeMode::Module { source_type } => match source_type {
+            // A module-local `export {};` keeps the prepended declarations from
+            // leaking globally (a bare top-level `declare function` in a
+            // script-context file becomes a global). The shared module runes
+            // are the same audited surface the component prelude carries.
+            RuneModuleSourceType::Ts => {
+                let mut out = String::with_capacity(
+                    MODULE_LOCAL_MARKER.len()
+                        + MODULE_RUNE_HEADER.len()
+                        + SHARED_MODULE_RUNES.len(),
+                );
+                out.push_str(MODULE_LOCAL_MARKER);
+                out.push_str(MODULE_RUNE_HEADER);
+                out.push_str(SHARED_MODULE_RUNES);
+                out
+            }
+            RuneModuleSourceType::Js => {
+                let mut out = String::with_capacity(
+                    MODULE_LOCAL_MARKER.len() + MODULE_RUNE_HEADER_JS.len() + JS_MODULE_RUNES.len(),
+                );
+                out.push_str(MODULE_LOCAL_MARKER);
+                out.push_str(MODULE_RUNE_HEADER_JS);
+                out.push_str(JS_MODULE_RUNES);
+                out
+            }
+        },
+    }
+}
+
+/// The module-valid rune ambient declarations (TS `declare` form) WITHOUT the
+/// module-local `export {};` marker or any header — the SHARED rune surface a
+/// standalone rune module exposes.
+///
+/// This is the SAME [`SHARED_MODULE_RUNES`] the component and module preludes
+/// carry. The session's per-file eval-environment merge (Channel A — so a rune
+/// module's exported rune-derived types infer correctly through Verter's own
+/// type-resolution engine) parses THIS text into an isolated env and merges its
+/// symbols; the EvalEnv merge is already file-scoped, so it needs no
+/// `export {};`. There is no second rune-declaration source.
+#[must_use]
+pub fn module_rune_ambient_source() -> &'static str {
+    SHARED_MODULE_RUNES
+}
+
+/// The version of the rune ambient surface. Bumped whenever the module rune
+/// declarations change so a prelude fix invalidates stale inferred exports of a
+/// rune module (it enters the rune module's type/eval-env cache key).
+pub const RUNE_AMBIENT_PRELUDE_VERSION: u32 = 1;
+
+/// The component prelude's leading imports + rune-section header. Component
+/// mode only — the `Snippet`/`Attachment` imports back the projection
+/// checkers, which a non-component module never references.
+const COMPONENT_RUNE_IMPORTS_AND_HEADER: &str = r#"import type { Snippet } from "svelte";
 import type { Attachment } from "svelte/attachments";
 // --- Svelte 5 runes (ambient; call sites stay verbatim) ---
-declare function $props<T = Record<string, unknown>>(): T;
+"#;
+
+/// The COMPONENT-ONLY runes that precede the shared module runes in source
+/// order (`$props` + its namespace, `$bindable`). A standalone rune module
+/// never calls these (they need a component instance), so the module prelude
+/// omits them.
+const COMPONENT_ONLY_RUNES_PROPS_BINDABLE: &str = r#"declare function $props<T = Record<string, unknown>>(): T;
 declare namespace $props {
   function id(): string;
 }
 declare function $bindable<T = never>(fallback?: T): T;
-declare function $state<T>(initial: T): T;
+"#;
+
+/// The COMPONENT-ONLY `$host` rune (component custom-element host access),
+/// emitted after the shared module runes in source order. Omitted from the
+/// module prelude.
+const COMPONENT_ONLY_RUNE_HOST: &str =
+    "declare function $host<El extends HTMLElement = HTMLElement>(): El;\n";
+
+/// The module-VALID rune surface — shared VERBATIM between the component and
+/// module preludes. These are the runes Svelte 5 allows OUTSIDE a component
+/// (`$state`/`$derived`/`$effect`/`$inspect` + every namespace member,
+/// per the D-u/D-ad audit, 5.56.x). This is the ONE rune-declaration source;
+/// neither mode re-declares them.
+const SHARED_MODULE_RUNES: &str = r#"declare function $state<T>(initial: T): T;
 declare function $state<T>(): T | undefined;
 declare namespace $state {
   function raw<T>(initial: T): T;
@@ -139,8 +288,146 @@ declare function $inspect<T extends unknown[]>(...values: T): { with: (fn: (type
 declare namespace $inspect {
   function trace(name?: string): void;
 }
-declare function $host<El extends HTMLElement = HTMLElement>(): El;
-// --- Verter projection checkers/declarators (D-ae(c)) ---
+"#;
+
+/// The module-local scope marker. A standalone rune module's prepended
+/// declarations MUST stay module-local: a bare top-level `declare function` in
+/// a script-context file becomes a GLOBAL ambient, which would leak the runes
+/// into every plain `.ts`/`.js` (req 4 — per-file scoping). `export {};`
+/// forces the file into module context so the declarations are file-scoped.
+const MODULE_LOCAL_MARKER: &str = "export {};\n";
+
+/// The TS module-rune section header.
+const MODULE_RUNE_HEADER: &str =
+    "// --- Svelte 5 module runes (ambient; call sites stay verbatim) ---\n";
+
+/// The JS module-rune section header.
+const MODULE_RUNE_HEADER_JS: &str =
+    "// --- Svelte 5 module runes (JSDoc-typed; call sites stay verbatim) ---\n";
+
+/// The JS-VALID module rune surface for a `.svelte.js` module (checked under
+/// `checkJs`). TS `declare function` syntax is not valid JavaScript, so the
+/// runes are declared as JSDoc-typed local functions (module-local via the
+/// leading `export {};`). The shapes mirror [`SHARED_MODULE_RUNES`] exactly so
+/// `export const s = $state(0)` infers `number` identically to the `.ts` form.
+const JS_MODULE_RUNES: &str = r#"/**
+ * @template T
+ * @overload
+ * @param {T} initial
+ * @returns {T}
+ */
+/**
+ * @overload
+ * @returns {unknown}
+ */
+/**
+ * @template T
+ * @param {T} [initial]
+ * @returns {T | unknown}
+ */
+function $state(initial) {
+  return initial;
+}
+/**
+ * @template T
+ * @overload
+ * @param {T} initial
+ * @returns {T}
+ */
+/**
+ * @overload
+ * @returns {unknown}
+ */
+/**
+ * @template T
+ * @param {T} [initial]
+ * @returns {T | unknown}
+ */
+$state.raw = function (initial) {
+  return initial;
+};
+/**
+ * @template T
+ * @param {T} state
+ * @returns {T}
+ */
+$state.snapshot = function (state) {
+  return state;
+};
+/**
+ * @template T
+ * @param {T} initial
+ * @returns {T}
+ */
+$state.eager = function (initial) {
+  return initial;
+};
+/**
+ * @template T
+ * @param {T} expression
+ * @returns {T}
+ */
+function $derived(expression) {
+  return expression;
+}
+/**
+ * @template T
+ * @param {() => T} fn
+ * @returns {T}
+ */
+$derived.by = function (fn) {
+  return fn();
+};
+/**
+ * @param {() => (void | (() => void))} fn
+ * @returns {void}
+ */
+function $effect(fn) {}
+/**
+ * @param {() => (void | (() => void))} fn
+ * @returns {void}
+ */
+$effect.pre = function (fn) {};
+/**
+ * @returns {boolean}
+ */
+$effect.tracking = function () {
+  return false;
+};
+/**
+ * @param {() => (void | (() => void))} fn
+ * @returns {() => void}
+ */
+$effect.root = function (fn) {
+  return function () {};
+};
+/**
+ * @returns {boolean}
+ */
+$effect.pending = function () {
+  return false;
+};
+/**
+ * @template {unknown[]} T
+ * @param {T} values
+ * @returns {{ with: (fn: (type: "init" | "update", ...values: T) => void) => void }}
+ */
+function $inspect(...values) {
+  return {
+    with: function (fn) {},
+  };
+}
+/**
+ * @param {string} [name]
+ * @returns {void}
+ */
+$inspect.trace = function (name) {};
+"#;
+
+/// The component projection checkers/declarators section (D-ae(c)) — the
+/// `__verter_*` helpers + the host-element / event helper types. Component
+/// mode only; a non-component module never references any of them.
+const COMPONENT_PROJECTION_CHECKERS: &str = r#"// --- Verter projection checkers/declarators (D-ae(c)) ---
 declare function __verter_attach<E extends EventTarget>(attachment: Attachment<E>): void;
 declare function __verter_snippet<Params extends unknown[]>(render: (...args: Params) => unknown): Snippet<Params>;
 declare function __verter_void(...values: unknown[]): void;
@@ -547,6 +834,166 @@ mod tests {
             p.contains("ANTI-`any`-GATE EXCEPTION"),
             "the legacy `any` carve-out is documented at the declaration site"
         );
+    }
+
+    #[test]
+    fn component_mode_render_is_byte_identical_to_the_historical_prelude() {
+        // The refactor into ONE rune-declaration source (Component/Module modes)
+        // must NOT change a single byte of the component prelude. The
+        // `render_prelude` wrapper and `render_rune_prelude(Component {..})` are
+        // the same output, and the historical fragment-concatenation is exact.
+        for namespace in [
+            SvelteJsxNamespace::Html,
+            SvelteJsxNamespace::Svg,
+            SvelteJsxNamespace::MathMl,
+        ] {
+            for legacy_mode in [true, false] {
+                let via_wrapper = render_prelude(namespace, legacy_mode);
+                let via_mode = render_rune_prelude(RunePreludeMode::Component {
+                    namespace,
+                    legacy_mode,
+                });
+                assert_eq!(
+                    via_wrapper, via_mode,
+                    "the wrapper and the Component mode must produce identical bytes"
+                );
+                // The historical layout: pragma, then the imports, then the rune
+                // surface in source order, then the checkers, then (legacy) magic.
+                assert!(via_mode.starts_with(namespace.pragma_line()));
+                assert!(via_mode.contains("import type { Snippet } from \"svelte\""));
+                // The component-only runes precede $state in source order.
+                let props_at = via_mode.find("declare function $props").unwrap();
+                let state_at = via_mode.find("declare function $state").unwrap();
+                let host_at = via_mode.find("declare function $host").unwrap();
+                let checker_at = via_mode.find("declare function __verter_attach").unwrap();
+                assert!(props_at < state_at, "$props precedes $state");
+                assert!(state_at < host_at, "$state precedes $host");
+                assert!(
+                    host_at < checker_at,
+                    "$host precedes the projection checkers"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ts_rune_module_prelude_is_the_module_local_module_rune_subset() {
+        // D-bk: a `.svelte.ts` rune module gets ONLY the module-valid runes
+        // ($state/$derived/$effect/$inspect + namespaces), module-local via a
+        // leading `export {};` so the declarations do not leak globally.
+        let p = render_rune_prelude(RunePreludeMode::Module {
+            source_type: RuneModuleSourceType::Ts,
+        });
+        // Module-local marker FIRST (per-file scoping — no global rune leak).
+        assert!(
+            p.starts_with("export {};\n"),
+            "the module prelude opens with `export {{}};` for module-local scope: {p}"
+        );
+        // The full module-valid rune surface (TS `declare` form).
+        for needle in [
+            "declare function $state<T>(initial: T): T;",
+            "function raw<",
+            "function snapshot<",
+            "function eager<",
+            "declare function $derived",
+            "function by<",
+            "declare function $effect",
+            "function pre(",
+            "function tracking()",
+            "function root(",
+            "function pending()",
+            "declare function $inspect",
+            "function trace(",
+        ] {
+            assert!(
+                p.contains(needle),
+                "module prelude missing rune member: {needle}"
+            );
+        }
+        // DISCRIMINATING EXCLUSIONS: component-only runes, the imports, the
+        // pragma, the projection checkers, and the legacy magic are ALL absent.
+        assert!(!p.contains("$props"), "no $props in a rune module");
+        assert!(!p.contains("$bindable"), "no $bindable in a rune module");
+        assert!(!p.contains("$host"), "no $host in a rune module");
+        assert!(
+            !p.contains("@jsxImportSource"),
+            "no jsx pragma in a rune module"
+        );
+        assert!(
+            !p.contains("import type { Snippet }"),
+            "no Snippet import in a rune module"
+        );
+        assert!(
+            !p.contains("import type { Attachment }"),
+            "no Attachment import in a rune module"
+        );
+        assert!(
+            !p.contains("__verter_"),
+            "no projection checkers in a rune module"
+        );
+        assert!(!p.contains("$$props"), "no legacy magic in a rune module");
+        assert!(!p.contains("$$slots"), "no legacy magic in a rune module");
+    }
+
+    #[test]
+    fn js_rune_module_prelude_is_js_valid_and_module_local() {
+        // D-bk: a `.svelte.js` rune module (checked under checkJs) gets the
+        // JS-valid JSDoc-typed-function form — TS `declare function` is not
+        // valid JS. Same rune surface, module-local.
+        let p = render_rune_prelude(RunePreludeMode::Module {
+            source_type: RuneModuleSourceType::Js,
+        });
+        assert!(p.starts_with("export {};\n"));
+        // JS-valid: NO TS `declare` syntax anywhere.
+        assert!(
+            !p.contains("declare "),
+            "the JS module prelude must not use TS `declare` syntax: {p}"
+        );
+        // The runes are JSDoc-typed local functions inferring the same shapes.
+        // Multi-line JSDoc with `@template`/`@param`/`@returns` on their own
+        // lines is REQUIRED — a single-line `@template T @param {T} ...` does
+        // not bind the generic under strict checkJs (TSGO infers `any`).
+        assert!(p.contains("function $state(initial) {"));
+        assert!(p.contains("$state.raw = function"));
+        assert!(p.contains("function $derived(expression) {"));
+        assert!(p.contains("$derived.by = function"));
+        assert!(p.contains("function $effect(fn) {}"));
+        assert!(p.contains("$effect.pre = function"));
+        assert!(p.contains("$effect.tracking = function"));
+        assert!(p.contains("$effect.root = function"));
+        assert!(p.contains("$effect.pending = function"));
+        assert!(p.contains("function $inspect(...values)"));
+        assert!(p.contains("@template T"), "JSDoc generic for inference");
+        // The generic JSDoc tags are on their OWN lines (binds under checkJs).
+        // `$state.eager` keeps the single-overload `@param {T} initial` form.
+        assert!(
+            p.contains("/**\n * @template T\n * @param {T} initial\n * @returns {T}\n */"),
+            "multi-line JSDoc binds the generic under strict checkJs: {p}"
+        );
+        // PARITY with the TS surface: `$state` and `$state.raw` carry the
+        // zero-arg overload. A required-arg-only JS surface would FAIL a valid
+        // zero-arg `let count = $state()`. The zero-arg overload returns
+        // `unknown` (NOT a generic `T | undefined`): a JS call site has no place
+        // to bind an unconstrained `T`, so a generic return would collapse to
+        // the UNSOUND `any` under checkJs; the TS form `$state<T>(): T |
+        // undefined` resolves its unbound `T` to `unknown`, so the faithful JS
+        // mirror returns `unknown` directly (sound, not `any`).
+        assert!(
+            p.contains("/**\n * @overload\n * @returns {unknown}\n */"),
+            "the zero-arg `$state()` / `$state.raw()` overload returns `unknown` \
+             (the sound TS mirror, not the unsound generic-collapses-to-`any`): {p}"
+        );
+        // The `@overload` tag is present (TS JSDoc overload mechanism).
+        assert!(
+            p.contains("@overload"),
+            "JSDoc @overload for the zero-arg form"
+        );
+        // Same exclusions as the TS form.
+        assert!(!p.contains("$props"));
+        assert!(!p.contains("$bindable"));
+        assert!(!p.contains("$host"));
+        assert!(!p.contains("__verter_"));
+        assert!(!p.contains("@jsxImportSource"));
     }
 
     #[test]

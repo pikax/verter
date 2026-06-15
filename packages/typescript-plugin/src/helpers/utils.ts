@@ -1,4 +1,14 @@
-import { VIRTUAL_FILE_NAMING } from "../generated/virtual-file-naming";
+import { VIRTUAL_FILE_NAMING, type VirtualPathPolicy } from "../generated/virtual-file-naming";
+
+/**
+ * The fixed suffix a `VirtualPathPolicy` appends to form a DISTINCT virtual
+ * file (the component-carrier dual-file model). A `selfFile`/`none` policy (the
+ * standalone rune-module model — the file serves its own path) has no distinct
+ * suffix, so it returns `null` and contributes no carrier virtual file.
+ */
+function policySuffix(policy: VirtualPathPolicy): string | null {
+  return policy.kind === "suffix" ? policy.suffix : null;
+}
 
 // The carrier virtual-file naming is DERIVED from the generated, byte-pinned
 // `virtual-file-naming.ts` mirror of the Rust framework-adapter descriptor
@@ -38,11 +48,15 @@ interface CarrierNaming {
  * carrier extension maps to its bare-carrier + virtual-suffix regexes.
  */
 const CARRIERS: readonly CarrierNaming[] = Object.values(VIRTUAL_FILE_NAMING)
-  .filter((row) => row.carrierExtension !== null)
+  // A true COMPONENT carrier projects a DISTINCT import-surface virtual file
+  // (a `suffix` policy → `*.vue.ts`). A standalone rune module (`selfFile`
+  // import surface) serves its OWN path — it is NOT a carrier virtual file, so
+  // it must not enter the carrier naming table (D-bk).
+  .filter((row) => row.carrierExtension !== null && policySuffix(row.importSurface) !== null)
   .map((row) => {
     const ext = row.carrierExtension as string;
     const e = escapeRegExp(ext);
-    const apiSuffix = row.apiSuffix;
+    const apiSuffix = policySuffix(row.importSurface);
     const testingApiSuffix = row.testingApiSuffix;
     return {
       extension: ext,

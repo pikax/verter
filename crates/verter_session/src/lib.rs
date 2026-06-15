@@ -313,7 +313,7 @@ pub use host_audit_runtime::{
 pub use types::*;
 pub use verter_language::{
     CapabilityId, FileLanguage, FrameworkAdapterId, GatedCandidate, LanguageId, LanguageRegistry,
-    LanguageRow, ScriptSourceType, StaticClassification,
+    LanguageRow, ScriptSourceType, StaticClassification, SVELTE_RUNE_MODULE_LANGUAGE_ID,
 };
 
 // Per-call-site instrumentation accessors. Production-on
