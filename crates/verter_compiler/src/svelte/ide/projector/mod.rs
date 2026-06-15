@@ -16,9 +16,11 @@ use verter_span::Span;
 
 use crate::code_transform::{CodeTransform, SourceMapOptions};
 
-use super::await_scan::scan_await_positions;
+use super::await_scan::{
+    pattern_default_await_keyword_offsets, rewrite_await_exprs_on, scan_await_positions,
+};
 use super::bind_contract::{lookup_bind_contract, BindContract, BindDirection};
-use super::emit::{is_css_custom_property, UnsupportedKind};
+use super::emit::{is_css_custom_property, DiagnosticSeverity, UnsupportedKind};
 use super::prelude::{render_prelude, SvelteJsxNamespace};
 use super::store_scan::{
     collect_declared_dollar_names, collect_pattern_dollar_names, scan_store_subscriptions,
@@ -58,14 +60,19 @@ use ident::{
 };
 use special::{detect_forced_runes_option, detect_jsx_namespace, extract_props_annotation};
 
-/// A typed-unsupported diagnostic the projector emitted for an OUT-OF-SCOPE
-/// matrix construct (the construct was still void-checked, never dropped).
+/// A typed diagnostic the projector emitted for a flagged matrix construct (the
+/// construct was still checked, never dropped). Re-exported with its severity:
+/// most codes are `Error` (uncheckable); the experimental await-EXPRESSION (F6)
+/// is `Information` (REAL-checked, just experimental).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SvelteIdeUnsupportedDiagnostic {
     /// The machine-stable code (e.g. `svelte-await-experimental`).
     pub code: &'static str,
     /// A human-readable message.
     pub message: String,
+    /// The reporting severity (`Error` for an unsupported construct,
+    /// `Information` for the experimental-but-checked await-EXPRESSION).
+    pub severity: DiagnosticSeverity,
     /// The offending span in the ORIGINAL source.
     pub span: Span,
 }
@@ -199,12 +206,13 @@ pub fn project_svelte_ide(
     };
     projector.project_template(&parsed.template, region);
 
-    // Await-experimental (D-bg) — instance/module SCRIPT positions. The script
-    // body is hoisted/kept verbatim (its inner type errors + hover survive), but
-    // an `await` at instance-script top level OR inside a `$derived(...)` /
-    // `$derived.by(...)` arg in the script is out-of-scope v1 — record one typed
-    // diagnostic per await-bearing position (the markup positions are handled in
-    // the projector walk).
+    // Experimental await-EXPRESSIONS (F6) — instance/module SCRIPT positions.
+    // An `await` at instance-script top level OR inside a `$derived(...)` /
+    // `$derived.by(...)` arg in the script is VALID top-level await under the
+    // gate's `module/target: esnext`, so it is kept VERBATIM (its inner type
+    // errors + hover survive). The markup positions are rewritten in the
+    // projector walk. Each await-bearing position records ONE informational
+    // diagnostic (the syntax is experimental, not unsupported — it is checked).
     for content in [parsed.module_content(), parsed.instance_content()]
         .into_iter()
         .flatten()
@@ -212,12 +220,13 @@ pub fn project_svelte_ide(
         let text = &source[content.start as usize..content.end as usize];
         for at in scan_await_positions(text) {
             let span = Span::new(
-                content.start + at,
-                content.start + at + "await".len() as u32,
+                content.start + at.keyword_start,
+                content.start + at.keyword_start + "await".len() as u32,
             );
             diagnostics.push(SvelteIdeUnsupportedDiagnostic {
                 code: UnsupportedKind::AwaitExperimental.code(),
                 message: UnsupportedKind::AwaitExperimental.message().to_string(),
+                severity: UnsupportedKind::AwaitExperimental.severity(),
                 span,
             });
         }
@@ -494,7 +503,7 @@ impl TemplateProjector<'_, '_> {
         // (`__verter_store_get(store)`) — the param names stay locals.
         let params = snip
             .params
-            .map(|p| self.rewrite_pattern_text_defaults(self.slice(p)))
+            .map(|p| self.rewrite_pattern_text_defaults(p))
             .unwrap_or_default();
         let header = format!(
             "const {} = __verter_snippet(({}) => (<>\n",
@@ -532,26 +541,55 @@ impl TemplateProjector<'_, '_> {
         self.block_declared.push(names);
     }
 
-    /// Rewrite the store-READ DEFAULT values inside a block-binding PATTERN TEXT
-    /// to the read helper (`__verter_store_get(store)`), returning the rewritten
-    /// text. A block-binding pattern (an `{#each … as PATTERN}` item, a snippet
-    /// PARAM list, a `{:then}`/`{:catch}` binding) is SLICED into a synthesised
+    /// Rewrite every markup-expression construct inside a block-binding PATTERN's
+    /// DEFAULT-VALUE expressions and return the rewritten text: the F11 store-READ
+    /// subscriptions (`{ x = $store }` → `__verter_store_get(store)`) AND the F6
+    /// experimental await-EXPRESSIONS (`{ x = await load() }` → `__verter_await_expr(
+    /// load())`). A block-binding pattern (an `{#each … as PATTERN}` item, a snippet
+    /// PARAM list, a `{:then}`/`{:catch}` binding) is SLICED into a synthesised SYNC
     /// projection string (a `.map((PARAMS) => …)` arrow head, a
-    /// `__verter_snippet((PARAMS) => …)` head, a `const BINDING: T = …`
-    /// declarator) — so its store-read defaults (`{ x = $store }` / `$item =
-    /// $store`) must be rewritten on the TEXT before it is emitted, NOT via
-    /// CodeTransform ops on the original (relocated / overwritten) span. The bound
-    /// NAMES stay locals; only the default initializers (ordinary read contexts)
-    /// are rewritten. The defaults are scanned against the currently-in-scope
-    /// declared names UNIONED with the names this pattern introduces (so a default
-    /// referencing a sibling binding stays a local).
-    fn rewrite_pattern_text_defaults(&self, pattern_text: &str) -> String {
-        if !pattern_text.contains('$') {
+    /// `__verter_snippet((PARAMS) => …)` head, a `const BINDING: T = …` declarator)
+    /// — so a raw `await` in a default would be INVALID TSX, and both rewrites must
+    /// run on the TEXT before it is emitted, NOT via CodeTransform ops on the
+    /// original (relocated / overwritten) span. The bound NAMES stay locals; only
+    /// the default initializers (ordinary read contexts) are rewritten. Store
+    /// defaults are scanned against the currently-in-scope declared names UNIONED
+    /// with the names this pattern introduces (so a default referencing a sibling
+    /// binding stays a local). The INFORMATIONAL await diagnostic is recorded
+    /// against the ORIGINAL absolute pattern span (the sliced text carries no
+    /// source span).
+    fn rewrite_pattern_text_defaults(&mut self, pattern_span: Span) -> String {
+        let pattern_text = &self.source[pattern_span.start as usize..pattern_span.end as usize];
+        let has_dollar = pattern_text.contains('$');
+        let has_await = pattern_text.contains("await");
+        if !has_dollar && !has_await {
             return pattern_text.to_string();
+        }
+        if has_await {
+            self.record_pattern_default_await_diagnostics_in(pattern_span);
         }
         let mut declared = self.declared_dollar_names();
         declared.extend(collect_pattern_dollar_names(pattern_text));
+        // Re-slice (the `declared`-building borrow above ended) so the call below
+        // takes a fresh `&'a str` not tied to `&self`.
+        let pattern_text = &self.source[pattern_span.start as usize..pattern_span.end as usize];
         self.rewrite_pattern_default_store_subs_text(pattern_text, &declared)
+    }
+
+    /// Record one INFORMATIONAL `svelte-await-experimental` diagnostic per
+    /// experimental await-expression inside a block-binding PATTERN's
+    /// DEFAULT-VALUE expressions, WITHOUT applying the byte transform. The pattern
+    /// text alone is not a parseable module, so it is scanned inside the SAME
+    /// `const [{pattern}] = null as any;` wrapper the rewrite uses; each found
+    /// keyword position is translated past the wrapper prefix back to the ABSOLUTE
+    /// source offset so the hint lands on the real `await` token.
+    fn record_pattern_default_await_diagnostics_in(&mut self, pattern_span: Span) {
+        let pattern_text = &self.source[pattern_span.start as usize..pattern_span.end as usize];
+        for kw in pattern_default_await_keyword_offsets(pattern_text) {
+            let kw_start = pattern_span.start + kw;
+            let span = Span::new(kw_start, kw_start + "await".len() as u32);
+            self.push_diag(span, UnsupportedKind::AwaitExperimental);
+        }
     }
 
     /// Pop the most recent markup-block binding scope pushed by
@@ -580,26 +618,12 @@ impl TemplateProjector<'_, '_> {
                     self.ct.overwrite(span.start - 1, span.start, "{");
                 }
                 self.ct.overwrite(span.end, span.end + 1, "}");
-                // An await-EXPRESSION inside the interpolation is out of scope
-                // v1 (D-bg): record one typed diagnostic per await-bearing
-                // position. The scan is word-boundary + string/comment-aware, so
-                // it catches a leading `{await x}`, a NESTED `{foo(await bar())}`,
-                // and an `await` inside `$derived(await …)` in markup (all three
-                // markup forms). The expression still type-checks; the value
-                // remains a checked position.
-                // Slice from the `'a`-lifetime source (copied out of `self` so
-                // the borrow is NOT tied to `&self` and does not block the mutable
-                // `self.ct` / `self.push_diag` uses below).
-                let source = self.source;
-                let body = &source[span.start as usize..span.end as usize];
-                let awaits = scan_await_positions(body);
-                for at in awaits {
-                    let kw = Span::new(span.start + at, span.start + at + "await".len() as u32);
-                    self.push_diag(kw, UnsupportedKind::AwaitExperimental);
-                }
-                // F11 store auto-subscription in a markup interpolation (`{$store}`)
-                // — rewritten through the same `$`-span CodeTransform overwrites as
-                // the script bodies (identifier/RHS bytes preserved).
+                // An experimental await-EXPRESSION inside the interpolation (F6)
+                // is REWRITTEN to a real checkable form: `await ARG` →
+                // F6 await-EXPRESSIONS + F11 store auto-subscriptions in a markup
+                // interpolation are rewritten through the shared markup-expression
+                // entry (`$store` / `await e` interior CodeTransform overwrites,
+                // identifier/RHS/ARG bytes preserved).
                 self.rewrite_store_subs_in(*span);
             }
             SvelteNode::Element(el) => self.project_element(el),
@@ -1241,12 +1265,23 @@ impl TemplateProjector<'_, '_> {
         // store-bearing inner is TEXT-rewritten and emitted as text at the hoist
         // anchor (bounded mapping degrade for the rare store-subscribed value);
         // the common non-store `{@const}` keeps full mapping via `move_wrapped`.
-        let inner_text = self.slice(tag.inner);
-        let text_rewrite = if inner_text.contains('$') {
+        // F6: a markup await in a `{@const x = await load()}` / `{@let}` VALUE is a
+        // markup-expression position — `__verter_render` stays SYNC, so a raw
+        // `await` left on the mapped move would be INVALID TSX. The inner is
+        // diverted to the await-safe TEXT path (the same path the store-sub case
+        // uses) whenever it carries EITHER a store-sub `$` OR an `await`. The
+        // INFORMATIONAL await diagnostic anchors on the ORIGINAL absolute keyword
+        // position (the text fragment carries no source span).
+        // Slice from the `'a`-lifetime source (not `&self`) so the immutable slice
+        // borrow does not block the `&mut self` diagnostic record below.
+        let inner_text = &self.source[tag.inner.start as usize..tag.inner.end as usize];
+        self.record_await_diagnostics_in(tag.inner);
+        let text_rewrite = if inner_text.contains('$') || inner_text.contains("await") {
             let rewritten = self.rewrite_store_subs_in_text(inner_text);
             // Only divert to the text path when the rewrite actually changed the
             // inner (a `$`-byte that was NOT a store-sub — a rune / `$$`-magic /
-            // local — leaves the inner untouched and stays on the mapped move).
+            // local — or an `await` substring that was NOT an experimental await
+            // leaves the inner untouched and stays on the mapped move).
             (rewritten != inner_text).then_some(rewritten)
         } else {
             None
@@ -1333,10 +1368,58 @@ impl TemplateProjector<'_, '_> {
         }
     }
 
+    /// Rewrite every experimental await-EXPRESSION (F6) inside a MARKUP
+    /// expression `span` (a markup interpolation, an attribute / directive value,
+    /// a block-head condition / iterable, a tag inner) to the real checkable form
+    /// `await ARG` → `__verter_await_expr(ARG)`. `__verter_render` STAYS SYNC: a
+    /// raw `await` outside an async fn would be INVALID TSX, so EVERY markup
+    /// expression position is rewritten (not just interpolations) — otherwise an
+    /// `<img src={await load()} />` would leak a raw `await` into the sync render
+    /// fn. The PromiseLike-constrained helper flows `Awaited<typeof ARG>` to the
+    /// use site; the awaited ARG bytes stay Original (hover / mapping preserved),
+    /// only the synthetic wrapper bytes are inserted via CodeTransform ops (no
+    /// post-hoc string splice). The scan is grammar-correct (OXC) — it catches a
+    /// leading `{await x}`, a NESTED `{foo(await bar())}`, and an `await` inside
+    /// `$derived(await …)` in markup, and SKIPS an `await` inside an async
+    /// fn/arrow body. One INFORMATIONAL diagnostic is recorded per await position.
+    /// Composes with any boundary overwrite the caller applies to the same span.
+    pub(super) fn rewrite_await_exprs_in(&mut self, span: Span) {
+        // Slice from the `'a`-lifetime source (copied out of `self` so the borrow
+        // is NOT tied to `&self` and does not block the mutable `self.ct` /
+        // `self.push_diag` uses below).
+        let source = self.source;
+        let body = &source[span.start as usize..span.end as usize];
+        // The byte transform routes the SHARED `rewrite_await_exprs_on` helper (the
+        // one entry the TEXT path also calls), so both paths emit byte-identical
+        // wrapper ops — there is one source of truth for the rewrite.
+        rewrite_await_exprs_on(self.ct, span.start, body);
+        self.record_await_diagnostics_in(span);
+    }
+
+    /// Record one INFORMATIONAL `svelte-await-experimental` diagnostic per
+    /// experimental await-expression in a MARKUP expression `span`, WITHOUT
+    /// applying the byte transform. The span-based [`rewrite_await_exprs_in`] runs
+    /// this alongside its in-place transform; the TEXT-path markup-expression
+    /// entries (the F8 dynamic-component `this`, the hoisted `{@const}`/`{@let}`
+    /// inner) call this directly because their byte transform happens on a copied
+    /// text fragment that carries no source span — the diagnostic must still anchor
+    /// at the ORIGINAL absolute `await` keyword position so the hint lands on the
+    /// real source token.
+    pub(super) fn record_await_diagnostics_in(&mut self, span: Span) {
+        let source = self.source;
+        let body = &source[span.start as usize..span.end as usize];
+        for at in scan_await_positions(body) {
+            let kw_start = span.start + at.keyword_start;
+            let kw = Span::new(kw_start, kw_start + "await".len() as u32);
+            self.push_diag(kw, UnsupportedKind::AwaitExperimental);
+        }
+    }
+
     fn push_diag(&mut self, span: Span, kind: UnsupportedKind) {
         self.diagnostics.push(SvelteIdeUnsupportedDiagnostic {
             code: kind.code(),
             message: kind.message().to_string(),
+            severity: kind.severity(),
             span,
         });
     }

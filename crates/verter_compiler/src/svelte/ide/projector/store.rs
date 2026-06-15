@@ -12,20 +12,34 @@ use verter_span::Span;
 
 use crate::code_transform::CodeTransform;
 
+use super::super::await_scan::{rewrite_await_exprs_on, rewrite_pattern_default_awaits_on};
 use super::super::store_scan::{
     scan_pattern_default_store_subs, scan_store_subscriptions_with, StoreSub, StoreSubKind,
 };
 use super::TemplateProjector;
 
 impl TemplateProjector<'_, '_> {
-    /// Rewrite every F11 store auto-subscription within an expression `span` (a
-    /// markup expression that stays an Original chunk — a plain attribute value, a
+    /// Rewrite every markup-expression construct that the projector lowers
+    /// IN-PLACE within an expression `span` (a markup expression that stays an
+    /// Original chunk — a markup interpolation, a plain attribute value, a
     /// block-head condition / iterable / key expression, a tag inner, a directive
-    /// value). The store rewrite touches ONLY the interior `$` / operator bytes,
-    /// composing with any boundary overwrite the caller applies to the same span.
+    /// value): the F11 store auto-subscriptions AND the F6 experimental
+    /// await-EXPRESSIONS. Both touch ONLY interior bytes (the `$` / operator spans
+    /// for stores, the `await ` keyword span for awaits) on DISJOINT ranges, and
+    /// compose with any boundary overwrite the caller applies to the same span.
     /// The script-declared `$`-names are consulted so a markup `$x` that refers to
     /// a script-declared local stays an ordinary reference.
+    ///
+    /// The F6 await rewrite is applied at EVERY markup-expression position (not
+    /// just interpolations): `__verter_render` stays SYNC, so a raw `await` left in
+    /// an attribute / directive / block-head value (`<img src={await load()} />`)
+    /// would be INVALID TSX. Routing it through this single entry guarantees no
+    /// markup await position leaks a raw keyword.
     pub(super) fn rewrite_store_subs_in(&mut self, span: Span) {
+        // F6: await-EXPRESSIONS first (overwrites the `await ` keyword run); then
+        // F11 store-subs (overwrites the `$` / operator bytes). The two ranges are
+        // disjoint, so order does not affect correctness.
+        self.rewrite_await_exprs_in(span);
         let source = self.source;
         let body = &source[span.start as usize..span.end as usize];
         let declared = self.declared_dollar_names();
@@ -34,29 +48,45 @@ impl TemplateProjector<'_, '_> {
         }
     }
 
-    /// Rewrite every F11 store auto-subscription READ inside the DEFAULT-VALUE
+    /// Rewrite every markup-expression construct inside the DEFAULT-VALUE
     /// expressions of a block-binding PATTERN TEXT (`{ x = $store }` / `$item =
-    /// $store`), returning the rewritten text. Used for the SLICED-into-synthesised
-    /// patterns (`{#each}` item / snippet params / `{:then}`/`{:catch}` binding)
-    /// whose bytes are copied into a projection string, not kept as a mapped
-    /// chunk. The bound names are binding identifiers (never references) and stay
-    /// untouched; only the default initializers (read contexts) become
-    /// `__verter_store_get(store)`. Runs the same `rewrite_store_sub` ops over a
-    /// throwaway transform on the text (byte-identical to the mapped mode), so a
-    /// nested store read inside a default has no offset / overlap hazard.
+    /// $store` / `{ x = await load() }`), returning the rewritten text: the F11
+    /// store auto-subscription READS AND the F6 experimental await-EXPRESSIONS.
+    /// Used for the SLICED-into-synthesised patterns (`{#each}` item / snippet
+    /// params / `{:then}`/`{:catch}` binding) whose bytes are copied into a
+    /// projection string, not kept as a mapped chunk. The bound names are binding
+    /// identifiers (never references) and stay untouched; only the default
+    /// initializers (read contexts) are rewritten — a store read becomes
+    /// `__verter_store_get(store)`, an `await x` becomes `__verter_await_expr(x)`.
+    ///
+    /// The default is sliced into a SYNC arrow head (`xs.map(({ x = await
+    /// load() }) => …)`), so a raw `await` would be INVALID TSX — the await
+    /// rewrite makes this markup position await-safe like every other. Both
+    /// rewrites run their ops over ONE throwaway transform on the text
+    /// (byte-identical to the mapped mode), the await rewrite FIRST (the `await `
+    /// run is disjoint from any store `$` span). The await diagnostic is NOT
+    /// emitted here (the text carries no source span) — the caller records it
+    /// against the absolute span via `record_await_diagnostics_in`.
     pub(super) fn rewrite_pattern_default_store_subs_text(
         &self,
         pattern_text: &str,
         declared: &[String],
     ) -> String {
         let subs = scan_pattern_default_store_subs(pattern_text, declared);
-        if subs.is_empty() {
+        let has_await = pattern_text.contains("await");
+        if subs.is_empty() && !has_await {
             return pattern_text.to_string();
         }
         let allocator = oxc_allocator::Allocator::default();
         let mut ct = CodeTransform::new(pattern_text, &allocator);
+        // F6 await-EXPRESSIONS first, then F11 store-subs — disjoint ranges, so
+        // order does not affect correctness.
+        let rewrote_await = rewrite_pattern_default_awaits_on(&mut ct, pattern_text);
         for sub in &subs {
             rewrite_store_sub(&mut ct, 0, sub);
+        }
+        if subs.is_empty() && !rewrote_await {
+            return pattern_text.to_string();
         }
         ct.build_string()
     }
@@ -79,37 +109,62 @@ impl TemplateProjector<'_, '_> {
         declared
     }
 
-    /// Rewrite every F11 store auto-subscription in `text` (a slice that the
+    /// Rewrite every markup-expression construct in `text` (a slice that the
     /// caller re-emits as TEXT, NOT as a mapped chunk — e.g. the
     /// `<svelte:component this={$store}>` value, which the F8 dynamic-component
-    /// IIFE interpolates into `__verter_dynamic_component((…))`). Because the
+    /// IIFE interpolates into `__verter_dynamic_component((…))`): the F11 store
+    /// auto-subscriptions AND the F6 experimental await-EXPRESSIONS. Because the
     /// caller already re-slices the bytes into a synthesised overwrite (the
-    /// original `this` position carries no independent mapped chunk), the store
-    /// rewrite is applied to the text and returned for the caller's single
-    /// CodeTransform overwrite — no second transform op on the original bytes. The
-    /// script-declared `$`-names are consulted so a script-declared local stays an
-    /// ordinary reference.
+    /// original position carries no independent mapped chunk), the rewrite is
+    /// applied to the text and returned for the caller's single CodeTransform
+    /// overwrite — no second transform op on the original bytes.
+    ///
+    /// The F6 await rewrite runs here so the TEXT path is await-safe too:
+    /// `__verter_render` stays SYNC, so a raw `await` left in a re-emitted markup
+    /// expression (`<svelte:component this={await load()}>`) would be INVALID TSX.
+    /// Routing the text path through the SAME `rewrite_await_exprs_on` helper as
+    /// the span path makes the "no raw `await` at ANY markup position" guarantee
+    /// TRUE. The INFORMATIONAL diagnostic is NOT emitted here (the text carries no
+    /// source span) — the caller records it against the absolute span via
+    /// `record_await_diagnostics_in`. The script-declared `$`-names are consulted
+    /// so a script-declared local stays an ordinary reference.
     pub(super) fn rewrite_store_subs_in_text(&self, text: &str) -> String {
         rewrite_store_subs_text(text, &self.declared_dollar_names())
     }
 }
 
-/// Apply every classified store-sub rewrite to `text`, returning the rewritten
-/// fragment. Used ONLY for re-emitted-as-text values (the F8 dynamic-component
-/// `this` expression, the hoisted store-bearing `{@const}`/`{@let}` inner) where
-/// the bytes are NOT kept as an independently-mapped Original chunk — the caller
-/// re-slices them into a synthesised overwrite / a text emission at a hoist
-/// anchor. The rewrite runs the SAME `rewrite_store_sub` CodeTransform ops over a
-/// throwaway transform on `text`, then `build_string()` — so the text mode is
+/// Apply every markup-expression rewrite to `text`, returning the rewritten
+/// fragment: the F11 store auto-subscriptions AND the F6 experimental
+/// await-EXPRESSIONS. Used ONLY for re-emitted-as-text values (the F8
+/// dynamic-component `this` expression, the hoisted `{@const}`/`{@let}` inner, a
+/// `bind:` target) where the bytes are NOT kept as an independently-mapped
+/// Original chunk — the caller re-slices them into a synthesised overwrite / a
+/// text emission at a hoist anchor.
+///
+/// BOTH rewrites run the SAME CodeTransform ops the span path uses
+/// (`rewrite_await_exprs_on` for awaits, `rewrite_store_sub` for store-subs) over
+/// ONE throwaway transform on `text`, then `build_string()` — so the text mode is
 /// byte-identical to the mapped mode (no hand-rolled offset arithmetic, no
-/// overlap hazard for a nested store read inside a store write).
+/// overlap hazard for a nested store read inside a store write). The await rewrite
+/// is applied FIRST (the `await ` keyword run is disjoint from any store `$` /
+/// operator span, so order does not affect correctness). The await rewrite makes
+/// the TEXT path await-safe: `__verter_render` stays SYNC, so a raw `await` left
+/// in a re-emitted markup expression would be INVALID TSX — every text entry now
+/// routes the await rewrite, so no markup await position leaks a raw keyword.
 fn rewrite_store_subs_text(text: &str, declared: &[String]) -> String {
     let subs = scan_store_subscriptions_with(text, declared);
-    if subs.is_empty() {
+    let has_await = text.contains("await");
+    if subs.is_empty() && !has_await {
         return text.to_string();
     }
     let allocator = oxc_allocator::Allocator::default();
     let mut ct = CodeTransform::new(text, &allocator);
+    // F6 await-EXPRESSIONS first (overwrites the `await ` keyword run); then F11
+    // store-subs (overwrites the `$` / operator bytes). The two ranges are
+    // disjoint, so order does not affect correctness.
+    if has_await {
+        rewrite_await_exprs_on(&mut ct, 0, text);
+    }
     for sub in &subs {
         rewrite_store_sub(&mut ct, 0, sub);
     }

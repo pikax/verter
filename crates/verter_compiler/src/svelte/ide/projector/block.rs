@@ -133,12 +133,12 @@ impl TemplateProjector<'_, '_> {
             // rewritten on the TEXT (`__verter_store_get(store)`) — the bound
             // names stay locals.
             let params = match (item, index) {
-                (Some(it), Some(ix)) => format!(
-                    "{}, {}",
-                    self.rewrite_pattern_text_defaults(self.slice(it)),
-                    self.rewrite_pattern_text_defaults(self.slice(ix))
-                ),
-                (Some(it), None) => self.rewrite_pattern_text_defaults(self.slice(it)),
+                (Some(it), Some(ix)) => {
+                    let it_text = self.rewrite_pattern_text_defaults(it);
+                    let ix_text = self.rewrite_pattern_text_defaults(ix);
+                    format!("{it_text}, {ix_text}")
+                }
+                (Some(it), None) => self.rewrite_pattern_text_defaults(it),
                 (None, _) => "__verter_item".to_string(),
             };
             self.ct
@@ -189,8 +189,10 @@ impl TemplateProjector<'_, '_> {
     }
 
     /// `{#await p}P{:then v}T{:catch e}C{/await}` → ternary over a synthetic
-    /// promise-state holder. v1: await-expressions are out of scope (D-bg) only
-    /// for the EXPRESSION position; the `{#await}` BLOCK itself projects.
+    /// promise-state holder. An await-EXPRESSION in the `{#await}` head
+    /// (`{#await load()}` vs `{#await await load()}`) is rewritten through the
+    /// shared markup-await helper like every other markup-expression position; the
+    /// `{#await}` BLOCK structure itself projects to the synthetic holder below.
     fn project_await(
         &mut self,
         block: &SvelteBlock,
@@ -208,17 +210,12 @@ impl TemplateProjector<'_, '_> {
             head.start,
             "{((__verter_p) => { type __VA = Awaited<typeof __verter_p>; ",
         );
-        let open_close = self.find_char_after(head.end, '}');
-        if let Some(c) = open_close {
-            self.ct.overwrite(head.end, c + 1, "; return (<>");
-        }
-        // In the INLINE forms `{#await p then $v}` / `{#await p catch $e}` the
-        // block has no separate `{:then}`/`{:catch}` clause — `block.children` IS
-        // the then-/catch-body, and the binding lives on the block-level
-        // `then_binding`/`catch_binding` span. Push the applicable inline binding's
-        // `$`-names so a `$`-named inline binding is not mis-rewritten as a
-        // store-sub inside that body. (The full clause forms scope
-        // their binding per-clause below.)
+        // In the INLINE forms `{#await p then v}` / `{#await p catch e}` the block
+        // has no separate `{:then}`/`{:catch}` clause — `block.children` IS the
+        // then-/catch-body, and the binding lives on the block-level
+        // `then_binding`/`catch_binding` span. The binding must be DECLARED (as a
+        // const of `__VA` for `then`, `unknown` for `catch`) so the body's
+        // references resolve, exactly like the full-clause forms below.
         let has_then_clause = block
             .clauses
             .iter()
@@ -228,12 +225,57 @@ impl TemplateProjector<'_, '_> {
             .iter()
             .any(|c| c.kind == SvelteClauseKind::Catch);
         let inline_body_binding = if !has_then_clause && then_binding.is_some() {
-            then_binding // `{#await p then $v}` — children are the then-body
+            then_binding // `{#await p then v}` — children are the then-body
         } else if !has_then_clause && !has_catch_clause && catch_binding.is_some() {
-            catch_binding // `{#await p catch $e}` — children are the catch-body
+            catch_binding // `{#await p catch e}` — children are the catch-body
         } else {
             None
         };
+        // The const declaration for the inline binding (none for the leading
+        // pending body of a full-clause form). A DESTRUCTURING binding (`then
+        // {a,b}` / `catch {x}`) keeps its pattern text; store-READ defaults
+        // inside it are rewritten on the TEXT.
+        let inline_decl = match inline_body_binding {
+            Some(sp) if !has_then_clause && then_binding == Some(sp) => {
+                let binding = self.rewrite_pattern_text_defaults(sp);
+                format!("const {binding}: __VA = (null as any); ")
+            }
+            Some(sp) => {
+                let binding = self.rewrite_pattern_text_defaults(sp);
+                format!("const {binding}: unknown = (null as any); ")
+            }
+            None => String::new(),
+        };
+        // The await-open's closing `}` is AFTER every INLINE binding span — an
+        // INLINE `{#await p then {a,b}}` / `{#await p catch {x}}` DESTRUCTURING
+        // binding lives INSIDE the open tag and contains its OWN `}`, so the
+        // search must START past the inline binding span, else it stops at the
+        // pattern's inner `}` and strands the tail (invalid TSX). Mirror the
+        // `{#each}` fix. ONLY inline bindings count — a `then_binding` /
+        // `catch_binding` backed by a SEPARATE `{:then}`/`{:catch}` clause lives
+        // AFTER the open tag and must NOT extend this search (it would skip the
+        // real open-tag `}` and overwrite into the clause).
+        let inline_then = if has_then_clause { None } else { then_binding };
+        let inline_catch = if has_catch_clause {
+            None
+        } else {
+            catch_binding
+        };
+        let search_from = [inline_then, inline_catch]
+            .into_iter()
+            .flatten()
+            .map(|s| s.end)
+            .chain(std::iter::once(head.end))
+            .max()
+            .unwrap_or(head.end);
+        let open_close = self.find_char_after(search_from, '}');
+        if let Some(c) = open_close {
+            self.ct
+                .overwrite(head.end, c + 1, &format!("; {inline_decl}return (<>"));
+        }
+        // Push the applicable inline binding's `$`-names so a `$`-named inline
+        // binding is not mis-rewritten as a store-sub inside that body. (The full
+        // clause forms scope their binding per-clause below.)
         self.push_block_bindings(&[inline_body_binding]);
         for child in &block.children {
             self.project_node(child);
@@ -248,7 +290,7 @@ impl TemplateProjector<'_, '_> {
                     // binding) still rewrites cleanly with a synthetic name (P1-1).
                     let binding = clause
                         .expr
-                        .map(|sp| self.rewrite_pattern_text_defaults(self.slice(sp)))
+                        .map(|sp| self.rewrite_pattern_text_defaults(sp))
                         .unwrap_or_else(|| "__verter_v".to_string());
                     self.ct.overwrite(
                         clause.tag_span.start,
@@ -271,7 +313,7 @@ impl TemplateProjector<'_, '_> {
                     // `{:catch}` still rewrites cleanly (P1-1).
                     let binding = clause
                         .expr
-                        .map(|sp| self.rewrite_pattern_text_defaults(self.slice(sp)))
+                        .map(|sp| self.rewrite_pattern_text_defaults(sp))
                         .unwrap_or_else(|| "__verter_e".to_string());
                     self.ct.overwrite(
                         clause.tag_span.start,

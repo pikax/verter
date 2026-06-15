@@ -6,6 +6,7 @@
 //! session-side fixtures; these characterize the syntactic transform.
 
 use super::projector::project_svelte_ide;
+use super::DiagnosticSeverity;
 use crate::svelte::parser::parse_svelte;
 
 /// Project a source and return the generated TSX code.
@@ -724,13 +725,24 @@ fn component_style_block_is_stripped() {
 }
 
 #[test]
-fn await_block_out_of_scope_expression_emits_diagnostic_but_projects() {
+fn await_block_projects_with_no_residue_and_no_await_expression_diagnostic() {
+    // The `{#await}` TEMPLATE BLOCK (no await-EXPRESSION in its head) projects to
+    // the IIFE state holder with NO residue and — since there is no `await`
+    // keyword anywhere — NO await-experimental diagnostic.
     let source = "<div>{#await p}loading{:then v}{v}{:catch e}{e}{/await}</div>";
     let parsed = parse_svelte(source);
     let projection = project_svelte_ide(source, &parsed, Some("C.svelte"), false);
     assert!(!projection.code.contains("{#await"), "no #await residue");
     assert!(!projection.code.contains("{:then"), "no :then residue");
     assert!(!projection.code.contains("{/await}"), "no /await residue");
+    assert!(
+        !projection
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "svelte-await-experimental"),
+        "the `{{#await}}` block head `p` has no await-EXPRESSION: {:?}",
+        projection.diagnostics
+    );
 }
 
 #[test]
@@ -808,17 +820,39 @@ fn function_binding_on_value_derives_the_target_type_from_the_intrinsic_table() 
 }
 
 #[test]
-fn await_expression_in_interpolation_records_the_experimental_diagnostic() {
+fn await_expression_in_interpolation_projects_the_promise_like_helper() {
+    // F6: a markup `{await thing}` is REWRITTEN to `{__verter_await_expr(thing)}`
+    // — `__verter_render` stays SYNC (no raw `await` in the render fn), and the
+    // resolved value type flows through the PromiseLike-constrained helper. ONE
+    // informational diagnostic is recorded.
     let source = "<div>{await thing}</div>";
     let parsed = parse_svelte(source);
     let projection = project_svelte_ide(source, &parsed, Some("C.svelte"), false);
+    let body = render_body(&projection.code);
     assert!(
-        projection
-            .diagnostics
-            .iter()
-            .any(|d| d.code == "svelte-await-experimental"),
-        "await-experimental diagnostic present: {:?}",
-        projection.diagnostics
+        body.contains("__verter_await_expr(thing)"),
+        "markup await projects through the PromiseLike helper: {body}"
+    );
+    // The original `thing` bytes are preserved (hover / mapping); the `await `
+    // keyword is gone from the render body (no raw await — render stays sync).
+    assert!(
+        !body.contains("await thing") && !body.contains("await "),
+        "no raw `await` keyword survives in the render body: {body}"
+    );
+    let diag = projection
+        .diagnostics
+        .iter()
+        .find(|d| d.code == "svelte-await-experimental")
+        .expect("await-experimental diagnostic present");
+    assert_eq!(
+        diag.severity,
+        DiagnosticSeverity::Information,
+        "the experimental await-expression is INFORMATIONAL, not an error"
+    );
+    assert!(
+        diag.message.contains("experimental") && diag.message.contains("type-checked here"),
+        "the informational message uses the ratified copy: {}",
+        diag.message
     );
 }
 
@@ -855,8 +889,10 @@ fn await_inside_derived_arg_records_the_diagnostic() {
     );
 
     // A DIRECT await in the derived arg (the experimental reactive form) IS
-    // flagged in markup; an await nested inside an async arrow is NOT (ordinary
-    // TS) — the discriminating async-fn case is covered separately.
+    // flagged in markup AND REWRITTEN through the same helper:
+    // `$derived(await load())` → `$derived(__verter_await_expr(load()))`. An
+    // await nested inside an async arrow is NOT flagged (ordinary TS) — the
+    // discriminating async-fn case is covered separately.
     let markup_src = "<div>{$derived(await load())}</div>";
     let parsed = parse_svelte(markup_src);
     let projection = project_svelte_ide(markup_src, &parsed, Some("C.svelte"), false);
@@ -867,6 +903,11 @@ fn await_inside_derived_arg_records_the_diagnostic() {
             .any(|d| d.code == "svelte-await-experimental"),
         "$derived(await …) in markup: {:?}",
         projection.diagnostics
+    );
+    let body = render_body(&projection.code);
+    assert!(
+        body.contains("$derived(__verter_await_expr(load()))"),
+        "markup `$derived(await …)` routes through the same helper: {body}"
     );
 }
 
@@ -885,6 +926,13 @@ fn nested_await_in_markup_records_the_diagnostic() {
             .any(|d| d.code == "svelte-await-experimental"),
         "nested markup await diagnostic: {:?}",
         projection.diagnostics
+    );
+    // The nested await is rewritten in place: `foo(await bar())` →
+    // `foo(__verter_await_expr(bar()))`.
+    let body = render_body(&projection.code);
+    assert!(
+        body.contains("foo(__verter_await_expr(bar()))"),
+        "the nested markup await is rewritten through the helper: {body}"
     );
 }
 
@@ -1112,6 +1160,125 @@ fn await_word_boundary_does_not_false_positive_on_identifiers_or_strings() {
 }
 
 #[test]
+fn svelte_markup_await_projects_promise_like_helper() {
+    // ARCHITECTURE GUARD (F6): a PURE-markup await projects `__verter_await_expr`
+    // and `__verter_render` STAYS SYNC — there is NO raw `await` keyword anywhere
+    // in the render fn (a raw `await` outside an async fn would be INVALID TSX).
+    let source = "<div>{await fetchUser()}</div>";
+    let parsed = parse_svelte(source);
+    let projection = project_svelte_ide(source, &parsed, Some("C.svelte"), false);
+    let body = render_body(&projection.code);
+    assert!(
+        body.contains("__verter_await_expr(fetchUser())"),
+        "the PromiseLike helper wraps the awaited argument: {body}"
+    );
+    // The render fn is declared exactly once and is NOT async.
+    assert!(
+        body.contains("function __verter_render()"),
+        "render fn present: {body}"
+    );
+    assert!(
+        !body.contains("async function __verter_render"),
+        "`__verter_render` must STAY SYNC: {body}"
+    );
+    // No raw `await ` keyword survives in the render body — the rewrite removed it.
+    assert!(
+        !body.contains("await "),
+        "no raw `await` keyword in the render body (render stays sync): {body}"
+    );
+    // The prelude declares the PromiseLike-constrained helper.
+    assert!(
+        projection.code.contains(
+            "declare function __verter_await_expr<T extends PromiseLike<unknown>>(value: T): Awaited<T>;"
+        ),
+        "the prelude declares the PromiseLike-constrained helper: {}",
+        projection.code
+    );
+}
+
+#[test]
+fn svelte_await_diagnostic_is_informational() {
+    // ARCHITECTURE GUARD (F6): the `svelte-await-experimental` diagnostic carries
+    // `Information` severity (the construct is REAL-checked). DISCRIMINATING: an
+    // unknown-unsupported construct stays `Error`.
+    let await_src = "<div>{await thing}</div>";
+    let parsed = parse_svelte(await_src);
+    let projection = project_svelte_ide(await_src, &parsed, Some("C.svelte"), false);
+    let await_diag = projection
+        .diagnostics
+        .iter()
+        .find(|d| d.code == "svelte-await-experimental")
+        .expect("await diagnostic present");
+    assert_eq!(
+        await_diag.severity,
+        DiagnosticSeverity::Information,
+        "the await-experimental diagnostic is INFORMATIONAL"
+    );
+
+    // DISCRIMINATING: an unrecognised `{@unknown …}` tag stays an ERROR.
+    let unknown_src = "<div>{@unknown foo}</div>";
+    let parsed = parse_svelte(unknown_src);
+    let projection = project_svelte_ide(unknown_src, &parsed, Some("C.svelte"), false);
+    let err_diag = projection
+        .diagnostics
+        .iter()
+        .find(|d| d.code == "svelte-unsupported-construct")
+        .expect("unknown-construct diagnostic present");
+    assert_eq!(
+        err_diag.severity,
+        DiagnosticSeverity::Error,
+        "an unsupported construct stays an ERROR (discriminating vs Information)"
+    );
+}
+
+#[test]
+fn await_expression_in_an_attribute_value_is_rewritten_through_the_helper() {
+    // F6: an await in an ATTRIBUTE value position is ALSO rewritten — a raw
+    // `await` left in the sync render fn would be invalid TSX. `__verter_render`
+    // stays sync.
+    let source = "<img src={await fetchUrl()} />";
+    let parsed = parse_svelte(source);
+    let projection = project_svelte_ide(source, &parsed, Some("C.svelte"), false);
+    let body = render_body(&projection.code);
+    assert!(
+        body.contains("src={__verter_await_expr(fetchUrl())}"),
+        "the attribute-value await is rewritten in place: {body}"
+    );
+    assert!(
+        !body.contains("await "),
+        "no raw `await` keyword survives in the render body: {body}"
+    );
+    assert!(
+        projection
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "svelte-await-experimental"),
+        "the attribute await records the informational diagnostic: {:?}",
+        projection.diagnostics
+    );
+}
+
+#[test]
+fn full_clause_await_block_with_destructuring_bindings_has_no_residue() {
+    // FOLD-IN regression: the FULL-clause `{#await p}{:then {a,b}}{:catch {e}}`
+    // form (separate clauses, NOT inline) must NOT be affected by the inline
+    // close-brace search — the clause bindings live AFTER the open tag and are
+    // excluded from `search_from`. No raw await residue, no stranded `(<>}`.
+    let source = "{#await p}<span>loading</span>{:then { a, b }}<span>{a}{b}</span>{:catch { message }}<span>{message}</span>{/await}";
+    let parsed = parse_svelte(source);
+    let projection = project_svelte_ide(source, &parsed, Some("C.svelte"), false);
+    let body = render_body(&projection.code);
+    assert!(
+        !body.contains("{#await") && !body.contains("{:then") && !body.contains("{/await}"),
+        "no raw await-block residue in the full-clause destructuring form: {body}"
+    );
+    assert!(
+        !body.contains("(<>}"),
+        "no stranded close brace producing `(<>}}`: {body}"
+    );
+}
+
+#[test]
 fn dynamic_component_projects_through_the_helper_with_no_residue() {
     // F8: `<svelte:component this={C} prop={x} />` flips to SUPPORTED — it
     // projects through the `__verter_dynamic_component` prelude checker (the
@@ -1163,6 +1330,93 @@ fn dynamic_component_this_expression_is_parenthesized() {
     assert!(
         !body.contains("__verter_dynamic_component(tick(), Dyn)"),
         "no bare sequence expression splitting into two args: {body}"
+    );
+}
+
+#[test]
+fn dynamic_component_this_await_rewrites_through_the_helper_and_render_stays_sync() {
+    // F6/F8: a markup `await` in the `<svelte:component this={await load()}>` value
+    // is a MARKUP-EXPRESSION position — `__verter_render` STAYS SYNC, so a raw
+    // `await` left in the dynamic-component IIFE would be INVALID TSX. The text
+    // path must route the await rewrite: `await load()` → `__verter_await_expr(
+    // load())`, NO raw `await` anywhere in the render body.
+    let source = "<svelte:component this={await load()} label={\"ok\"} />";
+    let parsed = parse_svelte(source);
+    let projection = project_svelte_ide(source, &parsed, Some("C.svelte"), false);
+    let body = render_body(&projection.code);
+    assert!(
+        body.contains("__verter_dynamic_component((__verter_await_expr(load())))"),
+        "the dynamic-component `this` await routes through the helper: {body}"
+    );
+    // No raw `await` keyword survives in the render body (render stays sync).
+    assert!(
+        !body.contains("await load") && !body.contains("await "),
+        "no raw `await` keyword leaks into the sync render body: {body}"
+    );
+    assert!(
+        !projection.code.contains("async function __verter_render"),
+        "`__verter_render` must stay sync: {}",
+        projection.code
+    );
+    // The informational diagnostic is emitted for THIS markup position too.
+    assert!(
+        projection
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "svelte-await-experimental"),
+        "the dynamic-component `this` await records the informational diagnostic: {:?}",
+        projection.diagnostics
+    );
+}
+
+#[test]
+fn dynamic_component_this_await_diagnostic_is_informational() {
+    // The await-experimental diagnostic at the dynamic-component `this` position is
+    // INFORMATIONAL (a hint), not an error — same severity as every other markup
+    // await position.
+    let source = "<svelte:component this={await load()} />";
+    let parsed = parse_svelte(source);
+    let projection = project_svelte_ide(source, &parsed, Some("C.svelte"), false);
+    let diag = projection
+        .diagnostics
+        .iter()
+        .find(|d| d.code == "svelte-await-experimental")
+        .expect("the dynamic-component this await diagnostic is present");
+    assert_eq!(
+        diag.severity,
+        DiagnosticSeverity::Information,
+        "the dynamic-component `this` await diagnostic is INFORMATIONAL"
+    );
+}
+
+#[test]
+fn const_tag_await_value_rewrites_through_the_helper_and_render_stays_sync() {
+    // F6: a markup `await` in a `{@const x = await load()}` declaration VALUE is a
+    // markup-expression position — the hoisted inner is text-rewritten, so the
+    // await must route the helper. NO raw `await` survives (render stays sync).
+    let source = "<div>{@const c = await load()}<span>{c}</span></div>";
+    let parsed = parse_svelte(source);
+    let projection = project_svelte_ide(source, &parsed, Some("C.svelte"), false);
+    assert!(
+        projection.code.contains("__verter_await_expr(load())"),
+        "the `{{@const}}` await value routes through the helper: {}",
+        projection.code
+    );
+    // No raw `await` keyword survives AFTER the prelude (the prelude's own helper
+    // doc-comments legitimately mention `await`; the hoisted value + render body
+    // must be raw-await-free since `__verter_render` stays sync).
+    let body = after_prelude(&projection.code);
+    assert!(
+        !body.contains("await "),
+        "no raw `await` keyword leaks into the hoisted value / render body: {body}"
+    );
+    assert!(
+        projection
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "svelte-await-experimental"),
+        "the `{{@const}}` await records the informational diagnostic: {:?}",
+        projection.diagnostics
     );
 }
 
@@ -2483,5 +2737,78 @@ fn an_each_dollar_binding_does_not_leak_to_a_sibling_block() {
     assert!(
         body.contains("(<><li>{$item}</li></>)"),
         "the each-body `$item` stays a verbatim local reference: {body}"
+    );
+}
+
+#[test]
+fn each_destructure_default_await_rewrites_through_the_helper_and_arrow_stays_sync() {
+    // F6 (COMPREHENSIVE-AUDIT — the binding-pattern-default markup-await position):
+    // an `await` in an `{#each xs as { x = await load() }}` destructuring DEFAULT is
+    // sliced into a SYNC `.map((PARAMS) => …)` arrow head — a raw `await` there
+    // would be INVALID TSX. The pattern-default text path must route the await
+    // rewrite: `__verter_await_expr(load())`, NO raw `await` in the arrow param.
+    let source = "{#each xs as { x = await load() }}<span>{x}</span>{/each}";
+    let parsed = parse_svelte(source);
+    let projection = project_svelte_ide(source, &parsed, Some("C.svelte"), false);
+    let body = render_body(&projection.code);
+    assert!(
+        body.contains("{ x = __verter_await_expr(load()) }"),
+        "the each-destructure default await routes through the helper: {body}"
+    );
+    assert!(
+        !body.contains("await "),
+        "no raw `await` keyword leaks into the sync `.map` arrow head: {body}"
+    );
+    // The informational diagnostic is emitted for this binding-default position too.
+    assert!(
+        projection
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "svelte-await-experimental"),
+        "the binding-default await records the informational diagnostic: {:?}",
+        projection.diagnostics
+    );
+}
+
+#[test]
+fn fragment_dynamic_slot_await_rewrites_through_the_helper_and_render_stays_sync() {
+    // F6/F9 (COMPREHENSIVE-AUDIT — the dynamic `<svelte:fragment slot={…}>` value
+    // markup-await position): the dynamic slot value is void-checked in place via
+    // `{__verter_void(TEXT)}` in the SYNC render fn — a raw `await` there would be
+    // INVALID TSX. The slot-expression text path must route the await rewrite.
+    let source = "<svelte:fragment slot={await load()}><span>x</span></svelte:fragment>";
+    let parsed = parse_svelte(source);
+    let projection = project_svelte_ide(source, &parsed, Some("C.svelte"), false);
+    let body = render_body(&projection.code);
+    assert!(
+        body.contains("__verter_void(__verter_await_expr(load()))"),
+        "the dynamic-slot await routes through the helper: {body}"
+    );
+    assert!(
+        !body.contains("await "),
+        "no raw `await` keyword leaks into the sync render body: {body}"
+    );
+    assert!(
+        projection
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "svelte-await-experimental"),
+        "the dynamic-slot await records the informational diagnostic: {:?}",
+        projection.diagnostics
+    );
+}
+
+#[test]
+fn fragment_dynamic_slot_store_sub_is_rewritten() {
+    // F9/F11 (COMPREHENSIVE-AUDIT side effect): a store-sub in a dynamic
+    // `<svelte:fragment slot={$name}>` value must ALSO be rewritten through the
+    // text path — a raw `$name` would surface a phantom `Cannot find name`.
+    let source = "<script lang=\"ts\">import { writable } from \"svelte/store\"; const name = writable(\"a\");</script>\n<svelte:fragment slot={$name}><span>x</span></svelte:fragment>";
+    let parsed = parse_svelte(source);
+    let projection = project_svelte_ide(source, &parsed, Some("C.svelte"), false);
+    let body = render_body(&projection.code);
+    assert!(
+        body.contains("__verter_void(__verter_store_get(name))"),
+        "the dynamic-slot store-sub is rewritten through the text path: {body}"
     );
 }

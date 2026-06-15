@@ -26,11 +26,21 @@ impl TemplateProjector<'_, '_> {
     /// not a phantom name error. When a store-sub IS present, the target is no
     /// longer a `typeof`-safe identifier (it is a call), so the `bind:this`
     /// projection is forced onto the read-bearing (non-`typeof`) invariant form.
-    fn bind_target_local(&self, expr: Span) -> (String, bool) {
-        let raw = self.slice(expr);
+    fn bind_target_local(&mut self, expr: Span) -> (String, bool) {
+        // Slice from the `'a`-lifetime source (not `&self`) so the immutable slice
+        // borrow does not block the `&mut self` diagnostic record below.
+        let raw = &self.source[expr.start as usize..expr.end as usize];
         let rewritten = self.rewrite_store_subs_in_text(raw);
-        let had_store_sub = rewritten != raw;
-        (rewritten, had_store_sub)
+        // The rewrite touches the target bytes for a store-sub READ (`$store`) OR a
+        // markup await-EXPRESSION (`await x` — degenerate as a bind TARGET, but the
+        // text path still rewrites it so no raw `await` leaks into the sync render
+        // fn). When rewritten, the target is no longer a `typeof`-safe identifier (a
+        // call), so the caller overwrites the in-place bytes and uses the
+        // read-bearing invariant form. The INFORMATIONAL await diagnostic anchors on
+        // the ORIGINAL absolute span (the rewritten text carries no source span).
+        let target_was_rewritten = rewritten != raw;
+        self.record_await_diagnostics_in(expr);
+        (rewritten, target_was_rewritten)
     }
 
     /// Project a `bind:` directive (F4/F5).
@@ -141,16 +151,17 @@ impl TemplateProjector<'_, '_> {
             return;
         };
         let host_ty = self.bind_this_host_type(el, is_component);
-        let (local, had_store_sub) = self.bind_target_local(expr);
+        let (local, target_was_rewritten) = self.bind_target_local(expr);
         self.ct.overwrite(attr.span.start, expr.start, "{...((");
-        if had_store_sub {
-            // A `$store` bind TARGET (invalid Svelte) — replace the in-place bytes
-            // with the READ-helper rewrite and use the read-bearing (non-`typeof`)
-            // invariant: `__verter_store_get(store) = __verter_bind_rw<Host>(
-            // __verter_store_get(store))`. This is syntactically valid TSX and
-            // surfaces the correct lvalue error (assignment to a call result), NOT
-            // a phantom `Cannot find name '$store'`. The target is a call, so the
-            // `typeof LOCAL` form would be invalid — hence the read-bearing branch.
+        if target_was_rewritten {
+            // A `$store` / `await …` bind TARGET (invalid Svelte) — replace the
+            // in-place bytes with the rewritten text and use the read-bearing
+            // (non-`typeof`) invariant: `__verter_store_get(store) =
+            // __verter_bind_rw<Host>(__verter_store_get(store))`. This is
+            // syntactically valid TSX and surfaces the correct lvalue error
+            // (assignment to a call result), NOT a phantom `Cannot find name
+            // '$store'`. The target is a call, so the `typeof LOCAL` form would be
+            // invalid — hence the read-bearing branch.
             self.ct.overwrite(expr.start, expr.end, &local);
             self.ct.overwrite(
                 expr.end,
@@ -226,11 +237,12 @@ impl TemplateProjector<'_, '_> {
         // ` = CHECKER(LOCAL)), {})}`. The round-trip assignment makes a const
         // target fail too.
         self.ct.overwrite(attr.span.start, expr.start, "{...((");
-        let (local, had_store_sub) = self.bind_target_local(expr);
-        if had_store_sub {
-            // A `$store` bind:group TARGET (invalid Svelte) — replace the in-place
-            // bytes with the READ-helper rewrite so the round-trip assignment
-            // surfaces the correct lvalue error, NOT a phantom name error.
+        let (local, target_was_rewritten) = self.bind_target_local(expr);
+        if target_was_rewritten {
+            // A `$store` / `await …` bind:group TARGET (invalid Svelte) — replace
+            // the in-place bytes with the rewritten text so the round-trip
+            // assignment surfaces the correct lvalue error, NOT a phantom name error
+            // and never a raw `await` leak.
             self.ct.overwrite(expr.start, expr.end, &local);
         }
         self.ct.overwrite(
@@ -288,8 +300,8 @@ impl TemplateProjector<'_, '_> {
         // correct lvalue error, never a phantom `Cannot find name '$w'`. The
         // in-place LOCAL bytes are the assignment LHS in BOTH directions, so they
         // are overwritten with the rewrite when a store-sub is present.
-        let (local, had_store_sub) = self.bind_target_local(expr);
-        if had_store_sub {
+        let (local, target_was_rewritten) = self.bind_target_local(expr);
+        if target_was_rewritten {
             self.ct.overwrite(expr.start, expr.end, &local);
         }
         match contract.direction {

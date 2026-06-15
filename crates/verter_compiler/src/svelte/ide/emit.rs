@@ -2,15 +2,30 @@
 //!
 //! These are pure text/transform utilities — no type lowering, no resolution.
 
-/// A machine-stable diagnostic code for an OUT-OF-SCOPE matrix construct.
+/// The reporting severity of a projector diagnostic.
 ///
-/// The projector emits the construct's expressions void-checked and records
-/// one of these codes so the session surfaces a typed-unsupported diagnostic
-/// (never a crash, never a silent drop).
+/// Most diagnostics are `Error` (an unsupported construct the projection could
+/// not check). The experimental await-EXPRESSION (F6) is REAL-checkable TSX —
+/// it is reported as `Information` (a heads-up that the syntax is experimental),
+/// never an error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiagnosticSeverity {
+    /// An unsupported / uncheckable construct.
+    Error,
+    /// An informational heads-up — the construct IS checked.
+    Information,
+}
+
+/// A machine-stable diagnostic code for a matrix construct the projector flags.
+///
+/// The projector emits the construct's expressions checked and records one of
+/// these codes so the session surfaces a typed diagnostic (never a crash, never
+/// a silent drop).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnsupportedKind {
-    /// An await-expression (`{#await}` arms use experimental async syntax in
-    /// 5.36+). D-bg: parse-without-crash + void-check + the diagnostic.
+    /// An experimental Svelte await-EXPRESSION (5.36+, `experimental.async`).
+    /// F6: REAL-checkable projection (`__verter_await_expr`) + an INFORMATIONAL
+    /// diagnostic — the syntax is experimental, not unsupported.
     AwaitExperimental,
     /// An unrecognised construct parsed without crash.
     Unknown,
@@ -31,9 +46,19 @@ impl UnsupportedKind {
     pub fn message(self) -> &'static str {
         match self {
             Self::AwaitExperimental => {
-                "await-expressions are experimental (Svelte 5.36+, `experimental.async`) and out of scope"
+                "Svelte await-expressions are experimental (5.36+, `experimental.async`); type-checked here, behavior may change before Svelte 6."
             }
             Self::Unknown => "unsupported Svelte construct",
+        }
+    }
+
+    /// The reporting severity for this kind. The experimental await-EXPRESSION
+    /// is REAL-checkable, so it is `Information`; every other kind is an `Error`.
+    #[must_use]
+    pub fn severity(self) -> DiagnosticSeverity {
+        match self {
+            Self::AwaitExperimental => DiagnosticSeverity::Information,
+            Self::Unknown => DiagnosticSeverity::Error,
         }
     }
 }

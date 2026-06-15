@@ -144,6 +144,14 @@ declare function $host<El extends HTMLElement = HTMLElement>(): El;
 declare function __verter_attach<E extends EventTarget>(attachment: Attachment<E>): void;
 declare function __verter_snippet<Params extends unknown[]>(render: (...args: Params) => unknown): Snippet<Params>;
 declare function __verter_void(...values: unknown[]): void;
+// F6 experimental await-EXPRESSION projection (`{await e}` in markup / inside a
+// rune). `__verter_render` STAYS SYNC — a markup `await e` is rewritten to
+// `__verter_await_expr(e)` so the resolved value type flows to the use site
+// (`Awaited<T>` is resolved by TS/the shared type path, NO Svelte promise
+// walker). The `T extends PromiseLike<unknown>` constraint makes `{await 1}`
+// (a non-promise) FAIL type-checking, while `{await fetchUser()}` flows
+// `Awaited<typeof fetchUser()>`.
+declare function __verter_await_expr<T extends PromiseLike<unknown>>(value: T): Awaited<T>;
 // The host-element instance type for a projected tag (the `transition:`/`in:`/
 // `out:`/`animate:` host node, D-ae). A known HTML/SVG tag resolves to its
 // precise DOM instance type; an unknown/custom-element/dynamic host falls back
@@ -425,6 +433,20 @@ mod tests {
         // `class?: ClassValue` in the intrinsic table — no dead
         // `__verter_class` declarator (NIT-1).
         assert!(!p.contains("__verter_class"), "dead declarator removed");
+    }
+
+    #[test]
+    fn prelude_declares_the_await_expression_helper() {
+        // F6: the experimental await-EXPRESSION helper is declared with the
+        // PromiseLike constraint so a non-promise (`{await 1}`) FAILS while a
+        // promise flows `Awaited<T>`. `__verter_render` stays SYNC.
+        let p = render_prelude(SvelteJsxNamespace::Html, true);
+        assert!(
+            p.contains(
+                "declare function __verter_await_expr<T extends PromiseLike<unknown>>(value: T): Awaited<T>;"
+            ),
+            "the PromiseLike-constrained await-expression helper is declared: {p}"
+        );
     }
 
     #[test]

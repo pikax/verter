@@ -77,11 +77,17 @@ impl TemplateProjector<'_, '_> {
             self.neutralize_element(el);
             return;
         };
-        // F11 (P1-3): a store-sub in the `this={$store}` value is rewritten. The
-        // F8 IIFE re-emits the `this` value as TEXT (interpolated into
-        // `__verter_dynamic_component((…))`), so the store rewrite is applied to
-        // the sliced text (the original `this` bytes are overwritten wholesale —
-        // no independent mapped chunk to compose with).
+        // F11 (P1-3): a store-sub in the `this={$store}` value is rewritten; F6: an
+        // await-EXPRESSION (`this={await load()}`) is ALSO rewritten through the
+        // PromiseLike helper. The F8 IIFE re-emits the `this` value as TEXT
+        // (interpolated into `__verter_dynamic_component((…))`), so both rewrites
+        // are applied to the sliced text (the original `this` bytes are overwritten
+        // wholesale — no independent mapped chunk to compose with). The text path
+        // carries no source span, so the INFORMATIONAL await diagnostic is recorded
+        // separately against the ORIGINAL absolute `this` expression span — a raw
+        // `await` here would leak into the SYNC render IIFE (invalid TSX), so this
+        // markup position is await-safe like every other.
+        self.record_await_diagnostics_in(this_expr);
         let component = self.rewrite_store_subs_in_text(self.slice(this_expr).trim());
         self.emit_dynamic_component(el, &component, Some(find_this_attr_span(el)));
     }
@@ -174,8 +180,21 @@ impl TemplateProjector<'_, '_> {
     fn project_fragment(&mut self, el: &SvelteElement) {
         // Void-check the `slot` value (literal or expression) — emitted in place
         // of the open tag, then children render transparently as siblings.
-        let void_check = match find_slot_value_text(self.source, el) {
-            Some(text) => format!("{{__verter_void({text})}}"),
+        //
+        // A DYNAMIC `slot={expr}` is a MARKUP-EXPRESSION position: the value is
+        // emitted into `{__verter_void(EXPR)}` inside the SYNC render fn, so a
+        // store-sub (`slot={$name}`) is rewritten to its read helper AND a markup
+        // await (`slot={await load()}`) is rewritten to `__verter_await_expr(…)`
+        // — a raw `await` here would be INVALID TSX. Both rewrites route the same
+        // TEXT path as every other re-emitted markup expression; the INFORMATIONAL
+        // await diagnostic anchors on the original absolute expression span.
+        let void_check = match find_slot_value(self.source, el) {
+            Some(SlotValue::Expression(span)) => {
+                self.record_await_diagnostics_in(span);
+                let expr = self.rewrite_store_subs_in_text(self.slice(span));
+                format!("{{__verter_void({expr})}}")
+            }
+            Some(SlotValue::Literal(text)) => format!("{{__verter_void({text})}}"),
             None => String::new(),
         };
         // Replace the whole open tag with the void-check (no `<svelte:fragment`
@@ -268,27 +287,38 @@ pub(super) fn find_this_attr_span(el: &SvelteElement) -> Span {
         .unwrap_or_else(|| Span::new(el.open_span.start, el.open_span.start))
 }
 
-/// The `slot` attribute value text of a `<svelte:fragment slot="x">` (F9) — a
-/// VALID TSX expression to void-check: a JS-escaped string literal for a static
-/// `slot="x"`, or the raw expression text for a dynamic `slot={expr}`. `None`
-/// when there is no `slot` attribute (an empty fragment) or when the value is a
-/// `Mixed` text-plus-interpolation literal (`slot="a{b}"`) — its raw span is not
-/// a valid standalone expression and slot-NAME precision is not claimed here, so
-/// no void-check is emitted rather than invalid TSX residue.
-pub(super) fn find_slot_value_text(source: &str, el: &SvelteElement) -> Option<String> {
+/// The `slot` attribute value of a `<svelte:fragment slot=…>` (F9), classified
+/// for void-checking. A static `slot="x"` yields a JS-ESCAPED string-literal
+/// `Literal` (a valid TSX string — `serde_json::to_string` escapes
+/// quotes/backslashes; a raw double-quote wrap is invalid TSX). A dynamic
+/// `slot={expr}` yields the `Expression` SPAN (so the caller can route the markup
+/// rewrite — store-subs / awaits — and record diagnostics against the absolute
+/// span, NOT pre-format the raw bytes). `None` when there is no `slot` attribute
+/// (an empty fragment) or for a `Mixed` text+interpolation literal (`slot="a{b}"`)
+/// — its raw span is not a valid standalone expression and slot-NAME precision is
+/// not claimed here, so no void-check is emitted rather than invalid TSX residue.
+pub(super) enum SlotValue {
+    /// A JS-escaped string literal (a static `slot="x"`), ready to emit verbatim.
+    Literal(String),
+    /// The source span of a dynamic `slot={expr}` value (the caller routes the
+    /// markup rewrite + diagnostics).
+    Expression(Span),
+}
+
+pub(super) fn find_slot_value(source: &str, el: &SvelteElement) -> Option<SlotValue> {
     el.attributes.iter().find_map(|a| match &a.kind {
         SvelteAttributeKind::Plain { name, value, .. } if name == "slot" => match value {
-            // Static literal — JS-escape the raw text so quotes/backslashes
-            // produce a VALID TSX string literal (a raw double-quote wrap is
-            // invalid TSX). `serde_json::to_string` yields a JSON string, which
-            // is a valid JS/TS string literal.
+            // Static literal — JS-escape the raw text so quotes/backslashes produce
+            // a VALID TSX string literal. `serde_json::to_string` yields a JSON
+            // string, which is a valid JS/TS string literal.
             Some(SvelteAttributeValue::Text(span)) => {
-                serde_json::to_string(&source[span.start as usize..span.end as usize]).ok()
+                serde_json::to_string(&source[span.start as usize..span.end as usize])
+                    .ok()
+                    .map(SlotValue::Literal)
             }
-            // A dynamic `slot={expr}` — the expression text is already valid TSX.
-            Some(SvelteAttributeValue::Expression(span)) => {
-                Some(source[span.start as usize..span.end as usize].to_string())
-            }
+            // A dynamic `slot={expr}` — return the SPAN so the caller routes the
+            // markup rewrite (store-subs / awaits) and records diagnostics.
+            Some(SvelteAttributeValue::Expression(span)) => Some(SlotValue::Expression(*span)),
             // A `Mixed` text+interpolation literal is not a valid standalone
             // expression — skip the void-check (no invalid residue).
             Some(SvelteAttributeValue::Mixed(_)) | None => None,

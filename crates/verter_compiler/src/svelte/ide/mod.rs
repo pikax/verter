@@ -42,4 +42,5 @@ mod projector_tests;
 #[cfg(test)]
 mod store_scan_tests;
 
+pub use emit::DiagnosticSeverity;
 pub use projector::{project_svelte_ide, SvelteIdeProjection, SvelteIdeUnsupportedDiagnostic};

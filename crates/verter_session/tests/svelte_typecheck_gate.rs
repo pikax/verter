@@ -867,6 +867,348 @@ fn projected_await_catch_binding_resolves() {
 }
 
 #[test]
+fn projected_markup_await_expression_flows_the_resolved_value_type() {
+    // F6: a markup `{(await fetchUser()).name}` projects to
+    // `(__verter_await_expr(fetchUser())).name` — `Awaited<Promise<{name}>>`
+    // flows so `.name` (a `string`) checks. `__verter_render` STAYS SYNC. DISCRIM
+    // through the type checker (a `string` consumer accepts the resolved value).
+    let projected = project(
+        "<script lang=\"ts\">\n\
+         async function fetchUser(): Promise<{ name: string }> { return { name: \"a\" }; }\n\
+         </script>\n\
+         <div>{(await fetchUser()).name}</div>",
+    );
+    assert!(
+        projected.contains("__verter_await_expr(fetchUser())"),
+        "the markup await is rewritten through the helper: {projected}"
+    );
+    assert!(
+        !projected.contains("async function __verter_render"),
+        "`__verter_render` must stay sync: {projected}"
+    );
+    let Some((ok, out)) = typecheck_projected(&projected, "AwaitExpr.svelte.tsx", &[], true) else {
+        skip_note("markup await value type");
+        return;
+    };
+    assert!(
+        ok,
+        "the resolved `Awaited<…>.name` value type must flow and check:\n{out}"
+    );
+}
+
+#[test]
+fn projected_markup_await_expression_missing_member_is_rejected() {
+    // F6 (DISCRIMINATING): `(await fetchUser()).missing` accesses a member that
+    // does NOT exist on the resolved value type — TSGO must REJECT it (the value
+    // type genuinely flows, it is not `any`).
+    let projected = project(
+        "<script lang=\"ts\">\n\
+         async function fetchUser(): Promise<{ name: string }> { return { name: \"a\" }; }\n\
+         </script>\n\
+         <div>{(await fetchUser()).missing}</div>",
+    );
+    let Some((ok, out)) = typecheck_projected(&projected, "AwaitExprBad.svelte.tsx", &[], true)
+    else {
+        skip_note("markup await missing member");
+        return;
+    };
+    assert!(
+        !ok,
+        "a missing member on the resolved await value type MUST be rejected:\n{out}"
+    );
+}
+
+#[test]
+fn projected_markup_await_of_a_non_promise_is_rejected() {
+    // F6 (DISCRIMINATING): `{await 1}` — `1` is NOT `PromiseLike<unknown>`, so the
+    // `T extends PromiseLike<unknown>` constraint on `__verter_await_expr` makes
+    // TSGO REJECT it. A `@ts-expect-error` over the helper call asserts the
+    // rejection lands (a clean compile then PROVES the error fired).
+    let projected = project("<div>{await 1}</div>");
+    assert!(
+        projected.contains("__verter_await_expr(1)"),
+        "the await-1 is rewritten through the helper: {projected}"
+    );
+    // Re-shape the projected helper call under a `@ts-expect-error` so a CLEAN
+    // type-check proves the PromiseLike constraint fired (a non-rejected call
+    // would make `@ts-expect-error` itself an unused-directive error).
+    let guarded = projected.replace(
+        "__verter_await_expr(1)",
+        "(\n// @ts-expect-error a non-promise must fail the PromiseLike constraint\n__verter_await_expr(1)\n)",
+    );
+    let Some((ok, out)) = typecheck_projected(&guarded, "AwaitOne.svelte.tsx", &[], true) else {
+        skip_note("markup await non-promise");
+        return;
+    };
+    assert!(
+        ok,
+        "`@ts-expect-error` over `__verter_await_expr(1)` must compile CLEAN \
+         (proving the PromiseLike constraint rejected the non-promise):\n{out}"
+    );
+}
+
+#[test]
+fn projected_markup_derived_await_flows_and_checks() {
+    // F6: a markup `{$derived(await load())}` routes through the SAME rewrite —
+    // `$derived(__verter_await_expr(load()))` — checkable against
+    // `$derived<T>(expression: T): T`. The resolved `number` flows.
+    let projected = project(
+        "<script lang=\"ts\">\n\
+         async function load(): Promise<number> { return 1; }\n\
+         </script>\n\
+         <div>{$derived(await load())}</div>",
+    );
+    assert!(
+        projected.contains("$derived(__verter_await_expr(load()))"),
+        "markup `$derived(await …)` routes through the helper: {projected}"
+    );
+    let Some((ok, out)) = typecheck_projected(&projected, "DerivedAwait.svelte.tsx", &[], true)
+    else {
+        skip_note("markup derived await");
+        return;
+    };
+    assert!(
+        ok,
+        "a markup `$derived(await …)` must project valid, clean TSX:\n{out}"
+    );
+}
+
+#[test]
+fn projected_attribute_await_expression_flows_and_keeps_render_sync() {
+    // F6 (regression guard): an await-EXPRESSION in an ATTRIBUTE value position
+    // (`<img src={await fetchUrl()} />`) must ALSO be rewritten — a raw `await`
+    // left in the sync render fn would be INVALID TSX. The resolved `string`
+    // value flows to the `src` attribute and checks.
+    let projected = project(
+        "<script lang=\"ts\">\n\
+         async function fetchUrl(): Promise<string> { return \"x\"; }\n\
+         </script>\n\
+         <img src={await fetchUrl()} />",
+    );
+    assert!(
+        projected.contains("__verter_await_expr(fetchUrl())"),
+        "the attribute-value await is rewritten through the helper: {projected}"
+    );
+    assert!(
+        !projected.contains("async function __verter_render"),
+        "`__verter_render` stays sync even with an attribute await: {projected}"
+    );
+    let Some((ok, out)) = typecheck_projected(&projected, "AttrAwait.svelte.tsx", &[], true) else {
+        skip_note("attribute await");
+        return;
+    };
+    assert!(
+        ok,
+        "an attribute-value await must project valid, clean TSX (resolved string \
+         flows to `src`):\n{out}"
+    );
+}
+
+#[test]
+fn projected_dynamic_component_this_await_flows_and_keeps_render_sync() {
+    // F6/F8 (regression guard — the markup-await leak class): an await-EXPRESSION
+    // in the `<svelte:component this={await load()}>` value position is a MARKUP
+    // expression — a raw `await` left in the sync render fn (the dynamic-component
+    // IIFE) would be INVALID TSX (TS1308). The text path must route the await
+    // rewrite: `__verter_await_expr(load())`, `__verter_render` STAYS SYNC, and the
+    // resolved component value flows to `__verter_dynamic_component`.
+    let projected = project(
+        "<script lang=\"ts\">\n\
+         declare class Comp { $props: { label: string }; }\n\
+         async function load(): Promise<typeof Comp> { return Comp; }\n\
+         </script>\n\
+         <svelte:component this={await load()} label={\"ok\"} />",
+    );
+    assert!(
+        projected.contains("__verter_await_expr(load())"),
+        "the dynamic-component `this` await is rewritten through the helper: {projected}"
+    );
+    assert!(
+        !render_body(&projected).contains("await "),
+        "no raw `await` keyword survives in the render body (render stays sync): {projected}"
+    );
+    assert!(
+        !projected.contains("async function __verter_render"),
+        "`__verter_render` stays sync even with a dynamic-component await: {projected}"
+    );
+    let Some((ok, out)) = typecheck_projected(&projected, "DynCompAwait.svelte.tsx", &[], true)
+    else {
+        skip_note("dynamic-component this await");
+        return;
+    };
+    assert!(
+        ok,
+        "a dynamic-component `this` await must project valid, clean TSX (resolved \
+         component value flows to the helper):\n{out}"
+    );
+}
+
+#[test]
+fn projected_dynamic_component_this_await_of_a_non_promise_is_rejected() {
+    // F6/F8 (DISCRIMINATING): `<svelte:component this={await 1} />` — `1` is NOT
+    // `PromiseLike<unknown>`, so the `T extends PromiseLike<unknown>` constraint on
+    // `__verter_await_expr` makes TSGO REJECT it. A `@ts-expect-error` over the
+    // helper call asserts the rejection lands (a clean compile then PROVES the
+    // PromiseLike constraint fired — not an `any` escape).
+    let projected = project("<svelte:component this={await 1} />");
+    assert!(
+        projected.contains("__verter_await_expr(1)"),
+        "the dynamic-component await-1 is rewritten through the helper: {projected}"
+    );
+    let guarded = projected.replace(
+        "__verter_await_expr(1)",
+        "(\n// @ts-expect-error a non-promise must fail the PromiseLike constraint\n__verter_await_expr(1)\n)",
+    );
+    let Some((ok, out)) = typecheck_projected(&guarded, "DynCompAwaitOne.svelte.tsx", &[], true)
+    else {
+        skip_note("dynamic-component await non-promise");
+        return;
+    };
+    assert!(
+        ok,
+        "`@ts-expect-error` over `__verter_await_expr(1)` in the dynamic-component \
+         `this` must compile CLEAN (proving the PromiseLike constraint rejected the \
+         non-promise):\n{out}"
+    );
+}
+
+#[test]
+fn projected_fragment_dynamic_slot_await_flows_and_keeps_render_sync() {
+    // F6/F9 (regression guard — the dynamic-slot markup-await position): an
+    // await-EXPRESSION in a dynamic `<svelte:fragment slot={await name()}>` value
+    // is void-checked in place inside the SYNC render fn — a raw `await` there
+    // would be INVALID TSX (TS1308). The slot-expression text path must route the
+    // await rewrite: `__verter_void(__verter_await_expr(name()))`, render stays
+    // sync, and the resolved `string` flows to the void check.
+    let projected = project(
+        "<script lang=\"ts\">\n\
+         async function name(): Promise<string> { return \"a\"; }\n\
+         </script>\n\
+         <svelte:fragment slot={await name()}><span>x</span></svelte:fragment>",
+    );
+    assert!(
+        projected.contains("__verter_void(__verter_await_expr(name()))"),
+        "the dynamic-slot await is rewritten through the helper: {projected}"
+    );
+    assert!(
+        !render_body(&projected).contains("await "),
+        "no raw `await` keyword survives in the render body (render stays sync): {projected}"
+    );
+    assert!(
+        !projected.contains("async function __verter_render"),
+        "`__verter_render` stays sync even with a dynamic-slot await: {projected}"
+    );
+    let Some((ok, out)) = typecheck_projected(&projected, "FragSlotAwait.svelte.tsx", &[], true)
+    else {
+        skip_note("fragment dynamic slot await");
+        return;
+    };
+    assert!(
+        ok,
+        "a dynamic-slot await must project valid, clean TSX (resolved value flows \
+         to the void check):\n{out}"
+    );
+}
+
+#[test]
+fn projected_fragment_dynamic_slot_await_of_a_non_promise_is_rejected() {
+    // F6/F9 (DISCRIMINATING — mirrors the dynamic-component `this` non-promise
+    // case): `<svelte:fragment slot={await 1}>` — `1` is NOT
+    // `PromiseLike<unknown>`, so the `T extends PromiseLike<unknown>` constraint on
+    // `__verter_await_expr` makes TSGO REJECT it. A `@ts-expect-error` over the
+    // helper call asserts the rejection lands (a clean compile then PROVES the
+    // PromiseLike constraint fired at the fragment-slot await position — the slot
+    // value is NOT loosened to `any`).
+    let projected = project("<svelte:fragment slot={await 1}><span>x</span></svelte:fragment>");
+    assert!(
+        projected.contains("__verter_await_expr(1)"),
+        "the fragment-slot await-1 is rewritten through the helper: {projected}"
+    );
+    // Re-shape the projected helper call under a `@ts-expect-error` so a CLEAN
+    // type-check proves the PromiseLike constraint fired (a non-rejected call would
+    // make `@ts-expect-error` itself an unused-directive error). If the helper were
+    // loosened to accept `any`, the directive would be unused and TSGO would FAIL —
+    // so this discriminates on the constraint being present.
+    let guarded = projected.replace(
+        "__verter_await_expr(1)",
+        "(\n// @ts-expect-error a non-promise must fail the PromiseLike constraint\n__verter_await_expr(1)\n)",
+    );
+    let Some((ok, out)) = typecheck_projected(&guarded, "FragSlotAwaitOne.svelte.tsx", &[], true)
+    else {
+        skip_note("fragment-slot await non-promise");
+        return;
+    };
+    assert!(
+        ok,
+        "`@ts-expect-error` over `__verter_await_expr(1)` in the fragment-slot \
+         value must compile CLEAN (proving the PromiseLike constraint rejected the \
+         non-promise — the slot await is not loosened to `any`):\n{out}"
+    );
+}
+
+#[test]
+fn projected_top_level_script_await_type_checks_clean() {
+    // F6: a top-level instance-script `await` is kept VERBATIM (valid top-level
+    // await under `module/target: esnext`). The resolved value type checks and
+    // the binding is visible to the markup.
+    let projected = project(
+        "<script lang=\"ts\">\n\
+         async function fetchThing(): Promise<{ id: number }> { return { id: 1 }; }\n\
+         const thing = await fetchThing();\n\
+         const id: number = thing.id;\n\
+         </script>\n\
+         <div>{id}</div>",
+    );
+    // The top-level await is NOT rewritten in the script body (stays verbatim).
+    assert!(
+        projected.contains("const thing = await fetchThing();"),
+        "the top-level script await is kept verbatim: {projected}"
+    );
+    let Some((ok, out)) = typecheck_projected(&projected, "TopLevelAwait.svelte.tsx", &[], true)
+    else {
+        skip_note("top-level script await");
+        return;
+    };
+    assert!(
+        ok,
+        "a top-level script await must type-check clean (valid top-level await):\n{out}"
+    );
+}
+
+#[test]
+fn projected_inline_await_destructuring_binding_strands_no_close_brace() {
+    // FOLD-IN (B8f/B8g carry-forward): an INLINE `{#await p then {a,b}}` with a
+    // DESTRUCTURING binding contains its OWN `}` — the open-tag close-brace search
+    // must start PAST the binding span, else the pattern's inner `}` strands and
+    // produces invalid TSX. The destructuring binding is also DECLARED so the body
+    // resolves `{a}`/`{b}`.
+    let projected = project(
+        "<script lang=\"ts\">const p: Promise<{ a: number; b: string }> = Promise.resolve({ a: 1, b: \"x\" });</script>\n\
+         <div>{#await p then { a, b }}<span>{a}{b}</span>{/await}</div>",
+    );
+    // No stranded raw await syntax / no malformed `(<>}` tail.
+    assert!(
+        !projected.contains("{#await") && !projected.contains("{/await}"),
+        "no raw await-block residue: {projected}"
+    );
+    assert!(
+        !projected.contains("(<>}"),
+        "no stranded close brace producing `(<>}}`: {projected}"
+    );
+    let Some((ok, out)) =
+        typecheck_projected(&projected, "InlineAwaitDestructure.svelte.tsx", &[], true)
+    else {
+        skip_note("inline await destructuring close-brace");
+        return;
+    };
+    assert!(
+        ok,
+        "an inline await destructuring binding must project valid, clean TSX \
+         (no stranded close brace, binding declared):\n{out}"
+    );
+}
+
+#[test]
 fn projected_attribute_shorthand_type_checks_clean() {
     // `<input {value} />` shorthand must become `value={value}` (valid TSX).
     let projected = project("<script lang=\"ts\">const value = \"x\";</script>\n<input {value} />");
