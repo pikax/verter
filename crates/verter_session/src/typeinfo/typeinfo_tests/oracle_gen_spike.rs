@@ -676,12 +676,11 @@ async fn spike_reject_families_rejected_with_exact_reason() {
             probe_rhs: "T",
             expected: RejectReason::TupleElementShape,
         },
-        RejectCase {
-            family: "tuple_labelled",
-            fixture: "type T = [first: number, second: string];\n",
-            probe_rhs: "T",
-            expected: RejectReason::TupleElementShape,
-        },
+        // A LABELLED (non-optional) tuple element is NOT a reject family: E2
+        // made it faithfully representable (`TupleElement.label` carries the
+        // label and the compare is label-aware), so `[first: number, second:
+        // string]` ADMITS per-element. Only `Optional` / `Rest` elements stay
+        // lossy `TupleElementShape` rejects (the two cases retained here).
         RejectCase {
             family: "template_literal",
             fixture: "type T = `a${string}b`;\n",
@@ -694,11 +693,18 @@ async fn spike_reject_families_rejected_with_exact_reason() {
             probe_rhs: "T",
             expected: RejectReason::NonStaticKey,
         },
+        // A PLAIN `new (a: number) => { x: number }` constructor type is NOT a
+        // reject family: the gate admits it per-constituent (its param + return
+        // walk the positive allowlist clean) exactly like a call signature —
+        // `RejectReason::Callable` is enum-only, never constructed. The genuinely
+        // LOSSY constructor variant is the ABSTRACT one: the `abstract` brand is
+        // not representable on the lowered carrier, so it rejects with the exact
+        // `AbstractCtor` reason.
         RejectCase {
-            family: "constructor_type",
-            fixture: "type T = new (a: number) => { x: number };\n",
+            family: "abstract_constructor_type",
+            fixture: "type T = abstract new (a: number) => { x: number };\n",
             probe_rhs: "T",
-            expected: RejectReason::Callable,
+            expected: RejectReason::AbstractCtor,
         },
         RejectCase {
             family: "enum_member_ref",

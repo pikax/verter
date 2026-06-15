@@ -23,7 +23,7 @@
 //!    snapshot's stored (already-normalized) `oracle_value` under the same
 //!    normalization. NO tsgo at consumption time.
 //!
-//! The registry ([`ORACLE_QUERY_SPECS`]) seats the 44 lifted rows (the
+//! The registry ([`ORACLE_QUERY_SPECS`]) seats the 46 lifted rows (the
 //! authoritative enumeration lives on that const's doc comment, pinned exactly by
 //! `oracle_query_specs_registry_holds_the_lifted_rows_and_is_well_formed`), so
 //! `run_row` IS invoked at runtime by those rows' `oracle::run_row` bodies. Its

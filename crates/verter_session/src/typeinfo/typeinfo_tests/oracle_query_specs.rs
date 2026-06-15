@@ -21,7 +21,7 @@
 // cleanly into the `tests/` guard — an inner doc comment is illegal in an
 // `include!`d position.)
 //
-// The registry seats the 44 lifted rows; the authoritative enumeration lives
+// The registry seats the 46 lifted rows; the authoritative enumeration lives
 // on `ORACLE_QUERY_SPECS`' doc comment and is pinned exactly by
 // `oracle_query_specs_registry_holds_the_lifted_rows_and_is_well_formed`. The
 // types + validation are additionally exercised with synthetic specs by the
@@ -978,6 +978,7 @@ export type DeepUtilityConfig = Required<
 include!("oracle_query_specs_vendored_sources.rs");
 include!("oracle_query_specs_vendored_sources_module_aug.rs");
 include!("oracle_query_specs_vendored_sources_jsx.rs");
+include!("oracle_query_specs_vendored_sources_mapped_template.rs");
 
 /// The single-file workspace the JSX lift rows upsert (the `jsx.ts` fixture
 /// declares the global `JSX` namespace through `declare global { namespace JSX
@@ -988,7 +989,25 @@ const JSX_FILES: &[WorkspaceFileSpec] = &[WorkspaceFileSpec {
     source: JSX_SOURCE,
 }];
 
-/// The closed registry table. Holds the 44 lifted rows — the two
+/// The single-file workspace the `mapped_template.rs` `RecordTemplateRootSlot`
+/// lift row upserts. The on-disk fixture name uses an underscore but the row
+/// upserts it at the hyphenated canonical path `/fixtures/mapped-template.ts`
+/// (the canonical upsert path is independent of the on-disk fixture filename).
+#[allow(dead_code)]
+const MAPPED_TEMPLATE_FILES: &[WorkspaceFileSpec] = &[WorkspaceFileSpec {
+    path: "/fixtures/mapped-template.ts",
+    source: MAPPED_TEMPLATE_SOURCE,
+}];
+
+/// The single-file workspace the `template_literal_inference.rs`
+/// `CounterHandlers` lift row upserts.
+#[allow(dead_code)]
+const TEMPLATE_LITERAL_INFERENCE_FILES: &[WorkspaceFileSpec] = &[WorkspaceFileSpec {
+    path: "/fixtures/template_literal_inference.ts",
+    source: TEMPLATE_LITERAL_INFERENCE_SOURCE,
+}];
+
+/// The closed registry table. Holds the 46 lifted rows — the two
 /// index-signature publication queries, the two built-in modifier-utility
 /// queries, the three U2 IndexedAccess-reduction carve-out queries (two
 /// terminal indexed-access projections + one wide/deep literal-union
@@ -1004,10 +1023,14 @@ const JSX_FILES: &[WorkspaceFileSpec] = &[WorkspaceFileSpec {
 /// queries (the `as const` typeof indexed member + the two `typeof import(...)`
 /// value-member projections [named-value + default-export shape] at
 /// `U2.INDEXED_ACCESS`, plus the namespace alias-chain projection at
-/// `U2.QUERY_VALUE_DOMAIN`), and the two U2.JSX-era queries (the two
+/// `U2.QUERY_VALUE_DOMAIN`), the two U2.JSX-era queries (the two
 /// parametric `IntrinsicPropsFor<"div">` / `IntrinsicPropsFor<"span">`
 /// intrinsic-lookup rows whose `JSX.IntrinsicElements[Tag]` reduction
-/// terminates at `IndexedAccess` and sits under `U2.INDEXED_ACCESS`)
+/// terminates at `IndexedAccess` and sits under `U2.INDEXED_ACCESS`), and the
+/// two U2.MAPPED_TEMPLATE-era queries (the `RecordTemplateRootSlot` same-file
+/// string-literal index-chain row + the `CounterHandlers` `Capitalize` key-remap
+/// mapped-type row, both terminating at `MappedTemplateRemap` under
+/// `U2.MAPPED_TEMPLATE`)
 /// (`docs/arch/ts-compat-two-mode-model.md`, `docs/arch/u0-oracle-harness-design.md`).
 #[allow(dead_code)]
 pub(crate) const ORACLE_QUERY_SPECS: &[QuerySpec] = &[
@@ -1363,6 +1386,33 @@ pub(crate) const ORACLE_QUERY_SPECS: &[QuerySpec] = &[
         JSX_FILES,
         "/fixtures/jsx.ts",
         "SpanPropsViaIndex",
+    ),
+    // U2.MAPPED_TEMPLATE-era lifts (tsgo-available oracle lift). Both source
+    // bodies admit on the source side and reduce to a clean callable surface
+    // tsgo expands structurally:
+    //   - `RecordTemplateRootSlot = RecordTemplateSlots["slot:root"]` indexes a
+    //     `Record<`slot:${"root"|"item"}`, …>` by the same-file string-literal
+    //     key `slot:root` (the string-literal index-chain source-walk carve-out)
+    //     and reduces to `(payload: { name: "item" | "root" }) => VNode[]`.
+    //   - `CounterHandlers = EventHandlers<"inc" | "dec">` is a bare `Ref` over a
+    //     string-literal union argument; tsgo expands the key-remapped mapped
+    //     type to `{ onDec: (payload: "dec") => void; onInc: (payload: "inc") =>
+    //     void }`.
+    carve_out_spec(
+        "mapped_template.rs",
+        "record_with_template_literal_key_union_projects_root_slot",
+        "mapped_template",
+        MAPPED_TEMPLATE_FILES,
+        "/fixtures/mapped-template.ts",
+        "RecordTemplateRootSlot",
+    ),
+    carve_out_spec(
+        "template_literal_inference.rs",
+        "template_literal_key_remap_capitalises_each_event_key",
+        "template_literal_inference",
+        TEMPLATE_LITERAL_INFERENCE_FILES,
+        "/fixtures/template_literal_inference.ts",
+        "CounterHandlers",
     ),
 ];
 
@@ -1873,5 +1923,28 @@ pub(crate) const LIFTED_ROW_MIGRATIONS: &[LiftMigrationProvenance] = &[
         migration_fingerprint: "blake3:844f65b203f46bf5c7876121295c75b5513ee785180a5841ecac9f64e7011d39",
         workspace_files: &[("/fixtures/wide-deep.ts", "sha256:7cfb3d614dbc6ea427f24882e6bb7c40bf2ed4042287c39aee3192ec6337fab9")],
         original_body_tokens: "{ let host = make_host_with_footprint () ; upsert_ts (& host , \"/fixtures/wide-deep.ts\" , WIDE_DEEP) ; let (expr , record) = resolve_expr (& host , \"/fixtures/wide-deep.ts\" , \"WideDeepProjectedToken\" , & [] , ProjectionMode :: Expanded ,) ; assert_literal_union (& expr , & [\"alpha\" , \"beta\" , \"gamma\"]) ; assert_query_mode (& record , ProjectionModeTag :: Expanded) ; }",
+    },
+    // U2.MAPPED_TEMPLATE-era lifts (tsgo-available oracle lift). Provenance
+    // emitted by the audited `emit_lifted_row_migrations` lift-capture (the
+    // closed `syn` extractor over the original `#[ignore]` body); the
+    // body-extracted fingerprint matched the registry-projected fingerprint, so
+    // the registry faithfully reproduces each original query.
+    LiftMigrationProvenance {
+        row_file: "mapped_template.rs",
+        row_function: "record_with_template_literal_key_union_projects_root_slot",
+        oracle_query_ordinals: 1,
+        migration_fingerprint_version: 1,
+        migration_fingerprint: "blake3:f8c259acdc518799ba6dfdbf6598ac3a9e3fac3dab7c265d22d4d0ef9d3c1d47",
+        workspace_files: &[("/fixtures/mapped-template.ts", "sha256:68b1c5433dd696540382c2d22f1a491e6bc355c9a73652eb6bc7ebc8923c65cf")],
+        original_body_tokens: "{ let host = make_host_with_footprint () ; upsert_ts (& host , \"/fixtures/mapped-template.ts\" , MAPPED_TEMPLATE) ; let (expr , record) = resolve_expr (& host , \"/fixtures/mapped-template.ts\" , \"RecordTemplateRootSlot\" , & [] , ProjectionMode :: Expanded ,) ; let slot = function_type (& expr) ; assert_eq ! (slot . parameters . len () , 1) ; let payload = object_props (& slot . parameters [0] . ty) ; assert_literal_union (& payload [\"name\"] . ty , & [\"item\" , \"root\"]) ; assert_query_mode (& record , ProjectionModeTag :: Expanded) ; }",
+    },
+    LiftMigrationProvenance {
+        row_file: "template_literal_inference.rs",
+        row_function: "template_literal_key_remap_capitalises_each_event_key",
+        oracle_query_ordinals: 1,
+        migration_fingerprint_version: 1,
+        migration_fingerprint: "blake3:4376ec8e27b02314d0af94a7d6de18c2a6a468d1090dc236b2216096c43305bc",
+        workspace_files: &[("/fixtures/template_literal_inference.ts", "sha256:383c4fdd04efadb1f7344d3b8518313172211f86e2e712e570e82d25d8b8fb44")],
+        original_body_tokens: "{ let host = make_host_with_footprint () ; upsert (& host) ; let (expr , record) = resolve_expr (& host , \"/fixtures/template_literal_inference.ts\" , \"CounterHandlers\" , & [] , ProjectionMode :: Expanded ,) ; let props = object_props (& expr) ; assert_eq ! (prop_names (& props) , vec ! [\"onDec\" , \"onInc\"]) ; let on_inc = function_type (& props [\"onInc\"] . ty) ; assert_eq ! (on_inc . parameters . len () , 1) ; assert_string_literal (& on_inc . parameters [0] . ty , \"inc\") ; let on_dec = function_type (& props [\"onDec\"] . ty) ; assert_eq ! (on_dec . parameters . len () , 1) ; assert_string_literal (& on_dec . parameters [0] . ty , \"dec\") ; assert_query_mode (& record , ProjectionModeTag :: Expanded) ; }",
     },
 ];

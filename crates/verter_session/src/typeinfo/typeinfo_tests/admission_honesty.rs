@@ -33,7 +33,7 @@
 //!      text must carry a liftability/admits marker and must NOT cite a phantom
 //!      rejection.
 //!
-//! The registry pairs the seven F9/F10 rows under correction with honest CONTROL
+//! The registry pairs the five F9/F10 rows under correction with honest CONTROL
 //! rows whose text already names a genuine rejection (`NeverKeyword`,
 //! `AnyKeyword`, source `indexed-access`). The controls prove the guard
 //! DISCRIMINATES — it is not a blanket "everything admits": a control's genuine
@@ -54,7 +54,6 @@ use verter_compiler::utils::oxc::vue::raw_surface::SymbolSpace;
 
 const MAPPED_TEMPLATE: &str = include_str!("fixtures/mapped_template.ts");
 const INDEXED_UTILITIES: &str = include_str!("fixtures/indexed_utilities.ts");
-const TEMPLATE_LITERAL_INFERENCE: &str = include_str!("fixtures/template_literal_inference.ts");
 const UTILITY_TOP_BOTTOM: &str = include_str!("fixtures/utility_top_bottom.ts");
 
 /// The specific positive-allowlist reject reason a `Rejects` row's source/value
@@ -127,19 +126,12 @@ struct Case {
 }
 
 const CASES: &[Case] = &[
-    // ── F9: the three template-literal/mapped Callable rows ──────────────
-    // 168 — RecordTemplateSlots["slot:root"] is a same-file STRING-LITERAL
-    // index chain (a source-root carve-out the gate ADMITs) and the reduced
-    // value is a clean function. Genuinely liftable; the only blocker is the
-    // tsgo snapshot. (was: false `Reject(Callable)`.)
-    Case {
-        row_file: "mapped_template.rs",
-        row_function: "record_with_template_literal_key_union_projects_root_slot",
-        canonical: "/fixtures/mapped-template.ts",
-        fixture: MAPPED_TEMPLATE,
-        symbol: "RecordTemplateRootSlot",
-        claim: Claim::AdmitsBothSides,
-    },
+    // ── F9: the two non-liftable template-literal/mapped rows (169, 170). ──
+    // Row 168 (`record_with_template_literal_key_union_projects_root_slot`) was
+    // the third member here; it is now oracle-LIFTED (its `AdmitsBothSides`
+    // claim is proven by `oracle::run_row` against the checked-in tsgo snapshot),
+    // so it left this ignored-admission-claim registry. The two rows below stay
+    // `#[ignore]`d on genuine source-side indexed-access rejections.
     // 169 — StaticTemplateSlots[TemplateLiteralCellName]: the index is a Ref
     // (template-literal alias), NOT a string literal, so the source body is a
     // non-carve-out indexed access the SOURCE side rejects. (was: false
@@ -177,18 +169,10 @@ const CASES: &[Case] = &[
         symbol: "NestedIndexedUtilitySurface",
         claim: Claim::AdmitsBothSides,
     },
-    // 312 — EventHandlers<"inc" | "dec"> is a clean Ref source; the reduced
-    // surface is an object whose members are clean callables (admitted
-    // per-signature). Genuinely liftable; only the tsgo snapshot blocks. (was:
-    // false `Reject(Callable)`.)
-    Case {
-        row_file: "template_literal_inference.rs",
-        row_function: "template_literal_key_remap_capitalises_each_event_key",
-        canonical: "/fixtures/template_literal_inference.ts",
-        fixture: TEMPLATE_LITERAL_INFERENCE,
-        symbol: "CounterHandlers",
-        claim: Claim::AdmitsBothSides,
-    },
+    // Row 312 (`template_literal_key_remap_capitalises_each_event_key`,
+    // `EventHandlers<"inc" | "dec">`) was also an `AdmitsBothSides` member here;
+    // it is now oracle-LIFTED (proven by `oracle::run_row` against the checked-in
+    // tsgo snapshot), so it left this registry too.
     // ── F10: the two `Parameters<any>`/`ConstructorParameters<any>` rows ──
     // 346 — the `unknown[]` RESULT is admitted; the real blocker is the SOURCE
     // `<any>` argument (`AnyKeyword`). (was: false "unknown[] carries
@@ -308,7 +292,6 @@ fn embedded_source(row_file: &str) -> &'static str {
     match row_file {
         "mapped_template.rs" => include_str!("mapped_template.rs"),
         "indexed_utilities.rs" => include_str!("indexed_utilities.rs"),
-        "template_literal_inference.rs" => include_str!("template_literal_inference.rs"),
         "utility_top_bottom.rs" => include_str!("utility_top_bottom.rs"),
         other => panic!("admission-honesty registry references unembedded source {other:?}"),
     }

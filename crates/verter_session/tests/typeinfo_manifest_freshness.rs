@@ -160,7 +160,7 @@ fn typeinfo_manifest_files_are_byte_equal_to_regenerated_generator_output() {
 /// namespace alias-chain lift, whose measured trace terminates at
 /// {ResolveDecl, Instantiate(, TypeOf)}); `U2.INDEXED_ACCESS` owns 23 (14
 /// lifted — incl. the 2 JSX parametric intrinsic-lookup rows re-homed in from
-/// `U2.JSX_FOUNDATIONS`); `U2.UTILITIES` owns 32; `U2.MAPPED_TEMPLATE` owns 19 (4 lifted);
+/// `U2.JSX_FOUNDATIONS`); `U2.UTILITIES` owns 32; `U2.MAPPED_TEMPLATE` owns 19 (6 lifted);
 /// `U2.CLASS_SURFACES` owns 38 (5 lifted — the class typeof-path rows whose
 /// trace dispatches `ResolveClassSurface` + `ProjectPath`);
 /// `U2.MODULE_AUGMENTATION` owns 4 (0 lifted — the 4 remaining rows whose
@@ -232,10 +232,11 @@ fn manifest_block_counts_reflect_lifts() {
     // Lifted-status counts.
     assert_eq!(
         count("status: IgnoreStatus::Lifted {"),
-        44,
-        "exactly 44 IgnoredTestRows must carry `status: Lifted` (the 19 \
+        46,
+        "exactly 46 IgnoredTestRows must carry `status: Lifted` (the 19 \
          pre-class-surface lifts + the 19 class-surface-era lifts + the 4 \
-         module-augmentation-era lifts + the 2 JSX-era lifts)",
+         module-augmentation-era lifts + the 2 JSX-era lifts + the 2 \
+         mapped-template-era lifts)",
     );
     assert_eq!(
         count(
@@ -259,10 +260,12 @@ fn manifest_block_counts_reflect_lifts() {
     );
     assert_eq!(
         count("status: IgnoreStatus::Lifted { block_id: TypeInfoParityBlockId::U2MappedTemplate }"),
-        4,
+        6,
         "the 2 built-in modifier-utility lifts + the wide/deep literal-union \
          projection lift + the `-?` optional-remover (`mapped_modifier_minus_optional`) \
-         lift must record their lifting block as U2.MAPPED_TEMPLATE",
+         lift + the 2 mapped-template-era lifts (the `RecordTemplateRootSlot` \
+         string-literal index-chain row + the `CounterHandlers` key-remap \
+         mapped-type row) must record their lifting block as U2.MAPPED_TEMPLATE",
     );
 
     assert_eq!(
@@ -274,10 +277,10 @@ fn manifest_block_counts_reflect_lifts() {
          lifting block as U2.CLASS_SURFACES",
     );
 
-    // Total ignored (status: Ignored) rows after 44 lifts.
+    // Total ignored (status: Ignored) rows after 46 lifts.
     assert_eq!(
         count("status: IgnoreStatus::Ignored"),
-        318,
-        "exactly 318 IgnoredTestRows must remain `Ignored` (362 total − 44 lifted)",
+        316,
+        "exactly 316 IgnoredTestRows must remain `Ignored` (362 total − 46 lifted)",
     );
 }

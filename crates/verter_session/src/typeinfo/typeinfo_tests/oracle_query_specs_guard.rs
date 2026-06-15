@@ -3,7 +3,7 @@
 //! registry `include!`-compiles WITHOUT the unit-test `support` module
 //! (`oracle_query_specs_is_pure_data`); this src-side half proves the structural
 //! well-formedness validation is genuinely discriminating, with SYNTHETIC specs.
-//! The real table seats the 44 lifted rows — the authoritative enumeration
+//! The real table seats the 46 lifted rows — the authoritative enumeration
 //! lives on `ORACLE_QUERY_SPECS`' doc comment and is pinned exactly by
 //! `oracle_query_specs_registry_holds_the_lifted_rows_and_is_well_formed`.
 
@@ -12,16 +12,16 @@ use super::oracle::query_specs::{
     ProjectionModeSpec, QueryHelperSpec, QuerySpec, RegistryError, SourceLocatorSpec, SymbolSpace,
     BRANDED_TYPES_SOURCE, CLASS_FEATURES_SOURCE, DECORATORS_SOURCE, DEEP_PATH_SOURCE,
     FUNCTION_ADVANCED_SOURCE, INDEX_SIGNATURES_SOURCE, JSX_SOURCE, MAPPED_MODIFIERS_SOURCE,
-    MODERN_TS_FEATURES_SOURCE, MODE_BOUNDARY_REEXPORT_BARREL_SOURCE,
+    MAPPED_TEMPLATE_SOURCE, MODERN_TS_FEATURES_SOURCE, MODE_BOUNDARY_REEXPORT_BARREL_SOURCE,
     MODE_BOUNDARY_REEXPORT_LEAF_SOURCE, MODE_BOUNDARY_REEXPORT_LINK_1_SOURCE,
     MODE_BOUNDARY_REEXPORT_LINK_2_SOURCE, MODE_BOUNDARY_REEXPORT_LINK_3_SOURCE,
     MODE_BOUNDARY_REEXPORT_LINK_4_SOURCE, MODE_BOUNDARY_REEXPORT_LINK_5_SOURCE,
     MODE_BOUNDARY_REEXPORT_LINK_6_SOURCE, MODE_BOUNDARY_REEXPORT_PRINCIPAL_SOURCE,
     MODULE_FEATURES_BASE_SOURCE, MODULE_FEATURES_CJS_SOURCE, MODULE_FEATURES_CONSUMER_SOURCE,
     MODULE_FEATURES_LEAF_SOURCE, MODULE_FEATURES_PATCH_SOURCE, MODULE_FEATURES_SOURCE,
-    ORACLE_QUERY_SPECS, SUBSTITUTION_TYPES_SOURCE, TYPESCRIPT_RULES_SOURCE,
-    UNION_KEY_ACCESS_SOURCE, UTILITY_COMPOSITION_SOURCE, UTILITY_EDGE_SOURCE,
-    UTILITY_TOP_BOTTOM_SOURCE, VARIADIC_TUPLES_SOURCE, WIDE_DEEP_SOURCE,
+    ORACLE_QUERY_SPECS, SUBSTITUTION_TYPES_SOURCE, TEMPLATE_LITERAL_INFERENCE_SOURCE,
+    TYPESCRIPT_RULES_SOURCE, UNION_KEY_ACCESS_SOURCE, UTILITY_COMPOSITION_SOURCE,
+    UTILITY_EDGE_SOURCE, UTILITY_TOP_BOTTOM_SOURCE, VARIADIC_TUPLES_SOURCE, WIDE_DEEP_SOURCE,
 };
 
 /// The registry inlines each fixture's source bytes (`INDEX_SIGNATURES_SOURCE` /
@@ -228,6 +228,18 @@ fn inlined_registry_source_is_byte_identical_to_fixture_files() {
         "MODULE_FEATURES_CONSUMER_SOURCE (inlined in the registry) drifted from \
          fixtures/module_features_consumer.ts (read by the sibling #[ignore]d tests)",
     );
+    assert_eq!(
+        MAPPED_TEMPLATE_SOURCE,
+        include_str!("fixtures/mapped_template.ts"),
+        "MAPPED_TEMPLATE_SOURCE (inlined in the registry) drifted from \
+         fixtures/mapped_template.ts (read by the sibling #[ignore]d tests)",
+    );
+    assert_eq!(
+        TEMPLATE_LITERAL_INFERENCE_SOURCE,
+        include_str!("fixtures/template_literal_inference.ts"),
+        "TEMPLATE_LITERAL_INFERENCE_SOURCE (inlined in the registry) drifted from \
+         fixtures/template_literal_inference.ts (read by the sibling #[ignore]d tests)",
+    );
 }
 
 /// A synthetic well-formed spec with a tweakable `oracle_family` + `query_ordinal`.
@@ -262,7 +274,7 @@ fn spec(row_function: &'static str, query_ordinal: u16, oracle_family: &'static 
 
 #[test]
 fn oracle_query_specs_registry_holds_the_lifted_rows_and_is_well_formed() {
-    // The lifts seat 44 queries: the two index-signature publication
+    // The lifts seat 46 queries: the two index-signature publication
     // queries, the two built-in modifier-utility queries, the three U2
     // IndexedAccess-reduction carve-out queries, the U2.MAPPED_TEMPLATE
     // `-?` optional-remover query, the three keyof-expansion carve-out
@@ -275,13 +287,15 @@ fn oracle_query_specs_registry_holds_the_lifted_rows_and_is_well_formed() {
     // two decoration-invariance rows), the four U2.MODULE_AUGMENTATION-era
     // lifts (the `as const` typeof indexed member + the two `typeof import(...)`
     // value-member projections [named-value + default-shape] + the namespace
-    // alias-chain projection), and the two U2.INDEXED_ACCESS JSX parametric
+    // alias-chain projection), the two U2.INDEXED_ACCESS JSX parametric
     // intrinsic-lookup lifts (`IntrinsicPropsFor<"div">` /
-    // `IntrinsicPropsFor<"span">`); the table is well-formed (non-empty
-    // `oracle_family`, contiguous ordinals).
+    // `IntrinsicPropsFor<"span">`), and the two U2.MAPPED_TEMPLATE-era lifts
+    // (the `RecordTemplateRootSlot` string-literal index-chain query + the
+    // `CounterHandlers` key-remap mapped-type query); the table is well-formed
+    // (non-empty `oracle_family`, contiguous ordinals).
     assert_eq!(registry_well_formed(ORACLE_QUERY_SPECS), Ok(()));
 
-    // The seated set is EXACTLY those 44 rows, one query each. A stray
+    // The seated set is EXACTLY those 46 rows, one query each. A stray
     // addition / removal FAILS here (discriminating).
     let seated: Vec<(&str, &str, u16)> = ORACLE_QUERY_SPECS
         .iter()
@@ -508,6 +522,16 @@ fn oracle_query_specs_registry_holds_the_lifted_rows_and_is_well_formed() {
             (
                 "jsx.rs",
                 "jsx_intrinsic_via_generic_lookup_span_resolves_to_span_shape",
+                0
+            ),
+            (
+                "mapped_template.rs",
+                "record_with_template_literal_key_union_projects_root_slot",
+                0
+            ),
+            (
+                "template_literal_inference.rs",
+                "template_literal_key_remap_capitalises_each_event_key",
                 0
             ),
         ],

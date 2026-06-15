@@ -1748,6 +1748,35 @@ LIFTED_ROW_OVERRIDES: dict[tuple[str, str], dict[str, object]] = {
             "lifted (JSX family; re-homed to U2.INDEXED_ACCESS per measured trace): `IntrinsicPropsFor<\"span\">` (alias for `JSX.IntrinsicElements[Tag]`) instantiates `Tag = \"span\"` and reduces the indexed access over the global-augmented `JSX.IntrinsicElements` to the declared `span` shape `{ title?: string }`, proven against the checked-in tsgo oracle snapshot via oracle::run_row"
         ),
     },
+    # U2.MAPPED_TEMPLATE-era lifts (tsgo-available oracle lift). Both rows reduce
+    # to a clean callable surface tsgo expands structurally; the
+    # `semantic_queries` / `mech` / `consumed_mechanisms` below are the MEASURED
+    # dispatch trace, validated by the keystone
+    # `lifted_row_mechanism_trace_matches_manifest`.
+    ("mapped_template.rs", "record_with_template_literal_key_union_projects_root_slot"): {
+        "mech": "MappedTemplateRemap",
+        "proof": "ProofRequirement::Ts7Oracle(OracleId::MappedTemplate)",
+        "semantic_queries": [
+            "ResolveDecl", "Instantiate", "IndexedAccess", "MappedType",
+            "NormalizeUnion", "ProjectPath", "TemplateLiteralReduce",
+        ],
+        "consumed_mechanisms": ["QueryValueDomainFoundation", "IndexedAccessUnionDistribution"],
+        "unblocker": (
+            "lifted by U2.MAPPED_TEMPLATE: `RecordTemplateRootSlot = RecordTemplateSlots[\"slot:root\"]` reduces the same-file string-literal index chain over the `Record<`slot:${\"root\"|\"item\"}`, …>` template keyspace to `(payload: { name: \"item\" | \"root\" }) => VNode[]`, proven against the checked-in tsgo oracle snapshot via oracle::run_row"
+        ),
+    },
+    ("template_literal_inference.rs", "template_literal_key_remap_capitalises_each_event_key"): {
+        "mech": "MappedTemplateRemap",
+        "proof": "ProofRequirement::Ts7Oracle(OracleId::TemplateLiteral)",
+        "semantic_queries": [
+            "ResolveDecl", "Instantiate", "MappedType", "ProjectPath",
+            "TemplateLiteralReduce",
+        ],
+        "consumed_mechanisms": ["QueryValueDomainFoundation", "IndexedAccessUnionDistribution"],
+        "unblocker": (
+            "lifted by U2.MAPPED_TEMPLATE: `CounterHandlers = EventHandlers<\"inc\" | \"dec\">` expands the key-remapped mapped type `{ [K in T as `on${Capitalize<K>}`]: (payload: K) => void }` to `{ onDec: (payload: \"dec\") => void; onInc: (payload: \"inc\") => void }`, proven against the checked-in tsgo oracle snapshot via oracle::run_row"
+        ),
+    },
 }
 
 

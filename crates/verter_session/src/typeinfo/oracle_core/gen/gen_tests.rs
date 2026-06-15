@@ -20,6 +20,11 @@
 //! gate — run with `cargo test -p verter_session --features oracle-gen`.
 
 use super::*;
+// `SymbolSpace` lives in the `query_specs` registry module (the sibling
+// `SourceLocatorSpec` / `OracleValueKindSpec` fields below reach it by full
+// path); bring it into scope so the bare `SymbolSpace::Type` field initialisers
+// resolve under the `oracle-gen` lib-test build.
+use super::super::query_specs::SymbolSpace;
 
 /// A clean, single-contributor object alias — every member on the positive
 /// allowlist (primitive-typed properties + an optional literal-union), so the

@@ -191,7 +191,9 @@ pub(crate) enum RejectReason {
     /// An enum-member / qualified-name `Ref` (`Color.Red`) — a nominal brand
     /// `TypeExpr` cannot carry.
     EnumMemberOrQualified,
-    /// Optional / labelled / `| undefined` tuple element.
+    /// `Optional` / `Rest` tuple element — lossy. A LABELLED non-optional
+    /// element is faithfully representable (`TupleElement.label` is carried
+    /// end-to-end and compared label-aware) and ADMITS.
     TupleElementShape,
     /// A deferred construct (`Conditional` / `Mapped` / `TemplateLiteral` /
     /// `Infer` / `KeyOf` / `IndexedAccess` / `TypeOf`) outside the source-root

@@ -9,7 +9,9 @@
 //! `as never` key drop and `K & string` literal-subsumption stay owned by
 //! deferred blocks; the `infer`-pattern contracts stay future work.
 
+use super::oracle;
 use super::support::*;
+use verter_session_oracle_macro::oracle_row;
 
 const TEMPLATE_LITERAL_INFERENCE: &str = include_str!("fixtures/template_literal_inference.ts");
 
@@ -90,45 +92,25 @@ fn template_literal_strip_returns_input_unchanged_when_prefix_missing() {
     assert_query_mode(&record, ProjectionModeTag::Expanded);
 }
 
+// LIFTED: `CounterHandlers = EventHandlers<"inc" | "dec">` is a bare `Ref` over a
+// string-literal union argument (the source side admits without descending the
+// alias body); tsgo expands the key-remapped mapped type `{ [K in T as
+// `on${Capitalize<K>}`]: (payload: K) => void }` to `{ onDec: (payload: "dec") =>
+// void; onInc: (payload: "inc") => void }`. The lifted body is the registry-keyed
+// `oracle::run_row` shared-driver call comparing Verter's `Expanded` projection
+// against the checked-in tsgo snapshot.
+#[oracle_row]
 #[test]
-#[ignore = "reducer resolves this correctly (covered by the non-ignored `event_handler_key_remap_reducer_capitalises_keys` regression); LIFTABLE — the live two-sided oracle admission ADMITs both sides: the source body `EventHandlers<...>` is a clean `Ref` over a string-literal union argument and the reduced object surface's handler members are clean callables the §Q2 positive allowlist admits per-signature. The only remaining blocker is oracle snapshot generation via the tsgo driver (unavailable in this environment). Lift pending tsgo snapshot availability"]
-fn template_literal_key_remap_capitalises_each_event_key() {
-    // TS7 contract: `EventHandlers<"inc" | "dec">` produces an object where
-    // each key is remapped through `\`on${Capitalize<K>}\``, yielding
-    // `{ onInc: (payload: "inc") => void; onDec: (payload: "dec") => void }`.
-    // The remapped keys are `onInc` / `onDec`; the handlers preserve the
-    // original key as the payload literal.
-    let host = make_host_with_footprint();
-    upsert(&host);
-
-    let (expr, record) = resolve_expr(
-        &host,
-        "/fixtures/template_literal_inference.ts",
-        "CounterHandlers",
-        &[],
-        ProjectionMode::Expanded,
-    );
-
-    let props = object_props(&expr);
-    assert_eq!(prop_names(&props), vec!["onDec", "onInc"]);
-
-    let on_inc = function_type(&props["onInc"].ty);
-    assert_eq!(on_inc.parameters.len(), 1);
-    assert_string_literal(&on_inc.parameters[0].ty, "inc");
-
-    let on_dec = function_type(&props["onDec"].ty);
-    assert_eq!(on_dec.parameters.len(), 1);
-    assert_string_literal(&on_dec.parameters[0].ty, "dec");
-    assert_query_mode(&record, ProjectionModeTag::Expanded);
-}
+fn template_literal_key_remap_capitalises_each_event_key() {}
 
 /// Non-ignored reducer regression for the callable-result key-remap row
-/// `template_literal_key_remap_capitalises_each_event_key`, which stays
-/// `#[ignore]`d only because its oracle snapshot needs the tsgo driver: the live
-/// two-sided admission ADMITs both sides — the `EventHandlers<…>` source is a
-/// clean `Ref` over a string-literal union argument and the reduced object's
-/// handler members are clean callables the §Q2 positive allowlist admits
-/// per-signature. The SHARED resolver remaps each key through
+/// `template_literal_key_remap_capitalises_each_event_key`, which is now
+/// oracle-LIFTED (`#[oracle_row]`): the live two-sided admission ADMITs both
+/// sides — the `EventHandlers<…>` source is a clean `Ref` over a string-literal
+/// union argument and the reduced object's handler members are clean callables
+/// the §Q2 positive allowlist admits per-signature — and its `Expanded`
+/// projection converges against the checked-in tsgo snapshot. The SHARED resolver
+/// remaps each key through
 /// `` `on${Capitalize<K>}` `` correctly — the open-`K` string intrinsic stays a
 /// carrier until per-key substitution binds the key — so this runs the same
 /// assertions in the normal suite to keep the reducer path guarded.

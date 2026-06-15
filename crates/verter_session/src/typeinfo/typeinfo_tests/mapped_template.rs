@@ -1,6 +1,8 @@
 //! @ai-generated - Synthetic mapped-type and template-literal key tests.
 
+use super::oracle;
 use super::support::*;
+use verter_session_oracle_macro::oracle_row;
 
 #[test]
 fn mapped_type_without_key_remap_materializes_required_surface() {
@@ -87,26 +89,15 @@ fn template_literal_key_alias_projects_static_template_slot() {
     assert_query_mode(&record, ProjectionModeTag::Expanded);
 }
 
+// LIFTED: `RecordTemplateRootSlot = RecordTemplateSlots["slot:root"]` indexes a
+// `Record<`slot:${"root"|"item"}`, …>` by the same-file string-literal key
+// `slot:root` (the string-literal index-chain source-walk carve-out) and reduces
+// to `(payload: { name: "item" | "root" }) => VNode[]`. The lifted body is the
+// registry-keyed `oracle::run_row` shared-driver call comparing Verter's
+// `Expanded` projection against the checked-in tsgo snapshot.
+#[oracle_row]
 #[test]
-#[ignore = "reducer resolves this correctly (covered by the non-ignored `template_literal_key_reducer_projects_callable_slots` regression); LIFTABLE — the live two-sided oracle admission ADMITs both sides: the source body indexes `RecordTemplateSlots` by the string-literal key `slot:root` (a same-file string-literal index-chain carve-out the source-side allowlist admits) and the reduced function value passes the §Q2 positive allowlist per-signature. The only remaining blocker is oracle snapshot generation via the tsgo driver (unavailable in this environment). Lift pending tsgo snapshot availability"]
-fn record_with_template_literal_key_union_projects_root_slot() {
-    let host = make_host_with_footprint();
-    upsert_ts(&host, "/fixtures/mapped-template.ts", MAPPED_TEMPLATE);
-
-    let (expr, record) = resolve_expr(
-        &host,
-        "/fixtures/mapped-template.ts",
-        "RecordTemplateRootSlot",
-        &[],
-        ProjectionMode::Expanded,
-    );
-
-    let slot = function_type(&expr);
-    assert_eq!(slot.parameters.len(), 1);
-    let payload = object_props(&slot.parameters[0].ty);
-    assert_literal_union(&payload["name"].ty, &["item", "root"]);
-    assert_query_mode(&record, ProjectionModeTag::Expanded);
-}
+fn record_with_template_literal_key_union_projects_root_slot() {}
 
 #[test]
 #[ignore = "reducer resolves this correctly (covered by the non-ignored `template_literal_key_reducer_projects_callable_slots` regression); NOT oracle-liftable — the declared source body indexes `StaticTemplateSlots` by a template-literal union key, a non-carve-out indexed-access the oracle source-side positive allowlist rejects (measured Reject(DeferredConstruct(indexed-access))); the reduced union of function values is itself admissible. Lift pending an oracle source-walk carve-out for template-literal-keyed indexed access"]
@@ -133,14 +124,15 @@ fn template_literal_union_key_projects_static_slot_union() {
 /// key rows (`template_literal_key_alias_projects_static_template_slot`,
 /// `record_with_template_literal_key_union_projects_root_slot`,
 /// `template_literal_union_key_projects_static_slot_union`). All three reduce to
-/// admissible function values — none is blocked on a function surface — and stay
-/// `#[ignore]`d for two distinct verified reasons: the `record_*_root_slot` row
-/// admits both sides and is blocked only by tsgo oracle-snapshot generation,
-/// while the two `StaticTemplateSlots[…]` alias/union rows are blocked by their
-/// non-carve-out indexed-access source bodies. The SHARED resolver reduces each
-/// one correctly — this test runs the same assertions in the normal suite so the
-/// U2.MAPPED_TEMPLATE reducer paths (template-literal alias key, Record
-/// template-union keyspace enumeration, union-index distribution) stay guarded.
+/// admissible function values — none is blocked on a function surface. The
+/// `record_*_root_slot` row is now oracle-LIFTED (`#[oracle_row]`): it admits both
+/// sides and its `Expanded` projection converges against the checked-in tsgo
+/// snapshot. The two `StaticTemplateSlots[…]` alias/union rows stay `#[ignore]`d,
+/// blocked by their non-carve-out indexed-access source bodies. The SHARED
+/// resolver reduces each one correctly — this test runs the same assertions in the
+/// normal suite so the U2.MAPPED_TEMPLATE reducer paths (template-literal alias
+/// key, Record template-union keyspace enumeration, union-index distribution) stay
+/// guarded.
 #[test]
 fn template_literal_key_reducer_projects_callable_slots() {
     let host = make_host_with_footprint();
