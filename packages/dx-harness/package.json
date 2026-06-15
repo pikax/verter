@@ -1,0 +1,35 @@
+{
+  "name": "@verter/dx-harness",
+  "version": "0.0.1",
+  "private": true,
+  "description": "DX harness substrate: the immutable MaterializedWorkspace scaffold (fixture copy + anchor strip, deterministic toolRoots, committed Vue shims, workspace settings) plus the TS orchestration that drives the verter_dx_baseline materializer and bridge.",
+  "license": "MIT",
+  "author": "pikax",
+  "type": "module",
+  "sideEffects": false,
+  "main": "dist/index.js",
+  "module": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "npx shx rm -rf dist tsconfig.tsbuildinfo && tsc -b --force",
+    "dev": "tsc -b --watch",
+    "clean": "npx shx rm -rf .turbo dist tsconfig.tsbuildinfo",
+    "test": "vitest --run",
+    "test:unit": "vitest --run --exclude '**/baselineIntegration.test.ts'"
+  },
+  "dependencies": {
+    "@verter/lsp-test-client": "workspace:^"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.1",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.7"
+  }
+}
