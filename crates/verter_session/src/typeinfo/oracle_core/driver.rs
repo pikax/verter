@@ -23,13 +23,11 @@
 //!    snapshot's stored (already-normalized) `oracle_value` under the same
 //!    normalization. NO tsgo at consumption time.
 //!
-//! The registry seats the 19 lifted rows (the two index-signature
-//! publication queries + the two built-in modifier-utility queries + the three
-//! U2 IndexedAccess-reduction carve-out queries + the mapped-modifier `-?`
-//! carve-out query at U2.MAPPED_TEMPLATE + the three keyof-expansion carve-out
-//! queries + the eight U2.UTILITIES reducer queries), so `run_row`
-//! IS invoked at runtime by those rows' `oracle::run_row` bodies. Its pure
-//! sub-functions are additionally exercised directly by discriminating unit
+//! The registry ([`ORACLE_QUERY_SPECS`]) seats the 44 lifted rows (the
+//! authoritative enumeration lives on that const's doc comment, pinned exactly by
+//! `oracle_query_specs_registry_holds_the_lifted_rows_and_is_well_formed`), so
+//! `run_row` IS invoked at runtime by those rows' `oracle::run_row` bodies. Its
+//! pure sub-functions are additionally exercised directly by discriminating unit
 //! tests; the orchestrator is the real path every lifted row rides.
 
 use std::path::{Path, PathBuf};
@@ -38,6 +36,8 @@ use std::sync::Arc;
 use serde_json::Value;
 use verter_type_expr::{type_expr_from_json, TypeExpr};
 
+use super::admission::{self, AdmissionVerdict};
+use super::hover_extract;
 use super::identity::{
     self, HostProject, HostSetupKind, OracleValueKind, PinnedEnv, ProbeRhsKind, QueryHelperKind,
     SnapshotIdentity, WorkspaceFileRef,
@@ -48,6 +48,7 @@ use super::query_specs::{
     QueryHelperSpec, QuerySpec, COMPILER_OPTIONS_HASH, CURRENT_ENV_CORPUS_ID, ORACLE_QUERY_SPECS,
 };
 use super::snapshot::{self, OracleSnapshot};
+use super::source_digest::{self, SourceDigestError};
 
 /// The relative infix from `CARGO_MANIFEST_DIR` (= `crates/verter_session/`) to
 /// the snapshot tree. The FULL infix is REQUIRED — joining only
@@ -101,6 +102,26 @@ pub(crate) enum DriverError {
     /// Verter's normalized `TypeExpr` did not structurally equal the snapshot's
     /// normalized `oracle_value` — a real parity divergence.
     ValueMismatch { verter: String, oracle: String },
+    /// The recorded `raw_capture.hover_contents` could not be re-derived back to a
+    /// value (the offline hover-extraction grammar, hover admission, or strict
+    /// lowering rejected it) — a tampered or no-longer-admissible recorded hover.
+    RawCaptureRederiveFailed(String),
+    /// Re-deriving the oracle truth from `raw_capture.hover_contents` (re-running
+    /// the hover-extraction grammar + strict lowering + normalization) did NOT
+    /// equal the stored `oracle_value` — a hand-edited `oracle_value` the
+    /// snapshot-side `compare_oracle_value` rail alone could never catch.
+    RawCaptureValueMismatch {
+        rederived: String,
+        oracle_value: String,
+    },
+    /// The shared source-digest re-derivation failed (the source-side walk no
+    /// longer resolves the queried declaration, or its span / file is missing).
+    SourceDigest(SourceDigestError),
+    /// Re-deriving `source_admission_digest` from the CURRENT registry source
+    /// bytes through the shared source-side walk did NOT equal the stored digest
+    /// — a hand-edited locator / content hash / contributor raw surface / lowered
+    /// body / verdict / single-contributor count.
+    SourceDigestMismatch { rederived: String, stored: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -527,6 +548,95 @@ pub(crate) fn compare_oracle_value(
 }
 
 // ---------------------------------------------------------------------------
+// Consume-time oracle-VALUE fidelity guards (F1)
+//
+// `compare_oracle_value` proves Verter equals the snapshot's STORED
+// `oracle_value` — but it never re-derives the oracle truth from the snapshot's
+// own recorded evidence, so a hand edit to `oracle_value` (or to
+// `source_admission_digest`) that leaves the evidence intact would warm-validate
+// against a fabricated answer. These two guards close that hole by re-deriving
+// the oracle truth at consume time, tsgo-free, from the recorded evidence and
+// the current registry source bytes — run from `run_one` BEFORE the
+// Verter-vs-oracle compare.
+// ---------------------------------------------------------------------------
+
+/// Re-derive the oracle truth from the snapshot's RECORDED hover and assert it
+/// equals the stored `oracle_value`. Reruns the SAME offline pipeline the
+/// generator drove: the hover-extraction grammar over `raw_capture.hover_contents`
+/// → hover admission → strict lowering → normalization (in the query's mode). A
+/// hand-edited `oracle_value` whose `raw_capture` was left unchanged FAILS here,
+/// because the value re-derived from the recorded hover no longer matches it.
+#[allow(dead_code)]
+pub(crate) fn raw_capture_matches_oracle_value(
+    snapshot: &OracleSnapshot,
+    mode: ProjectionModeKind,
+) -> Result<(), DriverError> {
+    // (1) Recover the probe RHS from the RECORDED hover (the offline grammar).
+    let rhs = hover_extract::extract_probe_rhs(
+        &snapshot.raw_capture.hover_contents,
+        &snapshot.raw_capture.probe_name,
+    )
+    .map_err(|e| DriverError::RawCaptureRederiveFailed(format!("hover extract: {e:?}")))?;
+    // (2) Re-run hover admission — the recorded hover must STILL admit.
+    match admission::admit_hover_text(&rhs) {
+        AdmissionVerdict::Admit => {}
+        verdict => {
+            return Err(DriverError::RawCaptureRederiveFailed(format!(
+                "hover admission rejected the recorded hover: {verdict:?}"
+            )))
+        }
+    }
+    // (3) Strict-lower + normalize the recovered hover under the query's mode.
+    let lowered = admission::lower_hover_rhs(&rhs).ok_or_else(|| {
+        DriverError::RawCaptureRederiveFailed("recorded hover did not lower".to_string())
+    })?;
+    let rederived = normalize::normalized_canonical_json(&lowered, mode)
+        .map_err(DriverError::NormalizeReject)?;
+    // (4) Compare to the STORED oracle_value under the SAME normalization.
+    let oracle_expr = type_expr_from_json(&snapshot.oracle_value).ok_or_else(|| {
+        DriverError::RawCaptureValueMismatch {
+            rederived: rederived.clone(),
+            oracle_value: "<oracle_value did not decode to TypeExpr>".to_string(),
+        }
+    })?;
+    let stored = normalize::normalized_canonical_json(&oracle_expr, mode)
+        .map_err(DriverError::NormalizeReject)?;
+    if rederived != stored {
+        return Err(DriverError::RawCaptureValueMismatch {
+            rederived,
+            oracle_value: stored,
+        });
+    }
+    Ok(())
+}
+
+/// Re-derive `source_admission_digest` from the CURRENT registry source bytes
+/// through the shared source-side walk (`source_digest::rederive_source_digest`)
+/// and assert it equals the snapshot's STORED digest under canonical JSON. The
+/// re-derivation is the SAME one the `oracle-gen` generator assembled, so a
+/// hand-edited locator, content hash, contributor raw surface, lowered body,
+/// admission verdict, or single-contributor count FAILS here. `stored_digest` is
+/// the snapshot's raw `source_admission_digest` sub-object (the consumption
+/// driver passes it from the decoded envelope).
+#[allow(dead_code)]
+pub(crate) fn source_admission_digest_consistent(
+    spec: &QuerySpec,
+    stored_digest: &Value,
+) -> Result<(), DriverError> {
+    let rederived =
+        source_digest::rederive_source_digest(spec).map_err(DriverError::SourceDigest)?;
+    let rederived_canonical = normalize::canonical_json_string(&rederived);
+    let stored_canonical = normalize::canonical_json_string(stored_digest);
+    if rederived_canonical != stored_canonical {
+        return Err(DriverError::SourceDigestMismatch {
+            rederived: rederived_canonical,
+            stored: stored_canonical,
+        });
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Helper dispatch (host construction + the support.rs helper call)
 // ---------------------------------------------------------------------------
 
@@ -662,6 +772,16 @@ fn run_one(spec: &QuerySpec, env: &PinnedEnv) -> Result<(), DriverError> {
     let snapshot = snapshot::decode_strict(&json).map_err(DriverError::Decode)?;
     validate_env_pins(&snapshot, spec, &identity, env)?;
     validate_env_corpus(&snapshot, &corpus_root(&env.env_corpus_id))?;
+    // F1 — re-derive the oracle truth from the snapshot's OWN recorded evidence +
+    // the current registry source BEFORE trusting `oracle_value` / the digest:
+    // a hand-edited answer (raw_capture/source-digest left intact) fails here.
+    raw_capture_matches_oracle_value(&snapshot, identity.projection_mode)?;
+    let stored_digest = json.get("source_admission_digest").ok_or_else(|| {
+        DriverError::Decode(snapshot::SnapshotDecodeError::Envelope(
+            "snapshot missing source_admission_digest".to_string(),
+        ))
+    })?;
+    source_admission_digest_consistent(spec, stored_digest)?;
     compare_oracle_value(&verter_expr, &snapshot, identity.projection_mode)?;
     Ok(())
 }

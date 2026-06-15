@@ -14,10 +14,12 @@ use super::super::query_specs::{
     QueryHelperSpec, QuerySpec, SourceLocatorSpec, SymbolSpace, WorkspaceFileSpec,
 };
 use super::super::snapshot::{decode_strict, EnvFileEntry};
+use super::super::source_digest;
 use super::{
     compare_oracle_value, corpus_root, identity_from_spec, lookup_row_entries, pinned_env,
-    recompute_oracle_env_hash, row_basename, snapshot_abs_path, snapshot_relative_tail,
-    type_argument_values, validate_env_corpus, validate_env_pins, DriverError,
+    raw_capture_matches_oracle_value, recompute_oracle_env_hash, row_basename, snapshot_abs_path,
+    snapshot_relative_tail, source_admission_digest_consistent, type_argument_values,
+    validate_env_corpus, validate_env_pins, DriverError,
 };
 
 const FIXTURE_PATH: &str = "/fixtures/util.ts";
@@ -247,6 +249,8 @@ fn synthetic_snapshot(spec: &QuerySpec) -> Value {
         "oracle_family": spec.oracle_family,
         "oracle_value_kind": "structured_type_expr",
         "snapshot_id": snapshot_id,
+        "migration_fingerprint_version": 1,
+        "migration_fingerprint": "blake3:0000000000000000000000000000000000000000000000000000000000000000",
         "row_ref": {
             "row_file": spec.row_file,
             "row_function": spec.row_function,
@@ -421,6 +425,111 @@ fn run_row_panics_when_no_registry_entries() {
         "crates/verter_session/src/typeinfo/typeinfo_tests/nonexistent.rs",
         "no_such_row",
     );
+}
+
+// -- raw_capture_matches_oracle_value (F1) ---------------------------------
+
+/// The consume-time oracle-VALUE fidelity guard re-derives the oracle truth from
+/// the snapshot's RECORDED hover and rejects a hand-edited `oracle_value`. This
+/// is the F1 hole: `compare_oracle_value` only compares Verter to the STORED
+/// `oracle_value`, so a hand edit to `oracle_value` (leaving `raw_capture`
+/// unchanged) warm-validates against a fabricated answer today. The valid case
+/// proves the recorded `number` hover re-derives `number`; the mutation proves a
+/// `string` `oracle_value` over an unchanged `number` hover FAILS.
+#[test]
+fn raw_capture_matches_oracle_value_catches_hand_edited_oracle_value() {
+    let spec = sample_spec("util.rs", "foo_resolves", 0);
+    // synthetic_snapshot records hover `number` and oracle_value `number`.
+    let decoded = decode_strict(&synthetic_snapshot(&spec)).expect("valid snapshot");
+    raw_capture_matches_oracle_value(&decoded, ProjectionModeKind::Shallow)
+        .expect("recorded hover re-derives the stored oracle_value");
+
+    // Hand-edit ONLY oracle_value → string, leaving raw_capture.hover_contents
+    // (still `number`) intact. The snapshot stays strictly decodable.
+    let mut tampered_json = synthetic_snapshot(&spec);
+    tampered_json["oracle_value"] = TypeExpr::Primitive(PrimitiveName::String).to_json_value();
+    let tampered = decode_strict(&tampered_json).expect("string oracle_value still decodes");
+    assert!(
+        matches!(
+            raw_capture_matches_oracle_value(&tampered, ProjectionModeKind::Shallow),
+            Err(DriverError::RawCaptureValueMismatch { .. })
+        ),
+        "a hand-edited oracle_value over an unchanged `number` hover must fail the \
+         raw-capture fidelity guard",
+    );
+
+    // Symmetric direction: tamper the recorded HOVER (→ string) while leaving
+    // oracle_value (`number`) intact — the re-derived value diverges too.
+    let mut tampered_hover = synthetic_snapshot(&spec);
+    tampered_hover["raw_capture"]["hover_contents"] =
+        json!("```typescript\ntype __oracle_probe__0 = string;\n```");
+    let tampered_hover = decode_strict(&tampered_hover).expect("decodes");
+    assert!(matches!(
+        raw_capture_matches_oracle_value(&tampered_hover, ProjectionModeKind::Shallow),
+        Err(DriverError::RawCaptureValueMismatch { .. })
+    ));
+}
+
+// -- source_admission_digest_consistent (F1) -------------------------------
+
+/// The consume-time source-digest fidelity guard re-derives
+/// `source_admission_digest` from the CURRENT registry source bytes through the
+/// shared source-side walk and rejects a hand-edited digest. The valid case
+/// proves the re-derivation produces the real single `Foo` contributor; the
+/// mutations prove a tampered verdict / content hash FAILS — neither
+/// `decode_strict` nor `compare_oracle_value` re-parses the digest, so this is
+/// the F1 closure for the source-admission rail.
+#[test]
+fn source_admission_digest_consistent_catches_digest_drift() {
+    let spec = sample_spec("util.rs", "foo_resolves", 0);
+    // sample_spec's fixture is `export type Foo = { id: number };`.
+    let digest = source_digest::rederive_source_digest(&spec)
+        .expect("Foo resolves to a single source contributor");
+
+    // The re-derivation produced real, meaningful content (not a vacuous empty
+    // digest) — so the consistency compare below is discriminating.
+    assert_eq!(
+        digest["contributors"].as_array().map(Vec::len),
+        Some(1),
+        "Foo is a single-contributor type alias"
+    );
+    assert_eq!(digest["contributors"][0]["name"], json!("Foo"));
+    assert_eq!(digest["contributors"][0]["decl_kind"], json!("TypeAlias"));
+    assert_eq!(digest["contributors"][0]["verdict"], json!("Admit"));
+    assert_eq!(digest["source_locator"]["reference_name"], json!("Foo"));
+    assert_eq!(digest["source_locator"]["symbol_space"], json!("Type"));
+
+    // The TRUE digest is consistent with the live re-derivation.
+    source_admission_digest_consistent(&spec, &digest)
+        .expect("the true re-derived digest is consistent");
+
+    // A hand-edited contributor verdict fails.
+    let mut bad_verdict = digest.clone();
+    bad_verdict["contributors"][0]["verdict"] = json!("Reject");
+    assert!(
+        matches!(
+            source_admission_digest_consistent(&spec, &bad_verdict),
+            Err(DriverError::SourceDigestMismatch { .. })
+        ),
+        "a hand-edited contributor verdict must fail the source-digest guard",
+    );
+
+    // A hand-edited observed-source content hash fails.
+    let mut bad_hash = digest.clone();
+    bad_hash["observed_source_files"][0]["content_hash"] = json!("sha256:deadbeef");
+    assert!(matches!(
+        source_admission_digest_consistent(&spec, &bad_hash),
+        Err(DriverError::SourceDigestMismatch { .. })
+    ));
+
+    // A hand-edited lowered body (the silently-erased-construct rail) fails.
+    let mut bad_body = digest.clone();
+    bad_body["contributors"][0]["lowered_body"] =
+        TypeExpr::Primitive(PrimitiveName::String).to_json_value();
+    assert!(matches!(
+        source_admission_digest_consistent(&spec, &bad_body),
+        Err(DriverError::SourceDigestMismatch { .. })
+    ));
 }
 
 #[test]

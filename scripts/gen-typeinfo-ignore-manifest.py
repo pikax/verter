@@ -1908,6 +1908,7 @@ def emit_ignored_rows(rows: list[dict]) -> str:
             f"semantic_queries: &[{keys}], "
             f"proof: {r['proof']}, "
             f"status: {r['status']}, "
+            f"oracle_query_ordinals: {r['oracle_query_ordinals']}, "
             f"mechanism_id: MechanismId::{r['mech']}, "
             f"consumed_mechanisms: &[{mechs}], "
             f'unblocker: "{r["unblocker"]}" }},'
@@ -2140,6 +2141,14 @@ def main(check_only: bool = False) -> int:
             unblocker = escape_rust_string_literal(discovered[(file_, fn_name)])
             row_keys = keys_for_row(mech)
             row_consumed = consumed_mechs_for_block(block_var)
+        # §Q4: the number of oracle queries the row declares. A LIFTED row issues
+        # exactly its registry-entry count; the registry seats one `QuerySpec`
+        # per lifted row (each constructor call produces one spec), so the count
+        # is 1 today. A non-lifted row issues none. The Rust guard
+        # `registry_entry_count_matches_declared` cross-checks this against the
+        # ACTUAL `ORACLE_QUERY_SPECS` count + the retained migration metadata, so a
+        # future multi-query lift that left this stale would FAIL loudly there.
+        oracle_query_ordinals = 1 if override else 0
         rows.append(
             {
                 "file": file_,
@@ -2154,6 +2163,7 @@ def main(check_only: bool = False) -> int:
                 "mech": mech,
                 "consumed": row_consumed,
                 "status": status,
+                "oracle_query_ordinals": oracle_query_ordinals,
                 "unblocker": unblocker,
             }
         )

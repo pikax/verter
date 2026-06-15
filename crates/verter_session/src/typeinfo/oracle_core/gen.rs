@@ -35,26 +35,13 @@
 //! by `gen_tests::oracle_gen_is_idempotent`.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Duration;
 
-use oxc_allocator::Allocator;
-use oxc_ast::ast::Statement;
-use oxc_parser::Parser;
-use oxc_span::{GetSpan, SourceType};
 use serde_json::{json, Value};
-use verter_compiler::utils::oxc::vue::raw_surface::{
-    RawDeclKind, RawKey, RawMemberKind, RawSourceSurface, SymbolSpace as RawSymbolSpace,
-    TupleElementShape,
-};
 use verter_type_runtime::tsgo::ipc::{find_tsgo_binary, TsgoTypeProvider};
 use verter_type_runtime::{path_to_file_uri_string, TypeProvider};
 
-use crate::resolver_core::{CanonicalCompletionOverlay, HostResolverContext};
-use crate::types::{FileKind, HostConfig, UpsertRequest};
-use crate::VerterHost;
-
-use super::admission::{self, AdmissionVerdict, SourceContributor, SourceWalkResult};
+use super::admission::{self, AdmissionVerdict, SourceWalkResult};
 use super::hover_extract;
 use super::identity::{
     self, HostProject, HostSetupKind, OracleValueKind, PinnedEnv, ProbeRhsKind, QueryHelperKind,
@@ -63,11 +50,15 @@ use super::identity::{
 use super::normalize::{self, ProjectionModeKind};
 use super::probe;
 use super::query_specs::{
-    HostSetupKindSpec, ProbeRhsSpec, ProjectionModeSpec, QueryHelperSpec, QuerySpec, SymbolSpace,
-    COMPILER_OPTIONS_HASH, CURRENT_ENV_CORPUS_ID, ORACLE_QUERY_SPECS,
+    HostSetupKindSpec, LiftMigrationProvenance, ProbeRhsSpec, ProjectionModeSpec, QueryHelperSpec,
+    QuerySpec, COMPILER_OPTIONS_HASH, CURRENT_ENV_CORPUS_ID, LIFTED_ROW_MIGRATIONS,
+    ORACLE_QUERY_SPECS,
 };
 use super::snapshot::{self, ProbeLocator};
-use super::source_walk::{resolve_source_declarations, SourceLocator};
+use super::source_digest::{
+    build_source_digest, build_source_host, source_side_walk, workspace_file_source,
+    SourceDigestError,
+};
 
 /// The snapshot-tree infix from `CARGO_MANIFEST_DIR` (= `crates/verter_session/`).
 /// MIRRORS the consumption driver's `SNAPSHOT_TREE_INFIX` (which the
@@ -134,6 +125,20 @@ pub enum GenError {
     PreflightUnclean(String),
 }
 
+/// The shared `source_admission_digest` derivation lives in `source_digest`; its
+/// failures map onto the generator's loud, never-silent `GenError` surface.
+impl From<SourceDigestError> for GenError {
+    fn from(e: SourceDigestError) -> Self {
+        match e {
+            SourceDigestError::WalkNotResolved(detail) => GenError::Rejected(format!(
+                "source-side walk did not resolve to a contributor vector: {detail}"
+            )),
+            SourceDigestError::MissingFile(path) => GenError::MissingPrimaryFile(path),
+            SourceDigestError::DeclSpanNotFound(name) => GenError::DeclSpanNotFound(name),
+        }
+    }
+}
+
 /// The generation config: where the vendored corpus lives, where snapshots are
 /// written, and the pinned env that enters every `snapshot_id`.
 pub(crate) struct GenConfig {
@@ -194,6 +199,109 @@ pub fn run_oracle_gen() -> Result<usize, GenError> {
         written += 1;
     }
     Ok(written)
+}
+
+/// Deterministic, TSGO-FREE v2→v3 snapshot upgrade (§Q4). The v3 schema change
+/// ADDS only the tsgo-free migration-fidelity mirror
+/// (`migration_fingerprint_version` + `migration_fingerprint`) and bumps
+/// `oracle_schema_version` 2→3; the tsgo-derived content (oracle_value /
+/// raw_capture / source_admission_digest / oracle_env_*) is UNCHANGED, so each
+/// snapshot is upgraded by injecting the row's retained
+/// `LIFTED_ROW_MIGRATIONS` fingerprint, bumping the version, recomputing the
+/// (now-changed) `snapshot_id`, writing the new file, and removing the stale one.
+/// Re-running is byte-idempotent: an already-v3 snapshot recomputes the SAME id
+/// (so it overwrites itself, never deleting the file it just wrote). Returns
+/// `(written, deleted)`. NEVER drives tsgo.
+pub fn upgrade_snapshots_to_v3() -> Result<(usize, usize), GenError> {
+    let config = GenConfig::checked_in();
+    let root = &config.snapshot_root;
+
+    // Collect every current snapshot path FIRST, so the newly-written v3 files are
+    // not re-processed mid-walk.
+    let mut files: Vec<PathBuf> = Vec::new();
+    for fam in std::fs::read_dir(root).map_err(|e| GenError::Io(e.to_string()))? {
+        let fam_dir = fam.map_err(|e| GenError::Io(e.to_string()))?.path();
+        if !fam_dir.is_dir() {
+            continue;
+        }
+        for entry in std::fs::read_dir(&fam_dir).map_err(|e| GenError::Io(e.to_string()))? {
+            let p = entry.map_err(|e| GenError::Io(e.to_string()))?.path();
+            if p.extension().and_then(|e| e.to_str()) == Some("json") {
+                files.push(p);
+            }
+        }
+    }
+    files.sort();
+
+    let mut written = 0usize;
+    let mut deleted = 0usize;
+    for path in files {
+        let bytes = std::fs::read(&path).map_err(|e| GenError::Io(e.to_string()))?;
+        let mut json: Value = serde_json::from_slice(&bytes)
+            .map_err(|e| GenError::Io(format!("{}: {e}", path.display())))?;
+
+        let row_file = json["row_ref"]["row_file"]
+            .as_str()
+            .ok_or_else(|| GenError::Io(format!("{}: missing row_ref.row_file", path.display())))?
+            .to_string();
+        let row_function = json["row_ref"]["row_function"]
+            .as_str()
+            .ok_or_else(|| {
+                GenError::Io(format!("{}: missing row_ref.row_function", path.display()))
+            })?
+            .to_string();
+        let family = json["oracle_family"]
+            .as_str()
+            .ok_or_else(|| GenError::Io(format!("{}: missing oracle_family", path.display())))?
+            .to_string();
+        let migration = LIFTED_ROW_MIGRATIONS
+            .iter()
+            .find(|m| m.row_file == row_file && m.row_function == row_function)
+            .ok_or_else(|| {
+                GenError::Rejected(format!(
+                    "{row_file}::{row_function}: no retained migration provenance for the snapshot's row"
+                ))
+            })?;
+
+        {
+            let obj = json
+                .as_object_mut()
+                .ok_or_else(|| GenError::Io(format!("{}: not a JSON object", path.display())))?;
+            obj.insert(
+                "oracle_schema_version".to_string(),
+                json!(identity::ORACLE_SCHEMA_VERSION),
+            );
+            obj.insert(
+                "migration_fingerprint_version".to_string(),
+                json!(migration.migration_fingerprint_version),
+            );
+            obj.insert(
+                "migration_fingerprint".to_string(),
+                json!(migration.migration_fingerprint),
+            );
+        }
+
+        // Recompute the snapshot_id from the now-v3 envelope (the schema-version
+        // bump flows into the id through `PinnedEnv`). decode_strict doubles as a
+        // sanity gate that the upgraded envelope is well-formed.
+        let snapshot =
+            snapshot::decode_strict(&json).map_err(|e| GenError::Rejected(format!("{e:?}")))?;
+        let new_id = snapshot::redrive_snapshot_id(&snapshot)
+            .map_err(|e| GenError::Rejected(format!("{e:?}")))?;
+        json.as_object_mut()
+            .unwrap()
+            .insert("snapshot_id".to_string(), json!(new_id));
+
+        let new_path = root.join(&family).join(format!("{new_id}.json"));
+        let text = normalize::canonical_json_string(&json);
+        std::fs::write(&new_path, text).map_err(|e| GenError::Io(e.to_string()))?;
+        written += 1;
+        if new_path != path {
+            std::fs::remove_file(&path).map_err(|e| GenError::Io(e.to_string()))?;
+            deleted += 1;
+        }
+    }
+    Ok((written, deleted))
 }
 
 /// Write `document` to `oracle_snapshots/<family>/<snapshot_id>.json` under the
@@ -282,6 +390,7 @@ pub(crate) async fn generate_snapshot(
     });
     let source_admission_digest = build_source_digest(spec, contributors)?;
     let (oracle_env_files, oracle_env_hash) = build_env_files(config)?;
+    let migration = lookup_migration(spec)?;
 
     let document = snapshot::assemble_snapshot_document(
         spec.oracle_family,
@@ -293,8 +402,25 @@ pub(crate) async fn generate_snapshot(
         &oracle_env_files,
         &oracle_env_hash,
         &source_admission_digest,
+        migration.migration_fingerprint_version,
+        migration.migration_fingerprint,
     );
     Ok(document)
+}
+
+/// The retained migration provenance for a lifted row (§Q4). A lifted row MUST
+/// carry retained provenance — a missing entry is a loud generation failure, not
+/// a silently-omitted snapshot mirror.
+fn lookup_migration(spec: &QuerySpec) -> Result<&'static LiftMigrationProvenance, GenError> {
+    LIFTED_ROW_MIGRATIONS
+        .iter()
+        .find(|m| m.row_file == spec.row_file && m.row_function == spec.row_function)
+        .ok_or_else(|| {
+            GenError::Rejected(format!(
+                "{}::{}: no retained LIFTED_ROW_MIGRATIONS provenance for the lifted row",
+                spec.row_file, spec.row_function
+            ))
+        })
 }
 
 /// The synthesized probe: the cloned primary-file source with the versioned probe
@@ -375,15 +501,6 @@ fn synthesize_probe(spec: &QuerySpec) -> Result<Synthesized, GenError> {
 /// relative path (`fixtures/foo.ts`) — the spelling tsgo's file-system root sees.
 fn sandbox_relative(canonical: &str) -> &str {
     canonical.strip_prefix('/').unwrap_or(canonical)
-}
-
-/// The upserted source bytes the spec's registry entry carries for `canonical`
-/// (the registry is the source-byte authority).
-fn workspace_file_source<'a>(spec: &'a QuerySpec, canonical: &str) -> Option<&'a str> {
-    spec.workspace_files
-        .iter()
-        .find(|f| f.path == canonical)
-        .map(|f| f.source)
 }
 
 /// Drive tsgo's `textDocument/hover` over a hermetic sandbox seeded from the
@@ -543,27 +660,6 @@ fn cross_check_probe_strategy(
     }
 }
 
-/// Build a standalone `VerterHost` from the spec's workspace files and walk the
-/// queried symbol's source-side declaration graph through the shared resolver
-/// (`resolve_source_declarations`). This is the SAME construction the consumption
-/// path uses; it adds NO tsgo and NO query-time resolution beyond the shared
-/// resolver. Only the `standalone` host kind is first-class (§Scope).
-fn source_side_walk(spec: &QuerySpec) -> SourceWalkResult {
-    let host = build_source_host(spec);
-    // Build-time oracle generator: build a quiescent owned view over the
-    // freshly-constructed standalone host. The raw-view escape hatch is
-    // allowlisted for this build-tool driver-snapshot rail.
-    let store_view = host.resolver_store_view_read().into_owned_view();
-    let overlay = Arc::new(CanonicalCompletionOverlay::new());
-    let ctx = HostResolverContext::new(&host, &store_view, overlay);
-    let locator = SourceLocator {
-        reference_canonical: spec.source_locator.reference_canonical.to_string(),
-        reference_name: spec.source_locator.reference_name.to_string(),
-        symbol_space: to_walk_space(spec.source_locator.symbol_space),
-    };
-    resolve_source_declarations(&ctx, &locator)
-}
-
 /// The reducer PREFLIGHT (`docs/arch/u0-oracle-harness-design.md` §Q2 —
 /// "reducer-preflight before writing carve-out snapshots"). Before a snapshot is
 /// assembled, run the SPEC'S query through Verter's ONE shared resolver in the
@@ -638,236 +734,6 @@ fn resolver_mode_of(mode: ProjectionModeSpec) -> crate::semantic_query::Projecti
         ProjectionModeSpec::Navigate => ProjectionMode::Navigate,
         ProjectionModeSpec::Expanded => ProjectionMode::Expanded,
         ProjectionModeSpec::Skeleton => ProjectionMode::Skeleton,
-    }
-}
-
-/// Map the registry's `SymbolSpace` onto the resolver's raw-surface `SymbolSpace`
-/// (the `SourceLocator` axis). Two distinct enums, one meaning.
-fn to_walk_space(space: SymbolSpace) -> RawSymbolSpace {
-    match space {
-        SymbolSpace::Type => RawSymbolSpace::Type,
-        SymbolSpace::Value => RawSymbolSpace::Value,
-    }
-}
-
-/// Construct the standalone footprint host for the source-side walk and upsert
-/// every workspace file (the `make_host_with_footprint` shape — the only
-/// admissible host class currently). `workspace_footprint` /
-/// package-backed kinds are deferred (§Scope); a spec carrying one still
-/// constructs a host so the walk runs, but the snapshot's `host_setup_kind`
-/// (set in [`build_identity`]) will fail `standalone_host_is_default_canonical_config`.
-fn build_source_host(spec: &QuerySpec) -> Arc<VerterHost> {
-    let host = Arc::new(VerterHost::new_standalone(HostConfig {
-        audit_enabled: true,
-        footprint_capture: true,
-        ..HostConfig::default()
-    }));
-    for f in spec.workspace_files {
-        let _ = host.upsert(UpsertRequest {
-            canonical_id: Some(f.path.to_string()),
-            input_id: f.path.to_string(),
-            source: Arc::from(f.source),
-            file_kind: FileKind::from_path(f.path),
-            aliases: Vec::new(),
-        });
-    }
-    host
-}
-
-/// Assemble the `source_admission_digest` (§Q1) from the resolved contributor(s).
-/// For the admitted single-contributor class the digest carries exactly one
-/// contributor entry; its `decl_span` is recovered by re-parsing the primary
-/// fixture source (a deterministic, offline-reproducible generation step), and
-/// its `raw_surface` is rendered canonically from the parse-time raw-fact record.
-fn build_source_digest(
-    spec: &QuerySpec,
-    contributors: &[SourceContributor],
-) -> Result<Value, GenError> {
-    let locator = &spec.source_locator;
-    let space_tag = symbol_space_tag(locator.symbol_space);
-
-    // The observed source-declaration files: each recorded contributor's defining
-    // file, with the content hash of the registry source bytes for that path.
-    let mut observed: Vec<(String, String)> = Vec::new();
-    let mut entries: Vec<Value> = Vec::new();
-    for c in contributors {
-        // The defining file. `RawSourceSurface.decl_canonical` is stamped by the
-        // file-aware storage layer and may be empty on this read path; for the
-        // admitted PROVABLY-SINGLE-CONTRIBUTOR class (no import / re-export hop)
-        // the defining file IS the locator's reference file (§Scope), so fall
-        // back to it when the stamp is absent.
-        let decl_canonical = if c.raw_surface.decl_canonical.is_empty() {
-            locator.reference_canonical.to_string()
-        } else {
-            c.raw_surface.decl_canonical.clone()
-        };
-        let source = workspace_file_source(spec, &decl_canonical)
-            .ok_or_else(|| GenError::MissingPrimaryFile(decl_canonical.clone()))?;
-        let (start, end) = find_decl_span(source, locator.reference_name, locator.symbol_space)
-            .ok_or_else(|| GenError::DeclSpanNotFound(locator.reference_name.to_string()))?;
-        let content_hash = identity::content_hash(source);
-        if !observed.iter().any(|(p, _)| p == &decl_canonical) {
-            observed.push((decl_canonical.clone(), content_hash.clone()));
-        }
-        entries.push(json!({
-            "contributor_ordinal": c.ordinal,
-            "decl_span": { "file": decl_canonical, "start": start, "end": end },
-            "decl_canonical": decl_canonical,
-            "name": locator.reference_name,
-            "symbol_space": space_tag,
-            "decl_kind": raw_decl_kind_tag(c.raw_surface.decl_kind),
-            "raw_surface": raw_surface_to_json(&c.raw_surface),
-            "lowered_body": c.lowered_body.to_json_value(),
-            "verdict": "Admit",
-        }));
-    }
-
-    let observed_source_files: Vec<Value> = observed
-        .iter()
-        .map(|(path, hash)| json!({ "path": path, "content_hash": hash }))
-        .collect();
-
-    Ok(json!({
-        "source_locator": {
-            "reference_canonical": locator.reference_canonical,
-            "reference_name": locator.reference_name,
-            "symbol_space": space_tag,
-        },
-        "observed_source_files": observed_source_files,
-        "contributors": entries,
-        "final_verdict": "Admit",
-    }))
-}
-
-/// Locate the `(start, end)` span of the top-level declaration named `name` in
-/// `source` by re-parsing it with OXC. A deterministic, offline-reproducible
-/// generation step (the `source_admission_digest_consistent` guard re-derives the
-/// same span from current source). Type-space binds a type alias / interface /
-/// enum / class; value-space binds a `const`/`let`/`var`, function, or class.
-fn find_decl_span(source: &str, name: &str, space: SymbolSpace) -> Option<(u32, u32)> {
-    use oxc_ast::ast::Declaration;
-    let allocator = Allocator::default();
-    let ret = Parser::new(&allocator, source, SourceType::ts()).parse();
-    if ret.panicked {
-        return None;
-    }
-    for stmt in &ret.program.body {
-        // A top-level declaration is either a bare declaration statement or one
-        // wrapped in `export { ... }` / `export default`. Unwrap both.
-        let decl: Option<&Declaration> = match stmt {
-            Statement::ExportNamedDeclaration(e) => e.declaration.as_ref(),
-            other => other.as_declaration(),
-        };
-        let Some(decl) = decl else { continue };
-        let hit = match (space, decl) {
-            (SymbolSpace::Type, Declaration::TSTypeAliasDeclaration(d)) => d.id.name == name,
-            (SymbolSpace::Type, Declaration::TSInterfaceDeclaration(d)) => d.id.name == name,
-            (SymbolSpace::Type, Declaration::TSEnumDeclaration(d)) => d.id.name == name,
-            (_, Declaration::ClassDeclaration(d)) => {
-                d.id.as_ref().map(|i| i.name == name).unwrap_or(false)
-            }
-            (SymbolSpace::Value, Declaration::FunctionDeclaration(d)) => {
-                d.id.as_ref().map(|i| i.name == name).unwrap_or(false)
-            }
-            (SymbolSpace::Value, Declaration::VariableDeclaration(d)) => {
-                d.declarations.iter().any(|v| {
-                    v.id.get_binding_identifier()
-                        .map(|i| i.name == name)
-                        .unwrap_or(false)
-                })
-            }
-            _ => false,
-        };
-        if hit {
-            let span = decl.span();
-            return Some((span.start, span.end));
-        }
-    }
-    None
-}
-
-/// Render a `RawSourceSurface` to its canonical JSON (§Q1 example) — the
-/// parse-time raw-fact record the digest stores. `RawSourceSurface` carries no
-/// `Serialize`, so each field is rendered explicitly; the offline
-/// `source_admission_digest_consistent` guard (first-lift) re-derives the SAME
-/// shape from current source.
-fn raw_surface_to_json(raw: &RawSourceSurface) -> Value {
-    json!({
-        "raw_member_keys": raw.raw_member_keys.iter().map(raw_key_tag).collect::<Vec<_>>(),
-        "member_kinds": raw.member_kinds.iter().map(|k| raw_member_kind_tag(*k)).collect::<Vec<_>>(),
-        "member_visibility": raw
-            .member_visibility
-            .iter()
-            .map(|v| member_visibility_tag(*v))
-            .collect::<Vec<_>>(),
-        "unique_symbol_ops": vec![Value::Null; raw.unique_symbol_ops.len()]
-            .iter()
-            .map(|_| json!("UniqueSymbol"))
-            .collect::<Vec<_>>(),
-        "abstract_ctor": raw.abstract_ctor,
-        "type_param_modifiers": raw
-            .type_param_modifiers
-            .iter()
-            .map(|m| json!({
-                "is_const": m.is_const,
-                "variance_in": m.variance_in,
-                "variance_out": m.variance_out,
-            }))
-            .collect::<Vec<_>>(),
-        "this_type_or_param": raw.this_type_or_param,
-        "value_const_assertion": raw.value_const_assertion,
-        "overload_signatures": vec![Value::Null; raw.overload_signatures.len()]
-            .iter()
-            .map(|_| json!("OverloadSignature"))
-            .collect::<Vec<_>>(),
-        "tuple_element_shape": raw
-            .tuple_element_shape
-            .iter()
-            .map(|t| tuple_element_shape_tag(*t))
-            .collect::<Vec<_>>(),
-        "utility_referent_names": raw.utility_referent_names.clone(),
-        "transitive_referents": raw
-            .transitive_referents
-            .iter()
-            .map(|r| json!({ "reference_name": r.reference_name }))
-            .collect::<Vec<_>>(),
-    })
-}
-
-fn raw_key_tag(key: &RawKey) -> Value {
-    match key {
-        RawKey::Static(s) => json!(format!("Static({s})")),
-        other => json!(format!("{other:?}")),
-    }
-}
-
-fn raw_member_kind_tag(kind: RawMemberKind) -> Value {
-    json!(format!("{kind:?}"))
-}
-
-fn member_visibility_tag(v: verter_type_expr::MemberVisibility) -> Value {
-    json!(format!("{v:?}"))
-}
-
-fn tuple_element_shape_tag(t: TupleElementShape) -> Value {
-    json!(format!("{t:?}"))
-}
-
-fn raw_decl_kind_tag(kind: RawDeclKind) -> &'static str {
-    match kind {
-        RawDeclKind::TypeAlias => "TypeAlias",
-        RawDeclKind::Interface => "Interface",
-        RawDeclKind::Enum => "Enum",
-        RawDeclKind::Class => "Class",
-        RawDeclKind::Function => "Function",
-        RawDeclKind::Variable => "Variable",
-    }
-}
-
-fn symbol_space_tag(space: SymbolSpace) -> &'static str {
-    match space {
-        SymbolSpace::Type => "Type",
-        SymbolSpace::Value => "Value",
     }
 }
 

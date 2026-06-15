@@ -100,6 +100,13 @@ pub(crate) struct OracleSnapshot {
     pub(crate) oracle_family: String,
     pub(crate) oracle_value_kind: String,
     pub(crate) snapshot_id: String,
+    /// The migration-fidelity mirror (v3, §Q4): the row's retained
+    /// `migration_fingerprint` (+ algorithm version) computed at lift time from
+    /// the ORIGINAL pre-`#[oracle_row]` body. NOT a `snapshot_id` input — bound
+    /// to the retained-lift metadata by
+    /// `snapshot_migration_fingerprint_matches_retained_lift_metadata`.
+    pub(crate) migration_fingerprint_version: u32,
+    pub(crate) migration_fingerprint: String,
     pub(crate) row_ref: RowRef,
     pub(crate) identity: Value,
     pub(crate) oracle_value: Value,
@@ -453,6 +460,8 @@ pub(crate) fn assemble_snapshot_document(
     oracle_env_files: &Value,
     oracle_env_hash: &str,
     source_admission_digest: &Value,
+    migration_fingerprint_version: u32,
+    migration_fingerprint: &str,
 ) -> Value {
     let snapshot_id = derive_snapshot_id(identity, env);
     json!({
@@ -467,6 +476,8 @@ pub(crate) fn assemble_snapshot_document(
         "oracle_family": oracle_family,
         "oracle_value_kind": identity.oracle_value_kind.tag(),
         "snapshot_id": snapshot_id,
+        "migration_fingerprint_version": migration_fingerprint_version,
+        "migration_fingerprint": migration_fingerprint,
         "row_ref": {
             "row_file": identity.row_file,
             "row_function": identity.row_function,

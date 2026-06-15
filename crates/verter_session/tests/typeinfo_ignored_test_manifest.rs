@@ -531,7 +531,7 @@ enum ProofRequirement {
 }
 
 /// One manifest row per typeinfo test-site — EXACTLY 362 rows total
-/// (318 `Ignored` + 44 `Lifted`). 13 fields.
+/// (318 `Ignored` + 44 `Lifted`). 14 fields.
 #[derive(Clone, Copy, Debug)]
 #[allow(dead_code)]
 struct IgnoredTestRow {
@@ -545,6 +545,11 @@ struct IgnoredTestRow {
     semantic_queries: &'static [SemanticQueryName],
     proof: ProofRequirement,
     status: IgnoreStatus,
+    /// The number of oracle queries this row declares it issues (§Q4): the
+    /// row's registry-entry count for a `Lifted` row, `0` for every other row.
+    /// Cross-checked against `ORACLE_QUERY_SPECS` + the retained migration
+    /// metadata by `registry_entry_count_matches_declared`.
+    oracle_query_ordinals: u16,
     mechanism_id: MechanismId,
     consumed_mechanisms: &'static [MechanismId],
     unblocker: &'static str,
@@ -2119,6 +2124,13 @@ mod oracle_registry {
     include!("../src/typeinfo/typeinfo_tests/oracle_query_specs.rs");
 }
 
+// The closed `syn` migration-fidelity extractor + canonical fingerprint (§Q4):
+// the SOLE migration-fidelity authority the registry payload is validated
+// against (`registry_payload_matches_migration_fingerprint`). It lives in a
+// subdirectory so cargo does not treat it as its own integration-test binary.
+#[path = "manifest_data/oracle_migration_extract.rs"]
+mod oracle_migration_extract;
+
 /// The block that owns (produces) each block's dominant mechanism — read off
 /// `TYPEINFO_PARITY_BLOCKS` so the block→mechanism direction stays single-source
 /// with `mechanism_owning_block` (its inverse).
@@ -2809,25 +2821,958 @@ fn registry_entries_bind_to_their_snapshots_and_lifted_rows() {
         "registry_entries_bind_to_their_snapshots_and_lifted_rows: the registry, its \
          snapshots, and the manifest's Lifted set must agree row-for-row and \
          symbol-for-symbol. NOTE: this binds the registry's DECLARED symbol to the \
-         snapshot's RECORDED symbol; binding the registry payload to the ORIGINAL \
-         pre-lift test BODY (the full migration-fidelity authority) is the deferred \
-         `registry_payload_matches_migration_fingerprint` guard \
-         (u0-oracle-harness-design.md §Q4 — needs the not-yet-added \
-         `migration_fingerprint` / `original_body_tokens` fidelity fields on the \
-         retained-lift metadata `LIFTED_ROW_OVERRIDES`). Divergences:\n  {}",
+         snapshot's RECORDED symbol; the FULL migration-fidelity authority — binding \
+         the registry payload to the ORIGINAL pre-lift test body's QUERY IDENTITY — \
+         is the `registry_payload_matches_migration_fingerprint` guard below \
+         (u0-oracle-harness-design.md §Q4), which catches a fully self-consistent \
+         wrong (spec ∧ snapshot) pair this symbol-binding guard alone cannot. \
+         Divergences:\n  {}",
         failures.join("\n  "),
     );
+}
 
-    // TODO(follow-up): the deeper original-body fidelity guard
-    // (`registry_payload_matches_migration_fingerprint`, u0-oracle-harness-design.md §Q4)
-    // binds each registry entry's full fidelity tuple to the canonical-JSON
-    // `migration_fingerprint` captured over the ORIGINAL hand-authored test body
-    // BEFORE the `#[oracle_row]` replacement — catching a fully self-consistent
-    // wrong (spec ∧ snapshot) pair this symbol-binding guard cannot. The row's
-    // query mode is already proven live (`lifted_row_audit_query_mode_matches_spec`);
-    // the missing capability is the cryptographic `migration_fingerprint` +
-    // `original_body_tokens` body-hash artifact (a `syn`-AST lift-time extractor
-    // that auto-derives the fidelity tuple from the original body).
+// ===========================================================================
+// Migration-fidelity: bind each lifted row's REGISTRY PAYLOAD to the retained
+// `migration_fingerprint` extracted from its ORIGINAL pre-`#[oracle_row]` body
+// (§Q4). The closed `syn` extractor (`oracle_migration_extract`) is the SOLE
+// authority; the registry payload is validated AGAINST it.
+// ===========================================================================
+
+use oracle_migration_extract::{
+    content_hash as migration_content_hash, extract_fidelity, fidelity_from_registry,
+    fingerprint as migration_fingerprint, ProofShape, QueryFidelity, SourceLocatorFidelity,
+    WorkspaceFileFidelity, MIGRATION_FINGERPRINT_VERSION,
+};
+
+/// Project ONE registry `QuerySpec` onto the registry-comparable `QueryFidelity`
+/// (the same axes the body extractor recovers, INCLUDING the typed `source_locator`).
+fn registry_query_fidelity(spec: &oracle_registry::QuerySpec) -> QueryFidelity {
+    use oracle_registry::{
+        HostSetupKindSpec as Hk, ProjectionModeSpec as M, QueryHelperSpec as H, SymbolSpace as Sp,
+    };
+    let mode_tag = |m: M| {
+        match m {
+            M::Shallow => "Shallow",
+            M::Navigate => "Navigate",
+            M::Expanded => "Expanded",
+            M::Skeleton => "Skeleton",
+        }
+        .to_string()
+    };
+    let (helper_kind, symbol, type_arg_strs, mode): (&str, String, &[&str], String) =
+        match &spec.query_helper {
+            H::ResolveExpr {
+                symbol,
+                type_args,
+                projection_mode,
+                ..
+            } => (
+                "ResolveExpr",
+                (*symbol).to_string(),
+                type_args,
+                mode_tag(*projection_mode),
+            ),
+            H::ShallowSurfaceExpr { symbol } => (
+                "ShallowSurfaceExpr",
+                (*symbol).to_string(),
+                &[],
+                "Shallow".to_string(),
+            ),
+            H::EvaluateExpr {
+                expression,
+                projection_mode,
+            } => (
+                "EvaluateExpr",
+                (*expression).to_string(),
+                &[],
+                mode_tag(*projection_mode),
+            ),
+        };
+    let type_arguments: Vec<serde_json::Value> = type_arg_strs
+        .iter()
+        .map(|s| serde_json::from_str(s).expect("registry type-arg is canonical JSON"))
+        .collect();
+    let host_setup_kind = match spec.host_project.host_setup_kind {
+        Hk::Standalone => "standalone",
+        Hk::WorkspaceFootprint => "workspace_footprint",
+        Hk::PackageBacked => "package_backed",
+    }
+    .to_string();
+    let source_locator = SourceLocatorFidelity {
+        reference_canonical: spec.source_locator.reference_canonical.to_string(),
+        reference_name: spec.source_locator.reference_name.to_string(),
+        symbol_space: match spec.source_locator.symbol_space {
+            Sp::Type => "Type",
+            Sp::Value => "Value",
+        }
+        .to_string(),
+    };
+    QueryFidelity {
+        helper_kind: helper_kind.to_string(),
+        primary_canonical: spec.primary_canonical.to_string(),
+        symbol_or_expression: symbol,
+        type_arguments,
+        projection_mode: mode,
+        host_setup_kind,
+        source_locator,
+    }
+}
+
+/// The row's workspace file set projected onto migration-fidelity coordinates: each
+/// `{path, content_hash}` over the registry's UPSERTED SOURCE BYTES (the registry
+/// is the source-byte authority), SORTED by path. All of a row's query specs share
+/// one workspace (the host is built once per row), so this is the per-row set; a
+/// row whose specs disagree on the file set is a registry defect.
+fn registry_workspace_files(row_file: &str, row_function: &str) -> Vec<WorkspaceFileFidelity> {
+    let specs: Vec<&oracle_registry::QuerySpec> = oracle_registry::ORACLE_QUERY_SPECS
+        .iter()
+        .filter(|s| s.row_file == row_file && s.row_function == row_function)
+        .collect();
+    let project = |spec: &oracle_registry::QuerySpec| -> Vec<WorkspaceFileFidelity> {
+        let mut files: Vec<WorkspaceFileFidelity> = spec
+            .workspace_files
+            .iter()
+            .map(|f| WorkspaceFileFidelity {
+                path: f.path.to_string(),
+                content_hash: migration_content_hash(f.source),
+            })
+            .collect();
+        files.sort_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()));
+        files
+    };
+    let first = specs.first().map(|s| project(s)).unwrap_or_default();
+    for s in &specs {
+        assert_eq!(
+            project(s),
+            first,
+            "{row_file}::{row_function}: query specs disagree on the workspace file set",
+        );
+    }
+    first
+}
+
+/// The proof-shape DISCRIMINANT a lifted row's manifest `proof` carries (the
+/// specific `OracleId` is NOT in the fingerprint — the body does not name it).
+fn proof_shape_of(proof: &ProofRequirement) -> ProofShape {
+    match proof {
+        ProofRequirement::Ts7Oracle(_) => ProofShape::Ts7Oracle,
+        ProofRequirement::OracleAndGuard { guard, .. } => {
+            ProofShape::OracleAndGuard(format!("{guard:?}"))
+        }
+        // A lifted TS7 row is always oracle-backed; a non-oracle proof on a lifted
+        // row is itself a manifest defect surfaced by the binding guards.
+        other => ProofShape::OracleAndGuard(format!("{other:?}")),
+    }
+}
+
+/// Build the REGISTRY-side fidelity tuple for a row: its registry entries in
+/// `query_ordinal` order, plus the manifest-declared proof shape.
+fn registry_fidelity_for_row(
+    row_file: &str,
+    row_function: &str,
+) -> oracle_migration_extract::FidelityTuple {
+    let mut specs: Vec<&oracle_registry::QuerySpec> = oracle_registry::ORACLE_QUERY_SPECS
+        .iter()
+        .filter(|s| s.row_file == row_file && s.row_function == row_function)
+        .collect();
+    specs.sort_by_key(|s| s.query_ordinal);
+    let queries: Vec<QueryFidelity> = specs.iter().map(|s| registry_query_fidelity(s)).collect();
+    let proof = EXPECTED_IGNORE_MANIFEST
+        .iter()
+        .find(|r| r.file == row_file && r.function == row_function)
+        .map(|r| proof_shape_of(&r.proof))
+        .unwrap_or(ProofShape::Ts7Oracle);
+    let workspace_files = registry_workspace_files(row_file, row_function);
+    fidelity_from_registry(row_file, row_function, queries, proof, workspace_files)
+}
+
+/// One-time AUDITED LIFT-CAPTURE generator (NOT a gate test — `#[ignore]`d).
+/// Reads the recovered + path-const-folded original bodies from a sidecar JSON
+/// (produced offline from git history), canonicalizes + extracts each through the
+/// closed `syn` extractor, CROSS-CHECKS that the body-extracted fingerprint equals
+/// the registry-projected fingerprint (so a row is captured ONLY when the registry
+/// faithfully reproduces the original query), and emits the `LIFTED_ROW_MIGRATIONS`
+/// Rust literal to a `/tmp` file. Run manually:
+///   `LIFTED_BODIES=/tmp/mom/F1F2/lifted_bodies.json \
+///    cargo test -p verter_session --test typeinfo_ignored_test_manifest \
+///    -- --ignored --nocapture emit_lifted_row_migrations`
+#[test]
+#[ignore = "audited lift-capture generator; run manually to (re)emit LIFTED_ROW_MIGRATIONS"]
+fn emit_lifted_row_migrations() {
+    let sidecar = std::env::var("LIFTED_BODIES")
+        .unwrap_or_else(|_| "/tmp/mom/F1F2/lifted_bodies.json".to_string());
+    let bytes = fs::read(&sidecar).unwrap_or_else(|e| panic!("read sidecar {sidecar}: {e}"));
+    let rows: serde_json::Value = serde_json::from_slice(&bytes).expect("sidecar JSON");
+    let rows = rows.as_array().expect("sidecar is an array");
+
+    let mut out = String::new();
+    let mut mismatches: Vec<String> = Vec::new();
+    let mut deferred: Vec<String> = Vec::new();
+    out.push_str("pub(crate) const LIFTED_ROW_MIGRATIONS: &[LiftMigrationProvenance] = &[\n");
+    for row in rows {
+        let row_file = row["row_file"].as_str().unwrap();
+        let row_function = row["row_function"].as_str().unwrap();
+        let Some(body) = row["folded_body"].as_str() else {
+            deferred.push(format!("{row_file}::{row_function} (no recovered body)"));
+            continue;
+        };
+        let canonical = match oracle_migration_extract::canonicalize_body(body) {
+            Ok(c) => c,
+            Err(e) => {
+                deferred.push(format!("{row_file}::{row_function} canonicalize: {e:?}"));
+                continue;
+            }
+        };
+        // The workspace files are CAPTURED from the lift/registry context (not the
+        // body token stream) — the same set the registry projection uses, so the
+        // body-extracted and registry-projected fingerprints agree iff the registry
+        // faithfully reproduces the original query.
+        let workspace_files = registry_workspace_files(row_file, row_function);
+        let body_fidelity =
+            match extract_fidelity(&canonical, row_file, row_function, workspace_files.clone()) {
+                Ok(f) => f,
+                Err(e) => {
+                    deferred.push(format!("{row_file}::{row_function} extract: {e:?}"));
+                    continue;
+                }
+            };
+        let body_fp = migration_fingerprint(&body_fidelity);
+        let registry_fp = migration_fingerprint(&registry_fidelity_for_row(row_file, row_function));
+        if body_fp != registry_fp {
+            mismatches.push(format!(
+                "{row_file}::{row_function}: body fp {body_fp} != registry fp {registry_fp}\n  \
+                 body={body_fidelity:?}\n  registry={:?}",
+                registry_fidelity_for_row(row_file, row_function)
+            ));
+            continue;
+        }
+        let workspace_files_literal = workspace_files
+            .iter()
+            .map(|f| format!("({:?}, {:?})", f.path, f.content_hash))
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push_str(&format!(
+            "    LiftMigrationProvenance {{\n        row_file: {row_file:?},\n        \
+             row_function: {row_function:?},\n        oracle_query_ordinals: {},\n        \
+             migration_fingerprint_version: {},\n        migration_fingerprint: {body_fp:?},\n        \
+             workspace_files: &[{workspace_files_literal}],\n        \
+             original_body_tokens: {canonical:?},\n    }},\n",
+            body_fidelity.declared_query_count, MIGRATION_FINGERPRINT_VERSION,
+        ));
+    }
+    out.push_str("];\n");
+    let dest = "/tmp/mom/F1F2/lifted_row_migrations.txt";
+    fs::write(dest, &out).unwrap();
+    eprintln!(
+        "emit_lifted_row_migrations: wrote {dest}; deferred {} row(s); {} fingerprint MISMATCH(es)",
+        deferred.len(),
+        mismatches.len()
+    );
+    for d in &deferred {
+        eprintln!("  DEFER: {d}");
+    }
+    for m in &mismatches {
+        eprintln!("  MISMATCH: {m}");
+    }
+    assert!(
+        mismatches.is_empty(),
+        "registry payload diverges from the original body for {} row(s) — see above",
+        mismatches.len()
+    );
+}
+
+/// `registry_entry_count_matches_declared` (§Q4): every lifted row's REGISTRY
+/// entry count equals the declared `oracle_query_ordinals` in its retained
+/// migration metadata AND in its manifest row, and the ordinals are unique +
+/// contiguous from 0. Catches a dropped / duplicated / extra registry query.
+#[test]
+fn registry_entry_count_matches_declared() {
+    for m in oracle_registry::LIFTED_ROW_MIGRATIONS {
+        let mut ordinals: Vec<u16> = oracle_registry::ORACLE_QUERY_SPECS
+            .iter()
+            .filter(|s| s.row_file == m.row_file && s.row_function == m.row_function)
+            .map(|s| s.query_ordinal)
+            .collect();
+        ordinals.sort_unstable();
+        assert_eq!(
+            ordinals.len() as u16,
+            m.oracle_query_ordinals,
+            "{}::{}: registry holds {} entries but the row declares {} queries",
+            m.row_file,
+            m.row_function,
+            ordinals.len(),
+            m.oracle_query_ordinals,
+        );
+        for (expected, got) in ordinals.iter().enumerate() {
+            assert_eq!(
+                *got, expected as u16,
+                "{}::{}: query ordinals must be unique + contiguous from 0, got {ordinals:?}",
+                m.row_file, m.row_function,
+            );
+        }
+        // Three-way agreement: the manifest row's declared count (the
+        // `IgnoredTestRow` side, Python-generated) matches the retained metadata.
+        let row = EXPECTED_IGNORE_MANIFEST
+            .iter()
+            .find(|r| r.file == m.row_file && r.function == m.row_function)
+            .unwrap_or_else(|| {
+                panic!(
+                    "{}::{}: lifted row with retained provenance has no manifest row",
+                    m.row_file, m.row_function
+                )
+            });
+        assert_eq!(
+            row.oracle_query_ordinals, m.oracle_query_ordinals,
+            "{}::{}: manifest row count {} != retained metadata count {}",
+            m.row_file, m.row_function, row.oracle_query_ordinals, m.oracle_query_ordinals,
+        );
+    }
+    // Every non-lifted manifest row declares ZERO oracle queries.
+    for row in EXPECTED_IGNORE_MANIFEST {
+        if !matches!(row.status, IgnoreStatus::Lifted { .. }) {
+            assert_eq!(
+                row.oracle_query_ordinals, 0,
+                "non-lifted row {}::{} must declare 0 oracle queries",
+                row.file, row.function,
+            );
+        }
+    }
+}
+
+/// `migration_fingerprint_extraction_is_static` (§Q4): the closed `syn` extractor
+/// REJECTS an unsupported / non-statically-extractable body rather than
+/// approximating a fingerprint — the soundness rail behind the auto-lift core.
+#[test]
+fn migration_fingerprint_extraction_is_static() {
+    use oracle_migration_extract::{canonicalize_body, extract_fidelity, ExtractError};
+    // A symbol computed through a call is not const-foldable → defer.
+    let computed = canonicalize_body(
+        "{ let host = make_host_with_footprint(); \
+         let (e, r) = resolve_expr(&host, \"/f.ts\", compute(), &[], ProjectionMode::Expanded); }",
+    )
+    .unwrap();
+    assert_eq!(
+        extract_fidelity(&computed, "f.rs", "g", vec![]),
+        Err(ExtractError::NonConstArg("symbol"))
+    );
+    // A body whose host construction is hidden behind a non-modeled wrapper → defer.
+    let no_host = canonicalize_body(
+        "{ let (e, r) = resolve_expr(&host, \"/f.ts\", \"X\", &[], ProjectionMode::Expanded); }",
+    )
+    .unwrap();
+    assert_eq!(
+        extract_fidelity(&no_host, "f.rs", "g", vec![]),
+        Err(ExtractError::NoHostSetup)
+    );
+    // An obligation-bearing assertion seated bare → defer (never silently mis-seated).
+    let obligation = canonicalize_body(
+        "{ let host = make_host_with_footprint(); \
+         let (e, r) = resolve_expr(&host, \"/f.ts\", \"X\", &[], ProjectionMode::Expanded); \
+         assert_dependency_footprint(&r, &[\"/f.ts\"]); }",
+    )
+    .unwrap();
+    assert!(matches!(
+        extract_fidelity(&obligation, "f.rs", "g", vec![]),
+        Err(ExtractError::UnmodeledObligation(_))
+    ));
+    // CLOSED over control flow: a query carrying a CONST arg inside a loop /
+    // closure / conditional REJECTS (not flattened to a top-level query).
+    let in_loop = canonicalize_body(
+        "{ let host = make_host_with_footprint(); \
+         for _ in 0..1 { let (e, r) = resolve_expr(&host, \"/f.ts\", \"X\", &[], ProjectionMode::Expanded); } }",
+    )
+    .unwrap();
+    assert_eq!(
+        extract_fidelity(&in_loop, "f.rs", "g", vec![]),
+        Err(ExtractError::ControlFlowAroundQuery("loop"))
+    );
+    let in_closure = canonicalize_body(
+        "{ let host = make_host_with_footprint(); \
+         let run = || { let (e, r) = resolve_expr(&host, \"/f.ts\", \"X\", &[], ProjectionMode::Expanded); }; }",
+    )
+    .unwrap();
+    assert_eq!(
+        extract_fidelity(&in_closure, "f.rs", "g", vec![]),
+        Err(ExtractError::ControlFlowAroundQuery("closure"))
+    );
+    // The closure is genuinely CLOSED: the remaining short-circuiting / deferred /
+    // early-transfer / conditional constructs reject too. The RHS of `&&` / `||`
+    // (short-circuit), `async { … }` (deferred), the `?` operator and `try { … }`
+    // (fallible early transfer), and a `let … else { … }` diverge (conditional).
+    let in_short_circuit = canonicalize_body(
+        "{ let host = make_host_with_footprint(); \
+         let _ = false && { let (e, r) = resolve_expr(&host, \"/f.ts\", \"X\", &[], ProjectionMode::Expanded); true }; }",
+    )
+    .unwrap();
+    assert_eq!(
+        extract_fidelity(&in_short_circuit, "f.rs", "g", vec![]),
+        Err(ExtractError::ControlFlowAroundQuery("short-circuit"))
+    );
+    let in_async = canonicalize_body(
+        "{ let host = make_host_with_footprint(); \
+         let _f = async { let (e, r) = resolve_expr(&host, \"/f.ts\", \"X\", &[], ProjectionMode::Expanded); }; }",
+    )
+    .unwrap();
+    assert_eq!(
+        extract_fidelity(&in_async, "f.rs", "g", vec![]),
+        Err(ExtractError::ControlFlowAroundQuery("async"))
+    );
+    let in_try = canonicalize_body(
+        "{ let host = make_host_with_footprint(); \
+         let _ = resolve_expr(&host, \"/f.ts\", \"X\", &[], ProjectionMode::Expanded)?; }",
+    )
+    .unwrap();
+    assert_eq!(
+        extract_fidelity(&in_try, "f.rs", "g", vec![]),
+        Err(ExtractError::ControlFlowAroundQuery("try"))
+    );
+    let in_try_block = canonicalize_body(
+        "{ let host = make_host_with_footprint(); \
+         let _ = try { let (e, r) = resolve_expr(&host, \"/f.ts\", \"X\", &[], ProjectionMode::Expanded); }; }",
+    )
+    .unwrap();
+    assert_eq!(
+        extract_fidelity(&in_try_block, "f.rs", "g", vec![]),
+        Err(ExtractError::ControlFlowAroundQuery("try"))
+    );
+    let in_let_else = canonicalize_body(
+        "{ let host = make_host_with_footprint(); \
+         let Some(_x) = maybe() else { \
+         let (e, r) = resolve_expr(&host, \"/f.ts\", \"X\", &[], ProjectionMode::Expanded); panic!(); }; }",
+    )
+    .unwrap();
+    assert_eq!(
+        extract_fidelity(&in_let_else, "f.rs", "g", vec![]),
+        Err(ExtractError::ControlFlowAroundQuery("conditional"))
+    );
+    // A bare `{ … }` block is NOT control flow — its statements run unconditionally,
+    // so a query scoped in one stays ADMISSIBLE (this is the real corpus shape of
+    // `utility_top_bottom.rs::Utb21NonNullableUnknown`). Over-rejecting it would
+    // drop a genuine straight-line row.
+    let in_bare_block = canonicalize_body(
+        "{ let expr = { let host = make_host_with_footprint(); \
+         let (e, r) = resolve_expr(&host, \"/f.ts\", \"X\", &[], ProjectionMode::Expanded); e }; }",
+    )
+    .unwrap();
+    let admitted = extract_fidelity(&in_bare_block, "f.rs", "g", vec![])
+        .expect("a query in a bare nested block is a straight-line query and must extract");
+    assert_eq!(admitted.queries.len(), 1);
+    assert_eq!(admitted.queries[0].symbol_or_expression, "X");
+    // Statement reachability: a query in a statement DEAD after an unconditional
+    // `return;` / `break;` / `continue;` never executes — so it must REJECT as
+    // `"unreachable"`, not be collected as a top-level executed query (a walk that
+    // ignored reachability would flatten the dead query as straight-line).
+    let dead_after_return = canonicalize_body(
+        "{ let host = make_host_with_footprint(); return; \
+         let _ = resolve_expr(&host, \"/f.ts\", \"X\", &[], ProjectionMode::Expanded); }",
+    )
+    .unwrap();
+    assert_eq!(
+        extract_fidelity(&dead_after_return, "f.rs", "g", vec![]),
+        Err(ExtractError::ControlFlowAroundQuery("unreachable"))
+    );
+    // The reachability cut is precise: the OPERAND of the transfer evaluates BEFORE
+    // the transfer, so `return <query>` with NO later dead statement is a genuine
+    // straight-line executed query and stays ADMISSIBLE — gating it would over-reject
+    // a valid row (codex ruling: return/break/await operands are correct).
+    let return_operand = canonicalize_body(
+        "{ let host = make_host_with_footprint(); \
+         return resolve_expr(&host, \"/f.ts\", \"X\", &[], ProjectionMode::Expanded); }",
+    )
+    .unwrap();
+    let admitted_operand = extract_fidelity(&return_operand, "f.rs", "g", vec![])
+        .expect("a return-operand query with no dead code must extract");
+    assert_eq!(admitted_operand.queries.len(), 1);
+    assert_eq!(admitted_operand.queries[0].symbol_or_expression, "X");
+    // Reachability is COMPLETE recursive divergence analysis, not a direct-transfer
+    // match: divergence through an unconditional WRAPPER cuts the following sibling
+    // too. A bare block that diverges (`{ return; }`), a `let` initializer that
+    // diverges (`let _ = { return; };`), a `match` whose EVERY arm diverges, an `if`
+    // whose BOTH arms diverge, a doubly-nested diverging block, and an infinite
+    // `loop` all make a following query DEAD → REJECT as `"unreachable"`.
+    for (label, body) in [
+        (
+            "bare-block",
+            "{ let host = make_host_with_footprint(); { return; } \
+             let _ = resolve_expr(&host, \"/f.ts\", \"X\", &[], ProjectionMode::Expanded); }",
+        ),
+        (
+            "let-init",
+            "{ let host = make_host_with_footprint(); let _ = { return; }; \
+             let _ = resolve_expr(&host, \"/f.ts\", \"X\", &[], ProjectionMode::Expanded); }",
+        ),
+        (
+            "match-all-arms",
+            "{ let host = make_host_with_footprint(); match 0 { _ => return } \
+             let _ = resolve_expr(&host, \"/f.ts\", \"X\", &[], ProjectionMode::Expanded); }",
+        ),
+        (
+            "if-else-both-arms",
+            "{ let host = make_host_with_footprint(); if true { return; } else { return; } \
+             let _ = resolve_expr(&host, \"/f.ts\", \"X\", &[], ProjectionMode::Expanded); }",
+        ),
+        (
+            "doubly-nested-block",
+            "{ let host = make_host_with_footprint(); { { return; } } \
+             let _ = resolve_expr(&host, \"/f.ts\", \"X\", &[], ProjectionMode::Expanded); }",
+        ),
+        (
+            "infinite-loop",
+            "{ let host = make_host_with_footprint(); loop { do_work(); } \
+             let _ = resolve_expr(&host, \"/f.ts\", \"X\", &[], ProjectionMode::Expanded); }",
+        ),
+        (
+            "loop-break-in-nested-loop",
+            "{ let host = make_host_with_footprint(); loop { loop { break; } } \
+             let _ = resolve_expr(&host, \"/f.ts\", \"X\", &[], ProjectionMode::Expanded); }",
+        ),
+    ] {
+        let canonical = canonicalize_body(body).unwrap();
+        assert_eq!(
+            extract_fidelity(&canonical, "f.rs", "g", vec![]),
+            Err(ExtractError::ControlFlowAroundQuery("unreachable")),
+            "a dead query after the {label} divergence must REJECT as unreachable",
+        );
+    }
+    // The converse must NOT over-cut: a query after a construct that may FALL THROUGH
+    // (a `match` with a live arm, an `if` with a live arm, a `loop` exited by an
+    // escaping break) is a genuine straight-line query and stays ADMISSIBLE.
+    for (label, body) in [
+        (
+            "match-live-arm",
+            "{ let host = make_host_with_footprint(); match 0 { 1 => return, _ => () } \
+             let (e, r) = resolve_expr(&host, \"/f.ts\", \"X\", &[], ProjectionMode::Expanded); }",
+        ),
+        (
+            "if-live-else",
+            "{ let host = make_host_with_footprint(); if true { return; } else { () } \
+             let (e, r) = resolve_expr(&host, \"/f.ts\", \"X\", &[], ProjectionMode::Expanded); }",
+        ),
+        (
+            "loop-escaping-break",
+            "{ let host = make_host_with_footprint(); loop { if done() { break; } } \
+             let (e, r) = resolve_expr(&host, \"/f.ts\", \"X\", &[], ProjectionMode::Expanded); }",
+        ),
+    ] {
+        let canonical = canonicalize_body(body).unwrap();
+        let admitted = extract_fidelity(&canonical, "f.rs", "g", vec![]).unwrap_or_else(|e| {
+            panic!("a query after the {label} (live fall-through) must extract: {e:?}")
+        });
+        assert_eq!(admitted.queries.len(), 1);
+        assert_eq!(admitted.queries[0].symbol_or_expression, "X");
+    }
+    // ONE evaluation-order reachability walker drives divergence, break-escape, AND
+    // query-collection, so reachability is shared at both statement AND operand
+    // granularity — an expression diverges iff any UNCONDITIONALLY-evaluated operand
+    // diverges or the form cannot complete normally. This closes the loop-HEADER,
+    // break-VALUE, deep-operand-WRAPPER, and label-SHADOW cases a per-form case-list
+    // would miss, plus the §3 opaque macro-STATEMENT barrier (STRUCTURAL, never a
+    // `panic!` name match). Because break-escape and query-collection use the SAME
+    // cursor, a break reached only through a DEAD subtree (a dead `if` branch, a dead
+    // operand) never terminates its loop, a query in a DEAD operand is rejected, and a
+    // diverging match GUARD (evaluated before its body) cuts the following reachability.
+    // Each dead query after such a divergence REJECTS as `"unreachable"`.
+    for (label, body) in [
+        (
+            "while-header-diverges",
+            "{ let host = make_host_with_footprint(); while ({ return; }) {} \
+             let _ = resolve_expr(&host, \"/f.ts\", \"X\", &[], ProjectionMode::Expanded); }",
+        ),
+        (
+            "for-iterator-diverges",
+            "{ let host = make_host_with_footprint(); for _ in ({ return; }) {} \
+             let _ = resolve_expr(&host, \"/f.ts\", \"X\", &[], ProjectionMode::Expanded); }",
+        ),
+        (
+            "break-value-diverges",
+            "{ let host = make_host_with_footprint(); loop { break { return; }; } \
+             let _ = resolve_expr(&host, \"/f.ts\", \"X\", &[], ProjectionMode::Expanded); }",
+        ),
+        (
+            "deep-operand-call-arg",
+            "{ let host = make_host_with_footprint(); recv({ return; }); \
+             let _ = resolve_expr(&host, \"/f.ts\", \"X\", &[], ProjectionMode::Expanded); }",
+        ),
+        (
+            "deep-operand-array",
+            "{ let host = make_host_with_footprint(); let _ = [{ return; }]; \
+             let _ = resolve_expr(&host, \"/f.ts\", \"X\", &[], ProjectionMode::Expanded); }",
+        ),
+        (
+            "label-shadowed-inner-break",
+            "{ let host = make_host_with_footprint(); 'outer: loop { 'outer: loop { break 'outer; } } \
+             let _ = resolve_expr(&host, \"/f.ts\", \"X\", &[], ProjectionMode::Expanded); }",
+        ),
+        (
+            "macro-statement-barrier",
+            "{ let host = make_host_with_footprint(); panic!(); \
+             let _ = resolve_expr(&host, \"/f.ts\", \"X\", &[], ProjectionMode::Expanded); }",
+        ),
+        (
+            "macro-barrier-non-panic",
+            "{ let host = make_host_with_footprint(); unreachable!(); \
+             let _ = resolve_expr(&host, \"/f.ts\", \"X\", &[], ProjectionMode::Expanded); }",
+        ),
+        // Break-escape shares the query walk's reachability: a break reached only
+        // through a DEAD subtree never terminates its loop, so the loop stays infinite
+        // and the following query is dead.
+        (
+            "break-in-dead-if-branch",
+            "{ let host = make_host_with_footprint(); loop { if ({ return; }) { break; } } \
+             let _ = resolve_expr(&host, \"/f.ts\", \"X\", &[], ProjectionMode::Expanded); }",
+        ),
+        (
+            "break-in-dead-operand",
+            "{ let host = make_host_with_footprint(); loop { f({ return; }, { break; }); } \
+             let _ = resolve_expr(&host, \"/f.ts\", \"X\", &[], ProjectionMode::Expanded); }",
+        ),
+        // Query-collection cuts at OPERAND granularity: a query in a later call operand
+        // after an earlier operand diverges is in a DEAD position.
+        (
+            "query-in-dead-operand",
+            "{ let host = make_host_with_footprint(); \
+             f({ return; }, resolve_expr(&host, \"/f.ts\", \"X\", &[], ProjectionMode::Expanded)); }",
+        ),
+        // A query helper's OWN operands run before the helper is entered: a divergence in
+        // the host argument (which the identity parser ignores) means the call is never
+        // reached, so the query never executes — recording it from the identity args
+        // alone would admit a dead query.
+        (
+            "query-own-operand-diverges",
+            "{ let host = make_host_with_footprint(); \
+             let _ = resolve_expr({ return; }, \"/f.ts\", \"X\", &[], ProjectionMode::Expanded); }",
+        ),
+        // A match GUARD is evaluated before its arm body; a diverging first guard
+        // transfers control before any body, so the match diverges.
+        (
+            "match-guard-diverges",
+            "{ let host = make_host_with_footprint(); match 0 { _ if { return; } => (), _ => () } \
+             let _ = resolve_expr(&host, \"/f.ts\", \"X\", &[], ProjectionMode::Expanded); }",
+        ),
+        // The three terminating structural discriminators from the variant-table ruling:
+        // (1) a `let … else` whose initializer diverges makes the else `break` DEAD, so it
+        // does not escape the enclosing loop; (2) an immediately-invoked closure with an
+        // infinite-loop body never returns to the caller, so the call diverges; (3) an
+        // inner labeled block shadows a same-name loop label, so `break 'outer` targets
+        // the block, not the loop. Each leaves the outer loop / call diverging → the
+        // following query is dead.
+        (
+            "let-else-dead-break",
+            "{ let host = make_host_with_footprint(); \
+             loop { let Some(_) = ({ return; }) else { break; }; } \
+             let _ = resolve_expr(&host, \"/f.ts\", \"X\", &[], ProjectionMode::Expanded); }",
+        ),
+        (
+            "iife-infinite-loop-body",
+            "{ let host = make_host_with_footprint(); (|| loop {})(); \
+             let _ = resolve_expr(&host, \"/f.ts\", \"X\", &[], ProjectionMode::Expanded); }",
+        ),
+        (
+            "labeled-block-shadows-loop-label",
+            "{ let host = make_host_with_footprint(); 'outer: loop { 'outer: { break 'outer; } } \
+             let _ = resolve_expr(&host, \"/f.ts\", \"X\", &[], ProjectionMode::Expanded); }",
+        ),
+    ] {
+        let canonical = canonicalize_body(body).unwrap();
+        assert_eq!(
+            extract_fidelity(&canonical, "f.rs", "g", vec![]),
+            Err(ExtractError::ControlFlowAroundQuery("unreachable")),
+            "a dead query after the {label} divergence must REJECT as unreachable",
+        );
+    }
+    // The predicate must NOT over-cut: a benign loop header, a REAL labeled break that
+    // escapes a nested loop (shadow-aware resolution still admits the true escape), and
+    // a benign macro AFTER the query (the corpus shape) all keep the query ADMISSIBLE —
+    // the macro barrier never retroactively rejects a collected query.
+    for (label, body) in [
+        (
+            "benign-while-header",
+            "{ let host = make_host_with_footprint(); while flag {} \
+             let (e, r) = resolve_expr(&host, \"/f.ts\", \"X\", &[], ProjectionMode::Expanded); }",
+        ),
+        (
+            "labeled-break-real-escape",
+            "{ let host = make_host_with_footprint(); 'outer: loop { loop { break 'outer; } } \
+             let (e, r) = resolve_expr(&host, \"/f.ts\", \"X\", &[], ProjectionMode::Expanded); }",
+        ),
+        (
+            "benign-macro-after-query",
+            "{ let host = make_host_with_footprint(); \
+             let (e, r) = resolve_expr(&host, \"/f.ts\", \"X\", &[], ProjectionMode::Expanded); assert_eq!(1, 1); }",
+        ),
+        // The match-guard divergence rule is one-way: a BENIGN guard does not diverge,
+        // so with non-diverging arm bodies the match may fall through and the following
+        // query stays admissible (no over-reject).
+        (
+            "benign-match-guard",
+            "{ let host = make_host_with_footprint(); match 0 { 1 if cond => (), _ => () } \
+             let (e, r) = resolve_expr(&host, \"/f.ts\", \"X\", &[], ProjectionMode::Expanded); }",
+        ),
+    ] {
+        let canonical = canonicalize_body(body).unwrap();
+        let admitted = extract_fidelity(&canonical, "f.rs", "g", vec![])
+            .unwrap_or_else(|e| panic!("a query with the {label} (no over-cut) must extract: {e:?}"));
+        assert_eq!(admitted.queries.len(), 1);
+        assert_eq!(admitted.queries[0].symbol_or_expression, "X");
+    }
+}
+
+/// `original_extraction_input_auditable` (§Q4): re-running the closed extractor
+/// over each row's CHECKED-IN `original_body_tokens` re-derives EXACTLY the
+/// retained `migration_fingerprint` — HERMETICALLY, from the retained-lift
+/// metadata alone, with NO VCS archaeology.
+#[test]
+fn original_extraction_input_auditable() {
+    assert!(
+        !oracle_registry::LIFTED_ROW_MIGRATIONS.is_empty(),
+        "expected retained migration provenance for the lifted rows",
+    );
+    for m in oracle_registry::LIFTED_ROW_MIGRATIONS {
+        // The hermetic inputs: the checked-in body tokens + the RETAINED
+        // workspace_files (the captured-from-context axis). No live registry read,
+        // no VCS archaeology.
+        let retained_workspace_files: Vec<WorkspaceFileFidelity> = m
+            .workspace_files
+            .iter()
+            .map(|(path, content_hash)| WorkspaceFileFidelity {
+                path: (*path).to_string(),
+                content_hash: (*content_hash).to_string(),
+            })
+            .collect();
+        let fidelity = extract_fidelity(
+            m.original_body_tokens,
+            m.row_file,
+            m.row_function,
+            retained_workspace_files,
+        )
+        .unwrap_or_else(|e| {
+            panic!(
+                "{}::{}: retained original_body_tokens must re-extract: {e:?}",
+                m.row_file, m.row_function
+            )
+        });
+        assert_eq!(
+            migration_fingerprint(&fidelity),
+            m.migration_fingerprint,
+            "{}::{}: the fingerprint re-derived from the checked-in original_body_tokens \
+             + retained workspace_files must equal the retained migration_fingerprint",
+            m.row_file,
+            m.row_function,
+        );
+        assert_eq!(
+            m.migration_fingerprint_version, MIGRATION_FINGERPRINT_VERSION,
+            "{}::{}: retained fingerprint version must match the current algorithm version",
+            m.row_file, m.row_function,
+        );
+    }
+}
+
+/// `registry_payload_matches_migration_fingerprint` (§Q4): the registry PAYLOAD
+/// for each lifted row, projected into the migration fidelity tuple, re-derives
+/// the SAME `migration_fingerprint` the closed extractor captured from the
+/// ORIGINAL body. This is the migration-fidelity AUTHORITY: a fully
+/// self-consistent wrong `(spec ∧ snapshot)` pair — the registry + snapshot both
+/// query a DIFFERENT symbol/mode/type-args than the original body authored —
+/// FAILS here, even though the symbol-binding + env-pin rails pass it.
+#[test]
+fn registry_payload_matches_migration_fingerprint() {
+    for m in oracle_registry::LIFTED_ROW_MIGRATIONS {
+        let registry = registry_fidelity_for_row(m.row_file, m.row_function);
+        assert_eq!(
+            migration_fingerprint(&registry),
+            m.migration_fingerprint,
+            "{}::{}: the registry payload must reproduce the retained migration_fingerprint",
+            m.row_file,
+            m.row_function,
+        );
+    }
+
+    // Discriminating: a self-consistent WRONG pair. Mutate ONLY the
+    // registry-projected symbol (as if the registry were re-pointed at a different
+    // type AND a matching snapshot fabricated for it). The retained fingerprint —
+    // from the FROZEN original body — still names the original symbol, so the wrong
+    // payload FAILS the fingerprint match.
+    let m = &oracle_registry::LIFTED_ROW_MIGRATIONS[0];
+    let mut wrong = registry_fidelity_for_row(m.row_file, m.row_function);
+    wrong.queries[0].symbol_or_expression =
+        format!("{}__WRONG", wrong.queries[0].symbol_or_expression);
+    assert_ne!(
+        migration_fingerprint(&wrong),
+        m.migration_fingerprint,
+        "a registry payload re-pointed at a WRONG symbol must NOT reproduce the retained \
+         fingerprint — exactly the self-consistent wrong (spec ∧ snapshot) pair the \
+         symbol-binding + env-pin rails cannot catch",
+    );
+    let mut wrong_mode = registry_fidelity_for_row(m.row_file, m.row_function);
+    wrong_mode.queries[0].projection_mode = "Shallow".to_string();
+    assert_ne!(migration_fingerprint(&wrong_mode), m.migration_fingerprint);
+
+    // The workspace_files + source_locator axes. A self-consistent wrong pair can
+    // ALSO be built by re-pointing the row's WORKSPACE setup or its SOURCE LOCATOR
+    // and regenerating a matching snapshot: `snapshot_id` + the source-admission
+    // digest both RECOMPUTE over the wrong current files and self-agree. Only the
+    // IMMUTABLE retained fingerprint anchors the original, so both axes MUST be in
+    // it. (a) workspace_files content drift:
+    let mut wrong_ws_content = registry_fidelity_for_row(m.row_file, m.row_function);
+    assert!(
+        !wrong_ws_content.workspace_files.is_empty(),
+        "{}::{}: a lifted row must carry at least one workspace file",
+        m.row_file,
+        m.row_function,
+    );
+    wrong_ws_content.workspace_files[0].content_hash =
+        migration_content_hash("export type __DRIFTED__ = unknown;\n");
+    assert_ne!(
+        migration_fingerprint(&wrong_ws_content),
+        m.migration_fingerprint,
+        "a registry payload whose workspace_files CONTENT drifted (+ a regenerated \
+         self-consistent snapshot) must NOT reproduce the retained fingerprint",
+    );
+    // (b) workspace_files path drift:
+    let mut wrong_ws_path = registry_fidelity_for_row(m.row_file, m.row_function);
+    wrong_ws_path.workspace_files[0].path =
+        format!("{}.__wrong__.ts", wrong_ws_path.workspace_files[0].path);
+    assert_ne!(
+        migration_fingerprint(&wrong_ws_path),
+        m.migration_fingerprint,
+        "a registry payload whose workspace_files PATH drifted must NOT reproduce the \
+         retained fingerprint",
+    );
+    // (c) source_locator symbol-space flip (Type↔Value):
+    let mut wrong_space = registry_fidelity_for_row(m.row_file, m.row_function);
+    let flipped = if wrong_space.queries[0].source_locator.symbol_space == "Type" {
+        "Value"
+    } else {
+        "Type"
+    };
+    wrong_space.queries[0].source_locator.symbol_space = flipped.to_string();
+    assert_ne!(
+        migration_fingerprint(&wrong_space),
+        m.migration_fingerprint,
+        "a registry payload whose source_locator symbol_space flipped must NOT reproduce \
+         the retained fingerprint",
+    );
+    // (d) source_locator reference re-point:
+    let mut wrong_ref = registry_fidelity_for_row(m.row_file, m.row_function);
+    wrong_ref.queries[0].source_locator.reference_name = format!(
+        "{}__WRONG",
+        wrong_ref.queries[0].source_locator.reference_name
+    );
+    assert_ne!(
+        migration_fingerprint(&wrong_ref),
+        m.migration_fingerprint,
+        "a registry payload whose source_locator reference_name drifted must NOT reproduce \
+         the retained fingerprint",
+    );
+}
+
+/// `snapshot_migration_fingerprint_matches_retained_lift_metadata` (§Q4): every
+/// checked-in v3 snapshot's `migration_fingerprint` (+ version) MIRROR equals its
+/// row's retained migration provenance — so a hand-edited snapshot mirror, or a
+/// snapshot whose row carries no provenance, FAILS.
+#[test]
+fn snapshot_migration_fingerprint_matches_retained_lift_metadata() {
+    let root = typeinfo_tests_dir().join("oracle_snapshots");
+    let mut checked = 0usize;
+    let families = fs::read_dir(&root).unwrap_or_else(|e| panic!("read {root:?}: {e}"));
+    for fam in families.flatten() {
+        let fam_path = fam.path();
+        if !fam_path.is_dir() {
+            continue;
+        }
+        for snap in fs::read_dir(&fam_path).unwrap_or_else(|e| panic!("read {fam_path:?}: {e}")) {
+            let p = snap.unwrap_or_else(|e| panic!("dir entry: {e}")).path();
+            if p.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            let j: serde_json::Value =
+                serde_json::from_slice(&fs::read(&p).unwrap()).expect("snapshot JSON");
+            let row_file = j["row_ref"]["row_file"].as_str().unwrap();
+            let row_function = j["row_ref"]["row_function"].as_str().unwrap();
+            let m = oracle_registry::LIFTED_ROW_MIGRATIONS
+                .iter()
+                .find(|m| m.row_file == row_file && m.row_function == row_function)
+                .unwrap_or_else(|| {
+                    panic!("snapshot {p:?} ({row_file}::{row_function}) has NO retained provenance")
+                });
+            assert_eq!(
+                j["migration_fingerprint"].as_str().unwrap(),
+                m.migration_fingerprint,
+                "snapshot {p:?}: migration_fingerprint mirror diverges from retained metadata",
+            );
+            assert_eq!(
+                j["migration_fingerprint_version"].as_u64().unwrap() as u32,
+                m.migration_fingerprint_version,
+                "snapshot {p:?}: migration_fingerprint_version mirror diverges",
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked > 0, "expected at least one v3 snapshot to check");
+}
+
+/// `snapshot_workspace_files_match_retained_provenance` (§Q4): every v3 snapshot's
+/// generator-written `identity.workspace_files` (`{path, content_hash}`, the lib's
+/// `identity::content_hash` recipe) equals its row's RETAINED provenance
+/// `workspace_files`. Two roles: (1) PINS the migration extractor's replicated
+/// `content_hash` to the lib recipe — a drift between the two would surface here as
+/// a mismatch against the generator-written snapshot hashes; (2) a SECOND
+/// independent wrong-pair detector — a snapshot regenerated over drifted workspace
+/// source (its `identity.workspace_files` content_hash moves) but a retained
+/// provenance left unchanged FAILS, complementing the immutable-fingerprint rail.
+#[test]
+fn snapshot_workspace_files_match_retained_provenance() {
+    let root = typeinfo_tests_dir().join("oracle_snapshots");
+    let mut checked = 0usize;
+    let families = fs::read_dir(&root).unwrap_or_else(|e| panic!("read {root:?}: {e}"));
+    for fam in families.flatten() {
+        let fam_path = fam.path();
+        if !fam_path.is_dir() {
+            continue;
+        }
+        for snap in fs::read_dir(&fam_path).unwrap_or_else(|e| panic!("read {fam_path:?}: {e}")) {
+            let p = snap.unwrap_or_else(|e| panic!("dir entry: {e}")).path();
+            if p.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            let j: serde_json::Value =
+                serde_json::from_slice(&fs::read(&p).unwrap()).expect("snapshot JSON");
+            let row_file = j["row_ref"]["row_file"].as_str().unwrap();
+            let row_function = j["row_ref"]["row_function"].as_str().unwrap();
+            let m = oracle_registry::LIFTED_ROW_MIGRATIONS
+                .iter()
+                .find(|m| m.row_file == row_file && m.row_function == row_function)
+                .unwrap_or_else(|| {
+                    panic!("snapshot {p:?} ({row_file}::{row_function}) has NO retained provenance")
+                });
+            // Snapshot's identity.workspace_files → sorted (path, content_hash) pairs.
+            let mut snap_files: Vec<(String, String)> = j["identity"]["workspace_files"]
+                .as_array()
+                .unwrap_or_else(|| panic!("snapshot {p:?}: identity.workspace_files not an array"))
+                .iter()
+                .map(|f| {
+                    (
+                        f["path"].as_str().unwrap().to_string(),
+                        f["content_hash"].as_str().unwrap().to_string(),
+                    )
+                })
+                .collect();
+            snap_files.sort();
+            let mut retained_files: Vec<(String, String)> = m
+                .workspace_files
+                .iter()
+                .map(|(path, hash)| ((*path).to_string(), (*hash).to_string()))
+                .collect();
+            retained_files.sort();
+            assert_eq!(
+                retained_files, snap_files,
+                "snapshot {p:?}: identity.workspace_files diverge from the retained provenance \
+                 (a content-hash recipe drift OR a self-consistent workspace re-point)",
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked > 0, "expected at least one v3 snapshot to check");
 }
 
 /// Oracle query IDENTITY: every lifted row's live audit `query_mode` equals the

@@ -216,6 +216,14 @@ name = "oracle_gen"
 path = "src/bin/oracle_gen.rs"
 required-features = ["oracle-gen"]
 
+# Deterministic, tsgo-FREE v2->v3 snapshot schema upgrade (§Q4). Run with
+# `cargo run -p verter_session --features oracle-gen --bin oracle_upgrade`.
+# `required-features` keeps it out of the default tsgo-free build.
+[[bin]]
+name = "oracle_upgrade"
+path = "src/bin/oracle_upgrade.rs"
+required-features = ["oracle-gen"]
+
 [[bench]]
 name = "host_bench"
 harness = false

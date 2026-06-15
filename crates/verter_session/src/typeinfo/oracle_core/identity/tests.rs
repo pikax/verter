@@ -86,15 +86,18 @@ fn snapshot_id_v2_includes_probe_rhs_kind() {
         "an unknown capture-strategy tag is a closed-set decode failure"
     );
 
-    // The field-set change bumped the domain tag (the documented rule) and the
-    // file-shape + probe-synthesis versions.
+    // The `snapshot_id` HASH-INPUT field set is unchanged by v3 (the migration
+    // mirror is NOT a `snapshot_id` input), so the domain tag stays v2 — but the
+    // file-shape version is v3 (the migration-fidelity field-set change), and it
+    // flows into `snapshot_id` through `PinnedEnv.oracle_schema_version`, so every
+    // derived `snapshot_id` value still changes.
     assert_eq!(
         SNAPSHOT_ID_DOMAIN_TAG, b"verter.oracle.snapshot_id.v2",
-        "the snapshot_id field-set change bumps the domain-separation tag to v2"
+        "the snapshot_id HASH-INPUT field set is unchanged by v3; the domain tag stays v2"
     );
     assert_eq!(
-        ORACLE_SCHEMA_VERSION, 2,
-        "raw_capture.probe_scaffold + identity.probe_rhs_kind are a schema-shape change"
+        ORACLE_SCHEMA_VERSION, 3,
+        "migration_fingerprint_version + migration_fingerprint are the v3 schema-shape change"
     );
     assert_eq!(
         PROBE_SYNTHESIS_VERSION, 2,

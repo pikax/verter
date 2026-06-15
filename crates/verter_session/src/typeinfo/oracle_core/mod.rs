@@ -28,6 +28,15 @@ pub(crate) mod probe;
 pub(crate) mod snapshot;
 pub(crate) mod source_walk;
 
+// The shared, tsgo-free `source_admission_digest` derivation — ONE owner for the
+// source-side admission digest, reached by BOTH the `#[cfg(test)]` consumption
+// guard (`source_admission_digest_consistent`) and the
+// `#[cfg(feature = "oracle-gen")]` generator. Gated to both cfg contexts so the
+// default resolver build never compiles it, preserving the tsgo-free /
+// one-engine invariants.
+#[cfg(any(test, feature = "oracle-gen"))]
+pub(crate) mod source_digest;
+
 // The pure-data oracle-query-spec registry. It lives physically at the
 // design-pinned path `typeinfo_tests/oracle_query_specs.rs`
 // (`registry_in_src_carries_oracle_family`, and the `tests/` guards `include!`

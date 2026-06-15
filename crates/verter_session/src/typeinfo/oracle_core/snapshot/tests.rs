@@ -115,6 +115,8 @@ fn valid_snapshot() -> Value {
         "oracle_family": "utility_composition",
         "oracle_value_kind": "structured_type_expr",
         "snapshot_id": snapshot_id,
+        "migration_fingerprint_version": 1,
+        "migration_fingerprint": "blake3:0000000000000000000000000000000000000000000000000000000000000000",
         "row_ref": {
             "row_file": "utility_composition.rs",
             "row_function": "composed_props_resolves",
@@ -201,6 +203,8 @@ fn snapshot_encode_assembles_canonical_document() {
         &fixture["oracle_env_files"],
         fixture["oracle_env_hash"].as_str().unwrap(),
         &fixture["source_admission_digest"],
+        fixture["migration_fingerprint_version"].as_u64().unwrap() as u32,
+        fixture["migration_fingerprint"].as_str().unwrap(),
     );
 
     // The assembled document equals the hand-authored canonical fixture.
@@ -231,6 +235,8 @@ fn snapshot_encode_assembles_canonical_document() {
         &fixture["oracle_env_files"],
         fixture["oracle_env_hash"].as_str().unwrap(),
         &fixture["source_admission_digest"],
+        fixture["migration_fingerprint_version"].as_u64().unwrap() as u32,
+        fixture["migration_fingerprint"].as_str().unwrap(),
     );
     assert_ne!(
         assembled_other["snapshot_id"], assembled["snapshot_id"],
@@ -303,6 +309,21 @@ fn strict_snapshot_decode() {
         ),
         "a missing required envelope field must FAIL decode"
     );
+
+    // v3: the migration-fidelity mirror fields are REQUIRED — a v2-shaped snapshot
+    // (missing `migration_fingerprint` / `migration_fingerprint_version`) FAILS
+    // strict decode, so no pre-v3 snapshot can warm-validate under the new schema.
+    for field in ["migration_fingerprint", "migration_fingerprint_version"] {
+        let mut v2_shaped = valid_snapshot();
+        v2_shaped.as_object_mut().unwrap().remove(field);
+        assert!(
+            matches!(
+                decode_strict(&v2_shaped),
+                Err(SnapshotDecodeError::Envelope(_))
+            ),
+            "a snapshot missing the required v3 field `{field}` must FAIL decode"
+        );
+    }
 
     // A snapshot whose oracle_value carries a MALFORMED member (the member is
     // dropped by the shared `filter_map` decoder) FAILS rather than decoding to a
@@ -395,10 +416,12 @@ fn identity_is_kind_specific_schema_bumped() {
 
     // The known-kinds set size stays tied to the schema version: a new kind
     // MUST bump ORACLE_SCHEMA_VERSION. There is still exactly one kind; schema
-    // v2 is the FIELD-SET change (`identity.probe_rhs_kind` +
-    // `raw_capture.probe_scaffold`), not a kind addition.
+    // v2 was the capture-strategy field-set change (`identity.probe_rhs_kind` +
+    // `raw_capture.probe_scaffold`); schema v3 is the migration-fidelity field-set
+    // change (`migration_fingerprint_version` + `migration_fingerprint`), not a
+    // kind addition.
     assert_eq!(KNOWN_VALUE_KINDS.len(), 1);
-    assert_eq!(ORACLE_SCHEMA_VERSION, 2);
+    assert_eq!(ORACLE_SCHEMA_VERSION, 3);
 }
 
 // -- probe_scaffold_recorded_and_rederivable --------------------------------

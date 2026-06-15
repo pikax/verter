@@ -4722,7 +4722,7 @@ mod foundations_guards {
         // `oracle-gen` feature (off the default closure), so the
         // `src/bin/oracle_gen` binary (a separate crate that sees only non-test
         // `pub` lib items) can invoke it. The default build never compiles it.
-        "pub use crate::typeinfo::oracle_core::gen::{run_oracle_gen, GenError}",
+        "pub use crate::typeinfo::oracle_core::gen::{run_oracle_gen, upgrade_snapshots_to_v3, GenError}",
         // Actual base-view sweep counter (one bump per `build_coherent`
         // sweep, NOT per `from_host` call): `store_view_coherent_build_sweeps`
         // + `reset_store_view_coherent_build_sweeps`. A batch-saturation
@@ -4828,6 +4828,14 @@ mod foundations_guards {
     /// currently exempt while B-C5 / §12.A4 prepares the splits.
     pub fn guard6_exemptions() -> BTreeSet<&'static str> {
         BTreeSet::from([
+            // The oracle-query-spec registry co-locates the closed
+            // `LIFTED_ROW_MIGRATIONS` retained-lift table (§Q4) — 44 generated
+            // `original_body_tokens` audit-record token streams — with the
+            // registry it is the migration-fidelity authority for. The two MUST
+            // be one `include!`d unit (the same file is reached as both the lib
+            // `oracle_core::query_specs` module and the `tests/` `oracle_registry`
+            // include); the size is intentional generated audit data.
+            "crates/verter_session/src/typeinfo/typeinfo_tests/oracle_query_specs.rs",
             // Block-1.5 substrate split — view-aware prepared-decl
             // bundle/type/value variants live alongside their base
             // counterparts so the cache invariants stay in one file.
@@ -8703,7 +8711,14 @@ fn no_direct_oxc_parser_calls_outside_scheduler_path() {
             "crates/verter_session/src/typeinfo/oracle_core/hover_extract.rs",
             1,
         ),
-        ("crates/verter_session/src/typeinfo/oracle_core/gen.rs", 1),
+        // The source-digest derivation (`find_decl_span` re-parses a fixture to
+        // locate a declaration span) moved out of the `oracle-gen`-only `gen.rs`
+        // into the shared `source_digest` module (test + `oracle-gen` only — never
+        // the production resolver path); `gen.rs` no longer parses directly.
+        (
+            "crates/verter_session/src/typeinfo/oracle_core/source_digest.rs",
+            1,
+        ),
         (
             "crates/verter_session/src/typeinfo/oracle_core/admission.rs",
             2,
@@ -17474,6 +17489,13 @@ const INTO_OWNED_VIEW_ALLOWLIST: &[&str] = &[
     // on the consumption path): builds a quiescent owned view over a
     // freshly-constructed standalone host for the source-side walk.
     "crates/verter_session/src/typeinfo/oracle_core/gen.rs",
+    // The shared, tsgo-free `source_admission_digest` derivation
+    // (`#[cfg(any(test, feature = "oracle-gen"))]` only — never on the
+    // production resolver path): builds the SAME quiescent owned view over a
+    // freshly-constructed standalone host for the source-side walk, reached by
+    // both the `oracle-gen` generator and the consumption guard
+    // `source_admission_digest_consistent`.
+    "crates/verter_session/src/typeinfo/oracle_core/source_digest.rs",
 ];
 
 fn store_view_guard_production_rs_files() -> Vec<std::path::PathBuf> {
