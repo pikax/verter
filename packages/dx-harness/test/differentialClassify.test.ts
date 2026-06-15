@@ -253,6 +253,23 @@ describe("baseline disagreement helpers compare two provider outputs directly", 
     ).not.toEqual([]);
   });
 
+  it("completionDisagrees flags an import-source detail difference symmetrically (both providers authoritative)", () => {
+    // The baseline-vs-baseline check names BOTH providers authoritative, so a meaningful
+    // detail one provider surfaces and the other lacks IS a disagreement — in either
+    // argument order. (The forward verter-vs-baseline path is directional: only the
+    // authoritative side's detail governs. Here neither provider is privileged, so the
+    // relation must not depend on which provider is the first argument.)
+    const withDetail: BaselineCompletion = {
+      items: [{ label: "x", detail: "from './a'" }],
+      isIncomplete: false,
+    };
+    const without: BaselineCompletion = { items: [{ label: "x" }], isIncomplete: false };
+    expect(completionDisagrees(withDetail, without)).not.toEqual([]);
+    expect(completionDisagrees(without, withDetail)).not.toEqual([]);
+    // Two providers agreeing on the same detail is NOT a disagreement.
+    expect(completionDisagrees(withDetail, withDetail)).toEqual([]);
+  });
+
   it("diagnosticsDisagrees flags a severity difference at the same code+range", () => {
     expect(
       diagnosticsDisagrees(

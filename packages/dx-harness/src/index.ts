@@ -3,12 +3,12 @@
  * the TypeScript orchestration that drives the `verter_dx_baseline` differential
  * baseline.
  *
- * B owns the Verter-facing scaffold (fixture copy + test-anchor strip,
- * deterministic tool roots, the committed vendored Vue shims, workspace settings)
- * and the bridge/materialize clients; C (`crates/verter_dx_baseline`) owns ALL
- * baseline materialization. B CALLS C and reads its emitted source maps as
- * authoritative — it never duplicates C's compilation, twin generation, specifier
- * rewriting, or source-map shifting.
+ * The dx-harness scaffold owns the Verter-facing layout (fixture copy + test-anchor
+ * strip, deterministic tool roots, the committed vendored Vue shims, workspace
+ * settings) and the bridge/materialize clients; the `crates/verter_dx_baseline` bridge
+ * owns ALL baseline materialization. The scaffold CALLS the baseline bridge and reads
+ * its emitted source maps as authoritative — it never duplicates the bridge's
+ * compilation, twin generation, specifier rewriting, or source-map shifting.
  */
 
 export { canonicalizePath, joinCanonical, offsetToLineChar, type LineChar } from "./paths.js";
@@ -182,4 +182,11 @@ export * from "./normalize/index.js";
 // The artifact-parity differential: the comparison engine over verter's
 // `Canonical*` forms and the bridge's `Normalized*` outputs, plus the
 // coordinate/source-map projection that bridges their two coordinate spaces.
+// (Also re-exports the curated semantic-oracle `vueSemanticValidity` diff.)
 export * from "./differential/index.js";
+
+// The curated semantic-oracle runner: the `.ts` gold-standard descriptor, the pure
+// fact extractors, anchor → byte-offset resolution, and the orchestration that
+// drives verter-on-`.vue` against tsgo/tsserver-on-`.ts` for the vueSemanticValidity
+// dimension. Consumes the diff re-exported above.
+export * from "./semantic-oracle/index.js";

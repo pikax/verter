@@ -48,6 +48,7 @@ export {
   type BaselineCompletion,
   type ComparableCompletionItem,
   type CompletionCompareOptions,
+  type CompletionFieldOptions,
 } from "./completion.js";
 
 export { compareHover, stripUnstableDocs, type HoverCompareOptions } from "./hover.js";
@@ -93,3 +94,22 @@ export {
   type ParsedSourceMap,
   type SegmentSource,
 } from "./projection.js";
+
+// The curated semantic-oracle diff: the `vueSemanticValidity` sibling of the
+// artifact-parity comparators above. It reuses the same per-method comparators,
+// disagreement helpers, and {@link classifyProbe} orchestrator — comparing verter
+// against a hand-authored `.ts` gold standard rather than verter's own emitted TSX.
+export {
+  classifyOracleCompletion,
+  classifyOracleDefinition,
+  classifyOracleDiagnostics,
+  classifyOracleHover,
+  classifyOracleProbe,
+  compareOracleDiagnostics,
+  type OracleClassifyInput,
+  type OracleCompletionInput,
+  type OracleDefinitionInput,
+  type OracleDiagnosticsCompareOptions,
+  type OracleDiagnosticsInput,
+  type OracleHoverInput,
+} from "./vueSemanticValidity.js";

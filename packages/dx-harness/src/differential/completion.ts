@@ -3,13 +3,18 @@
  *
  * Compares verter's normalized completion set against a baseline provider's on
  * the same emitted TSX: required-label presence, the normalized label SET
- * (compared in BOTH directions, order-insensitive), kind, and insert/edit shape.
- * The DX-critical signal is No-Suggestions collapse: verter empty where the
- * baseline is non-empty.
+ * (compared in BOTH directions, order-insensitive), kind, insert/edit shape, and
+ * the resolved type / import-source `detail`. The DX-critical signal is
+ * No-Suggestions collapse: verter empty where the baseline is non-empty.
  *
- * The field equivalence (label set + kind + insert/edit shape) is factored into
- * one place — {@link completionFieldDivergences} — so the forward verter-vs-baseline
- * comparison and the baseline-vs-baseline disagreement check cannot drift apart.
+ * The field equivalence (label set + kind + insert/edit shape + detail) is factored
+ * into one place — {@link completionFieldDivergences} — so the forward
+ * verter-vs-baseline comparison and the baseline-vs-baseline disagreement check
+ * cannot drift apart. The detail comparison is VARIANT-AWARE (same-label items are
+ * distinct import-source candidates, so the full detail SET is compared, never a
+ * first-wins representative) and DIRECTIONAL (the authoritative side governs which
+ * resolved type / import source the other must surface — verter failing to surface a
+ * baseline-resolved import source is a divergence, not a silent agreement).
  *
  * Two surfaces are deliberately NOT verter-vs-baseline parity here:
  *  - Auto-import `additionalTextEdits`: the baseline normalized item carries none,
@@ -41,12 +46,27 @@ export interface CompletionCompareOptions {
   readonly requiredLabels?: readonly string[];
 }
 
+/** Options driving {@link completionFieldDivergences}. */
+export interface CompletionFieldOptions {
+  /**
+   * Which side's resolved-type / import-source `detail` is authoritative. The forward
+   * verter-vs-baseline path uses `"right"` (the baseline is the gold standard): a
+   * meaningful baseline detail verter fails to surface is a divergence, while a
+   * verter-only detail is tolerated. The baseline-vs-baseline disagreement check uses
+   * `"both"` (neither provider is privileged): a meaningful detail on EITHER side the
+   * other lacks is a disagreement, so the relation is symmetric. Defaults to `"right"`.
+   */
+  readonly detailAuthority?: "right" | "both";
+}
+
 /** The provider-agnostic fields the completion equivalence compares. */
 export interface ComparableCompletionItem {
   readonly label: string;
   readonly kind?: string;
   /** The effective insert/edit text (an edit's text, else `insertText`, else `label`). */
   readonly insert: string;
+  /** The provider's resolved type / import-source label, when it attaches one. */
+  readonly detail?: string;
 }
 
 /** The effective insert text of a verter item: its edit's text, else `insertText`, else `label`. */
@@ -66,6 +86,7 @@ export function verterComparable(item: CanonicalCompletionItem): ComparableCompl
     label: item.label,
     ...(item.kind !== undefined ? { kind: item.kind } : {}),
     insert: verterInsert(item),
+    ...(item.detail !== undefined ? { detail: item.detail } : {}),
   };
 }
 
@@ -75,13 +96,38 @@ export function baselineComparable(item: NormalizedCompletionItem): ComparableCo
     label: item.label,
     ...(item.kind !== undefined ? { kind: item.kind } : {}),
     insert: baselineInsert(item),
+    ...(item.detail !== undefined ? { detail: item.detail } : {}),
   };
 }
 
-/** First-wins label → item map (a label rarely repeats; the first is canonical). */
+/** First-wins label → item map (used for label-set parity and the kind/insert shape). */
 function indexByLabel<T extends { label: string }>(items: readonly T[]): Map<string, T> {
   const map = new Map<string, T>();
   for (const item of items) if (!map.has(item.label)) map.set(item.label, item);
+  return map;
+}
+
+/**
+ * Group each label's MEANINGFUL (defined, non-blank, EOL-normalized) resolved-type /
+ * import-source details. Same-label items that differ only by `detail` are distinct
+ * import-source candidates — the normalizer preserves both — so the detail comparison
+ * compares the variant SET, never a single first-wins representative.
+ */
+function meaningfulDetailsByLabel(
+  items: readonly ComparableCompletionItem[],
+): Map<string, Set<string>> {
+  const map = new Map<string, Set<string>>();
+  for (const item of items) {
+    if (item.detail === undefined) continue;
+    const detail = normalizeEol(item.detail);
+    if (detail.trim() === "") continue;
+    let set = map.get(item.label);
+    if (set === undefined) {
+      set = new Set<string>();
+      map.set(item.label, set);
+    }
+    set.add(detail);
+  }
   return map;
 }
 
@@ -93,14 +139,21 @@ function sameOrder(a: readonly string[], b: readonly string[]): boolean {
 /**
  * The shared completion field equivalence: the symmetric label-set parity (a `right`-only
  * label is `missingLabel`, a `left`-only label is `extraLabel`) plus, per shared label,
- * a case-insensitive `kind` comparison (a kind on exactly one side counts) and an
- * EOL-normalized insert/edit-shape comparison. In the forward path `left` is verter and
- * `right` is the baseline; the baseline-vs-baseline disagreement check passes the two
- * providers. Returns a flat divergence list (empty = the field views agree).
+ * a case-insensitive `kind` comparison (a kind on exactly one side counts), an
+ * EOL-normalized insert/edit-shape comparison, and a VARIANT-AWARE, DIRECTIONAL
+ * resolved-type / import-source `detail` comparison. The detail comparison reads the full
+ * meaningful detail SET per label (same-label items are distinct import-source candidates)
+ * and is governed by {@link CompletionFieldOptions.detailAuthority}: a meaningful
+ * authoritative detail the other side fails to surface is a `typeLabelMismatch`. In the
+ * forward path `left` is verter, `right` is the baseline (authoritative), so a missing
+ * verter detail is a divergence while a verter-only detail is tolerated; the
+ * baseline-vs-baseline disagreement check passes the two providers and names both
+ * authoritative. Returns a flat divergence list (empty = the field views agree).
  */
 export function completionFieldDivergences(
   left: readonly ComparableCompletionItem[],
   right: readonly ComparableCompletionItem[],
+  options: CompletionFieldOptions = {},
 ): Divergence[] {
   const divergences: Divergence[] = [];
   const leftByLabel = indexByLabel(left);
@@ -149,6 +202,53 @@ export function completionFieldDivergences(
         verterValue: li,
         baselineValue: ri,
       });
+    }
+  }
+
+  // Per shared label: resolved type / import source. An item present on both sides with
+  // the same label, kind, and insert can still resolve from the wrong module or to the
+  // wrong type — the `detail` the provider attaches. The comparison reads the variant SET
+  // (same-label items are distinct import-source candidates, so a first-wins
+  // representative would hide or mispair a candidate) and is DIRECTIONAL: the
+  // authoritative side's meaningful detail the other fails to surface is a divergence.
+  // Reuses `typeLabelMismatch` — a completion's detail IS its resolved type /
+  // import-source label.
+  const leftDetails = meaningfulDetailsByLabel(left);
+  const rightDetails = meaningfulDetailsByLabel(right);
+  const bothAuthoritative = options.detailAuthority === "both";
+  const noDetails: ReadonlySet<string> = new Set();
+  for (const label of leftByLabel.keys()) {
+    if (!rightByLabel.has(label)) continue;
+    const ld = leftDetails.get(label) ?? noDetails;
+    const rd = rightDetails.get(label) ?? noDetails;
+    // The authoritative `right` (baseline) details the `left` (verter) must surface.
+    for (const detail of rd) {
+      if (ld.has(detail)) continue;
+      divergences.push({
+        class: "typeLabelMismatch",
+        detail:
+          ld.size === 0
+            ? `completion "${label}" omits the resolved type / import source the baseline surfaces`
+            : `completion "${label}" resolves to a different type / import source`,
+        verterValue: [...ld],
+        baselineValue: detail,
+      });
+    }
+    // The disagreement check names both sides authoritative, so a meaningful `left` detail
+    // the `right` side lacks is equally a divergence (the relation is symmetric there).
+    if (bothAuthoritative) {
+      for (const detail of ld) {
+        if (rd.has(detail)) continue;
+        divergences.push({
+          class: "typeLabelMismatch",
+          detail:
+            rd.size === 0
+              ? `completion "${label}" carries a resolved type / import source the other provider omits`
+              : `completion "${label}" resolves to a different type / import source`,
+          verterValue: detail,
+          baselineValue: [...rd],
+        });
+      }
     }
   }
 

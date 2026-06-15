@@ -142,3 +142,89 @@ describe("compareCompletion — kind and insert/edit shape", () => {
     expect(compareCompletion(v, b)).toEqual([]);
   });
 });
+
+describe("compareCompletion — resolved type / import-source detail (the baseline is authoritative)", () => {
+  it("the baseline carries an import-source detail verter omits (same label/kind/insert) -> typeLabelMismatch", () => {
+    // verter under-resolves the import metadata: it surfaces the label but not the
+    // resolved type / import source the baseline attaches. The authoritative baseline
+    // detail governs, so a missing verter detail is a divergence, not a silent agreement.
+    const v = verter([{ label: "useFetch", kind: "Function", insertText: "useFetch" }]);
+    const b = baseline([
+      {
+        label: "useFetch",
+        kind: "Function",
+        insertText: "useFetch",
+        detail: "Auto import from '#imports'",
+      },
+    ]);
+    const out = compareCompletion(v, b);
+    expect(out.map((d) => d.class)).toEqual(["typeLabelMismatch"]);
+    expect(out[0].baselineValue).toBe("Auto import from '#imports'");
+  });
+
+  it("both sides carry the same detail -> agreement", () => {
+    const v = verter([{ label: "x", detail: "import('./a').Widget" }]);
+    const b = baseline([{ label: "x", detail: "import('./a').Widget" }]);
+    expect(compareCompletion(v, b)).toEqual([]);
+  });
+
+  it("both sides carry a DIFFERENT detail -> typeLabelMismatch", () => {
+    const v = verter([{ label: "x", detail: "import('./a').Widget" }]);
+    const b = baseline([{ label: "x", detail: "import('./b').Widget" }]);
+    const out = compareCompletion(v, b);
+    expect(out.map((d) => d.class)).toEqual(["typeLabelMismatch"]);
+  });
+
+  it("genuinely detail-less on both sides -> agreement (no false divergence)", () => {
+    // A keyword completion legitimately carries no detail on either side.
+    const v = verter([{ label: "return", kind: "Keyword" }]);
+    const b = baseline([{ label: "return", kind: "Keyword" }]);
+    expect(compareCompletion(v, b)).toEqual([]);
+  });
+
+  it("verter carries a detail the baseline omits -> agreement (verter-extra detail tolerated)", () => {
+    // Direction matters: only the authoritative baseline's meaningful detail must be
+    // matched. A verter-only detail (commonly a normalization artifact) is NOT flagged.
+    const v = verter([{ label: "x", detail: "import('./a').Widget" }]);
+    const b = baseline([{ label: "x" }]);
+    expect(compareCompletion(v, b)).toEqual([]);
+  });
+
+  it("a whitespace-only baseline detail is not meaningful -> agreement", () => {
+    const v = verter([{ label: "x" }]);
+    const b = baseline([{ label: "x", detail: "   " }]);
+    expect(compareCompletion(v, b)).toEqual([]);
+  });
+});
+
+describe("compareCompletion — same-label / different-detail variants are paired, not collapsed", () => {
+  it("the same variant SET in a different order -> agreement (a first-wins label pairing would mispair)", () => {
+    // Both sides offer `foo` from two import sources; only the ORDER differs. A
+    // label-only first-wins pairing compares verter's first variant against the
+    // baseline's first variant and FALSELY diverges; variant-aware pairing recognizes
+    // the equal set.
+    const v = verter([
+      { label: "foo", detail: "from './a'" },
+      { label: "foo", detail: "from './b'" },
+    ]);
+    const b = baseline([
+      { label: "foo", detail: "from './b'" },
+      { label: "foo", detail: "from './a'" },
+    ]);
+    expect(compareCompletion(v, b)).toEqual([]);
+  });
+
+  it("the baseline offers an import-source variant verter lacks -> typeLabelMismatch (not collapsed away)", () => {
+    // Baseline surfaces `foo` from TWO sources; verter only ONE. A first-wins pairing
+    // matches the shared first variant and MISSES the dropped one; variant-aware
+    // pairing flags the unsurfaced import source.
+    const v = verter([{ label: "foo", detail: "from './a'" }]);
+    const b = baseline([
+      { label: "foo", detail: "from './a'" },
+      { label: "foo", detail: "from './b'" },
+    ]);
+    const out = compareCompletion(v, b);
+    expect(out.map((d) => d.class)).toEqual(["typeLabelMismatch"]);
+    expect(out[0].baselineValue).toBe("from './b'");
+  });
+});

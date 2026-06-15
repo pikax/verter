@@ -195,13 +195,17 @@ function setsEqual(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
 /**
  * Whether two providers disagree on completions, using the SAME field set as the
  * forward verter-vs-baseline comparator — label set (both directions, order-insensitive)
- * plus per-shared-label kind and insert/edit shape — via the shared
- * {@link completionFieldDivergences}, so the two cannot drift apart.
+ * plus per-shared-label kind, insert/edit shape, and resolved-type / import-source detail
+ * — via the shared {@link completionFieldDivergences}, so the two cannot drift apart.
+ * Neither provider is privileged here, so the detail comparison runs with both sides
+ * authoritative: a meaningful detail one provider surfaces and the other lacks is a
+ * disagreement, symmetric in the argument order.
  */
 export function completionDisagrees(a: BaselineCompletion, b: BaselineCompletion): Divergence[] {
   return completionFieldDivergences(
     a.items.map(baselineComparable),
     b.items.map(baselineComparable),
+    { detailAuthority: "both" },
   );
 }
 
