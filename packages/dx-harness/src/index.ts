@@ -164,3 +164,17 @@ export {
   type RawLspStartupResult,
   type StartupLspClient,
 } from "./core/startupGate.js";
+
+// The authored scenario model + trust-boundary validator. The sub-barrel is
+// curated; re-exported wholesale so external consumers reach the scenario surface
+// without a deep import.
+export * from "./scenario/index.js";
+
+// The pure LSP-response normalizers. These verter-side `Canonical*` forms are
+// DISTINCT from the bridge's byte-offset `Normalized*` wire shapes exported above.
+// The normalize barrel intentionally withholds the raw-LSP response-input unions
+// (`CompletionResponse`/`HoverResponse`/`DefinitionResponse`/`DiagnosticsResponse`),
+// so the only `DiagnosticsResponse` reachable from this root is the bridge's object
+// envelope above — the public normalize surface is the `Canonical*` outputs plus the
+// `normalize*` functions.
+export * from "./normalize/index.js";
