@@ -178,3 +178,8 @@ export * from "./scenario/index.js";
 // envelope above — the public normalize surface is the `Canonical*` outputs plus the
 // `normalize*` functions.
 export * from "./normalize/index.js";
+
+// The artifact-parity differential: the comparison engine over verter's
+// `Canonical*` forms and the bridge's `Normalized*` outputs, plus the
+// coordinate/source-map projection that bridges their two coordinate spaces.
+export * from "./differential/index.js";
