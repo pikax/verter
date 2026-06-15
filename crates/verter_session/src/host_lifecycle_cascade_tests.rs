@@ -55,11 +55,11 @@ fn close_releases_per_canonical_domains_and_moves_project_generation() {
 
     let pts = host.project_type_store();
     assert!(
-        pts.derived_raw_cache().len() > 0,
+        !pts.derived_raw_cache().is_empty(),
         "precondition: upsert populates derived_raw_cache"
     );
     assert!(
-        pts.dependency_cache().len() > 0,
+        !pts.dependency_cache().is_empty(),
         "precondition: upsert populates dependency_cache"
     );
     let generation_before = pts.current_project_generation();

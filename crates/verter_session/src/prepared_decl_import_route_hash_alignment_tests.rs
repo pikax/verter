@@ -280,7 +280,7 @@ fn bundle_admission_records_dynamic_import_route_hash_when_static_is_absent() {
     assert!(
         signatures
             .iter()
-            .any(|signature| signature.iter().any(|fact| *fact == expected)),
+            .any(|signature| signature.contains(&expected)),
         "ADMISSION HASH SOURCE REGRESSION: the admitted bundle's fact \
          signature must carry the DYNAMIC \
          `generation_current_import_route_hash` ImportRoute fact. A static \

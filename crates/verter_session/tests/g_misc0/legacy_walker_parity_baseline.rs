@@ -145,7 +145,11 @@ enum ResolvedValueKind<'a> {
     /// because the fixture exercises a code path that needs
     /// session-side resolver state not present in the hermetic
     /// AuditedRequest builder. Treated as a non-discriminating
-    /// outcome by the discrimination guard.
+    /// outcome by the discrimination guard, which matches it
+    /// defensively (the `matches!` + `unreachable!` arms below) even
+    /// though no current hermetic fixture constructs it — same kept-
+    /// taxonomy rationale as the `SymbolicRef` sibling above.
+    #[allow(dead_code)]
     Unresolved,
 }
 

@@ -37,8 +37,8 @@ pub(crate) const TSGO_VERSION: &str = "7.0.0-dev.20260526.1";
 /// Bumped on any schema-field change AND whenever a new `oracle_value_kind` is
 /// added (a new kind carries a different required `identity` shape). v2 added
 /// `identity.probe_rhs_kind` + `raw_capture.probe_scaffold` (the capture-
-/// strategy axis); v3 added the REQUIRED top-level `migration_fingerprint_version`
-/// + `migration_fingerprint` migration-fidelity mirror (§Q4). Because it flows
+/// strategy axis); v3 added the REQUIRED top-level `migration_fingerprint_version` +
+/// `migration_fingerprint` migration-fidelity mirror (§Q4). Because it flows
 /// into `snapshot_id` through `PinnedEnv`, the bump changes every `snapshot_id`
 /// (hence every checked-in snapshot filename).
 #[allow(dead_code)]

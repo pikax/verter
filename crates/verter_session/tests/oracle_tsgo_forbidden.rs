@@ -405,6 +405,7 @@ fn tsgo_runtime_driver_checker_discriminates() {
 ///     (`src/typeinfo/typeinfo_tests/oracle_gen_spike.rs`),
 ///   - the `#[cfg(test)]`-only `typeinfo/typeinfo_tests/mod.rs` that declares the
 ///     gated spike module (it names the driver crate in a comment).
+///
 /// The rest of the `#[cfg(test)]` `typeinfo_tests` tree (the harness's own test
 /// consumers, e.g. the lifted-row registry) is scanned: it must stay tsgo-free,
 /// and the registry is additionally covered by

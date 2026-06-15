@@ -991,7 +991,7 @@ declare module "ext" { namespace NS { interface Foo { x: GlobalOnly } } }
         .expect("NS.Foo should prepare");
 
         assert!(
-            prepared.name_resolution.get("GlobalOnly").is_none(),
+            !prepared.name_resolution.contains_key("GlobalOnly"),
             "a module-augmentation namespace decl must NOT bind a \
              global-augmentation sibling of the same namespace name"
         );
@@ -1031,7 +1031,7 @@ declare global { namespace JSX {
         );
         // Restrict: the non-consumable global VALUE sibling must NOT be bound.
         assert!(
-            prepared.name_resolution.get("VERSION").is_none(),
+            !prepared.name_resolution.contains_key("VERSION"),
             "a non-consumable global-augmentation VALUE sibling must NOT be \
              bound into name_resolution"
         );

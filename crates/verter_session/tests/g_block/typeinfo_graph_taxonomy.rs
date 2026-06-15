@@ -271,27 +271,21 @@ fn type_info_graph_request_taxonomy_proto_ts_parity() {
 fn rust_generated_module_carries_documented_kind_variants() {
     // The Rust side is regenerated from the same proto every build, so
     // the proto-side variant counts are the Rust-side variant counts.
-    // This test asserts the generated Rust file lives where the
-    // verter_protocol crate expects it AND that the carrier modules
-    // we depend on exist. The byte-level Rust-side coverage lives in
-    // `verter_protocol::tests::typeinfo_proto_roundtrip` (which
+    // This test asserts the carrier modules we depend on exist in the
+    // generated `verter.v1` source. The byte-level Rust-side coverage
+    // lives in `verter_protocol::tests::typeinfo_proto_roundtrip` (which
     // constructs every variant and roundtrips through prost).
     //
-    // The generated `verter.v1.rs` is produced by `prost-build` from
-    // `crates/verter_protocol/build.rs` during a normal cargo build.
-    // A missing artifact means the dependency graph never built
-    // `verter_protocol` before this test ran — that is a build
-    // configuration bug, not a runtime condition to silently skip.
-    let path = find_generated_rust().unwrap_or_else(|| {
-        panic!(
-            "verter.v1 generated Rust not built; \
-             run `cargo build -p verter_protocol` before this test \
-             (or run with a CARGO_TARGET_DIR that already contains \
-             a built verter_protocol artifact)."
-        )
-    });
-    let rust = std::fs::read_to_string(&path)
-        .unwrap_or_else(|err| panic!("read generated Rust {}: {err}", path.display()));
+    // The source under inspection is `verter_protocol`'s own
+    // `GENERATED_VERTER_V1_RS` — `include_str!` of the exact
+    // `OUT_DIR/verter.v1.rs` that the crate's `include!` compiled and
+    // linked into THIS build. There is no `target/` scan, so there is no
+    // stale-sibling ambiguity: a `verter_protocol-<hash>/out/` dir from
+    // another fingerprint, worktree, or branch sharing the same
+    // `CARGO_TARGET_DIR` cannot be inspected in place of the artifact
+    // this run actually built. A missing/incomplete generated module is
+    // a compile error on the `const`, never a silent skip.
+    let rust = verter_protocol::GENERATED_VERTER_V1_RS;
     assert!(
         rust.contains("pub mod graph_type_node {"),
         "generated verter.v1 must include `graph_type_node` oneof carrier module",
@@ -308,22 +302,4 @@ fn rust_generated_module_carries_documented_kind_variants() {
         rust.contains("pub mod type_info_graph_request {"),
         "generated verter.v1 must include `type_info_graph_request` oneof carrier module",
     );
-}
-
-fn find_generated_rust() -> Option<PathBuf> {
-    let target_dir = std::env::var_os("CARGO_TARGET_DIR")
-        .map(PathBuf::from)
-        .or_else(|| workspace_root().join("target").canonicalize().ok())?;
-    let build_dir = target_dir.join("debug").join("build");
-    let entries = std::fs::read_dir(&build_dir).ok()?;
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        if name.to_string_lossy().starts_with("verter_protocol-") {
-            let candidate = entry.path().join("out").join("verter.v1.rs");
-            if candidate.exists() {
-                return Some(candidate);
-            }
-        }
-    }
-    None
 }

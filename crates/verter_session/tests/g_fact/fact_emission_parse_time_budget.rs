@@ -23,6 +23,7 @@
 //!    boundary:
 //!      - linear    O(N)  ⇒ doubling the input ⇒ ratio ≈ 2.0x
 //!      - quadratic O(N²) ⇒ doubling the input ⇒ ratio ≈ 4.0x
+//!
 //!    A `3.0x` threshold sits squarely between the two classes: it
 //!    passes a linear emitter with comfortable margin and trips on a
 //!    quadratic (or worse) one. It is a SCALING guard, not a

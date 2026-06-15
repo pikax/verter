@@ -20,3 +20,17 @@ pub mod verter {
         include!(concat!(env!("OUT_DIR"), "/verter.v1.rs"));
     }
 }
+
+/// The generated `verter.v1` prost Rust source that THIS build compiled and
+/// linked, exposed verbatim for test-support.
+///
+/// `include_str!` reads the exact same `concat!(env!("OUT_DIR"),
+/// "/verter.v1.rs")` path that the `verter::v1` `include!` above compiles, so
+/// this string is the prost output of the current build *by construction* —
+/// not a sibling artifact discovered by scanning `target/` (whose `read_dir`
+/// can surface a stale `verter_protocol-<hash>/out/` dir from another
+/// fingerprint, worktree, or branch sharing the same `CARGO_TARGET_DIR`).
+/// Taxonomy guards assert the documented oneof carrier modules are present in
+/// this source. The `const` carries no codegen footprint where unreferenced,
+/// so production binaries that never touch it are unaffected.
+pub const GENERATED_VERTER_V1_RS: &str = include_str!(concat!(env!("OUT_DIR"), "/verter.v1.rs"));
