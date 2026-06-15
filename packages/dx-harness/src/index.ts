@@ -190,3 +190,12 @@ export * from "./differential/index.js";
 // drives verter-on-`.vue` against tsgo/tsserver-on-`.ts` for the vueSemanticValidity
 // dimension. Consumes the diff re-exported above.
 export * from "./semantic-oracle/index.js";
+
+// The raw-LSP signal collectors: the shared event/severity/JSONL substrate, the
+// per-edit sampling loop, and the nine collectors (completion, hover, definition,
+// auto-import, diagnostics, churn, latency, logs, recovery). Each pure classifier
+// folds normalized inputs into severity-tagged events; the live drivers spawn the
+// real `verter-lsp` binary and are exercised by the env-gated integration suite. The
+// collectors DRIVE the differential comparators / normalizers / quiescence gates —
+// they do not re-implement comparison.
+export * from "./collectors/index.js";
