@@ -54,25 +54,6 @@ export class GeneratedDocument {
   byteRangeToPosition(start: number, end: number): Range {
     return { start: this.byteToPosition(start), end: this.byteToPosition(end) };
   }
-
-  /**
-   * The exclusive-end `character` of a generated line: the count of UTF-16 code units of
-   * CONTENT on `line`, excluding its line terminator. Returns `null` when `line` is out of
-   * range. Reuses the underlying {@link DocumentPositions} line-end clamp (which strips a
-   * trailing `\n` / `\r` / `\r\n`) rather than a second walker — the span from the line
-   * start to the over-long-character clamp is exactly the line's content length. The
-   * column-0 range reconstruction uses this to bound a content line by its REAL generated
-   * length instead of fabricating an authored span across the line break.
-   */
-  lineEndCharacter(line: number): number | null {
-    if (!Number.isInteger(line) || line < 0 || line >= this.positions.lineCount) return null;
-    const start = this.positions.positionToUtf16({ line, character: 0 }, "utf-16");
-    const end = this.positions.positionToUtf16(
-      { line, character: Number.MAX_SAFE_INTEGER },
-      "utf-16",
-    );
-    return end - start;
-  }
 }
 
 /**
@@ -85,7 +66,7 @@ export function baselineByteToPosition(emittedTsx: string, byteOffset: number): 
 }
 
 /**
- * One-shot convenience: fold a baseline `[start, end)` UTF-8 byte range over the
+ * One-shot convenience: fold a baseline `[start, end)` byte range over the
  * emitted TSX into a generated LSP {@link Range} (UTF-16 columns).
  */
 export function baselineRangeToPosition(emittedTsx: string, start: number, end: number): Range {
@@ -289,196 +270,37 @@ export function projectGeneratedPosition(
 }
 
 /**
- * Project the CONTENT of a generated range `[startGen, endGen)` to its authored EXCLUSIVE-end
- * position, confirming the whole content is ONE contiguous same-source 1:1 mapping. Returns `null`
- * when any content position is source-less, maps to a different source than `startGen`, breaks
- * within-line authored-column contiguity, or breaks authored-LINE continuity across a generated
- * line break — any of which means no single authored range faithfully represents the generated
- * content, so the span is reported as unprojectable rather than fabricated across the hole.
+ * Project a generated {@link Range} back to an authored {@link OriginalRange} by proving EVERY
+ * generated content column the range covers, never by sampling its endpoints. Returns `null`
+ * unless the whole content `[start .. end-1]` is one contiguous same-source 1:1 mapping: a start
+ * and end in different sources, a source-less / cross-source / authored-column-jumping hole
+ * anywhere in the interior, or a generated line break that does not restart the next authored line
+ * at column 0, all make the range unprojectable rather than fabricated across the gap.
  *
- * The content positions are `[startGen .. endGen - 1]` flattened across generated lines: on the
- * start line from `startGen.character`, every fully-included intermediate line in whole (its
- * trailing segment extends to the line end), and the final content line up to its last content
- * column. When `endGen.character` is greater than 0 the final content line is `endGen.line` up to
- * `endGen.character - 1`. When `endGen.character` is 0 the content stops at the end of the previous
- * generated line, whose last content column is bounded by that line's REAL generated length (from
- * the {@link GeneratedDocument} the projector owns) — so no column of `endGen.line` is content. In
- * both cases the authored exclusive end is reconstructed one unit past the authored position of that
- * last included column. A column-0 end additionally validates that the boundary at `endGen` is a
- * faithful same-source line break (it must continue the authored line at column 0), but that
- * boundary is only a gate and never supplies the returned end.
+ * An LSP range is inclusive-start / EXCLUSIVE-end, so its content is the positions
+ * `[start .. end-1]` and the exclusive end is NOT content. A segment opening exactly at
+ * `generated.end.character` therefore does not reject the range — that is what lets a fully-mapped
+ * token whose end abuts a generated-only (unmapped) boundary still project, which an endpoint-only
+ * check cannot tell apart from an interior hole that mapping resumes past before the end.
  *
- * Coverage is verified by walking the segments of each generated content line: a segment opening a
- * new sub-run must keep the authored line and resume at the authored column the previous segment
- * interpolates to at that boundary, and the first segment of every content line after the start
- * must open on the next authored line at authored column 0 — a faithful copy advances exactly one
- * authored line per generated line break and restarts at that line's start, so a break onto a
- * non-adjacent authored line, or onto a column past the line start, is rejected rather than
- * fabricating the authored columns the generated content never covers.
- *
- * Limitation: this projector owns the generated artifact text and the source map, but not the
- * authored Vue text. It can bound fully included generated lines by their real generated line
- * length, but it cannot prove that a non-final generated line copied through the end of its authored
- * line. A generated break from authored (A,C) to authored (A+1,0) may therefore be a true authored
- * line break or a break after copying only a strict prefix of authored line A. This is recorded as
- * an authored-reporting limitation; the authored-text-aware generated-to-Vue projection layer must
- * close it by checking authored line lengths.
- */
-function projectContentSpan(
-  map: ParsedSourceMap,
-  document: GeneratedDocument,
-  startGen: Position,
-  endGen: Position,
-): OriginalPosition | null {
-  const startSegment =
-    startGen.line >= 0 && startGen.line < map.lines.length
-      ? coveringSegment(map.lines[startGen.line], startGen.character)
-      : null;
-  if (startSegment === null || startSegment.source === null) return null;
-  const sourceIndex = startSegment.source.index;
-
-  const endsAtColumnZero = endGen.character === 0;
-  // A column-0 exclusive end's content runs through the end of the previous generated line; a
-  // real-column end's content runs through `endGen.character - 1` on the end line itself.
-  const lastContentLine = endsAtColumnZero ? endGen.line - 1 : endGen.line;
-  if (lastContentLine < startGen.line) return null; // empty or inverted content
-  // The last content line's last content column. For a column-0 end it is bounded by that line's
-  // REAL generated length (`lineEndCharacter - 1`) — NOT Infinity and NOT the authored position the
-  // column-0 boundary maps to — so a generated line that copied only a prefix of its authored line
-  // yields a tight authored end rather than fabricating the uncovered authored suffix. For a
-  // real-column end it is the column one before the exclusive end on the end line itself.
-  let lastContentColumn: number;
-  if (endsAtColumnZero) {
-    const lineEnd = document.lineEndCharacter(lastContentLine);
-    if (lineEnd === null) return null; // the generated document has no such line — cannot bound
-    lastContentColumn = lineEnd - 1;
-  } else {
-    lastContentColumn = endGen.character - 1;
-  }
-
-  let prevAuthoredLine = startSegment.source.line;
-  for (let line = startGen.line; line <= lastContentLine; line++) {
-    const segments = line >= 0 && line < map.lines.length ? map.lines[line] : [];
-    const colFrom = line === startGen.line ? startGen.character : 0;
-    // The final content line stops at its last content column; an earlier line runs to its end,
-    // which the trailing segment already covers.
-    const colTo = line === lastContentLine ? lastContentColumn : Infinity;
-
-    const cover = coveringSegment(segments, colFrom);
-    if (cover === null || cover.source === null || cover.source.index !== sourceIndex) {
-      return null;
-    }
-    // Authored-line continuity across a generated line break: each content line after the start
-    // must open one authored line past the previous content line's authored line AND at authored
-    // column 0 — a faithful line break restarts the next authored line at its start, so a break
-    // onto a non-adjacent authored line, or onto a column past that line's start (which would
-    // fabricate the authored columns before it), is rejected.
-    if (
-      line > startGen.line &&
-      (cover.source.line !== prevAuthoredLine + 1 || cover.source.column !== 0)
-    ) {
-      return null;
-    }
-
-    let prevSource: SegmentSource = cover.source;
-    let prevGenColumn = cover.genColumn;
-    for (const segment of segments) {
-      if (segment.genColumn <= colFrom) continue; // already covered by `cover`
-      if (segment.genColumn > colTo) break; // past this line's content
-      if (segment.source === null || segment.source.index !== sourceIndex) return null;
-      const expectedColumn = prevSource.column + (segment.genColumn - prevGenColumn);
-      if (segment.source.line !== prevSource.line || segment.source.column !== expectedColumn) {
-        return null;
-      }
-      prevSource = segment.source;
-      prevGenColumn = segment.genColumn;
-    }
-    // Within a content line every segment shares one authored line (enforced above), so the
-    // covering segment's authored line is this line's authored line.
-    prevAuthoredLine = cover.source.line;
-  }
-
-  // A column-0 exclusive end additionally requires the generated line break to be a FAITHFUL
-  // same-source wrap: the boundary at `endGen` must map to the start source and open the next
-  // authored line (one past the last content line) at authored column 0. This rejects a
-  // source-less, cross-source, line-jumping, or mid-line break rather than projecting across it.
-  // The boundary is only a GATE — it does not supply the returned end (a faithful break to authored
-  // (A+1,0) does not prove the generated line copied through the end of authored line A; that is
-  // the authored-reporting limitation documented above).
-  if (endsAtColumnZero) {
-    const boundary = projectGeneratedPosition(map, endGen);
-    if (
-      boundary === null ||
-      boundary.source !== map.sources[sourceIndex] ||
-      boundary.line !== prevAuthoredLine + 1 ||
-      boundary.character !== 0
-    ) {
-      return null;
-    }
-  }
-
-  // The authored exclusive end is one past the authored position of the LAST ACTUAL generated
-  // content column: `endGen.character - 1` for a real-column end, the real-length-bounded last
-  // column for a column-0 end. Both reconstruct identically through the source map, so a column-0
-  // end never returns the boundary's (A+1,0) position and a prefix-copied final line is bounded to
-  // the columns it actually covered.
-  const lastIncluded = projectGeneratedPosition(map, {
-    line: lastContentLine,
-    character: lastContentColumn,
-  });
-  if (lastIncluded === null) return null;
-  return {
-    source: lastIncluded.source,
-    line: lastIncluded.line,
-    character: lastIncluded.character + 1,
-  };
-}
-
-/**
- * The paired inputs a generated → authored range projection reads: the V3 source map AND the
- * generated artifact's text. The projector owns BOTH — the map gives authored attribution per
- * generated column, and the {@link GeneratedDocument} gives each generated line's real length,
- * which bounds a content line to the columns generated content actually covers instead of
- * fabricating across a line break (see {@link projectContentSpan}). It does NOT own the authored
- * Vue text, which is the boundary of what it can prove (see the limitation on
- * {@link projectContentSpan}).
- */
-export interface GeneratedProjection {
-  readonly map: ParsedSourceMap;
-  readonly document: GeneratedDocument;
-}
-
-/**
- * Project a generated {@link Range} back to an authored {@link OriginalRange}.
- * Returns `null` unless the range's CONTENT projects and resolves to a single SAME source — a
- * start and end in different sources, or content broken by a source-less / cross-source /
- * non-contiguous hole, is not a coherent single-source range and is reported as unprojectable
- * rather than fabricated.
- *
- * An LSP range is inclusive-start / EXCLUSIVE-end: its content is the positions `[start .. end-1]`,
- * and the exclusive end is one past the last content position. The range is therefore projected by
- * its content — EVERY content position must be covered by one contiguous same-source mapping, with
- * authored-column contiguity within a generated line and authored-line continuity across a line
- * break — NOT by projecting the exclusive end as a point. Projecting the exclusive end would both
- * reject a fully-mapped token range merely because its end abuts a generated-only (unmapped)
- * boundary (the shape verter emits for inserted content immediately after a copied token) AND
- * accept a range whose interior content hides an unmapped, cross-source, or line-jumping hole that
- * mapping resumes past before the end. One content walk ({@link projectContentSpan}) handles every
- * non-empty range — including one ending at the column-0 break of a later generated line — so there
- * is no endpoint-only path; the authored exclusive end is derived only after the full content span
- * validates as one contiguous same-source copy.
+ * The authored exclusive end is derived only after the content validates. For a real-column end it
+ * is one past the authored position of the last content column (`generated.end.character - 1`). For
+ * an end at column 0 of a later generated line — where no column of `generated.end.line` is content
+ * and the content runs through the generated EOL of the previous line — the boundary `generated.end`
+ * is itself projected: a faithful line break carries it to the START of the next authored line
+ * (`{ lastAuthoredLine + 1, 0 }`), so it both gates the wrap as same-source and supplies the
+ * authored exclusive end.
  */
 export function projectGeneratedRange(
-  projection: GeneratedProjection,
+  map: ParsedSourceMap,
   generated: Range,
 ): OriginalRange | null {
-  const { map, document } = projection;
   const start = projectGeneratedPosition(map, generated.start);
   if (start === null) return null;
   const startPos = { line: start.line, character: start.character };
 
-  // A zero-width range is its single position: it projects exactly when the start does, and the
-  // authored range is the zero-width point. It has no content positions to walk.
+  // A zero-width range is its single position: it projects exactly when the start does, with a
+  // zero-width authored range and no content columns to walk.
   if (
     generated.start.line === generated.end.line &&
     generated.start.character === generated.end.character
@@ -486,10 +308,107 @@ export function projectGeneratedRange(
     return { source: start.source, range: { start: startPos, end: startPos } };
   }
 
-  const end = projectContentSpan(map, document, generated.start, generated.end);
-  if (end === null) return null;
+  // An inverted range (end before start) has no content and is not a coherent span.
+  if (
+    generated.end.line < generated.start.line ||
+    (generated.end.line === generated.start.line &&
+      generated.end.character < generated.start.character)
+  ) {
+    return null;
+  }
+
+  // The start projected, so its covering segment is mapped; its source anchors the whole span and
+  // the same authored line seeds the cross-line-break continuity check below.
+  const startCover = coveringSegment(map.lines[generated.start.line], generated.start.character);
+  if (startCover === null || startCover.source === null) return null;
+  const sourceIndex = startCover.source.index;
+  const sourceName = map.sources[sourceIndex];
+  if (sourceName === undefined) return null;
+
+  // An end at column 0 has its content run through the previous generated line's EOL; a real-column
+  // end's content runs through `end.character - 1` on the end line itself.
+  const endsAtColumnZero = generated.end.character === 0;
+  const lastContentLine = endsAtColumnZero ? generated.end.line - 1 : generated.end.line;
+  if (lastContentLine < generated.start.line) return null;
+
+  let previousAuthoredLine = startCover.source.line;
+  for (let line = generated.start.line; line <= lastContentLine; line++) {
+    const segments = line >= 0 && line < map.lines.length ? map.lines[line] : [];
+    const from = line === generated.start.line ? generated.start.character : 0;
+    // The exclusive-end column is NOT content; only a real-column end on the end line itself bounds
+    // a content line short of its generated EOL.
+    const toExclusive =
+      line === generated.end.line && generated.end.character > 0
+        ? generated.end.character
+        : Number.POSITIVE_INFINITY;
+
+    const cover = coveringSegment(segments, from);
+    if (cover === null || cover.source === null || cover.source.index !== sourceIndex) {
+      return null;
+    }
+    // Across a generated line break a faithful 1:1 copy advances exactly one authored line and
+    // restarts it at column 0 — a break onto a non-adjacent authored line, or onto a column past
+    // the line start (which would fabricate the authored columns before it), is rejected.
+    if (
+      line > generated.start.line &&
+      (cover.source.line !== previousAuthoredLine + 1 || cover.source.column !== 0)
+    ) {
+      return null;
+    }
+
+    // Within the line every sub-run must keep the authored line and resume at the authored column
+    // the previous segment interpolates to — a source-less, cross-source, authored-line-breaking,
+    // or authored-column-jumping segment is not a contiguous copy.
+    let previous: MappingSegment = cover;
+    for (const segment of segments) {
+      if (segment.genColumn <= from) continue; // already covered by `cover`
+      if (segment.genColumn >= toExclusive) break; // at/past the exclusive end — not content
+      const previousSource = previous.source;
+      if (
+        segment.source === null ||
+        previousSource === null ||
+        segment.source.index !== sourceIndex ||
+        segment.source.line !== previousSource.line
+      ) {
+        return null;
+      }
+      const expectedColumn = previousSource.column + (segment.genColumn - previous.genColumn);
+      if (segment.source.column !== expectedColumn) return null;
+      previous = segment;
+    }
+    previousAuthoredLine = cover.source.line;
+  }
+
+  let authoredEnd: OriginalPosition;
+  if (endsAtColumnZero) {
+    // The column-0 break is both gated as a faithful same-source wrap AND supplies the authored
+    // exclusive end: it must map to the start source at the START of the next authored line.
+    const boundary = projectGeneratedPosition(map, generated.end);
+    if (
+      boundary === null ||
+      boundary.source !== sourceName ||
+      boundary.line !== previousAuthoredLine + 1 ||
+      boundary.character !== 0
+    ) {
+      return null;
+    }
+    authoredEnd = boundary;
+  } else {
+    // The authored exclusive end is one past the authored position of the last content column.
+    const lastIncluded = projectGeneratedPosition(map, {
+      line: generated.end.line,
+      character: generated.end.character - 1,
+    });
+    if (lastIncluded === null || lastIncluded.source !== sourceName) return null;
+    authoredEnd = {
+      source: sourceName,
+      line: lastIncluded.line,
+      character: lastIncluded.character + 1,
+    };
+  }
+
   return {
-    source: start.source,
-    range: { start: startPos, end: { line: end.line, character: end.character } },
+    source: sourceName,
+    range: { start: startPos, end: { line: authoredEnd.line, character: authoredEnd.character } },
   };
 }

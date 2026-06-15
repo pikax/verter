@@ -28,11 +28,7 @@ import {
   rangesEqual,
 } from "../normalize/index.js";
 import type { Divergence } from "./outcome.js";
-import {
-  GeneratedDocument,
-  projectGeneratedRange,
-  type GeneratedProjection,
-} from "./projection.js";
+import { GeneratedDocument, projectGeneratedRange, type ParsedSourceMap } from "./projection.js";
 
 /** The baseline provider's resolved locations plus the file texts behind their byte offsets. */
 export interface BaselineLocations {
@@ -45,8 +41,8 @@ export interface BaselineLocations {
 export interface DefinitionCompareOptions {
   /** The expected authored-Vue symbol identity; when present it governs the comparison. */
   readonly expected?: ExpectedDefinition;
-  /** The source map + generated artifact text for projecting generated targets to authored Vue space. */
-  readonly projection?: GeneratedProjection;
+  /** The source map for projecting generated targets back to authored Vue space. */
+  readonly map?: ParsedSourceMap;
   /** The baseline provider's resolved locations plus the texts needed to convert them. */
   readonly baseline?: BaselineLocations;
 }
@@ -69,7 +65,7 @@ interface BaselineAuthored {
 /** Reduce verter targets to authored identities, projecting generated targets via the map. */
 function verterAuthored(
   verter: readonly CanonicalDefinitionTarget[],
-  projection: GeneratedProjection | undefined,
+  map: ParsedSourceMap | undefined,
 ): AuthoredIdentity[] {
   const authored: AuthoredIdentity[] = [];
   for (const target of verter) {
@@ -77,7 +73,7 @@ function verterAuthored(
       authored.push({ uri: target.uri, range: target.range });
       continue;
     }
-    const projected = projection ? projectGeneratedRange(projection, target.range) : null;
+    const projected = map ? projectGeneratedRange(map, target.range) : null;
     if (projected !== null) authored.push({ uri: projected.source, range: projected.range });
     // else: a generated target with no mapping back — omitted (see unmappedGenerated below)
   }
@@ -87,7 +83,7 @@ function verterAuthored(
 /** Reduce baseline locations to authored identities, projecting generated paths via the map. */
 function baselineAuthored(
   baseline: BaselineLocations,
-  projection: GeneratedProjection | undefined,
+  map: ParsedSourceMap | undefined,
 ): BaselineAuthored {
   const authored: AuthoredIdentity[] = [];
   const unconvertible: NormalizedLocation[] = [];
@@ -114,11 +110,9 @@ function baselineAuthored(
     }
     const generatedRange = doc.byteRangeToPosition(loc.start, loc.end);
     if (isGeneratedUri(loc.path)) {
-      // The baseline's range is in `loc.path`'s coordinate space, so pair the projection's
-      // source map with THIS path's just-built document (`doc`), not the verter-side document.
-      const projected = projection
-        ? projectGeneratedRange({ map: projection.map, document: doc }, generatedRange)
-        : null;
+      // The baseline's byte offsets converted to a generated position through THIS path's document
+      // (`doc`) above; the source map projects that position back to authored Vue space.
+      const projected = map ? projectGeneratedRange(map, generatedRange) : null;
       if (projected !== null) authored.push({ uri: projected.source, range: projected.range });
       // A generated baseline target that converted but has no mapping back to authored
       // source: surface it (see unmappedGenerated below), never drop it into agreement.
@@ -178,7 +172,7 @@ export function compareDefinition(
   options: DefinitionCompareOptions = {},
 ): Divergence[] {
   const divergences: Divergence[] = [];
-  const verterIds = verterAuthored(verter, options.projection);
+  const verterIds = verterAuthored(verter, options.map);
   // Generated-only (the shared normalizer predicate) AND none mapped back = unmapped-generated.
   const verterAllUnmapped = isDefinitionGeneratedOnly(verter) && verterIds.length === 0;
 
@@ -216,7 +210,7 @@ export function compareDefinition(
       authored: baselineIds,
       unconvertible,
       unprojectableGenerated,
-    } = baselineAuthored(options.baseline, options.projection);
+    } = baselineAuthored(options.baseline, options.map);
     pushLocationSetDiff(divergences, verterIds, baselineIds);
     for (const loc of unconvertible) {
       divergences.push({

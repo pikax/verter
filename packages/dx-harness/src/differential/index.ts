@@ -87,7 +87,6 @@ export {
   parseSourceMap,
   projectGeneratedPosition,
   projectGeneratedRange,
-  type GeneratedProjection,
   type MappingSegment,
   type OriginalPosition,
   type OriginalRange,

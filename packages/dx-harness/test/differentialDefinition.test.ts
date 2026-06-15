@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { GeneratedDocument, compareDefinition, parseSourceMap } from "../src/differential/index.js";
+import { compareDefinition, parseSourceMap } from "../src/differential/index.js";
 import type {
   CanonicalDefinitionTarget,
   ExpectedDefinition,
@@ -8,10 +8,8 @@ import type {
 } from "../src/index.js";
 import { buildSourceMapJson } from "./_sourceMap.js";
 
-// `compareDefinition`'s `projection` now pairs the source map with the generated artifact's text
-// (a `GeneratedProjection`). The targets below are single-line, so the document — consulted only by
-// `projectGeneratedRange`'s column-0 reconstruction — is a structurally-valid generated-text
-// stand-in here; the baseline path rebuilds its own per-path document from the supplied texts.
+// `compareDefinition` projects generated targets back to authored Vue space through the source map
+// alone (`map`); the baseline path converts its own byte offsets via the per-path texts it is given.
 
 describe("compareDefinition — symbol identity by file+range, NEVER by line === 0", () => {
   it("a precise LINE-0 target that matches the expected identity -> agreement", () => {
@@ -43,12 +41,7 @@ describe("compareDefinition — symbol identity by file+range, NEVER by line ===
       uri: "App.vue",
       range: { start: { line: 1, character: 6 }, end: { line: 1, character: 9 } },
     };
-    expect(
-      compareDefinition([generated], {
-        expected,
-        projection: { map, document: new GeneratedDocument("l0\nl1\nl2\nl3\n  const App = 1") },
-      }),
-    ).toEqual([]);
+    expect(compareDefinition([generated], { expected, map })).toEqual([]);
   });
 
   it("a target in the wrong file/symbol -> wrongTarget", () => {
@@ -155,7 +148,7 @@ describe("compareDefinition — a baseline GENERATED target with text but no map
     const locations: NormalizedLocation[] = [{ path: "App.vue.tsx", start: 10, end: 11 }];
     const out = compareDefinition([], {
       baseline: { locations, texts: { "App.vue.tsx": generatedText } },
-      projection: { map, document: new GeneratedDocument(generatedText) },
+      map,
     });
     expect(out).not.toEqual([]);
     expect(out.map((d) => d.class)).toContain("unmappedGenerated");
@@ -175,7 +168,7 @@ describe("compareDefinition — a baseline GENERATED target with text but no map
     ];
     const out = compareDefinition(verter, {
       baseline: { locations, texts: { "App.vue.tsx": generatedText } },
-      projection: { map, document: new GeneratedDocument(generatedText) },
+      map,
     });
     expect(out).toEqual([]);
   });
@@ -198,10 +191,7 @@ describe("compareDefinition — a generated target in an UNMAPPED run is not a f
       uri: "App.vue",
       range: { start: { line: 1, character: 18 }, end: { line: 1, character: 21 } },
     };
-    const out = compareDefinition([generated], {
-      expected: falseProjectedIdentity,
-      projection: { map, document: new GeneratedDocument("const Heading = somethingElse;") },
-    });
+    const out = compareDefinition([generated], { expected: falseProjectedIdentity, map });
     expect(out.map((d) => d.class)).toEqual(["unmappedGenerated"]);
     expect(out.map((d) => d.class)).not.toContain("wrongTarget");
   });
