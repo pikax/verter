@@ -21,7 +21,8 @@
 use std::path::PathBuf;
 
 use verter_session::framework::svelte_jsx_assets::{
-    SVELTE_JSX_DEV_RUNTIME_DTS, SVELTE_JSX_RUNTIME_DTS,
+    SVELTE_JSX_DEV_RUNTIME_DTS, SVELTE_JSX_MATHML_DEV_RUNTIME_DTS, SVELTE_JSX_MATHML_RUNTIME_DTS,
+    SVELTE_JSX_RUNTIME_DTS, SVELTE_JSX_SVG_DEV_RUNTIME_DTS, SVELTE_JSX_SVG_RUNTIME_DTS,
 };
 
 /// Resolve the workspace root from this crate's manifest dir
@@ -52,7 +53,7 @@ struct ShimAsset {
     embedded: &'static str,
 }
 
-fn assets() -> [ShimAsset; 2] {
+fn assets() -> [ShimAsset; 6] {
     [
         ShimAsset {
             file_name: "jsx-runtime.d.ts",
@@ -61,6 +62,24 @@ fn assets() -> [ShimAsset; 2] {
         ShimAsset {
             file_name: "jsx-dev-runtime.d.ts",
             embedded: SVELTE_JSX_DEV_RUNTIME_DTS,
+        },
+        // The F10 svg-namespace entrypoint (`@verter/svelte-jsx/svg/jsx-runtime`).
+        ShimAsset {
+            file_name: "svg/jsx-runtime.d.ts",
+            embedded: SVELTE_JSX_SVG_RUNTIME_DTS,
+        },
+        ShimAsset {
+            file_name: "svg/jsx-dev-runtime.d.ts",
+            embedded: SVELTE_JSX_SVG_DEV_RUNTIME_DTS,
+        },
+        // The F10 mathml-namespace entrypoint.
+        ShimAsset {
+            file_name: "mathml/jsx-runtime.d.ts",
+            embedded: SVELTE_JSX_MATHML_RUNTIME_DTS,
+        },
+        ShimAsset {
+            file_name: "mathml/jsx-dev-runtime.d.ts",
+            embedded: SVELTE_JSX_MATHML_DEV_RUNTIME_DTS,
         },
     ]
 }

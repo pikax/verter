@@ -366,21 +366,28 @@ impl<'a> SvelteParser<'a> {
 
         let void = self_closing || is_void_element(&name);
         let mut children = Vec::new();
+        let mut close_span = None;
         if !void {
             if matches!(kind, SvelteElementKind::NestedStyle) {
                 // Nested <style> inside template markup — opaque content.
                 let content_start = self.pos;
-                if let Some((_content_end, after)) = self.find_close_tag(b"style") {
+                if let Some((content_end, after)) = self.find_close_tag(b"style") {
                     self.pos = after;
+                    // The NestedStyle text child spans content + close tag (the
+                    // projector strips it whole); the close span is recorded for
+                    // close-tag-aware consumers but stays inside that removed run.
                     children.push(SvelteNode::Text(Span::new(
                         content_start as u32,
                         self.pos as u32,
                     )));
+                    close_span = Some(Span::new(content_end as u32, after as u32));
                 } else {
                     self.pos = self.len();
                 }
             } else {
-                children = self.parse_children_until_close(&name);
+                let (kids, close) = self.parse_children_until_close(&name);
+                children = kids;
+                close_span = close;
             }
         }
 
@@ -392,12 +399,14 @@ impl<'a> SvelteParser<'a> {
             children,
             self_closing: void,
             open_span,
+            close_span,
         })]
     }
 
-    /// Parse child nodes until the matching `</name>` close (or EOF). The close
-    /// tag is consumed.
-    fn parse_children_until_close(&mut self, name: &str) -> Vec<SvelteNode> {
+    /// Parse child nodes until the matching `</name>` close (or EOF). Returns the
+    /// children plus the consumed `</name>` close-tag span (`None` if the element
+    /// is unterminated / closed implicitly by a foreign close).
+    fn parse_children_until_close(&mut self, name: &str) -> (Vec<SvelteNode>, Option<Span>) {
         let mut children = Vec::new();
         let mut text_start = self.pos;
         while !self.eof() {
@@ -406,15 +415,17 @@ impl<'a> SvelteParser<'a> {
                 // Is this the matching close tag?
                 if self.at(self.pos + 1) == b'/' {
                     if self.matches_close_name(self.pos + 2, name) {
-                        // flush text and consume the close tag
+                        // flush text and consume the close tag, recording its span
                         if text_start < self.pos {
                             children.push(SvelteNode::Text(Span::new(
                                 text_start as u32,
                                 self.pos as u32,
                             )));
                         }
+                        let close_start = self.pos as u32;
                         self.consume_close_tag();
-                        return children;
+                        let close_span = Span::new(close_start, self.pos as u32);
+                        return (children, Some(close_span));
                     }
                     // A different close tag — recovery: flush and consume it,
                     // treating the current element as implicitly closed.
@@ -425,7 +436,7 @@ impl<'a> SvelteParser<'a> {
                         )));
                     }
                     // Leave the foreign close for the parent to handle: stop.
-                    return children;
+                    return (children, None);
                 }
                 if text_start < self.pos {
                     children.push(SvelteNode::Text(Span::new(
@@ -451,7 +462,7 @@ impl<'a> SvelteParser<'a> {
                 // A block-closing/clause token belongs to an enclosing block —
                 // stop child scan so the block parser sees it.
                 if self.is_block_close_or_clause() {
-                    return children;
+                    return (children, None);
                 }
                 let nodes = self.parse_brace_construct();
                 children.extend(nodes);
@@ -466,7 +477,7 @@ impl<'a> SvelteParser<'a> {
                 self.pos as u32,
             )));
         }
-        children
+        (children, None)
     }
 
     fn matches_close_name(&self, pos: usize, name: &str) -> bool {

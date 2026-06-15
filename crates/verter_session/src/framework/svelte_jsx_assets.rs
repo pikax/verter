@@ -39,6 +39,45 @@ pub const SVELTE_JSX_RUNTIME_SPECIFIER: &str = "@verter/svelte-jsx/jsx-runtime";
 /// (`@verter/svelte-jsx/jsx-dev-runtime`).
 pub const SVELTE_JSX_DEV_RUNTIME_SPECIFIER: &str = "@verter/svelte-jsx/jsx-dev-runtime";
 
+// --- F10 svg-namespace entrypoint (`@verter/svelte-jsx/svg`) ---
+
+/// The embedded `@verter/svelte-jsx/svg/jsx-runtime.d.ts` shim — the SVG-only
+/// `JSX` namespace (`IntrinsicElements` = the SVG element set via
+/// `SVGAttributes`). Selected by a `<svelte:options namespace="svg">`.
+pub const SVELTE_JSX_SVG_RUNTIME_DTS: &str = include_str!("svelte_jsx_assets/svg/jsx-runtime.d.ts");
+
+/// The embedded `@verter/svelte-jsx/svg/jsx-dev-runtime.d.ts` shim — the
+/// dev-mode re-export of the SVG `JSX` namespace.
+pub const SVELTE_JSX_SVG_DEV_RUNTIME_DTS: &str =
+    include_str!("svelte_jsx_assets/svg/jsx-dev-runtime.d.ts");
+
+/// The `svg/jsx-runtime` subpath specifier (resolved by the
+/// `@jsxImportSource @verter/svelte-jsx/svg` pragma).
+pub const SVELTE_JSX_SVG_RUNTIME_SPECIFIER: &str = "@verter/svelte-jsx/svg/jsx-runtime";
+
+/// The `svg/jsx-dev-runtime` subpath specifier.
+pub const SVELTE_JSX_SVG_DEV_RUNTIME_SPECIFIER: &str = "@verter/svelte-jsx/svg/jsx-dev-runtime";
+
+// --- F10 mathml-namespace entrypoint (`@verter/svelte-jsx/mathml`) ---
+
+/// The embedded `@verter/svelte-jsx/mathml/jsx-runtime.d.ts` shim — the
+/// Verter-owned MathML `JSX` namespace (svelte ships no MathML types).
+pub const SVELTE_JSX_MATHML_RUNTIME_DTS: &str =
+    include_str!("svelte_jsx_assets/mathml/jsx-runtime.d.ts");
+
+/// The embedded `@verter/svelte-jsx/mathml/jsx-dev-runtime.d.ts` shim — the
+/// dev-mode re-export of the MathML `JSX` namespace.
+pub const SVELTE_JSX_MATHML_DEV_RUNTIME_DTS: &str =
+    include_str!("svelte_jsx_assets/mathml/jsx-dev-runtime.d.ts");
+
+/// The `mathml/jsx-runtime` subpath specifier (resolved by the
+/// `@jsxImportSource @verter/svelte-jsx/mathml` pragma).
+pub const SVELTE_JSX_MATHML_RUNTIME_SPECIFIER: &str = "@verter/svelte-jsx/mathml/jsx-runtime";
+
+/// The `mathml/jsx-dev-runtime` subpath specifier.
+pub const SVELTE_JSX_MATHML_DEV_RUNTIME_SPECIFIER: &str =
+    "@verter/svelte-jsx/mathml/jsx-dev-runtime";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -59,5 +98,39 @@ mod tests {
     #[test]
     fn embedded_dev_runtime_reexports_the_namespace() {
         assert!(SVELTE_JSX_DEV_RUNTIME_DTS.contains("export { JSX } from \"./jsx-runtime\""));
+    }
+
+    #[test]
+    fn embedded_svg_runtime_declares_an_svg_only_namespace() {
+        // F10: the svg entrypoint's `IntrinsicElements` is the SVG element set
+        // (svg-only — it REPLACES the HTML table, sourced from `svelte/elements`'
+        // `SVGAttributes`), and stays Svelte-true (snippet result + $props).
+        assert!(SVELTE_JSX_SVG_RUNTIME_DTS.contains("export namespace JSX"));
+        assert!(SVELTE_JSX_SVG_RUNTIME_DTS
+            .contains("import type { SVGAttributes } from \"svelte/elements\""));
+        assert!(SVELTE_JSX_SVG_RUNTIME_DTS.contains("svg: SVGAttributes<SVGSVGElement>"));
+        assert!(SVELTE_JSX_SVG_RUNTIME_DTS.contains("circle: SVGAttributes<SVGCircleElement>"));
+        assert!(SVELTE_JSX_SVG_RUNTIME_DTS.contains("ReturnType<Snippet>"));
+        // It does NOT extend the HTML table (svg-only, no catch-all).
+        assert!(!SVELTE_JSX_SVG_RUNTIME_DTS.contains("extends SvelteHTMLElements"));
+        assert!(SVELTE_JSX_SVG_DEV_RUNTIME_DTS.contains("export { JSX } from \"./jsx-runtime\""));
+    }
+
+    #[test]
+    fn embedded_mathml_runtime_declares_a_closed_mathml_namespace() {
+        // F10: the mathml entrypoint is a Verter-owned closed MathML table (no
+        // svelte MathML types exist); typed via a hand-written `MathMLAttributes`
+        // base using structured primitives, never `any`.
+        assert!(SVELTE_JSX_MATHML_RUNTIME_DTS.contains("export namespace JSX"));
+        assert!(SVELTE_JSX_MATHML_RUNTIME_DTS.contains("interface MathMLAttributes"));
+        assert!(SVELTE_JSX_MATHML_RUNTIME_DTS.contains("math: MathMLAttributes"));
+        assert!(SVELTE_JSX_MATHML_RUNTIME_DTS.contains("mrow: MathMLAttributes"));
+        assert!(!SVELTE_JSX_MATHML_RUNTIME_DTS.contains("extends SvelteHTMLElements"));
+        // No `any` in the mathml attribute typing (structured primitives only).
+        assert!(
+            !SVELTE_JSX_MATHML_RUNTIME_DTS.contains(": any"),
+            "mathml attrs use structured primitives, not `any`"
+        );
+        assert!(SVELTE_JSX_MATHML_DEV_RUNTIME_DTS.contains("export { JSX } from \"./jsx-runtime\""));
     }
 }

@@ -10,8 +10,8 @@
 //! `{const}`/`{let}`/`{@debug}`), directive attributes (`bind:`/`class:`/
 //! `style:`/`use:`/`transition:`/`in:`/`out:`/`animate:`/legacy `on:`), and
 //! the special elements (`<svelte:head>` / `<svelte:element>` / `<svelte:window>`
-//! / `<svelte:boundary>` / `<svelte:options>` / the out-of-scope
-//! `<svelte:component>` / `<svelte:self>` / `<svelte:fragment>`).
+//! / `<svelte:boundary>` / `<svelte:options>` / `<svelte:component>` /
+//! `<svelte:self>` / `<svelte:fragment>`).
 //!
 //! Every node records spans into the ORIGINAL source so a later projector maps
 //! positions precisely. The AST is intentionally LOSSLESS over the matrix: a
@@ -118,6 +118,12 @@ pub struct SvelteElement {
     pub self_closing: bool,
     /// The full open-tag span.
     pub open_span: Span,
+    /// The full span of the MATCHING `</name>` close tag — `start` at the `<` of
+    /// `</name`, `end` just past the closing `>`. `None` for a self-closing or
+    /// unterminated element. Recorded by the string/brace-aware child walk (the
+    /// parser is the close-tag authority); consumers read this instead of
+    /// re-deriving the close tag with a literal-unaware source scan.
+    pub close_span: Option<Span>,
 }
 
 /// The structural kind of an element.
@@ -150,11 +156,11 @@ pub enum SvelteSpecialKind {
     Boundary,
     /// `<svelte:options>`.
     Options,
-    /// `<svelte:component>` (deprecated in runes mode; out-of-scope v1).
+    /// `<svelte:component this={C}>` (dynamic component, F8).
     Component,
-    /// `<svelte:self>` (deprecated in runes mode; out-of-scope v1).
+    /// `<svelte:self>` (recursive self reference, F8).
     SelfRef,
-    /// `<svelte:fragment>` (legacy slot construct; out-of-scope v1).
+    /// `<svelte:fragment slot="x">` (transparent slot-grouping fragment, F9).
     Fragment,
     /// An unrecognised `<svelte:*>` name — parsed without crash.
     Unknown,

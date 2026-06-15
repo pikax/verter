@@ -276,9 +276,9 @@ impl CarrierCompiler for SvelteCarrierCompiler {
         let duration_ms = start.elapsed().as_secs_f64() * 1000.0;
 
         // TODO(follow-up): the projection's typed-unsupported diagnostics
-        // (`projection.diagnostics` — `svelte-await-experimental`,
-        // `svelte-deprecated-special-element`, the remaining out-of-scope codes)
-        // are produced here but `IdeOutput` has no framework-neutral diagnostic
+        // (`projection.diagnostics` — `svelte-await-experimental` and the
+        // remaining out-of-scope codes) are produced here but `IdeOutput` has no
+        // framework-neutral diagnostic
         // channel, so they do not yet reach the host `DiagnosticsSnapshot` / the
         // LSP. Delivering them end-to-end requires threading a diagnostics field
         // through `IdeOutput` → `VerterTsxBlock` → the framework executor →

@@ -2080,12 +2080,20 @@ out-of-scope-row assertions.
 - F9 `<svelte:fragment slot="x">…</svelte:fragment>` → children projected UNWRAPPED (transparent, like
   `{#key}`); the `slot` literal preserved/void-checked; slot-NAME precision NOT claimed (an API
   `$slots` contract is an owner-gated extension, see B8h's `$events` analogue).
-- F10 `<svelte:options namespace="svg|mathml">` → SEPARATE shim entrypoints `@verter/svelte-jsx/svg`
-  (`IntrinsicElements extends SVGElements`) + `/mathml` (`MathMLElements`), selected by the per-file
-  `@jsxImportSource` pragma (the projector emits the svg/mathml pragma variant for a namespaced
-  component) — NO per-element namespace switching inside one JSX namespace. The `@verter/svelte-jsx`
-  package (D-av) gains the `svg`/`mathml` entrypoints (in-crate mirrors + byte-pin freshness; the
-  same host-materialized + `paths`-injected locating model).
+- F10 `<svelte:options namespace="svg|mathml">` → SEPARATE shim entrypoints
+  `@verter/svelte-jsx/svg/jsx-runtime` (+ `/jsx-dev-runtime`) and `@verter/svelte-jsx/mathml/…`,
+  selected by the per-file `@jsxImportSource @verter/svelte-jsx/svg` (resp. `/mathml`) pragma variant
+  (the projector emits the namespaced pragma for a namespaced component) — NO per-element namespace
+  switching inside one JSX namespace. Each entrypoint's `JSX.IntrinsicElements` is a Verter-owned
+  namespace table that REPLACES the HTML table (svg-only / mathml-only — no catch-all index): the svg
+  table is keyed by the SVG tag set against `svelte/elements`' exported `SVGAttributes` (svelte ships
+  NO `SVGElements`/`MathMLElements` export — the real `SvelteHTMLElements` folds svg in, so the shim
+  builds its own svg-only record); the mathml table is a Verter-owned closed MathML tag set typed by a
+  hand-written `MathMLAttributes` base (svelte ships no MathML types) using structured primitives, not
+  `any`. The `@verter/svelte-jsx` package (D-av) gains the `svg`/`mathml` entrypoints (in-crate
+  mirrors + byte-pin freshness; the same host-materialized + `paths`-injected locating model — the
+  provider `configure_paths` maps all four new subpaths). The `<svelte:options>` element itself is
+  stripped from the projection (compiler metadata, no JSX surface).
 
 **Legacy Deletions.** The B8c `<svelte:component>`/`<svelte:self>`/`<svelte:fragment>`/non-html-
 namespace typed-unsupported diagnostics + out-of-scope assertions.

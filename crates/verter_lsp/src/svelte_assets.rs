@@ -23,8 +23,12 @@ use std::path::{Path, PathBuf};
 use tower_lsp_server::ls_types::{Diagnostic, DiagnosticSeverity, NumberOrString, Position, Range};
 
 use verter_session::framework::svelte_jsx_assets::{
-    SVELTE_JSX_DEV_RUNTIME_DTS, SVELTE_JSX_DEV_RUNTIME_SPECIFIER, SVELTE_JSX_RUNTIME_DTS,
-    SVELTE_JSX_RUNTIME_SPECIFIER,
+    SVELTE_JSX_DEV_RUNTIME_DTS, SVELTE_JSX_DEV_RUNTIME_SPECIFIER,
+    SVELTE_JSX_MATHML_DEV_RUNTIME_DTS, SVELTE_JSX_MATHML_DEV_RUNTIME_SPECIFIER,
+    SVELTE_JSX_MATHML_RUNTIME_DTS, SVELTE_JSX_MATHML_RUNTIME_SPECIFIER, SVELTE_JSX_RUNTIME_DTS,
+    SVELTE_JSX_RUNTIME_SPECIFIER, SVELTE_JSX_SVG_DEV_RUNTIME_DTS,
+    SVELTE_JSX_SVG_DEV_RUNTIME_SPECIFIER, SVELTE_JSX_SVG_RUNTIME_DTS,
+    SVELTE_JSX_SVG_RUNTIME_SPECIFIER,
 };
 
 /// The typed Verter diagnostic code for a missing `svelte` package install
@@ -55,11 +59,31 @@ pub(crate) fn materialize_svelte_jsx_shim() -> std::io::Result<PathBuf> {
         &dir.join("jsx-dev-runtime.d.ts"),
         SVELTE_JSX_DEV_RUNTIME_DTS,
     )?;
+    // The F10 svg / mathml namespace entrypoints (selected by a top-level
+    // `<svelte:options namespace="svg|mathml">` via the per-file pragma).
+    std::fs::create_dir_all(dir.join("svg"))?;
+    std::fs::create_dir_all(dir.join("mathml"))?;
+    write_if_changed(
+        &dir.join("svg/jsx-runtime.d.ts"),
+        SVELTE_JSX_SVG_RUNTIME_DTS,
+    )?;
+    write_if_changed(
+        &dir.join("svg/jsx-dev-runtime.d.ts"),
+        SVELTE_JSX_SVG_DEV_RUNTIME_DTS,
+    )?;
+    write_if_changed(
+        &dir.join("mathml/jsx-runtime.d.ts"),
+        SVELTE_JSX_MATHML_RUNTIME_DTS,
+    )?;
+    write_if_changed(
+        &dir.join("mathml/jsx-dev-runtime.d.ts"),
+        SVELTE_JSX_MATHML_DEV_RUNTIME_DTS,
+    )?;
     // A minimal package.json so node-style resolution of the subpaths works if
     // a consumer resolves the package directory rather than the path mapping.
     write_if_changed(
         &dir.join("package.json"),
-        r#"{"name":"@verter/svelte-jsx","types":"jsx-runtime.d.ts","exports":{"./jsx-runtime":{"types":"./jsx-runtime.d.ts"},"./jsx-dev-runtime":{"types":"./jsx-dev-runtime.d.ts"}}}"#,
+        r#"{"name":"@verter/svelte-jsx","types":"jsx-runtime.d.ts","exports":{"./jsx-runtime":{"types":"./jsx-runtime.d.ts"},"./jsx-dev-runtime":{"types":"./jsx-dev-runtime.d.ts"},"./svg/jsx-runtime":{"types":"./svg/jsx-runtime.d.ts"},"./svg/jsx-dev-runtime":{"types":"./svg/jsx-dev-runtime.d.ts"},"./mathml/jsx-runtime":{"types":"./mathml/jsx-runtime.d.ts"},"./mathml/jsx-dev-runtime":{"types":"./mathml/jsx-dev-runtime.d.ts"}}}"#,
     )?;
     Ok(dir)
 }
@@ -123,6 +147,23 @@ pub(crate) fn inject_svelte_paths(
     obj.insert(
         SVELTE_JSX_DEV_RUNTIME_SPECIFIER.to_string(),
         serde_json::json!([format!("{shim}/jsx-dev-runtime.d.ts")]),
+    );
+    // F10 svg / mathml namespace entrypoints.
+    obj.insert(
+        SVELTE_JSX_SVG_RUNTIME_SPECIFIER.to_string(),
+        serde_json::json!([format!("{shim}/svg/jsx-runtime.d.ts")]),
+    );
+    obj.insert(
+        SVELTE_JSX_SVG_DEV_RUNTIME_SPECIFIER.to_string(),
+        serde_json::json!([format!("{shim}/svg/jsx-dev-runtime.d.ts")]),
+    );
+    obj.insert(
+        SVELTE_JSX_MATHML_RUNTIME_SPECIFIER.to_string(),
+        serde_json::json!([format!("{shim}/mathml/jsx-runtime.d.ts")]),
+    );
+    obj.insert(
+        SVELTE_JSX_MATHML_DEV_RUNTIME_SPECIFIER.to_string(),
+        serde_json::json!([format!("{shim}/mathml/jsx-dev-runtime.d.ts")]),
     );
 
     // Transitive `svelte` rows — only when the owner workspace installs it.
@@ -206,6 +247,30 @@ mod tests {
         let obj = injected.as_object().unwrap();
         assert!(obj.contains_key("@verter/svelte-jsx/jsx-runtime"));
         assert!(obj.contains_key("@verter/svelte-jsx/jsx-dev-runtime"));
+    }
+
+    #[test]
+    fn inject_adds_the_svg_and_mathml_namespace_rows() {
+        // F10: the svg / mathml namespace entrypoints are path-mapped at the
+        // host-materialized shim copies (selected by the `<svelte:options
+        // namespace>` pragma variant).
+        let injected = inject_svelte_paths(serde_json::Value::Null, "/nonexistent-workspace");
+        let obj = injected.as_object().unwrap();
+        assert!(obj.contains_key("@verter/svelte-jsx/svg/jsx-runtime"));
+        assert!(obj.contains_key("@verter/svelte-jsx/svg/jsx-dev-runtime"));
+        assert!(obj.contains_key("@verter/svelte-jsx/mathml/jsx-runtime"));
+        assert!(obj.contains_key("@verter/svelte-jsx/mathml/jsx-dev-runtime"));
+    }
+
+    #[test]
+    fn materialize_writes_the_svg_and_mathml_entrypoints() {
+        let dir = materialize_svelte_jsx_shim().expect("materialize");
+        assert!(dir.join("svg/jsx-runtime.d.ts").exists());
+        assert!(dir.join("svg/jsx-dev-runtime.d.ts").exists());
+        assert!(dir.join("mathml/jsx-runtime.d.ts").exists());
+        assert!(dir.join("mathml/jsx-dev-runtime.d.ts").exists());
+        let svg = std::fs::read_to_string(dir.join("svg/jsx-runtime.d.ts")).unwrap();
+        assert_eq!(svg, SVELTE_JSX_SVG_RUNTIME_DTS);
     }
 
     #[test]

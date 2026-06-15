@@ -55,6 +55,36 @@ interface HTMLSelectAttributes<T extends EventTarget> extends SvelteBaseAttribut
   multiple?: boolean;
 }
 
+// Vendored minimal `SVGAttributes` — the SVG-namespace attribute table the
+// F10 `@verter/svelte-jsx/svg` shim sources. DISCRIMINATING: it carries
+// SVG-specific presentation attributes (`cx`/`cy`/`r`/`fill`/`d`/`points`) and
+// shared globals (`class`/`id`/`onclick`), but NO HTML form attributes
+// (`value`/`checked`/`type`) — so an HTML-only attribute on an svg element
+// FAILS, proving the svg table replaced the HTML table.
+export interface SVGAttributes<T extends EventTarget> {
+  children?: unknown;
+  class?: ClassValue;
+  id?: string;
+  // Shared SVG presentation globals.
+  fill?: string;
+  stroke?: string;
+  "stroke-width"?: number | string;
+  transform?: string;
+  // Geometry (subset — enough for the gate fixtures).
+  cx?: number | string;
+  cy?: number | string;
+  r?: number | string;
+  x?: number | string;
+  y?: number | string;
+  width?: number | string;
+  height?: number | string;
+  d?: string;
+  points?: string;
+  viewBox?: string;
+  onclick?: (event: DOMEvent<T> & MouseEvent) => void;
+  [dataAttr: `data-${string}`]: unknown;
+}
+
 export interface SvelteHTMLElements {
   div: SvelteBaseAttributes<HTMLDivElement>;
   span: SvelteBaseAttributes<HTMLSpanElement>;

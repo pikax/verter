@@ -26,18 +26,61 @@
 /// `jsxImportSource` for this file only.
 pub const PRAGMA_LINE: &str = "/** @jsxImportSource @verter/svelte-jsx */\n";
 
-/// Render the complete UNMAPPED prelude text.
+/// The JSX namespace a component projects into, selected by a top-level
+/// `<svelte:options namespace="...">` (F10). The base HTML namespace is the
+/// default; `svg`/`mathml` select the dedicated shim entrypoints whose
+/// `IntrinsicElements` table is the svg / mathml element set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SvelteJsxNamespace {
+    /// The default HTML (+ inline svg, per `SvelteHTMLElements`) namespace —
+    /// `@verter/svelte-jsx`.
+    #[default]
+    Html,
+    /// The svg namespace — `@verter/svelte-jsx/svg`.
+    Svg,
+    /// The mathml namespace — `@verter/svelte-jsx/mathml`.
+    MathMl,
+}
+
+impl SvelteJsxNamespace {
+    /// The `@jsxImportSource` pragma line for this namespace.
+    #[must_use]
+    pub fn pragma_line(self) -> &'static str {
+        match self {
+            Self::Html => PRAGMA_LINE,
+            Self::Svg => "/** @jsxImportSource @verter/svelte-jsx/svg */\n",
+            Self::MathMl => "/** @jsxImportSource @verter/svelte-jsx/mathml */\n",
+        }
+    }
+
+    /// Classify a `<svelte:options namespace="...">` literal value. An unknown
+    /// or absent value keeps the default HTML namespace.
+    #[must_use]
+    pub fn from_options_literal(value: &str) -> Self {
+        match value {
+            "svg" => Self::Svg,
+            // Svelte accepts both `mathml` and the legacy `math`/`mathml` MathML
+            // namespace literal; classify both to the mathml table.
+            "mathml" | "math" => Self::MathMl,
+            _ => Self::Html,
+        }
+    }
+}
+
+/// Render the complete UNMAPPED prelude text for a JSX `namespace`.
 ///
 /// The result is a single block of inserted text. It is deterministic and
 /// self-contained (every referenced type is imported or declared here), so a
 /// fixture's only un-checked names are the user's own script/template
-/// symbols.
+/// symbols. The leading `@jsxImportSource` pragma is the only part that varies
+/// by namespace (F10) — the rune surface + checkers are namespace-invariant.
 #[must_use]
-pub fn render_prelude() -> String {
+pub fn render_prelude(namespace: SvelteJsxNamespace) -> String {
     // One static block — the rune surface is fixed (the audited Svelte 5.56.x
     // surface), so a const string is exact and allocation-free to assemble.
-    let mut out = String::with_capacity(PRAGMA_LINE.len() + RUNE_AND_CHECKER_PRELUDE.len());
-    out.push_str(PRAGMA_LINE);
+    let pragma = namespace.pragma_line();
+    let mut out = String::with_capacity(pragma.len() + RUNE_AND_CHECKER_PRELUDE.len());
+    out.push_str(pragma);
     out.push_str(RUNE_AND_CHECKER_PRELUDE);
     out
 }
@@ -156,6 +199,22 @@ declare function __verter_bind_group_radio<L>(local: L extends readonly unknown[
 // (a readonly function binding must be the write-only `{null, set}` form).
 declare function __verter_bind_fn<V>(get: (() => V) | null, set: (value: V) => void): void;
 declare function __verter_bind_fn_read<V>(get: null, set: (value: V) => void): void;
+// --- F8 `<svelte:component this={C}>` / `<svelte:self>` dynamic component.
+// The `this` value must be a class-shaped component (an `abstract new (...) =>
+// { $props }` constructor — the synth shape every `.svelte`/`.vue` component
+// exposes). The props `P` are inferred DIRECTLY from the constructor's `$props`
+// return member (NOT via `InstanceType<C>["$props"]`, which does not narrow
+// over a generic `C` even at the call site — it stays `object`/`unknown`). The
+// helper returns a FUNCTION COMPONENT typed by `P` (so `<__VerterDyn prop={x}>`
+// checks `prop` against the component's own `$props`): a wrong prop FAILS, a
+// non-component `this` FAILS the constructor constraint. `children` is
+// permitted (svelte components accept slotted children) without forcing it onto
+// the `$props` contract. The return type is `ReturnType<Snippet>` (the
+// projected-element shape), never the pragma-bound `JSX.Element` (which is not
+// in lexical scope in the prelude).
+declare function __verter_dynamic_component<P>(
+  component: abstract new (...args: never[]) => { $props: P },
+): (props: P & { children?: unknown }) => ReturnType<Snippet>;
 "#;
 
 #[cfg(test)]
@@ -164,13 +223,69 @@ mod tests {
 
     #[test]
     fn prelude_opens_with_the_jsx_import_source_pragma() {
-        let prelude = render_prelude();
+        let prelude = render_prelude(SvelteJsxNamespace::Html);
         assert!(prelude.starts_with("/** @jsxImportSource @verter/svelte-jsx */"));
     }
 
     #[test]
+    fn prelude_pragma_varies_by_namespace() {
+        // F10: the svg / mathml namespaces select the dedicated shim entrypoints
+        // via the leading pragma; the rune surface stays namespace-invariant.
+        let html = render_prelude(SvelteJsxNamespace::Html);
+        let svg = render_prelude(SvelteJsxNamespace::Svg);
+        let mathml = render_prelude(SvelteJsxNamespace::MathMl);
+        assert!(html.starts_with("/** @jsxImportSource @verter/svelte-jsx */"));
+        assert!(svg.starts_with("/** @jsxImportSource @verter/svelte-jsx/svg */"));
+        assert!(mathml.starts_with("/** @jsxImportSource @verter/svelte-jsx/mathml */"));
+        // The body after the pragma is identical across namespaces.
+        let body_of = |s: &str| s[s.find('\n').unwrap() + 1..].to_string();
+        assert_eq!(body_of(&svg), body_of(&html));
+        assert_eq!(body_of(&mathml), body_of(&html));
+    }
+
+    #[test]
+    fn namespace_classifies_the_options_literal() {
+        assert_eq!(
+            SvelteJsxNamespace::from_options_literal("svg"),
+            SvelteJsxNamespace::Svg
+        );
+        assert_eq!(
+            SvelteJsxNamespace::from_options_literal("mathml"),
+            SvelteJsxNamespace::MathMl
+        );
+        // An absent / unknown / `html` literal keeps the default HTML namespace.
+        assert_eq!(
+            SvelteJsxNamespace::from_options_literal("html"),
+            SvelteJsxNamespace::Html
+        );
+        assert_eq!(
+            SvelteJsxNamespace::from_options_literal(""),
+            SvelteJsxNamespace::Html
+        );
+    }
+
+    #[test]
+    fn prelude_declares_the_dynamic_component_checker() {
+        // F8: the `<svelte:component>` / `<svelte:self>` dynamic-component
+        // checker is declared with the class-shaped-constructor constraint,
+        // inferring the props `P` DIRECTLY from the constructor's `{ $props: P }`
+        // return member (NOT via `InstanceType<C>["$props"]` — see the prelude
+        // comment for why that does not narrow over a generic `C`).
+        let p = render_prelude(SvelteJsxNamespace::Html);
+        assert!(p.contains("declare function __verter_dynamic_component"));
+        assert!(
+            p.contains("abstract new (...args: never[]) => { $props: P }"),
+            "the props are inferred directly from the constructor's $props member"
+        );
+        assert!(
+            p.contains("(props: P & { children?: unknown })"),
+            "the returned function component is typed by the inferred $props"
+        );
+    }
+
+    #[test]
     fn prelude_declares_the_complete_rune_surface() {
-        let p = render_prelude();
+        let p = render_prelude(SvelteJsxNamespace::Html);
         for needle in [
             "declare function $props",
             "function id()",
@@ -196,7 +311,7 @@ mod tests {
 
     #[test]
     fn prelude_declares_the_three_checkers_and_imports_snippet() {
-        let p = render_prelude();
+        let p = render_prelude(SvelteJsxNamespace::Html);
         assert!(p.contains("import type { Snippet } from \"svelte\""));
         assert!(p.contains("declare function __verter_attach"));
         assert!(p.contains("declare function __verter_snippet"));
@@ -213,7 +328,7 @@ mod tests {
         // checkers are declared referencing the `svelte/transition`/
         // `svelte/animate` config types, plus the `__VerterHostEl<Tag>` host-node
         // helper the projector uses for the real call site.
-        let p = render_prelude();
+        let p = render_prelude(SvelteJsxNamespace::Html);
         assert!(p.contains("declare function __verter_transition"));
         assert!(p.contains("declare function __verter_animate"));
         assert!(p.contains("type __VerterHostEl"));
@@ -242,7 +357,7 @@ mod tests {
         // F4/F5: the wide `bind:` family value-type checkers (read-write / read /
         // write), the `bind:group` checkbox/radio checkers, and the F5
         // function-binding checker are all declared.
-        let p = render_prelude();
+        let p = render_prelude(SvelteJsxNamespace::Html);
         for needle in [
             "declare function __verter_bind_rw",
             "declare function __verter_bind_read",

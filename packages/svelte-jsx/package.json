@@ -1,7 +1,7 @@
 {
   "name": "@verter/svelte-jsx",
   "version": "0.0.1-beta.1",
-  "description": "Verter-owned JSX namespace shim for the Svelte IDE TSX projection — typed via svelte/elements (Svelte-true intrinsics), the component $props contract, and the Snippet brand. Types-only, no runtime JS.",
+  "description": "Verter-owned JSX namespace shim for the Svelte IDE TSX projection — typed via svelte/elements (Svelte-true intrinsics), the component $props contract, and the Snippet brand, with dedicated /svg and /mathml namespace entrypoints for `<svelte:options namespace>` components. Types-only, no runtime JS.",
   "keywords": [
     "svelte",
     "jsx",
@@ -18,6 +18,10 @@
   "files": [
     "jsx-runtime.d.ts",
     "jsx-dev-runtime.d.ts",
+    "svg/jsx-runtime.d.ts",
+    "svg/jsx-dev-runtime.d.ts",
+    "mathml/jsx-runtime.d.ts",
+    "mathml/jsx-dev-runtime.d.ts",
     "readme.md",
     "LICENSE"
   ],
@@ -33,6 +37,18 @@
     },
     "./jsx-dev-runtime": {
       "types": "./jsx-dev-runtime.d.ts"
+    },
+    "./svg/jsx-runtime": {
+      "types": "./svg/jsx-runtime.d.ts"
+    },
+    "./svg/jsx-dev-runtime": {
+      "types": "./svg/jsx-dev-runtime.d.ts"
+    },
+    "./mathml/jsx-runtime": {
+      "types": "./mathml/jsx-runtime.d.ts"
+    },
+    "./mathml/jsx-dev-runtime": {
+      "types": "./mathml/jsx-dev-runtime.d.ts"
     }
   },
   "peerDependencies": {

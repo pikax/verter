@@ -590,7 +590,7 @@ fn supported_special_elements_parse() {
 }
 
 #[test]
-fn out_of_scope_special_elements_parse_without_crash() {
+fn dynamic_self_and_fragment_special_elements_parse() {
     let src = "<svelte:component this={Comp} /><svelte:self /><svelte:fragment slot=\"x\">y</svelte:fragment>";
     let p = parse_clean(src);
     let mut els = Vec::new();
@@ -730,4 +730,80 @@ fn full_kitchen_sink_parses_without_panic() {
     assert!(p.instance_script.is_some());
     assert!(p.module_script.is_some());
     assert_eq!(p.styles.len(), 1);
+}
+
+#[test]
+fn element_records_the_matching_close_tag_span() {
+    // The parser is the close-tag authority — it records the matching `</name>`
+    // close-tag span (start at `<`, end past `>`) on the constructed element.
+    let src = "<div>x</div>";
+    let p = parse_clean(src);
+    let mut els = Vec::new();
+    elements(&p.template, &mut els);
+    let div = els.iter().find(|e| e.name == "div").expect("div");
+    let span = div
+        .close_span
+        .expect("close span recorded for a closed element");
+    assert_eq!(&src[span.start as usize..span.end as usize], "</div>");
+}
+
+#[test]
+fn self_closing_and_void_elements_have_no_close_span() {
+    let p = parse_clean("<br /><img src=\"a.png\">");
+    let mut els = Vec::new();
+    elements(&p.template, &mut els);
+    for el in &els {
+        assert!(
+            el.close_span.is_none(),
+            "self-closing / void `{}` has no close span",
+            el.name
+        );
+    }
+}
+
+#[test]
+fn close_span_is_depth_aware_for_nested_same_name_elements() {
+    // A nested same-name `<div>` must NOT steal the outer element's close — the
+    // recorded span is the close that brings depth back to zero (the LAST
+    // `</div>`).
+    let src = "<div><div>inner</div></div>";
+    let p = parse_clean(src);
+    let outer = match &p.template[0] {
+        SvelteNode::Element(el) => el,
+        other => panic!("expected an element, got {other:?}"),
+    };
+    let span = outer.close_span.expect("outer close span");
+    // The outer close is the FINAL `</div>` in the source (offset of the last
+    // occurrence), not the inner one.
+    let last_close = src.rfind("</div>").unwrap() as u32;
+    assert_eq!(
+        span.start, last_close,
+        "outer close is the depth-zero close"
+    );
+    assert_eq!(&src[span.start as usize..span.end as usize], "</div>");
+    // The inner element's close is the FIRST `</div>`.
+    let inner = match &outer.children[0] {
+        SvelteNode::Element(el) => el,
+        other => panic!("expected inner element, got {other:?}"),
+    };
+    let inner_span = inner.close_span.expect("inner close span");
+    assert_eq!(inner_span.start, src.find("</div>").unwrap() as u32);
+}
+
+#[test]
+fn close_span_ignores_a_close_tag_inside_a_descendant_string_literal() {
+    // The string/brace-aware child walk never sees the `</div>` inside a child
+    // interpolation's string literal — the recorded close span is the REAL close
+    // tag after the children.
+    let src = "<div>{\"a </div> b\"}<span>x</span></div>";
+    let p = parse_clean(src);
+    let div = match &p.template[0] {
+        SvelteNode::Element(el) => el,
+        other => panic!("expected an element, got {other:?}"),
+    };
+    let span = div.close_span.expect("close span");
+    // The REAL close is the FINAL `</div>` (after `<span>x</span>`), NOT the one
+    // inside the string literal.
+    assert_eq!(span.start, src.rfind("</div>").unwrap() as u32);
+    assert_eq!(&src[span.start as usize..span.end as usize], "</div>");
 }

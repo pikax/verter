@@ -12,10 +12,6 @@ pub enum UnsupportedKind {
     /// An await-expression (`{#await}` arms use experimental async syntax in
     /// 5.36+). D-bg: parse-without-crash + void-check + the diagnostic.
     AwaitExperimental,
-    /// A `<svelte:component>` / `<svelte:self>` deprecated special element.
-    DeprecatedSpecialElement,
-    /// A `<svelte:fragment>` legacy slot construct.
-    LegacyFragment,
     /// An unrecognised construct parsed without crash.
     Unknown,
 }
@@ -26,8 +22,6 @@ impl UnsupportedKind {
     pub fn code(self) -> &'static str {
         match self {
             Self::AwaitExperimental => "svelte-await-experimental",
-            Self::DeprecatedSpecialElement => "svelte-deprecated-special-element",
-            Self::LegacyFragment => "svelte-legacy-fragment",
             Self::Unknown => "svelte-unsupported-construct",
         }
     }
@@ -39,10 +33,6 @@ impl UnsupportedKind {
             Self::AwaitExperimental => {
                 "await-expressions are experimental (Svelte 5.36+, `experimental.async`) and out of scope"
             }
-            Self::DeprecatedSpecialElement => {
-                "`<svelte:component>` / `<svelte:self>` are deprecated in runes mode and out of scope"
-            }
-            Self::LegacyFragment => "`<svelte:fragment>` is a legacy slot construct, out of scope",
             Self::Unknown => "unsupported Svelte construct",
         }
     }

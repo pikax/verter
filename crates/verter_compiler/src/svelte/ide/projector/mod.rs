@@ -19,7 +19,7 @@ use crate::code_transform::{CodeTransform, SourceMapOptions};
 use super::await_scan::scan_await_positions;
 use super::bind_contract::{lookup_bind_contract, BindContract, BindDirection};
 use super::emit::{is_css_custom_property, UnsupportedKind};
-use super::prelude::render_prelude;
+use super::prelude::{render_prelude, SvelteJsxNamespace};
 use crate::svelte::parser::{
     ParsedSvelte, SvelteAttribute, SvelteAttributeKind, SvelteAttributeValue, SvelteBlock,
     SvelteBlockKind, SvelteClauseKind, SvelteDirectiveKind, SvelteElement, SvelteElementKind,
@@ -29,6 +29,12 @@ use crate::svelte::parser::{
 /// The `bind:` directive projection (F4/F5) — a continuation of the
 /// `TemplateProjector` impl, extracted for file size.
 mod bind;
+
+/// The `<svelte:*>` special-element + namespace projection (F8/F9/F10) — a
+/// continuation of the `TemplateProjector` impl, extracted for file size.
+mod special;
+
+use special::{detect_jsx_namespace, extract_props_annotation};
 
 /// A typed-unsupported diagnostic the projector emitted for an OUT-OF-SCOPE
 /// matrix construct (the construct was still void-checked, never dropped).
@@ -97,8 +103,10 @@ pub fn project_svelte_ide(
     // 2) The unmapped prelude as the module INTRO — always emitted FIRST in
     //    output (the `@jsxImportSource` pragma MUST be the leading bytes). Using
     //    the intro (not `prepend_left(0)`) keeps the pragma ahead of any content
-    //    a trailing-script MOVE relocates to the top.
-    let prelude = render_prelude();
+    //    a trailing-script MOVE relocates to the top. The pragma variant is
+    //    selected by a top-level `<svelte:options namespace="svg|mathml">` (F10).
+    let namespace = detect_jsx_namespace(source, &parsed.template);
+    let prelude = render_prelude(namespace);
     ct.prepend(&prelude);
 
     // 3) The render scope function wrapping the template. With trailing/
@@ -107,12 +115,20 @@ pub fn project_svelte_ide(
     //    wraps the WHOLE markup (including element close tags the AST does not
     //    span individually).
     let region = first_template.map(|first| (first, source.len() as u32));
+    // The LOCAL self-props contract (F8 `<svelte:self>`) — derived SYNTACTICALLY
+    // from the instance script's `$props()` annotation (no resolver).
+    let self_props_type = parsed
+        .instance_content()
+        .map(|c| &source[c.start as usize..c.end as usize])
+        .and_then(extract_props_annotation);
     let mut projector = TemplateProjector {
         ct: &mut ct,
         source,
         diagnostics: &mut diagnostics,
         snippet_moves: Vec::new(),
         decl_moves: Vec::new(),
+        needs_self_contract: false,
+        self_props_type,
     };
     projector.project_template(&parsed.template, region);
 
@@ -251,6 +267,14 @@ struct TemplateProjector<'ct, 'a> {
     /// to sibling references (D-ap sibling-run scope) — an in-place IIFE would
     /// scope the binding locally and a following sibling could not see it.
     decl_moves: Vec<DeclMove>,
+    /// Whether a `<svelte:self>` was projected — its LOCAL self-component
+    /// contract (`__VerterSelfProps` + `__verter_self`) must be emitted at
+    /// module scope (F8).
+    needs_self_contract: bool,
+    /// The self-props type text derived SYNTACTICALLY from the instance script's
+    /// `$props()` annotation (LOCAL — no resolver). `None` ⇒ a permissive
+    /// `Record<string, unknown>` contract (untyped `$props()`).
+    self_props_type: Option<String>,
 }
 
 /// A snippet declarator to hoist to the top of its scope function.
@@ -326,8 +350,30 @@ impl TemplateProjector<'_, '_> {
             );
         }
         self.ct.append_left(last, "\n</>);\n}\nexport {};\n");
-        self.ct
-            .prepend_left(first, "\n;function __verter_render() {\nreturn (<>\n");
+        // F8 `<svelte:self>` LOCAL contract — emitted at MODULE scope ABOVE the
+        // render fn, as a PREFIX of the render-header insertion (one chunk, so it
+        // reliably lands above `;function __verter_render()` regardless of
+        // same-index insertion ordering). The self-props type is derived
+        // syntactically from the instance script's `$props()` annotation (LOCAL
+        // — no resolver); an untyped `$props()` degrades to a permissive
+        // `Record<string, unknown>` contract.
+        let self_contract = if self.needs_self_contract {
+            let props_ty = self
+                .self_props_type
+                .clone()
+                .unwrap_or_else(|| "Record<string, unknown>".to_string());
+            format!(
+                "\ntype __VerterSelfProps = {props_ty};\n\
+                 declare const __verter_self: abstract new (...args: never[]) => \
+                 {{ $props: __VerterSelfProps }};\n"
+            )
+        } else {
+            String::new()
+        };
+        self.ct.prepend_left(
+            first,
+            &format!("{self_contract}\n;function __verter_render() {{\nreturn (<>\n"),
+        );
     }
 
     /// Emit one hoisted snippet declarator at the scope top.
@@ -428,114 +474,28 @@ impl TemplateProjector<'_, '_> {
         }
     }
 
-    /// Project a `<svelte:*>` special element.
-    fn project_special_element(&mut self, el: &SvelteElement, kind: SvelteSpecialKind) {
-        match kind {
-            SvelteSpecialKind::Component | SvelteSpecialKind::SelfRef => {
-                self.push_diag(el.open_span, UnsupportedKind::DeprecatedSpecialElement);
-                // Project as a void-checked fragment so the file stays valid.
-                self.neutralize_element(el);
-            }
-            SvelteSpecialKind::Fragment => {
-                self.push_diag(el.open_span, UnsupportedKind::LegacyFragment);
-                self.neutralize_element(el);
-            }
-            SvelteSpecialKind::Unknown => {
-                self.push_diag(el.open_span, UnsupportedKind::Unknown);
-                self.neutralize_element(el);
-            }
-            // Head / Window / Document / Body / Element / Boundary / Options:
-            // rewrite the `<svelte:foo>` tag name to a lowercase intrinsic so
-            // the JSX intrinsic table types it conservatively, keep attributes.
-            _ => {
-                self.rewrite_special_to_intrinsic(el);
-                for attr in &el.attributes {
-                    self.project_attribute(el, attr);
-                }
-                for child in &el.children {
-                    self.project_node(child);
-                }
-            }
-        }
-    }
-
-    /// Rewrite a `<svelte:foo ...>` open + close to a lowercase `<div>`
-    /// intrinsic carrier (conservative typing) keeping the attribute run.
-    fn rewrite_special_to_intrinsic(&mut self, el: &SvelteElement) {
-        // Overwrite `svelte:foo` name with `div` so the element types through
-        // the intrinsic table, on BOTH the open AND the matching close tag —
-        // an `</svelte:window>` residue would be invalid TSX.
-        self.ct
-            .overwrite(el.name_span.start, el.name_span.end, "div");
-        self.rewrite_close_tag_name(el, "div");
-    }
-
-    /// Project an element to an empty void-checked fragment (its expressions
-    /// are preserved in children but the element wrapper is neutralized).
-    fn neutralize_element(&mut self, el: &SvelteElement) {
-        // Rewrite the tag name to a fragment-safe `div` and keep children, on
-        // BOTH the open AND close tag.
-        if el.name_span.start < el.name_span.end {
-            self.ct
-                .overwrite(el.name_span.start, el.name_span.end, "div");
-        }
-        self.rewrite_close_tag_name(el, "div");
-        for child in &el.children {
-            self.project_node(child);
-        }
-    }
-
     /// Rewrite the MATCHING `</original-name>` close tag's NAME to `replacement`
-    /// (no-op for a self-closing element). DEPTH-AWARE: scans from the open
-    /// tag's end, counting `<name`/`</name` opens and closes so a NESTED
-    /// same-name element (e.g. nested `<svelte:boundary>`) does not steal the
-    /// match — the close that brings depth back to zero is this element's.
+    /// (no-op for a self-closing element).
     fn rewrite_close_tag_name(&mut self, el: &SvelteElement, replacement: &str) {
-        if el.self_closing {
-            return;
+        if let Some((close_start, _)) = self.matching_close_tag_span(el) {
+            self.rewrite_close_at(close_start, el.name.len(), replacement);
         }
-        let open_needle = format!("<{}", el.name);
-        let close_needle = format!("</{}", el.name);
-        let mut pos = el.open_span.end as usize;
-        let mut depth: i32 = 1; // the open tag itself
-        let bytes = self.source.as_bytes();
-        while pos < bytes.len() {
-            // Find the next open or close of this name, whichever is first.
-            let next_close = self.source[pos..].find(&close_needle).map(|i| pos + i);
-            let next_open = self.source[pos..].find(&open_needle).map(|i| pos + i);
-            match (next_close, next_open) {
-                (None, _) => return, // unterminated — leave as-is
-                (Some(c), Some(o)) if o < c => {
-                    // A nested same-name OPEN — but `</name` also matches
-                    // `<name` as a prefix; ensure this `o` is NOT the `c`'s `</`.
-                    if o + 1 < bytes.len() && bytes[o + 1] == b'/' {
-                        // It's actually a close tag (`</name`), handle as close.
-                        depth -= 1;
-                        if depth == 0 {
-                            self.rewrite_close_at(c, el.name.len(), replacement);
-                            return;
-                        }
-                        pos = c + close_needle.len();
-                    } else {
-                        depth += 1;
-                        pos = o + open_needle.len();
-                    }
-                }
-                (Some(c), _) => {
-                    depth -= 1;
-                    if depth == 0 {
-                        self.rewrite_close_at(c, el.name.len(), replacement);
-                        return;
-                    }
-                    pos = c + close_needle.len();
-                }
-            }
-        }
+    }
+
+    /// The MATCHING `</name>` close-tag span of `el`, as `(start, end)` —
+    /// `start` at the `<` of `</name`, `end` just past the closing `>`. Reads the
+    /// span the PARSER recorded during its string/brace-aware child walk (the
+    /// parser is the close-tag authority); a `</name>` appearing inside a
+    /// descendant string/template literal is therefore never mistaken for this
+    /// element's real close tag. `None` for a self-closing or unterminated
+    /// element.
+    fn matching_close_tag_span(&self, el: &SvelteElement) -> Option<(u32, u32)> {
+        el.close_span.map(|s| (s.start, s.end))
     }
 
     /// Overwrite the name run of a `</name` close tag starting at `close_start`.
-    fn rewrite_close_at(&mut self, close_start: usize, name_len: usize, replacement: &str) {
-        let name_start = (close_start + 2) as u32; // after `</`
+    fn rewrite_close_at(&mut self, close_start: u32, name_len: usize, replacement: &str) {
+        let name_start = close_start + 2; // after `</`
         let name_end = name_start + name_len as u32;
         self.ct.overwrite(name_start, name_end, replacement);
     }
@@ -863,17 +823,13 @@ impl TemplateProjector<'_, '_> {
     /// the `Element` bound.
     fn host_element_hint(&self, el: &SvelteElement) -> String {
         match el.kind {
-            SvelteElementKind::Intrinsic => {
-                // NIT-1: `el.name` is interpolated raw into a `__VerterHostEl<"…">`
-                // string literal. The parser only classifies a bare tag identifier
-                // as `Intrinsic`, so this is safe today; guard it so a future
-                // producer change that admits a `"`/newline into the name fails
-                // loudly here instead of emitting a broken type literal.
-                debug_assert!(
-                    is_bare_tag_identifier(&el.name),
-                    "intrinsic host tag must be a bare identifier with no quote/newline: {:?}",
-                    el.name
-                );
+            // `el.name` is interpolated raw into a `__VerterHostEl<"…">` string
+            // literal. The parser only classifies a bare tag identifier as
+            // `Intrinsic`, so this holds today; the RUNTIME guard (consistent
+            // with `bind.rs::bind_this_host_type`) falls back to the `Element`
+            // bound if a future producer change admits a `"`/newline into the
+            // name — never emitting a broken type literal.
+            SvelteElementKind::Intrinsic if is_bare_tag_identifier(&el.name) => {
                 format!("(null! as __VerterHostEl<\"{}\">)", el.name)
             }
             _ => "(null! as Element)".to_string(),
@@ -887,11 +843,15 @@ impl TemplateProjector<'_, '_> {
             return false;
         };
         let body = self.slice(span);
-        // A top-level comma (depth 0, outside strings) marks the `get, set`
-        // function-binding form.
+        // A top-level comma (depth 0, OUTSIDE string/template/char literals)
+        // marks the `get, set` function-binding form. The scanner skips literal
+        // bodies so a comma inside a string (`bind:x={() => f("a,b"), set}`) does
+        // not false-positive — and an escaped quote inside a literal is honoured.
         let mut depth = 0i32;
-        for ch in body.chars() {
+        let mut chars = body.chars().peekable();
+        while let Some(ch) = chars.next() {
             match ch {
+                '\'' | '"' | '`' => skip_string_literal(&mut chars, ch),
                 '(' | '[' | '{' => depth += 1,
                 ')' | ']' | '}' => depth -= 1,
                 ',' if depth == 0 => return true,
@@ -1329,6 +1289,24 @@ fn node_span(node: &SvelteNode) -> Option<Span> {
         SvelteNode::Block(b) => b.span,
         SvelteNode::Tag(t) => t.span,
     })
+}
+
+/// Advance `chars` past the body of a string / template / char literal opened
+/// by `quote`, honouring backslash escapes. Used by the function-binding
+/// top-level-comma scanner so a comma inside a literal is not mistaken for the
+/// `get, set` separator. (A template literal's `${…}` interpolation is not
+/// descended — a top-level comma cannot legally appear there at the binding
+/// expression's depth-0, so skipping the whole literal body is conservative and
+/// correct for this heuristic.)
+fn skip_string_literal(chars: &mut std::iter::Peekable<std::str::Chars>, quote: char) {
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            // Skip the escaped character.
+            chars.next();
+        } else if c == quote {
+            return;
+        }
+    }
 }
 
 /// Whether `name` is a valid JS binding identifier — used to decide whether a

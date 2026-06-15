@@ -1076,23 +1076,298 @@ fn await_word_boundary_does_not_false_positive_on_identifiers_or_strings() {
 }
 
 #[test]
-fn deprecated_special_element_records_a_diagnostic_but_projects() {
-    let source = "<svelte:self count={n} />";
+fn dynamic_component_projects_through_the_helper_with_no_residue() {
+    // F8: `<svelte:component this={C} prop={x} />` flips to SUPPORTED — it
+    // projects through the `__verter_dynamic_component` prelude checker (the
+    // `this` value is checked class-shaped, the props bag against
+    // `InstanceType<...>["$props"]`). No `<svelte:component` residue, no
+    // out-of-scope diagnostic.
+    let source = "<svelte:component this={Dynamic} label={title} />";
+    let parsed = parse_svelte(source);
+    let projection = project_svelte_ide(source, &parsed, Some("C.svelte"), false);
+    assert!(
+        projection.diagnostics.is_empty(),
+        "no out-of-scope diagnostic for the now-supported svelte:component: {:?}",
+        projection.diagnostics
+    );
+    let body = render_body(&projection.code);
+    assert!(
+        !body.contains("svelte:component"),
+        "no svelte:component residue: {body}"
+    );
+    assert!(
+        body.contains("__verter_dynamic_component((Dynamic))"),
+        "dynamic-component helper present over `this` (parenthesized): {body}"
+    );
+    // The remaining attribute stays a checkable JSX attribute on the synthesized
+    // component local.
+    assert!(body.contains("label={title}"), "prop attr kept: {body}");
+    // The old out-of-scope diagnostic codes are gone entirely.
+    assert!(
+        !projection
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "svelte-deprecated-special-element"),
+        "the deprecated-special-element diagnostic is retired"
+    );
+}
+
+#[test]
+fn dynamic_component_this_expression_is_parenthesized() {
+    // P1: a `this={a, b}` sequence/comma expression must be parenthesized when
+    // interpolated into the helper call, so it stays ONE argument
+    // (`__verter_dynamic_component((a, b))`) — a bare `(a, b)` would split into
+    // two arguments and false-fail a valid component-valued `this`.
+    let code = project("<svelte:component this={tick(), Dyn} label={\"ok\"} />");
+    let body = render_body(&code);
+    assert!(
+        body.contains("__verter_dynamic_component((tick(), Dyn))"),
+        "the this expression is parenthesized to stay one argument: {body}"
+    );
+    assert!(
+        !body.contains("__verter_dynamic_component(tick(), Dyn)"),
+        "no bare sequence expression splitting into two args: {body}"
+    );
+}
+
+#[test]
+fn dynamic_component_with_children_wraps_them_in_the_component_local() {
+    // A non-self-closing `<svelte:component this={C}>CHILDREN</svelte:component>`
+    // renders CHILDREN under the synthesized component local; no close residue.
+    let source = "<svelte:component this={Comp}>{value}</svelte:component>";
+    let parsed = parse_svelte(source);
+    let projection = project_svelte_ide(source, &parsed, Some("C.svelte"), false);
+    let body = render_body(&projection.code);
+    assert!(
+        !body.contains("svelte:component"),
+        "no open/close svelte:component residue: {body}"
+    );
+    assert!(body.contains("{value}"), "child interpolation kept: {body}");
+}
+
+#[test]
+fn self_reference_projects_against_the_local_self_contract() {
+    // F8: `<svelte:self prop={x} />` checks against a LOCAL self-component
+    // contract derived from the current component's own props — NO metadata
+    // resolution. It routes through the same dynamic-component helper over a
+    // synthesized self value typed by `__VerterSelfProps`.
+    let source = "<script lang=\"ts\">\n\
+         interface Props { count: number }\n\
+         let { count }: Props = $props();\n\
+         </script>\n\
+         <svelte:self count={count} />";
+    let parsed = parse_svelte(source);
+    let projection = project_svelte_ide(source, &parsed, Some("C.svelte"), false);
+    assert!(
+        projection.diagnostics.is_empty(),
+        "svelte:self is now supported (no diagnostic): {:?}",
+        projection.diagnostics
+    );
+    let body = render_body(&projection.code);
+    assert!(
+        !body.contains("svelte:self"),
+        "no svelte:self residue: {body}"
+    );
+    // The self contract is a module-scope type derived from the props
+    // annotation (LOCAL, no resolver), and the self value flows through the
+    // dynamic-component helper.
+    assert!(
+        projection.code.contains("__VerterSelfProps"),
+        "the local self-props contract type is emitted: {}",
+        projection.code
+    );
+    assert!(
+        body.contains("__verter_dynamic_component"),
+        "self routes through the dynamic-component helper: {body}"
+    );
+}
+
+#[test]
+fn fragment_children_are_unwrapped_transparently() {
+    // F9: `<svelte:fragment slot="x">…</svelte:fragment>` projects its children
+    // UNWRAPPED (transparent like `{#key}`); the `slot` literal is void-checked;
+    // no `<svelte:fragment` residue, no out-of-scope diagnostic.
+    let source = "<svelte:fragment slot=\"footer\"><span>{label}</span></svelte:fragment>";
+    let parsed = parse_svelte(source);
+    let projection = project_svelte_ide(source, &parsed, Some("C.svelte"), false);
+    assert!(
+        projection.diagnostics.is_empty(),
+        "svelte:fragment is now supported (no diagnostic): {:?}",
+        projection.diagnostics
+    );
+    let body = render_body(&projection.code);
+    assert!(
+        !body.contains("svelte:fragment"),
+        "no svelte:fragment open/close residue: {body}"
+    );
+    // Children survive transparently.
+    assert!(body.contains("<span>"), "child element kept: {body}");
+    assert!(body.contains("{label}"), "child interpolation kept: {body}");
+    // The slot literal is void-checked (preserved as a checked value).
+    assert!(
+        body.contains("__verter_void(\"footer\")"),
+        "slot literal void-checked: {body}"
+    );
+    // The retired legacy-fragment diagnostic is gone.
+    assert!(
+        !projection
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "svelte-legacy-fragment"),
+        "the legacy-fragment diagnostic is retired"
+    );
+}
+
+#[test]
+fn fragment_with_dynamic_slot_void_checks_the_expression() {
+    // A dynamic `slot={name}` is void-checked (the expression stays mapped).
+    let source = "<svelte:fragment slot={name}>x</svelte:fragment>";
+    let parsed = parse_svelte(source);
+    let projection = project_svelte_ide(source, &parsed, Some("C.svelte"), false);
+    let body = render_body(&projection.code);
+    assert!(
+        body.contains("__verter_void(name)"),
+        "dynamic slot expression void-checked: {body}"
+    );
+    assert!(!body.contains("svelte:fragment"), "no residue: {body}");
+}
+
+#[test]
+fn svelte_options_svg_namespace_selects_the_svg_pragma_and_strips_the_element() {
+    // F10: `<svelte:options namespace="svg">` selects the svg shim entrypoint
+    // via the per-file `@jsxImportSource` pragma and STRIPS the options element
+    // (compiler metadata, no JSX surface).
+    let source = "<svelte:options namespace=\"svg\" />\n<svg><circle r={5} /></svg>";
     let parsed = parse_svelte(source);
     let projection = project_svelte_ide(source, &parsed, Some("C.svelte"), false);
     assert!(
         projection
-            .diagnostics
-            .iter()
-            .any(|d| d.code == "svelte-deprecated-special-element"),
-        "deprecated-special-element diagnostic: {:?}",
-        projection.diagnostics
+            .code
+            .starts_with("/** @jsxImportSource @verter/svelte-jsx/svg */"),
+        "svg pragma variant leads: {}",
+        &projection.code[..projection.code.len().min(80)]
     );
+    let body = render_body(&projection.code);
     assert!(
-        !projection.code.contains("svelte:self"),
-        "name rewritten: {}",
-        projection.code
+        !body.contains("svelte:options"),
+        "the options element is stripped: {body}"
     );
+    assert!(body.contains("<svg>"), "the svg markup survives: {body}");
+}
+
+#[test]
+fn svelte_options_mathml_namespace_selects_the_mathml_pragma() {
+    // F10: `<svelte:options namespace="mathml">` selects the mathml shim
+    // entrypoint pragma variant.
+    let source = "<svelte:options namespace=\"mathml\" />\n<math><mrow /></math>";
+    let parsed = parse_svelte(source);
+    let projection = project_svelte_ide(source, &parsed, Some("C.svelte"), false);
+    assert!(
+        projection
+            .code
+            .starts_with("/** @jsxImportSource @verter/svelte-jsx/mathml */"),
+        "mathml pragma variant leads: {}",
+        &projection.code[..projection.code.len().min(80)]
+    );
+}
+
+#[test]
+fn default_namespace_keeps_the_base_pragma() {
+    // DISCRIMINATING: a component WITHOUT a namespace option keeps the base
+    // `@verter/svelte-jsx` pragma (no svg/mathml variant).
+    let source = "<div>x</div>";
+    let parsed = parse_svelte(source);
+    let projection = project_svelte_ide(source, &parsed, Some("C.svelte"), false);
+    assert!(
+        projection
+            .code
+            .starts_with("/** @jsxImportSource @verter/svelte-jsx */"),
+        "base pragma kept: {}",
+        &projection.code[..projection.code.len().min(80)]
+    );
+}
+
+#[test]
+fn bound_expression_maps_back_to_the_original_source_byte() {
+    // B8e test-3 (fast-follow): a `bind:value={expr}` bound token maps back to
+    // the original source byte through the projection source map — hover /
+    // go-to on the bound identifier lands on the original `name`. The bind
+    // projection strips only the `bind:` prefix, so the value expression keeps
+    // its source span.
+    use oxc_sourcemap::SourceMap;
+
+    let source = "<input bind:value={name} />";
+    let parsed = parse_svelte(source);
+    let projection = project_svelte_ide(source, &parsed, Some("Comp.svelte"), false);
+    assert!(
+        !projection.source_map.is_empty(),
+        "the projection emits a source map"
+    );
+
+    // The original byte offset of the `name` identifier in the SOURCE.
+    let src_off = source.find("name").expect("`name` in source") as u32;
+    let (src_line, src_col) = byte_offset_to_line_col(source, src_off);
+
+    // The byte offset of `name` in the projected OUTPUT — the occurrence in the
+    // render body (the prelude declares `name?` params, so scope to after the
+    // render fn header).
+    let render_start = projection
+        .code
+        .find("function __verter_render()")
+        .expect("render fn present");
+    let out_off = (render_start
+        + projection.code[render_start..]
+            .find("name")
+            .expect("`name` in render body")) as u32;
+    let (out_line, out_col) = byte_offset_to_line_col(&projection.code, out_off);
+
+    let map = SourceMap::from_json_string(&projection.source_map).expect("decode map");
+    // The CodeTransform map is chunk-granular: the bound-value Original chunk
+    // (`value={name}`) maps as a UNIT to its source origin, so hover within it
+    // interpolates by the within-chunk offset. Find the covering token (the
+    // token at or immediately before the output `name`), assert it sits on the
+    // SAME source line, and that applying the offset-preserving within-chunk
+    // delta lands EXACTLY on the original `name` byte — i.e. the bound
+    // expression kept its source span and maps back byte-accurately (the bind
+    // projection stripped only the `bind:` prefix, never relocated the value).
+    let token = map
+        .get_tokens()
+        .filter(|t| t.get_dst_line() == out_line && t.get_dst_col() <= out_col)
+        .max_by_key(|t| t.get_dst_col())
+        .expect("a token covering the bound identifier");
+    assert_eq!(
+        token.get_src_line(),
+        src_line,
+        "the bound token maps to the original source line"
+    );
+    let delta = out_col - token.get_dst_col();
+    assert_eq!(
+        token.get_src_col() + delta,
+        src_col,
+        "the bound `name` maps back byte-accurately to the original source \
+         (token src {}:{} + dst delta {delta} = expected src col {src_col})",
+        token.get_src_line(),
+        token.get_src_col()
+    );
+}
+
+/// Convert a byte offset to a zero-based (line, column) pair (UTF-16-agnostic
+/// for the ASCII fixtures here — columns are byte columns).
+fn byte_offset_to_line_col(text: &str, offset: u32) -> (u32, u32) {
+    let mut line = 0u32;
+    let mut col = 0u32;
+    for (i, ch) in text.char_indices() {
+        if i as u32 >= offset {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            col = 0;
+        } else {
+            col += 1;
+        }
+    }
+    (line, col)
 }
 
 #[test]
@@ -1100,4 +1375,224 @@ fn empty_template_still_produces_a_valid_module() {
     let code = project("<script lang=\"ts\">export let x: number;</script>");
     assert!(code.contains("export let x: number;"));
     assert!(code.contains("function __verter_render()"));
+}
+
+#[test]
+fn function_binding_comma_scanner_skips_string_literals() {
+    // B8e NIT: a comma INSIDE a string literal in a single-getter `bind:x`
+    // value must NOT be mistaken for the `get, set` function-binding separator —
+    // `bind:value={pick("a,b")}` is a plain value binding, not a function
+    // binding. (If it were misread as a function binding it would project
+    // through `__verter_bind_fn`; as a plain value it stays `value={…}`.)
+    let code = project("<input bind:value={pick(\"a,b\")} />");
+    let body = render_body(&code);
+    assert!(
+        !body.contains("__verter_bind_fn"),
+        "a comma inside a string literal is not the get/set separator: {body}"
+    );
+    assert!(
+        body.contains("value={pick(\"a,b\")}"),
+        "the plain value binding is kept: {body}"
+    );
+}
+
+#[test]
+fn self_props_contract_uses_the_annotation_form() {
+    // The LOCAL self-props contract derives from a `: Type = $props()`
+    // annotation (no resolver).
+    let source = "<script lang=\"ts\">\n\
+         type P = { a: number };\n\
+         let { a }: P = $props();\n\
+         </script>\n\
+         <svelte:self a={a} />";
+    let code = project(source);
+    assert!(
+        code.contains("type __VerterSelfProps = P;"),
+        "self-props contract uses the annotation type: {code}"
+    );
+}
+
+#[test]
+fn self_props_contract_uses_the_generic_form() {
+    // The generic `$props<T>()` form contributes the type argument.
+    let source = "<script lang=\"ts\">\n\
+         let props = $props<{ b: string }>();\n\
+         </script>\n\
+         <svelte:self b={props.b} />";
+    let code = project(source);
+    assert!(
+        code.contains("type __VerterSelfProps = { b: string };"),
+        "self-props contract uses the generic argument: {code}"
+    );
+}
+
+#[test]
+fn self_props_contract_degrades_to_permissive_when_untyped() {
+    // An untyped `$props()` (no annotation, no generic) → a permissive
+    // `Record<string, unknown>` contract (no resolver, no crash).
+    let source = "<script lang=\"ts\">\n\
+         let props = $props();\n\
+         </script>\n\
+         <svelte:self />";
+    let code = project(source);
+    assert!(
+        code.contains("type __VerterSelfProps = Record<string, unknown>;"),
+        "untyped $props() degrades to a permissive self contract: {code}"
+    );
+}
+
+#[test]
+fn self_props_contract_ignores_a_member_call_props_before_the_real_rune() {
+    // P1: an earlier `$props.id()` member call (NOT the props rune) must NOT
+    // poison the contract — the SYNTACTIC scan binds the real `$props()` call's
+    // declarator annotation, so a wrong self-prop still FAILS against `Props`.
+    let source = "<script lang=\"ts\">\n\
+         const id = $props.id();\n\
+         interface Props { count: number }\n\
+         let { count }: Props = $props();\n\
+         </script>\n\
+         <svelte:self count={count} />";
+    let code = project(source);
+    assert!(
+        code.contains("type __VerterSelfProps = Props;"),
+        "the real `$props()` declarator annotation is used, not `$props.id()`: {code}"
+    );
+    assert!(
+        !code.contains("type __VerterSelfProps = Record<string, unknown>;"),
+        "a member-call `$props.id()` must not degrade the contract: {code}"
+    );
+}
+
+#[test]
+fn self_props_contract_ignores_props_inside_a_string_or_comment() {
+    // P1: a `$props` substring inside a string literal or comment is NOT the
+    // rune call — the SYNTACTIC scan skips it and binds the real annotated call.
+    let source = "<script lang=\"ts\">\n\
+         const note = \"call $props() here\"; // also $props in a comment\n\
+         type P = { a: number };\n\
+         let { a }: P = $props();\n\
+         </script>\n\
+         <svelte:self a={a} />";
+    let code = project(source);
+    assert!(
+        code.contains("type __VerterSelfProps = P;"),
+        "a `$props` inside a string/comment must not pre-empt the real rune: {code}"
+    );
+}
+
+#[test]
+fn fragment_static_slot_literal_is_js_escaped() {
+    // P1: a single-quoted slot value containing a double quote must JS-escape
+    // when injected into the void-check so the projected TSX stays VALID — a raw
+    // `"foo"bar"` double-quote wrap is invalid TSX.
+    let source = "<svelte:fragment slot='foo\"bar'>x</svelte:fragment>";
+    let parsed = parse_svelte(source);
+    let projection = project_svelte_ide(source, &parsed, Some("C.svelte"), false);
+    let body = render_body(&projection.code);
+    assert!(
+        body.contains("__verter_void(\"foo\\\"bar\")"),
+        "the slot literal is JS-escaped (valid TSX string), not raw-wrapped: {body}"
+    );
+    assert!(
+        !body.contains("__verter_void(\"foo\"bar\")"),
+        "no invalid raw double-quote wrap: {body}"
+    );
+}
+
+#[test]
+fn fragment_static_slot_literal_with_backslash_is_js_escaped() {
+    // P1: a backslash in a static slot value must also escape so the void-check
+    // string is valid TSX.
+    let source = "<svelte:fragment slot=\"a\\b\">x</svelte:fragment>";
+    let parsed = parse_svelte(source);
+    let projection = project_svelte_ide(source, &parsed, Some("C.svelte"), false);
+    let body = render_body(&projection.code);
+    assert!(
+        body.contains("__verter_void(\"a\\\\b\")"),
+        "the backslash is escaped: {body}"
+    );
+}
+
+#[test]
+fn fragment_close_tag_inside_a_descendant_string_literal_is_not_mistaken_for_the_real_close() {
+    // P1: a child interpolation containing the LITERAL text `</svelte:fragment>`
+    // inside a string must NOT be mistaken for the element's real close tag. The
+    // parser is the close-tag authority (its child walk is string/brace-aware);
+    // the projector reads the parser-recorded close span — a literal-unaware
+    // source byte-scan would close at the in-string occurrence, swallowing the
+    // real children + the `<div>after</div>` sibling and corrupting the string.
+    let source = "<svelte:fragment slot=\"a\">{\"x </svelte:fragment> y\"}<span>{tail}</span></svelte:fragment><div>after</div>";
+    let parsed = parse_svelte(source);
+    let projection = project_svelte_ide(source, &parsed, Some("C.svelte"), false);
+    let body = render_body(&projection.code);
+    // (a) No `<svelte:fragment` open-tag residue (the open tag was overwritten by
+    //     the void-check). The string `svelte:fragment` only survives INSIDE the
+    //     preserved descendant string literal, never as element syntax.
+    assert!(
+        !body.contains("<svelte:fragment"),
+        "no svelte:fragment open-tag residue: {body}"
+    );
+    // The REAL close tag was removed — the ONLY `</svelte:fragment>` left is the
+    // one inside the preserved string literal (exactly one occurrence).
+    assert_eq!(
+        body.matches("</svelte:fragment>").count(),
+        1,
+        "exactly one `</svelte:fragment>` survives — the in-string literal, not a \
+         structural close-tag residue: {body}"
+    );
+    // (b) The real children survived and the sibling `<div>after</div>` was NOT
+    //     swallowed by an in-string close match.
+    assert!(body.contains("<span>"), "child span kept: {body}");
+    assert!(body.contains("{tail}"), "child interpolation kept: {body}");
+    assert!(
+        body.contains("<div>after</div>"),
+        "the sibling AFTER the real close tag is preserved (not swallowed): {body}"
+    );
+    // (c) The user's string `"x </svelte:fragment> y"` is preserved un-corrupted
+    //     (the literal-unaware byte-scan would splice the close tag out of it).
+    assert!(
+        body.contains("\"x </svelte:fragment> y\""),
+        "the descendant string literal is preserved un-corrupted: {body}"
+    );
+}
+
+#[test]
+fn component_close_tag_inside_a_descendant_string_literal_is_not_mistaken_for_the_real_close() {
+    // P1 (shared scanner): the close-tag span read also drives `<svelte:component>`
+    // close-tag NAME rewrite. A `</svelte:component>` inside a descendant string
+    // must not be rewritten — the rewrite must land on the REAL close tag, and
+    // the in-string text must stay verbatim.
+    let source = "<svelte:component this={Dyn}>{\"q </svelte:component> r\"}<span>{x}</span></svelte:component><div>tail</div>";
+    let parsed = parse_svelte(source);
+    let projection = project_svelte_ide(source, &parsed, Some("C.svelte"), false);
+    let body = render_body(&projection.code);
+    // No `<svelte:component` open-tag residue (open rewritten to the dynamic
+    // local). The string only survives inside the preserved literal.
+    assert!(
+        !body.contains("<svelte:component"),
+        "no svelte:component open-tag residue: {body}"
+    );
+    // The REAL close tag was rewritten to the dynamic local — the only
+    // `</svelte:component>` left is the in-string literal (exactly one).
+    assert_eq!(
+        body.matches("</svelte:component>").count(),
+        1,
+        "exactly one `</svelte:component>` survives — the in-string literal, not a \
+         structural close-tag residue: {body}"
+    );
+    // The real close was rewritten to the dynamic local carrier.
+    assert!(
+        body.contains("</__VerterDyn>"),
+        "the REAL close tag was rewritten to the dynamic local: {body}"
+    );
+    // The in-string text stays verbatim (the rewrite did NOT corrupt it).
+    assert!(
+        body.contains("\"q </svelte:component> r\""),
+        "descendant string literal preserved un-corrupted: {body}"
+    );
+    // The sibling after the real close survives.
+    assert!(
+        body.contains("<div>tail</div>"),
+        "sibling after the real close is preserved: {body}"
+    );
 }

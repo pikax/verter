@@ -111,7 +111,11 @@ fn typecheck_projected(
     "allowImportingTsExtensions": true,
     "paths": {{
       "@verter/svelte-jsx/jsx-runtime": ["{shim}/jsx-runtime.d.ts"],
-      "@verter/svelte-jsx/jsx-dev-runtime": ["{shim}/jsx-dev-runtime.d.ts"]
+      "@verter/svelte-jsx/jsx-dev-runtime": ["{shim}/jsx-dev-runtime.d.ts"],
+      "@verter/svelte-jsx/svg/jsx-runtime": ["{shim}/svg/jsx-runtime.d.ts"],
+      "@verter/svelte-jsx/svg/jsx-dev-runtime": ["{shim}/svg/jsx-dev-runtime.d.ts"],
+      "@verter/svelte-jsx/mathml/jsx-runtime": ["{shim}/mathml/jsx-runtime.d.ts"],
+      "@verter/svelte-jsx/mathml/jsx-dev-runtime": ["{shim}/mathml/jsx-dev-runtime.d.ts"]
     }}
   }},
   "include": ["**/*.ts", "**/*.tsx"]
@@ -1309,5 +1313,247 @@ fn missing_svelte_package_fails_closed_with_module_not_found() {
     assert!(
         out.contains("svelte") || out.to_lowercase().contains("cannot find module"),
         "the failure must be the missing `svelte` module:\n{out}"
+    );
+}
+
+// --- B8f F8/F9/F10 special-element + namespace TSGO fixtures ---
+
+#[test]
+fn dynamic_component_wrong_prop_is_rejected() {
+    // F8: a dynamic `<svelte:component this={C} label={x}>` checks `label`
+    // against the props `P` inferred from the component's `{ $props: P }`
+    // constructor member through `__verter_dynamic_component`. A correctly-typed
+    // `label` checks; a wrong-typed `label` FAILS.
+    let good = project(
+        "<script lang=\"ts\">\n\
+         declare const Dyn: abstract new (...a: never[]) => { $props: { label: string } };\n\
+         let title = \"ok\";\n\
+         </script>\n\
+         <svelte:component this={Dyn} label={title} />",
+    );
+    let Some((ok, out)) = typecheck_projected(&good, "DynOk.svelte.tsx", &[], true) else {
+        skip_note("dynamic component wrong-prop");
+        return;
+    };
+    assert!(
+        ok,
+        "a correctly-typed dynamic-component prop must check through the \
+         `{{ $props: P }}`-inferred props:\n{out}"
+    );
+
+    let bad = project(
+        "<script lang=\"ts\">\n\
+         declare const Dyn: abstract new (...a: never[]) => { $props: { label: string } };\n\
+         let count = 123;\n\
+         </script>\n\
+         <svelte:component this={Dyn} label={count} />",
+    );
+    let Some((bad_ok, bad_out)) = typecheck_projected(&bad, "DynBad.svelte.tsx", &[], true) else {
+        return;
+    };
+    assert!(
+        !bad_ok,
+        "a wrong-typed dynamic-component prop must be REJECTED:\n{bad_out}"
+    );
+}
+
+#[test]
+fn dynamic_component_non_component_this_is_rejected() {
+    // F8: a NON-component `this` (a plain number) FAILS the
+    // `__verter_dynamic_component` class-shaped-constructor constraint.
+    let bad = project(
+        "<script lang=\"ts\">\n\
+         let notAComponent = 42;\n\
+         </script>\n\
+         <svelte:component this={notAComponent} />",
+    );
+    let Some((bad_ok, bad_out)) = typecheck_projected(&bad, "DynNonComp.svelte.tsx", &[], true)
+    else {
+        skip_note("dynamic component non-component this");
+        return;
+    };
+    assert!(
+        !bad_ok,
+        "a non-component `this` must FAIL the class-shaped-constructor \
+         constraint:\n{bad_out}"
+    );
+}
+
+#[test]
+fn svelte_self_wrong_prop_is_rejected_against_the_local_contract() {
+    // F8: `<svelte:self prop={x}>` checks against the LOCAL self-props contract
+    // derived SYNTACTICALLY from this component's own `$props()` annotation. A
+    // correct self-prop checks; a wrong-typed self-prop FAILS.
+    let good = project(
+        "<script lang=\"ts\">\n\
+         interface Props { count: number }\n\
+         let { count }: Props = $props();\n\
+         </script>\n\
+         <svelte:self count={count} />",
+    );
+    let Some((ok, out)) = typecheck_projected(&good, "SelfOk.svelte.tsx", &[], true) else {
+        skip_note("svelte:self wrong-prop");
+        return;
+    };
+    assert!(
+        ok,
+        "a correct self-prop must check against the local self contract:\n{out}"
+    );
+
+    let bad = project(
+        "<script lang=\"ts\">\n\
+         interface Props { count: number }\n\
+         let { count }: Props = $props();\n\
+         </script>\n\
+         <svelte:self count={\"not a number\"} />",
+    );
+    let Some((bad_ok, bad_out)) = typecheck_projected(&bad, "SelfBad.svelte.tsx", &[], true) else {
+        return;
+    };
+    assert!(
+        !bad_ok,
+        "a wrong-typed self-prop must be REJECTED against the local \
+         self-props contract:\n{bad_out}"
+    );
+}
+
+#[test]
+fn svelte_self_contract_ignores_a_member_call_props_before_the_real_rune() {
+    // F8 P1: a preceding `$props.id()` member call (NOT the props rune) must NOT
+    // poison the LOCAL self-props contract. The SYNTACTIC OXC scan binds the
+    // REAL `$props()` declarator's `Props` annotation, so a wrong self-prop still
+    // FAILS — proving the contract is `Props`, not a permissive degrade.
+    let bad = project(
+        "<script lang=\"ts\">\n\
+         const id = $props.id();\n\
+         interface Props { count: number }\n\
+         let { count }: Props = $props();\n\
+         void id;\n\
+         </script>\n\
+         <svelte:self count={\"not a number\"} />",
+    );
+    let Some((bad_ok, bad_out)) = typecheck_projected(&bad, "SelfMemberCall.svelte.tsx", &[], true)
+    else {
+        skip_note("svelte:self member-call props");
+        return;
+    };
+    assert!(
+        !bad_ok,
+        "a wrong self-prop must be REJECTED against `Props` even when a \
+         `$props.id()` member call precedes the real rune:\n{bad_out}"
+    );
+}
+
+#[test]
+fn svelte_fragment_children_type_check_transparently() {
+    // F9: `<svelte:fragment slot="x">…</svelte:fragment>` projects its children
+    // UNWRAPPED; they type-check, and the slot literal void-checks. A type error
+    // INSIDE a child surfaces (the children are genuinely checked).
+    let good = project(
+        "<script lang=\"ts\">let label: string = \"hi\";</script>\n\
+         <svelte:fragment slot=\"footer\"><span>{label}</span></svelte:fragment>",
+    );
+    let Some((ok, out)) = typecheck_projected(&good, "FragOk.svelte.tsx", &[], true) else {
+        skip_note("svelte:fragment children");
+        return;
+    };
+    assert!(
+        ok,
+        "transparent fragment children must type-check clean:\n{out}"
+    );
+
+    // DISCRIMINATING: a type error inside a fragment child surfaces.
+    let bad = project(
+        "<script lang=\"ts\">let label: number = 1;</script>\n\
+         <svelte:fragment slot=\"footer\"><span>{label.nope}</span></svelte:fragment>",
+    );
+    let Some((bad_ok, _)) = typecheck_projected(&bad, "FragBad.svelte.tsx", &[], true) else {
+        return;
+    };
+    assert!(
+        !bad_ok,
+        "a type error in a transparent fragment child must surface (children \
+         are genuinely checked)"
+    );
+}
+
+#[test]
+fn fragment_close_tag_inside_a_descendant_string_literal_projects_valid_tsx() {
+    // P1 (literal-aware close-tag span): a child interpolation whose string
+    // literal CONTAINS the text `</svelte:fragment>` must NOT be mistaken for the
+    // element's real close tag. The projector reads the parser-recorded close
+    // span (the parser's child walk is string/brace-aware), so the real close is
+    // removed cleanly and the in-string text is preserved verbatim. A
+    // literal-unaware source byte-scan would splice the close tag out of the
+    // string and leave the real `</svelte:fragment>` residue → invalid TSX
+    // (TS17015 unterminated/mismatched JSX). This fixture proves the projection
+    // type-checks CLEAN through tsgo, AND that a type error in a sibling AFTER the
+    // real close still surfaces (the sibling was NOT swallowed).
+    let good = project(
+        "<script lang=\"ts\">let s: string = \"hi\"; let tail: string = \"t\";</script>\n\
+         <svelte:fragment slot=\"a\">{\"x </svelte:fragment> y\"}<span>{tail}</span></svelte:fragment>\n\
+         <div>{s}</div>",
+    );
+    let Some((ok, out)) = typecheck_projected(&good, "FragLiteral.svelte.tsx", &[], true) else {
+        skip_note("fragment close-tag-in-literal");
+        return;
+    };
+    assert!(
+        ok,
+        "a `</svelte:fragment>` inside a descendant string literal must project \
+         VALID TSX that type-checks clean (no TS17015 mismatched-tag):\n{out}"
+    );
+
+    // DISCRIMINATING: the sibling AFTER the real close tag was NOT swallowed by an
+    // in-string close match — a type error in it surfaces.
+    let bad = project(
+        "<script lang=\"ts\">let n: number = 1; let tail: string = \"t\";</script>\n\
+         <svelte:fragment slot=\"a\">{\"x </svelte:fragment> y\"}<span>{tail}</span></svelte:fragment>\n\
+         <div>{n.nope}</div>",
+    );
+    let Some((bad_ok, bad_out)) = typecheck_projected(&bad, "FragLiteralBad.svelte.tsx", &[], true)
+    else {
+        return;
+    };
+    assert!(
+        !bad_ok,
+        "a type error in the sibling AFTER the real close tag must surface (the \
+         sibling was not swallowed by the in-string close):\n{bad_out}"
+    );
+}
+
+#[test]
+fn svg_namespace_component_type_checks_svg_intrinsics_and_rejects_html_only_attrs() {
+    // F10: a `<svelte:options namespace="svg" />` component projects with the
+    // svg-namespace pragma; its svg intrinsics (`<circle r={5} />`) check
+    // through the svg table. An HTML-only attribute (`value`) on an svg element
+    // FAILS — proving the svg table REPLACED the HTML table (svg-only).
+    let good = project(
+        "<svelte:options namespace=\"svg\" />\n\
+         <svg viewBox=\"0 0 10 10\"><circle cx={1} cy={1} r={5} /></svg>",
+    );
+    let Some((ok, out)) = typecheck_projected(&good, "SvgOk.svelte.tsx", &[], true) else {
+        skip_note("svg namespace");
+        return;
+    };
+    assert!(
+        ok,
+        "svg intrinsics must type-check under the svg-namespace pragma:\n{out}"
+    );
+
+    // DISCRIMINATING: an HTML-only attribute (`value` — present on `<input>` in
+    // the HTML table, ABSENT from `SVGAttributes`) on an svg element FAILS,
+    // proving the svg table is in effect (not the HTML table).
+    let bad = project(
+        "<svelte:options namespace=\"svg\" />\n\
+         <svg><circle value=\"nope\" /></svg>",
+    );
+    let Some((bad_ok, bad_out)) = typecheck_projected(&bad, "SvgBad.svelte.tsx", &[], true) else {
+        return;
+    };
+    assert!(
+        !bad_ok,
+        "an HTML-only attribute on an svg element must FAIL (svg table replaced \
+         the HTML table):\n{bad_out}"
     );
 }
