@@ -59,6 +59,61 @@ jobs:
       - name: Extension-host DX unit suite
         run: pnpm --filter verter-vscode test:e2e:dx:unit
 
+  # The full raw-LSP corpus sweep: drives the REAL verter-lsp over EVERY committed
+  # hermetic scenario on materialized workspaces, differences each DX signal against
+  # the tsgo gold standard, and RECORDS every divergence as a finding. It is
+  # record-only (it asserts the run was non-vacuous — baseline-ran > 0 and at least
+  # one event/outcome — but never enforces verter-vs-tsgo parity), and it is heavier
+  # than the required smoke (whole corpus, tsgo bridge), so it lives here on the
+  # weekly schedule + manual dispatch, NOT on the PR-required gate in ci.yml. The
+  # required gate proves the spine; this sweep maps the differential surface.
+  corpus-sweep-dx:
+    name: Raw-LSP corpus sweep (record-only)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: lts/*
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # The sweep drives verter-lsp + the baseline bridge against a real tsgo (the
+      # gold standard), so tsgo must be discoverable — prewarm its cache.
+      - name: Prewarm tsgo cache
+        run: npx -y @typescript/native-preview@latest --version
+      - name: Build differential-baseline bridge
+        run: cargo build -p verter_dx_baseline
+      - name: Build verter-lsp
+        run: cargo build -p verter_lsp
+      - name: Build DX harness
+        run: pnpm --filter "@verter/dx-harness..." build
+      # Findings go to a runner-temp dir (never the repo) and upload as an artifact;
+      # the run is gated on DX_LSP_BIN + DX_BASELINE_BIN and self-skips without them.
+      - name: Raw-LSP corpus sweep
+        env:
+          DX_LSP_BIN: ${{ github.workspace }}/target/debug/verter-lsp
+          DX_BASELINE_BIN: ${{ github.workspace }}/target/debug/verter-dx-baseline
+          DX_FINDINGS_OUT: ${{ runner.temp }}/dx-run
+        run: pnpm --filter @verter/dx-harness exec vitest --run test/dxCorpusSweep.run.test.ts
+      - name: Upload DX findings
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: dx-corpus-sweep-findings
+          path: ${{ runner.temp }}/dx-run
+          if-no-files-found: ignore
+
   # External-corpus DX differential. workflow_dispatch ONLY and gated on an explicit
   # external corpus repo input, so it never runs by default, never on a pull
   # request, and never in the required gate — per the testing-hermeticity rule

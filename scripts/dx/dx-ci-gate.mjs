@@ -6,18 +6,18 @@
  * corpus in STRICT mode and refuses to pass unless the differential baseline
  * actually ran. Four properties are asserted, each as a hard failure (exit 1):
  *
- *   1. Pinned tool root (P2-A) — `repoRoot` / `tsserverTsdk` / `expectedTsserverJs`
+ *   1. Pinned tool root — `repoRoot` / `tsserverTsdk` / `expectedTsserverJs`
  *      / TypeScript version are all present, the pinned `tsserver.js` exists on
  *      disk, and it lives UNDER the repository (never an ambient/global-npm
  *      TypeScript). The live strict bridge then reports the SAME pinned path back
  *      as `baselineToolRootUsed`, proving a real provider matched the pin rather
  *      than drifting onto a discovered one.
- *   2. Vendored Vue declaration version-sync (P3-3) — every vendored `vue`/`@vue/*`
+ *   2. Vendored Vue declaration version-sync — every vendored `vue`/`@vue/*`
  *      package carries the pinned line AND that line equals the Vue version the
  *      repo resolves for its provider-facing tests, so the hermetic differential
  *      can never silently run against Vue declarations different from the ones the
  *      provider resolves.
- *   3. Versioned per-edit artifact sync (P2-B) — a probe requested at version V is
+ *   3. Versioned per-edit artifact sync — a probe requested at version V is
  *      REFUSED (`baseline_artifact_stale`, carrying the requested/have versions)
  *      when the bridge only holds artifacts for an earlier version, so the
  *      differential never compares verter@editN against baseline@edit0.
@@ -92,7 +92,7 @@ if (!existsSync(fixtureDir)) {
 }
 const allowCompileErrors = process.env.DX_ALLOW_COMPILE_ERRORS === "1";
 
-// ── 1. Pinned tool root (P2-A), static half ──────────────────────────────────
+// ── 1. Pinned tool root, static half ─────────────────────────────────────────
 const toolRoots = resolveToolRoots(repoRoot);
 check(!!toolRoots.repoRoot, "toolRoot.repoRoot is empty");
 check(!!toolRoots.tsserverTsdk, "toolRoot.tsserverTsdk is empty");
@@ -114,7 +114,7 @@ check(
   `pinned tsserver.js is not under the repo root (ambient/global fallback?): ${expectedCanon} not under ${repoRoot}`,
 );
 
-// ── 2. Vendored Vue declaration version-sync (P3-3) ──────────────────────────
+// ── 2. Vendored Vue declaration version-sync ─────────────────────────────────
 const vuePkgs = collectVuePackageVersions();
 check(vuePkgs.length > 0, "no vendored vue/@vue packages found");
 for (const { package: pkg, version } of vuePkgs) {
@@ -233,7 +233,7 @@ try {
       `fresh diagnostics probe did not run: ${JSON.stringify(diag)}`,
     );
 
-    // P2-B: a probe at a NEWER version than the synced overlay must be refused as
+    // A probe at a NEWER version than the synced overlay must be refused as
     // stale (never compare verter@editN with baseline@edit0).
     const stale = await client.query({
       method: "hover",

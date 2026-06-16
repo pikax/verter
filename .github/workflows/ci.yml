@@ -506,8 +506,13 @@ jobs:
       # over the vendored corpus; the workspace also builds it as a [[bin]] target.
       - name: Build differential-baseline bridge
         run: cargo build -p verter_dx_baseline
-      # Build the harness (and its workspace deps) so the strict gate can import the
-      # published dist and drive the bridge.
+      # The verter raw-LSP server itself — the binary the spine smoke drives over
+      # the vendored corpus. Without this the job named "raw-LSP" would never run
+      # the raw-LSP path.
+      - name: Build verter-lsp
+        run: cargo build -p verter_lsp
+      # Build the harness (and its workspace deps, including the lsp-test-client) so
+      # the gates can import the published dist and drive both real binaries.
       - name: Build DX harness
         run: pnpm --filter "@verter/dx-harness..." build
       # Pure-hermetic unit suite (no real binary; the integration specs self-skip
@@ -523,3 +528,16 @@ jobs:
           DX_REPO_ROOT: ${{ github.workspace }}
           DX_BASELINE_BIN: ${{ github.workspace }}/target/debug/verter-dx-baseline
         run: node scripts/dx/dx-ci-gate.mjs
+      # The verter raw-LSP spine: drives the REAL verter-lsp over the vendored
+      # hermetic corpus (pinned tsserver, no network) and FAILS unless verter-lsp
+      # starts, reaches readiness, RESPONDS to hover/definition/completion, and
+      # produces at least one contentful response. It records the differential but
+      # does NOT enforce verter-vs-tsgo parity — verter's known divergences must not
+      # turn the required gate red. The full record-and-diff corpus sweep is the
+      # scheduled dx-extended.yml job.
+      - name: Verter raw-LSP spine smoke
+        env:
+          DX_REPO_ROOT: ${{ github.workspace }}
+          DX_LSP_BIN: ${{ github.workspace }}/target/debug/verter-lsp
+          DX_BASELINE_BIN: ${{ github.workspace }}/target/debug/verter-dx-baseline
+        run: node scripts/dx/dx-lsp-smoke.mjs
