@@ -23,6 +23,7 @@ jobs:
       playground: ${{ steps.filter.outputs.playground }}
       vscode: ${{ steps.filter.outputs.vscode }}
       native: ${{ steps.filter.outputs.native }}
+      dx: ${{ steps.filter.outputs.dx }}
     steps:
       - uses: actions/checkout@v5
       - uses: dorny/paths-filter@v3
@@ -111,6 +112,12 @@ jobs:
               - 'packages/typescript-plugin/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
+              - '.github/workflows/ci.yml'
+            dx:
+              - 'crates/verter_dx_baseline/**'
+              - 'packages/dx-harness/**'
+              - 'packages/lsp-test-client/**'
+              - 'scripts/dx/**'
               - '.github/workflows/ci.yml'
 
   terminology-check:
@@ -471,3 +478,48 @@ jobs:
         run: pnpm --filter @verter/typescript-plugin test
       - name: Test @verter/unplugin
         run: pnpm --filter @verter/unplugin test
+
+  dx-harness-hermetic:
+    name: DX Harness (raw-LSP hermetic)
+    needs: detect-changes
+    if: needs.detect-changes.outputs.dx == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: lts/*
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # The differential-baseline bridge. The strict gate drives this real binary
+      # over the vendored corpus; the workspace also builds it as a [[bin]] target.
+      - name: Build differential-baseline bridge
+        run: cargo build -p verter_dx_baseline
+      # Build the harness (and its workspace deps) so the strict gate can import the
+      # published dist and drive the bridge.
+      - name: Build DX harness
+        run: pnpm --filter "@verter/dx-harness..." build
+      # Pure-hermetic unit suite (no real binary; the integration specs self-skip
+      # without their bin env gates).
+      - name: DX harness hermetic unit suite
+        run: pnpm --filter @verter/dx-harness test:unit
+      # The non-vacuous strict differential: spawns the real tsserver-backed baseline
+      # over the committed vendored corpus and FAILS unless the pinned tool root,
+      # vendored Vue version-sync, versioned artifact-sync refusal, and baseline-ran>0
+      # all hold.
+      - name: Strict differential baseline gate
+        env:
+          DX_REPO_ROOT: ${{ github.workspace }}
+          DX_BASELINE_BIN: ${{ github.workspace }}/target/debug/verter-dx-baseline
+        run: node scripts/dx/dx-ci-gate.mjs
