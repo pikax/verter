@@ -266,6 +266,10 @@ Style block content
 
 **Key API**: `VerterHost::ensure_compiled(canonical_id, profile)` compiles with the given profile's target. Used by LSP and MCP to populate the cache. `get_virtual_file()` still exists for retrieving specific virtual file outputs.
 
+## TypeExpr Lowering To The Semantic Graph (session boundary)
+
+The OXC worker and the semantic-lowering surface produce owned `TypeExpr` IR (and worker-local OXC AST) ONLY — they never emit a session semantic-graph node (`SemanticNodeData` / `SemanticNodeId` / `HotTypeRef`); that crate barrier (`verter_semantic` never depends on `verter_session`) is locked from the worker side by the `oxc_worker_emits_no_session_graph_node` guard. Downstream, a session-owned, query-free **structural lowerer** (`crates/verter_session/src/project_semantic_dispatch/structural_lower.rs`, entry `lower_type_expr_structural`) consumes that owned `TypeExpr` and emits the dormant semantic-graph carriers (`BareRef` / `ImportType` / `RawFallback` / `ConstructorType` / `SyntheticBinding`, with tuple rest preserved on `TupleElement.rest`) plus the structural shells, NodeScopeId-rooted, performing NO name / import / type resolution: `Foo<Arg>` becomes a `BareRef` whose `type_args` are structurally lowered (never an `InstantiationRef`), and `keyof` / indexed-access / conditional / mapped / `typeof` stay deferred shells even where the eager path would reduce them. It is intern-only — it makes no host / dispatch query (`session_graph_lowerer_makes_no_query`) and never materializes a carrier back to `TypeExpr` during emission (`unresolved_carriers_not_materialized_during_emission`). It stays dormant / demand-time (never pulled into publish or indexing). Carrier RESOLUTION is a separate demand-time engine — see the type-resolution skill.
+
 ## Key Files
 
 | File | Purpose |

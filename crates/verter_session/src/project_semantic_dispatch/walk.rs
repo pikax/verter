@@ -1881,7 +1881,14 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 SemanticNodeData::TypeOf {
                     value_root,
                     path: typeof_path,
+                    ..
                 } => {
+                    // TODO(carrier-resolution): apply TypeOf.type_args
+                    // (apply_typeof_instantiation_args) once the structural
+                    // lowerer is wired; carriers are dormant today so no
+                    // non-empty type_args reaches here. See
+                    // docs/arch/parselower-design.md (demand-time
+                    // carrier-resolution debt note).
                     let value_root = value_root.clone();
                     let typeof_path = typeof_path.clone();
                     // PathWalker hop = a demand point: the typeof root

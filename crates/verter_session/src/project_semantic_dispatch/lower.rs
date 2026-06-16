@@ -6,12 +6,13 @@
 //! this pass stays one member / arm / sub-expression deep so the
 //! published shell identity is stable across entry paths.
 //!
-//! **Authority contract:** this is the *only* TypeExpr
+//! **Authority contract:** this is the *only* EAGER (resolving) TypeExpr
 //! lowering path in the workspace. The §6.5 invariant test
-//! `type_expr_lowering_has_exactly_one_path` asserts exactly one
-//! `fn shallow_lower_type_expr_with_context` exists in `crates/`
+//! `type_expr_lowering_has_exactly_two_single_definition_producers` asserts
+//! exactly one `fn shallow_lower_type_expr_with_context` exists in `crates/`
 //! (and no bare-`mode` wrapper beside it — every caller states its
-//! full [`ProjectionReductionContext`] demand explicitly).
+//! full [`ProjectionReductionContext`] demand explicitly), alongside the one
+//! query-free structural producer `fn lower_type_expr_structural`.
 
 use std::sync::Arc;
 

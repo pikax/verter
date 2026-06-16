@@ -589,18 +589,46 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     true,
                 )
             }
-            SemanticNodeData::TypeOf { .. } => {
-                // TypeOf carries an opaque value-root + path. Substitution
-                // never descends into it, so the input node id is returned
-                // unchanged with `changed = false` — the caller skips the
-                // rebuild + re-intern entirely.
-                //
-                // "opaque TypeOf returns"
-                // counter (brief site `substitute.rs:452`).
-                if let Some(observer) = verter_audit::current_observer() {
-                    observer.record_event(verter_audit::AuditEvent::SubstituteTypeOfOpaque);
+            SemanticNodeData::TypeOf {
+                value_root,
+                path,
+                type_args,
+            } => {
+                // The value-root + path are opaque to substitution (they are
+                // not node ids). Structural child-integrity requires descending
+                // into the instantiation `type_args` so a `T` inside
+                // `typeof f<T>` is rewritten — STRUCTURAL recursion only, NOT
+                // semantic instantiation application (that is a demand-time
+                // carrier-resolution reduction). An empty / no-change arg list
+                // returns unchanged and records the opaque counter, preserving
+                // the dormant-state behaviour.
+                let mut new_args = Vec::with_capacity(type_args.len());
+                let mut any_changed = false;
+                for arg_node in type_args.iter() {
+                    let (sub, c) =
+                        self.substitute_with_change_tracking(*arg_node, parameter_node, arg);
+                    any_changed |= c;
+                    new_args.push(sub);
                 }
-                (node, false)
+                if !any_changed {
+                    // "opaque TypeOf returns" counter (brief site
+                    // `substitute.rs:452`).
+                    if let Some(observer) = verter_audit::current_observer() {
+                        observer.record_event(verter_audit::AuditEvent::SubstituteTypeOfOpaque);
+                    }
+                    return (node, false);
+                }
+                (
+                    self.graph().intern_preserving_scope(
+                        node,
+                        SemanticNodeData::TypeOf {
+                            value_root: value_root.clone(),
+                            path: path.clone(),
+                            type_args: Arc::from(new_args.into_boxed_slice()),
+                        },
+                    ),
+                    true,
+                )
             }
             SemanticNodeData::Conditional {
                 check,
@@ -758,6 +786,77 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     true,
                 )
             }
+            // Unresolved bare-name carrier `Foo<arg…>`: descend into the
+            // structural `type_args` so a `T` inside an applied carrier is
+            // rewritten when the binder fires — structural child-integrity,
+            // NOT semantic instantiation application (a demand-time
+            // carrier-resolution concern). `name` / `scope` are preserved
+            // verbatim. An empty / no-change arg list returns unchanged.
+            SemanticNodeData::BareRef {
+                name,
+                scope,
+                type_args,
+            } => {
+                let mut new_args = Vec::with_capacity(type_args.len());
+                let mut any_changed = false;
+                for arg_node in type_args.iter() {
+                    let (sub, c) =
+                        self.substitute_with_change_tracking(*arg_node, parameter_node, arg);
+                    any_changed |= c;
+                    new_args.push(sub);
+                }
+                if !any_changed {
+                    return (node, false);
+                }
+                (
+                    self.graph().intern_preserving_scope(
+                        node,
+                        SemanticNodeData::BareRef {
+                            name: Arc::clone(name),
+                            scope: scope.clone(),
+                            type_args: Arc::from(new_args.into_boxed_slice()),
+                        },
+                    ),
+                    true,
+                )
+            }
+            // Unresolved import-type carrier `import("m").Q<arg…>`: descend into
+            // the structural `type_args` so a `T` inside an applied import-type
+            // carrier is rewritten when the binder fires — same structural
+            // child-integrity as the `BareRef` arm, NOT semantic instantiation
+            // application or import resolution (a demand-time carrier-resolution
+            // concern). `specifier` / `qualifier` / `typeof_query` are preserved
+            // verbatim. An empty / no-change arg list returns unchanged.
+            SemanticNodeData::ImportType {
+                specifier,
+                qualifier,
+                type_args,
+                typeof_query,
+            } => {
+                let mut new_args = Vec::with_capacity(type_args.len());
+                let mut any_changed = false;
+                for arg_node in type_args.iter() {
+                    let (sub, c) =
+                        self.substitute_with_change_tracking(*arg_node, parameter_node, arg);
+                    any_changed |= c;
+                    new_args.push(sub);
+                }
+                if !any_changed {
+                    return (node, false);
+                }
+                (
+                    self.graph().intern_preserving_scope(
+                        node,
+                        SemanticNodeData::ImportType {
+                            specifier: Arc::clone(specifier),
+                            qualifier: qualifier.clone(),
+                            type_args: Arc::from(new_args.into_boxed_slice()),
+                            typeof_query: *typeof_query,
+                        },
+                    ),
+                    true,
+                )
+            }
             _ => (node, false),
         }
     }
@@ -781,11 +880,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///
     /// **Recursion mirrors substitute exactly.** Every arm of
     /// `substitute_with_change_tracking` that descends into child
-    /// `SemanticNodeId`s descends here too; arms that return
-    /// `(node, false)` without recursion (TypeOf, leaf TypeParam /
-    /// Primitive / Literal / Opaque / DeclRef / Never / Unknown / Any /
-    /// VueMacroElements) terminate here too. Cyclic graphs are guarded
-    /// by a `visited` set.
+    /// `SemanticNodeId`s descends here too — including the three
+    /// unresolved carriers (`BareRef` / `TypeOf` / `ImportType`), whose
+    /// `type_args` slices ARE descended (the mirror contract; see the
+    /// carrier arm below). Arms that return `(node, false)` without
+    /// recursion (leaf TypeParam / Primitive / Literal / Opaque /
+    /// DeclRef / Never / Unknown / Any / VueMacroElements) terminate here
+    /// too. Cyclic graphs are guarded by a `visited` set.
     ///
     /// **`Mapped` shadowing** is honoured: when a nested mapped binder
     /// shadows the same `target` (`nested_mapper.parameter_node ==
@@ -965,11 +1066,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         }
                     }
                 }
+                // Unresolved carriers descend into their structural
+                // `type_args` exactly as substitute's BareRef / TypeOf /
+                // ImportType arms do — the mirror contract. All three variants
+                // carry an `Arc<[SemanticNodeId]>` arg slice.
+                SemanticNodeData::BareRef { type_args, .. }
+                | SemanticNodeData::TypeOf { type_args, .. }
+                | SemanticNodeData::ImportType { type_args, .. } => {
+                    for arg in type_args.iter() {
+                        stack.push(*arg);
+                    }
+                }
                 // Substitute's catch-all `_ => (node, false)` covers
-                // TypeOf, Primitive, Literal, Opaque, DeclRef, Never,
-                // Unknown, Any, VueMacroElements. None of these have
-                // child semantic-node references that substitute would
-                // recurse into, so neither does the walker.
+                // Primitive, Literal, Opaque, DeclRef, Never, Unknown, Any,
+                // VueMacroElements. None of these have child semantic-node
+                // references that substitute would recurse into, so neither
+                // does the walker.
                 _ => {}
             }
         }

@@ -369,11 +369,26 @@ pub(crate) fn display_type_node(
             };
             format!("{{ {readonly}[{param} in {key_space}{remap}]{optionality}: {value} }}")
         }
-        SemanticNodeData::TypeOf { value_root, path } => {
+        SemanticNodeData::TypeOf {
+            value_root,
+            path,
+            type_args,
+        } => {
             let mut s = format!("typeof {}", value_root.name);
             for seg in path.iter() {
                 s.push('.');
                 s.push_str(seg);
+            }
+            // Instantiation args render in a `<...>` segment, matching the
+            // `ImportType` / `InstantiationRef` convention; empty stays bare.
+            if !type_args.is_empty() {
+                let rendered: Vec<String> = type_args
+                    .iter()
+                    .map(|a| display_type_node(store, *a, needs, child_depth, visited).0)
+                    .collect();
+                s.push('<');
+                s.push_str(&rendered.join(", "));
+                s.push('>');
             }
             s
         }
@@ -455,9 +470,23 @@ pub(crate) fn display_type_node(
                 format!("{name}<{}>", rendered.join(", "))
             }
         }
-        // Unresolved bare-name carrier renders as its written name (display
-        // never re-resolves a carrier).
-        SemanticNodeData::BareRef { name, .. } => name.to_string(),
+        // Unresolved bare-name carrier renders as its written name plus any
+        // applied type arguments (`Foo<Arg>`), matching the `ImportType` /
+        // `InstantiationRef` convention; an empty `type_args` stays bare.
+        // Display never re-resolves a carrier — the args render structurally.
+        SemanticNodeData::BareRef {
+            name, type_args, ..
+        } => {
+            if type_args.is_empty() {
+                name.to_string()
+            } else {
+                let rendered: Vec<String> = type_args
+                    .iter()
+                    .map(|a| display_type_node(store, *a, needs, child_depth, visited).0)
+                    .collect();
+                format!("{name}<{}>", rendered.join(", "))
+            }
+        }
         // Dynamic-import carrier renders the import expression + qualifier
         // path + any type arguments.
         SemanticNodeData::ImportType {

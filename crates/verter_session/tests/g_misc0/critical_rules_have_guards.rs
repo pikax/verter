@@ -87,6 +87,10 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             // verter_session owns the hot handle-bearing structs;
             // verter_semantic stays compat DTOs with no session back-edge.
             "no_verter_semantic_to_verter_session_dep",
+            // Same barrier from the worker side: the OXC worker /
+            // semantic-lowering surface produces owned `TypeExpr` IR only and
+            // never emits a session semantic-graph node.
+            "oxc_worker_emits_no_session_graph_node",
         ],
     ),
     (
@@ -373,6 +377,32 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             // QueryError), never a raw `TypeExpr::Unknown` control sentinel
             // (scoped to the carrier surface; the global fence lands later).
             "carrier_constructors_do_not_use_unknown_as_control_flow",
+            // The query-free structural lowerer (`structural_lower.rs`) emits
+            // the typed carriers from the owned `TypeExpr` WITHOUT any
+            // resolution / host query, and never materialises a carrier back
+            // to `TypeExpr` during emission — it is a producer, not a second
+            // resolver.
+            "session_graph_lowerer_makes_no_query",
+            "unresolved_carriers_not_materialized_during_emission",
+            // ANTI-TAIL: a structural graph SCAN/CLASSIFY walker must read a
+            // carrier's (`BareRef`/`TypeOf`/`ImportType`) type arguments
+            // through the shared `SemanticNodeData::carrier_type_args` accessor
+            // — a NEW production site hand-binding a carrier `type_args` field
+            // outside the enumerated identity/reconstruction/construction
+            // boundaries is forbidden, so a future carrier-scan cannot silently
+            // drop the args the way the absorb / open-node / `is_deferred`
+            // carrier scans previously did.
+            "no_new_direct_carrier_type_args_traversal_outside_accessor_or_allowlist",
+            // DORMANT-WIRING: the structural lowerer's public entry
+            // `lower_type_expr_structural` has ZERO production call sites — it
+            // stays dormant until the carrier-resolution work wires it together
+            // with the deferred consumer-walker carrier-arg descent and its
+            // integration tests. This blocks the recorded carrier-resolution
+            // debt (the `meta_resolve` ref/cycle/dep walkers etc. that still
+            // drop carrier `type_args`) from being silently bypassed: the
+            // lowerer cannot feed non-empty carriers to those walkers without
+            // removing this guard.
+            "structural_lowerer_has_no_production_caller_until_carrier_resolution",
         ],
     ),
     (

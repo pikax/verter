@@ -509,14 +509,21 @@ impl ProjectSemanticDispatch<'_> {
     /// [`TypeParam`](SemanticNodeData::TypeParam) constraint/default, a
     /// [`MergedDecl`](SemanticNodeData::MergedDecl)'s contributors, and a
     /// [`Function`](SemanticNodeData::Function)'s param / return / type-param
-    /// node ids. The match has NO catch-all: leaf carriers
+    /// node ids, and the three unresolved carriers that apply type arguments
+    /// ([`BareRef`](SemanticNodeData::BareRef) `Foo<infer U>`,
+    /// [`TypeOf`](SemanticNodeData::TypeOf) `typeof make<infer U>`,
+    /// [`ImportType`](SemanticNodeData::ImportType) `import("m").Box<infer U>`),
+    /// each scanned through the shared
+    /// [`carrier_type_args`](SemanticNodeData::carrier_type_args) accessor. The
+    /// match has NO catch-all: leaf carriers
     /// ([`Primitive`](SemanticNodeData::Primitive), literals,
     /// [`Opaque`](SemanticNodeData::Opaque),
-    /// [`TypeOf`](SemanticNodeData::TypeOf),
     /// [`VueMacroElements`](SemanticNodeData::VueMacroElements),
-    /// [`DeclRef`](SemanticNodeData::DeclRef)) hold no nested infer-bearing node
-    /// id and stop the walk explicitly, so a future variant addition forces a
-    /// compile error here rather than silently regressing the guard.
+    /// [`DeclRef`](SemanticNodeData::DeclRef),
+    /// [`RawFallback`](SemanticNodeData::RawFallback)) hold no nested
+    /// infer-bearing node id and stop the walk explicitly, so a future variant
+    /// addition forces a compile error here rather than silently regressing the
+    /// guard.
     ///
     /// Cheap `node_data` peeks only (no resolver/execute work), bounded by
     /// `SCAN_BUDGET` for cycle safety. Budget exhaustion is conservative — it
@@ -616,10 +623,17 @@ impl ProjectSemanticDispatch<'_> {
                 SemanticNodeData::InstantiationRef { args, .. } => {
                     stack.extend(args.iter().copied());
                 }
-                // Carrier child node ids could hold a nested `infer` inside an
-                // import type-argument / constructor signature.
-                SemanticNodeData::ImportType { type_args, .. } => {
-                    stack.extend(type_args.iter().copied());
+                // The three unresolved carriers that apply type arguments
+                // (`Foo<infer P>`, `typeof make<infer P>`,
+                // `import("m").Box<infer P>`) can each hold a nested `infer`
+                // inside their `type_args`; scan all three through the shared
+                // structural carrier-arg accessor so a future carrier with
+                // args is covered here in one place rather than silently
+                // treated as an infer-free leaf.
+                SemanticNodeData::ImportType { .. }
+                | SemanticNodeData::TypeOf { .. }
+                | SemanticNodeData::BareRef { .. } => {
+                    stack.extend(data.carrier_type_args().iter().copied());
                 }
                 SemanticNodeData::ConstructorType { signature } => stack.push(*signature),
 
@@ -630,12 +644,11 @@ impl ProjectSemanticDispatch<'_> {
                 SemanticNodeData::Primitive(_)
                 | SemanticNodeData::Literal(_)
                 | SemanticNodeData::Opaque(_)
-                | SemanticNodeData::TypeOf { .. }
                 | SemanticNodeData::VueMacroElements(_)
+                // `DeclRef` carries only a declaration identity (no args); the
+                // raw-fallback / synthetic-binding carriers hold no
+                // infer-bearing child node id.
                 | SemanticNodeData::DeclRef { .. }
-                // Unresolved bare-name / raw-fallback / synthetic-binding
-                // carriers hold no infer-bearing child node id.
-                | SemanticNodeData::BareRef { .. }
                 | SemanticNodeData::RawFallback { .. }
                 | SemanticNodeData::SyntheticBinding { .. } => {}
             }
