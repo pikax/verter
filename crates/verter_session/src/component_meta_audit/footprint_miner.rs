@@ -472,6 +472,21 @@ fn map_node_kind(data: &SemanticNodeData) -> SemanticNodeKind {
         SemanticNodeData::MergedDecl { .. } => SemanticNodeKind::Other {
             name: Arc::from("MergedDecl"),
         },
+        SemanticNodeData::BareRef { .. } => SemanticNodeKind::Other {
+            name: Arc::from("BareRef"),
+        },
+        SemanticNodeData::ImportType { .. } => SemanticNodeKind::Other {
+            name: Arc::from("ImportType"),
+        },
+        SemanticNodeData::RawFallback { .. } => SemanticNodeKind::Other {
+            name: Arc::from("RawFallback"),
+        },
+        SemanticNodeData::ConstructorType { .. } => SemanticNodeKind::Other {
+            name: Arc::from("ConstructorType"),
+        },
+        SemanticNodeData::SyntheticBinding { .. } => SemanticNodeKind::Other {
+            name: Arc::from("SyntheticBinding"),
+        },
     }
 }
 
@@ -526,6 +541,15 @@ fn display_label_for(data: &SemanticNodeData) -> Arc<str> {
         )),
         SemanticNodeData::MergedDecl { contributors } => {
             Arc::from(format!("MergedDecl[{}]", contributors.len()))
+        }
+        SemanticNodeData::BareRef { name, .. } => Arc::from(format!("BareRef({name})")),
+        SemanticNodeData::ImportType { specifier, .. } => {
+            Arc::from(format!("import(\"{specifier}\")"))
+        }
+        SemanticNodeData::RawFallback { .. } => Arc::from("RawFallback"),
+        SemanticNodeData::ConstructorType { .. } => Arc::from("ConstructorType"),
+        SemanticNodeData::SyntheticBinding { id, .. } => {
+            Arc::from(format!("SyntheticBinding({})", id.binding_name))
         }
     }
 }

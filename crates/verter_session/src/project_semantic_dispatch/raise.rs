@@ -25,10 +25,10 @@ use crate::resolver_core::component_meta_query_engine::{
     SEMANTIC_OBJECT_SURFACE,
 };
 use crate::semantic_query::{
-    DepSignature, IndexKey, MapperKey, OptionalityMod, PrimitiveKind as SemanticPrimitiveKind,
-    ProjectionMode, ProjectionReductionContext, QueryError, QueryResult, ReadonlyMod,
-    ReductionDemand, ResolveDeclKey, ScopeId, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
-    SurfaceMember, SurfaceView, TupleElement,
+    DepSignature, HotTypeRef, IndexKey, MapperKey, OptionalityMod,
+    PrimitiveKind as SemanticPrimitiveKind, ProjectionMode, ProjectionReductionContext, QueryError,
+    QueryResult, ReadonlyMod, ReductionDemand, ResolveDeclKey, ScopeId, SemanticNodeData,
+    SemanticNodeId, SemanticQueryKey, SurfaceMember, SurfaceView, TupleElement,
 };
 
 // =====================================================================
@@ -632,7 +632,95 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     type_arguments: std::sync::Arc::from(raised_args.into_boxed_slice()),
                 }
             }
+            // Unresolved bare-name carrier → bare `Ref { name }` (the
+            // shallow-by-default published shape). `scope` is value-side
+            // resolution context, not part of the projected shape.
+            SemanticNodeData::BareRef { name, .. } => TypeExpr::Ref {
+                name: std::sync::Arc::clone(name),
+                type_arguments: verter_type_expr::empty_type_args(),
+            },
+            // Unresolved dynamic-import carrier → `TypeExpr::ImportType`.
+            // A miss on any type-arg raise becomes the `<raise miss>`
+            // placeholder so the outer import-type still constructs.
+            SemanticNodeData::ImportType {
+                specifier,
+                qualifier,
+                type_args,
+                typeof_query,
+            } => {
+                let raised_args: Vec<TypeExpr> = type_args
+                    .iter()
+                    .map(|id| {
+                        self.raise_node_to_type_expr_inner(*id, active).unwrap_or(
+                            TypeExpr::Unknown {
+                                raw: "<raise miss>".to_string(),
+                            },
+                        )
+                    })
+                    .collect();
+                TypeExpr::ImportType {
+                    specifier: std::sync::Arc::clone(specifier),
+                    qualifier: std::sync::Arc::clone(qualifier),
+                    typeof_query: *typeof_query,
+                    type_arguments: std::sync::Arc::from(raised_args.into_boxed_slice()),
+                }
+            }
+            // Raw-fallback carrier → `TypeExpr::Unknown { raw }` (the
+            // round-trip of the only carrier that holds raw type text).
+            SemanticNodeData::RawFallback { raw } => TypeExpr::Unknown {
+                raw: raw.as_ref().to_string(),
+            },
+            // Constructor-type carrier → `TypeExpr::ConstructorType`. The
+            // signature interns a `Function` node; rewrap its raised
+            // `FunctionExpr` as a constructor type. Any non-function shape
+            // (malformed carrier) is preserved as raised rather than
+            // fabricated.
+            SemanticNodeData::ConstructorType { signature } => {
+                let raised = self.raise_node_to_type_expr_inner(*signature, active)?;
+                if let TypeExpr::Function(func) = &raised {
+                    TypeExpr::ConstructorType(std::sync::Arc::clone(func))
+                } else {
+                    raised
+                }
+            }
+            // Synthetic-binding carrier → `TypeExpr::SyntheticSlotBinding`.
+            // Re-hydrate the full carrier key by re-attaching the value-side
+            // `value_node` provenance ordinal to the content-free identity.
+            SemanticNodeData::SyntheticBinding { id, value_node } => {
+                TypeExpr::SyntheticSlotBinding(std::sync::Arc::new(id.to_carrier_key(*value_node)))
+            }
         })
+    }
+
+    /// The single reverse / materialisation boundary: project a
+    /// [`HotTypeRef`] handle back to a compat [`TypeExpr`].
+    ///
+    /// This is the output/compat seam — it is the named boundary that the
+    /// migration collapses all `TypeExpr` materialisation onto. It is a
+    /// TOTAL wrapper over the shell-only [`Self::raise_node_to_type_expr`]
+    /// primitive: every carrier round-trips here (raw-fallback text →
+    /// `Unknown { raw }`, the synthetic binding, the constructor carrier, and
+    /// the `RecursiveRef` back-edge via `Opaque(QueryError::RecursiveRef)`).
+    /// Tuple-element rest fidelity round-trips separately through the `Tuple`
+    /// arm's `TupleElement.rest`; there is no standalone `Rest` carrier. A
+    /// deref miss (a stale handle whose node is out of the live arena)
+    /// yields a `"<materialize miss>"` fallback rather than panicking.
+    ///
+    /// Operator-shape REDUCTION (`IndexedAccess` / `Conditional` / `Mapped`
+    /// / `KeyOf` / `TypeOf`) is NOT performed here — that is
+    /// [`Self::raise_and_reduce`]'s job; this boundary is shell-only, like
+    /// the primitive it wraps.
+    // The production callers (output adapters / diagnostics / compat
+    // exporters) collapse onto this boundary as the hot path migrates off
+    // stored `TypeExpr` bodies; it is exercised today by the carrier
+    // round-trip unit tests.
+    #[allow(dead_code)]
+    #[must_use]
+    pub(crate) fn materialize_type_expr(&self, handle: HotTypeRef) -> TypeExpr {
+        self.raise_node_to_type_expr(handle.node())
+            .unwrap_or(TypeExpr::Unknown {
+                raw: "<materialize miss>".to_string(),
+            })
     }
 
     fn index_key_to_type_expr(
@@ -938,7 +1026,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
             | SemanticNodeData::TemplateLiteral { .. }
             | SemanticNodeData::TypeOf { .. }
             | SemanticNodeData::VueMacroElements(_)
-            | SemanticNodeData::DeclRef { .. } => {}
+            | SemanticNodeData::DeclRef { .. }
+            // Unresolved bare-name / dynamic-import / raw-fallback /
+            // synthetic-binding carriers are resolved as a whole by the
+            // dispatch, not rebuilt by this reducer, so they expose no
+            // operand children to pre-resolve here.
+            | SemanticNodeData::BareRef { .. }
+            | SemanticNodeData::ImportType { .. }
+            | SemanticNodeData::RawFallback { .. }
+            | SemanticNodeData::SyntheticBinding { .. } => {}
             SemanticNodeData::Alias(target) => {
                 stack.push(ReduceFrame::descend(*target, parent_context));
             }
@@ -1084,6 +1180,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
                 }
             }
+            // The constructor signature descends like the function
+            // signature under whole-surface publication.
+            SemanticNodeData::ConstructorType { signature } => {
+                if is_whole_surface_published(parent_context) {
+                    stack.push(ReduceFrame::descend(*signature, parent_context));
+                }
+            }
         }
     }
 
@@ -1206,7 +1309,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
             | SemanticNodeData::Literal(_)
             | SemanticNodeData::TypeParam { .. }
             | SemanticNodeData::Opaque(_)
-            | SemanticNodeData::VueMacroElements(_) => node,
+            | SemanticNodeData::VueMacroElements(_)
+            // Unresolved bare-name / dynamic-import / raw-fallback /
+            // synthetic-binding carriers pass through this reducer
+            // unchanged — the dispatch resolves them as a whole.
+            | SemanticNodeData::BareRef { .. }
+            | SemanticNodeData::ImportType { .. }
+            | SemanticNodeData::RawFallback { .. }
+            | SemanticNodeData::SyntheticBinding { .. } => node,
 
             // --- hard-stop operator shapes (no dispatch variant) ---
             SemanticNodeData::TemplateLiteral { .. } => {
@@ -1524,6 +1634,27 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     already
                 } else {
                     self.reduce_subtree(merged, context, state)
+                }
+            }
+            // Structural fidelity carriers rebuild from their reduced single
+            // child (like `Array` / `Function`): if the child is unchanged
+            // the shell is preserved, else a scope-preserving shell is
+            // re-interned.
+            SemanticNodeData::ConstructorType { signature } => {
+                let new_sig = state
+                    .mapping
+                    .get(&(*signature, context))
+                    .copied()
+                    .unwrap_or(*signature);
+                if new_sig == *signature {
+                    node
+                } else {
+                    self.graph().intern_preserving_scope(
+                        node,
+                        SemanticNodeData::ConstructorType {
+                            signature: new_sig,
+                        },
+                    )
                 }
             }
         }
@@ -4244,6 +4375,26 @@ impl OpenWalk {
             // value-body walk treats it as closed (carries no outer
             // generic).
             SemanticNodeData::TypeOf { .. } => !self.outer_generic_only,
+
+            // --- unresolved / fidelity carriers ---
+            // A constructor type delegates to its inner function signature
+            // (which carries the value-surface descent rule).
+            SemanticNodeData::ConstructorType { signature } => self.node_is_open(ctx, *signature),
+            // An unresolved dynamic-import: open if any type argument reaches
+            // the outer generic; otherwise undecidable (open) for the
+            // enumeration-domain walk, closed for the value-body walk.
+            SemanticNodeData::ImportType { type_args, .. } => {
+                type_args.iter().any(|a| self.node_is_open(ctx, *a)) || !self.outer_generic_only
+            }
+            // An unresolved bare-name / raw-fallback carrier holds no outer
+            // generic (closed for the value-body walk) but is undecidable for
+            // the enumeration-domain walk — mirroring `TypeOf` and an
+            // unresolved name.
+            SemanticNodeData::BareRef { .. } | SemanticNodeData::RawFallback { .. } => {
+                !self.outer_generic_only
+            }
+            // A synthetic slot-binding is a concrete shallow terminal.
+            SemanticNodeData::SyntheticBinding { .. } => false,
         }
     }
 

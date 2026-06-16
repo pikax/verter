@@ -59,11 +59,14 @@ pub type TypeResolutionResult = SemanticNodeId;
 /// subset of those are *request faults* the public API surfaces as an
 /// `Err`:
 ///
-/// - [`crate::semantic_query::QueryError::Miss`],
-///   [`crate::semantic_query::QueryError::RecursiveRef`], and
-///   [`crate::semantic_query::QueryError::DeclPlaceholder`] are NOT
-///   faults — they ride the success arm as `Ok(None)` (no resolved
-///   node, but the request was well-formed and serviced).
+/// - The non-fault arms classified by `from_query_error` —
+///   [`crate::semantic_query::QueryError::Miss`],
+///   [`crate::semantic_query::QueryError::RecursiveRef`],
+///   [`crate::semantic_query::QueryError::DeclPlaceholder`], and the
+///   typed semantic-sentinel control carriers (cycle / miss /
+///   unrepresentable / macro-placeholder) — are NOT faults: they
+///   ride the success arm as `Ok(None)` (no resolved node, but the
+///   request was well-formed and serviced).
 /// - `UnsupportedIntrinsic`, `BudgetExceeded`, `UnstableState`,
 ///   `AliasCycle`, `Other`, and `ValueDomainMismatch` ARE request
 ///   faults — they map to the matching [`TypeResolutionRequestError`]
@@ -103,17 +106,35 @@ impl TypeResolutionRequestError {
     /// request fault (`Some(err)` → carrier `Err`) or a non-fault miss
     /// (`None` → carrier `Ok(None)`).
     ///
-    /// `Miss` / `RecursiveRef` / `DeclPlaceholder` are non-faults: the
-    /// query was well-formed but produced no resolved node, which the
-    /// public API represents as `Ok(None)`. Every other arm is a
-    /// genuine request fault.
+    /// Non-faults — the query was well-formed but produced no resolved
+    /// node, which the public API represents as `Ok(None)`:
+    /// `Miss` / `RecursiveRef` / `DeclPlaceholder`, plus the typed
+    /// semantic-sentinel control carriers `RaiseAliasCycle` /
+    /// `TypeParamCycle` / `RaiseMiss` / `UnrepresentableSurface` /
+    /// `UnrepresentableSurfaceMember` / `VueMacroElementsPlaceholder`.
+    ///
+    /// Genuine request faults map to the matching
+    /// `TypeResolutionRequestError` arm and ride the carrier's `Err`:
+    /// `UnsupportedIntrinsic` / `BudgetExceeded` / `UnstableState` /
+    /// `AliasCycle` / `Other` / `ValueDomainMismatch` (the last has no
+    /// dedicated arm — it rides the text-bearing `Other` carrier).
     #[must_use]
     pub fn from_query_error(err: &crate::semantic_query::QueryError) -> Option<Self> {
         use crate::semantic_query::QueryError;
         match err {
             QueryError::Miss
             | QueryError::RecursiveRef { .. }
-            | QueryError::DeclPlaceholder { .. } => None,
+            | QueryError::DeclPlaceholder { .. }
+            // The typed semantic-sentinel carriers are non-fault control
+            // signals (cycle / miss / unrepresentable / macro-placeholder);
+            // like `Miss` they surface as a well-formed `Ok(None)`, not a
+            // request fault.
+            | QueryError::RaiseAliasCycle
+            | QueryError::TypeParamCycle
+            | QueryError::RaiseMiss
+            | QueryError::UnrepresentableSurface
+            | QueryError::UnrepresentableSurfaceMember
+            | QueryError::VueMacroElementsPlaceholder => None,
             QueryError::UnsupportedIntrinsic { name } => Some(Self::UnsupportedIntrinsic {
                 name: Arc::clone(name),
             }),
@@ -154,9 +175,11 @@ impl VerterHost {
     /// Outcome mapping:
     /// - `Ok(Some(node))` — dispatch produced a value (or a recursive
     ///   back-edge node).
-    /// - `Ok(None)` — dispatch returned a non-fault miss
-    ///   (`Miss` / `RecursiveRef` / `DeclPlaceholder`): the query was
-    ///   well-formed but resolved no node.
+    /// - `Ok(None)` — dispatch returned a non-fault miss as classified
+    ///   by `TypeResolutionRequestError::from_query_error`
+    ///   (`Miss` / `RecursiveRef` / `DeclPlaceholder` or a typed
+    ///   semantic sentinel): the query was well-formed but resolved no
+    ///   node.
     /// - `Err(fault)` — dispatch returned a genuine request fault
     ///   (`BudgetExceeded` / `UnstableState` / `AliasCycle` /
     ///   `UnsupportedIntrinsic` / `Other` / `ValueDomainMismatch`).

@@ -1088,6 +1088,24 @@ pub fn audit_key_for_node(
         SemanticNodeData::MergedDecl { contributors } => {
             format!("MergedDecl[{}]", contributors.len())
         }
+        SemanticNodeData::BareRef { name, .. } => format!("BareRef({name})"),
+        SemanticNodeData::ImportType {
+            specifier,
+            qualifier,
+            typeof_query,
+            ..
+        } => format!(
+            "ImportType({specifier},q[{}],typeof={typeof_query})",
+            qualifier.len()
+        ),
+        SemanticNodeData::RawFallback { raw } => format!("RawFallback(\"{raw}\")"),
+        SemanticNodeData::ConstructorType { signature } => {
+            format!("ConstructorType({})", signature.0)
+        }
+        SemanticNodeData::SyntheticBinding { id: binding, .. } => format!(
+            "SyntheticBinding({}::{})",
+            binding.scope_canonical_id, binding.binding_name
+        ),
     };
     Arc::from(label)
 }

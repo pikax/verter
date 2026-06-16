@@ -78,8 +78,10 @@ impl VerterHost {
     /// because this path resolves through the one shared typed-IR
     /// engine, not the wire request validator. Outcome mapping:
     /// - `Ok(Some(node))` — dispatch produced a value.
-    /// - `Ok(None)` — a non-fault miss (`Miss` / `RecursiveRef` /
-    ///   `DeclPlaceholder` / lowering miss): the request was
+    /// - `Ok(None)` — a non-fault miss: a dispatch miss classified by
+    ///   `TypeResolutionRequestError::from_query_error`
+    ///   (`Miss` / `RecursiveRef` / `DeclPlaceholder` or a typed
+    ///   semantic sentinel) or a lowering miss — the request was
     ///   well-formed but resolved no node.
     /// - `Err(fault)` — a genuine dispatch fault (`BudgetExceeded` /
     ///   `UnstableState` / `AliasCycle` / `UnsupportedIntrinsic` /
@@ -408,9 +410,10 @@ fn resolve_named_symbol_inner(
         QueryResult::Recursive(node) => Some(node),
         QueryResult::Error(err) => {
             // A genuine dispatch fault on the bare-decl probe is a
-            // request fault — surface it. A non-fault miss
-            // (`Miss` / `RecursiveRef` / `DeclPlaceholder`) leaves the
-            // fallback node `None` and the Instantiate path below
+            // request fault — surface it. A non-fault miss (any arm
+            // `from_query_error` maps to `None`: `Miss` / `RecursiveRef`
+            // / `DeclPlaceholder` or a typed semantic sentinel) leaves
+            // the fallback node `None` and the Instantiate path below
             // continues.
             match TypeResolutionRequestError::from_query_error(&err) {
                 Some(fault) => return (Err(fault), effective_mode),
@@ -489,10 +492,11 @@ fn resolve_named_symbol_inner(
 ///   `AliasCycle` / `UnsupportedIntrinsic` / `Other` /
 ///   `ValueDomainMismatch`, the last riding the text-bearing `Other`
 ///   carrier) → `Err(fault)`.
-/// - A non-fault MISS (`Miss` / `RecursiveRef` / `DeclPlaceholder`) →
-///   `Ok(fallback)`, where `fallback` is whatever identifiable node the
-///   caller already resolved (e.g. the bare `ResolveDecl` node) — `None`
-///   when there is none.
+/// - A non-fault MISS (`Miss` / `RecursiveRef` / `DeclPlaceholder` or a
+///   typed semantic sentinel — every arm `from_query_error` maps to
+///   `None`) → `Ok(fallback)`, where `fallback` is whatever identifiable
+///   node the caller already resolved (e.g. the bare `ResolveDecl` node)
+///   — `None` when there is none.
 ///
 /// Both the top-level Instantiate path and the nested
 /// [`materialize_through_aliases`] placeholder hop route their
@@ -856,7 +860,8 @@ pub(crate) fn classify_base_surfacing(
 /// Differs from [`classify_materialization_step`]: an operator alias must
 /// never *degrade* to a worse terminal than its own carrier. When the
 /// reducer returns a NON-FAULT miss carrier (`Miss` / `RecursiveRef` /
-/// `DeclPlaceholder`), a `Recursive` cycle back-edge, or makes no
+/// `DeclPlaceholder`, or any other arm [`classify_dispatch_error`]
+/// treats as a non-fault), a `Recursive` cycle back-edge, or makes no
 /// progress, the bridge keeps the original `IndexedAccess` / `KeyOf` shell
 /// (matching the pre-bridge carrier-publication behaviour for the cases
 /// the reducer cannot yet resolve — open `TypeParam` operands,

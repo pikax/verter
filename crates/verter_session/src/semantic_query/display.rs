@@ -455,6 +455,48 @@ pub(crate) fn display_type_node(
                 format!("{name}<{}>", rendered.join(", "))
             }
         }
+        // Unresolved bare-name carrier renders as its written name (display
+        // never re-resolves a carrier).
+        SemanticNodeData::BareRef { name, .. } => name.to_string(),
+        // Dynamic-import carrier renders the import expression + qualifier
+        // path + any type arguments.
+        SemanticNodeData::ImportType {
+            specifier,
+            qualifier,
+            type_args,
+            typeof_query,
+        } => {
+            let mut out = if *typeof_query {
+                format!("typeof import(\"{specifier}\")")
+            } else {
+                format!("import(\"{specifier}\")")
+            };
+            for segment in qualifier.iter() {
+                out.push('.');
+                out.push_str(segment);
+            }
+            if !type_args.is_empty() {
+                let rendered: Vec<String> = type_args
+                    .iter()
+                    .map(|a| display_type_node(store, *a, needs, child_depth, visited).0)
+                    .collect();
+                out.push('<');
+                out.push_str(&rendered.join(", "));
+                out.push('>');
+            }
+            out
+        }
+        // Raw-fallback carrier renders its preserved text verbatim.
+        SemanticNodeData::RawFallback { raw } => raw.to_string(),
+        // Constructor-type carrier renders `new ` + its function signature.
+        SemanticNodeData::ConstructorType { signature } => {
+            format!(
+                "new {}",
+                display_type_node(store, *signature, needs, child_depth, visited).0
+            )
+        }
+        // Synthetic-binding carrier renders the bound name.
+        SemanticNodeData::SyntheticBinding { id, .. } => id.binding_name.to_string(),
     };
     visited.pop();
     DisplayString(out)
@@ -878,9 +920,12 @@ fn prec_of(data: &SemanticNodeData) -> Prec {
         // element, keyof base, indexed-access object, another conditional's
         // check / extends / true branch) it must parenthesise.
         SemanticNodeData::Conditional { .. } => Prec::Loose,
-        SemanticNodeData::Function { .. } => Prec::Loose,
+        // A constructor type renders `new (…) => R` — a loose binder like a
+        // function type.
+        SemanticNodeData::Function { .. } | SemanticNodeData::ConstructorType { .. } => Prec::Loose,
         SemanticNodeData::Union(_) => Prec::Union,
         SemanticNodeData::Intersection(_) => Prec::Intersection,
+        // Prefix operators (`keyof T`, `infer T`).
         SemanticNodeData::KeyOf { .. } | SemanticNodeData::Infer { .. } => Prec::Prefix,
         SemanticNodeData::Array { .. } | SemanticNodeData::IndexedAccess { .. } => Prec::Postfix,
         // `Alias` is transparent (rendered as its target); its precedence is
@@ -901,7 +946,13 @@ fn prec_of(data: &SemanticNodeData) -> Prec {
         | SemanticNodeData::VueMacroElements(_)
         | SemanticNodeData::MergedDecl { .. }
         | SemanticNodeData::DeclRef { .. }
-        | SemanticNodeData::InstantiationRef { .. } => Prec::Atom,
+        | SemanticNodeData::InstantiationRef { .. }
+        // Unresolved bare-name / dynamic-import / raw-fallback /
+        // synthetic-binding carriers all render as atomic references.
+        | SemanticNodeData::BareRef { .. }
+        | SemanticNodeData::ImportType { .. }
+        | SemanticNodeData::RawFallback { .. }
+        | SemanticNodeData::SyntheticBinding { .. } => Prec::Atom,
     }
 }
 

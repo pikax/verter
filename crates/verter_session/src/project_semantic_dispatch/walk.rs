@@ -2221,7 +2221,16 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 | SemanticNodeData::TemplateLiteral { .. }
                 | SemanticNodeData::TypeParam { .. }
                 | SemanticNodeData::Infer { .. }
-                | SemanticNodeData::Function { .. } => {
+                | SemanticNodeData::Function { .. }
+                // Unresolved bare-name / dynamic-import / raw-fallback /
+                // constructor / synthetic-binding carriers cannot be
+                // path-navigated as-is — they are resolved by the dispatch
+                // before a walk descends. Return Opaque(Miss).
+                | SemanticNodeData::BareRef { .. }
+                | SemanticNodeData::ImportType { .. }
+                | SemanticNodeData::RawFallback { .. }
+                | SemanticNodeData::ConstructorType { .. }
+                | SemanticNodeData::SyntheticBinding { .. } => {
                     // Can't descend further through generic path-walk —
                     // template-literal relation matching is its own
                     // path-walker semantic work. The shell carriers exist
@@ -3507,7 +3516,16 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             | SemanticNodeData::Function { .. }
             | SemanticNodeData::KeyOf { .. }
             | SemanticNodeData::IndexedAccess { .. }
-            | SemanticNodeData::TypeOf { .. } => {
+            | SemanticNodeData::TypeOf { .. }
+            // Unresolved bare-name / dynamic-import / raw-fallback /
+            // constructor / synthetic-binding carriers contribute no shallow
+            // surface members (they are resolved by the dispatch before a
+            // surface synthesis descends).
+            | SemanticNodeData::BareRef { .. }
+            | SemanticNodeData::ImportType { .. }
+            | SemanticNodeData::RawFallback { .. }
+            | SemanticNodeData::ConstructorType { .. }
+            | SemanticNodeData::SyntheticBinding { .. } => {
                 drop(data);
                 self.contribute_surface(
                     target,

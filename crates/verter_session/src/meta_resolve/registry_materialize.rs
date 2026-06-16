@@ -53,7 +53,10 @@ pub(crate) fn component_meta_registry_prefers_structural_materialization_node(
         | SemanticNodeData::Mapped { .. }
         | SemanticNodeData::TemplateLiteral { .. }
         | SemanticNodeData::Function { .. }
-        | SemanticNodeData::KeyOf { .. } => true,
+        | SemanticNodeData::KeyOf { .. }
+        // Structural fidelity carrier (constructor signature) materialises
+        // structurally like the function shape it wraps.
+        | SemanticNodeData::ConstructorType { .. } => true,
         SemanticNodeData::Alias(inner) => {
             component_meta_registry_prefers_structural_materialization_node(
                 graph,
@@ -74,7 +77,14 @@ pub(crate) fn component_meta_registry_prefers_structural_materialization_node(
         // A merged declaration is a concrete peer-merged object surface — like
         // `Object`, it does not prefer structural materialization.
         | SemanticNodeData::MergedDecl { .. }
-        | SemanticNodeData::VueMacroElements(_) => false,
+        | SemanticNodeData::VueMacroElements(_)
+        // Unresolved bare-name / dynamic-import / raw-fallback /
+        // synthetic-binding carriers are references / terminals, not
+        // structural shapes to materialise.
+        | SemanticNodeData::BareRef { .. }
+        | SemanticNodeData::ImportType { .. }
+        | SemanticNodeData::RawFallback { .. }
+        | SemanticNodeData::SyntheticBinding { .. } => false,
     }
 }
 

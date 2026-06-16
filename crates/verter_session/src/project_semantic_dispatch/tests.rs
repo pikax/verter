@@ -7633,11 +7633,114 @@ fn function_surface_publishes_as_object_with_call_signatures() {
     }
 }
 
+/// Strip `//`-line comments from each line of `src` (everything from the first
+/// `//` to end-of-line). Used so the brace-balanced enum-body isolation below
+/// is not thrown off by `{` / `}` that appear only inside doc / line comments
+/// (the `SemanticNodeData` rustdoc is full of `{ ... }` code examples), and so
+/// the variant scan never false-matches a variant name that appears only in
+/// prose.
+fn strip_line_comments(src: &str) -> String {
+    src.lines()
+        .map(|line| match line.find("//") {
+            Some(i) => &line[..i],
+            None => line,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// If `src` declares `enum <enum_name> { ... }` and that enum body declares a
+/// top-level variant whose name is any of `variants`, return the matched
+/// variant name; otherwise `None`.
+///
+/// The scan is SCOPED to the named enum's body ONLY — isolated by brace-
+/// balanced matching from the `{` after the enum name to its matching close
+/// brace, over comment-stripped source. This scoping is load-bearing: in
+/// `semantic_query.rs`, `enum QueryError` legitimately has a
+/// `RecursiveRef { name: Arc<str> }` variant (the
+/// `Opaque(QueryError::RecursiveRef)` home), and isolating the
+/// `SemanticNodeData` body excludes it so the §7.18 declaration scan never
+/// false-trips on the QueryError variant.
+///
+/// A match is whole-variant-token: a trimmed body line that STARTS WITH the
+/// variant name followed by `{`, `(`, `,`, or whitespace / end-of-line — so
+/// `SomeRestThing` / `Restful` do NOT false-match a `Rest` needle.
+fn enum_body_declares_variant(src: &str, enum_name: &str, variants: &[&str]) -> Option<String> {
+    let stripped = strip_line_comments(src);
+    let header = format!("enum {enum_name}");
+    // Locate the declaration whose name is EXACTLY `enum_name` (the char after
+    // the name must be a non-identifier boundary, so `enum Foo` does not match
+    // an `enum FooBar` prefix-collision).
+    let mut search_from = 0usize;
+    let enum_pos = loop {
+        let rel = stripped[search_from..].find(&header)?;
+        let abs = search_from + rel;
+        let after = abs + header.len();
+        let boundary = match stripped[after..].chars().next() {
+            None => true,
+            Some(c) => c == '<' || c == '{' || c.is_whitespace(),
+        };
+        if boundary {
+            break abs;
+        }
+        search_from = after;
+    };
+    // Brace-balance from the `{` opening the body to its matching close.
+    let brace_rel = stripped[enum_pos..].find('{')?;
+    let body_start = enum_pos + brace_rel + 1;
+    let bytes = stripped.as_bytes();
+    let mut depth = 1usize;
+    let mut idx = body_start;
+    let mut body_end = stripped.len();
+    while idx < bytes.len() {
+        match bytes[idx] {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    body_end = idx;
+                    break;
+                }
+            }
+            _ => {}
+        }
+        idx += 1;
+    }
+    // Whole-variant-token scan over the isolated body lines.
+    for raw in stripped[body_start..body_end].lines() {
+        let line = raw.trim();
+        for v in variants {
+            if let Some(rest) = line.strip_prefix(v) {
+                let delimited = match rest.chars().next() {
+                    None => true,
+                    Some(c) => c == '{' || c == '(' || c == ',' || c.is_whitespace(),
+                };
+                if delimited {
+                    return Some((*v).to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Solver scratch-only node kinds (`Rest`, `RecursiveRef`) MUST NOT
-/// have dedicated [`SemanticNodeData`] variants per §7.18. This is a build-level invariant: walking the crate source
-/// and asserting the variants are absent lets a future agent notice
-/// instantly if someone tries to promote a scratch-only node into
-/// the publication graph.
+/// have dedicated [`SemanticNodeData`] variants per §7.18. This is a
+/// build-level invariant: walking the crate source and asserting the
+/// variants are absent lets a future agent notice instantly if someone
+/// tries to promote a scratch-only node into the publication graph.
+///
+/// Why each is scratch-only — never a graph variant:
+/// - Standalone `Rest` (`...T` outside a tuple-element slot) is a
+///   category error as a publishable type: a bare rest node has no
+///   keyspace / members / projection / assignability of its own.
+///   Tuple-rest fidelity is first-class metadata on `TupleElement.rest`,
+///   round-tripped through the `Tuple` materialize arm — NOT a
+///   `SemanticNodeData::Rest` carrier.
+/// - A `RecursiveRef` back-edge is demand-time-minted and publishes as
+///   [`SemanticNodeData::Opaque`] carrying `QueryError::RecursiveRef`,
+///   which the reverse boundary raises to `TypeExpr::RecursiveRef` —
+///   there is no dedicated `RecursiveRef` semantic-node variant.
 ///
 /// `Infer` is intentionally NOT in this list: it has a concrete
 /// semantic role as the named placeholder in a conditional's
@@ -7720,9 +7823,105 @@ fn solver_scratch_only_nodes_never_enter_semantic_graph_store() {
     );
     assert!(
         violations.is_empty(),
-        "Solver scratch-only nodes (Infer/Rest/RecursiveRef) must never appear as \
+        "Solver scratch-only nodes (Rest/RecursiveRef) must never appear as \
          SemanticNodeData variants — they stay solver-scratch per\nFound:\n{}",
         violations.join("\n")
+    );
+
+    // ── Declaration scan (backstop completeness) ────────────────────────
+    //
+    // The needle scan above only catches QUALIFIED usage
+    // (`SemanticNodeData::Rest(...)` etc.). It NEVER inspects the
+    // `enum SemanticNodeData { ... }` DECLARATION, where a re-added variant is
+    // written `Rest { ... }` / `Rest(...)` WITHOUT the `SemanticNodeData::`
+    // prefix and could then be used internally as `Self::Rest`. Add a scan of
+    // the enum declaration itself so a standalone re-added `Rest` /
+    // `RecursiveRef` variant cannot slip past the §7.18 backstop.
+    let semantic_query_src = std::fs::read_to_string(
+        workspace_root
+            .join("crates")
+            .join("verter_session")
+            .join("src")
+            .join("semantic_query.rs"),
+    )
+    .expect("read semantic_query.rs for the SemanticNodeData declaration scan");
+    // Anti-vacuity: the scanner actually isolated the real enum body (a known
+    // current variant, `Alias`, is found) — so a `None` from the Rest/
+    // RecursiveRef scan below means "no such variant", not "body not found".
+    assert_eq!(
+        enum_body_declares_variant(&semantic_query_src, "SemanticNodeData", &["Alias"]).as_deref(),
+        Some("Alias"),
+        "declaration scan must isolate the real `enum SemanticNodeData` body \
+         (its `Alias` variant must be found) — a miss here means the body \
+         isolation broke, not that Rest/RecursiveRef is absent"
+    );
+    if let Some(variant) = enum_body_declares_variant(
+        &semantic_query_src,
+        "SemanticNodeData",
+        &["Rest", "RecursiveRef"],
+    ) {
+        panic!(
+            "`enum SemanticNodeData` declares a scratch-only `{variant}` variant \
+             — Rest/RecursiveRef must stay solver-scratch (§7.18) and never gain \
+             a dedicated SemanticNodeData variant. `RecursiveRef` publishes as \
+             `Opaque(QueryError::RecursiveRef)`; a standalone `Rest` is a \
+             category error as a publishable type."
+        );
+    }
+
+    // Self-discrimination for the declaration scanner (exercises the REAL
+    // body-isolation + whole-token logic — never a bare `literal.contains`):
+    //   SCOPING — a clean `SemanticNodeData` body alongside a SEPARATE
+    //   `QueryError` enum carrying `RecursiveRef` must NOT trip: the body
+    //   isolation excludes the QueryError variant (the exact real-file shape).
+    let scoped = concat!(
+        "pub enum SemanticNodeData {\n",
+        "    Alias(SemanticNodeId),\n",
+        "    Object(SurfaceView),\n",
+        "}\n",
+        "\n",
+        "pub enum QueryError {\n",
+        "    Miss,\n",
+        "    RecursiveRef { name: Arc<str> },\n",
+        "}\n",
+    );
+    assert!(
+        enum_body_declares_variant(scoped, "SemanticNodeData", &["Rest", "RecursiveRef"]).is_none(),
+        "self-test (scoping): a `QueryError::RecursiveRef` variant must NOT trip \
+         the `SemanticNodeData` body scan — body isolation must exclude QueryError"
+    );
+    //   POSITIVE — a `SemanticNodeData` body re-adding a standalone `Rest`
+    //   variant TRIPS the scan (even with a sibling QueryError::RecursiveRef).
+    let with_rest = concat!(
+        "pub enum SemanticNodeData {\n",
+        "    Alias(SemanticNodeId),\n",
+        "    Rest { inner: SemanticNodeId },\n",
+        "}\n",
+        "\n",
+        "pub enum QueryError {\n",
+        "    RecursiveRef { name: Arc<str> },\n",
+        "}\n",
+    );
+    assert_eq!(
+        enum_body_declares_variant(with_rest, "SemanticNodeData", &["Rest", "RecursiveRef"])
+            .as_deref(),
+        Some("Rest"),
+        "self-test (positive): a re-added `Rest` variant in the SemanticNodeData \
+         body must trip the declaration scan"
+    );
+    //   WHOLE-TOKEN — `Restful` / `SomeRestThing`-shaped variants must NOT
+    //   false-match the `Rest` needle.
+    let lookalikes = concat!(
+        "pub enum SemanticNodeData {\n",
+        "    Restful(SemanticNodeId),\n",
+        "    SomeRestThing { inner: SemanticNodeId },\n",
+        "}\n",
+    );
+    assert!(
+        enum_body_declares_variant(lookalikes, "SemanticNodeData", &["Rest", "RecursiveRef"])
+            .is_none(),
+        "self-test (whole-token): `Restful` / `SomeRestThing` must NOT \
+         false-match the `Rest` needle"
     );
 }
 

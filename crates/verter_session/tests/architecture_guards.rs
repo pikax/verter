@@ -19702,3 +19702,371 @@ fn decl_lowering_wasm_path_retains_snapshot_source_guard() {
          hit/miss result — never an unconditional `parsed_now: true`"
     );
 }
+
+// ════════════════════════════════════════════════════════════════════════
+// PARSELOWER carrier-contract foundation guards (additive).
+//
+// The TypeExpr→handle migration introduces session-owned hot carriers
+// (`HotTypeRef`, the `BareRef` / `ImportType` / `RawFallback` graph carriers,
+// the content-free `SyntheticBindingId`) plus the `CarrierResolverContext`
+// value-side resolution bundle. These three guards pin the foundation
+// invariants: the crate-ownership direction, the content-free synthetic
+// identity, and the SCOPED ban on `Unknown`-as-control-flow inside the
+// carrier surface.
+// ════════════════════════════════════════════════════════════════════════
+
+/// The brace-balanced body of `struct <name> { ... }` with line comments
+/// stripped, so a field-token scan cannot be masked or falsely tripped by
+/// DOC-comment prose.
+fn carrier_guard_struct_body(src: &str, name: &str) -> String {
+    let needle = format!("struct {name} {{");
+    let start = src
+        .find(&needle)
+        .unwrap_or_else(|| panic!("guard must find `struct {name}`"));
+    let body_start = start + needle.len();
+    let mut depth = 0usize;
+    let mut end = body_start;
+    for (offset, ch) in src[body_start..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                if depth == 0 {
+                    end = body_start + offset;
+                    break;
+                }
+                depth -= 1;
+            }
+            _ => {}
+        }
+    }
+    src[body_start..end]
+        .lines()
+        .map(|line| match line.find("//") {
+            Some(i) => &line[..i],
+            None => line,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The PRODUCTION portion of a Rust source: the text BEFORE the first
+/// `#[cfg(test)]` marker, with `//` line-comments stripped. The
+/// `carrier_constructors_do_not_use_unknown_as_control_flow` guard AND its
+/// self-test both scan through this helper, so the self-test exercises the
+/// same split-then-strip logic the guard relies on — never a bare
+/// `synthetic.contains(...)` that would hold by construction.
+fn carrier_production_code(src: &str) -> String {
+    let production_src = src.split("#[cfg(test)]").next().unwrap_or(src);
+    production_src
+        .lines()
+        .map(|line| match line.find("//") {
+            Some(i) => &line[..i],
+            None => line,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Extract the union of EVERY comma-separated trait list across all STACKED
+/// `#[derive(...)]` attributes in the contiguous attribute / `pub` / whitespace
+/// / doc block immediately preceding `struct <name>` in `src`. Rust permits
+/// multiple derive attributes to stack:
+///
+/// ```text
+/// #[derive(Hash)]
+/// #[derive(Debug, Clone, Copy)]
+/// pub struct HotTypeRef(SemanticNodeId);
+/// ```
+///
+/// A single `rfind("#[derive(")` would return only the LAST (Hash-free) line
+/// and miss the `Hash` on the earlier stacked attribute — a silent R6 bypass.
+/// This extractor walks BACKWARDS from the struct over the contiguous block,
+/// collecting every stacked derive's trait list and stopping at the first
+/// non-attribute item boundary (`;` / `}` / `struct ` / `enum ` / `fn ` / any
+/// other code), so a far-away derive from an unrelated earlier struct never
+/// leaks in (adjacency intent preserved). Panics if the struct or a preceding
+/// derive is absent, or a derive is malformed — the guard fails LOUDLY rather
+/// than passing vacuously. Both the real `HotTypeRef` guard and its self-test
+/// call THIS extractor against the same shapes, so the self-test never
+/// bypasses the real parsing logic.
+fn carrier_struct_derive_list(src: &str, name: &str) -> String {
+    let needle = format!("struct {name}");
+    let struct_pos = src
+        .find(&needle)
+        .unwrap_or_else(|| panic!("guard must find `struct {name}`"));
+    // Walk the lines preceding `struct <name>` in reverse. The final prefix
+    // line is the struct's own line content up to (not including) the `struct`
+    // keyword — e.g. the `pub ` in `pub struct HotTypeRef(...)`. Only
+    // attributes / `pub` / blank / doc-comment lines may sit in the contiguous
+    // block; the first line that is none of those is the item boundary.
+    let prefix = &src[..struct_pos];
+    let mut lists: Vec<String> = Vec::new();
+    for raw_line in prefix.lines().rev() {
+        let line = raw_line.trim();
+        // Contiguous-block filler that may legitimately sit between stacked
+        // derives and the struct: blank lines, doc / line comments, or a
+        // `pub` / `pub(crate)` visibility token on the struct's own line.
+        // Checked FIRST so a doc comment that merely MENTIONS `#[derive(Hash)]`
+        // in prose (the real `HotTypeRef` rustdoc does exactly this) is never
+        // mistaken for an actual derive attribute.
+        if line.is_empty()
+            || line.starts_with("///")
+            || line.starts_with("//!")
+            || line.starts_with("//")
+            || line == "pub"
+            || line == "pub(crate)"
+        {
+            continue;
+        }
+        // A REAL derive attribute, trimmed, STARTS WITH `#[derive(` — match by
+        // prefix (not substring) so only a genuine attribute contributes.
+        if let Some(rest) = line.strip_prefix("#[derive(") {
+            let close = rest
+                .find(')')
+                .unwrap_or_else(|| panic!("malformed `#[derive(...)]` before `struct {name}`"));
+            lists.push(rest[..close].to_string());
+            continue;
+        }
+        // A non-derive attribute (`#[repr(C)]`, `#[cfg(...)]`) is still part of
+        // the contiguous attribute block; keep walking.
+        if line.starts_with("#[") || line.starts_with("#![") {
+            continue;
+        }
+        // Anything else is a non-attribute item boundary (`;` / `}` /
+        // `struct ` / `enum ` / `fn ` / a prior decl): the contiguous block
+        // ends here, so an unrelated earlier struct's derive cannot leak in.
+        break;
+    }
+    assert!(
+        !lists.is_empty(),
+        "guard must find a `#[derive(...)]` preceding `struct {name}`"
+    );
+    // Source-order (top-down) union, comma-joined: the predicate splits on `,`
+    // so duplicates are harmless and the failure message reads naturally.
+    lists.reverse();
+    lists.join(", ")
+}
+
+/// True iff a derive trait list contains `Hash` or `Ord` as a WHOLE trait
+/// token (split on `,`, trimmed). Whole-token matching is the discriminating
+/// detail: `PartialOrd` / `PartialEq` must NOT register as a substring
+/// false-positive for `Ord`. A handle that derived either trait could be
+/// lifted into a `HashMap` / `BTreeMap` cache key, breaking R6.
+fn derive_list_has_hash_or_ord(list: &str) -> bool {
+    list.split(',')
+        .map(str::trim)
+        .any(|t| t == "Hash" || t == "Ord")
+}
+
+/// True iff `manifest` declares a dependency on `dep`. The real
+/// `no_verter_semantic_to_verter_session_dep` assertion AND its self-test both
+/// route through THIS predicate, so the self-test exercises the real detection
+/// logic instead of a tautological `literal.contains(substring-of-literal)`.
+fn manifest_declares_dep(manifest: &str, dep: &str) -> bool {
+    manifest.contains(dep)
+}
+
+/// Crate-ownership: `verter_session` owns the hot handle-bearing structs;
+/// `verter_semantic` stays compat DTOs (`TypeExpr` / locators) and MUST NOT
+/// depend on `verter_session`. The dependency direction is session →
+/// semantic, never the reverse — a back-edge would let the lower compat-DTO
+/// crate carry session `HotTypeRef` handles or grow a second resolution path.
+#[test]
+fn no_verter_semantic_to_verter_session_dep() {
+    let manifest = read_workspace_file("crates/verter_semantic/Cargo.toml");
+    assert!(
+        !manifest_declares_dep(&manifest, "verter_session"),
+        "verter_semantic/Cargo.toml must NOT reference verter_session — the \
+         dependency direction is session → semantic, never the reverse. A \
+         back-edge would let the lower compat-DTO crate carry session \
+         HotTypeRef handles or grow a second resolution path."
+    );
+    // Self-discrimination through the SAME predicate (never a tautological
+    // `literal.contains(substring-of-literal)`):
+    //   POSITIVE — a manifest that DECLARES the dep is detected.
+    assert!(
+        manifest_declares_dep(
+            "[dependencies]\nverter_session = { path = \"../verter_session\" }\n",
+            "verter_session"
+        ),
+        "scanner self-test (positive): a declared verter_session dep must be detected"
+    );
+    //   NEGATIVE — a manifest WITHOUT the dep is NOT detected. This is the
+    //   discriminating half: it FAILS if the predicate vacuously returns true.
+    assert!(
+        !manifest_declares_dep("[dependencies]\nserde = \"1\"\n", "verter_session"),
+        "scanner self-test (negative): a manifest without the dep must NOT be detected"
+    );
+}
+
+/// R6 content-free identity: `SyntheticBindingId` is the synthetic-binding
+/// identity that a future synthetic-deepening cache key roots on. It MUST NOT
+/// carry a bare `SemanticNodeId`, a `value_node` ordinal, or any
+/// content/version hash — the arena ordinal is provenance that lives on the
+/// `SemanticNodeData::SyntheticBinding` CARRIER, never on the identity.
+#[test]
+fn synthetic_binding_identity_is_content_free() {
+    let src = read_workspace_file("crates/verter_session/src/semantic_query.rs");
+    let body = carrier_guard_struct_body(&src, "SyntheticBindingId");
+    // Anti-vacuity: the extractor found the real struct (its known field).
+    assert!(
+        body.contains("binding_name"),
+        "guard must extract the real SyntheticBindingId body"
+    );
+    for forbidden in ["SemanticNodeId", "value_node", "whole_hash", "content_hash"] {
+        assert!(
+            !body.contains(forbidden),
+            "SyntheticBindingId must be content-free (R6) — found `{forbidden}` \
+             in its field list. The arena ordinal / version hash is provenance \
+             that belongs on the SemanticNodeData::SyntheticBinding carrier, \
+             never on the binding identity."
+        );
+    }
+    // Self-discrimination: the same predicate detects a `value_node` field on
+    // a synthetic struct — RED if a bare ordinal is re-introduced.
+    let synthetic = "struct X { pub value_node: u64, }";
+    assert!(
+        carrier_guard_struct_body(synthetic, "X").contains("value_node"),
+        "scanner self-test: a value_node field must be detected"
+    );
+}
+
+/// Scoped `Unknown`-as-control-flow ban: the carrier-construction surface
+/// (`carrier.rs`, the home of `CarrierResolverContext` and — as later stages
+/// land — the carrier lowerer / resolver) must emit TYPED carriers (BareRef /
+/// ImportType / RawFallback nodes or typed `QueryError`), never a raw
+/// `TypeExpr::Unknown` control sentinel. SCOPED to this surface — NOT global:
+/// `raise.rs` legitimately materialises `Unknown` at the OUTPUT boundary, and
+/// the global fence lands with the final cutover.
+#[test]
+fn carrier_constructors_do_not_use_unknown_as_control_flow() {
+    let src = read_workspace_file("crates/verter_session/src/project_semantic_dispatch/carrier.rs");
+    // Scope to the PRODUCTION portion (before the module's `#[cfg(test)]`
+    // block) with `//` comments stripped, so only real CODE constructing
+    // `TypeExpr::Unknown` trips the scan (module / field docs may mention it
+    // in prose). The same `carrier_production_code` helper drives the
+    // self-test below, so the self-test exercises the real scan logic.
+    let production = carrier_production_code(&src);
+    assert!(
+        !production.contains("TypeExpr::Unknown"),
+        "the carrier-construction surface (carrier.rs) must not use \
+         `TypeExpr::Unknown` as a control signal — emit a typed carrier \
+         (BareRef / ImportType / RawFallback) or a typed QueryError instead."
+    );
+
+    // Self-discrimination through the SAME extractor (never a bare
+    // `synthetic.contains(...)` that would hold by construction):
+    //   POSITIVE — a production-portion `TypeExpr::Unknown` IS detected, so a
+    //   real construction in carrier.rs would trip the assertion above.
+    let positive = "let x = TypeExpr::Unknown { raw: \"y\".to_string() };";
+    assert!(
+        carrier_production_code(positive).contains("TypeExpr::Unknown"),
+        "scanner self-test (positive): a production-portion `TypeExpr::Unknown` \
+         construction must be detected"
+    );
+    //   NEGATIVE-1 — `TypeExpr::Unknown` mentioned only in a `//` comment is
+    //   stripped out, so it does NOT trip (proves comment-stripping works).
+    let comment_only = "let ok = 1; // TypeExpr::Unknown is fine in prose";
+    assert!(
+        !carrier_production_code(comment_only).contains("TypeExpr::Unknown"),
+        "scanner self-test (negative, comment): a `//`-commented \
+         `TypeExpr::Unknown` must be stripped from the production scan"
+    );
+    //   NEGATIVE-2 — `TypeExpr::Unknown` only AFTER a `#[cfg(test)]` marker is
+    //   excluded, so it does NOT trip (proves the cfg-test split works).
+    let test_only = "fn prod() {}\n#[cfg(test)]\nmod t { let x = TypeExpr::Unknown { raw: () }; }";
+    assert!(
+        !carrier_production_code(test_only).contains("TypeExpr::Unknown"),
+        "scanner self-test (negative, cfg-test): a `TypeExpr::Unknown` after a \
+         `#[cfg(test)]` marker must be excluded from the production scan"
+    );
+}
+
+/// `HotTypeRef` (the internal session hot handle) is a DISTINCT nominal type
+/// from the public `component_meta_payload::TypeHandle` DTO, and is
+/// deliberately NOT `Hash`/`Ord` so R6 structurally forbids it from ever
+/// being a derived-`Hash` / `BTreeMap` cache key. A future `#[derive(Hash)]`
+/// on this `Copy` newtype — or a re-alias of the public handle onto the
+/// `HotTypeRef` name — must turn this guard RED.
+#[test]
+fn hot_type_ref_is_distinct_handle_and_not_hash_or_ord_derived() {
+    let src = read_workspace_file("crates/verter_session/src/semantic_query.rs");
+
+    // (1) Anti-vacuity: the real `struct HotTypeRef` declaration exists.
+    assert!(
+        src.contains("struct HotTypeRef"),
+        "guard must find the real `struct HotTypeRef` in semantic_query.rs"
+    );
+
+    // (2) Name distinctness: `HotTypeRef` is its own nominal `struct`, NOT a
+    // type alias of, nor a `use ... as` re-export of, the public `TypeHandle`.
+    assert!(
+        !src.contains("type HotTypeRef"),
+        "`HotTypeRef` must be a distinct `struct`, never a \
+         `type HotTypeRef = ...TypeHandle...` alias of the public DTO"
+    );
+    assert!(
+        !src.contains("as HotTypeRef"),
+        "`HotTypeRef` must not be a `use ... TypeHandle as HotTypeRef` \
+         re-export — the public handle stays \
+         `component_meta_payload::TypeHandle`"
+    );
+    let decl_line = src
+        .lines()
+        .find(|l| l.contains("struct HotTypeRef"))
+        .expect("guard must find the `struct HotTypeRef` line");
+    assert!(
+        !decl_line.contains("TypeHandle"),
+        "the `struct HotTypeRef` declaration must not wrap / equate to the \
+         public `TypeHandle` DTO"
+    );
+
+    // (3) R6 non-key rail: its derive carries NEITHER `Hash` NOR `Ord`.
+    let derives = carrier_struct_derive_list(&src, "HotTypeRef");
+    assert!(
+        !derive_list_has_hash_or_ord(&derives),
+        "`HotTypeRef` must NOT derive `Hash`/`Ord` (R6): a content/version- \
+         bearing arena ordinal must never be embeddable in a derived-`Hash` / \
+         `BTreeMap` cache key. Found derive list: `{derives}`."
+    );
+
+    // (4) Self-discrimination through the SAME extractor + predicate (never a
+    // bare `synthetic.contains(\"Hash\")`):
+    //   - a synthetic `HotTypeRef` deriving `Hash` TRIPS the predicate,
+    let with_hash = "#[derive(Debug, Clone, Copy, Hash)]\nstruct HotTypeRef(SemanticNodeId);";
+    assert!(
+        derive_list_has_hash_or_ord(&carrier_struct_derive_list(with_hash, "HotTypeRef")),
+        "self-test: a `HotTypeRef` deriving `Hash` must trip the predicate"
+    );
+    //   - a STACKED `#[derive(Hash)]` above a Hash-free derive TRIPS the
+    //     predicate: Rust allows multiple derive attributes, and the extractor
+    //     must collect EVERY one. A single `rfind("#[derive(")` would see only
+    //     the LAST (Hash-free) derive and miss the `Hash` on the earlier
+    //     stacked line — a silent R6 bypass while the type DERIVES `Hash`.
+    let stacked =
+        "#[derive(Hash)]\n#[derive(Debug, Clone, Copy)]\nstruct HotTypeRef(SemanticNodeId);";
+    assert!(
+        derive_list_has_hash_or_ord(&carrier_struct_derive_list(stacked, "HotTypeRef")),
+        "self-test: a STACKED `#[derive(Hash)]` above a Hash-free derive must \
+         trip the predicate — the extractor must union ALL stacked derives"
+    );
+    //   - a synthetic deriving `Ord` TRIPS the predicate,
+    let with_ord = "#[derive(Clone, Ord)]\nstruct HotTypeRef(SemanticNodeId);";
+    assert!(
+        derive_list_has_hash_or_ord(&carrier_struct_derive_list(with_ord, "HotTypeRef")),
+        "self-test: a `HotTypeRef` deriving `Ord` must trip the predicate"
+    );
+    //   - the real-shaped derive (no Hash/Ord) does NOT trip the predicate,
+    let without =
+        "#[derive(Debug, Clone, Copy, PartialEq, Eq)]\nstruct HotTypeRef(SemanticNodeId);";
+    assert!(
+        !derive_list_has_hash_or_ord(&carrier_struct_derive_list(without, "HotTypeRef")),
+        "self-test: a Hash/Ord-free derive must NOT trip the predicate"
+    );
+    //   - whole-token matching: `PartialOrd` must NOT be a substring
+    //     false-positive for `Ord`.
+    assert!(
+        !derive_list_has_hash_or_ord("Debug, Clone, PartialOrd, PartialEq"),
+        "self-test: `PartialOrd` must not be a substring false-positive for `Ord`"
+    );
+}

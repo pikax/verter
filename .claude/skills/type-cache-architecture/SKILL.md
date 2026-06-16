@@ -1473,6 +1473,16 @@ is permitted.
   `u2_value_domain_design_doc_locks_invariants` live in
   `crates/verter_session/tests/g_block/u2_value_domain_design_guards.rs`.
 
+## Carrier handle identity is never a cache key (PARSELOWER foundation)
+
+The `TypeExpr`→handle migration carries graph handles on the hot path but keeps cache keys content-free (R6). Foundation contracts (additive, dormant):
+
+- **`HotTypeRef`** (the session hot handle around a `SemanticNodeId`) is a content/version-bearing arena ordinal — exactly what R6 bans from a derived-`Hash` query-identity key. It derives neither `Hash` nor `Ord`, so it cannot be a map key nor be embedded in a `#[derive(Hash)]` cache key; the materialised VALUE roots its version through the node's `NodeScopeId` + read-set, never the handle.
+- **`SyntheticBindingId`** is the content-free successor to `SyntheticCarrierKey.value_node: u64` — `(scope_canonical_id, surface_kind, slot_name, binding_name)` with NO arena ordinal. It is the identity a future synthetic-deepening key roots on; the `value_node` ordinal is demoted to value-side provenance on the `SemanticNodeData::SyntheticBinding` carrier (re-attached only at the compat materialisation boundary).
+- **`CarrierResolverContext`** is value-side runtime resolution state, never hashed into a `SemanticQueryKey`.
+
+Guard: `synthetic_binding_identity_is_content_free`. See `/type-resolution` for the full carrier set + `materialize_type_expr` boundary.
+
 ## Related skills
 
 - `/architecture` — high-level module map

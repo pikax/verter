@@ -101,9 +101,11 @@ impl VerterHost {
     /// because this path resolves through the one shared typed-IR
     /// engine, not the wire request validator. Outcome mapping:
     /// - `Ok(Some(node))` — dispatch produced a value.
-    /// - `Ok(None)` — a non-fault miss (`Miss` / `RecursiveRef` /
-    ///   `DeclPlaceholder`, an upsert failure, or a missing scratch
-    ///   shallow state): the request was well-formed but resolved no
+    /// - `Ok(None)` — a non-fault miss: a dispatch miss classified by
+    ///   `TypeResolutionRequestError::from_query_error`
+    ///   (`Miss` / `RecursiveRef` / `DeclPlaceholder` or a typed
+    ///   semantic sentinel), an upsert failure, or a missing scratch
+    ///   shallow state — the request was well-formed but resolved no
     ///   node.
     /// - `Err(fault)` — a genuine dispatch fault (`BudgetExceeded` /
     ///   `UnstableState` / `AliasCycle` / `UnsupportedIntrinsic` /
@@ -302,8 +304,10 @@ fn noop_evaluate_record(
 /// scratch URI was found in the host's cache and resolution did not
 /// re-synthesise / re-upsert. `outcome` is `Err(fault)` on a genuine
 /// dispatch fault, `Ok(None)` on a non-fault miss (upsert failure,
-/// missing scratch shallow state, or a `Miss`/`RecursiveRef`/
-/// `DeclPlaceholder` from dispatch), and `Ok(Some(node))` on success.
+/// missing scratch shallow state, or a dispatch miss classified by
+/// `TypeResolutionRequestError::from_query_error` — `Miss` /
+/// `RecursiveRef` / `DeclPlaceholder` or a typed semantic sentinel),
+/// and `Ok(Some(node))` on success.
 #[allow(clippy::type_complexity)]
 fn evaluate_inner(
     host: &VerterHost,

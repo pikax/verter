@@ -616,6 +616,12 @@ impl ProjectSemanticDispatch<'_> {
                 SemanticNodeData::InstantiationRef { args, .. } => {
                     stack.extend(args.iter().copied());
                 }
+                // Carrier child node ids could hold a nested `infer` inside an
+                // import type-argument / constructor signature.
+                SemanticNodeData::ImportType { type_args, .. } => {
+                    stack.extend(type_args.iter().copied());
+                }
+                SemanticNodeData::ConstructorType { signature } => stack.push(*signature),
 
                 // ── Leaf carriers: no child node id can hold a nested `infer`
                 //    (TS rejects `infer` outside conditional `extends`, and
@@ -626,7 +632,12 @@ impl ProjectSemanticDispatch<'_> {
                 | SemanticNodeData::Opaque(_)
                 | SemanticNodeData::TypeOf { .. }
                 | SemanticNodeData::VueMacroElements(_)
-                | SemanticNodeData::DeclRef { .. } => {}
+                | SemanticNodeData::DeclRef { .. }
+                // Unresolved bare-name / raw-fallback / synthetic-binding
+                // carriers hold no infer-bearing child node id.
+                | SemanticNodeData::BareRef { .. }
+                | SemanticNodeData::RawFallback { .. }
+                | SemanticNodeData::SyntheticBinding { .. } => {}
             }
         }
         false

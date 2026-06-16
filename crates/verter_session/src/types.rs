@@ -2591,11 +2591,11 @@ pub(crate) struct CachedMetaPayload {
 /// Number of [`crate::semantic_query::SemanticNodeData`] discriminants used
 /// to size the per-discriminant push-count array in [`MetaProvenance`].
 ///
-/// Sized with headroom over the current 20 variants so adding a
+/// Sized with headroom over the current variants so adding a
 /// variant doesn't require widening the array. If
-/// `SemanticNodeData::discriminant_index` ever returns `>= 24`, that's
+/// `SemanticNodeData::discriminant_index` ever returns `>= 32`, that's
 /// a debug-assert hit at the push site rather than a silent overflow.
-pub const SEMANTIC_NODE_DATA_DISCRIMINANT_COUNT: usize = 24;
+pub const SEMANTIC_NODE_DATA_DISCRIMINANT_COUNT: usize = 32;
 
 /// Per-host provenance counters for component-meta observability.
 ///

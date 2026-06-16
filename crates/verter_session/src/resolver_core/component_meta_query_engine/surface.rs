@@ -368,6 +368,17 @@ pub(crate) fn semantic_query_error_raw(err: &QueryError) -> String {
         QueryError::ValueDomainMismatch { expected, actual } => {
             format!("valueDomainMismatch(expected={expected:?},actual={actual:?})")
         }
+        // Typed semantic-sentinel carriers → BYTE-IDENTICAL legacy raw
+        // strings. A future stage that swaps a raw `Unknown { raw: "X" }`
+        // construction for `Opaque(QueryError::…)` must raise to the same
+        // text, so these mappings are pinned by
+        // `typed_query_error_sentinels_round_trip_to_legacy_raw`.
+        QueryError::RaiseAliasCycle => "semanticAliasCycle".to_string(),
+        QueryError::TypeParamCycle => "semanticTypeParamCycle".to_string(),
+        QueryError::RaiseMiss => "<raise miss>".to_string(),
+        QueryError::UnrepresentableSurface => SEMANTIC_OBJECT_SURFACE.to_string(),
+        QueryError::UnrepresentableSurfaceMember => SEMANTIC_SURFACE_MEMBER.to_string(),
+        QueryError::VueMacroElementsPlaceholder => "VueMacroElements".to_string(),
     }
 }
 

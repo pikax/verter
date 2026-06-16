@@ -83,6 +83,10 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             "verter_audit_no_upward_deps",
             "audit_substrate_isolation",
             "audit_observer_single_accessor",
+            // Crate-ownership direction for the TypeExpr→handle migration:
+            // verter_session owns the hot handle-bearing structs;
+            // verter_semantic stays compat DTOs with no session back-edge.
+            "no_verter_semantic_to_verter_session_dep",
         ],
     ),
     (
@@ -364,6 +368,11 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             // scheduler-retained parse snapshot and returns owned typed
             // IR — never a raw-string re-parse per body touch.
             "lazy_decl_lowering_uses_scheduler_snapshot_not_reparse",
+            // Migration foundation: the carrier-construction surface emits
+            // TYPED carriers (BareRef / ImportType / RawFallback / typed
+            // QueryError), never a raw `TypeExpr::Unknown` control sentinel
+            // (scoped to the carrier surface; the global fence lands later).
+            "carrier_constructors_do_not_use_unknown_as_control_flow",
         ],
     ),
     (
@@ -518,6 +527,11 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             // discriminates RED-on-revert if the cache route stops
             // routing through `carrier.value_node`.
             "synthetic_carrier_explicit_deepen_proof",
+            // The migration's content-free successor identity for the
+            // synthetic carrier (`SyntheticBindingId`) carries no bare
+            // `SemanticNodeId` / `value_node` ordinal — the ordinal is
+            // provenance on the carrier, never on the identity (R6).
+            "synthetic_binding_identity_is_content_free",
         ],
     ),
     (

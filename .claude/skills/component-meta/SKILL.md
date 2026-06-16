@@ -246,6 +246,16 @@ Concrete contract:
 
 **Architecture guards:** (1) `no_carrier_verdict_db` (file basename) at `crates/verter_session/tests/no_carrier_verdict_db.rs` — walks `crates/*/src/**` and asserts every retired R22 identifier is absent from production source; the same file also hosts `synthetic_carrier_explicit_deepen_routes_through_shape_cache_key`, which bans bare `SemanticNodeId(<ident>.value_node)` constructions outside the legitimate cache-route call (narrowing exempts the rustfmt-broken legitimate shape via an upstream-window check). Paired self-tests prove both scanners discriminate. (2) `synthetic_carrier_explicit_deepen_proof` (file basename) at `crates/verter_session/tests/synthetic_carrier_explicit_deepen_proof.rs` — positive executable proof of the explicit-deepen cache route: constructs a `SyntheticCarrierKey`, admits a deep `TypeExpr` under `ShapeCacheKey::semantic_node_whole(scope, SemanticNodeId(carrier.value_node), mode)`, and asserts the legitimate lookup returns the deep type AND that distinct `value_node` / `scope` / `ProjectionMode` discriminate the cache identity.
 
+## Carrier publication & the materialize boundary (PARSELOWER foundation)
+
+The shallow-by-default publication surface is migrating from stored `TypeExpr` bodies to session graph handles, with `TypeExpr` materialised only at the output/compat boundary (additive Stage-1 foundation, dormant):
+
+- Internal publication carriers become `HotTypeRef` handles into the semantic graph; the public `TypeExpr::Ref` (and the rest of the compat DTO surface) is the MATERIALISED output of `materialize_type_expr`, not a stored body.
+- The synthetic slot-binding carrier (`TypeExpr::SyntheticSlotBinding`) gains a typed-IR mirror (`SemanticNodeData::SyntheticBinding`) whose identity is the content-free `SyntheticBindingId`; `materialize_type_expr` re-hydrates the full `SyntheticCarrierKey` (re-attaching the value-side `value_node` provenance) only at the compat boundary.
+- The native/compat boundary is unchanged: JS still reads the materialised `TypeDescriptor`; the migration moves the Rust-internal storage to handles, not the wire shape.
+
+See `/type-resolution` for the full carrier set + the `materialize_type_expr` reverse boundary, and `/type-cache-architecture` for the no-cache-key handle-identity contract.
+
 ## Component-Meta Resolver Rules
 
 Canonical component-meta resolver rules. They govern how the shared cross-file resolver operates when serving component-meta queries.

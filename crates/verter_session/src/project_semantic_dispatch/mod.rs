@@ -89,6 +89,7 @@ use verter_type_expr::{PrimitiveName, TypeExpr};
 // `mod.rs` retains the dispatch entry points and shared dispatcher state.
 pub(crate) mod absorb;
 pub(crate) mod build;
+pub(crate) mod carrier;
 pub(crate) mod enumerate;
 pub(crate) mod evaluate;
 pub(crate) mod lower;
@@ -2428,3 +2429,6 @@ impl<'a> DispatchHost for SessionDispatchHost<'a> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod carrier_materialize_tests;

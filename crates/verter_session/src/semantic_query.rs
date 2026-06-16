@@ -102,6 +102,49 @@ pub type HashValue = Hash16;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SemanticNodeId(pub u64);
 
+/// Internal session hot handle wrapping a [`SemanticNodeId`] interned in
+/// the `semantic_query_memo` arena.
+///
+/// `HotTypeRef` is the in-session identity for a graph type node that hot
+/// caches, prepared declarations, and macro payloads can carry directly —
+/// the typed-IR handle that replaces a stored [`TypeExpr`](verter_type_expr::TypeExpr)
+/// body on the hot path. It is `Send + Sync` (a `Copy` wrapper around the
+/// `Send + Sync` [`SemanticNodeId`]) so it can live in host-owned shared
+/// caches.
+///
+/// **Distinct from the public `TypeHandle`.** This is NOT
+/// [`component_meta_payload::TypeHandle`](crate::component_meta_payload::TypeHandle),
+/// which is a public content-hash BFS DTO addressed by `(project, canonical,
+/// content_hash, query_path)`. `HotTypeRef` is an internal arena ordinal and
+/// never crosses a wire/FFI boundary.
+///
+/// **NEVER a cache key (R6).** A `HotTypeRef` is a content/version-bearing
+/// arena ordinal — exactly the identity R6 forbids in a derived-`Hash`
+/// query-identity key. To make that misuse structurally impossible it
+/// deliberately does NOT derive `Hash`/`Ord`, so it cannot be a `HashMap`/
+/// `BTreeMap` key nor be embedded in a `#[derive(Hash)]` cache key. Cache
+/// keys stay the content-free slot/fact identities; the materialised VALUE
+/// roots its version through the node's [`NodeScopeId`] + read-set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HotTypeRef(SemanticNodeId);
+
+impl HotTypeRef {
+    /// Wrap an interned [`SemanticNodeId`] as a hot handle.
+    #[must_use]
+    pub fn new(node: SemanticNodeId) -> Self {
+        Self(node)
+    }
+
+    /// The underlying interned node id. Used only at the
+    /// [`materialize_type_expr`](crate::project_semantic_dispatch::ProjectSemanticDispatch::materialize_type_expr)
+    /// reverse boundary and by handle-capable consumers; it is never lifted
+    /// into a cache key.
+    #[must_use]
+    pub fn node(self) -> SemanticNodeId {
+        self.0
+    }
+}
+
 /// Canonicalize a node-id sequence into a true SET: sorted ascending and
 /// deduplicated. The content-free node-set cache-key axes
 /// ([`FlowNarrowingKey`], [`ContextualTypingKey`], [`InferableParamSetId`])
@@ -298,6 +341,66 @@ impl DeclIdentity {
             Arc::clone(&self.canonical_id),
             Arc::clone(&self.decl_name),
         )
+    }
+}
+
+/// Content-free identity for a synthetic slot-binding / `defineSlots`
+/// binding carrier.
+///
+/// This is the four content-free fields of
+/// [`verter_type_expr::SyntheticCarrierKey`] —
+/// `(scope_canonical_id, surface_kind, slot_name, binding_name)` — WITHOUT
+/// the `value_node: u64` arena ordinal. `value_node` is a bare
+/// [`SemanticNodeId`] ordinal: a content/version-bearing handle that R6
+/// forbids from any derived-`Hash` cache key. `SyntheticBindingId` is the
+/// identity a future synthetic-deepening cache key roots on; the original
+/// `value_node` is demoted to value-side output data (it round-trips
+/// through [`SemanticNodeData::SyntheticBinding`] for compat
+/// materialisation, but never enters the slot identity).
+///
+/// **Invariant — content-free.** This struct MUST NOT carry a bare
+/// [`SemanticNodeId`], a `value_node` ordinal, or any other content/version
+/// hash. The architecture guard `synthetic_binding_identity_is_content_free`
+/// pins it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SyntheticBindingId {
+    /// Canonical id of the component scope the binding lives in.
+    pub scope_canonical_id: Arc<str>,
+    /// Slot-binding vs `defineSlots` binding surface discriminator.
+    pub surface_kind: verter_type_expr::SyntheticCarrierSurfaceKind,
+    /// Owning slot name (`None` for a non-slot binding surface).
+    pub slot_name: Option<Arc<str>>,
+    /// The bound name.
+    pub binding_name: Arc<str>,
+}
+
+impl SyntheticBindingId {
+    /// Project the content-free identity out of a full
+    /// [`verter_type_expr::SyntheticCarrierKey`], dropping the
+    /// `value_node` arena ordinal.
+    #[must_use]
+    pub fn from_carrier_key(key: &verter_type_expr::SyntheticCarrierKey) -> Self {
+        Self {
+            scope_canonical_id: Arc::clone(&key.scope_canonical_id),
+            surface_kind: key.surface_kind,
+            slot_name: key.slot_name.clone(),
+            binding_name: Arc::clone(&key.binding_name),
+        }
+    }
+
+    /// Re-hydrate a full [`verter_type_expr::SyntheticCarrierKey`] by
+    /// re-attaching the value-side `value_node` ordinal. Used only at the
+    /// compat materialisation boundary; the ordinal is provenance data, not
+    /// part of the identity.
+    #[must_use]
+    pub fn to_carrier_key(&self, value_node: u64) -> verter_type_expr::SyntheticCarrierKey {
+        verter_type_expr::SyntheticCarrierKey {
+            scope_canonical_id: Arc::clone(&self.scope_canonical_id),
+            surface_kind: self.surface_kind,
+            slot_name: self.slot_name.clone(),
+            binding_name: Arc::clone(&self.binding_name),
+            value_node,
+        }
     }
 }
 
@@ -2006,6 +2109,40 @@ pub enum QueryError {
         expected: SemanticQueryValueTag,
         actual: SemanticQueryValueTag,
     },
+    // ──────────────────────────────────────────────────────────────────
+    // Typed homes for the semantic `Unknown { raw }` control-flow
+    // sentinels. Each maps through `semantic_query_error_raw` to the
+    // BYTE-IDENTICAL sentinel string the resolver / reverse boundary
+    // currently emits as a raw `TypeExpr::Unknown`, so a site that swaps
+    // `Unknown { raw: "X" }` for `Opaque(QueryError::…)` produces the same
+    // raised output. They are CONTROL sentinels (not the §22 error type).
+    // The display-only `rawType` passthrough is SEPARATE — it round-trips
+    // genuine raw type text through `SemanticNodeData::RawFallback`, never
+    // through these carriers.
+    // ──────────────────────────────────────────────────────────────────
+    /// Alias-cycle back-edge detected at the reverse (raise) boundary.
+    /// Maps to the `"semanticAliasCycle"` sentinel. Distinct from
+    /// [`AliasCycle`](Self::AliasCycle), which is the walker-side cycle
+    /// carrier (`"aliasCycle(N)"`) recording the participant chain.
+    RaiseAliasCycle,
+    /// Type-parameter constraint/default cycle detected at the reverse
+    /// boundary. Maps to the `"semanticTypeParamCycle"` sentinel.
+    TypeParamCycle,
+    /// A sub-result raise missed while a containing shape still needed to
+    /// construct (e.g. an instantiation argument). Maps to the
+    /// `"<raise miss>"` sentinel.
+    RaiseMiss,
+    /// A surface the projection boundary cannot represent. Maps to the
+    /// `SEMANTIC_OBJECT_SURFACE` sentinel — the carrier the intersection
+    /// reducer drops as a vacuous arm.
+    UnrepresentableSurface,
+    /// A surface member the projection boundary cannot represent. Maps to
+    /// the `SEMANTIC_SURFACE_MEMBER` sentinel.
+    UnrepresentableSurfaceMember,
+    /// A [`SemanticNodeData::VueMacroElements`] node reached the reverse
+    /// boundary, which has no `TypeExpr` projection for it. Maps to the
+    /// `"VueMacroElements"` sentinel.
+    VueMacroElementsPlaceholder,
 }
 
 impl QueryError {
@@ -2050,7 +2187,17 @@ impl QueryError {
             | QueryError::UnstableState { .. }
             | QueryError::AliasCycle { .. }
             | QueryError::RecursiveRef { .. }
-            | QueryError::DeclPlaceholder { .. } => false,
+            | QueryError::DeclPlaceholder { .. }
+            // The typed semantic-sentinel carriers are CONTROL signals
+            // (cycle / miss / unrepresentable / macro-placeholder), not the
+            // §22 error type — they keep their existing raw-sentinel
+            // semantics under relation / raise / absorption.
+            | QueryError::RaiseAliasCycle
+            | QueryError::TypeParamCycle
+            | QueryError::RaiseMiss
+            | QueryError::UnrepresentableSurface
+            | QueryError::UnrepresentableSurfaceMember
+            | QueryError::VueMacroElementsPlaceholder => false,
         }
     }
 }
@@ -2096,6 +2243,12 @@ impl PartialEq for QueryError {
                     actual: b_a,
                 },
             ) => a_e == b_e && a_a == b_a,
+            (Self::RaiseAliasCycle, Self::RaiseAliasCycle) => true,
+            (Self::TypeParamCycle, Self::TypeParamCycle) => true,
+            (Self::RaiseMiss, Self::RaiseMiss) => true,
+            (Self::UnrepresentableSurface, Self::UnrepresentableSurface) => true,
+            (Self::UnrepresentableSurfaceMember, Self::UnrepresentableSurfaceMember) => true,
+            (Self::VueMacroElementsPlaceholder, Self::VueMacroElementsPlaceholder) => true,
             _ => false,
         }
     }
@@ -2148,6 +2301,24 @@ impl std::hash::Hash for QueryError {
                 8u8.hash(state);
                 expected.hash(state);
                 actual.hash(state);
+            }
+            Self::RaiseAliasCycle => {
+                9u8.hash(state);
+            }
+            Self::TypeParamCycle => {
+                10u8.hash(state);
+            }
+            Self::RaiseMiss => {
+                11u8.hash(state);
+            }
+            Self::UnrepresentableSurface => {
+                12u8.hash(state);
+            }
+            Self::UnrepresentableSurfaceMember => {
+                13u8.hash(state);
+            }
+            Self::VueMacroElementsPlaceholder => {
+                14u8.hash(state);
             }
         }
     }
@@ -4226,13 +4397,19 @@ pub struct TupleElement {
 /// Immutable semantic-node payload. Storage for this enum is owned by the
 /// shared semantic graph; node ids hand out views without copying.
 ///
-/// **Publication boundary.** Solver `Infer`, `Rest`, and
-/// `RecursiveRef` nodes are scratch-only and never enter this enum. Solver
-/// `Error` values publish at the boundary as [`SemanticNodeData::Opaque`]
-/// carrying the concrete [`QueryError`]. Functions publish through
-/// [`SemanticNodeData::Object`] with empty `members` and populated
-/// `call_signatures` / `construct_signatures` — there is no dedicated
-/// `Function` variant.
+/// **Publication boundary.** A solver `RecursiveRef` back-edge is
+/// demand-time-minted (never lowered ahead of demand): it publishes as
+/// [`SemanticNodeData::Opaque`] carrying [`QueryError::RecursiveRef`], which
+/// the reverse boundary raises to [`TypeExpr::RecursiveRef`](verter_type_expr::TypeExpr::RecursiveRef).
+/// Solver `Error` values publish at the boundary as
+/// [`SemanticNodeData::Opaque`] carrying the concrete [`QueryError`].
+///
+/// **Unresolved carriers.** [`BareRef`](Self::BareRef),
+/// [`ImportType`](Self::ImportType), and [`RawFallback`](Self::RawFallback)
+/// preserve an unresolved name / dynamic-import reference / raw-fallback
+/// text as a typed node so the structural graph can be lowered without any
+/// name/import/type reduction. They are resolved at demand time through the
+/// shared dispatch; until a producer emits them they carry no behaviour.
 #[derive(Debug, Clone)]
 pub enum SemanticNodeData {
     Alias(SemanticNodeId),
@@ -4470,6 +4647,100 @@ pub enum SemanticNodeData {
         /// Lowered contributor bodies, in source order.
         contributors: Arc<[SemanticNodeId]>,
     },
+
+    /// Unresolved bare-name reference carrier.
+    ///
+    /// Holds a type-name reference `name` (with no type arguments)
+    /// captured in `scope` BEFORE any name/import resolution runs. A
+    /// query-free structural lowerer emits this carrier; demand-time
+    /// carrier resolution (via the shared dispatch and a
+    /// `CarrierResolverContext`)
+    /// resolves the name to a `DeclRef` / `InstantiationRef` / import /
+    /// augmentation result.
+    ///
+    /// Raises to `TypeExpr::Ref { name, type_arguments: [] }` at the
+    /// reverse boundary — the unresolved bare reference is the
+    /// shallow-by-default published shape.
+    BareRef {
+        /// The unresolved type name as written.
+        name: Arc<str>,
+        /// The lexical scope the reference was captured in (the
+        /// declaration-origin file + content generation + optional inner
+        /// scope), so demand-time resolution can re-key its bare-name
+        /// lookup without a host query at lowering time.
+        scope: NodeScopeId,
+    },
+
+    /// Unresolved dynamic-import type carrier.
+    ///
+    /// The typed-IR mirror of [`TypeExpr::ImportType`](verter_type_expr::TypeExpr::ImportType):
+    /// `import("specifier").qualifier<type_args>` /
+    /// `typeof import("specifier")`. Carried unresolved so the structural
+    /// graph never performs module resolution at lowering time; the
+    /// shared dispatch resolves `specifier` to a canonical file and walks
+    /// the qualifier path at demand time.
+    ///
+    /// Raises to [`TypeExpr::ImportType`](verter_type_expr::TypeExpr::ImportType).
+    ImportType {
+        /// The module specifier inside `import("…")`.
+        specifier: Arc<str>,
+        /// The dotted qualifier path after the import (`import("m").A.B`
+        /// → `["A", "B"]`); empty for a bare module reference.
+        qualifier: Arc<[Arc<str>]>,
+        /// Type arguments applied at the import-type site
+        /// (`import("m").Generic<Arg>`).
+        type_args: Arc<[SemanticNodeId]>,
+        /// `true` for `typeof import("…")` (the module's VALUE-export
+        /// namespace); `false` for `import("…")` in type position.
+        typeof_query: bool,
+    },
+
+    /// Raw-fallback carrier — the typed-IR home for a type the lowering
+    /// could not represent structurally.
+    ///
+    /// Preserves the raw source text verbatim so the reverse boundary can
+    /// round-trip it back to [`TypeExpr::Unknown`](verter_type_expr::TypeExpr::Unknown).
+    /// This is the ONLY carrier that holds raw type text, and it is
+    /// display-only: it is never interpreted as a semantic control signal
+    /// (those ride the typed [`QueryError`] carriers on
+    /// [`SemanticNodeData::Opaque`]). `raw` is `Arc<str>` for a cheap,
+    /// `Send + Sync` clone on the host cache path.
+    RawFallback {
+        /// The raw source text of the unrepresentable type.
+        raw: Arc<str>,
+    },
+
+    /// Constructor-type carrier — `new (…) => R` (TS `TSConstructorType`).
+    ///
+    /// Preserves the distinction
+    /// [`TypeExpr::ConstructorType`](verter_type_expr::TypeExpr::ConstructorType)
+    /// draws between a bare constructor *type* and a type-literal carrying
+    /// a construct signature (which lowers to [`Object`](Self::Object)).
+    /// `signature` interns a [`Function`](Self::Function) node carrying the
+    /// same parameters / return / type-parameters / spans as the construct
+    /// signature; the reverse boundary rewraps the raised function as
+    /// `TypeExpr::ConstructorType`.
+    ConstructorType {
+        /// The constructor signature — a [`Function`](Self::Function) node.
+        signature: SemanticNodeId,
+    },
+
+    /// Synthetic slot-binding / `defineSlots` binding carrier.
+    ///
+    /// The typed-IR mirror of
+    /// [`TypeExpr::SyntheticSlotBinding`](verter_type_expr::TypeExpr::SyntheticSlotBinding).
+    /// Identity is the content-free [`SyntheticBindingId`]; the `value_node`
+    /// arena ordinal is value-side provenance carried alongside so the
+    /// reverse boundary can re-hydrate the full
+    /// [`verter_type_expr::SyntheticCarrierKey`] for compat output, NOT part
+    /// of the binding identity. Raises to `TypeExpr::SyntheticSlotBinding`.
+    SyntheticBinding {
+        /// The content-free binding identity.
+        id: SyntheticBindingId,
+        /// Value-side provenance: the original `value_node` arena ordinal,
+        /// re-attached only for compat materialisation.
+        value_node: u64,
+    },
 }
 
 impl SemanticNodeData {
@@ -4506,6 +4777,13 @@ impl SemanticNodeData {
             Self::Function { .. } => 19,
             Self::DeclRef { .. } => 20,
             Self::InstantiationRef { .. } => 21,
+            Self::BareRef { .. } => 22,
+            Self::ImportType { .. } => 23,
+            Self::RawFallback { .. } => 24,
+            // Index 25 is intentionally unused so the surviving variants
+            // keep stable bucket indices independent of declaration order.
+            Self::ConstructorType { .. } => 26,
+            Self::SyntheticBinding { .. } => 27,
         }
     }
 }
@@ -4668,6 +4946,44 @@ impl PartialEq for SemanticNodeData {
                 Self::InstantiationRef { base: bb, args: ba },
             ) => ab == bb && aa == ba,
             (Self::MergedDecl { contributors: a }, Self::MergedDecl { contributors: b }) => a == b,
+            (
+                Self::BareRef {
+                    name: an,
+                    scope: asc,
+                },
+                Self::BareRef {
+                    name: bn,
+                    scope: bsc,
+                },
+            ) => an == bn && asc == bsc,
+            (
+                Self::ImportType {
+                    specifier: asp,
+                    qualifier: aq,
+                    type_args: ata,
+                    typeof_query: atq,
+                },
+                Self::ImportType {
+                    specifier: bsp,
+                    qualifier: bq,
+                    type_args: bta,
+                    typeof_query: btq,
+                },
+            ) => asp == bsp && aq == bq && ata == bta && atq == btq,
+            (Self::RawFallback { raw: a }, Self::RawFallback { raw: b }) => a == b,
+            (Self::ConstructorType { signature: a }, Self::ConstructorType { signature: b }) => {
+                a == b
+            }
+            (
+                Self::SyntheticBinding {
+                    id: aid,
+                    value_node: avn,
+                },
+                Self::SyntheticBinding {
+                    id: bid,
+                    value_node: bvn,
+                },
+            ) => aid == bid && avn == bvn,
             _ => false,
         }
     }
@@ -4790,6 +5106,31 @@ impl std::hash::Hash for SemanticNodeData {
             }
             Self::MergedDecl { contributors } => {
                 contributors.hash(state);
+            }
+            Self::BareRef { name, scope } => {
+                name.hash(state);
+                scope.hash(state);
+            }
+            Self::ImportType {
+                specifier,
+                qualifier,
+                type_args,
+                typeof_query,
+            } => {
+                specifier.hash(state);
+                qualifier.hash(state);
+                type_args.hash(state);
+                typeof_query.hash(state);
+            }
+            Self::RawFallback { raw } => {
+                raw.hash(state);
+            }
+            Self::ConstructorType { signature } => {
+                signature.hash(state);
+            }
+            Self::SyntheticBinding { id, value_node } => {
+                id.hash(state);
+                value_node.hash(state);
             }
         }
     }
