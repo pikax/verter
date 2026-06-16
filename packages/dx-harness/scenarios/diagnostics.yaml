@@ -1,0 +1,43 @@
+# Diagnostics: a genuine type error MUST be reported, while a valid `let`
+# reassignment MUST NOT be spuriously flagged (the historical false-positive).
+- id: diagnostics-real-and-false-positive
+  fixture: diagnostics
+  entryFile: App.vue
+  anchors: [diag.realError, diag.validLet]
+  script: []
+  probes:
+    - id: real-type-error-reported
+      method: diagnostics
+      anchor: diag.realError
+      mappingPolicy: strict
+      confidence: high
+      dimension: artifactParity
+      requiresSourceMap: true
+      requiredDrivers: [rawLsp, tsgo]
+      capabilityRequirements: [diagnosticsPush]
+    - id: valid-let-not-flagged
+      method: diagnostics
+      anchor: diag.validLet
+      mappingPolicy: strict
+      confidence: high
+      dimension: artifactParity
+      requiresSourceMap: true
+      requiredDrivers: [rawLsp, tsgo]
+      capabilityRequirements: [diagnosticsPush]
+  invariants:
+    - id: real-error-mentions-number
+      anchor: diag.realError
+      method: diagnostics
+      assertion: contains
+      value: number
+    - id: valid-let-has-no-diagnostic
+      anchor: diag.validLet
+      method: diagnostics
+      assertion: excludes
+      value: let
+  baselines:
+    tsgo: required
+    tsserver: requiredForCi
+    volar: optional
+  thresholds:
+    flakeWindows: 2

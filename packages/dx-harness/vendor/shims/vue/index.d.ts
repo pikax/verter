@@ -21,6 +21,12 @@ export declare function onUnmounted(hook: () => void): void;
 export declare function nextTick(): Promise<void>;
 export declare function h(type: unknown, props?: unknown, children?: unknown): unknown;
 
+// `<script setup>` fallthrough-attribute accessor: the inherited HTML attributes a
+// component did not declare as props. Loosely typed here (the differential gates
+// the precise shape through the materialized `.vue.tsx`, not this shim).
+export type ComponentAttrs = Record<string, unknown>;
+export declare function useAttrs(): ComponentAttrs;
+
 export type DefineComponent<Props = Record<string, unknown>> = new () => { $props: Props };
 export declare function defineComponent<Props = Record<string, unknown>>(
   options: unknown,

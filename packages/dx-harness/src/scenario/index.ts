@@ -66,3 +66,17 @@ export {
   type ScenarioValidationError,
   type ScenarioValidationResult,
 } from "./validate.js";
+
+// The committed-corpus loader: the dependency-free YAML-subset parser plus the
+// readers that validate every authored scenario through `validateScenario`.
+export {
+  ScenarioLoadError,
+  YamlParseError,
+  corpusFixturesDir,
+  corpusScenariosDir,
+  loadScenarioCorpus,
+  loadScenarioFile,
+  loadScenariosFromSource,
+  parseScenarioYaml,
+  type ScenarioLoadFailure,
+} from "./load.js";
