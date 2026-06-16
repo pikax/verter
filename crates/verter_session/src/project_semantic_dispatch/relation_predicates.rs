@@ -36,18 +36,26 @@ pub(super) fn is_deferred(data: &SemanticNodeData) -> bool {
             | SemanticNodeData::Conditional { .. }
             | SemanticNodeData::TypeOf { .. }
             | SemanticNodeData::TemplateLiteral { .. }
-            // DeclRef/InstantiationRef carriers are
-            // unresolved references whose concrete content depends on
-            // instantiation. Treat as deferred at the recursive-pair
-            // level so callers (especially build_conditional) preserve
-            // both branches when the carrier appears in the check
-            // position. The OUTER `decide_relation_with_dispatch` call
-            // unwraps via `unwrap_identity_carrier_for_relation`, but
-            // that unwrap fires once at the top — recursive `expand_pair`
-            // calls see carriers verbatim. Treating them as deferred
-            // keeps the relation engine safely conservative there.
+            // The unresolved-reference carriers (`DeclRef` / `InstantiationRef`
+            // / `BareRef` / `ImportType`) are references whose concrete content
+            // depends on demand-time carrier resolution / instantiation. Treat
+            // them as deferred at the recursive-pair level so callers
+            // (especially build_conditional) preserve both branches when the
+            // carrier appears in the check position, and so a recursive
+            // `expand_pair` defers to `Unknown` instead of falling through to
+            // the `NotAssignable` "different concrete kinds" default. The OUTER
+            // `decide_relation_with_dispatch` call unwraps `DeclRef` /
+            // `InstantiationRef` via `unwrap_identity_carrier_for_relation`, but
+            // that unwrap fires once at the top — recursive `expand_pair` calls
+            // see carriers verbatim. Treating them as deferred keeps the
+            // relation engine safely conservative there. A RESOLVED root
+            // (`Object` / `Primitive` / `Function` / …) is matched by its own
+            // arm before the default, so this classification never changes a
+            // resolved-root verdict.
             | SemanticNodeData::DeclRef { .. }
             | SemanticNodeData::InstantiationRef { .. }
+            | SemanticNodeData::BareRef { .. }
+            | SemanticNodeData::ImportType { .. }
     )
 }
 

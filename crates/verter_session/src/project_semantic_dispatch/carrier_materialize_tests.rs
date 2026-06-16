@@ -24,8 +24,8 @@ use crate::resolver_core::component_meta_query_engine::{
 };
 use crate::resolver_core::shallow_file_state::{BudgetDomain, BudgetExceededFailure};
 use crate::semantic_query::{
-    HotTypeRef, NodeScopeId, PrimitiveKind, QueryError, SemanticNodeData, SemanticNodeId,
-    SyntheticBindingId, TupleElement,
+    HotTypeRef, NodeScopeId, PrimitiveKind, QueryError, ScopeId, SemanticNodeData, SemanticNodeId,
+    SyntheticBindingId, TupleElement, ValueRootKey,
 };
 use crate::VerterHost;
 
@@ -86,6 +86,7 @@ fn materialize_bare_ref_round_trips_to_bare_ref() {
         SemanticNodeData::BareRef {
             name: Arc::from("Foo"),
             scope: NodeScopeId::Global,
+            type_args: Arc::from(Vec::new().into_boxed_slice()),
         },
     );
     match &expr {
@@ -97,6 +98,85 @@ fn materialize_bare_ref_round_trips_to_bare_ref() {
             assert!(type_arguments.is_empty(), "bare ref carries no type args");
         }
         other => panic!("expected Ref, got {other:?}"),
+    }
+}
+
+#[test]
+fn materialize_bare_ref_round_trips_type_args() {
+    // A `BareRef` with NON-EMPTY `type_args` must round-trip the args onto
+    // `Ref.type_arguments`. Locks the structural materialize/raise path against
+    // dropping the carrier's `type_args` — a raise arm that ignored the field
+    // would yield an empty arg list and FAIL this fixture (discriminating).
+    let host = VerterHost::new_standalone(Default::default());
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let arg = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let node = graph.intern_node(SemanticNodeData::BareRef {
+        name: Arc::from("Foo"),
+        scope: NodeScopeId::Global,
+        type_args: Arc::from(vec![arg].into_boxed_slice()),
+    });
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let expr = dispatch.materialize_type_expr(HotTypeRef::new(node));
+    match &expr {
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } => {
+            assert_eq!(name.as_ref(), "Foo");
+            assert_eq!(
+                type_arguments.len(),
+                1,
+                "BareRef.type_args must round-trip onto Ref.type_arguments"
+            );
+            assert!(matches!(
+                &type_arguments[0],
+                TypeExpr::Primitive(PrimitiveName::Number)
+            ));
+        }
+        other => panic!("expected Ref, got {other:?}"),
+    }
+}
+
+#[test]
+fn materialize_typeof_round_trips_type_args() {
+    // There was no TypeOf materialize fixture, so raise.rs could have dropped
+    // the `type_args` field and stayed green. A `TypeOf` with NON-EMPTY
+    // `type_args` must round-trip the instantiation args onto
+    // `ValueRef.type_args` (and the root + path onto `ValueRef.path`).
+    let host = VerterHost::new_standalone(Default::default());
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let arg = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let node = graph.intern_node(SemanticNodeData::TypeOf {
+        value_root: ValueRootKey {
+            scope: ScopeId {
+                canonical_id: Arc::from("/m.ts"),
+                local_scope: None,
+            },
+            name: Arc::from("factory"),
+        },
+        path: Arc::from(vec![Arc::<str>::from("make")].into_boxed_slice()),
+        type_args: Arc::from(vec![arg].into_boxed_slice()),
+    });
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let expr = dispatch.materialize_type_expr(HotTypeRef::new(node));
+    match &expr {
+        TypeExpr::TypeOf(value_ref) => {
+            assert_eq!(
+                value_ref.path,
+                vec!["factory".to_string(), "make".to_string()],
+                "the value root + projected path round-trip onto ValueRef.path"
+            );
+            assert_eq!(
+                value_ref.type_args.len(),
+                1,
+                "TypeOf.type_args must round-trip onto ValueRef.type_args"
+            );
+            assert!(matches!(
+                &value_ref.type_args[0],
+                TypeExpr::Primitive(PrimitiveName::String)
+            ));
+        }
+        other => panic!("expected TypeOf, got {other:?}"),
     }
 }
 

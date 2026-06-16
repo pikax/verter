@@ -470,19 +470,35 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     None => None,
                 },
             },
-            SemanticNodeData::TypeOf { value_root, path } => {
+            SemanticNodeData::TypeOf {
+                value_root,
+                path,
+                type_args,
+            } => {
                 let mut segments = value_root
                     .name
                     .split('.')
                     .map(|segment| segment.to_string())
                     .collect::<Vec<_>>();
                 segments.extend(path.iter().map(|segment| segment.as_ref().to_string()));
-                // The node-level `TypeOf` is an already-resolved value root +
-                // member path; instantiation-expression args were consumed at
-                // lowering time, so the projection has none to carry.
+                // Raise the instantiation-expression args back onto the
+                // projected `ValueRef.type_args` so `typeof C.make<string>`
+                // round-trips its arguments. A miss on any arg becomes the
+                // `<raise miss>` placeholder so the outer typeof still
+                // constructs (mirrors the `ImportType` arm).
+                let raised_args: Vec<TypeExpr> = type_args
+                    .iter()
+                    .map(|id| {
+                        self.raise_node_to_type_expr_inner(*id, active).unwrap_or(
+                            TypeExpr::Unknown {
+                                raw: "<raise miss>".to_string(),
+                            },
+                        )
+                    })
+                    .collect();
                 TypeExpr::TypeOf(verter_type_expr::ValueRef {
                     path: segments,
-                    type_args: Vec::new(),
+                    type_args: raised_args,
                 })
             }
             SemanticNodeData::TypeParam {
@@ -632,13 +648,32 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     type_arguments: std::sync::Arc::from(raised_args.into_boxed_slice()),
                 }
             }
-            // Unresolved bare-name carrier → bare `Ref { name }` (the
-            // shallow-by-default published shape). `scope` is value-side
-            // resolution context, not part of the projected shape.
-            SemanticNodeData::BareRef { name, .. } => TypeExpr::Ref {
-                name: std::sync::Arc::clone(name),
-                type_arguments: verter_type_expr::empty_type_args(),
-            },
+            // Unresolved bare-name carrier → `Ref { name, type_arguments }`
+            // (the shallow-by-default published shape). `scope` is value-side
+            // resolution context, not part of the projected shape. The
+            // structurally-lowered `type_args` raise back onto
+            // `Ref.type_arguments` so `Foo<Arg>` round-trips its arguments;
+            // an empty slice raises to the bare `Foo` case. A miss on any
+            // arg becomes the `<raise miss>` placeholder so the outer
+            // reference still constructs (mirrors the `ImportType` arm).
+            SemanticNodeData::BareRef {
+                name, type_args, ..
+            } => {
+                let raised_args: Vec<TypeExpr> = type_args
+                    .iter()
+                    .map(|id| {
+                        self.raise_node_to_type_expr_inner(*id, active).unwrap_or(
+                            TypeExpr::Unknown {
+                                raw: "<raise miss>".to_string(),
+                            },
+                        )
+                    })
+                    .collect();
+                TypeExpr::Ref {
+                    name: std::sync::Arc::clone(name),
+                    type_arguments: std::sync::Arc::from(raised_args.into_boxed_slice()),
+                }
+            }
             // Unresolved dynamic-import carrier → `TypeExpr::ImportType`.
             // A miss on any type-arg raise becomes the `<raise miss>`
             // placeholder so the outer import-type still constructs.
@@ -1436,6 +1471,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 )
             }
             SemanticNodeData::TypeOf { value_root, .. } => {
+                // TODO(carrier-resolution): apply TypeOf.type_args
+                // (apply_typeof_instantiation_args) once the structural lowerer
+                // is wired; carriers are dormant today so no non-empty
+                // type_args reaches here. This arm dispatches the typeof key
+                // for SEMANTIC reduction (not the structural raise/round-trip,
+                // which preserves type_args at raise_node_to_type_expr_inner).
+                // See docs/arch/parselower-design.md (demand-time
+                // carrier-resolution debt note).
                 let typeof_key = self.typeof_key_for(value_root.clone(), context);
                 self.dispatch_operator_with_recurse(node, typeof_key, context, state)
             }
@@ -4369,30 +4412,33 @@ impl OpenWalk {
                 contributors.iter().any(|a| self.node_is_open(ctx, *a))
             }
 
-            // A `typeof` lookup references a VALUE binding, not the
-            // mapper's outer generic: the enumeration-domain walk treats it
-            // as conservatively undecidable (open key space); the
-            // value-body walk treats it as closed (carries no outer
-            // generic).
-            SemanticNodeData::TypeOf { .. } => !self.outer_generic_only,
-
             // --- unresolved / fidelity carriers ---
             // A constructor type delegates to its inner function signature
             // (which carries the value-surface descent rule).
             SemanticNodeData::ConstructorType { signature } => self.node_is_open(ctx, *signature),
-            // An unresolved dynamic-import: open if any type argument reaches
-            // the outer generic; otherwise undecidable (open) for the
-            // enumeration-domain walk, closed for the value-body walk.
-            SemanticNodeData::ImportType { type_args, .. } => {
-                type_args.iter().any(|a| self.node_is_open(ctx, *a)) || !self.outer_generic_only
+            // The three unresolved carriers that apply type arguments
+            // (`typeof make<T>`, `import("m").Box<T>`, `Foo<T>`): OPEN if any
+            // applied type argument reaches the outer generic — scanned through
+            // the shared carrier-arg accessor so the value-body walk does NOT
+            // false-close `Foo<T>` / `typeof make<T>` over an open `T`. With NO
+            // open argument the carrier itself holds no outer generic (a
+            // value-rooted `typeof` lookup / an unresolved name / a dynamic
+            // import carries none), so it stays undecidable (open) for the
+            // enumeration-domain walk and closed for the value-body walk — the
+            // existing undecidable-root rule, now applied AFTER the type-arg
+            // openness check.
+            SemanticNodeData::TypeOf { .. }
+            | SemanticNodeData::ImportType { .. }
+            | SemanticNodeData::BareRef { .. } => {
+                data.carrier_type_args()
+                    .iter()
+                    .any(|a| self.node_is_open(ctx, *a))
+                    || !self.outer_generic_only
             }
-            // An unresolved bare-name / raw-fallback carrier holds no outer
-            // generic (closed for the value-body walk) but is undecidable for
-            // the enumeration-domain walk — mirroring `TypeOf` and an
-            // unresolved name.
-            SemanticNodeData::BareRef { .. } | SemanticNodeData::RawFallback { .. } => {
-                !self.outer_generic_only
-            }
+            // An unresolved raw-fallback carrier holds no type arguments and no
+            // outer generic (closed for the value-body walk) but is undecidable
+            // for the enumeration-domain walk.
+            SemanticNodeData::RawFallback { .. } => !self.outer_generic_only,
             // A synthetic slot-binding is a concrete shallow terminal.
             SemanticNodeData::SyntheticBinding { .. } => false,
         }

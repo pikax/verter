@@ -9379,6 +9379,62 @@ fn mapped_predicate_each_dimension_opens_independently_with_k_only_controls() {
     );
 }
 
+/// The value-body openness walk (`builtin_lowering_argument_is_open`, the
+/// carrier-mode lowering gate's per-argument consult) must judge a `BareRef`
+/// / `TypeOf` carrier OPEN when ANY of its `type_args` reaches an unbound
+/// outer generic — mirroring the `ImportType` arm. Pre-fix the `BareRef` /
+/// `TypeOf` arms dropped `type_args` and returned the bare
+/// `!outer_generic_only` (= CLOSED for the value-body walk), FALSE-CLOSING
+/// `Foo<T>` / `typeof make<T>` over an open `T`. A closed carrier arg keeps the
+/// walk closed (control), so the carrier-stop never over-fires.
+#[test]
+fn carrier_type_args_open_node_judges_bareref_and_typeof_open_over_outer_generic() {
+    let host = host();
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let t_param = outer_type_param(&graph, "T");
+    let string_ty = primitive(&graph, PrimitiveKind::String);
+
+    // `Foo<T>` with an open outer-generic arg → OPEN (BareRef.type_args).
+    let bare_open = graph.intern_node(SemanticNodeData::BareRef {
+        name: Arc::from("Foo"),
+        scope: crate::semantic_query::NodeScopeId::Global,
+        type_args: Arc::from(vec![t_param].into_boxed_slice()),
+    });
+    assert!(
+        super::raise::builtin_lowering_argument_is_open(&host, bare_open),
+        "`Foo<T>` over an open outer generic must classify OPEN, not false-closed"
+    );
+
+    // `typeof make<T>` with an open outer-generic arg → OPEN (TypeOf.type_args).
+    let typeof_open = graph.intern_node(SemanticNodeData::TypeOf {
+        value_root: crate::semantic_query::ValueRootKey {
+            scope: crate::semantic_query::ScopeId {
+                canonical_id: Arc::from("/w/open_carrier.ts"),
+                local_scope: None,
+            },
+            name: Arc::from("make"),
+        },
+        path: Arc::from(Vec::new().into_boxed_slice()),
+        type_args: Arc::from(vec![t_param].into_boxed_slice()),
+    });
+    assert!(
+        super::raise::builtin_lowering_argument_is_open(&host, typeof_open),
+        "`typeof make<T>` over an open outer generic must classify OPEN, not false-closed"
+    );
+
+    // CONTROL: `Foo<string>` — a CLOSED carrier arg keeps the value-body walk
+    // CLOSED (no outer generic reached), so the carrier-stop must NOT over-fire.
+    let bare_closed = graph.intern_node(SemanticNodeData::BareRef {
+        name: Arc::from("Foo"),
+        scope: crate::semantic_query::NodeScopeId::Global,
+        type_args: Arc::from(vec![string_ty].into_boxed_slice()),
+    });
+    assert!(
+        !super::raise::builtin_lowering_argument_is_open(&host, bare_closed),
+        "`Foo<string>` (closed arg) must stay CLOSED for the value-body walk"
+    );
+}
+
 /// Per-argument KEY-DOMAIN rule for the MAPPED family (the same rule as
 /// `Pick`/`Omit`): `{ [K in keyof Foo<T>]: string }` over a FIXED-KEY
 /// `interface Foo<T> { label?: string; items?: T }` — the open `T` is
@@ -18126,6 +18182,291 @@ fn subtree_references_node_descends_merged_decl_contributors() {
         substituted, merged,
         "substitute rewrites through MergedDecl contributors; a non-referencing \
          walker verdict would contradict it"
+    );
+}
+
+/// Substitute and the read-only reachability walker must BOTH descend into
+/// the structural `type_args` of the unresolved `BareRef` / `TypeOf` carriers
+/// (mirror contract). Substituting `T`→`U` inside `Foo<T>` / `typeof f<T>`
+/// rewrites the arg to `U` (structural child-integrity), and
+/// `subtree_references_node` reports the carrier references `T`. This is
+/// STRUCTURAL recursion only — NOT semantic instantiation application (a
+/// demand-time carrier-resolution concern).
+#[test]
+fn substitute_and_walker_descend_carrier_type_args() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let t_param = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: decl_identity_value(&host, "/w/carrier_args.ts", "T"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("T"),
+    });
+    let u_replacement = graph.intern_node(SemanticNodeData::Primitive(
+        crate::semantic_query::PrimitiveKind::Number,
+    ));
+
+    // --- BareRef carrier: `Foo<T>` ---
+    let bare = graph.intern_node(SemanticNodeData::BareRef {
+        name: Arc::from("Foo"),
+        scope: crate::semantic_query::NodeScopeId::Global,
+        type_args: Arc::from(vec![t_param].into_boxed_slice()),
+    });
+    assert!(
+        dispatch.subtree_references_node(bare, t_param),
+        "the walker must see `T` inside BareRef.type_args"
+    );
+    let bare_sub = dispatch.substitute_semantic_type_param(bare, t_param, u_replacement);
+    let bare_data = graph
+        .node_data(bare_sub)
+        .expect("substituted BareRef interned");
+    let SemanticNodeData::BareRef {
+        name, type_args, ..
+    } = &*bare_data
+    else {
+        panic!("the BareRef shape must survive substitution, got {bare_data:?}");
+    };
+    assert_eq!(name.as_ref(), "Foo", "the carrier name is preserved");
+    assert_eq!(type_args.len(), 1);
+    assert_eq!(
+        type_args[0], u_replacement,
+        "BareRef.type_args[0] `T`→`U` must be structurally rewritten"
+    );
+
+    // --- TypeOf carrier: `typeof factory<T>` ---
+    let typeof_node = graph.intern_node(SemanticNodeData::TypeOf {
+        value_root: crate::semantic_query::ValueRootKey {
+            scope: crate::semantic_query::ScopeId {
+                canonical_id: Arc::from("/w/carrier_args.ts"),
+                local_scope: None,
+            },
+            name: Arc::from("factory"),
+        },
+        path: Arc::from(Vec::new().into_boxed_slice()),
+        type_args: Arc::from(vec![t_param].into_boxed_slice()),
+    });
+    assert!(
+        dispatch.subtree_references_node(typeof_node, t_param),
+        "the walker must see `T` inside TypeOf.type_args"
+    );
+    let typeof_sub = dispatch.substitute_semantic_type_param(typeof_node, t_param, u_replacement);
+    let typeof_data = graph
+        .node_data(typeof_sub)
+        .expect("substituted TypeOf interned");
+    let SemanticNodeData::TypeOf { type_args, .. } = &*typeof_data else {
+        panic!("the TypeOf shape must survive substitution, got {typeof_data:?}");
+    };
+    assert_eq!(type_args.len(), 1);
+    assert_eq!(
+        type_args[0], u_replacement,
+        "TypeOf.type_args[0] `T`→`U` must be structurally rewritten"
+    );
+}
+
+/// `ImportType` is the third unresolved carrier carrying an
+/// `Arc<[SemanticNodeId]>` `type_args` slice (`import("m").Box<T>`), so
+/// substitute and the read-only reachability walker must descend into it
+/// exactly as they do for `BareRef` / `TypeOf` (the mirror contract).
+/// Substituting `T`→`U` rewrites the import-type arg to `U` (structural
+/// child-integrity) while preserving `specifier` / `qualifier` /
+/// `typeof_query`, and `subtree_references_node` reports the carrier
+/// references `T`. STRUCTURAL recursion only — NO import resolution / no
+/// semantic instantiation application (a demand-time carrier-resolution
+/// concern).
+#[test]
+fn substitute_and_walker_descend_import_type_carrier_type_args() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let t_param = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: decl_identity_value(&host, "/w/import_carrier_args.ts", "T"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("T"),
+    });
+    let u_replacement = graph.intern_node(SemanticNodeData::Primitive(
+        crate::semantic_query::PrimitiveKind::Number,
+    ));
+
+    // `import("./m").Box<T>` — a non-typeof import-type carrier with a
+    // qualifier path and one applied type argument `T`.
+    let import_type = graph.intern_node(SemanticNodeData::ImportType {
+        specifier: Arc::from("./m"),
+        qualifier: Arc::from(vec![Arc::<str>::from("Box")].into_boxed_slice()),
+        type_args: Arc::from(vec![t_param].into_boxed_slice()),
+        typeof_query: false,
+    });
+    assert!(
+        dispatch.subtree_references_node(import_type, t_param),
+        "the walker must see `T` inside ImportType.type_args"
+    );
+    let import_sub = dispatch.substitute_semantic_type_param(import_type, t_param, u_replacement);
+    let import_data = graph
+        .node_data(import_sub)
+        .expect("substituted ImportType interned");
+    let SemanticNodeData::ImportType {
+        specifier,
+        qualifier,
+        type_args,
+        typeof_query,
+    } = &*import_data
+    else {
+        panic!("the ImportType shape must survive substitution, got {import_data:?}");
+    };
+    assert_eq!(
+        specifier.as_ref(),
+        "./m",
+        "the module specifier is preserved"
+    );
+    assert_eq!(qualifier.len(), 1, "the qualifier path is preserved");
+    assert_eq!(qualifier[0].as_ref(), "Box");
+    assert!(!typeof_query, "the typeof-query flag is preserved");
+    assert_eq!(type_args.len(), 1);
+    assert_eq!(
+        type_args[0], u_replacement,
+        "ImportType.type_args[0] `T`→`U` must be structurally rewritten"
+    );
+}
+
+/// The §22 `any`-row absorption (`any extends T ? X : Y` ⇒ `X | Y`) MUST be
+/// suppressed when the `extends` clause carries an `infer` inside a `BareRef`
+/// / `TypeOf` carrier's `type_args` (`any extends Foo<infer P> ? P : never`,
+/// `any extends (typeof make<infer P>) ? P : never`). Pre-fix
+/// `extends_is_infer_pattern` treated `BareRef` / `TypeOf` as infer-free
+/// LEAVES (descending only `ImportType.type_args`), so the absorber unioned
+/// both branches verbatim and leaked the unbound `Infer P`. The carrier's
+/// `type_args` must be scanned through the shared accessor, so `absorb_conditional`
+/// returns `None` and the conditional falls through to the infer-binding path.
+#[test]
+fn absorb_conditional_detects_infer_in_bareref_and_typeof_carrier_type_args() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let any = graph.intern_node(SemanticNodeData::Primitive(
+        crate::semantic_query::PrimitiveKind::Any,
+    ));
+    let never = graph.intern_node(SemanticNodeData::Primitive(
+        crate::semantic_query::PrimitiveKind::Never,
+    ));
+    let infer_p = graph.intern_node(SemanticNodeData::Infer {
+        name: Arc::from("P"),
+    });
+    let string_ty = graph.intern_node(SemanticNodeData::Primitive(
+        crate::semantic_query::PrimitiveKind::String,
+    ));
+
+    // `any extends Foo<infer P> ? P : never` — BareRef.type_args holds the infer.
+    let foo_infer = graph.intern_node(SemanticNodeData::BareRef {
+        name: Arc::from("Foo"),
+        scope: crate::semantic_query::NodeScopeId::Global,
+        type_args: Arc::from(vec![infer_p].into_boxed_slice()),
+    });
+    assert!(
+        dispatch
+            .absorb_conditional(any, foo_infer, infer_p, never, false)
+            .is_none(),
+        "`any extends Foo<infer P> ? …` must NOT be absorbed — the BareRef \
+         carrier's `type_args` carry an infer pattern"
+    );
+
+    // `any extends (typeof make<infer P>) ? P : never` — TypeOf.type_args holds it.
+    let typeof_infer = graph.intern_node(SemanticNodeData::TypeOf {
+        value_root: crate::semantic_query::ValueRootKey {
+            scope: crate::semantic_query::ScopeId {
+                canonical_id: Arc::from("/w/absorb_carrier.ts"),
+                local_scope: None,
+            },
+            name: Arc::from("make"),
+        },
+        path: Arc::from(Vec::new().into_boxed_slice()),
+        type_args: Arc::from(vec![infer_p].into_boxed_slice()),
+    });
+    assert!(
+        dispatch
+            .absorb_conditional(any, typeof_infer, infer_p, never, false)
+            .is_none(),
+        "`any extends (typeof make<infer P>) ? …` must NOT be absorbed — the \
+         TypeOf carrier's `type_args` carry an infer pattern"
+    );
+
+    // CONTROL: an infer-FREE BareRef carrier (`Foo<string>`) IS still absorbed
+    // to `X | Y` — proving the assertion is not vacuously `None` for every
+    // carrier extends and that the §22 any-row still fires when no infer is
+    // present.
+    let foo_string = graph.intern_node(SemanticNodeData::BareRef {
+        name: Arc::from("Foo"),
+        scope: crate::semantic_query::NodeScopeId::Global,
+        type_args: Arc::from(vec![string_ty].into_boxed_slice()),
+    });
+    assert!(
+        dispatch
+            .absorb_conditional(any, foo_string, string_ty, never, false)
+            .is_some(),
+        "`any extends Foo<string> ? X : Y` (no infer) must STILL be absorbed to \
+         the branch union — the control keeps the infer detection honest"
+    );
+}
+
+/// `is_deferred` (the recursive relation-pair root-kind classifier) must treat
+/// the unresolved `BareRef` / `ImportType` carriers as DEFERRED roots —
+/// consistent with the already-deferred `TypeOf` / `DeclRef` /
+/// `InstantiationRef` carriers. They are unresolved references whose concrete
+/// content depends on demand-time carrier resolution, so a recursive
+/// `expand_pair` that sees one verbatim must defer to `Unknown` rather than
+/// fall through to the `NotAssignable` "different concrete kinds" default. A
+/// resolved/leaf root (`Primitive`) stays NON-deferred (unchanged) — the fix
+/// must not over-classify a resolved root. Pre-fix `BareRef` / `ImportType`
+/// were not deferred.
+#[test]
+fn is_deferred_classifies_bareref_and_importtype_carriers_as_deferred_roots() {
+    let bare = SemanticNodeData::BareRef {
+        name: Arc::from("Foo"),
+        scope: crate::semantic_query::NodeScopeId::Global,
+        type_args: Arc::from(Vec::new().into_boxed_slice()),
+    };
+    assert!(
+        super::relation_predicates::is_deferred(&bare),
+        "an unresolved BareRef carrier must be a DEFERRED relation root"
+    );
+
+    let import_type = SemanticNodeData::ImportType {
+        specifier: Arc::from("./m"),
+        qualifier: Arc::from(vec![Arc::<str>::from("Box")].into_boxed_slice()),
+        type_args: Arc::from(Vec::new().into_boxed_slice()),
+        typeof_query: false,
+    };
+    assert!(
+        super::relation_predicates::is_deferred(&import_type),
+        "an unresolved ImportType carrier must be a DEFERRED relation root"
+    );
+
+    // Carrier-model consistency control: the sibling `TypeOf` carrier is
+    // ALREADY deferred (this is the precedent the fix aligns BareRef/ImportType to).
+    let type_of = SemanticNodeData::TypeOf {
+        value_root: crate::semantic_query::ValueRootKey {
+            scope: crate::semantic_query::ScopeId {
+                canonical_id: Arc::from("/w/deferred.ts"),
+                local_scope: None,
+            },
+            name: Arc::from("make"),
+        },
+        path: Arc::from(Vec::new().into_boxed_slice()),
+        type_args: Arc::from(Vec::new().into_boxed_slice()),
+    };
+    assert!(
+        super::relation_predicates::is_deferred(&type_of),
+        "TypeOf stays a deferred carrier root (carrier-model consistency control)"
+    );
+
+    // A resolved/leaf root is NOT deferred — the fix must not over-classify.
+    let primitive = SemanticNodeData::Primitive(crate::semantic_query::PrimitiveKind::Number);
+    assert!(
+        !super::relation_predicates::is_deferred(&primitive),
+        "a resolved/leaf Primitive root must remain NON-deferred (verdict unchanged)"
     );
 }
 

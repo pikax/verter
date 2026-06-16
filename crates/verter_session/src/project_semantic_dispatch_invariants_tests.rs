@@ -1950,16 +1950,23 @@ fn relation_engine_has_exactly_one_implementation() {
 }
 
 #[test]
-fn type_expr_lowering_has_exactly_one_path() {
-    // Demand-driven reducer spec: the lowering path exposes exactly
-    // ONE entry point — `shallow_lower_type_expr_with_context`, which
-    // takes the full [`ProjectionReductionContext`]. Every caller
-    // states its demand explicitly; a bare-`mode` wrapper that
-    // defaults the demand to `Published` is forbidden (it is exactly
-    // how a transit/skeleton caller silently lowers at a publication
-    // demand it never asked for).
+fn type_expr_lowering_has_exactly_two_single_definition_producers() {
+    // `TypeExpr` lowering has exactly TWO producers, each with a single
+    // definition:
+    //   1. the EAGER, resolving producer `shallow_lower_type_expr_with_context`,
+    //      which takes the full `ProjectionReductionContext` so every caller
+    //      states its demand explicitly — a bare-`mode` wrapper that defaults
+    //      the demand to `Published` is forbidden (it is exactly how a transit /
+    //      skeleton caller would silently lower at a publication demand it never
+    //      asked for); and
+    //   2. the QUERY-FREE structural producer `lower_type_expr_structural`,
+    //      which emits the dormant graph carriers from the owned `TypeExpr`
+    //      without performing any name / import / type resolution.
+    // The two are distinct and non-overlapping; neither may grow a second
+    // definition, and the retired bare-`mode` eager wrapper stays absent.
     let legacy = count_def_in_crates("fn shallow_lower_type_expr(");
     let with_ctx = count_def_in_crates("fn shallow_lower_type_expr_with_context(");
+    let structural = count_def_in_crates("fn lower_type_expr_structural(");
     assert_eq!(
         legacy, 0,
         "the bare-mode `fn shallow_lower_type_expr(` wrapper is retired; \
@@ -1967,13 +1974,19 @@ fn type_expr_lowering_has_exactly_one_path() {
     );
     assert_eq!(
         with_ctx, 1,
-        "fn shallow_lower_type_expr_with_context must have exactly one definition; got {with_ctx}"
+        "fn shallow_lower_type_expr_with_context (the single eager producer) must \
+         have exactly one definition; got {with_ctx}"
+    );
+    assert_eq!(
+        structural, 1,
+        "fn lower_type_expr_structural (the single query-free structural producer) \
+         must have exactly one definition; got {structural}"
     );
 }
 
 #[test]
 fn semantic_node_to_type_expr_has_exactly_one_path() {
-    // Sibling invariant of `type_expr_lowering_has_exactly_one_path`:
+    // Sibling invariant of `type_expr_lowering_has_exactly_two_single_definition_producers`:
     // the reverse direction (`SemanticNodeId → TypeExpr`) must also
     // have exactly one production path. After Step 6.1 of the F2
     // architectural unification, `fn raise_node_to_type_expr(`

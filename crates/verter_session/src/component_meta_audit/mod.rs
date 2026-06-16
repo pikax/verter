@@ -1055,7 +1055,9 @@ pub fn audit_key_for_node(
             IndexKey::TypeNode(n) => format!("IndexedAccess({}[<type:{}>])", object.0, n.0),
         },
         SemanticNodeData::Mapped { source, .. } => format!("Mapped(source={})", source.0),
-        SemanticNodeData::TypeOf { value_root, path } => format!(
+        SemanticNodeData::TypeOf {
+            value_root, path, ..
+        } => format!(
             "TypeOf({}::{},path[{}])",
             value_root.scope.canonical_id,
             value_root.name,

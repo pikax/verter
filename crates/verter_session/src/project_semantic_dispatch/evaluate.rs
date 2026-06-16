@@ -377,7 +377,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         _ => break self.opaque(QueryError::Miss),
                     }
                 }
-                SemanticNodeData::TypeOf { value_root, path } => {
+                SemanticNodeData::TypeOf {
+                    value_root, path, ..
+                } => {
+                    // TODO(carrier-resolution): apply TypeOf.type_args
+                    // (apply_typeof_instantiation_args) once the structural
+                    // lowerer is wired; carriers are dormant today so no
+                    // non-empty type_args reaches here. See
+                    // docs/arch/parselower-design.md (demand-time
+                    // carrier-resolution debt note).
                     // The enclosing evaluation's demand rides the key —
                     // operator recursion never widens a deferred typeof
                     // carrier past the caller's mode.

@@ -46,8 +46,9 @@ use verter_session::semantic_query::demand::{
 };
 use verter_session::semantic_query::{
     DeclIdentity, DeclarationAnalysisValue, FunctionParam, IndexKey, LiteralValue, MapperKey,
-    MapperKind, MemberMergeRole, OptionalityMod, PrimitiveKind, ReadonlyMod, SemanticNodeData,
-    SemanticNodeId, SemanticQueryValue, SurfaceMember, SurfaceView, TypeParamDecl,
+    MapperKind, MemberMergeRole, NodeScopeId, OptionalityMod, PrimitiveKind, ReadonlyMod, ScopeId,
+    SemanticNodeData, SemanticNodeId, SemanticQueryValue, SurfaceMember, SurfaceView,
+    TypeParamDecl, ValueRootKey,
 };
 
 /// A `Demand` that is `Expanded` on every semantic axis and carries `dn` as its
@@ -1067,4 +1068,75 @@ fn vue_macro_elements_render_is_payload_derived_not_constant() {
     assert_ne!(r_empty, r_callable);
     assert_eq!(r_empty, "<vue-macro props=0 emits=0>");
     assert_eq!(r_callable, "<vue-macro props=0 emits=0 callable>");
+}
+
+// ----------------------------------------------------------------------
+// GUARD — the unresolved `BareRef` / `TypeOf` carriers render their
+// `type_args` in a `<...>` segment (matching the `ImportType` /
+// `InstantiationRef` arg-render convention), and an empty `type_args` stays
+// bare. DISCRIMINATING: a renderer that drops `type_args` would emit `Foo` /
+// `typeof factory.make` for the applied cases below.
+// ----------------------------------------------------------------------
+
+#[test]
+fn bare_ref_carrier_renders_type_args() {
+    let store = SemanticGraphStore::new();
+    let number_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+
+    let bare = store.intern_node(SemanticNodeData::BareRef {
+        name: Arc::from("Foo"),
+        scope: NodeScopeId::Global,
+        type_args: Arc::from(Vec::new().into_boxed_slice()),
+    });
+    assert_eq!(
+        render(&store, bare),
+        "Foo",
+        "a bare BareRef renders its name only"
+    );
+
+    let applied = store.intern_node(SemanticNodeData::BareRef {
+        name: Arc::from("Foo"),
+        scope: NodeScopeId::Global,
+        type_args: Arc::from(vec![number_id].into_boxed_slice()),
+    });
+    assert_eq!(
+        render(&store, applied),
+        "Foo<number>",
+        "BareRef.type_args must render in a `<...>` segment"
+    );
+}
+
+#[test]
+fn typeof_carrier_renders_type_args() {
+    let store = SemanticGraphStore::new();
+    let string_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let value_root = ValueRootKey {
+        scope: ScopeId {
+            canonical_id: Arc::from("/m.ts"),
+            local_scope: None,
+        },
+        name: Arc::from("factory"),
+    };
+
+    let bare = store.intern_node(SemanticNodeData::TypeOf {
+        value_root: value_root.clone(),
+        path: Arc::from(vec![Arc::<str>::from("make")].into_boxed_slice()),
+        type_args: Arc::from(Vec::new().into_boxed_slice()),
+    });
+    assert_eq!(
+        render(&store, bare),
+        "typeof factory.make",
+        "a bare TypeOf renders root + path only"
+    );
+
+    let applied = store.intern_node(SemanticNodeData::TypeOf {
+        value_root,
+        path: Arc::from(vec![Arc::<str>::from("make")].into_boxed_slice()),
+        type_args: Arc::from(vec![string_id].into_boxed_slice()),
+    });
+    assert_eq!(
+        render(&store, applied),
+        "typeof factory.make<string>",
+        "TypeOf.type_args must render in a `<...>` segment"
+    );
 }

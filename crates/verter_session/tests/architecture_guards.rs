@@ -19749,22 +19749,238 @@ fn carrier_guard_struct_body(src: &str, name: &str) -> String {
         .join("\n")
 }
 
-/// The PRODUCTION portion of a Rust source: the text BEFORE the first
-/// `#[cfg(test)]` marker, with `//` line-comments stripped. The
-/// `carrier_constructors_do_not_use_unknown_as_control_flow` guard AND its
-/// self-test both scan through this helper, so the self-test exercises the
-/// same split-then-strip logic the guard relies on — never a bare
-/// `synthetic.contains(...)` that would hold by construction.
+/// The PRODUCTION portion of a Rust source: every line with `//` line-comments
+/// AND `/* … */` block comments stripped, and every inline `#[cfg(test)]` ITEM
+/// blanked IN PLACE — so production code that follows an inline cfg-test item
+/// is still scanned (the weak split-once truncation lost it) and a forbidden
+/// token mentioned inside a `/* */` block comment is never a false positive.
+/// This matches the robust Stage-1 strippers. The carrier guards AND their
+/// self-tests all scan through this helper, so the self-tests exercise the same
+/// strip logic the guards rely on — never a bare `synthetic.contains(...)` that
+/// would hold by construction.
 fn carrier_production_code(src: &str) -> String {
-    let production_src = src.split("#[cfg(test)]").next().unwrap_or(src);
-    production_src
-        .lines()
-        .map(|line| match line.find("//") {
-            Some(i) => &line[..i],
-            None => line,
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    carrier_strip_inline_cfg_test_items(&carrier_strip_comments(src))
+}
+
+/// Replace `//` line comments and `/* … */` (nesting) block comments with
+/// equivalent-length whitespace (newlines preserved), skipping comment-like
+/// sequences inside regular and raw string literals so the strip never
+/// invalidates real source. Mirrors the robust Stage-1 `strip_comments`.
+fn carrier_strip_comments(src: &str) -> String {
+    let bytes = src.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let n = bytes.len();
+    let mut i = 0usize;
+    while i < n {
+        let c = bytes[i];
+        // Raw string: r"..."  /  r#"..."#  /  r##"..."##  ...
+        if c == b'r' {
+            let mut j = i + 1;
+            let mut hashes = 0usize;
+            while j < n && bytes[j] == b'#' {
+                hashes += 1;
+                j += 1;
+            }
+            if j < n && bytes[j] == b'"' {
+                out.extend_from_slice(&bytes[i..=j]);
+                let close: Vec<u8> = std::iter::once(b'"')
+                    .chain(std::iter::repeat_n(b'#', hashes))
+                    .collect();
+                let mut k = j + 1;
+                while k + close.len() <= n {
+                    if &bytes[k..k + close.len()] == close.as_slice() {
+                        out.extend_from_slice(&bytes[(j + 1)..(k + close.len())]);
+                        i = k + close.len();
+                        break;
+                    }
+                    out.push(bytes[k]);
+                    k += 1;
+                }
+                if k + close.len() > n {
+                    out.extend_from_slice(&bytes[(j + 1)..n]);
+                    i = n;
+                }
+                continue;
+            }
+            // Not a raw string — fall through to normal handling.
+        }
+        // Regular string literal "..." (with \" escape handling).
+        if c == b'"' {
+            out.push(b'"');
+            let mut k = i + 1;
+            while k < n {
+                if bytes[k] == b'\\' && k + 1 < n {
+                    out.push(bytes[k]);
+                    out.push(bytes[k + 1]);
+                    k += 2;
+                    continue;
+                }
+                if bytes[k] == b'"' {
+                    out.push(b'"');
+                    k += 1;
+                    break;
+                }
+                out.push(bytes[k]);
+                k += 1;
+            }
+            i = k;
+            continue;
+        }
+        // Char / byte-char literal 'x' / '\n' / '\u{…}' / '"' — disambiguated
+        // from a lifetime (`'a` / `'static`, which has NO closing quote) like
+        // rustc: a backslash escape, OR a single byte immediately followed by a
+        // closing quote, is a char literal; anything else starting with `'`
+        // falls through as a lifetime. This stops a `'"'` char literal from
+        // mis-opening string mode and masking later source (the string arm
+        // above only special-cases `"`).
+        if c == b'\'' {
+            // Escaped char literal `'\X…'`: scan to the unescaped closing quote.
+            if i + 1 < n && bytes[i + 1] == b'\\' {
+                out.push(b'\'');
+                let mut k = i + 1;
+                while k < n {
+                    if bytes[k] == b'\\' && k + 1 < n {
+                        out.push(bytes[k]);
+                        out.push(bytes[k + 1]);
+                        k += 2;
+                        continue;
+                    }
+                    if bytes[k] == b'\'' {
+                        out.push(b'\'');
+                        k += 1;
+                        break;
+                    }
+                    out.push(bytes[k]);
+                    k += 1;
+                }
+                i = k;
+                continue;
+            }
+            // Simple single-byte char literal `'x'` (close quote at i+2).
+            if i + 2 < n && bytes[i + 2] == b'\'' {
+                out.extend_from_slice(&bytes[i..=i + 2]);
+                i += 3;
+                continue;
+            }
+            // Otherwise a lifetime — fall through to normal byte handling.
+        }
+        // Line comment //
+        if c == b'/' && i + 1 < n && bytes[i + 1] == b'/' {
+            let mut k = i;
+            while k < n && bytes[k] != b'\n' {
+                out.push(b' ');
+                k += 1;
+            }
+            i = k;
+            continue;
+        }
+        // Block comment /* ... */ with nesting support.
+        if c == b'/' && i + 1 < n && bytes[i + 1] == b'*' {
+            let mut depth = 1u32;
+            out.push(b' ');
+            out.push(b' ');
+            let mut k = i + 2;
+            while k < n && depth > 0 {
+                if k + 1 < n && bytes[k] == b'/' && bytes[k + 1] == b'*' {
+                    depth += 1;
+                    out.push(b' ');
+                    out.push(b' ');
+                    k += 2;
+                    continue;
+                }
+                if k + 1 < n && bytes[k] == b'*' && bytes[k + 1] == b'/' {
+                    depth -= 1;
+                    out.push(b' ');
+                    out.push(b' ');
+                    k += 2;
+                    continue;
+                }
+                if bytes[k] == b'\n' {
+                    out.push(b'\n');
+                } else {
+                    out.push(b' ');
+                }
+                k += 1;
+            }
+            i = k;
+            continue;
+        }
+        out.push(c);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Blank every `#[cfg(test)]`-attributed ITEM in place (newlines preserved)
+/// instead of truncating at the first marker, so production code AFTER a
+/// cfg-test item survives the scan. The blanked span runs from the attribute to
+/// either the matching close brace of the item's first `{…}` body (an inline
+/// `mod` / `fn` test item) or the `;` terminating a body-less declaration
+/// (`#[cfg(test)] … mod foo;`), whichever comes first at item level —
+/// string-aware so a `{` / `;` inside a string literal (e.g. a `#[path = "…"]`)
+/// is skipped. Expects comment-stripped input (run after
+/// [`carrier_strip_comments`]).
+fn carrier_strip_inline_cfg_test_items(src: &str) -> String {
+    let bytes = src.as_bytes();
+    let n = bytes.len();
+    let mut out = bytes.to_vec();
+    let needle = b"#[cfg(test)]";
+    let mut i = 0usize;
+    while i + needle.len() <= n {
+        if &bytes[i..i + needle.len()] != needle {
+            i += 1;
+            continue;
+        }
+        // Find the end of this cfg-test item at item level.
+        let mut j = i + needle.len();
+        let mut end = n;
+        let mut depth: i32 = 0;
+        let mut started_body = false;
+        while j < n {
+            match bytes[j] {
+                b'"' => {
+                    // Skip a regular string literal (with \" escapes).
+                    j += 1;
+                    while j < n {
+                        if bytes[j] == b'\\' && j + 1 < n {
+                            j += 2;
+                            continue;
+                        }
+                        if bytes[j] == b'"' {
+                            j += 1;
+                            break;
+                        }
+                        j += 1;
+                    }
+                    continue;
+                }
+                b'{' => {
+                    depth += 1;
+                    started_body = true;
+                }
+                b'}' => {
+                    depth -= 1;
+                    if started_body && depth == 0 {
+                        end = j + 1;
+                        break;
+                    }
+                }
+                b';' if !started_body && depth == 0 => {
+                    end = j + 1;
+                    break;
+                }
+                _ => {}
+            }
+            j += 1;
+        }
+        for slot in out.iter_mut().take(end).skip(i) {
+            if *slot != b'\n' {
+                *slot = b' ';
+            }
+        }
+        i = end;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Extract the union of EVERY comma-separated trait list across all STACKED
@@ -20068,5 +20284,798 @@ fn hot_type_ref_is_distinct_handle_and_not_hash_or_ord_derived() {
     assert!(
         !derive_list_has_hash_or_ord("Debug, Clone, PartialOrd, PartialEq"),
         "self-test: `PartialOrd` must not be a substring false-positive for `Ord`"
+    );
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// PARSELOWER Stage 2 — query-free structural lowerer guards.
+//
+// The session-owned structural lowerer (`structural_lower.rs`) EMITS the
+// dormant graph carriers from the owned `TypeExpr` without performing any
+// name / import / type resolution. These guards lock its query-free, emit-only
+// contract and the worker-side dep barrier.
+// ───────────────────────────────────────────────────────────────────────────
+
+/// The query-free structural lowerer performs NO resolution / host query: its
+/// production code must not reach a dispatcher, resolver context, query key, or
+/// host / type-provider surface. Carrier RESOLUTION is Stage-3's demand-time
+/// concern; the lowerer only emits typed carriers.
+#[test]
+fn session_graph_lowerer_makes_no_query() {
+    let src = read_workspace_file(
+        "crates/verter_session/src/project_semantic_dispatch/structural_lower.rs",
+    );
+    let production = carrier_production_code(&src);
+    // Anti-vacuity: the extractor found the real lowerer production code.
+    assert!(
+        production.contains("fn lower_type_expr_structural"),
+        "guard must extract the real structural lowerer production code"
+    );
+    for forbidden in [
+        "ProjectSemanticDispatch",
+        "ResolverContext",
+        "SemanticQueryKey",
+        ".execute(",
+        "execute_read",
+        "execute_type_node",
+        "resolve_bare_name_in_scope",
+        "resolve_type_dependency_canonical",
+        "prepared_decl_bundle",
+        "ensure_indexed_ready",
+        "type_provider",
+        "tsserver",
+        // Assembled at compile time so this needle list does not itself carry
+        // the literal identifier and trip the
+        // `no_session_solver_host_in_production_code` retired-symbol scanner,
+        // which greps non-`*_tests.rs` `crates/**` source for `SessionSolverHost`.
+        // The scan against `structural_lower.rs` is unchanged — it still looks
+        // for the full assembled identifier.
+        concat!("Session", "SolverHost"),
+    ] {
+        assert!(
+            !production.contains(forbidden),
+            "the query-free structural lowerer (structural_lower.rs) must perform NO \
+             resolution / host query — found `{forbidden}` in production code. Carrier \
+             resolution is Stage-3's demand-time concern; emit a typed carrier instead."
+        );
+    }
+    // Self-discrimination through the SAME extractor (never a bare
+    // `synthetic.contains(...)`):
+    //   POSITIVE — a real `.execute(` / `execute_read` query IS detected.
+    let positive = "fn f() { let _ = self.execute_read(key); }";
+    assert!(
+        carrier_production_code(positive).contains("execute_read"),
+        "scanner self-test (positive): a production `execute_read` query must be detected"
+    );
+    //   NEGATIVE-1 — a query token only in a `//` comment is stripped.
+    let comment_only = "fn f() {} // execute_type_node is only described in prose";
+    assert!(
+        !carrier_production_code(comment_only).contains("execute_type_node"),
+        "scanner self-test (negative, comment): a commented query token must be stripped"
+    );
+    //   NEGATIVE-2 — a query token only after `#[cfg(test)]` is excluded.
+    let test_only = "fn prod() {}\n#[cfg(test)]\nmod t { fn g() { d.execute_read(k); } }";
+    assert!(
+        !carrier_production_code(test_only).contains("execute_read"),
+        "scanner self-test (negative, cfg-test): a query token after `#[cfg(test)]` must be excluded"
+    );
+}
+
+/// During EMISSION the structural lowerer never raises / materializes a carrier
+/// back to `TypeExpr`: materialization is the reverse OUTPUT boundary
+/// (`raise.rs`), not part of forward lowering. Static half (this test) — the
+/// lowerer's production code references no materialize / raise helper; the
+/// runtime half lives in `structural_lower_tests.rs`
+/// (`structural_root_is_an_unmaterialized_carrier`), which lowers `Foo<Bar>` and
+/// an import type and asserts the emitted root stays a `BareRef` / `ImportType`
+/// carrier.
+#[test]
+fn unresolved_carriers_not_materialized_during_emission() {
+    let src = read_workspace_file(
+        "crates/verter_session/src/project_semantic_dispatch/structural_lower.rs",
+    );
+    let production = carrier_production_code(&src);
+    assert!(
+        production.contains("fn lower_type_expr_structural"),
+        "guard must extract the real structural lowerer production code"
+    );
+    for forbidden in [
+        "materialize_type_expr",
+        "raise_node_to_type_expr",
+        "raise_index_key_to_type_expr",
+        "raise_and_reduce",
+    ] {
+        assert!(
+            !production.contains(forbidden),
+            "the structural lowerer must EMIT carriers, never materialize / raise them \
+             back to TypeExpr during emission — found `{forbidden}` in production code. \
+             Materialization is the reverse OUTPUT boundary (raise.rs), not forward lowering."
+        );
+    }
+    // Self-discrimination through the SAME extractor:
+    //   POSITIVE — a real `materialize_type_expr` call IS detected.
+    let positive = "fn f() { let _ = self.materialize_type_expr(handle); }";
+    assert!(
+        carrier_production_code(positive).contains("materialize_type_expr"),
+        "scanner self-test (positive): a production `materialize_type_expr` call must be detected"
+    );
+    //   NEGATIVE-1 — a raise token only in a `//` comment is stripped.
+    let comment_only = "fn f() {} // raise_node_to_type_expr is the reverse boundary";
+    assert!(
+        !carrier_production_code(comment_only).contains("raise_node_to_type_expr"),
+        "scanner self-test (negative, comment): a commented raise token must be stripped"
+    );
+    //   NEGATIVE-2 — a raise token only after `#[cfg(test)]` is excluded.
+    let test_only = "fn prod() {}\n#[cfg(test)]\nmod t { fn g() { d.materialize_type_expr(h); } }";
+    assert!(
+        !carrier_production_code(test_only).contains("materialize_type_expr"),
+        "scanner self-test (negative, cfg-test): a raise token after `#[cfg(test)]` must be excluded"
+    );
+}
+
+/// Recursively collect production (`*.rs`, excluding `*_tests.rs`) files under
+/// `dir`. Test files are excluded — the guard locks the PRODUCTION worker
+/// surface; test code legitimately references session-graph types.
+fn collect_production_rs(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+    if !dir.exists() {
+        return;
+    }
+    for entry in fs::read_dir(dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display())) {
+        let path = entry.expect("dir entry").path();
+        if path.is_dir() {
+            collect_production_rs(&path, out);
+        } else if path.extension().and_then(|e| e.to_str()) == Some("rs")
+            && !path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.ends_with("_tests.rs"))
+                .unwrap_or(false)
+        {
+            out.push(path);
+        }
+    }
+}
+
+/// The OXC worker + semantic-lowering surface produces the owned `TypeExpr` IR
+/// ONLY — it never emits a session semantic-graph node. The semantic crate
+/// cannot even depend on session; this LOCKS that the worker surface (and the
+/// session-side retained-worker `decl_lowering`) stays free of the session-graph
+/// types, so session-graph emission can never leak into the worker.
+#[test]
+fn oxc_worker_emits_no_session_graph_node() {
+    let forbidden = [
+        "SemanticNodeData",
+        "SemanticNodeId",
+        "HotTypeRef",
+        "SemanticGraphStore",
+        "intern_node",
+    ];
+    let mut files: Vec<PathBuf> = Vec::new();
+    collect_production_rs(
+        &workspace_path("crates/verter_type_expr_oxc/src"),
+        &mut files,
+    );
+    collect_production_rs(
+        &workspace_path("crates/verter_semantic/src/analysis"),
+        &mut files,
+    );
+    files.push(workspace_path("crates/verter_session/src/decl_lowering.rs"));
+    // Anti-vacuity: the walker found a real, non-trivial worker surface.
+    assert!(
+        files.len() > 5,
+        "guard must find the OXC-worker / semantic-lowering surface files; found {}",
+        files.len()
+    );
+    for file in &files {
+        let src =
+            fs::read_to_string(file).unwrap_or_else(|e| panic!("read {}: {e}", file.display()));
+        let production = carrier_production_code(&src);
+        for tok in forbidden {
+            assert!(
+                !production.contains(tok),
+                "{}: the OXC-worker / semantic-lowering surface must emit owned TypeExpr IR \
+                 only — found session-graph `{tok}` in production code. The semantic crate \
+                 cannot depend on session; session-graph emission is the worker's forbidden side.",
+                file.display()
+            );
+        }
+    }
+    // Self-discrimination through the SAME extractor:
+    //   POSITIVE — a real production `intern_node` call IS detected.
+    let positive = "fn f() { graph.intern_node(data); }";
+    assert!(
+        carrier_production_code(positive).contains("intern_node"),
+        "scanner self-test (positive): a production `intern_node` call must be detected"
+    );
+    //   NEGATIVE-1 — a session-graph token only in a `//` comment is stripped.
+    let comment_only = "fn f() {} // SemanticNodeData appears only in this prose";
+    assert!(
+        !carrier_production_code(comment_only).contains("SemanticNodeData"),
+        "scanner self-test (negative, comment): a commented session-graph token must be stripped"
+    );
+    //   NEGATIVE-2 — a session-graph token only after `#[cfg(test)]` is excluded.
+    let test_only = "fn prod() {}\n#[cfg(test)]\nmod t { let _ = SemanticNodeId(0); }";
+    assert!(
+        !carrier_production_code(test_only).contains("SemanticNodeId"),
+        "scanner self-test (negative, cfg-test): a session-graph token after `#[cfg(test)]` must be excluded"
+    );
+}
+
+/// Self-test for the strengthened `carrier_production_code` extractor (PLS2 fix
+/// F): it must match the robust Stage-1 strippers — (1) scan production code
+/// AFTER an inline `#[cfg(test)]` item (blank the test item in place, never
+/// truncate at the first marker) and (2) NOT false-positive on a token inside a
+/// `/* */` block comment. Both halves FAIL against the weak split-once +
+/// `//`-only extractor.
+#[test]
+fn carrier_production_code_scans_post_cfg_test_and_strips_block_comments() {
+    // (1) Production code AFTER an inline cfg-test module is still scanned: the
+    //     forbidden token in `fn prod` survives, while the token inside the
+    //     cfg-test block is excluded. The weak split-once extractor truncates
+    //     at the leading `#[cfg(test)]`, losing `fn prod` entirely.
+    let post_cfg = "#[cfg(test)]\nmod t { let inert = execute_read(); }\n\
+                    fn prod() { let hit = intern_node(); }";
+    let scanned = carrier_production_code(post_cfg);
+    assert!(
+        scanned.contains("intern_node"),
+        "production code AFTER a cfg-test item must still be scanned"
+    );
+    assert!(
+        !scanned.contains("execute_read"),
+        "a token inside the cfg-test block must be excluded"
+    );
+
+    // (2) A token inside a `/* */` block comment must NOT be a false positive.
+    //     The weak `//`-only stripper leaves the block-comment token intact.
+    let block_comment = "fn prod() { /* execute_read happens elsewhere */ let ok = 1; }";
+    assert!(
+        !carrier_production_code(block_comment).contains("execute_read"),
+        "a token inside a `/* */` block comment must not be a false positive"
+    );
+
+    // Anti-vacuity: a forbidden token in genuine production code IS still seen.
+    assert!(
+        carrier_production_code("fn prod() { let _ = execute_read(); }").contains("execute_read"),
+        "a production token must still be detected by the strengthened extractor"
+    );
+
+    // (3) A `'"'` char literal must NOT open string mode. Pre-fix the lone `"`
+    //     inside the char literal opened a phantom string that disabled
+    //     comment-stripping to end of input, so a token inside the following
+    //     `//` comment leaked into the scan (false positive).
+    let char_quote = "let _q = '\"'; // intern_node\nfn prod() { let hit = execute_read(); }";
+    let scanned = carrier_production_code(char_quote);
+    assert!(
+        !scanned.contains("intern_node"),
+        "a `//` comment after a `'\"'` char literal must still be stripped"
+    );
+    assert!(
+        scanned.contains("execute_read"),
+        "real code after a `'\"'` char literal and comment must still be scanned"
+    );
+
+    // (4) A lifetime (`'a`) is NOT a char literal and must pass through
+    //     untouched — a naive char arm that scanned to the next `'` would mask
+    //     the real code that follows.
+    assert!(
+        carrier_production_code("fn f<'a>(x: &'a str) { let _ = execute_read(); }")
+            .contains("execute_read"),
+        "a lifetime must not be mistaken for a char literal that masks later code"
+    );
+}
+
+/// The lowerer's defining module — the one production file that may NAME
+/// `lower_type_expr_structural` (its definition + rustdoc). Any OTHER
+/// production file naming it is a caller, i.e. a wiring of the dormant lowerer.
+const STRUCTURAL_LOWERER_DEFINING_MODULE: &str = "project_semantic_dispatch/structural_lower.rs";
+
+/// Production references to the structural lowerer's public entry that are NOT
+/// in its defining module — callers that would wake the dormant lowerer.
+/// `hits` is the `(loc, ident)` list from [`session_production_ident_hits`]
+/// (which already strips comments, `#[cfg(test)]` items, and `*_tests.rs`).
+fn structural_lowerer_foreign_callers(hits: &[(String, String)]) -> Vec<(String, String)> {
+    hits.iter()
+        .filter(|(loc, _)| !loc.contains(STRUCTURAL_LOWERER_DEFINING_MODULE))
+        .cloned()
+        .collect()
+}
+
+/// DORMANT-WIRING: the query-free structural lowerer (`structural_lower.rs`)
+/// stays DORMANT — its public entry `lower_type_expr_structural` has ZERO
+/// production call sites until the carrier-resolution work wires it. The
+/// emit-only / no-query guards cannot catch OMISSION (a consumer walker that
+/// root-kind-matches a carrier and silently drops its `type_args`); the
+/// deferred consumer-walker carrier-arg descent (the `meta_resolve`
+/// ref/cycle/dep walkers, the `build.rs` type-param collector, the exactness
+/// classifiers) is owed BEFORE the lowerer may feed those walkers non-empty
+/// carrier args. This guard pins that ordering: the lowerer cannot be wired
+/// (and thus cannot feed non-empty carriers to the still-naive walkers)
+/// without removing this guard — which the carrier-resolution work does in the
+/// SAME change that lands the consumer-walker descent and its integration
+/// tests. `lower_type_expr_structural` is the sole `pub(crate)` entry, so any
+/// caller necessarily references it by name; an external crate cannot reach a
+/// `pub(crate)` fn, so the `verter_session` production scan is the complete scope.
+#[test]
+fn structural_lowerer_has_no_production_caller_until_carrier_resolution() {
+    let hits = session_production_ident_hits(&["lower_type_expr_structural"]);
+    // Anti-vacuity: the scan must SEE the lowerer's defining-module definition,
+    // else the scanner / scan root regressed and the guard is decorative.
+    assert!(
+        hits.iter()
+            .any(|(loc, _)| loc.contains(STRUCTURAL_LOWERER_DEFINING_MODULE)),
+        "anti-vacuity: the production scan must see the lowerer's defining module \
+         (`{STRUCTURAL_LOWERER_DEFINING_MODULE}`) — its absence means the scanner regressed. \
+         Hits: {hits:#?}"
+    );
+    let foreign = structural_lowerer_foreign_callers(&hits);
+    assert!(
+        foreign.is_empty(),
+        "the query-free structural lowerer `lower_type_expr_structural` has a PRODUCTION \
+         caller outside its defining module — it must stay DORMANT until the carrier-resolution \
+         work wires it TOGETHER with the deferred consumer-walker carrier-arg descent and the \
+         carrier-resolution integration tests. Wiring it earlier feeds non-empty carrier \
+         `type_args` into walkers that silently drop them. Remove this guard only in the same \
+         change that lands the consumer-walker descent + integration tests: {foreign:#?}"
+    );
+}
+
+/// Self-test for the dormancy classifier ([`structural_lowerer_foreign_callers`]):
+/// the defining-module DEFINITION is not a caller (dormant → no violation), and a
+/// SYNTHETIC production caller in any other module IS reported (early wiring → fail).
+#[test]
+fn structural_lowerer_dormancy_detector_discriminates() {
+    // DORMANT — only the defining-module definition is present; not a caller.
+    let dormant = vec![(
+        "crates/verter_session/src/project_semantic_dispatch/structural_lower.rs:216".to_string(),
+        "lower_type_expr_structural".to_string(),
+    )];
+    assert!(
+        structural_lowerer_foreign_callers(&dormant).is_empty(),
+        "dormant: the defining-module definition line is not a foreign caller"
+    );
+    // WIRED — a SYNTHETIC production caller in another module (a carrier-resolution
+    // consumer walker wired prematurely) is the SOLE reported violation; the
+    // defining-module definition is correctly NOT reported.
+    let wired = vec![
+        (
+            "crates/verter_session/src/project_semantic_dispatch/structural_lower.rs:216"
+                .to_string(),
+            "lower_type_expr_structural".to_string(),
+        ),
+        (
+            "crates/verter_session/src/meta_resolve/slot_binding_graph.rs:512".to_string(),
+            "lower_type_expr_structural".to_string(),
+        ),
+    ];
+    let foreign = structural_lowerer_foreign_callers(&wired);
+    assert_eq!(
+        foreign.len(),
+        1,
+        "a synthetic foreign caller must be the SOLE reported dormancy violation"
+    );
+    assert!(
+        foreign[0].0.contains("meta_resolve/slot_binding_graph.rs"),
+        "the reported violation is the synthetic foreign caller, not the definition"
+    );
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// PARSELOWER carrier-class anti-tail guard (additive).
+//
+// The three unresolved carriers that apply type arguments — `BareRef`
+// (`Foo<Arg>`), `TypeOf` (`typeof f<Arg>`), `ImportType`
+// (`import("m").G<Arg>`) — expose their `type_args` through the single shared
+// `SemanticNodeData::carrier_type_args` accessor. Every structural graph
+// walker that DESCENDS a carrier's type arguments (openness, infer detection,
+// …) must route them through that accessor, so a future carrier with args is
+// covered in one place AND a NEW arg-descending scan site cannot silently DROP
+// the args. Two structural scan sites previously dropped the args and now
+// descend via the accessor (absorb's infer scan, the open-node value-body
+// walk). `is_deferred` is a ROOT-KIND classifier — it recognizes `BareRef` /
+// `ImportType` as deferred-roots BY KIND, with no `carrier_type_args()` call
+// and no arg descent, so it is NOT an accessor-descent site and is correctly
+// absent from the allowlist. This guard prevents recurrence by forbidding a
+// NEW production site that hand-binds a carrier `type_args` field directly
+// outside the enumerated identity / reconstruction / construction boundaries.
+// ════════════════════════════════════════════════════════════════════════
+
+/// The complete set of production sites that legitimately hand-bind a
+/// carrier (`BareRef` / `TypeOf` / `ImportType`) `type_args` field DIRECTLY
+/// (rather than reading it through the shared `carrier_type_args` accessor),
+/// keyed by EXACT `(relative-path, fn-name)` — NOT by bare fn-name. Keying by
+/// name alone would let a future direct carrier-`type_args` traversal in any
+/// unrelated `fn hash` / `fn eq` / `fn lower_node` slip through; the path pin
+/// restricts each boundary to the one file that genuinely owns it.
+///
+/// These are identity / reconstruction / rendering / rewrite / construction
+/// boundaries — NOT scan/classify walkers, which MUST use the accessor:
+///
+/// - `carrier_type_args` — the shared accessor itself (`semantic_query.rs`).
+/// - `eq` / `hash` — `SemanticNodeData` structural identity (`type_args` is
+///   part of a carrier's identity) (`semantic_query.rs`).
+/// - `raise_node_to_type_expr_inner` — the reverse OUTPUT boundary rebuilding
+///   the `TypeExpr` from every carrier field (`raise.rs`).
+/// - `display_type_node` — the display / render boundary (`display.rs`).
+/// - `substitute_with_change_tracking_inner` — the rewrite boundary that
+///   re-substitutes each carrier arg (`substitute.rs`).
+/// - `subtree_references_node` — the read-only reachability scan that descends
+///   the args to its worklist (`substitute.rs`).
+/// - `lower_node` — the query-free structural lowerer that CONSTRUCTS the
+///   carriers with their lowered args (`structural_lower.rs`).
+///
+/// A NEW production site binding a carrier `type_args` field whose
+/// `(path, fn)` pair is not listed here fails
+/// [`no_new_direct_carrier_type_args_traversal_outside_accessor_or_allowlist`]:
+/// route it through `carrier_type_args`, or — if it is a genuine
+/// identity/reconstruction boundary — add the exact pair here WITH justification.
+const CARRIER_TYPEARGS_DIRECT_BIND_ALLOWLIST: &[(&str, &str)] = &[
+    (
+        "crates/verter_session/src/semantic_query.rs",
+        "carrier_type_args",
+    ),
+    ("crates/verter_session/src/semantic_query.rs", "eq"),
+    ("crates/verter_session/src/semantic_query.rs", "hash"),
+    (
+        "crates/verter_session/src/project_semantic_dispatch/raise.rs",
+        "raise_node_to_type_expr_inner",
+    ),
+    (
+        "crates/verter_session/src/semantic_query/display.rs",
+        "display_type_node",
+    ),
+    (
+        "crates/verter_session/src/project_semantic_dispatch/substitute.rs",
+        "substitute_with_change_tracking_inner",
+    ),
+    (
+        "crates/verter_session/src/project_semantic_dispatch/substitute.rs",
+        "subtree_references_node",
+    ),
+    (
+        "crates/verter_session/src/project_semantic_dispatch/structural_lower.rs",
+        "lower_node",
+    ),
+];
+
+/// Whether a carrier `type_args` direct-bind at `(rel, fn_name)` is an
+/// allowlisted identity/reconstruction/render/rewrite/construction boundary.
+/// Path-exact: the same fn-name in a different file is NOT allowlisted.
+fn carrier_typeargs_bind_is_allowlisted(rel: &str, fn_name: &str) -> bool {
+    CARRIER_TYPEARGS_DIRECT_BIND_ALLOWLIST
+        .iter()
+        .any(|(p, n)| *p == rel && *n == fn_name)
+}
+
+/// Whether `word` occurs in `s` as a whole identifier token (boundaries are
+/// non-`[A-Za-z0-9_]`), so `type_args` does NOT match inside `type_arguments`.
+fn contains_ident_word(s: &str, word: &str) -> bool {
+    let bytes = s.as_bytes();
+    let wb = word.as_bytes();
+    let n = bytes.len();
+    let m = wb.len();
+    if m == 0 || m > n {
+        return false;
+    }
+    let is_ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    let mut i = 0usize;
+    while i + m <= n {
+        if &bytes[i..i + m] == wb {
+            let before_ok = i == 0 || !is_ident(bytes[i - 1]);
+            let after_ok = i + m >= n || !is_ident(bytes[i + m]);
+            if before_ok && after_ok {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Every `fn NAME` declaration's byte offset + name, in source order. `fn` is
+/// matched as a standalone keyword (preceded by a non-identifier byte).
+fn carrier_fn_decl_positions(src: &str) -> Vec<(usize, String)> {
+    let bytes = src.as_bytes();
+    let n = bytes.len();
+    let is_ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    let mut out: Vec<(usize, String)> = Vec::new();
+    let mut i = 0usize;
+    while i < n {
+        if i + 3 <= n
+            && &bytes[i..i + 2] == b"fn"
+            && (bytes[i + 2] == b' ' || bytes[i + 2] == b'\t' || bytes[i + 2] == b'\n')
+            && (i == 0 || !is_ident(bytes[i - 1]))
+        {
+            let mut j = i + 2;
+            while j < n && bytes[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            let name_start = j;
+            while j < n && is_ident(bytes[j]) {
+                j += 1;
+            }
+            if j > name_start {
+                out.push((i, src[name_start..j].to_string()));
+            }
+            i = j;
+            continue;
+        }
+        i += 1;
+    }
+    out
+}
+
+/// The enclosing function NAME for a byte offset — the nearest `fn NAME`
+/// declared before it in source order. `<module-scope>` if none precedes.
+fn carrier_enclosing_fn(decls: &[(usize, String)], pos: usize) -> String {
+    decls
+        .iter()
+        .rev()
+        .find(|(p, _)| *p < pos)
+        .map(|(_, name)| name.clone())
+        .unwrap_or_else(|| "<module-scope>".to_string())
+}
+
+/// The set of enclosing function names that DIRECTLY bind a carrier
+/// (`BareRef` / `TypeOf` / `ImportType`) `type_args` field — i.e. a
+/// `::{carrier} { … type_args … }` destructure or construction. A root-kind-
+/// only arm (`::{carrier} { .. }`, no `type_args`) is NOT reported — those
+/// classify by root kind, child-independently, and never drop args. The
+/// `::`-anchor matches `Self::` and `SemanticNodeData::` qualifiers; the
+/// whole-word `type_args` requirement excludes both `SemanticQueryKey::TypeOf`
+/// (no `type_args` field) and `TypeExpr::ImportType { type_arguments }` (a
+/// different field). Expects comment-and-cfg-test-stripped input
+/// ([`carrier_production_code`]).
+fn carrier_typeargs_binding_fns(production: &str) -> std::collections::BTreeSet<String> {
+    use std::collections::BTreeSet;
+    let bytes = production.as_bytes();
+    let n = bytes.len();
+    let is_ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    let carriers = ["BareRef", "TypeOf", "ImportType"];
+    let decls = carrier_fn_decl_positions(production);
+    let mut hits: BTreeSet<String> = BTreeSet::new();
+    let mut i = 0usize;
+    while i + 2 <= n {
+        if &bytes[i..i + 2] == b"::" {
+            let after = i + 2;
+            let mut matched = false;
+            for carrier in carriers {
+                let cb = carrier.as_bytes();
+                if after + cb.len() <= n && &bytes[after..after + cb.len()] == cb {
+                    let bpos = after + cb.len();
+                    // Carrier-name token boundary (reject `::TypeOfContext`).
+                    if bpos < n && is_ident(bytes[bpos]) {
+                        continue;
+                    }
+                    // Skip whitespace to the destructure / construction `{`.
+                    let mut j = bpos;
+                    while j < n && bytes[j].is_ascii_whitespace() {
+                        j += 1;
+                    }
+                    if j < n && bytes[j] == b'{' {
+                        // Brace-balanced inner span of the carrier's `{ … }`.
+                        let inner_start = j + 1;
+                        let mut depth = 1i32;
+                        let mut k = inner_start;
+                        while k < n {
+                            match bytes[k] {
+                                b'{' => depth += 1,
+                                b'}' => {
+                                    depth -= 1;
+                                    if depth == 0 {
+                                        break;
+                                    }
+                                }
+                                _ => {}
+                            }
+                            k += 1;
+                        }
+                        let inner = &production[inner_start..k.min(n)];
+                        if contains_ident_word(inner, "type_args") {
+                            hits.insert(carrier_enclosing_fn(&decls, i));
+                        }
+                        i = bpos;
+                        matched = true;
+                        break;
+                    }
+                }
+            }
+            if matched {
+                continue;
+            }
+        }
+        i += 1;
+    }
+    hits
+}
+
+/// ANTI-TAIL: no NEW production site may hand-bind a carrier (`BareRef` /
+/// `TypeOf` / `ImportType`) `type_args` field directly outside the shared
+/// `carrier_type_args` accessor or the enumerated identity / reconstruction /
+/// construction boundaries ([`CARRIER_TYPEARGS_DIRECT_BIND_ALLOWLIST`]). A
+/// scan/classify walker that hand-binds the field can silently DROP the args
+/// (the carrier-scan class — absorb / open-node / `is_deferred`); routing
+/// through the accessor makes the args impossible to forget.
+#[test]
+fn no_new_direct_carrier_type_args_traversal_outside_accessor_or_allowlist() {
+    use std::collections::BTreeSet;
+    use walkdir::WalkDir;
+
+    let workspace = workspace_root();
+    let src_root = workspace.join("crates/verter_session/src");
+    let mut violations: Vec<String> = Vec::new();
+    let mut all_detected: BTreeSet<(String, String)> = BTreeSet::new();
+
+    for entry in WalkDir::new(&src_root) {
+        let entry = entry.expect("walkdir entry");
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        let rel = path
+            .strip_prefix(&workspace)
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
+        // Test-module / fixture files are NOT production code (the inline
+        // `#[cfg(test)]` strip covers production files; whole test modules
+        // are excluded here by filename).
+        if rel.ends_with("_tests.rs") || rel.ends_with("/tests.rs") || rel.contains("/tests/") {
+            continue;
+        }
+        let src = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {rel}: {e}"));
+        let production = carrier_production_code(&src);
+        for f in carrier_typeargs_binding_fns(&production) {
+            all_detected.insert((rel.clone(), f.clone()));
+            if !carrier_typeargs_bind_is_allowlisted(&rel, &f) {
+                violations.push(format!(
+                    "{rel}: fn `{f}` hand-binds a carrier (`BareRef`/`TypeOf`/`ImportType`) \
+                     `type_args` field directly — route it through the shared \
+                     `SemanticNodeData::carrier_type_args` accessor, or (if it is a genuine \
+                     identity/reconstruction/render/rewrite boundary) add the exact \
+                     `(path, fn)` pair to `CARRIER_TYPEARGS_DIRECT_BIND_ALLOWLIST` with justification"
+                ));
+            }
+        }
+    }
+
+    // Anti-vacuity: the scan MUST detect the known direct-bind sites across the
+    // real tree (the accessor, the lowerer construction, the reverse boundary,
+    // the rewrite boundary), each at its EXACT owning path. A missing one means
+    // the detector or the scan root regressed and the guard is silently passing.
+    for known in [
+        (
+            "crates/verter_session/src/semantic_query.rs",
+            "carrier_type_args",
+        ),
+        (
+            "crates/verter_session/src/project_semantic_dispatch/structural_lower.rs",
+            "lower_node",
+        ),
+        (
+            "crates/verter_session/src/project_semantic_dispatch/raise.rs",
+            "raise_node_to_type_expr_inner",
+        ),
+        (
+            "crates/verter_session/src/project_semantic_dispatch/substitute.rs",
+            "substitute_with_change_tracking_inner",
+        ),
+    ] {
+        assert!(
+            all_detected.contains(&(known.0.to_string(), known.1.to_string())),
+            "anti-vacuity: the carrier `type_args` scan must detect the known direct-bind \
+             site `{}` in `{}` — its absence means the detector or scan root regressed. \
+             Detected: {all_detected:?}",
+            known.1,
+            known.0
+        );
+    }
+
+    assert!(
+        violations.is_empty(),
+        "NEW direct carrier `type_args` traversal arm(s) outside the accessor / allowlist \
+         (PARSELOWER carrier-class anti-tail):\n{}",
+        violations.join("\n")
+    );
+}
+
+/// Self-tests for the carrier `type_args` anti-tail detector
+/// ([`carrier_typeargs_binding_fns`]) + the path-exact allowlist predicate
+/// ([`carrier_typeargs_bind_is_allowlisted`]) — POSITIVE (an allowlisted-shape
+/// bind is detected and attributed to its fn at its owning path), NEGATIVE (an
+/// UNLISTED scan site is caught), PATH-SCOPING (a `fn hash` carrier-`type_args`
+/// bind is allowlisted ONLY in `semantic_query.rs` and REJECTED elsewhere), and
+/// DISCRIMINATION (a root-kind-only arm, a commented mention, and the different
+/// `type_arguments` field are NOT flagged). All run through the SAME extractor
+/// + detector + predicate the guard uses, never a bare `contains`.
+#[test]
+fn carrier_typeargs_anti_tail_detector_discriminates() {
+    // POSITIVE — an allowlisted construction site is detected and attributed to
+    // its enclosing fn, and that `(path, fn)` pair is allowlisted (the guard
+    // passes for the lowerer's own file).
+    let allow = "fn lower_node() { let _ = SemanticNodeData::BareRef { name, scope, type_args }; }";
+    let allow_fns = carrier_typeargs_binding_fns(&carrier_production_code(allow));
+    assert!(
+        allow_fns.contains("lower_node"),
+        "positive: a carrier `type_args` bind must be attributed to its enclosing fn"
+    );
+    assert!(
+        allow_fns
+            .iter()
+            .all(|f| carrier_typeargs_bind_is_allowlisted(
+                "crates/verter_session/src/project_semantic_dispatch/structural_lower.rs",
+                f
+            )),
+        "positive: the lowerer's `(structural_lower.rs, lower_node)` pair must pass the predicate"
+    );
+
+    // NEGATIVE — a NEW unlisted scan site binding a carrier `type_args` is
+    // detected AND no `(path, fn)` pair allowlists it, so the guard would flag it.
+    let evil = "fn evil_openness_scan(d: &SemanticNodeData) -> bool { \
+                matches!(d, SemanticNodeData::TypeOf { type_args, .. } if !type_args.is_empty()) }";
+    let evil_fns = carrier_typeargs_binding_fns(&carrier_production_code(evil));
+    assert!(
+        evil_fns.contains("evil_openness_scan"),
+        "negative: a NEW unlisted carrier `type_args` bind must be detected"
+    );
+    assert!(
+        !carrier_typeargs_bind_is_allowlisted(
+            "crates/verter_session/src/meta_resolve/graph_predicates.rs",
+            "evil_openness_scan"
+        ),
+        "negative: the synthetic scan site is on no `(path, fn)` pair → the guard catches it"
+    );
+
+    // PATH-SCOPING (S2) — a `fn hash` (or `fn eq`) that hand-binds a carrier
+    // `type_args` field is the legitimate `SemanticNodeData` identity boundary
+    // ONLY in `semantic_query.rs`. The SAME broad fn-name binding a carrier in
+    // ANY OTHER file is a new direct traversal and MUST be REJECTED — the
+    // allowlist keys by `(path, fn)`, so a bare-name match cannot disarm it.
+    let evil_hash =
+        "fn hash() { let _ = SemanticNodeData::ImportType { specifier, name, type_args }; }";
+    let evil_hash_fns = carrier_typeargs_binding_fns(&carrier_production_code(evil_hash));
+    assert!(
+        evil_hash_fns.contains("hash"),
+        "path-scoping: a carrier `type_args` bind inside `fn hash` must be detected"
+    );
+    assert!(
+        carrier_typeargs_bind_is_allowlisted("crates/verter_session/src/semantic_query.rs", "hash"),
+        "path-scoping: `fn hash` IS the SemanticNodeData identity boundary in semantic_query.rs"
+    );
+    assert!(
+        !carrier_typeargs_bind_is_allowlisted(
+            "crates/verter_session/src/meta_resolve/graph_predicates.rs",
+            "hash"
+        ),
+        "path-scoping: the SAME `fn hash` in a NON-semantic_query.rs file is a new direct \
+         carrier `type_args` traversal — it must NOT be allowlisted"
+    );
+
+    // DISCRIMINATION-1 — a root-kind-only arm (`{ .. }`, no `type_args`) is the
+    // legitimate `is_deferred`-style classifier shape and must NOT be flagged.
+    let root_kind = "fn classifier(d: &SemanticNodeData) -> bool { \
+                     matches!(d, SemanticNodeData::BareRef { .. } \
+                     | SemanticNodeData::ImportType { .. } | SemanticNodeData::TypeOf { .. }) }";
+    assert!(
+        carrier_typeargs_binding_fns(&carrier_production_code(root_kind)).is_empty(),
+        "discrimination: a root-kind-only carrier arm (no `type_args` bind) must NOT be flagged"
+    );
+
+    // DISCRIMINATION-2 — a `type_args` mention only inside a `//` comment is
+    // stripped by `carrier_production_code` and must NOT be flagged.
+    let commented = "fn doc_only() {\n// SemanticNodeData::BareRef { type_args } described in prose\n let _ = 1; }";
+    assert!(
+        carrier_typeargs_binding_fns(&carrier_production_code(commented)).is_empty(),
+        "discrimination: a commented carrier `type_args` mention must be stripped, not flagged"
+    );
+
+    // DISCRIMINATION-3 — `type_arguments` (the `TypeExpr::ImportType` field, a
+    // different token) must NOT satisfy the whole-word `type_args` match.
+    let other_field = "fn raises() { let _ = TypeExpr::ImportType { type_arguments }; }";
+    assert!(
+        carrier_typeargs_binding_fns(&carrier_production_code(other_field)).is_empty(),
+        "discrimination: `type_arguments` (a different field) must not match `type_args`"
     );
 }
