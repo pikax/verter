@@ -96,6 +96,24 @@ describe("urlState", () => {
       expect(result?.verterVersion).toBe("release:0.0.1");
     });
 
+    it("preserves the framework language pin", () => {
+      const state = makeState({
+        files: { "App.svelte": "<h1>hi</h1>" },
+        activeFile: "App.svelte",
+        language: "svelte",
+      });
+      serializeToHash(state);
+      const result = deserializeFromHash();
+      expect(result?.language).toBe("svelte");
+    });
+
+    it("omits the language pin when in Auto (undefined)", () => {
+      const state = makeState();
+      serializeToHash(state);
+      const result = deserializeFromHash();
+      expect(result?.language).toBeUndefined();
+    });
+
     it("preserves typeChecker", () => {
       const state = makeState({ typeChecker: "tsgo" });
       serializeToHash(state);
@@ -249,6 +267,22 @@ describe("urlState", () => {
       expect(flat["_isProduction"]).toBe("true");
     });
 
+    it("serializes _language when pinned", () => {
+      const state = makeState({ language: "svelte" });
+      serializeToHash(state);
+      const hash = location.hash.slice(1);
+      const flat = decodeHash(hash);
+      expect(flat["_language"]).toBe("svelte");
+    });
+
+    it("omits _language when in Auto (undefined)", () => {
+      const state = makeState();
+      serializeToHash(state);
+      const hash = location.hash.slice(1);
+      const flat = decodeHash(hash);
+      expect(flat["_language"]).toBeUndefined();
+    });
+
     it("serializes _typeChecker when not tsc", () => {
       const state = makeState({ typeChecker: "tsgo" });
       serializeToHash(state);
@@ -394,6 +428,24 @@ describe("urlState", () => {
       window.location.hash = `#${encodeFlat(flat)}`;
       const result = deserializeFromHash();
       expect(result!.outputMode).toBe("js");
+    });
+
+    it("extracts _language metadata", () => {
+      const flat: Record<string, string> = {
+        "App.svelte": "<h1>hi</h1>",
+        _language: "svelte",
+      };
+      window.location.hash = `#${encodeFlat(flat)}`;
+      const result = deserializeFromHash();
+      expect(result!.language).toBe("svelte");
+      expect(result!.files["_language"]).toBeUndefined();
+    });
+
+    it("returns undefined language when _language is absent", () => {
+      const flat: Record<string, string> = { "App.vue": "" };
+      window.location.hash = `#${encodeFlat(flat)}`;
+      const result = deserializeFromHash();
+      expect(result!.language).toBeUndefined();
     });
 
     it("extracts _typeChecker metadata", () => {

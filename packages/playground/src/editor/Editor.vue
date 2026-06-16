@@ -6,6 +6,7 @@ import { extractVueVersion } from "../core/importMap";
 import type { HostDiagnostic, LintDiagnostic } from "../core/types";
 import { registerLspProviders } from "./lspProviders";
 import { computeAutoCloseTagText } from "./templateIde";
+import { frameworkLanguageIdForFilename, isCarrierFilename } from "../core/frameworks";
 import { TypeScriptService, type MappedDiagnostic } from "./tsService";
 import { TsgoService } from "./tsgoService";
 import { getTypeDiagnosticsSourceMap } from "./diagnosticSourceMap";
@@ -44,7 +45,11 @@ let tsSyncTimer: ReturnType<typeof setTimeout> | null = null;
 const TS_SYNC_DEBOUNCE_MS = 300;
 
 function getLanguage(filename: string): string {
-  if (filename.endsWith(".vue")) return "vue";
+  // Framework carrier / adapter-module documents resolve to the framework's
+  // Monaco language id (descriptor-driven, longest-suffix). This takes priority
+  // over the base extensions so `store.svelte.ts` is "svelte", not "typescript".
+  const frameworkLangId = frameworkLanguageIdForFilename(filename);
+  if (frameworkLangId) return frameworkLangId;
   if (filename.endsWith(".ts")) return "typescript";
   if (filename.endsWith(".js")) return "javascript";
   if (filename.endsWith(".css")) return "css";
@@ -344,7 +349,9 @@ onMounted(() => {
   // Auto-close HTML/Vue tags inside <template> blocks when typing `>`.
   editor.value.onDidType((text) => {
     if (text !== ">") return;
-    if (!props.store.activeFilename.endsWith(".vue")) return;
+    // Auto-close tags inside any framework CARRIER document's markup (descriptor
+    // carrier extensions), not just Vue.
+    if (!isCarrierFilename(props.store.activeFilename)) return;
 
     const monacoEditor = editor.value;
     if (!monacoEditor) return;
