@@ -12,6 +12,7 @@
 
 pub mod api_projector;
 pub mod api_projectors;
+pub mod client_framework_manifest_ts;
 pub mod ctx;
 pub mod descriptor;
 pub mod language_classifier;

@@ -354,10 +354,13 @@ pub(super) async fn handle_initialized(server: &VerterLanguageServer, _params: I
                 watchers: vec![
                     FileSystemWatcher {
                         // Carrier-file watcher glob, built from the
-                        // registry's carrier rows. Includes carrier
-                        // rows without a registered implementation
-                        // (`.svelte`): their events produce no provider
-                        // sync state until a carrier lands.
+                        // registry's carrier rows. File-watching is a
+                        // SERVER concern (the client manifest carries no
+                        // watch globs); this glob is the descriptor-derived
+                        // authority. It covers carrier extensions today
+                        // (`.vue`, `.svelte`) — including carrier rows with
+                        // no registered implementation, whose events produce
+                        // no provider sync state until a carrier lands.
                         glob_pattern: GlobPattern::String(carrier_watch_glob()),
                         kind: watch_kind,
                     },

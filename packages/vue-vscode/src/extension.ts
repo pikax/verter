@@ -61,7 +61,12 @@ import {
 } from "./claudeCodeDetection";
 import { createActivationGate } from "./activationGate";
 import { readE2eEnv } from "./e2eEnv";
-import { shouldConfigureBuiltInTypeScriptPlugin } from "./startupOptimizations";
+import {
+  frameworkDocumentSelector,
+  frameworkClientLanguageIds,
+  isFrameworkCarrierLanguageId,
+  shouldConfigureTypeScriptPluginForLanguageId,
+} from "./frameworkWiring";
 import { StartupProbe, readStartupProbeConfig, writeTimingMarker } from "./startupProbe";
 import { shouldRestartLanguageServerForConfigurationChange } from "./languageServerConfig";
 import { addShowRecentAuditRecordsCommand } from "./audit";
@@ -206,7 +211,7 @@ async function activateExtension(context: ExtensionContext) {
     if (
       tsPluginConfigured ||
       tsPluginPromise ||
-      (!force && !shouldConfigureBuiltInTypeScriptPlugin(document?.languageId))
+      (!force && !shouldConfigureTypeScriptPluginForLanguageId(document?.languageId))
     ) {
       return tsPluginPromise;
     }
@@ -280,8 +285,8 @@ async function activateExtension(context: ExtensionContext) {
     return serverPromise;
   };
 
-  const ensureStartedForVueDocument = (document?: TextDocument) => {
-    if (document?.languageId !== "vue") {
+  const ensureStartedForFrameworkDocument = (document?: TextDocument) => {
+    if (!isFrameworkCarrierLanguageId(document?.languageId)) {
       return;
     }
     void ensureLanguageServerStarted();
@@ -294,11 +299,11 @@ async function activateExtension(context: ExtensionContext) {
   context.subscriptions.push(
     workspace.onDidOpenTextDocument((document) => {
       ensureTypeScriptPluginConfiguredForDocument(document);
-      ensureStartedForVueDocument(document);
+      ensureStartedForFrameworkDocument(document);
     }),
     window.onDidChangeActiveTextEditor((editor) => {
       ensureTypeScriptPluginConfiguredForDocument(editor?.document);
-      ensureStartedForVueDocument(editor?.document);
+      ensureStartedForFrameworkDocument(editor?.document);
     }),
     workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration("verter.experimental.exposeBindingsTesting")) {
@@ -344,8 +349,8 @@ async function activateExtension(context: ExtensionContext) {
   );
 
   if (
-    workspace.textDocuments.some((doc) => doc.languageId === "vue") ||
-    window.activeTextEditor?.document.languageId === "vue"
+    workspace.textDocuments.some((doc) => isFrameworkCarrierLanguageId(doc.languageId)) ||
+    isFrameworkCarrierLanguageId(window.activeTextEditor?.document.languageId)
   ) {
     void ensureLanguageServerStarted();
   }
@@ -456,17 +461,19 @@ export async function activateVueLanguageServer(
     findStyleBlockAt(scanStyleBlocks(source), source, line, character) !== undefined;
   const hasStyleBlocks = (source: string) => scanStyleBlocks(source).length > 0;
 
-  // Opt-in framework carriers beyond Vue (`verter.frameworks`). Svelte attaches
-  // to the EXISTING `svelte` language id (no grammar contributed) when opted in.
-  const optInFrameworks = workspace.getConfiguration("verter").get<string[]>("frameworks", []);
+  // The active framework carriers are EVERY registered adapter — derived from
+  // the descriptor-generated client framework manifest, NOT an opt-in client
+  // gate. Svelte is first-class (no opt-in). Each attaches to its manifest
+  // client language id (e.g. the existing `svelte` id; Verter contributes no
+  // grammar and relies on the user's Svelte extension for syntax).
+  const activeFrameworks = frameworkClientLanguageIds();
 
   // Options to control the language client
   const clientOptions: LanguageClientOptions = {
     documentSelector: [
-      { scheme: "file", language: "vue" },
-      { scheme: "file", language: "javascript" },
-      { scheme: "file", language: "typescript" },
-      ...(optInFrameworks.includes("svelte") ? [{ scheme: "file", language: "svelte" }] : []),
+      // The base TS/JS surface + every registered framework's client language
+      // id, derived from the manifest (one `{ scheme: "file", language }` each).
+      ...frameworkDocumentSelector(),
       // Virtual files from the Verter Analysis panel — route through the LSP
       // so it can provide position-mapped features (hover, definition, etc.)
       { scheme: VirtualFileContentProvider.scheme },
@@ -487,8 +494,8 @@ export async function activateVueLanguageServer(
         html: workspace.getConfiguration("html"),
       },
       statistics: getStatisticsInitialization(rootPath),
-      // The opt-in framework carriers the server should attach to beyond Vue.
-      frameworks: optInFrameworks,
+      // Every registered framework carrier the client wires (manifest-derived).
+      frameworks: activeFrameworks,
       lint: {
         enabled: workspace.getConfiguration("verter").get<boolean>("lint.enabled", false),
         preset: workspace.getConfiguration("verter").get<string>("lint.preset", "recommended"),

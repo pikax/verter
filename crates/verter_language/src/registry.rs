@@ -255,6 +255,25 @@ impl LanguageRegistry {
             })
             .collect()
     }
+
+    /// The ADAPTER-MODULE extensions (without the leading dot) the given
+    /// adapter owns, in longest-suffix-first row order. An adapter module is a
+    /// standalone non-component script (a Svelte `.svelte.ts` / `.svelte.js`
+    /// rune module), distinct from the adapter's CARRIER extension. The client
+    /// framework manifest builds its adapter-module extension list from this so
+    /// the watcher globs and ts-plugin classification cover rune modules.
+    pub fn adapter_module_extensions(&self, adapter_id: &FrameworkAdapterId) -> Vec<&str> {
+        self.rows
+            .iter()
+            .filter_map(|(_, row)| match &row.classification {
+                RowClassification::Static(language) => language
+                    .adapter_script_language()
+                    .filter(|(owner, _)| *owner == adapter_id)
+                    .map(|_| row.extension.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -470,6 +489,24 @@ mod tests {
         let mut extensions = registry.carrier_extensions();
         extensions.sort_unstable();
         assert_eq!(extensions, vec!["svelte", "vue"]);
+    }
+
+    #[test]
+    fn adapter_module_extensions_scoped_to_owning_adapter() {
+        let registry = LanguageRegistry::built_in();
+        // The Svelte adapter owns the two rune-module rows; row order is
+        // longest-suffix-first deterministic.
+        let svelte = registry.adapter_module_extensions(&FrameworkAdapterId::svelte());
+        assert_eq!(svelte, vec!["svelte.js", "svelte.ts"]);
+        // Vue has NO adapter-module rows — it is a carrier-only adapter.
+        assert!(
+            registry
+                .adapter_module_extensions(&FrameworkAdapterId::vue())
+                .is_empty(),
+            "Vue owns no adapter-module rows"
+        );
+        // The carrier extension is NEVER in the adapter-module set.
+        assert!(!svelte.contains(&"svelte"));
     }
 
     #[test]

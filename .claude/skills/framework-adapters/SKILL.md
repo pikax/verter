@@ -56,6 +56,32 @@ derivations are CONSUMERS of the column; consumer rewiring is a later
 vertical, but the column + mirror + freshness pin land here so the two
 cannot drift.
 
+### Client framework manifest (de-Vue-forked client wiring)
+
+A SECOND descriptor-generated, byte-pinned TS artifact —
+`packages/language-shared/src/client-framework-manifest.generated.ts`,
+rendered by `render_client_framework_manifest_ts` (in
+`verter_session::framework::client_framework_manifest_ts`) from
+`built_in_descriptors()` joined with the `verter_language` extension table
+(`LanguageRegistry::adapter_module_extensions`) — is the SINGLE authority
+for the VS Code extension + TS-plugin CLIENT wiring. Per registered carrier
+adapter it records: framework id, carrier extension(s), adapter-module
+extension(s) (rune modules), client language id(s), trigger language id(s),
+the virtual-file naming suffixes, and the file-watch globs; plus the base
+TS/JS surface and the flattened derived lists (activation / trigger /
+carrier / watch). Byte-pinned by `client_framework_manifest_ts_freshness`
+(regen path under `VERTER_UPDATE_CLIENT_FRAMEWORK_MANIFEST_TS`). The
+extension consumes it through `packages/vue-vscode/src/frameworkWiring.ts`
+(document selector, framework-carrier predicate, TS-plugin configure
+trigger, watch globs) — NO per-framework `if (vue)`/`if (svelte)` branch,
+and Svelte is FIRST-CLASS (the retired `verter.frameworks` opt-in gate is
+gone). The extension's `package.json` framework wiring
+(activation events, `contributes.languages`) MATCHES the manifest, pinned by
+`client_framework_manifest_drives_extension_wiring` (scans the extension
+source) + the TS specs `frameworkWiring.spec.ts` /
+`packageManifestFramework.spec.ts`. Verter ships NO Svelte TextMate grammar
+(it relies on the user's Svelte extension for syntax).
+
 ## The framework-surface executor
 
 `VerterHost::resolve_framework_surface_with_audit(TypeInfoGraphRequest)` is
@@ -307,6 +333,8 @@ runtime-loaded `FileLanguage` and routes through
 | `script_fact_capture_is_syntax_only` | the capture surface carries no resolved-import / capability data |
 | `script_fact_providers_zero_cost_on_miss` | empty active-provider set is byte-identical zero-cost |
 | `virtual_file_naming_ts_freshness` | the generated TS mirror is byte-equal to the rendered descriptor column |
+| `client_framework_manifest_ts_freshness` | the generated client framework manifest is byte-equal to the rendered descriptor registry |
+| `client_framework_manifest_drives_extension_wiring` | the extension wiring (activation / document selector / trigger / watch) derives from the manifest; Svelte ungated; no per-framework client fork |
 | `vue_relocation_no_shim` | no re-export shim for relocated Vue resolution; deleted files stay deleted |
 | `retired_symbols_absent_from_production_source` | `VueShallowMetadataStore` / `VueMacroDtoKey` / `VueMacroDtos` / `VueMacroDtosEntry` retired |
 | `framework_surface_executor` (suite) | executor behavior: validation-first, unknown-adapter rejection, Vue parity, per-kind status |

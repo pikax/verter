@@ -408,6 +408,12 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             // Generated virtual-file naming mirror is byte-equal to the
             // rendered descriptor column.
             "virtual_file_naming_ts_freshness",
+            // Generated client framework manifest is byte-equal to the
+            // rendered descriptor registry, and the extension's framework
+            // wiring (activation / document selector / trigger ids / watch
+            // globs) derives from it (Svelte ungated, no per-framework fork).
+            "client_framework_manifest_ts_freshness",
+            "client_framework_manifest_drives_extension_wiring",
             // Vue re-housing: no re-export shim, deleted files stay
             // deleted, retired stores absent from production.
             "vue_relocation_no_shim",
