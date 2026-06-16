@@ -518,6 +518,8 @@ fn test_go_to_component_definition_from_template() {
                     has_dynamic_class: false,
                     dynamic_classes: vec![],
                     v_models: vec![],
+                    bindings: vec![],
+                    events: vec![],
                     span: verter_span::Span::new(0, 0),
                 }],
                 ..Default::default()
@@ -1663,6 +1665,8 @@ fn test_path_alias_resolution_on_component_tag() {
                     has_dynamic_class: false,
                     dynamic_classes: vec![],
                     v_models: vec![],
+                    bindings: vec![],
+                    events: vec![],
                     span: verter_span::Span::new(0, 0),
                 }],
                 ..Default::default()
@@ -2655,6 +2659,8 @@ fn test_component_tag_default_fallback() {
                     has_dynamic_class: false,
                     dynamic_classes: vec![],
                     v_models: vec![],
+                    bindings: vec![],
+                    events: vec![],
                     span: verter_span::Span::new(0, 0),
                 }],
                 ..Default::default()

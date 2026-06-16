@@ -11,9 +11,10 @@
 //! [`SvelteCarrierCompiler`] is the second [`CarrierCompiler`] (Vue is the
 //! reference). `parse` produces the neutral artifact, `eval_source` blanks
 //! everything but BOTH script contents at their raw offsets (output length ==
-//! input length), and `template_data` returns empty neutral facts (the Svelte
-//! template-fact extraction is a later vertical). `compile_ide` returns the
-//! typed unsupported answer until the IDE TSX projection (B8c) lands.
+//! input length), `template_data` extracts the framework-neutral
+//! component-usage facts from the typed template tree (see
+//! [`template_facts`](super::template_facts)), and `compile_ide` projects the
+//! type-checked IDE TSX.
 
 use std::any::Any;
 use std::sync::Arc;
@@ -285,8 +286,8 @@ impl CarrierCompiler for SvelteCarrierCompiler {
         // `CachedTsx`/`CompileSlot.diagnostics`. This is a pre-existing gap (the
         // Vue carrier path has the same shape — IDE-compile diagnostics flow
         // through the parse artifact's `common.diagnostics`, not `IdeOutput`) and
-        // is tracked as its own work item; the projector-level production +
-        // void-checking the named B8c findings required is complete and tested.
+        // is tracked as its own work item; the projector-level production of
+        // these typed-unsupported diagnostics is complete and tested.
         let _ = &projection.diagnostics;
         Ok(IdeOutput {
             code: projection.code,
@@ -300,10 +301,18 @@ impl CarrierCompiler for SvelteCarrierCompiler {
     }
 
     fn template_data(&self, source: &str, artifact: &FrameworkParseArtifact) -> TemplateFacts {
-        let _ = (source, artifact);
-        // Svelte template-fact extraction (component usages, bindings) is a
-        // later vertical; the honest answer here is empty neutral facts.
-        TemplateFacts::default()
+        // A foreign artifact (not a Svelte carrier) yields empty neutral facts.
+        let Some(parsed) = self.parsed_svelte(artifact) else {
+            return TemplateFacts::default();
+        };
+        let mut data = crate::compile::RawTemplateData::default();
+        // STRUCTURAL walk over the typed `ParsedSvelte.template` tree (mirrors
+        // `collect_slot_elements`' walk shape — recurse element children, block
+        // children, and each clause's children). The component-by-KIND
+        // classification reads the typed AST; expression TEXT is span-sliced from
+        // the carrier source. No structural source scan.
+        super::template_facts::collect_component_usages(&parsed.template, source, &mut data);
+        TemplateFacts { data }
     }
 }
 
@@ -472,12 +481,235 @@ mod tests {
         assert!(out.is_ok());
     }
 
-    #[test]
-    fn template_data_is_empty_for_now() {
+    fn facts_for(source: &str) -> crate::compile::RawTemplateData {
         let compiler = SvelteCarrierCompiler::default();
-        let source = "<script>let a = 1;</script>\n<Child />";
         let artifact = compiler.parse(source, &ParseOptions::default());
-        let facts = compiler.template_data(source, &artifact);
-        assert!(facts.data.components.is_empty());
+        compiler.template_data(source, &artifact).data
+    }
+
+    #[test]
+    fn template_data_collects_full_component_usage_facts() {
+        // The discriminating producer unit: a component usage carries the static
+        // prop, the `on*` plain attribute AS A PROP (props/events is syntactic —
+        // a plain `on*` attr is never an event at the usage site), the `bind:`
+        // binding, and the passed `{#snippet}` (via `slots_used`).
+        let source = "<script lang=\"ts\">let value = 0; function handler() {}</script>\n\
+             <Button size=\"sm\" bind:value onclick={handler}>{#snippet icon()}x{/snippet}</Button>";
+        let data = facts_for(source);
+        assert_eq!(data.components.len(), 1, "exactly one component usage");
+        let usage = &data.components[0];
+        assert_eq!(usage.tag_name, "Button");
+        assert!(!usage.is_dynamic, "a static component is not dynamic");
+
+        // `size="sm"` is a STATIC prop (Text value); `onclick={handler}` is a
+        // PLAIN prop (a callback handler IS a prop in Svelte 5 — the child
+        // decides which props are events, not a usage-site name guess);
+        // `bind:value` is NOT a prop.
+        let prop_names: Vec<&str> = usage.props.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(
+            prop_names,
+            vec!["size", "onclick"],
+            "`size` and `onclick` are both props"
+        );
+        let size_prop = usage.props.iter().find(|p| p.name == "size").unwrap();
+        assert!(!size_prop.is_bound, "a Text value is a static prop");
+        let onclick_prop = usage.props.iter().find(|p| p.name == "onclick").unwrap();
+        assert!(onclick_prop.is_bound, "an `{{...}}` value is a bound prop");
+        assert_eq!(onclick_prop.expression.as_deref(), Some("handler"));
+
+        // `bind:value` is a neutral BINDING (NOT a prop, NOT v_model).
+        let binding_names: Vec<&str> = usage.bindings.iter().map(|b| b.name.as_str()).collect();
+        assert_eq!(binding_names, vec!["value"], "`bind:value` is a binding");
+
+        // No EVENT — there is no legacy `on:` directive here. A plain `on*`
+        // attribute is never fabricated as an event.
+        assert!(
+            usage.events.is_empty(),
+            "a plain `on*` attribute is a prop, never an event"
+        );
+
+        // The `{#snippet icon}` passed inside the component is recorded in
+        // `slots_used` (names-only).
+        assert_eq!(usage.slots_used, vec!["icon".to_string()]);
+
+        // NEGATIVES: `bind:value` does NOT leak into props; `onclick` does NOT
+        // leak into bindings.
+        assert!(!prop_names.contains(&"value"));
+        assert!(!binding_names.contains(&"onclick"));
+    }
+
+    #[test]
+    fn template_data_keeps_on_prefixed_plain_attrs_as_props_not_events() {
+        // THE discriminating regression for the P1 finding: plain attributes
+        // whose names START WITH `on` but are NOT events (`online`, `once`,
+        // `onboarding`, `one`) must stay PROPS and must NOT be fabricated as
+        // events by a name-prefix heuristic. RED against the old
+        // `is_runes_event_name` (which classified every `on`-prefixed plain attr
+        // as an event); GREEN after the syntactic-only classification.
+        let source = "<script lang=\"ts\">let x = 1; let y = 2; let z = 3;</script>\n\
+             <Widget online={x} once={y} onboarding={z} one=\"1\" onclick={x} />";
+        let data = facts_for(source);
+        let usage = &data.components[0];
+
+        let prop_names: Vec<&str> = usage.props.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(
+            prop_names,
+            vec!["online", "once", "onboarding", "one", "onclick"],
+            "every plain `on*` attribute is a PROP, none removed by a name guess"
+        );
+
+        // NEGATIVE: none of them were fabricated as events.
+        assert!(
+            usage.events.is_empty(),
+            "no plain `on*` attribute is fabricated as an event, got {:?}",
+            usage.events.iter().map(|e| &e.name).collect::<Vec<_>>()
+        );
+        for name in ["online", "once", "onboarding", "one", "onclick"] {
+            assert!(
+                !usage.events.iter().any(|e| e.name == name),
+                "`{name}` must not be an event"
+            );
+        }
+    }
+
+    #[test]
+    fn template_data_maps_legacy_on_directive_to_event() {
+        // A legacy `on:click|stop` is an EVENT named `click` carrying its
+        // modifiers — NOT a prop, NOT a binding.
+        let source = "<script>function f(){}</script>\n<Button on:click|stop={f} />";
+        let data = facts_for(source);
+        let usage = &data.components[0];
+        assert!(usage.props.is_empty(), "`on:click` is not a prop");
+        assert!(usage.bindings.is_empty(), "`on:click` is not a binding");
+        let event_names: Vec<&str> = usage.events.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(
+            event_names,
+            vec!["click"],
+            "`on:click` maps to event `click`"
+        );
+        assert_eq!(usage.events[0].modifiers, vec!["stop".to_string()]);
+    }
+
+    #[test]
+    fn template_data_skips_non_model_directives_and_class_use_let() {
+        // NEGATIVES: `class:`, `use:`, `bind:this`, `let:` produce NO prop, NO
+        // event, NO binding on a component usage.
+        let source = "<script>let el; function a(){}</script>\n\
+             <Button class:active use:a bind:this={el} let:item />";
+        let data = facts_for(source);
+        let usage = &data.components[0];
+        assert!(
+            usage.props.is_empty(),
+            "no props from class/use/bind:this/let:"
+        );
+        assert!(
+            usage.events.is_empty(),
+            "no events from class/use/bind:this/let:"
+        );
+        assert!(
+            usage.bindings.is_empty(),
+            "`bind:this` is a ref, not a model binding; class/use/let produce no binding"
+        );
+    }
+
+    #[test]
+    fn template_data_dynamic_component_skips_this_attr() {
+        // `<svelte:component this={X}>` is a DYNAMIC usage; the `this` attribute
+        // is the component selector, NOT a prop.
+        let source = "<script>let X; let v = 0;</script>\n\
+             <svelte:component this={X} label=\"hi\" bind:value={v} />";
+        let data = facts_for(source);
+        assert_eq!(data.components.len(), 1);
+        let usage = &data.components[0];
+        assert!(usage.is_dynamic, "`<svelte:component>` is dynamic");
+        let prop_names: Vec<&str> = usage.props.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(
+            prop_names,
+            vec!["label"],
+            "`this` is skipped as a prop; `label` remains a prop"
+        );
+        assert!(!prop_names.contains(&"this"), "`this` is never a prop");
+        let binding_names: Vec<&str> = usage.bindings.iter().map(|b| b.name.as_str()).collect();
+        assert_eq!(
+            binding_names,
+            vec!["value"],
+            "`bind:value` is still a binding"
+        );
+    }
+
+    #[test]
+    fn template_data_records_self_reference_and_spread() {
+        // `<svelte:self>` is a self usage; `{...rest}` sets `has_spread`.
+        let source = "<script>let rest = {};</script>\n<svelte:self {...rest} />";
+        let data = facts_for(source);
+        assert_eq!(data.components.len(), 1);
+        let usage = &data.components[0];
+        assert_eq!(usage.tag_name, "svelte:self");
+        assert!(usage.has_spread, "`{{...rest}}` sets has_spread");
+    }
+
+    #[test]
+    fn template_data_recurses_into_blocks_and_clauses() {
+        // The structural walk recurses element children, block children, and each
+        // clause's children — a component nested in an `{:else}` clause is found.
+        let source = "<script>let cond = true;</script>\n\
+             {#if cond}<Yes />{:else}<No />{/if}";
+        let data = facts_for(source);
+        let names: Vec<&str> = data
+            .components
+            .iter()
+            .map(|c| c.tag_name.as_str())
+            .collect();
+        assert!(names.contains(&"Yes"), "the if-branch component is found");
+        assert!(names.contains(&"No"), "the else-clause component is found");
+    }
+
+    #[test]
+    fn template_data_ignores_intrinsic_and_special_layout_elements() {
+        // NEGATIVE: intrinsic HTML elements and non-component special elements
+        // (`<svelte:head>`) are NOT component usages.
+        let source =
+            "<script>let a = 1;</script>\n<div><svelte:head><title>t</title></svelte:head></div>";
+        let data = facts_for(source);
+        assert!(
+            data.components.is_empty(),
+            "intrinsic / layout special elements are not component usages"
+        );
+    }
+
+    #[test]
+    fn template_data_records_inline_handler_and_expression_binding() {
+        // An inline arrow handler on a LEGACY `on:` directive is flagged
+        // `is_inline`; a plain `onclick={...}` attribute is a BOUND PROP (not an
+        // event — the props/events split is syntactic); an Expression-valued
+        // (`{count}`) plain prop is a BOUND prop.
+        let source = "<script>let count = 0;</script>\n\
+             <Child on:click={() => count++} onclick={() => count++} count={count} />";
+        let data = facts_for(source);
+        let usage = &data.components[0];
+
+        // The legacy `on:click` directive is the SOLE event, and its inline
+        // arrow handler is flagged `is_inline`.
+        assert_eq!(usage.events.len(), 1, "only the legacy `on:` is an event");
+        assert_eq!(usage.events[0].name, "click");
+        assert!(usage.events[0].is_inline, "an arrow handler is inline");
+
+        // The plain `onclick={...}` attribute is a BOUND prop, NOT an event.
+        let onclick_prop = usage
+            .props
+            .iter()
+            .find(|p| p.name == "onclick")
+            .expect("onclick is a prop, not an event");
+        assert!(
+            onclick_prop.is_bound,
+            "an `{{...}}` handler attribute is a bound prop"
+        );
+
+        let count_prop = usage
+            .props
+            .iter()
+            .find(|p| p.name == "count")
+            .expect("count prop present");
+        assert!(count_prop.is_bound, "an `{{expr}}` value is a bound prop");
     }
 }

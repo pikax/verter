@@ -170,6 +170,40 @@ byte-identical pre/post the rehousing (pinned by
 `rehoused_carrier_dispatch_drives_compile_byte_identical_to_direct_compile`
 and the unchanged `ide_virtual_output_for_fixture_sfc_is_byte_stable` hash).
 
+The host's TEMPLATE-DATA ingestion is rehoused through this registry the
+SAME way as the parse dispatch: `compute_template_analysis_if_missing`
+/ `build_template_analysis` gate on `parse::file_language_has_template_data_compiler`
+(does the file's carrier row have a registered compiler?) — NOT a hardcoded
+`.vue` / `is_vue()` check — and extract through `parse::compile_template_data`,
+which dispatches to the file's `CarrierCompiler::template_data(source, artifact)`.
+Vue's bridge runs the META-target `compile_from_parsed` (for `referenced_bindings`
+/ constness), byte-identical to the retired Vue-only `compile_vue_template_data`;
+Svelte's walks the typed `ParsedSvelte` template tree. One registry-dispatched
+path, no dual path/shim. The populated `RawTemplateData.components` reaches the
+public `ComponentMetaBody.components` (`ComponentUsage`) — the same surface Vue
+already published. Pinned by `template_data_ingestion_is_registry_dispatched`
+(no `.vue` / `is_vue()` gate on the template-data path) and the public E2E
+`svelte_component_meta_carries_template_usage_facts`.
+
+The Svelte `template_data` producer (`verter_compiler/src/svelte/template_facts.rs`)
+is TYPED-IR-ONLY: it walks the typed `ParsedSvelte` template tree (recurse
+element children + block `children` + each clause's children, mirroring
+`svelte_exec::collect_slot_elements`' walk shape), classifying child-component
+usages BY KIND (`SvelteElementKind::Component`, `Special(Component)` dynamic-this,
+`Special(SelfRef)`) and mapping attributes structurally — EVERY plain attribute
+(including `on*`) → PROP (a plain `on*` attribute is a callback PROP, not a
+template-usage event; the child's component-meta decides which props are callback
+events), ONLY `Directive(On)` (the legacy `on:` directive) → neutral EVENT,
+`Directive(Bind)` except
+`bind:this` → neutral BINDING, `Directive(Let/Class/Style/Use/Transition/In/Out/
+Animate)` + `bind:this` → SKIP, `Spread` → `has_spread`, child `{#snippet name}`
+→ `slots_used`. Expression TEXT is span-sliced from the carrier source; there is
+NO structural source scan and NO type lowering. The neutral per-usage
+`bindings` / `events` fields (and the `ComponentBindingUsage` / `ComponentEventUsage`
+proto messages 9/10, `COMPONENT_META_SCHEMA_VERSION` 3) are ADD-ONLY — Vue keeps
+its two-way bindings in `v_models` and leaves these empty. Pinned by
+`svelte_template_data_producer_is_typed_ir_only` and the carrier unit tests.
+
 The compiler-side `CarrierCompilerCtx::carrier_for::<T>` is the third
 blessed carrier-downcast home (D-m); `receive_vue_carrier_token` is the
 compiler's sanctioned carrier-proof receipt site (the bridge reaches its

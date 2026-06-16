@@ -56,7 +56,6 @@ const CARRIER_LITERAL_ALLOWLIST: &[&str] = &[
     // Vue-semantic session surfaces (Vue parse/extract paths; rows
     // shrink as each surface moves behind the Vue carrier accessors).
     "crates/verter_session/src/host_manage.rs",
-    "crates/verter_session/src/host_manage/analysis_io.rs",
     "crates/verter_session/src/host_manage/prepared_decl.rs",
     "crates/verter_session/src/host_resolve/frontier_engine.rs",
     "crates/verter_session/src/host_resolve/virtual_file_pipeline.rs",

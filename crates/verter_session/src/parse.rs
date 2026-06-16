@@ -1169,84 +1169,78 @@ pub(crate) fn build_carrier_snapshot_from_artifact(
     None
 }
 
-/// The Vue template-data compile half shared by
-/// `build_template_analysis` / `compute_template_analysis_if_missing`
-/// (relocated behind the Vue bridge so `host_manage/**` stays free of
-/// `ParsedSfc` / `parse_sfc`).
+/// Whether a file's resolved carrier row has a registered carrier compiler that
+/// can extract template data — the REGISTRY-DISPATCHED ingestion gate that
+/// replaces the hardcoded `.vue` / `is_vue()` check. A plain script (no carrier
+/// row) or a carrier whose adapter has no registered compiler answers `false`.
+#[must_use]
+pub(crate) fn file_language_has_template_data_compiler(
+    file_language: &verter_language::FileLanguage,
+) -> bool {
+    let Some(adapter_id) = file_language.adapter_id() else {
+        return false;
+    };
+    let Some(carrier_language_id) = file_language.carrier_language_id() else {
+        return false;
+    };
+    carrier_compiler_registry()
+        .compiler_for_carrier_language(adapter_id, carrier_language_id)
+        .is_some()
+}
+
+/// The carrier-NEUTRAL template-data extraction half shared by
+/// `build_template_analysis` / `compute_template_analysis_if_missing`.
 ///
-/// Parses `compile_source` (re-using the artifact's carrier parse when
-/// `reuse_carrier_parse` is set and the artifact opens as Vue), runs
-/// the META-target compile, and returns the extracted raw template
-/// data. `None` on structural compile errors (type-resolution errors —
-/// `XInvalidMacroType` / `XMissingMacroType` — do not block template
-/// extraction) or when no template data was produced.
-pub(crate) fn compile_vue_template_data(
-    canonical_id: &str,
+/// This is the SINGLE registry-dispatched template-data path: it interns the
+/// file's resolved carrier row and dispatches the extraction through that
+/// carrier's [`CarrierCompiler::template_data`](verter_compiler::framework_common::CarrierCompiler::template_data)
+/// (Vue's bridge runs the META-target `compile_from_parsed` for
+/// `referenced_bindings` / constness; Svelte's walks the typed template tree).
+/// There is no Vue-only branch here.
+///
+/// When `reuse_carrier_parse` is set and `framework_parse` matches the file's
+/// carrier, the cached artifact's parse is reused; otherwise a fresh artifact is
+/// parsed from `compile_source` through the same registry (the external-src
+/// merge case, where the compile source differs from the file content). Returns
+/// `None` for a non-carrier file or a carrier row with no registered compiler.
+pub(crate) fn compile_template_data(
+    file_language: &verter_language::FileLanguage,
     compile_source: &str,
     framework_parse: Option<&verter_language::FrameworkParseArtifact>,
     reuse_carrier_parse: bool,
 ) -> Option<verter_compiler::compile::RawTemplateData> {
-    let cached = if reuse_carrier_parse {
-        framework_parse.and_then(crate::typeinfo::adapters::vue::vue_parse)
-    } else {
+    let adapter_id = file_language.adapter_id()?;
+    let carrier_language_id = file_language.carrier_language_id()?;
+    let compiler = carrier_compiler_registry()
+        .compiler_for_carrier_language(adapter_id, carrier_language_id)?;
+
+    // Reuse the cached artifact only when the caller permits it AND the artifact
+    // belongs to THIS carrier (adapter id + carrier language id match) — a
+    // foreign / stale artifact forces a fresh parse rather than a misrouted
+    // dispatch.
+    let reuse = reuse_carrier_parse
+        && framework_parse.is_some_and(|artifact| {
+            artifact.adapter_id == *adapter_id && artifact.language_id == *carrier_language_id
+        });
+
+    let fresh_artifact = if reuse {
         None
-    };
-    // The non-reuse path produces a fresh parse through the carrier
-    // registry (the Vue bridge) — the SAME single dispatch path — rather
-    // than a second session-side `parse_sfc` producer. The freshly built
-    // artifact owns the `Arc<ParsedSfc>` reached through the blessed
-    // accessor.
-    let fresh_artifact = if cached.is_none() {
-        Some(build_vue_parse_artifact_from_source(compile_source))
     } else {
-        None
+        Some(compiler.parse(
+            compile_source,
+            &verter_compiler::framework_common::ParseOptions::default(),
+        ))
     };
-    let parsed = match cached {
-        Some(parsed) => std::borrow::Cow::Borrowed(parsed.as_ref()),
-        None => std::borrow::Cow::Borrowed(
-            crate::typeinfo::adapters::vue::vue_parse(
-                fresh_artifact
-                    .as_ref()
-                    .expect("fresh artifact built when no carrier parse is reused"),
-            )
-            .expect("the freshly built Vue artifact opens as a Vue carrier")
-            .as_ref(),
-        ),
+    let artifact = if reuse {
+        framework_parse.expect("reuse implies a present artifact")
+    } else {
+        fresh_artifact
+            .as_ref()
+            .expect("a fresh artifact is built when the cached one is not reused")
+            .as_ref()
     };
 
-    let alloc = Allocator::new();
-    let options = verter_compiler::compile::CodegenOptions {
-        target: verter_compiler::compile::CompileTarget::META,
-        filename: Some(canonical_id.to_string()),
-        ..verter_compiler::compile::CodegenOptions::default()
-    };
-    let verter_opts = verter_compiler::compile::VerterCompileOptions {
-        extract_template_data: true,
-        ..verter_compiler::compile::VerterCompileOptions::default()
-    };
-    let compiled = verter_compiler::compile::compile_from_parsed(
-        compile_source,
-        &parsed,
-        &options,
-        &verter_opts,
-        &alloc,
-    );
-
-    // Bail on structural compile errors that would invalidate template
-    // data; skip type-resolution errors since template slot extraction
-    // does not depend on type resolution.
-    let has_structural_errors = compiled.errors.iter().any(|d| {
-        matches!(
-            d.severity,
-            verter_compiler::compile::CompileDiagnosticSeverity::Error,
-        ) && !d.code.starts_with("XInvalidMacroType")
-            && !d.code.starts_with("XMissingMacroType")
-    });
-    if has_structural_errors {
-        return None;
-    }
-
-    compiled.template_data
+    Some(compiler.template_data(compile_source, artifact).data)
 }
 
 pub(crate) fn build_non_sfc_snapshot_from_program(

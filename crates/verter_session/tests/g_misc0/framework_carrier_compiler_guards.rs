@@ -398,6 +398,153 @@ fn no_custom_event_any_detector_discriminates() {
 }
 
 #[test]
+fn template_data_ingestion_is_registry_dispatched() {
+    // Shared-substrate rule: template-data ingestion is REGISTRY-DISPATCHED
+    // by the file's carrier row, NOT gated on a hardcoded `.vue` / `is_vue()`
+    // check. The `compute_template_analysis_if_missing` body and the
+    // `build_template_analysis` body must route the extraction through the
+    // carrier registry (`file_language_has_template_data_compiler` +
+    // `compile_template_data`), and must NOT contain a `.vue` literal gate or an
+    // `is_vue()` gate on the template-data path.
+    let analysis_io = strip_line_comments(&read_src(
+        "crates/verter_session/src/host_manage/analysis_io.rs",
+    ));
+
+    // The registry-dispatched gate + extraction must be present.
+    assert!(
+        analysis_io.contains("file_language_has_template_data_compiler"),
+        "the template-data ingestion gate must be the registry-dispatched \
+         `file_language_has_template_data_compiler`, not a hardcoded carrier check"
+    );
+    assert!(
+        analysis_io.contains("compile_template_data("),
+        "template-data extraction must route through the carrier-neutral \
+         `compile_template_data` (registry-dispatched), not a Vue-only path"
+    );
+
+    // The retired Vue-only gates must NOT reappear on the template-data path.
+    // Scope the scan to the two ingestion bodies so an unrelated `.vue` literal
+    // elsewhere in the (large) file does not false-positive.
+    for marker in [
+        "fn compute_template_analysis_if_missing",
+        "fn build_template_analysis",
+    ] {
+        let body = analysis_io
+            .split(marker)
+            .nth(1)
+            .and_then(|rest| rest.split("\n    pub").next().or(Some(rest)))
+            .unwrap_or("");
+        assert!(
+            !body.contains("ends_with(\".vue\")"),
+            "`{marker}` must not gate the template-data path on a `.vue` literal \
+             (registry-dispatched ingestion):\n{body}"
+        );
+        assert!(
+            !body.contains("file_language.is_vue()") && !body.contains("hd.file_language.is_vue()"),
+            "`{marker}` must not gate the template-data path on `is_vue()` \
+             (registry-dispatched ingestion):\n{body}"
+        );
+    }
+
+    // The retired Vue-only extraction helper must be GONE (no dual path/shim).
+    let parse = strip_line_comments(&read_src("crates/verter_session/src/parse.rs"));
+    assert!(
+        !parse.contains("fn compile_vue_template_data"),
+        "the Vue-only `compile_vue_template_data` must be retired in favour of the \
+         carrier-neutral `compile_template_data` — no dual path"
+    );
+}
+
+#[test]
+fn template_data_ingestion_registry_dispatch_detector_discriminates() {
+    // The detector must catch a synthetic ingestion body that re-introduces the
+    // retired Vue-only gate — proving the guard discriminates.
+    let offending = r#"
+        fn compute_template_analysis_if_missing(&self) {
+            if !canonical.ends_with(".vue") { return; }
+        }
+    "#;
+    let stripped = strip_line_comments(offending);
+    let body = stripped
+        .split("fn compute_template_analysis_if_missing")
+        .nth(1)
+        .unwrap_or("");
+    assert!(
+        body.contains("ends_with(\".vue\")"),
+        "the detector must catch a `.vue` literal gate on the template-data path"
+    );
+}
+
+#[test]
+fn svelte_template_data_producer_is_typed_ir_only() {
+    // Producer rule: the Svelte `template_data` producer walks the typed
+    // `ParsedSvelte` template tree (typed-IR / typed template AST) and may
+    // span-slice the carrier source for expression TEXT only. It must NOT
+    // STRUCTURALLY scan the source — no regex, no `find`/`contains`-driven tag
+    // discovery, no synthesise-then-reparse, no type lowering.
+    let producer = strip_line_comments(&read_src(
+        "crates/verter_compiler/src/svelte/template_facts.rs",
+    ));
+
+    // Positive: it walks the typed AST node families (structural classification
+    // by KIND, not by source scanning).
+    assert!(
+        producer.contains("SvelteNode::Element")
+            && producer.contains("SvelteNode::Block")
+            && producer.contains("SvelteElementKind::Component"),
+        "the producer must classify components structurally off the typed AST"
+    );
+    assert!(
+        producer.contains("collect_component_usages"),
+        "the producer must be the structural recursive walk `collect_component_usages`"
+    );
+
+    // NEGATIVE: no structural source scanning / reparse / type lowering inside
+    // the producer.
+    for forbidden in [
+        "parse_type_annotation",
+        "lower_ts_type",
+        "Regex",
+        "regex::",
+        ".find(\"<\")",
+        "split_top_level",
+        "ProjectSemanticDispatch",
+        "Parser::new(",
+    ] {
+        assert!(
+            !producer.contains(forbidden),
+            "the Svelte template-data producer must not `{forbidden}` — it walks the \
+             typed `ParsedSvelte` tree and span-slices for expression TEXT only"
+        );
+    }
+}
+
+#[test]
+fn svelte_template_data_producer_typed_ir_detector_discriminates() {
+    // The detector must catch a synthetic producer that re-introduces a
+    // source-scan / reparse / type-lowering path — proving the guard
+    // discriminates rather than always passing.
+    let offending = r#"
+        fn collect_component_usages(source: &str) {
+            let ty = parse_type_annotation(source);
+            let _ = lower_ts_type(&ty);
+        }
+    "#;
+    let stripped = strip_line_comments(offending);
+    let mut tripped = false;
+    for forbidden in ["parse_type_annotation", "lower_ts_type"] {
+        if stripped.contains(forbidden) {
+            tripped = true;
+        }
+    }
+    assert!(
+        tripped,
+        "the typed-IR producer guard must catch a reparse / type-lowering path \
+         inside the producer"
+    );
+}
+
+#[test]
 fn svelte_surface_source_exhaustive() {
     // The closed `SvelteSurfaceSource` enum (including the new `CallbackPropEvents`
     // family) is matched EXHAUSTIVELY across the resolution leg — adding a family

@@ -883,6 +883,24 @@ function decodeComponentUsage(
     ),
     hasDynamicClass: Boolean(component.hasDynamicClass),
     vModels: decodeStringList(numberList(component.vModelIds), graph, "component v-models"),
+    bindings: ((component.bindings as ProtoRecord[] | undefined) ?? []).map((binding) => ({
+      name: graph.getString(readRequiredId(binding.nameId, "component binding name")),
+      modifiers: decodeStringList(
+        numberList(binding.modifierIds),
+        graph,
+        "component binding modifiers",
+      ),
+    })),
+    events: ((component.events as ProtoRecord[] | undefined) ?? []).map((event) => ({
+      name: graph.getString(readRequiredId(event.nameId, "component event name")),
+      ...maybe("handlerExpression", graph.getStringMaybe(Number(event.handlerExpressionId ?? 0))),
+      isInline: Boolean(event.isInline),
+      modifiers: decodeStringList(
+        numberList(event.modifierIds),
+        graph,
+        "component event modifiers",
+      ),
+    })),
   };
 }
 

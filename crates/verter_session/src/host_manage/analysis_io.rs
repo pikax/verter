@@ -50,6 +50,7 @@ impl VerterHost {
     pub(super) fn build_template_analysis(
         &self,
         canonical: &str,
+        file_language: &FileLanguage,
         source: &Arc<str>,
         framework_parse: Option<Arc<verter_language::FrameworkParseArtifact>>,
         src_blocks: &[crate::SrcBlockInfo],
@@ -86,8 +87,8 @@ impl VerterHost {
             std::borrow::Cow::Borrowed(source.as_ref())
         };
 
-        let raw = crate::parse::compile_vue_template_data(
-            canonical,
+        let raw = crate::parse::compile_template_data(
+            file_language,
             &merged_source,
             framework_parse.as_deref(),
             src_blocks.is_empty(),
@@ -117,36 +118,49 @@ impl VerterHost {
         if snapshot.template.is_some() {
             return;
         }
-        if !canonical.ends_with(".vue") {
-            return;
-        }
 
-        let (source, framework_parse, src_blocks, external_requests) = {
+        // Registry-dispatched: template-data ingestion is gated on the file's
+        // resolved carrier row (does its adapter have a registered carrier
+        // compiler?), NOT a hardcoded `.vue` / `is_vue()` check. A `.svelte`
+        // carrier file reaches the same path and the same shared substrate.
+        let (source, file_language, framework_parse, src_blocks, external_requests) = {
             use crate::host_executor::HostSourceData;
             if let Some(snap) = self.scheduler.try_get_source(canonical) {
                 let Some(hd) = snap.downcast_data::<HostSourceData>() else {
                     return;
                 };
-                if !hd.file_language.is_vue() {
+                if !crate::parse::file_language_has_template_data_compiler(&hd.file_language) {
                     return;
                 }
                 (
                     snap.source.clone(),
+                    hd.file_language.clone(),
                     hd.framework_parse.clone(),
                     hd.parse.src_blocks.clone(),
                     hd.parse.external_requests.clone(),
                 )
             } else {
+                let file_language = self.language_classifier().classify(canonical);
+                if !crate::parse::file_language_has_template_data_compiler(&file_language) {
+                    return;
+                }
                 let Some(source) = self.read_analysis_source(canonical) else {
                     return;
                 };
-                let (parse, artifact) = crate::parse::parse_vue_snapshot(
+                // Carrier-neutral cold-read parse: dispatch through the registry
+                // by the file's carrier row, preserving each carrier's external
+                // src-block discovery (Vue `<template src>`; Svelte has none).
+                let Some((parse, artifact)) = crate::parse::carrier_parse_snapshot(
                     canonical,
                     &source,
                     self.config.effective_scope(),
-                );
+                    &file_language,
+                ) else {
+                    return;
+                };
                 (
                     source,
+                    file_language,
                     Some(artifact),
                     parse.src_blocks,
                     parse.external_requests,
@@ -186,11 +200,12 @@ impl VerterHost {
             std::borrow::Cow::Borrowed(source.as_ref())
         };
 
-        // Compile with META target (script codegen + template data, no
-        // JS/TSX output) through the Vue-bridge compile half, re-using
-        // the carrier parse when no external src merged the source.
-        let raw = crate::parse::compile_vue_template_data(
-            canonical,
+        // Registry-dispatched template-data extraction: route through the file's
+        // carrier compiler (Vue's bridge runs the META compile, Svelte walks the
+        // typed template tree), re-using the carrier parse when no external src
+        // merged the source.
+        let raw = crate::parse::compile_template_data(
+            &file_language,
             &merged_source,
             framework_parse.as_deref(),
             src_blocks.is_empty(),
@@ -1658,7 +1673,9 @@ impl VerterHost {
             }
             let source_snap = self.scheduler.try_get_source(canonical)?;
             let hd = source_snap.downcast_data::<HostSourceData>()?;
-            if !hd.file_language.is_vue() {
+            // Registry-dispatched: a file has template analysis when its carrier
+            // row has a registered template-data compiler, NOT when it is `.vue`.
+            if !crate::parse::file_language_has_template_data_compiler(&hd.file_language) {
                 return None;
             }
             drop(source_snap);
@@ -1678,8 +1695,10 @@ impl VerterHost {
             cc.content_overrides.get(&profile_hash)?.clone()
         };
 
+        let file_language = self.language_classifier().classify(canonical);
         self.build_template_analysis(
             canonical,
+            &file_language,
             &override_with_parse.source,
             override_with_parse.framework_parse.clone(),
             &override_with_parse.parse.src_blocks,

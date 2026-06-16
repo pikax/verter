@@ -166,6 +166,8 @@ mod tests {
                 has_dynamic_class: false,
                 dynamic_classes: vec![],
                 v_models: vec![],
+                bindings: vec![],
+                events: vec![],
                 span: Span::new(10, 20),
             }],
             ..Default::default()
@@ -203,6 +205,8 @@ mod tests {
                 has_dynamic_class: false,
                 dynamic_classes: vec![],
                 v_models: vec![],
+                bindings: vec![],
+                events: vec![],
                 span: Span::new(10, 20),
             }],
             ..Default::default()
@@ -239,6 +243,8 @@ mod tests {
                 has_dynamic_class: false,
                 dynamic_classes: vec![],
                 v_models: vec![],
+                bindings: vec![],
+                events: vec![],
                 span: Span::new(10, 20),
             }],
             ..Default::default()
@@ -272,6 +278,8 @@ mod tests {
                 has_dynamic_class: true,
                 dynamic_classes: vec!["foo".into()],
                 v_models: vec![],
+                bindings: vec![],
+                events: vec![],
                 span: Span::new(10, 20),
             }],
             ..Default::default()

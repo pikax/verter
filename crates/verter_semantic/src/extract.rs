@@ -1187,6 +1187,8 @@ mod tests {
             has_dynamic_class: false,
             dynamic_classes: Vec::new(),
             v_models: Vec::new(),
+            bindings: Vec::new(),
+            events: Vec::new(),
             span: Span::new(0, 50),
         }
     }

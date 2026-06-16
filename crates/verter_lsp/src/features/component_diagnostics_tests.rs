@@ -76,6 +76,8 @@ fn make_component(
         has_dynamic_class: false,
         dynamic_classes: vec![],
         v_models: vec![],
+        bindings: vec![],
+        events: vec![],
         span: verter_span::Span::new(0, 50),
     }
 }
@@ -232,6 +234,8 @@ fn v_bind_spread_skips_component() {
         has_dynamic_class: false,
         dynamic_classes: vec![],
         v_models: vec![],
+        bindings: vec![],
+        events: vec![],
         span: verter_span::Span::new(0, 50),
     }]);
     let child = make_child_with_props(&[]);
@@ -257,6 +261,8 @@ fn dynamic_component_skipped() {
         has_dynamic_class: false,
         dynamic_classes: vec![],
         v_models: vec![],
+        bindings: vec![],
+        events: vec![],
         span: verter_span::Span::new(0, 50),
     }]);
 
@@ -334,6 +340,8 @@ fn no_import_source_skipped() {
         has_dynamic_class: false,
         dynamic_classes: vec![],
         v_models: vec![],
+        bindings: vec![],
+        events: vec![],
         span: verter_span::Span::new(0, 50),
     }]);
 
@@ -485,6 +493,8 @@ fn make_component_with_vmodels(
         has_dynamic_class: false,
         dynamic_classes: vec![],
         v_models: vmodels,
+        bindings: vec![],
+        events: vec![],
         span: verter_span::Span::new(0, 50),
     }
 }
@@ -637,6 +647,8 @@ fn dynamic_component_vmodel_skipped() {
             binding_name: "title".to_string(),
             span: verter_span::Span::new(10, 30),
         }],
+        bindings: vec![],
+        events: vec![],
         span: verter_span::Span::new(0, 50),
     }]);
 
@@ -700,6 +712,8 @@ fn data_attr_not_flagged_on_non_fragment_component() {
         has_dynamic_class: false,
         dynamic_classes: vec![],
         v_models: vec![],
+        bindings: vec![],
+        events: vec![],
         span: verter_span::Span::new(0, 50),
     }]);
 
@@ -726,6 +740,8 @@ fn data_attr_flagged_on_fragment_component() {
         has_dynamic_class: false,
         dynamic_classes: vec![],
         v_models: vec![],
+        bindings: vec![],
+        events: vec![],
         span: verter_span::Span::new(0, 50),
     }]);
 
@@ -756,6 +772,8 @@ fn aria_attr_not_flagged_on_non_fragment_component() {
         has_dynamic_class: false,
         dynamic_classes: vec![],
         v_models: vec![],
+        bindings: vec![],
+        events: vec![],
         span: verter_span::Span::new(0, 50),
     }]);
 
@@ -1001,6 +1019,8 @@ fn make_component_with_slots(
         has_dynamic_class: false,
         dynamic_classes: vec![],
         v_models: vec![],
+        bindings: vec![],
+        events: vec![],
         span: verter_span::Span::new(0, 50),
     }
 }
