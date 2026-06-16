@@ -353,7 +353,8 @@ pub struct ProjectOverviewComponentEdge {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectOverviewStats {
-    pub total_vue_files: usize,
+    /// Count of framework CARRIER component files (`.vue`, `.svelte`, …).
+    pub total_component_files: usize,
     pub total_components: usize,
     pub total_provide_keys: usize,
     pub total_inject_keys: usize,

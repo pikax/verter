@@ -79,13 +79,14 @@ impl MappedRun {
     }
 }
 
-/// Bidirectional position mapper between Vue source positions and generated IDE positions.
+/// Bidirectional position mapper between carrier-source positions (`.vue`,
+/// `.svelte`, …) and generated IDE positions.
 ///
 /// Consumes an `oxc_sourcemap::OwnedSourceMap` (from `verter_session.get_ide()`) and provides
 /// strict, **in-run** lookups in both directions:
-/// - [`tsx_to_vue`](PositionMapper::tsx_to_vue): generated TSX position ([`TsPosition`]) ->
-///   original Vue position ([`LspPosition`], wrapped in [`SourceMapped`]).
-/// - [`vue_to_tsx`](PositionMapper::vue_to_tsx): original Vue position ([`LspPosition`]) ->
+/// - [`tsx_to_carrier`](PositionMapper::tsx_to_carrier): generated TSX position ([`TsPosition`]) ->
+///   original carrier-source position ([`LspPosition`], wrapped in [`SourceMapped`]).
+/// - [`carrier_to_tsx`](PositionMapper::carrier_to_tsx): original carrier-source position ([`LspPosition`]) ->
 ///   generated TSX position ([`TsPosition`], wrapped in [`GeneratedMapped`]).
 ///
 /// Both directions return `None` unless the query falls **strictly inside a single mapped
@@ -95,7 +96,7 @@ impl MappedRun {
 /// preserved ONLY within one mapped run (the query's offset from the run start is added to
 /// the run's mapped start).
 ///
-/// A RANGE maps only via [`tsx_range_to_vue`](PositionMapper::tsx_range_to_vue), which
+/// A RANGE maps only via [`tsx_range_to_carrier`](PositionMapper::tsx_range_to_carrier), which
 /// requires both endpoints to resolve inside the SAME **compatibility component** (the same
 /// run, or runs linked by an unbroken chain that is contiguous in BOTH the generated and the
 /// source space — same-line adjacency or the multiline line-wrap equivalent). Two endpoints
@@ -105,7 +106,7 @@ impl MappedRun {
 ///
 /// All positions use 0-indexed lines and UTF-16 columns (matching LSP `Position`). The typed
 /// [`TsPosition`] / [`LspPosition`] wrappers make it impossible to pass a TSX coordinate where
-/// a Vue coordinate is expected.
+/// a carrier-source coordinate is expected.
 ///
 /// Performance: the mapped runs and the per-line sorted indices used for lookup are
 /// precomputed ONCE in [`from_json`](PositionMapper::from_json). Both public lookups are then
@@ -125,8 +126,8 @@ pub struct PositionMapper {
     by_src_line: Vec<Vec<u32>>,
 }
 
-/// Result of [`PositionMapper::tsx_to_vue`]: an original-`.vue` position plus the identity of
-/// the mapped run it resolved inside (so a range composer can prove endpoint compatibility).
+/// Result of [`PositionMapper::tsx_to_carrier`]: an original carrier-source position plus the
+/// identity of the mapped run it resolved inside (so a range composer can prove endpoint compatibility).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SourceMapped {
     /// The resolved Vue source position (LSP-negotiated encoding).
@@ -135,7 +136,7 @@ pub struct SourceMapped {
     pub run: RunId,
 }
 
-/// Result of [`PositionMapper::vue_to_tsx`]: a generated-TSX position plus the identity of the
+/// Result of [`PositionMapper::carrier_to_tsx`]: a generated-TSX position plus the identity of the
 /// mapped run it resolved inside (so a range composer can prove endpoint compatibility).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GeneratedMapped {
@@ -148,7 +149,7 @@ pub struct GeneratedMapped {
 /// Stable identity of a single mapped run within one [`PositionMapper`].
 ///
 /// It is opaque on purpose: callers compare two `RunId`s only through
-/// [`PositionMapper::tsx_range_to_vue`] (which decides endpoint compatibility), never by
+/// [`PositionMapper::tsx_range_to_carrier`] (which decides endpoint compatibility), never by
 /// reaching into the underlying index. Two `RunId`s from DIFFERENT mappers are meaningless
 /// together.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -467,10 +468,10 @@ impl PositionMapper {
         }
     }
 
-    /// Map a generated TSX position back to the original Vue source position.
+    /// Map a generated TSX position back to the original carrier-source position.
     ///
     /// This is the most common LSP operation: TSGO or TypeScript reports a position
-    /// in the generated TSX, and we need the corresponding Vue source position.
+    /// in the generated TSX, and we need the corresponding carrier-source position.
     ///
     /// Strict in-run lookup: returns `Some` ONLY when the query lies strictly inside a
     /// single mapped run's generated extent. A query on an unmapped/synthetic token (e.g.
@@ -478,7 +479,7 @@ impl PositionMapper {
     /// end, or bridging into the next run returns `None`. Within the run, character precision
     /// is preserved by adding the query's offset from the run start to the mapped source
     /// column.
-    pub fn tsx_to_vue(&self, pos: TsPosition) -> Option<SourceMapped> {
+    pub fn tsx_to_carrier(&self, pos: TsPosition) -> Option<SourceMapped> {
         let run_id = self.run_at_dst(pos.line, pos.character)?;
         let run = &self.runs[run_id.0 as usize];
         // Within-run character precision: the run's generated and source extents are
@@ -493,16 +494,16 @@ impl PositionMapper {
         })
     }
 
-    /// Map an original Vue source position to the generated TSX position.
+    /// Map an original carrier-source position to the generated TSX position.
     ///
-    /// This is needed when the user interacts at a Vue position and we need
-    /// to query TSGO at the corresponding TSX offset.
+    /// This is needed when the user interacts at a carrier-source position and we
+    /// need to query TSGO at the corresponding TSX offset.
     ///
     /// Strict in-run lookup (no snap-to-previous): returns `Some` ONLY when the target
     /// source position lies strictly inside a single mapped run's source extent. A target in
     /// a gap, past the run's true content end, or in a later/unmapped run returns `None`.
     /// Within the run, the in-run offset is added to the mapped generated column.
-    pub fn vue_to_tsx(&self, pos: LspPosition) -> Option<GeneratedMapped> {
+    pub fn carrier_to_tsx(&self, pos: LspPosition) -> Option<GeneratedMapped> {
         let run_id = self.run_at_src(pos.line, pos.character)?;
         let run = &self.runs[run_id.0 as usize];
         Some(GeneratedMapped {
@@ -514,7 +515,7 @@ impl PositionMapper {
         })
     }
 
-    /// Map a generated TSX **range** `[start, end)` back to a Vue source range `(start, end)`,
+    /// Map a generated TSX **range** `[start, end)` back to a carrier-source range `(start, end)`,
     /// enforcing the half-open endpoint-compatibility rule.
     ///
     /// A range maps only when both endpoints resolve inside the SAME compatibility component:
@@ -530,12 +531,12 @@ impl PositionMapper {
     /// `MoveOriginal` / repeated-emission shape), or otherwise in different components, returns
     /// `None` — never a bogus straddling range. This is the binding "both endpoints inside
     /// compatible mapped spans" contract.
-    pub fn tsx_range_to_vue(
+    pub fn tsx_range_to_carrier(
         &self,
         start: TsPosition,
         end: TsPosition,
     ) -> Option<(LspPosition, LspPosition)> {
-        let start_mapped = self.tsx_to_vue(start)?;
+        let start_mapped = self.tsx_to_carrier(start)?;
 
         // Half-open end at the EXCLUSIVE generated end of a run: the last included column is
         // `end.character - 1`, which lies inside the terminal run. That run may be
@@ -564,7 +565,7 @@ impl PositionMapper {
         }
 
         // Otherwise the end must resolve INSIDE a run compatible with the start run.
-        let end_mapped = self.tsx_to_vue(end)?;
+        let end_mapped = self.tsx_to_carrier(end)?;
         if self.runs_compatible(start_mapped.run, end_mapped.run) {
             Some((start_mapped.pos, end_mapped.pos))
         } else {

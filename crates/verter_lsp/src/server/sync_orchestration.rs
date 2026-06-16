@@ -1,7 +1,7 @@
 //! Provider-sync orchestration.
 //!
 //! Inherent-impl extension methods on [`super::VerterLanguageServer`]
-//! covering diagnostics publishing, IDE/API/non-Vue provider sync,
+//! covering diagnostics publishing, IDE/API/non-carrier provider sync,
 //! background-init bootstrap, and unresolved (pre-snapshot) sync paths.
 //!
 //! All methods were moved verbatim from `server.rs` (now `server/mod.rs`).
@@ -36,9 +36,9 @@ impl VerterLanguageServer {
             match self.ide_context(uri) {
                 Some((tsx_path, tsx_content, mapper)) => {
                     let tsx_li = LineIndex::new(&tsx_content, self.documents.encoding());
-                    let vue_li = self.documents.get(uri).map(|d| d.line_index.clone());
-                    match (tp.get_diagnostics(&tsx_path).await, vue_li) {
-                        (Ok(type_diags), Some(vue_li)) => {
+                    let carrier_li = self.documents.get(uri).map(|d| d.line_index.clone());
+                    match (tp.get_diagnostics(&tsx_path).await, carrier_li) {
+                        (Ok(type_diags), Some(carrier_li)) => {
                             tracing::debug!(
                                 "publish_full_diagnostics: type provider returned {} for {}",
                                 type_diags.len(),
@@ -49,7 +49,7 @@ impl VerterLanguageServer {
                                 type_diags,
                                 &tsx_li,
                                 &mapper,
-                                &vue_li,
+                                &carrier_li,
                             )
                         }
                         (Err(e), _) => {
@@ -201,7 +201,7 @@ impl VerterLanguageServer {
                     return;
                 };
                 let Some(transition) =
-                    self.prepare_vue_provider_sync_transition(&canonical_id, ide.is_jsx)
+                    self.prepare_carrier_provider_sync_transition(&canonical_id, ide.is_jsx)
                 else {
                     self.pending_snapshot_provider_sync.insert(canonical_id);
                     tracing::debug!(
@@ -259,10 +259,10 @@ impl VerterLanguageServer {
                 .documents
                 .get_ide(uri)
                 .and_then(|ide| {
-                    self.prepare_vue_provider_sync_transition(&canonical_id, ide.is_jsx)
+                    self.prepare_carrier_provider_sync_transition(&canonical_id, ide.is_jsx)
                 })
                 .or_else(|| {
-                    self.prepare_vue_provider_sync_transition(
+                    self.prepare_carrier_provider_sync_transition(
                         &canonical_id,
                         self.documents.is_jsx(uri),
                     )
@@ -304,15 +304,15 @@ impl VerterLanguageServer {
         }
     }
 
-    pub(super) async fn sync_vue_public_api_by_canonical_id(&self, canonical_id: &str) {
+    pub(super) async fn sync_carrier_public_api_by_canonical_id(&self, canonical_id: &str) {
         if let Some(uri) = self.documents.canonical_id_to_uri(canonical_id) {
             self.sync_api_to_provider(&uri).await;
         } else {
-            self.resync_background_vue_file(canonical_id).await;
+            self.resync_background_carrier_file(canonical_id).await;
         }
     }
 
-    pub(super) fn refresh_vue_dependency_tracking(&self, canonical_id: &str) {
+    pub(super) fn refresh_carrier_dependency_tracking(&self, canonical_id: &str) {
         let Some(snapshot) = self.published_resolver() else {
             return;
         };
@@ -341,7 +341,7 @@ impl VerterLanguageServer {
         );
     }
 
-    pub(super) async fn sync_non_vue_file_to_provider(
+    pub(super) async fn sync_non_carrier_file_to_provider(
         &self,
         snapshot: &PublishedResolverSnapshot,
         canonical_id: &str,
@@ -349,7 +349,7 @@ impl VerterLanguageServer {
         module_references: &[verter_session::ScriptModuleReference],
     ) {
         let reader = LspProjectResolverReader::new(&self.documents);
-        let Some(prepared) = prepare_non_vue_provider_sync(
+        let Some(prepared) = prepare_non_carrier_provider_sync(
             Some(snapshot),
             &reader,
             canonical_id,
@@ -363,7 +363,9 @@ impl VerterLanguageServer {
             if matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo) {
                 configure_provider_paths_for_source(sync, snapshot, canonical_id, false).await;
             }
-            if let Some(transition) = self.prepare_non_vue_provider_sync_transition(canonical_id) {
+            if let Some(transition) =
+                self.prepare_non_carrier_provider_sync_transition(canonical_id)
+            {
                 self.close_provider_paths(&transition.stale_paths).await;
                 if let Err(error) = sync
                     .sync_file(&prepared.provider_path, &prepared.rewritten)
@@ -402,19 +404,21 @@ impl VerterLanguageServer {
             );
         }
 
-        let vue_targets = prepared
+        let carrier_public_api_targets = prepared
             .resolved_dependencies
             .iter()
             .filter(|dependency| {
-                dependency.provider_target == crate::project_resolver::ProviderTarget::VuePublicApi
+                dependency.provider_target
+                    == crate::project_resolver::ProviderTarget::CarrierPublicApi
             })
             .map(|dependency| dependency.source_id.clone())
             .collect::<Vec<_>>();
-        for vue_target in vue_targets {
-            self.sync_vue_public_api_by_canonical_id(&vue_target).await;
+        for carrier_public_api_target in carrier_public_api_targets {
+            self.sync_carrier_public_api_by_canonical_id(&carrier_public_api_target)
+                .await;
         }
 
-        let non_vue_targets = prepared
+        let non_carrier_provider_graph_targets = prepared
             .resolved_dependencies
             .iter()
             .filter(|dependency| {
@@ -426,11 +430,14 @@ impl VerterLanguageServer {
             })
             .map(|dependency| dependency.source_id.clone())
             .collect::<Vec<_>>();
-        self.sync_non_vue_provider_graph(&snapshot.resolver, non_vue_targets)
-            .await;
+        self.sync_non_carrier_provider_graph(
+            &snapshot.resolver,
+            non_carrier_provider_graph_targets,
+        )
+        .await;
     }
 
-    pub(super) async fn sync_non_vue_provider_graph(
+    pub(super) async fn sync_non_carrier_provider_graph(
         &self,
         resolver: &crate::project_resolver::NativeProjectResolver,
         initial_ids: Vec<String>,
@@ -447,7 +454,7 @@ impl VerterLanguageServer {
             if !seen.insert(canonical_id.clone()) {
                 continue;
             }
-            // Framework carriers never sync through the non-Vue graph
+            // Framework carriers never sync through the non-carrier graph
             // as raw scripts: `.vue` targets sync through the Vue
             // public-api path, and a carrier-less row (`.svelte`)
             // produces no provider sync state.
@@ -474,7 +481,7 @@ impl VerterLanguageServer {
                 .map(|result| result.module_references)
                 .unwrap_or_default();
 
-            let Some(prepared) = prepare_non_vue_provider_sync(
+            let Some(prepared) = prepare_non_carrier_provider_sync(
                 Some(&PublishedResolverSnapshot {
                     resolver: resolver.clone(),
                     ownership_ready: true,
@@ -494,7 +501,9 @@ impl VerterLanguageServer {
                 };
                 configure_provider_paths_for_source(sync, &snapshot, &canonical_id, true).await;
             }
-            if let Some(transition) = self.prepare_non_vue_provider_sync_transition(&canonical_id) {
+            if let Some(transition) =
+                self.prepare_non_carrier_provider_sync_transition(&canonical_id)
+            {
                 self.close_provider_paths(&transition.stale_paths).await;
                 if let Err(error) = sync
                     .sync_file(&prepared.provider_path, &prepared.rewritten)
@@ -534,9 +543,9 @@ impl VerterLanguageServer {
 
             for dependency in resolved_dependencies {
                 if dependency.provider_target
-                    == crate::project_resolver::ProviderTarget::VuePublicApi
+                    == crate::project_resolver::ProviderTarget::CarrierPublicApi
                 {
-                    self.sync_vue_public_api_by_canonical_id(&dependency.source_id)
+                    self.sync_carrier_public_api_by_canonical_id(&dependency.source_id)
                         .await;
                 } else if dependency.provider_target
                     == crate::project_resolver::ProviderTarget::ShadowSourceFile
@@ -565,8 +574,8 @@ impl VerterLanguageServer {
             return;
         };
         let is_tsgo = matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo);
-        let Some(transition) =
-            self.prepare_vue_provider_sync_transition(&canonical_id, self.documents.is_jsx(&uri))
+        let Some(transition) = self
+            .prepare_carrier_provider_sync_transition(&canonical_id, self.documents.is_jsx(&uri))
         else {
             self.pending_snapshot_provider_sync.insert(canonical_id);
             return;
@@ -687,10 +696,10 @@ impl VerterLanguageServer {
                 let Some(ide_path) =
                     provider_ide_path_for_source(&snap.resolver, &canonical_id, is_jsx)
                 else {
-                    // Non-Vue file: IDE sync not applicable.
+                    // Non-carrier file: IDE sync not applicable.
                     return;
                 };
-                match crate::provider_sync::vue_sync_state_for_source(
+                match crate::provider_sync::carrier_sync_state_for_source(
                     &snap.resolver,
                     &canonical_id,
                     is_jsx,
@@ -702,7 +711,7 @@ impl VerterLanguageServer {
                         // as UNRESOLVED open-document state instead of closing it.
                         //
                         // Route an OPEN file through the shared
-                        // `preserve_open_unresolved_vue` primitive (forces
+                        // `preserve_open_unresolved_carrier` primitive (forces
                         // `Unresolved`, preserves the live IDE TSX, drops AND
                         // CLOSES the stale owner-derived `.vue.ts`), queue it for a
                         // future owner reconciliation, and return. This is the
@@ -712,7 +721,7 @@ impl VerterLanguageServer {
                         // them via an early return or an inline commit that leaks
                         // the dropped `.vue.ts`.
                         if self.documents.canonical_id_to_uri(&canonical_id).is_some() {
-                            self.preserve_open_unresolved_vue(
+                            self.preserve_open_unresolved_carrier(
                                 &canonical_id,
                                 is_jsx,
                                 ide.as_ref().map(|output| &*output.code),
@@ -734,7 +743,7 @@ impl VerterLanguageServer {
                 let Some(ide_path) =
                     provider_ide_path_for_source(&snap.resolver, &canonical_id, is_jsx)
                 else {
-                    // Non-Vue file: IDE sync not applicable.
+                    // Non-carrier file: IDE sync not applicable.
                     return;
                 };
                 if matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo) {
@@ -743,12 +752,17 @@ impl VerterLanguageServer {
                 (ide_path, true)
             }
             None => {
-                // No VFS workspace at all: unresolved
-                if !canonical_id.ends_with(".vue") {
+                // No VFS workspace at all: unresolved. Any framework carrier
+                // projects its IDE virtual path through the carrier-generic
+                // derivation (`Foo.svelte` → `Foo.svelte.tsx`), never a
+                // hardcoded `.vue` suffix.
+                if carrier_language_for(&canonical_id).is_none() {
                     return;
                 }
-                let ext = if is_jsx { ".jsx" } else { ".tsx" };
-                (format!("{canonical_id}{ext}"), true)
+                (
+                    verter_workspace::carrier_ide_provider_path(&canonical_id, is_jsx),
+                    true,
+                )
             }
         };
 
@@ -800,7 +814,7 @@ impl VerterLanguageServer {
                         ..Default::default()
                     }
                 } else if let Some(snapshot) = &snapshot {
-                    crate::provider_sync::vue_sync_state_for_source(
+                    crate::provider_sync::carrier_sync_state_for_source(
                         &snapshot.resolver,
                         &canonical_id,
                         is_jsx,
@@ -908,11 +922,11 @@ impl VerterLanguageServer {
     /// Legacy wrapper for backward compat — calls `ensure_current_file_synced`.
     pub(super) async fn ensure_provider_synced(&self, uri: &Uri) {
         self.ensure_current_file_synced(uri).await;
-        self.ensure_imported_vue_apis_synced(uri).await;
+        self.ensure_imported_carrier_apis_synced(uri).await;
         self.ensure_barrel_imports_synced_for_tsgo(uri).await;
     }
 
-    pub(super) async fn ensure_imported_vue_apis_synced(&self, uri: &Uri) {
+    pub(super) async fn ensure_imported_carrier_apis_synced(&self, uri: &Uri) {
         if matches!(self.type_provider_kind, crate::TypeProviderKind::None) {
             return;
         }
@@ -924,7 +938,7 @@ impl VerterLanguageServer {
             return;
         };
 
-        let mut import_ids = collect_imported_vue_priority_ids_from_imports_with_fallback(
+        let mut import_ids = collect_imported_carrier_priority_ids_from_imports_with_fallback(
             &analysis.imports,
             Some(&canonical_id),
             |parent, specifier| self.resolve_import_specifier(parent, specifier),
@@ -932,7 +946,7 @@ impl VerterLanguageServer {
 
         let snapshot = self.published_resolver();
         let reader = LspProjectResolverReader::new(&self.documents);
-        let dynamic_ids = collect_priority_vue_targets_from_module_references(
+        let dynamic_ids = collect_priority_carrier_public_api_targets_from_module_references(
             snapshot.as_ref(),
             &reader,
             &canonical_id,
@@ -946,14 +960,14 @@ impl VerterLanguageServer {
         }
 
         for import_id in import_ids {
-            self.sync_imported_vue_api_lightweight(&import_id).await;
+            self.sync_imported_carrier_api_lightweight(&import_id).await;
         }
     }
 
-    /// Sync barrel (non-Vue re-export) imports and their Vue dependencies to TSGO.
+    /// Sync barrel (non-carrier re-export) imports and their Vue dependencies to TSGO.
     ///
     /// When a Vue file imports components through a barrel (`import { Comp } from './components'`),
-    /// `ensure_imported_vue_apis_synced` misses both the barrel and its Vue re-export targets
+    /// `ensure_imported_carrier_apis_synced` misses both the barrel and its Vue re-export targets
     /// because the barrel is a `.ts` file. This method discovers barrels from template component
     /// usages, syncs their Vue dependencies first, then syncs the barrel itself.
     pub(super) async fn ensure_barrel_imports_synced_for_tsgo(&self, uri: &Uri) {
@@ -978,9 +992,9 @@ impl VerterLanguageServer {
 
         let host = self.documents.host();
         let mut barrel_ids: Vec<String> = Vec::new();
-        let mut barrel_vue_deps: Vec<String> = Vec::new();
+        let mut barrel_carrier_deps: Vec<String> = Vec::new();
         let mut seen_barrels = HashSet::new();
-        let mut seen_barrel_vue = HashSet::new();
+        let mut seen_barrel_carrier = HashSet::new();
 
         for component in &template.components {
             let Some(import_source) = component.import_source.as_deref() else {
@@ -989,27 +1003,28 @@ impl VerterLanguageServer {
             let Some(resolved) = self.resolve_import_specifier(&canonical_id, import_source) else {
                 continue;
             };
-            if resolved.ends_with(".vue") {
-                continue; // already handled by Vue sync
+            if verter_workspace::path_is_carrier(&resolved) {
+                continue; // a directly-resolved carrier is already handled by carrier sync
             }
             if !seen_barrels.insert(resolved.clone()) {
                 continue;
             }
 
-            // Load barrel into host and scan its module references for Vue specifiers
+            // Load barrel into host and scan its module references for carrier
+            // (`.vue`, `.svelte`, …) specifiers re-exported through it.
             host.ensure_loaded(&resolved);
 
             if let Some(barrel_analysis) = host.get_analysis(&resolved) {
                 for module_ref in barrel_analysis.module_references.iter() {
                     if let Some(specifier) = &module_ref.literal_specifier {
-                        if specifier.ends_with(".vue") {
-                            if let Some(vue_id) =
+                        if verter_workspace::path_is_carrier(specifier) {
+                            if let Some(carrier_id) =
                                 self.resolve_import_specifier(&resolved, specifier)
                             {
-                                if vue_id.ends_with(".vue")
-                                    && seen_barrel_vue.insert(vue_id.clone())
+                                if verter_workspace::path_is_carrier(&carrier_id)
+                                    && seen_barrel_carrier.insert(carrier_id.clone())
                                 {
-                                    barrel_vue_deps.push(vue_id);
+                                    barrel_carrier_deps.push(carrier_id);
                                 }
                             }
                         }
@@ -1020,9 +1035,10 @@ impl VerterLanguageServer {
             barrel_ids.push(resolved);
         }
 
-        // Sync Vue dependencies first (so TSGO has .vue.ts targets)
-        for vue_id in &barrel_vue_deps {
-            self.sync_imported_vue_api_lightweight(vue_id).await;
+        // Sync carrier dependencies first (so the provider has their virtual
+        // IDE targets).
+        for carrier_id in &barrel_carrier_deps {
+            self.sync_imported_carrier_api_lightweight(carrier_id).await;
         }
 
         // Sync barrel files (TSGO's rewrite_vue_imports_for_tsgo handles .vue → .vue.ts)
@@ -1055,7 +1071,7 @@ impl VerterLanguageServer {
                 .unwrap_or_default()
             });
             let reader = LspProjectResolverReader::new(&self.documents);
-            let Some(prepared) = prepare_non_vue_provider_sync(
+            let Some(prepared) = prepare_non_carrier_provider_sync(
                 Some(&snapshot),
                 &reader,
                 barrel_id,
@@ -1067,7 +1083,7 @@ impl VerterLanguageServer {
 
             configure_provider_paths_for_source(sync, &snapshot, barrel_id, false).await;
 
-            if let Some(transition) = self.prepare_non_vue_provider_sync_transition(barrel_id) {
+            if let Some(transition) = self.prepare_non_carrier_provider_sync_transition(barrel_id) {
                 self.close_provider_paths(&transition.stale_paths).await;
                 if let Err(error) = sync
                     .sync_file(&prepared.provider_path, &prepared.rewritten)
@@ -1226,20 +1242,23 @@ impl VerterLanguageServer {
         verter_diagnostics::Linter::default()
     }
 
-    /// Generate an unresolved public API path (.vue.ts) without resolver ownership.
+    /// Generate an unresolved public API path (`Foo.vue.ts` / `Foo.svelte.ts`)
+    /// without resolver ownership.
     ///
-    /// Mirrors `provider_id_for_source()` for Vue files and is used during cold
-    /// start before `background_init()` has built the resolver snapshot.
+    /// Mirrors `provider_id_for_source()` for any framework carrier and is used
+    /// during cold start before `background_init()` has built the resolver
+    /// snapshot. The virtual suffix is the carrier-generic derivation, never a
+    /// hardcoded `.vue` suffix.
     pub(super) fn unresolved_api_path_for_canonical_id(
         &self,
         canonical_id: &str,
     ) -> Option<String> {
-        canonical_id
-            .ends_with(".vue")
-            .then(|| format!("{canonical_id}.ts"))
+        carrier_language_for(canonical_id)
+            .is_some()
+            .then(|| verter_workspace::carrier_api_provider_path(canonical_id))
     }
 
-    pub(super) async fn sync_vue_ide_unresolved(
+    pub(super) async fn sync_carrier_ide_unresolved(
         &self,
         canonical_id: &str,
         ide_code: &str,
@@ -1248,8 +1267,10 @@ impl VerterLanguageServer {
         let Some(sync) = &self.project_sync else {
             return false;
         };
-        let ext = if is_jsx { ".jsx" } else { ".tsx" };
-        let ide_path = format!("{canonical_id}{ext}");
+        // Carrier-generic IDE virtual-file derivation (`Foo.svelte` →
+        // `Foo.svelte.tsx`), never a hardcoded `.vue` suffix. This bootstrap
+        // unresolved path already knows it holds a carrier.
+        let ide_path = verter_workspace::carrier_ide_provider_path(canonical_id, is_jsx);
 
         let mut state = self
             .provider_sync_state_for_source(canonical_id)
@@ -1280,14 +1301,18 @@ impl VerterLanguageServer {
                 true
             }
             Err(error) => {
-                tracing::warn!("sync_vue_ide_unresolved: failed for {canonical_id}: {error}");
+                tracing::warn!("sync_carrier_ide_unresolved: failed for {canonical_id}: {error}");
                 self.queue_snapshot_provider_sync(canonical_id.to_string());
                 false
             }
         }
     }
 
-    pub(super) async fn sync_vue_api_unresolved(&self, canonical_id: &str, api_code: &str) -> bool {
+    pub(super) async fn sync_carrier_api_unresolved(
+        &self,
+        canonical_id: &str,
+        api_code: &str,
+    ) -> bool {
         let Some(sync) = &self.project_sync else {
             return false;
         };
@@ -1323,7 +1348,7 @@ impl VerterLanguageServer {
                 true
             }
             Err(error) => {
-                tracing::warn!("sync_vue_api_unresolved: failed for {canonical_id}: {error}");
+                tracing::warn!("sync_carrier_api_unresolved: failed for {canonical_id}: {error}");
                 self.queue_snapshot_provider_sync(canonical_id.to_string());
                 false
             }
@@ -1360,7 +1385,7 @@ impl VerterLanguageServer {
     ///
     /// This is safe for sync planning, but not for live provider queries.
     /// When no published resolver exists yet, fall back to the local
-    /// unresolved `.vue.tsx` / `.vue.jsx` formula.
+    /// unresolved carrier IDE formula (`Foo.svelte.tsx` / `Foo.vue.jsx`, …).
     pub(super) fn target_ide_path_for_uri(&self, uri: &Uri) -> Option<String> {
         let canonical = self
             .documents
@@ -1373,9 +1398,9 @@ impl VerterLanguageServer {
                 provider_ide_path_for_source(&snapshot.resolver, &canonical, is_jsx)
             })
             .or_else(|| {
-                canonical
-                    .ends_with(".vue")
-                    .then(|| format!("{canonical}{}", if is_jsx { ".jsx" } else { ".tsx" }))
+                carrier_language_for(&canonical)
+                    .is_some()
+                    .then(|| verter_workspace::carrier_ide_provider_path(&canonical, is_jsx))
             })
     }
 
@@ -1397,8 +1422,11 @@ impl VerterLanguageServer {
         ide_path: &str,
     ) -> Option<(String, Arc<str>, PositionMapper)> {
         let snapshot = self.published_resolver()?;
-        let canonical_id =
-            source_id_from_provider_vue_path(&snapshot.resolver, self.documents.host(), ide_path)?;
+        let canonical_id = source_id_from_provider_carrier_path(
+            &snapshot.resolver,
+            self.documents.host(),
+            ide_path,
+        )?;
         let uri = self.documents.canonical_id_to_uri(&canonical_id)?;
         self.ide_context(&uri)
     }
@@ -1463,9 +1491,9 @@ impl VerterLanguageServer {
     ///
     /// Tries to generate and sync the required Vue artifacts without disk I/O:
     /// if the host already has the file in memory, `get_public_api` avoids
-    /// re-reading from disk. Falls back to `resync_background_vue_file` when
+    /// re-reading from disk. Falls back to `resync_background_carrier_file` when
     /// the file hasn't been upserted yet.
-    pub(super) async fn sync_imported_vue_api_lightweight(&self, canonical_id: &str) {
+    pub(super) async fn sync_imported_carrier_api_lightweight(&self, canonical_id: &str) {
         let is_tsgo = matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo);
         let profile = self.documents.tsx_profile.read().clone();
         let snapshot = self.published_resolver();
@@ -1486,24 +1514,26 @@ impl VerterLanguageServer {
                 // Bootstrap: unresolved sync is allowed
                 if let Some(ide) = ide.as_ref() {
                     let _ = self
-                        .sync_vue_ide_unresolved(canonical_id, &ide.code, ide.is_jsx)
+                        .sync_carrier_ide_unresolved(canonical_id, &ide.code, ide.is_jsx)
                         .await;
                 }
-                let _ = self.sync_vue_api_unresolved(canonical_id, &api.code).await;
+                let _ = self
+                    .sync_carrier_api_unresolved(canonical_id, &api.code)
+                    .await;
                 return;
             }
 
             if let Some(sync) = &self.project_sync {
                 let is_jsx = ide.as_ref().map(|output| output.is_jsx).unwrap_or(false);
                 let Some(transition) =
-                    self.prepare_vue_provider_sync_transition(canonical_id, is_jsx)
+                    self.prepare_carrier_provider_sync_transition(canonical_id, is_jsx)
                 else {
                     // Ready snapshot but no owner. Editor-liveness invariant: an
                     // OPEN imported `.vue` (imported-by-an-open-file) must keep
                     // its TSX live as Unresolved open-document state — NEVER
                     // clear+close. Only a genuinely non-open import is removed.
                     if self.documents.canonical_id_to_uri(canonical_id).is_some() {
-                        self.preserve_open_unresolved_vue(
+                        self.preserve_open_unresolved_carrier(
                             canonical_id,
                             is_jsx,
                             ide.as_ref().map(|output| &*output.code),
@@ -1535,7 +1565,7 @@ impl VerterLanguageServer {
                             synced_kinds.push(ProviderPathKind::Ide);
                         } else if let Err(error) = result {
                             tracing::warn!(
-                                "sync_imported_vue_api_lightweight: failed for {ide_path}: {error}"
+                                "sync_imported_carrier_api_lightweight: failed for {ide_path}: {error}"
                             );
                             self.queue_snapshot_provider_sync(canonical_id.to_string());
                         }
@@ -1553,7 +1583,7 @@ impl VerterLanguageServer {
                         synced_kinds.push(ProviderPathKind::Api);
                     } else if let Err(e) = result {
                         tracing::warn!(
-                            "sync_imported_vue_api_lightweight: failed for {dts_path}: {e}"
+                            "sync_imported_carrier_api_lightweight: failed for {dts_path}: {e}"
                         );
                         self.queue_snapshot_provider_sync(canonical_id.to_string());
                     }
@@ -1592,12 +1622,14 @@ impl VerterLanguageServer {
                 if is_tsgo {
                     if let Some(ide) = self.documents.host.get_ide(canonical_id, &profile) {
                         let _ = self
-                            .sync_vue_ide_unresolved(canonical_id, &ide.code, ide.is_jsx)
+                            .sync_carrier_ide_unresolved(canonical_id, &ide.code, ide.is_jsx)
                             .await;
                     }
                 }
                 if let Some(api) = self.documents.host.get_public_api(canonical_id) {
-                    let _ = self.sync_vue_api_unresolved(canonical_id, &api.code).await;
+                    let _ = self
+                        .sync_carrier_api_unresolved(canonical_id, &api.code)
+                        .await;
                     return;
                 }
             }
@@ -1607,10 +1639,10 @@ impl VerterLanguageServer {
         }
 
         // Slow path: file not in host yet — full disk read + upsert + compile + sync.
-        self.resync_background_vue_file(canonical_id).await;
+        self.resync_background_carrier_file(canonical_id).await;
     }
 
-    pub(super) async fn resync_background_vue_file(&self, canonical_id: &str) {
+    pub(super) async fn resync_background_carrier_file(&self, canonical_id: &str) {
         tracing::info!(
             "resync_background: START {canonical_id} thread={:?}",
             std::thread::current().id()
@@ -1620,7 +1652,7 @@ impl VerterLanguageServer {
         // a pure resolver query, so a COMPILE FAILURE (the `compile_result`
         // early-return below) must not strand a previously-`Owned` OPEN `.vue`
         // on its dead owner. Route the owner-None case through the shared
-        // reconcile with NO IDE output (`sync_compiled_vue_to_provider` corrects
+        // reconcile with NO IDE output (`sync_compiled_carrier_to_provider` corrects
         // the binding — preserve open / clear non-open — without needing a
         // successful compile). Only run when a published resolver exists; the
         // bootstrap (pre-snapshot) window still falls through to the sync below.
@@ -1631,7 +1663,8 @@ impl VerterLanguageServer {
             )
             .is_unresolved()
             {
-                self.sync_compiled_vue_to_provider(canonical_id, None).await;
+                self.sync_compiled_carrier_to_provider(canonical_id, None)
+                    .await;
                 return;
             }
         }
@@ -1664,10 +1697,10 @@ impl VerterLanguageServer {
             return;
         };
 
-        self.refresh_vue_dependency_tracking(canonical_id);
+        self.refresh_carrier_dependency_tracking(canonical_id);
 
         let ide = self.documents.host.get_ide(canonical_id, &profile);
-        self.sync_compiled_vue_to_provider(canonical_id, ide.as_ref())
+        self.sync_compiled_carrier_to_provider(canonical_id, ide.as_ref())
             .await;
     }
 
@@ -1675,7 +1708,7 @@ impl VerterLanguageServer {
     /// type provider, owner-aware, with the editor-liveness + close-AFTER-
     /// successful-sync discipline.
     ///
-    /// Separated from [`Self::resync_background_vue_file`] (which owns the
+    /// Separated from [`Self::resync_background_carrier_file`] (which owns the
     /// destructive disk reload) so the owner-resolution + sync DECISION is
     /// directly exercisable. `ide` is the compiled IDE output if available.
     ///
@@ -1685,7 +1718,7 @@ impl VerterLanguageServer {
     /// otherwise it stays stranded on its stale owner (the `no ide_context`
     /// class). `is_jsx` defaults to false when the IDE output is absent (the
     /// desired-extension target for the unresolved-preserve path).
-    pub(super) async fn sync_compiled_vue_to_provider(
+    pub(super) async fn sync_compiled_carrier_to_provider(
         &self,
         canonical_id: &str,
         ide: Option<&verter_session::IdeResponse>,
@@ -1700,7 +1733,7 @@ impl VerterLanguageServer {
                 configure_provider_paths_for_source(sync, &snapshot, canonical_id, true).await;
             }
         }
-        let Some(transition) = self.prepare_vue_provider_sync_transition(canonical_id, is_jsx)
+        let Some(transition) = self.prepare_carrier_provider_sync_transition(canonical_id, is_jsx)
         else {
             // Ready snapshot but no owner. Editor-liveness invariant: an OPEN
             // Vue document keeps its TSX live as Unresolved open-document state
@@ -1711,7 +1744,7 @@ impl VerterLanguageServer {
             // alive (R3-5). The preserve helper syncs fresh IDE code only when it
             // is available (`ide.code`), else it just corrects the binding.
             if self.documents.canonical_id_to_uri(canonical_id).is_some() {
-                self.preserve_open_unresolved_vue(
+                self.preserve_open_unresolved_carrier(
                     canonical_id,
                     is_jsx,
                     ide.map(|output| &*output.code),

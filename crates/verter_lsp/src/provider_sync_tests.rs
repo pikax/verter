@@ -22,7 +22,7 @@ fn vue_sync_state_uses_owner_key_from_tsconfig() {
         ),
     ]);
 
-    let state = vue_sync_state_for_source(&resolver, "/workspace/pkg-a/src/App.vue", false)
+    let state = carrier_sync_state_for_source(&resolver, "/workspace/pkg-a/src/App.vue", false)
         .expect("matched Vue source should materialize provider state");
 
     assert_eq!(
@@ -239,7 +239,7 @@ fn unresolved_state_is_detected() {
 
 #[test]
 fn unresolved_vue_builds_local_tsx_ide_path() {
-    let tsx = ProviderSyncState::unresolved_vue("/workspace/src/App.vue", false);
+    let tsx = ProviderSyncState::unresolved_carrier("/workspace/src/App.vue", false);
     assert!(tsx.is_unresolved());
     assert_eq!(tsx.ide_path.as_deref(), Some("/workspace/src/App.vue.tsx"));
     assert!(
@@ -248,7 +248,7 @@ fn unresolved_vue_builds_local_tsx_ide_path() {
     );
 
     // Negative: a JSX document must NOT get a `.tsx` path.
-    let jsx = ProviderSyncState::unresolved_vue("/workspace/src/App.vue", true);
+    let jsx = ProviderSyncState::unresolved_carrier("/workspace/src/App.vue", true);
     assert_eq!(jsx.ide_path.as_deref(), Some("/workspace/src/App.vue.jsx"));
     assert_ne!(jsx.ide_path.as_deref(), Some("/workspace/src/App.vue.tsx"));
 }
@@ -313,7 +313,7 @@ fn remove_sync_state_returns_all_active_paths() {
 }
 
 #[test]
-fn open_unresolved_vue_state_converts_prior_owned_to_unresolved() {
+fn open_unresolved_carrier_state_converts_prior_owned_to_unresolved() {
     // FIX-1: an owned→unowned open Vue file must NOT keep its Owned binding
     // or its owner-derived `.vue.ts` API path; only the owner-independent
     // IDE TSX survives, and the binding is forced to Unresolved.
@@ -326,7 +326,7 @@ fn open_unresolved_vue_state_converts_prior_owned_to_unresolved() {
         ..Default::default()
     };
 
-    let state = open_unresolved_vue_state(Some(&previous), "/workspace/src/App.vue", false);
+    let state = open_unresolved_carrier_state(Some(&previous), "/workspace/src/App.vue", false);
 
     // Discriminator: a naive "reuse prior state" would keep Owned + api_path.
     assert!(
@@ -355,14 +355,14 @@ fn open_unresolved_vue_state_converts_prior_owned_to_unresolved() {
 }
 
 #[test]
-fn open_unresolved_vue_state_builds_local_when_no_prior_ide_path() {
+fn open_unresolved_carrier_state_builds_local_when_no_prior_ide_path() {
     // No prior state, or prior state without an IDE path → synthesize the
     // local `{src}.tsx`/`.jsx` unresolved Vue state.
-    let none = open_unresolved_vue_state(None, "/workspace/src/App.vue", false);
+    let none = open_unresolved_carrier_state(None, "/workspace/src/App.vue", false);
     assert!(none.is_unresolved());
     assert_eq!(none.ide_path.as_deref(), Some("/workspace/src/App.vue.tsx"));
 
-    let jsx = open_unresolved_vue_state(None, "/workspace/src/App.vue", true);
+    let jsx = open_unresolved_carrier_state(None, "/workspace/src/App.vue", true);
     assert_eq!(jsx.ide_path.as_deref(), Some("/workspace/src/App.vue.jsx"));
 
     // Prior state with no IDE path is treated as "no live path".
@@ -371,7 +371,8 @@ fn open_unresolved_vue_state_builds_local_when_no_prior_ide_path() {
         api_path: Some("/workspace/src/App.vue.ts".to_string()),
         ..Default::default()
     };
-    let rebuilt = open_unresolved_vue_state(Some(&prior_no_ide), "/workspace/src/App.vue", false);
+    let rebuilt =
+        open_unresolved_carrier_state(Some(&prior_no_ide), "/workspace/src/App.vue", false);
     assert!(rebuilt.is_unresolved());
     assert_eq!(
         rebuilt.ide_path.as_deref(),
@@ -381,7 +382,7 @@ fn open_unresolved_vue_state_builds_local_when_no_prior_ide_path() {
 }
 
 #[test]
-fn open_unresolved_vue_state_does_not_preserve_unloaded_prior_ide_path() {
+fn open_unresolved_carrier_state_does_not_preserve_unloaded_prior_ide_path() {
     // R3-1: a committed unresolved open-document state may carry
     // `ide_background_loaded = true` ONLY for a path genuinely live in the
     // provider. A prior IDE path that was NEVER background-loaded
@@ -403,7 +404,7 @@ fn open_unresolved_vue_state_does_not_preserve_unloaded_prior_ide_path() {
         ..Default::default()
     };
     let state =
-        open_unresolved_vue_state(Some(&prev_unloaded_jsx), "/workspace/src/App.vue", false);
+        open_unresolved_carrier_state(Some(&prev_unloaded_jsx), "/workspace/src/App.vue", false);
     assert_ne!(
         state.ide_path.as_deref(),
         Some("/workspace/src/App.vue.jsx"),
@@ -422,7 +423,7 @@ fn open_unresolved_vue_state_does_not_preserve_unloaded_prior_ide_path() {
 }
 
 #[test]
-fn open_unresolved_vue_state_uses_desired_ext_on_jsx_flip() {
+fn open_unresolved_carrier_state_uses_desired_ext_on_jsx_flip() {
     // R3-4: the desired unresolved IDE path is derived from the CURRENT
     // `is_jsx`. A prior live `.jsx` path must NOT be reused when the document
     // flipped to TS (`is_jsx == false`) — reusing it would sync the new TS
@@ -436,7 +437,8 @@ fn open_unresolved_vue_state_uses_desired_ext_on_jsx_flip() {
         ..Default::default()
     };
     // is_jsx flipped to false → desired path is `.tsx`.
-    let flipped = open_unresolved_vue_state(Some(&prev_live_jsx), "/workspace/src/App.vue", false);
+    let flipped =
+        open_unresolved_carrier_state(Some(&prev_live_jsx), "/workspace/src/App.vue", false);
     assert_eq!(
         flipped.ide_path.as_deref(),
         Some("/workspace/src/App.vue.tsx"),
@@ -457,7 +459,7 @@ fn open_unresolved_vue_state_uses_desired_ext_on_jsx_flip() {
         ide_background_loaded: true,
         ..Default::default()
     };
-    let kept = open_unresolved_vue_state(Some(&prev_live_tsx), "/workspace/src/App.vue", false);
+    let kept = open_unresolved_carrier_state(Some(&prev_live_tsx), "/workspace/src/App.vue", false);
     assert_eq!(
         kept.ide_path.as_deref(),
         Some("/workspace/src/App.vue.tsx"),
@@ -481,7 +483,7 @@ fn dropped_api_path_on_unowned_conversion_returns_stale_owner_derived_api() {
         api_background_loaded: true,
         ..Default::default()
     };
-    let converted = open_unresolved_vue_state(Some(&previous), "/workspace/src/App.vue", false);
+    let converted = open_unresolved_carrier_state(Some(&previous), "/workspace/src/App.vue", false);
 
     let dropped = dropped_api_path_on_unowned_conversion(Some(&previous), &converted);
     assert_eq!(
@@ -545,7 +547,7 @@ fn dropped_api_path_on_unowned_conversion_none_when_no_api_or_unchanged() {
         api_path: Some("/workspace/src/App.vue.ts".to_string()),
         ..Default::default()
     };
-    let converted_unresolved = open_unresolved_vue_state(
+    let converted_unresolved = open_unresolved_carrier_state(
         Some(&prev_unresolved_with_api),
         "/workspace/src/App.vue",
         false,
@@ -769,7 +771,7 @@ fn genuinely_stale_after_sync_skips_same_path_rebind() {
     );
 }
 
-// ---- open_unresolved_vue_commit decision table (R5-1) ----------------
+// ---- open_unresolved_carrier_commit decision table (R5-1) ----------------
 //
 // The pure state half of the unified unresolved-preserve liveness machine.
 // One test per row of the brief's 9-row table. `P_old`/`L_old` = prior
@@ -779,9 +781,9 @@ fn genuinely_stale_after_sync_skips_same_path_rebind() {
 // and the IDE close target (`stale_ide_after_success`).
 
 /// Build the desired Unresolved target the caller passes to the commit
-/// builder (mirrors `open_unresolved_vue_state(prev, src, is_jsx)`).
+/// builder (mirrors `open_unresolved_carrier_state(prev, src, is_jsx)`).
 fn target_for(previous: Option<&ProviderSyncState>, is_jsx: bool) -> ProviderSyncState {
-    open_unresolved_vue_state(previous, "/workspace/src/App.vue", is_jsx)
+    open_unresolved_carrier_state(previous, "/workspace/src/App.vue", is_jsx)
 }
 
 #[test]
@@ -789,7 +791,7 @@ fn open_unresolved_commit_row1_no_prior_no_ide() {
     // Row 1: no prior live state, IDE did not sync this pass → committed
     // ide_path None, not loaded, nothing to close.
     let target = target_for(None, false);
-    let commit = open_unresolved_vue_commit(None, target, false);
+    let commit = open_unresolved_carrier_commit(None, target, false);
     assert!(commit.committed.is_unresolved());
     assert!(
         commit.committed.ide_path.is_none(),
@@ -805,7 +807,7 @@ fn open_unresolved_commit_row1_no_prior_no_ide() {
 fn open_unresolved_commit_row2_no_prior_sync_ok() {
     // Row 2: no prior live state, IDE synced → committed P_new, loaded.
     let target = target_for(None, false);
-    let commit = open_unresolved_vue_commit(None, target, true);
+    let commit = open_unresolved_carrier_commit(None, target, true);
     assert_eq!(
         commit.committed.ide_path.as_deref(),
         Some("/workspace/src/App.vue.tsx")
@@ -822,7 +824,7 @@ fn open_unresolved_commit_row3_no_prior_sync_err() {
     // Row 3: no prior live state, IDE sync FAILED → committed None, not
     // loaded (the failed open never went live; no dead path advertised).
     let target = target_for(None, false);
-    let commit = open_unresolved_vue_commit(None, target, false);
+    let commit = open_unresolved_carrier_commit(None, target, false);
     assert!(
         commit.committed.ide_path.is_none(),
         "a failed first-open with no prior live path must commit ide_path=None, got {:?}",
@@ -843,7 +845,7 @@ fn open_unresolved_commit_row4_live_same_ext_no_ide() {
         ..Default::default()
     };
     let target = target_for(Some(&prev), false);
-    let commit = open_unresolved_vue_commit(Some(&prev), target, false);
+    let commit = open_unresolved_carrier_commit(Some(&prev), target, false);
     assert_eq!(
         commit.committed.ide_path.as_deref(),
         Some("/workspace/src/App.vue.tsx"),
@@ -872,7 +874,7 @@ fn open_unresolved_commit_row5_live_same_ext_sync_ok() {
         ..Default::default()
     };
     let target = target_for(Some(&prev), false);
-    let commit = open_unresolved_vue_commit(Some(&prev), target, true);
+    let commit = open_unresolved_carrier_commit(Some(&prev), target, true);
     assert_eq!(
         commit.committed.ide_path.as_deref(),
         Some("/workspace/src/App.vue.tsx")
@@ -896,7 +898,7 @@ fn open_unresolved_commit_row6_live_same_ext_sync_err() {
         ..Default::default()
     };
     let target = target_for(Some(&prev), false);
-    let commit = open_unresolved_vue_commit(Some(&prev), target, false);
+    let commit = open_unresolved_carrier_commit(Some(&prev), target, false);
     assert_eq!(
         commit.committed.ide_path.as_deref(),
         Some("/workspace/src/App.vue.tsx"),
@@ -923,7 +925,7 @@ fn open_unresolved_commit_row7_live_diff_ext_no_ide() {
         ..Default::default()
     };
     let target = target_for(Some(&prev), false); // desired .tsx
-    let commit = open_unresolved_vue_commit(Some(&prev), target, false);
+    let commit = open_unresolved_carrier_commit(Some(&prev), target, false);
     assert_eq!(
         commit.committed.ide_path.as_deref(),
         Some("/workspace/src/App.vue.jsx"),
@@ -952,7 +954,7 @@ fn open_unresolved_commit_row8_live_diff_ext_sync_ok() {
         ..Default::default()
     };
     let target = target_for(Some(&prev), false); // desired .tsx
-    let commit = open_unresolved_vue_commit(Some(&prev), target, true);
+    let commit = open_unresolved_carrier_commit(Some(&prev), target, true);
     assert_eq!(
         commit.committed.ide_path.as_deref(),
         Some("/workspace/src/App.vue.tsx"),
@@ -986,7 +988,7 @@ fn open_unresolved_commit_row9_live_diff_ext_sync_err() {
         ..Default::default()
     };
     let target = target_for(Some(&prev), false); // desired .tsx
-    let commit = open_unresolved_vue_commit(Some(&prev), target, false);
+    let commit = open_unresolved_carrier_commit(Some(&prev), target, false);
     assert_eq!(
         commit.committed.ide_path.as_deref(),
         Some("/workspace/src/App.vue.jsx"),
@@ -1033,7 +1035,7 @@ fn open_unresolved_commit_prior_unloaded_no_ide() {
         ..Default::default()
     };
     let target = target_for(Some(&prev), false);
-    let commit = open_unresolved_vue_commit(Some(&prev), target, false);
+    let commit = open_unresolved_carrier_commit(Some(&prev), target, false);
     assert!(commit.committed.is_unresolved());
     assert!(
         commit.committed.ide_path.is_none(),
@@ -1068,7 +1070,7 @@ fn open_unresolved_commit_prior_unloaded_sync_err() {
     };
     let target = target_for(Some(&prev), false);
     // `ide_synced == false`: a fresh open of the desired path failed this pass.
-    let commit = open_unresolved_vue_commit(Some(&prev), target, false);
+    let commit = open_unresolved_carrier_commit(Some(&prev), target, false);
     assert!(
         commit.committed.ide_path.is_none(),
         "a failed open with only an UNLOADED (never-live) prior must commit \
@@ -1098,7 +1100,7 @@ fn open_unresolved_commit_prior_unloaded_sync_ok() {
         ..Default::default()
     };
     let target = target_for(Some(&prev), false);
-    let commit = open_unresolved_vue_commit(Some(&prev), target, true);
+    let commit = open_unresolved_carrier_commit(Some(&prev), target, true);
     assert_eq!(
         commit.committed.ide_path.as_deref(),
         Some("/workspace/src/App.vue.tsx"),
@@ -1132,7 +1134,7 @@ fn open_unresolved_commit_prior_owned_drops_and_surfaces_api_close() {
         ..Default::default()
     };
     let target = target_for(Some(&prev), false); // desired .tsx, api None
-    let commit = open_unresolved_vue_commit(Some(&prev), target, false);
+    let commit = open_unresolved_carrier_commit(Some(&prev), target, false);
 
     // Binding forced Unresolved, owner-derived API dropped from state.
     assert!(commit.committed.is_unresolved());
@@ -1182,7 +1184,7 @@ fn open_unresolved_commit_prior_owned_diff_ext_sync_ok_drops_api_and_closes_old_
         ..Default::default()
     };
     let target = target_for(Some(&prev), false); // desired .tsx
-    let commit = open_unresolved_vue_commit(Some(&prev), target, true);
+    let commit = open_unresolved_carrier_commit(Some(&prev), target, true);
     assert!(commit.committed.is_unresolved());
     assert!(commit.committed.api_path.is_none());
     assert_eq!(

@@ -6,7 +6,7 @@ use crate::ProjectSyncMode;
 
 /// Syncs project files to a `TypeProvider`.
 ///
-/// In `FullProject` mode, `.vue` outputs and non-Vue source files are all sent.
+/// In `FullProject` mode, `.vue` outputs and non-carrier source files are all sent.
 #[derive(Clone)]
 pub struct ProjectSync {
     provider: Arc<dyn TypeProvider>,
@@ -84,18 +84,18 @@ impl ProjectSync {
         self.provider.close_file(dts_path).await
     }
 
-    /// Load a non-Vue file into the type provider for import resolution only.
+    /// Load a non-carrier file into the type provider for import resolution only.
     /// Unlike `sync_file`, this uses `load_file` (background semantics — no diagnostics).
     pub async fn load_file(&self, path: &str, content: &str) -> Result<(), TypeProviderError> {
         self.provider.load_file(path, content).await
     }
 
-    /// Sync a non-Vue file to the type provider.
+    /// Sync a non-carrier file to the type provider.
     pub async fn sync_file(&self, path: &str, content: &str) -> Result<(), TypeProviderError> {
         self.provider.update_file(path, content).await
     }
 
-    /// Close a non-Vue provider file.
+    /// Close a non-carrier provider file.
     pub async fn close_file(&self, path: &str) -> Result<(), TypeProviderError> {
         self.provider.close_file(path).await
     }
@@ -450,9 +450,9 @@ mod tests {
         }
     }
 
-    /// @ai-generated — Non-Vue files are synced only in FullProject mode
+    /// @ai-generated — Non-carrier files are synced only in FullProject mode
     #[tokio::test]
-    async fn non_vue_file_synced_in_full_project_mode() {
+    async fn non_carrier_file_synced_in_full_project_mode() {
         let mock = MockTypeProvider::new();
         let sync = make_sync(&mock, ProjectSyncMode::FullProject);
 
@@ -504,7 +504,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn non_vue_file_close_sends_close_file() {
+    async fn non_carrier_file_close_sends_close_file() {
         let mock = MockTypeProvider::new();
         let sync = make_sync(&mock, ProjectSyncMode::FullProject);
 
@@ -642,7 +642,7 @@ mod tests {
         );
     }
 
-    /// @ai-generated — sync_file propagates provider errors for non-Vue files.
+    /// @ai-generated — sync_file propagates provider errors for non-carrier files.
     #[tokio::test]
     async fn sync_file_full_project_propagates_provider_errors() {
         let failing =
@@ -658,7 +658,7 @@ mod tests {
 
     /// Regression: open_dts propagates provider errors.
     ///
-    /// `sync_imported_vue_api_lightweight` calls `open_dts` for TSGO when the file
+    /// `sync_imported_carrier_api_lightweight` calls `open_dts` for TSGO when the file
     /// hasn't been background-loaded yet. The server must handle the returned error
     /// (log + queue for retry), not silently drop it.
     #[tokio::test]
@@ -676,7 +676,7 @@ mod tests {
 
     /// Regression: sync_dts propagates provider errors.
     ///
-    /// `sync_imported_vue_api_lightweight` calls `sync_dts` for non-TSGO or
+    /// `sync_imported_carrier_api_lightweight` calls `sync_dts` for non-TSGO or
     /// already-background-loaded files. The server must handle the returned error.
     #[tokio::test]
     async fn sync_dts_propagates_provider_errors() {

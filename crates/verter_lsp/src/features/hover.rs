@@ -219,7 +219,7 @@ pub fn child_hover_target_at_offset(
         }
     }
 
-    direct_vue_import_binding_hover_target(offset, analysis).map(ChildHoverTarget::ImportBinding)
+    direct_import_binding_hover_target(offset, analysis).map(ChildHoverTarget::ImportBinding)
 }
 
 pub fn build_child_component_hover(
@@ -423,7 +423,7 @@ fn hover_in_script(
     hover_for_word(&word, analysis)
 }
 
-fn direct_vue_import_binding_hover_target(
+fn direct_import_binding_hover_target(
     offset: u32,
     analysis: &FileAnalysisSnapshot,
 ) -> Option<ImportBindingHoverTarget> {

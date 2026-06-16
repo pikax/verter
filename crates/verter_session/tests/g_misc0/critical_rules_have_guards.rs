@@ -418,6 +418,20 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             // deleted, retired stores absent from production.
             "vue_relocation_no_shim",
             "retired_symbols_absent_from_production_source",
+            // Framework-carrier LSP routing is carrier-generic: no Vue-only
+            // gate (`.is_vue(` / `ends_with(".vue")` / `strip_suffix(".vue")` /
+            // bare `"vue"`-prefix language-id classifier) and no hardcoded
+            // carrier provider literal (`.vue.ts`, …) in feature/server routing
+            // outside the narrow SSR-convention / test / comment / `is_svelte()`
+            // allowlist.
+            "carrier_lsp_routing_has_no_hardcoded_vue_gate",
+            // …and NO carrier-generic routing / provider-sync / position-mapper
+            // primitive may carry a Vue-flavoured NAME (`vue_resync_ids`,
+            // `vue_position_to_tsx_offset`, `prepare_non_vue_provider_sync`, …)
+            // — the naming half of the pair that ends the whack-a-mole, banning
+            // `vue`/`Vue`-substring identifiers in the scanned modules outside
+            // the narrow Vue-intrinsic allowlist.
+            "carrier_routing_has_no_vue_named_generic_primitive",
         ],
     ),
     // ──────────────────── SKILL.md additions ──────────────────────

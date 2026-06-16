@@ -1,5 +1,5 @@
-// Document drop edit: when a .vue file is dropped into a template,
-// insert a component tag and auto-import it.
+// Document drop edit: when a framework CARRIER file (`.vue`, `.svelte`, …)
+// is dropped into a template, insert a component tag and auto-import it.
 
 use tower_lsp_server::ls_types::*;
 
@@ -23,10 +23,8 @@ pub fn document_drop_edit(
     target_uri: &Uri,
     preferred_import_path: Option<&str>,
 ) -> Option<WorkspaceEdit> {
-    // Only handle .vue file drops
-    if !dropped_uri.ends_with(".vue") {
-        return None;
-    }
+    // Only handle framework CARRIER file drops (`.vue`, `.svelte`, …).
+    crate::server::carrier_language_for(dropped_uri)?;
 
     // Check the drop position is inside a template block
     let offset = line_index.position_to_offset(position)? as usize;
@@ -100,8 +98,10 @@ fn extract_component_name(path: &str) -> Option<String> {
         .rsplit('/')
         .next()
         .or_else(|| path.rsplit('\\').next())?;
-    let name = filename.strip_suffix(".vue")?;
-    if name.is_empty() {
+    // Registry-backed carrier strip: `Foo.vue` / `Foo.svelte` → `Foo`. A
+    // non-carrier filename yields itself unchanged, so reject it.
+    let name = verter_workspace::strip_carrier_extension(filename);
+    if name.is_empty() || name == filename {
         return None;
     }
     // Ensure PascalCase (capitalize first letter)
@@ -158,7 +158,7 @@ mod tests {
     }
 
     #[test]
-    fn test_drop_edit_non_vue_file() {
+    fn test_drop_edit_non_carrier_file() {
         let result = document_drop_edit(
             "file:///project/utils.ts",
             &Position {

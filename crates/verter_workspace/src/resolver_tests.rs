@@ -652,6 +652,51 @@ fn rune_modules_are_not_carriers_and_serve_their_own_provider_path() {
 }
 
 #[test]
+fn strip_carrier_extension_is_registry_backed_for_every_carrier() {
+    // The registry-backed carrier strip yields the bare stem for EVERY
+    // carrier extension (`.vue`, `.svelte`), longest-suffix-first.
+    assert_eq!(
+        strip_carrier_extension("/project/src/components/MyButton.vue"),
+        "/project/src/components/MyButton"
+    );
+    assert_eq!(
+        strip_carrier_extension("/project/src/components/MyButton.svelte"),
+        "/project/src/components/MyButton"
+    );
+    assert_eq!(strip_carrier_extension("Foo.svelte"), "Foo");
+    assert_eq!(strip_carrier_extension("Foo.vue"), "Foo");
+    // A non-carrier path is returned UNCHANGED (discrimination: the caller
+    // distinguishes carrier from non-carrier by stem != input).
+    assert_eq!(strip_carrier_extension("util.ts"), "util.ts");
+    assert_eq!(
+        strip_carrier_extension("store.svelte.ts"),
+        "store.svelte.ts"
+    );
+    // A bare `.svelte` / `.vue` (no stem) does not strip to empty wrongly —
+    // the helper requires at least one stem char before the extension.
+    assert_eq!(strip_carrier_extension(".svelte"), ".svelte");
+}
+
+#[test]
+fn carrier_api_provider_path_appends_ts_to_full_carrier() {
+    // The API virtual path is the FULL carrier canonical + `.ts` for every
+    // carrier — never a hardcoded `.vue.ts`.
+    assert_eq!(
+        carrier_api_provider_path("/workspace/src/App.vue"),
+        "/workspace/src/App.vue.ts"
+    );
+    assert_eq!(
+        carrier_api_provider_path("/workspace/src/App.svelte"),
+        "/workspace/src/App.svelte.ts"
+    );
+    // Mirrors the IDE derivation's carrier-genericity.
+    assert_eq!(
+        carrier_ide_provider_path("/workspace/src/App.svelte", false),
+        "/workspace/src/App.svelte.tsx"
+    );
+}
+
+#[test]
 fn provider_paths_round_trip_back_to_source_ids() {
     let resolver = ProjectResolver::new(vec![project(
         "/workspace",
@@ -707,7 +752,7 @@ fn resolve_relative_vue_import_returns_real_source_and_provider_api() {
         .expect("relative .vue import should resolve");
 
     assert_eq!(resolved.source_id, "/workspace/src/Foo.vue");
-    assert_eq!(resolved.provider_target, ProviderTarget::VuePublicApi);
+    assert_eq!(resolved.provider_target, ProviderTarget::CarrierPublicApi);
     assert_eq!(resolved.resolution_kind, ResolutionKind::Relative);
     assert_eq!(resolved.provider_specifier, "./Foo.vue.ts");
     assert!(
@@ -1226,8 +1271,8 @@ fn resolve_relative_unowned_to_owned_target() {
     assert_eq!(resolved.source_id, "/workspace/src/Foo.vue");
     assert_eq!(
         resolved.provider_target,
-        ProviderTarget::VuePublicApi,
-        "Vue target owned by a project should get VuePublicApi"
+        ProviderTarget::CarrierPublicApi,
+        "Vue target owned by a project should get CarrierPublicApi"
     );
     assert!(
         resolved.provider_id.ends_with(".vue.ts"),

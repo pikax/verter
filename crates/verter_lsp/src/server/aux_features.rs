@@ -244,7 +244,7 @@ pub(super) async fn handle_document_highlight(
         if let Some((tsx_path, tsx_content, mapper)) = server.ide_context(uri) {
             let tsx_li = LineIndex::new(&tsx_content, server.documents.encoding());
             if let Some(doc) = server.documents.get(uri) {
-                if let Some(tsx_offset) = merge::vue_position_to_tsx_offset_validated(
+                if let Some(tsx_offset) = merge::carrier_position_to_tsx_offset_validated(
                     position,
                     &doc.line_index,
                     &mapper,
@@ -292,9 +292,9 @@ pub(super) async fn handle_signature_help(
     // Extract all context synchronously — no DashMap guard held across await.
     if let Some(tp) = &server.type_provider {
         if let Some(ctx) = server.type_provider_context(uri) {
-            if let Some(tsx_offset) = merge::vue_position_to_tsx_offset_validated(
+            if let Some(tsx_offset) = merge::carrier_position_to_tsx_offset_validated(
                 position,
-                &ctx.vue_line_index,
+                &ctx.carrier_line_index,
                 &ctx.mapper,
                 &ctx.tsx_line_index,
             ) {
@@ -437,28 +437,28 @@ pub(super) async fn handle_code_action(
     {
         if let Some(tp) = &server.type_provider {
             if let Some(ctx) = server.type_provider_context(uri) {
-                let start_offset = merge::vue_position_to_tsx_offset_validated(
+                let start_offset = merge::carrier_position_to_tsx_offset_validated(
                     &range.start,
-                    &ctx.vue_line_index,
+                    &ctx.carrier_line_index,
                     &ctx.mapper,
                     &ctx.tsx_line_index,
                 );
-                let end_offset = merge::vue_position_to_tsx_offset_validated(
+                let end_offset = merge::carrier_position_to_tsx_offset_validated(
                     &range.end,
-                    &ctx.vue_line_index,
+                    &ctx.carrier_line_index,
                     &ctx.mapper,
                     &ctx.tsx_line_index,
                 );
                 if let (Some(so), Some(eo)) = (start_offset, end_offset) {
                     if let Ok(type_actions) = tp.get_code_actions(&ctx.tsx_path, so, eo).await {
-                        let vue_source_exists =
+                        let carrier_source_exists =
                             |p: &str| server.documents.host().get_source(p).is_some();
                         let actions = merge::merge_code_actions(
                             type_actions,
                             &ctx.tsx_line_index,
                             &ctx.mapper,
-                            &ctx.vue_line_index,
-                            &vue_source_exists,
+                            &ctx.carrier_line_index,
+                            &carrier_source_exists,
                         );
                         all_actions.extend(actions);
                     }
@@ -517,7 +517,7 @@ pub(super) async fn handle_semantic_tokens_full(
                         type_tokens,
                         &ctx.tsx_line_index,
                         &ctx.mapper,
-                        &ctx.vue_line_index,
+                        &ctx.carrier_line_index,
                     );
                     if !tokens.is_empty() {
                         return Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
@@ -657,9 +657,9 @@ pub(super) async fn handle_inlay_hint(
     if !typing && inlay_enabled {
         if let Some(tp) = &server.type_provider {
             if let Some(ctx) = server.type_provider_context(uri) {
-                let start_offset = merge::vue_position_to_tsx_offset_validated(
+                let start_offset = merge::carrier_position_to_tsx_offset_validated(
                     &range.start,
-                    &ctx.vue_line_index,
+                    &ctx.carrier_line_index,
                     &ctx.mapper,
                     &ctx.tsx_line_index,
                 );
@@ -667,16 +667,16 @@ pub(super) async fn handle_inlay_hint(
                 // The visible range end often lands in synthetic JSX (generated for
                 // HTML elements), which fails validation. Inlay hints tolerate an
                 // approximate end bound — only the start must be precise.
-                let end_offset = merge::vue_position_to_tsx_offset_validated(
+                let end_offset = merge::carrier_position_to_tsx_offset_validated(
                     &range.end,
-                    &ctx.vue_line_index,
+                    &ctx.carrier_line_index,
                     &ctx.mapper,
                     &ctx.tsx_line_index,
                 )
                 .or_else(|| {
-                    merge::vue_position_to_tsx_offset(
+                    merge::carrier_position_to_tsx_offset(
                         &range.end,
-                        &ctx.vue_line_index,
+                        &ctx.carrier_line_index,
                         &ctx.mapper,
                         &ctx.tsx_line_index,
                     )
@@ -694,7 +694,7 @@ pub(super) async fn handle_inlay_hint(
                                 type_hints,
                                 &ctx.tsx_line_index,
                                 &ctx.mapper,
-                                &ctx.vue_line_index,
+                                &ctx.carrier_line_index,
                             );
                             tracing::debug!(
                                 "inlay_hint: {} hints after merge mapping",

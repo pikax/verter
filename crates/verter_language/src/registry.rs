@@ -256,6 +256,30 @@ impl LanguageRegistry {
             .collect()
     }
 
+    /// Resolve an EDITOR `language_id` (the client's `TextDocumentItem`
+    /// `languageId` — `"vue"`, `"svelte"`, …) to its framework CARRIER
+    /// [`FileLanguage`] row, or `None` when no registered carrier owns that
+    /// editor id.
+    ///
+    /// This is the carrier-GENERIC editor-ingress classifier: an in-memory
+    /// carrier document may not carry a `.vue` / `.svelte` path, so the
+    /// editor's `languageId` is authoritative for the carrier row. It scans
+    /// the registered carrier rows by their `carrier_language_id` rather than
+    /// hardcoding any single framework's editor id — a new carrier adapter
+    /// participates the moment its row is registered, with no per-framework
+    /// `language_id == "vue"` branch at the ingress.
+    pub fn carrier_for_editor_language_id(&self, language_id: &str) -> Option<FileLanguage> {
+        self.rows
+            .iter()
+            .find_map(|(_, row)| match &row.classification {
+                RowClassification::Static(language) => language
+                    .carrier_language_id()
+                    .filter(|carrier_id| carrier_id.as_str() == language_id)
+                    .map(|_| language.clone()),
+                RowClassification::Gated(_) => None,
+            })
+    }
+
     /// The ADAPTER-MODULE extensions (without the leading dot) the given
     /// adapter owns, in longest-suffix-first row order. An adapter module is a
     /// standalone non-component script (a Svelte `.svelte.ts` / `.svelte.js`
@@ -334,6 +358,32 @@ mod tests {
         assert_eq!(
             resolved("/src/a.d.cts"),
             FileLanguage::script(ScriptSourceType::Dts)
+        );
+    }
+
+    #[test]
+    fn carrier_for_editor_language_id_maps_every_registered_carrier() {
+        let registry = LanguageRegistry::built_in();
+        // The editor `languageId` of EACH registered carrier maps to that
+        // carrier's framework row — carrier-generic, not a Vue-only branch.
+        assert_eq!(
+            registry.carrier_for_editor_language_id("vue"),
+            Some(FileLanguage::vue())
+        );
+        assert_eq!(
+            registry.carrier_for_editor_language_id("svelte"),
+            Some(FileLanguage::svelte())
+        );
+        // A non-carrier editor id (plain script / unknown) maps to nothing —
+        // the caller falls back to path classification.
+        assert_eq!(registry.carrier_for_editor_language_id("typescript"), None);
+        assert_eq!(registry.carrier_for_editor_language_id("javascript"), None);
+        assert_eq!(registry.carrier_for_editor_language_id(""), None);
+        // The Svelte rune-MODULE language id is NOT a carrier (it is an
+        // adapter-module script), so it must NOT resolve to a carrier row.
+        assert_eq!(
+            registry.carrier_for_editor_language_id(SVELTE_RUNE_MODULE_LANGUAGE_ID),
+            None
         );
     }
 

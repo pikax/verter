@@ -2579,7 +2579,7 @@ fn test_vue_default_import_retries_with_default_binding() {
 
 /// @ai-generated - Named import from non-.vue file still returns None without resolver
 #[test]
-fn test_named_import_non_vue_no_default_fallback() {
+fn test_named_import_non_carrier_no_default_fallback() {
     let source = "<script setup>\nimport { helper } from './utils'\n</script>\n";
     let blocks = scan_sfc_blocks(source);
     let line_index = LineIndex::new_utf16(source);

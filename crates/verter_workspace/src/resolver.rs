@@ -381,7 +381,7 @@ impl ProjectResolver {
             // virtual file (`{src}.ts`) for cross-file component typing — the
             // carrier-extension set is the registry's, not a `.vue` literal.
             Some(_) if path_is_carrier(&normalize_canonical_id(&source_id)) => {
-                ProviderTarget::VuePublicApi
+                ProviderTarget::CarrierPublicApi
             }
             Some(_) => ProviderTarget::ShadowSourceFile,
             None => ProviderTarget::SourceFile,
@@ -390,7 +390,7 @@ impl ProjectResolver {
             match provider_target {
                 // Vue imports must target the synthetic public API file for cross-file
                 // component typing inside the provider project.
-                ProviderTarget::VuePublicApi => {
+                ProviderTarget::CarrierPublicApi => {
                     let importer_provider_id = self
                         .provider_id_for_source(&request.importer_id)
                         .unwrap_or_else(|| normalize_canonical_id(&request.importer_id));
@@ -432,7 +432,7 @@ impl ProjectResolver {
             // virtual file (`{src}.ts`) for cross-file component typing — the
             // carrier-extension set is the registry's, not a `.vue` literal.
             Some(_) if path_is_carrier(&normalize_canonical_id(&source_id)) => {
-                ProviderTarget::VuePublicApi
+                ProviderTarget::CarrierPublicApi
             }
             Some(_) => ProviderTarget::ShadowSourceFile,
             None => ProviderTarget::SourceFile,
@@ -782,6 +782,18 @@ pub fn carrier_ide_provider_path(source_id: &str, is_jsx: bool) -> String {
     format!("{source_id}{ext}")
 }
 
+/// The carrier-independent API virtual-file derivation: append `.ts` to the
+/// FULL carrier canonical (`Foo.vue` → `Foo.vue.ts`, `Foo.svelte` →
+/// `Foo.svelte.ts`). Mirrors `carrier_ide_provider_path` for the API
+/// (`.d.ts`-style) provider surface. `provider_id_for_source` additionally
+/// gates on carrier classification; the LSP cold-start fallback (which
+/// already knows it holds a carrier) routes through this rather than
+/// hardcoding `{src}.vue.ts`.
+#[must_use]
+pub fn carrier_api_provider_path(source_id: &str) -> String {
+    format!("{source_id}.ts")
+}
+
 /// Whether `path` is a framework CARRIER file (`.vue` / `.svelte`), by the
 /// language registry's carrier-extension set (the single classification
 /// authority — a new carrier extends the registry, not this predicate).
@@ -795,6 +807,37 @@ pub fn path_is_carrier(path: &str) -> bool {
             let needle = format!(".{ext}");
             path.len() > needle.len() && path.ends_with(&needle)
         })
+}
+
+/// Strip the registry-classified CARRIER extension from a path or filename,
+/// returning the bare stem. `Foo.vue` → `Foo`, `Foo.svelte` → `Foo`. The
+/// carrier-extension set (the single classification authority) is consulted
+/// in longest-suffix-first order so an adapter whose carrier extension is a
+/// suffix of another resolves the longest match first. A path with no
+/// carrier extension is returned unchanged.
+///
+/// This is the registry-backed replacement for the hardcoded
+/// `strip_suffix(".vue")` carrier-stem derivations across the LSP feature
+/// layer (component auto-import, drop-edit). A new carrier extends the
+/// registry, not this helper.
+pub fn strip_carrier_extension(path: &str) -> &str {
+    // Longest-suffix-first so `.svelte.ts`-style nested suffixes (were they
+    // ever carriers) and any future carrier that is a suffix of another match
+    // their longest form first. `carrier_extensions()` yields the registry's
+    // row order; we sort by descending length here to make the contract
+    // explicit and order-independent.
+    let registry = verter_language::LanguageRegistry::global();
+    let mut extensions = registry.carrier_extensions();
+    extensions.sort_unstable_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+    for ext in extensions {
+        let needle = format!(".{ext}");
+        if path.len() > needle.len() {
+            if let Some(stem) = path.strip_suffix(&needle) {
+                return stem;
+            }
+        }
+    }
+    path
 }
 
 fn normalized_starts_with(path: &str, prefix: &str) -> bool {

@@ -741,7 +741,7 @@ const msg = 'hello'
     let msg_col = (msg_offset - msg_line_start) as u32;
 
     // Map Vue position → TSX position
-    let tsx_pos = mapper.vue_to_tsx(LspPosition::new(msg_line, msg_col));
+    let tsx_pos = mapper.carrier_to_tsx(LspPosition::new(msg_line, msg_col));
     assert!(
         tsx_pos.is_some(),
         "Should map Vue position (line {msg_line}, col {msg_col}) to TSX"
@@ -758,13 +758,13 @@ const msg = 'hello'
     );
 
     // Map TSX position back → Vue position
-    let vue_pos = mapper.tsx_to_vue(TsPosition::new(tsx_pos.line, tsx_pos.character));
-    assert!(vue_pos.is_some(), "Should map TSX position back to Vue");
+    let carrier_pos = mapper.tsx_to_carrier(TsPosition::new(tsx_pos.line, tsx_pos.character));
+    assert!(carrier_pos.is_some(), "Should map TSX position back to Vue");
 
-    let vue_pos = vue_pos.unwrap().pos;
+    let carrier_pos = carrier_pos.unwrap().pos;
     // The roundtrip should land on the same line
     assert_eq!(
-        vue_pos.line, msg_line,
+        carrier_pos.line, msg_line,
         "Roundtrip should return to the same Vue line"
     );
 }
@@ -810,7 +810,7 @@ const count = 0
 
     // Forward map: start of "count" in Vue
     let tsx_start = mapper
-        .vue_to_tsx(LspPosition::new(template_count_line, template_count_col))
+        .carrier_to_tsx(LspPosition::new(template_count_line, template_count_col))
         .expect("Start of 'count' in template should map to TSX")
         .pos;
 
@@ -840,10 +840,10 @@ const count = 0
     for (i, expected_char) in expected_chars.iter().enumerate() {
         let vue_col = template_count_col + i as u32;
         let tsx_pos = mapper
-            .vue_to_tsx(LspPosition::new(template_count_line, vue_col))
+            .carrier_to_tsx(LspPosition::new(template_count_line, vue_col))
             .unwrap_or_else(|| {
                 panic!(
-                    "vue_to_tsx failed for 'count'[{i}] at Vue ({}, {vue_col})",
+                    "carrier_to_tsx failed for 'count'[{i}] at Vue ({}, {vue_col})",
                     template_count_line
                 )
             })
@@ -870,30 +870,30 @@ const count = 0
         );
 
         // Reverse: TSX → Vue should return the same Vue column
-        let vue_roundtrip = mapper
-            .tsx_to_vue(TsPosition::new(tsx_pos.line, tsx_pos.character))
+        let carrier_roundtrip = mapper
+            .tsx_to_carrier(TsPosition::new(tsx_pos.line, tsx_pos.character))
             .unwrap_or_else(|| {
                 panic!(
-                    "tsx_to_vue failed for TSX ({}, {})",
+                    "tsx_to_carrier failed for TSX ({}, {})",
                     tsx_pos.line, tsx_pos.character
                 )
             })
             .pos;
         assert_eq!(
-            vue_roundtrip.line, template_count_line,
+            carrier_roundtrip.line, template_count_line,
             "'count'[{i}] roundtrip: line mismatch"
         );
         assert_eq!(
-            vue_roundtrip.character, vue_col,
+            carrier_roundtrip.character, vue_col,
             "'count'[{i}] roundtrip: column mismatch (expected Vue col {vue_col}, got {})",
-            vue_roundtrip.character
+            carrier_roundtrip.character
         );
     }
 
     // Verify: the prefix region (positions before 'c' in TSX) maps to unmapped or different location
     if tsx_start.character > 0 {
         let prefix_pos =
-            mapper.tsx_to_vue(TsPosition::new(tsx_start.line, tsx_start.character - 1));
+            mapper.tsx_to_carrier(TsPosition::new(tsx_start.line, tsx_start.character - 1));
         // Inside the prepended prefix: should either be None (unmapped) or map to a
         // different Vue position (not the same as "count")
         if let Some(m) = prefix_pos {
@@ -910,7 +910,7 @@ const count = 0
 /// @ai-generated — Verifies that script block positions roundtrip with exact column accuracy.
 ///
 /// Script blocks are not prepended — they map 1:1. This confirms the column adjustment
-/// in tsx_to_vue works correctly for the identity mapping case.
+/// in tsx_to_carrier works correctly for the identity mapping case.
 #[test]
 fn integration_source_map_script_roundtrip_exact_column() {
     let source = r#"<script setup>
@@ -940,9 +940,9 @@ const count = 42
     for (i, expected_char) in expected_chars.iter().enumerate() {
         let vue_col = msg_col + i as u32;
         let tsx_pos = mapper
-            .vue_to_tsx(LspPosition::new(msg_line, vue_col))
+            .carrier_to_tsx(LspPosition::new(msg_line, vue_col))
             .unwrap_or_else(|| {
-                panic!("vue_to_tsx failed for 'message'[{i}] at ({msg_line}, {vue_col})")
+                panic!("carrier_to_tsx failed for 'message'[{i}] at ({msg_line}, {vue_col})")
             })
             .pos;
 
@@ -958,8 +958,9 @@ const count = 42
         }
 
         // Roundtrip
-        let vue_roundtrip = mapper.tsx_to_vue(TsPosition::new(tsx_pos.line, tsx_pos.character));
-        if let Some(m) = vue_roundtrip {
+        let carrier_roundtrip =
+            mapper.tsx_to_carrier(TsPosition::new(tsx_pos.line, tsx_pos.character));
+        if let Some(m) = carrier_roundtrip {
             let pos = m.pos;
             assert_eq!(pos.line, msg_line, "'message'[{i}] roundtrip line mismatch");
             assert_eq!(
@@ -1003,7 +1004,7 @@ fn integration_utf16_source_map_with_multibyte_chars() {
     let template_cafe_col_utf16 = line_prefix.encode_utf16().count() as u32;
 
     // Forward map: "café" in Vue should map to a valid TSX position
-    let tsx_pos = mapper.vue_to_tsx(LspPosition::new(
+    let tsx_pos = mapper.carrier_to_tsx(LspPosition::new(
         template_cafe_line,
         template_cafe_col_utf16,
     ));
@@ -1050,7 +1051,7 @@ fn integration_utf16_source_map_with_multibyte_chars() {
     for (i, expected_char) in expected_chars.iter().enumerate() {
         let vue_col = template_cafe_col_utf16 + i as u32;
         if let Some(tsx_mapped) = mapper
-            .vue_to_tsx(LspPosition::new(template_cafe_line, vue_col))
+            .carrier_to_tsx(LspPosition::new(template_cafe_line, vue_col))
             .map(|m| m.pos)
         {
             // Verify character at TSX position
@@ -1076,16 +1077,16 @@ fn integration_utf16_source_map_with_multibyte_chars() {
             }
 
             // Roundtrip: TSX -> Vue
-            if let Some(vue_roundtrip) = mapper
-                .tsx_to_vue(TsPosition::new(tsx_mapped.line, tsx_mapped.character))
+            if let Some(carrier_roundtrip) = mapper
+                .tsx_to_carrier(TsPosition::new(tsx_mapped.line, tsx_mapped.character))
                 .map(|m| m.pos)
             {
                 assert_eq!(
-                    vue_roundtrip.line, template_cafe_line,
+                    carrier_roundtrip.line, template_cafe_line,
                     "café[{i}] roundtrip line mismatch"
                 );
                 assert_eq!(
-                    vue_roundtrip.character, vue_col,
+                    carrier_roundtrip.character, vue_col,
                     "café[{i}] roundtrip column mismatch"
                 );
             }
@@ -1116,11 +1117,12 @@ fn integration_utf16_surrogate_pair_position_accuracy() {
         let msg_utf16_col = 8u32; // "const " (6) + 😀 (2)
 
         if let Some(tsx_pos) = mapper
-            .vue_to_tsx(LspPosition::new(script_line, msg_utf16_col))
+            .carrier_to_tsx(LspPosition::new(script_line, msg_utf16_col))
             .map(|m| m.pos)
         {
-            let vue_roundtrip = mapper.tsx_to_vue(TsPosition::new(tsx_pos.line, tsx_pos.character));
-            if let Some(m) = vue_roundtrip {
+            let carrier_roundtrip =
+                mapper.tsx_to_carrier(TsPosition::new(tsx_pos.line, tsx_pos.character));
+            if let Some(m) = carrier_roundtrip {
                 let pos = m.pos;
                 assert_eq!(pos.line, script_line, "😀msg roundtrip: line should match");
                 // Column should be exact or on the same line
@@ -1392,8 +1394,8 @@ const c = 3
 
     // Mappers should be independent — mapping line 1 in each file should give different results
     // (because the script blocks have different content and line counts)
-    let a_tsx = mapper_a.unwrap().vue_to_tsx(LspPosition::new(1, 0));
-    let b_tsx = mapper_b.unwrap().vue_to_tsx(LspPosition::new(1, 0));
+    let a_tsx = mapper_a.unwrap().carrier_to_tsx(LspPosition::new(1, 0));
+    let b_tsx = mapper_b.unwrap().carrier_to_tsx(LspPosition::new(1, 0));
     // Both should produce some mapping (not None)
     assert!(
         a_tsx.is_some() || b_tsx.is_some(),
@@ -1518,10 +1520,10 @@ const count = 0
     );
 }
 
-/// @ai-generated — vue_position_to_tsx_offset_validated should succeed for template bindings.
+/// @ai-generated — carrier_position_to_tsx_offset_validated should succeed for template bindings.
 ///
 /// Bug #20: When hovering on a template expression like `{{ count }}`, the LSP
-/// falls back to Verter binding info because vue_position_to_tsx_offset_validated
+/// falls back to Verter binding info because carrier_position_to_tsx_offset_validated
 /// returns None for template positions, preventing TSGO from being queried.
 #[test]
 fn validated_tsx_offset_works_for_template_binding() {
@@ -1551,7 +1553,7 @@ const count = 0
     };
 
     // The unvalidated mapping should work
-    let tsx_offset = crate::tsgo::merge::vue_position_to_tsx_offset(
+    let tsx_offset = crate::tsgo::merge::carrier_position_to_tsx_offset(
         &position,
         &doc.line_index,
         &mapper,
@@ -1559,13 +1561,13 @@ const count = 0
     );
     assert!(
         tsx_offset.is_some(),
-        "vue_position_to_tsx_offset should map template binding 'count' to TSX offset.\n\
+        "carrier_position_to_tsx_offset should map template binding 'count' to TSX offset.\n\
          TSX code:\n{}",
         tsx.code
     );
 
     // The VALIDATED mapping must also work — this is the bug (#20)
-    let validated = crate::tsgo::merge::vue_position_to_tsx_offset_validated(
+    let validated = crate::tsgo::merge::carrier_position_to_tsx_offset_validated(
         &position,
         &doc.line_index,
         &mapper,
@@ -1573,7 +1575,7 @@ const count = 0
     );
     assert!(
         validated.is_some(),
-        "vue_position_to_tsx_offset_validated should succeed for template binding 'count'.\n\
+        "carrier_position_to_tsx_offset_validated should succeed for template binding 'count'.\n\
          Unvalidated offset: {:?}\n\
          Vue position: {}:{}\n\
          TSX code:\n{}",
@@ -1625,7 +1627,7 @@ const msg = 'hello'
         character: (template_msg - line_start) as u32,
     };
 
-    let validated = crate::tsgo::merge::vue_position_to_tsx_offset_validated(
+    let validated = crate::tsgo::merge::carrier_position_to_tsx_offset_validated(
         &position,
         &doc.line_index,
         &mapper,
@@ -1671,7 +1673,7 @@ function handleClick() {}
         character: (template_hc - line_start) as u32,
     };
 
-    let validated = crate::tsgo::merge::vue_position_to_tsx_offset_validated(
+    let validated = crate::tsgo::merge::carrier_position_to_tsx_offset_validated(
         &position,
         &doc.line_index,
         &mapper,
@@ -1715,7 +1717,7 @@ const nested = reactive({ deep: { value: 'hello', count: 1 } })
         character: (source_offset - line_start) as u32,
     };
 
-    let tsx_offset = crate::tsgo::merge::vue_position_to_tsx_offset_validated(
+    let tsx_offset = crate::tsgo::merge::carrier_position_to_tsx_offset_validated(
         &position,
         &doc.line_index,
         &mapper,
@@ -1775,7 +1777,7 @@ const actions: Action[] = [{ label: 'ok', disabled: false }]
         character: (source_offset - line_start) as u32,
     };
 
-    let tsx_offset = crate::tsgo::merge::vue_position_to_tsx_offset_validated(
+    let tsx_offset = crate::tsgo::merge::carrier_position_to_tsx_offset_validated(
         &position,
         &doc.line_index,
         &mapper,
@@ -1856,7 +1858,7 @@ const users: User[] = [{ name: 'Alice', email: 'a@b.com', age: 30 }]
         character: (source_offset - line_start) as u32,
     };
 
-    let tsx_offset = crate::tsgo::merge::vue_position_to_tsx_offset_validated(
+    let tsx_offset = crate::tsgo::merge::carrier_position_to_tsx_offset_validated(
         &position,
         &doc.line_index,
         &mapper,
@@ -1911,7 +1913,7 @@ fn validated_tsx_offset_keeps_fixture_vfor_member_access_on_template_occurrence(
         character: (source_offset - line_start) as u32,
     };
 
-    let tsx_offset = crate::tsgo::merge::vue_position_to_tsx_offset_validated(
+    let tsx_offset = crate::tsgo::merge::carrier_position_to_tsx_offset_validated(
         &position,
         &doc.line_index,
         &mapper,
@@ -1971,7 +1973,7 @@ const outerLabel = 'outer'
         character: (source_offset - line_start) as u32,
     };
 
-    let tsx_offset = crate::tsgo::merge::vue_position_to_tsx_offset_validated(
+    let tsx_offset = crate::tsgo::merge::carrier_position_to_tsx_offset_validated(
         &position,
         &doc.line_index,
         &mapper,
@@ -2023,7 +2025,7 @@ const outerLabel = 'outer'
         character: (source_offset - line_start) as u32,
     };
 
-    let tsx_offset = crate::tsgo::merge::vue_position_to_tsx_offset_validated(
+    let tsx_offset = crate::tsgo::merge::carrier_position_to_tsx_offset_validated(
         &position,
         &doc.line_index,
         &mapper,
@@ -2084,7 +2086,7 @@ const outerLabel = 'outer'
         character: (source_offset - line_start) as u32,
     };
 
-    let tsx_offset = crate::tsgo::merge::vue_position_to_tsx_offset_validated(
+    let tsx_offset = crate::tsgo::merge::carrier_position_to_tsx_offset_validated(
         &position,
         &doc.line_index,
         &mapper,
@@ -2097,9 +2099,10 @@ const outerLabel = 'outer'
         for delta in 0..=12 {
             let candidate = slot_idx as u32 + delta;
             if let Some(tsx_pos) = tsx_li.offset_to_position(candidate) {
-                let vue_pos = mapper.tsx_to_vue(TsPosition::new(tsx_pos.line, tsx_pos.character));
+                let carrier_pos =
+                    mapper.tsx_to_carrier(TsPosition::new(tsx_pos.line, tsx_pos.character));
                 eprintln!(
-                    "candidate offset={candidate} tsx={}:{} vue={vue_pos:?} text={:?}",
+                    "candidate offset={candidate} tsx={}:{} vue={carrier_pos:?} text={:?}",
                     tsx_pos.line,
                     tsx_pos.character,
                     &tsx.code[candidate as usize..tsx.code.len().min(candidate as usize + 6)]
@@ -2147,7 +2150,7 @@ const show = true
         character: (template_show - line_start) as u32,
     };
 
-    let validated = crate::tsgo::merge::vue_position_to_tsx_offset_validated(
+    let validated = crate::tsgo::merge::carrier_position_to_tsx_offset_validated(
         &position,
         &doc.line_index,
         &mapper,
@@ -2196,7 +2199,7 @@ const items = [1, 2, 3]
         character: (items_in_vfor - line_start) as u32,
     };
 
-    let validated = crate::tsgo::merge::vue_position_to_tsx_offset_validated(
+    let validated = crate::tsgo::merge::carrier_position_to_tsx_offset_validated(
         &position,
         &doc.line_index,
         &mapper,
@@ -2474,25 +2477,25 @@ fn virtual_files_response_serializes_all_fields() {
 /// The handler now skips `.vue` URIs — they are synced via TSX compilation.
 #[test]
 fn on_did_change_skips_vue_files() {
-    let vue_uris = [
+    let carrier_uris = [
         "file:///d:/dev/project/src/App.vue",
         "file:///home/user/project/Component.vue",
         "file:///c:/Users/dev/src/views/Home.vue",
     ];
-    for uri in &vue_uris {
+    for uri in &carrier_uris {
         assert!(
             uri.ends_with(".vue"),
             "Test setup: URI should end with .vue: {uri}"
         );
     }
 
-    let non_vue_uris = [
+    let non_carrier_uris = [
         "file:///d:/dev/project/src/utils.ts",
         "file:///home/user/project/types.d.ts",
         "file:///c:/Users/dev/src/index.js",
         "file:///d:/dev/project/src/App.vue.tsx", // TSX version should NOT be skipped
     ];
-    for uri in &non_vue_uris {
+    for uri in &non_carrier_uris {
         assert!(
             !uri.ends_with(".vue"),
             "Test setup: URI should NOT end with .vue: {uri}"
@@ -3402,8 +3405,12 @@ const count = 42
     let tsx_li = LineIndex::new(&tsx_response.code, registry.encoding());
 
     // Step 3: map Vue position → TSX offset
-    let tsx_offset =
-        merge::vue_position_to_tsx_offset_validated(&position, &doc.line_index, &mapper, &tsx_li);
+    let tsx_offset = merge::carrier_position_to_tsx_offset_validated(
+        &position,
+        &doc.line_index,
+        &mapper,
+        &tsx_li,
+    );
     assert!(
         tsx_offset.is_some(),
         "position mapping must succeed for a script binding used in template"
@@ -3588,14 +3595,14 @@ const msg = 'hello'
 /// resolves to runtime-dom.d.ts, VS Code opens then immediately closes it.
 /// The did_close guard (get_ide().is_some()) must prevent close_tsx.
 #[test]
-fn close_non_vue_file_does_not_affect_vue_ide_state() {
+fn close_non_carrier_file_does_not_affect_vue_ide_state() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let registry = DocumentRegistry::new(host);
 
     // Open a Vue file
-    let vue_uri: Uri = "file:///test/App.vue".parse().unwrap();
+    let carrier_uri: Uri = "file:///test/App.vue".parse().unwrap();
     let vue_item = TextDocumentItem {
-        uri: vue_uri.clone(),
+        uri: carrier_uri.clone(),
         language_id: "vue".to_string(),
         version: 1,
         text: r#"<script setup lang="ts">
@@ -3607,7 +3614,7 @@ const msg = 'hello'
     };
     registry.did_open(&vue_item);
     assert!(
-        registry.get_ide(&vue_uri).is_some(),
+        registry.get_ide(&carrier_uri).is_some(),
         "Vue file should have IDE output"
     );
 
@@ -3630,7 +3637,7 @@ const msg = 'hello'
 
     // Vue file's IDE output must still be intact after closing the .d.ts file
     assert!(
-        registry.get_ide(&vue_uri).is_some(),
+        registry.get_ide(&carrier_uri).is_some(),
         "Vue IDE output must survive non-Vue file close"
     );
 }
@@ -4616,7 +4623,7 @@ const msg = "hello"
         .get_position_mapper(&uri)
         .expect("position mapper should exist");
     let tsx_li = LineIndex::new(&tsx_response.code, registry.encoding());
-    let vue_li = registry.get(&uri).unwrap().line_index.clone();
+    let carrier_li = registry.get(&uri).unwrap().line_index.clone();
     // At this point, all DashMap guards are dropped.
 
     // Map a position in the template
@@ -4626,7 +4633,7 @@ const msg = "hello"
         character: position.character + 3, // 'm' in msg
     };
     let tsx_offset =
-        merge::vue_position_to_tsx_offset_validated(&position, &vue_li, &mapper, &tsx_li);
+        merge::carrier_position_to_tsx_offset_validated(&position, &carrier_li, &mapper, &tsx_li);
     assert!(tsx_offset.is_some(), "position mapping must succeed");
 
     // Configure mock to return completions at this offset
@@ -5215,7 +5222,7 @@ async fn integration_hover_slot_merge_preserves_verter_info() {
     let tsx_li = LineIndex::new(&tsx_response.code, registry.encoding());
 
     let tsx_offset =
-        merge::vue_position_to_tsx_offset_validated(&pos, &doc.line_index, &mapper, &tsx_li);
+        merge::carrier_position_to_tsx_offset_validated(&pos, &doc.line_index, &mapper, &tsx_li);
     assert!(tsx_offset.is_some(), "slot tag should map to TSX");
     let tsx_offset = tsx_offset.unwrap();
 
@@ -5263,7 +5270,7 @@ fn dep_did_open_preserves_vue_ide_context() {
     let registry = DocumentRegistry::new(host);
 
     // 1. Open a Vue file that imports from a .ts dependency
-    let vue_source = r#"<script setup lang="ts">
+    let carrier_source = r#"<script setup lang="ts">
 import { greet } from './utils'
 const msg = greet('world')
 </script>
@@ -5272,17 +5279,17 @@ const msg = greet('world')
   <div>{{ msg }}</div>
 </template>
 "#;
-    let vue_uri: Uri = "file:///test/App.vue".parse().unwrap();
+    let carrier_uri: Uri = "file:///test/App.vue".parse().unwrap();
     let vue_item = TextDocumentItem {
-        uri: vue_uri.clone(),
+        uri: carrier_uri.clone(),
         language_id: "vue".to_string(),
         version: 1,
-        text: vue_source.to_string(),
+        text: carrier_source.to_string(),
     };
     registry.did_open(&vue_item);
 
     // Verify IDE output exists after initial open
-    let ide_before = registry.get_ide(&vue_uri);
+    let ide_before = registry.get_ide(&carrier_uri);
     assert!(
         ide_before.is_some(),
         "IDE output should exist after opening Vue file"
@@ -5307,7 +5314,7 @@ const msg = greet('world')
     registry.did_open(&ts_item);
 
     // 3. Verify IDE output is still available for the Vue file
-    let ide_after = registry.get_ide(&vue_uri);
+    let ide_after = registry.get_ide(&carrier_uri);
     assert!(
         ide_after.is_some(),
         "IDE output should still exist after dependency did_open (lazy recompilation)"
@@ -5318,7 +5325,7 @@ const msg = greet('world')
     );
 
     // 4. Position mapper should also be available
-    let mapper = registry.get_position_mapper(&vue_uri);
+    let mapper = registry.get_position_mapper(&carrier_uri);
     assert!(
         mapper.is_some(),
         "Position mapper should be rebuilt after lazy recompilation"
@@ -5333,7 +5340,7 @@ fn dep_peek_open_close_preserves_ide() {
     let registry = DocumentRegistry::new(host);
 
     // 1. Open a Vue file
-    let vue_source = r#"<script setup lang="ts">
+    let carrier_source = r#"<script setup lang="ts">
 import { count } from './state'
 </script>
 
@@ -5341,17 +5348,17 @@ import { count } from './state'
   <span>{{ count }}</span>
 </template>
 "#;
-    let vue_uri: Uri = "file:///test/Counter.vue".parse().unwrap();
+    let carrier_uri: Uri = "file:///test/Counter.vue".parse().unwrap();
     let vue_item = TextDocumentItem {
-        uri: vue_uri.clone(),
+        uri: carrier_uri.clone(),
         language_id: "vue".to_string(),
         version: 1,
-        text: vue_source.to_string(),
+        text: carrier_source.to_string(),
     };
     registry.did_open(&vue_item);
 
     // Verify IDE output
-    let ide_initial = registry.get_ide(&vue_uri);
+    let ide_initial = registry.get_ide(&carrier_uri);
     assert!(ide_initial.is_some(), "Initial IDE output should exist");
 
     // 2. Open the .ts dependency (peek definition)
@@ -5366,7 +5373,7 @@ import { count } from './state'
     registry.did_open(&ts_item);
 
     // 3. IDE output still available after dep open
-    let ide_after_open = registry.get_ide(&vue_uri);
+    let ide_after_open = registry.get_ide(&carrier_uri);
     assert!(
         ide_after_open.is_some(),
         "IDE output should exist after dependency open"
@@ -5380,7 +5387,7 @@ import { count } from './state'
     registry.did_close(&ts_uri);
 
     // 5. IDE output still available after dep close
-    let ide_after_close = registry.get_ide(&vue_uri);
+    let ide_after_close = registry.get_ide(&carrier_uri);
     assert!(
         ide_after_close.is_some(),
         "IDE output should exist after dependency close"
@@ -5400,7 +5407,7 @@ fn v_for_member_access_position_mapping() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let registry = DocumentRegistry::new(host);
 
-    let vue_source = r#"<script setup lang="ts">
+    let carrier_source = r#"<script setup lang="ts">
 interface Action { label: string; disabled: boolean }
 const actions: Action[] = [{ label: 'ok', disabled: false }]
 </script>
@@ -5409,17 +5416,17 @@ const actions: Action[] = [{ label: 'ok', disabled: false }]
   <button v-for="action in actions" :disabled="action.disabled">{{ action.label }}</button>
 </template>
 "#;
-    let vue_uri: Uri = "file:///test/VForTest.vue".parse().unwrap();
+    let carrier_uri: Uri = "file:///test/VForTest.vue".parse().unwrap();
     let vue_item = TextDocumentItem {
-        uri: vue_uri.clone(),
+        uri: carrier_uri.clone(),
         language_id: "vue".to_string(),
         version: 1,
-        text: vue_source.to_string(),
+        text: carrier_source.to_string(),
     };
     registry.did_open(&vue_item);
 
     // Get IDE output
-    let ide = registry.get_ide(&vue_uri);
+    let ide = registry.get_ide(&carrier_uri);
     assert!(ide.is_some(), "IDE output should exist");
     let ide = ide.unwrap();
     let tsx = &ide.code;
@@ -5437,18 +5444,18 @@ const actions: Action[] = [{ label: 'ok', disabled: false }]
     );
 
     // Get position mapper
-    let mapper = registry.get_position_mapper(&vue_uri);
+    let mapper = registry.get_position_mapper(&carrier_uri);
     assert!(mapper.is_some(), "Position mapper should exist");
     let mapper = mapper.unwrap();
 
     // Find "action.disabled" in Vue source
-    let vue_action_disabled = vue_source.find("action.disabled").unwrap();
+    let vue_action_disabled = carrier_source.find("action.disabled").unwrap();
     let vue_dot = vue_action_disabled + "action".len();
 
     // Convert byte offset to line/col (0-based)
     let mut vue_line = 0u32;
     let mut vue_col = 0u32;
-    for (i, &b) in vue_source.as_bytes().iter().enumerate() {
+    for (i, &b) in carrier_source.as_bytes().iter().enumerate() {
         if i == vue_dot {
             break;
         }
@@ -5462,7 +5469,7 @@ const actions: Action[] = [{ label: 'ok', disabled: false }]
     eprintln!("Vue '.' position: line={}, col={}", vue_line, vue_col);
 
     // Map Vue position to TSX position
-    let tsx_pos = mapper.vue_to_tsx(LspPosition::new(vue_line, vue_col));
+    let tsx_pos = mapper.carrier_to_tsx(LspPosition::new(vue_line, vue_col));
     assert!(
         tsx_pos.is_some(),
         "Vue position (line={}, col={}) should map to TSX. \
@@ -5506,5 +5513,184 @@ const actions: Action[] = [{ label: 'ok', disabled: false }]
         tsx_offset,
         tsx_char,
         tsx
+    );
+}
+
+/// Gap 1: workspace-symbol search includes `.svelte` components.
+/// DISCRIMINATING: under the pre-change `!file_language.is_vue()` gate the
+/// Svelte file was skipped and contributed zero symbols; a plain `.ts` is NOT
+/// a carrier and is also excluded here.
+#[test]
+fn workspace_symbols_includes_svelte_components() {
+    use crate::features::workspace_symbol::workspace_symbols;
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    host.upsert(verter_session::UpsertRequest {
+        canonical_id: Some("/workspace/src/SvelteWidget.svelte".to_string()),
+        input_id: "/workspace/src/SvelteWidget.svelte".to_string(),
+        source: "<script>let widgetCount = 1;</script>".into(),
+        file_language: verter_session::FileLanguage::svelte(),
+        aliases: Vec::new(),
+    })
+    .unwrap();
+    // A plain .ts is NOT a carrier — workspace_symbols only scans carriers.
+    host.upsert(verter_session::UpsertRequest {
+        canonical_id: Some("/workspace/src/plain.ts".to_string()),
+        input_id: "/workspace/src/plain.ts".to_string(),
+        source: "export const plainOnly = 1;".into(),
+        file_language: verter_session::FileLanguage::script_ts(),
+        aliases: Vec::new(),
+    })
+    .unwrap();
+
+    let symbols = workspace_symbols(&host, "widget");
+    assert!(
+        symbols
+            .iter()
+            .any(|s| s.location.uri.as_str().ends_with("SvelteWidget.svelte")),
+        "workspace symbols must include the .svelte component's symbols, got: {:?}",
+        symbols.iter().map(|s| s.name.clone()).collect::<Vec<_>>()
+    );
+
+    // Discrimination: a plain .ts file's symbols are never scanned by this
+    // carrier-only search.
+    let plain = workspace_symbols(&host, "plainOnly");
+    assert!(
+        !plain
+            .iter()
+            .any(|s| s.location.uri.as_str().ends_with("plain.ts")),
+        "a non-carrier .ts file must not contribute workspace symbols"
+    );
+}
+
+/// Gap 3: a `.svelte` carrier dropped into a template produces a component
+/// tag + import insertion. DISCRIMINATING: the pre-change
+/// `!dropped_uri.ends_with(".vue")` gate returned `None` for a `.svelte`
+/// drop; a plain `.ts` drop still returns `None`.
+#[test]
+fn document_drop_edit_accepts_svelte_carrier() {
+    use crate::documents::line_index::LineIndex;
+    use crate::features::document_drop_edit::document_drop_edit;
+
+    let source = "<template>\n  <div></div>\n</template>\n<script setup>\n</script>\n";
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+    let target_uri: Uri = "file:///project/src/App.vue".parse().unwrap();
+    let drop_pos = Position {
+        line: 1,
+        character: 7,
+    };
+
+    let edit = document_drop_edit(
+        "file:///project/src/MyButton.svelte",
+        &drop_pos,
+        source,
+        &blocks,
+        &line_index,
+        &target_uri,
+        None,
+    );
+    let edit = edit.expect("a .svelte carrier drop must produce a WorkspaceEdit");
+    let texts: Vec<String> = edit
+        .changes
+        .as_ref()
+        .and_then(|c| c.values().next())
+        .map(|edits| edits.iter().map(|e| e.new_text.clone()).collect())
+        .unwrap_or_default();
+    let joined = texts.join("\n");
+    assert!(
+        joined.contains("<MyButton />"),
+        "the drop must insert the carrier component tag, got: {joined:?}"
+    );
+    assert!(
+        joined.contains("import MyButton from") && joined.contains("MyButton.svelte"),
+        "the drop must insert the carrier import, got: {joined:?}"
+    );
+
+    // Discrimination: a non-carrier .ts drop returns None.
+    let none = document_drop_edit(
+        "file:///project/src/util.ts",
+        &drop_pos,
+        source,
+        &blocks,
+        &line_index,
+        &target_uri,
+        None,
+    );
+    assert!(none.is_none(), "a non-carrier .ts drop must return None");
+}
+
+/// Gap 5: a default import of a `.svelte` child retries export resolution
+/// with `"default"` (the carrier's default export IS the component).
+/// DISCRIMINATING: the pre-change `canonical_id.ends_with(".vue")` gate did
+/// not retry for a `.svelte` import, so the default-export location was never
+/// returned.
+#[test]
+fn definition_retries_default_export_for_svelte_carrier() {
+    use crate::documents::line_index::LineIndex;
+
+    let source = "<script setup>\nimport Child from './Child.svelte'\n</script>\n<template><Child /></template>\n";
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+    let (registry, uri) = open_vue_file(source);
+    let analysis = registry.get_analysis(&uri).expect("analysis");
+
+    // Place the cursor on the `Child` import binding.
+    let child_offset = source.find("Child").unwrap() as u32;
+    let position = line_index.offset_to_position(child_offset).unwrap();
+
+    let child_canonical = "/test/Child.svelte";
+    // resolve_path maps the import specifier to the .svelte child canonical.
+    let resolve_path = |spec: &str| -> Option<String> {
+        if spec == "./Child.svelte" {
+            Some(child_canonical.to_string())
+        } else {
+            None
+        }
+    };
+    // resolve_export_location returns a location ONLY for the "default" export
+    // of the .svelte child — never for the local binding name "Child". This is
+    // exactly the SFC default-export shape the carrier retry handles.
+    let default_loc_uri: Uri = format!("file://{child_canonical}").parse().unwrap();
+    let resolve_export_location = |canonical: &str, name: &str| -> Option<Location> {
+        if canonical == child_canonical && name == "default" {
+            Some(Location {
+                uri: default_loc_uri.clone(),
+                range: Range {
+                    start: Position {
+                        line: 0,
+                        character: 0,
+                    },
+                    end: Position {
+                        line: 0,
+                        character: 0,
+                    },
+                },
+            })
+        } else {
+            None
+        }
+    };
+
+    let result = definition_at_position(
+        &position,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        Some(&resolve_path),
+        Some(&resolve_export_location),
+    );
+
+    let result = result.expect("definition must resolve the .svelte default export via retry");
+    let landed_uri = match result {
+        GotoDefinitionResponse::Scalar(loc) => loc.uri,
+        GotoDefinitionResponse::Array(locs) => locs.into_iter().next().expect("a location").uri,
+        GotoDefinitionResponse::Link(links) => links.into_iter().next().expect("a link").target_uri,
+    };
+    assert!(
+        landed_uri.as_str().ends_with("Child.svelte"),
+        "definition must land on the .svelte child via the default-export retry, got {}",
+        landed_uri.as_str()
     );
 }

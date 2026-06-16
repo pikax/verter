@@ -20,7 +20,7 @@ use crate::provider_sync::{
 };
 use crate::tsgo::merge;
 
-use super::server_utils::source_id_from_provider_vue_path;
+use super::server_utils::source_id_from_provider_carrier_path;
 use super::{TypeProviderContext, VerterLanguageServer};
 
 impl VerterLanguageServer {
@@ -29,14 +29,17 @@ impl VerterLanguageServer {
         let tsx_line_index = LineIndex::new(&tsx_content, self.documents.encoding());
         // Get the Vue file's line index
         let snapshot = self.published_resolver()?;
-        let canonical_id =
-            source_id_from_provider_vue_path(&snapshot.resolver, self.documents.host(), ide_path)?;
+        let canonical_id = source_id_from_provider_carrier_path(
+            &snapshot.resolver,
+            self.documents.host(),
+            ide_path,
+        )?;
         let uri = self.documents.canonical_id_to_uri(&canonical_id)?;
         let doc = self.documents.get(&uri)?;
         Some(merge::ExternalIdeContext {
             tsx_line_index,
             mapper,
-            vue_line_index: doc.line_index.clone(),
+            carrier_line_index: doc.line_index.clone(),
         })
     }
 
@@ -46,22 +49,25 @@ impl VerterLanguageServer {
     pub(super) fn type_provider_context(&self, uri: &Uri) -> Option<TypeProviderContext> {
         let (tsx_path, tsx_content, mapper) = self.ide_context(uri)?;
         let tsx_line_index = LineIndex::new(&tsx_content, self.documents.encoding());
-        let vue_line_index = self.documents.get(uri)?.line_index.clone();
+        let carrier_line_index = self.documents.get(uri)?.line_index.clone();
         // DashMap Ref dropped here at end of `?` chain
         Some(TypeProviderContext {
             tsx_path,
             tsx_content,
             mapper,
             tsx_line_index,
-            vue_line_index,
+            carrier_line_index,
         })
     }
 
     /// Find the Vue URI corresponding to an IDE path.
-    pub(super) fn vue_uri_from_ide_path(&self, ide_path: &str) -> Option<Uri> {
+    pub(super) fn carrier_uri_from_ide_path(&self, ide_path: &str) -> Option<Uri> {
         let snapshot = self.published_resolver()?;
-        let canonical_id =
-            source_id_from_provider_vue_path(&snapshot.resolver, self.documents.host(), ide_path)?;
+        let canonical_id = source_id_from_provider_carrier_path(
+            &snapshot.resolver,
+            self.documents.host(),
+            ide_path,
+        )?;
         self.documents.canonical_id_to_uri(&canonical_id)
     }
 
@@ -88,13 +94,13 @@ impl VerterLanguageServer {
             .map(|entry| entry.clone())
     }
 
-    pub(super) fn prepare_vue_provider_sync_transition(
+    pub(super) fn prepare_carrier_provider_sync_transition(
         &self,
         canonical_id: &str,
         is_jsx: bool,
     ) -> Option<crate::provider_sync::ProviderSyncTransition> {
         let snapshot = self.published_resolver()?;
-        let next_state = crate::provider_sync::vue_sync_state_for_source(
+        let next_state = crate::provider_sync::carrier_sync_state_for_source(
             &snapshot.resolver,
             canonical_id,
             is_jsx,
@@ -106,13 +112,15 @@ impl VerterLanguageServer {
         ))
     }
 
-    pub(super) fn prepare_non_vue_provider_sync_transition(
+    pub(super) fn prepare_non_carrier_provider_sync_transition(
         &self,
         canonical_id: &str,
     ) -> Option<crate::provider_sync::ProviderSyncTransition> {
         let snapshot = self.published_resolver()?;
-        let next_state =
-            crate::provider_sync::non_vue_sync_state_for_source(&snapshot.resolver, canonical_id)?;
+        let next_state = crate::provider_sync::non_carrier_sync_state_for_source(
+            &snapshot.resolver,
+            canonical_id,
+        )?;
         Some(prepare_sync_transition(
             &self.provider_sync_states,
             canonical_id,
@@ -142,11 +150,11 @@ impl VerterLanguageServer {
     ///
     /// Editor-liveness invariant: an open Vue document keeps a usable TSX in the
     /// provider even while its owning project is unresolved. Builds the commit
-    /// state through the shared [`open_unresolved_vue_state`] primitive (forces
+    /// state through the shared [`open_unresolved_carrier_state`] primitive (forces
     /// `Unresolved`, preserves the owner-independent live IDE path, drops the
     /// owner-derived API path), syncs the IDE TSX when fresh `ide_code` is
     /// available, and commits. It NEVER removes the state or closes the TSX.
-    pub(super) async fn preserve_open_unresolved_vue(
+    pub(super) async fn preserve_open_unresolved_carrier(
         &self,
         canonical_id: &str,
         is_jsx: bool,
@@ -156,7 +164,7 @@ impl VerterLanguageServer {
         // The DESIRED Unresolved target: owner-independent desired-extension IDE
         // path + the open-vs-update syncability hint. Binding forced
         // `Unresolved`, owner-derived API dropped.
-        let target = crate::provider_sync::open_unresolved_vue_state(
+        let target = crate::provider_sync::open_unresolved_carrier_state(
             previous.as_ref(),
             canonical_id,
             is_jsx,
@@ -177,7 +185,7 @@ impl VerterLanguageServer {
                 Ok(()) => ide_synced = true,
                 Err(error) => {
                     tracing::warn!(
-                        "preserve_open_unresolved_vue: failed to sync open unresolved IDE path \
+                        "preserve_open_unresolved_carrier: failed to sync open unresolved IDE path \
                          {ide_path}: {error}"
                     );
                 }
@@ -190,8 +198,11 @@ impl VerterLanguageServer {
         // is still open in the provider — rows 7 & 9), the owner-derived API is
         // dropped+closed unconditionally, and the orphaned prior IDE path is
         // closed ONLY after a successful flip (close-after-success).
-        let commit =
-            crate::provider_sync::open_unresolved_vue_commit(previous.as_ref(), target, ide_synced);
+        let commit = crate::provider_sync::open_unresolved_carrier_commit(
+            previous.as_ref(),
+            target,
+            ide_synced,
+        );
         self.commit_provider_sync_state(canonical_id, commit.committed);
         if let Some(dropped) = commit.dropped_api {
             self.close_provider_paths(std::slice::from_ref(&dropped))

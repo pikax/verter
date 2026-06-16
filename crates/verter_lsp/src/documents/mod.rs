@@ -89,21 +89,20 @@ impl DocumentRegistry {
 
     /// Resolve the [`FileLanguage`] row for an editor document.
     ///
-    /// The client's `language_id` is authoritative for the Vue carrier
-    /// (an in-memory Vue document may not carry a `.vue` path); every
-    /// other document classifies by canonical path through the host's
-    /// language classifier — the same authority the workspace-scan
-    /// ingress uses, so one file resolves one `FileLanguage` row
-    /// regardless of which ingress loaded it. A registered carrier row
-    /// (`.svelte`) resolves to its framework row here and the host upsert
-    /// parses it through the registered carrier — never silently as a
-    /// plain script.
+    /// The client's `language_id` is authoritative for a framework CARRIER
+    /// (an in-memory carrier document may not carry its `.vue` / `.svelte`
+    /// path); every other document classifies by canonical path through the
+    /// host's language classifier — the same authority the workspace-scan
+    /// ingress uses, so one file resolves one `FileLanguage` row regardless of
+    /// which ingress loaded it. The carrier mapping is REGISTRY-driven
+    /// (`carrier_for_editor_language_id`), not a hardcoded `== "vue"` branch:
+    /// any registered carrier (`vue`, `svelte`, …) resolves to its framework
+    /// row here and the host upsert parses it through the registered carrier —
+    /// never silently as a plain script.
     fn document_file_language(&self, language_id: &str, canonical_id: &str) -> FileLanguage {
-        if language_id == "vue" {
-            FileLanguage::vue()
-        } else {
-            self.host.language_classifier().classify(canonical_id)
-        }
+        verter_session::LanguageRegistry::global()
+            .carrier_for_editor_language_id(language_id)
+            .unwrap_or_else(|| self.host.language_classifier().classify(canonical_id))
     }
 
     /// Handle a document being opened in the editor.

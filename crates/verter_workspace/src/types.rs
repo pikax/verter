@@ -42,7 +42,7 @@ pub struct ResolutionContext {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderTarget {
     SourceFile,
-    VuePublicApi,
+    CarrierPublicApi,
     ShadowSourceFile,
 }
 

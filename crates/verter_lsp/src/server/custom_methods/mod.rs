@@ -35,7 +35,7 @@ impl VerterLanguageServer {
     pub async fn on_did_change_ts_or_js_file(&self, params: OnDidChangeTsOrJsFileParams) {
         tracing::info!("onDidChangeTsOrJsFile ENTER {}", params.uri);
 
-        // For non-Vue files tracked by the extension (TS/JS), keep the host and
+        // For non-carrier files tracked by the extension (TS/JS), keep the host and
         // provider in sync. Exact `.vue` imports are rewritten to `.vue.ts`
         // before syncing so the provider resolves through Verter-managed files.
         if let Some(last) = params.changes.last() {
@@ -73,7 +73,7 @@ impl VerterLanguageServer {
                 .unwrap_or_default();
 
             if let Some(snapshot) = self.published_resolver() {
-                self.sync_non_vue_file_to_provider(
+                self.sync_non_carrier_file_to_provider(
                     &snapshot,
                     &path,
                     Arc::from(last.text.as_str()),
@@ -121,12 +121,13 @@ impl VerterLanguageServer {
             ws.apply_changes(vec![change]);
         }
 
-        // Handle .vue file changes from the file watcher.
-        // These are files not open in the editor — re-sync to type provider.
-        if params.uri.ends_with(".vue") {
+        // Handle framework CARRIER (`.vue`, `.svelte`, …) changes from the
+        // file watcher. These are files not open in the editor — re-sync to
+        // the type provider.
+        if crate::server::carrier_language_for(&params.uri).is_some() {
             match params.change_type.as_str() {
                 "create" | "update" => {
-                    self.resync_background_vue_file(&canonical_id).await;
+                    self.resync_background_carrier_file(&canonical_id).await;
                 }
                 "delete" => {
                     // Close TSX/DTS in the type provider and clean up.
@@ -137,7 +138,7 @@ impl VerterLanguageServer {
                                 .host
                                 .get_ide(&canonical_id, &profile)
                                 .and_then(|ide| {
-                                    self.prepare_vue_provider_sync_transition(
+                                    self.prepare_carrier_provider_sync_transition(
                                         &canonical_id,
                                         ide.is_jsx,
                                     )
@@ -456,13 +457,13 @@ impl VerterLanguageServer {
 
         let mut files = Vec::new();
         let mut component_graph = Vec::new();
-        let mut total_vue_files = 0usize;
+        let mut total_component_files = 0usize;
         let mut total_components = 0usize;
         let mut files_with_scoped_styles = 0usize;
 
         for (canonical_id, file_language) in &file_list {
-            let kind = if file_language.is_vue() {
-                "vue"
+            let kind = if file_language.is_framework_carrier() {
+                "component"
             } else if canonical_id.ends_with(".ts") || canonical_id.ends_with(".tsx") {
                 "ts"
             } else {
@@ -474,8 +475,8 @@ impl VerterLanguageServer {
                 kind,
             });
 
-            if file_language.is_vue() {
-                total_vue_files += 1;
+            if file_language.is_framework_carrier() {
+                total_component_files += 1;
 
                 // Get analysis for component graph
                 if let Some(analysis) = self.documents.host.get_analysis(canonical_id) {
@@ -504,7 +505,7 @@ impl VerterLanguageServer {
             files,
             component_graph,
             stats: ProjectOverviewStats {
-                total_vue_files,
+                total_component_files,
                 total_components,
                 total_provide_keys: 0,
                 total_inject_keys: 0,
@@ -527,11 +528,11 @@ impl VerterLanguageServer {
             .unwrap_or_default());
         };
 
-        // Collect template components from all Vue SFC analyses
+        // Collect template components from all framework CARRIER analyses
         let file_list = self.documents.host.list_files();
         let mut template_components = Vec::new();
         for (canonical_id, file_language) in &file_list {
-            if file_language.is_vue() {
+            if file_language.is_framework_carrier() {
                 if let Some(analysis) = self.documents.host.get_analysis(canonical_id) {
                     if let Some(template) = &analysis.template {
                         template_components
@@ -587,11 +588,13 @@ impl VerterLanguageServer {
 
         for binding in &analysis.bindings {
             // Convert Vue byte offset → Vue Position → TSX offset
-            let vue_pos = doc.line_index.offset_to_position(binding.span.start);
-            let Some(vue_pos) = vue_pos else { continue };
+            let carrier_pos = doc.line_index.offset_to_position(binding.span.start);
+            let Some(carrier_pos) = carrier_pos else {
+                continue;
+            };
 
-            let tsx_offset = merge::vue_position_to_tsx_offset_validated(
-                &vue_pos,
+            let tsx_offset = merge::carrier_position_to_tsx_offset_validated(
+                &carrier_pos,
                 &doc.line_index,
                 &mapper,
                 &tsx_li,
@@ -650,15 +653,18 @@ impl VerterLanguageServer {
 
         let file_list = self.documents.host.list_files();
         let mut parents = Vec::new();
-        let vue_count = file_list.iter().filter(|(_, k)| k.is_vue()).count();
+        let carrier_count = file_list
+            .iter()
+            .filter(|(_, k)| k.is_framework_carrier())
+            .count();
         tracing::info!(
-            "getComponentParents: target='{}' scanning {} vue files",
+            "getComponentParents: target='{}' scanning {} carrier files",
             target_normalized,
-            vue_count
+            carrier_count
         );
 
         for (canonical_id, file_language) in &file_list {
-            if !file_language.is_vue() {
+            if !file_language.is_framework_carrier() {
                 continue;
             }
             // Skip the target file itself

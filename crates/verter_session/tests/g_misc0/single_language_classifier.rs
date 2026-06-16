@@ -65,16 +65,11 @@ const CARRIER_LITERAL_ALLOWLIST: &[&str] = &[
     // classification).
     "crates/verter_workspace/src/resolver.rs",
     // LSP / MCP / tooling feature files (swept by the consumer-sweep
-    // block; frozen here so no NEW file grows a literal).
-    "crates/verter_lsp/src/background_drain.rs",
-    "crates/verter_lsp/src/features/definition.rs",
-    "crates/verter_lsp/src/features/document_drop_edit.rs",
-    "crates/verter_lsp/src/server/component_resolve.rs",
-    "crates/verter_lsp/src/server/custom_methods/mod.rs",
-    "crates/verter_lsp/src/server/lifecycle.rs",
-    "crates/verter_lsp/src/server/nav_features.rs",
-    "crates/verter_lsp/src/server/sync_orchestration.rs",
-    "crates/verter_lsp/src/server_utils.rs",
+    // block; frozen here so no NEW file grows a literal). The feature /
+    // server LSP-routing files were de-Vue-gated (block S2b — carrier
+    // routing is carrier-generic, pinned by
+    // `carrier_lsp_routing_has_no_hardcoded_vue_gate`), so their rows are
+    // gone from this shrink-only list.
     "crates/verter_lsp/src/test_harness.rs",
     "crates/verter_mcp/src/server.rs",
     "crates/verter_tsc/src/tsconfig.rs",

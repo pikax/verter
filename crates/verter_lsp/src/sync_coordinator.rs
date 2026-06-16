@@ -22,9 +22,9 @@ use crate::documents::line_index::LineIndex;
 use crate::documents::position_map::PositionMapper;
 use crate::documents::DocumentRegistry;
 use crate::provider_sync::{
-    commit_sync_transition, genuinely_stale_after_sync, open_unresolved_vue_commit,
-    open_unresolved_vue_state, prepare_sync_transition, remove_sync_state, revert_unsynced_kinds,
-    ProviderPathKind, ProviderSyncState,
+    commit_sync_transition, genuinely_stale_after_sync, open_unresolved_carrier_commit,
+    open_unresolved_carrier_state, prepare_sync_transition, remove_sync_state,
+    revert_unsynced_kinds, ProviderPathKind, ProviderSyncState,
 };
 use crate::server::compute_verter_diagnostics_for_with_views;
 use crate::tsgo::merge;
@@ -178,15 +178,17 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
     tracing::info!("sync_coordinator: HOST_GET_IDE_START {canonical_id}");
     let ide = tokio::task::block_in_place(|| deps.documents.host.get_ide(canonical_id, &profile));
     let is_jsx = ide.as_ref().map(|ide| ide.is_jsx).unwrap_or(false);
-    let Some(next_state) =
-        crate::provider_sync::vue_sync_state_for_source(&snapshot.resolver, canonical_id, is_jsx)
-    else {
+    let Some(next_state) = crate::provider_sync::carrier_sync_state_for_source(
+        &snapshot.resolver,
+        canonical_id,
+        is_jsx,
+    ) else {
         // No owner resolved. Editor-liveness invariant: the coordinator syncs
         // OPEN documents (signalled from did_change). An OPEN `.vue` must keep
         // its TSX live as Unresolved open-document state — NEVER clear+close.
         // Only a genuinely non-open file is removed (and only once ready).
         if deps.documents.canonical_id_to_uri(canonical_id).is_some() {
-            preserve_open_unresolved_vue(deps, canonical_id, is_jsx, ide.as_ref()).await;
+            preserve_open_unresolved_carrier(deps, canonical_id, is_jsx, ide.as_ref()).await;
         } else if snapshot.ownership_ready {
             clear_provider_sync_state(&deps.project_sync, &deps.provider_sync_states, canonical_id)
                 .await;
@@ -282,11 +284,11 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
 /// the coordinator's ready snapshot resolves no owner, keeping its IDE TSX live.
 ///
 /// Editor-liveness invariant: builds the commit state through the shared
-/// [`open_unresolved_vue_state`] primitive (forces `Unresolved`, preserves the
+/// [`open_unresolved_carrier_state`] primitive (forces `Unresolved`, preserves the
 /// owner-independent live IDE path, drops the owner-derived API path), syncs the
 /// IDE TSX when fresh code is available, and commits. It NEVER removes the state
 /// or closes the TSX.
-async fn preserve_open_unresolved_vue(
+async fn preserve_open_unresolved_carrier(
     deps: &SyncCoordinatorDeps,
     canonical_id: &str,
     is_jsx: bool,
@@ -299,7 +301,7 @@ async fn preserve_open_unresolved_vue(
     // The DESIRED Unresolved target: owner-independent desired-extension IDE
     // path + the open-vs-update syncability hint. Binding forced `Unresolved`,
     // owner-derived API dropped.
-    let target = open_unresolved_vue_state(previous.as_ref(), canonical_id, is_jsx);
+    let target = open_unresolved_carrier_state(previous.as_ref(), canonical_id, is_jsx);
 
     // Attempt the desired IDE sync when fresh code is available (update-in-place
     // when the desired path is already live, else first-open).
@@ -323,7 +325,7 @@ async fn preserve_open_unresolved_vue(
     // prior LIVE path (never dropped to a dead/None path while the prior is still
     // open — rows 7 & 9), the owner-derived API is dropped+closed unconditionally,
     // and the orphaned prior IDE path is closed ONLY after a successful flip.
-    let commit = open_unresolved_vue_commit(previous.as_ref(), target, ide_synced);
+    let commit = open_unresolved_carrier_commit(previous.as_ref(), target, ide_synced);
     commit_sync_transition(&deps.provider_sync_states, canonical_id, commit.committed);
     if let Some(dropped) = commit.dropped_api {
         close_stale_paths(&deps.project_sync, std::slice::from_ref(&dropped)).await;
@@ -453,18 +455,24 @@ async fn publish_merged_diagnostics(deps: &SyncCoordinatorDeps, canonical_id: &s
                 .and_then(|sm| PositionMapper::from_json(sm).ok());
 
             // Build Vue source line index
-            let vue_source = deps.documents.host.get_source(canonical_id);
+            let carrier_source = deps.documents.host.get_source(canonical_id);
 
-            match (tp.get_diagnostics(&tsx_path).await, mapper, vue_source) {
-                (Ok(type_diags), Some(mapper), Some(vue_src)) => {
-                    let vue_li = LineIndex::new(&vue_src, encoding);
+            match (tp.get_diagnostics(&tsx_path).await, mapper, carrier_source) {
+                (Ok(type_diags), Some(mapper), Some(carrier_src)) => {
+                    let carrier_li = LineIndex::new(&carrier_src, encoding);
                     tracing::debug!(
                         "sync_coordinator: publish {} verter + {} type diags for {}",
                         verter_diags.len(),
                         type_diags.len(),
                         canonical_id
                     );
-                    merge::merge_diagnostics(verter_diags, type_diags, &tsx_li, &mapper, &vue_li)
+                    merge::merge_diagnostics(
+                        verter_diags,
+                        type_diags,
+                        &tsx_li,
+                        &mapper,
+                        &carrier_li,
+                    )
                 }
                 (Err(e), _, _) => {
                     tracing::warn!(
@@ -698,13 +706,13 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn preserve_open_unresolved_vue_no_ide_no_prior_commits_empty_unresolved() {
+    async fn preserve_open_unresolved_carrier_no_ide_no_prior_commits_empty_unresolved() {
         // R6-3 (row 1, sync_coordinator caller): with NO prior committed state
         // AND no IDE output (`ide = None`), the coordinator's
-        // `preserve_open_unresolved_vue` commits an EMPTY `Unresolved` state
+        // `preserve_open_unresolved_carrier` commits an EMPTY `Unresolved` state
         // (ide_path=None, binding=Unresolved) — recording the open file's
         // unresolved status. This pins the SAME row-1 behavior the drain and the
-        // server `preserve_open_unresolved_vue` commit (all three unified).
+        // server `preserve_open_unresolved_carrier` commit (all three unified).
         let documents = Arc::new(DocumentRegistry::new(Arc::new(VerterHost::new_standalone(
             HostConfig::default(),
         ))));
@@ -723,7 +731,7 @@ mod tests {
         };
 
         // No prior state in the (empty) states map; no IDE output this pass.
-        preserve_open_unresolved_vue(&deps, "/workspace/src/App.vue", false, None).await;
+        preserve_open_unresolved_carrier(&deps, "/workspace/src/App.vue", false, None).await;
 
         let state = deps
             .provider_sync_states

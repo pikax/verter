@@ -310,6 +310,104 @@ The public-API surface dispatches through the registry api-projector leg:
 runtime-loaded `FileLanguage` and routes through
 `framework_registry().api_projector_for(adapter_id)` — no `is_vue()` branch.
 
+## Carrier-generic LSP routing (no hardcoded Vue gate)
+
+The `verter_lsp` feature / server ROUTING layer is carrier-generic: every
+framework CARRIER (`.vue`, `.svelte`, …) reaches the SAME LSP features. A
+routing decision NEVER hardcodes a Vue-only gate — no `.is_vue()` call, no
+`ends_with(".vue")` / `strip_suffix(".vue")` / `trim_end_matches(".vue")`
+suffix check, and no hardcoded carrier provider literal (`.vue.ts` /
+`.vue.tsx` / `.vue.jsx`) — in executable routing code. Such a gate keeps
+attracting Vue-only behaviour and silently strands every other carrier at
+less than full parity. Route through the shared substrate instead:
+
+- `file_language.is_framework_carrier()` when a `FileLanguage` is in hand,
+- `crate::server::carrier_language_for(path).is_some()` for URI / canonical
+  routing (the LSP-local registry-backed classifier),
+- `crate::server::is_default_export_component_carrier(path)` for the
+  default-export / component-target navigation gates (every carrier shares
+  default-export component semantics — none is Vue-intrinsic),
+- `verter_workspace::path_is_carrier` / `strip_carrier_extension` for pure
+  path / stem helpers (registry-owned, longest-suffix-first),
+- `verter_workspace::carrier_ide_provider_path` / `carrier_api_provider_path`
+  (or the resolver `provider_*_for_source` / `source_id_from_provider_id`
+  helpers) for the provider virtual-file path — the IDE / API suffix is
+  carrier-owned, so `Foo.svelte` projects `Foo.svelte.tsx` / `Foo.svelte.ts`,
+  never a hardcoded `.vue.ts`.
+
+The custom project-overview wire shape is carrier-neutral: the stats field is
+`totalComponentFiles` and the per-file kind discriminant is `"component"`
+(not `"vue"`) — `.svelte` is counted in the component graph.
+
+The carrier-generic-but-Vue-named routing / provider-sync / watcher /
+position-mapper primitives are named `carrier_*` (e.g. `carrier_uri_from_ide_path`,
+`source_id_from_provider_carrier_path`, `carrier_sync_state_for_source`,
+`open_unresolved_carrier_state`, `prepare_carrier_provider_sync_transition`,
+`resync_background_carrier_file`, `sync_pending_carrier_provider_file`,
+`sync_imported_carrier_apis`, `imported_carrier_priority_ids`,
+`carrier_resync_ids` / `carrier_delete_ids` (the watcher queues),
+`carrier_position_to_tsx_offset[_validated]`, `tsx_range_to_carrier[_range]`,
+`carrier_line_index`, `PositionMapper::carrier_to_tsx` / `tsx_to_carrier`,
+`direct_import_binding_hover_target`) so the names stop attracting Vue-only
+behaviour; no re-export shims. The plain-script (non-carrier) provider-sync
+family is `non_carrier_*` (`prepare_non_carrier_provider_sync`,
+`PreparedNonCarrierProviderSync`, `rewrite_non_carrier_source_with_resolver`,
+`sync_non_carrier_file_to_provider`, `resync_non_carrier_file`,
+`sync_pending_non_carrier_provider_file`,
+`prepare_non_carrier_provider_sync_transition`) — these key on plain
+`.ts/.tsx/.js/.jsx` scripts via `provider_id_for_source` / `is_plain_source_file`
+(which return `None`/`false` for ALL carriers), so the old `non_vue` name was
+misleading (a `.svelte` carrier is "non-Vue" but must NOT route here).
+
+The genuinely Vue-INTRINSIC names are KEPT: the Vue-SFC `@event`/`:prop`
+attribute mappers (`jsx_prop_to_vue_attr`, `extract_vue_attr_label`,
+`replace_primary_label_with_vue_attr`, `vue_attr`, `vue_label`), the Vue hover
+kind label (`vue_kind_label`), the Vue runtime-API classification
+(`VueApiClassification` / `VueApiCallSite` / the `vue_api` binding field /
+`vue_api_calls` / `vue_api_hover_at_offset`), the Vue built-in component tags
+(`VUE_BUILTINS`), and `FileLanguage::is_vue()`.
+
+The routing rule is pinned by TWO static guards, both scanning the same non-test
+production routing source (`features/`, `server/`, `documents/`, `tsgo/`, plus
+`server_utils.rs` / `background_drain.rs` / `provider_sync.rs` /
+`sync_coordinator.rs` / `workspace_scanner.rs`), both stripping comments +
+`#[cfg(test)]` blocks + `*_tests.rs` files and carving out
+`extract_component.rs` (Vue-SFC code-action codegen, not carrier routing). They
+differ on STRING literals: the literal-GATE guard KEEPS string contents (its
+gate forms — `== "vue"`, `starts_with("vue")`, `ends_with(".vue")`, `.vue.ts` —
+ARE string literals, so it cannot blank them; it is string-aware only to avoid
+treating a `//` inside a literal as a comment), while the NAMING guard BLANKS
+string literals (a `vue`/`Vue` word inside the `"vue"` npm specifier or a log
+message is not a routed identifier):
+
+- `carrier_lsp_routing_has_no_hardcoded_vue_gate`
+  (`crates/verter_lsp/tests/carrier_routing_no_vue_gate.rs`) — bans executable
+  `.vue` / `"vue"` GATES: `.is_vue(`, the `.vue`-suffix classifiers
+  (`ends_with` / `strip_suffix` / `trim_end_matches` / `starts_with` /
+  `contains` against `".vue"`), the `.vue` / `"vue"` equality + `matches!`
+  gates, the bare `"vue"` LANGUAGE-ID classifiers (`contains` / `starts_with` /
+  `ends_with` / `strip_prefix` / `strip_suffix` / `trim_*_matches` against the
+  bare `"vue"` — e.g. `language_id.starts_with("vue")`), the hardcoded carrier
+  provider literals (`.vue.ts` / `.vue.tsx` / `.vue.jsx`), and the `.vue`
+  provider/routing-path builders. It MASKS ONLY the `.server.vue` / `.client.vue`
+  SSR needles (needle-narrow — a bare `.vue` gate BESIDE an SSR check still
+  flags). Self-discriminating: its detector FLAGS the pre-change `.vue`-gated
+  shapes and PASSES the carrier-generic post-change shapes.
+- `carrier_routing_has_no_vue_named_generic_primitive`
+  (`crates/verter_lsp/tests/carrier_routing_no_vue_named_primitive.rs`) — the
+  NAMING half that ends the whack-a-mole: bans ANY `vue`/`Vue`-substring
+  identifier in the scanned production code outside the Vue-intrinsic allowlist
+  (the attr mappers, hover label, runtime-API classification, `VUE_BUILTINS`,
+  `is_vue` above). Multi-line-raw-string-aware so a test SFC fixture's braces
+  never tear the `#[cfg(test)]` scope.
+
+NOT allowlisted by either guard: `.vue` / Vue-named primitives in definition /
+navigation / component-resolution, workspace symbols, component import / drop,
+watcher carrier routing, provider-path reverse-mapping, position mapping, or
+barrel / provider sync — exactly the categories that must be carrier-generic.
+Out of scope (block S2c): `.svelte.ts`/`.svelte.js` rune-module own-buffer
+queries and descriptor-driven watcher REGISTRATION / adapter-module globs.
+
 ## Bindings (NAPI / WASM / MCP / TS)
 
 - NAPI `resolveFrameworkSurfaceWithAudit(Buffer) -> { response, auditRecord }`
@@ -338,6 +436,8 @@ runtime-loaded `FileLanguage` and routes through
 | `vue_relocation_no_shim` | no re-export shim for relocated Vue resolution; deleted files stay deleted |
 | `retired_symbols_absent_from_production_source` | `VueShallowMetadataStore` / `VueMacroDtoKey` / `VueMacroDtos` / `VueMacroDtosEntry` retired |
 | `framework_surface_executor` (suite) | executor behavior: validation-first, unknown-adapter rejection, Vue parity, per-kind status |
+| `carrier_lsp_routing_has_no_hardcoded_vue_gate` | no executable `.vue`/`"vue"` GATE in non-test feature/server/documents/tsgo LSP routing: `.is_vue(`, `.vue`-suffix classifiers, `.vue`/`"vue"` equality + `matches!`, the bare `"vue"`-prefix language-id classifiers (`language_id.starts_with("vue")` etc.), `.vue.ts/.tsx/.jsx` literals, `.vue` provider-path builders — outside the needle-narrow SSR-convention (`.server.vue`/`.client.vue`) / `is_svelte()` / `extract_component.rs` allowlist |
+| `carrier_routing_has_no_vue_named_generic_primitive` | the NAMING half: no `vue`/`Vue`-substring IDENTIFIER for a carrier-generic routing/provider-sync/watcher/position-mapper or plain-script (`non_carrier_*`) primitive in the scanned production modules, outside the narrow Vue-intrinsic allowlist (`@event`/`:prop` attr mappers, `vue_kind_label`, the `vue_api*` runtime-API classification, `VUE_BUILTINS`, `is_vue`); ends the whack-a-mole |
 | `framework_codegen_uses_code_transform` | the carrier-compiler IDE codegen path delegates to the CodeTransform-backed pipeline and never post-hoc string-munges built output (+ negative self-test) |
 | `carrier_descriptors_have_compilers` | every carrier-bearing session descriptor has a registered `CarrierCompiler` (Vue-through-the-bridge) |
 | `framework_known_bug_ledger_bijection` | 1:1 between framework known-bug ledger entries and their `#[ignore]`d characterizing tests (empty ledger ⇒ trivially green; non-empty enforcement self-tested) |

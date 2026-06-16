@@ -772,7 +772,7 @@ fn synced_type_provider_context(server: &VerterLanguageServer, uri: &Uri) -> Typ
         .or_else(|| server.target_ide_path_for_uri(uri))
         .expect("type provider path should exist");
     let tsx_line_index = LineIndex::new(&ide.code, server.documents.encoding());
-    let vue_line_index = server
+    let carrier_line_index = server
         .documents
         .get(uri)
         .expect("document should exist")
@@ -783,7 +783,7 @@ fn synced_type_provider_context(server: &VerterLanguageServer, uri: &Uri) -> Typ
         tsx_content: ide.code,
         mapper,
         tsx_line_index,
-        vue_line_index,
+        carrier_line_index,
     }
 }
 
@@ -795,9 +795,9 @@ fn set_type_hover_at_vue_position(
     contents: &str,
 ) {
     let ctx = synced_type_provider_context(server, uri);
-    let tsx_offset = merge::vue_position_to_tsx_offset_validated(
+    let tsx_offset = merge::carrier_position_to_tsx_offset_validated(
         &position,
-        &ctx.vue_line_index,
+        &ctx.carrier_line_index,
         &ctx.mapper,
         &ctx.tsx_line_index,
     )
@@ -821,9 +821,9 @@ fn set_type_completions_at_vue_position(
     items: Vec<crate::tsgo::protocol::Completion>,
 ) {
     let ctx = synced_type_provider_context(server, uri);
-    let tsx_offset = merge::vue_position_to_tsx_offset_validated(
+    let tsx_offset = merge::carrier_position_to_tsx_offset_validated(
         &position,
-        &ctx.vue_line_index,
+        &ctx.carrier_line_index,
         &ctx.mapper,
         &ctx.tsx_line_index,
     )
@@ -1279,7 +1279,7 @@ fn provider_sync_without_snapshot_is_deferred_not_fallback_rewritten() {
     let reader =
         TestResolverReader::with_files(&["/workspace/src/Foo.vue", "/workspace/src/util.ts"]);
 
-    let prepared = prepare_non_vue_provider_sync(
+    let prepared = prepare_non_carrier_provider_sync(
         None,
         &reader,
         "/workspace/src/App.ts",
@@ -1337,7 +1337,7 @@ fn provider_sync_with_snapshot_uses_resolved_dependencies_only() {
     let util_start = source.find(util_expr).unwrap();
     let dynamic_start = source.find(dynamic_expr).unwrap();
 
-    let prepared = prepare_non_vue_provider_sync(
+    let prepared = prepare_non_carrier_provider_sync(
         Some(&PublishedResolverSnapshot {
             resolver,
             ownership_ready: true,
@@ -1515,11 +1515,11 @@ fn provider_path_helpers_round_trip_through_resolver() {
     let api_path = provider_api_path_for_source(&resolver, "/workspace/src/App.vue").unwrap();
 
     assert_eq!(
-        source_id_from_provider_vue_path(&resolver, &host, &ide_path).as_deref(),
+        source_id_from_provider_carrier_path(&resolver, &host, &ide_path).as_deref(),
         Some("/workspace/src/App.vue")
     );
     assert_eq!(
-        source_id_from_provider_vue_path(&resolver, &host, &api_path).as_deref(),
+        source_id_from_provider_carrier_path(&resolver, &host, &api_path).as_deref(),
         Some("/workspace/src/App.vue")
     );
 }
@@ -1527,7 +1527,7 @@ fn provider_path_helpers_round_trip_through_resolver() {
 #[test]
 fn vue_tsx_collision_with_real_file() {
     // A real .vue.tsx file exists but there's no matching .vue source in any project.
-    // source_id_from_provider_vue_path should return None (collision guard).
+    // source_id_from_provider_carrier_path should return None (collision guard).
     let resolver = crate::project_resolver::NativeProjectResolver::new(vec![
         crate::project_resolver::IdeProjectConfig::new(
             "/workspace/src".to_string(),
@@ -1540,7 +1540,7 @@ fn vue_tsx_collision_with_real_file() {
     // "/workspace/src/weird.vue.tsx" has no backing "/workspace/src/weird.vue"
     // registered in any project, so the resolver should not strip the suffix
     assert_eq!(
-        source_id_from_provider_vue_path(&resolver, &host, "/other/weird.vue.tsx"),
+        source_id_from_provider_carrier_path(&resolver, &host, "/other/weird.vue.tsx"),
         None,
         ".vue.tsx with no backing .vue in any project should return None"
     );
@@ -1568,7 +1568,8 @@ fn vue_tsx_virtual_file_resolves() {
     .unwrap();
 
     assert_eq!(
-        source_id_from_provider_vue_path(&resolver, &host, "/workspace/src/App.vue.tsx").as_deref(),
+        source_id_from_provider_carrier_path(&resolver, &host, "/workspace/src/App.vue.tsx")
+            .as_deref(),
         Some("/workspace/src/App.vue"),
         "virtual .vue.tsx with backing .vue source should resolve to .vue"
     );
@@ -1590,7 +1591,7 @@ fn vue_tsx_collision_guard_rejects_when_host_missing_source() {
     // Do NOT upsert /workspace/src/Real.vue into host
 
     assert_eq!(
-        source_id_from_provider_vue_path(&resolver, &host, "/workspace/src/Real.vue.tsx"),
+        source_id_from_provider_carrier_path(&resolver, &host, "/workspace/src/Real.vue.tsx"),
         None,
         ".vue.tsx in project but no backing .vue in host should return None"
     );
@@ -1628,7 +1629,7 @@ fn svelte_ts_rune_module_resolves_to_itself_not_phantom_component() {
     // rune module itself.
 
     let mapped =
-        source_id_from_provider_vue_path(&resolver, &host, "/workspace/src/store.svelte.ts");
+        source_id_from_provider_carrier_path(&resolver, &host, "/workspace/src/store.svelte.ts");
     assert_eq!(
         mapped.as_deref(),
         Some("/workspace/src/store.svelte.ts"),
@@ -1665,14 +1666,14 @@ fn svelte_component_virtual_still_resolves_to_carrier() {
     .unwrap();
 
     assert_eq!(
-        source_id_from_provider_vue_path(&resolver, &host, "/workspace/src/Foo.svelte.ts")
+        source_id_from_provider_carrier_path(&resolver, &host, "/workspace/src/Foo.svelte.ts")
             .as_deref(),
         Some("/workspace/src/Foo.svelte"),
         "a Foo.svelte.ts API virtual with a backing Foo.svelte component must \
          reverse-map to the carrier"
     );
     assert_eq!(
-        source_id_from_provider_vue_path(&resolver, &host, "/workspace/src/Foo.svelte.tsx")
+        source_id_from_provider_carrier_path(&resolver, &host, "/workspace/src/Foo.svelte.tsx")
             .as_deref(),
         Some("/workspace/src/Foo.svelte"),
         "a Foo.svelte.tsx IDE virtual with a backing Foo.svelte component must \
@@ -1681,10 +1682,80 @@ fn svelte_component_virtual_still_resolves_to_carrier() {
 }
 
 #[test]
+fn build_workspace_components_enumerates_svelte_and_strips_extension() {
+    // Gap 2: component auto-import must enumerate `.svelte` carriers and
+    // derive the PascalCase component name via the registry-backed strip
+    // (`MyButton.svelte` → `MyButton`). A plain `.ts` is NOT a carrier and is
+    // excluded. Discrimination: pre-change (`!kind.is_vue()`) the Svelte
+    // component is skipped and never appears.
+    let host = VerterHost::new_standalone(HostConfig::default());
+    host.upsert(verter_session::UpsertRequest {
+        canonical_id: Some("/workspace/src/MyButton.svelte".to_string()),
+        input_id: "/workspace/src/MyButton.svelte".to_string(),
+        source: "<script>let x = 1;</script>".into(),
+        file_language: verter_session::FileLanguage::svelte(),
+        aliases: Vec::new(),
+    })
+    .unwrap();
+    host.upsert(verter_session::UpsertRequest {
+        canonical_id: Some("/workspace/src/util.ts".to_string()),
+        input_id: "/workspace/src/util.ts".to_string(),
+        source: "export const x = 1;".into(),
+        file_language: verter_session::FileLanguage::script_ts(),
+        aliases: Vec::new(),
+    })
+    .unwrap();
+
+    let components = build_workspace_components(&host, "/workspace/src/App.svelte");
+    let names: Vec<&str> = components.iter().map(|c| c.name.as_str()).collect();
+    assert!(
+        names.contains(&"MyButton"),
+        "Svelte component must be enumerated with the stripped PascalCase name, got: {names:?}"
+    );
+    assert!(
+        !names.iter().any(|n| n.contains("util")),
+        "a plain .ts file is NOT a carrier and must be excluded, got: {names:?}"
+    );
+    assert!(
+        !names.iter().any(|n| n.contains(".svelte")),
+        "the carrier extension must be stripped from the component name, got: {names:?}"
+    );
+}
+
+#[test]
 fn import_resolved_matches_target_exact() {
     assert!(import_resolved_matches_target(
         "C:/project/src/components/Foo.vue",
         "C:/project/src/components/Foo.vue"
+    ));
+}
+
+#[test]
+fn import_resolved_matches_target_svelte_carrier() {
+    // The fuzzy import matcher is carrier-generic: `./Popup` resolves a
+    // `.svelte` carrier just as it does `.vue` (gap-5 import resolution).
+    assert!(import_resolved_matches_target(
+        "C:/proj/src/Popup",
+        "C:/proj/src/Popup.svelte"
+    ));
+    assert!(import_resolved_matches_target(
+        "C:/proj/src/Popover",
+        "C:/proj/src/Popover/index.svelte"
+    ));
+    assert!(import_resolved_matches_target(
+        "C:/proj/src/Popover",
+        "C:/proj/src/Popover/Popover.svelte"
+    ));
+    // Discrimination: a resolved that already carries a `.svelte` ext gets no
+    // fuzzy match (mirrors the `.vue` early-out), and an unrelated target does
+    // not match.
+    assert!(!import_resolved_matches_target(
+        "C:/proj/src/Popup.svelte",
+        "C:/proj/src/Other.svelte"
+    ));
+    assert!(!import_resolved_matches_target(
+        "C:/proj/src/Popup",
+        "C:/proj/src/Other.svelte"
     ));
 }
 
@@ -1745,7 +1816,7 @@ fn capabilities_do_not_include_pull_diagnostics() {
 fn did_open_startup_policy_enables_sync_for_tsgo_and_tsserver() {
     let tsgo = did_open_startup_policy(crate::TypeProviderKind::Tsgo);
     assert!(
-        tsgo.sync_imported_vue_files,
+        tsgo.sync_imported_carrier_apis,
         "TSGO should eagerly sync imported .vue files"
     );
     assert!(
@@ -1755,7 +1826,7 @@ fn did_open_startup_policy_enables_sync_for_tsgo_and_tsserver() {
 
     let tsserver = did_open_startup_policy(crate::TypeProviderKind::Tsserver);
     assert!(
-        tsserver.sync_imported_vue_files,
+        tsserver.sync_imported_carrier_apis,
         "tsserver should eagerly sync imported .vue files"
     );
     assert!(
@@ -1768,7 +1839,7 @@ fn did_open_startup_policy_enables_sync_for_tsgo_and_tsserver() {
 fn did_open_startup_policy_skips_sync_for_no_provider() {
     let none = did_open_startup_policy(crate::TypeProviderKind::None);
     assert!(
-        !none.sync_imported_vue_files,
+        !none.sync_imported_carrier_apis,
         "no type provider should not eagerly sync imported .vue files"
     );
     assert!(
@@ -1882,7 +1953,7 @@ async fn initialized_returns_before_background_configure_paths_completes() {
 }
 
 #[test]
-fn collect_imported_vue_priority_ids_keeps_only_resolved_vue_imports() {
+fn collect_imported_carrier_priority_ids_keeps_only_resolved_vue_imports() {
     let analysis = verter_semantic::analysis::ScriptAnalysisSnapshot {
         imports: vec![
             verter_semantic::analysis::AnalyzedImport {
@@ -1934,7 +2005,7 @@ fn collect_imported_vue_priority_ids_keeps_only_resolved_vue_imports() {
         declaration_entries: Vec::new(),
     };
 
-    let ids = collect_imported_vue_priority_ids(&analysis);
+    let ids = collect_imported_carrier_priority_ids(&analysis);
 
     assert_eq!(
         ids,
@@ -1948,7 +2019,7 @@ fn collect_imported_vue_priority_ids_keeps_only_resolved_vue_imports() {
 }
 
 #[test]
-fn collect_imported_vue_priority_ids_falls_back_to_relative_resolution() {
+fn collect_imported_carrier_priority_ids_falls_back_to_relative_resolution() {
     let imports = vec![
         verter_semantic::analysis::AnalyzedImport {
             source: "./TypedSlotComp.vue".to_string(),
@@ -1966,7 +2037,7 @@ fn collect_imported_vue_priority_ids_falls_back_to_relative_resolution() {
         },
     ];
 
-    let ids = collect_imported_vue_priority_ids_from_imports_with_fallback(
+    let ids = collect_imported_carrier_priority_ids_from_imports_with_fallback(
         &imports,
         Some("/workspace/src/TemplateSlotCases.vue"),
         |parent, specifier| {
@@ -2003,7 +2074,7 @@ fn did_open_prioritizes_exact_and_finite_dynamic_targets() {
         "/workspace/src/Bar.vue",
         "/workspace/src/util.ts",
     ]);
-    let targets = collect_priority_vue_targets_from_module_references(
+    let targets = collect_priority_carrier_public_api_targets_from_module_references(
         Some(&PublishedResolverSnapshot {
             resolver,
             ownership_ready: true,
@@ -2049,7 +2120,7 @@ fn unknown_dynamic_imports_sync_no_provider_dependencies() {
         ),
     ]);
     let reader = TestResolverReader::with_files(&["/workspace/src/Foo.vue"]);
-    let targets = collect_priority_vue_targets_from_module_references(
+    let targets = collect_priority_carrier_public_api_targets_from_module_references(
         Some(&PublishedResolverSnapshot {
             resolver,
             ownership_ready: true,
@@ -2398,9 +2469,9 @@ async fn goto_definition_component_event_name_skips_type_provider_virtual_fallba
     let server = service.inner();
     let position = find_document_position(server, &app_uri, "@custom=\"handleCustom\"", 1);
     let ctx = synced_type_provider_context(server, &app_uri);
-    let tsx_offset = merge::vue_position_to_tsx_offset_validated(
+    let tsx_offset = merge::carrier_position_to_tsx_offset_validated(
         &position,
-        &ctx.vue_line_index,
+        &ctx.carrier_line_index,
         &ctx.mapper,
         &ctx.tsx_line_index,
     )
@@ -3019,9 +3090,9 @@ async fn barrel_import_binding_in_vue_script_skips_type_provider_barrel_result()
     let server = service.inner();
     let position = find_document_position(server, &app_uri, "{ Overlay, Button }", 2);
     let ctx = synced_type_provider_context(server, &app_uri);
-    let tsx_offset = merge::vue_position_to_tsx_offset_validated(
+    let tsx_offset = merge::carrier_position_to_tsx_offset_validated(
         &position,
-        &ctx.vue_line_index,
+        &ctx.carrier_line_index,
         &ctx.mapper,
         &ctx.tsx_line_index,
     )
@@ -3279,9 +3350,9 @@ async fn goto_type_definition_delegates_to_provider() {
     // Set up mock to return a type definition when queried
     {
         let ctx = synced_type_provider_context(server, &app_uri);
-        if let Some(tsx_offset) = merge::vue_position_to_tsx_offset_validated(
+        if let Some(tsx_offset) = merge::carrier_position_to_tsx_offset_validated(
             &position,
-            &ctx.vue_line_index,
+            &ctx.carrier_line_index,
             &ctx.mapper,
             &ctx.tsx_line_index,
         ) {
@@ -3694,9 +3765,9 @@ const outerLabel = 'outer'
     let slot_uri = open_test_vue(server, "/workspace/src/TemplateSlotCases.vue", slot_source);
     let position = find_document_position(server, &slot_uri, "{{ sl }}", 5);
     let slot_ctx = synced_type_provider_context(server, &slot_uri);
-    let slot_tsx_offset = merge::vue_position_to_tsx_offset_validated(
+    let slot_tsx_offset = merge::carrier_position_to_tsx_offset_validated(
         &position,
-        &slot_ctx.vue_line_index,
+        &slot_ctx.carrier_line_index,
         &slot_ctx.mapper,
         &slot_ctx.tsx_line_index,
     )
@@ -3833,9 +3904,9 @@ const outerLabel = 'outer'
     let slot_uri = open_test_vue(server, "/workspace/src/TemplateSlotCases.vue", slot_source);
     let position = find_document_position(server, &slot_uri, "slotItem.name", 9);
     let slot_ctx = synced_type_provider_context(server, &slot_uri);
-    let slot_tsx_offset = merge::vue_position_to_tsx_offset_validated(
+    let slot_tsx_offset = merge::carrier_position_to_tsx_offset_validated(
         &position,
-        &slot_ctx.vue_line_index,
+        &slot_ctx.carrier_line_index,
         &slot_ctx.mapper,
         &slot_ctx.tsx_line_index,
     )
@@ -3958,9 +4029,9 @@ const outerLabel = 'outer'
     let slot_uri = open_test_vue(server, "/workspace/src/TemplateSlotCases.vue", slot_source);
     let position = find_document_position(server, &slot_uri, "slotItem.na", 11);
     let slot_ctx = synced_type_provider_context(server, &slot_uri);
-    let slot_tsx_offset = merge::vue_position_to_tsx_offset_validated(
+    let slot_tsx_offset = merge::carrier_position_to_tsx_offset_validated(
         &position,
-        &slot_ctx.vue_line_index,
+        &slot_ctx.carrier_line_index,
         &slot_ctx.mapper,
         &slot_ctx.tsx_line_index,
     )
@@ -4069,9 +4140,9 @@ const actions: Action[] = [{ label: 'ok', disabled: false, handler: () => {} }]
     let uri = open_test_vue(server, "/workspace/src/App.vue", source);
     let position = find_document_position(server, &uri, "action.di", 7);
     let ctx = synced_type_provider_context(server, &uri);
-    let tsx_offset = merge::vue_position_to_tsx_offset_validated(
+    let tsx_offset = merge::carrier_position_to_tsx_offset_validated(
         &position,
-        &ctx.vue_line_index,
+        &ctx.carrier_line_index,
         &ctx.mapper,
         &ctx.tsx_line_index,
     )
@@ -4176,9 +4247,9 @@ async fn completion_queries_type_provider_for_fixture_vfor_member_access_after_b
     let uri = open_test_vue(server, "/workspace/src/App.vue", source);
     let position = find_document_position(server, &uri, "action.disabled", 7);
     let ctx = synced_type_provider_context(server, &uri);
-    let tsx_offset = merge::vue_position_to_tsx_offset_validated(
+    let tsx_offset = merge::carrier_position_to_tsx_offset_validated(
         &position,
-        &ctx.vue_line_index,
+        &ctx.carrier_line_index,
         &ctx.mapper,
         &ctx.tsx_line_index,
     )
@@ -4522,9 +4593,9 @@ const broken =
     );
     let position = find_document_position(server, &recovery_uri, "{{ cou }}", 6);
     let recovery_ctx = synced_type_provider_context(server, &recovery_uri);
-    let recovery_tsx_offset = merge::vue_position_to_tsx_offset_validated(
+    let recovery_tsx_offset = merge::carrier_position_to_tsx_offset_validated(
         &position,
-        &recovery_ctx.vue_line_index,
+        &recovery_ctx.carrier_line_index,
         &recovery_ctx.mapper,
         &recovery_ctx.tsx_line_index,
     )
@@ -4638,9 +4709,9 @@ const broken =
     );
     let position = find_document_position(server, &recovery_uri, "{{ safeA }}", 8);
     let recovery_ctx = synced_type_provider_context(server, &recovery_uri);
-    let recovery_tsx_offset = merge::vue_position_to_tsx_offset_validated(
+    let recovery_tsx_offset = merge::carrier_position_to_tsx_offset_validated(
         &position,
-        &recovery_ctx.vue_line_index,
+        &recovery_ctx.carrier_line_index,
         &recovery_ctx.mapper,
         &recovery_ctx.tsx_line_index,
     )
@@ -5203,8 +5274,8 @@ async fn drain_owned_to_unowned_open_vue_converts_state_to_unresolved() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn open_unresolved_vue_no_ide_output_commits_forced_unresolved_binding() {
-    // R2-1: the no-IDE branch of `sync_open_unresolved_vue_provider_file` must
+async fn open_unresolved_carrier_no_ide_output_commits_forced_unresolved_binding() {
+    // R2-1: the no-IDE branch of `sync_open_unresolved_carrier_provider_file` must
     // still COMMIT the forced-`Unresolved` state when a prior committed state
     // exists — never abandon the conversion and leave a stale `Owned` binding.
     // An owned→unowned OPEN Vue file with a transient IDE compile miss (ide=None)
@@ -5246,7 +5317,7 @@ async fn open_unresolved_vue_no_ide_output_commits_forced_unresolved_binding() {
     );
 
     // Drive the no-IDE branch directly: no compiled IDE output this pass.
-    let synced = sync_open_unresolved_vue_provider_file(
+    let synced = sync_open_unresolved_carrier_provider_file(
         &sync,
         &provider_sync_states,
         "/workspace/src/App.vue",
@@ -5311,7 +5382,7 @@ async fn open_unresolved_vue_no_ide_output_commits_forced_unresolved_binding() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn open_unresolved_vue_closes_dropped_owner_api_path_keeps_ide_tsx() {
+async fn open_unresolved_carrier_closes_dropped_owner_api_path_keeps_ide_tsx() {
     // R2-8: converting an OPEN Vue file owned→unowned drops the owner-derived
     // `.vue.ts` API path from the committed state, but the provider still holds
     // that `.vue.ts` open. The conversion MUST close the stale `.vue.ts`
@@ -5360,7 +5431,7 @@ async fn open_unresolved_vue_closes_dropped_owner_api_path_keeps_ide_tsx() {
         is_jsx: false,
         destructured_block: None,
     };
-    let synced = sync_open_unresolved_vue_provider_file(
+    let synced = sync_open_unresolved_carrier_provider_file(
         &sync,
         &provider_sync_states,
         "/workspace/src/App.vue",
@@ -5412,7 +5483,7 @@ async fn open_unresolved_vue_closes_dropped_owner_api_path_keeps_ide_tsx() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn preserve_open_unresolved_vue_failed_first_open_commits_no_dead_ide_path() {
+async fn preserve_open_unresolved_carrier_failed_first_open_commits_no_dead_ide_path() {
     // R3-1 (a) [P0]: an OPEN unowned `.vue` with NO prior live IDE state whose
     // first `open_tsx` FAILS must NOT commit a `ide_path` the provider never
     // opened. A committed `ide_path = Some(p)` is a promise that hover/completion
@@ -5495,7 +5566,7 @@ const msg = 'hello'
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn preserve_open_unresolved_vue_failed_update_keeps_prior_live_ide_path() {
+async fn preserve_open_unresolved_carrier_failed_update_keeps_prior_live_ide_path() {
     // R3-1 (b): an OPEN unowned `.vue` with a prior LIVE IDE path whose UPDATE
     // fails must KEEP the prior live path — it is still open in the provider
     // (only the in-place update failed; the document stays usable with its
@@ -5537,7 +5608,7 @@ const msg = 'hello'
     provider.set_fail_sync_path("/workspace/src/App.vue.tsx");
 
     server
-        .preserve_open_unresolved_vue(
+        .preserve_open_unresolved_carrier(
             canonical_id,
             false,
             Some("export default { updated: true }"),
@@ -5586,7 +5657,8 @@ const msg = 'hello'
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn preserve_open_unresolved_vue_jsx_flip_syncs_new_tsx_and_closes_old_jsx_after_success() {
+async fn preserve_open_unresolved_carrier_jsx_flip_syncs_new_tsx_and_closes_old_jsx_after_success()
+{
     // R3-4 [P1]: an OPEN unowned `.vue` with a prior LIVE `.jsx` that flips to TS
     // (`is_jsx == false`) must sync the NEW code into the desired `.tsx`, NEVER
     // into the stale `.jsx`, and close the old `.jsx` ONLY AFTER the new `.tsx`
@@ -5627,7 +5699,7 @@ const msg = 'hello'
     // Flip to TS: is_jsx = false → desired path is `.tsx`. Fresh IDE code; the
     // new `.tsx` open SUCCEEDS (no failure injection).
     server
-        .preserve_open_unresolved_vue(canonical_id, false, Some("export default { ts: true }"))
+        .preserve_open_unresolved_carrier(canonical_id, false, Some("export default { ts: true }"))
         .await;
 
     let calls = provider.file_sync_calls();
@@ -5692,7 +5764,7 @@ const msg = 'hello'
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn preserve_open_unresolved_vue_jsx_flip_no_ide_output_retains_prior_live_jsx() {
+async fn preserve_open_unresolved_carrier_jsx_flip_no_ide_output_retains_prior_live_jsx() {
     // R5-1 ROW 7 (REGRESSION, P0): an OPEN unowned `.vue` with a prior LIVE
     // `.jsx` that flips to TS (`is_jsx == false`) but has NO compiled IDE output
     // this pass (a transient compile miss) must RETAIN the prior live `.jsx` —
@@ -5737,7 +5809,7 @@ const msg = 'hello'
 
     // Flip to TS (is_jsx = false → desired `.tsx`) but with NO IDE code this pass.
     server
-        .preserve_open_unresolved_vue(canonical_id, false, None)
+        .preserve_open_unresolved_carrier(canonical_id, false, None)
         .await;
 
     let calls = provider.file_sync_calls();
@@ -5778,7 +5850,7 @@ const msg = 'hello'
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn preserve_open_unresolved_vue_jsx_flip_failed_tsx_sync_retains_prior_live_jsx() {
+async fn preserve_open_unresolved_carrier_jsx_flip_failed_tsx_sync_retains_prior_live_jsx() {
     // R5-1 ROW 9 (REGRESSION, P0): an OPEN unowned `.vue` with a prior LIVE
     // `.jsx` that flips to TS (`is_jsx == false`) whose new `.tsx` sync FAILS
     // must RETAIN the prior live `.jsx` — it is still physically open in the
@@ -5823,7 +5895,7 @@ const msg = 'hello'
     // Flip to TS with fresh IDE code, but FAIL the new `.tsx` first-open.
     provider.set_fail_sync_path("/workspace/src/App.vue.tsx");
     server
-        .preserve_open_unresolved_vue(canonical_id, false, Some("export default { ts: true }"))
+        .preserve_open_unresolved_carrier(canonical_id, false, Some("export default { ts: true }"))
         .await;
 
     let calls = provider.file_sync_calls();
@@ -5876,7 +5948,7 @@ const msg = 'hello'
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn preserve_open_unresolved_vue_prior_owned_jsx_flip_failed_drops_api_retains_jsx() {
+async fn preserve_open_unresolved_carrier_prior_owned_jsx_flip_failed_drops_api_retains_jsx() {
     // R5-1 prior-Owned row (combined with row 9): when the prior binding was
     // `Owned` and the new `.tsx` flip sync FAILS, the owner `.vue.ts` is dropped
     // from state AND closed (R2-8, independent of the IDE outcome), while the
@@ -5919,7 +5991,7 @@ const msg = 'hello'
     // Flip to TS with fresh IDE code, but FAIL the new `.tsx` first-open.
     provider.set_fail_sync_path("/workspace/src/App.vue.tsx");
     server
-        .preserve_open_unresolved_vue(canonical_id, false, Some("export default { ts: true }"))
+        .preserve_open_unresolved_carrier(canonical_id, false, Some("export default { ts: true }"))
         .await;
 
     let calls = provider.file_sync_calls();
@@ -5974,12 +6046,12 @@ const msg = 'hello'
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn drain_open_unresolved_vue_no_ide_no_prior_commits_empty_unresolved() {
+async fn drain_open_unresolved_carrier_no_ide_no_prior_commits_empty_unresolved() {
     // R6-3 (row 1, drain caller): with NO prior committed state AND no IDE
     // output this pass, the drain commits an EMPTY `Unresolved` state
     // (ide_path=None, binding=Unresolved) — recording the open file's
     // unresolved status (queued for retry), UNIFIED with the two
-    // `preserve_open_unresolved_vue` callers (which already commit this).
+    // `preserve_open_unresolved_carrier` callers (which already commit this).
     //
     // Discriminator (RED pre-fix): the drain guarded the commit behind
     // `if previous.is_some()`, so row 1 committed NOTHING (state map empty) —
@@ -6001,7 +6073,7 @@ async fn drain_open_unresolved_vue_no_ide_no_prior_commits_empty_unresolved() {
     let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
     let provider_sync_states = DashMap::new();
 
-    let synced = sync_open_unresolved_vue_provider_file(
+    let synced = sync_open_unresolved_carrier_provider_file(
         &sync,
         &provider_sync_states,
         "/workspace/src/App.vue",
@@ -6041,9 +6113,9 @@ async fn drain_open_unresolved_vue_no_ide_no_prior_commits_empty_unresolved() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn preserve_open_unresolved_vue_no_ide_no_prior_commits_empty_unresolved() {
+async fn preserve_open_unresolved_carrier_no_ide_no_prior_commits_empty_unresolved() {
     // R6-3 (row 1, server preserve caller): with NO prior committed state AND no
-    // IDE code (`ide_code = None`), `Server::preserve_open_unresolved_vue`
+    // IDE code (`ide_code = None`), `Server::preserve_open_unresolved_carrier`
     // commits an EMPTY `Unresolved` state (ide_path=None, binding=Unresolved) —
     // recording the open file's unresolved status. This pins the SAME row-1
     // behavior as the drain + sync_coordinator callers (all three unified).
@@ -6066,7 +6138,7 @@ const msg = 'hello'
 
     // No prior committed state seeded; no IDE code this pass.
     server
-        .preserve_open_unresolved_vue(canonical_id, false, None)
+        .preserve_open_unresolved_carrier(canonical_id, false, None)
         .await;
 
     let state = server
@@ -6496,7 +6568,7 @@ async fn background_init_drain_clears_stale_macro_type_diagnostic_for_package_ex
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn sync_imported_vue_api_lightweight_uses_unresolved_api_path_before_snapshot() {
+async fn sync_imported_carrier_api_lightweight_uses_unresolved_api_path_before_snapshot() {
     let temp = tempfile::tempdir().expect("temp dir");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(workspace.join("src")).expect("create src dir");
@@ -6533,7 +6605,9 @@ defineProps<{ msg: string }>()
     let server = service.inner();
     let child_id = crate::test_utils::canonical_test_path(&workspace.join("src/Child.vue"));
 
-    server.sync_imported_vue_api_lightweight(&child_id).await;
+    server
+        .sync_imported_carrier_api_lightweight(&child_id)
+        .await;
 
     let calls = provider.file_sync_calls();
     let expected_api_path = format!("{child_id}.ts");
@@ -6570,7 +6644,7 @@ defineProps<{ msg: string }>()
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn sync_imported_vue_api_lightweight_opens_snapshot_api_path_for_tsserver() {
+async fn sync_imported_carrier_api_lightweight_opens_snapshot_api_path_for_tsserver() {
     let provider = Arc::new(MockTypeProvider::new());
     let type_provider: Arc<dyn TypeProvider> = provider.clone();
     let service = make_hover_test_service(type_provider);
@@ -6588,7 +6662,7 @@ defineProps<{ msg: string }>()
 "#,
     );
 
-    server.sync_imported_vue_api_lightweight(child_id).await;
+    server.sync_imported_carrier_api_lightweight(child_id).await;
 
     let state = server
         .provider_sync_states
@@ -6622,8 +6696,8 @@ defineProps<{ msg: string }>()
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn sync_vue_ide_unresolved_forces_unresolved_over_prior_owned() {
-    // R2-3: `sync_vue_ide_unresolved` is a bootstrap "unresolved" sync — it is
+async fn sync_carrier_ide_unresolved_forces_unresolved_over_prior_owned() {
+    // R2-3: `sync_carrier_ide_unresolved` is a bootstrap "unresolved" sync — it is
     // unresolved BY DEFINITION. It reuses a prior committed state (to keep the
     // background-loaded bookkeeping) but must FORCE the binding to `Unresolved`.
     // Pre-fix it only defaulted to `Unresolved` when NO state existed; a prior
@@ -6652,7 +6726,7 @@ async fn sync_vue_ide_unresolved_forces_unresolved_over_prior_owned() {
     );
 
     server
-        .sync_vue_ide_unresolved(canonical_id, "export const x = 1;", false)
+        .sync_carrier_ide_unresolved(canonical_id, "export const x = 1;", false)
         .await;
 
     let state = server
@@ -6663,14 +6737,14 @@ async fn sync_vue_ide_unresolved_forces_unresolved_over_prior_owned() {
     // Discriminator: pre-fix the binding stays `Owned("/old/tsconfig.json")`.
     assert!(
         state.is_unresolved(),
-        "bootstrap sync_vue_ide_unresolved must force an Unresolved binding, got {:?}",
+        "bootstrap sync_carrier_ide_unresolved must force an Unresolved binding, got {:?}",
         state.owner_binding
     );
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn sync_vue_api_unresolved_forces_unresolved_over_prior_owned() {
-    // R2-3: `sync_vue_api_unresolved` mirror — a bootstrap unresolved API sync
+async fn sync_carrier_api_unresolved_forces_unresolved_over_prior_owned() {
+    // R2-3: `sync_carrier_api_unresolved` mirror — a bootstrap unresolved API sync
     // must force the binding to `Unresolved` even when reusing a prior `Owned`
     // committed state.
     let provider = Arc::new(MockTypeProvider::new());
@@ -6695,7 +6769,7 @@ async fn sync_vue_api_unresolved_forces_unresolved_over_prior_owned() {
     );
 
     server
-        .sync_vue_api_unresolved(canonical_id, "export {};")
+        .sync_carrier_api_unresolved(canonical_id, "export {};")
         .await;
 
     let state = server
@@ -6706,7 +6780,7 @@ async fn sync_vue_api_unresolved_forces_unresolved_over_prior_owned() {
     // Discriminator: pre-fix the binding stays `Owned("/old/tsconfig.json")`.
     assert!(
         state.is_unresolved(),
-        "bootstrap sync_vue_api_unresolved must force an Unresolved binding, got {:?}",
+        "bootstrap sync_carrier_api_unresolved must force an Unresolved binding, got {:?}",
         state.owner_binding
     );
 }
@@ -6956,7 +7030,7 @@ defineProps<{ msg: string }>()
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn sync_imported_vue_api_lightweight_opens_snapshot_ide_path_for_tsgo() {
+async fn sync_imported_carrier_api_lightweight_opens_snapshot_ide_path_for_tsgo() {
     let provider = Arc::new(MockTypeProvider::new());
     let type_provider: Arc<dyn TypeProvider> = provider.clone();
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
@@ -6991,7 +7065,7 @@ defineProps<{ msg: string }>()
 "#,
     );
 
-    server.sync_imported_vue_api_lightweight(child_id).await;
+    server.sync_imported_carrier_api_lightweight(child_id).await;
 
     let state = server
         .provider_sync_states
@@ -7014,8 +7088,8 @@ defineProps<{ msg: string }>()
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn sync_imported_vue_api_lightweight_preserves_open_unowned_state() {
-    // FIX-5: the ready-no-owner arm of sync_imported_vue_api_lightweight must
+async fn sync_imported_carrier_api_lightweight_preserves_open_unowned_state() {
+    // FIX-5: the ready-no-owner arm of sync_imported_carrier_api_lightweight must
     // NOT clear+close+return for an OPEN `.vue` that is imported-by-an-open-file
     // and unowned. Pre-fix it called clear_provider_sync_state (removing state +
     // closing the live TSX) → re-triggered the no-ide_context bug on a sibling
@@ -7072,7 +7146,7 @@ defineProps<{ msg: string }>()
         },
     );
 
-    server.sync_imported_vue_api_lightweight(child_id).await;
+    server.sync_imported_carrier_api_lightweight(child_id).await;
 
     // Discriminator: the open child's state must SURVIVE (pre-fix it was
     // removed by clear_provider_sync_state).
@@ -7112,7 +7186,7 @@ defineProps<{ msg: string }>()
 #[tokio::test(flavor = "multi_thread")]
 async fn sync_api_to_provider_retains_prior_path_when_replacement_sync_fails() {
     // Whole-class coverage: sync_api_to_provider (a live owner-resolved Vue sync
-    // path reachable for OPEN files via sync_vue_public_api_by_canonical_id) must
+    // path reachable for OPEN files via sync_carrier_public_api_by_canonical_id) must
     // use close-AFTER-successful-sync. On an owner-key change that force-rebinds
     // the owner-independent `{src}.vue.ts`, a FAILED replacement sync must not
     // close the prior live path and must retain the prior state.
@@ -7262,7 +7336,8 @@ const actions: Action[] = [{ label: 'ok', disabled: false }]
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn ensure_current_file_synced_preserves_open_unresolved_vue_state_when_ready_owner_is_none() {
+async fn ensure_current_file_synced_preserves_open_unresolved_carrier_state_when_ready_owner_is_none(
+) {
     // Editor-liveness invariant on the FOREGROUND sync path: when the ready
     // ownership snapshot resolves no owner for an OPEN Vue file, the sync must
     // keep the file's TSX live in the provider (unresolved open-document
@@ -8080,9 +8155,9 @@ async fn completion_with_real_tsserver_returns_fixture_vfor_member_access_proper
 
     let position = find_document_position(server, &uri, "action.disabled", 7);
     let ctx = synced_type_provider_context(server, &uri);
-    let tsx_offset = merge::vue_position_to_tsx_offset_validated(
+    let tsx_offset = merge::carrier_position_to_tsx_offset_validated(
         &position,
-        &ctx.vue_line_index,
+        &ctx.carrier_line_index,
         &ctx.mapper,
         &ctx.tsx_line_index,
     )
@@ -8598,9 +8673,9 @@ async fn real_tsserver_slot_member_access_stays_typed_after_opening_child_and_pa
     let direct_debug = Some(synced_type_provider_context(server, &parent_uri))
         .and_then(|ctx| {
             let tsx_path = ctx.tsx_path.clone();
-            merge::vue_position_to_tsx_offset_validated(
+            merge::carrier_position_to_tsx_offset_validated(
                 &member_position,
-                &ctx.vue_line_index,
+                &ctx.carrier_line_index,
                 &ctx.mapper,
                 &ctx.tsx_line_index,
             )
@@ -8686,7 +8761,7 @@ async fn real_tsserver_slot_member_access_stays_typed_after_opening_child_and_pa
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn sync_pending_vue_provider_file_hydrates_codegen_blockers_before_sync() {
+async fn sync_pending_carrier_provider_file_hydrates_codegen_blockers_before_sync() {
     let temp = tempfile::tempdir().expect("temp dir");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(workspace.join("src/partials")).expect("create partials dir");
@@ -8778,7 +8853,7 @@ async fn sync_pending_vue_provider_file_hydrates_codegen_blockers_before_sync() 
     let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
     let provider_sync_states = DashMap::new();
 
-    let synced = sync_pending_vue_provider_file(
+    let synced = sync_pending_carrier_provider_file(
         &sync,
         &documents,
         &snapshot,
@@ -8817,7 +8892,7 @@ async fn sync_pending_vue_provider_file_hydrates_codegen_blockers_before_sync() 
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn sync_pending_vue_provider_file_syncs_ide_artifact_for_tsgo() {
+async fn sync_pending_carrier_provider_file_syncs_ide_artifact_for_tsgo() {
     let temp = tempfile::tempdir().expect("temp dir");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(workspace.join("src")).expect("create src dir");
@@ -8866,7 +8941,7 @@ defineProps<{ msg: string }>()
     let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
     let provider_sync_states = DashMap::new();
 
-    let synced = sync_pending_vue_provider_file(
+    let synced = sync_pending_carrier_provider_file(
         &sync,
         &documents,
         &snapshot,
@@ -9406,7 +9481,7 @@ import Child from '@/components/Child.vue'
 
     // Phase 1: before VFS snapshot is built — aliased import should NOT resolve
     let analysis = host.get_analysis(&app_id).expect("analysis for App.vue");
-    let ids_before = collect_imported_vue_priority_ids_from_imports_with_fallback(
+    let ids_before = collect_imported_carrier_priority_ids_from_imports_with_fallback(
         &analysis.imports,
         Some(&app_id),
         |parent, specifier| resolve_import_specifier_standalone(&host, parent, specifier),
@@ -9438,7 +9513,7 @@ import Child from '@/components/Child.vue'
     let vfs_workspace = make_test_vfs_workspace_from_registry(&registry);
 
     // Now aliased import should resolve
-    let ids_after = collect_imported_vue_priority_ids_from_imports_with_fallback(
+    let ids_after = collect_imported_carrier_priority_ids_from_imports_with_fallback(
         &analysis.imports,
         Some(&app_id),
         |parent, specifier| resolve_import_specifier_standalone(&host, parent, specifier),
@@ -9889,7 +9964,7 @@ async fn resync_aliased_already_loaded_open_vue_reconciled_when_owner_lost() {
     // the `already_loaded` skip short-circuited it, leaving it stranded on the
     // dead owner (the `no ide_context` class). Post-fix: the skip is gated on the
     // committed binding still matching the live resolution, so an owner-lost open
-    // file falls through to `reconcile_unowned_vue_provider_file` → converts to
+    // file falls through to `reconcile_unowned_carrier_provider_file` → converts to
     // Unresolved + closes the dropped owner-derived `.vue.ts`.
     let temp_base = std::env::temp_dir().join("verter_test_r24_aliased_owner_lost");
     let _ = std::fs::remove_dir_all(&temp_base);
@@ -10250,7 +10325,7 @@ async fn resync_background_vue_reconciles_owner_loss_when_ide_output_is_absent()
     // (force `Unresolved`, drop+close the owner-derived `.vue.ts`) before
     // requiring IDE output.
     //
-    // Driven through `sync_compiled_vue_to_provider` (the post-compile sync
+    // Driven through `sync_compiled_carrier_to_provider` (the post-compile sync
     // decision, separated from the destructive disk reload) with `ide = None` —
     // the exact absent-IDE-output condition — under an owner-None snapshot for an
     // OPEN document.
@@ -10294,7 +10369,7 @@ defineProps<{ msg: string }>()
 
     // Absent IDE output: pass `ide = None` (the transient compile-miss condition).
     server
-        .sync_compiled_vue_to_provider(canonical_id, None)
+        .sync_compiled_carrier_to_provider(canonical_id, None)
         .await;
 
     // Discriminator (RED pre-fix): the stale `Owned` binding survived because the
@@ -10343,19 +10418,19 @@ defineProps<{ msg: string }>()
 #[tokio::test(flavor = "multi_thread")]
 async fn resync_background_vue_reconciles_owner_loss_before_compile_gate() {
     // R5-2 [P1]: the owner-None reconcile must run BEFORE the destructive disk
-    // reload + compile gate in `resync_background_vue_file`. R3-5 moved the
+    // reload + compile gate in `resync_background_carrier_file`. R3-5 moved the
     // reconcile before the IDE-output requirement INSIDE
-    // `sync_compiled_vue_to_provider`, but the OUTER compile gate in
-    // `resync_background_vue_file` (`host.remove` then `ensure_loaded` then
+    // `sync_compiled_carrier_to_provider`, but the OUTER compile gate in
+    // `resync_background_carrier_file` (`host.remove` then `ensure_loaded` then
     // `ensure_compiled`, with an early `return` on failure) still short-circuits
-    // BEFORE `sync_compiled_vue_to_provider` is ever called. A COMPILE FAILURE
+    // BEFORE `sync_compiled_carrier_to_provider` is ever called. A COMPILE FAILURE
     // (here: `host.remove` drops the in-memory source and the test harness has no
     // disk file to reload, so the load/compile gate fails) therefore left a
     // previously-`Owned` OPEN `.vue` stranded on its stale owner.
     //
     // The fix detects owner-None via the published resolver (a pure resolver
     // query, no compile) and reconciles the binding before the destructive
-    // reload. Driven through `resync_background_vue_file` (the entry that owns
+    // reload. Driven through `resync_background_carrier_file` (the entry that owns
     // the compile gate) under an owner-None snapshot for an OPEN document.
     let provider = Arc::new(MockTypeProvider::new());
     let type_provider: Arc<dyn TypeProvider> = provider.clone();
@@ -10396,7 +10471,7 @@ defineProps<{ msg: string }>()
         },
     );
 
-    server.resync_background_vue_file(canonical_id).await;
+    server.resync_background_carrier_file(canonical_id).await;
 
     // Discriminator (RED pre-fix): the stale `Owned` binding survived because the
     // compile gate returned before the owner-None reconcile ran.
@@ -10657,12 +10732,13 @@ fn standalone_host_cannot_resolve_disk_files() {
     );
 }
 
-/// Watcher-glob inertness at the LSP routing layer: the watcher glob
-/// includes `.svelte` (a registered carrier extension since B8a), so a
-/// watched `.svelte` change routes through the carrier resync path. The
-/// IDE TSX projection for `.svelte` is a later vertical (B8c) — until it
-/// lands the compile gate produces no IDE virtual file, so no provider
-/// sync state is created and nothing syncs to the type provider.
+/// A watched `.svelte` change routes through the SAME carrier resync path as
+/// `.vue` (the watcher glob includes every registered carrier extension, and
+/// the lifecycle batch no longer Vue-gates the inner branch). The watched
+/// `.svelte` here is never opened/compiled, so its resync finds no IDE
+/// virtual-file output and creates no provider sync state and issues no
+/// provider sync calls — the carrier resync is a no-op for provider state on
+/// an uncompiled carrier.
 #[tokio::test]
 async fn watched_svelte_change_produces_no_provider_sync_state() {
     let mock = Arc::new(MockTypeProvider::new());
@@ -10701,15 +10777,16 @@ async fn watched_svelte_change_produces_no_provider_sync_state() {
     );
 }
 
-/// Watcher inertness on the owner-UNRESOLVED branch: a watched `.svelte`
-/// change whose canonical falls outside every project root must not
-/// enter the Vue resync path's unresolved-owner reconciliation — no
-/// queued snapshot provider sync, no provider sync state, no provider
-/// calls. DISCRIMINATING: when the routing layer admits every carrier
-/// row into the Vue resync, the unresolved-owner branch queues a
-/// snapshot provider sync for the (non-Vue) carrier file.
+/// Gap 7: the `did_change_watched_files` batch routes EVERY carrier
+/// (`.vue`, `.svelte`, …) through the shared resync/delete queues — the
+/// inner `language.is_vue()` gate is gone. A watched `.svelte` change whose
+/// canonical falls outside every project root (owner-unresolved) enters the
+/// carrier resync's unresolved-owner reconciliation EXACTLY like `.vue`,
+/// queuing a snapshot provider sync for later drain. DISCRIMINATING: under
+/// the pre-change Vue-only inner gate, the `.svelte` event was dropped at
+/// the routing layer and nothing was queued; now it flows through.
 #[tokio::test]
-async fn watched_svelte_outside_project_roots_queues_no_provider_sync() {
+async fn did_change_watched_files_resyncs_svelte() {
     let mock = Arc::new(MockTypeProvider::new());
     let service = make_hover_test_service(mock.clone());
     let server = service.inner();
@@ -10720,31 +10797,234 @@ async fn watched_svelte_outside_project_roots_queues_no_provider_sync() {
     crate::server::lifecycle::handle_did_change_watched_files(
         server,
         DidChangeWatchedFilesParams {
-            changes: vec![
-                FileEvent {
-                    uri: format!("file://{canonical}").parse().expect("valid uri"),
-                    typ: FileChangeType::CHANGED,
-                },
-                FileEvent {
-                    uri: format!("file://{canonical}").parse().expect("valid uri"),
-                    typ: FileChangeType::DELETED,
-                },
-            ],
+            changes: vec![FileEvent {
+                uri: format!("file://{canonical}").parse().expect("valid uri"),
+                typ: FileChangeType::CHANGED,
+            }],
         },
     )
     .await;
 
+    // The de-gated batch admits the `.svelte` carrier into the resync queue,
+    // which (owner-unresolved) queues a snapshot provider sync — parity with
+    // the `.vue` carrier (see
+    // `background_init_drains_pending_snapshot_provider_sync_for_open_vue_file`).
     assert!(
-        !server.pending_snapshot_provider_sync.contains(canonical),
-        "a carrier-less watched file must not queue a snapshot provider sync"
+        server.pending_snapshot_provider_sync.contains(canonical),
+        "a watched .svelte carrier must flow through the carrier resync queue \
+         (parity with .vue), queuing a snapshot provider sync"
     );
+    // The synchronous handler itself opens no provider sync state and issues no
+    // provider calls for the uncompiled carrier (the queued sync drains later
+    // and is a no-op while no IDE virtual file exists).
     assert!(
         server.provider_sync_state_for_source(canonical).is_none(),
-        "a carrier-less watched file must create no provider sync state"
+        "the synchronous watcher handler creates no provider sync state for an \
+         uncompiled .svelte carrier"
     );
     assert!(
         mock.calls().is_empty(),
-        "a carrier-less watched file must trigger no provider calls, got {:?}",
+        "the synchronous watcher handler issues no provider calls, got {:?}",
         mock.calls()
+    );
+
+    // Discrimination control: a plain `.ts` source (NOT a carrier) takes the
+    // TS/JS branch, never the carrier resync queue.
+    let ts_canonical = "/workspace/src/util.ts";
+    crate::server::lifecycle::handle_did_change_watched_files(
+        server,
+        DidChangeWatchedFilesParams {
+            changes: vec![FileEvent {
+                uri: format!("file://{ts_canonical}").parse().expect("valid uri"),
+                typ: FileChangeType::CHANGED,
+            }],
+        },
+    )
+    .await;
+    assert!(
+        !server.pending_snapshot_provider_sync.contains(ts_canonical),
+        "a non-carrier .ts file must not enter the carrier resync queue"
+    );
+}
+
+/// Open a `.svelte` carrier document into the server's host. The path's
+/// `.svelte` extension classifies it as the Svelte carrier row (the editor
+/// `language_id` is only authoritative for the Vue carrier).
+fn open_test_svelte(server: &VerterLanguageServer, path: &str, source: &str) -> Uri {
+    let uri: Uri = format!("file://{path}").parse().expect("valid test uri");
+    let _ = server.documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "svelte".to_string(),
+        version: 1,
+        text: source.to_string(),
+    });
+    uri
+}
+
+/// Gap 4: `$/verter/getProjectOverview` counts `.svelte` carriers in the
+/// component graph and the carrier-neutral `totalComponentFiles` stat, with
+/// the per-file kind discriminant `"component"`. DISCRIMINATING: under the
+/// pre-change `is_vue()` gates the Svelte file was neither counted nor kinded
+/// as a component.
+#[tokio::test]
+async fn project_overview_counts_svelte_in_component_graph() {
+    let mock = Arc::new(MockTypeProvider::new());
+    let service = make_hover_test_service(mock.clone());
+    let server = service.inner();
+    install_test_resolver(server);
+
+    let child = "<script>let x = 1;</script>";
+    let parent = r#"<script>import Child from './Child.svelte';</script>
+<Child />
+"#;
+    open_test_svelte(server, "/workspace/src/Child.svelte", child);
+    let parent_uri = open_test_svelte(server, "/workspace/src/App.svelte", parent);
+    // A plain .ts is NOT a component carrier.
+    let _ = server.documents.did_open(&TextDocumentItem {
+        uri: "file:///workspace/src/util.ts".parse().unwrap(),
+        language_id: "typescript".to_string(),
+        version: 1,
+        text: "export const x = 1;".to_string(),
+    });
+
+    let overview = server
+        .get_project_overview(serde_json::Value::Null)
+        .await
+        .expect("overview");
+
+    assert!(
+        overview.stats.total_component_files >= 2,
+        "both .svelte carriers must be counted, got {}",
+        overview.stats.total_component_files
+    );
+    // Every .svelte file kinds as a component; the .ts file does not.
+    let svelte_kinds: Vec<&str> = overview
+        .files
+        .iter()
+        .filter(|f| f.path.ends_with(".svelte"))
+        .map(|f| f.kind)
+        .collect();
+    assert!(
+        !svelte_kinds.is_empty() && svelte_kinds.iter().all(|k| *k == "component"),
+        "every .svelte file must kind as `component`, got {svelte_kinds:?}"
+    );
+    assert!(
+        overview
+            .files
+            .iter()
+            .any(|f| f.path.ends_with("util.ts") && f.kind == "ts"),
+        "the plain .ts file must kind as `ts`, not `component`"
+    );
+    // The parent's template-component edge for the Svelte child appears in the
+    // component graph.
+    let _ = parent_uri;
+    assert!(
+        overview
+            .component_graph
+            .iter()
+            .any(|e| e.file.ends_with("App.svelte")),
+        "the Svelte parent's component-usage edge must appear in the graph"
+    );
+}
+
+/// Gap 6: `$/onFileChanged` for a `.svelte` carrier routes through the
+/// carrier cleanup (delete) path. DISCRIMINATING: the pre-change
+/// `params.uri.ends_with(".vue")` gate dropped the `.svelte` delete event
+/// entirely, so a closed-file `.svelte` delete would NOT clean up host state;
+/// the de-gated handler enters the carrier branch and removes the carrier
+/// from the host. A plain `.ts` delete never enters the carrier branch (its
+/// host state is unaffected by this handler).
+#[tokio::test]
+async fn on_file_changed_resyncs_and_cleans_svelte() {
+    let mock = Arc::new(MockTypeProvider::new());
+    let service = make_hover_test_service(mock.clone());
+    let server = service.inner();
+    install_test_resolver(server);
+
+    // Open the carrier so the host holds its source (the watched delete must
+    // then clean it up through the carrier branch).
+    let canonical = "/workspace/src/Box.svelte";
+    open_test_svelte(server, canonical, "<script>let x = 1;</script>");
+    assert!(
+        server.documents.host.get_source(canonical).is_some(),
+        "precondition: the opened .svelte carrier is in the host"
+    );
+
+    // A control non-carrier `.ts` file is also present.
+    let ts_canonical = "/workspace/src/util.ts";
+    let _ = server.documents.did_open(&TextDocumentItem {
+        uri: format!("file://{ts_canonical}").parse().unwrap(),
+        language_id: "typescript".to_string(),
+        version: 1,
+        text: "export const x = 1;".to_string(),
+    });
+
+    // delete: the de-gated carrier branch removes the .svelte from the host.
+    server
+        .on_file_changed(OnFileChangedParams {
+            uri: format!("file://{canonical}"),
+            change_type: "delete".to_string(),
+        })
+        .await;
+    assert!(
+        server.documents.host.get_source(canonical).is_none(),
+        "a watched .svelte delete must enter the carrier branch and remove the \
+         carrier from the host (pre-change the .vue gate dropped this event)"
+    );
+
+    // The .ts delete does NOT take the carrier branch (the carrier branch is
+    // the only place this handler removes host source); its own ingress is
+    // unaffected here.
+    server
+        .on_file_changed(OnFileChangedParams {
+            uri: format!("file://{ts_canonical}"),
+            change_type: "delete".to_string(),
+        })
+        .await;
+    assert!(
+        server.documents.host.get_source(ts_canonical).is_some(),
+        "a non-carrier .ts file must not be removed by the carrier branch"
+    );
+}
+
+/// Gap 5: a default import of a `.svelte` child component resolves to the
+/// child carrier through the carrier-generic `is_default_export_component_carrier`
+/// gate — exactly like a `.vue` child. DISCRIMINATING: the pre-change
+/// `ends_with(".vue")` gate would skip the `.svelte` resolved target and the
+/// component would not resolve.
+#[tokio::test]
+async fn component_resolve_targets_svelte_carrier() {
+    let mock = Arc::new(MockTypeProvider::new());
+    let service = make_hover_test_service(mock.clone());
+    let server = service.inner();
+    install_test_resolver(server);
+
+    open_test_svelte(
+        server,
+        "/workspace/src/Child.svelte",
+        "<script>let x = 1;</script>",
+    );
+    let parent_uri = open_test_svelte(
+        server,
+        "/workspace/src/App.svelte",
+        "<script>import Child from './Child.svelte';</script>\n<Child />\n",
+    );
+    let parent_analysis = server
+        .documents
+        .get_analysis(&parent_uri)
+        .expect("parent analysis");
+
+    let resolved = server.resolve_component_document_for_import_binding(
+        &parent_uri,
+        &parent_analysis,
+        "./Child.svelte",
+        "Child",
+    );
+    let resolved =
+        resolved.expect("a default import of a .svelte child must resolve to the carrier");
+    assert!(
+        resolved.uri.as_str().ends_with("Child.svelte"),
+        "the resolved component-target must be the .svelte carrier, got {}",
+        resolved.uri.as_str()
     );
 }

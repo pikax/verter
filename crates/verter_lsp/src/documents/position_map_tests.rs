@@ -88,11 +88,11 @@ fn test_from_json_invalid_json() {
 fn test_from_json_empty_mappings() {
     let json = build_test_source_map("test.vue", "", &[]);
     let mapper = PositionMapper::from_json(&json).unwrap();
-    assert!(mapper.tsx_to_vue(ts(0, 0)).is_none());
+    assert!(mapper.tsx_to_carrier(ts(0, 0)).is_none());
 }
 
 // ========================================================================
-// tsx_to_vue (generated -> source)
+// tsx_to_carrier (generated -> source)
 // ========================================================================
 
 #[test]
@@ -105,10 +105,10 @@ fn test_tsx_to_vue_exact_token_match() {
     );
     let mapper = PositionMapper::from_json(&json).unwrap();
 
-    let m = mapper.tsx_to_vue(ts(0, 0)).unwrap();
+    let m = mapper.tsx_to_carrier(ts(0, 0)).unwrap();
     assert_eq!(m.pos, LspPosition::new(2, 5));
 
-    let m = mapper.tsx_to_vue(ts(1, 0)).unwrap();
+    let m = mapper.tsx_to_carrier(ts(1, 0)).unwrap();
     assert_eq!(m.pos, LspPosition::new(4, 0));
 }
 
@@ -127,9 +127,9 @@ fn test_tsx_to_vue_cross_token_no_extrapolation() {
 
     // Query 5 columns past the mapped token, on the unmapped token -> None.
     assert!(
-        mapper.tsx_to_vue(ts(0, 5)).is_none(),
+        mapper.tsx_to_carrier(ts(0, 5)).is_none(),
         "must not extrapolate across an unmapped-token boundary: {:?}",
-        mapper.tsx_to_vue(ts(0, 5))
+        mapper.tsx_to_carrier(ts(0, 5))
     );
 }
 
@@ -145,19 +145,19 @@ fn test_tsx_to_vue_within_run_character_precision() {
     let mapper = PositionMapper::from_json(&json).unwrap();
 
     // Column 3 of the 6-char run -> src col 10 + 3 = 13.
-    let m = mapper.tsx_to_vue(ts(0, 3)).unwrap();
+    let m = mapper.tsx_to_carrier(ts(0, 3)).unwrap();
     assert_eq!(m.pos, LspPosition::new(0, 13));
     // Run start maps exactly.
     assert_eq!(
-        mapper.tsx_to_vue(ts(0, 0)).unwrap().pos,
+        mapper.tsx_to_carrier(ts(0, 0)).unwrap().pos,
         LspPosition::new(0, 10)
     );
     // Last in-run column (5) maps; column 6 is the unmapped boundary -> None.
     assert_eq!(
-        mapper.tsx_to_vue(ts(0, 5)).unwrap().pos,
+        mapper.tsx_to_carrier(ts(0, 5)).unwrap().pos,
         LspPosition::new(0, 15)
     );
-    assert!(mapper.tsx_to_vue(ts(0, 6)).is_none());
+    assert!(mapper.tsx_to_carrier(ts(0, 6)).is_none());
 }
 
 /// Query at the `_ctx.` / `$setup.` prefix columns -> None.
@@ -173,8 +173,8 @@ fn test_tsx_to_vue_inside_prefix_returns_none() {
     let mapper = PositionMapper::from_json(&json).unwrap();
 
     // Inside "_ctx." prefix (gen cols 2-6) -> None.
-    assert!(mapper.tsx_to_vue(ts(0, 3)).is_none());
-    assert!(mapper.tsx_to_vue(ts(0, 5)).is_none());
+    assert!(mapper.tsx_to_carrier(ts(0, 3)).is_none());
+    assert!(mapper.tsx_to_carrier(ts(0, 5)).is_none());
 }
 
 /// Overwritten / synthetic punctuation interior -> None: a query inside an unmapped
@@ -192,21 +192,21 @@ fn test_tsx_to_vue_unmapped_synthetic_interior_returns_none() {
 
     // The mapped run gen[0,3) ends at the unmapped token; col 5 is in the synthetic
     // interior (covered by the unmapped token) -> None.
-    assert!(mapper.tsx_to_vue(ts(0, 5)).is_none());
+    assert!(mapper.tsx_to_carrier(ts(0, 5)).is_none());
     // The first mapped run is bounded to [0,3): col 2 still maps within it.
     assert_eq!(
-        mapper.tsx_to_vue(ts(0, 2)).unwrap().pos,
+        mapper.tsx_to_carrier(ts(0, 2)).unwrap().pos,
         LspPosition::new(0, 2)
     );
     // The second mapped run starts at gen 8.
     assert_eq!(
-        mapper.tsx_to_vue(ts(0, 8)).unwrap().pos,
+        mapper.tsx_to_carrier(ts(0, 8)).unwrap().pos,
         LspPosition::new(0, 20)
     );
 }
 
 // ========================================================================
-// vue_to_tsx (source -> generated)
+// carrier_to_tsx (source -> generated)
 // ========================================================================
 
 #[test]
@@ -216,11 +216,11 @@ fn test_vue_to_tsx_exact_token_match() {
     let mapper = PositionMapper::from_json(&json).unwrap();
 
     assert_eq!(
-        mapper.vue_to_tsx(vue(0, 0)).unwrap().pos,
+        mapper.carrier_to_tsx(vue(0, 0)).unwrap().pos,
         TsPosition::new(5, 0)
     );
     assert_eq!(
-        mapper.vue_to_tsx(vue(1, 2)).unwrap().pos,
+        mapper.carrier_to_tsx(vue(1, 2)).unwrap().pos,
         TsPosition::new(6, 4)
     );
 }
@@ -238,18 +238,18 @@ fn test_vue_to_tsx_unmapped_source_returns_none() {
 
     // src(5,0): a Vue line with no mapped token -> None (no snap to line 0).
     assert!(
-        mapper.vue_to_tsx(vue(5, 0)).is_none(),
+        mapper.carrier_to_tsx(vue(5, 0)).is_none(),
         "unmapped source line must not snap to a preceding token: {:?}",
-        mapper.vue_to_tsx(vue(5, 0))
+        mapper.carrier_to_tsx(vue(5, 0))
     );
     // src(0,0) still maps exactly.
     assert_eq!(
-        mapper.vue_to_tsx(vue(0, 0)).unwrap().pos,
+        mapper.carrier_to_tsx(vue(0, 0)).unwrap().pos,
         TsPosition::new(0, 0)
     );
 }
 
-/// Within-run character precision for `vue_to_tsx`: a target inside a single mapped
+/// Within-run character precision for `carrier_to_tsx`: a target inside a single mapped
 /// source run maps to the corresponding generated column.
 #[test]
 fn test_vue_to_tsx_within_run_character_precision() {
@@ -261,21 +261,21 @@ fn test_vue_to_tsx_within_run_character_precision() {
 
     // src col 13 -> gen col 10 + (13-7) = 16.
     assert_eq!(
-        mapper.vue_to_tsx(vue(0, 13)).unwrap().pos,
+        mapper.carrier_to_tsx(vue(0, 13)).unwrap().pos,
         TsPosition::new(0, 16)
     );
     // Run start: src 7 -> gen 10.
     assert_eq!(
-        mapper.vue_to_tsx(vue(0, 7)).unwrap().pos,
+        mapper.carrier_to_tsx(vue(0, 7)).unwrap().pos,
         TsPosition::new(0, 10)
     );
     // Last in-run col (19) -> gen 22; col 20 enters the next run (maps via that token).
     assert_eq!(
-        mapper.vue_to_tsx(vue(0, 19)).unwrap().pos,
+        mapper.carrier_to_tsx(vue(0, 19)).unwrap().pos,
         TsPosition::new(0, 22)
     );
     assert_eq!(
-        mapper.vue_to_tsx(vue(0, 20)).unwrap().pos,
+        mapper.carrier_to_tsx(vue(0, 20)).unwrap().pos,
         TsPosition::new(0, 40)
     );
 }
@@ -284,7 +284,7 @@ fn test_vue_to_tsx_within_run_character_precision() {
 fn test_vue_to_tsx_no_tokens() {
     let json = build_test_source_map("App.vue", "", &[]);
     let mapper = PositionMapper::from_json(&json).unwrap();
-    assert!(mapper.vue_to_tsx(vue(0, 0)).is_none());
+    assert!(mapper.carrier_to_tsx(vue(0, 0)).is_none());
 }
 
 #[test]
@@ -292,7 +292,7 @@ fn test_vue_to_tsx_position_before_all_tokens() {
     // All tokens start at src(2,0) or later; query before them -> None.
     let json = build_test_source_map("App.vue", "\n\nhello", &[(5, 0, 2, 0)]);
     let mapper = PositionMapper::from_json(&json).unwrap();
-    assert!(mapper.vue_to_tsx(vue(0, 0)).is_none());
+    assert!(mapper.carrier_to_tsx(vue(0, 0)).is_none());
 }
 
 #[test]
@@ -309,12 +309,12 @@ fn test_vue_to_tsx_multiline_source() {
 
     // src(5,6) -> gen(0,6): "x" in "const x = 1;" (col 6 < line length 12).
     assert_eq!(
-        mapper.vue_to_tsx(vue(5, 6)).unwrap().pos,
+        mapper.carrier_to_tsx(vue(5, 6)).unwrap().pos,
         TsPosition::new(0, 6)
     );
     // src(6,6) -> gen(1,6).
     assert_eq!(
-        mapper.vue_to_tsx(vue(6, 6)).unwrap().pos,
+        mapper.carrier_to_tsx(vue(6, 6)).unwrap().pos,
         TsPosition::new(1, 6)
     );
 }
@@ -325,7 +325,7 @@ fn test_vue_to_tsx_multiline_source() {
 // real content end of the last token on a line, returns None.
 // ========================================================================
 
-/// `vue_to_tsx`: a source query in a GAP between two mapped tokens — where the first
+/// `carrier_to_tsx`: a source query in a GAP between two mapped tokens — where the first
 /// token's TRUE content (bounded by the next dst token of ANY kind) ends before the
 /// gap — must be `None`, NOT snapped into the preceding run.
 ///
@@ -350,25 +350,25 @@ fn test_vue_to_tsx_gap_between_tokens_returns_none() {
     // src col 12 is in the gap between the first run [0,3) and the second run [20,..).
     // It belongs to NO mapped run -> None (no snap into the first run).
     assert!(
-        mapper.vue_to_tsx(vue(0, 12)).is_none(),
+        mapper.carrier_to_tsx(vue(0, 12)).is_none(),
         "source query in an inter-token gap must not snap to the preceding run: {:?}",
-        mapper.vue_to_tsx(vue(0, 12))
+        mapper.carrier_to_tsx(vue(0, 12))
     );
     // The first run's true interior (col 2, inside [0,3)) still maps.
     assert_eq!(
-        mapper.vue_to_tsx(vue(0, 2)).unwrap().pos,
+        mapper.carrier_to_tsx(vue(0, 2)).unwrap().pos,
         TsPosition::new(0, 2)
     );
     // The last in-run col of the first run (2) maps; col 3 is the boundary -> None.
-    assert!(mapper.vue_to_tsx(vue(0, 3)).is_none());
+    assert!(mapper.carrier_to_tsx(vue(0, 3)).is_none());
     // The second run still maps at its start.
     assert_eq!(
-        mapper.vue_to_tsx(vue(0, 20)).unwrap().pos,
+        mapper.carrier_to_tsx(vue(0, 20)).unwrap().pos,
         TsPosition::new(0, 20)
     );
 }
 
-/// `tsx_to_vue`: a query past the real content end of the LAST mapped token on a line
+/// `tsx_to_carrier`: a query past the real content end of the LAST mapped token on a line
 /// must be `None`. The run's extent is the SOURCE line's true content length, not EOL.
 ///
 /// Discriminating: a "last run extends to end-of-line" strategy would map a query at gen
@@ -383,24 +383,24 @@ fn test_tsx_to_vue_past_last_token_content_returns_none() {
 
     // Within the 2-char run: cols 0 and 1 map.
     assert_eq!(
-        mapper.tsx_to_vue(ts(0, 0)).unwrap().pos,
+        mapper.tsx_to_carrier(ts(0, 0)).unwrap().pos,
         LspPosition::new(0, 0)
     );
     assert_eq!(
-        mapper.tsx_to_vue(ts(0, 1)).unwrap().pos,
+        mapper.tsx_to_carrier(ts(0, 1)).unwrap().pos,
         LspPosition::new(0, 1)
     );
     // Col 2 is one-past the real content end -> None (not extended to EOL).
     assert!(
-        mapper.tsx_to_vue(ts(0, 2)).is_none(),
+        mapper.tsx_to_carrier(ts(0, 2)).is_none(),
         "query at the content end of the last run must be None: {:?}",
-        mapper.tsx_to_vue(ts(0, 2))
+        mapper.tsx_to_carrier(ts(0, 2))
     );
     // Col 5 (well past content) -> None.
-    assert!(mapper.tsx_to_vue(ts(0, 5)).is_none());
+    assert!(mapper.tsx_to_carrier(ts(0, 5)).is_none());
 }
 
-/// Symmetric: `vue_to_tsx` past the real content end of the last mapped token on a
+/// Symmetric: `carrier_to_tsx` past the real content end of the last mapped token on a
 /// source line must be `None` (true source-line-length bound, not EOL).
 #[test]
 fn test_vue_to_tsx_past_last_token_content_returns_none() {
@@ -409,13 +409,13 @@ fn test_vue_to_tsx_past_last_token_content_returns_none() {
     let mapper = PositionMapper::from_json(&json).unwrap();
 
     assert_eq!(
-        mapper.vue_to_tsx(vue(0, 1)).unwrap().pos,
+        mapper.carrier_to_tsx(vue(0, 1)).unwrap().pos,
         TsPosition::new(0, 6)
     );
     assert!(
-        mapper.vue_to_tsx(vue(0, 2)).is_none(),
+        mapper.carrier_to_tsx(vue(0, 2)).is_none(),
         "source query past content end must be None: {:?}",
-        mapper.vue_to_tsx(vue(0, 2))
+        mapper.carrier_to_tsx(vue(0, 2))
     );
 }
 
@@ -431,23 +431,26 @@ fn test_multiline_mapped_expression_in_bounds_still_maps() {
 
     // Cols 2/3/4 are all within the 12-char source lines.
     assert_eq!(
-        mapper.tsx_to_vue(ts(0, 2)).unwrap().pos,
+        mapper.tsx_to_carrier(ts(0, 2)).unwrap().pos,
         LspPosition::new(4, 2)
     );
     assert_eq!(
-        mapper.tsx_to_vue(ts(1, 3)).unwrap().pos,
+        mapper.tsx_to_carrier(ts(1, 3)).unwrap().pos,
         LspPosition::new(5, 3)
     );
     assert_eq!(
-        mapper.tsx_to_vue(ts(2, 4)).unwrap().pos,
+        mapper.tsx_to_carrier(ts(2, 4)).unwrap().pos,
         LspPosition::new(6, 4)
     );
 
     // Roundtrip on the middle line.
-    let tsx = mapper.vue_to_tsx(vue(5, 3)).unwrap().pos;
+    let tsx = mapper.carrier_to_tsx(vue(5, 3)).unwrap().pos;
     assert_eq!(tsx, TsPosition::new(1, 3));
     assert_eq!(
-        mapper.tsx_to_vue(ts(tsx.line, tsx.character)).unwrap().pos,
+        mapper
+            .tsx_to_carrier(ts(tsx.line, tsx.character))
+            .unwrap()
+            .pos,
         LspPosition::new(5, 3)
     );
 }
@@ -480,17 +483,17 @@ fn test_tsx_range_cross_run_with_synthetic_between_returns_none() {
     // Both endpoints individually map (start col 1 -> run A, end col 9 -> run B),
     // but the runs are separated by synthetic content at gen col 3 -> None.
     assert!(
-        mapper.tsx_to_vue(ts(0, 1)).is_some(),
+        mapper.tsx_to_carrier(ts(0, 1)).is_some(),
         "precondition: start endpoint maps"
     );
     assert!(
-        mapper.tsx_to_vue(ts(0, 9)).is_some(),
+        mapper.tsx_to_carrier(ts(0, 9)).is_some(),
         "precondition: end endpoint maps"
     );
     assert!(
-        mapper.tsx_range_to_vue(ts(0, 1), ts(0, 9)).is_none(),
+        mapper.tsx_range_to_carrier(ts(0, 1), ts(0, 9)).is_none(),
         "a range straddling synthetic content between two runs must be dropped: {:?}",
-        mapper.tsx_range_to_vue(ts(0, 1), ts(0, 9))
+        mapper.tsx_range_to_carrier(ts(0, 1), ts(0, 9))
     );
 }
 
@@ -503,13 +506,13 @@ fn test_tsx_range_within_single_run_maps() {
     let mapper = PositionMapper::from_json(&json).unwrap();
 
     // Range [1,4) inside the run -> Vue [11,14).
-    let (start, end) = mapper.tsx_range_to_vue(ts(0, 1), ts(0, 4)).unwrap();
+    let (start, end) = mapper.tsx_range_to_carrier(ts(0, 1), ts(0, 4)).unwrap();
     assert_eq!(start, LspPosition::new(0, 11));
     assert_eq!(end, LspPosition::new(0, 14));
 
     // Half-open end exactly at the run's exclusive end (gen col 6 == run end) maps to
     // the run's mapped source end (src col 16).
-    let (start, end) = mapper.tsx_range_to_vue(ts(0, 0), ts(0, 6)).unwrap();
+    let (start, end) = mapper.tsx_range_to_carrier(ts(0, 0), ts(0, 6)).unwrap();
     assert_eq!(start, LspPosition::new(0, 10));
     assert_eq!(end, LspPosition::new(0, 16));
 }
@@ -531,7 +534,7 @@ fn test_tsx_range_contiguous_runs_maps() {
     let mapper = PositionMapper::from_json(&json).unwrap();
 
     // Range [1,5): start in run A, end in run B; runs are contiguous -> maps.
-    let (start, end) = mapper.tsx_range_to_vue(ts(0, 1), ts(0, 5)).unwrap();
+    let (start, end) = mapper.tsx_range_to_carrier(ts(0, 1), ts(0, 5)).unwrap();
     assert_eq!(start, LspPosition::new(0, 1));
     assert_eq!(end, LspPosition::new(0, 5));
 }
@@ -560,18 +563,18 @@ fn test_tsx_range_dst_adjacent_src_discontiguous_returns_none() {
 
     // Each endpoint maps individually (start col 1 -> run A, end col 4 -> run B).
     assert!(
-        mapper.tsx_to_vue(ts(0, 1)).is_some(),
+        mapper.tsx_to_carrier(ts(0, 1)).is_some(),
         "precondition: start endpoint maps in run A"
     );
     assert!(
-        mapper.tsx_to_vue(ts(0, 4)).is_some(),
+        mapper.tsx_to_carrier(ts(0, 4)).is_some(),
         "precondition: end endpoint maps in run B"
     );
     // The runs are dst-adjacent but src-discontiguous -> the range must be dropped.
     assert!(
-        mapper.tsx_range_to_vue(ts(0, 1), ts(0, 4)).is_none(),
+        mapper.tsx_range_to_carrier(ts(0, 1), ts(0, 4)).is_none(),
         "dst-adjacent + src-discontiguous runs must not compose a range: {:?}",
-        mapper.tsx_range_to_vue(ts(0, 1), ts(0, 4))
+        mapper.tsx_range_to_carrier(ts(0, 1), ts(0, 4))
     );
 }
 
@@ -592,7 +595,7 @@ fn test_tsx_range_multiline_wrap_runs_compose() {
     // Range from inside run A on line 0 to inside run B on line 1: the line-wrap
     // transition is contiguous in both spaces -> the range composes.
     let (start, end) = mapper
-        .tsx_range_to_vue(ts(0, 2), ts(1, 3))
+        .tsx_range_to_carrier(ts(0, 2), ts(1, 3))
         .expect("a genuine multiline-wrap expression range must compose");
     assert_eq!(start, LspPosition::new(0, 2));
     assert_eq!(end, LspPosition::new(1, 3));
@@ -664,23 +667,23 @@ fn test_no_sources_content_interior_run_bounded_by_next_token_not_permissive() {
 
     // First run interior: col 2 maps within [0,3).
     assert_eq!(
-        mapper.tsx_to_vue(ts(0, 2)).unwrap().pos,
+        mapper.tsx_to_carrier(ts(0, 2)).unwrap().pos,
         LspPosition::new(0, 2)
     );
     // Col 5 is NOT in the first run [0,3); it is the second run [3,6)'s interior -> src 5.
     // A permissive first run (extend-to-EOL) would have instead mapped col 5 off the FIRST
     // run; the invariant bound forbids that. Either way col 5 must map via the SECOND run.
     assert_eq!(
-        mapper.tsx_to_vue(ts(0, 5)).unwrap().pos,
+        mapper.tsx_to_carrier(ts(0, 5)).unwrap().pos,
         LspPosition::new(0, 5)
     );
     // The last-on-line token (gen 6) has no extent signal without content -> dropped, so
     // col 6 maps to nothing (non-permissive: no extend-to-EOL).
     assert!(
-        mapper.tsx_to_vue(ts(0, 6)).is_none(),
+        mapper.tsx_to_carrier(ts(0, 6)).is_none(),
         "a last-on-line no-content run has no extent signal and must be dropped, not \
          extended: {:?}",
-        mapper.tsx_to_vue(ts(0, 6))
+        mapper.tsx_to_carrier(ts(0, 6))
     );
 }
 
@@ -704,9 +707,9 @@ fn test_no_sources_content_interior_matches_with_content_geometry() {
     // Interior columns map identically (Some/None and value) in both maps.
     for col in 0..6u32 {
         assert_eq!(
-            with.tsx_to_vue(ts(0, col)).map(|m| m.pos),
-            without.tsx_to_vue(ts(0, col)).map(|m| m.pos),
-            "interior tsx_to_vue diverges with vs without sourcesContent at col {col}"
+            with.tsx_to_carrier(ts(0, col)).map(|m| m.pos),
+            without.tsx_to_carrier(ts(0, col)).map(|m| m.pos),
+            "interior tsx_to_carrier diverges with vs without sourcesContent at col {col}"
         );
     }
 }
@@ -725,12 +728,18 @@ fn test_roundtrip_exact_token_positions() {
     );
     let mapper = PositionMapper::from_json(&json).unwrap();
 
-    let tsx = mapper.vue_to_tsx(vue(0, 0)).unwrap().pos;
-    let back = mapper.tsx_to_vue(ts(tsx.line, tsx.character)).unwrap().pos;
+    let tsx = mapper.carrier_to_tsx(vue(0, 0)).unwrap().pos;
+    let back = mapper
+        .tsx_to_carrier(ts(tsx.line, tsx.character))
+        .unwrap()
+        .pos;
     assert_eq!(back, LspPosition::new(0, 0));
 
-    let tsx = mapper.vue_to_tsx(vue(1, 0)).unwrap().pos;
-    let back = mapper.tsx_to_vue(ts(tsx.line, tsx.character)).unwrap().pos;
+    let tsx = mapper.carrier_to_tsx(vue(1, 0)).unwrap().pos;
+    let back = mapper
+        .tsx_to_carrier(ts(tsx.line, tsx.character))
+        .unwrap()
+        .pos;
     assert_eq!(back, LspPosition::new(1, 0));
 }
 
@@ -749,10 +758,13 @@ fn test_roundtrip_exact_mapped_text_identity() {
 
     for i in 0..5u32 {
         let vue_col = 14 + i;
-        let tsx = mapper.vue_to_tsx(vue(3, vue_col)).unwrap().pos;
+        let tsx = mapper.carrier_to_tsx(vue(3, vue_col)).unwrap().pos;
         assert_eq!(tsx, TsPosition::new(0, 7 + i), "forward char {i}");
 
-        let back = mapper.tsx_to_vue(ts(tsx.line, tsx.character)).unwrap().pos;
+        let back = mapper
+            .tsx_to_carrier(ts(tsx.line, tsx.character))
+            .unwrap()
+            .pos;
         assert_eq!(back, LspPosition::new(3, vue_col), "roundtrip char {i}");
     }
 }
@@ -775,15 +787,15 @@ fn test_half_open_one_past_end() {
     // run, so it resolves into the SECOND run (src 20), not an extrapolation of the
     // first.
     assert_eq!(
-        mapper.tsx_to_vue(ts(0, 3)).unwrap().pos,
+        mapper.tsx_to_carrier(ts(0, 3)).unwrap().pos,
         LspPosition::new(0, 20)
     );
     // One past the end of the (bounded) second run: gen col 6 is the unmapped
     // boundary -> None.
-    assert!(mapper.tsx_to_vue(ts(0, 6)).is_none());
+    assert!(mapper.tsx_to_carrier(ts(0, 6)).is_none());
     // Interior of the second run still maps.
     assert_eq!(
-        mapper.tsx_to_vue(ts(0, 5)).unwrap().pos,
+        mapper.tsx_to_carrier(ts(0, 5)).unwrap().pos,
         LspPosition::new(0, 22)
     );
 }
@@ -807,17 +819,17 @@ fn test_prepended_text_forward_mapping_start_middle_end() {
 
     // start of "count": Vue(1,3) -> TSX(0,7)
     assert_eq!(
-        mapper.vue_to_tsx(vue(1, 3)).unwrap().pos,
+        mapper.carrier_to_tsx(vue(1, 3)).unwrap().pos,
         TsPosition::new(0, 7)
     );
     // middle ('u', col 5) -> TSX col 9
     assert_eq!(
-        mapper.vue_to_tsx(vue(1, 5)).unwrap().pos,
+        mapper.carrier_to_tsx(vue(1, 5)).unwrap().pos,
         TsPosition::new(0, 9)
     );
     // end ('t', col 7) -> TSX col 11
     assert_eq!(
-        mapper.vue_to_tsx(vue(1, 7)).unwrap().pos,
+        mapper.carrier_to_tsx(vue(1, 7)).unwrap().pos,
         TsPosition::new(0, 11)
     );
 }
@@ -834,17 +846,17 @@ fn test_prepended_text_reverse_mapping_start_middle_end() {
 
     // TSX col 7 ('c') -> Vue(1,3)
     assert_eq!(
-        mapper.tsx_to_vue(ts(0, 7)).unwrap().pos,
+        mapper.tsx_to_carrier(ts(0, 7)).unwrap().pos,
         LspPosition::new(1, 3)
     );
     // TSX col 9 ('u') -> Vue(1,5)
     assert_eq!(
-        mapper.tsx_to_vue(ts(0, 9)).unwrap().pos,
+        mapper.tsx_to_carrier(ts(0, 9)).unwrap().pos,
         LspPosition::new(1, 5)
     );
     // TSX col 11 ('t') -> Vue(1,7)
     assert_eq!(
-        mapper.tsx_to_vue(ts(0, 11)).unwrap().pos,
+        mapper.tsx_to_carrier(ts(0, 11)).unwrap().pos,
         LspPosition::new(1, 7)
     );
 }
@@ -869,19 +881,19 @@ fn test_prepended_text_multiple_bindings_on_same_line() {
     let mapper = PositionMapper::from_json(&json).unwrap();
 
     assert_eq!(
-        mapper.vue_to_tsx(vue(1, 9)).unwrap().pos,
+        mapper.carrier_to_tsx(vue(1, 9)).unwrap().pos,
         TsPosition::new(0, 7)
     );
     assert_eq!(
-        mapper.vue_to_tsx(vue(1, 18)).unwrap().pos,
+        mapper.carrier_to_tsx(vue(1, 18)).unwrap().pos,
         TsPosition::new(0, 16)
     );
     assert_eq!(
-        mapper.tsx_to_vue(ts(0, 7)).unwrap().pos,
+        mapper.tsx_to_carrier(ts(0, 7)).unwrap().pos,
         LspPosition::new(1, 9)
     );
     assert_eq!(
-        mapper.tsx_to_vue(ts(0, 16)).unwrap().pos,
+        mapper.tsx_to_carrier(ts(0, 16)).unwrap().pos,
         LspPosition::new(1, 18)
     );
 }
@@ -904,14 +916,14 @@ fn test_crlf_mapping() {
 
     // Forward + within-run + roundtrip across the CRLF-terminated line.
     assert_eq!(
-        mapper.vue_to_tsx(vue(1, 6)).unwrap().pos,
+        mapper.carrier_to_tsx(vue(1, 6)).unwrap().pos,
         TsPosition::new(0, 6)
     );
     assert_eq!(
-        mapper.vue_to_tsx(vue(1, 8)).unwrap().pos,
+        mapper.carrier_to_tsx(vue(1, 8)).unwrap().pos,
         TsPosition::new(0, 8)
     );
-    let back = mapper.tsx_to_vue(ts(0, 8)).unwrap().pos;
+    let back = mapper.tsx_to_carrier(ts(0, 8)).unwrap().pos;
     assert_eq!(back, LspPosition::new(1, 8));
 }
 
@@ -928,15 +940,15 @@ fn test_tabs_mapping() {
     let mapper = PositionMapper::from_json(&json).unwrap();
 
     assert_eq!(
-        mapper.vue_to_tsx(vue(0, 8)).unwrap().pos,
+        mapper.carrier_to_tsx(vue(0, 8)).unwrap().pos,
         TsPosition::new(0, 2)
     );
     // within-run interior after the tabs
     assert_eq!(
-        mapper.vue_to_tsx(vue(0, 10)).unwrap().pos,
+        mapper.carrier_to_tsx(vue(0, 10)).unwrap().pos,
         TsPosition::new(0, 4)
     );
-    let back = mapper.tsx_to_vue(ts(0, 4)).unwrap().pos;
+    let back = mapper.tsx_to_carrier(ts(0, 4)).unwrap().pos;
     assert_eq!(back, LspPosition::new(0, 10));
 }
 
@@ -963,15 +975,15 @@ fn test_utf16_emoji_before_binding_forward() {
     let mapper = PositionMapper::from_json(&json).unwrap();
 
     assert_eq!(
-        mapper.vue_to_tsx(vue(0, 5)).unwrap().pos,
+        mapper.carrier_to_tsx(vue(0, 5)).unwrap().pos,
         TsPosition::new(0, 7)
     );
     assert_eq!(
-        mapper.vue_to_tsx(vue(0, 6)).unwrap().pos,
+        mapper.carrier_to_tsx(vue(0, 6)).unwrap().pos,
         TsPosition::new(0, 8)
     );
     assert_eq!(
-        mapper.vue_to_tsx(vue(0, 7)).unwrap().pos,
+        mapper.carrier_to_tsx(vue(0, 7)).unwrap().pos,
         TsPosition::new(0, 9)
     );
 }
@@ -982,15 +994,15 @@ fn test_utf16_emoji_before_binding_reverse() {
     let mapper = PositionMapper::from_json(&json).unwrap();
 
     assert_eq!(
-        mapper.tsx_to_vue(ts(0, 7)).unwrap().pos,
+        mapper.tsx_to_carrier(ts(0, 7)).unwrap().pos,
         LspPosition::new(0, 5)
     );
     assert_eq!(
-        mapper.tsx_to_vue(ts(0, 8)).unwrap().pos,
+        mapper.tsx_to_carrier(ts(0, 8)).unwrap().pos,
         LspPosition::new(0, 6)
     );
     assert_eq!(
-        mapper.tsx_to_vue(ts(0, 9)).unwrap().pos,
+        mapper.tsx_to_carrier(ts(0, 9)).unwrap().pos,
         LspPosition::new(0, 7)
     );
 }
@@ -1008,9 +1020,12 @@ fn test_utf16_non_ascii_identifier_roundtrip() {
 
     for i in 0..4u32 {
         let vue_col = 3 + i;
-        let tsx = mapper.vue_to_tsx(vue(0, vue_col)).unwrap().pos;
+        let tsx = mapper.carrier_to_tsx(vue(0, vue_col)).unwrap().pos;
         assert_eq!(tsx.character, 5 + i, "café[{i}] forward");
-        let back = mapper.tsx_to_vue(ts(tsx.line, tsx.character)).unwrap().pos;
+        let back = mapper
+            .tsx_to_carrier(ts(tsx.line, tsx.character))
+            .unwrap()
+            .pos;
         assert_eq!(back.character, vue_col, "café[{i}] roundtrip");
     }
 }
@@ -1027,17 +1042,17 @@ fn test_utf16_surrogate_pair_in_identifier() {
     let mapper = PositionMapper::from_json(&json).unwrap();
 
     // 'a' col 3 -> gen 5
-    assert_eq!(mapper.vue_to_tsx(vue(0, 3)).unwrap().pos.character, 5);
-    assert_eq!(mapper.tsx_to_vue(ts(0, 5)).unwrap().pos.character, 3);
+    assert_eq!(mapper.carrier_to_tsx(vue(0, 3)).unwrap().pos.character, 5);
+    assert_eq!(mapper.tsx_to_carrier(ts(0, 5)).unwrap().pos.character, 3);
     // 😀 first unit col 4 -> gen 6
-    assert_eq!(mapper.vue_to_tsx(vue(0, 4)).unwrap().pos.character, 6);
-    assert_eq!(mapper.tsx_to_vue(ts(0, 6)).unwrap().pos.character, 4);
+    assert_eq!(mapper.carrier_to_tsx(vue(0, 4)).unwrap().pos.character, 6);
+    assert_eq!(mapper.tsx_to_carrier(ts(0, 6)).unwrap().pos.character, 4);
     // 😀 second unit col 5 -> gen 7
-    assert_eq!(mapper.vue_to_tsx(vue(0, 5)).unwrap().pos.character, 7);
-    assert_eq!(mapper.tsx_to_vue(ts(0, 7)).unwrap().pos.character, 5);
+    assert_eq!(mapper.carrier_to_tsx(vue(0, 5)).unwrap().pos.character, 7);
+    assert_eq!(mapper.tsx_to_carrier(ts(0, 7)).unwrap().pos.character, 5);
     // 'b' col 6 -> gen 8
-    assert_eq!(mapper.vue_to_tsx(vue(0, 6)).unwrap().pos.character, 8);
-    assert_eq!(mapper.tsx_to_vue(ts(0, 8)).unwrap().pos.character, 6);
+    assert_eq!(mapper.carrier_to_tsx(vue(0, 6)).unwrap().pos.character, 8);
+    assert_eq!(mapper.tsx_to_carrier(ts(0, 8)).unwrap().pos.character, 6);
 }
 
 // ========================================================================
@@ -1058,7 +1073,7 @@ fn test_utf16_surrogate_pair_in_identifier() {
 /// unmapped tail produces no run, so `runs.last()` is still `prev` when `cur` is processed —
 /// and a range from `prev` into `cur` composes a Vue range spanning the synthetic tail. The
 /// strict rule (prev must be the LAST token of any kind on its generated line AND reach its
-/// source line's true end) rejects the join -> `tsx_range_to_vue` returns `None`.
+/// source line's true end) rejects the join -> `tsx_range_to_carrier` returns `None`.
 #[test]
 fn test_tsx_range_line_wrap_over_synthetic_tail_returns_none() {
     // Generated line 0: mapped run [0,3) then a SYNTHETIC (unmapped) token at gen col 3
@@ -1075,19 +1090,19 @@ fn test_tsx_range_line_wrap_over_synthetic_tail_returns_none() {
 
     // Both endpoints individually map (start in the line-0 run, end in the line-1 run).
     assert!(
-        mapper.tsx_to_vue(ts(0, 1)).is_some(),
+        mapper.tsx_to_carrier(ts(0, 1)).is_some(),
         "precondition: start endpoint maps in the line-0 run"
     );
     assert!(
-        mapper.tsx_to_vue(ts(1, 2)).is_some(),
+        mapper.tsx_to_carrier(ts(1, 2)).is_some(),
         "precondition: end endpoint maps in the line-1 run"
     );
     // The line-0 run is NOT the last token on its generated line (a synthetic tail follows
     // at gen col 3), so it must not line-wrap-join the line-1 run -> the range is dropped.
     assert!(
-        mapper.tsx_range_to_vue(ts(0, 1), ts(1, 2)).is_none(),
+        mapper.tsx_range_to_carrier(ts(0, 1), ts(1, 2)).is_none(),
         "a line-wrap join across a synthetic tail must not compose a range: {:?}",
-        mapper.tsx_range_to_vue(ts(0, 1), ts(1, 2))
+        mapper.tsx_range_to_carrier(ts(0, 1), ts(1, 2))
     );
 }
 
@@ -1101,7 +1116,7 @@ fn test_tsx_range_line_wrap_over_synthetic_tail_returns_none() {
 /// SECOND run's exclusive generated end. It must map to the correct Vue range.
 ///
 /// Discriminating: a half-open special case that only accepts `end == start_run.dst_end`
-/// (here 3) falls through to `tsx_to_vue(end=6)`, which is `None` (6 is one-past-end of the
+/// (here 3) falls through to `tsx_to_carrier(end=6)`, which is `None` (6 is one-past-end of the
 /// second run), so the whole multi-token range is wrongly dropped. Accepting `end` at the
 /// exclusive end of ANY run in the start's component composes the range.
 #[test]
@@ -1118,15 +1133,15 @@ fn test_tsx_range_end_at_later_run_exclusive_end_maps() {
     );
     let mapper = PositionMapper::from_json(&json).unwrap();
 
-    // Precondition: end=6 is one-past-end of the second run, so tsx_to_vue(6) is None — the
+    // Precondition: end=6 is one-past-end of the second run, so tsx_to_carrier(6) is None — the
     // range must NOT rely on mapping the exclusive-end position directly.
     assert!(
-        mapper.tsx_to_vue(ts(0, 6)).is_none(),
+        mapper.tsx_to_carrier(ts(0, 6)).is_none(),
         "precondition: the exclusive end column itself does not map (one-past run B)"
     );
     // Range [1,6): start inside run A, half-open end at run B's exclusive end -> Vue [1,6).
     let (start, end) = mapper
-        .tsx_range_to_vue(ts(0, 1), ts(0, 6))
+        .tsx_range_to_carrier(ts(0, 1), ts(0, 6))
         .expect("a range ending at a later compatible run's exclusive end must compose");
     assert_eq!(start, LspPosition::new(0, 1));
     assert_eq!(end, LspPosition::new(0, 6));
@@ -1180,18 +1195,18 @@ fn test_tsx_range_cross_source_same_geometry_returns_none() {
 
     // Both endpoints individually map.
     assert!(
-        mapper.tsx_to_vue(ts(0, 1)).is_some(),
+        mapper.tsx_to_carrier(ts(0, 1)).is_some(),
         "precondition: start endpoint maps (source 0)"
     );
     assert!(
-        mapper.tsx_to_vue(ts(0, 4)).is_some(),
+        mapper.tsx_to_carrier(ts(0, 4)).is_some(),
         "precondition: end endpoint maps (source 1)"
     );
     // Geometry matches but the sources differ -> the runs must NOT compose a range.
     assert!(
-        mapper.tsx_range_to_vue(ts(0, 1), ts(0, 4)).is_none(),
+        mapper.tsx_range_to_carrier(ts(0, 1), ts(0, 4)).is_none(),
         "runs from different sources must not compose a range despite matching geometry: {:?}",
-        mapper.tsx_range_to_vue(ts(0, 1), ts(0, 4))
+        mapper.tsx_range_to_carrier(ts(0, 1), ts(0, 4))
     );
 }
 
@@ -1237,23 +1252,23 @@ fn test_no_sources_content_extent_proof_is_per_run() {
     // First run: its boundary witness disagrees (src 10 != lockstep 3) -> no proven extent ->
     // dropped, so its would-be interior (col 1) maps to nothing.
     assert!(
-        mapper.tsx_to_vue(ts(0, 1)).is_none(),
+        mapper.tsx_to_carrier(ts(0, 1)).is_none(),
         "a content-less run whose boundary witness is non-lockstep must be dropped: {:?}",
-        mapper.tsx_to_vue(ts(0, 1))
+        mapper.tsx_to_carrier(ts(0, 1))
     );
     // Second run: its boundary witness (gen 6 -> src 13) advances in EXACT lockstep with the
     // generated delta (3), positively proving the run [3,6) -> [10,13). Its interior (col 4)
     // maps to src col 10 + (4 - 3) = 11. (An all-or-nothing global flag would wrongly drop it.)
     assert_eq!(
-        mapper.tsx_to_vue(ts(0, 4)).unwrap().pos,
+        mapper.tsx_to_carrier(ts(0, 4)).unwrap().pos,
         LspPosition::new(0, 11),
         "a content-less run WITH a matching lockstep witness must still map (per-run proof)"
     );
     // The last-on-line token (gen 6) has no following extent signal -> dropped.
     assert!(
-        mapper.tsx_to_vue(ts(0, 6)).is_none(),
+        mapper.tsx_to_carrier(ts(0, 6)).is_none(),
         "a last-on-line content-less run has no extent signal and must be dropped: {:?}",
-        mapper.tsx_to_vue(ts(0, 6))
+        mapper.tsx_to_carrier(ts(0, 6))
     );
 }
 
@@ -1269,7 +1284,7 @@ fn test_no_sources_content_position_preserving_still_maps() {
     let mapper = PositionMapper::from_json(&json).unwrap();
     // Interior run [0,3) still maps under the (valid) invariant inference.
     assert_eq!(
-        mapper.tsx_to_vue(ts(0, 1)).unwrap().pos,
+        mapper.tsx_to_carrier(ts(0, 1)).unwrap().pos,
         LspPosition::new(0, 1)
     );
 }
@@ -1322,16 +1337,16 @@ fn test_no_sources_content_run_bounded_by_unmapped_is_dropped() {
     // "position-preserving" global flag would instead have fabricated the run [0,5) and mapped
     // col 4 to Some(src 0,4); the per-run witness check forbids that.
     assert!(
-        mapper.tsx_to_vue(ts(0, 4)).is_none(),
+        mapper.tsx_to_carrier(ts(0, 4)).is_none(),
         "a content-less run bounded by an unmapped token has no lockstep witness and must be \
          dropped, not fabricated: {:?}",
-        mapper.tsx_to_vue(ts(0, 4))
+        mapper.tsx_to_carrier(ts(0, 4))
     );
     // Even the run's own start column maps to nothing (the whole run is dropped).
     assert!(
-        mapper.tsx_to_vue(ts(0, 0)).is_none(),
+        mapper.tsx_to_carrier(ts(0, 0)).is_none(),
         "a dropped content-less run covers no columns at all: {:?}",
-        mapper.tsx_to_vue(ts(0, 0))
+        mapper.tsx_to_carrier(ts(0, 0))
     );
 }
 
@@ -1372,10 +1387,10 @@ fn test_no_sources_content_backward_source_movement_is_rejected() {
     // on a DIFFERENT source line, and one moves backward). A flag fooled by `saturating_sub`
     // would have fabricated the run and mapped col 1 to Some; the exact per-run check drops it.
     assert!(
-        mapper.tsx_to_vue(ts(0, 1)).is_none(),
+        mapper.tsx_to_carrier(ts(0, 1)).is_none(),
         "a backward / cross-src-line co-located witness must not be treated as \
          position-preserving — the content-less run must be dropped: {:?}",
-        mapper.tsx_to_vue(ts(0, 1))
+        mapper.tsx_to_carrier(ts(0, 1))
     );
 }
 
@@ -1415,18 +1430,18 @@ fn test_tsx_range_line_wrap_blocked_by_colocated_successor_returns_none() {
 
     // Both endpoints individually map (start inside the line-0 run, end inside the line-1 run).
     assert!(
-        mapper.tsx_to_vue(ts(0, 4)).is_some(),
+        mapper.tsx_to_carrier(ts(0, 4)).is_some(),
         "precondition: start endpoint maps in the line-0 run"
     );
     assert!(
-        mapper.tsx_to_vue(ts(1, 1)).is_some(),
+        mapper.tsx_to_carrier(ts(1, 1)).is_some(),
         "precondition: end endpoint maps in the line-1 run"
     );
     // The line-0 run has a co-located successor at gen col 3, so it is NOT last-on-its-line and
     // must not line-wrap-join the line-1 run -> the range across them is dropped.
     assert!(
-        mapper.tsx_range_to_vue(ts(0, 4), ts(1, 1)).is_none(),
+        mapper.tsx_range_to_carrier(ts(0, 4), ts(1, 1)).is_none(),
         "a line-wrap join across a co-located same-column successor must not compose a range: {:?}",
-        mapper.tsx_range_to_vue(ts(0, 4), ts(1, 1))
+        mapper.tsx_range_to_carrier(ts(0, 4), ts(1, 1))
     );
 }
