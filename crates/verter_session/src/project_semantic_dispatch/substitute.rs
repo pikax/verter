@@ -882,11 +882,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// `substitute_with_change_tracking` that descends into child
     /// `SemanticNodeId`s descends here too — including the three
     /// unresolved carriers (`BareRef` / `TypeOf` / `ImportType`), whose
-    /// `type_args` slices ARE descended (the mirror contract; see the
-    /// carrier arm below). Arms that return `(node, false)` without
-    /// recursion (leaf TypeParam / Primitive / Literal / Opaque /
-    /// DeclRef / Never / Unknown / Any / VueMacroElements) terminate here
-    /// too. Cyclic graphs are guarded by a `visited` set.
+    /// `type_args` slices ARE descended. As a read-only reachability SCAN
+    /// it reaches them through the shared
+    /// [`SemanticNodeData::carrier_type_args`] accessor in the catch-all
+    /// arm (so a future carrier added to that exhaustive accessor is
+    /// descended automatically, never silently dropped) — the mirror
+    /// contract. Arms that return `(node, false)` without recursion (leaf
+    /// TypeParam / Primitive / Literal / Opaque / DeclRef / Never /
+    /// Unknown / Any / VueMacroElements) terminate here too — the accessor
+    /// returns an empty slice for them. Cyclic graphs are guarded by a
+    /// `visited` set.
     ///
     /// **`Mapped` shadowing** is honoured: when a nested mapped binder
     /// shadows the same `target` (`nested_mapper.parameter_node ==
@@ -1066,23 +1071,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         }
                     }
                 }
-                // Unresolved carriers descend into their structural
-                // `type_args` exactly as substitute's BareRef / TypeOf /
-                // ImportType arms do — the mirror contract. All three variants
-                // carry an `Arc<[SemanticNodeId]>` arg slice.
-                SemanticNodeData::BareRef { type_args, .. }
-                | SemanticNodeData::TypeOf { type_args, .. }
-                | SemanticNodeData::ImportType { type_args, .. } => {
-                    for arg in type_args.iter() {
+                // Unresolved carriers (`BareRef` / `TypeOf` / `ImportType`)
+                // descend into their structural `type_args` exactly as
+                // substitute's carrier arms do — the mirror contract. As a
+                // SCAN this routes through the shared `carrier_type_args`
+                // accessor in the catch-all below rather than hand-binding
+                // each carrier, so a future carrier added to the exhaustive
+                // accessor is descended here automatically and can never be
+                // silently dropped by the catch-all.
+                //
+                // The catch-all also covers substitute's `_ => (node, false)`
+                // leaf variants (Primitive, Literal, Opaque, DeclRef, Never,
+                // Unknown, Any, VueMacroElements): none have child
+                // semantic-node references, and the accessor returns an empty
+                // slice for them, so the walker pushes nothing.
+                other => {
+                    for arg in other.carrier_type_args() {
                         stack.push(*arg);
                     }
                 }
-                // Substitute's catch-all `_ => (node, false)` covers
-                // Primitive, Literal, Opaque, DeclRef, Never, Unknown, Any,
-                // VueMacroElements. None of these have child semantic-node
-                // references that substitute would recurse into, so neither
-                // does the walker.
-                _ => {}
             }
         }
         false

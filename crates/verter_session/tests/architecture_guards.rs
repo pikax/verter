@@ -20698,10 +20698,13 @@ fn structural_lowerer_dormancy_detector_discriminates() {
 /// - `display_type_node` — the display / render boundary (`display.rs`).
 /// - `substitute_with_change_tracking_inner` — the rewrite boundary that
 ///   re-substitutes each carrier arg (`substitute.rs`).
-/// - `subtree_references_node` — the read-only reachability scan that descends
-///   the args to its worklist (`substitute.rs`).
 /// - `lower_node` — the query-free structural lowerer that CONSTRUCTS the
 ///   carriers with their lowered args (`structural_lower.rs`).
+///
+/// Reachability/scan walkers are NOT on this list: `subtree_references_node`
+/// (the read-only `build_mapped_type` reachability scan) reaches a carrier's
+/// args through the shared `carrier_type_args` accessor in its catch-all, like
+/// every other scan/classify walker.
 ///
 /// A NEW production site binding a carrier `type_args` field whose
 /// `(path, fn)` pair is not listed here fails
@@ -20728,10 +20731,6 @@ const CARRIER_TYPEARGS_DIRECT_BIND_ALLOWLIST: &[(&str, &str)] = &[
         "substitute_with_change_tracking_inner",
     ),
     (
-        "crates/verter_session/src/project_semantic_dispatch/substitute.rs",
-        "subtree_references_node",
-    ),
-    (
         "crates/verter_session/src/project_semantic_dispatch/structural_lower.rs",
         "lower_node",
     ),
@@ -20746,146 +20745,288 @@ fn carrier_typeargs_bind_is_allowlisted(rel: &str, fn_name: &str) -> bool {
         .any(|(p, n)| *p == rel && *n == fn_name)
 }
 
-/// Whether `word` occurs in `s` as a whole identifier token (boundaries are
-/// non-`[A-Za-z0-9_]`), so `type_args` does NOT match inside `type_arguments`.
-fn contains_ident_word(s: &str, word: &str) -> bool {
-    let bytes = s.as_bytes();
-    let wb = word.as_bytes();
-    let n = bytes.len();
-    let m = wb.len();
-    if m == 0 || m > n {
-        return false;
-    }
-    let is_ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
-    let mut i = 0usize;
-    while i + m <= n {
-        if &bytes[i..i + m] == wb {
-            let before_ok = i == 0 || !is_ident(bytes[i - 1]);
-            let after_ok = i + m >= n || !is_ident(bytes[i + m]);
-            if before_ok && after_ok {
-                return true;
-            }
-        }
-        i += 1;
-    }
-    false
-}
-
-/// Every `fn NAME` declaration's byte offset + name, in source order. `fn` is
-/// matched as a standalone keyword (preceded by a non-identifier byte).
-fn carrier_fn_decl_positions(src: &str) -> Vec<(usize, String)> {
-    let bytes = src.as_bytes();
-    let n = bytes.len();
-    let is_ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
-    let mut out: Vec<(usize, String)> = Vec::new();
-    let mut i = 0usize;
-    while i < n {
-        if i + 3 <= n
-            && &bytes[i..i + 2] == b"fn"
-            && (bytes[i + 2] == b' ' || bytes[i + 2] == b'\t' || bytes[i + 2] == b'\n')
-            && (i == 0 || !is_ident(bytes[i - 1]))
-        {
-            let mut j = i + 2;
-            while j < n && bytes[j].is_ascii_whitespace() {
-                j += 1;
-            }
-            let name_start = j;
-            while j < n && is_ident(bytes[j]) {
-                j += 1;
-            }
-            if j > name_start {
-                out.push((i, src[name_start..j].to_string()));
-            }
-            i = j;
-            continue;
-        }
-        i += 1;
-    }
-    out
-}
-
-/// The enclosing function NAME for a byte offset — the nearest `fn NAME`
-/// declared before it in source order. `<module-scope>` if none precedes.
-fn carrier_enclosing_fn(decls: &[(usize, String)], pos: usize) -> String {
-    decls
-        .iter()
-        .rev()
-        .find(|(p, _)| *p < pos)
-        .map(|(_, name)| name.clone())
-        .unwrap_or_else(|| "<module-scope>".to_string())
-}
+/// The three unresolved-carrier variant names whose `type_args` field the
+/// anti-tail rule polices (`Foo<Arg>` / `typeof f<Arg>` / `import("m").G<Arg>`).
+const CARRIER_VARIANT_NAMES: [&str; 3] = ["BareRef", "TypeOf", "ImportType"];
 
 /// The set of enclosing function names that DIRECTLY bind a carrier
-/// (`BareRef` / `TypeOf` / `ImportType`) `type_args` field — i.e. a
-/// `::{carrier} { … type_args … }` destructure or construction. A root-kind-
-/// only arm (`::{carrier} { .. }`, no `type_args`) is NOT reported — those
-/// classify by root kind, child-independently, and never drop args. The
-/// `::`-anchor matches `Self::` and `SemanticNodeData::` qualifiers; the
-/// whole-word `type_args` requirement excludes both `SemanticQueryKey::TypeOf`
-/// (no `type_args` field) and `TypeExpr::ImportType { type_arguments }` (a
-/// different field). Expects comment-and-cfg-test-stripped input
-/// ([`carrier_production_code`]).
-fn carrier_typeargs_binding_fns(production: &str) -> std::collections::BTreeSet<String> {
-    use std::collections::BTreeSet;
-    let bytes = production.as_bytes();
-    let n = bytes.len();
-    let is_ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
-    let carriers = ["BareRef", "TypeOf", "ImportType"];
-    let decls = carrier_fn_decl_positions(production);
-    let mut hits: BTreeSet<String> = BTreeSet::new();
-    let mut i = 0usize;
-    while i + 2 <= n {
-        if &bytes[i..i + 2] == b"::" {
-            let after = i + 2;
-            let mut matched = false;
-            for carrier in carriers {
-                let cb = carrier.as_bytes();
-                if after + cb.len() <= n && &bytes[after..after + cb.len()] == cb {
-                    let bpos = after + cb.len();
-                    // Carrier-name token boundary (reject `::TypeOfContext`).
-                    if bpos < n && is_ident(bytes[bpos]) {
-                        continue;
-                    }
-                    // Skip whitespace to the destructure / construction `{`.
-                    let mut j = bpos;
-                    while j < n && bytes[j].is_ascii_whitespace() {
-                        j += 1;
-                    }
-                    if j < n && bytes[j] == b'{' {
-                        // Brace-balanced inner span of the carrier's `{ … }`.
-                        let inner_start = j + 1;
-                        let mut depth = 1i32;
-                        let mut k = inner_start;
-                        while k < n {
-                            match bytes[k] {
-                                b'{' => depth += 1,
-                                b'}' => {
-                                    depth -= 1;
-                                    if depth == 0 {
-                                        break;
-                                    }
-                                }
-                                _ => {}
-                            }
-                            k += 1;
-                        }
-                        let inner = &production[inner_start..k.min(n)];
-                        if contains_ident_word(inner, "type_args") {
-                            hits.insert(carrier_enclosing_fn(&decls, i));
-                        }
-                        i = bpos;
-                        matched = true;
-                        break;
-                    }
-                }
-            }
-            if matched {
-                continue;
+/// (`BareRef` / `TypeOf` / `ImportType`) `type_args` field — i.e. a carrier
+/// struct PATTERN (`… BareRef { type_args, .. }`) or struct EXPRESSION
+/// (`SemanticNodeData::BareRef { …, type_args }`).
+///
+/// Syn-based VARIANT inspection, NOT a `::`-anchored byte-scan: it keys on the
+/// pattern/expression's FINAL path segment, so it catches the carrier bind
+/// whether the variant is QUALIFIED (`SemanticNodeData::TypeOf { … }` /
+/// `Self::TypeOf { … }`) or BARE / IMPORTED (`use SemanticNodeData::TypeOf; …
+/// TypeOf { … }`). Because syn distinguishes a `Pat`/`Expr` struct from a
+/// `syn::Variant`, the carrier's OWN `enum SemanticNodeData { TypeOf { …,
+/// type_args } }` DECLARATION (bare, with a `type_args` field) is NOT flagged —
+/// only USES are. A root-kind-only arm (`TypeOf { .. }`, no `type_args`) is NOT
+/// reported (it classifies by root kind, child-independently, never dropping
+/// args); `TypeExpr::ImportType { type_arguments }` is NOT reported (a
+/// different field); `SemanticQueryKey::TypeOf { .. }` is NOT reported (no
+/// `type_args` field). Patterns hidden inside `matches!(…)` and other macros —
+/// which `syn::visit` does not descend into — are recovered by a proc-macro2
+/// token-stream scan. NOTE: a `use … BareRef as Alias;` rename at the path tail
+/// evades the final-segment key (an aliased-rename, not a bare/qualified
+/// variant literal); the exhaustive non-wildcard `carrier_type_args` accessor +
+/// the dormant-wiring guard + review are the backstop for that residual class.
+///
+/// Operates on RAW source (not a byte-stripped string): syn ignores comments
+/// natively, and the visitor skips TEST-ONLY items, so commented mentions and
+/// the common test-code containers never flag — without depending on a pre-strip
+/// whose output may not re-parse (raw Rust always parses; the comment/cfg-test
+/// byte-stripper's output does not, in general). The cfg-test skip covers the
+/// containers where test code actually lives — `#[cfg(test)]` /
+/// `#[cfg(all(test, …))]` MODULES, IMPLS, free FNS, and IMPL METHODS (cfg
+/// polarity respected: `#[cfg(not(test))]` / `#[cfg(any(test, …))]` production
+/// items are STILL scanned). A test-only carrier bind in an EXOTIC container (a
+/// `const`/`static` initializer, a trait item, or a statement-level
+/// `#[cfg(test)]` inside a production fn) is conservatively SCANNED, not skipped
+/// — a harmless over-approximation (it can at worst over-report a non-existent
+/// test bind, never hide a production one).
+fn carrier_typeargs_binding_fns(src: &str) -> std::collections::BTreeSet<String> {
+    use syn::visit::Visit as _;
+    let file = syn::parse_file(src)
+        .expect("carrier `type_args` anti-tail scan: source must parse as a Rust file");
+    let mut visitor = CarrierTypeArgsBindVisitor::default();
+    visitor.visit_file(&file);
+    visitor.hits
+}
+
+/// Whether any attribute marks the item as TEST-ONLY — compiled exclusively
+/// under `cfg(test)`, so its carrier binds are test code rather than a
+/// production traversal. POLARITY-AWARE (the critical distinction): `#[cfg(test)]`
+/// and `#[cfg(all(test, …))]` are test-only (skip), but `#[cfg(not(test))]` and
+/// `#[cfg(any(test, debug_assertions))]` are PRODUCTION (compiled in non-test /
+/// debug builds) and must STILL be scanned — a naive "any cfg mentioning `test`"
+/// skip would let a production carrier bind under those evade the guard.
+fn attrs_are_cfg_test(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|attr| {
+        attr.path().is_ident("cfg")
+            && attr
+                .parse_args::<syn::Meta>()
+                .map(|meta| cfg_meta_is_test_only(&meta))
+                .unwrap_or(false)
+    })
+}
+
+/// Whether a `cfg(...)` predicate is satisfiable ONLY when `test` is set — i.e.
+/// the gated item compiles exclusively in test builds (skip it). Defined as the
+/// negation of [`cfg_can_hold_without_test`]: test-only iff the predicate CANNOT
+/// hold in any configuration where `test` is unset. Sound for arbitrary `test` /
+/// `all` / `any` / `not` nesting, including double negation (`not(not(test))` is
+/// correctly test-only). The ONLY approximation is that `all` / `any` treat
+/// their operands as INDEPENDENT, so a CONTRADICTORY predicate such as
+/// `all(X, not(X))` (an item that compiles in NO configuration, so never exists
+/// to scan) may be classed non-test-only. The bias is always toward SCANNING
+/// (treating as production), so a real production carrier bind is never skipped.
+fn cfg_meta_is_test_only(meta: &syn::Meta) -> bool {
+    !cfg_can_hold_without_test(meta)
+}
+
+/// Whether the predicate can be TRUE in some configuration where `test` is
+/// unset (so the gated item is reachable in a non-test / production build).
+fn cfg_can_hold_without_test(meta: &syn::Meta) -> bool {
+    match meta {
+        // `test` is false when test is unset; every other atom is a free flag
+        // (`feature = "…"`, `debug_assertions`, …) that can be set true.
+        syn::Meta::Path(path) => !path.is_ident("test"),
+        syn::Meta::NameValue(_) => true,
+        syn::Meta::List(list) => {
+            let nested = cfg_nested_metas(list);
+            if list.path.is_ident("not") {
+                // `not(P)` holds without test iff `P` can be FALSE without test.
+                nested.first().is_some_and(cfg_can_be_false_without_test)
+            } else if list.path.is_ident("all") {
+                // `cfg(all())` is vacuously TRUE (always compiled = production),
+                // so an EMPTY `all` holds — `.all()` over no operands is `true`.
+                nested.iter().all(cfg_can_hold_without_test)
+            } else if list.path.is_ident("any") {
+                // `cfg(any())` is vacuously FALSE (never compiled), so an EMPTY
+                // `any` does not hold — `.any()` over no operands is `false`.
+                nested.iter().any(cfg_can_hold_without_test)
+            } else {
+                // Unknown predicate kind — assume it can hold (scan = safe).
+                true
             }
         }
-        i += 1;
     }
-    hits
+}
+
+/// Whether the predicate can be FALSE in some configuration where `test` is
+/// unset — the dual of [`cfg_can_hold_without_test`], used under `not`.
+fn cfg_can_be_false_without_test(meta: &syn::Meta) -> bool {
+    match meta {
+        // `test` is false when unset; any other atom can be set false.
+        syn::Meta::Path(_) | syn::Meta::NameValue(_) => true,
+        syn::Meta::List(list) => {
+            let nested = cfg_nested_metas(list);
+            if list.path.is_ident("not") {
+                // `not(P)` is false iff `P` is true (can hold without test).
+                nested.first().is_some_and(cfg_can_hold_without_test)
+            } else if list.path.is_ident("all") {
+                // `all` is false iff some conjunct is false.
+                nested.iter().any(cfg_can_be_false_without_test)
+            } else if list.path.is_ident("any") {
+                // `any` is false iff every disjunct is false.
+                nested.is_empty() || nested.iter().all(cfg_can_be_false_without_test)
+            } else {
+                true
+            }
+        }
+    }
+}
+
+/// Parse the comma-separated nested predicates of a `cfg` list predicate
+/// (`all(A, B)` / `any(A, B)` / `not(A)`).
+fn cfg_nested_metas(list: &syn::MetaList) -> Vec<syn::Meta> {
+    list.parse_args_with(syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated)
+        .map(|punct| punct.into_iter().collect())
+        .unwrap_or_default()
+}
+
+/// Visitor backing [`carrier_typeargs_binding_fns`] — see its docstring for the
+/// detection contract. Tracks the enclosing `fn` name so each carrier
+/// `type_args` bind is attributed to the function that owns it.
+#[derive(Default)]
+struct CarrierTypeArgsBindVisitor {
+    /// Stack of enclosing `fn` names (free fns + impl methods); the innermost
+    /// is the attribution target. `<module-scope>` when empty.
+    fn_stack: Vec<String>,
+    hits: std::collections::BTreeSet<String>,
+}
+
+impl CarrierTypeArgsBindVisitor {
+    /// The innermost enclosing `fn` name, or `<module-scope>` at file scope.
+    fn current_fn(&self) -> String {
+        self.fn_stack
+            .last()
+            .cloned()
+            .unwrap_or_else(|| "<module-scope>".to_string())
+    }
+
+    /// Record the enclosing fn iff `path`'s FINAL segment is a carrier variant
+    /// AND the struct names a `type_args` field. The final-segment key catches
+    /// both qualified (`SemanticNodeData::BareRef`) and bare (`BareRef`) forms.
+    fn record_carrier_bind(&mut self, path: &syn::Path, binds_type_args: bool) {
+        if binds_type_args
+            && path
+                .segments
+                .last()
+                .is_some_and(|seg| CARRIER_VARIANT_NAMES.contains(&seg.ident.to_string().as_str()))
+        {
+            let owner = self.current_fn();
+            self.hits.insert(owner);
+        }
+    }
+
+    /// Whether a macro invocation's token stream contains a carrier struct
+    /// shape binding `type_args` — e.g. `matches!(d, SemanticNodeData::TypeOf
+    /// { type_args, .. })`, whose pattern is opaque to `syn::visit`. A carrier
+    /// IDENT immediately followed by a brace group naming `type_args` (at the
+    /// group's top level) is the shape; nested groups are searched too so the
+    /// carrier may sit anywhere in the macro body. Ident tokens only: a carrier
+    /// name inside a string literal never flags.
+    fn macro_tokens_bind_carrier(tokens: proc_macro2::TokenStream) -> bool {
+        let trees: Vec<proc_macro2::TokenTree> = tokens.into_iter().collect();
+        for (i, tree) in trees.iter().enumerate() {
+            match tree {
+                proc_macro2::TokenTree::Ident(ident)
+                    if CARRIER_VARIANT_NAMES.contains(&ident.to_string().as_str()) =>
+                {
+                    if let Some(proc_macro2::TokenTree::Group(group)) = trees.get(i + 1) {
+                        if group.delimiter() == proc_macro2::Delimiter::Brace
+                            && Self::brace_group_names_type_args(group.stream())
+                        {
+                            return true;
+                        }
+                    }
+                }
+                proc_macro2::TokenTree::Group(group) => {
+                    if Self::macro_tokens_bind_carrier(group.stream()) {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// Whether the carrier brace group's TOP-LEVEL tokens contain a `type_args`
+    /// ident (`{ type_args, .. }` / `{ type_args: … }`). This is a CONSERVATIVE
+    /// top-level-ident check, not a strict field-name-position match: it does not
+    /// descend into a nested `{ other: Foo { type_args } }` (which binds `Foo`'s
+    /// field, not the carrier's), but it would also accept a top-level
+    /// `type_args` appearing in value position (`{ x: type_args }`). Such a shape
+    /// in a carrier struct does not arise in practice, and the bias is toward
+    /// over-reporting (scan = safe), never toward missing a real bind.
+    fn brace_group_names_type_args(tokens: proc_macro2::TokenStream) -> bool {
+        tokens.into_iter().any(
+            |tree| matches!(tree, proc_macro2::TokenTree::Ident(ident) if ident == "type_args"),
+        )
+    }
+}
+
+impl<'ast> syn::visit::Visit<'ast> for CarrierTypeArgsBindVisitor {
+    fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+        // Skip the whole `#[cfg(test)] mod tests { … }` subtree — its carrier
+        // binds are test code, not production traversals.
+        if attrs_are_cfg_test(&item.attrs) {
+            return;
+        }
+        syn::visit::visit_item_mod(self, item);
+    }
+
+    fn visit_item_impl(&mut self, item: &'ast syn::ItemImpl) {
+        if attrs_are_cfg_test(&item.attrs) {
+            return;
+        }
+        syn::visit::visit_item_impl(self, item);
+    }
+
+    fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+        if attrs_are_cfg_test(&item.attrs) {
+            return;
+        }
+        self.fn_stack.push(item.sig.ident.to_string());
+        syn::visit::visit_item_fn(self, item);
+        self.fn_stack.pop();
+    }
+
+    fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
+        if attrs_are_cfg_test(&item.attrs) {
+            return;
+        }
+        self.fn_stack.push(item.sig.ident.to_string());
+        syn::visit::visit_impl_item_fn(self, item);
+        self.fn_stack.pop();
+    }
+
+    fn visit_pat_struct(&mut self, pat: &'ast syn::PatStruct) {
+        let binds = pat.fields.iter().any(
+            |field| matches!(&field.member, syn::Member::Named(ident) if ident == "type_args"),
+        );
+        self.record_carrier_bind(&pat.path, binds);
+        syn::visit::visit_pat_struct(self, pat);
+    }
+
+    fn visit_expr_struct(&mut self, expr: &'ast syn::ExprStruct) {
+        let binds = expr.fields.iter().any(
+            |field| matches!(&field.member, syn::Member::Named(ident) if ident == "type_args"),
+        );
+        self.record_carrier_bind(&expr.path, binds);
+        syn::visit::visit_expr_struct(self, expr);
+    }
+
+    fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+        if Self::macro_tokens_bind_carrier(mac.tokens.clone()) {
+            let owner = self.current_fn();
+            self.hits.insert(owner);
+        }
+        syn::visit::visit_macro(self, mac);
+    }
 }
 
 /// ANTI-TAIL: no NEW production site may hand-bind a carrier (`BareRef` /
@@ -20919,15 +21060,16 @@ fn no_new_direct_carrier_type_args_traversal_outside_accessor_or_allowlist() {
             .unwrap()
             .to_string_lossy()
             .replace('\\', "/");
-        // Test-module / fixture files are NOT production code (the inline
-        // `#[cfg(test)]` strip covers production files; whole test modules
-        // are excluded here by filename).
+        // Test-module / fixture files are NOT production code (whole test
+        // modules are excluded here by filename). Inline TEST-ONLY items in
+        // production files (`#[cfg(test)]` / `#[cfg(all(test, …))]` mods, fns,
+        // impls) are skipped by the visitor; production `#[cfg(not(test))]` /
+        // `#[cfg(any(test, …))]` items are still scanned (cfg polarity).
         if rel.ends_with("_tests.rs") || rel.ends_with("/tests.rs") || rel.contains("/tests/") {
             continue;
         }
         let src = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {rel}: {e}"));
-        let production = carrier_production_code(&src);
-        for f in carrier_typeargs_binding_fns(&production) {
+        for f in carrier_typeargs_binding_fns(&src) {
             all_detected.insert((rel.clone(), f.clone()));
             if !carrier_typeargs_bind_is_allowlisted(&rel, &f) {
                 violations.push(format!(
@@ -20986,17 +21128,22 @@ fn no_new_direct_carrier_type_args_traversal_outside_accessor_or_allowlist() {
 /// ([`carrier_typeargs_bind_is_allowlisted`]) — POSITIVE (an allowlisted-shape
 /// bind is detected and attributed to its fn at its owning path), NEGATIVE (an
 /// UNLISTED scan site is caught), PATH-SCOPING (a `fn hash` carrier-`type_args`
-/// bind is allowlisted ONLY in `semantic_query.rs` and REJECTED elsewhere), and
-/// DISCRIMINATION (a root-kind-only arm, a commented mention, and the different
-/// `type_arguments` field are NOT flagged). All run through the SAME extractor
-/// + detector + predicate the guard uses, never a bare `contains`.
+/// bind is allowlisted ONLY in `semantic_query.rs` and REJECTED elsewhere),
+/// IMPORTED/BARE (an unqualified `TypeOf { type_args, .. }` — both in a
+/// structural `if let` and inside a `matches!` macro — is detected), CFG-POLARITY
+/// (test-only `#[cfg(test)]` / `#[cfg(all(test, …))]` / `#[cfg(not(not(test)))]`
+/// binds are skipped, but PRODUCTION `#[cfg(not(test))]` / `#[cfg(any(test,
+/// debug_assertions))]` binds are DETECTED), and DISCRIMINATION (a root-kind-only
+/// arm, a commented mention, the different `type_arguments` field, and the
+/// carrier's own enum-variant DECLARATION are NOT flagged). All run through the
+/// SAME syn-based detector + predicate the guard uses, never a bare `contains`.
 #[test]
 fn carrier_typeargs_anti_tail_detector_discriminates() {
     // POSITIVE — an allowlisted construction site is detected and attributed to
     // its enclosing fn, and that `(path, fn)` pair is allowlisted (the guard
     // passes for the lowerer's own file).
     let allow = "fn lower_node() { let _ = SemanticNodeData::BareRef { name, scope, type_args }; }";
-    let allow_fns = carrier_typeargs_binding_fns(&carrier_production_code(allow));
+    let allow_fns = carrier_typeargs_binding_fns(allow);
     assert!(
         allow_fns.contains("lower_node"),
         "positive: a carrier `type_args` bind must be attributed to its enclosing fn"
@@ -21015,7 +21162,7 @@ fn carrier_typeargs_anti_tail_detector_discriminates() {
     // detected AND no `(path, fn)` pair allowlists it, so the guard would flag it.
     let evil = "fn evil_openness_scan(d: &SemanticNodeData) -> bool { \
                 matches!(d, SemanticNodeData::TypeOf { type_args, .. } if !type_args.is_empty()) }";
-    let evil_fns = carrier_typeargs_binding_fns(&carrier_production_code(evil));
+    let evil_fns = carrier_typeargs_binding_fns(evil);
     assert!(
         evil_fns.contains("evil_openness_scan"),
         "negative: a NEW unlisted carrier `type_args` bind must be detected"
@@ -21035,7 +21182,7 @@ fn carrier_typeargs_anti_tail_detector_discriminates() {
     // allowlist keys by `(path, fn)`, so a bare-name match cannot disarm it.
     let evil_hash =
         "fn hash() { let _ = SemanticNodeData::ImportType { specifier, name, type_args }; }";
-    let evil_hash_fns = carrier_typeargs_binding_fns(&carrier_production_code(evil_hash));
+    let evil_hash_fns = carrier_typeargs_binding_fns(evil_hash);
     assert!(
         evil_hash_fns.contains("hash"),
         "path-scoping: a carrier `type_args` bind inside `fn hash` must be detected"
@@ -21053,21 +21200,41 @@ fn carrier_typeargs_anti_tail_detector_discriminates() {
          carrier `type_args` traversal — it must NOT be allowlisted"
     );
 
+    // IMPORTED / BARE FORM — a carrier `type_args` bind written WITHOUT the
+    // `SemanticNodeData::` / `Self::` qualifier (`use SemanticNodeData::TypeOf;
+    // … TypeOf { type_args, .. }`) MUST still be detected. A `::`-anchored
+    // byte-scan misses this; the variant inspection keys on the pattern /
+    // expression's FINAL path segment, so the bare form is caught — both in a
+    // structural `if let` (seen by the pat/expr walk) AND inside a `matches!`
+    // macro (seen by the macro token-scan, since the pattern is opaque to syn).
+    let bare_structural = "fn bare_if_let(d: SemanticNodeData) { \
+                           if let TypeOf { type_args, .. } = d { let _ = type_args; } }";
+    assert!(
+        carrier_typeargs_binding_fns(bare_structural).contains("bare_if_let"),
+        "imported/bare form: an unqualified `TypeOf {{ type_args, .. }}` destructure must be detected"
+    );
+    let bare_macro = "fn bare_matches(d: &SemanticNodeData) -> bool { \
+                      matches!(d, BareRef { type_args, .. } if !type_args.is_empty()) }";
+    assert!(
+        carrier_typeargs_binding_fns(bare_macro).contains("bare_matches"),
+        "imported/bare form: an unqualified `BareRef {{ type_args, .. }}` inside `matches!` must be detected"
+    );
+
     // DISCRIMINATION-1 — a root-kind-only arm (`{ .. }`, no `type_args`) is the
     // legitimate `is_deferred`-style classifier shape and must NOT be flagged.
     let root_kind = "fn classifier(d: &SemanticNodeData) -> bool { \
                      matches!(d, SemanticNodeData::BareRef { .. } \
                      | SemanticNodeData::ImportType { .. } | SemanticNodeData::TypeOf { .. }) }";
     assert!(
-        carrier_typeargs_binding_fns(&carrier_production_code(root_kind)).is_empty(),
+        carrier_typeargs_binding_fns(root_kind).is_empty(),
         "discrimination: a root-kind-only carrier arm (no `type_args` bind) must NOT be flagged"
     );
 
     // DISCRIMINATION-2 — a `type_args` mention only inside a `//` comment is
-    // stripped by `carrier_production_code` and must NOT be flagged.
+    // ignored natively by syn (raw input) and must NOT be flagged.
     let commented = "fn doc_only() {\n// SemanticNodeData::BareRef { type_args } described in prose\n let _ = 1; }";
     assert!(
-        carrier_typeargs_binding_fns(&carrier_production_code(commented)).is_empty(),
+        carrier_typeargs_binding_fns(commented).is_empty(),
         "discrimination: a commented carrier `type_args` mention must be stripped, not flagged"
     );
 
@@ -21075,7 +21242,106 @@ fn carrier_typeargs_anti_tail_detector_discriminates() {
     // different token) must NOT satisfy the whole-word `type_args` match.
     let other_field = "fn raises() { let _ = TypeExpr::ImportType { type_arguments }; }";
     assert!(
-        carrier_typeargs_binding_fns(&carrier_production_code(other_field)).is_empty(),
+        carrier_typeargs_binding_fns(other_field).is_empty(),
         "discrimination: `type_arguments` (a different field) must not match `type_args`"
+    );
+
+    // DISCRIMINATION-4 (cfg polarity) — TEST-ONLY cfg items are skipped, but
+    // PRODUCTION cfg items (compiled in non-test / debug builds) are STILL
+    // scanned. A naive "any cfg mentioning `test`" skip would wrongly drop a
+    // `#[cfg(not(test))]` / `#[cfg(any(test, debug_assertions))]` production
+    // carrier bind, evading the guard.
+    //
+    // (a) `#[cfg(test)] mod tests` — test-only → skipped.
+    let cfg_test = "#[cfg(test)]\nmod tests {\n    fn t(d: SemanticNodeData) { \
+                    if let SemanticNodeData::BareRef { type_args, .. } = d { let _ = type_args; } }\n}";
+    assert!(
+        carrier_typeargs_binding_fns(cfg_test).is_empty(),
+        "cfg-polarity: a carrier bind inside `#[cfg(test)] mod tests` (test-only) must be skipped"
+    );
+    // (b) `#[cfg(all(test, …))]` — requires test (test-only) → skipped.
+    let cfg_all_test = "#[cfg(all(test, feature = \"x\"))]\nfn t(d: SemanticNodeData) { \
+                        if let SemanticNodeData::TypeOf { type_args, .. } = d { let _ = type_args; } }";
+    assert!(
+        carrier_typeargs_binding_fns(cfg_all_test).is_empty(),
+        "cfg-polarity: `#[cfg(all(test, …))]` (requires test = test-only) must be skipped"
+    );
+    // (c) `#[cfg(not(test))]` — PRODUCTION → its carrier bind MUST be detected.
+    let cfg_not_test = "#[cfg(not(test))]\nfn prod(d: SemanticNodeData) { \
+                        if let SemanticNodeData::BareRef { type_args, .. } = d { let _ = type_args; } }";
+    assert!(
+        carrier_typeargs_binding_fns(cfg_not_test).contains("prod"),
+        "cfg-polarity: `#[cfg(not(test))]` is PRODUCTION — its carrier bind MUST be detected"
+    );
+    // (d) `#[cfg(any(test, debug_assertions))]` — PRODUCTION (debug builds) →
+    // its carrier bind MUST be detected (255 such items live in `src`).
+    let cfg_any_test = "#[cfg(any(test, debug_assertions))]\nfn dbg(d: SemanticNodeData) { \
+                        if let SemanticNodeData::ImportType { type_args, .. } = d { let _ = type_args; } }";
+    assert!(
+        carrier_typeargs_binding_fns(cfg_any_test).contains("dbg"),
+        "cfg-polarity: `#[cfg(any(test, debug_assertions))]` is PRODUCTION — its bind MUST be detected"
+    );
+    // (e) `#[cfg(not(not(test)))]` ≡ `test` — double negation is TEST-ONLY, so
+    // the solver must skip it (a flat "scan every `not(…)`" approximation would
+    // wrongly scan it). Pins the soundness of `cfg_meta_is_test_only`.
+    let cfg_double_not = "#[cfg(not(not(test)))]\nfn t(d: SemanticNodeData) { \
+                          if let SemanticNodeData::BareRef { type_args, .. } = d { let _ = type_args; } }";
+    assert!(
+        carrier_typeargs_binding_fns(cfg_double_not).is_empty(),
+        "cfg-polarity: `#[cfg(not(not(test)))]` ≡ test (test-only) must be skipped"
+    );
+    // (f) `#[cfg(all())]` is vacuously TRUE (always compiled = PRODUCTION), so
+    // its carrier bind MUST be detected — the empty `all` must not be mistaken
+    // for test-only (a `!nested.is_empty()` guard would wrongly skip it).
+    let cfg_empty_all = "#[cfg(all())]\nfn prod(d: SemanticNodeData) { \
+                         if let SemanticNodeData::BareRef { type_args, .. } = d { let _ = type_args; } }";
+    assert!(
+        carrier_typeargs_binding_fns(cfg_empty_all).contains("prod"),
+        "cfg-polarity: `#[cfg(all())]` is vacuously-true PRODUCTION — its bind MUST be detected"
+    );
+
+    // DISCRIMINATION-5 (enum definition) — the carrier's OWN variant
+    // DECLARATION (`enum SemanticNodeData { TypeOf { …, type_args: … } }`) is a
+    // `syn::Variant`, NOT a pat/expr struct USE, so it must NOT be flagged. (A
+    // bare byte-scan WOULD false-positive this; the syn visit distinguishes it.)
+    let enum_def = "enum SemanticNodeData { \
+                    TypeOf { value_root: ValueRootKey, type_args: Arc<[SemanticNodeId]> }, \
+                    Other(u32) }";
+    assert!(
+        carrier_typeargs_binding_fns(enum_def).is_empty(),
+        "discrimination: the carrier's own enum-variant DECLARATION must NOT be flagged as a bind"
+    );
+}
+
+/// `subtree_references_node` is a pure read-only reachability SCAN over the
+/// substitute engine's structural edges (it powers the `build_mapped_type`
+/// key-independence hoist). Like every scan/classify walker it MUST reach a
+/// carrier's `type_args` through the shared `SemanticNodeData::carrier_type_args`
+/// accessor — NOT a hand-destructured `BareRef { type_args, .. }` arm whose
+/// sibling `_ => {}` catch-all would SILENTLY DROP a future carrier's args (the
+/// carrier-scan tail-drop class the anti-tail rule exists to prevent). This pins
+/// it OUT of the direct-bind allowlist and OFF the anti-tail detector's hit set,
+/// so a future 4th carrier added to the exhaustive `carrier_type_args` accessor
+/// is descended automatically rather than dropped. (Its descent BEHAVIOUR is
+/// covered by `substitute_and_walker_descend_carrier_type_args` /
+/// `..._descend_import_type_carrier_type_args` in the dispatch tests.)
+#[test]
+fn subtree_references_node_scans_carrier_args_via_accessor_not_direct_bind() {
+    let workspace = workspace_root();
+    let rel = "crates/verter_session/src/project_semantic_dispatch/substitute.rs";
+    let src = std::fs::read_to_string(workspace.join(rel)).expect("read substitute.rs");
+    let detected = carrier_typeargs_binding_fns(&src);
+    assert!(
+        !detected.contains("subtree_references_node"),
+        "F1: `subtree_references_node` must route carrier `type_args` through the shared \
+         `carrier_type_args` accessor (so its `_ => {{}}` catch-all cannot silently drop a \
+         future carrier's args), NOT hand-bind the field — the anti-tail detector still sees \
+         a direct `type_args` bind inside it. Detected: {detected:?}"
+    );
+    assert!(
+        !carrier_typeargs_bind_is_allowlisted(rel, "subtree_references_node"),
+        "F1: `subtree_references_node` must NOT be on `CARRIER_TYPEARGS_DIRECT_BIND_ALLOWLIST` — \
+         it is a reachability SCAN that routes through the accessor, not an \
+         identity/reconstruction/render/rewrite boundary"
     );
 }
