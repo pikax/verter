@@ -115,6 +115,7 @@ jobs:
               - '.github/workflows/ci.yml'
             dx:
               - 'crates/verter_dx_baseline/**'
+              - 'crates/verter_lsp/**'
               - 'packages/dx-harness/**'
               - 'packages/lsp-test-client/**'
               - 'scripts/dx/**'

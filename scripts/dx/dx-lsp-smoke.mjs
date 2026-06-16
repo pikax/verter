@@ -164,6 +164,25 @@ function posInFragment(text, lineFragment, token) {
   return offsetToPos(text, base + rel);
 }
 
+/**
+ * Resolve the source position at `token` inside `lineFragment`, REQUIRING the
+ * anchor to exist in the vendored corpus. On fixture drift — the committed entry
+ * no longer contains the fragment — this FAILS LOUDLY (naming the missing fragment
+ * + fixture) instead of silently probing offset 0:0, which would let a hover or
+ * definition probe land on `0:0` and pass vacuously.
+ */
+function requireAnchorPos(text, lineFragment, token, entryRel) {
+  const pos = posInFragment(text, lineFragment, token);
+  if (pos === null) {
+    fatal(
+      `anchor not found in hermetic fixture — expected fragment '${lineFragment}' ` +
+        `(token '${token}') in entry '${entryRel}' under '${path.basename(fixtureDir)}'. ` +
+        "Fixture drift: update the smoke anchors or the vendored corpus instead of probing 0:0.",
+    );
+  }
+  return pos;
+}
+
 // ── verter driver bootstrap ──────────────────────────────────────────────────
 
 async function startVerter(root, tsdk) {
@@ -263,7 +282,7 @@ async function main() {
     await new Promise((r) => setTimeout(r, 250));
 
     // 2a. Hover on the resolved `.label` member of `item.label`.
-    const hoverPos = posInFragment(entryText, "item.label", "label") ?? offsetToPos(entryText, 0);
+    const hoverPos = requireAnchorPos(entryText, "item.label", "label", entryRel);
     signals.hover = await driveSignal("hover", () =>
       client.sendRequest(
         "textDocument/hover",
@@ -273,7 +292,7 @@ async function main() {
     );
 
     // 2b. Definition on the `item` receiver — resolves the `const item` decl.
-    const defPos = posInFragment(entryText, "item.label", "item") ?? offsetToPos(entryText, 0);
+    const defPos = requireAnchorPos(entryText, "item.label", "item", entryRel);
     signals.definition = await driveSignal("definition", () =>
       client.sendRequest(
         "textDocument/definition",
