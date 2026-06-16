@@ -20,8 +20,12 @@
 use std::sync::Arc;
 
 use verter_semantic::analysis::type_expand::ExpandedIndexSignature;
-use verter_semantic::analysis::types::{AnalyzedEmitField, AnalyzedPropField, AnalyzedSlotField};
+use verter_semantic::analysis::types::{
+    AnalyzedDefaultValue, AnalyzedEmitField, AnalyzedPropField, AnalyzedSlotField,
+};
 use verter_type_expr::TypeExpr;
+
+use crate::resolver_core::ResolvedTypeDeclaration;
 
 /// The resolved `defineProps` surface: named prop fields plus index signatures.
 ///
@@ -35,6 +39,77 @@ pub struct PropsSurface {
     pub fields: Vec<AnalyzedPropField>,
     /// Index signatures on the props type-argument surface.
     pub index_signatures: Vec<ExpandedIndexSignature>,
+    /// Prop DEFAULT values — a framework-neutral SIDECAR populated only by an
+    /// adapter that captures runtime defaults (Svelte runes `$props()`
+    /// destructuring defaults + `$bindable(<default>)` fallbacks). The Vue
+    /// analyzer pipeline carries defaults through its own `withDefaults`
+    /// merge path and leaves this empty. Source-text + span, keyed by prop
+    /// name — NOT a `TypeExpr` (defaults are runtime expressions).
+    pub prop_defaults: Vec<AnalyzedDefaultValue>,
+    /// Prop ORIGIN entries — a framework-neutral SIDECAR carrying the
+    /// resolver-known declaration provenance for each prop whose type resolved
+    /// to a declaration. Populated only from routes the shared resolver already
+    /// traversed; an inline/local prop carries a [`OriginHop::Local`], an
+    /// unresolved prop carries NO entry (never source-text-guessed).
+    pub prop_origins: Vec<PropOriginEntry>,
+}
+
+/// One prop's resolver-known declaration origin (a framework-neutral SIDECAR
+/// entry on [`PropsSurface`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PropOriginEntry {
+    /// The prop name this origin describes.
+    pub prop_name: String,
+    /// The resolved origin.
+    pub origin: PropOrigin,
+}
+
+/// The declaration origin of a prop type: the final resolved declaration plus
+/// the ordered hop chain the shared resolver traversed to reach it.
+///
+/// Built ENTIRELY from resolver-known routes (`ResolvedTypeDeclaration` +
+/// requested-vs-resolved name / canonical comparison) — never a new traversal,
+/// never a source-text guess.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PropOrigin {
+    /// The final resolved declaration (canonical source, resolved name, span,
+    /// kind), as produced by the shared resolver's `resolve_type_declaration`.
+    pub declaration: ResolvedTypeDeclaration,
+    /// The ordered hop chain from the requesting file to the declaration.
+    pub chain: Vec<OriginHop>,
+}
+
+/// One hop in a prop's origin chain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OriginHop {
+    /// The declaration lives in the requesting file (no cross-file hop).
+    Local,
+    /// The declaration was reached by an import from another module.
+    Import {
+        /// The module the symbol was imported from (the resolved canonical).
+        from: String,
+        /// The raw import specifier, when recorded.
+        specifier: Option<String>,
+        /// The imported name (the name in the SOURCE module).
+        imported_name: String,
+    },
+    /// The declaration was reached by a re-export chain.
+    Reexport {
+        /// The re-exporting module.
+        from: String,
+        /// The module the symbol re-exports TO (the next hop's canonical).
+        to: String,
+        /// The name the symbol is re-exported under.
+        exported_name: String,
+        /// The original name before the re-export rename.
+        original_name: String,
+    },
+    /// The declaration was reached by a same-name-changing alias
+    /// (`export { Foo as Bar }` / `type Bar = Foo`) within a file.
+    Alias {
+        /// The alias target name.
+        name: String,
+    },
 }
 
 /// The resolved `defineEmits` surface: named emit fields plus index signatures.
@@ -170,6 +245,26 @@ impl MacroSurfaceDtos {
     pub fn slot_fields(&self) -> &[AnalyzedSlotField] {
         self.slots.as_deref().unwrap_or(&[])
     }
+
+    /// The resolved prop DEFAULT values (the framework-neutral SIDECAR), or an
+    /// empty slice when no props surface was resolved or the adapter captured
+    /// no defaults.
+    #[must_use]
+    pub fn prop_defaults(&self) -> &[AnalyzedDefaultValue] {
+        self.props
+            .as_ref()
+            .map_or(&[], |surface| surface.prop_defaults.as_slice())
+    }
+
+    /// The resolved prop ORIGIN entries (the framework-neutral SIDECAR), or an
+    /// empty slice when no props surface was resolved or no prop origin was
+    /// resolver-known.
+    #[must_use]
+    pub fn prop_origins(&self) -> &[PropOriginEntry] {
+        self.props
+            .as_ref()
+            .map_or(&[], |surface| surface.prop_origins.as_slice())
+    }
 }
 
 impl crate::framework::surface_store::FrameworkSurfaceDtoBundle for MacroSurfaceDtos {
@@ -289,9 +384,13 @@ mod tests {
         let PropsSurface {
             fields,
             index_signatures,
+            prop_defaults,
+            prop_origins,
         } = &surface;
         assert!(fields.is_empty());
         assert!(index_signatures.is_empty());
+        assert!(prop_defaults.is_empty());
+        assert!(prop_origins.is_empty());
     }
 
     #[test]

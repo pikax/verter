@@ -34,19 +34,24 @@
 use std::collections::HashMap;
 
 use verter_protocol::typeinfo::graph::{
-    self as wire, Exactness, FrameworkSurfaceKind, FrameworkSurfaceKindEntry,
-    FrameworkSurfaceKindStatus, FrameworkSurfaceKindSupport, PrimitiveKind, SemanticTypeGraph,
-    SymbolNamespace,
+    self as wire, Exactness, FrameworkSurfaceDeclarationKind, FrameworkSurfaceKind,
+    FrameworkSurfaceKindEntry, FrameworkSurfaceKindStatus, FrameworkSurfaceKindSupport,
+    FrameworkSurfaceOriginHopKind, PrimitiveKind, SemanticTypeGraph, SymbolNamespace,
 };
 use verter_protocol::verter::v1::{
-    graph_query_error, graph_type_node, GraphLiteral, GraphLiteralValue, GraphObject, GraphOpaque,
-    GraphPrimitive, GraphQueryError, GraphQueryErrorOther, GraphReference, GraphStringTable,
-    GraphSymbolNode, GraphTypeNode, SemanticTypeGraph as WireGraph,
+    graph_query_error, graph_type_node, FrameworkSurfaceMemberDeclaration,
+    FrameworkSurfaceMemberOrigin, FrameworkSurfaceOriginHop, GraphLiteral, GraphLiteralValue,
+    GraphObject, GraphOpaque, GraphPrimitive, GraphQueryError, GraphQueryErrorOther,
+    GraphReference, GraphStringTable, GraphSymbolNode, GraphTypeNode,
+    SemanticTypeGraph as WireGraph,
 };
 use verter_type_expr::{LiteralValue, PrimitiveName, TypeExpr};
 
+use crate::resolver_core::{ResolvedDeclarationKind, ResolvedTypeDeclaration};
+use crate::typeinfo::framework_surface::results;
 use crate::typeinfo::framework_surface::results::{
-    MacroSurfaceDtos, NamedTypeMember, NormalizedSurface, NormalizedSurfaces, ResolvedOutcome,
+    MacroSurfaceDtos, NamedTypeMember, NormalizedSurface, NormalizedSurfaces, OriginHop,
+    ResolvedOutcome,
 };
 
 /// The bounded shallow encoder's traversal depth budget. The member value
@@ -229,6 +234,109 @@ impl GraphArena {
             }
         };
         GraphLiteralValue { kind: Some(kind) }
+    }
+
+    /// Encode a per-member declaration [`PropOrigin`](results::PropOrigin) into
+    /// the wire [`FrameworkSurfaceMemberOrigin`] (schema 4). All string fields
+    /// intern into the graph string table; the hop chain maps each
+    /// framework-neutral [`OriginHop`] onto its wire form. This is a pure
+    /// projection of resolved data — no dispatch, no re-resolution.
+    fn encode_member_origin(
+        &mut self,
+        origin: &results::PropOrigin,
+    ) -> FrameworkSurfaceMemberOrigin {
+        let declaration = Some(self.encode_member_declaration(&origin.declaration));
+        let chain = origin
+            .chain
+            .iter()
+            .map(|hop| self.encode_origin_hop(hop))
+            .collect();
+        FrameworkSurfaceMemberOrigin { declaration, chain }
+    }
+
+    /// Encode a [`ResolvedTypeDeclaration`] into the wire
+    /// [`FrameworkSurfaceMemberDeclaration`] (string ids interned).
+    fn encode_member_declaration(
+        &mut self,
+        declaration: &ResolvedTypeDeclaration,
+    ) -> FrameworkSurfaceMemberDeclaration {
+        let requested_name_id = self.strings.intern(&declaration.requested_name);
+        let resolved_name_id = self.strings.intern(&declaration.resolved_name);
+        let canonical_source_id = self.strings.intern(&declaration.canonical_source);
+        FrameworkSurfaceMemberDeclaration {
+            requested_name_id,
+            resolved_name_id,
+            canonical_source_id,
+            span_start: declaration.span.start,
+            span_end: declaration.span.end,
+            kind: declaration_kind_for(declaration.kind) as i32,
+        }
+    }
+
+    /// Encode one framework-neutral [`OriginHop`] into the wire
+    /// [`FrameworkSurfaceOriginHop`]. Each hop's string-id fields are
+    /// PRESENCE-AWARE (`optional` on the wire): a field is `Some(interned id)`
+    /// ONLY when the hop kind genuinely carries it, `None` otherwise. The
+    /// encoder NEVER emits id 0 for an absent field — the graph string table is
+    /// zero-based (entry 0 is a real interned string), so an id-0 absent
+    /// sentinel would alias a real table entry and fabricate data on decode.
+    /// A hop string a present hop genuinely carries is always interned, even
+    /// if it is an empty string (a present-but-empty value stays present).
+    fn encode_origin_hop(&mut self, hop: &OriginHop) -> FrameworkSurfaceOriginHop {
+        // A LOCAL hop carries no string fields — every id is absent.
+        let mut wire = FrameworkSurfaceOriginHop {
+            kind: FrameworkSurfaceOriginHopKind::Local as i32,
+            from_id: None,
+            specifier_id: None,
+            imported_name_id: None,
+            to_id: None,
+            exported_name_id: None,
+            original_name_id: None,
+            alias_name_id: None,
+        };
+        match hop {
+            OriginHop::Local => {}
+            OriginHop::Import {
+                from,
+                specifier,
+                imported_name,
+            } => {
+                wire.kind = FrameworkSurfaceOriginHopKind::Import as i32;
+                wire.from_id = Some(self.strings.intern(from));
+                // The specifier is itself optional in the source model — set
+                // the field only when it was recorded.
+                wire.specifier_id = specifier.as_deref().map(|s| self.strings.intern(s));
+                wire.imported_name_id = Some(self.strings.intern(imported_name));
+            }
+            OriginHop::Reexport {
+                from,
+                to,
+                exported_name,
+                original_name,
+            } => {
+                wire.kind = FrameworkSurfaceOriginHopKind::Reexport as i32;
+                wire.from_id = Some(self.strings.intern(from));
+                wire.to_id = Some(self.strings.intern(to));
+                wire.exported_name_id = Some(self.strings.intern(exported_name));
+                wire.original_name_id = Some(self.strings.intern(original_name));
+            }
+            OriginHop::Alias { name } => {
+                wire.kind = FrameworkSurfaceOriginHopKind::Alias as i32;
+                wire.alias_name_id = Some(self.strings.intern(name));
+            }
+        }
+        wire
+    }
+}
+
+/// Map a [`ResolvedDeclarationKind`] onto the wire
+/// [`FrameworkSurfaceDeclarationKind`].
+fn declaration_kind_for(kind: ResolvedDeclarationKind) -> FrameworkSurfaceDeclarationKind {
+    match kind {
+        ResolvedDeclarationKind::Interface => FrameworkSurfaceDeclarationKind::Interface,
+        ResolvedDeclarationKind::TypeAlias => FrameworkSurfaceDeclarationKind::TypeAlias,
+        ResolvedDeclarationKind::Class => FrameworkSurfaceDeclarationKind::Class,
+        ResolvedDeclarationKind::Unknown => FrameworkSurfaceDeclarationKind::Unknown,
     }
 }
 
@@ -439,20 +547,44 @@ fn encode_kind_members(
     dtos: &MacroSurfaceDtos,
 ) -> Vec<wire::FrameworkSurfaceMember> {
     match kind {
-        FrameworkSurfaceKind::Props => dtos
-            .prop_fields()
-            .iter()
-            .map(|f| {
-                let name_id = arena.strings.intern(&f.name);
-                let type_node_id = arena.encode_member_value(f.type_expr.as_ref(), 0);
-                wire::FrameworkSurfaceMember {
-                    name_id,
-                    type_node_id,
-                    required: !f.is_optional,
-                    readonly: false,
-                }
-            })
-            .collect(),
+        FrameworkSurfaceKind::Props => {
+            // Index the DEFAULT-value + ORIGIN sidecars by prop name so each
+            // member emits its own runtime default source text + resolver-known
+            // declaration provenance on the wire (schema 4). Both sidecars are
+            // framework-neutral; a member with no default / no resolved origin
+            // emits the absent (`None`) wire form.
+            let defaults: HashMap<&str, &str> = dtos
+                .prop_defaults()
+                .iter()
+                .map(|d| (d.key.as_str(), d.value.as_str()))
+                .collect();
+            let origins: HashMap<&str, &results::PropOrigin> = dtos
+                .prop_origins()
+                .iter()
+                .map(|o| (o.prop_name.as_str(), &o.origin))
+                .collect();
+            dtos.prop_fields()
+                .iter()
+                .map(|f| {
+                    let name_id = arena.strings.intern(&f.name);
+                    let type_node_id = arena.encode_member_value(f.type_expr.as_ref(), 0);
+                    let default_value_id = defaults
+                        .get(f.name.as_str())
+                        .map(|value| arena.strings.intern(value));
+                    let origin = origins
+                        .get(f.name.as_str())
+                        .map(|origin| arena.encode_member_origin(origin));
+                    wire::FrameworkSurfaceMember {
+                        name_id,
+                        type_node_id,
+                        required: !f.is_optional,
+                        readonly: false,
+                        default_value_id,
+                        origin,
+                    }
+                })
+                .collect()
+        }
         FrameworkSurfaceKind::Emits => dtos
             .emit_fields()
             .iter()
@@ -466,6 +598,8 @@ fn encode_kind_members(
                     // readonly do not apply (always false on the wire).
                     required: false,
                     readonly: false,
+                    default_value_id: None,
+                    origin: None,
                 }
             })
             .collect(),
@@ -483,6 +617,8 @@ fn encode_kind_members(
                     type_node_id,
                     required: f.is_required,
                     readonly: false,
+                    default_value_id: None,
+                    origin: None,
                 }
             })
             .collect(),
@@ -510,6 +646,8 @@ fn encode_kind_members(
                             type_node_id,
                             required: !b.prop.is_optional,
                             readonly: false,
+                            default_value_id: None,
+                            origin: None,
                         }
                     })
                     .collect()
@@ -533,6 +671,8 @@ fn encode_named_members(
                 type_node_id,
                 required: !m.is_optional,
                 readonly: false,
+                default_value_id: None,
+                origin: None,
             }
         })
         .collect()
@@ -649,6 +789,7 @@ mod tests {
                     props: Some(PropsSurface {
                         fields,
                         index_signatures: Vec::new(),
+                        ..Default::default()
                     }),
                     ..Default::default()
                 }),
@@ -920,6 +1061,7 @@ mod tests {
                             value_type: TypeExpr::Primitive(PrimitiveName::Number),
                             readonly: false,
                         }],
+                        ..Default::default()
                     }),
                     ..Default::default()
                 }),
@@ -959,5 +1101,86 @@ mod tests {
         );
         // The named member still encodes.
         assert_eq!(props.members.len(), 1);
+    }
+
+    #[test]
+    fn absent_origin_hop_fields_stay_absent_across_a_nonempty_table_zero() {
+        // DISCRIMINATING (the P0): the encoder is PRESENCE-AWARE — an absent
+        // hop string field is `None`, never id 0. The string table is
+        // zero-based (entry 0 is a real interned string), so an id-0 absent
+        // sentinel would alias entry 0 and fabricate data on decode. This test
+        // forces a NON-EMPTY table[0] (the real encoder never seeds `""` at 0),
+        // encodes a LOCAL hop (no string fields) and an IMPORT hop with NO
+        // specifier, and asserts every absent field is `None` while present
+        // fields resolve to their interned strings — RED before presence-aware
+        // encoding (the old encoder wrote literal 0 for absent fields).
+        use crate::typeinfo::framework_surface::results::{OriginHop, PropOrigin};
+
+        let mut arena = GraphArena::new();
+        // Intern a distinctive string FIRST so table[0] is a real, non-empty
+        // entry — exactly the layout the real encoder produces.
+        let sentinel_zero = arena.strings.intern("__SENTINEL_ZERO__");
+        assert_eq!(sentinel_zero, 0, "the sentinel must occupy table index 0");
+
+        let declaration = ResolvedTypeDeclaration {
+            requested_name: "size".to_string(),
+            declaration_id: None,
+            resolved_name: "Size".to_string(),
+            canonical_source: "/lib/props.ts".to_string(),
+            span: verter_span::Span::default(),
+            kind: ResolvedDeclarationKind::TypeAlias,
+            text: None,
+        };
+        let origin = PropOrigin {
+            declaration,
+            chain: vec![
+                OriginHop::Local,
+                OriginHop::Import {
+                    from: "/lib/props.ts".to_string(),
+                    specifier: None,
+                    imported_name: "Size".to_string(),
+                },
+            ],
+        };
+
+        let encoded = arena.encode_member_origin(&origin);
+        let entries = &arena.strings.entries;
+
+        // The declaration's always-present string ids resolve to real entries
+        // (never the absent sentinel by accident).
+        let decl = encoded.declaration.as_ref().expect("declaration present");
+        assert_eq!(entries[decl.resolved_name_id as usize], "Size");
+        assert_eq!(entries[decl.canonical_source_id as usize], "/lib/props.ts");
+
+        // LOCAL hop: EVERY string field is `None` — never `Some(0)`.
+        let local = &encoded.chain[0];
+        assert_eq!(local.kind, FrameworkSurfaceOriginHopKind::Local as i32);
+        assert!(local.from_id.is_none(), "LOCAL from_id must be absent");
+        assert!(local.specifier_id.is_none());
+        assert!(local.imported_name_id.is_none());
+        assert!(local.to_id.is_none());
+        assert!(local.exported_name_id.is_none());
+        assert!(local.original_name_id.is_none());
+        assert!(local.alias_name_id.is_none());
+
+        // IMPORT hop: from + importedName present, specifier ABSENT.
+        let import = &encoded.chain[1];
+        assert_eq!(import.kind, FrameworkSurfaceOriginHopKind::Import as i32);
+        let from_id = import.from_id.expect("IMPORT from_id present");
+        let imported_id = import
+            .imported_name_id
+            .expect("IMPORT importedName present");
+        assert_eq!(entries[from_id as usize], "/lib/props.ts");
+        assert_eq!(entries[imported_id as usize], "Size");
+        assert!(
+            import.specifier_id.is_none(),
+            "an IMPORT hop with no recorded specifier must leave specifier_id absent, \
+             never id 0 (which would alias the non-empty table[0])"
+        );
+        // The other (REEXPORT/ALIAS) fields are absent for an IMPORT hop.
+        assert!(import.to_id.is_none());
+        assert!(import.exported_name_id.is_none());
+        assert!(import.original_name_id.is_none());
+        assert!(import.alias_name_id.is_none());
     }
 }

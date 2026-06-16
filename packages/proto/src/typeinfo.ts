@@ -49,6 +49,8 @@ export {
   // Closed enums.
   FrameworkSurfaceKind,
   FrameworkSurfaceKindSupport,
+  FrameworkSurfaceOriginHopKind,
+  FrameworkSurfaceDeclarationKind,
   FrameworkTag,
   GraphAccessibility,
   GraphBudgetDomain,
@@ -97,6 +99,10 @@ export type {
   FrameworkSurfacePayload,
   FrameworkSurfaceKindEntry,
   FrameworkSurfaceKindStatus,
+  FrameworkSurfaceMember,
+  FrameworkSurfaceMemberOrigin,
+  FrameworkSurfaceMemberDeclaration,
+  FrameworkSurfaceOriginHop,
   ComponentSelector,
   StructuredTypeExpression,
   GraphTypeNode,
@@ -125,7 +131,10 @@ export type {
  * keep the two values in lock-step.
  *
  * Schema 3 added the `framework_surface` response arm plus the
- * per-kind `FrameworkSurfaceKindStatus`. Schema 2 stays accepted for
- * the legacy operations; the framework-surface operation requires 3.
+ * per-kind `FrameworkSurfaceKindStatus`. Schema 4 added the add-only
+ * `FrameworkSurfaceMember.default_value_id` + `origin` fields (a
+ * member's runtime default source text and its resolver-known
+ * declaration provenance). Schema 2 stays accepted for the legacy
+ * operations; the framework-surface operation requires 3.
  */
-export const TYPEINFO_GRAPH_SCHEMA_VERSION = 3;
+export const TYPEINFO_GRAPH_SCHEMA_VERSION = 4;

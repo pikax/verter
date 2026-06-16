@@ -415,6 +415,94 @@ fn framework_surface_kind_entry_field_numbers_are_stable() {
 }
 
 #[test]
+fn framework_surface_member_default_and_origin_field_numbers_are_stable() {
+    // Wire-compat (schema 4): the four pre-existing `FrameworkSurfaceMember`
+    // fields keep their numbers; the add-only `default_value_id` is the NEW
+    // optional tag 5 and `origin` the NEW tag 6 (never recycled tags). The
+    // origin sub-messages + their closed enums land typeinfo-LOCAL (NOT the
+    // component-meta `PropOrigin`), and the TS bindings carry them (drift fails
+    // here before the byte-pin runs).
+    let proto = read_workspace_file("crates/verter_protocol/proto/verter/v1/typeinfo.proto");
+    let member = proto_message_body(&proto, "FrameworkSurfaceMember");
+    assert!(
+        member.contains("uint32 name_id = 1;"),
+        "`FrameworkSurfaceMember.name_id` must stay field 1",
+    );
+    assert!(
+        member.contains("uint32 type_node_id = 2;"),
+        "`FrameworkSurfaceMember.type_node_id` must stay field 2",
+    );
+    assert!(
+        member.contains("bool required = 3;"),
+        "`FrameworkSurfaceMember.required` must stay field 3",
+    );
+    assert!(
+        member.contains("bool readonly = 4;"),
+        "`FrameworkSurfaceMember.readonly` must stay field 4",
+    );
+    assert!(
+        member.contains("optional uint32 default_value_id = 5;"),
+        "`FrameworkSurfaceMember.default_value_id` must be the new presence-aware field 5",
+    );
+    assert!(
+        member.contains("FrameworkSurfaceMemberOrigin origin = 6;"),
+        "`FrameworkSurfaceMember.origin` must be the new field 6",
+    );
+
+    // The origin shapes are typeinfo-graph-LOCAL (their own GraphStringTable
+    // ids), NOT a cross-import of the component-meta `PropOrigin`.
+    for message in [
+        "FrameworkSurfaceMemberOrigin",
+        "FrameworkSurfaceMemberDeclaration",
+        "FrameworkSurfaceOriginHop",
+    ] {
+        assert!(
+            proto.contains(&format!("message {message} {{")),
+            "typeinfo.proto must declare the typeinfo-local `{message}` message",
+        );
+    }
+    for enum_name in [
+        "FrameworkSurfaceOriginHopKind",
+        "FrameworkSurfaceDeclarationKind",
+    ] {
+        assert!(
+            proto.contains(&format!("enum {enum_name} {{")),
+            "typeinfo.proto must declare the closed `{enum_name}` enum",
+        );
+    }
+
+    // TS parity: the generated bindings carry the new member fields + the
+    // origin enums.
+    let ts = read_workspace_file("packages/proto/src/gen/verter/v1/typeinfo_pb.ts");
+    assert!(
+        ts.contains("defaultValueId?: number | undefined;"),
+        "typeinfo_pb.ts must carry the optional `defaultValueId` member field",
+    );
+    assert!(
+        ts.contains("export enum FrameworkSurfaceOriginHopKind"),
+        "typeinfo_pb.ts must declare the `FrameworkSurfaceOriginHopKind` enum",
+    );
+    assert!(
+        ts.contains("export enum FrameworkSurfaceDeclarationKind"),
+        "typeinfo_pb.ts must declare the `FrameworkSurfaceDeclarationKind` enum",
+    );
+
+    // The component-meta wire must NOT carry the retired dead `PropOrigin`
+    // (the wrong-wire B8k addition was removed; Vue public origin is a separate
+    // follow-up).
+    let component_meta =
+        read_workspace_file("crates/verter_protocol/proto/verter/v1/component_meta.proto");
+    assert!(
+        !component_meta.contains("PropOrigin origin = 11;"),
+        "the dead Vue-path `PropMeta.origin` must be removed from component_meta.proto",
+    );
+    assert!(
+        !component_meta.contains("message PropOrigin"),
+        "the dead `PropOrigin` message must be removed from component_meta.proto",
+    );
+}
+
+#[test]
 fn structured_type_expression_taxonomy_proto_ts_parity() {
     assert_proto_ts_parity(
         "StructuredTypeExpression",

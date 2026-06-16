@@ -93,6 +93,11 @@ pub const MIN_TYPEINFO_GRAPH_SCHEMA_VERSION: u32 = 2;
 /// `wire_error_unknown_schema_version`.
 pub const SUPPORTED_TYPEINFO_GRAPH_SCHEMA_VERSIONS: &[u32] = &[
     MIN_TYPEINFO_GRAPH_SCHEMA_VERSION,
+    // Schema 3 stays accepted: a v3 framework-surface response is still a
+    // valid decode (the v4 member fields are add-only, absent on a v3
+    // payload), and v3 remains the floor the framework-surface operation
+    // requires.
+    3,
     TYPEINFO_GRAPH_SCHEMA_VERSION,
 ];
 

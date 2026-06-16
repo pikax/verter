@@ -23,6 +23,9 @@ export type {
   FrameworkSurfaceError,
   FrameworkSurfaceKindResult,
   FrameworkSurfaceMember,
+  FrameworkSurfaceMemberDeclaration,
+  FrameworkSurfaceMemberOrigin,
+  FrameworkSurfaceOriginHop,
 } from "./framework-surface.js";
 
 export type {

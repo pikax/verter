@@ -132,11 +132,25 @@ fn project_kind_entry(entry: &FrameworkSurfaceKindEntry, strings: &[String]) -> 
         .members
         .iter()
         .map(|m| {
-            serde_json::json!({
+            let mut member = serde_json::json!({
                 "name": resolve_string(strings, m.name_id),
                 "required": m.required,
                 "readonly": m.readonly,
-            })
+            });
+            // Schema 4 add-only fields: the member's runtime DEFAULT source text
+            // and its resolver-known declaration ORIGIN, surfaced only when
+            // present (presence-aware default, optional origin).
+            let object = member.as_object_mut().expect("member is a JSON object");
+            if let Some(default_id) = m.default_value_id {
+                object.insert(
+                    "default".to_string(),
+                    serde_json::Value::String(resolve_string(strings, default_id).to_string()),
+                );
+            }
+            if let Some(origin) = m.origin.as_ref() {
+                object.insert("origin".to_string(), project_member_origin(origin, strings));
+            }
+            member
         })
         .collect();
 
@@ -146,6 +160,68 @@ fn project_kind_entry(entry: &FrameworkSurfaceKindEntry, strings: &[String]) -> 
         "members": members,
         "diagnostics": diagnostics,
     })
+}
+
+/// Project a wire member origin (schema 4) into a stable JSON shape, resolving
+/// string ids through the graph string table.
+fn project_member_origin(
+    origin: &wire::FrameworkSurfaceMemberOrigin,
+    strings: &[String],
+) -> serde_json::Value {
+    let declaration = origin.declaration.as_ref().map(|d| {
+        serde_json::json!({
+            "resolvedName": resolve_string(strings, d.resolved_name_id),
+            "canonicalSource": resolve_string(strings, d.canonical_source_id),
+            "spanStart": d.span_start,
+            "spanEnd": d.span_end,
+        })
+    });
+    let chain: Vec<serde_json::Value> = origin
+        .chain
+        .iter()
+        .map(|hop| {
+            let kind = wire::FrameworkSurfaceOriginHopKind::try_from(hop.kind)
+                .map(|k| k.as_str_name().to_string())
+                .unwrap_or_else(|_| format!("UNKNOWN({})", hop.kind));
+            // PRESENCE-AWARE: each hop string id is `optional` on the wire.
+            // A field is projected ONLY when genuinely set — an absent field
+            // is omitted entirely, NEVER resolved through the zero-based string
+            // table (where id 0 is a real interned entry, not an absent
+            // sentinel). The hop kind selects which fields a hop carries.
+            let mut hop_json = serde_json::Map::new();
+            hop_json.insert("kind".to_string(), serde_json::Value::String(kind));
+            insert_optional_string(&mut hop_json, "from", hop.from_id, strings);
+            insert_optional_string(&mut hop_json, "specifier", hop.specifier_id, strings);
+            insert_optional_string(&mut hop_json, "importedName", hop.imported_name_id, strings);
+            insert_optional_string(&mut hop_json, "to", hop.to_id, strings);
+            insert_optional_string(&mut hop_json, "exportedName", hop.exported_name_id, strings);
+            insert_optional_string(&mut hop_json, "originalName", hop.original_name_id, strings);
+            insert_optional_string(&mut hop_json, "aliasName", hop.alias_name_id, strings);
+            serde_json::Value::Object(hop_json)
+        })
+        .collect();
+    serde_json::json!({
+        "declaration": declaration,
+        "chain": chain,
+    })
+}
+
+/// Insert a PRESENCE-AWARE hop string field into `obj` under `key`, resolving
+/// `id` through the graph string table ONLY when it is genuinely present
+/// (`Some`). An absent (`None`) field is omitted — never resolved to the
+/// zero-based table's entry 0.
+fn insert_optional_string(
+    obj: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    id: Option<u32>,
+    strings: &[String],
+) {
+    if let Some(id) = id {
+        obj.insert(
+            key.to_string(),
+            serde_json::Value::String(resolve_string(strings, id).to_string()),
+        );
+    }
 }
 
 fn project_error(error: &TypeInfoRequestError) -> serde_json::Value {
@@ -263,6 +339,8 @@ mod tests {
                     type_node_id: 0,
                     required: true,
                     readonly: false,
+                    default_value_id: None,
+                    origin: None,
                 }],
                 status: Some(wire::FrameworkSurfaceKindStatus {
                     support: FrameworkSurfaceKindSupport::Supported as i32,
@@ -281,5 +359,86 @@ mod tests {
         );
         assert_eq!(surface["members"][0]["name"], "count");
         assert_eq!(surface["members"][0]["required"], true);
+    }
+
+    #[test]
+    fn project_member_origin_omits_absent_hop_fields_over_a_nonempty_table_zero() {
+        // DISCRIMINATING (the P0): the graph string table's entry 0 is a real
+        // interned string — the encoder NEVER seeds it with `""`. A LOCAL hop
+        // carries NO string fields; an IMPORT hop without a specifier carries
+        // `from`+`importedName` but no specifier. The presence-aware projection
+        // must OMIT the absent fields, never resolve them to entry 0
+        // (`"__SENTINEL_ZERO__"`). The old id-0 decode fabricated entry 0 for
+        // every absent field — RED before the presence-aware fix.
+        let strings = vec![
+            "__SENTINEL_ZERO__".to_string(),
+            "/lib/props.ts".to_string(),
+            "Size".to_string(),
+        ];
+        let origin = wire::FrameworkSurfaceMemberOrigin {
+            declaration: Some(wire::FrameworkSurfaceMemberDeclaration {
+                requested_name_id: 2,
+                resolved_name_id: 2,
+                canonical_source_id: 1,
+                span_start: 0,
+                span_end: 0,
+                kind: wire::FrameworkSurfaceDeclarationKind::TypeAlias as i32,
+            }),
+            chain: vec![
+                // LOCAL: no string fields at all.
+                wire::FrameworkSurfaceOriginHop {
+                    kind: wire::FrameworkSurfaceOriginHopKind::Local as i32,
+                    from_id: None,
+                    specifier_id: None,
+                    imported_name_id: None,
+                    to_id: None,
+                    exported_name_id: None,
+                    original_name_id: None,
+                    alias_name_id: None,
+                },
+                // IMPORT: from + importedName present, NO specifier.
+                wire::FrameworkSurfaceOriginHop {
+                    kind: wire::FrameworkSurfaceOriginHopKind::Import as i32,
+                    from_id: Some(1),
+                    specifier_id: None,
+                    imported_name_id: Some(2),
+                    to_id: None,
+                    exported_name_id: None,
+                    original_name_id: None,
+                    alias_name_id: None,
+                },
+            ],
+        };
+
+        let json = project_member_origin(&origin, &strings);
+        let chain = json["chain"].as_array().expect("chain is an array");
+
+        // LOCAL hop: only `kind` — every string field OMITTED, never entry 0.
+        let local = &chain[0];
+        assert_eq!(local["kind"], "FRAMEWORK_SURFACE_ORIGIN_HOP_KIND_LOCAL");
+        for key in [
+            "from",
+            "specifier",
+            "importedName",
+            "to",
+            "exportedName",
+            "originalName",
+            "aliasName",
+        ] {
+            assert!(
+                local.get(key).is_none(),
+                "LOCAL hop must omit `{key}`, not resolve it to string-table entry 0"
+            );
+        }
+
+        // IMPORT hop: from + importedName resolved; specifier OMITTED.
+        let import = &chain[1];
+        assert_eq!(import["kind"], "FRAMEWORK_SURFACE_ORIGIN_HOP_KIND_IMPORT");
+        assert_eq!(import["from"], "/lib/props.ts");
+        assert_eq!(import["importedName"], "Size");
+        assert!(
+            import.get("specifier").is_none(),
+            "an IMPORT hop with no recorded specifier must omit it, not fabricate entry 0"
+        );
     }
 }

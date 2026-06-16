@@ -731,10 +731,13 @@ describe("typeinfo proto TS bindings", () => {
     expect(decodedUnsupported.status?.diagnostics.length).toBeGreaterThanOrEqual(1);
   });
 
-  it("wire schema version is 3 with the framework-surface response arm", () => {
-    // Schema 2→3: the framework_surface response arm + per-kind
-    // status landed under a schema bump per the closed-enum rule.
-    expect(TYPEINFO_GRAPH_SCHEMA_VERSION).toBe(3);
+  it("wire schema version is 4 with the framework-surface member default/origin fields", () => {
+    // Schema 3→4: the add-only `FrameworkSurfaceMember.default_value_id` +
+    // `origin` fields landed under a schema bump per the closed-enum rule
+    // (3 added the framework_surface response arm + per-kind status). The TS
+    // facade constant tracks the Rust `TYPEINFO_GRAPH_SCHEMA_VERSION` in
+    // lock-step.
+    expect(TYPEINFO_GRAPH_SCHEMA_VERSION).toBe(4);
   });
 
   it("deep-equality roundtrip detects nested field corruption that case-match misses", () => {

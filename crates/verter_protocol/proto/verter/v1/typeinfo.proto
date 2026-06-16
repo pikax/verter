@@ -847,8 +847,10 @@ message TypeInfoCapabilityHandshakeResponse {
 // ----------- Framework surface payload -----------
 
 // FrameworkSurfacePayload — the framework component-surface response
-// (schema 3). A v3 framework-surface response carries EXACTLY ONE
-// `FrameworkSurfaceKindEntry` per known `FrameworkSurfaceKind`.
+// (schema 3+). A framework-surface response carries EXACTLY ONE
+// `FrameworkSurfaceKindEntry` per known `FrameworkSurfaceKind`. Schema 4
+// added the add-only `FrameworkSurfaceMember.default_value_id` +
+// `origin` fields.
 message FrameworkSurfacePayload {
   uint32 schema_version = 1;
   ComponentSelector selector = 2;
@@ -889,6 +891,95 @@ message FrameworkSurfaceMember {
   uint32 type_node_id = 2;
   bool required = 3;
   bool readonly = 4;
+  // The member's runtime DEFAULT value source text, interned into the
+  // graph string table (schema 4, add-only). Defaults are runtime
+  // expressions (a destructuring default RHS, a `$bindable(<default>)`
+  // fallback), not types — they ride a string id, never a type node.
+  // `optional` so a string-table id of 0 (a legitimate intern slot) is
+  // NOT confused with "no default"; absent ⇒ the member has no default.
+  // A consumer that ignores this field keeps working.
+  optional uint32 default_value_id = 5;
+  // The member's DECLARATION origin (schema 4, add-only): the resolver-
+  // known per-member declaration plus the ordered hop chain to it.
+  // Absent when no origin was resolver-known. Populated only from routes
+  // the shared resolver already traversed — never source-text-guessed.
+  FrameworkSurfaceMemberOrigin origin = 6;
+}
+
+// The declaration ORIGIN of a framework-surface member (schema 4): the
+// resolver-known declaration plus the ordered hop chain the shared
+// resolver traversed to reach it. Framework-neutral — populated from
+// resolver-known routes only. Typeinfo-graph-LOCAL (string ids index the
+// graph string table); intentionally NOT the component-meta wire's
+// `PropOrigin`/`ResolvedTypeDeclaration` (the two public wires stay
+// decoupled).
+message FrameworkSurfaceMemberOrigin {
+  // The per-member resolved declaration (its declaring file, resolved
+  // name, span, kind). Absent for an inline/local member that has a
+  // declaration FILE but no separately-named declaration to resolve.
+  FrameworkSurfaceMemberDeclaration declaration = 1;
+  // The ordered hop chain from the requesting file to the declaration.
+  repeated FrameworkSurfaceOriginHop chain = 2;
+}
+
+// One member's resolved declaration on the framework-surface graph wire
+// (schema 4). String ids index the graph string table.
+message FrameworkSurfaceMemberDeclaration {
+  uint32 requested_name_id = 1;
+  uint32 resolved_name_id = 2;
+  uint32 canonical_source_id = 3;
+  uint32 span_start = 4;
+  uint32 span_end = 5;
+  FrameworkSurfaceDeclarationKind kind = 6;
+}
+
+// One hop in a framework-surface member's origin chain (schema 4).
+// `kind` selects which fields apply. String ids index the graph string
+// table.
+//
+// Every string-id field is PRESENCE-AWARE (proto3 `optional` / explicit
+// has-bit): an unset field decodes as absent (None), NOT as string-table
+// id 0. The graph string table is zero-based (entry 0 is a real interned
+// string), so a plain `uint32` field defaulting to 0 would alias a real
+// table entry — a sentinel collision that fabricates data for an N/A
+// field. Mirroring `FrameworkSurfaceMember.default_value_id`'s pattern,
+// each hop field is set ONLY when its hop kind genuinely carries it; the
+// decoder reads presence and never resolves an unset field through the
+// string table. Schema 4, add-only: the field numbers are unchanged
+// (presence is a wire-compatible has-bit on the same tag).
+message FrameworkSurfaceOriginHop {
+  FrameworkSurfaceOriginHopKind kind = 1;
+  // Import / Reexport: the source module canonical. Absent (unset) when
+  // the hop kind does not carry it.
+  optional uint32 from_id = 2;
+  // Import: the raw import specifier. Absent when unrecorded or N/A.
+  optional uint32 specifier_id = 3;
+  // Import: the imported name in the source module. Absent when N/A.
+  optional uint32 imported_name_id = 4;
+  // Reexport: the module the symbol re-exports to. Absent when N/A.
+  optional uint32 to_id = 5;
+  // Reexport: the name the symbol is re-exported under. Absent when N/A.
+  optional uint32 exported_name_id = 6;
+  // Reexport: the original name before the re-export rename. Absent when
+  // N/A.
+  optional uint32 original_name_id = 7;
+  // Alias: the alias target name. Absent when N/A.
+  optional uint32 alias_name_id = 8;
+}
+
+enum FrameworkSurfaceOriginHopKind {
+  FRAMEWORK_SURFACE_ORIGIN_HOP_KIND_UNSPECIFIED = 0;
+  FRAMEWORK_SURFACE_ORIGIN_HOP_KIND_LOCAL = 1;
+  FRAMEWORK_SURFACE_ORIGIN_HOP_KIND_IMPORT = 2;
+  FRAMEWORK_SURFACE_ORIGIN_HOP_KIND_REEXPORT = 3;
+  FRAMEWORK_SURFACE_ORIGIN_HOP_KIND_ALIAS = 4;
+}
+
+enum FrameworkSurfaceDeclarationKind {
+  FRAMEWORK_SURFACE_DECLARATION_KIND_UNKNOWN = 0;
+  FRAMEWORK_SURFACE_DECLARATION_KIND_INTERFACE = 1;
+  FRAMEWORK_SURFACE_DECLARATION_KIND_TYPE_ALIAS = 2;
+  FRAMEWORK_SURFACE_DECLARATION_KIND_CLASS = 3;
 }
 
 // ----------- Closed enums -----------

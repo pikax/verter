@@ -40,7 +40,7 @@ use crate::typeinfo::framework_surface::results::{
 };
 use crate::typeinfo::framework_surface::vue_exec::{
     emits_from_typeinfo_surface, navigate_param_to_object_surface, props_from_typeinfo_surface,
-    slots_from_typeinfo_surface, VueMacroSurface,
+    VueMacroSurface,
 };
 use crate::typeinfo::framework_surface::{SvelteSurfaceKey, SvelteSurfaceSource};
 use crate::typeinfo::surface::TypeInfoSurface;
@@ -189,28 +189,142 @@ fn resolve_runes_props(
     owner: &str,
     facts: Option<&SvelteScriptFacts>,
 ) -> ResolvedMacroPayload {
-    let Some(props_type) = facts.and_then(|f| f.props_type.as_ref()) else {
+    let Some(facts) = facts else {
         return ResolvedOutcome::Missing;
     };
-    let fields = navigate_param_to_object_surface(ctx, owner, props_type)
-        .map(|surface| {
-            props_from_typeinfo_surface(
+    let Some(props_type) = facts.props_type.as_ref() else {
+        return ResolvedOutcome::Missing;
+    };
+    // Navigate the props type to its one-level object surface ONCE, then derive
+    // BOTH the published prop fields (via the shared normalizer) AND the
+    // per-member declaration ORIGINs from the SAME surface — the surface's
+    // per-member `origin.canonical_file` is the heritage-aware declaration file
+    // (the file the member's `name`/`: T` is written in), so a member inherited
+    // from an imported base reports THAT base's file, not the props_type's.
+    let surface = navigate_param_to_object_surface(ctx, owner, props_type);
+    let (mut fields, prop_origins) = match surface {
+        Some(surface) => {
+            let prop_origins = prop_origins_from_surface(owner, &surface);
+            let fields = props_from_typeinfo_surface(
                 ctx,
                 &macro_surface_shell(surface, AnalyzedMacroKind::DefineProps, owner),
-            )
-        })
+            );
+            (fields, prop_origins)
+        }
         // A props type that does not project to an object surface (a primitive /
         // open generic) still establishes a PRESENT props surface — supported-
         // empty, never a Missing.
-        .unwrap_or_default();
+        None => (Vec::new(), Vec::new()),
+    };
+    // Apply runtime DEFAULTS DIRECTLY (the Svelte path does NOT use Vue's
+    // analyzer default-merge path): a prop with a captured default is OPTIONAL
+    // on the surface (`required = !is_optional` downstream), and the default
+    // VALUE rides the framework-neutral `prop_defaults` SIDECAR.
+    let default_keys: std::collections::HashSet<&str> =
+        facts.prop_defaults.iter().map(|d| d.key.as_str()).collect();
+    for field in &mut fields {
+        if default_keys.contains(field.name.as_str()) {
+            field.is_optional = true;
+        }
+    }
     let dtos = MacroSurfaceDtos {
         props: Some(PropsSurface {
             fields,
             index_signatures: Vec::new(),
+            prop_defaults: facts.prop_defaults.clone(),
+            prop_origins,
         }),
         ..Default::default()
     };
     ResolvedOutcome::Resolved(Arc::new(dtos))
+}
+
+/// Derive each prop's MEMBER-DECLARATION origin from the resolved props object
+/// surface (gap 2 — framework-neutral SIDECAR).
+///
+/// The origin is the member's DECLARATION provenance (where the prop's
+/// `name`/`: T` is written), NOT its value-type provenance. The shared
+/// resolver already records this per-member axis on
+/// [`SurfaceMemberOrigin::canonical_file`](crate::typeinfo::surface::SurfaceMemberOrigin):
+/// the heritage-aware file the member's declaration lives in. A member
+/// inherited from an imported `Base` reports THAT base's file (an Import hop);
+/// a member declared in a local/inline props type reports the owner file (a
+/// Local hop), INCLUDING a primitive-typed member (it is still DECLARED
+/// somewhere). A synthetic / multi-origin member (a union common-member, a
+/// mapped-produced member) carries NO single declaration file → NO entry
+/// (never guessed).
+fn prop_origins_from_surface(
+    owner: &str,
+    surface: &TypeInfoSurface,
+) -> Vec<crate::typeinfo::framework_surface::results::PropOriginEntry> {
+    let mut origins = Vec::new();
+    for member in surface.members.iter() {
+        if !member.visibility.is_public() {
+            continue;
+        }
+        let Some(origin) = member_declaration_origin(owner, member) else {
+            continue;
+        };
+        origins.push(
+            crate::typeinfo::framework_surface::results::PropOriginEntry {
+                prop_name: member.name.as_ref().to_string(),
+                origin,
+            },
+        );
+    }
+    origins
+}
+
+/// Build a [`PropOrigin`](crate::typeinfo::framework_surface::results::PropOrigin)
+/// for ONE surface member from its DECLARATION provenance. Returns `None` when
+/// the member has no single declaration file (a synthetic / multi-origin
+/// member). The hop chain is derived purely from the per-member declaration
+/// file vs the owner: same file ⇒ a `Local` hop; a different file ⇒ an `Import`
+/// hop pointing at the declaring module (the member was reached cross-file —
+/// an imported props interface, a heritage base in another file).
+fn member_declaration_origin(
+    owner: &str,
+    member: &crate::typeinfo::surface::TypeInfoSurfaceMember,
+) -> Option<crate::typeinfo::framework_surface::results::PropOrigin> {
+    use crate::resolver_core::{ResolvedDeclarationKind, ResolvedTypeDeclaration};
+    use crate::typeinfo::framework_surface::results::{OriginHop, PropOrigin};
+
+    let canonical_file = member.origin.canonical_file.as_ref()?;
+    let canonical_source = canonical_file.as_ref().to_string();
+    let member_name = member.name.as_ref().to_string();
+    let span = member
+        .origin
+        .declaration_span
+        .as_ref()
+        .map(|cspan| cspan.span)
+        .or_else(|| member.name_span.as_ref().map(|cspan| cspan.span))
+        .unwrap_or_default();
+
+    let declaration = ResolvedTypeDeclaration {
+        requested_name: member_name.clone(),
+        declaration_id: None,
+        resolved_name: member_name.clone(),
+        canonical_source: canonical_source.clone(),
+        span,
+        // A surface member is not itself a named interface/alias/class
+        // declaration — its declaration kind is the MEMBER declaration, which
+        // the surface does not classify. Report Unknown rather than fabricate a
+        // kind; the load-bearing provenance is the file + name + span + hop.
+        kind: ResolvedDeclarationKind::Unknown,
+        text: None,
+    };
+
+    let chain = if canonical_source == owner {
+        vec![OriginHop::Local]
+    } else {
+        vec![OriginHop::Import {
+            from: canonical_source,
+            specifier: None,
+            imported_name: member_name,
+        }]
+    };
+
+    Some(PropOrigin { declaration, chain })
 }
 
 /// PROPS from legacy `export let` props. The legacy props carry no type
@@ -235,6 +349,7 @@ fn resolve_legacy_export_let(
         props: Some(PropsSurface {
             fields,
             index_signatures: Vec::new(),
+            ..Default::default()
         }),
         ..Default::default()
     };
@@ -352,7 +467,12 @@ fn resolve_snippet_props(
             // Retain only the snippet-validated members BEFORE the slot
             // normalizer (the other props are not slots).
             let filtered = retain_members(&surface, &facts.validated_snippet_members);
-            slots_from_typeinfo_surface(
+            // The SVELTE-SPECIFIC snippet normalizer (NOT Vue's shared
+            // `slots_from_typeinfo_surface`): a Svelte `Snippet<[a, b]>`
+            // contributes ALL positional parameters as ordered slot bindings,
+            // whereas Vue's slot callable surfaces only its first-parameter
+            // object. The two normalizers stay separate so neither regresses.
+            svelte_snippet_slots_from_typeinfo_surface(
                 ctx,
                 &macro_surface_shell(filtered, AnalyzedMacroKind::DefineSlots, owner),
             )
@@ -363,6 +483,240 @@ fn resolve_snippet_props(
         ..Default::default()
     };
     ResolvedOutcome::Resolved(Arc::new(dtos))
+}
+
+/// The SVELTE-SPECIFIC snippet-slot normalizer (gap 3).
+///
+/// Unlike Vue's shared `slots_from_typeinfo_surface` (which surfaces ONLY a
+/// slot callable's FIRST-parameter object), a Svelte `Snippet<[a, b]>` exposes
+/// EVERY positional parameter as an ordered slot binding. For each validated
+/// snippet member this:
+///
+/// 1. realizes the member value to a callable through the SHARED
+///    callable-realization substrate (`realize_callable_member` +
+///    `raise_node_to_type_expr`) — never a second resolver;
+/// 2. iterates the realized `Function`'s parameters in positional ORDER,
+///    SKIPPING the leading `this` parameter and EXPANDING a rest-tuple
+///    parameter (`...args: [item: Item, index: number]`) into one binding per
+///    tuple element (label from `TupleElement.label`, type from the element
+///    type); a non-rest, non-`this` parameter contributes one positional
+///    binding directly;
+/// 3. combines a UNION / INTERSECTION of callable arms by index (intersecting
+///    each positional binding's types), mirroring the Vue multi-arm rule.
+///
+/// The ordered `bindings` vector IS the positional order (no explicit position
+/// field). The binding type is the typed-IR element type (typed-IR only — no
+/// source slicing).
+fn svelte_snippet_slots_from_typeinfo_surface(
+    ctx: &dyn ResolverContext,
+    macro_surface: &VueMacroSurface,
+) -> Vec<AnalyzedSlotField> {
+    let host = ctx.host_for_fact_tracer_install();
+    macro_surface
+        .surface
+        .members
+        .iter()
+        .filter(|member| member.visibility.is_public())
+        .filter_map(|member| {
+            // Realize the member value to a callable through the SHARED
+            // substrate (Alias / Conditional / InstantiationRef / DeclRef
+            // carrier normalization), then raise to a TypeExpr.
+            let dispatch = ctx.dispatch();
+            let realized = crate::meta_resolve::dispatch_helpers::realize_callable_member(
+                &dispatch,
+                member.value,
+                crate::semantic_query::ProjectionReductionContext::published(
+                    crate::semantic_query::ProjectionMode::Navigate,
+                ),
+            )
+            .unwrap_or(member.value);
+            let value = dispatch.raise_node_to_type_expr(realized)?;
+            let scope = crate::typeinfo::framework_surface::scope::member_value_expr_scope(
+                host,
+                member,
+                macro_surface.owner_canonical.as_ref(),
+            );
+            let bindings = snippet_callable_positional_bindings(&value, &scope)?;
+            Some(AnalyzedSlotField {
+                name: member.name.as_ref().to_string(),
+                is_required: !member.optional,
+                span: verter_span::Span::default(),
+                bindings,
+                return_type: None,
+                return_expr: None,
+                return_expr_scope: None,
+                description: None,
+                tags: Vec::new(),
+            })
+        })
+        .collect()
+}
+
+/// Extract the ordered positional slot bindings from a realized snippet
+/// callable `value`, handling a single `Function`, or a `Union` / `Intersection`
+/// of callable arms (combined by positional index — intersecting types). Each
+/// `this` param is skipped and each rest-tuple param is expanded into its
+/// element bindings. Returns `None` when the value is not callable.
+fn snippet_callable_positional_bindings(
+    value: &TypeExpr,
+    scope: &verter_type_expr::TypeExprScope,
+) -> Option<Vec<AnalyzedSlotFieldBinding>> {
+    match value {
+        // A realized snippet call signature: `(this: void, ...args: Params)`.
+        TypeExpr::Function(_) => Some(snippet_function_positional_bindings(value, scope)),
+        // A `Snippet<Params>` carrier the resolver kept as a Ref (the common
+        // case — the structural `Snippet<Params>` interface does not reduce to a
+        // bare `Function` under Navigate). The member is ALREADY structurally
+        // validated as snippet-typed, so its SINGLE tuple type-argument IS the
+        // `Params` tuple — expand it element-wise. Typed-IR only (no nominal
+        // name match, no source slicing): we read the carrier's first type
+        // argument, which the validated `Snippet<Params>` contract fixes as the
+        // positional-params tuple.
+        TypeExpr::Ref { type_arguments, .. } => {
+            // A validated snippet carrier is ALWAYS a slot; an open-generic /
+            // non-tuple `Params` simply yields no enumerable bindings (a
+            // present, binding-less slot — NOT a dropped slot).
+            match single_tuple_type_argument(type_arguments) {
+                Some(params) => Some(positional_bindings_from_tuple(params, scope)),
+                None => Some(Vec::new()),
+            }
+        }
+        TypeExpr::Parenthesized(inner) => snippet_callable_positional_bindings(inner, scope),
+        TypeExpr::Union(arms) | TypeExpr::Intersection(arms) => {
+            // Every arm must be a callable / snippet carrier; combine by index.
+            let mut per_arm: Vec<Vec<AnalyzedSlotFieldBinding>> = Vec::new();
+            for arm in arms.iter() {
+                let arm_bindings = snippet_callable_positional_bindings(arm, scope)?;
+                per_arm.push(arm_bindings);
+            }
+            Some(combine_positional_bindings_by_index(per_arm, scope))
+        }
+        _ => None,
+    }
+}
+
+/// The single tuple `Params` argument of a `Snippet<Params>` carrier `Ref`'s
+/// type-argument list, or `None` when the carrier has no single tuple argument
+/// (an open `Params` generic / a non-tuple arg ⇒ no enumerable positional
+/// bindings).
+fn single_tuple_type_argument(
+    type_arguments: &[TypeExpr],
+) -> Option<&[verter_type_expr::TupleElement]> {
+    let [TypeExpr::Tuple { elements, .. }] = type_arguments else {
+        return None;
+    };
+    Some(elements)
+}
+
+/// Expand a `Params` tuple into ordered positional bindings (label →
+/// `arg{index}` fallback, element type preserved).
+fn positional_bindings_from_tuple(
+    elements: &[verter_type_expr::TupleElement],
+    scope: &verter_type_expr::TypeExprScope,
+) -> Vec<AnalyzedSlotFieldBinding> {
+    elements
+        .iter()
+        .enumerate()
+        .map(|(index, element)| {
+            positional_binding(element.label.clone(), index, &element.ty, scope)
+        })
+        .collect()
+}
+
+/// The ordered positional bindings of ONE realized snippet `Function`: skip the
+/// leading `this` param, expand a rest-tuple param into element bindings, and
+/// emit each remaining positional param directly.
+fn snippet_function_positional_bindings(
+    value: &TypeExpr,
+    scope: &verter_type_expr::TypeExprScope,
+) -> Vec<AnalyzedSlotFieldBinding> {
+    let TypeExpr::Function(func) = value else {
+        return Vec::new();
+    };
+    let mut bindings = Vec::new();
+    for param in &func.parameters {
+        // Skip the leading `this` parameter (the vendored `Snippet` call
+        // signature is `(this: void, ...args: Params)`).
+        if param.name.as_deref() == Some("this") {
+            continue;
+        }
+        if param.rest {
+            // A rest-tuple param spreads the snippet's `Params` tuple — expand
+            // each tuple element into one ordered positional binding. A rest
+            // param whose type is NOT a tuple (an open `Params` generic /
+            // `unknown[]`) carries no enumerable positional bindings.
+            if let TypeExpr::Tuple { elements, .. } = &param.ty {
+                bindings.extend(positional_bindings_from_tuple(elements, scope));
+            }
+            continue;
+        }
+        let index = bindings.len();
+        bindings.push(positional_binding(
+            param.name.clone(),
+            index,
+            &param.ty,
+            scope,
+        ));
+    }
+    bindings
+}
+
+/// One positional slot binding: name from the label (fallback `arg{index}`),
+/// the typed element/param type, scoped to the slot member's value-node file.
+fn positional_binding(
+    label: Option<String>,
+    index: usize,
+    ty: &TypeExpr,
+    scope: &verter_type_expr::TypeExprScope,
+) -> AnalyzedSlotFieldBinding {
+    let name = label.unwrap_or_else(|| format!("arg{index}"));
+    let type_annotation = crate::resolver_core::surface_projector::render_type_expr_display(ty);
+    AnalyzedSlotFieldBinding {
+        name,
+        type_annotation,
+        binding_expr: Some(ty.clone()),
+        binding_expr_scope: Some(scope.clone()),
+        span: verter_span::Span::default(),
+    }
+}
+
+/// Combine per-arm positional bindings by index: a binding at index `i` is the
+/// INTERSECTION of every arm's `i`-th binding type (a template can rely on a
+/// positional binding only if EVERY arm supplies it). Bindings present in only
+/// some arms are dropped (the shortest arm caps the count).
+fn combine_positional_bindings_by_index(
+    per_arm: Vec<Vec<AnalyzedSlotFieldBinding>>,
+    scope: &verter_type_expr::TypeExprScope,
+) -> Vec<AnalyzedSlotFieldBinding> {
+    let Some(min_len) = per_arm.iter().map(|a| a.len()).min() else {
+        return Vec::new();
+    };
+    let mut out = Vec::with_capacity(min_len);
+    for i in 0..min_len {
+        let mut types: Vec<TypeExpr> = Vec::new();
+        // Use the first arm's binding NAME for the position.
+        let name = per_arm[0][i].name.clone();
+        for arm in &per_arm {
+            if let Some(expr) = arm[i].binding_expr.as_ref() {
+                types.push(expr.clone());
+            }
+        }
+        let combined = match types.len() {
+            0 => TypeExpr::Primitive(PrimitiveName::Unknown),
+            1 => types.into_iter().next().unwrap(),
+            _ => TypeExpr::Intersection(Arc::from(types.into_boxed_slice())),
+        };
+        let type_annotation =
+            crate::resolver_core::surface_projector::render_type_expr_display(&combined);
+        out.push(AnalyzedSlotFieldBinding {
+            name,
+            type_annotation,
+            binding_expr: Some(combined),
+            binding_expr_scope: Some(scope.clone()),
+            span: verter_span::Span::default(),
+        });
+    }
+    out
 }
 
 /// A [`TypeInfoSurface`] keeping only the members whose name is in `keep`.
@@ -770,530 +1124,5 @@ fn resolve_instance_exports(facts: Option<&SvelteScriptFacts>) -> ResolvedMacroP
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use verter_compiler::svelte::parser::parse_svelte;
-
-    /// Collect the legacy `<slot>` slot fields from a `.svelte` SOURCE through the
-    /// same structural walk the resolver uses (the typed template carrier).
-    fn legacy_slots(source: &str) -> Vec<AnalyzedSlotField> {
-        let parsed = parse_svelte(source);
-        let mut slots = Vec::new();
-        collect_slot_elements(&parsed.template, source, "/Test.svelte", &mut slots);
-        slots
-    }
-
-    #[test]
-    fn legacy_slot_names_are_exact_and_dedup_first_writer_wins() {
-        // F9: the legacy `<slot>` inventory walk yields EXACT slot NAMES from the
-        // typed template AST — precise, structural, never a source-text scan.
-        let slots = legacy_slots(
-            "<div><slot /></div><slot name=\"header\" /><slot name=\"header\" item={x} />",
-        );
-        let names: Vec<&str> = slots.iter().map(|s| s.name.as_str()).collect();
-        assert!(names.contains(&"default"), "the bare <slot> is `default`");
-        assert!(names.contains(&"header"), "the named <slot> is `header`");
-        // First-writer-wins on a duplicate name (the `header` slot appears once).
-        assert_eq!(
-            names.iter().filter(|n| **n == "header").count(),
-            1,
-            "duplicate slot names dedup first-writer-wins, got {names:?}"
-        );
-    }
-
-    #[test]
-    #[ignore = "NAMED FOLLOW-UP (owner-decided carve-out): a legacy `<slot name=x let:b>` / \
-                forwarded `<slot attr={expr}>` binding VALUE type is currently `any` — a \
-                DOCUMENTED deprecated-path carve-out scoped to legacy-<slot> bindings ONLY (the \
-                slot NAMES are precise). Precise parse-domain forwarded-expression capture (typing \
-                each binding from its `attr={expr}` through the shared engine) is the follow-up. \
-                This test asserts the binding `binding_expr` is PRECISE (NOT `Primitive(Any)`); it \
-                is RED today (the carve-out emits `any`) and flips green (ignore removed) when the \
-                precise-capture follow-up lands."]
-    fn legacy_slot_let_binding_value_precision_is_a_followup() {
-        // DISCRIMINATING: the forwarded `item={items[0]}` binding's value type must
-        // be PRECISE (resolved from the forwarded expression), NOT the `any`
-        // carve-out. Today `slot_bindings` emits `Primitive(Any)`, so this RED
-        // assertion is ledgered behind `#[ignore]`. When the precise forwarded-
-        // expression capture lands, `binding_expr` becomes the resolved type and
-        // this assertion passes — the ignore is then removed.
-        let slots = legacy_slots(
-            "<script lang=\"ts\">let items: { id: number }[] = []; void items;</script>\n\
-             <slot name=\"row\" item={items[0]} />",
-        );
-        let row = slots
-            .iter()
-            .find(|s| s.name == "row")
-            .expect("the `row` slot is collected");
-        let binding = row
-            .bindings
-            .iter()
-            .find(|b| b.name == "item")
-            .expect("the forwarded `item` binding is collected");
-        assert!(
-            !matches!(
-                binding.binding_expr,
-                Some(TypeExpr::Primitive(PrimitiveName::Any))
-            ),
-            "the legacy slot binding value must be PRECISE (not the `any` carve-out) — \
-             follow-up: precise forwarded-expression capture"
-        );
-    }
-
-    #[test]
-    fn legacy_slot_binding_expr_is_paired_with_a_scope() {
-        // PAIRING INVARIANT: even the `any` carve-out value must be paired with a
-        // `binding_expr_scope` (`binding_expr.is_some() <=> binding_expr_scope
-        // .is_some()`). A `Some`-expr / `None`-scope mismatch violates the
-        // documented `AnalyzedSlotFieldBinding` pairing invariant. This is
-        // DISCRIMINATING: it FAILS if `slot_bindings` drops the scope back to
-        // `None`.
-        let slots = legacy_slots("<slot name=\"row\" item={x} />");
-        let binding = slots
-            .iter()
-            .find(|s| s.name == "row")
-            .and_then(|s| s.bindings.iter().find(|b| b.name == "item"))
-            .expect("the forwarded `item` binding is collected");
-        assert_eq!(
-            binding.binding_expr.is_some(),
-            binding.binding_expr_scope.is_some(),
-            "binding_expr must be paired with binding_expr_scope (pairing invariant)"
-        );
-        assert!(
-            binding.binding_expr_scope.is_some(),
-            "the legacy slot binding's `any` value must carry an owner scope"
-        );
-    }
-
-    /// Build a host carrying ONE `.svelte` source under `canonical`, returning
-    /// the host plus a PROVEN-CURRENT base view — the caller builds the request
-    /// `ResolverContext` inline (the ctx borrows both, so it cannot outlive a
-    /// helper that owns them).
-    fn host_with_svelte(
-        canonical: &str,
-        source: &str,
-    ) -> (
-        std::sync::Arc<VerterHost>,
-        crate::resolver_store::CurrentHostStoreView,
-    ) {
-        use crate::{HostConfig, UpsertRequest};
-        use verter_language::FileLanguage;
-        let host = std::sync::Arc::new(VerterHost::new_standalone(HostConfig::default()));
-        let _ = host
-            .upsert(UpsertRequest {
-                canonical_id: Some(canonical.to_string()),
-                input_id: canonical.to_string(),
-                source: Arc::from(source),
-                file_language: FileLanguage::svelte(),
-                aliases: Vec::new(),
-            })
-            .unwrap_or_else(|e| panic!("upsert: {e:?}"));
-        let view =
-            crate::typeinfo::current_store_view_for_query(&host).expect("current store view");
-        (host, view)
-    }
-
-    #[test]
-    fn callback_event_payload_named_ref_resolves_on_the_component_meta_surface() {
-        // P1 (COMPONENT-META surface, not IDE-TSX): a callback-prop event
-        // `onselect: (row: Row) => void` (with `Row` a same-module interface)
-        // resolves through the framework-surface resolver to an `AnalyzedEmitField`
-        // whose payload `Row` reference is PRECISE — its `payload_expr_scope`
-        // anchors the SAME module so a consumer re-resolves `Row` to its object
-        // surface. DISCRIMINATING: if the scope is dropped (`None`), the pairing
-        // breaks and the `Row` re-resolution below cannot anchor.
-        let canonical = "/CbScope.svelte";
-        let source = "<script lang=\"ts\">\n\
-             interface Row { id: number }\n\
-             interface Props { onselect: (row: Row) => void }\n\
-             let { onselect }: Props = $props();\n\
-             void onselect;\n\
-             </script>\n\
-             <button onclick={() => onselect({ id: 1 })} />";
-        let (host, view) = host_with_svelte(canonical, source);
-        let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let ctx = crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
-
-        let outcome = resolve_svelte_surface(
-            &host,
-            &ctx,
-            canonical,
-            SvelteSurfaceSource::CallbackPropEvents,
-        );
-        let ResolvedOutcome::Resolved(dtos) = outcome else {
-            panic!("the callback-prop EMITS surface must resolve, got {outcome:?}");
-        };
-        let emits = dtos.emits.as_ref().expect("emits surface present");
-        let select = emits
-            .fields
-            .iter()
-            .find(|e| e.name == "select")
-            .expect("the `onselect` callback prop surfaces as event `select`");
-
-        // PAIRING: a `Some` payload_expr MUST carry a `Some` payload_expr_scope.
-        assert!(
-            select.payload_expr.is_some(),
-            "the `select` event carries a payload tuple"
-        );
-        let scope = select
-            .payload_expr_scope
-            .as_ref()
-            .expect("payload_expr_scope must be Some when payload_expr is Some (P1 pairing)");
-        // The scope anchors the OWNER module where `Row` is declared.
-        assert_eq!(
-            scope.as_str(),
-            canonical,
-            "the callback payload scope anchors the `$props` member's value-node file \
-             (where `Row` is declared)"
-        );
-
-        // DISCRIMINATING named-ref resolution: take the payload tuple's `Row`
-        // element type and re-resolve it THROUGH THE SHARED RESOLVER in `scope`.
-        // A precise scope yields `Row`'s object surface (member `id`); a dropped
-        // scope could not anchor this resolution.
-        let TypeExpr::Tuple { elements, .. } = select.payload_expr.as_ref().expect("payload tuple")
-        else {
-            panic!("the callback payload is a labelled tuple");
-        };
-        let row_ty = elements
-            .first()
-            .map(|el| el.ty.clone())
-            .expect("the `(row: Row)` callback has one parameter");
-        assert!(
-            matches!(&row_ty, TypeExpr::Ref { name, .. } if name.as_ref() == "Row"),
-            "the payload element is the named `Row` ref, got {row_ty:?}"
-        );
-        let resolved = navigate_param_to_object_surface(&ctx, scope.as_str(), &row_ty)
-            .expect("`Row` resolves to an object surface in its declaring scope");
-        assert!(
-            resolved.members.iter().any(|m| m.name.as_ref() == "id"),
-            "the resolved `Row` surface carries member `id` (precise named-ref \
-             resolution via the payload scope), got members {:?}",
-            resolved
-                .members
-                .iter()
-                .map(|m| m.name.as_ref())
-                .collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn optional_callback_prop_classifies_as_event_with_precise_payload() {
-        // P1-importance (COMPONENT-META surface): a member-OPTIONAL callback prop
-        // `onselect?: (row: Row) => void`. The `?` is factored into the surface
-        // member `optional` flag, so the VALUE raises to a BARE `Function` (NOT a
-        // union — that is the explicit-union case below). It MUST classify as event
-        // `select` with a PRECISE `(row: Row)` payload. A NON-callable optional prop
-        // (`label?: string`) is NOT an event; a non-`on` prop is never mined.
-        let canonical = "/OptCb.svelte";
-        let source = "<script lang=\"ts\">\n\
-             interface Row { id: number }\n\
-             interface Props {\n\
-               onselect?: (row: Row) => void;\n\
-               label?: string;\n\
-               plain: number;\n\
-             }\n\
-             let { onselect, label, plain }: Props = $props();\n\
-             void onselect; void label; void plain;\n\
-             </script>\n\
-             <div />";
-        let (host, view) = host_with_svelte(canonical, source);
-        let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let ctx = crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
-
-        let outcome = resolve_svelte_surface(
-            &host,
-            &ctx,
-            canonical,
-            SvelteSurfaceSource::CallbackPropEvents,
-        );
-        let ResolvedOutcome::Resolved(dtos) = outcome else {
-            panic!("the callback-prop EMITS surface must resolve, got {outcome:?}");
-        };
-        let emits = dtos.emits.as_ref().expect("emits surface present");
-        let names: Vec<&str> = emits.fields.iter().map(|e| e.name.as_str()).collect();
-
-        // (a) the OPTIONAL callback prop IS event `select`.
-        let select = emits
-            .fields
-            .iter()
-            .find(|e| e.name == "select")
-            .unwrap_or_else(|| {
-                panic!(
-                    "an OPTIONAL `onselect?:` callback prop must classify as event \
-                     `select` (its value raises to a bare `Function`), got {names:?}"
-                )
-            });
-        // (c) the non-callable optional prop `label?: string` is NOT an event
-        // (neither the prop name nor the `on`-strip residue).
-        assert!(
-            !names.contains(&"label") && !names.contains(&"abel"),
-            "a non-callable optional prop must NOT be an event, got {names:?}"
-        );
-        // a non-`on` prop is never mined.
-        assert!(
-            !names.contains(&"plain"),
-            "a non-`on` prop must NOT be an event, got {names:?}"
-        );
-
-        // The optional callback's payload is PRECISE — `Row` resolves in scope.
-        let scope = select
-            .payload_expr_scope
-            .as_ref()
-            .expect("optional callback payload_expr_scope is Some (pairing)");
-        let TypeExpr::Tuple { elements, .. } = select.payload_expr.as_ref().expect("payload tuple")
-        else {
-            panic!("optional callback payload is a tuple");
-        };
-        let row_ty = elements
-            .first()
-            .map(|el| el.ty.clone())
-            .expect("the `(row: Row)` callback has one parameter");
-        let resolved = navigate_param_to_object_surface(&ctx, scope.as_str(), &row_ty)
-            .expect("`Row` resolves through the optional callback payload scope");
-        assert!(
-            resolved.members.iter().any(|m| m.name.as_ref() == "id"),
-            "the optional callback's `Row` payload resolves precisely (member `id`)"
-        );
-    }
-
-    #[test]
-    fn union_with_no_callable_arm_is_not_an_event() {
-        // P1-importance edge: an `on`-prefixed prop whose value is a union with NO
-        // callable arm (`onmode: \"a\" | \"b\"`) is NOT an event — the shared
-        // callable-arm extractor returns `None` for a non-callable union.
-        // DISCRIMINATING: a classifier that accepted any union would mis-mine it.
-        let canonical = "/UnionNoCb.svelte";
-        let source = "<script lang=\"ts\">\n\
-             interface Props { onmode: \"a\" | \"b\" }\n\
-             let { onmode }: Props = $props();\n\
-             void onmode;\n\
-             </script>\n\
-             <div />";
-        let (host, view) = host_with_svelte(canonical, source);
-        let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let ctx = crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
-
-        let outcome = resolve_svelte_surface(
-            &host,
-            &ctx,
-            canonical,
-            SvelteSurfaceSource::CallbackPropEvents,
-        );
-        let ResolvedOutcome::Resolved(dtos) = outcome else {
-            panic!("the EMITS surface must resolve, got {outcome:?}");
-        };
-        let emits = dtos.emits.as_ref().expect("emits surface present");
-        assert!(
-            !emits.fields.iter().any(|e| e.name == "mode"),
-            "an `on`-prefixed union with no callable arm must NOT be an event, got {:?}",
-            emits
-                .fields
-                .iter()
-                .map(|e| e.name.as_str())
-                .collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn optional_alias_callback_prop_classifies_as_event_with_precise_payload() {
-        // P1-importance WHOLE-CLASS edge: an OPTIONAL callback prop whose value is
-        // an ALIAS (`type Handler = (row: Row) => void; onselect?: Handler`). The
-        // member-`?` rides the surface `optional` flag, and the alias `Ref` carrier
-        // is realised through the SHARED resolver (`realize_callable_member`) to its
-        // bare `Function` body. It MUST classify as event `select` with a PRECISE
-        // `(row: Row)` payload. DISCRIMINATING: a classifier that only matched a
-        // bare post-raise `Function` arm WITHOUT realising the alias `Ref` carrier
-        // first would DROP it (the value is a `Ref`, not a `Function`, before
-        // realisation).
-        let canonical = "/OptAliasCb.svelte";
-        let source = "<script lang=\"ts\">\n\
-             interface Row { id: number }\n\
-             type Handler = (row: Row) => void;\n\
-             interface Props { onselect?: Handler }\n\
-             let { onselect }: Props = $props();\n\
-             void onselect;\n\
-             </script>\n\
-             <div />";
-        let (host, view) = host_with_svelte(canonical, source);
-        let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let ctx = crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
-
-        let outcome = resolve_svelte_surface(
-            &host,
-            &ctx,
-            canonical,
-            SvelteSurfaceSource::CallbackPropEvents,
-        );
-        let ResolvedOutcome::Resolved(dtos) = outcome else {
-            panic!("the callback-prop EMITS surface must resolve, got {outcome:?}");
-        };
-        let emits = dtos.emits.as_ref().expect("emits surface present");
-        let select = emits
-            .fields
-            .iter()
-            .find(|e| e.name == "select")
-            .unwrap_or_else(|| {
-                panic!(
-                    "an OPTIONAL alias callback prop `onselect?: Handler` must classify as \
-                 event `select` (the alias arm is realised, the `| undefined` arm stripped), \
-                 got {:?}",
-                    emits
-                        .fields
-                        .iter()
-                        .map(|e| e.name.as_str())
-                        .collect::<Vec<_>>()
-                )
-            });
-        let scope = select
-            .payload_expr_scope
-            .as_ref()
-            .expect("optional alias callback payload_expr_scope is Some (pairing)");
-        let TypeExpr::Tuple { elements, .. } = select.payload_expr.as_ref().expect("payload tuple")
-        else {
-            panic!("optional alias callback payload is a tuple");
-        };
-        let row_ty = elements
-            .first()
-            .map(|el| el.ty.clone())
-            .expect("the `(row: Row)` callback has one parameter");
-        let resolved = navigate_param_to_object_surface(&ctx, scope.as_str(), &row_ty)
-            .expect("`Row` resolves through the optional alias callback payload scope");
-        assert!(
-            resolved.members.iter().any(|m| m.name.as_ref() == "id"),
-            "the optional alias callback's `Row` payload resolves precisely (member `id`)"
-        );
-    }
-
-    #[test]
-    fn explicit_union_callback_prop_value_classifies_as_event_with_precise_payload() {
-        // P2 (COMPONENT-META surface): a prop whose WRITTEN VALUE is an EXPLICIT
-        // union containing a callable arm — `onselect: ((row: Row) => void) |
-        // undefined` (NOT member-`?` optionality, which is carried by the surface
-        // `optional` flag and raises to a BARE `Function`). The explicit union
-        // raises to `Union([Function, Primitive(Undefined)])`; the shared
-        // callable-arm extractor strips the nullish arm and pulls out the single
-        // callable. It MUST classify as event `select` with a PRECISE `(row: Row)`
-        // payload.
-        //
-        // DISCRIMINATING (the whole point): this exercises the
-        // `Union`/`Intersection` arm of `callable_arm_from_raised`. If that helper
-        // is reverted to a bare `TypeExpr::Function(func)` match, this test goes
-        // RED (no `select` event) while the member-`?` tests above stay GREEN
-        // (they raise to a bare `Function`). A non-callable explicit-union prop
-        // (`onmode: "a" | "b"`) is NOT an event (asserted negatively here too).
-        let canonical = "/ExplicitUnionCb.svelte";
-        let source = "<script lang=\"ts\">\n\
-             interface Row { id: number }\n\
-             interface Props {\n\
-               onselect: ((row: Row) => void) | undefined;\n\
-               onmode: \"a\" | \"b\";\n\
-             }\n\
-             let { onselect, onmode }: Props = $props();\n\
-             void onselect; void onmode;\n\
-             </script>\n\
-             <div />";
-        let (host, view) = host_with_svelte(canonical, source);
-        let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let ctx = crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
-
-        let outcome = resolve_svelte_surface(
-            &host,
-            &ctx,
-            canonical,
-            SvelteSurfaceSource::CallbackPropEvents,
-        );
-        let ResolvedOutcome::Resolved(dtos) = outcome else {
-            panic!("the callback-prop EMITS surface must resolve, got {outcome:?}");
-        };
-        let emits = dtos.emits.as_ref().expect("emits surface present");
-        let names: Vec<&str> = emits.fields.iter().map(|e| e.name.as_str()).collect();
-
-        // (a) the EXPLICIT-union callable VALUE IS event `select` (this is the
-        // branch the member-`?` tests do NOT cover — they raise to a bare
-        // `Function`, this raises to a `Union`).
-        let select = emits
-            .fields
-            .iter()
-            .find(|e| e.name == "select")
-            .unwrap_or_else(|| {
-                panic!(
-                    "an EXPLICIT-union callable prop VALUE `onselect: ((row: Row) => void) | \
-                 undefined` must classify as event `select` (the `| undefined` arm is \
-                 stripped from the union), got {names:?}"
-                )
-            });
-        // (b) NEGATIVE: an explicit union with NO callable arm is NOT an event.
-        assert!(
-            !names.contains(&"mode"),
-            "an explicit union with no callable arm (`onmode: \"a\" | \"b\"`) must NOT be \
-             an event, got {names:?}"
-        );
-
-        // The payload is PRECISE — `Row` resolves in scope (member `id`).
-        let scope = select
-            .payload_expr_scope
-            .as_ref()
-            .expect("explicit-union callback payload_expr_scope is Some (pairing)");
-        let TypeExpr::Tuple { elements, .. } = select.payload_expr.as_ref().expect("payload tuple")
-        else {
-            panic!("explicit-union callback payload is a tuple");
-        };
-        let row_ty = elements
-            .first()
-            .map(|el| el.ty.clone())
-            .expect("the `(row: Row)` callback has one parameter");
-        let resolved = navigate_param_to_object_surface(&ctx, scope.as_str(), &row_ty)
-            .expect("`Row` resolves through the explicit-union callback payload scope");
-        assert!(
-            resolved.members.iter().any(|m| m.name.as_ref() == "id"),
-            "the explicit-union callback's `Row` payload resolves precisely (member `id`)"
-        );
-    }
-
-    #[test]
-    fn explicit_union_with_two_distinct_callable_arms_refuses() {
-        // P2 (COMPONENT-META surface): the ambiguity branch of
-        // `callable_arm_from_raised`. An `on`-prefixed prop whose explicit-union
-        // VALUE has TWO DISTINCT callable arms — `onselect: ((row: Row) => void) |
-        // ((id: number) => void)` — is AMBIGUOUS: the extractor must REFUSE rather
-        // than fabricate a single payload from divergent signatures. No `select`
-        // event is mined.
-        //
-        // DISCRIMINATING: the union-arm loop returns `None` when a second, distinct
-        // callable arm appears. A classifier that picked the first callable arm
-        // would wrongly mine `select`; this asserts it does NOT.
-        let canonical = "/AmbiguousUnionCb.svelte";
-        let source = "<script lang=\"ts\">\n\
-             interface Row { id: number }\n\
-             interface Props { onselect: ((row: Row) => void) | ((id: number) => void) }\n\
-             let { onselect }: Props = $props();\n\
-             void onselect;\n\
-             </script>\n\
-             <div />";
-        let (host, view) = host_with_svelte(canonical, source);
-        let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let ctx = crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
-
-        let outcome = resolve_svelte_surface(
-            &host,
-            &ctx,
-            canonical,
-            SvelteSurfaceSource::CallbackPropEvents,
-        );
-        let ResolvedOutcome::Resolved(dtos) = outcome else {
-            panic!("the EMITS surface must resolve, got {outcome:?}");
-        };
-        let emits = dtos.emits.as_ref().expect("emits surface present");
-        assert!(
-            !emits.fields.iter().any(|e| e.name == "select"),
-            "an explicit union with TWO distinct callable arms is ambiguous and must NOT be \
-             mined as an event, got {:?}",
-            emits
-                .fields
-                .iter()
-                .map(|e| e.name.as_str())
-                .collect::<Vec<_>>()
-        );
-    }
-}
+#[path = "svelte_exec_tests.rs"]
+mod tests;

@@ -601,8 +601,10 @@ fn every_legacy_operation_accepts_schema_two_and_three_op_by_op() {
 }
 
 #[test]
-fn schema_versions_one_and_four_are_rejected_with_typed_errors() {
-    for version in [1u32, 4u32] {
+fn schema_versions_one_and_five_are_rejected_with_typed_errors() {
+    // 1 is below the floor; 5 is the first version ABOVE the current supported
+    // set ([2, 3, 4]). Both are outside the closed set and rejected.
+    for version in [1u32, 5u32] {
         let err = validate_type_info_graph_request(&legacy_envelope(
             wire::Operation::ResolveSymbol,
             version,
@@ -695,18 +697,20 @@ fn framework_surface_envelope_payload_version_mismatch_is_malformed_payload() {
 }
 
 #[test]
-fn supported_schema_version_set_is_exactly_two_and_three() {
+fn supported_schema_version_set_is_exactly_two_three_and_four() {
     assert_eq!(
         SUPPORTED_TYPEINFO_GRAPH_SCHEMA_VERSIONS,
         &[
             MIN_TYPEINFO_GRAPH_SCHEMA_VERSION,
+            3,
             TYPEINFO_GRAPH_SCHEMA_VERSION
         ],
         "the supported set holds every version some operation still accepts: \
-         schema 2 (legacy-operations-only) and schema 3 (current)",
+         schema 2 (legacy-operations-only), schema 3 (the framework-surface \
+         floor), and schema 4 (current — adds the member default/origin fields)",
     );
     assert_eq!(MIN_TYPEINFO_GRAPH_SCHEMA_VERSION, 2);
-    assert_eq!(TYPEINFO_GRAPH_SCHEMA_VERSION, 3);
+    assert_eq!(TYPEINFO_GRAPH_SCHEMA_VERSION, 4);
     assert_eq!(FRAMEWORK_SURFACE_MIN_SCHEMA_VERSION, 3);
 }
 
@@ -714,10 +718,12 @@ fn supported_schema_version_set_is_exactly_two_and_three() {
 /// error payload's `server_supported_versions`, populated from
 /// `SUPPORTED_TYPEINFO_GRAPH_SCHEMA_VERSIONS` via
 /// `wire_error_unknown_schema_version` — the single advertisement
-/// source. It reports `[2, 3]`.
+/// source. It reports `[2, 3, 4]`.
 #[test]
-fn unknown_schema_version_error_advertises_two_and_three() {
-    let err = validate_type_info_graph_request(&legacy_envelope(wire::Operation::ResolveSymbol, 4))
+fn unknown_schema_version_error_advertises_two_three_and_four() {
+    // Version 5 is the first version OUTSIDE the supported set — it triggers
+    // the UnknownSchemaVersion rejection (4 is now supported).
+    let err = validate_type_info_graph_request(&legacy_envelope(wire::Operation::ResolveSymbol, 5))
         .unwrap_err();
     let payload = match err.kind.as_ref().expect("error kind") {
         type_info_request_error::Kind::UnknownSchemaVersion(p) => p,
@@ -725,8 +731,8 @@ fn unknown_schema_version_error_advertises_two_and_three() {
     };
     assert_eq!(
         payload.server_supported_versions,
-        vec![2, 3],
-        "the advertisement surface must report exactly [2, 3]",
+        vec![2, 3, 4],
+        "the advertisement surface must report exactly [2, 3, 4]",
     );
     assert_eq!(
         payload.server_supported_versions,
@@ -736,11 +742,11 @@ fn unknown_schema_version_error_advertises_two_and_three() {
 
     // The constructor itself is the single advertisement source.
     let wire_payload = wire::wire_error_unknown_schema_version(
-        4,
+        5,
         TYPEINFO_GRAPH_SCHEMA_VERSION,
         SUPPORTED_TYPEINFO_GRAPH_SCHEMA_VERSIONS,
     );
-    assert_eq!(wire_payload.server_supported_versions, vec![2, 3]);
+    assert_eq!(wire_payload.server_supported_versions, vec![2, 3, 4]);
 }
 
 /// Walks EVERY operation discriminant through
@@ -810,8 +816,9 @@ fn op_minimum_gate_walks_every_operation_discriminant() {
         }
 
         // Outside the global set: UnknownSchemaVersion regardless of
-        // the operation (global membership runs first).
-        for version in [1u32, 4u32] {
+        // the operation (global membership runs first). 1 is below the
+        // floor; 5 is the first version above the current set ([2, 3, 4]).
+        for version in [1u32, 5u32] {
             let err = validate_schema_version_for_operation(operation, version).unwrap_err();
             assert_eq!(
                 err_variant_label(&err),

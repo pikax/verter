@@ -119,6 +119,38 @@ fn typeinfo_ts_bindings_reference_every_proto_message() {
 }
 
 #[test]
+fn typeinfo_ts_facade_schema_version_matches_rust() {
+    // The hand-authored TS facade constant `TYPEINFO_GRAPH_SCHEMA_VERSION`
+    // in `packages/proto/src/typeinfo.ts` advertises the current wire schema
+    // to public TS consumers and MUST stay in lock-step with the Rust
+    // `verter_protocol::typeinfo::graph::TYPEINFO_GRAPH_SCHEMA_VERSION`. A drift
+    // (e.g. a Rust schema bump without the facade update) would let a TS
+    // consumer request/decode under a stale version — exactly the gap this
+    // guard closes.
+    let rust = verter_protocol::typeinfo::graph::TYPEINFO_GRAPH_SCHEMA_VERSION;
+    let ts = read_workspace_file("packages/proto/src/typeinfo.ts");
+    let needle = "export const TYPEINFO_GRAPH_SCHEMA_VERSION = ";
+    let line = ts
+        .lines()
+        .find(|l| l.trim_start().starts_with(needle))
+        .unwrap_or_else(|| {
+            panic!("typeinfo.ts must declare `export const TYPEINFO_GRAPH_SCHEMA_VERSION = <n>;`")
+        });
+    let value: u32 = line
+        .trim()
+        .trim_start_matches(needle)
+        .trim_end_matches(';')
+        .trim()
+        .parse()
+        .unwrap_or_else(|err| panic!("the facade constant must be a number, got `{line}`: {err}"));
+    assert_eq!(
+        value, rust,
+        "the TS facade `TYPEINFO_GRAPH_SCHEMA_VERSION` ({value}) must match the Rust \
+         `TYPEINFO_GRAPH_SCHEMA_VERSION` ({rust}) — they advertise the same wire schema",
+    );
+}
+
+#[test]
 fn typeinfo_ts_bindings_record_the_proto_file_path() {
     let ts = read_workspace_file("packages/proto/src/gen/verter/v1/typeinfo_pb.ts");
     // The protoc-gen-es header records the source proto file path,

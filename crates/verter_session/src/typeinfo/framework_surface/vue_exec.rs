@@ -733,6 +733,7 @@ pub(crate) fn vue_macro_dtos_with_ctx(
                     props: Some(PropsSurface {
                         fields: props_from_typeinfo_surface(ctx, &macro_surface),
                         index_signatures: index_signatures_from_surface(ctx, &macro_surface),
+                        ..Default::default()
                     }),
                     ..MacroSurfaceDtos::default()
                 },
@@ -757,6 +758,7 @@ pub(crate) fn vue_macro_dtos_with_ctx(
                         props: Some(PropsSurface {
                             fields: prop_fields,
                             index_signatures: index_signatures_from_surface(ctx, &macro_surface),
+                            ..Default::default()
                         }),
                         model: Some(crate::typeinfo::framework_surface::results::ModelSurface {
                             bindings,

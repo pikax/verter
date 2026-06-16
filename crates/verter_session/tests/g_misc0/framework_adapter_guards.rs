@@ -377,3 +377,119 @@ fn framework_surface_wire_executor_validates_first() {
          must precede selector resolution (offset {resolve_selector_at})."
     );
 }
+
+#[test]
+fn svelte_fact_capture_defaults_are_syntax_only() {
+    // GAP 1 guard: the Svelte prop-DEFAULT capture is SYNTAX-ONLY — it walks the
+    // OXC destructuring + slices the source default-value text, but MUST NOT
+    // resolve imports or read capability bits (the
+    // `script_fact_capture_is_syntax_only` discipline). The default-capture
+    // function lives in the syntax-capture provider half.
+    let src = read_src("crates/verter_semantic/src/analysis/framework_facts/svelte.rs");
+    let capture = extract_fn_body(&src, "collect_bindable_and_defaults");
+    // The default capture only reads OXC + the source slice — never a resolver /
+    // capability / import-resolution call.
+    for banned in [
+        "resolve_import",
+        "resolved_canonical",
+        "capability",
+        "ResolvedImportTarget",
+        "ProjectSemanticDispatch",
+        "store_view",
+    ] {
+        assert!(
+            !capture.contains(banned),
+            "collect_bindable_and_defaults must be syntax-only — it must not \
+             reference `{banned}` (import resolution / capability reads belong to \
+             the resolved-validation half)."
+        );
+    }
+    // It DOES slice the source for the default value (the one allowed source-text
+    // read — the runtime default expression display).
+    let push = extract_fn_body(&src, "push_default");
+    assert!(
+        push.contains("source.get("),
+        "push_default must slice the default VALUE source text (the runtime \
+         default expression display is the one allowed source read)."
+    );
+}
+
+#[test]
+fn resolve_snippet_props_does_not_call_shared_slots_normalizer() {
+    // GAP 3 guard: the shared Vue `slots_from_typeinfo_surface` is VUE-ONLY.
+    // The Svelte snippet path must call its OWN normalizer
+    // (`svelte_snippet_slots_from_typeinfo_surface`), never the shared Vue one
+    // (which surfaces only a slot callable's first-parameter object and would
+    // drop 2nd+ positional snippet params).
+    let src = read_src("crates/verter_session/src/typeinfo/framework_surface/svelte_exec.rs");
+    let body = strip_comments(&extract_fn_body(&src, "resolve_snippet_props"));
+    assert!(
+        body.contains("svelte_snippet_slots_from_typeinfo_surface"),
+        "resolve_snippet_props must call the Svelte-specific \
+         `svelte_snippet_slots_from_typeinfo_surface` normalizer."
+    );
+    assert!(
+        !body.contains("slots_from_typeinfo_surface(")
+            || body.contains("svelte_snippet_slots_from_typeinfo_surface("),
+        "resolve_snippet_props must NOT call the shared Vue \
+         `slots_from_typeinfo_surface` (it drops 2nd+ positional snippet params)."
+    );
+    // The shared Vue normalizer must not even be IMPORTED into svelte_exec (the
+    // import was removed when the Svelte normalizer replaced it).
+    let import_region = strip_comments(&src);
+    assert!(
+        !import_region.contains("    slots_from_typeinfo_surface,"),
+        "svelte_exec must not import the shared Vue `slots_from_typeinfo_surface` \
+         — the Svelte snippet path owns its own normalizer."
+    );
+}
+
+#[test]
+fn vue_shared_slot_normalizer_uses_first_param_only() {
+    // GAP 3 NO-REGRESSION guard: the shared Vue slot normalizer
+    // (`slot_callable_param_and_return`) stays byte-identical to its
+    // first-parameter-only behavior — a `TypeExpr::Function` arm surfaces
+    // `func.parameters.first()`, NOT every positional param. If a future edit
+    // made the SHARED fn iterate all params (the Svelte behavior), Vue slot
+    // bindings would regress; this pins the shared fn to first-param-only.
+    let src = read_src("crates/verter_session/src/typeinfo/framework_surface/vue_exec.rs");
+    let body = extract_fn_body(&src, "slot_callable_param_and_return");
+    assert!(
+        body.contains("func.parameters.first()"),
+        "the shared Vue `slot_callable_param_and_return` must keep its \
+         first-parameter-only behavior (`func.parameters.first()`) — Svelte's \
+         all-positional-params normalizer is a SEPARATE fn and must not leak \
+         into the shared Vue path."
+    );
+    // The Svelte-specific normalizer must NOT live in the shared Vue module.
+    assert!(
+        !src.contains("svelte_snippet_slots_from_typeinfo_surface"),
+        "the Svelte snippet normalizer must NOT live in the shared Vue module \
+         (vue_exec.rs) — it belongs to svelte_exec.rs."
+    );
+}
+
+#[test]
+fn svelte_executor_no_source_or_regex_type_parsing() {
+    // GAP 2/3 guard: the Svelte executor drives slot / origin / prop TYPES from
+    // the typed IR — NO source slicing, NO regex, NO parse-then-reparse of type
+    // text. The ONE allowed source read is the legacy `<slot>` NAME slice
+    // (`slice_attr_value`, an existing carve-out) — never type-text parsing.
+    let src = read_src("crates/verter_session/src/typeinfo/framework_surface/svelte_exec.rs");
+    let stripped = strip_comments(&src);
+    for banned in [
+        "parse_type_annotation",
+        "split_top_level",
+        "find_top_level_char",
+        "starts_with(\"Pick<\")",
+        ".contains(\"/node_modules/\")",
+        "Regex::",
+        "regex::",
+    ] {
+        assert!(
+            !stripped.contains(banned),
+            "svelte_exec.rs must not type-parse source text — found `{banned}`. \
+             Walk the typed IR (TypeExpr) instead."
+        );
+    }
+}

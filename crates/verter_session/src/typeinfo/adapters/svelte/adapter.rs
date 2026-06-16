@@ -170,6 +170,17 @@ fn merge_source_into(
                 target
                     .index_signatures
                     .extend(props.index_signatures.iter().cloned());
+                // The framework-neutral DEFAULT + ORIGIN sidecars MUST survive
+                // normalisation — they are the public per-member runtime default
+                // + declaration provenance the graph-wire encoder emits. Dropping
+                // them here (the original Props merge) silently lost both off the
+                // public framework-surface wire.
+                target
+                    .prop_defaults
+                    .extend(props.prop_defaults.iter().cloned());
+                target
+                    .prop_origins
+                    .extend(props.prop_origins.iter().cloned());
             } else {
                 aggregate.props.get_or_insert_with(Default::default);
             }
@@ -395,6 +406,7 @@ mod tests {
             props: Some(crate::typeinfo::framework_surface::results::PropsSurface {
                 fields: vec![prop("a")],
                 index_signatures: Vec::new(),
+                ..Default::default()
             }),
             ..Default::default()
         }));

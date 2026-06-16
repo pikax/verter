@@ -16,8 +16,10 @@
 
 import { create, toBinary } from "@bufbuild/protobuf";
 import {
+  FrameworkSurfaceDeclarationKind,
   FrameworkSurfaceKind,
   FrameworkSurfaceKindSupport,
+  FrameworkSurfaceOriginHopKind,
   FrameworkTag,
   TypeInfoGraphResponseSchema,
 } from "@verter/proto";
@@ -181,6 +183,169 @@ describe("decodeFrameworkSurfaceResponse", () => {
     expect(expose.support).toBe(FrameworkSurfaceKindSupport.SUPPORTED);
     expect(expose.isSupported).toBe(true);
     expect(expose.members).toEqual([{ name: "focus", required: true, readonly: false }]);
+  });
+
+  it("exposes a member's runtime default and member-declaration origin (schema 4)", () => {
+    // THE P0 PUBLIC-CONSUMER PROOF (DISCRIMINATING): a docs / semantic-DB
+    // consumer decoding the framework-surface wire reads each prop's runtime
+    // DEFAULT value source text AND its member-declaration ORIGIN through this
+    // public surface. Built directly from the wire `FrameworkSurfaceMember`
+    // `default_value_id` + `origin` (schema 4) — RED before the wire carried
+    // them (the fields did not exist on the member shape).
+    //
+    // The string table's entry 0 is a DISTINCTIVE non-empty sentinel — the
+    // real encoder NEVER seeds entry 0 with `""`. A LOCAL hop carries none of
+    // the import/reexport/alias string-id fields; the presence-aware decoder
+    // must decode those absent fields as `undefined`, NOT as string-table
+    // entry 0 (the zero-based-table-vs-0-sentinel collision this guards).
+    const response = create(TypeInfoGraphResponseSchema, {
+      kind: {
+        case: "frameworkSurface",
+        value: {
+          schemaVersion: 4,
+          framework: FrameworkTag.SVELTE,
+          graph: {
+            schemaVersion: 4,
+            strings: { entries: ["__SENTINEL_ZERO__", "size", "label", "'md'", "/App.svelte"] },
+          },
+          surfaces: [
+            {
+              kind: FrameworkSurfaceKind.PROPS,
+              members: [
+                {
+                  // `size = 'md'` — optional, carries a default + a LOCAL origin.
+                  nameId: 1,
+                  typeNodeId: 0,
+                  required: false,
+                  readonly: false,
+                  defaultValueId: 3,
+                  origin: {
+                    declaration: {
+                      requestedNameId: 1,
+                      resolvedNameId: 1,
+                      canonicalSourceId: 4,
+                      spanStart: 0,
+                      spanEnd: 0,
+                      kind: FrameworkSurfaceDeclarationKind.UNKNOWN,
+                    },
+                    // A LOCAL hop sets NO string-id field — every hop string
+                    // id is absent (the `optional` has-bit is unset).
+                    chain: [{ kind: FrameworkSurfaceOriginHopKind.LOCAL }],
+                  },
+                },
+                // `label` — required, NO default (the `default_value_id`
+                // `optional` field is absent), NO origin.
+                { nameId: 2, typeNodeId: 0, required: true, readonly: false },
+              ],
+              status: {
+                support: FrameworkSurfaceKindSupport.SUPPORTED,
+                exactness: 0,
+                diagnostics: [],
+              },
+            },
+          ],
+        },
+      },
+    });
+    const bytes = toBinary(TypeInfoGraphResponseSchema, response);
+
+    const surface = decodeFrameworkSurfaceResponse(bytes) as FrameworkSurface;
+    const props = surface.kinds.get(FrameworkSurfaceKind.PROPS)!;
+    const size = props.members.find((m) => m.name === "size")!;
+    expect(size.default).toBe("'md'");
+    expect(size.origin).toBeDefined();
+    expect(size.origin!.chain).toHaveLength(1);
+    const localHop = size.origin!.chain[0];
+    expect(localHop.kind).toBe(FrameworkSurfaceOriginHopKind.LOCAL);
+    // DISCRIMINATING (the P0): a LOCAL hop's import/reexport/alias string
+    // fields are genuinely ABSENT — never resolved through the string table
+    // to entry 0 (`"__SENTINEL_ZERO__"`).
+    expect(localHop.from).toBeUndefined();
+    expect(localHop.specifier).toBeUndefined();
+    expect(localHop.importedName).toBeUndefined();
+    expect(localHop.to).toBeUndefined();
+    expect(localHop.exportedName).toBeUndefined();
+    expect(localHop.originalName).toBeUndefined();
+    expect(localHop.aliasName).toBeUndefined();
+    expect(size.origin!.declaration).toBeDefined();
+    expect(size.origin!.declaration!.canonicalSource).toBe("/App.svelte");
+    expect(size.origin!.declaration!.resolvedName).toBe("size");
+
+    // DISCRIMINATING: a member without a default decodes `default` to
+    // `undefined` (presence-aware), and no origin → `undefined`.
+    const label = props.members.find((m) => m.name === "label")!;
+    expect(label.default).toBeUndefined();
+    expect(label.origin).toBeUndefined();
+  });
+
+  it("decodes an IMPORT hop without a specifier as an absent specifier (schema 4)", () => {
+    // DISCRIMINATING (the P0, import variant): an IMPORT hop carries `from` +
+    // `importedName` but may have NO recorded `specifier`. The presence-aware
+    // decoder must surface `from`/`importedName` as their interned strings and
+    // `specifier` as ABSENT — never string-table entry 0 (the distinctive
+    // sentinel below), and never the bogus specifier the old id-0 decode
+    // produced.
+    const response = create(TypeInfoGraphResponseSchema, {
+      kind: {
+        case: "frameworkSurface",
+        value: {
+          schemaVersion: 4,
+          framework: FrameworkTag.SVELTE,
+          graph: {
+            schemaVersion: 4,
+            strings: { entries: ["__SENTINEL_ZERO__", "size", "/lib/props.ts", "Size"] },
+          },
+          surfaces: [
+            {
+              kind: FrameworkSurfaceKind.PROPS,
+              members: [
+                {
+                  nameId: 1,
+                  typeNodeId: 0,
+                  required: false,
+                  readonly: false,
+                  origin: {
+                    declaration: {
+                      requestedNameId: 1,
+                      resolvedNameId: 3,
+                      canonicalSourceId: 2,
+                      spanStart: 0,
+                      spanEnd: 0,
+                      kind: FrameworkSurfaceDeclarationKind.TYPE_ALIAS,
+                    },
+                    // IMPORT hop: `from` + `importedName` present, NO specifier.
+                    chain: [
+                      {
+                        kind: FrameworkSurfaceOriginHopKind.IMPORT,
+                        fromId: 2,
+                        importedNameId: 3,
+                      },
+                    ],
+                  },
+                },
+              ],
+              status: {
+                support: FrameworkSurfaceKindSupport.SUPPORTED,
+                exactness: 0,
+                diagnostics: [],
+              },
+            },
+          ],
+        },
+      },
+    });
+    const bytes = toBinary(TypeInfoGraphResponseSchema, response);
+
+    const surface = decodeFrameworkSurfaceResponse(bytes) as FrameworkSurface;
+    const props = surface.kinds.get(FrameworkSurfaceKind.PROPS)!;
+    const size = props.members.find((m) => m.name === "size")!;
+    const importHop = size.origin!.chain[0];
+    expect(importHop.kind).toBe(FrameworkSurfaceOriginHopKind.IMPORT);
+    expect(importHop.from).toBe("/lib/props.ts");
+    expect(importHop.importedName).toBe("Size");
+    // DISCRIMINATING: an unrecorded specifier is ABSENT, never the bogus
+    // string-table entry 0.
+    expect(importHop.specifier).toBeUndefined();
   });
 
   it("decodes the error arm to a typed FrameworkSurfaceError", () => {

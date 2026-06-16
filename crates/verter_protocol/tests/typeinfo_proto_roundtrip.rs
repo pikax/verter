@@ -221,6 +221,8 @@ fn framework_surface_payload_roundtrips() {
                 type_node_id: 0,
                 required: true,
                 readonly: false,
+                default_value_id: None,
+                origin: None,
             }],
             status: Some(supported_status()),
         }],
@@ -230,6 +232,75 @@ fn framework_surface_payload_roundtrips() {
     let decoded = g::FrameworkSurfacePayload::decode(bytes.as_slice())
         .expect("FrameworkSurfacePayload must roundtrip");
     assert_eq!(decoded, payload);
+}
+
+#[test]
+fn framework_surface_origin_hop_presence_roundtrips() {
+    // DISCRIMINATING (the P0 wire proof): the origin-hop string-id fields are
+    // PRESENCE-AWARE (`optional` on the wire). An ABSENT field (`None`) must
+    // survive a proto roundtrip as `None`, and a genuinely-PRESENT id 0
+    // (`Some(0)`) must survive as `Some(0)` — DISTINCT from absence. Before
+    // the `optional` change the fields were plain `uint32`: `Some(0)` and
+    // `None` both encoded as the default and decoded identically, so an absent
+    // field aliased a real id-0 string-table entry. This test fails to even
+    // compile against the pre-change plain-`u32` fields and asserts the
+    // presence distinction post-change.
+    let hops = vec![
+        // LOCAL: every string field absent.
+        g::FrameworkSurfaceOriginHop {
+            kind: g::FrameworkSurfaceOriginHopKind::Local as i32,
+            from_id: None,
+            specifier_id: None,
+            imported_name_id: None,
+            to_id: None,
+            exported_name_id: None,
+            original_name_id: None,
+            alias_name_id: None,
+        },
+        // IMPORT: from present at id 0 (a genuine interned entry), no specifier.
+        g::FrameworkSurfaceOriginHop {
+            kind: g::FrameworkSurfaceOriginHopKind::Import as i32,
+            from_id: Some(0),
+            specifier_id: None,
+            imported_name_id: Some(2),
+            to_id: None,
+            exported_name_id: None,
+            original_name_id: None,
+            alias_name_id: None,
+        },
+    ];
+    let origin = g::FrameworkSurfaceMemberOrigin {
+        declaration: Some(g::FrameworkSurfaceMemberDeclaration {
+            requested_name_id: 1,
+            resolved_name_id: 1,
+            canonical_source_id: 0,
+            span_start: 0,
+            span_end: 0,
+            kind: g::FrameworkSurfaceDeclarationKind::TypeAlias as i32,
+        }),
+        chain: hops,
+    };
+
+    let bytes = origin.encode_to_vec();
+    let decoded = g::FrameworkSurfaceMemberOrigin::decode(bytes.as_slice())
+        .expect("FrameworkSurfaceMemberOrigin must roundtrip");
+    assert_eq!(decoded, origin);
+
+    // Explicit presence assertions: absence survives as `None`; a present id 0
+    // survives as `Some(0)` and is DISTINCT from absence.
+    let local = &decoded.chain[0];
+    assert!(local.from_id.is_none(), "absent LOCAL from_id stays None");
+    assert!(local.specifier_id.is_none());
+    let import = &decoded.chain[1];
+    assert_eq!(
+        import.from_id,
+        Some(0),
+        "a genuinely-present id 0 survives as Some(0), distinct from None"
+    );
+    assert!(
+        import.specifier_id.is_none(),
+        "an absent specifier stays None — never collapses to id 0"
+    );
 }
 
 fn supported_status() -> g::FrameworkSurfaceKindStatus {
