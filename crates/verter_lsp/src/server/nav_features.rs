@@ -1324,27 +1324,36 @@ pub(super) async fn handle_rename(
 
     // Enhance with TypeProvider for cross-file renames.
     // Extract all context synchronously — no DashMap guard held across await.
-    if let Some(tp) = &server.type_provider {
-        if let Some(ctx) = server.type_provider_context(uri) {
-            if let Some(tsx_offset) = merge::carrier_position_to_tsx_offset_validated(
-                position,
-                &ctx.carrier_line_index,
-                &ctx.mapper,
-                &ctx.tsx_line_index,
-            ) {
-                if let Ok(type_locs) = tp.get_rename_locations(&ctx.tsx_path, tsx_offset).await {
-                    let carrier_source_exists =
-                        |p: &str| server.documents.host().get_source(p).is_some();
-                    return Ok(merge::merge_rename_locations(
-                        verter_result,
-                        type_locs,
-                        new_name,
-                        &ctx.tsx_line_index,
-                        &ctx.mapper,
-                        &ctx.carrier_line_index,
-                        Some(&|ide_path: &str| server.external_ide_context(ide_path)),
-                        &carrier_source_exists,
-                    ));
+    //
+    // GATED OFF for a SELF-FILE rune-module own buffer: its workspace-EDIT
+    // positions are not yet mapped through the self-file mapper, so a returned
+    // edit could land off by the prelude offset (or inside the prelude) and
+    // CORRUPT the module. Rename stays DEFERRED for the self-file projection —
+    // a clean no-op, never a wrong/unmapped edit. (Carrier rename unchanged.)
+    if !server.is_self_file_projection(uri) {
+        if let Some(tp) = &server.type_provider {
+            if let Some(ctx) = server.type_provider_context(uri) {
+                if let Some(tsx_offset) = merge::carrier_position_to_tsx_offset_validated(
+                    position,
+                    &ctx.carrier_line_index,
+                    &ctx.mapper,
+                    &ctx.tsx_line_index,
+                ) {
+                    if let Ok(type_locs) = tp.get_rename_locations(&ctx.tsx_path, tsx_offset).await
+                    {
+                        let carrier_source_exists =
+                            |p: &str| server.documents.host().get_source(p).is_some();
+                        return Ok(merge::merge_rename_locations(
+                            verter_result,
+                            type_locs,
+                            new_name,
+                            &ctx.tsx_line_index,
+                            &ctx.mapper,
+                            &ctx.carrier_line_index,
+                            Some(&|ide_path: &str| server.external_ide_context(ide_path)),
+                            &carrier_source_exists,
+                        ));
+                    }
                 }
             }
         }

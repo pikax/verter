@@ -155,6 +155,19 @@ pub struct GeneratedMapped {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RunId(u32);
 
+impl RunId {
+    /// A sentinel `RunId` for a self-file provider mapping (a rune module's
+    /// own-buffer projection). The self-file mapper composes ranges directly
+    /// (both endpoints in the user-source region), never through run
+    /// compatibility, so the run identity is unused — this sentinel only fills
+    /// the [`SourceMapped`] / [`GeneratedMapped`] shape so the self-file mapper
+    /// can return the SAME types as the source-map-backed [`PositionMapper`].
+    #[must_use]
+    pub fn self_file_sentinel() -> Self {
+        RunId(u32::MAX)
+    }
+}
+
 impl PositionMapper {
     /// Create a position mapper from a source map JSON string.
     ///

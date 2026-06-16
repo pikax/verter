@@ -432,6 +432,20 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             // `vue`/`Vue`-substring identifiers in the scanned modules outside
             // the narrow Vue-intrinsic allowlist.
             "carrier_routing_has_no_vue_named_generic_primitive",
+            // Rune-module (`.svelte.ts` / `.svelte.js`) own-buffer LSP path:
+            // the self-file projection consumes the prelude line count as a
+            // uniform line offset; the self-file mapper drops the prelude +
+            // rewrite regions; the ONE generalized provider-projection context
+            // serves BOTH carrier-IDE and self-file (no parallel rune path);
+            // the rune extension is NOT a carrier extension; the watcher globs
+            // are descriptor-derived (carrier glob + dedicated adapter-module
+            // glob); the rune self-file provider state is closed on did_close.
+            "rune_module_self_file_projection_uses_prelude_line_count",
+            "self_file_mapper_drops_prelude_and_rewrite_regions",
+            "provider_projection_context_serves_both_carrier_and_self_file",
+            "svelte_rune_module_not_in_carrier_extensions",
+            "lifecycle_watch_globs_are_descriptor_derived",
+            "rune_module_self_file_state_closed_on_did_close",
         ],
     ),
     // ──────────────────── SKILL.md additions ──────────────────────

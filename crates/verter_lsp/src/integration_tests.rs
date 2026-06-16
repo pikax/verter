@@ -730,8 +730,9 @@ const msg = 'hello'
 </template>
 "#;
     let (registry, uri) = open_vue_file(source);
-    let doc = registry.get(&uri).unwrap();
-    let mapper = doc.position_mapper.as_ref().expect("mapper should exist");
+    let mapper = registry
+        .get_position_mapper(&uri)
+        .expect("mapper should exist");
     let tsx = registry.get_ide(&uri).expect("tsx should exist");
 
     // Find "msg" in the original source (script block)
@@ -787,10 +788,8 @@ const count = 0
 </template>
 "#;
     let (registry, uri) = open_vue_file(source);
-    let doc = registry.get(&uri).unwrap();
-    let mapper = doc
-        .position_mapper
-        .as_ref()
+    let mapper = registry
+        .get_position_mapper(&uri)
         .expect("mapper should exist after compilation");
     let tsx = registry.get_ide(&uri).expect("tsx should exist");
 
@@ -923,8 +922,9 @@ const count = 42
 </template>
 "#;
     let (registry, uri) = open_vue_file(source);
-    let doc = registry.get(&uri).unwrap();
-    let mapper = doc.position_mapper.as_ref().expect("mapper should exist");
+    let mapper = registry
+        .get_position_mapper(&uri)
+        .expect("mapper should exist");
     let tsx = registry.get_ide(&uri).expect("tsx should exist");
     let tsx_code = tsx.code.as_ref();
     let tsx_lines: Vec<&str> = tsx_code.lines().collect();
@@ -983,10 +983,8 @@ fn integration_utf16_source_map_with_multibyte_chars() {
     // 'é' in "café" is 2 bytes UTF-8, 1 UTF-16 code unit
     let source = "<script setup>\nconst café = 'latte'\n</script>\n\n<template>\n  <div>{{ café }}</div>\n</template>\n";
     let (registry, uri) = open_vue_file(source);
-    let doc = registry.get(&uri).unwrap();
-    let mapper = doc
-        .position_mapper
-        .as_ref()
+    let mapper = registry
+        .get_position_mapper(&uri)
         .expect("mapper should exist for SFC with non-ASCII chars");
     let tsx = registry.get_ide(&uri).expect("tsx should exist");
     let tsx_code = tsx.code.as_ref();
@@ -1106,8 +1104,7 @@ fn integration_utf16_surrogate_pair_position_accuracy() {
     let (registry, uri) = open_vue_file(source);
 
     // Just verify compilation doesn't panic and we get a mapper
-    let doc = registry.get(&uri).unwrap();
-    let mapper = doc.position_mapper.as_ref();
+    let mapper = registry.get_position_mapper(&uri);
 
     // If mapper exists, verify the script binding position roundtrips
     if let Some(mapper) = mapper {
@@ -2562,10 +2559,10 @@ const msg = 'hello'
     let tsx_after = registry.get_ide(&uri);
     assert!(tsx_after.is_some(), "TSX should exist after did_change");
 
-    // Verify position mapper exists
+    // Verify the provider projection exists
     assert!(
-        doc.position_mapper.is_some(),
-        "position mapper should exist after did_change"
+        doc.projection.is_some(),
+        "provider projection should exist after did_change"
     );
 }
 

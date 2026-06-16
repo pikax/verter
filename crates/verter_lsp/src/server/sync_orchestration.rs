@@ -17,7 +17,7 @@ use tower_lsp_server::ls_types::*;
 use verter_workspace::WorkspaceRead;
 
 use crate::documents::line_index::LineIndex;
-use crate::documents::position_map::PositionMapper;
+use crate::documents::provider_projection::ProviderPositionMapper;
 use crate::documents::sfc_scanner::scan_sfc_blocks;
 use crate::provider_sync::ProviderPathKind;
 use crate::tsgo::merge;
@@ -26,7 +26,7 @@ use super::background_drain::configure_provider_paths_for_source;
 use super::background_init::{background_init, BackgroundInitArgs};
 use super::handler_guard::block_in_place_if_available;
 use super::server_utils::*;
-use super::{PublishedResolverSnapshot, VerterLanguageServer};
+use super::{ProviderProjectionContext, PublishedResolverSnapshot, VerterLanguageServer};
 
 impl VerterLanguageServer {
     pub(super) async fn publish_full_diagnostics(&self, uri: &Uri) {
@@ -1159,31 +1159,158 @@ impl VerterLanguageServer {
         now.saturating_sub(last) < 300
     }
 
-    /// Get IDE context for TypeProvider queries: (ide_path, ide_code, position_mapper).
-    pub(super) fn ide_context(&self, uri: &Uri) -> Option<(String, Arc<str>, PositionMapper)> {
-        let canonical_id = self.documents.get_canonical_id(uri);
-        if canonical_id.is_none() {
-            tracing::info!("ide_context: no canonical_id for {}", uri.as_str());
-            return None;
-        }
-        self.documents
-            .host()
-            .ensure_loaded(canonical_id.as_deref()?);
-        let Some(ide) = self.documents.get_ide(uri) else {
-            tracing::info!(
-                "ide_context: no IDE output for {} (canonical={})",
-                uri.as_str(),
-                canonical_id.as_deref().unwrap_or("?")
-            );
-            return None;
-        };
+    /// Get the carrier IDE context for TypeProvider queries: `(ide_path,
+    /// ide_code, mapper)`. Thin carrier-compat wrapper over
+    /// [`Self::provider_projection_context`] for the two cross-file carrier
+    /// callers (`ide_context_by_path` / `external_ide_context`) that need the
+    /// narrow `(provider_path, provider_content, mapper)` shape; every feature
+    /// handler routes through `provider_projection_context` /
+    /// `type_provider_context`.
+    pub(super) fn ide_context(
+        &self,
+        uri: &Uri,
+    ) -> Option<(String, Arc<str>, ProviderPositionMapper)> {
+        let ctx = self.provider_projection_context(uri)?;
+        Some((ctx.provider_path, ctx.provider_content, ctx.mapper))
+    }
 
-        let Some(mapper) = self.documents.get_position_mapper(uri) else {
-            tracing::info!("ide_context: no position mapper for {}", uri.as_str());
-            return None;
+    /// The generalized per-document provider-projection query context, serving
+    /// BOTH the carrier-IDE projection (`.vue` / `.svelte` → IDE TSX) and the
+    /// self-file projection (`.svelte.ts` / `.svelte.js` rune module → own-path
+    /// provider buffer). This is the SOLE query path — there is no parallel
+    /// rune-only query path.
+    ///
+    /// - `provider_path`: the path the TypeProvider opened — the carrier IDE
+    ///   path for a carrier, or the module's OWN canonical id for a self-file
+    ///   rune module (its provider buffer is served from its own path).
+    /// - `provider_content`: the bytes the TypeProvider type-checks (the IDE
+    ///   TSX, or `<rune prelude> + <rewritten module bytes>`).
+    /// - `mapper`: the unified source↔provider mapper (projection-agnostic).
+    /// - `provider_line_index` / `source_line_index`: line indexes over the
+    ///   provider content and the user source.
+    pub(super) fn provider_projection_context(
+        &self,
+        uri: &Uri,
+    ) -> Option<ProviderProjectionContext> {
+        let canonical_id = self.documents.get_canonical_id(uri)?;
+        self.documents.host().ensure_loaded(&canonical_id);
+
+        let projection = self.documents.get_projection(uri)?;
+        match projection {
+            crate::documents::provider_projection::DocumentProviderProjection::CarrierIde {
+                ..
+            } => {
+                // Carrier: the provider buffer is the IDE TSX; the path is the
+                // committed live carrier IDE path.
+                let ide = self.documents.get_ide(uri)?;
+                let mapper = self.documents.get_position_mapper(uri)?;
+                let provider_path = self.active_ide_path_for_uri(uri)?;
+                let provider_content = ide.code;
+                let provider_line_index =
+                    LineIndex::new(&provider_content, self.documents.encoding());
+                let source_line_index = self.documents.get(uri)?.line_index.clone();
+                Some(ProviderProjectionContext {
+                    provider_path,
+                    provider_content,
+                    mapper,
+                    provider_line_index,
+                    source_line_index,
+                })
+            }
+            crate::documents::provider_projection::DocumentProviderProjection::SelfFile {
+                ..
+            } => {
+                // Self-file rune module: the provider buffer is served from the
+                // module's OWN canonical path (`<rune prelude> + <rewritten
+                // module bytes>`). Build the provider content from the document
+                // source through the SAME rune-module + rewrite pipeline the
+                // background sync uses, so the own-buffer query is queryable
+                // before resolver ownership is ready (empty rewrites then).
+                let doc = self.documents.get(uri)?;
+                let source = doc.source.clone();
+                let source_line_index = doc.line_index.clone();
+                let file_language = self
+                    .documents
+                    .host()
+                    .language_classifier()
+                    .classify(&canonical_id);
+                drop(doc);
+
+                let mapper = self.documents.get_position_mapper(uri)?;
+                let provider_content: Arc<str> = Arc::from(self.self_file_provider_content(
+                    &canonical_id,
+                    &file_language,
+                    &source,
+                )?);
+                let provider_line_index =
+                    LineIndex::new(&provider_content, self.documents.encoding());
+                Some(ProviderProjectionContext {
+                    provider_path: canonical_id,
+                    provider_content,
+                    mapper,
+                    provider_line_index,
+                    source_line_index,
+                })
+            }
+        }
+    }
+
+    /// Build the self-file provider content (`<rune prelude> + <rewritten
+    /// module bytes>`) for a rune module from its document source, applying the
+    /// resolver-backed import-specifier rewrites when a published resolver is
+    /// available (empty otherwise). This is the same pipeline
+    /// `prepare_non_carrier_provider_sync` uses, sourced from the OPEN buffer.
+    fn self_file_provider_content(
+        &self,
+        canonical_id: &str,
+        file_language: &verter_session::FileLanguage,
+        source: &str,
+    ) -> Option<String> {
+        super::server_utils::self_file_provider_content(
+            &self.documents,
+            self.published_resolver().as_ref(),
+            canonical_id,
+            file_language,
+            source,
+        )
+    }
+
+    /// Sync an OPEN rune module's self-file provider buffer to the provider as
+    /// UNRESOLVED open-document state, keyed at the module's OWN canonical path
+    /// (the Shadow provider path), so it is QUERYABLE before resolver ownership
+    /// is ready.
+    ///
+    /// Mirrors [`Self::sync_carrier_ide_unresolved`] but for a SELF-FILE rune
+    /// module: the provider buffer is `<rune prelude> + <rewritten module
+    /// bytes>`, the provider path is the canonical id itself (not a derived
+    /// `.tsx` path), and it does NOT depend on
+    /// `non_carrier_sync_state_for_source` (which requires resolver ownership).
+    /// It refreshes the document's rewrite-aware projection from the same
+    /// replacements it applied, so own-buffer position mapping is exact.
+    pub(super) async fn sync_self_file_shadow_unresolved(&self, uri: &Uri) -> bool {
+        let Some(canonical_id) = self.documents.get_canonical_id(uri) else {
+            return false;
         };
-        let ide_path = self.active_ide_path_for_uri(uri)?;
-        Some((ide_path, ide.code, mapper))
+        let Some(file_language) = super::server_utils::adapter_module_language_for(&canonical_id)
+        else {
+            return false;
+        };
+        let Some(sync) = &self.project_sync else {
+            return false;
+        };
+        // Route through the SHARED self-file shadow-sync primitive — the SAME
+        // path the debounced coordinator uses, so a rune module's Shadow state
+        // is never forked between the editor ingress and the debounced tick.
+        super::server_utils::sync_self_file_shadow_state(
+            &self.documents,
+            sync,
+            &self.provider_sync_states,
+            self.published_resolver().as_ref(),
+            uri,
+            &canonical_id,
+            &file_language,
+        )
+        .await
     }
 
     /// Load the current workspace snapshot's resolver, if a published snapshot exists.
@@ -1420,7 +1547,7 @@ impl VerterLanguageServer {
     pub(super) fn ide_context_by_path(
         &self,
         ide_path: &str,
-    ) -> Option<(String, Arc<str>, PositionMapper)> {
+    ) -> Option<(String, Arc<str>, ProviderPositionMapper)> {
         let snapshot = self.published_resolver()?;
         let canonical_id = source_id_from_provider_carrier_path(
             &snapshot.resolver,

@@ -312,3 +312,45 @@ fn svelte_feature_rows_supported_no_diagnostic() {
          proves the rune module's all-UNSUPPORTED verdict is component-specific)"
     );
 }
+
+/// `svelte_rune_module_not_in_carrier_extensions`: a `.svelte.ts` / `.svelte.js`
+/// rune module is a NON-component carrier — its extension MUST NOT appear in
+/// `carrier_extensions()` (the carrier-watch-glob authority), and MUST appear in
+/// `adapter_module_extensions()` / `all_adapter_module_extensions()` (the
+/// adapter-module-watch-glob authority). The two glob authorities are disjoint
+/// for the rune module: it is covered by the dedicated adapter-module glob, NOT
+/// the carrier glob.
+#[test]
+fn svelte_rune_module_not_in_carrier_extensions() {
+    let registry = LanguageRegistry::built_in();
+
+    let carriers = registry.carrier_extensions();
+    assert!(
+        !carriers.contains(&"svelte.ts") && !carriers.contains(&"svelte.js"),
+        "carrier_extensions() must NOT include the rune-module extensions, got {carriers:?}"
+    );
+    // The carrier glob authority still covers the real `.svelte` component carrier.
+    assert!(
+        carriers.contains(&"svelte"),
+        "carrier_extensions() still covers the `.svelte` component carrier, got {carriers:?}"
+    );
+
+    // The rune-module extensions ARE the adapter-module glob authority.
+    let svelte_modules = registry.adapter_module_extensions(&FrameworkAdapterId::svelte());
+    assert!(
+        svelte_modules.contains(&"svelte.ts") && svelte_modules.contains(&"svelte.js"),
+        "adapter_module_extensions(svelte) must include svelte.ts + svelte.js, got {svelte_modules:?}"
+    );
+    let all_modules = registry.all_adapter_module_extensions();
+    assert!(
+        all_modules.contains(&"svelte.ts") && all_modules.contains(&"svelte.js"),
+        "all_adapter_module_extensions() must include svelte.ts + svelte.js, got {all_modules:?}"
+    );
+    // The two authorities are disjoint for the rune module.
+    for ext in &all_modules {
+        assert!(
+            !carriers.contains(ext),
+            "an adapter-module extension ({ext}) must never be a carrier extension"
+        );
+    }
+}

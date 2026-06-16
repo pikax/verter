@@ -50,6 +50,19 @@ pub(crate) fn carrier_language_for(path: &str) -> Option<verter_session::FileLan
     language.is_framework_carrier().then_some(language)
 }
 
+/// Registry-backed adapter-MODULE classification for a canonical ID (or URI
+/// string): `Some(language)` when the path classifies as a standalone non-
+/// component adapter module (`.svelte.ts` / `.svelte.js` rune module), `None`
+/// otherwise (carriers, plain scripts, unknown extensions). An adapter module
+/// is NOT a carrier — it serves its OWN-path provider buffer with a synthetic
+/// rune prelude, not an IDE TSX projection.
+pub(crate) fn adapter_module_language_for(path: &str) -> Option<verter_session::FileLanguage> {
+    let language = verter_session::LanguageRegistry::global()
+        .classify_static(path)
+        .static_resolution();
+    verter_session::framework::svelte_rune_module_source_type(&language).map(|_| language)
+}
+
 /// Whether `path` is a framework CARRIER whose default export IS the
 /// component value (`.vue`, `.svelte`, …). Every framework carrier shares
 /// default-export component semantics: a default import of the carrier binds
@@ -358,14 +371,20 @@ impl verter_workspace::WorkspaceAccess for LspProjectResolverReader<'_> {
     fn record_ambient_dependency(&self, _consumer: &str, _virtual_id: &str) {}
 }
 
-pub(crate) fn rewrite_non_carrier_source_with_resolver(
+/// Compute the import-specifier replacement spans for a non-carrier source,
+/// each `(byte_start, byte_end, replacement_text)` indexing into `source` (the
+/// pre-rewrite bytes). The replacement text is the quote-wrapped provider
+/// specifier. The spans are returned in ASCENDING byte order so a consumer can
+/// translate them to per-line (line, column) segments (the self-file position
+/// mapper); apply them with [`apply_specifier_replacements`] (which sorts
+/// descending so earlier in-place edits don't shift later spans).
+pub(crate) fn compute_specifier_replacements(
     resolver: &crate::project_resolver::NativeProjectResolver,
     reader: &dyn verter_workspace::WorkspaceRead,
     importer_id: &str,
     source: &str,
     module_references: &[verter_session::ScriptModuleReference],
-) -> String {
-    let mut rewritten = source.to_string();
+) -> Vec<(usize, usize, String)> {
     let mut replacements: Vec<(usize, usize, String)> = module_references
         .iter()
         .filter_map(|reference| {
@@ -397,13 +416,178 @@ pub(crate) fn rewrite_non_carrier_source_with_resolver(
             ))
         })
         .collect();
+    replacements.sort_by_key(|replacement| replacement.0);
+    replacements
+}
 
-    replacements.sort_by_key(|replacement| std::cmp::Reverse(replacement.0));
-    for (start, end, replacement) in replacements {
-        rewritten.replace_range(start..end, &replacement);
+/// Apply the specifier replacements to `source`, producing the rewritten
+/// provider bytes. Edits are applied in descending byte order so an in-place
+/// replacement never shifts the spans of replacements earlier in the file.
+pub(crate) fn apply_specifier_replacements(
+    source: &str,
+    replacements: &[(usize, usize, String)],
+) -> String {
+    let mut rewritten = source.to_string();
+    let mut ordered: Vec<&(usize, usize, String)> = replacements.iter().collect();
+    ordered.sort_by_key(|replacement| std::cmp::Reverse(replacement.0));
+    for (start, end, replacement) in ordered {
+        rewritten.replace_range(*start..*end, replacement);
     }
-
     rewritten
+}
+
+/// Build the self-file provider content (`<rune prelude> + <rewritten module
+/// bytes>`) for a rune module from its OPEN-document source, applying the
+/// resolver-backed import-specifier rewrites when a published snapshot is
+/// available (empty otherwise). This is the SAME pipeline
+/// `prepare_non_carrier_provider_sync` uses, sourced from the open buffer —
+/// shared by the server's generalized projection context and the coordinator's
+/// debounced diagnostics so both produce a byte-identical self-file buffer.
+pub(crate) fn self_file_provider_content(
+    documents: &DocumentRegistry,
+    snapshot: Option<&super::PublishedResolverSnapshot>,
+    canonical_id: &str,
+    file_language: &verter_session::FileLanguage,
+    source: &str,
+) -> Option<String> {
+    let module_references: Vec<verter_session::ScriptModuleReference> = documents
+        .host()
+        .get_analysis(canonical_id)
+        .map(|analysis| {
+            analysis
+                .module_references
+                .iter()
+                .map(verter_session::ScriptModuleReference::from)
+                .collect()
+        })
+        .unwrap_or_default();
+    let rewritten = if let Some(snapshot) = snapshot {
+        let ws = documents.host().workspace_read();
+        rewrite_non_carrier_source_with_resolver(
+            &snapshot.resolver,
+            ws.as_ref(),
+            canonical_id,
+            source,
+            &module_references,
+        )
+    } else {
+        source.to_string()
+    };
+    verter_session::framework::rune_module_provider_content(file_language, &rewritten)
+        .map(|built| built.content)
+}
+
+/// Sync an OPEN rune module's self-file provider buffer (`<rune prelude> +
+/// <rewritten module bytes>`) to the type provider as UNRESOLVED open-document
+/// state, keyed at the module's OWN canonical path (the Shadow provider path).
+///
+/// This is the SHARED self-file shadow-sync primitive, called from BOTH the
+/// server's `did_open`/`did_change` handler and the debounced [`SyncCoordinator`]
+/// tick — so a debounced sync routes a rune module through the SAME self-file
+/// projection path the editor ingress uses (NOT the carrier-miss
+/// `preserve_open_unresolved_carrier`, which would clobber the Shadow state with
+/// an IDE-path state and break did_close cleanup).
+///
+/// Returns `true` when the self-file buffer was synced and the Shadow state
+/// committed; `false` when the path is not a rune module, the document is gone,
+/// or the provider sync failed. It refreshes the document's rewrite-aware
+/// projection from the same replacements it applies, so own-buffer position
+/// mapping stays exact.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn sync_self_file_shadow_state(
+    documents: &DocumentRegistry,
+    project_sync: &crate::tsgo::project_sync::ProjectSync,
+    provider_sync_states: &DashMap<String, crate::provider_sync::ProviderSyncState>,
+    snapshot: Option<&super::PublishedResolverSnapshot>,
+    uri: &Uri,
+    canonical_id: &str,
+    file_language: &verter_session::FileLanguage,
+) -> bool {
+    documents.host().ensure_loaded(canonical_id);
+
+    let Some(source) = documents.get(uri).map(|d| d.source.clone()) else {
+        return false;
+    };
+
+    // Compute the import-specifier rewrites (resolver-backed when a snapshot
+    // exists; empty otherwise), refine the document's rewrite-aware projection,
+    // then build the provider buffer from the SAME replacements.
+    let module_references: Vec<verter_session::ScriptModuleReference> = documents
+        .host()
+        .get_analysis(canonical_id)
+        .map(|analysis| {
+            analysis
+                .module_references
+                .iter()
+                .map(verter_session::ScriptModuleReference::from)
+                .collect()
+        })
+        .unwrap_or_default();
+    let replacements = if let Some(snapshot) = snapshot {
+        let ws = documents.host().workspace_read();
+        compute_specifier_replacements(
+            &snapshot.resolver,
+            ws.as_ref(),
+            canonical_id,
+            &source,
+            &module_references,
+        )
+    } else {
+        Vec::new()
+    };
+    documents.refresh_self_file_rewrites(uri, file_language, &replacements);
+
+    let rewritten = apply_specifier_replacements(&source, &replacements);
+    let Some(built) =
+        verter_session::framework::rune_module_provider_content(file_language, &rewritten)
+    else {
+        return false;
+    };
+
+    let mut state = provider_sync_states
+        .get(canonical_id)
+        .map(|entry| entry.clone())
+        .unwrap_or_else(|| crate::provider_sync::ProviderSyncState {
+            owner_binding: crate::provider_sync::ProviderOwnerBinding::Unresolved,
+            ..Default::default()
+        });
+    // Bootstrap UNRESOLVED open-document state — force `Unresolved` so a stale
+    // `Owned` binding from a prior committed state is never re-committed here
+    // (mirrors the carrier unresolved-sync discipline).
+    state.owner_binding = crate::provider_sync::ProviderOwnerBinding::Unresolved;
+
+    let needs_open =
+        state.shadow_path.as_deref() != Some(canonical_id) || !state.shadow_background_loaded;
+    let result = if needs_open {
+        project_sync.load_file(canonical_id, &built.content).await
+    } else {
+        project_sync.sync_file(canonical_id, &built.content).await
+    };
+
+    match result {
+        Ok(()) => {
+            state.shadow_path = Some(canonical_id.to_string());
+            state.shadow_background_loaded = true;
+            crate::provider_sync::commit_sync_transition(provider_sync_states, canonical_id, state);
+            true
+        }
+        Err(error) => {
+            tracing::warn!("sync_self_file_shadow_state: failed for {canonical_id}: {error}");
+            false
+        }
+    }
+}
+
+pub(crate) fn rewrite_non_carrier_source_with_resolver(
+    resolver: &crate::project_resolver::NativeProjectResolver,
+    reader: &dyn verter_workspace::WorkspaceRead,
+    importer_id: &str,
+    source: &str,
+    module_references: &[verter_session::ScriptModuleReference],
+) -> String {
+    let replacements =
+        compute_specifier_replacements(resolver, reader, importer_id, source, module_references);
+    apply_specifier_replacements(source, &replacements)
 }
 
 pub(crate) fn prepare_non_carrier_provider_sync(

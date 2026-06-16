@@ -7,6 +7,7 @@ use tower_lsp_server::{Client, LanguageServer};
 
 use crate::documents::line_index::LineIndex;
 use crate::documents::position_map::PositionMapper;
+use crate::documents::provider_projection::ProviderPositionMapper;
 use crate::documents::{uri_to_canonical_id, DocumentRegistry};
 use crate::features::cursor_context::ExpressionContext;
 use crate::features::diagnostics::map_diagnostics;
@@ -115,8 +116,9 @@ pub use self::protocol_types::*;
 mod server_utils;
 use self::server_utils::*;
 pub(crate) use self::server_utils::{
-    carrier_language_for, compute_verter_diagnostics_for_with_views,
+    adapter_module_language_for, carrier_language_for, compute_verter_diagnostics_for_with_views,
     is_default_export_component_carrier, prepare_non_carrier_provider_sync,
+    self_file_provider_content, sync_self_file_shadow_state,
 };
 
 #[path = "../background_drain.rs"]
@@ -149,9 +151,28 @@ pub(crate) struct PublishedResolverSnapshot {
 pub(crate) struct TypeProviderContext {
     pub(crate) tsx_path: String,
     pub(crate) tsx_content: Arc<str>,
-    pub(crate) mapper: PositionMapper,
+    pub(crate) mapper: ProviderPositionMapper,
     pub(crate) tsx_line_index: LineIndex,
     pub(crate) carrier_line_index: LineIndex,
+}
+
+/// The generalized per-document provider-projection query context, serving BOTH
+/// the carrier-IDE projection and the self-file rune-module projection. The
+/// SOLE query path for a document's provider buffer (no parallel rune path).
+pub(crate) struct ProviderProjectionContext {
+    /// The path the TypeProvider opened: the carrier IDE path, or the rune
+    /// module's OWN canonical id (self-file provider buffer served from its own
+    /// path).
+    pub(crate) provider_path: String,
+    /// The bytes the TypeProvider type-checks (IDE TSX, or `<rune prelude> +
+    /// <rewritten module bytes>`).
+    pub(crate) provider_content: Arc<str>,
+    /// The unified source↔provider position mapper (projection-agnostic).
+    pub(crate) mapper: ProviderPositionMapper,
+    /// Line index over [`Self::provider_content`].
+    pub(crate) provider_line_index: LineIndex,
+    /// Line index over the user source.
+    pub(crate) source_line_index: LineIndex,
 }
 
 #[derive(Debug, Clone)]

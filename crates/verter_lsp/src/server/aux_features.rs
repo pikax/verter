@@ -432,7 +432,15 @@ pub(super) async fn handle_code_action(
     // TypeProvider code actions (TSGO quick fixes, refactorings).
     // Skip during typing cooldown to keep TSGO pipeline clear for interactive requests.
     // Extract all context synchronously — no DashMap guard held across await.
-    if !server.is_typing_cooldown()
+    //
+    // GATED OFF for a SELF-FILE rune-module own buffer: a code-action's
+    // workspace-EDIT positions are not yet mapped through the self-file mapper,
+    // so an applied edit could land off by the prelude offset (or inside the
+    // prelude) and CORRUPT the module. Code actions stay DEFERRED for the
+    // self-file projection — a clean no-op, never a wrong/unmapped edit.
+    // (Carrier code actions unchanged.)
+    if !server.is_self_file_projection(uri)
+        && !server.is_typing_cooldown()
         && (wants_code_action_kind(only, "quickfix") || wants_code_action_kind(only, "refactor"))
     {
         if let Some(tp) = &server.type_provider {

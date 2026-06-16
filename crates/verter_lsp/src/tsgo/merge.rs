@@ -8,7 +8,7 @@ use tower_lsp_server::ls_types::*;
 use verter_span::{LspPosition, TsPosition};
 
 use crate::documents::line_index::LineIndex;
-use crate::documents::position_map::PositionMapper;
+use crate::documents::provider_projection::ProviderPositionMapper;
 #[cfg(test)]
 use crate::tsgo::protocol::Completion;
 use crate::tsgo::protocol::{
@@ -27,7 +27,7 @@ use crate::uri::path_to_file_uri;
 /// resolver closure produces it.
 pub struct ExternalIdeContext {
     pub tsx_line_index: LineIndex,
-    pub mapper: PositionMapper,
+    pub mapper: ProviderPositionMapper,
     pub carrier_line_index: LineIndex,
 }
 
@@ -53,7 +53,7 @@ pub type BarrelResolver<'a> = &'a dyn Fn(&str, u32, u32) -> Option<Location>;
 pub fn carrier_position_to_tsx_offset(
     position: &Position,
     _carrier_line_index: &LineIndex,
-    mapper: &PositionMapper,
+    mapper: &ProviderPositionMapper,
     tsx_line_index: &LineIndex,
 ) -> Option<u32> {
     let tsx_pos = mapper
@@ -74,7 +74,7 @@ pub fn carrier_position_to_tsx_offset(
 pub fn carrier_position_to_tsx_offset_validated(
     position: &Position,
     carrier_line_index: &LineIndex,
-    mapper: &PositionMapper,
+    mapper: &ProviderPositionMapper,
     tsx_line_index: &LineIndex,
 ) -> Option<u32> {
     let tsx_offset =
@@ -103,7 +103,7 @@ pub fn carrier_position_to_tsx_offset_validated(
 fn find_exact_roundtrip_offset(
     position: &Position,
     initial_offset: u32,
-    mapper: &PositionMapper,
+    mapper: &ProviderPositionMapper,
     tsx_line_index: &LineIndex,
 ) -> Option<u32> {
     const SEARCH_WINDOW: u32 = 256;
@@ -155,7 +155,7 @@ pub fn tsx_range_to_carrier_range(
     tsx_start: u32,
     tsx_end: u32,
     tsx_line_index: &LineIndex,
-    mapper: &PositionMapper,
+    mapper: &ProviderPositionMapper,
     carrier_line_index: &LineIndex,
 ) -> Option<Range> {
     let start_pos = tsx_line_index.offset_to_position(tsx_start)?;
@@ -195,7 +195,7 @@ pub fn tsx_range_to_carrier_range(
 pub fn merge_hover(
     verter_hover: Option<Hover>,
     type_hover: Option<HoverInfo>,
-    _mapper: &PositionMapper,
+    _mapper: &ProviderPositionMapper,
     _tsx_line_index: &LineIndex,
     _carrier_line_index: &LineIndex,
     vue_kind_label: Option<&str>,
@@ -476,7 +476,7 @@ fn is_internal_dunder(label: &str) -> bool {
 pub fn merge_completions(
     verter_items: Vec<CompletionItem>,
     type_result: CompletionResult,
-    mapper: &PositionMapper,
+    mapper: &ProviderPositionMapper,
     tsx_line_index: &LineIndex,
     carrier_line_index: &LineIndex,
     tsx_path: Option<&str>,
@@ -606,7 +606,7 @@ pub fn merge_diagnostics(
     verter_diags: Vec<Diagnostic>,
     type_diags: Vec<TypeDiagnostic>,
     tsx_line_index: &LineIndex,
-    mapper: &PositionMapper,
+    mapper: &ProviderPositionMapper,
     carrier_line_index: &LineIndex,
 ) -> Vec<Diagnostic> {
     let mut result = verter_diags;
@@ -672,7 +672,7 @@ fn resolve_carrier_tsx_range(
     start: u32,
     end: u32,
     current_tsx_line_index: &LineIndex,
-    current_mapper: &PositionMapper,
+    current_mapper: &ProviderPositionMapper,
     current_carrier_line_index: &LineIndex,
     external_resolver: Option<ExternalIdeResolver<'_>>,
 ) -> Range {
@@ -722,7 +722,7 @@ pub fn merge_definitions(
     verter_def: Option<GotoDefinitionResponse>,
     type_defs: Vec<TypeLocation>,
     tsx_line_index: &LineIndex,
-    mapper: &PositionMapper,
+    mapper: &ProviderPositionMapper,
     carrier_line_index: &LineIndex,
     external_resolver: Option<ExternalIdeResolver<'_>>,
     document_uri: &Uri,
@@ -749,7 +749,7 @@ pub fn merge_definitions_with_barrel_resolver(
     verter_def: Option<GotoDefinitionResponse>,
     type_defs: Vec<TypeLocation>,
     tsx_line_index: &LineIndex,
-    mapper: &PositionMapper,
+    mapper: &ProviderPositionMapper,
     carrier_line_index: &LineIndex,
     external_resolver: Option<ExternalIdeResolver<'_>>,
     document_uri: &Uri,
@@ -943,7 +943,7 @@ pub fn merge_references(
     verter_refs: Option<Vec<Location>>,
     type_refs: Vec<TypeLocation>,
     tsx_line_index: &LineIndex,
-    mapper: &PositionMapper,
+    mapper: &ProviderPositionMapper,
     carrier_line_index: &LineIndex,
     external_resolver: Option<ExternalIdeResolver<'_>>,
     carrier_source_exists: &dyn Fn(&str) -> bool,
@@ -1013,7 +1013,7 @@ pub fn merge_rename_locations(
     type_locations: Vec<RenameLocation>,
     new_name: &str,
     tsx_line_index: &LineIndex,
-    mapper: &PositionMapper,
+    mapper: &ProviderPositionMapper,
     carrier_line_index: &LineIndex,
     external_resolver: Option<ExternalIdeResolver<'_>>,
     carrier_source_exists: &dyn Fn(&str) -> bool,
@@ -1087,7 +1087,7 @@ pub fn merge_document_highlights(
     verter_highlights: Option<Vec<DocumentHighlight>>,
     type_highlights: Vec<TypeDocumentHighlight>,
     tsx_line_index: &LineIndex,
-    mapper: &PositionMapper,
+    mapper: &ProviderPositionMapper,
     carrier_line_index: &LineIndex,
 ) -> Option<Vec<DocumentHighlight>> {
     let mut result = verter_highlights.unwrap_or_default();
@@ -1170,7 +1170,7 @@ pub fn merge_signature_help(
 pub fn merge_code_actions(
     type_actions: Vec<TypeCodeAction>,
     tsx_line_index: &LineIndex,
-    mapper: &PositionMapper,
+    mapper: &ProviderPositionMapper,
     carrier_line_index: &LineIndex,
     carrier_source_exists: &dyn Fn(&str) -> bool,
 ) -> Vec<CodeActionOrCommand> {
@@ -1240,7 +1240,7 @@ pub fn merge_code_actions(
 pub fn merge_semantic_tokens(
     type_tokens: Vec<protocol::SemanticToken>,
     tsx_line_index: &LineIndex,
-    mapper: &PositionMapper,
+    mapper: &ProviderPositionMapper,
     carrier_line_index: &LineIndex,
 ) -> Vec<tower_lsp_server::ls_types::SemanticToken> {
     // Map each token's whole half-open range `[start, start+length)` from TSX to Vue
@@ -1325,7 +1325,7 @@ pub fn merge_semantic_tokens(
 pub fn merge_inlay_hints(
     type_hints: Vec<InlayHint>,
     tsx_line_index: &LineIndex,
-    mapper: &PositionMapper,
+    mapper: &ProviderPositionMapper,
     carrier_line_index: &LineIndex,
 ) -> Vec<tower_lsp_server::ls_types::InlayHint> {
     let mut result = Vec::with_capacity(type_hints.len());
@@ -1380,10 +1380,11 @@ pub fn merge_inlay_hints(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::documents::position_map::PositionMapper;
 
     // ── Position mapping tests ─────────────────────────────────────
 
-    fn make_mapper_and_indexes() -> (PositionMapper, LineIndex, LineIndex) {
+    fn make_mapper_and_indexes() -> (ProviderPositionMapper, LineIndex, LineIndex) {
         // Vue source (line 0-1: template, line 3-4: script)
         let carrier_source = "<template>\n  <div>{{ msg }}</div>\n</template>\n\n<script setup>\nconst msg = \"hello\";\n</script>";
         // TSX source (script at line 0)
@@ -1397,7 +1398,7 @@ mod tests {
         builder.add_token(0, 10, 5, 10, Some(source_id), None);
         let json = builder.into_sourcemap().to_json_string();
 
-        let mapper = PositionMapper::from_json(&json).unwrap();
+        let mapper = ProviderPositionMapper::source_map(PositionMapper::from_json(&json).unwrap());
         let carrier_li = LineIndex::new_utf16(carrier_source);
         let tsx_li = LineIndex::new_utf16(tsx_source);
 
@@ -1465,14 +1466,15 @@ mod tests {
         builder.add_token(0, 7, 0, 50, Some(source_id), None);
         let json = builder.into_sourcemap().to_json_string();
 
-        let mapper = PositionMapper::from_json(&json).unwrap();
+        let pm = PositionMapper::from_json(&json).unwrap();
         let tsx_li = LineIndex::new_utf16(tsx_source);
         let carrier_li = LineIndex::new_utf16(carrier_source);
 
         // Precondition: both endpoints individually map (start byte 1 -> run A,
         // end byte 9 -> run B), so the *old* per-endpoint composer returned Some.
-        assert!(mapper.tsx_to_carrier(TsPosition::new(0, 1)).is_some());
-        assert!(mapper.tsx_to_carrier(TsPosition::new(0, 9)).is_some());
+        assert!(pm.tsx_to_carrier(TsPosition::new(0, 1)).is_some());
+        assert!(pm.tsx_to_carrier(TsPosition::new(0, 9)).is_some());
+        let mapper = ProviderPositionMapper::source_map(pm);
 
         // Cross-run range straddling the synthetic "XXXX" -> dropped.
         assert!(
@@ -3232,7 +3234,8 @@ mod tests {
         builder.add_token(0, 0, 1, 0, Some(sid), None); // TSX 0:0 → Vue 1:0
         builder.add_token(0, 16, 1, 16, Some(sid), None); // TSX 0:16 → Vue 1:16
         let json = builder.into_sourcemap().to_json_string();
-        let target_mapper = PositionMapper::from_json(&json).unwrap();
+        let target_mapper =
+            ProviderPositionMapper::source_map(PositionMapper::from_json(&json).unwrap());
 
         let type_defs = vec![TypeLocation {
             path: "/src/components/Target.vue.tsx".to_string(),

@@ -19,7 +19,7 @@ use std::sync::Arc;
 use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::ls_types::*;
 
-use crate::capabilities::{carrier_watch_glob, server_capabilities};
+use crate::capabilities::{adapter_module_watch_glob, carrier_watch_glob, server_capabilities};
 use crate::documents::uri_to_canonical_id;
 use crate::provider_sync::ProviderPathKind;
 
@@ -345,50 +345,60 @@ pub(super) async fn handle_initialized(server: &VerterLanguageServer, _params: I
     // build tools, other editors). Enables non-VS Code clients (Neovim, etc.)
     // to get full external change detection via the standard LSP mechanism.
     let watch_kind = Some(WatchKind::Change | WatchKind::Create | WatchKind::Delete);
+    let mut watchers = vec![FileSystemWatcher {
+        // Carrier-file watcher glob, built from the registry's carrier
+        // rows. File-watching is a SERVER concern (the client manifest
+        // carries no watch globs); this glob is the descriptor-derived
+        // authority. It covers carrier extensions today (`.vue`,
+        // `.svelte`) — including carrier rows with no registered
+        // implementation, whose events produce no provider sync state
+        // until a carrier lands.
+        glob_pattern: GlobPattern::String(carrier_watch_glob()),
+        kind: watch_kind,
+    }];
+    // Dedicated ADAPTER-MODULE watcher glob (`**/*.{svelte.js,svelte.ts}`),
+    // built from `LanguageRegistry::all_adapter_module_extensions()`. A rune
+    // module is NOT a carrier and its coverage is its OWN descriptor-derived
+    // glob — the generic TS/JS glob below no longer carries rune-module
+    // responsibility.
+    if let Some(adapter_module_glob) = adapter_module_watch_glob() {
+        watchers.push(FileSystemWatcher {
+            glob_pattern: GlobPattern::String(adapter_module_glob),
+            kind: watch_kind,
+        });
+    }
+    watchers.extend([
+        FileSystemWatcher {
+            // Generic TS/JS glob for ORDINARY TS/JS dependency + config
+            // tracking ONLY (rune-module coverage moved to the dedicated
+            // adapter-module glob above).
+            glob_pattern: GlobPattern::String("**/*.{ts,tsx,js,jsx,mts,mjs,cts,cjs}".to_string()),
+            kind: watch_kind,
+        },
+        FileSystemWatcher {
+            glob_pattern: GlobPattern::String("**/tsconfig*.json".to_string()),
+            kind: watch_kind,
+        },
+        FileSystemWatcher {
+            glob_pattern: GlobPattern::String("**/.verterrc.json".to_string()),
+            kind: watch_kind,
+        },
+        FileSystemWatcher {
+            glob_pattern: GlobPattern::String("**/vite.config.{ts,js,mjs,cjs,mts,cts}".to_string()),
+            kind: watch_kind,
+        },
+        FileSystemWatcher {
+            glob_pattern: GlobPattern::String("**/package.json".to_string()),
+            kind: watch_kind,
+        },
+    ]);
     let _ = server
         .client
         .register_capability(vec![Registration {
             id: "verter-file-watcher".to_string(),
             method: "workspace/didChangeWatchedFiles".to_string(),
             register_options: serde_json::to_value(DidChangeWatchedFilesRegistrationOptions {
-                watchers: vec![
-                    FileSystemWatcher {
-                        // Carrier-file watcher glob, built from the
-                        // registry's carrier rows. File-watching is a
-                        // SERVER concern (the client manifest carries no
-                        // watch globs); this glob is the descriptor-derived
-                        // authority. It covers carrier extensions today
-                        // (`.vue`, `.svelte`) — including carrier rows with
-                        // no registered implementation, whose events produce
-                        // no provider sync state until a carrier lands.
-                        glob_pattern: GlobPattern::String(carrier_watch_glob()),
-                        kind: watch_kind,
-                    },
-                    FileSystemWatcher {
-                        glob_pattern: GlobPattern::String(
-                            "**/*.{ts,tsx,js,jsx,mts,mjs,cts,cjs}".to_string(),
-                        ),
-                        kind: watch_kind,
-                    },
-                    FileSystemWatcher {
-                        glob_pattern: GlobPattern::String("**/tsconfig*.json".to_string()),
-                        kind: watch_kind,
-                    },
-                    FileSystemWatcher {
-                        glob_pattern: GlobPattern::String("**/.verterrc.json".to_string()),
-                        kind: watch_kind,
-                    },
-                    FileSystemWatcher {
-                        glob_pattern: GlobPattern::String(
-                            "**/vite.config.{ts,js,mjs,cjs,mts,cts}".to_string(),
-                        ),
-                        kind: watch_kind,
-                    },
-                    FileSystemWatcher {
-                        glob_pattern: GlobPattern::String("**/package.json".to_string()),
-                        kind: watch_kind,
-                    },
-                ],
+                watchers,
             })
             .ok(),
         }])
@@ -498,6 +508,18 @@ pub(super) async fn handle_did_open(
     if provider_sync_policy.await_ide_sync {
         // Use ensure_current_file_synced for immediate IDE-only sync
         server.ensure_current_file_synced(uri).await;
+    }
+
+    // A self-file rune module (`.svelte.ts` / `.svelte.js`) is NOT a carrier —
+    // it serves its OWN-path provider buffer. Sync it as UNRESOLVED open-
+    // document shadow state so its own buffer is queryable before resolver
+    // ownership is ready (a no-op for any non-rune document).
+    if current_canonical_id
+        .as_deref()
+        .and_then(adapter_module_language_for)
+        .is_some()
+    {
+        server.sync_self_file_shadow_unresolved(uri).await;
     }
 
     // Imported carrier API warmup SECOND (Normal priority, never blocks active file)
@@ -628,7 +650,7 @@ pub(super) async fn handle_did_change(
             server.needs_ide_sync.insert(canonical_id.clone());
             server.needs_deferred_sync.insert(canonical_id.clone());
             if let Some(coordinator) = &server.sync_coordinator {
-                coordinator.signal(canonical_id, uri.as_str().to_string());
+                coordinator.signal(canonical_id.clone(), uri.as_str().to_string());
             }
 
             // Eager TSX sync — send fresh TSX to type provider immediately.
@@ -643,6 +665,17 @@ pub(super) async fn handle_did_change(
                         }
                     }
                 }
+            }
+
+            // A self-file rune module (`.svelte.ts` / `.svelte.js`) is NOT a
+            // carrier — the eager TSX path above never fires for it, and the
+            // coordinator's diagnostics route through carrier IDE state. Re-sync
+            // its OWN-path provider buffer here so an editor edit refreshes the
+            // provider content AND refines the rewrite-aware projection (keeping
+            // `provider_projection_context`'s content and mapper consistent — no
+            // stale own-buffer content, no lost rewrite columns).
+            if adapter_module_language_for(&canonical_id).is_some() {
+                server.sync_self_file_shadow_unresolved(&uri).await;
             }
         }
     }
@@ -660,6 +693,19 @@ pub(super) async fn handle_did_close(
     let _hg = HandlerGuard::new("did_close");
     let uri = &params.text_document.uri;
     tracing::info!("did_close: {}", uri.as_str());
+
+    // A self-file rune module (`.svelte.ts` / `.svelte.js`) has NO IDE TSX —
+    // the carrier-oriented branch below (gated on `get_ide(...).is_some()`)
+    // never fires for it. Close + remove its OWN-path Shadow provider state
+    // explicitly so the open-document buffer does not linger in the provider.
+    if server.documents.get_virtual_source_uri(uri).is_none() && server.project_sync.is_some() {
+        if let Some(canonical_id) = server.documents.get_canonical_id(uri) {
+            if adapter_module_language_for(&canonical_id).is_some() {
+                server.clear_provider_sync_state(&canonical_id).await;
+            }
+        }
+    }
+
     // Virtual files don't have TSX in the provider
     if server.documents.get_virtual_source_uri(uri).is_none()
         && server.project_sync.is_some()
@@ -793,6 +839,8 @@ pub(super) async fn handle_did_change_watched_files(
     let mut ts_js_delete_ids = Vec::new();
     let mut carrier_resync_ids = Vec::new();
     let mut carrier_delete_ids: Vec<(String, String)> = Vec::new(); // (canonical_id, uri_str)
+    let mut adapter_module_resync_ids = Vec::new();
+    let mut adapter_module_delete_ids = Vec::new();
     let mut config_changed = false;
 
     for event in &params.changes {
@@ -826,6 +874,18 @@ pub(super) async fn handle_did_change_watched_files(
                 carrier_delete_ids.push((canonical_id, event.uri.as_str().to_string()));
             } else {
                 carrier_resync_ids.push(canonical_id);
+            }
+        } else if adapter_module_language_for(&canonical_id).is_some() {
+            // A standalone ADAPTER MODULE (`.svelte.ts` / `.svelte.js` rune
+            // module) — classified EXPLICITLY (descriptor-derived) rather than
+            // falling through the incidental generic-TS `else` arm. A rune
+            // module is NOT a carrier; its background resync reuses the non-
+            // carrier resync impl (its provider buffer is the own-path rune-
+            // module content).
+            if event.typ == FileChangeType::DELETED {
+                adapter_module_delete_ids.push(canonical_id);
+            } else {
+                adapter_module_resync_ids.push(canonical_id);
             }
         } else {
             // TS/JS source file
@@ -870,8 +930,14 @@ pub(super) async fn handle_did_change_watched_files(
         tracing::debug!("did_change_watched_files: resynced carrier {canonical_id}");
     }
 
-    // ── TS/JS file deletions ───────────────────────────────────
-    for canonical_id in &ts_js_delete_ids {
+    // ── TS/JS + adapter-module file deletions ──────────────────
+    // A rune module's provider state lives on its OWN canonical path (the
+    // Shadow path), so removal is the same remove-state + host-evict the
+    // non-carrier path uses.
+    for canonical_id in ts_js_delete_ids
+        .iter()
+        .chain(adapter_module_delete_ids.iter())
+    {
         if let Some(state) = server.remove_provider_sync_state(canonical_id) {
             server.close_provider_state(&state).await;
         }
@@ -879,8 +945,15 @@ pub(super) async fn handle_did_change_watched_files(
         tracing::debug!("did_change_watched_files: removed {canonical_id}");
     }
 
-    // ── TS/JS file creates/changes ─────────────────────────────
-    if !ts_js_resync_ids.is_empty() {
+    // ── TS/JS + adapter-module file creates/changes ────────────
+    // Adapter modules (rune modules) reuse the non-carrier resync impl: their
+    // provider buffer is the own-path rune-module content (prelude + rewritten
+    // bytes), produced by the same `prepare_non_carrier_provider_sync` path.
+    let non_carrier_resync_ids: Vec<String> = ts_js_resync_ids
+        .into_iter()
+        .chain(adapter_module_resync_ids)
+        .collect();
+    if !non_carrier_resync_ids.is_empty() {
         if let Some(sync) = &server.project_sync {
             let host = server.documents.host_arc();
             let sync = sync.clone();
@@ -889,7 +962,7 @@ pub(super) async fn handle_did_change_watched_files(
             let is_tsgo = matches!(server.type_provider_kind, crate::TypeProviderKind::Tsgo);
 
             tokio::spawn(async move {
-                for canonical_id in ts_js_resync_ids {
+                for canonical_id in non_carrier_resync_ids {
                     crate::workspace_scanner::resync_non_carrier_file(
                         &canonical_id,
                         &host,

@@ -9308,6 +9308,525 @@ fn test_carrier_watch_glob_covers_registry_carrier_rows() {
     assert_eq!(glob, "**/*.{svelte,vue}");
 }
 
+/// Guard `lifecycle_watch_globs_are_descriptor_derived`: the watcher globs are
+/// DESCRIPTOR-DERIVED, never hand-listed. The carrier glob comes from the
+/// registry's carrier rows; the adapter-module glob comes from
+/// `all_adapter_module_extensions()` (`**/*.{svelte.ts,svelte.js}`) — a rune
+/// module is NOT a carrier, so its coverage is the dedicated adapter-module
+/// glob, NOT the generic `**/*.{ts,tsx,…}` glob (which the assertion proves
+/// excludes the rune extensions). Without the dedicated glob the rune module
+/// would only be covered incidentally by the generic TS glob (the S2a P1 gap).
+#[test]
+fn lifecycle_watch_globs_are_descriptor_derived() {
+    // The adapter-module glob is built from the registry, covering the
+    // registered rune-module extensions in longest-suffix-first row order.
+    let adapter_glob = crate::capabilities::adapter_module_watch_glob()
+        .expect("the svelte adapter registers rune-module extensions");
+    // The adapter-module glob is built from the SAME registry source the
+    // descriptor authority exposes — not a hand-listed literal.
+    let from_registry = verter_session::LanguageRegistry::global().all_adapter_module_extensions();
+    assert_eq!(
+        adapter_glob,
+        format!("**/*.{{{}}}", from_registry.join(",")),
+        "the adapter-module glob is descriptor-derived from all_adapter_module_extensions()"
+    );
+    let mut sorted = from_registry.clone();
+    sorted.sort_unstable();
+    assert_eq!(
+        sorted,
+        vec!["svelte.js", "svelte.ts"],
+        "the registry is the authority for the adapter-module extensions (svelte.ts + svelte.js)"
+    );
+
+    // The generic TS/JS glob does NOT carry rune-module coverage: `.svelte.ts`
+    // / `.svelte.js` are NOT among the bare TS/JS extensions. (The glob
+    // `**/*.{ts,...}` would match `foo.svelte.ts` by suffix, but the
+    // classification + the dedicated adapter-module glob are what make the
+    // rune-module coverage descriptor-driven and explicit.)
+    let generic = "ts,tsx,js,jsx,mts,mjs,cts,cjs";
+    assert!(
+        !generic
+            .split(',')
+            .any(|e| e == "svelte.ts" || e == "svelte.js"),
+        "rune-module extensions must not be hand-listed in the generic TS/JS glob"
+    );
+}
+
+/// Guard `provider_projection_context_serves_both_carrier_and_self_file`: the
+/// ONE generalized `provider_projection_context` serves BOTH a `.vue` carrier
+/// (carrier-IDE projection) AND a `.svelte.ts` rune module (self-file
+/// projection) — there is no parallel rune-only query path. The discriminating
+/// assertion is the self-file prelude offset: a user-source line maps to
+/// provider line `+ prelude_line_count`, and a provider position in the prelude
+/// region drops to no source line (off-by-prelude if the offset were unwired).
+#[tokio::test]
+async fn provider_projection_context_serves_both_carrier_and_self_file() {
+    use verter_span::TsPosition;
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let host_for_server = Arc::clone(&host);
+    let type_provider_for_server = Arc::clone(&type_provider);
+    let (service, socket) = tower_lsp_server::LspService::new(move |client| {
+        VerterLanguageServer::new(
+            client,
+            LspConfig {
+                host: Arc::clone(&host_for_server),
+                type_provider: Some(Arc::clone(&type_provider_for_server)),
+                project_sync_mode: crate::ProjectSyncMode::FullProject,
+                type_provider_kind: crate::TypeProviderKind::Tsserver,
+                suggest_tsgo: false,
+                mcp_port: None,
+                type_provider_none_reason: None,
+            },
+        )
+    });
+    let drain = tokio::spawn(async move {
+        let mut socket = socket;
+        while socket.next().await.is_some() {}
+    });
+    let server = service.inner();
+    install_test_resolver(server);
+
+    // (1) CARRIER: a `.vue` file projects through the carrier-IDE branch of the
+    // ONE generalized context.
+    let vue_uri: Uri = "file:///workspace/App.vue".parse().unwrap();
+    let _ = server.documents.did_open(&TextDocumentItem {
+        uri: vue_uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: "<script setup lang=\"ts\">\nconst x = 1;\n</script>\n<template>{{ x }}</template>"
+            .to_string(),
+    });
+    server.ensure_current_file_synced(&vue_uri).await;
+    assert!(
+        matches!(
+            server.documents.get_projection(&vue_uri),
+            Some(
+                crate::documents::provider_projection::DocumentProviderProjection::CarrierIde { .. }
+            )
+        ),
+        "a `.vue` carrier builds the carrier-IDE projection"
+    );
+    let carrier_ctx = server
+        .provider_projection_context(&vue_uri)
+        .expect("the carrier projects through the generalized context");
+    assert!(
+        carrier_ctx.provider_path.ends_with(".tsx") || carrier_ctx.provider_path.ends_with(".jsx"),
+        "a carrier's provider path is an IDE TSX/JSX path, got {}",
+        carrier_ctx.provider_path
+    );
+
+    // (2) SELF-FILE: a `.svelte.ts` rune module projects through the self-file
+    // branch served by the SAME context — provider path IS the canonical id.
+    let rune_uri: Uri = "file:///workspace/store.svelte.ts".parse().unwrap();
+    let _ = server.documents.did_open(&TextDocumentItem {
+        uri: rune_uri.clone(),
+        language_id: "typescript".to_string(),
+        version: 1,
+        text: "export const s = $state(0);\n".to_string(),
+    });
+    let rune_ctx = server
+        .provider_projection_context(&rune_uri)
+        .expect("the rune module projects through the SAME generalized context");
+    assert_eq!(
+        rune_ctx.provider_path, "/workspace/store.svelte.ts",
+        "a self-file rune module serves its provider buffer from its OWN canonical path"
+    );
+    // The provider content prepends the synthetic rune prelude.
+    assert!(
+        rune_ctx.provider_content.contains("$state"),
+        "the rune-module provider buffer carries the synthetic rune prelude declarations"
+    );
+
+    // Discriminating: the self-file mapper offsets the user-source line DOWN by
+    // the prelude line count. A provider position INSIDE the prelude region
+    // drops to no source line (never a fake source-line-0).
+    let drop_in_prelude = rune_ctx.mapper.tsx_to_carrier(TsPosition::new(0, 0));
+    assert!(
+        drop_in_prelude.is_none(),
+        "a provider position in the synthetic prelude region must drop, not surface a source line"
+    );
+    // A user-source position maps to a provider line strictly BELOW the prelude.
+    let mapped = rune_ctx
+        .mapper
+        .carrier_to_tsx(verter_span::LspPosition::new(0, 13))
+        .expect("a user-source position maps into the provider buffer");
+    assert!(
+        mapped.pos.line > 0,
+        "the user-source line must shift DOWN by the prelude line count (off-by-prelude if unwired)"
+    );
+
+    drain.abort();
+}
+
+/// Open-before-ownership: `did_open` on a `.svelte.ts` rune module makes
+/// `provider_projection_context` available at the module's OWN canonical path
+/// BEFORE any resolver ownership is published (no `install_test_resolver`). The
+/// self-file shadow path does NOT depend on `non_carrier_sync_state_for_source`
+/// (which requires ownership), so the own buffer is queryable immediately.
+#[tokio::test]
+async fn rune_module_queryable_before_resolver_ownership() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let host_for_server = Arc::clone(&host);
+    let type_provider_for_server = Arc::clone(&type_provider);
+    let (service, socket) = tower_lsp_server::LspService::new(move |client| {
+        VerterLanguageServer::new(
+            client,
+            LspConfig {
+                host: Arc::clone(&host_for_server),
+                type_provider: Some(Arc::clone(&type_provider_for_server)),
+                project_sync_mode: crate::ProjectSyncMode::FullProject,
+                type_provider_kind: crate::TypeProviderKind::Tsserver,
+                suggest_tsgo: false,
+                mcp_port: None,
+                type_provider_none_reason: None,
+            },
+        )
+    });
+    let drain = tokio::spawn(async move {
+        let mut socket = socket;
+        while socket.next().await.is_some() {}
+    });
+    let server = service.inner();
+    // NO install_test_resolver — there is no published ownership snapshot.
+    assert!(
+        server.published_resolver().is_none(),
+        "precondition: no resolver ownership is published"
+    );
+
+    let rune_uri: Uri = "file:///workspace/store.svelte.ts".parse().unwrap();
+    let _ = server.documents.did_open(&TextDocumentItem {
+        uri: rune_uri.clone(),
+        language_id: "typescript".to_string(),
+        version: 1,
+        text: "export const s = $state(0);\n".to_string(),
+    });
+
+    // The own buffer is queryable at its OWN canonical path before ownership.
+    let ctx = server
+        .provider_projection_context(&rune_uri)
+        .expect("the rune module own buffer is queryable before resolver ownership");
+    assert_eq!(ctx.provider_path, "/workspace/store.svelte.ts");
+    assert!(ctx.provider_content.contains("$state"));
+
+    drain.abort();
+}
+
+/// An editor edit to an OPEN `.svelte.ts` rune module re-syncs its self-file
+/// own-buffer to the provider (the carrier eager-TSX path never fires for a
+/// non-carrier, and the coordinator routes diagnostics through carrier IDE
+/// state). After `handle_did_change`, `provider_projection_context` reflects
+/// the EDITED source — stale own-buffer content would leave the old text.
+#[tokio::test]
+async fn rune_module_own_buffer_resyncs_on_did_change() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let host_for_server = Arc::clone(&host);
+    let type_provider_for_server = Arc::clone(&type_provider);
+    let (service, socket) = tower_lsp_server::LspService::new(move |client| {
+        VerterLanguageServer::new(
+            client,
+            LspConfig {
+                host: Arc::clone(&host_for_server),
+                type_provider: Some(Arc::clone(&type_provider_for_server)),
+                project_sync_mode: crate::ProjectSyncMode::FullProject,
+                type_provider_kind: crate::TypeProviderKind::Tsserver,
+                suggest_tsgo: false,
+                mcp_port: None,
+                type_provider_none_reason: None,
+            },
+        )
+    });
+    let drain = tokio::spawn(async move {
+        let mut socket = socket;
+        while socket.next().await.is_some() {}
+    });
+    let server = service.inner();
+
+    let rune_uri: Uri = "file:///workspace/store.svelte.ts".parse().unwrap();
+    let _ = server.documents.did_open(&TextDocumentItem {
+        uri: rune_uri.clone(),
+        language_id: "typescript".to_string(),
+        version: 1,
+        text: "export const s = $state(0);\n".to_string(),
+    });
+    let ctx0 = server.provider_projection_context(&rune_uri).unwrap();
+    assert!(ctx0.provider_content.contains("$state(0)"));
+
+    // Edit the document, then drive the did_change handler.
+    super::lifecycle::handle_did_change(
+        server,
+        DidChangeTextDocumentParams {
+            text_document: VersionedTextDocumentIdentifier {
+                uri: rune_uri.clone(),
+                version: 2,
+            },
+            content_changes: vec![TextDocumentContentChangeEvent {
+                range: None,
+                range_length: None,
+                text: "export const count = $state(42);\n".to_string(),
+            }],
+        },
+    )
+    .await;
+
+    let ctx1 = server
+        .provider_projection_context(&rune_uri)
+        .expect("the rune module is still queryable after did_change");
+    assert!(
+        ctx1.provider_content.contains("$state(42)") && ctx1.provider_content.contains("count"),
+        "the own-buffer provider content must reflect the EDIT, got: {}",
+        ctx1.provider_content
+    );
+    assert!(
+        !ctx1.provider_content.contains("const s = $state(0)"),
+        "the stale pre-edit own-buffer content must NOT linger"
+    );
+
+    drain.abort();
+}
+
+/// Guard `rune_module_self_file_state_closed_on_did_close`: an OPEN rune
+/// module's self-file Shadow provider state is closed + removed on did_close.
+/// The existing did_close branch is carrier-oriented (gated on `get_ide(...)`),
+/// which never fires for a non-carrier rune module — this pins the explicit
+/// self-file branch.
+#[tokio::test]
+async fn rune_module_self_file_state_closed_on_did_close() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let host_for_server = Arc::clone(&host);
+    let type_provider_for_server = Arc::clone(&type_provider);
+    let (service, socket) = tower_lsp_server::LspService::new(move |client| {
+        VerterLanguageServer::new(
+            client,
+            LspConfig {
+                host: Arc::clone(&host_for_server),
+                type_provider: Some(Arc::clone(&type_provider_for_server)),
+                project_sync_mode: crate::ProjectSyncMode::FullProject,
+                type_provider_kind: crate::TypeProviderKind::Tsserver,
+                suggest_tsgo: false,
+                mcp_port: None,
+                type_provider_none_reason: None,
+            },
+        )
+    });
+    let drain = tokio::spawn(async move {
+        let mut socket = socket;
+        while socket.next().await.is_some() {}
+    });
+    let server = service.inner();
+
+    let rune_uri: Uri = "file:///workspace/store.svelte.ts".parse().unwrap();
+    let canonical_id = "/workspace/store.svelte.ts";
+    let _ = server.documents.did_open(&TextDocumentItem {
+        uri: rune_uri.clone(),
+        language_id: "typescript".to_string(),
+        version: 1,
+        text: "export const s = $state(0);\n".to_string(),
+    });
+    // Sync the open-document self-file Shadow state.
+    assert!(
+        server.sync_self_file_shadow_unresolved(&rune_uri).await,
+        "the open rune module syncs its self-file Shadow provider state"
+    );
+    let state = server
+        .provider_sync_state_for_source(canonical_id)
+        .expect("the rune module has provider sync state after the shadow sync");
+    assert_eq!(
+        state.shadow_path.as_deref(),
+        Some(canonical_id),
+        "the self-file Shadow path is the module's OWN canonical id"
+    );
+    assert!(state.shadow_background_loaded);
+
+    // did_close must close + remove the self-file provider state.
+    super::lifecycle::handle_did_close(
+        server,
+        DidCloseTextDocumentParams {
+            text_document: TextDocumentIdentifier {
+                uri: rune_uri.clone(),
+            },
+        },
+    )
+    .await;
+    assert!(
+        server
+            .provider_sync_state_for_source(canonical_id)
+            .is_none(),
+        "did_close must remove the rune module's self-file provider state"
+    );
+
+    drain.abort();
+}
+
+/// Guard `self_file_rename_and_code_actions_gated_off`: rename and code actions
+/// are DEFERRED for a SELF-FILE rune-module own buffer — their workspace-EDIT
+/// positions are not yet mapped through the self-file mapper, so an applied edit
+/// could land off by the prelude offset (or inside the prelude) and CORRUPT the
+/// module. The handlers must be a CLEAN no-op for a rune module (no rename, no
+/// actions), NEVER a wrong/unmapped edit, and must NOT query the TypeProvider
+/// for rename locations / code actions. (Carrier rename/code-actions unchanged —
+/// pinned elsewhere.)
+#[tokio::test]
+async fn self_file_rename_and_code_actions_gated_off() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let host_for_server = Arc::clone(&host);
+    let type_provider_for_server = Arc::clone(&type_provider);
+    let (service, socket) = tower_lsp_server::LspService::new(move |client| {
+        VerterLanguageServer::new(
+            client,
+            LspConfig {
+                host: Arc::clone(&host_for_server),
+                type_provider: Some(Arc::clone(&type_provider_for_server)),
+                project_sync_mode: crate::ProjectSyncMode::FullProject,
+                type_provider_kind: crate::TypeProviderKind::Tsserver,
+                suggest_tsgo: false,
+                mcp_port: None,
+                type_provider_none_reason: None,
+            },
+        )
+    });
+    let drain = tokio::spawn(async move {
+        let mut socket = socket;
+        while socket.next().await.is_some() {}
+    });
+    let server = service.inner();
+
+    let rune_uri: Uri = "file:///workspace/store.svelte.ts".parse().unwrap();
+    let canonical_id = "/workspace/store.svelte.ts";
+    let _ = server.documents.did_open(&TextDocumentItem {
+        uri: rune_uri.clone(),
+        language_id: "typescript".to_string(),
+        version: 1,
+        text: "export const count = $state(0);\n".to_string(),
+    });
+    // Sync the self-file Shadow state so the projection + provider path exist.
+    assert!(
+        server.sync_self_file_shadow_unresolved(&rune_uri).await,
+        "the open rune module syncs its self-file Shadow provider state"
+    );
+    assert!(
+        server.is_self_file_projection(&rune_uri),
+        "the rune module must carry a SelfFile projection"
+    );
+
+    // Arm the provider with a rename location AND a code action at the rune's
+    // OWN canonical path — if the handlers were NOT gated, these would surface
+    // as an (unmapped, position-corrupting) workspace edit. Cover the whole
+    // buffer offset range so any forwarded request would match.
+    provider.set_rename_locations(
+        canonical_id,
+        0,
+        vec![RenameLocation {
+            path: canonical_id.to_string(),
+            start: 13,
+            end: 18,
+        }],
+    );
+    for off in 0..40u32 {
+        provider.set_rename_locations(
+            canonical_id,
+            off,
+            vec![RenameLocation {
+                path: canonical_id.to_string(),
+                start: 13,
+                end: 18,
+            }],
+        );
+    }
+    provider.set_code_actions(
+        canonical_id,
+        0,
+        u32::MAX,
+        vec![TypeCodeAction {
+            title: "Convert to named import".to_string(),
+            kind: Some("quickfix".to_string()),
+            edits: vec![crate::tsgo::protocol::TypeCodeEdit {
+                path: canonical_id.to_string(),
+                start: 0,
+                end: 5,
+                new_text: "let".to_string(),
+            }],
+        }],
+    );
+
+    // Rename: must be a CLEAN no-op (no edit), NOT a wrong/unmapped edit.
+    let rename = super::nav_features::handle_rename(
+        server,
+        RenameParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier {
+                    uri: rune_uri.clone(),
+                },
+                position: Position::new(0, 13),
+            },
+            new_name: "renamed".to_string(),
+            work_done_progress_params: Default::default(),
+        },
+    )
+    .await
+    .expect("rename returns Ok");
+    assert!(
+        rename.is_none(),
+        "rename on a rune-module own buffer must be a clean no-op, got {rename:?}"
+    );
+
+    // Code actions: must be a CLEAN no-op (no actions).
+    let actions = super::aux_features::handle_code_action(
+        server,
+        CodeActionParams {
+            text_document: TextDocumentIdentifier {
+                uri: rune_uri.clone(),
+            },
+            range: Range {
+                start: Position::new(0, 13),
+                end: Position::new(0, 18),
+            },
+            context: CodeActionContext {
+                diagnostics: Vec::new(),
+                only: None,
+                trigger_kind: None,
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        },
+    )
+    .await
+    .expect("code_action returns Ok");
+    assert!(
+        actions.as_ref().map(|a| a.is_empty()).unwrap_or(true),
+        "code actions on a rune-module own buffer must be a clean no-op, got {actions:?}"
+    );
+
+    // Discriminator: the TypeProvider must NOT have been queried for rename
+    // locations or code actions for the rune module — the gate short-circuits
+    // BEFORE any forwarded edit-producing request.
+    let calls = provider.calls();
+    assert!(
+        !calls
+            .iter()
+            .any(|c| matches!(c, MockCall::GetRenameLocations { .. })),
+        "rename must NOT forward to the TypeProvider for a rune module, calls={calls:?}"
+    );
+    assert!(
+        !calls
+            .iter()
+            .any(|c| matches!(c, MockCall::GetCodeActions { .. })),
+        "code actions must NOT forward to the TypeProvider for a rune module, calls={calls:?}"
+    );
+
+    drain.abort();
+}
+
 #[test]
 fn compute_verter_diagnostics_ignores_plain_typescript_files() {
     let host = Arc::new(VerterHost::new_standalone(
@@ -10774,6 +11293,56 @@ async fn watched_svelte_change_produces_no_provider_sync_state() {
             .get_ide(canonical, &profile)
             .is_none(),
         "a watched .svelte change must leave no IDE virtual-file state"
+    );
+}
+
+/// A closed-file `.svelte.ts` rune-module edit is classified EXPLICITLY as an
+/// adapter module (the descriptor-derived `adapter_module_language_for`
+/// predicate the `did_change_watched_files` branch uses) and routes through the
+/// non-carrier resync — NOT the carrier path and NOT silently dropped. The
+/// rune module is covered by its descriptor-derived watch glob (the S2a P1 gap,
+/// closed server-side). The watched file is never opened, so the standalone
+/// resync produces no provider state — the discriminating fact is the explicit
+/// adapter-module classification (a carrier predicate would reject it).
+#[tokio::test]
+async fn did_change_watched_files_resyncs_rune_module_via_adapter_module_glob() {
+    let mock = Arc::new(MockTypeProvider::new());
+    let service = make_hover_test_service(mock.clone());
+    let server = service.inner();
+    install_test_resolver(server);
+
+    let canonical = "/workspace/src/store.svelte.ts";
+    // The rune module is classified as an ADAPTER MODULE, not a carrier — the
+    // exact predicate the watched-files branch uses to route it.
+    assert!(
+        super::server_utils::adapter_module_language_for(canonical).is_some(),
+        "a `.svelte.ts` is an adapter module (the descriptor-derived watch branch predicate)"
+    );
+    assert!(
+        super::server_utils::carrier_language_for(canonical).is_none(),
+        "a rune module is NOT a carrier — it must not route through the carrier resync"
+    );
+
+    crate::server::lifecycle::handle_did_change_watched_files(
+        server,
+        DidChangeWatchedFilesParams {
+            changes: vec![FileEvent {
+                uri: format!("file://{canonical}").parse().expect("valid uri"),
+                typ: FileChangeType::CHANGED,
+            }],
+        },
+    )
+    .await;
+
+    // No carrier IDE state is produced for a rune module (it has no IDE TSX).
+    let profile = server.documents.tsx_profile.read().clone();
+    assert!(
+        server
+            .documents
+            .host()
+            .get_ide(canonical, &profile)
+            .is_none(),
+        "a rune module produces no carrier IDE virtual-file state"
     );
 }
 

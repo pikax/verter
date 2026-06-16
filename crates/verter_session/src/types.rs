@@ -1130,6 +1130,23 @@ pub struct ScriptModuleReference {
     pub expr_span: verter_span::Span,
 }
 
+impl From<&verter_semantic::analysis::AnalyzedModuleReference> for ScriptModuleReference {
+    fn from(reference: &verter_semantic::analysis::AnalyzedModuleReference) -> Self {
+        ScriptModuleReference {
+            syntax: reference.syntax,
+            semantics: reference.semantics,
+            is_type_only: reference.is_type_only,
+            raw_text: reference.raw_text.clone(),
+            literal_specifier: reference.literal_specifier.clone(),
+            finite_specifiers: reference.finite_specifiers.clone(),
+            static_prefix: reference.static_prefix.clone(),
+            analyzability: reference.analyzability,
+            span: reference.span,
+            expr_span: reference.expr_span,
+        }
+    }
+}
+
 /// Result of [`VerterHost::upsert`](crate::VerterHost::upsert) or
 /// [`VerterHost::apply_style_overrides`](crate::VerterHost::apply_style_overrides).
 ///

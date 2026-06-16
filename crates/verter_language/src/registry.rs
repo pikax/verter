@@ -298,6 +298,24 @@ impl LanguageRegistry {
             })
             .collect()
     }
+
+    /// Every ADAPTER-MODULE extension (without the leading dot) across ALL
+    /// adapters, in longest-suffix-first row order (e.g. `["svelte.ts",
+    /// "svelte.js"]`). An adapter module is a standalone non-component script
+    /// (a Svelte `.svelte.ts` / `.svelte.js` rune module), distinct from any
+    /// adapter's CARRIER extension. The watcher's adapter-module glob builds
+    /// from this so rune-module coverage is descriptor-derived, not hand-listed.
+    pub fn all_adapter_module_extensions(&self) -> Vec<&str> {
+        self.rows
+            .iter()
+            .filter_map(|(_, row)| match &row.classification {
+                RowClassification::Static(language) => language
+                    .adapter_script_language()
+                    .map(|_| row.extension.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]

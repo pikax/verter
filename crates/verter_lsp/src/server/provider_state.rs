@@ -47,17 +47,31 @@ impl VerterLanguageServer {
     /// All DashMap guards are dropped before this is returned, so it is safe
     /// to hold this across `.await` points without risking deadlock.
     pub(super) fn type_provider_context(&self, uri: &Uri) -> Option<TypeProviderContext> {
-        let (tsx_path, tsx_content, mapper) = self.ide_context(uri)?;
-        let tsx_line_index = LineIndex::new(&tsx_content, self.documents.encoding());
-        let carrier_line_index = self.documents.get(uri)?.line_index.clone();
-        // DashMap Ref dropped here at end of `?` chain
+        // Route through the generalized projection context (serves BOTH the
+        // carrier-IDE and self-file rune-module projections). The feature layer
+        // sees the same `tsx_*` field names regardless of projection.
+        let ctx = self.provider_projection_context(uri)?;
         Some(TypeProviderContext {
-            tsx_path,
-            tsx_content,
-            mapper,
-            tsx_line_index,
-            carrier_line_index,
+            tsx_path: ctx.provider_path,
+            tsx_content: ctx.provider_content,
+            mapper: ctx.mapper,
+            tsx_line_index: ctx.provider_line_index,
+            carrier_line_index: ctx.source_line_index,
         })
+    }
+
+    /// Whether `uri` projects through a SELF-FILE rune-module own buffer.
+    ///
+    /// Features whose workspace-EDIT positions are not mapped through the
+    /// self-file mapper (rename, code actions) are GATED OFF for a self-file
+    /// projection — an unmapped edit would land off by the prelude offset (or
+    /// inside the prelude) and corrupt the rune module. They stay DEFERRED for
+    /// the self-file projection until their edit-mapping lands; the carrier
+    /// projection is unaffected.
+    pub(super) fn is_self_file_projection(&self, uri: &Uri) -> bool {
+        self.documents
+            .get_projection(uri)
+            .is_some_and(|projection| projection.is_self_file())
     }
 
     /// Find the Vue URI corresponding to an IDE path.
