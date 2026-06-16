@@ -18,6 +18,8 @@ export {
   SEVERITY_RANK,
   atLeastAsSevere,
   collectorEvent,
+  isCollectorName,
+  isCollectorSignal,
   isSeverity,
   serializeCollectorEvent,
   toJsonl,

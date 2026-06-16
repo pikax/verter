@@ -83,6 +83,11 @@ export const COLLECTOR_NAMES = [
 ] as const;
 export type CollectorName = (typeof COLLECTOR_NAMES)[number];
 
+/** Whether `value` is one of the closed {@link COLLECTOR_NAMES} (the trust-boundary guard). */
+export function isCollectorName(value: unknown): value is CollectorName {
+  return typeof value === "string" && (COLLECTOR_NAMES as readonly string[]).includes(value);
+}
+
 /**
  * The closed taxonomy of every signal a collector emits — the SINGLE source of
  * truth, grouped by owning collector in {@link COLLECTOR_NAMES} order. A
@@ -135,6 +140,11 @@ export const COLLECTOR_SIGNALS = [
 
 /** One signal value from the closed {@link COLLECTOR_SIGNALS} taxonomy. */
 export type CollectorSignal = (typeof COLLECTOR_SIGNALS)[number];
+
+/** Whether `value` is one of the closed {@link COLLECTOR_SIGNALS} (the trust-boundary guard). */
+export function isCollectorSignal(value: unknown): value is CollectorSignal {
+  return typeof value === "string" && (COLLECTOR_SIGNALS as readonly string[]).includes(value);
+}
 
 /**
  * The identity every event is keyed by: the scenario, the index of the edit script

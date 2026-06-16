@@ -1,0 +1,5 @@
+# `artifacts/` holds GENERATED report output (dx-events.jsonl, dx-summary.json,
+# DX-FINDINGS.md, junit.xml, baseline-manifest.json). Keep the directory, ignore
+# everything written into it.
+*
+!.gitignore

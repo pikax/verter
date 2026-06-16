@@ -199,3 +199,11 @@ export * from "./semantic-oracle/index.js";
 // collectors DRIVE the differential comparators / normalizers / quiescence gates —
 // they do not re-implement comparison.
 export * from "./collectors/index.js";
+
+// The report generator: the terminal stage that consumes the collector event stream,
+// the differential outcomes, the scenario model, and the normalizers, and emits the
+// run's durable artifacts — the `dx-events.jsonl` stream, the deduped finding set with
+// its content-addressed fingerprint and S0–S4 ladder (`dx-summary.json` /
+// `DX-FINDINGS.md` / `baseline-manifest.json`), the `junit.xml`, and the
+// `BUG-REPORT.md` reconciliation. It owns no comparison/normalization of its own.
+export * from "./report/index.js";
