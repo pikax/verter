@@ -6,6 +6,7 @@
 
 pub mod css_vars;
 pub mod macros;
+pub mod prepared;
 pub mod process;
 
 #[cfg(test)]
@@ -17,6 +18,7 @@ use rustc_hash::FxHashMap;
 use crate::code_transform::CodeTransform;
 use crate::css::types::VBindVar;
 use crate::parser::types::RootNodeScript;
+use crate::script::prepared::PreparedScript;
 use crate::template::code_gen::binding::BindingType;
 use crate::template::code_gen::types::CodeGenOutput;
 
@@ -40,9 +42,6 @@ pub struct ScriptCodeGenOptions<'a> {
     pub has_scoped_style: bool,
     /// CSS v-bind vars from style codegen (for `_useCssVars` injection).
     pub css_v_binds: &'a [VBindVar],
-    /// Pre-resolved external types for cross-file type resolution.
-    pub external_types:
-        Option<rustc_hash::FxHashMap<String, crate::utils::oxc::vue::ResolvedElements>>,
     /// Set of identifiers used in the template (from AST-based expression
     /// binding extraction + component tag names). `SetupImport` bindings are
     /// only included in `__returned__` when their name appears in this set.
@@ -86,6 +85,7 @@ pub struct ScriptCodeGenResult<'alloc> {
 pub fn generate_script<'alloc>(
     script: Option<&RootNodeScript>,
     script_setup: Option<&RootNodeScript>,
+    prepared: &PreparedScript<'alloc>,
     source: &'alloc str,
     ct: &mut CodeTransform<'alloc>,
     alloc: &'alloc Allocator,
@@ -103,11 +103,11 @@ pub fn generate_script<'alloc>(
     match (script, script_setup) {
         (_, Some(setup)) => {
             // <script setup> present — this is the primary block
-            process::process_script_setup(setup, script, &mut ctx, options);
+            process::process_script_setup(setup, prepared, &mut ctx, options);
         }
         (Some(normal), None) => {
             // Only <script> (no setup) — Options API
-            process::process_script_only(normal, &mut ctx, options);
+            process::process_script_only(normal, prepared.companion(), &mut ctx, options);
         }
         (None, None) => {
             // No script blocks — nothing to do

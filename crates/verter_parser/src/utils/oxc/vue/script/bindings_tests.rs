@@ -1,5 +1,6 @@
 use super::*;
 use crate::types::BindingType;
+use crate::utils::oxc::vue::script::resolve_type::build_type_context;
 use oxc_allocator::Allocator;
 use oxc_parser::Parser;
 use oxc_span::SourceType;
@@ -10,7 +11,9 @@ fn classify(source: &str) -> Vec<(String, BindingType)> {
     let ret = Parser::new(&alloc, source, SourceType::tsx()).parse();
     assert!(ret.errors.is_empty(), "Parse errors: {:?}", ret.errors);
     let ctx = ScriptParseContext::new(0, source.as_bytes());
-    let entries = extract_bindings(&ret.program, &ctx);
+    // Standalone caller (no macro pass): build the context and resolve locally.
+    let type_ctx = build_type_context(&ret.program, source.as_bytes(), 0);
+    let entries = extract_bindings(&ret.program, &ctx, &type_ctx, None);
     entries
         .into_iter()
         .map(|(span, bt)| {
@@ -702,7 +705,8 @@ fn spans_are_local_coordinates() {
     let alloc = Allocator::default();
     let ret = Parser::new(&alloc, source, SourceType::tsx()).parse();
     let ctx = ScriptParseContext::new(0, source.as_bytes());
-    let entries = extract_bindings(&ret.program, &ctx);
+    let type_ctx = build_type_context(&ret.program, source.as_bytes(), 0);
+    let entries = extract_bindings(&ret.program, &ctx, &type_ctx, None);
     assert_eq!(entries.len(), 1);
     let (span, bt) = &entries[0];
     // 'x' is at position 6 in source

@@ -97,9 +97,17 @@ fn run_full_pipeline_mode(source: &str, mode: super::super::CodeGenMode) -> Stri
         has_scoped_style: syntax.has_style_scope(),
         ..Default::default()
     };
+    let prepared = crate::script::prepared::PreparedScript::build(
+        source,
+        syntax.script(),
+        syntax.script_setup(),
+        &alloc,
+        None,
+    );
     let script_result = generate_script(
         syntax.script(),
         syntax.script_setup(),
+        &prepared,
         source,
         &mut ct,
         &alloc,

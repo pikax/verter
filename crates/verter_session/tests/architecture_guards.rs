@@ -15770,10 +15770,8 @@ mod single_resolution_engine_guards {
     // as a new file, and shrinks as later stages delete uses.
     // -----------------------------------------------------------------------
     const RESOLVED_ELEMENTS_FILE_ALLOWLIST: &[(&str, usize)] = &[
-        ("crates/verter_compiler/src/compile/mod.rs", 2),
         ("crates/verter_compiler/src/compile/types.rs", 1),
-        ("crates/verter_compiler/src/script/macros.rs", 2),
-        ("crates/verter_compiler/src/script/mod.rs", 1),
+        ("crates/verter_compiler/src/script/prepared.rs", 7),
         ("crates/verter_compiler/src/tsc/script.rs", 5),
         ("crates/verter_parser/src/utils/oxc/vue/script/macros.rs", 2),
         ("crates/verter_parser/src/utils/oxc/vue/script/mod.rs", 2),

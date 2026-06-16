@@ -40,6 +40,43 @@ fn make_script(source: &str, tag_open_str: &str, is_setup: bool) -> (RootNodeScr
     (script, full_source)
 }
 
+/// Build the prepared script for the given blocks and run script codegen,
+/// mirroring the production flow where `PreparedScript` is built once and handed
+/// to `generate_script`.
+fn gen_script<'a>(
+    script: Option<&RootNodeScript>,
+    script_setup: Option<&RootNodeScript>,
+    source: &'a str,
+    ct: &mut CodeTransform<'a>,
+    alloc: &'a Allocator,
+    options: &ScriptCodeGenOptions<'_>,
+) -> ScriptCodeGenResult<'a> {
+    gen_script_with_external(script, script_setup, source, ct, alloc, options, None)
+}
+
+/// Same as [`gen_script`] but with pre-resolved external types, as the host
+/// supplies them.
+fn gen_script_with_external<'a>(
+    script: Option<&RootNodeScript>,
+    script_setup: Option<&RootNodeScript>,
+    source: &'a str,
+    ct: &mut CodeTransform<'a>,
+    alloc: &'a Allocator,
+    options: &ScriptCodeGenOptions<'_>,
+    external_types: Option<
+        &rustc_hash::FxHashMap<String, crate::utils::oxc::vue::ResolvedElements>,
+    >,
+) -> ScriptCodeGenResult<'a> {
+    let prepared = crate::script::prepared::PreparedScript::build(
+        source,
+        script,
+        script_setup,
+        alloc,
+        external_types,
+    );
+    generate_script(script, script_setup, &prepared, source, ct, alloc, options)
+}
+
 // ── Test 1: No script blocks ──────────────────────────────────
 
 #[test]
@@ -48,7 +85,7 @@ fn no_script_blocks_returns_empty() {
     let source = "<template><div>hi</div></template>";
     let mut ct = CodeTransform::new(source, &alloc);
 
-    let result = generate_script(None, None, source, &mut ct, &alloc, &Default::default());
+    let result = gen_script(None, None, source, &mut ct, &alloc, &Default::default());
 
     assert!(result.bindings.is_empty());
     assert!(result.inline_inject_pos.is_none());
@@ -63,7 +100,7 @@ fn empty_script_setup_produces_wrapper() {
     let (setup, full) = make_script("", "<script setup>", true);
     let mut ct = CodeTransform::new(&full, &alloc);
 
-    let _result = generate_script(
+    let _result = gen_script(
         None,
         Some(&setup),
         &full,
@@ -97,7 +134,7 @@ fn script_setup_extracts_bindings() {
     let (setup, full) = make_script(content, "<script setup>", true);
     let mut ct = CodeTransform::new(&full, &alloc);
 
-    let result = generate_script(
+    let result = gen_script(
         None,
         Some(&setup),
         &full,
@@ -126,7 +163,7 @@ fn script_setup_ref_binding_type() {
     let (setup, full) = make_script(content, "<script setup>", true);
     let mut ct = CodeTransform::new(&full, &alloc);
 
-    let result = generate_script(
+    let result = gen_script(
         None,
         Some(&setup),
         &full,
@@ -156,7 +193,7 @@ fn script_setup_hoists_imports() {
     let (setup, full) = make_script(content, "<script setup>", true);
     let mut ct = CodeTransform::new(&full, &alloc);
 
-    let _result = generate_script(
+    let _result = gen_script(
         None,
         Some(&setup),
         &full,
@@ -193,7 +230,7 @@ fn non_inline_has_return_statement() {
     let (setup, full) = make_script(content, "<script setup>", true);
     let mut ct = CodeTransform::new(&full, &alloc);
 
-    let _result = generate_script(
+    let _result = gen_script(
         None,
         Some(&setup),
         &full,
@@ -228,7 +265,7 @@ fn inline_mode_no_return_has_inject_pos() {
     let (setup, full) = make_script(content, "<script setup>", true);
     let mut ct = CodeTransform::new(&full, &alloc);
 
-    let result = generate_script(
+    let result = gen_script(
         None,
         Some(&setup),
         &full,
@@ -262,7 +299,7 @@ fn options_api_script_wraps_export() {
     let (script, full) = make_script(content, "<script>", false);
     let mut ct = CodeTransform::new(&full, &alloc);
 
-    let _result = generate_script(
+    let _result = gen_script(
         Some(&script),
         None,
         &full,
@@ -296,7 +333,7 @@ fn ts_types_stripped_by_default() {
     let (setup, full) = make_script(content, "<script setup>", true);
     let mut ct = CodeTransform::new(&full, &alloc);
 
-    let _result = generate_script(
+    let _result = gen_script(
         None,
         Some(&setup),
         &full,
@@ -327,7 +364,7 @@ fn ts_types_hoisted_when_keep_ts_types() {
     let (setup, full) = make_script(content, "<script setup>", true);
     let mut ct = CodeTransform::new(&full, &alloc);
 
-    let _result = generate_script(
+    let _result = gen_script(
         None,
         Some(&setup),
         &full,
@@ -365,7 +402,7 @@ fn scoped_style_adds_scope_id() {
     let (setup, full) = make_script(content, "<script setup>", true);
     let mut ct = CodeTransform::new(&full, &alloc);
 
-    let _result = generate_script(
+    let _result = gen_script(
         None,
         Some(&setup),
         &full,
@@ -395,7 +432,7 @@ fn define_component_in_imports() {
     let (setup, full) = make_script("", "<script setup>", true);
     let mut ct = CodeTransform::new(&full, &alloc);
 
-    let result = generate_script(
+    let result = gen_script(
         None,
         Some(&setup),
         &full,
@@ -428,7 +465,7 @@ fn css_v_binds_inject_use_css_vars() {
         var_name: "abc-count".to_string(),
     }];
 
-    let result = generate_script(
+    let result = gen_script(
         None,
         Some(&setup),
         &full,
@@ -468,7 +505,7 @@ fn define_props_runtime_object() {
     let (setup, full) = make_script(content, "<script setup>", true);
     let mut ct = CodeTransform::new(&full, &alloc);
 
-    let result = generate_script(
+    let result = gen_script(
         None,
         Some(&setup),
         &full,
@@ -511,7 +548,7 @@ fn define_props_runtime_array() {
     let (setup, full) = make_script(content, "<script setup>", true);
     let mut ct = CodeTransform::new(&full, &alloc);
 
-    let _result = generate_script(
+    let _result = gen_script(
         None,
         Some(&setup),
         &full,
@@ -545,7 +582,7 @@ fn define_emits_runtime_array() {
     let (setup, full) = make_script(content, "<script setup>", true);
     let mut ct = CodeTransform::new(&full, &alloc);
 
-    let _result = generate_script(
+    let _result = gen_script(
         None,
         Some(&setup),
         &full,
@@ -585,7 +622,7 @@ fn define_expose_replaces_with_dunder_expose() {
     let (setup, full) = make_script(content, "<script setup>", true);
     let mut ct = CodeTransform::new(&full, &alloc);
 
-    let _result = generate_script(
+    let _result = gen_script(
         None,
         Some(&setup),
         &full,
@@ -625,7 +662,7 @@ fn define_slots_replaces_with_use_slots() {
     let (setup, full) = make_script(content, "<script setup>", true);
     let mut ct = CodeTransform::new(&full, &alloc);
 
-    let result = generate_script(
+    let result = gen_script(
         None,
         Some(&setup),
         &full,
@@ -664,7 +701,7 @@ fn define_options_extracts_to_component_level() {
     let (setup, full) = make_script(content, "<script setup>", true);
     let mut ct = CodeTransform::new(&full, &alloc);
 
-    let _result = generate_script(
+    let _result = gen_script(
         None,
         Some(&setup),
         &full,
@@ -699,7 +736,7 @@ fn define_model_replaces_with_use_model() {
     let (setup, full) = make_script(content, "<script setup>", true);
     let mut ct = CodeTransform::new(&full, &alloc);
 
-    let result = generate_script(
+    let result = gen_script(
         None,
         Some(&setup),
         &full,
@@ -738,7 +775,7 @@ fn define_model_named_replaces_with_use_model() {
     let (setup, full) = make_script(content, "<script setup>", true);
     let mut ct = CodeTransform::new(&full, &alloc);
 
-    let result = generate_script(
+    let result = gen_script(
         None,
         Some(&setup),
         &full,
@@ -778,7 +815,7 @@ fn define_props_and_emits_combined() {
     let (setup, full) = make_script(content, "<script setup>", true);
     let mut ct = CodeTransform::new(&full, &alloc);
 
-    let _result = generate_script(
+    let _result = gen_script(
         None,
         Some(&setup),
         &full,
@@ -817,7 +854,7 @@ fn macro_output_is_valid_js() {
     let (setup, full) = make_script(content, "<script setup>", true);
     let mut ct = CodeTransform::new(&full, &alloc);
 
-    let _result = generate_script(
+    let _result = gen_script(
         None,
         Some(&setup),
         &full,
@@ -852,7 +889,7 @@ fn output_is_valid_js() {
     let (setup, full) = make_script(content, "<script setup>", true);
     let mut ct = CodeTransform::new(&full, &alloc);
 
-    let _result = generate_script(
+    let _result = gen_script(
         None,
         Some(&setup),
         &full,
@@ -887,7 +924,7 @@ fn define_props_object_extracts_prop_bindings() {
     let (setup, full) = make_script(content, "<script setup>", true);
     let mut ct = CodeTransform::new(&full, &alloc);
 
-    let result = generate_script(
+    let result = gen_script(
         None,
         Some(&setup),
         &full,
@@ -923,7 +960,7 @@ fn define_props_array_extracts_prop_bindings() {
     let (setup, full) = make_script(content, "<script setup>", true);
     let mut ct = CodeTransform::new(&full, &alloc);
 
-    let result = generate_script(
+    let result = gen_script(
         None,
         Some(&setup),
         &full,
@@ -959,7 +996,7 @@ fn inline_mode_inject_pos_at_close_tag() {
     let close_tag_start = setup.tag_close.as_ref().unwrap().start;
     let mut ct = CodeTransform::new(&full, &alloc);
 
-    let result = generate_script(
+    let result = gen_script(
         None,
         Some(&setup),
         &full,
@@ -989,7 +1026,7 @@ fn returned_object_includes_only_setup_bindings() {
     let (setup, full) = make_script(content, "<script setup>", true);
     let mut ct = CodeTransform::new(&full, &alloc);
 
-    let _result = generate_script(
+    let _result = gen_script(
         None,
         Some(&setup),
         &full,
@@ -1038,7 +1075,7 @@ fn output_structure_order() {
     let (setup, full) = make_script(content, "<script setup>", true);
     let mut ct = CodeTransform::new(&full, &alloc);
 
-    let _result = generate_script(
+    let _result = gen_script(
         None,
         Some(&setup),
         &full,
@@ -1079,7 +1116,7 @@ fn e2e_complex_sfc_valid_js() {
         var_name: "abc-count".to_string(),
     }];
 
-    let result = generate_script(
+    let result = gen_script(
         None,
         Some(&setup),
         &full,
@@ -1179,7 +1216,7 @@ fn e2e_inline_mode_valid_js() {
     let (setup, full) = make_script(content, "<script setup>", true);
     let mut ct = CodeTransform::new(&full, &alloc);
 
-    let result = generate_script(
+    let result = gen_script(
         None,
         Some(&setup),
         &full,
@@ -1235,7 +1272,7 @@ fn multiple_imports_all_hoisted() {
     let (setup, full) = make_script(content, "<script setup>", true);
     let mut ct = CodeTransform::new(&full, &alloc);
 
-    let _result = generate_script(
+    let _result = gen_script(
         None,
         Some(&setup),
         &full,
@@ -1287,7 +1324,7 @@ fn multiple_define_model_deduplicates_imports() {
     let (setup, full) = make_script(content, "<script setup>", true);
     let mut ct = CodeTransform::new(&full, &alloc);
 
-    let result = generate_script(
+    let result = gen_script(
         None,
         Some(&setup),
         &full,
@@ -1347,7 +1384,7 @@ fn async_setup_produces_async_wrapper() {
     let (setup, full) = make_script(content, "<script setup>", true);
     let mut ct = CodeTransform::new(&full, &alloc);
 
-    let _result = generate_script(
+    let _result = gen_script(
         None,
         Some(&setup),
         &full,
@@ -1384,7 +1421,7 @@ withDefaults(defineProps<{
     let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
     let mut ct = CodeTransform::new(&full, &alloc);
 
-    let _result = generate_script(
+    let _result = gen_script(
         None,
         Some(&setup),
         &full,
@@ -1456,7 +1493,7 @@ fn external_type_defineprops_generates_runtime_props() {
     let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
     let mut ct = crate::code_transform::CodeTransform::new(&full, &alloc);
 
-    let result = generate_script(
+    let result = gen_script_with_external(
         None,
         Some(&setup),
         &full,
@@ -1464,9 +1501,9 @@ fn external_type_defineprops_generates_runtime_props() {
         &alloc,
         &ScriptCodeGenOptions {
             component_name: "Test",
-            external_types: Some(external_types),
             ..Default::default()
         },
+        Some(&external_types),
     );
 
     // External props should be in bindings
@@ -1518,7 +1555,7 @@ fn external_type_defineprops_optional_prop() {
     let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
     let mut ct = crate::code_transform::CodeTransform::new(&full, &alloc);
 
-    let _result = generate_script(
+    let _result = gen_script_with_external(
         None,
         Some(&setup),
         &full,
@@ -1526,9 +1563,9 @@ fn external_type_defineprops_optional_prop() {
         &alloc,
         &ScriptCodeGenOptions {
             component_name: "Test",
-            external_types: Some(external_types),
             ..Default::default()
         },
+        Some(&external_types),
     );
 
     let output = ct.build_string();
@@ -1566,7 +1603,7 @@ fn external_type_defineemits_generates_emits_section() {
     let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
     let mut ct = crate::code_transform::CodeTransform::new(&full, &alloc);
 
-    let _result = generate_script(
+    let _result = gen_script_with_external(
         None,
         Some(&setup),
         &full,
@@ -1574,9 +1611,9 @@ fn external_type_defineemits_generates_emits_section() {
         &alloc,
         &ScriptCodeGenOptions {
             component_name: "Test",
-            external_types: Some(external_types),
             ..Default::default()
         },
+        Some(&external_types),
     );
 
     let output = ct.build_string();
@@ -1615,7 +1652,7 @@ fn external_type_with_no_matching_type_falls_back() {
     let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
     let mut ct = crate::code_transform::CodeTransform::new(&full, &alloc);
 
-    let result = generate_script(
+    let result = gen_script_with_external(
         None,
         Some(&setup),
         &full,
@@ -1623,9 +1660,9 @@ fn external_type_with_no_matching_type_falls_back() {
         &alloc,
         &ScriptCodeGenOptions {
             component_name: "Test",
-            external_types: Some(external_types),
             ..Default::default()
         },
+        Some(&external_types),
     );
 
     // No props should be resolved — unknown type is not in external_types
@@ -1723,7 +1760,7 @@ fn external_type_props_dont_conflict_with_companion_types() {
 
     let mut ct = crate::code_transform::CodeTransform::new(&full, &alloc);
 
-    let result = generate_script(
+    let result = gen_script_with_external(
         Some(&companion_node),
         Some(&setup_node),
         &full,
@@ -1731,9 +1768,9 @@ fn external_type_props_dont_conflict_with_companion_types() {
         &alloc,
         &ScriptCodeGenOptions {
             component_name: "Test",
-            external_types: Some(external_types),
             ..Default::default()
         },
+        Some(&external_types),
     );
 
     // "shared" should be in bindings (from companion, takes precedence)
@@ -1758,7 +1795,7 @@ fn external_type_withdefaults_uses_key_name() {
     let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
     let mut ct = crate::code_transform::CodeTransform::new(&full, &alloc);
 
-    let result = generate_script(
+    let result = gen_script_with_external(
         None,
         Some(&setup),
         &full,
@@ -1766,9 +1803,9 @@ fn external_type_withdefaults_uses_key_name() {
         &alloc,
         &ScriptCodeGenOptions {
             component_name: "Test",
-            external_types: Some(external_types),
             ..Default::default()
         },
+        Some(&external_types),
     );
 
     let output = ct.build_string();
@@ -1821,7 +1858,7 @@ fn typeof_external_value_generates_runtime_props() {
     let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
     let mut ct = crate::code_transform::CodeTransform::new(&full, &alloc);
 
-    let result = generate_script(
+    let result = gen_script_with_external(
         None,
         Some(&setup),
         &full,
@@ -1829,9 +1866,9 @@ fn typeof_external_value_generates_runtime_props() {
         &alloc,
         &ScriptCodeGenOptions {
             component_name: "Test",
-            external_types: Some(external_types),
             ..Default::default()
         },
+        Some(&external_types),
     );
 
     // External props should be in bindings
@@ -1884,7 +1921,7 @@ fn typeof_external_value_infers_from_object_literal() {
     let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
     let mut ct = crate::code_transform::CodeTransform::new(&full, &alloc);
 
-    let result = generate_script(
+    let result = gen_script_with_external(
         None,
         Some(&setup),
         &full,
@@ -1892,9 +1929,9 @@ fn typeof_external_value_infers_from_object_literal() {
         &alloc,
         &ScriptCodeGenOptions {
             component_name: "Test",
-            external_types: Some(external_types),
             ..Default::default()
         },
+        Some(&external_types),
     );
 
     // External props should be in bindings
@@ -1915,5 +1952,278 @@ fn typeof_external_value_infers_from_object_literal() {
         "typeof object literal defineProps should produce valid JS.\nOutput:\n{}\nErrors: {:?}",
         output,
         parser_result.errors
+    );
+}
+
+// ── force-js section stripping: withDefaults, multi-declarator, array names ──
+//
+// Every props/emits section that copies a macro argument verbatim must be
+// TypeScript-stripped in force-js mode. The synthesized `withDefaults` sections
+// and any non-first declarator's macro section are produced from raw source
+// slices, so the section text — not just the residual script body — must be
+// stripped. The output must additionally parse as plain JavaScript.
+
+/// Assert a force-js code-gen output parses as ECMAScript modules (no TS).
+fn assert_valid_js(output: &str) {
+    let js_alloc = oxc_allocator::Allocator::default();
+    let parser_result =
+        oxc_parser::Parser::new(&js_alloc, output, oxc_span::SourceType::mjs()).parse();
+    assert!(
+        parser_result.errors.is_empty(),
+        "force-js output must be valid JavaScript.\nOutput:\n{}\nErrors: {:?}",
+        output,
+        parser_result.errors
+    );
+}
+
+#[test]
+fn with_defaults_force_js_strips_ts_from_object_defaults() {
+    // withDefaults copies each default value verbatim into the synthesized props
+    // section; a `[] as string[]` default must lose its TS cast in force-js.
+    let alloc = Allocator::default();
+    let content = "\ninterface Props { items?: string[]; color?: string }\nconst props = withDefaults(defineProps<Props>(), { items: [] as string[], color: 'primary' })\n";
+    let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
+    let mut ct = CodeTransform::new(&full, &alloc);
+
+    let _result = gen_script(
+        None,
+        Some(&setup),
+        &full,
+        &mut ct,
+        &alloc,
+        &ScriptCodeGenOptions {
+            component_name: "WD",
+            ..Default::default()
+        },
+    );
+
+    let output = ct.build_string();
+    assert!(
+        !output.contains("as string[]"),
+        "force-js must strip the `as string[]` cast from the default. output:\n{}",
+        output
+    );
+    assert!(
+        output.contains("default: []"),
+        "stripped array default should remain `default: []`. output:\n{}",
+        output
+    );
+    assert_valid_js(&output);
+}
+
+#[test]
+fn with_defaults_force_js_strips_satisfies_and_non_null() {
+    // `satisfies` and the non-null `!` are TS-only; a leaked `!` would make the
+    // output invalid JS, so the mjs parse is the strongest guard here.
+    let alloc = Allocator::default();
+    let content = "\ninterface Props { count?: number; label?: string }\nconst defaultLabel = 'fallback'\nconst props = withDefaults(defineProps<Props>(), { count: 0 satisfies number, label: defaultLabel! })\n";
+    let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
+    let mut ct = CodeTransform::new(&full, &alloc);
+
+    let _result = gen_script(
+        None,
+        Some(&setup),
+        &full,
+        &mut ct,
+        &alloc,
+        &ScriptCodeGenOptions {
+            component_name: "WD",
+            ..Default::default()
+        },
+    );
+
+    let output = ct.build_string();
+    assert!(
+        !output.contains("satisfies"),
+        "force-js must strip `satisfies`. output:\n{}",
+        output
+    );
+    assert!(
+        !output.contains("defaultLabel!"),
+        "force-js must strip the non-null `!`. output:\n{}",
+        output
+    );
+    assert!(
+        output.contains("default: 0"),
+        "`0 satisfies number` should strip to `0`. output:\n{}",
+        output
+    );
+    assert_valid_js(&output);
+}
+
+#[test]
+fn with_defaults_force_js_strips_ts_from_unresolved_variable_ref_defaults() {
+    // Unresolvable props type + non-object defaults → runtime IIFE that wraps the
+    // defaults expression verbatim. A `defaults as T` cast must be stripped.
+    let alloc = Allocator::default();
+    let content = "\nconst baseDefaults = { color: 'primary' }\nconst props = withDefaults(defineProps<ImportedProps>(), baseDefaults as ImportedProps)\n";
+    let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
+    let mut ct = CodeTransform::new(&full, &alloc);
+
+    let _result = gen_script(
+        None,
+        Some(&setup),
+        &full,
+        &mut ct,
+        &alloc,
+        &ScriptCodeGenOptions {
+            component_name: "WD",
+            ..Default::default()
+        },
+    );
+
+    let output = ct.build_string();
+    assert!(
+        output.contains("((d)=>"),
+        "unresolved variable-ref defaults should build the runtime IIFE. output:\n{}",
+        output
+    );
+    assert!(
+        !output.contains("as ImportedProps"),
+        "force-js must strip the `as ImportedProps` cast from the IIFE argument. output:\n{}",
+        output
+    );
+    assert_valid_js(&output);
+}
+
+#[test]
+fn multi_declarator_force_js_strips_ts_from_second_macro() {
+    // `const p = defineProps(...), e = defineEmits(...)` — the emits section comes
+    // from the second declarator, which the producer-keyed strip must still reach.
+    let alloc = Allocator::default();
+    let content = "\nconst props = defineProps({ label: String }), emit = defineEmits({ change: (value: string) => true })\n";
+    let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
+    let mut ct = CodeTransform::new(&full, &alloc);
+
+    let _result = gen_script(
+        None,
+        Some(&setup),
+        &full,
+        &mut ct,
+        &alloc,
+        &ScriptCodeGenOptions {
+            component_name: "Multi",
+            ..Default::default()
+        },
+    );
+
+    let output = ct.build_string();
+    assert!(
+        !output.contains("(value: string)"),
+        "force-js must strip the typed emits validator param. output:\n{}",
+        output
+    );
+    assert_valid_js(&output);
+}
+
+#[test]
+fn define_props_array_ts_wrapped_element_binds_clean_name() {
+    // `['foo' as const, 'bar']` — the prop name is the string literal, not the
+    // TS-wrapped expression. The binding must be `foo`, never `foo' as const`.
+    let alloc = Allocator::default();
+    let content = "\nconst props = defineProps(['foo' as const, 'bar'])\n";
+    let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
+    let mut ct = CodeTransform::new(&full, &alloc);
+
+    let result = gen_script(
+        None,
+        Some(&setup),
+        &full,
+        &mut ct,
+        &alloc,
+        &ScriptCodeGenOptions {
+            component_name: "Arr",
+            ..Default::default()
+        },
+    );
+
+    assert!(
+        result.bindings.contains_key("foo"),
+        "TS-wrapped string element must bind the clean name `foo`. bindings: {:?}",
+        result.bindings.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        result.bindings.contains_key("bar"),
+        "plain string element must bind `bar`. bindings: {:?}",
+        result.bindings.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        !result.bindings.keys().any(|k| k.contains("as const")),
+        "no binding may carry the TS wrapper text. bindings: {:?}",
+        result.bindings.keys().collect::<Vec<_>>()
+    );
+
+    let output = ct.build_string();
+    assert!(
+        !output.contains("as const"),
+        "force-js must strip the `as const` from the runtime props array. output:\n{}",
+        output
+    );
+    assert_valid_js(&output);
+}
+
+#[test]
+fn define_props_array_escaped_quote_binds_decoded_name() {
+    // The element name is read from the AST string-literal value (decoded), not a
+    // raw quote-stripped slice — so `'foo\'bar'` binds `foo'bar`.
+    let alloc = Allocator::default();
+    let content = "\nconst props = defineProps(['foo\\'bar'])\n";
+    let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
+    let mut ct = CodeTransform::new(&full, &alloc);
+
+    let result = gen_script(
+        None,
+        Some(&setup),
+        &full,
+        &mut ct,
+        &alloc,
+        &ScriptCodeGenOptions {
+            component_name: "Esc",
+            ..Default::default()
+        },
+    );
+
+    assert!(
+        result.bindings.contains_key("foo'bar"),
+        "escaped-quote element should bind the decoded name `foo'bar`. bindings: {:?}",
+        result.bindings.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        !result.bindings.contains_key("foo\\'bar"),
+        "the raw backslash-escaped slice must not be used as the binding name. bindings: {:?}",
+        result.bindings.keys().collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn define_props_array_dynamic_element_names_nothing() {
+    // A non-literal (dynamic) array element names no prop. `dynamicName` is an
+    // undeclared identifier — it must not surface as a prop binding.
+    let alloc = Allocator::default();
+    let content = "\nconst props = defineProps(['foo', dynamicName])\n";
+    let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
+    let mut ct = CodeTransform::new(&full, &alloc);
+
+    let result = gen_script(
+        None,
+        Some(&setup),
+        &full,
+        &mut ct,
+        &alloc,
+        &ScriptCodeGenOptions {
+            component_name: "Dyn",
+            ..Default::default()
+        },
+    );
+
+    assert!(
+        result.bindings.contains_key("foo"),
+        "string element must bind `foo`. bindings: {:?}",
+        result.bindings.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        !result.bindings.contains_key("dynamicName"),
+        "a dynamic identifier element must not be treated as a prop name. bindings: {:?}",
+        result.bindings.keys().collect::<Vec<_>>()
     );
 }

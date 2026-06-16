@@ -19,6 +19,7 @@ use verter_compiler::css::process_style;
 use verter_compiler::css::types::ProcessStyleOptions;
 use verter_compiler::diagnostics::{SyntaxPluginContext, SyntaxPluginOptions};
 use verter_compiler::parser::Syntax as NewSyntax;
+use verter_compiler::script::prepared::PreparedScript;
 use verter_compiler::script::{generate_script, ScriptCodeGenOptions};
 use verter_compiler::style::generate_style;
 use verter_compiler::template::code_gen::{generate_template, CodeGenMode, TemplateCodeGenOptions};
@@ -107,9 +108,12 @@ fn compile_full(source: &str) -> String {
         has_scoped_style: has_scoped,
         ..Default::default()
     };
+    let prepared =
+        PreparedScript::build(source, syntax.script(), syntax.script_setup(), &alloc, None);
     let script_result = generate_script(
         syntax.script(),
         syntax.script_setup(),
+        &prepared,
         source,
         &mut ct,
         &alloc,

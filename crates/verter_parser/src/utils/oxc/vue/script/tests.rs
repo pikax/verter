@@ -637,3 +637,38 @@ const instance = getCurrentInstance();
     // Should have the preceding await span
     assert!(usage.preceding_await_span.is_some());
 }
+
+#[test]
+fn array_arg_element_names_come_from_ast_literal() {
+    // Prop / event names are read from the string-literal AST value, transparently
+    // unwrapping a TS `as` / `satisfies` / non-null wrapper. Dynamic and
+    // non-string-literal elements name nothing — never a span-sliced fragment.
+    let source = r#"defineProps(['foo' as const, dynamic, `tpl`, 'bar'])"#;
+    let allocator = Allocator::default();
+    let ret = Parser::new(&allocator, source, SourceType::tsx()).parse();
+    let result = parse_script(&ret.program, ScriptMode::Setup, 0, source);
+
+    let arr = result
+        .items
+        .iter()
+        .find_map(|i| match i {
+            ScriptItem::Macro(ScriptMacro::DefineProps {
+                array_arg: Some(arr),
+                ..
+            }) => Some(arr),
+            _ => None,
+        })
+        .expect("defineProps array argument");
+
+    let names: Vec<Option<&str>> = arr.elements.iter().map(|e| e.name).collect();
+    assert_eq!(
+        names,
+        vec![
+            Some("foo"), // `'foo' as const` → unwrapped to the literal name
+            None,        // `dynamic` identifier → names nothing
+            None,        // template literal → not a string-literal prop name
+            Some("bar"), // plain string literal
+        ],
+        "array element names must come from the AST literal, not span slicing"
+    );
+}

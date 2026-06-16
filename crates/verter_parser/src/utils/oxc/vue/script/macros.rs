@@ -69,13 +69,25 @@ pub struct MacroProperty<'a> {
     pub prop_type_annotation: Option<Span>,
 }
 
+/// One element of a macro array argument (`defineProps(['foo', 'bar'])`).
+#[derive(Debug)]
+pub struct MacroArrayElement<'a> {
+    /// Span of the full element expression — including any TypeScript wrapper
+    /// such as the `as const` in `'foo' as const`. Used for source mapping.
+    pub span: Span,
+    /// The prop / event name when the element is a string literal, transparently
+    /// unwrapping a TS `as` / `satisfies` / non-null wrapper around one. `None`
+    /// for dynamic or otherwise non-literal elements, which name nothing.
+    pub name: Option<&'a str>,
+}
+
 /// Array argument info: defineEmits(['change', 'update'])
 #[derive(Debug)]
-pub struct MacroArrayArg {
+pub struct MacroArrayArg<'a> {
     /// Span of the entire array
     pub span: Span,
-    /// Spans of individual elements
-    pub element_spans: Vec<Span>,
+    /// The array elements (full expression span + resolved literal name).
+    pub elements: Vec<MacroArrayElement<'a>>,
 }
 
 /// Declarator info for macro assignments: `const props = defineProps()`
@@ -112,7 +124,7 @@ pub enum ScriptMacro<'a> {
         declarator: Option<MacroDeclarator<'a>>,
         type_params: Option<MacroTypeParams>,
         object_arg: Option<MacroObjectArg<'a>>,
-        array_arg: Option<MacroArrayArg>,
+        array_arg: Option<MacroArrayArg<'a>>,
     },
 
     /// defineEmits<T>() or defineEmits([...]) or defineEmits({ event: (payload) => true })
@@ -121,7 +133,7 @@ pub enum ScriptMacro<'a> {
         declarator: Option<MacroDeclarator<'a>>,
         type_params: Option<MacroTypeParams>,
         object_arg: Option<MacroObjectArg<'a>>,
-        array_arg: Option<MacroArrayArg>,
+        array_arg: Option<MacroArrayArg<'a>>,
     },
 
     /// defineExpose({ ... })

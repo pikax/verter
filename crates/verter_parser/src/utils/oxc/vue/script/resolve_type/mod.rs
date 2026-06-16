@@ -28,6 +28,45 @@ use verter_type_expr::{TypeExpr, TypeExprScope};
 
 use crate::common::Span;
 
+/// Test-only invocation counters that pin the single-parse dedup contract:
+/// one `parse_script_with_companion(Setup)` must build the type-resolution
+/// context once and resolve each macro type argument once — never twice.
+///
+/// Counters are thread-local so concurrently-running tests (which also build
+/// type contexts and resolve macro types) never perturb each other; the
+/// resolver itself runs synchronously on the calling thread.
+#[cfg(test)]
+pub(crate) mod call_counters {
+    use std::cell::Cell;
+
+    thread_local! {
+        static BUILD_TYPE_CONTEXT: Cell<usize> = const { Cell::new(0) };
+        static RESOLVE_TYPE_ELEMENTS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    pub(crate) fn bump_build_type_context() {
+        BUILD_TYPE_CONTEXT.with(|c| c.set(c.get() + 1));
+    }
+
+    pub(crate) fn bump_resolve_type_elements() {
+        RESOLVE_TYPE_ELEMENTS.with(|c| c.set(c.get() + 1));
+    }
+
+    /// Reset both counters on the current thread before an observed call.
+    pub(crate) fn reset() {
+        BUILD_TYPE_CONTEXT.with(|c| c.set(0));
+        RESOLVE_TYPE_ELEMENTS.with(|c| c.set(0));
+    }
+
+    pub(crate) fn build_type_context_calls() -> usize {
+        BUILD_TYPE_CONTEXT.with(|c| c.get())
+    }
+
+    pub(crate) fn resolve_type_elements_calls() -> usize {
+        RESOLVE_TYPE_ELEMENTS.with(|c| c.get())
+    }
+}
+
 fn component_meta_core_trace_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
@@ -1462,6 +1501,9 @@ pub fn build_type_context<'ctx, 'a: 'ctx>(
     source: &'ctx [u8],
     _content_offset: u32,
 ) -> TypeResolutionContext<'ctx, 'a> {
+    #[cfg(test)]
+    call_counters::bump_build_type_context();
+
     let mut ctx = TypeResolutionContext::new(source);
 
     for stmt in &program.body {
@@ -1843,6 +1885,9 @@ pub fn resolve_type_elements_with_ctx_ref<'ctx, 'a: 'ctx>(
     ctx: &TypeResolutionContext<'ctx, 'a>,
     from_root_body: bool,
 ) -> ResolvedElements {
+    #[cfg(test)]
+    call_counters::bump_resolve_type_elements();
+
     let mut result = ResolvedElements::default();
     resolve_type_elements_inner_with_ctx_ref(node, base_offset, &mut result, ctx, from_root_body);
     result.root_runtime_types = resolve_root_runtime_type_with_ctx_ref(node, ctx)
