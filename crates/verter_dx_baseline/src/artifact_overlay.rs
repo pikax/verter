@@ -236,6 +236,14 @@ impl ArtifactOverlay {
                     self.source_map_identity
                         .insert(version_key(&uri), file.source_map_identity.clone());
                 }
+            } else if file.role == FileRole::Entry {
+                // A plain-`.ts`/`.tsx` ORACLE entry (no authored `.vue` URI) is a
+                // static gold-standard mirror queried directly — not a versioned
+                // generated artifact. Stamp its exact path so a probe on it passes
+                // the freshness gate; it has no authored-URI rollup and no IDE
+                // source map. Support/Api files stay import-resolution only and
+                // gate no probe.
+                self.bump_path_version(&file.path, version);
             }
         }
     }
@@ -292,6 +300,13 @@ impl ArtifactOverlay {
         for file in files {
             if authored_uri_for(&file.path).is_some_and(|u| version_key(&u) == uri_key) {
                 authored_artifact_applied = true;
+                self.bump_path_version(&file.path, version);
+            } else if authored_uri_for(&file.path).is_none() && file.role == FileRole::Entry {
+                // A plain-`.ts`/`.tsx` ORACLE entry (no authored `.vue` URI)
+                // advances its own path on sync too — it is a static mirror, not a
+                // generated `.vue.*` artifact subject to the per-URI false-fresh
+                // rule (a non-`.vue` import-resolution file is role Support/Api,
+                // never Entry, so this never broadcasts a sibling's version).
                 self.bump_path_version(&file.path, version);
             }
         }
@@ -463,6 +478,64 @@ mod tests {
         assert_eq!(
             o.probe_status("file:///never.vue", 1),
             ProbeStatus::Stale { have: None }
+        );
+    }
+
+    // ── a plain-`.ts`/`.tsx` ORACLE entry is queryable ───────────────────────
+    //
+    // The `vueSemanticValidity` rail opens a curated plain-`.ts` gold-standard
+    // mirror directly (it has no authored `.vue` URI). It is a static oracle, not
+    // a versioned generated artifact, so a probe on it must pass the freshness
+    // gate — otherwise every oracle query is wrongly refused `baseline_artifact_stale`.
+
+    #[test]
+    fn plain_ts_oracle_entry_is_path_fresh_after_open() {
+        let mut o = ArtifactOverlay::new();
+        let applied = o.open(
+            &[
+                file("/ws/probe.ts", FileRole::Entry),
+                // An import-resolution support `.d.ts` gates NO probe.
+                file(
+                    "/ws/node_modules/typescript/lib/lib.es5.d.ts",
+                    FileRole::Support,
+                ),
+            ],
+            1,
+        );
+        assert_eq!(applied[0].action, SyncAction::Opened);
+        assert_eq!(applied[1].action, SyncAction::Loaded);
+        // The oracle entry's exact path is fresh at the open version.
+        assert_eq!(o.probe_path_status("/ws/probe.ts", 1), ProbeStatus::Fresh);
+        // A plain `.ts` has no authored `.vue` URI — the uri rollup stays empty.
+        assert_eq!(o.latest_version("/ws/probe.ts"), None);
+        // A negative-version probe is still refused.
+        assert_eq!(
+            o.probe_path_status("/ws/probe.ts", -1),
+            ProbeStatus::Stale { have: Some(1) }
+        );
+        // A support file (import-resolution only) gates no probe — stays stale.
+        assert_eq!(
+            o.probe_path_status("/ws/node_modules/typescript/lib/lib.es5.d.ts", 1),
+            ProbeStatus::Stale { have: None }
+        );
+    }
+
+    #[test]
+    fn plain_ts_oracle_entry_path_advances_on_sync() {
+        let mut o = ArtifactOverlay::new();
+        o.open(&[file("/ws/probe.ts", FileRole::Entry)], 1);
+        // A later sync of the same oracle entry advances its path version.
+        o.sync(
+            "file:///ws/probe.ts",
+            2,
+            &[file("/ws/probe.ts", FileRole::Entry)],
+            &[],
+            None,
+        );
+        assert_eq!(o.probe_path_status("/ws/probe.ts", 2), ProbeStatus::Fresh);
+        assert_eq!(
+            o.probe_path_status("/ws/probe.ts", 3),
+            ProbeStatus::Stale { have: Some(2) }
         );
     }
 
