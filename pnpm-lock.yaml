@@ -682,6 +682,9 @@ importers:
       '@types/vscode':
         specifier: ^1.120.0
         version: 1.120.0
+      '@verter/dx-harness':
+        specifier: workspace:^
+        version: link:../dx-harness
       '@verter/language-shared':
         specifier: workspace:^
         version: link:../language-shared

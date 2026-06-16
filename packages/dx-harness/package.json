@@ -15,6 +15,11 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "default": "./dist/index.js"
+    },
+    "./startup-gate": {
+      "types": "./dist/startup-gate.d.ts",
+      "import": "./dist/startup-gate.js",
+      "default": "./dist/startup-gate.js"
     }
   },
   "scripts": {
