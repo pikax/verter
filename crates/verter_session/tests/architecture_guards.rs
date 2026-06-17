@@ -15660,7 +15660,7 @@ mod single_resolution_engine_guards {
     // its consumers carry no engine tokens of their own (decision row D-l in
     // `docs/arch/multi-framework-adapters-plan.md`).
     const TYPE_SURFACE_PATH_FILE_ALLOWLIST: &[(&str, usize)] = &[
-        ("crates/verter_compiler/src/compile/mod.rs", 4),
+        ("crates/verter_compiler/src/compile/mod.rs", 2),
         ("crates/verter_compiler/src/compile/types.rs", 1),
         // The Vue carrier's PRIVATE runtime-compile extras sidecar
         // (`VueRuntimeCompileExtras.external_types`, typed via the
@@ -15671,9 +15671,16 @@ mod single_resolution_engine_guards {
             "crates/verter_compiler/src/framework_common/vue_bridge.rs",
             1,
         ),
-        ("crates/verter_compiler/src/script/macros.rs", 5),
-        ("crates/verter_compiler/src/script/mod.rs", 1),
-        ("crates/verter_compiler/src/tsc/script.rs", 35),
+        ("crates/verter_compiler/src/script/macros.rs", 3),
+        // Upstream's single-parse `PreparedScript` lane (`script/prepared.rs`) plus the
+        // framework-neutral import rehome made EXISTING eager-engine debt visible to this guard
+        // in a new home: the consumers it consolidates (`compile/mod.rs` 4→2,
+        // `script/macros.rs` 5→3, `script/mod.rs` 1→0) shed their direct
+        // `type_surface::ResolvedElements`/`extract_companion_types` uses onto the shared lane.
+        // Same doomed-engine symbols, relocated — NOT a new engine path (upstream `prepared.rs`
+        // already carried these sites and passed its own guard).
+        ("crates/verter_compiler/src/script/prepared.rs", 10),
+        ("crates/verter_compiler/src/tsc/script.rs", 37),
         ("crates/verter_parser/src/utils/oxc/script/mod.rs", 1),
         (
             "crates/verter_parser/src/utils/oxc/vue/script/bindings.rs",
@@ -15807,7 +15814,6 @@ mod single_resolution_engine_guards {
     // as a new file, and shrinks as later stages delete uses.
     // -----------------------------------------------------------------------
     const RESOLVED_ELEMENTS_FILE_ALLOWLIST: &[(&str, usize)] = &[
-        ("crates/verter_compiler/src/compile/mod.rs", 2),
         ("crates/verter_compiler/src/compile/types.rs", 1),
         // The Vue carrier's PRIVATE runtime-compile extras
         // (`VueRuntimeCompileExtras.external_types`): the host-resolved external
@@ -15819,8 +15825,11 @@ mod single_resolution_engine_guards {
             "crates/verter_compiler/src/framework_common/vue_bridge.rs",
             1,
         ),
-        ("crates/verter_compiler/src/script/macros.rs", 2),
-        ("crates/verter_compiler/src/script/mod.rs", 1),
+        // The shared single-parse preparation lane: setup + companion blocks are
+        // parsed once and their resolved companion/external `ResolvedElements`
+        // surfaces are threaded to every compile consumer through `PreparedScript`,
+        // not re-resolved per consumer. Pass-through of already-resolved data.
+        ("crates/verter_compiler/src/script/prepared.rs", 7),
         ("crates/verter_compiler/src/tsc/script.rs", 5),
         ("crates/verter_parser/src/utils/oxc/vue/script/macros.rs", 2),
         ("crates/verter_parser/src/utils/oxc/vue/script/mod.rs", 2),

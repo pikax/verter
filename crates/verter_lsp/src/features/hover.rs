@@ -10,6 +10,10 @@ use crate::documents::line_index::LineIndex;
 use crate::documents::sfc_scanner::{
     classify_cursor, parse_opening_tag, SfcBlock, SfcCursorContext,
 };
+use crate::features::hover_event_tokens::{
+    camelize_event_name, capitalize_first, event_directive_hover, hyphenate_event_name,
+    vue_event_attr_label,
+};
 
 /// Hover result from verter's own analysis, optionally carrying a Vue-specific
 /// kind label (e.g., "ref", "computed") to replace the type provider's generic kind prefix.
@@ -17,6 +21,27 @@ pub struct VerterHoverResult {
     pub hover: Hover,
     /// If set, replaces the type provider's `({kind})` prefix in the merged hover.
     pub vue_kind_label: Option<String>,
+    /// Typed source-token provenance for this hover. When the hover describes a
+    /// Vue template syntax token whose generated TSX counterpart differs (e.g. an
+    /// `@event` directive lowered to `onEvent`), this carries the structured source
+    /// identity so the merge layer can rewrite a paired TypeProvider hover back to
+    /// the source token — WITHOUT reparsing rendered hover markdown.
+    pub source_token: Option<HoverSourceToken>,
+}
+
+/// Structured provenance for a Vue template hover whose generated TSX token differs
+/// from the source token the user wrote.
+///
+/// This is the typed channel the merge layer reads to decide whether (and how) to
+/// rewrite a TypeProvider hover label back to Vue source syntax. It replaces the
+/// former practice of embedding a backticked `@event` label in the rendered hover
+/// text and reparsing it — display text is now display-only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HoverSourceToken {
+    /// A `v-on` / `@event` directive token. `vue_attr` is the canonical Vue
+    /// attribute label (`@click`, `@update:model-value`) that should replace the
+    /// generated `onClick` prop label in a merged TypeProvider hover.
+    EventDirective { vue_attr: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,6 +84,7 @@ impl From<Hover> for VerterHoverResult {
         Self {
             hover,
             vue_kind_label: None,
+            source_token: None,
         }
     }
 }
@@ -103,7 +129,7 @@ pub fn hover_at_position(
 
     match block.tag_name.as_str() {
         "script" => hover_in_script(offset, source, analysis, ssr_context),
-        "template" => hover_in_template(offset, source, analysis),
+        "template" => hover_in_template(offset, source, analysis, line_index),
         "style" => crate::css::css_hover(position, source, blocks, Some(analysis), line_index)
             .map(|h| h.into()),
         _ => None,
@@ -449,6 +475,7 @@ fn hover_in_template(
     offset: usize,
     source: &str,
     analysis: &FileAnalysisSnapshot,
+    line_index: &LineIndex,
 ) -> Option<VerterHoverResult> {
     // Don't provide hover inside HTML comments
     if crate::features::definition::is_inside_html_comment(source, offset) {
@@ -475,6 +502,20 @@ fn hover_in_template(
         return Some(hover.into());
     }
 
+    // Source-owned Vue template syntax hovers. These run BEFORE the attribute-name
+    // suppression below because event directives, modifiers, and the static `ref`
+    // attribute are Vue syntax tokens — not script bindings. The generated TSX either
+    // renames them (`@click` → `onClick`) or deletes them outright (modifiers,
+    // no-value directives, static `ref`), so the TypeProvider can never describe the
+    // source token. We reconstruct the hover label/range from the existing
+    // `TemplateDirective` / `TemplateAttribute` spans instead.
+    if let Some(hover) = event_directive_hover(offset as u32, source, analysis, line_index) {
+        return Some(hover);
+    }
+    if let Some(hover) = template_ref_hover(offset as u32, source, analysis, line_index) {
+        return Some(hover);
+    }
+
     // In template, look for bindings used in expressions like {{ myVar }}
     let word = word_at_offset(source, offset)?;
 
@@ -485,6 +526,62 @@ fn hover_in_template(
     }
 
     hover_for_word(&word, analysis)
+}
+
+/// Build an LSP range from a source byte span via the document line index.
+pub(super) fn span_to_range(line_index: &LineIndex, start: u32, end: u32) -> Option<Range> {
+    Some(Range {
+        start: line_index.offset_to_position(start)?,
+        end: line_index.offset_to_position(end)?,
+    })
+}
+
+/// Source-owned hover for a static template `ref` attribute (`<span ref="el">`).
+///
+/// The IDE codegen deletes the static `ref="..."` and reinserts an unmapped
+/// synthetic `ref={"..."}`, and the generic attribute-name suppression would
+/// otherwise route this through the imported Vue `ref()` symbol. We return a hover
+/// describing the template-ref declaration from the existing `TemplateAttribute`
+/// facts instead, without surfacing the import.
+fn template_ref_hover(
+    offset: u32,
+    source: &str,
+    analysis: &FileAnalysisSnapshot,
+    line_index: &LineIndex,
+) -> Option<VerterHoverResult> {
+    let template = analysis.template.as_deref()?;
+    for el in &template.elements {
+        for attr in &el.attributes {
+            if attr.name != "ref" || attr.is_dynamic {
+                continue;
+            }
+            if offset < attr.span.start || offset >= attr.span.end {
+                continue;
+            }
+            let token = source
+                .get(attr.span.start as usize..attr.span.end as usize)
+                .unwrap_or("ref");
+            let mut value = format!("`{token}`\n\nTemplate ref");
+            match attr.value.as_deref() {
+                Some(name) if !name.is_empty() => {
+                    value.push_str(&format!(" — registers a reference named `{name}`."));
+                }
+                _ => value.push('.'),
+            }
+            return Some(VerterHoverResult {
+                hover: Hover {
+                    contents: HoverContents::Markup(MarkupContent {
+                        kind: MarkupKind::Markdown,
+                        value,
+                    }),
+                    range: span_to_range(line_index, attr.span.start, attr.span.end),
+                },
+                vue_kind_label: None,
+                source_token: None,
+            });
+        }
+    }
+    None
 }
 
 /// Check if the given offset falls on an attribute name or directive name in the template.
@@ -980,6 +1077,7 @@ fn hover_for_word(word: &str, analysis: &FileAnalysisSnapshot) -> Option<VerterH
         return Some(VerterHoverResult {
             hover: format_binding_hover(binding),
             vue_kind_label,
+            source_token: None,
         });
     }
 
@@ -1369,61 +1467,6 @@ fn emit_handler_keys(event_name: &str) -> Vec<String> {
     }
 
     keys
-}
-
-fn capitalize_first(text: &str) -> String {
-    let mut chars = text.chars();
-    match chars.next() {
-        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-        None => String::new(),
-    }
-}
-
-fn camelize_event_name(text: &str) -> String {
-    let mut result = String::with_capacity(text.len());
-    let mut capitalize_next = false;
-    for ch in text.chars() {
-        if ch == '-' {
-            capitalize_next = true;
-            continue;
-        }
-        if capitalize_next {
-            result.extend(ch.to_uppercase());
-            capitalize_next = false;
-        } else {
-            result.push(ch);
-        }
-    }
-    result
-}
-
-fn hyphenate_event_name(text: &str) -> String {
-    let mut result = String::with_capacity(text.len() + 4);
-    for (idx, ch) in text.chars().enumerate() {
-        if ch.is_ascii_uppercase() {
-            if idx > 0 {
-                result.push('-');
-            }
-            result.push(ch.to_ascii_lowercase());
-        } else {
-            result.push(ch);
-        }
-    }
-    result
-}
-
-fn vue_event_attr_label(event_name: &str) -> String {
-    let mut parts = event_name.splitn(2, ':');
-    let first = parts.next().unwrap_or_default();
-    let second = parts.next();
-    match second {
-        Some(second) => format!(
-            "@{}:{}",
-            hyphenate_event_name(first),
-            hyphenate_event_name(second)
-        ),
-        None => format!("@{}", hyphenate_event_name(first)),
-    }
 }
 
 use crate::utils::word_at_offset;

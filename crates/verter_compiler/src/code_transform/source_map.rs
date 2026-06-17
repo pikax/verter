@@ -69,9 +69,37 @@ impl<'a> CodeTransform<'a> {
     /// let source_map = ct.generate_map(options);
     /// ```
     #[must_use]
-    #[allow(unused_assignments)] // generated_line/column updated in outro but intentionally not read after
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn generate_map(&self, options: SourceMapOptions) -> SourceMap<'static> {
+        self.generate_map_with_preamble(options).0
+    }
+
+    /// Like [`generate_map`](Self::generate_map), but ALSO returns the generated-TSX position
+    /// `(line, utf16_column)` immediately AFTER the recorded helper-import preamble insertion (see
+    /// [`set_helper_preamble_content`](Self::set_helper_preamble_content)) — the typed
+    /// helper-import-preamble end boundary. The preamble insertion is located by pointer identity
+    /// during the single generated-order chunk walk (no second pass, no content sniffing). Returns
+    /// `None` for the boundary when no preamble was recorded or its chunk was not emitted (e.g.
+    /// empty content). This is the SINGLE source of generated-position tracking; `generate_map`
+    /// delegates here and drops the boundary.
+    #[must_use]
+    #[allow(unused_assignments)] // generated_line/column updated in outro but intentionally not read after
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    pub fn generate_map_with_preamble(
+        &self,
+        options: SourceMapOptions,
+    ) -> (SourceMap<'static>, Option<(u32, u32)>) {
+        let preamble = self.helper_preamble_content();
+        // Generated-TSX position immediately after the helper-import preamble insertion, captured
+        // when the walk advances past its chunk. Pointer identity (start + len) is exact: the same
+        // bump-allocated `&str` flows from the insertion into its `Inserted`/`InsertedMapped` chunk.
+        let mut preamble_end: Option<(u32, u32)> = None;
+        let is_preamble = |content: &str| {
+            preamble.is_some_and(|p| {
+                std::ptr::eq(p.as_ptr(), content.as_ptr()) && p.len() == content.len()
+            })
+        };
+
         // Set up source file. Our usage never duplicates sources or adds names,
         // so the tokens accumulate into a single locally-owned, pre-reserved Vec
         // that is handed directly to `SourceMap::new` — avoiding both the
@@ -223,6 +251,11 @@ impl<'a> CodeTransform<'a> {
                         &mut generated_line,
                         &mut generated_column,
                     );
+                    // The helper-import preamble is an unmapped insertion: capture the
+                    // generated position immediately after it as the preamble-end boundary.
+                    if is_preamble(content) {
+                        preamble_end = Some((generated_line, generated_column));
+                    }
                 }
                 Chunk::InsertedMapped {
                     content,
@@ -274,6 +307,12 @@ impl<'a> CodeTransform<'a> {
                             &mut generated_column,
                         );
                     }
+                    // Defensive: the helper-import preamble is emitted unmapped (`Inserted`), but
+                    // match here too so the boundary survives if a preamble is ever routed through
+                    // a mapped insertion.
+                    if is_preamble(content) {
+                        preamble_end = Some((generated_line, generated_column));
+                    }
                 }
             }
         }
@@ -295,14 +334,17 @@ impl<'a> CodeTransform<'a> {
             );
         }
 
-        SourceMap::new(
-            file,
-            Vec::new(),
-            None,
-            sources,
-            source_contents,
-            tokens.into_boxed_slice(),
-            None,
+        (
+            SourceMap::new(
+                file,
+                Vec::new(),
+                None,
+                sources,
+                source_contents,
+                tokens.into_boxed_slice(),
+                None,
+            ),
+            preamble_end,
         )
     }
 
@@ -435,6 +477,36 @@ impl<'a> CodeTransform<'a> {
     pub fn generate_map_json(&self, options: SourceMapOptions) -> String {
         let map = self.generate_map(options);
         map.to_json_string()
+    }
+
+    /// Generate the source map JSON, augmented with the typed helper-import-preamble end boundary
+    /// when one was recorded (`x_verter_helper_preamble_end`). This is the producer side of the LSP
+    /// auto-import preamble classifier: the boundary is the generated-TSX position immediately after
+    /// the last helper import. It rides the source-map JSON (an `x_`-prefixed metadata member, the
+    /// source-map extension convention) because the only compiler→LSP transport is the source-map
+    /// string; `oxc_sourcemap` ignores the unknown member on parse, and the strict `PositionMapper`
+    /// recovers it into a typed field.
+    #[must_use]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    pub fn generate_map_json_with_preamble(&self, options: SourceMapOptions) -> String {
+        let (map, preamble_end) = self.generate_map_with_preamble(options);
+        inject_helper_preamble_end(map.to_json_string(), preamble_end)
+    }
+}
+
+/// Inject the `x_verter_helper_preamble_end` member into an `oxc_sourcemap` JSON object string.
+///
+/// `oxc_sourcemap`'s encoder has a fixed field set, so the boundary is added as a leading object
+/// member (the encoder always emits `{"version":3,…`, so splicing after `{` is deterministic and
+/// keeps valid JSON). A no-op when there is no boundary. The member shape mirrors the LSP's typed
+/// `TsPosition` (`{"line":<u32>,"character":<u32>}`).
+fn inject_helper_preamble_end(json: String, preamble_end: Option<(u32, u32)>) -> String {
+    match preamble_end {
+        Some((line, character)) if json.starts_with('{') => format!(
+            "{{\"x_verter_helper_preamble_end\":{{\"line\":{line},\"character\":{character}}},{}",
+            &json[1..]
+        ),
+        _ => json,
     }
 }
 

@@ -119,6 +119,101 @@ pub fn gen_tsx_script(source: &str) -> (String, FxHashMap<String, BindingType>) 
     (code, bindings)
 }
 
+/// Generate IDE TSX and its source-map JSON (carrying the `x_verter_helper_preamble_end` boundary),
+/// mirroring the production compile pipeline's IDE source-map step. Returns `(code, sourcemap_json)`.
+/// Used to pin that IDE codegen publishes the typed helper-import-preamble boundary end-to-end.
+pub fn gen_tsx_script_with_sourcemap(source: &str) -> (String, String) {
+    let alloc = Allocator::new();
+    let mut ct = CodeTransform::new(source, &alloc);
+
+    let bytes = source.as_bytes();
+    let mut syntax = crate::parser::Syntax::new(false);
+    crate::tokenizer::byte::tokenize_sfc(bytes, |e| {
+        syntax.handle(
+            &e,
+            &crate::diagnostics::SyntaxPluginContext {
+                input: source,
+                bytes,
+                options: &crate::diagnostics::SyntaxPluginOptions::default(),
+                diagnostics: Vec::new(),
+            },
+        )
+    });
+
+    let js_component_name = crate::ide::sanitize_js_identifier("App.vue");
+    let options = IdeScriptOptions {
+        component_name: "App",
+        js_component_name: &js_component_name,
+        filename: "App.vue",
+        scope_id: "data-v-abc123",
+        has_scoped_style: false,
+        runtime_module_name: "vue",
+        types_module_name: "@verter/types",
+        is_vapor: false,
+        embed_ambient_types: true,
+        is_jsx: false,
+        conditional_root_narrowing: false,
+        style_v_bind_vars: vec![],
+        css_modules: vec![],
+    };
+
+    let template_end = syntax.template_ast().map(|tpl| {
+        tpl.root
+            .tag_close
+            .as_ref()
+            .map(|tc| tc.end)
+            .unwrap_or(tpl.root.tag_open.end)
+    });
+
+    let result = generate_ide_script(
+        syntax.script(),
+        syntax.script_setup(),
+        syntax.template_ast(),
+        source,
+        &mut ct,
+        &alloc,
+        &options,
+        template_end,
+    );
+
+    if let (Some(return_close), Some(pos)) = (&result.return_close, result.return_close_pos) {
+        ct.prepend_left(pos, return_close);
+    }
+    // Append type constructs as the production pipeline does (after the source map anchor region);
+    // they sit past the preamble so they do not move the boundary.
+    if !result.type_constructs.is_empty() {
+        ct.append(&result.type_constructs);
+    }
+
+    if let Some(tpl) = syntax.template_ast() {
+        let start = tpl.root.tag_open.start;
+        let end = tpl
+            .root
+            .tag_close
+            .as_ref()
+            .map(|tc| tc.end)
+            .unwrap_or(tpl.root.tag_open.end);
+        ct.remove(start, end);
+    }
+    for style_node in syntax.style_nodes() {
+        let start = style_node.tag_open.start;
+        let end = style_node
+            .tag_close
+            .as_ref()
+            .map(|tc| tc.end)
+            .unwrap_or(style_node.tag_open.end);
+        ct.remove(start, end);
+    }
+
+    let code = ct.build_string();
+    let json = ct.generate_map_json_with_preamble(crate::code_transform::SourceMapOptions {
+        source: Some("App.vue"),
+        file: Some("App.vue"),
+        include_content: true,
+    });
+    (code, json)
+}
+
 /// Like gen_tsx_script_full but with conditional_root_narrowing enabled.
 pub fn gen_tsx_script_narrowing(source: &str) -> String {
     let alloc = Allocator::new();

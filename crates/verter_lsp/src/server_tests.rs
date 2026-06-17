@@ -737,6 +737,23 @@ fn completion_labels(response: Option<CompletionResponse>) -> Vec<String> {
     }
 }
 
+fn mock_completion(
+    label: &str,
+    kind: crate::tsgo::protocol::CompletionKind,
+) -> crate::tsgo::protocol::Completion {
+    crate::tsgo::protocol::Completion {
+        label: label.to_string(),
+        kind: Some(kind),
+        detail: None,
+        documentation: None,
+        edit_range_start: None,
+        edit_range_end: None,
+        insert_text: None,
+        sort_text: None,
+        data: None,
+    }
+}
+
 fn hover_text(hover: Option<Hover>) -> String {
     match hover.expect("hover should exist").contents {
         HoverContents::Markup(m) => m.value,
@@ -3364,13 +3381,17 @@ async fn goto_type_definition_delegates_to_provider() {
             &ctx.mapper,
             &ctx.tsx_line_index,
         ) {
+            // Point the type-definition at the real `count` identifier in the generated TSX so
+            // its offsets map back to the `.vue` source. (Offsets in the synthetic preamble,
+            // e.g. 0..5, do not map and are correctly dropped fail-closed — they would have
+            // collapsed to a line-0 range under the old `.unwrap_or_default()` behavior.)
             provider.set_type_definitions(
                 &ctx.tsx_path,
                 tsx_offset,
                 vec![TypeLocation {
                     path: ctx.tsx_path.clone(),
-                    start: 0,
-                    end: 5,
+                    start: tsx_offset,
+                    end: tsx_offset + "count".len() as u32,
                 }],
             );
         }
@@ -3990,6 +4011,167 @@ const outerLabel = 'outer'
     assert!(
         !labels.contains(&"outerLabel".to_string()),
         "member access should suppress outer scope identifiers, got: {labels:?}"
+    );
+}
+
+/// HEADLINE: incomplete member access in `<script setup>` (`a.`).
+///
+/// The recovery codegen keeps the virtual file valid TSX, and the completion handler
+/// classifies the SCRIPT dot boundary as `MemberAccess` so the dot-trigger + member-filtering
+/// machinery runs (it previously ran for template expressions only). The provider
+/// returns number members; the LSP surfaces them with NO `___VERTER___` recovery
+/// token leaking into a label.
+#[tokio::test]
+async fn script_member_access_completion_returns_number_members() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    install_test_resolver(server);
+
+    let source = "<script setup>\nlet a = 1;\na.\n</script>\n";
+    let uri = open_test_vue(server, "/workspace/src/Member.vue", source);
+
+    // The IDE virtual file must be VALID TSX — the recovery fix is what stops the
+    // whole-file language service from degrading to "No Suggestions".
+    let ide = server
+        .documents
+        .get_ide(&uri)
+        .expect("IDE TSX should exist");
+    {
+        let alloc = oxc_allocator::Allocator::new();
+        let parsed =
+            oxc_parser::Parser::new(&alloc, &ide.code, oxc_span::SourceType::tsx()).parse();
+        assert!(
+            parsed.errors.is_empty(),
+            "the LSP must ship VALID TSX for `a.`, got {:?}\n--- TSX ---\n{}",
+            parsed
+                .errors
+                .iter()
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>(),
+            ide.code
+        );
+    }
+
+    // Cursor right after the `a.` dot boundary.
+    let position = find_document_position(server, &uri, "a.", 2);
+
+    // Compute the TSX offset exactly as the completion handler does: the strict
+    // mapper is None at the zero-width member boundary by design, so fall back to
+    // the completion-boundary helper.
+    let ctx = synced_type_provider_context(server, &uri);
+    let vue_source = server.documents.get(&uri).unwrap().source.clone();
+    let tsx_offset = merge::carrier_position_to_tsx_offset_validated(
+        &position,
+        &ctx.carrier_line_index,
+        &ctx.mapper,
+        &ctx.tsx_line_index,
+    )
+    .or_else(|| {
+        merge::carrier_completion_member_boundary_offset(
+            &position,
+            &ctx.carrier_line_index,
+            &ctx.mapper,
+            &ctx.tsx_line_index,
+            &ctx.tsx_content,
+            &vue_source,
+        )
+    })
+    .expect("the `a.` dot boundary must map to a TSX offset (strict or fallback)");
+
+    // The script position must classify as member access.
+    let expr_ctx =
+        classify_expression_context_with_trigger(&ctx.tsx_content, tsx_offset as usize, Some("."));
+    assert!(
+        matches!(expr_ctx, ExpressionContext::MemberAccess),
+        "script `a.` must classify as MemberAccess, got {expr_ctx:?}"
+    );
+
+    use crate::tsgo::protocol::CompletionKind;
+    provider.set_completions(
+        &ctx.tsx_path,
+        tsx_offset,
+        vec![
+            mock_completion("toFixed", CompletionKind::Method),
+            mock_completion("toString", CompletionKind::Method),
+            mock_completion("valueOf", CompletionKind::Method),
+            // A non-member global the provider would also offer — member filtering
+            // must drop it.
+            mock_completion("AbortController", CompletionKind::Variable),
+        ],
+    );
+
+    // Both WITH the explicit `.` trigger and WITHOUT it (Ctrl+Space) must work.
+    for trigger in [Some("."), None] {
+        let labels = completion_labels(
+            server
+                .completion(completion_params(&uri, position, trigger))
+                .await
+                .expect("completion request should succeed"),
+        );
+        for member in ["toFixed", "toString", "valueOf"] {
+            assert!(
+                labels.contains(&member.to_string()),
+                "script member access (trigger={trigger:?}) must return `{member}`, got {labels:?}"
+            );
+        }
+        assert!(
+            labels.iter().all(|l| !l.contains("___VERTER___")),
+            "no completion label may leak a ___VERTER___ recovery token, got {labels:?}"
+        );
+        assert!(
+            !labels.contains(&"AbortController".to_string()),
+            "member-access filtering must drop non-member globals, got {labels:?}"
+        );
+    }
+}
+
+/// NEGATIVE: an ordinary `<script setup>` IDENTIFIER position must NOT
+/// inherit the template-only `IdentifierExpected` TypeProvider suppression — TS
+/// globals and imports are valid in script, so the provider's results flow
+/// through. (In a template the same context skips the provider; in script it must
+/// not.)
+#[tokio::test]
+async fn script_identifier_completion_is_not_suppressed() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    install_test_resolver(server);
+
+    let source = "<script setup>\nconst myValue = 1;\nmyVal\n</script>\n";
+    let uri = open_test_vue(server, "/workspace/src/Ident.vue", source);
+    // Cursor INSIDE the partial reference `myVal` (after `myV`), a clearly-mapped
+    // identifier position with prefix `myV`.
+    let position = find_document_position(server, &uri, "myVal\n", 3);
+
+    let ctx = synced_type_provider_context(server, &uri);
+    let tsx_offset = merge::carrier_position_to_tsx_offset_validated(
+        &position,
+        &ctx.carrier_line_index,
+        &ctx.mapper,
+        &ctx.tsx_line_index,
+    )
+    .expect("script identifier position should map to tsx");
+
+    use crate::tsgo::protocol::CompletionKind;
+    provider.set_completions(
+        &ctx.tsx_path,
+        tsx_offset,
+        vec![mock_completion("myValue", CompletionKind::Variable)],
+    );
+
+    let labels = completion_labels(
+        server
+            .completion(completion_params(&uri, position, None))
+            .await
+            .expect("completion request should succeed"),
+    );
+    assert!(
+        labels.contains(&"myValue".to_string()),
+        "ordinary script identifier completions must consult the TypeProvider \
+         (must NOT inherit template IdentifierExpected suppression), got {labels:?}"
     );
 }
 

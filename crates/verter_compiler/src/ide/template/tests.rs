@@ -52,6 +52,7 @@ fn gen_tsx_template(source: &str) -> String {
         &alloc,
         &bindings,
         &options,
+        &TemplateComponentBindings::default(),
     );
     out.apply_to(&mut tpl_ct);
 
@@ -69,6 +70,17 @@ fn gen_tsx_template(source: &str) -> String {
 }
 
 fn gen_tsx_template_with_bindings(source: &str, bindings: &[(&str, BindingType)]) -> String {
+    gen_tsx_template_with_components(source, bindings, &[])
+}
+
+/// Like [`gen_tsx_template_with_bindings`], but also seeds the GlobalComponents fallback
+/// inventory with `fallback_consts` — the PascalCase const names a `<script setup>` would
+/// emit for globally-registered components. Drives the global-component event-typing rows.
+fn gen_tsx_template_with_components(
+    source: &str,
+    bindings: &[(&str, BindingType)],
+    fallback_consts: &[&str],
+) -> String {
     let alloc = Allocator::new();
     let bytes = source.as_bytes();
 
@@ -115,6 +127,9 @@ fn gen_tsx_template_with_bindings(source: &str, bindings: &[(&str, BindingType)]
         strict_slots: false,
     };
 
+    let components =
+        TemplateComponentBindings::new(fallback_consts.iter().map(|s| s.to_string()).collect());
+
     generate_ide_template(
         &template_ast,
         &oxc_ast,
@@ -123,6 +138,7 @@ fn gen_tsx_template_with_bindings(source: &str, bindings: &[(&str, BindingType)]
         &tpl_alloc,
         &binding_map,
         &options,
+        &components,
     );
     out.apply_to(&mut tpl_ct);
 
@@ -2178,6 +2194,7 @@ fn gen_tsx_template_with_map(
         &tpl_alloc,
         &binding_map,
         &options,
+        &TemplateComponentBindings::default(),
     );
     out.apply_to(&mut tpl_ct);
 
@@ -4640,43 +4657,76 @@ fn closing_tag_case_mismatch_component() {
 // ── Kebab-case event handling in spread syntax ─────────────────────────────
 
 #[test]
-fn kebab_event_with_dollar_event_wraps_with_event_param() {
+fn kebab_event_with_dollar_event_emits_typed_payload_param() {
     let result = gen_tsx_template_with_bindings(
         r#"<template><div @click-overlay="emit('clickOverlay', $event)" /></template>"#,
         &[("emit", BindingType::SetupConst)],
     );
-    // Kebab event → spread syntax with eventCallbacks wrapper
-    assert!(
-        result.contains("___VERTER___eventCallbacks"),
-        "should use eventCallbacks wrapper: {result}"
-    );
+    // Hyphenated JSX name can't be a bare attribute → spread key.
     assert!(
         result.contains(r#""onClick-overlay""#),
-        "should preserve kebab-case event name: {result}"
+        "should preserve kebab-case event name as spread key: {result}"
+    );
+    // `$event` is bound as the handler's sole parameter, EXPLICITLY annotated with
+    // an ambient DOM event-payload type — JSX contextual typing cannot flow through a
+    // spread, so a bare parameter would be `any`. A non-standard native event
+    // (`click-overlay`) is not a known DOM event, so the intersected `Event` index
+    // fallback types it as the base `Event` (never a `ts(2339)` error).
+    assert!(
+        result.contains("($event:"),
+        "spread $event must be an explicitly-typed parameter: {result}"
     );
     assert!(
-        result.contains("...___VERTER___eventArgs"),
-        "should have rest args for eventCallbacks: {result}"
+        result.contains(r#"(GlobalEventHandlersEventMap & { [___VERTER___EventKey: string]: Event })["click-overlay"]"#),
+        "spread $event type must be the ambient DOM event-map type keyed by the event name: {result}"
     );
-    // Negative: should NOT have bare ($event) => without eventCallbacks
+    // Negative: the `import('vue')` indexed formula is NOT used for native spread
+    // `$event` — it does not resolve under the tsgo TypeProvider.
     assert!(
-        !result.contains(r#"": ($event) =>"#),
-        "should NOT use bare ($event) => pattern: {result}"
+        !result.contains("IntrinsicElementAttributes"),
+        "native spread $event must not use the import('vue') formula: {result}"
+    );
+    // Negative: the generic `eventCallbacks<TArgs extends Array<any>>` helper that
+    // forced `$event` to `any` is gone.
+    assert!(
+        !result.contains("___VERTER___eventCallbacks"),
+        "spread $event must NOT use the eventCallbacks wrapper: {result}"
+    );
+    assert!(
+        !result.contains("...___VERTER___eventArgs"),
+        "spread $event must NOT use the generic event-args rest param: {result}"
     );
 }
 
 #[test]
-fn kebab_event_arrow_function_is_raw() {
+fn kebab_event_arrow_function_satisfies_native_payload() {
     let result = gen_tsx_template_with_bindings(
         r#"<template><div @click-overlay="($event) => doSomething($event)" /></template>"#,
         &[("doSomething", BindingType::SetupConst)],
     );
-    // Arrow function should be passed raw in spread — no extra wrapping
+    // JSX contextual typing cannot flow through a spread, so the arrow handler's
+    // parameter would be implicit-`any`. The arrow is wrapped in a `satisfies` clause
+    // whose target is the native event-handler signature, so `$event` is contextually
+    // typed against the ambient DOM payload tuple. The user arrow stays source-mapped.
     assert!(
-        result.contains(r#""onClick-overlay": ($event) => doSomething($event)"#),
-        "arrow function should be raw in spread: {result}"
+        result.contains(
+            r#""onClick-overlay": (($event) => doSomething($event)) satisfies (...___VERTER___eventArgs: "#
+        ),
+        "arrow handler must be `satisfies`-wrapped on spread: {result}"
     );
-    // Negative: should NOT double-wrap
+    assert!(
+        result.contains(
+            r#"[(GlobalEventHandlersEventMap & { [___VERTER___EventKey: string]: Event })["click-overlay"]]) => unknown"#
+        ),
+        "satisfies target must be the native DOM payload tuple: {result}"
+    );
+    // Negative: the `import('vue')` indexed formula is NOT used (it does not resolve
+    // under the tsgo TypeProvider).
+    assert!(
+        !result.contains("IntrinsicElementAttributes"),
+        "native spread arrow must not use the import('vue') formula: {result}"
+    );
+    // Negative: should NOT double-wrap the arrow body into a synthetic block.
     assert!(
         !result.contains("($event) => {($event)"),
         "should NOT double-wrap arrow function: {result}"
@@ -4684,15 +4734,19 @@ fn kebab_event_arrow_function_is_raw() {
 }
 
 #[test]
-fn kebab_event_function_expr_is_raw() {
+fn kebab_event_function_expr_satisfies_native_payload() {
     let result = gen_tsx_template_with_bindings(
         r#"<template><div @click-overlay="function($event) { doSomething($event) }" /></template>"#,
         &[("doSomething", BindingType::SetupConst)],
     );
-    // Function expression should be passed raw in spread
+    // Function-expression handler is `satisfies`-wrapped exactly like the arrow case.
     assert!(
-        result.contains(r#""onClick-overlay": function($event)"#),
-        "function expression should be raw in spread: {result}"
+        result.contains(r#""onClick-overlay": (function($event) { doSomething($event) }) satisfies (...___VERTER___eventArgs: "#),
+        "function expression must be `satisfies`-wrapped on spread: {result}"
+    );
+    assert!(
+        result.contains(r#") => unknown"#),
+        "satisfies clause must close with `=> unknown`: {result}"
     );
 }
 
@@ -5080,6 +5134,7 @@ fn gen_jsx_template(source: &str) -> String {
         &alloc,
         &bindings,
         &options,
+        &TemplateComponentBindings::default(),
     );
     out.apply_to(&mut tpl_ct);
 
@@ -5629,6 +5684,7 @@ fn gen_tsx_template_strict_slots_with_bindings(
         &tpl_alloc,
         &binding_map,
         &options,
+        &TemplateComponentBindings::default(),
     );
     out.apply_to(&mut tpl_ct);
 
@@ -6088,6 +6144,7 @@ fn gen_tsx_template_strict_slots_with_map(
         &tpl_alloc,
         &binding_map,
         &options,
+        &TemplateComponentBindings::default(),
     );
     out.apply_to(&mut tpl_ct);
 
@@ -6390,50 +6447,49 @@ fn bare_event_no_value_removed() {
     );
 }
 
-// ── eventCallbacks wrapper for $event type inference ─────────────────────
+// ── $event type inference ────────────────────────────────────────────────
 
 #[test]
-fn event_handler_with_event_param_uses_event_callbacks_native() {
+fn event_handler_native_event_param_is_contextually_typed() {
+    // Native `$event` is bound as the handler's sole parameter so it is
+    // contextually typed by the JSX event prop (`onClick`) — the same mechanism
+    // that types an inline-arrow parameter. This replaces the generic
+    // `eventCallbacks` wrapper, which left `$event` as `any` because contextual
+    // typing does not flow through a synthetic rest parameter into a generic call.
     let result =
         gen_tsx_template(r#"<template><div @click="handleClick($event)">click</div></template>"#);
-    // Positive: should use eventCallbacks wrapper for $event type inference
     assert!(
-        result.contains("___VERTER___eventCallbacks"),
-        "native event with $event should use eventCallbacks wrapper: {result}"
+        result.contains("onClick={($event) => {"),
+        "native $event handler should bind $event as the contextually-typed parameter: {result}"
     );
     assert!(
-        result.contains("...___VERTER___eventArgs"),
-        "should have rest args for eventCallbacks: {result}"
+        result.contains("handleClick($event)"),
+        "should still contain the $event handler body: {result}"
     );
-    // Positive: $event should still be present inside the inner callback
+    // Negative: native $event no longer relies on the generic eventCallbacks wrapper.
     assert!(
-        result.contains("$event"),
-        "should still contain $event in inner callback: {result}"
+        !result.contains("___VERTER___eventCallbacks"),
+        "native $event should NOT use the generic eventCallbacks wrapper: {result}"
     );
-    // Negative: should NOT have bare ($event) => without eventCallbacks
     assert!(
-        !result.contains("={($event) =>"),
-        "should NOT use bare ($event) => pattern, must use eventCallbacks: {result}"
+        !result.contains("...___VERTER___eventArgs"),
+        "native $event should NOT use the generic event-args rest param: {result}"
     );
 }
 
 #[test]
-fn event_handler_with_event_param_uses_event_callbacks_component() {
+fn event_handler_component_event_param_is_contextually_typed() {
+    // A component `$event` is bound the same way — contextually typed by the
+    // component's JSX event prop (`onCustom`).
     let result =
         gen_tsx_template(r#"<template><MyComp @custom="handleCustom($event)" /></template>"#);
-    // Positive: should use eventCallbacks wrapper
     assert!(
-        result.contains("___VERTER___eventCallbacks"),
-        "component event with $event should use eventCallbacks wrapper: {result}"
+        result.contains("onCustom={($event) => {"),
+        "component $event handler should bind $event as the contextually-typed parameter: {result}"
     );
     assert!(
-        result.contains("...___VERTER___eventArgs"),
-        "should have rest args for eventCallbacks: {result}"
-    );
-    // Negative: should NOT have bare ($event) =>
-    assert!(
-        !result.contains("={($event) =>"),
-        "should NOT use bare ($event) => pattern on component: {result}"
+        !result.contains("___VERTER___eventCallbacks"),
+        "component in-place $event should NOT use the generic eventCallbacks wrapper: {result}"
     );
 }
 
@@ -6455,23 +6511,67 @@ fn event_handler_without_event_param_no_event_callbacks() {
 }
 
 #[test]
-fn event_handler_spread_with_event_param_uses_event_callbacks() {
-    let result = gen_tsx_template(
-        r#"<template><div @click-overlay="emit('clickOverlay', $event)" /></template>"#,
+fn dollar_event_inside_string_literal_is_not_treated_as_event_param() {
+    // Typed-IR detection: `$event` inside a STRING LITERAL is not an identifier
+    // reference, so the handler must NOT be wrapped as `($event) => …`. The former
+    // `resolved_expr.contains("$event")` substring check wrongly matched here, which
+    // would shadow a real outer `$event` and mis-type the handler.
+    let result = gen_tsx_template_with_bindings(
+        r#"<template><button @click="log('save $event now')" /></template>"#,
+        &[("log", BindingType::SetupConst)],
     );
-    // Positive: spread path should also use eventCallbacks
     assert!(
-        result.contains("___VERTER___eventCallbacks"),
-        "spread event with $event should use eventCallbacks wrapper: {result}"
+        !result.contains("($event)"),
+        "string-literal $event must NOT trigger the $event parameter wrapper: {result}"
+    );
+    // A plain inline expression with no real $event → wrapped as () => { … }.
+    assert!(
+        result.contains("onClick={() => {"),
+        "inline expression handler should use the () => {{ }} wrapper: {result}"
+    );
+}
+
+#[test]
+fn event_handler_spread_with_event_param_emits_typed_payload() {
+    // A duplicate `@click` routes the SECOND handler through the spread path (the
+    // first stays an in-place `onClick={…}`). The spread `$event` must be an
+    // explicitly-typed parameter — JSX contextual typing does not flow through a
+    // spread attribute, so the old generic `eventCallbacks<TArgs extends Array<any>>`
+    // wrapper left it `any`. For a native element the annotation is the ambient DOM
+    // event-map type keyed by the event name (`click`), which resolves under every
+    // TypeProvider (unlike the `import('vue')` formula).
+    let result = gen_tsx_template_with_bindings(
+        r#"<template><button @click="a($event)" @click="b($event)" /></template>"#,
+        &[
+            ("a", BindingType::SetupConst),
+            ("b", BindingType::SetupConst),
+        ],
+    );
+    // Positive: the spread branch binds `$event` as a typed parameter (the colon is
+    // exclusive to the explicitly-annotated spread param; the in-place handler emits
+    // a bare `($event) =>`).
+    assert!(
+        result.contains("($event:"),
+        "spread $event must be an explicitly-typed parameter: {result}"
     );
     assert!(
-        result.contains("...___VERTER___eventArgs"),
-        "spread event should have rest args: {result}"
+        result.contains(r#"(GlobalEventHandlersEventMap & { [___VERTER___EventKey: string]: Event })["click"]"#),
+        "spread $event type must be the ambient DOM event-map type keyed by the event name: {result}"
     );
-    // Negative: should NOT have bare ($event) => without eventCallbacks wrapping it
+    // Negative: the `import('vue')` indexed formula is NOT used for native spread
+    // `$event` — it does not resolve under the tsgo TypeProvider.
     assert!(
-        !result.contains(r#"": ($event) =>"#),
-        "spread event should NOT use bare ($event) => pattern (without eventCallbacks): {result}"
+        !result.contains("IntrinsicElementAttributes"),
+        "native spread $event must not use the import('vue') formula: {result}"
+    );
+    // Negative: the generic eventCallbacks helper / rest-args are gone.
+    assert!(
+        !result.contains("___VERTER___eventCallbacks"),
+        "spread event with $event must NOT use the eventCallbacks wrapper: {result}"
+    );
+    assert!(
+        !result.contains("...___VERTER___eventArgs"),
+        "spread event must NOT use the generic event-args rest param: {result}"
     );
 }
 
@@ -8372,4 +8472,283 @@ fn standalone_mapped_emitters_carry_no_resolver_prefix_fold() {
         mod_src.contains("prepend_mapped_generated_text"),
         "dynamic :is must lower via prepend_mapped_generated_text"
     );
+}
+
+// ── Spread-path event-typing closed matrix ────────────────────────────────
+//
+// The full spread-event typing matrix: {native, local component, global
+// component} × {$event inline, arrow/function param} × {duplicate event key, hyphenated
+// event key}. Native hyphenated rows are covered above by `kebab_event_*`. Every spread
+// surface types its handler from the typed-IR — native via the ambient DOM payload,
+// components via the shared `InstanceType<typeof Binding>["$props"]` inventory (local
+// binding OR GlobalComponents fallback const) — never `$event: any`, never the retired
+// `eventCallbacks` helper, never `import('vue').GlobalComponents[...]`.
+mod spread_event_typing_matrix {
+    use super::*;
+
+    /// The component event-handler payload tuple for `Binding` and JSX event prop `onX`.
+    fn component_params_tuple(binding: &str, on_event: &str) -> String {
+        format!(
+            r#"Parameters<NonNullable<Required<InstanceType<typeof {binding}>["$props"]>["{on_event}"]>>"#
+        )
+    }
+
+    fn native_payload(event: &str) -> String {
+        format!(
+            r#"(GlobalEventHandlersEventMap & {{ [___VERTER___EventKey: string]: Event }})["{event}"]"#
+        )
+    }
+
+    fn assert_no_untyped_leaks(result: &str) {
+        assert!(
+            !result.contains("$event: any"),
+            "spread $event must be precisely typed, never `$event: any`: {result}"
+        );
+        assert!(
+            !result.contains("___VERTER___eventCallbacks"),
+            "retired generic eventCallbacks helper must be absent: {result}"
+        );
+    }
+
+    // ── Native element ────────────────────────────────────────────────────
+
+    #[test]
+    fn duplicate_native_dollar_event_ambient_payload() {
+        let result = gen_tsx_template_with_bindings(
+            r#"<template><div @click="handle($event.clientY)" @click="handle($event.screenX)" /></template>"#,
+            &[("handle", BindingType::SetupConst)],
+        );
+        // The SECOND @click routes through the spread path (duplicate key).
+        assert!(
+            result.contains(&format!(
+                r#""onClick": ($event: {}) =>"#,
+                native_payload("click")
+            )),
+            "duplicate native $event must be typed via the ambient DOM payload: {result}"
+        );
+        assert!(
+            !result.contains("IntrinsicElementAttributes"),
+            "native spread must not use the import('vue') formula: {result}"
+        );
+        assert_no_untyped_leaks(&result);
+    }
+
+    #[test]
+    fn duplicate_native_arrow_satisfies_ambient_payload() {
+        let result = gen_tsx_template_with_bindings(
+            r#"<template><div @click="(e) => handle(e)" @click="(e) => other(e)" /></template>"#,
+            &[
+                ("handle", BindingType::SetupConst),
+                ("other", BindingType::SetupConst),
+            ],
+        );
+        assert!(
+            result.contains(&format!(
+                r#""onClick": ((e) => other(e)) satisfies (...___VERTER___eventArgs: [{}]) => unknown"#,
+                native_payload("click")
+            )),
+            "duplicate native arrow must be satisfies-wrapped against the ambient payload tuple: {result}"
+        );
+        assert!(
+            !result.contains("IntrinsicElementAttributes"),
+            "native spread arrow must not use the import('vue') formula: {result}"
+        );
+        assert_no_untyped_leaks(&result);
+    }
+
+    // ── Local (script-bound) component ────────────────────────────────────
+
+    #[test]
+    fn hyphenated_local_component_dollar_event_instance_type() {
+        let result = gen_tsx_template_with_bindings(
+            r#"<template><LocalComp @my-event="handle($event)" /></template>"#,
+            &[
+                ("LocalComp", BindingType::SetupConst),
+                ("handle", BindingType::SetupConst),
+            ],
+        );
+        assert!(
+            result.contains(&format!(
+                r#""onMy-event": ($event: {}[0]) =>"#,
+                component_params_tuple("LocalComp", "onMy-event")
+            )),
+            "hyphenated local-component $event must be typed via InstanceType<typeof LocalComp>: {result}"
+        );
+        assert!(
+            !result.contains("GlobalComponents"),
+            "local component must not use the GlobalComponents indexed type: {result}"
+        );
+        assert_no_untyped_leaks(&result);
+    }
+
+    #[test]
+    fn duplicate_local_component_dollar_event_instance_type() {
+        let result = gen_tsx_template_with_bindings(
+            r#"<template><LocalComp @click="handle($event)" @click="other($event)" /></template>"#,
+            &[
+                ("LocalComp", BindingType::SetupConst),
+                ("handle", BindingType::SetupConst),
+                ("other", BindingType::SetupConst),
+            ],
+        );
+        assert!(
+            result.contains(&format!(
+                r#""onClick": ($event: {}[0]) =>"#,
+                component_params_tuple("LocalComp", "onClick")
+            )),
+            "duplicate local-component $event must be typed via InstanceType<typeof LocalComp>: {result}"
+        );
+        assert_no_untyped_leaks(&result);
+    }
+
+    #[test]
+    fn hyphenated_local_component_arrow_satisfies_instance_type() {
+        let result = gen_tsx_template_with_bindings(
+            r#"<template><LocalComp @my-event="(e) => handle(e)" /></template>"#,
+            &[
+                ("LocalComp", BindingType::SetupConst),
+                ("handle", BindingType::SetupConst),
+            ],
+        );
+        assert!(
+            result.contains(&format!(
+                r#""onMy-event": ((e) => handle(e)) satisfies (...___VERTER___eventArgs: {}) => unknown"#,
+                component_params_tuple("LocalComp", "onMy-event")
+            )),
+            "hyphenated local-component arrow must satisfies-wrap the InstanceType<typeof LocalComp> tuple: {result}"
+        );
+        assert_no_untyped_leaks(&result);
+    }
+
+    #[test]
+    fn duplicate_local_component_arrow_satisfies_instance_type() {
+        let result = gen_tsx_template_with_bindings(
+            r#"<template><LocalComp @click="(e) => handle(e)" @click="(e) => other(e)" /></template>"#,
+            &[
+                ("LocalComp", BindingType::SetupConst),
+                ("handle", BindingType::SetupConst),
+                ("other", BindingType::SetupConst),
+            ],
+        );
+        assert!(
+            result.contains(&format!(
+                r#""onClick": ((e) => other(e)) satisfies (...___VERTER___eventArgs: {}) => unknown"#,
+                component_params_tuple("LocalComp", "onClick")
+            )),
+            "duplicate local-component arrow must satisfies-wrap the InstanceType<typeof LocalComp> tuple: {result}"
+        );
+        assert_no_untyped_leaks(&result);
+    }
+
+    // ── Global (GlobalComponents fallback) component ──────────────────────
+
+    #[test]
+    fn hyphenated_global_component_dollar_event_fallback_const() {
+        let result = gen_tsx_template_with_components(
+            r#"<template><GlobalComp @my-event="handle($event)" /></template>"#,
+            &[("handle", BindingType::SetupConst)],
+            &["GlobalComp"],
+        );
+        assert!(
+            result.contains(&format!(
+                r#""onMy-event": ($event: {}[0]) =>"#,
+                component_params_tuple("GlobalComp", "onMy-event")
+            )),
+            "hyphenated global-component $event must resolve via the fallback const InstanceType<typeof GlobalComp>: {result}"
+        );
+        // Never the direct GlobalComponents indexed type (tsgo cannot resolve it).
+        assert!(
+            !result.contains("GlobalComponents"),
+            "global component $event must NOT use import('vue').GlobalComponents[...]: {result}"
+        );
+        assert_no_untyped_leaks(&result);
+    }
+
+    #[test]
+    fn duplicate_global_component_dollar_event_fallback_const() {
+        let result = gen_tsx_template_with_components(
+            r#"<template><GlobalComp @click="handle($event)" @click="other($event)" /></template>"#,
+            &[
+                ("handle", BindingType::SetupConst),
+                ("other", BindingType::SetupConst),
+            ],
+            &["GlobalComp"],
+        );
+        assert!(
+            result.contains(&format!(
+                r#""onClick": ($event: {}[0]) =>"#,
+                component_params_tuple("GlobalComp", "onClick")
+            )),
+            "duplicate global-component $event must resolve via the fallback const InstanceType<typeof GlobalComp>: {result}"
+        );
+        assert!(
+            !result.contains("GlobalComponents"),
+            "global component $event must NOT use import('vue').GlobalComponents[...]: {result}"
+        );
+        assert_no_untyped_leaks(&result);
+    }
+
+    #[test]
+    fn hyphenated_global_component_arrow_satisfies_fallback_const() {
+        let result = gen_tsx_template_with_components(
+            r#"<template><GlobalComp @my-event="(e) => handle(e)" /></template>"#,
+            &[("handle", BindingType::SetupConst)],
+            &["GlobalComp"],
+        );
+        assert!(
+            result.contains(&format!(
+                r#""onMy-event": ((e) => handle(e)) satisfies (...___VERTER___eventArgs: {}) => unknown"#,
+                component_params_tuple("GlobalComp", "onMy-event")
+            )),
+            "hyphenated global-component arrow must satisfies-wrap the fallback-const InstanceType<typeof GlobalComp> tuple: {result}"
+        );
+        assert!(
+            !result.contains("GlobalComponents"),
+            "global component arrow must NOT use import('vue').GlobalComponents[...]: {result}"
+        );
+        assert_no_untyped_leaks(&result);
+    }
+
+    #[test]
+    fn duplicate_global_component_arrow_satisfies_fallback_const() {
+        let result = gen_tsx_template_with_components(
+            r#"<template><GlobalComp @click="(e) => handle(e)" @click="(e) => other(e)" /></template>"#,
+            &[
+                ("handle", BindingType::SetupConst),
+                ("other", BindingType::SetupConst),
+            ],
+            &["GlobalComp"],
+        );
+        assert!(
+            result.contains(&format!(
+                r#""onClick": ((e) => other(e)) satisfies (...___VERTER___eventArgs: {}) => unknown"#,
+                component_params_tuple("GlobalComp", "onClick")
+            )),
+            "duplicate global-component arrow must satisfies-wrap the fallback-const InstanceType<typeof GlobalComp> tuple: {result}"
+        );
+        assert!(
+            !result.contains("GlobalComponents"),
+            "global component arrow must NOT use import('vue').GlobalComponents[...]: {result}"
+        );
+        assert_no_untyped_leaks(&result);
+    }
+
+    // ── Unresolved component: explicit `any`, never implicit ──
+
+    #[test]
+    fn unresolved_component_dollar_event_explicit_any_not_implicit() {
+        // A component with no local binding and no fallback const (not in the inventory).
+        let result = gen_tsx_template_with_bindings(
+            r#"<template><UnknownComp @click="handle($event)" @click="other($event)" /></template>"#,
+            &[
+                ("handle", BindingType::SetupConst),
+                ("other", BindingType::SetupConst),
+            ],
+        );
+        // Explicit `$event: any` (never a bare implicit-any parameter).
+        assert!(
+            result.contains(r#""onClick": ($event: any) =>"#),
+            "unresolved component $event must be EXPLICIT any, never implicit: {result}"
+        );
+    }
 }

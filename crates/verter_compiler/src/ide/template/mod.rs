@@ -45,7 +45,7 @@ use crate::template::oxc::types::{
 };
 use crate::types::NodeId;
 
-use super::IdeTemplateOptions;
+use super::{IdeTemplateOptions, TemplateComponentBindings};
 
 /// How this element is being emitted relative to a v-if chain.
 ///
@@ -122,6 +122,9 @@ struct IdeTemplateCtx<'a, 'alloc> {
     alloc: &'alloc Allocator,
     resolver: &'a BindingResolver<'alloc>,
     options: &'a IdeTemplateOptions<'a>,
+    /// Inventory of GlobalComponents fallback consts in scope in the templateBindingFN,
+    /// so a global component's `@event` spread payload resolves through its emitted const.
+    components: &'a TemplateComponentBindings,
     /// TS directive comments to inject inside `<component :is>` IIFE (before `return`).
     ts_directives_for_component_is: Vec<String>,
     /// Collected strict slot entries for `strictRenderSlot` emission.
@@ -134,6 +137,7 @@ struct IdeTemplateCtx<'a, 'alloc> {
 ///
 /// Walks the AST and produces JSX output by overwriting Vue-specific syntax
 /// with JSX equivalents. Uses `CodeGenOutput` for deferred batch operations.
+#[allow(clippy::too_many_arguments)]
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub fn generate_ide_template<'alloc>(
     ast: &crate::ast::types::TemplateAst,
@@ -143,6 +147,7 @@ pub fn generate_ide_template<'alloc>(
     alloc: &'alloc Allocator,
     bindings: &FxHashMap<&'alloc str, BindingType>,
     options: &IdeTemplateOptions<'_>,
+    components: &TemplateComponentBindings,
 ) {
     let mut resolver = BindingResolver::new(bindings.clone(), true);
     resolver.set_tsx(true);
@@ -185,6 +190,7 @@ pub fn generate_ide_template<'alloc>(
         alloc,
         resolver: &resolver,
         options,
+        components,
         ts_directives_for_component_is: Vec::new(),
         strict_slot_entries: Vec::new(),
         required_slot_checks: Vec::new(),
@@ -552,6 +558,7 @@ fn walk_element<'a, 'alloc>(
         ctx.out,
         ctx.alloc,
         ctx.resolver,
+        ctx.components,
         guard_text.as_deref(),
         ctx.options.is_jsx,
     );

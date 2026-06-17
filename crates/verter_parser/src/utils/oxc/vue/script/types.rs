@@ -262,8 +262,8 @@ pub enum ScriptErrorKind {
 
 // Re-export macro types from macros module
 pub use super::macros::{
-    MacroArrayArg, MacroDeclarator, MacroObjectArg, MacroProperty, MacroTypeParams, ScriptMacro,
-    VueMacroKind,
+    MacroArrayArg, MacroArrayElement, MacroDeclarator, MacroObjectArg, MacroProperty,
+    MacroTypeParams, ScriptMacro, VueMacroKind,
 };
 
 // =============================================================================

@@ -31,12 +31,12 @@ use std::time::Instant;
 use web_time::Instant;
 
 use oxc_allocator::Allocator;
-use oxc_parser::Parser;
 use oxc_span::SourceType;
 use rustc_hash::FxHashSet;
 
 use crate::ast::types::{AstNodeKind, TagType};
 use crate::code_transform::{CodeTransform, SourceMapOptions};
+use crate::common::Span;
 use crate::css::{process_style, types::ProcessStyleOptions};
 use crate::diagnostics::{
     CompilerErrorCode, Diagnostic, DiagnosticSeverity, SyntaxPluginContext, SyntaxPluginOptions,
@@ -44,6 +44,7 @@ use crate::diagnostics::{
 use crate::ide;
 use crate::parser::types::{ParsedSfc, StyleLang};
 use crate::parser::Syntax;
+use crate::script::prepared::PreparedScript;
 use crate::script::{generate_script, ScriptCodeGenOptions};
 use crate::style::generate_style;
 use crate::template::code_gen::vdom::element::to_pascal_case;
@@ -51,12 +52,8 @@ use crate::template::code_gen::{generate_template, CodeGenMode, TemplateCodeGenO
 use crate::template::oxc::types::OxcParsedAst;
 use crate::tokenizer::byte::{tokenize_sfc, tokenize_sfc_with_delimiters};
 use crate::tsc;
-use crate::utils::oxc::script::type_surface::{
-    extract_companion_types, ResolvedElements, RuntimeType,
-};
-use crate::utils::oxc::vue::{
-    parse_script_with_companion, MacroTypeParams, ScriptItem, ScriptMacro, ScriptMode,
-};
+use crate::utils::oxc::script::type_surface::RuntimeType;
+use crate::utils::oxc::vue::{MacroTypeParams, ScriptItem, ScriptMacro};
 
 use helpers::{extract_attrs, extract_block_ranges};
 
@@ -148,10 +145,19 @@ fn push_invalid_macro_type_diagnostic(
     diagnostics: &mut Vec<Diagnostic>,
     message: String,
     type_params: &MacroTypeParams,
+    content_start: u32,
 ) {
+    // The prepared setup parse runs at the SFC content offset, so `type_span` is
+    // SFC-absolute. The public XInvalidMacroType diagnostic span is content-local
+    // (relative to the setup block content): localize it back here so the surfaced
+    // span is identical regardless of where the block sits in the SFC.
+    let local_span = Span::new(
+        type_params.type_span.start - content_start,
+        type_params.type_span.end - content_start,
+    );
     diagnostics.push(
         Diagnostic::error_with_message("script", CompilerErrorCode::XInvalidMacroType, message)
-            .with_span(type_params.type_span),
+            .with_span(local_span),
     );
 }
 
@@ -160,6 +166,7 @@ fn validate_imported_macro_type(
     type_params: &MacroTypeParams,
     type_text: &str,
     imported_type_names: &FxHashSet<&str>,
+    content_start: u32,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     if !is_simple_type_reference(type_text) || !imported_type_names.contains(type_text) {
@@ -174,6 +181,7 @@ fn validate_imported_macro_type(
                 macro_name, type_text
             ),
             type_params,
+            content_start,
         );
         return;
     }
@@ -188,6 +196,7 @@ fn validate_imported_macro_type(
                         type_text
                     ),
                     type_params,
+                    content_start,
                 );
             }
         }
@@ -199,6 +208,7 @@ fn validate_imported_macro_type(
                     type_text
                 ),
                 type_params,
+                content_start,
             );
         }
         _ => {}
@@ -295,59 +305,33 @@ fn push_expression_errors(
     }
 }
 
-fn collect_invalid_macro_type_diagnostics(
-    input: &str,
-    parsed: &ParsedSfc,
-    external_types: Option<&rustc_hash::FxHashMap<String, ResolvedElements>>,
-) -> Vec<Diagnostic> {
-    let Some(script_setup) = parsed.script_setup() else {
+/// Read a macro type argument's source text from the setup content slice.
+///
+/// [`MacroTypeParams::type_span`] is SFC-absolute (the prepared setup parse runs
+/// at the setup content offset), so it is localized against `content_str` here.
+fn macro_type_argument_text<'a>(
+    content_str: &'a str,
+    content_start: u32,
+    type_params: &MacroTypeParams,
+) -> &'a str {
+    let start = (type_params.type_span.start - content_start) as usize;
+    let end = (type_params.type_span.end - content_start) as usize;
+    content_str[start..end].trim()
+}
+
+fn collect_invalid_macro_type_diagnostics(prepared: &PreparedScript) -> Vec<Diagnostic> {
+    let Some(setup) = prepared.setup() else {
         return Vec::new();
     };
-    let Some(content_span) = script_setup.content else {
-        return Vec::new();
-    };
 
-    let content_str = &input[content_span.start as usize..content_span.end as usize];
-    let companion_types = if let Some(script) = parsed.script() {
-        if let Some(script_content) = script.content {
-            let script_source = &input[script_content.start as usize..script_content.end as usize];
-            let alloc = Allocator::default();
-            let parse_result = Parser::new(&alloc, script_source, SourceType::ts()).parse();
-            Some(extract_companion_types(
-                &parse_result.program,
-                script_source.as_bytes(),
-                script_content.start,
-            ))
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    let companion_types = match (companion_types, external_types) {
-        (Some(mut companion), Some(external)) => {
-            for (key, value) in external {
-                companion
-                    .entry(key.clone())
-                    .or_insert_with(|| value.clone());
-            }
-            Some(companion)
-        }
-        (Some(companion), None) => Some(companion),
-        (None, Some(external)) => Some(external.clone()),
-        (None, None) => None,
-    };
-
-    let alloc = Allocator::default();
-    let parse_result = Parser::new(&alloc, content_str, SourceType::ts()).parse();
-    let parsed_script = parse_script_with_companion(
-        &parse_result.program,
-        ScriptMode::Setup,
-        0,
-        content_str,
-        companion_types,
-    );
+    // The setup block was parsed once (companion + external types already folded
+    // in) when the prepared script was built — read the macro surfaces from that
+    // single parse instead of re-parsing and re-resolving here. Macro type-span
+    // coordinates are SFC-absolute (the prepared parse runs at the setup content
+    // offset), so they are localized against the content slice when read.
+    let content_str = setup.content_str();
+    let content_start = setup.content_start();
+    let parsed_script = setup.parse_result();
     let imported_type_names = collect_imported_type_names(&parsed_script.items);
     let mut diagnostics = Vec::new();
 
@@ -361,14 +345,13 @@ fn collect_invalid_macro_type_diagnostics(
                 type_params: Some(type_params),
                 ..
             } => {
-                let type_text = content_str
-                    [type_params.type_span.start as usize..type_params.type_span.end as usize]
-                    .trim();
+                let type_text = macro_type_argument_text(content_str, content_start, type_params);
                 validate_imported_macro_type(
                     "defineProps",
                     type_params,
                     type_text,
                     &imported_type_names,
+                    content_start,
                     &mut diagnostics,
                 );
             }
@@ -378,9 +361,7 @@ fn collect_invalid_macro_type_diagnostics(
                 defaults_arg_span,
                 ..
             } => {
-                let type_text = content_str
-                    [type_params.type_span.start as usize..type_params.type_span.end as usize]
-                    .trim();
+                let type_text = macro_type_argument_text(content_str, content_start, type_params);
                 let has_defaults_fallback = defaults.is_some() || defaults_arg_span.is_some();
                 let skip_unresolved_import_error = has_defaults_fallback
                     && type_params.unresolved_type_ref
@@ -394,6 +375,7 @@ fn collect_invalid_macro_type_diagnostics(
                     type_params,
                     type_text,
                     &imported_type_names,
+                    content_start,
                     &mut diagnostics,
                 );
             }
@@ -401,14 +383,13 @@ fn collect_invalid_macro_type_diagnostics(
                 type_params: Some(type_params),
                 ..
             } => {
-                let type_text = content_str
-                    [type_params.type_span.start as usize..type_params.type_span.end as usize]
-                    .trim();
+                let type_text = macro_type_argument_text(content_str, content_start, type_params);
                 validate_imported_macro_type(
                     "defineEmits",
                     type_params,
                     type_text,
                     &imported_type_names,
+                    content_start,
                     &mut diagnostics,
                 );
             }
@@ -499,14 +480,22 @@ fn compile_inner(
     };
     let options = &*options;
 
+    // Prepare the setup + companion script blocks once. This single parse backs
+    // the invalid-macro-type diagnostics (below, on every target), the script
+    // codegen macro surfaces and bindings, and the force-js type-stripping
+    // inputs — replacing the per-consumer re-parses that ran here before.
+    let prepared_script = PreparedScript::build(
+        input,
+        parsed.script(),
+        parsed.script_setup(),
+        allocator,
+        verter_options.external_types.as_ref(),
+    );
+
     // Clone diagnostics — this is the only clone needed from ParsedSfc.
     let mut all_diagnostics = parsed.clone_diagnostics();
     let has_parse_errors = parsed.has_errors();
-    all_diagnostics.extend(collect_invalid_macro_type_diagnostics(
-        input,
-        parsed,
-        verter_options.external_types.as_ref(),
-    ));
+    all_diagnostics.extend(collect_invalid_macro_type_diagnostics(&prepared_script));
 
     // ── 2. Extract metadata ───────────────────────────────────────
     let component_name = options
@@ -743,13 +732,13 @@ fn compile_inner(
             ssr: verter_options.ssr,
             has_scoped_style,
             css_v_binds: &all_v_bind_vars,
-            external_types: verter_options.external_types.clone(),
             template_used_vars,
         };
 
         let script_result = generate_script(
             parsed.script(),
             parsed.script_setup(),
+            &prepared_script,
             input,
             &mut ct,
             allocator,
@@ -809,38 +798,25 @@ fn compile_inner(
         // Remove inter-block gaps
         remove_inter_block_gaps(&mut ct, input.len() as u32, &block_ranges);
 
-        // Strip remaining TypeScript syntax if requested
+        // Strip remaining TypeScript syntax if requested. Both blocks were
+        // already parsed once into the compile allocator; strip from those
+        // programs instead of re-parsing here.
         if verter_options.force_js {
-            // Parse the script content with OXC and strip type annotations
-            if let Some(script_setup) = parsed.script_setup() {
-                if let Some(content) = &script_setup.content {
-                    let script_source = &input[content.start as usize..content.end as usize];
-                    let strip_alloc = Allocator::new();
-                    let source_type = SourceType::tsx();
-                    let parser = oxc_parser::Parser::new(&strip_alloc, script_source, source_type);
-                    let parse_result = parser.parse();
-                    crate::strip_types::typescript::strip_typescript_types(
-                        &parse_result.program,
-                        &mut ct,
-                        content.start,
-                        script_source,
-                    );
-                }
+            if let Some(setup) = prepared_script.setup() {
+                crate::strip_types::typescript::strip_typescript_types(
+                    setup.program(),
+                    &mut ct,
+                    setup.content_start(),
+                    setup.content_str(),
+                );
             }
-            if let Some(script) = parsed.script() {
-                if let Some(content) = &script.content {
-                    let script_source = &input[content.start as usize..content.end as usize];
-                    let strip_alloc = Allocator::new();
-                    let source_type = SourceType::tsx();
-                    let parser = oxc_parser::Parser::new(&strip_alloc, script_source, source_type);
-                    let parse_result = parser.parse();
-                    crate::strip_types::typescript::strip_typescript_types(
-                        &parse_result.program,
-                        &mut ct,
-                        content.start,
-                        script_source,
-                    );
-                }
+            if let Some(companion) = prepared_script.companion() {
+                crate::strip_types::typescript::strip_typescript_types(
+                    companion.program(),
+                    &mut ct,
+                    companion.content_start(),
+                    companion.content_str(),
+                );
             }
         }
 
@@ -1278,6 +1254,7 @@ fn compile_inner(
                         &tsx_alloc,
                         &tsx_script_result.bindings,
                         &tsx_t_opts,
+                        &tsx_script_result.template_component_bindings,
                     );
                     tsx_out.apply_to(&mut tsx_ct);
                 }
@@ -1342,7 +1319,10 @@ fn compile_inner(
                 file: options.filename.as_deref(),
                 include_content: true,
             };
-            tsx_ct.generate_map(sm_opts).to_json_string()
+            // Carry the typed helper-import-preamble end boundary on the IDE source map so the LSP
+            // auto-import classifier can re-anchor preamble insertions and reject trailing-synthetic
+            // edits even when the file has no mapped runs (an empty `<script setup>`).
+            tsx_ct.generate_map_json_with_preamble(sm_opts)
         } else {
             String::new()
         };
@@ -1460,3 +1440,6 @@ mod tests;
 #[cfg(test)]
 #[path = "../compile_template_error_tests.rs"]
 mod compile_template_error_tests;
+
+#[cfg(test)]
+mod script_preparation_tests;

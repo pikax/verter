@@ -13,9 +13,10 @@
 //! handler values via the in-place sink — so each identifier maps 1:1 back to its
 //! source span. The JSX event NAME (`onClick`, `onMy-event`) is a navigable semantic
 //! anchor MAPPED to the source event token. Object braces, computed-key template
-//! literals, the `($event) =>` / `eventCallbacks` handler-wrapper scaffolding, and
-//! the v-if narrowing guard are unmapped synthetic text. Extracted from `props.rs`
-//! to keep both files within the production line-count budget.
+//! literals, the `($event) => { … }` handler-wrapper scaffolding (with an explicit
+//! event-payload annotation on the spread path, where JSX contextual typing cannot
+//! flow), and the v-if narrowing guard are unmapped synthetic text. Extracted from
+//! `props.rs` to keep both files within the production line-count budget.
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::Expression;
@@ -23,15 +24,19 @@ use oxc_ast::ast::Expression;
 use verter_span::{GeneratedByteLen, SourceByteOffset, SourceByteRange};
 
 use super::props::get_prop_end;
-use crate::ide::event_to_jsx_name;
+use crate::ast::types::{ElementNode, TagType};
 use crate::ide::template::emit::{
     emit_expr_plan, emit_op, emit_relocated_value, plan_object_literal, plan_user_expr, trim_span,
     EmitOp, EmitText, ExprOptions, KeyRewritePolicy, Placement,
 };
+use crate::ide::{
+    event_handler_params_type, event_to_jsx_name, native_dom_event_payload_type,
+    TemplateComponentBindings,
+};
 use crate::template::code_gen::binding::BindingResolver;
 use crate::template::code_gen::types::CodeGenOutput;
 use crate::template::code_gen::vapor::interpolation::build_prefixed_expr;
-use crate::template::oxc::types::OxcParsedProp;
+use crate::template::oxc::types::{OxcParsedExpression, OxcParsedProp};
 use crate::types::NodeProp;
 
 /// Process `v-on` / `@` directive.
@@ -42,11 +47,13 @@ use crate::types::NodeProp;
 #[allow(clippy::too_many_arguments)]
 pub(super) fn process_v_on<'alloc>(
     prop: &NodeProp,
+    el: &ElementNode,
     oxc_prop: Option<&OxcParsedProp<'alloc>>,
     source: &'alloc str,
     out: &mut CodeGenOutput<'alloc>,
     _alloc: &'alloc Allocator,
     resolver: &BindingResolver<'alloc>,
+    components: &TemplateComponentBindings,
     v_if_guard: Option<&str>,
     use_spread: bool,
 ) {
@@ -232,10 +239,13 @@ pub(super) fn process_v_on<'alloc>(
             let is_simple_ident =
                 crate::template::code_gen::binding::is_simple_ident(resolved_expr);
             let is_member_expr = resolved_expr.contains('.') && !resolved_expr.contains('(');
-            let is_fn_expr = resolved_expr.starts_with("(")
-                || resolved_expr.starts_with("function")
-                || resolved_expr.contains("=>");
-            let has_event_param = resolved_expr.contains("$event");
+            // Arrow / function-expression handlers are classified from the OXC expression
+            // KIND, never a `starts_with("(")` / `contains("=>")` text probe — a string
+            // literal or member expression that happens to contain `=>` can never be
+            // misread as a function handler.
+            let is_fn_or_arrow = is_fn_or_arrow_expr(oxc_prop.and_then(|p| p.exp.as_ref()));
+            let has_event_param =
+                references_event_param(value_expr, oxc_prop.and_then(|p| p.exp.as_ref()));
 
             let (tvs, tve) = trim_span(source, vs, ve);
             let value_range = SourceByteRange::new(SourceByteOffset(tvs), SourceByteOffset(tve));
@@ -287,21 +297,60 @@ pub(super) fn process_v_on<'alloc>(
                 unmapped(out, "\"".to_string());
             };
 
-            if is_simple_ident || is_member_expr || is_fn_expr {
-                // Simple ident, member expression, or fn/arrow expression → pass raw.
+            if is_fn_or_arrow {
+                // Arrow / function-expression handler on a spread key (duplicate or
+                // hyphenated event). JSX contextual typing does NOT flow through a spread
+                // attribute, so the function's parameters would be implicit-`any`. Wrap the
+                // (still source-mapped) user function in a `satisfies` clause whose target
+                // is the element's event-handler signature — TypeScript then contextually
+                // types the parameters against the real payload tuple while the user code
+                // stays navigable. The `satisfies` wrapper and rest tuple are synthetic,
+                // unmapped scaffolding.
+                let types = spread_event_types(
+                    el,
+                    source,
+                    event_name,
+                    &jsx_event_name,
+                    components,
+                    resolver,
+                );
+                event_key(out);
+                unmapped(out, ": (".to_string());
+                value(out);
+                unmapped(
+                    out,
+                    format!(
+                        ") satisfies (...___VERTER___eventArgs: {}) => unknown}}}}",
+                        types.params_tuple
+                    ),
+                );
+            } else if is_simple_ident || is_member_expr {
+                // Simple handler reference (`handler` / `obj.method`) → pass raw. Its own
+                // declaration carries the parameter types (script-side event-handler param
+                // inference annotates a local function declaration); the spread does not
+                // re-annotate it.
                 event_key(out);
                 unmapped(out, ": ".to_string());
                 value(out);
                 unmapped(out, "}}".to_string());
             } else if has_event_param {
-                // Inline expression with $event → wrap with eventCallbacks for type inference.
-                event_key(out);
-                unmapped(
-                    out,
-                    ": (...___VERTER___eventArgs) => ___VERTER___eventCallbacks(___VERTER___eventArgs, ($event) => {".to_string(),
+                // Inline expression with `$event` on a spread key. Name the sole callback
+                // parameter `$event` and annotate it explicitly with the payload type (JSX
+                // contextual typing cannot reach it through the spread). This replaces the
+                // former `eventCallbacks<TArgs extends Array<any>>` helper, which forced
+                // `$event` to `any`.
+                let types = spread_event_types(
+                    el,
+                    source,
+                    event_name,
+                    &jsx_event_name,
+                    components,
+                    resolver,
                 );
+                event_key(out);
+                unmapped(out, format!(": ($event: {}) => {{", types.payload));
                 value(out);
-                unmapped(out, "})}}".to_string());
+                unmapped(out, "}}}".to_string());
             } else {
                 // Inline expression without $event → wrap with () => { ... }.
                 event_key(out);
@@ -332,7 +381,8 @@ pub(super) fn process_v_on<'alloc>(
             || resolved_expr.starts_with("function")
             || resolved_expr.contains("=>");
         let is_object_expr = resolved_expr.starts_with('{') && resolved_expr.ends_with('}');
-        let has_event_param = resolved_expr.contains("$event");
+        let has_event_param =
+            references_event_param(value_expr, oxc_prop.and_then(|p| p.exp.as_ref()));
 
         // Build prop end position (including modifiers and quotes)
         let prop_end = get_prop_end(prop);
@@ -367,7 +417,7 @@ pub(super) fn process_v_on<'alloc>(
         //
         // `scaffold_after_event` is the synthetic text emitted AFTER the mapped event
         // name and BEFORE the (optional) guard + body: `={`, `={() => {`, or the
-        // `eventCallbacks` wrapper. `guard_text` (when present) is the narrowing guard
+        // `={($event) => {` wrapper. `guard_text` (when present) is the narrowing guard
         // injected at the body start — a COMPOSED, span-erased compiler-synthesized
         // scaffold (see `emit_in_place_handler` docs) → UNMAPPED. Guards apply only to
         // the two wrapping branches ($event / inline expression); a function/object/
@@ -378,11 +428,16 @@ pub(super) fn process_v_on<'alloc>(
                 // Explicit function/object expressions are already valid handlers.
                 ("={".to_string(), "}", None)
             } else if has_event_param {
-                // $event can only exist inside a callback parameter scope. Wrap with
-                // eventCallbacks for proper type inference.
+                // `$event` can only exist inside a callback parameter scope. Name the
+                // handler's sole parameter `$event` so it is contextually typed by the
+                // JSX event prop (`onClick`, `onCustom`, …) — the exact mechanism that
+                // types an inline arrow's parameter. This needs no synthetic event-type
+                // formula and no generic `eventCallbacks` indirection (which left
+                // `$event` as `any` because contextual typing does not flow through a
+                // synthetic rest parameter into a generic helper call).
                 (
-                    "={(...___VERTER___eventArgs) => ___VERTER___eventCallbacks(___VERTER___eventArgs, ($event) => {".to_string(),
-                    "})}",
+                    "={($event) => {".to_string(),
+                    "}}",
                     v_if_guard.map(|guard| format!("if (!({})) {{ return undefined; }} ", guard)),
                 )
             } else if is_simple_ident || is_member_expr {
@@ -429,7 +484,7 @@ pub(super) fn process_v_on<'alloc>(
 ///   go-to-definition on a component's `@custom` resolves the child's `onCustom`
 ///   payload (and the LSP rewrites `onCustom` back to `@custom`). This matches the
 ///   v-on spread branch, which maps the event-name key via `InsertMapped@arg_start`.
-/// - `scaffold_after_event` (`={`, `={() => {`, the `eventCallbacks` wrapper) is
+/// - `scaffold_after_event` (`={`, `={() => {`, the `={($event) => {` wrapper) is
 ///   synthetic JSX scaffolding → UNMAPPED.
 /// - The optional `guard_text` is a v-if narrowing guard injected at the body start.
 ///   It is a COMPOSED, span-erased compiler-synthesized scaffold (own positive
@@ -533,4 +588,228 @@ fn emit_in_place_handler<'alloc>(
             anchor: None,
         },
     );
+}
+
+/// Whether the handler value is an arrow-function or function expression, classified
+/// from the OXC expression KIND — never a `starts_with("(")` / `contains("=>")` text
+/// probe. Drives the spread-path `satisfies` wrapping, where JSX contextual typing
+/// cannot reach the function's parameters.
+fn is_fn_or_arrow_expr(exp: Option<&OxcParsedExpression<'_>>) -> bool {
+    matches!(
+        exp.and_then(|e| e.expression.as_ref()),
+        Some(Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_))
+    )
+}
+
+/// The payload + parameter-tuple types for a spread-path event handler.
+///
+/// A spread object literal (`{...{"onClick": …}}`) gives the handler NO JSX contextual
+/// typing, so `$event` and arrow/function parameters must be annotated explicitly. Both
+/// annotations derive from one shared lookup so they never disagree.
+struct SpreadEventTypes {
+    /// Type of the first handler argument (`$event`): the ambient DOM payload for a
+    /// native element, or `params_tuple[0]` for a component.
+    payload: String,
+    /// The full handler parameter tuple, used as the
+    /// `satisfies (...___VERTER___eventArgs: TUPLE) => unknown` target for arrow/function
+    /// handlers.
+    params_tuple: String,
+}
+
+impl SpreadEventTypes {
+    /// Untyped fallback for a surface with no derivable type (a component with neither a
+    /// local binding nor a GlobalComponents fallback const — the unresolved-component case).
+    /// Explicit `any`, never an implicit-`any` bare parameter (which errors under
+    /// `noImplicitAny`) and never the retired `Array<any>` helper.
+    fn any() -> Self {
+        SpreadEventTypes {
+            payload: "any".to_string(),
+            params_tuple: "[any]".to_string(),
+        }
+    }
+}
+
+/// Resolve the spread-path event types for an element, by tag kind. The two surfaces
+/// have different TypeProvider-resolvability:
+///
+/// - NATIVE element → the ambient DOM event map via [`native_dom_event_payload_type`].
+///   The `import('vue').IntrinsicElementAttributes` formula resolves only under a full
+///   `tsserver`; the native preview (`tsgo`) cannot resolve `import('vue')` type queries
+///   from the generated virtual `.vue.tsx`. The ambient-DOM type resolves everywhere.
+/// - COMPONENT → the emit/prop surface via the shared [`event_handler_params_type`]
+///   formula (`Parameters<NonNullable<Required<InstanceType<typeof Binding>["$props"]>["onX"]>>`).
+///   The binding is resolved through the shared [`TemplateComponentBindings`] inventory —
+///   a local script binding OR a GlobalComponents fallback const — so a globally-registered
+///   component types identically to an imported one, NEVER through
+///   `import('vue').GlobalComponents[...]` (which `tsgo` cannot resolve).
+fn spread_event_types<'alloc>(
+    el: &ElementNode,
+    source: &'alloc str,
+    event_name: &str,
+    jsx_event_name: &str,
+    components: &TemplateComponentBindings,
+    resolver: &BindingResolver<'alloc>,
+) -> SpreadEventTypes {
+    match el.tag_type {
+        TagType::Element => {
+            let payload = native_dom_event_payload_type(event_name);
+            let params_tuple = format!("[{payload}]");
+            SpreadEventTypes {
+                payload,
+                params_tuple,
+            }
+        }
+        TagType::Component => {
+            let tag_name = &source[(el.tag_open.start + 1) as usize..el.tag_open.name_end as usize];
+            let binding = components.resolve(tag_name, el.tag_type, |n| resolver.get(n).is_some());
+            match binding.as_deref().and_then(|b| {
+                event_handler_params_type(tag_name, el.tag_type, Some(b), jsx_event_name)
+            }) {
+                Some(params_tuple) => {
+                    let payload = format!("{params_tuple}[0]");
+                    SpreadEventTypes {
+                        payload,
+                        params_tuple,
+                    }
+                }
+                None => SpreadEventTypes::any(),
+            }
+        }
+        _ => SpreadEventTypes::any(),
+    }
+}
+
+/// Whether a `v-on` handler value references the Vue `$event` built-in.
+///
+/// Typed-IR-first: when OXC parsed the handler into binding facts, `$event` use is
+/// an EXACT identifier match in `exp.bindings` (the binding visitor records every
+/// identifier, including the ignored `$event` built-in). This never matches `$event`
+/// inside a string literal, a comment, or a longer identifier like `my$eventBus` —
+/// unlike the former `resolved_expr.contains("$event")`.
+///
+/// For an INCOMPLETE handler that OXC could not lower into facts (e.g. `$event.`
+/// mid-completion), fall back to a token-level identifier scan that skips string and
+/// comment contents and matches only a whole `$event` identifier.
+fn references_event_param(value_expr: &str, exp: Option<&OxcParsedExpression<'_>>) -> bool {
+    if let Some(exp) = exp {
+        if let Some(bindings) = exp.bindings.as_ref() {
+            if bindings.bindings.iter().any(|b| b.name == "$event") {
+                return true;
+            }
+            // A complete, error-free parse that surfaced no `$event` binding is
+            // authoritative: `$event` is genuinely absent.
+            if exp.expression.is_some() && !bindings.has_errors {
+                return false;
+            }
+        }
+    }
+    // No usable facts (unparsed / incomplete / errored) — token-level scan.
+    scan_for_event_identifier(value_expr)
+}
+
+/// Token-level scan for a whole `$event` identifier, ignoring string-literal and
+/// comment contents. The incomplete-expression fallback for
+/// [`references_event_param`] — never the primary classifier.
+fn scan_for_event_identifier(src: &str) -> bool {
+    let bytes = src.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            // String literals — skip to the matching close quote.
+            quote @ (b'"' | b'\'' | b'`') => {
+                i += 1;
+                while i < bytes.len() {
+                    match bytes[i] {
+                        b'\\' => i += 2,
+                        b if b == quote => {
+                            i += 1;
+                            break;
+                        }
+                        _ => i += 1,
+                    }
+                }
+            }
+            // Line comment.
+            b'/' if bytes.get(i + 1) == Some(&b'/') => {
+                i += 2;
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            // Block comment.
+            b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                i += 2;
+                while i < bytes.len() && !(bytes[i] == b'*' && bytes.get(i + 1) == Some(&b'/')) {
+                    i += 1;
+                }
+                i += 2;
+            }
+            // Identifier (`$event` starts with `$`).
+            b if is_ident_start(b) => {
+                let start = i;
+                i += 1;
+                while i < bytes.len() && is_ident_continue(bytes[i]) {
+                    i += 1;
+                }
+                if &src[start..i] == "$event" {
+                    return true;
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    false
+}
+
+#[inline]
+fn is_ident_start(b: u8) -> bool {
+    b == b'$' || b == b'_' || b.is_ascii_alphabetic() || b >= 0x80
+}
+
+#[inline]
+fn is_ident_continue(b: u8) -> bool {
+    is_ident_start(b) || b.is_ascii_digit()
+}
+
+#[cfg(test)]
+mod event_param_detection_tests {
+    use super::scan_for_event_identifier;
+
+    #[test]
+    fn matches_real_event_identifier() {
+        assert!(scan_for_event_identifier("handle($event)"));
+        assert!(scan_for_event_identifier("$event"));
+        assert!(scan_for_event_identifier("$event.clientX"));
+        // Incomplete member access (the mid-completion case the scanner exists for).
+        assert!(scan_for_event_identifier("$event."));
+        assert!(scan_for_event_identifier("emit('x', $event)"));
+    }
+
+    #[test]
+    fn ignores_event_in_string_literal() {
+        // The old `.contains("$event")` wrongly matched all of these.
+        assert!(!scan_for_event_identifier("log('use $event here')"));
+        assert!(!scan_for_event_identifier("log(\"$event\")"));
+        assert!(!scan_for_event_identifier("t(`a $event b`)"));
+    }
+
+    #[test]
+    fn ignores_event_in_comment() {
+        assert!(!scan_for_event_identifier("doThing() // $event"));
+        assert!(!scan_for_event_identifier("doThing() /* $event */"));
+    }
+
+    #[test]
+    fn ignores_event_as_substring_of_longer_identifier() {
+        assert!(!scan_for_event_identifier("my$eventBus.emit()"));
+        assert!(!scan_for_event_identifier("handle$event"));
+        assert!(!scan_for_event_identifier("$eventually"));
+    }
+
+    #[test]
+    fn no_match_when_absent() {
+        assert!(!scan_for_event_identifier("count++"));
+        assert!(!scan_for_event_identifier("handleClick()"));
+        assert!(!scan_for_event_identifier("a.b.c"));
+    }
 }

@@ -11,8 +11,8 @@ use oxc_ast::ast::*;
 use oxc_span::GetSpan;
 
 use super::macros::{
-    detect_macro_kind, MacroArrayArg, MacroDeclarator, MacroObjectArg, MacroProperty,
-    MacroTypeParams, ScriptMacro, VueMacroKind,
+    detect_macro_kind, MacroArrayArg, MacroArrayElement, MacroDeclarator, MacroObjectArg,
+    MacroProperty, MacroTypeParams, ScriptMacro, VueMacroKind,
 };
 use super::shared::ScriptParseContext;
 use super::types::{
@@ -855,7 +855,7 @@ fn extract_type_params<'a>(
 fn extract_arg_spans<'a>(
     call: &CallExpression<'a>,
     ctx: &ScriptParseContext<'a>,
-) -> (Option<MacroObjectArg<'a>>, Option<MacroArrayArg>) {
+) -> (Option<MacroObjectArg<'a>>, Option<MacroArrayArg<'a>>) {
     let object_arg = extract_object_arg_from_call(call, 0, ctx);
     let array_arg = extract_array_arg_from_call(call, 0, ctx);
     (object_arg, array_arg)
@@ -902,14 +902,14 @@ fn extract_object_arg_from_call<'a>(
 }
 
 /// Extract an array argument from a call at a specific index
-fn extract_array_arg_from_call(
-    call: &CallExpression<'_>,
+fn extract_array_arg_from_call<'a>(
+    call: &CallExpression<'a>,
     index: usize,
-    ctx: &ScriptParseContext<'_>,
-) -> Option<MacroArrayArg> {
+    _ctx: &ScriptParseContext<'a>,
+) -> Option<MacroArrayArg<'a>> {
     call.arguments.get(index).and_then(|arg| {
         if let Some(Expression::ArrayExpression(arr)) = arg.as_expression() {
-            Some(extract_array_arg(arr, ctx))
+            Some(extract_array_arg(arr))
         } else {
             None
         }
@@ -1082,21 +1082,48 @@ fn extract_object_arg<'a>(
     }
 }
 
-/// Extract array argument details
-fn extract_array_arg(arr: &ArrayExpression<'_>, ctx: &ScriptParseContext<'_>) -> MacroArrayArg {
-    let element_spans = arr
+/// Extract array argument details.
+///
+/// Each element carries its full expression span (for source mapping) and the
+/// resolved string-literal name read from the AST. Prop / event names come from
+/// the literal value, never from slicing the element span — so a TS-wrapped
+/// element like `'foo' as const` still names the prop `foo`.
+fn extract_array_arg<'a>(arr: &ArrayExpression<'a>) -> MacroArrayArg<'a> {
+    let elements = arr
         .elements
         .iter()
         .filter_map(|elem| match elem {
-            ArrayExpressionElement::SpreadElement(s) => Some(Span::from(s.span)),
+            ArrayExpressionElement::SpreadElement(s) => Some(MacroArrayElement {
+                span: Span::from(s.span),
+                name: None,
+            }),
             ArrayExpressionElement::Elision(_) => None,
-            _ => elem.as_expression().map(|e| Span::from(e.span())),
+            _ => elem.as_expression().map(|e| MacroArrayElement {
+                span: Span::from(e.span()),
+                name: array_element_literal_name(e),
+            }),
         })
         .collect();
 
     MacroArrayArg {
         span: Span::from(arr.span),
-        element_spans,
+        elements,
+    }
+}
+
+/// Resolve a `defineProps` / `defineEmits` array element to its string-literal
+/// name, transparently unwrapping a TS `as` / `satisfies` / non-null wrapper
+/// around the literal (`'foo' as const`). The value is the decoded literal, so
+/// any escapes are already resolved. Any other (dynamic, non-literal) element
+/// names nothing — matching Vue's string-literal-only array syntax and the
+/// runtime-binding extraction path.
+fn array_element_literal_name<'a>(expr: &Expression<'a>) -> Option<&'a str> {
+    match expr {
+        Expression::StringLiteral(s) => Some(s.value.as_str()),
+        Expression::TSAsExpression(e) => array_element_literal_name(&e.expression),
+        Expression::TSSatisfiesExpression(e) => array_element_literal_name(&e.expression),
+        Expression::TSNonNullExpression(e) => array_element_literal_name(&e.expression),
+        _ => None,
     }
 }
 
