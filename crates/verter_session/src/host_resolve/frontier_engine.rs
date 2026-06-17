@@ -556,13 +556,25 @@ impl VerterHost {
     ) -> Option<String> {
         // Resolve the edge through the single shared route-edge policy
         // (`resolve_route_edge_canonical`), then layer the route-traversal-only
-        // side effects (`.vue` store-view gate, `ensure_loaded`) on top. The
+        // side effects (carrier store-view gate, `ensure_loaded`) on top. The
         // pure resolution — including the normalized ESM fallback — lives in
         // the shared helper so this path, shallow-state canonicalization, and
         // known-miss revalidation agree on every edge.
         let resolved = self.resolve_route_edge_canonical(owner_canonical, source_specifier)?;
 
-        if resolved.ends_with(".vue") {
+        // Carrier-GENERIC route-edge revalidation: a framework CARRIER target
+        // (`.vue`, `.svelte`, …) takes the store-view whole-hash gate; a plain
+        // script edge takes the `ensure_loaded` arm. The carrier branch loads
+        // the target via `current_or_read_whole_hash` (which ensure-loads on
+        // miss), so a `.svelte` carrier is loaded here exactly like a `.vue`
+        // one. Classified through the single static classifier, never a
+        // hardcoded `.vue` suffix that would strand other carriers.
+        let resolved_is_carrier = verter_language::LanguageRegistry::global()
+            .classify_static(resolved.as_str())
+            .static_resolution()
+            .is_framework_carrier();
+
+        if resolved_is_carrier {
             let known_hash = self.current_or_read_whole_hash(resolved.as_str());
             if let Some(hash) = known_hash {
                 if !self.store_view_allows_current_whole_hash(resolved.as_str(), hash) {

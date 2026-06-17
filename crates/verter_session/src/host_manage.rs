@@ -1369,11 +1369,17 @@ fn is_type_preferred_target(canonical_id: &str) -> bool {
         || canonical_id.ends_with(".tsx")
         || canonical_id.ends_with(".mts")
         || canonical_id.ends_with(".cts")
-        || canonical_id.ends_with(".vue")
+        // Carrier-GENERIC: a framework carrier (`.vue`, `.svelte`, …) projects a
+        // type-bearing virtual surface, so it is type-preferred exactly like a
+        // `.vue` SFC. Sourced from the registry carrier-extension set, never a
+        // hardcoded `.vue` arm that would strand other carriers.
+        || verter_workspace::path_is_carrier(canonical_id)
 }
 
 fn has_file_like_extension(canonical_id: &str) -> bool {
-    canonical_id.ends_with(".vue")
+    // Carrier-GENERIC: any registered framework carrier (`.vue`, `.svelte`, …)
+    // is a real file-like path, not a bare module specifier.
+    verter_workspace::path_is_carrier(canonical_id)
         || canonical_id.ends_with(".ts")
         || canonical_id.ends_with(".tsx")
         || canonical_id.ends_with(".mts")

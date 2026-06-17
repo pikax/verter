@@ -12,32 +12,44 @@
 //! strands it below parity (the `fallthrough.rs` child-resolution gate was
 //! exactly this bug).
 //!
-//! ## Scan scope (deliberately TIGHT)
+//! ## Scan scope (resolution / routing surface)
 //!
-//! The scan is scoped to `verter_session/src/resolver_core/` ONLY — the
-//! resolution / routing surface where a carrier-neutral `.vue` / `is_vue()`
-//! gate is a genuine cross-carrier PARITY bug. The rest of `verter_session/src`
-//! is intentionally OUT of scope: there `.vue` / `is_vue()` is legitimately
-//! dense (Vue api-projector / synth / adapter / descriptor identity,
+//! The scan covers the two `verter_session/src` resolution / routing trees
+//! where a carrier-neutral `.vue` / `is_vue()` gate is a genuine cross-carrier
+//! PARITY bug: `resolver_core/` (where `fallthrough.rs` lives) AND
+//! `host_resolve/` (the live-host resolver chain — frontier engine, route-edge
+//! resolution, dependency resolution). The rest of `verter_session/src` is
+//! intentionally OUT of scope: there `.vue` / `is_vue()` is legitimately dense
+//! (Vue api-projector / synth / adapter / descriptor identity,
 //! `host_compile_audit.rs`'s Svelte fail-closed gate, the `vue_exec` relocated
 //! Vue delegates, the legacy parse metric, the per-carrier compiler bridge),
 //! and a whole-`src` scan would drown the parity signal in Vue-intrinsic
-//! noise. The minimal scope that durably catches the bug class is the
-//! resolution/routing tree where `fallthrough.rs` lives.
+//! noise.
 //!
-//! ## Allowlist (needle-NARROW, Vue-intrinsic only)
+//! ## Allowlist (needle-NARROW, Vue-intrinsic / HARD-BOUNDARY only)
 //!
-//! Within the scan scope, the Vue-MACRO resolution helper
-//! `component_meta/direct_macro.rs` is allowlisted as a FILE: its gates are
-//! genuinely Vue-runtime / Vue-macro intrinsic — `dep.import_source == "vue"`
-//! detects the Vue runtime npm package's own `Slot` type, and
-//! `keep_direct_imported_vue_macro`'s `.ends_with(".vue")` carves out the
-//! `defineProps<ImportedVueProps>()` Vue-component-surface case. Neither is a
-//! carrier classification of an arbitrary component file. Test code
-//! (`#[cfg(test)]` blocks + `*_tests.rs` files, stripped), comments (stripped),
-//! and explicit `is_svelte()` checks (a DIFFERENT carrier) are excluded. The
-//! allowlist NEVER excuses a carrier-neutral gate; any new carrier-neutral
-//! `.vue` / `is_vue()` gate in scope is a violation, not an allowlist entry.
+//! Within the scan scope, two files are allowlisted as FILES:
+//!
+//!   - `component_meta/direct_macro.rs` — the Vue-MACRO resolution helper. Its
+//!     gates are genuinely Vue-runtime / Vue-macro intrinsic:
+//!     `dep.import_source == "vue"` detects the Vue runtime npm package's own
+//!     `Slot` type, and `keep_direct_imported_vue_macro`'s `.ends_with(".vue")`
+//!     carves out the `defineProps<ImportedVueProps>()` Vue-component-surface
+//!     case. Neither is a carrier classification of an arbitrary component file.
+//!   - `host_resolve/virtual_file_pipeline.rs` — a HARD-BOUNDARY file (owns
+//!     `compile_entry`, the carrier compile path the Svelte-first-class change
+//!     must NOT touch). Its only `.vue` literal is in `render_vue_public_api_legacy`
+//!     (the LEGACY Vue public-API renderer derives a component name by stripping
+//!     `.vue`) — Vue-intrinsic by definition and on the boundary. A genuine
+//!     Svelte component-name derivation belongs in the Svelte adapter's own
+//!     renderer, NOT a predicate swap here, so this is documented + allowlisted
+//!     rather than forced (tracked as an F4 carry-forward).
+//!
+//! Test code (`#[cfg(test)]` blocks + `*_tests.rs` files, stripped), comments
+//! (stripped), and explicit `is_svelte()` checks (a DIFFERENT carrier) are
+//! excluded. The allowlist NEVER excuses a carrier-neutral gate; any new
+//! carrier-neutral `.vue` / `is_vue()` gate in scope is a violation, not an
+//! allowlist entry.
 //!
 //! Registered in `CRITICAL_RULE_GUARDS` under "Framework Adapter Substrate"
 //! as `session_resolution_routing_has_no_hardcoded_vue_gate`. Documented in
@@ -46,18 +58,25 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// The single scan root (relative to the crate `src/`): the resolution /
-/// routing tree where a carrier-neutral `.vue` / `is_vue()` gate is a genuine
-/// parity bug.
-const SCAN_DIR: &str = "resolver_core";
+/// The scan roots (relative to the crate `src/`): the resolution / routing
+/// trees where a carrier-neutral `.vue` / `is_vue()` gate is a genuine parity
+/// bug — the `resolver_core/` semantic resolver and the `host_resolve/`
+/// live-host resolver chain.
+const SCAN_DIRS: &[&str] = &["resolver_core", "host_resolve"];
 
-/// Files excluded from the scan because their gates are genuinely Vue-runtime
-/// / Vue-macro intrinsic (NOT carrier classification of an arbitrary component
-/// file). `direct_macro.rs` resolves Vue `defineProps`/`defineSlots` macro
-/// types: it detects the Vue runtime package's own `Slot` type
-/// (`import_source == "vue"`) and carves out the imported-Vue-component-surface
-/// case — both Vue-specific by definition, neither a cross-carrier gate.
-const FILE_EXCLUSIONS: &[&str] = &["direct_macro.rs"];
+/// Files excluded from the scan as FILES — either Vue-runtime / Vue-macro
+/// intrinsic or HARD-BOUNDARY:
+///   - `direct_macro.rs` resolves Vue `defineProps`/`defineSlots` macro types:
+///     it detects the Vue runtime package's own `Slot` type
+///     (`import_source == "vue"`) and carves out the imported-Vue-component-
+///     surface case — both Vue-specific by definition, neither a cross-carrier
+///     gate.
+///   - `virtual_file_pipeline.rs` is a HARD-BOUNDARY file (owns `compile_entry`).
+///     Its only `.vue` literal lives in the LEGACY Vue public-API renderer
+///     (`render_vue_public_api_legacy`, a `.trim_end_matches(".vue")`
+///     component-name derivation) — Vue-intrinsic and on the boundary, so it is
+///     documented + allowlisted (an F4 carry-forward), not force-fixed.
+const FILE_EXCLUSIONS: &[&str] = &["direct_macro.rs", "virtual_file_pipeline.rs"];
 
 fn crate_src() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src")
@@ -91,7 +110,9 @@ fn collect_rs(dir: &Path, out: &mut Vec<PathBuf>) {
 
 fn scan_files() -> Vec<PathBuf> {
     let mut files = Vec::new();
-    collect_rs(&crate_src().join(SCAN_DIR), &mut files);
+    for dir in SCAN_DIRS {
+        collect_rs(&crate_src().join(dir), &mut files);
+    }
     files.sort();
     files
 }
@@ -330,7 +351,7 @@ fn session_resolution_routing_has_no_hardcoded_vue_gate() {
     let files = scan_files();
     assert!(
         !files.is_empty(),
-        "guard found no resolver_core files to scan — the scan root drifted"
+        "guard found no resolver_core / host_resolve files to scan — a scan root drifted"
     );
     let mut violations = Vec::new();
     for f in &files {
@@ -340,7 +361,8 @@ fn session_resolution_routing_has_no_hardcoded_vue_gate() {
     assert!(
         violations.is_empty(),
         "Carrier session-resolution-routing guard violations: resolution/routing code\n\
-         under `resolver_core/` re-introduced a Vue-only gate over a carrier file.\n\
+         under `resolver_core/` or `host_resolve/` re-introduced a Vue-only gate over a\n\
+         carrier file.\n\
          A `.vue` SFC and a `.svelte` component are both framework CARRIERS — gate on\n\
          the carrier-generic predicate instead:\n\
            - `file_language.is_framework_carrier()` when you hold a `FileLanguage`,\n\
@@ -348,8 +370,9 @@ fn session_resolution_routing_has_no_hardcoded_vue_gate() {
                 .static_resolution().is_framework_carrier()` for a path string,\n\
            - `verter_workspace::path_is_carrier(path)` for a bare path helper.\n\
          Allowlisted ONLY: the Vue-MACRO resolution helper `direct_macro.rs`\n\
-         (Vue-runtime/Vue-macro intrinsic), test code, comments, and explicit\n\
-         `is_svelte()` checks.\n\n\
+         (Vue-runtime/Vue-macro intrinsic) and the HARD-BOUNDARY\n\
+         `virtual_file_pipeline.rs` (legacy Vue public-API renderer), plus test\n\
+         code, comments, and explicit `is_svelte()` checks.\n\n\
          Violations:\n  {}",
         violations
             .iter()
@@ -460,19 +483,53 @@ mod tests {
 }
 
 #[test]
-fn direct_macro_file_is_excluded_from_scan() {
-    // The `direct_macro.rs` Vue-macro helper is allowlisted as a file: its
-    // genuinely Vue-runtime/Vue-macro gates must never appear in the scan set.
+fn allowlisted_files_are_excluded_from_scan() {
+    // The `direct_macro.rs` Vue-macro helper and the HARD-BOUNDARY
+    // `virtual_file_pipeline.rs` are allowlisted as files: their Vue-intrinsic /
+    // boundary gates must never appear in the scan set.
     let scanned = scan_files();
     assert!(
         !scanned.is_empty(),
-        "scan must find resolver_core production files"
+        "scan must find resolver_core / host_resolve production files"
     );
+    for excluded in FILE_EXCLUSIONS {
+        assert!(
+            scanned
+                .iter()
+                .all(|p| p.file_name().and_then(|n| n.to_str()) != Some(*excluded)),
+            "{excluded} (allowlisted) must be excluded from the scan"
+        );
+    }
+}
+
+#[test]
+fn scan_covers_both_resolver_core_and_host_resolve() {
+    // Discriminating scope assertion: the broadened guard must actually reach
+    // `host_resolve/` (where `frontier_engine.rs` route-edge gates live), not
+    // only `resolver_core/`. A regression that narrows the scan back to one root
+    // fails here.
+    let scanned = scan_files();
+    let rel = |p: &Path| {
+        p.strip_prefix(crate_src())
+            .unwrap_or(p)
+            .to_string_lossy()
+            .replace('\\', "/")
+    };
+    let in_dir = |dir: &str| scanned.iter().any(|p| rel(p).starts_with(dir));
+    assert!(
+        in_dir("resolver_core/"),
+        "scan must include resolver_core/ files"
+    );
+    assert!(
+        in_dir("host_resolve/"),
+        "scan must include host_resolve/ files (the broadened scope)"
+    );
+    // The frontier engine — the F4 route-edge gate site — must be in the set.
     assert!(
         scanned
             .iter()
-            .all(|p| p.file_name().and_then(|n| n.to_str()) != Some("direct_macro.rs")),
-        "direct_macro.rs (Vue-macro intrinsic) must be excluded from the scan"
+            .any(|p| p.file_name().and_then(|n| n.to_str()) == Some("frontier_engine.rs")),
+        "scan must include host_resolve/frontier_engine.rs"
     );
 }
 

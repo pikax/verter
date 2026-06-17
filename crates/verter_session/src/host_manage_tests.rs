@@ -12339,4 +12339,54 @@ mod manifest_types_entry_routing_tests {
              pass through the WorkspaceAccess routing path"
         );
     }
+
+    // ── F4: carrier-generic extension classifiers ────────────────────────────
+    //
+    // `is_type_preferred_target` and `has_file_like_extension` used a hardcoded
+    // `.vue` arm; a `.svelte` carrier must be classified identically to a `.vue`
+    // one (both are framework carriers projecting a type-bearing virtual
+    // surface / being real file-like paths). These pin the carrier-generic
+    // behavior — they FAIL against the pre-fix `.vue`-only arms.
+
+    #[test]
+    fn type_preferred_target_treats_svelte_carrier_like_vue() {
+        use super::is_type_preferred_target;
+        // A `.vue` SFC is type-preferred…
+        assert!(is_type_preferred_target("/src/App.vue"));
+        // …and so is a `.svelte` carrier (the F4 fix). Pre-fix this was false.
+        assert!(is_type_preferred_target("/src/Widget.svelte"));
+        // `.d.ts`/`.ts` stay type-preferred; a bare `.js` does not.
+        assert!(is_type_preferred_target("/src/types.d.ts"));
+        assert!(!is_type_preferred_target("/src/runtime.js"));
+        // A rune module (`.svelte.ts`) ends with `.ts` → type-preferred via the
+        // script arm (unchanged, and correct — it is a real TS surface).
+        assert!(is_type_preferred_target("/src/store.svelte.ts"));
+    }
+
+    #[test]
+    fn file_like_extension_recognizes_svelte_carrier_like_vue() {
+        use super::has_file_like_extension;
+        // Both carriers are real file-like paths, not bare specifiers.
+        assert!(has_file_like_extension("/src/App.vue"));
+        assert!(has_file_like_extension("/src/Widget.svelte"));
+        // Scripts / json stay file-like; a bare module specifier does not.
+        assert!(has_file_like_extension("/src/util.ts"));
+        assert!(has_file_like_extension("/src/data.json"));
+        assert!(!has_file_like_extension("lodash"));
+    }
+
+    #[test]
+    fn relative_svelte_path_is_not_misclassified_as_raw_specifier() {
+        use super::is_raw_import_specifier_id;
+        // The downstream consequence of the `has_file_like_extension` fix:
+        // a relative `./Widget.svelte` import is a FILE, not a raw module
+        // specifier. Pre-fix `has_file_like_extension` missed `.svelte`, so the
+        // `./`-prefixed path fell through to the raw-specifier `true` arm — a
+        // carrier asymmetry vs `./App.vue` (which was correctly `false`).
+        assert!(!is_raw_import_specifier_id("./Widget.svelte"));
+        assert!(!is_raw_import_specifier_id("./App.vue"));
+        // A genuine bare specifier is still a raw specifier.
+        assert!(is_raw_import_specifier_id("./some-pkg"));
+        assert!(is_raw_import_specifier_id("lodash"));
+    }
 }

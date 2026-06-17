@@ -336,12 +336,23 @@ pub(crate) fn wildcard_source_stem_for_matching(path: &str) -> Option<String> {
         .collect::<Vec<_>>();
     let mut stem = segments.pop()?;
 
-    for suffix in [
-        ".d.ts", ".d.mts", ".d.cts", ".vue", ".tsx", ".ts", ".jsx", ".js", ".mts", ".cts",
-    ] {
-        if let Some(stripped) = stem.strip_suffix(suffix) {
-            stem = stripped;
-            break;
+    // Strip a known declaration / script suffix, then any registered framework
+    // CARRIER extension (`.vue`, `.svelte`, …), so a `.svelte` wildcard route
+    // source derives the same bare component stem as a `.vue` one. The carrier
+    // extensions come from the language registry — never a hardcoded `.vue`
+    // arm that would leave other carriers' extensions in the stem.
+    const SCRIPT_SUFFIXES: [&str; 9] = [
+        ".d.ts", ".d.mts", ".d.cts", ".tsx", ".ts", ".jsx", ".js", ".mts", ".cts",
+    ];
+    if let Some(stripped) = SCRIPT_SUFFIXES.iter().find_map(|s| stem.strip_suffix(s)) {
+        stem = stripped;
+    } else {
+        for ext in verter_language::LanguageRegistry::global().carrier_extensions() {
+            let suffix = format!(".{ext}");
+            if let Some(stripped) = stem.strip_suffix(suffix.as_str()) {
+                stem = stripped;
+                break;
+            }
         }
     }
 
@@ -411,5 +422,47 @@ pub(crate) fn external_type_debug_enabled() -> bool {
 pub(crate) fn external_type_debug(message: impl AsRef<str>) {
     if external_type_debug_enabled() {
         eprintln!("[verter-meta] {}", message.as_ref());
+    }
+}
+
+#[cfg(test)]
+mod wildcard_stem_tests {
+    use super::wildcard_source_stem_for_matching;
+
+    // F4: the wildcard route source-stem derivation must strip ANY registered
+    // carrier extension, not just `.vue`. Pre-fix, a `.svelte` source kept its
+    // extension in the stem (`Widget.svelte` → `WidgetSvelte`), stranding it
+    // below the `.vue` parity.
+
+    #[test]
+    fn strips_svelte_carrier_extension_like_vue() {
+        // `.vue` → bare PascalCase stem…
+        assert_eq!(
+            wildcard_source_stem_for_matching("/src/widget.vue").as_deref(),
+            Some("Widget")
+        );
+        // …and `.svelte` strips identically (the F4 fix). Pre-fix the `.svelte`
+        // extension survived into the normalized stem.
+        assert_eq!(
+            wildcard_source_stem_for_matching("/src/widget.svelte").as_deref(),
+            Some("Widget")
+        );
+    }
+
+    #[test]
+    fn strips_script_suffixes_and_handles_index() {
+        assert_eq!(
+            wildcard_source_stem_for_matching("/routes/profile.ts").as_deref(),
+            Some("Profile")
+        );
+        assert_eq!(
+            wildcard_source_stem_for_matching("/routes/user.d.ts").as_deref(),
+            Some("User")
+        );
+        // `index.<ext>` falls back to the parent directory segment.
+        assert_eq!(
+            wildcard_source_stem_for_matching("/routes/settings/index.svelte").as_deref(),
+            Some("Settings")
+        );
     }
 }
