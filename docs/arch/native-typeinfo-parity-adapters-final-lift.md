@@ -20,14 +20,21 @@ cites, never restates, the parent for the engine architecture.
 
 It owns the parity blocks landing in **U14, U15**:
 
-1. **U14** — the framework macro / composite adapter surface over the graph: the
-   rebuild of `@verter/component-meta` as a thin `FrameworkSurfacePayload` adapter
-   + `FrameworkAdapterRegistry`, with `compat` a projection wrapper (no semantic
-   recovery), reading the U13 published `TypeDescriptor` projection structurally.
-   It lifts the single `MacroResolution` row (the framework-macro graph adapter)
-   and fixes the known Vue mismatch cases. Parent authority: PART 1 §8 (JSX through
-   existing queries), the Component-Meta Native vs Compat Rule, the Typed-IR-Only
-   Resolver Rule, the Macro-Type-Traversal Rule.
+1. **U14** — the framework macro / composite adapter surface over the graph.
+   **The framework-adapter merge landed substrate ahead of order, so this block has
+   two distinct layers (do NOT conflate them):** (a) the **Rust framework-surface
+   substrate** — the `FrameworkAdapterRegistry` (`crates/verter_session/src/framework/registry.rs`)
+   + the Vue/Svelte framework-surface adapters — is **ALREADY MERGED and exists in the
+   tree**; U14 **RE-WIRES** it onto the U11 public session + the U13 published
+   projection (it does NOT rebuild the registry/adapter from scratch); (b) the **TS
+   `@verter/component-meta` thin-adapter layer** — `packages/component-meta/src/framework-adapter.ts`
+   — is genuinely **still to BUILD** (it does not exist), built ON the re-wired Rust
+   surface + the U13 published projection, reading `prop.type` (`TypeDescriptor`)
+   structurally with `compat` a projection wrapper (no semantic recovery). It lifts
+   the single `MacroResolution` row (the framework-macro graph adapter) and fixes the
+   known Vue mismatch cases. Parent authority: PART 1 §8 (JSX through existing
+   queries), the Component-Meta Native vs Compat Rule, the Typed-IR-Only Resolver
+   Rule, the Macro-Type-Traversal Rule.
 
 2. **U15** — the **final lift**: the host integrations (LSP / MCP / playground),
    the composite end-to-end adapter surfaces, the Svelte/React STOP-gates, the
@@ -63,7 +70,7 @@ green CI → three-reviewer LAND → squash-merge with the `Typeinfo-Block:` tra
 U13.PROJECTION done  +  U11.PUBLIC_RELATION_SESSION done   (the published surface + session surface; not owned here)
         │
         ▼
-U14.MACRO_ADAPTER   (thin FrameworkSurfacePayload adapter + registry; compat projection; the MacroResolution row)
+U14.MACRO_ADAPTER   (RE-WIRE the merged Rust registry/adapters onto U11/U13 + BUILD the TS framework-adapter.ts; compat projection; the MacroResolution row)
         │
         ▼
 U15.FINAL_LIFT      (LSP/MCP/playground integrations + CompositeSurfaces rows + STOP-gates + bench schema +
@@ -115,7 +122,7 @@ consistent with the capability. The binding 362 total stays exact.
 
 ---
 
-# U14 — Framework macro / composite adapter
+# U14 — Framework macro / composite adapter (re-wire merged substrate + build TS layer)
 
 ## U14.MACRO_ADAPTER
 
@@ -126,22 +133,24 @@ Subplan: docs/arch/native-typeinfo-parity-adapters-final-lift.md
 Prerequisites: U13.PROJECTION, U11.PUBLIC_RELATION_SESSION, U10.RESULT_DB, U8.WIRE_SURFACE_CLOSURE, U2 (parent), U6 (parent).
 Blocked until: U13.PROJECTION done (the adapter reads the published `GraphTypeNode` / TS `TypeDescriptor` projection structurally) and U11.PUBLIC_RELATION_SESSION done (the adapter consumes the public session surface + the request footprint), and the whole U2 + U6 parents done (the macro surfaces it adapts — `defineProps` / `defineEmits` / `defineModel` / `defineSlots` / `withDefaults` payloads and the imported `.vue`-component surfaces — resolve through the U2 reducers and the U6 flow / call solver). This block is the framework-adapter that U15's composite surfaces build on.
 
-Context: The native component-meta payload is the semantic authority and `@verter/component-meta/compat` is a projection layer, not a second semantic pipeline (the Component-Meta Native vs Compat Rule). Today the native component-meta resolution path carries framework-specific resolution that must be cut over to a thin `FrameworkSurfacePayload` adapter + a `FrameworkAdapterRegistry`, so the framework surface is a STRUCTURAL projection of the engine's published results (the U13 `TypeDescriptor` projection) rather than a per-macro engine. Macro resolution is one shared path, not a per-macro engine (the Macro-Type-Traversal Rule): every macro and every imported `.vue`-component surface resolves through exactly TWO steps — resolve ONE type via the shared typed-IR five-mode dispatch, then normalise per kind (a thin transform, not a resolver). The single `MacroResolution` row exercises this: `Parameters<NonNullable<T['slot']>>[0]` is a cross-file slot-payload extraction that today stops behind a `semanticMiss` indexed access; lifting it routes the slot-payload type through the shared `IndexedAccess` / `Instantiate` / flow-call reductions (`Parameters<…>` is a U2 intrinsic over the U6-resolved call signature) and normalises the slot binding — NOT a macro-specific walker. The four known Vue mismatch cases (Popover `SlotProps<M>`, theme-alias display, `Button["variants"]["color"]` indexed-access, ContentSearch intersection) are fixed in the NATIVE layer first (fix metadata in the native layer first; Rust owns resolution, declaration routing, and graph construction). This block exists now because the composite end-to-end surfaces (U15) are built on the framework adapter, and the adapter must be a thin structural projection before the composite rows can lift end-to-end.
+Context: The native component-meta payload is the semantic authority and `@verter/component-meta/compat` is a projection layer, not a second semantic pipeline (the Component-Meta Native vs Compat Rule). **The framework-adapter merge landed the Rust framework-surface substrate ahead of order — the `FrameworkAdapterRegistry` (`crates/verter_session/src/framework/registry.rs`) and the Vue/Svelte plan/normalize adapters EXIST in the tree as a true plan/normalize adapter shape (A.15).** This block therefore does NOT build the registry / surface adapter from scratch — it RE-WIRES the merged Rust substrate onto the U11 public session + the U13 published projection, so the framework surface is a STRUCTURAL projection of the engine's published results (the U13 `TypeDescriptor` projection) rather than a per-macro engine; and it BUILDS the still-missing TS thin-adapter layer (`packages/component-meta/src/framework-adapter.ts`, which genuinely does NOT exist) over that re-wired surface. Macro resolution is one shared path, not a per-macro engine (the Macro-Type-Traversal Rule): every macro and every imported `.vue`-component surface resolves through exactly TWO steps — resolve ONE type via the shared typed-IR five-mode dispatch, then normalise per kind (a thin transform, not a resolver); the re-wire MUST NOT rebuild macro meaning (the macro semantics are the shared `ResolveMacroPayload` normalization per unified §3.1.1, which U14 consumes structurally and is forbidden from re-deriving). The single `MacroResolution` row exercises this: `Parameters<NonNullable<T['slot']>>[0]` is a cross-file slot-payload extraction that today stops behind a `semanticMiss` indexed access; lifting it routes the slot-payload type through the shared `IndexedAccess` / `Instantiate` / flow-call reductions (`Parameters<…>` is a U2 intrinsic over the U6-resolved call signature) and normalises the slot binding — NOT a macro-specific walker. The four known Vue mismatch cases (Popover `SlotProps<M>`, theme-alias display, `Button["variants"]["color"]` indexed-access, ContentSearch intersection) are fixed in the NATIVE layer first (fix metadata in the native layer first; Rust owns resolution, declaration routing, and graph construction). This block exists now because the composite end-to-end surfaces (U15) are built on the framework adapter, and the adapter must be a thin structural projection before the composite rows can lift end-to-end.
 
 Changes (exact files / functions):
 - `crates/verter_session/src/typeinfo/surface.rs` (the `FrameworkSurfacePayload` projection driven by `TypeInfoSurface::build`) — project the engine's published `TypeInfoGraphPayload` (the U13 `GraphTypeNode` type-value surface + the relocated side tables) into the `FrameworkSurfacePayload` carrier that embeds `TypeInfoGraphPayload` (the additive `TypeInfoGraphPayload` carrier U8 added at the next free tag, NOT the retired `FrameworkSurfacePayload.graph = 4` embedding — PART 1 §1.5). The framework surface is a structural projection of the engine's typed results; it does no query-time resolution.
-- `packages/component-meta/src/compat/native-projection.ts` (the existing `decodeComponentMetaPayload` consumer; the decoder itself lives in `packages/component-meta/src/type-graph-decode.ts`) + a NEW `packages/component-meta/src/framework-adapter.ts` (the `FrameworkAdapterRegistry` + the Vue adapter — no such registry exists in the tree yet) — rebuild `@verter/component-meta` as a thin adapter over the `FrameworkSurfacePayload`: the registry selects the Vue adapter, the adapter projects the published `TypeDescriptor` surface (props / emits / slots / expose / model) into the native component-meta payload STRUCTURALLY (reading `prop.type` (`TypeDescriptor`), never `prop.rawType`), and normalises per macro kind (props: defaults / optionality / readonly / provenance; emits: call-signature event extraction first; slots: function-like members, first-param object → bindings; options/expose: pass-through). No second resolver/expander, no AST/source fallback (cache-owned type recovery only — Component-Meta Native vs Compat Rule).
+- **RE-WIRE the merged Rust framework-surface substrate.** `crates/verter_session/src/framework/registry.rs` (`FrameworkAdapterRegistry`) + the Vue/Svelte framework-surface adapters ALREADY EXIST in the tree (the framework-adapter merge landed them ahead of order). U14 RE-WIRES — does NOT rebuild — this merged Rust substrate so it consumes the U11 public session (the framework-surface request path) and the U13 published projection (the post-U8 `TypeInfoGraphPayload` / `FrameworkSurfacePayload` structural decode). No new Rust `FrameworkAdapterRegistry` is introduced; the existing one is re-pointed onto the published surfaces.
+- `packages/component-meta/src/compat/native-projection.ts` (the existing `decodeComponentMetaPayload` consumer; the decoder itself lives in `packages/component-meta/src/type-graph-decode.ts`) + a NEW `packages/component-meta/src/framework-adapter.ts` (the TS thin-adapter layer — this TS file genuinely does NOT exist in the tree yet; it is built HERE ON the re-wired Rust surface + the U13 published projection — distinct from the already-merged Rust `FrameworkAdapterRegistry`, which is re-wired, not rebuilt) — build `@verter/component-meta`'s TS adapter as a thin layer over the `FrameworkSurfacePayload`: it selects the Vue adapter and projects the published `TypeDescriptor` surface (props / emits / slots / expose / model) into the native component-meta payload STRUCTURALLY (reading `prop.type` (`TypeDescriptor`), never `prop.rawType`), normalising per macro kind (props: defaults / optionality / readonly / provenance; emits: call-signature event extraction first; slots: function-like members, first-param object → bindings; options/expose: pass-through). No second resolver/expander, no AST/source fallback (cache-owned type recovery only — Component-Meta Native vs Compat Rule).
 - `packages/component-meta/src/compat/checker.ts` + `packages/component-meta/src/compat/schema.ts` — keep `compat` a projection wrapper over the native payload for `vue-component-meta` interop: it transforms STRUCTURE but must not recover MEANING; every semantic decision reads `prop.type` (`TypeDescriptor`), `prop.rawType` is display passthrough only, and type-role classification is structural (a type is a prop/emit/model/slot type because a Vue macro consumes it, not because its identifier ends with `"Props"` / `"Emits"` / `"Model"` / `"Slots"`).
 - `crates/verter_session/src/typeinfo/resolve_named_symbol.rs` + the slot-payload projection path — route `Parameters<NonNullable<T['slot']>>[0]` through the shared reductions: resolve `T['slot']` via `IndexedAccess`, strip `null`/`undefined` via the `NonNullable` intrinsic, take the call signature's parameters via `Parameters` (the U2 intrinsic over the U6-resolved call signature), index `[0]`, and normalise the slot binding — removing the `semanticMiss` indexed-access stop so the terminal slot-payload type resolves.
-- `crates/verter_session/src/typeinfo/typeinfo_tests/` Vue mismatch fixtures + `packages/component-meta/tests/` — the four mismatch-case regression fixtures (Popover `SlotProps<M>`, theme-alias display, `Button["variants"]["color"]` indexed-access, ContentSearch intersection), each fixed in the native layer and each failing on the legacy native-component-meta path / passing on the rebuilt adapter.
+- `crates/verter_session/src/typeinfo/typeinfo_tests/` Vue mismatch fixtures + `packages/component-meta/tests/` — the four mismatch-case regression fixtures (Popover `SlotProps<M>`, theme-alias display, `Button["variants"]["color"]` indexed-access, ContentSearch intersection), each fixed in the native layer and each failing on the legacy native-component-meta path / passing on the re-wired adapter path. These four fixtures are PRESERVED as the acceptance bar for the re-wire.
 
 Deliverables:
-- `@verter/component-meta` rebuilt as a thin `FrameworkSurfacePayload` adapter + `FrameworkAdapterRegistry`, projecting the U13 published `TypeDescriptor` surface structurally into the native component-meta payload; `compat` a projection wrapper that transforms structure only.
+- The merged Rust `FrameworkAdapterRegistry` + Vue/Svelte adapters RE-WIRED onto the U11 public session + the U13 published `TypeDescriptor` projection (not rebuilt — the registry already exists in the tree).
+- The NEW TS thin-adapter layer (`packages/component-meta/src/framework-adapter.ts`) built over that re-wired surface, projecting the U13 published `TypeDescriptor` surface structurally into the native component-meta payload; `compat` a projection wrapper that transforms structure only.
 - The `MacroResolution` slot-payload extraction (`Parameters<NonNullable<T['slot']>>[0]`) routed through the shared `IndexedAccess` / `NonNullable` / `Parameters` reductions + the U6 call signature, with the `semanticMiss` indexed-access stop removed.
-- The four Vue mismatch cases fixed in the native layer (Popover `SlotProps<M>`, theme-alias display, `Button["variants"]["color"]` indexed-access, ContentSearch intersection), each with a legacy-fails / rebuilt-passes regression test.
+- The four Vue mismatch cases fixed in the native layer (Popover `SlotProps<M>`, theme-alias display, `Button["variants"]["color"]` indexed-access, ContentSearch intersection), PRESERVED as the acceptance bar, each with a legacy-fails / re-wired-passes regression test.
 
 Legacy deletions:
-- The legacy native-component-meta resolution path the `FrameworkSurfacePayload` adapter replaces — cut over, NOT dual-pathed (the rebuilt adapter is the only framework-surface projection; no second framework resolution path survives).
+- The legacy native-component-meta resolution path the re-wired `FrameworkSurfacePayload` adapter supersedes — cut over, NOT dual-pathed (the re-wired adapter is the only framework-surface projection; no second framework resolution path survives; the re-wire re-points the merged Rust substrate onto the published surface rather than leaving a parallel legacy path alive).
 - Any per-macro / per-surface framework resolver in the native or compat layer (folded into `shared_resolve(type) + normalise` — the Macro-Type-Traversal Rule; a macro/import resolving its surface through anything other than the shared resolver is removed).
 - Any compat branch that recovers MEANING from `prop.rawType` / a raw / display string (`looksLike*` / `extract*` / `normalize*` / `split*` / `strip*` / `prefer*` / `shouldPrefer*` / `repairOpaque*`) or any hand-rolled type-text splitter — replaced by reading `prop.type` (`TypeDescriptor`) structurally (the Typed-IR-Only Resolver Rule; the `@verter/component-meta` no-rawtype-reads contract).
 - Any identifier-name-suffix type-role classification (`name.ends_with("Props")` etc.) in the adapter / compat layer — replaced by structural macro-participation classification (`AnalyzedMacro.kind` / `parsed_type_argument` / `type_references`).
@@ -157,16 +166,16 @@ Exact test rows lifted (capability `MacroResolution`, `basic.rs`):
 
 Required new guards (PART 1 §8; the Component-Meta Native vs Compat Rule):
 - `component_meta_is_thin_framework_adapter_no_second_resolver` — asserts `@verter/component-meta` is a thin `FrameworkSurfacePayload` adapter with no second resolver / expander (cache-owned type recovery only); the framework surface is a structural projection of the published payload, not a re-resolution path.
-- The four mismatch-case regression tests (each fails on the legacy native-component-meta path, passes on the rebuilt adapter): Popover `SlotProps<M>`, theme-alias display, `Button["variants"]["color"]` indexed-access, ContentSearch intersection.
+- The four mismatch-case regression tests, PRESERVED as the acceptance bar (each fails on the legacy native-component-meta path, passes on the re-wired adapter path): Popover `SlotProps<M>`, theme-alias display, `Button["variants"]["color"]` indexed-access, ContentSearch intersection.
 
 Critical-rule guards: this block implements the parent's `(CRITICAL)` Component-Meta Native vs Compat Rule, the Macro-Type-Traversal Rule, and the Typed-IR-Only Resolver Rule (the framework adapter projects the published typed surface structurally; the compat layer recovers no meaning from display strings; macro resolution is one shared path). The thin-adapter + no-rawtype-reads + structural-classification guards are these rules' R6 guards: the `@verter/component-meta` no-rawtype-reads contract (`packages/component-meta/tests/no-rawtype-reads.spec.ts`), the published-surface parity (`crates/verter_audit/tests/published_surface_constants_match_ts_port.rs`), and the architecture-guard list for the typed-IR-only pipeline. This block must not regress them. Any new `(CRITICAL)` framework-adapter rule text added to docs registers its guard here in the same change.
 
-Proof requirement: per-row — the `MacroResolution` row is `Ts7Oracle` (the exact TS judgement of the resolved `Parameters<NonNullable<T['slot']>>[0]` slot-payload type) paired with the structural assertion that the terminal slot-payload resolves through the shared reductions without a `semanticMiss` (`OracleAndGuard`). Consumed by the row's §10.3 proof-consumption rail (PART 2 §10.3; landed shape: the registry-bound driver-calling row body). The four mismatch-case regression tests are `StructuralGuard`-class (legacy-fails / rebuilt-passes), and the thin-adapter / no-rawtype contract is pinned by the existing no-rawtype-reads + published-surface-parity tests.
+Proof requirement: per-row — the `MacroResolution` row is `Ts7Oracle` (the exact TS judgement of the resolved `Parameters<NonNullable<T['slot']>>[0]` slot-payload type) paired with the structural assertion that the terminal slot-payload resolves through the shared reductions without a `semanticMiss` (`OracleAndGuard`). Consumed by the row's §10.3 proof-consumption rail (PART 2 §10.3; landed shape: the registry-bound driver-calling row body). The four mismatch-case regression tests are `StructuralGuard`-class (legacy-fails / re-wired-passes; PRESERVED as the acceptance bar), and the thin-adapter / no-rawtype contract is pinned by the existing no-rawtype-reads + published-surface-parity tests.
 
 Exit acceptance:
 - The `MacroResolution` row lifts and passes on the normal `lib*.d.ts` corpus; `Parameters<NonNullable<T['slot']>>[0]` resolves the terminal slot-payload precisely (no `semanticMiss`).
 - `@verter/component-meta` is a thin `FrameworkSurfacePayload` adapter (the thin-adapter guard green); `compat` transforms structure only; every semantic decision reads `prop.type`, `prop.rawType` is display-only (the no-rawtype-reads guard green); type-role classification is structural.
-- The four Vue mismatch cases pass on the rebuilt adapter and fail on the legacy path (the four regression tests green); the legacy native-component-meta resolution path is gone (no dual path).
+- The four Vue mismatch cases pass on the re-wired adapter path and fail on the legacy path (the four regression tests green, PRESERVED as the acceptance bar); the legacy native-component-meta resolution path is gone (no dual path).
 
 Verification commands:
 - `cargo test --package verter_session` typeinfo surface / framework-surface / slot-payload tests.
@@ -178,7 +187,7 @@ Verification commands:
 - `node scripts/gen-corpus-audit-tests.mjs` (idempotent; if audit-record schema/fixtures change).
 - Commit cadence / review gate: PARENT-UNIFORM — the uniform discipline for EVERY block in this subplan (parent PART 2 §11.11 / §11.12), stated once and not restated per block: each block lands as ONE squashed commit (WIP series during the work, no per-commit gate) after the three-reviewer LAND verdict (1 Claude Code + 2 codex).
 
-Docs updated: keep the `/component-meta` native-vs-compat + framework-adapter-registry sections current (the rebuilt `FrameworkSurfacePayload` adapter + `FrameworkAdapterRegistry`); update the `/architecture` framework-surface notes if the registry surface changes.
+Docs updated: keep the `/component-meta` native-vs-compat + framework-adapter-registry sections and the `/framework-adapters` skill current (the re-wired Rust `FrameworkAdapterRegistry` + the new TS `FrameworkSurfacePayload` adapter layer); update the `/architecture` framework-surface notes if the registry surface changes.
 
 Re-entry notes: idempotent. If partial, the manifest shows whether the `MacroResolution` row still carries `#[ignore]`. The framework adapter is a thin structural projection — if a compat branch reaches for `prop.rawType` to recover meaning, the no-rawtype-reads guard fails; fix the producer (add the missing `TypeDescriptor` variant) rather than parsing text. Do not reintroduce the legacy native-component-meta resolution path or a per-macro walker.
 
@@ -214,6 +223,7 @@ Deliverables:
 - The Svelte/React STOP-gate files (the explicit out-of-scope residual `#[ignore]`s) and the typed bench schema (`BenchResultRow` + vendored cm corpus benches + `MAX_TEST_TIMEOUT`).
 - The PART 1 §6.2 performance-contract benches — the Verter-vs-TS/tsgo benchmark fixtures on the same semantic queries + the per-family fallback-bound benches — perf-regression-gated as part of TERMINAL ACCEPTANCE (a family's fallback-count bound exceeded, or a missing Verter-vs-tsgo fixture, fails the bench gate), not merely the functional gate.
 - The final find-grep sweep removing every remaining legacy entry-point name, and the terminal-acceptance ledger assertions (all 362 `IgnoredTestRow`s `Lifted`; every `AdditionalProofRow` covered; no vacuous parent token).
+- **Framework-adapter re-base closure (final-lift checklist; unified §3.1.1 + U8/U10/U12/U14).** Because the framework-adapter substrate landed ahead of order, the final-lift sweep additionally REQUIRES, as a closure check (these verify the U8/U10/U12/U14 re-base obligations actually closed end to end — a terminal checklist, NOT new work U15 originates): (i) ZERO provisional pre-U8 framework wire remaining — no embedded-`SemanticTypeGraph` framework-surface field; the post-U8 `TypeInfoGraphPayload` carrier is the only shape; (ii) NO old-shape `graph_export` producer left (the U12 cut-over of `framework_surface/graph_export.rs` leaves no dual path); (iii) the framework-surface result cache CONSOLIDATED onto `ProjectTypeStore` / `TypeInfoGraphResultDb` (per U10, off the registry rows / off the host `FrameworkScriptCaches`); (iv) TRUE singleflight in place for framework-surface results (per U10); and (v) BOTH Vue and Svelte registered on the final graph path.
 
 Legacy deletions:
 - Any remaining legacy entry-point names surfaced by the final find-grep sweep (the last legacy resolution / projection / adapter symbol names — removed, not renamed-around).
@@ -338,6 +348,20 @@ named guard. The parity effort is complete iff ALL hold:
    hit count / fallback count
    (`bench_result_row_reports_cache_mode_sourcemap_batch_thread_hit_fallback`).
 
+6. **The framework-adapter re-base obligations closed end to end.** Because the
+   framework-adapter substrate landed AHEAD of order (the merged Rust
+   `FrameworkAdapterRegistry` + Vue/Svelte adapters + the provisional framework-surface
+   producer), terminal acceptance additionally requires the U8/U10/U12/U14 re-base
+   obligations to have closed (unified §3.1.1 + the U8/U10/U12/U14 block bodies): ZERO
+   provisional pre-U8 framework wire remaining (no embedded-`SemanticTypeGraph`
+   framework-surface field — the post-U8 `TypeInfoGraphPayload` carrier is the only
+   shape); NO old-shape `framework_surface/graph_export.rs` producer left (the U12
+   cut-over leaves no dual path); the framework-surface result cache CONSOLIDATED onto
+   `ProjectTypeStore` / `TypeInfoGraphResultDb` (per U10, off the registry rows / off the
+   host `FrameworkScriptCaches`) with TRUE singleflight; and BOTH Vue and Svelte
+   registered on the final graph path. This is a terminal CHECKLIST over work the
+   U8/U10/U12/U14 blocks own — not new work U15 originates.
+
 This is the composition the Capability Map names as "the guarantee over the 362
 rows": the two-table ledger with the exact-362 count + bijection (PART 2 §10.5);
 the U0 row-exact capability→mechanism→proof coverage table that DEFINES completeness
@@ -345,7 +369,7 @@ the U0 row-exact capability→mechanism→proof coverage table that DEFINES comp
 with the proof registry + row-test rail (PART 2 §§10.2–10.3 — landed under U0-FINISH-B
 in the locked design's hand-authored shape); the git/CI landing protocol (PART 2
 §11); the no-skip guarantee (PART 2 §12); and the git/manifest-driven, parallel-safe
-resume protocol (PART 2 §14). When all five checks hold, the 362-row
+resume protocol (PART 2 §14). When all six checks hold, the 362-row
 parity is mechanically tracked from `Ignored` to `Lifted`, never skipped and never
 vacuously satisfied — and the native typeinfo engine is the full TypeScript-parity
 checker the parent architecture specifies, with the LSP / MCP / component-meta /
