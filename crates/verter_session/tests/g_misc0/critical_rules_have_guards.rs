@@ -560,6 +560,15 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             // `vue`/`Vue`-substring identifiers in the scanned modules outside
             // the narrow Vue-intrinsic allowlist.
             "carrier_routing_has_no_vue_named_generic_primitive",
+            // …and the same no-hardcoded-Vue-gate enforcement extends to the
+            // other carrier-neutral consumer surfaces: the `verter_mcp` tool
+            // surface (carrier-neutral analysis tools route on
+            // `is_framework_carrier()`, not `is_vue()`, outside the Vue-intrinsic
+            // tool allowlist) and the `verter_session` resolution/routing tree
+            // under `resolver_core/` (the fallthrough / child-resolution carrier
+            // gate is carrier-generic).
+            "mcp_routing_has_no_hardcoded_vue_gate",
+            "session_resolution_routing_has_no_hardcoded_vue_gate",
             // Rune-module (`.svelte.ts` / `.svelte.js`) own-buffer LSP path:
             // the self-file projection consumes the prelude line count as a
             // uniform line offset; the self-file mapper drops the prelude +

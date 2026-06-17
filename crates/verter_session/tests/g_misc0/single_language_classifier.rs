@@ -60,18 +60,16 @@ const CARRIER_LITERAL_ALLOWLIST: &[&str] = &[
     "crates/verter_session/src/host_resolve/frontier_engine.rs",
     "crates/verter_session/src/host_resolve/virtual_file_pipeline.rs",
     "crates/verter_session/src/resolver_core/component_meta/direct_macro.rs",
-    "crates/verter_session/src/resolver_core/fallthrough.rs",
     // Workspace resolver `.vue`-aware routing (resolution data, not
     // classification).
     "crates/verter_workspace/src/resolver.rs",
-    // LSP / MCP / tooling feature files (swept by the consumer-sweep
-    // block; frozen here so no NEW file grows a literal). The feature /
-    // server LSP-routing files were de-Vue-gated (block S2b — carrier
-    // routing is carrier-generic, pinned by
-    // `carrier_lsp_routing_has_no_hardcoded_vue_gate`), so their rows are
-    // gone from this shrink-only list.
+    // LSP / MCP / tooling feature files (frozen here so no NEW file grows
+    // a literal). The LSP feature / server routing files and the MCP tool
+    // surface were de-Vue-gated (carrier routing is carrier-generic, pinned
+    // by `carrier_lsp_routing_has_no_hardcoded_vue_gate` and
+    // `mcp_routing_has_no_hardcoded_vue_gate`), so their rows are gone from
+    // this shrink-only list.
     "crates/verter_lsp/src/test_harness.rs",
-    "crates/verter_mcp/src/server.rs",
     "crates/verter_tsc/src/tsconfig.rs",
     // The DX-baseline measurement harness — a deliberately self-contained
     // reference reimplementation used for perf comparison, NOT the shared
