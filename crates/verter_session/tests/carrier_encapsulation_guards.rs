@@ -980,7 +980,7 @@ fn carrier_module_shape_violations(file: &syn::File) -> Vec<String> {
     // deviation just like an unexpected one. ──
     for expected in EXPECTED_USES {
         let want = norm_expected::<syn::ItemUse>(expected);
-        if !seen_uses.iter().any(|s| *s == want) {
+        if !seen_uses.contains(&want) {
             v.push(format!(
                 "required `use` import `{expected}` is missing from carrier.rs"
             ));
@@ -1720,7 +1720,7 @@ fn carrier_exact_shape_allowlist_discriminates() {
     assert!(
         rejects_mutation(|f| {
             let alias = find_head_alias_mut(f, "BareRefHead");
-            alias.ty = Box::new(syn::parse_str::<syn::Type>("&'a [NodeId]").unwrap());
+            *alias.ty = syn::parse_str::<syn::Type>("&'a [NodeId]").unwrap();
         }),
         "DISCRIMINATION (POINT 3): a head alias whose RHS is `&'a [NodeId]` (off the sanctioned \
          definition) must be REJECTED on exact shape."
