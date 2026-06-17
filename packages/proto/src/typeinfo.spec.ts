@@ -7,8 +7,11 @@ import {
   ExpandGraphAroundRequestSchema,
   ContextualTypeRequestSchema,
   FlowNarrowingRequestSchema,
+  FrameworkSurfaceKindEntrySchema,
+  FrameworkSurfaceKindSupport,
   FrameworkSurfacePayloadSchema,
   FrameworkSurfaceRequestSchema,
+  GraphDiagnosticSeverity,
   GraphPrimitiveKind,
   GraphProjectionMode,
   GraphReductionDemand,
@@ -36,6 +39,7 @@ import {
   TypeInfoCapabilityHandshakeRequestSchema,
   TypeInfoCapabilityHandshakeResponseSchema,
   TypeInfoGraphRequestSchema,
+  TypeInfoGraphResponseSchema,
   TypeInfoRequestErrorSchema,
 } from "./typeinfo.js";
 
@@ -641,6 +645,99 @@ describe("typeinfo proto TS bindings", () => {
     // member field, every nested node payload, and the selector
     // must survive identically.
     expect(decoded).toEqual(payload);
+  });
+
+  it("TypeInfoGraphResponse roundtrips the frameworkSurface arm with per-kind status", () => {
+    // Exactly one entry per known FrameworkSurfaceKind, each carrying
+    // the per-kind status (UNSPECIFIED is invalid in server-produced
+    // v3 payloads).
+    const everyKind = Object.values(FrameworkSurfaceKind).filter(
+      (v): v is FrameworkSurfaceKind => typeof v === "number",
+    );
+    expect(everyKind.length).toBe(6);
+
+    const response = create(TypeInfoGraphResponseSchema, {
+      kind: {
+        case: "frameworkSurface",
+        value: {
+          schemaVersion: TYPEINFO_GRAPH_SCHEMA_VERSION,
+          selector: { canonicalId: "/Foo.vue", frameworkAdapterId: "vue" },
+          framework: FrameworkTag.VUE,
+          graph: { schemaVersion: TYPEINFO_GRAPH_SCHEMA_VERSION },
+          surfaces: everyKind.map((kind) => ({
+            kind,
+            members: [],
+            status: {
+              support: FrameworkSurfaceKindSupport.SUPPORTED,
+              exactness: GraphExactness.EXACT_RESOLVED,
+              diagnostics: [],
+            },
+          })),
+        },
+      },
+    });
+
+    const bytes = toBinary(TypeInfoGraphResponseSchema, response);
+    const decoded = fromBinary(TypeInfoGraphResponseSchema, bytes);
+    expect(decoded).toEqual(response);
+    expect(decoded.kind.case).toBe("frameworkSurface");
+    if (decoded.kind.case !== "frameworkSurface") return;
+    expect(decoded.kind.value.surfaces.length).toBe(everyKind.length);
+    for (const entry of decoded.kind.value.surfaces) {
+      expect(entry.status?.support).toBe(FrameworkSurfaceKindSupport.SUPPORTED);
+    }
+  });
+
+  it("supported-empty and unsupported-empty decode to distinct typed states", () => {
+    // The wire proof that an empty member list alone never means
+    // "unsupported": SUPPORTED + empty members is supported-empty;
+    // UNSUPPORTED carries exactness UNSUPPORTED plus a diagnostic.
+    const supportedEmpty = create(FrameworkSurfaceKindEntrySchema, {
+      kind: FrameworkSurfaceKind.SLOTS,
+      members: [],
+      status: {
+        support: FrameworkSurfaceKindSupport.SUPPORTED,
+        exactness: GraphExactness.EXACT_RESOLVED,
+        diagnostics: [],
+      },
+    });
+    const unsupportedEmpty = create(FrameworkSurfaceKindEntrySchema, {
+      kind: FrameworkSurfaceKind.SLOTS,
+      members: [],
+      status: {
+        support: FrameworkSurfaceKindSupport.UNSUPPORTED,
+        exactness: GraphExactness.UNSUPPORTED,
+        diagnostics: [{ severity: GraphDiagnosticSeverity.WARN, messageNameId: 9 }],
+      },
+    });
+
+    const decodedSupported = fromBinary(
+      FrameworkSurfaceKindEntrySchema,
+      toBinary(FrameworkSurfaceKindEntrySchema, supportedEmpty),
+    );
+    const decodedUnsupported = fromBinary(
+      FrameworkSurfaceKindEntrySchema,
+      toBinary(FrameworkSurfaceKindEntrySchema, unsupportedEmpty),
+    );
+
+    // Both decode with empty member lists…
+    expect(decodedSupported.members).toEqual([]);
+    expect(decodedUnsupported.members).toEqual([]);
+    // …yet remain distinct typed states.
+    expect(decodedSupported).not.toEqual(decodedUnsupported);
+    expect(decodedSupported.status?.support).toBe(FrameworkSurfaceKindSupport.SUPPORTED);
+    expect(decodedUnsupported.status?.support).toBe(FrameworkSurfaceKindSupport.UNSUPPORTED);
+    expect(decodedUnsupported.status?.exactness).toBe(GraphExactness.UNSUPPORTED);
+    expect(decodedUnsupported.status?.diagnostics.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("wire schema version is 4 with the framework-surface member default/origin fields", () => {
+    // Schema 3→4: the add-only `FrameworkSurfaceMember.default_value_id` +
+    // `origin` fields landed under a schema bump per the closed-enum rule
+    // (3 added the framework_surface response arm + per-kind status). The TS
+    // facade constant tracks the Rust `TYPEINFO_GRAPH_SCHEMA_VERSION` in
+    // lock-step.
+    expect(TYPEINFO_GRAPH_SCHEMA_VERSION).toBe(4);
   });
 
   it("deep-equality roundtrip detects nested field corruption that case-match misses", () => {

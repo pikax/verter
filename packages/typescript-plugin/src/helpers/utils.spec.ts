@@ -6,6 +6,7 @@ import {
   isRelativeVueTs,
   isVue,
   isVueTs,
+  isVueTestingTs,
   resolveVuePublicApiMode,
 } from "./utils";
 
@@ -100,6 +101,50 @@ describe("isLikelyTestFileName", () => {
   it("does not flag normal source files", () => {
     expect(isLikelyTestFileName("/src/App.ts")).toBe(false);
     expect(isLikelyTestFileName("/src/components/Foo.vue")).toBe(false);
+  });
+});
+
+describe("carrier generalization (Svelte)", () => {
+  it("recognizes .svelte as a carrier (generalized from the registry column)", () => {
+    expect(isVue("./Comp.svelte")).toBe(true);
+    expect(isRelativeVue("./Comp.svelte")).toBe(true);
+    expect(isRelativeVue("svelte")).toBe(false);
+  });
+
+  it("recognizes the .svelte.ts api virtual-file SHAPE (suffix-only)", () => {
+    // These are pure PATH functions: `Comp.svelte.ts` matches the api
+    // virtual-file SHAPE. The `.svelte.ts` ambiguity against a real rune module
+    // (`store.svelte.ts`, D-bg) is disambiguated by the CONSUMER's file-exists
+    // check (the `readFile`/`fileExists` overrides fall through to the real
+    // file when the backing `.svelte` source is absent) — not in this function.
+    expect(isVueTs("./Comp.svelte.ts")).toBe(true);
+    expect(isVueTs("./Comp.svelte")).toBe(false);
+  });
+
+  it("parses .svelte virtual-file SHAPES (public only — Svelte has no testing surface)", () => {
+    expect(getVueVirtualFileInfo("/src/Comp.svelte.ts")).toEqual({
+      sourceFileName: "/src/Comp.svelte",
+      mode: "public",
+    });
+    expect(getVueVirtualFileInfo("/src/Comp.svelte.d.ts")).toEqual({
+      sourceFileName: "/src/Comp.svelte",
+      mode: "public",
+    });
+    // Svelte ships NO testing-API surface — `.svelte.__verter_test.ts` is not
+    // a recognized virtual file.
+    expect(getVueVirtualFileInfo("/src/Comp.svelte.__verter_test.ts")).toBeNull();
+    expect(isVueTestingTs("/src/Comp.svelte.__verter_test.ts")).toBe(false);
+  });
+
+  it("preserves Vue behavior exactly (negative — generalization did not regress Vue)", () => {
+    expect(isVue("./Foo.vue")).toBe(true);
+    expect(isVue("./Foo.vue.ts")).toBe(false);
+    expect(isVueTs("./Foo.vue.ts")).toBe(true);
+    expect(isVueTestingTs("./Foo.vue.__verter_test.ts")).toBe(true);
+    expect(getVueVirtualFileInfo("/src/Foo.vue.__verter_test.ts")).toEqual({
+      sourceFileName: "/src/Foo.vue",
+      mode: "testing",
+    });
   });
 });
 

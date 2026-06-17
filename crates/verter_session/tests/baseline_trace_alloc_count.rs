@@ -18,7 +18,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
 /// Counting allocator that delegates to the system allocator and
@@ -63,7 +63,7 @@ fn record_baseline_allocation_count_for_audit_off_get_component_meta() {
         canonical_id: Some("/Small.vue".into()),
         input_id: "/Small.vue".into(),
         source: Arc::from(FIXTURE_VUE),
-        file_kind: FileKind::VueSfc,
+        file_language: FileLanguage::vue(),
         aliases: vec![],
     });
 

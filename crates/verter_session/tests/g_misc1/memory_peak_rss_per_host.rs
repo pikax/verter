@@ -81,14 +81,18 @@ fn each_host_sampler_attributes_peak_only_to_its_own_request() {
         canonical_id: Some(canon_a.to_string()),
         input_id: canon_a.to_string(),
         source: Arc::from(SLOW_SFC),
-        file_kind: verter_session::FileKind::from_path(canon_a),
+        file_language: verter_session::LanguageRegistry::global()
+            .classify_static(canon_a)
+            .static_resolution(),
         aliases: Vec::new(),
     });
     let _ = host_b.upsert(UpsertRequest {
         canonical_id: Some(canon_b.to_string()),
         input_id: canon_b.to_string(),
         source: Arc::from(SLOW_SFC),
-        file_kind: verter_session::FileKind::from_path(canon_b),
+        file_language: verter_session::LanguageRegistry::global()
+            .classify_static(canon_b)
+            .static_resolution(),
         aliases: Vec::new(),
     });
 

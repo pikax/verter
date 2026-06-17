@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use verter_session::session_view::{HostView, SessionView};
 use verter_session::{
-    CompileErrorPolicy, DependencyResolution, FileKind, HostConfig, UpsertRequest, VerterHost,
+    CompileErrorPolicy, DependencyResolution, FileLanguage, HostConfig, UpsertRequest, VerterHost,
 };
 
 #[test]
@@ -40,7 +40,7 @@ fn producer_admits_positive_entry_with_resolved_source_name() {
             canonical_id: None,
             input_id: "/dep.ts".to_string(),
             source: Arc::from("export const used = 1;"),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .expect("dep upsert");
@@ -51,7 +51,7 @@ fn producer_admits_positive_entry_with_resolved_source_name() {
             canonical_id: None,
             input_id: "/owner.ts".to_string(),
             source: Arc::from(owner_source),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .expect("owner upsert");

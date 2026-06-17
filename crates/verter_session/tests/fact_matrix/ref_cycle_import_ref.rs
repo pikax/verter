@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
 #[test]
@@ -18,7 +18,7 @@ fn ref_cycle_producer_counter_monotonic_on_cross_file_recursion() {
         canonical_id: Some("/tree.ts".into()),
         input_id: "/tree.ts".into(),
         source: Arc::from("export interface Tree { children: Tree[] }"),
-        file_kind: FileKind::NonSfc,
+        file_language: FileLanguage::script_ts(),
         aliases: vec![],
     });
     let _ = host.upsert(UpsertRequest {
@@ -30,7 +30,7 @@ fn ref_cycle_producer_counter_monotonic_on_cross_file_recursion() {
              defineProps<{ root: Tree }>();\
              </script>",
         ),
-        file_kind: FileKind::VueSfc,
+        file_language: FileLanguage::vue(),
         aliases: vec![],
     });
 

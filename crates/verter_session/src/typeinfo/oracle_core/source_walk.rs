@@ -54,7 +54,7 @@
 
 use rustc_hash::FxHashSet;
 
-use verter_compiler::utils::oxc::vue::raw_surface::SymbolSpace;
+use verter_compiler::utils::oxc::script::raw_surface::SymbolSpace;
 use verter_type_expr::{PrimitiveName, TypeExpr};
 
 use crate::resolver_core::{ExportTarget, ResolverContext};
@@ -186,9 +186,7 @@ fn walk<C: ResolverContext>(
     // Snapshot the transitive next-hops before borrowing `acc`, so the recursive
     // re-entry does not alias the analysis Arc.
     let mut next_hops: Vec<SourceLocator> = Vec::new();
-    for (ordinal, (raw_surface, lowered_body)) in
-        surfaces.iter().zip(lowered_bodies.into_iter()).enumerate()
-    {
+    for (ordinal, (raw_surface, lowered_body)) in surfaces.iter().zip(lowered_bodies).enumerate() {
         // Source-ROOT carve-out SAME-FILE binding: for a carve-out-shaped body
         // (`keyof Root` / `Root["a"]["b"]…` / `Root[keyof Root]` /
         // `typeof Root(.ident)*` / `Util<carve-out-arg>`) resolve the root

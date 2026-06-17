@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use verter_audit::RequestKind;
 use verter_session::semantic_query::{ResolveDeclKey, ScopeId, SemanticQueryKey};
-use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{HostConfig, UpsertRequest, VerterHost};
 
 const A_TS: &str = r#"
 import type { B } from "./b";
@@ -42,7 +42,9 @@ fn build_host() -> Arc<VerterHost> {
             canonical_id: Some(path.to_string()),
             input_id: path.to_string(),
             source: Arc::from(source),
-            file_kind: FileKind::from_path(path),
+            file_language: verter_session::LanguageRegistry::global()
+                .classify_static(path)
+                .static_resolution(),
             aliases: Vec::new(),
         });
     }

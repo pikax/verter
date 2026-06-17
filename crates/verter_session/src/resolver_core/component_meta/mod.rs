@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use rustc_hash::FxHashSet;
-use verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements;
+use verter_compiler::utils::oxc::script::type_surface::ResolvedElements;
 use verter_semantic::analysis::component_meta::ResolvedTypeAnalysis;
 use verter_semantic::analysis::types::{
     AnalyzedImport, AnalyzedMacro, AnalyzedMacroKind, MacroTypeDep,
@@ -167,7 +167,7 @@ pub(crate) fn component_meta_resolved_macros(
         let Some(mac) = snapshot_macros.get(resolved.macro_index) else {
             continue;
         };
-        let dtos = crate::typeinfo::adapters::vue::surface::vue_macro_dtos_with_ctx(
+        let dtos = crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx(
             ctx,
             &crate::typeinfo::types::VueMacroSurfaceRequest {
                 owner_canonical: std::sync::Arc::from(owner_canonical),
@@ -180,10 +180,10 @@ pub(crate) fn component_meta_resolved_macros(
         inputs.push(
             verter_semantic::analysis::component_meta::ResolvedMacroInput {
                 macro_index: resolved.macro_index,
-                props: dtos.props.clone(),
-                emits: dtos.emits.clone(),
-                slots: dtos.slots.clone(),
-                exposed: dtos.exposed.clone(),
+                props: dtos.prop_fields().to_vec(),
+                emits: dtos.emit_fields().to_vec(),
+                slots: dtos.slot_fields().to_vec(),
+                exposed: dtos.expose_fields().to_vec(),
             },
         );
     }

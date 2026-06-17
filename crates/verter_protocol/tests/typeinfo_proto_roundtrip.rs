@@ -221,7 +221,10 @@ fn framework_surface_payload_roundtrips() {
                 type_node_id: 0,
                 required: true,
                 readonly: false,
+                default_value_id: None,
+                origin: None,
             }],
+            status: Some(supported_status()),
         }],
     };
 
@@ -229,6 +232,221 @@ fn framework_surface_payload_roundtrips() {
     let decoded = g::FrameworkSurfacePayload::decode(bytes.as_slice())
         .expect("FrameworkSurfacePayload must roundtrip");
     assert_eq!(decoded, payload);
+}
+
+#[test]
+fn framework_surface_origin_hop_presence_roundtrips() {
+    // DISCRIMINATING (the P0 wire proof): the origin-hop string-id fields are
+    // PRESENCE-AWARE (`optional` on the wire). An ABSENT field (`None`) must
+    // survive a proto roundtrip as `None`, and a genuinely-PRESENT id 0
+    // (`Some(0)`) must survive as `Some(0)` — DISTINCT from absence. Before
+    // the `optional` change the fields were plain `uint32`: `Some(0)` and
+    // `None` both encoded as the default and decoded identically, so an absent
+    // field aliased a real id-0 string-table entry. This test fails to even
+    // compile against the pre-change plain-`u32` fields and asserts the
+    // presence distinction post-change.
+    let hops = vec![
+        // LOCAL: every string field absent.
+        g::FrameworkSurfaceOriginHop {
+            kind: g::FrameworkSurfaceOriginHopKind::Local as i32,
+            from_id: None,
+            specifier_id: None,
+            imported_name_id: None,
+            to_id: None,
+            exported_name_id: None,
+            original_name_id: None,
+            alias_name_id: None,
+        },
+        // IMPORT: from present at id 0 (a genuine interned entry), no specifier.
+        g::FrameworkSurfaceOriginHop {
+            kind: g::FrameworkSurfaceOriginHopKind::Import as i32,
+            from_id: Some(0),
+            specifier_id: None,
+            imported_name_id: Some(2),
+            to_id: None,
+            exported_name_id: None,
+            original_name_id: None,
+            alias_name_id: None,
+        },
+    ];
+    let origin = g::FrameworkSurfaceMemberOrigin {
+        declaration: Some(g::FrameworkSurfaceMemberDeclaration {
+            requested_name_id: 1,
+            resolved_name_id: 1,
+            canonical_source_id: 0,
+            span_start: 0,
+            span_end: 0,
+            kind: g::FrameworkSurfaceDeclarationKind::TypeAlias as i32,
+        }),
+        chain: hops,
+    };
+
+    let bytes = origin.encode_to_vec();
+    let decoded = g::FrameworkSurfaceMemberOrigin::decode(bytes.as_slice())
+        .expect("FrameworkSurfaceMemberOrigin must roundtrip");
+    assert_eq!(decoded, origin);
+
+    // Explicit presence assertions: absence survives as `None`; a present id 0
+    // survives as `Some(0)` and is DISTINCT from absence.
+    let local = &decoded.chain[0];
+    assert!(local.from_id.is_none(), "absent LOCAL from_id stays None");
+    assert!(local.specifier_id.is_none());
+    let import = &decoded.chain[1];
+    assert_eq!(
+        import.from_id,
+        Some(0),
+        "a genuinely-present id 0 survives as Some(0), distinct from None"
+    );
+    assert!(
+        import.specifier_id.is_none(),
+        "an absent specifier stays None — never collapses to id 0"
+    );
+}
+
+fn supported_status() -> g::FrameworkSurfaceKindStatus {
+    g::FrameworkSurfaceKindStatus {
+        support: g::FrameworkSurfaceKindSupport::Supported as i32,
+        exactness: g::Exactness::ExactResolved as i32,
+        diagnostics: vec![],
+    }
+}
+
+fn unsupported_status() -> g::FrameworkSurfaceKindStatus {
+    g::FrameworkSurfaceKindStatus {
+        support: g::FrameworkSurfaceKindSupport::Unsupported as i32,
+        exactness: g::Exactness::Unsupported as i32,
+        diagnostics: vec![g::Diagnostic {
+            severity: g::DiagnosticSeverity::Warn as i32,
+            message_name_id: 9,
+            span_canonical_name_id: 0,
+            span_start: 0,
+            span_end: 0,
+            has_span: false,
+        }],
+    }
+}
+
+/// Every known `FrameworkSurfaceKind`, in tag order. A v3
+/// framework-surface response carries EXACTLY ONE entry per kind.
+const EVERY_FRAMEWORK_SURFACE_KIND: &[g::FrameworkSurfaceKind] = &[
+    g::FrameworkSurfaceKind::Props,
+    g::FrameworkSurfaceKind::Emits,
+    g::FrameworkSurfaceKind::Slots,
+    g::FrameworkSurfaceKind::Options,
+    g::FrameworkSurfaceKind::Expose,
+    g::FrameworkSurfaceKind::Model,
+];
+
+#[test]
+fn type_info_graph_response_roundtrip_covers_every_kind_arm() {
+    use verter_protocol::verter::v1::type_info_graph_response::Kind;
+
+    let framework_surface = g::FrameworkSurfacePayload {
+        schema_version: g::TYPEINFO_GRAPH_SCHEMA_VERSION,
+        selector: Some(sample_component_selector()),
+        framework: g::FrameworkTag::Vue as i32,
+        graph: Some(g::SemanticTypeGraph {
+            schema_version: g::TYPEINFO_GRAPH_SCHEMA_VERSION,
+            ..Default::default()
+        }),
+        // Exactly one entry per known kind, each carrying a per-kind
+        // status (UNSPECIFIED is invalid in server-produced v3
+        // payloads).
+        surfaces: EVERY_FRAMEWORK_SURFACE_KIND
+            .iter()
+            .map(|kind| g::FrameworkSurfaceKindEntry {
+                kind: *kind as i32,
+                members: vec![],
+                status: Some(supported_status()),
+            })
+            .collect(),
+    };
+
+    let arms: Vec<Kind> = vec![
+        Kind::Graph(g::SemanticTypeGraph {
+            schema_version: g::TYPEINFO_GRAPH_SCHEMA_VERSION,
+            ..Default::default()
+        }),
+        Kind::Error(g::TypeInfoRequestError {
+            kind: Some(
+                verter_protocol::verter::v1::type_info_request_error::Kind::MalformedPayload(
+                    g::wire_error_malformed_payload("boom"),
+                ),
+            ),
+        }),
+        Kind::FrameworkSurface(framework_surface),
+    ];
+    assert_eq!(
+        arms.len(),
+        3,
+        "TypeInfoGraphResponse covers exactly 3 closed oneof arms",
+    );
+
+    for (idx, kind) in arms.into_iter().enumerate() {
+        let response = g::TypeInfoGraphResponse { kind: Some(kind) };
+        let bytes = response.encode_to_vec();
+        let decoded = g::TypeInfoGraphResponse::decode(bytes.as_slice())
+            .unwrap_or_else(|e| panic!("response arm {idx} should decode: {e}"));
+        assert_eq!(decoded, response, "response arm {idx} must roundtrip");
+        assert!(
+            decoded.kind.is_some(),
+            "response arm {idx} kind must survive"
+        );
+    }
+}
+
+/// The §9 contract's wire proof: a kind entry with `SUPPORTED` +
+/// empty members (supported-empty) and one with `UNSUPPORTED` + empty
+/// members decode to DISTINCT typed states — an empty member list
+/// alone never means "unsupported".
+#[test]
+fn supported_empty_and_unsupported_empty_decode_to_distinct_states() {
+    let supported_empty = g::FrameworkSurfaceKindEntry {
+        kind: g::FrameworkSurfaceKind::Slots as i32,
+        members: vec![],
+        status: Some(supported_status()),
+    };
+    let unsupported_empty = g::FrameworkSurfaceKindEntry {
+        kind: g::FrameworkSurfaceKind::Slots as i32,
+        members: vec![],
+        status: Some(unsupported_status()),
+    };
+
+    let decoded_supported =
+        g::FrameworkSurfaceKindEntry::decode(supported_empty.encode_to_vec().as_slice())
+            .expect("supported-empty entry must decode");
+    let decoded_unsupported =
+        g::FrameworkSurfaceKindEntry::decode(unsupported_empty.encode_to_vec().as_slice())
+            .expect("unsupported-empty entry must decode");
+
+    // Both decode with empty member lists…
+    assert!(decoded_supported.members.is_empty());
+    assert!(decoded_unsupported.members.is_empty());
+    // …yet remain distinct typed states.
+    assert_ne!(decoded_supported, decoded_unsupported);
+
+    let supported_state = decoded_supported.status.expect("status must survive");
+    assert_eq!(
+        supported_state.support,
+        g::FrameworkSurfaceKindSupport::Supported as i32,
+        "SUPPORTED + empty members = supported-empty (members authoritative)",
+    );
+    assert!(supported_state.diagnostics.is_empty());
+
+    let unsupported_state = decoded_unsupported.status.expect("status must survive");
+    assert_eq!(
+        unsupported_state.support,
+        g::FrameworkSurfaceKindSupport::Unsupported as i32,
+    );
+    assert_eq!(
+        unsupported_state.exactness,
+        g::Exactness::Unsupported as i32,
+        "UNSUPPORTED carries `exactness = UNSUPPORTED`",
+    );
+    assert!(
+        !unsupported_state.diagnostics.is_empty(),
+        "UNSUPPORTED carries at least one diagnostic",
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -291,6 +509,29 @@ fn closed_taxonomies_have_the_documented_cardinalities() {
         g::OriginEdgeKind::AugmentationStitch,
     ];
     assert_eq!(origin.len(), 10);
+
+    // Framework tags: 6 — a tag value's existence is NOT a support
+    // guarantee, and new tag values land only together with their
+    // adapter's vertical (no additions ride the schema-3 bump).
+    let framework_tags: &[g::FrameworkTag] = &[
+        g::FrameworkTag::None,
+        g::FrameworkTag::Vue,
+        g::FrameworkTag::Svelte,
+        g::FrameworkTag::React,
+        g::FrameworkTag::Solid,
+        g::FrameworkTag::OpenCanonical,
+    ];
+    assert_eq!(framework_tags.len(), 6);
+
+    // Per-kind support: 4 (UNSPECIFIED / SUPPORTED / UNSUPPORTED /
+    // PARTIAL). UNSPECIFIED is invalid in server-produced v3 payloads.
+    let support: &[g::FrameworkSurfaceKindSupport] = &[
+        g::FrameworkSurfaceKindSupport::Unspecified,
+        g::FrameworkSurfaceKindSupport::Supported,
+        g::FrameworkSurfaceKindSupport::Unsupported,
+        g::FrameworkSurfaceKindSupport::Partial,
+    ];
+    assert_eq!(support.len(), 4);
 }
 
 // ---------------------------------------------------------------------------

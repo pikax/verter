@@ -22,7 +22,7 @@
 use std::sync::Arc;
 
 use crate::types::DependencyResolution;
-use crate::{FileKind, HostConfig, UpsertRequest, VerterHost};
+use crate::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 
 const SFC: &str = "<script setup lang=\"ts\">\n\
                    defineProps<{ alpha: string }>()\n\
@@ -35,7 +35,7 @@ fn upsert_sfc(host: &VerterHost, canonical: &str, aliases: Vec<String>) {
             canonical_id: Some(canonical.to_string()),
             input_id: canonical.to_string(),
             source: Arc::from(SFC),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases,
         })
         .expect("upsert succeeds");

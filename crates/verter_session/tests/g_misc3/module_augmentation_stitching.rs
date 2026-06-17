@@ -62,8 +62,10 @@ fn fixture(name: &str) -> String {
 }
 
 fn empty_external(
-) -> Arc<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource> {
-    Arc::new(verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default())
+) -> Arc<verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource> {
+    Arc::new(
+        verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(),
+    )
 }
 
 fn build_indexed_with_source(raw: &str, whole_hash: [u8; 16]) -> Arc<IndexedReady> {
@@ -106,6 +108,7 @@ fn insert_artifact_from_fixture(
         content_hash,
         parse_env_hash: [0u8; 16],
         parser_version: CURRENT_PARSER_VERSION,
+        file_language_id: FileArtifactKey::derived_file_language_id(canonical),
     };
     store.insert_artifacts(key.clone(), artifacts);
     key
@@ -134,6 +137,7 @@ fn insert_artifact_with_raw_source(
         content_hash,
         parse_env_hash: [0u8; 16],
         parser_version: CURRENT_PARSER_VERSION,
+        file_language_id: FileArtifactKey::derived_file_language_id(canonical),
     };
     store.insert_artifacts(key.clone(), artifacts);
     key
@@ -693,12 +697,10 @@ fn edit_augmenting_file_invalidates_consumer() {
         }
         fn validates(&self, fact: &FactVersionRef) -> bool {
             match fact {
-                FactVersionRef::FileWholeHash { canonical_id, hash } => {
-                    if canonical_id == &self.edited_canonical {
-                        hash == &self.new_hash
-                    } else {
-                        true
-                    }
+                FactVersionRef::FileWholeHash { canonical_id, hash }
+                    if canonical_id == &self.edited_canonical =>
+                {
+                    hash == &self.new_hash
                 }
                 // RouteSurface facts validate trivially in this test.
                 _ => true,
@@ -795,15 +797,11 @@ fn edit_unrelated_file_does_not_invalidate_consumer() {
         }
         fn validates(&self, fact: &FactVersionRef) -> bool {
             match fact {
-                FactVersionRef::FileWholeHash { canonical_id, hash } => {
+                FactVersionRef::FileWholeHash { canonical_id, hash }
                     // The augmenter's hash MUST still match (no edit to it).
-                    if canonical_id == &self.aug_canonical {
+                    if canonical_id == &self.aug_canonical => {
                         hash == &self.aug_hash
-                    } else {
-                        // Unrelated files default-accept.
-                        true
                     }
-                }
                 _ => true,
             }
         }
@@ -1157,6 +1155,7 @@ fn effective_export_set_session_view_stitches_overlay_augmenter() {
         content_hash: [99u8; 16],
         parse_env_hash: overlay_discriminator,
         parser_version: CURRENT_PARSER_VERSION,
+        file_language_id: FileArtifactKey::derived_file_language_id("/aug-overlay.ts"),
     };
     store.insert_artifacts(
         overlay_key,
@@ -1304,6 +1303,7 @@ fn session_overlay_augmenter_isolated_from_base_index() {
         content_hash: [99u8; 16],
         parse_env_hash: overlay_discriminator,
         parser_version: CURRENT_PARSER_VERSION,
+        file_language_id: FileArtifactKey::derived_file_language_id("/aug-overlay.ts"),
     };
     store.insert_artifacts(
         overlay_key,
@@ -1936,6 +1936,7 @@ fn seed_base_and_overlay_augmenters(
         content_hash: [99u8; 16],
         parse_env_hash: overlay_discriminator,
         parser_version: CURRENT_PARSER_VERSION,
+        file_language_id: FileArtifactKey::derived_file_language_id("/aug-overlay.ts"),
     };
     store.insert_artifacts(
         overlay_key,
@@ -2465,6 +2466,9 @@ fn relative_augmenter_resolver_runs_off_artifacts_guard() {
                 },
                 parse_env_hash: [0u8; 16],
                 parser_version: 1,
+                file_language_id: FileArtifactKey::derived_file_language_id(
+                    format!("/dir/reentrant-{n}-{j}.ts").as_str(),
+                ),
             };
             store.insert_artifacts(key, Arc::clone(&reentrant_payload));
         }

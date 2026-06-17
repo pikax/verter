@@ -571,11 +571,11 @@ fn pre_scan_vmodel_handler_merge(element: &ElementNode, source: &str) -> Vec<(us
     targets
 }
 
-/// Test-only instrumentation: counts how many times the duplicate-handler
-/// grouping maps are actually built. The merge gate is meant to skip that work
-/// whenever fewer than two candidate handlers exist (a collision is impossible),
-/// and this counter lets a test assert the gate directly rather than only
-/// through emitted shape. Compiled out of production builds.
+// Test-only instrumentation: counts how many times the duplicate-handler
+// grouping maps are actually built. The merge gate is meant to skip that work
+// whenever fewer than two candidate handlers exist (a collision is impossible),
+// and this counter lets a test assert the gate directly rather than only
+// through emitted shape. Compiled out of production builds.
 #[cfg(test)]
 thread_local! {
     static EVENT_MERGE_FULL_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };

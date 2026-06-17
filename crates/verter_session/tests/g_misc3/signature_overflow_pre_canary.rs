@@ -93,7 +93,7 @@ fn pre_canary_signature_overflow_count_is_zero_on_basic_resolver_flow() {
 #[test]
 fn pre_canary_signature_overflow_count_is_zero_under_steady_state_loop() {
     use std::sync::Arc;
-    use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
+    use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 
     let host = VerterHost::new_standalone(HostConfig::default());
 
@@ -102,7 +102,7 @@ fn pre_canary_signature_overflow_count_is_zero_under_steady_state_loop() {
         canonical_id: None,
         input_id: "/w/types.ts".to_string(),
         source: Arc::from("export interface Props { a: string; b: number }"),
-        file_kind: FileKind::NonSfc,
+        file_language: FileLanguage::script_ts(),
         aliases: Vec::new(),
     });
     for i in 0..8 {
@@ -118,7 +118,7 @@ fn pre_canary_signature_overflow_count_is_zero_under_steady_state_loop() {
             canonical_id: None,
             input_id: name,
             source: Arc::from(body.as_str()),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: Vec::new(),
         });
     }

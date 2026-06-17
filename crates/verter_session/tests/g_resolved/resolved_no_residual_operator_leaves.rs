@@ -26,7 +26,7 @@
 
 use std::sync::Arc;
 
-use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
 use verter_semantic::analysis::component_meta::ComponentMetaAnalysis;
@@ -60,21 +60,21 @@ fn host_with_fixtures() -> Arc<VerterHost> {
         canonical_id: Some("/Helper.ts".into()),
         input_id: "/Helper.ts".into(),
         source: Arc::from(FIXTURE_HELPER),
-        file_kind: FileKind::NonSfc,
+        file_language: FileLanguage::script_ts(),
         aliases: vec![],
     });
     let _ = host.upsert(UpsertRequest {
         canonical_id: Some("/Avatar.vue".into()),
         input_id: "/Avatar.vue".into(),
         source: Arc::from(FIXTURE_AVATAR),
-        file_kind: FileKind::VueSfc,
+        file_language: FileLanguage::vue(),
         aliases: vec![],
     });
     let _ = host.upsert(UpsertRequest {
         canonical_id: Some("/Card.vue".into()),
         input_id: "/Card.vue".into(),
         source: Arc::from(FIXTURE_CARD),
-        file_kind: FileKind::VueSfc,
+        file_language: FileLanguage::vue(),
         aliases: vec![],
     });
     host.set_import_dependencies(

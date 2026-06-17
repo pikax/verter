@@ -26,6 +26,7 @@ pub mod component_meta;
 pub mod decl_headers;
 mod exports;
 pub mod file_usage;
+pub mod framework_facts;
 pub mod html_intrinsics;
 mod imports;
 pub mod jsdoc;
@@ -56,6 +57,7 @@ mod type_eval_build_tests;
 pub use build::{
     build_export_signatures, build_export_signatures_from_program, build_script_analysis,
     build_script_analysis_with_scope, build_script_analysis_with_scope_from_program,
+    build_script_analysis_with_scope_from_program_with_providers,
 };
 pub use classify::{classify_store_api, is_store_composable_call};
 pub use classify::{classify_vue_api, is_lifecycle_api, is_reactivity_api, is_watcher_api};

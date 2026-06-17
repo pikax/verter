@@ -1,5 +1,5 @@
 use super::script::{generate_tsc_output_with_options, TscGenOptions, TscMode};
-use crate::utils::oxc::vue::resolve_type::resolve_external_type;
+use crate::utils::oxc::script::type_surface::resolve_external_type;
 use oxc_allocator::Allocator;
 use oxc_sourcemap::SourceMap;
 use rustc_hash::FxHashMap;
@@ -2746,7 +2746,7 @@ export interface ImportedEmits {
 
     // Resolve external types
     let alloc = Allocator::default();
-    let resolved = crate::utils::oxc::vue::resolve_type::resolve_external_type(
+    let resolved = crate::utils::oxc::script::type_surface::resolve_external_type(
         "ImportedEmits",
         dep_source,
         &alloc,
@@ -2809,7 +2809,7 @@ export interface ImportedProps {
 
     // Resolve external types
     let alloc = Allocator::default();
-    let resolved = crate::utils::oxc::vue::resolve_type::resolve_external_type(
+    let resolved = crate::utils::oxc::script::type_surface::resolve_external_type(
         "ImportedProps",
         dep_source,
         &alloc,

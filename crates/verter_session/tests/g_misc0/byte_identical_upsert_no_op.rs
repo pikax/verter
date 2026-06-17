@@ -19,7 +19,7 @@
 
 use std::sync::Arc;
 
-use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{HostConfig, UpsertRequest, VerterHost};
 
 const SFC_SOURCE: &str = r#"<script setup lang="ts">
 defineProps<{ alpha: string }>()
@@ -36,7 +36,9 @@ fn build_host_and_seed() -> Arc<VerterHost> {
             canonical_id: Some(CANONICAL.to_string()),
             input_id: CANONICAL.to_string(),
             source: Arc::from(SFC_SOURCE),
-            file_kind: FileKind::from_path(CANONICAL),
+            file_language: verter_session::LanguageRegistry::global()
+                .classify_static(CANONICAL)
+                .static_resolution(),
             aliases: Vec::new(),
         })
         .expect("initial seed upsert succeeds");
@@ -52,7 +54,9 @@ fn re_upsert_byte_identical(host: &VerterHost) {
             canonical_id: Some(CANONICAL.to_string()),
             input_id: CANONICAL.to_string(),
             source: Arc::from(SFC_SOURCE),
-            file_kind: FileKind::from_path(CANONICAL),
+            file_language: verter_session::LanguageRegistry::global()
+                .classify_static(CANONICAL)
+                .static_resolution(),
             aliases: Vec::new(),
         })
         .expect("re-upsert succeeds");
@@ -206,7 +210,9 @@ defineProps<{ beta: number }>()
 <template><div>{{ beta }}</div></template>
 "#,
             ),
-            file_kind: FileKind::from_path(CANONICAL),
+            file_language: verter_session::LanguageRegistry::global()
+                .classify_static(CANONICAL)
+                .static_resolution(),
             aliases: Vec::new(),
         })
         .expect("structural-change upsert succeeds");

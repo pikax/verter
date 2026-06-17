@@ -32,7 +32,7 @@ use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Mutex;
 
 use verter_session::component_meta_host::ComponentMetaHost;
-use verter_session::{CompileErrorPolicy, FileKind, HostConfig, UpsertRequest};
+use verter_session::{CompileErrorPolicy, HostConfig, UpsertRequest};
 
 /// Serialise the test so the per-host provenance counter deltas are
 /// stable. Mirrors `component_meta_result_eager_invalidation_defeating`.
@@ -112,7 +112,9 @@ fn admit_threads_cross_file_dep_signature_for_imported_helper() {
              }\n\
              export type Picked = Pick<Big, 'b'>;\n",
         ),
-        file_kind: FileKind::from_path("/src/helper.ts"),
+        file_language: verter_session::LanguageRegistry::global()
+            .classify_static("/src/helper.ts")
+            .static_resolution(),
         aliases: Vec::new(),
     };
     let _ = mh.host().upsert(req).expect("helper.ts re-upsert");

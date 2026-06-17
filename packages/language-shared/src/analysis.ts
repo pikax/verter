@@ -453,7 +453,8 @@ export interface FileAnalysisSnapshot {
 
 export interface ProjectOverviewFile {
   path: string;
-  kind: "vue" | "ts" | "js";
+  /** `"component"` is any framework CARRIER file (`.vue`, `.svelte`, …). */
+  kind: "component" | "ts" | "js";
 }
 
 export interface ProjectOverviewComponentEdge {
@@ -462,7 +463,8 @@ export interface ProjectOverviewComponentEdge {
 }
 
 export interface ProjectOverviewStats {
-  totalVueFiles: number;
+  /** Count of framework CARRIER component files (`.vue`, `.svelte`, …). */
+  totalComponentFiles: number;
   totalComponents: number;
   totalProvideKeys: number;
   totalInjectKeys: number;

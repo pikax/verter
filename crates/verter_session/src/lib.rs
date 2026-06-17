@@ -145,6 +145,7 @@ pub mod cross_file;
 pub(crate) mod decl_body_memo;
 pub(crate) mod decl_lowering;
 pub mod fact_emission;
+pub mod framework;
 // `fact_signature_helpers` is `pub(crate)`: the module's internals are
 // implementation detail. The only externally-needed type is
 // `ReadSetSignature` — the return type of the public inspector
@@ -169,6 +170,9 @@ pub mod resolved_import_facts_producer;
 // single-file `upsert` + `get_virtual_file`.
 #[cfg(test)]
 mod cache_identity_invariants_tests;
+// The B8a Svelte vertical: parse + shallow + synth + api-content behaviour.
+#[cfg(test)]
+mod svelte_vertical_tests;
 // Content-pinned artifact-read discriminators.
 #[cfg(test)]
 mod artifact_reads_pinned_tests;
@@ -333,6 +337,10 @@ pub use host_audit_runtime::{
     ActiveRegistration, AuditRequestRegistration, AuditRuntimeSnapshot, HostAuditRuntime,
 };
 pub use types::*;
+pub use verter_language::{
+    CapabilityId, FileLanguage, FrameworkAdapterId, GatedCandidate, LanguageId, LanguageRegistry,
+    LanguageRow, ScriptSourceType, StaticClassification, SVELTE_RUNE_MODULE_LANGUAGE_ID,
+};
 
 // Per-call-site instrumentation accessors. Production-on
 // (the counter map is bumped on every `HostStoreView::from_host`
@@ -354,7 +362,7 @@ pub use resolver_store::{
 // so the batch regression gate measures only its own host's overlay COWs.
 
 // Re-export for the LSP: standalone @verter/types .d.ts content.
-pub use verter_compiler::utils::oxc::vue::resolve_type::ResolvedMemberVisibility;
+pub use verter_compiler::utils::oxc::script::type_surface::ResolvedMemberVisibility;
 pub use verter_compiler::VERTER_TYPES_STANDALONE_DTS;
 
 // Re-export CompileTarget so downstream crates (LSP, MCP, FFI) can use it
@@ -384,6 +392,12 @@ use shared::Shared;
 pub struct VerterHost {
     pub(crate) instance_id: u64,
     pub(crate) config: HostConfig,
+    /// The single host-level language classification authority:
+    /// composes the static `LanguageRegistry` with the project
+    /// capability snapshot (empty until a capability producer lands).
+    /// Session-level consumers classify through this, never through
+    /// ad-hoc extension checks.
+    pub(crate) language_classifier: crate::framework::HostLanguageClassifier,
     /// VFS workspace providing file reads, import resolution, and edge recording.
     /// Wrapped in Arc<RwLock> so the scheduler's SourceLoader can share the same
     /// lock and always read through the latest workspace after `set_workspace()`.
@@ -633,13 +647,21 @@ pub struct VerterHost {
     /// `typeinfo::scratch_cache::DEFAULT_CAPACITY` (64).
     pub(crate) typeinfo_scratch_cache:
         parking_lot::Mutex<crate::typeinfo::scratch_cache::ScratchCache>,
-    /// Host-owned cache of `.vue` SFC macro-surface normalized DTOs
-    /// (the typeinfo Vue adapter's shallow-metadata home). Materialized
-    /// once per `(canonical, content, macro, level)` per the Shallow File
-    /// Processing Core Invariant. See
-    /// `typeinfo::adapters::vue::store::VueShallowMetadataStore`.
-    pub(crate) vue_shallow_metadata_store:
-        crate::typeinfo::adapters::vue::store::VueShallowMetadataStore,
+    /// The framework adapter registry — the single hub binding each
+    /// framework's descriptor, carrier leg, synthesis leg, public-API
+    /// projector, and surface-resolution disposition. Built ONCE at host
+    /// construction and immutable thereafter; the framework-surface executor,
+    /// the neutral synth injection, and the public-API projection all dispatch
+    /// through it. See `framework::registry::FrameworkAdapterRegistry`.
+    pub(crate) framework_registry: std::sync::Arc<crate::framework::FrameworkAdapterRegistry>,
+    /// Host-owned framework script-fact caches — the resolved-validation half
+    /// of the script-fact seam. The content-addressed candidate store + the
+    /// resolved-fact store the registry's active providers write through.
+    /// Empty for every adapter in this program (no production provider
+    /// registers; the fixture provider exercises the path). See
+    /// `framework::script_facts::FrameworkScriptCaches`.
+    pub(crate) framework_script_caches:
+        std::sync::Arc<crate::framework::script_facts::FrameworkScriptCaches>,
     /// Host-owned CPU pool for every host batch API's outer coordinator
     /// — both `compile_many` and the component-meta batch fan their
     /// outer wait out on it through the host batch coordinator. Distinct
@@ -757,3 +779,11 @@ impl std::fmt::Debug for VerterHost {
 #[cfg(test)]
 #[path = "lib_tests.rs"]
 mod lib_tests;
+
+#[cfg(test)]
+#[path = "framework_parse_characterization_tests.rs"]
+mod framework_parse_characterization_tests;
+
+#[cfg(test)]
+#[path = "plain_script_dialect_tests.rs"]
+mod plain_script_dialect_tests;

@@ -805,7 +805,7 @@ impl VerterHost {
                 target: verter_scheduler::stage::TargetStage::Analysis,
                 priority: verter_scheduler::stage::Priority::Interactive,
                 source: None,
-                file_kind: None,
+                file_language: None,
                 request_context: verter_scheduler::request_context::current_context(),
             });
 

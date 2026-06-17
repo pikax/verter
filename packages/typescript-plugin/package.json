@@ -32,7 +32,8 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@verter/native": "workspace:^"
+    "@verter/native": "workspace:^",
+    "@verter/svelte-jsx": "workspace:^"
   },
   "devDependencies": {
     "@types/node": "^25.9.1",

@@ -181,14 +181,16 @@ impl ComponentMetaRequestHost for VerterHost {
         component_meta_trace_custom!(
             "capture_component_meta_eval_state",
             format!(
-                "owner={} source_len={} has_cached_parse={} whole_hash={whole_hash:?}",
+                "owner={} source_len={} has_parse_artifact={} whole_hash={whole_hash:?}",
                 canonical,
                 facts.raw_source.len(),
-                facts.cached_parse.is_some(),
+                facts.framework_parse.is_some(),
             ),
         );
-        let owner_eval_source =
-            VerterHost::build_eval_script_source(&facts.raw_source, facts.cached_parse.as_deref());
+        let owner_eval_source = VerterHost::build_eval_script_source(
+            &facts.raw_source,
+            facts.framework_parse.as_deref(),
+        );
         let direct_import_started = audit_enabled.then(Instant::now);
         let direct_dependency_candidates =
             self.cache_dependency_candidates_from_snapshot(canonical, &snapshot);
@@ -594,8 +596,10 @@ impl<'a> ComponentMetaRequestHost for SessionRequestHost<'a> {
         let store_read_ms = store_read_started
             .map(|started| started.elapsed().as_secs_f64() * 1000.0)
             .unwrap_or(0.0);
-        let owner_eval_source =
-            VerterHost::build_eval_script_source(&facts.raw_source, facts.cached_parse.as_deref());
+        let owner_eval_source = VerterHost::build_eval_script_source(
+            &facts.raw_source,
+            facts.framework_parse.as_deref(),
+        );
         let direct_import_started = audit_enabled.then(Instant::now);
         let direct_dependency_candidates =
             host.cache_dependency_candidates_from_snapshot(canonical, &snapshot);

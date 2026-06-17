@@ -143,7 +143,7 @@ pub fn family_key_size_for_tests() -> usize {
 ///
 /// The [`named_type_index`](Self::named_type_index) `DashMap` is a secondary
 /// identity table that lets the parser's
-/// [`NamedTypeCache`](verter_compiler::utils::oxc::vue::resolve_type::cache_keys::NamedTypeCache)
+/// [`NamedTypeCache`](verter_compiler::utils::oxc::vue::named_type_keys::NamedTypeCache)
 /// adapter hit the shared graph in refcount-only time. Reads go
 /// `key → SemanticNodeId → SemanticNodeData::VueMacroElements(arc) →
 /// arc.clone()`: the hot path pays one `DashMap::get` + one arena read +
@@ -1493,7 +1493,7 @@ impl SemanticGraphStore {
     pub fn insert_resolved_named_type(
         &self,
         key: HostResolvedNamedTypeKey,
-        elements: Arc<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>,
+        elements: Arc<verter_compiler::utils::oxc::script::type_surface::ResolvedElements>,
         observed_named_type_generation: u64,
     ) -> Option<SemanticNodeId> {
         // Cheap pre-filter — reject the common straggler without interning
@@ -1530,7 +1530,7 @@ impl SemanticGraphStore {
     pub fn get_resolved_named_type(
         &self,
         key: &HostResolvedNamedTypeKey,
-    ) -> Option<Arc<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>> {
+    ) -> Option<Arc<verter_compiler::utils::oxc::script::type_surface::ResolvedElements>> {
         let node_id = self.named_type_index.get(key)?;
         match &*self.arena.get(node_id)? {
             SemanticNodeData::VueMacroElements(arc) => Some(Arc::clone(arc)),

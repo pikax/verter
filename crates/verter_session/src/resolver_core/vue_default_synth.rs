@@ -33,8 +33,6 @@ use verter_type_expr::{ObjectExpr, ObjectMember, ObjectProperty, TypeExpr};
 
 use crate::decl_body_memo::LoweredValueDecl;
 
-use super::shallow_file_state::ShallowFileState;
-
 /// Property name on the synthesised SFC instance that carries the
 /// `defineProps<T>()` shape.
 pub const VUE_INSTANCE_PROPS_MEMBER: &str = "$props";
@@ -132,7 +130,7 @@ pub fn synthesise_vue_default_value_symbol(macros: &[AnalyzedMacro]) -> Option<L
     // a re-lowered declaration. It is the same `LoweredValueDecl` body carrier
     // the lazy path produces; the caller stores it in the dedicated
     // synthesised-body map and derives the header symbol (which carries the
-    // `is_synthesised_vue_default` provenance flag) from it.
+    // `is_synthesised_component_default` provenance flag) from it.
     Some(LoweredValueDecl {
         kind: ValueDeclKind::Class,
         type_annotation: None,
@@ -147,57 +145,25 @@ pub fn synthesise_vue_default_value_symbol(macros: &[AnalyzedMacro]) -> Option<L
     })
 }
 
-/// URI prefix typeinfo scratch files use. Synthesis fires for
-/// these so a scratch that inlines a `.vue` scope's eval-source
-/// (see [`super::super::typeinfo::evaluate_type_expression`])
-/// picks up the synthesised `default` from the inlined macros.
+/// URI prefix typeinfo scratch files use. A scratch that inlines a
+/// `.vue` scope's eval-source (see
+/// [`super::super::typeinfo::evaluate_type_expression`]) carries the
+/// inlined macros, so the synthesizing framework's leg fabricates the
+/// `default` from them — even though the scratch classifies by its own
+/// `.ts` suffix.
 const TYPEINFO_SCRATCH_URI_PREFIX: &str = "verter://typeinfo/";
 
-/// Whether `canonical_id` is a candidate for `default`-symbol
-/// synthesis — i.e. a `.vue` SFC or a typeinfo scratch URI that
-/// inlines a `.vue` scope's eval-source. Plain `.ts` / `.js` files
-/// that happen to call something locally named `defineProps` do
-/// NOT qualify; only the two known producers of SFC-style macros
-/// flow through this seam.
+/// Whether `canonical_id` is a typeinfo evaluation scratch surface.
 ///
-/// This is INJECTION-ELIGIBILITY ONLY: it bounds which canonicals
-/// [`inject_vue_default_into_shallow_state`] is allowed to fabricate a
-/// synthesized `default` on. It is NOT a consumer proof — downstream
-/// consumers prove a resolved `default` IS the synthesized public instance via
-/// the direct structural fact
-/// [`ShallowValueSymbol::is_synthesised_vue_default`](super::shallow_file_state::ShallowValueSymbol::is_synthesised_vue_default),
-/// so a `.vue` carrying a USERLAND `export default` (eligible here, but synthesis
-/// skipped because the userland default already exists) is never mistreated as
-/// the synthesized public instance.
-fn is_synthesis_candidate(canonical_id: &str) -> bool {
-    canonical_id.ends_with(".vue") || canonical_id.starts_with(TYPEINFO_SCRATCH_URI_PREFIX)
-}
-
-/// Inject the synthesised `default` value symbol into `state` when
-/// `macros` contributes one. No-op when synthesis returns `None`
-/// (no type-based macros), when `state` already carries a userland
-/// `default` value symbol (userland always wins), or when
-/// `canonical_id` is not a recognised SFC / scratch surface
-/// ([`is_synthesis_candidate`]).
-///
-/// This is the single architectural seam between the shallow-state
-/// builder and the Vue-default synthesis policy. Both `.vue`
-/// canonical files and typeinfo scratch files that inline a
-/// `.vue` scope's eval-source flow through it.
-pub fn inject_vue_default_into_shallow_state(
-    canonical_id: &str,
-    state: &mut ShallowFileState,
-    macros: &[AnalyzedMacro],
-) {
-    if !is_synthesis_candidate(canonical_id) {
-        return;
-    }
-    if state.has_value_symbol("default") {
-        return;
-    }
-    if let Some(default_body) = synthesise_vue_default_value_symbol(macros) {
-        state.insert_synthesised_value_default("default", default_body);
-    }
+/// A typeinfo scratch is a host-internal evaluation file that inlines an
+/// arbitrary scope's eval-source as a prelude; it classifies by its `.ts`
+/// suffix yet must synthesize the inlined scope's `default`. The neutral
+/// synth-injection selector
+/// ([`crate::VerterHost::inject_component_default_into_shallow_state`])
+/// routes a scratch to the synthesizing framework's leg.
+#[must_use]
+pub fn is_typeinfo_scratch(canonical_id: &str) -> bool {
+    canonical_id.starts_with(TYPEINFO_SCRATCH_URI_PREFIX)
 }
 
 #[cfg(test)]
@@ -322,17 +288,15 @@ mod tests {
     }
 
     #[test]
-    fn is_synthesis_candidate_accepts_vue_files_and_typeinfo_scratches() {
-        assert!(is_synthesis_candidate("/workspace/src/App.vue"));
-        assert!(is_synthesis_candidate("verter://typeinfo/abc123.ts"));
-    }
-
-    #[test]
-    fn is_synthesis_candidate_rejects_plain_ts_and_js_files() {
-        assert!(!is_synthesis_candidate("/workspace/src/types.ts"));
-        assert!(!is_synthesis_candidate("/workspace/src/runtime.js"));
-        assert!(!is_synthesis_candidate("/workspace/src/decl.d.ts"));
-        assert!(!is_synthesis_candidate(""));
+    fn is_typeinfo_scratch_accepts_only_the_scratch_prefix() {
+        // The scratch surface is recognised by its URI prefix; a `.vue` file is
+        // NOT a scratch (it routes to the synth leg by its framework
+        // classification, not by this predicate).
+        assert!(is_typeinfo_scratch("verter://typeinfo/abc123.ts"));
+        assert!(!is_typeinfo_scratch("/workspace/src/App.vue"));
+        assert!(!is_typeinfo_scratch("/workspace/src/types.ts"));
+        assert!(!is_typeinfo_scratch("/workspace/src/runtime.js"));
+        assert!(!is_typeinfo_scratch(""));
     }
 
     #[test]

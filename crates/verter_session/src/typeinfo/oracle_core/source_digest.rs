@@ -21,13 +21,13 @@ use oxc_ast::ast::{Declaration, Statement};
 use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType};
 use serde_json::{json, Value};
-use verter_compiler::utils::oxc::vue::raw_surface::{
+use verter_compiler::utils::oxc::script::raw_surface::{
     RawDeclKind, RawKey, RawMemberKind, RawSourceSurface, SymbolSpace as RawSymbolSpace,
     TupleElementShape,
 };
 
 use crate::resolver_core::{CanonicalCompletionOverlay, HostResolverContext};
-use crate::types::{FileKind, HostConfig, UpsertRequest};
+use crate::types::{HostConfig, UpsertRequest};
 use crate::VerterHost;
 
 use super::admission::{SourceContributor, SourceWalkResult};
@@ -90,7 +90,9 @@ pub(crate) fn build_source_host(spec: &QuerySpec) -> Arc<VerterHost> {
             canonical_id: Some(f.path.to_string()),
             input_id: f.path.to_string(),
             source: Arc::from(f.source),
-            file_kind: FileKind::from_path(f.path),
+            file_language: verter_language::LanguageRegistry::global()
+                .classify_static(f.path)
+                .static_resolution(),
             aliases: Vec::new(),
         });
     }

@@ -433,7 +433,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // `default` ONLY): when the resolved value root is EXACTLY the
         // synthesized `.vue` public-instance `default` — `root_identity`'s symbol
         // is `default` AND the resolved canonical's shallow `default` value
-        // symbol carries the `is_synthesised_vue_default` provenance flag — the
+        // symbol carries the `is_synthesised_component_default` provenance flag — the
         // construct-signature RETURN must be produced by the keyed
         // `Instantiate(.vue default)` query, not by re-lowering the synthesized
         // default's first signature `return_type` here. This keeps `typeof
@@ -452,7 +452,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         indexed
                             .shallow_state
                             .value_symbol("default")
-                            .filter(|sym| sym.is_synthesised_vue_default)
+                            .filter(|sym| sym.is_synthesised_component_default)
                             .map(|_| indexed.whole_hash)
                     })
             } else {
@@ -818,12 +818,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // PROVENANCE gate (prefer-direct-structural-facts-over-heuristics): only
         // the SYNTHESIZED `.vue` public-instance `default` symbol drives this
         // branch. A USERLAND `export default` in a `.vue`'s `<script>` (synthesis
-        // skipped, userland default present) carries `is_synthesised_vue_default
+        // skipped, userland default present) carries `is_synthesised_component_default
         // == false` — even when its value type superficially looks like an
         // instance (`(): { $props: ... } => ...`) — so it falls through to the
         // ordinary prepared-decl path instead of being mistreated as the public
         // instance.
-        if !default_symbol.is_synthesised_vue_default {
+        if !default_symbol.is_synthesised_component_default {
             return None;
         }
         let default_body = indexed.shallow_state.value_decl("default")?;
@@ -1930,7 +1930,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // Without this branch the query would fall through to
         // `resolve_prepared_type_decl` below (a `.vue` has no prepared `default`
         // TYPE decl) and miss. The branch is gated on the STRUCTURAL PROVENANCE
-        // flag `is_synthesised_vue_default` of the resolved `default` value
+        // flag `is_synthesised_component_default` of the resolved `default` value
         // symbol (NOT the file-classifier `is_synthesis_candidate`), so a
         // userland `export default` — in a `.ts` file OR in a `.vue`'s
         // `<script>` block — is never hijacked even when its value type looks
@@ -1952,7 +1952,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     indexed
                         .shallow_state
                         .value_symbol("default")
-                        .map(|sym| sym.is_synthesised_vue_default)
+                        .map(|sym| sym.is_synthesised_component_default)
                 })
                 .unwrap_or(false)
         {
@@ -7414,7 +7414,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// Hot-path reads go through
     /// [`SemanticGraphStore::get_resolved_named_type`](crate::semantic_query_memo::SemanticGraphStore::get_resolved_named_type)
     /// directly from the parser's
-    /// [`NamedTypeCache`](verter_compiler::utils::oxc::vue::resolve_type::cache_keys::NamedTypeCache)
+    /// [`NamedTypeCache`](verter_compiler::utils::oxc::vue::named_type_keys::NamedTypeCache)
     /// adapter — the formal `execute` path stays available as an entry
     /// point for callers that want to check presence through the shared
     /// query API but must not be relied on in the refcount-only hot

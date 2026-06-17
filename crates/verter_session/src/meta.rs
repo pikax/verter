@@ -25,7 +25,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::session_runtime::SessionRuntime;
-use crate::types::{FileKind, UpsertRequest};
+use crate::types::UpsertRequest;
 use crate::VerterHost;
 
 // ---------------------------------------------------------------------------
@@ -220,7 +220,7 @@ impl MetaProject {
             canonical_id: Some(canonical_id.to_string()),
             input_id: canonical_id.to_string(),
             source: Arc::from(source),
-            file_kind: FileKind::from_path(canonical_id),
+            file_language: self.host.language_classifier().classify(canonical_id),
             aliases: Vec::new(),
         };
         let _ = self

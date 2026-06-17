@@ -29,3 +29,17 @@ fn workspace_accessor_visibility() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/compile-fail/workspace_accessor_visibility.rs");
 }
+
+/// API-surface half of `carrier_access_token_minted_only_in_verter_language`
+/// (D-ba): an out-of-crate `CarrierAccessToken` struct literal must fail
+/// to compile — the `_private: ()` field is the in-language forging
+/// barrier; the static guard is the cross-crate enforcement authority.
+#[test]
+#[cfg_attr(
+    not(feature = "compile-fail"),
+    ignore = "run with --features compile-fail (CI)"
+)]
+fn carrier_access_token_not_constructible_outside_verter_language() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/compile-fail/carrier_access_token_struct_literal.rs");
+}

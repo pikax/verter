@@ -68,6 +68,36 @@ const ENTRY_STEM = "corpus_audit_tests";
 const OVERRIDES_SUBDIR = "overrides";
 
 // ---------------------------------------------------------------------------
+// Corpus configuration table
+// ---------------------------------------------------------------------------
+//
+// One row per framework corpus the generator sweeps. ONE idempotent
+// script sweeps every corpus, so every later framework vertical adds a
+// ROW here instead of forking a parallel generator (no generator
+// divergence). Each row declares:
+//
+//   - frameworkId: the framework adapter id (drives the request shape).
+//   - fileExtension: the carrier file extension the sweep discovers.
+//   - requestShape: how the generated test resolves each component
+//     (`componentMeta` drives `AuditedRequest::...resolve_component_meta`).
+//   - testSubdir / fixturesSubdir / entryStem: the output layout.
+//
+// At the compiler scaffold's landing the ONLY corpus is the vendored Vue
+// fixture set, so the table has a single row that reproduces the
+// historical single-corpus output byte-for-byte. The parity +
+// idempotency tests pin that re-running the generator produces no diff.
+const CORPUS_CONFIGS = [
+  {
+    frameworkId: "vue",
+    fileExtension: ".vue",
+    requestShape: "componentMeta",
+    testSubdir: TEST_SUBDIR,
+    fixturesSubdir: FIXTURES_SUBDIR,
+    entryStem: ENTRY_STEM,
+  },
+];
+
+// ---------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------
 
@@ -96,19 +126,19 @@ function parseArgs(argv) {
 // Discovery — recursive, sorted
 // ---------------------------------------------------------------------------
 
-function discoverVueFiles(root) {
+function discoverComponentFiles(root, fileExtension) {
   const found = [];
   const stack = [root];
   while (stack.length > 0) {
     const dir = stack.pop();
     const entries = readdirSync(dir, { withFileTypes: true });
     for (const e of entries) {
-      // README.md / LICENSE.md / overrides/ etc. are not Vue
+      // README.md / LICENSE.md / overrides/ etc. are not carrier
       // fixtures.
       if (e.name === OVERRIDES_SUBDIR) continue;
       const p = join(dir, e.name);
       if (e.isDirectory()) stack.push(p);
-      else if (e.isFile() && e.name.endsWith(".vue")) found.push(p);
+      else if (e.isFile() && e.name.endsWith(fileExtension)) found.push(p);
     }
   }
   return found.sort();
@@ -119,9 +149,10 @@ function discoverVueFiles(root) {
 // ---------------------------------------------------------------------------
 
 /** Turn a file path into a snake_case Rust identifier slug. */
-function slugFor(absPath) {
-  const rel = relative(COMPONENTS_ROOT, absPath).replace(/\\/g, "/");
-  const noExt = rel.replace(/\.vue$/, "");
+function slugFor(absPath, componentsRoot, fileExtension) {
+  const rel = relative(componentsRoot, absPath).replace(/\\/g, "/");
+  const escExt = fileExtension.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const noExt = rel.replace(new RegExp(`${escExt}$`), "");
   return noExt
     .replace(/[\/-]/g, "_")
     .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
@@ -129,16 +160,17 @@ function slugFor(absPath) {
 }
 
 /** Canonical id used inside the AuditedRequest harness. */
-function canonicalForComponent(absPath) {
-  const name = relative(COMPONENTS_ROOT, absPath).replace(/\\/g, "/");
+function canonicalForComponent(absPath, componentsRoot) {
+  const name = relative(componentsRoot, absPath).replace(/\\/g, "/");
   return `/${name}`;
 }
 
 /** Render the per-component test file body. */
-function renderTestBody(absPath) {
-  const slug = slugFor(absPath);
-  const canonical = canonicalForComponent(absPath);
-  const relToCrateTestDir = relative(resolve(DEFAULT_OUTPUT_DIR, TEST_SUBDIR), absPath).replace(
+function renderTestBody(absPath, config) {
+  const { componentsRoot, fileExtension, testSubdir } = config;
+  const slug = slugFor(absPath, componentsRoot, fileExtension);
+  const canonical = canonicalForComponent(absPath, componentsRoot);
+  const relToCrateTestDir = relative(resolve(DEFAULT_OUTPUT_DIR, testSubdir), absPath).replace(
     /\\/g,
     "/",
   );
@@ -206,7 +238,7 @@ fn corpus_audit_${slug}_produces_audit_record_or_documents_skip() {
 // mod.rs generator
 // ---------------------------------------------------------------------------
 
-function renderEntryPointRs(testSlugs) {
+function renderEntryPointRs(testSlugs, testSubdir) {
   // The cargo integration test target is `tests/corpus_audit_tests.rs`.
   // Each `mod` line pulls in one per-component test file via
   // `#[path = ...]` — matching the sibling `component_meta_audit.rs`
@@ -220,7 +252,7 @@ function renderEntryPointRs(testSlugs) {
     "",
   ];
   for (const slug of testSlugs) {
-    lines.push(`#[path = "component_meta_audit_corpus/${slug}.rs"]`);
+    lines.push(`#[path = "${testSubdir}/${slug}.rs"]`);
     lines.push(`mod ${slug};`);
   }
   lines.push("");
@@ -260,18 +292,28 @@ assertions that the generator cannot derive automatically.
 // Main
 // ---------------------------------------------------------------------------
 
-function main() {
-  const config = parseArgs(process.argv.slice(2));
+/** Sweep ONE corpus config: discover its fixtures, write per-component
+ *  test files into its subdir, and write its entry point. Returns the
+ *  number of fixtures discovered. */
+function sweepCorpus(corpus, cliConfig) {
+  const componentsRoot = resolve(DEFAULT_OUTPUT_DIR, corpus.testSubdir, corpus.fixturesSubdir);
+  const config = {
+    componentsRoot,
+    fileExtension: corpus.fileExtension,
+    requestShape: corpus.requestShape,
+    testSubdir: corpus.testSubdir,
+  };
 
-  const vueFiles = discoverVueFiles(COMPONENTS_ROOT);
-  if (vueFiles.length === 0) {
+  const componentFiles = discoverComponentFiles(componentsRoot, corpus.fileExtension);
+  if (componentFiles.length === 0) {
     console.error(
-      `No .vue files found under ${COMPONENTS_ROOT}. Is the integration-tests submodule present?`,
+      `No ${corpus.fileExtension} files found under ${componentsRoot}. ` +
+        `Is the ${corpus.frameworkId} fixture set vendored?`,
     );
     process.exit(1);
   }
 
-  const testDir = resolve(config.outputDir, TEST_SUBDIR);
+  const testDir = resolve(cliConfig.outputDir, corpus.testSubdir);
   const overridesDir = resolve(testDir, OVERRIDES_SUBDIR);
 
   // Clean regeneration — remove any prior generated files, preserve
@@ -279,12 +321,12 @@ function main() {
   // harness.rs is the cross-component regression capture harness that
   // lives alongside the generated per-component tests; it is not
   // generator output and must survive regeneration.
-  if (!config.dryRun) {
+  if (!cliConfig.dryRun) {
     try {
       for (const entry of readdirSync(testDir)) {
         if (
           entry === OVERRIDES_SUBDIR ||
-          entry === FIXTURES_SUBDIR ||
+          entry === corpus.fixturesSubdir ||
           entry === "README.md" ||
           entry === "harness.rs"
         ) {
@@ -313,31 +355,47 @@ function main() {
     })(),
   );
 
-  for (const vue of vueFiles) {
-    const slug = slugFor(vue);
+  for (const component of componentFiles) {
+    const slug = slugFor(component, componentsRoot, corpus.fileExtension);
     slugs.push(slug);
     if (overrideSlugs.has(slug)) continue; // override wins
-    const body = renderTestBody(vue);
+    const body = renderTestBody(component, config);
     writeFileSync(resolve(testDir, `${slug}.rs`), body);
   }
 
   // Add overrides to the module graph even when their file is not
-  // generated from the .vue scan — they're authored pins.
+  // generated from the component scan — they're authored pins.
   const allSlugs = Array.from(new Set([...slugs, ...overrideSlugs])).sort();
 
-  // Cargo integration test target at `tests/corpus_audit_tests.rs`.
-  // The stem differs from the subdir's `component_meta_audit_corpus`
-  // because cargo auto-discovers `tests/<name>.rs` AND `tests/<name>/`
-  // as candidates for the same target name, raising a duplicate-name
-  // error when both exist.
-  writeFileSync(resolve(config.outputDir, `${ENTRY_STEM}.rs`), renderEntryPointRs(allSlugs));
-  writeFileSync(resolve(testDir, "README.md"), renderCorpusReadme(vueFiles.length));
+  // Cargo integration test target at `tests/<entryStem>.rs`. The stem
+  // differs from the subdir's stem because cargo auto-discovers
+  // `tests/<name>.rs` AND `tests/<name>/` as candidates for the same
+  // target name, raising a duplicate-name error when both exist.
+  writeFileSync(
+    resolve(cliConfig.outputDir, `${corpus.entryStem}.rs`),
+    renderEntryPointRs(allSlugs, corpus.testSubdir),
+  );
+  writeFileSync(resolve(testDir, "README.md"), renderCorpusReadme(componentFiles.length));
 
   // overrides/ gitkeep so the directory exists in fresh checkouts.
   writeFileSync(resolve(overridesDir, ".gitkeep"), "");
 
-  if (!config.dryRun) {
-    console.log(`Generated ${allSlugs.length} corpus tests into ${relative(REPO_ROOT, testDir)}/`);
+  if (!cliConfig.dryRun) {
+    console.log(
+      `Generated ${allSlugs.length} ${corpus.frameworkId} corpus tests into ` +
+        `${relative(REPO_ROOT, testDir)}/`,
+    );
+  }
+
+  return componentFiles.length;
+}
+
+function main() {
+  const cliConfig = parseArgs(process.argv.slice(2));
+  // ONE idempotent script sweeps every configured corpus. A later
+  // framework vertical adds a row to CORPUS_CONFIGS; no generator fork.
+  for (const corpus of CORPUS_CONFIGS) {
+    sweepCorpus(corpus, cliConfig);
   }
 }
 

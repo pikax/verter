@@ -73,8 +73,8 @@ use verter_scheduler::stage::Priority;
 
 use crate::hash::hash_16;
 use crate::types::{
-    CompileCacheMode, CompileProfile, DowngradeReason, FileKind, HostError, HostSeverity,
-    UpsertRequest, VirtualNodeKind, VirtualQuery,
+    CompileCacheMode, CompileProfile, DowngradeReason, HostError, HostSeverity, UpsertRequest,
+    VirtualNodeKind, VirtualQuery,
 };
 use crate::VerterHost;
 
@@ -254,7 +254,7 @@ impl VerterHost {
                 canonical_id: Some(input.canonical_id.clone()),
                 input_id: input.canonical_id.clone(),
                 source: Arc::clone(&input.source),
-                file_kind: FileKind::VueSfc,
+                file_language: verter_language::FileLanguage::vue(),
                 aliases: Vec::new(),
             })
             .collect();

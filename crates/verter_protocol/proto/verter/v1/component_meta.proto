@@ -415,6 +415,24 @@ message ComponentUsage {
   repeated uint32 static_class_ids = 6;
   bool has_dynamic_class = 7;
   repeated uint32 v_model_ids = 8;
+  // Framework-neutral two-way bindings (the Svelte `bind:` family). Empty for
+  // Vue (two-way bindings are carried in v_model_ids).
+  repeated ComponentBindingUsage bindings = 9;
+  // Framework-neutral events (the legacy Svelte `on:` directive only — a plain
+  // `on*` attribute is a prop, never an event). Empty for Vue.
+  repeated ComponentEventUsage events = 10;
+}
+
+message ComponentBindingUsage {
+  uint32 name_id = 1;
+  repeated uint32 modifier_ids = 2;
+}
+
+message ComponentEventUsage {
+  uint32 name_id = 1;
+  uint32 handler_expression_id = 2;
+  bool is_inline = 3;
+  repeated uint32 modifier_ids = 4;
 }
 
 message ComponentPropUsage {

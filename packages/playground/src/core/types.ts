@@ -1,3 +1,5 @@
+import { detectFrameworkId, isCarrierFilename } from "./frameworks";
+
 export interface HostDiagnostic {
   severity: "error" | "warning" | "info";
   code: string;
@@ -60,8 +62,14 @@ export class File {
     this.code = code;
   }
 
-  get language(): "vue" | "typescript" | "javascript" | "css" | "json" {
-    if (this.filename.endsWith(".vue")) return "vue";
+  /**
+   * The document language for this file. A framework CARRIER file (manifest-
+   * driven, e.g. `.vue` / `.svelte`) returns its owning framework id; otherwise
+   * the plain TS/JS/CSS/JSON classification, defaulting to `"typescript"`.
+   */
+  get language(): string {
+    const frameworkId = detectFrameworkId(this.filename);
+    if (frameworkId && isCarrierFilename(this.filename)) return frameworkId;
     if (this.filename.endsWith(".ts")) return "typescript";
     if (this.filename.endsWith(".js")) return "javascript";
     if (this.filename.endsWith(".css")) return "css";
@@ -72,7 +80,8 @@ export class File {
   /** Whether this file contains TypeScript */
   get isTS(): boolean {
     if (this.filename.endsWith(".ts") || this.filename.endsWith(".tsx")) return true;
-    if (this.filename.endsWith(".vue")) {
+    // A framework carrier (e.g. .vue / .svelte) is TS when its <script> opts in.
+    if (isCarrierFilename(this.filename)) {
       return /<script[^>]*\blang\s*=\s*["'](ts|tsx)["']/.test(this.code);
     }
     return false;

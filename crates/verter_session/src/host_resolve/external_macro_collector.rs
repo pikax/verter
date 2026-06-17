@@ -32,8 +32,10 @@ impl crate::resolver_core::ExternalMacroTypeCollectorHost for HostExternalMacroT
         cache: &mut ExternalTypeCache,
         visiting: &mut rustc_hash::FxHashSet<(String, String)>,
         profile_hash: Option<u64>,
-    ) -> Result<Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>, Self::Error>
-    {
+    ) -> Result<
+        Option<verter_compiler::utils::oxc::script::type_surface::ResolvedElements>,
+        Self::Error,
+    > {
         self.host.resolve_external_type_from_loaded_files_with_view(
             self.ctx,
             owner_canonical,

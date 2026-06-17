@@ -11,7 +11,7 @@
 use std::sync::Arc;
 
 use verter_compiler::compile::{CompileTarget, VerterCompileOptions};
-use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
 const SFC: &str = "<script setup lang=\"ts\">\n\
@@ -34,7 +34,7 @@ fn host_for() -> Arc<VerterHost> {
         canonical_id: Some("/sm.vue".into()),
         input_id: "/sm.vue".into(),
         source: Arc::from(SFC),
-        file_kind: FileKind::VueSfc,
+        file_language: FileLanguage::vue(),
         aliases: Vec::new(),
     });
     host

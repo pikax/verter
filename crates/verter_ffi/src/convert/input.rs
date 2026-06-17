@@ -4,6 +4,7 @@
 use std::sync::Arc;
 
 use verter_session as host;
+use verter_session::StaticClassification;
 
 use crate::types::*;
 
@@ -159,12 +160,74 @@ pub(super) fn ffi_target_to_compile_target(
     }
 }
 
-/// Parse a file kind string to the host enum.
-pub fn ffi_file_kind_to_host(input: Option<&str>) -> Result<host::FileKind, FfiConversionError> {
-    match input.unwrap_or("vue").to_ascii_lowercase().as_str() {
-        "vue" | "sfc" | "vue_sfc" => Ok(host::FileKind::VueSfc),
-        "non_sfc" | "text" | "file" => Ok(host::FileKind::NonSfc),
-        other => Err(FfiConversionError::InvalidFileKind(other.to_string())),
+/// Resolve the FFI `fileKind` string (plus the request's canonical
+/// path) to the host [`host::FileLanguage`].
+///
+/// Accepted kind strings (add-only): `"vue"` / `"sfc"` / `"vue_sfc"` →
+/// the Vue carrier; `"svelte"` → the Svelte carrier (paired with its
+/// `LanguageRegistry` row — a carrier-less row serves the typed
+/// unsupported-language state at dispatch); `"non_sfc"` / `"text"` /
+/// `"file"` → a plain script (dialect derived from the path when one
+/// is present).
+///
+/// ABSENT kind → STATIC-ONLY classification of the canonical path via
+/// [`host::LanguageRegistry::classify_static`] — the ONE (logged)
+/// lenient-inference point for the NAPI/WASM JS boundaries. FFI-time
+/// classification never consults project capabilities, so a
+/// gated-candidate extension can NEVER classify by inference here:
+/// gated rows REQUIRE an explicit kind string (typed error otherwise).
+/// Absent kind with no path is a typed error.
+pub fn ffi_file_language_to_host(
+    kind: Option<&str>,
+    canonical_path: Option<&str>,
+) -> Result<host::FileLanguage, FfiConversionError> {
+    classify_ffi_file_language(host::LanguageRegistry::global(), kind, canonical_path)
+}
+
+/// Registry-parameterized core of [`ffi_file_language_to_host`] (unit
+/// tests exercise the gated-row arm with a fixture registry).
+pub(crate) fn classify_ffi_file_language(
+    registry: &verter_session::LanguageRegistry,
+    kind: Option<&str>,
+    canonical_path: Option<&str>,
+) -> Result<host::FileLanguage, FfiConversionError> {
+    use verter_session::FileLanguage;
+    match kind {
+        Some(kind) => match kind.to_ascii_lowercase().as_str() {
+            "vue" | "sfc" | "vue_sfc" => Ok(FileLanguage::vue()),
+            "svelte" => Ok(FileLanguage::svelte()),
+            "non_sfc" | "text" | "file" => {
+                // Explicit plain-script request: derive the dialect from
+                // the path when it statically resolves to a script row.
+                let dialect = canonical_path
+                    .map(|path| registry.classify_static(path).static_resolution())
+                    .and_then(|language| language.script_source_type())
+                    .unwrap_or(verter_session::ScriptSourceType::Ts);
+                Ok(FileLanguage::script(dialect))
+            }
+            other => Err(FfiConversionError::InvalidFileKind(other.to_string())),
+        },
+        None => {
+            let Some(path) = canonical_path else {
+                return Err(FfiConversionError::MissingFileLanguagePath);
+            };
+            match registry.classify_static(path) {
+                StaticClassification::Resolved(language) => {
+                    log::debug!("file language inferred from path '{path}': {language:?}");
+                    Ok(language)
+                }
+                StaticClassification::Unknown => {
+                    log::debug!(
+                        "file language inferred from path '{path}': unknown extension, \
+                         routing as plain script"
+                    );
+                    Ok(FileLanguage::script_ts())
+                }
+                StaticClassification::Gated(_) => Err(
+                    FfiConversionError::GatedFileLanguageRequiresExplicitKind(path.to_string()),
+                ),
+            }
+        }
     }
 }
 
@@ -190,11 +253,16 @@ pub fn ffi_node_kind_to_host(
 pub fn ffi_upsert_to_host(
     input: FfiUpsertRequest,
 ) -> Result<host::UpsertRequest, FfiConversionError> {
+    let classification_path = input
+        .canonical_id
+        .as_deref()
+        .or(Some(input.input_id.as_str()));
+    let file_language = ffi_file_language_to_host(input.file_kind.as_deref(), classification_path)?;
     Ok(host::UpsertRequest {
         canonical_id: input.canonical_id,
         input_id: input.input_id,
         source: Arc::from(input.source),
-        file_kind: ffi_file_kind_to_host(input.file_kind.as_deref())?,
+        file_language,
         aliases: input.aliases.unwrap_or_default(),
     })
 }

@@ -79,7 +79,7 @@ use verter_audit::ProjectionModeTag;
 use verter_session::semantic_query::{
     PathSegment, ProjectionMode, ResolveDeclKey, ScopeId, SemanticQueryKey,
 };
-use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{HostConfig, UpsertRequest, VerterHost};
 
 /// Fixture: deeply-nested type so the three-segment path
 /// `A['c']['full']['bar']` exercises distinct intermediate hops.
@@ -110,7 +110,9 @@ fn path_a_c_full_bar_navigates_intermediates_and_expands_terminal() {
         canonical_id: Some("/types.ts".to_string()),
         input_id: "/types.ts".to_string(),
         source: Arc::from(TYPES_TS),
-        file_kind: FileKind::from_path("/types.ts"),
+        file_language: verter_session::LanguageRegistry::global()
+            .classify_static("/types.ts")
+            .static_resolution(),
         aliases: Vec::new(),
     });
 

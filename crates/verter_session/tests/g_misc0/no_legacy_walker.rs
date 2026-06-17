@@ -207,6 +207,32 @@ const RETIRED_SYMBOLS: &[&str] = &[
     // shape assertion that never landed; CLAUDE.md "Don't add features
     // beyond what the task requires" forbids carrying it as scaffolding.
     "assert_route_union_surface",
+    // File-language routing authority: the duplicated per-crate
+    // file-kind enums (session / scheduler source_loader / scheduler
+    // node / workspace), the resolver-core export-graph clone, the
+    // FFI kind parser with its silent `"vue"` default, and the LSP
+    // path sniffing helper are all replaced by
+    // `verter_language::FileLanguage` + `LanguageRegistry`
+    // classification. Re-introducing any of these names would revive
+    // a second language-kind definition next to the single routing
+    // authority (see also
+    // `single_language_classifier.rs::single_language_classifier`).
+    "FileKind",
+    "ExportGraphFileKind",
+    "ffi_file_kind_to_host",
+    "is_vue_file",
+    // Framework parse-artifact carrier substrate (D-af): every production
+    // `cached_parse` carrier field — `IndexedReady`,
+    // `RouteOwnedShallowEntry`, `HostSourceData`, `CompileInput`,
+    // `EffectiveFileState`, `ContentOverrideWithParse`,
+    // `ExternalTypeResolutionInputs` — plus the producer/threading
+    // locals and the `route_owned_snapshot_cached_parse_hits`
+    // provenance-counter family are renamed/replaced by the
+    // framework-neutral `framework_parse:
+    // Option<Arc<FrameworkParseArtifact>>` payload. Re-introducing
+    // the token would revive a Vue-typed parse carrier on the
+    // neutral session surface.
+    "cached_parse",
     // String-resolver eradication: the typed-IR-only
     // resolver rule deletes every hand-rolled type-text splitter,
     // source-slicing helper, `parse_type_annotation` reparse fallback,
@@ -428,6 +454,27 @@ const RETIRED_SYMBOLS: &[&str] = &[
     // Re-introducing it would resurrect a consumer-local
     // second-resolution path beside the shared resolver.
     "select_imported_materialization_scope",
+    // "Emit" is Vue semantics, not a neutral script-surface concept.
+    // The neutral type-surface element types carry the neutral names
+    // `ResolvedNamedCallSignature` / `ResolvedCallPayloadForm`
+    // (`verter_parser::utils::oxc::script::type_surface`); the retired
+    // Vue-flavoured names must not reappear on the neutral surface or
+    // as aliases beside it.
+    "ResolvedEmit",
+    "ResolvedEmitSignature",
+    // The Vue adapter's host-owned shallow-metadata store + its key/value
+    // types are RETIRED. The neutral, framework-generic
+    // `FrameworkSurfaceStore<VueSurfaceKey, MacroSurfaceDtos>` (reached
+    // through `VerterHost::vue_surface_store`) is the sole home of the
+    // `.vue` macro-surface DTO cache; the relocated producer in
+    // `typeinfo::framework_surface::vue_exec` keys it with the neutral
+    // `FullKey<VueSurfaceKey>` + `StoredSurfaceDto<MacroSurfaceDtos>`.
+    // Re-introducing any of these Vue-private store types would resurrect
+    // a second, framework-specific cache lane beside the neutral store.
+    "VueShallowMetadataStore",
+    "VueMacroDtoKey",
+    "VueMacroDtos",
+    "VueMacroDtosEntry",
 ];
 
 /// File names whose presence at the head of the path should make us

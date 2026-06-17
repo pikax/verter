@@ -354,7 +354,7 @@ defineProps<Props>();
 /// content change so the edit is observable end-to-end.
 #[test]
 fn invalidation_owner_component_file_edit() {
-    use verter_session::{FileKind, UpsertRequest};
+    use verter_session::UpsertRequest;
     use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
     let workspace = Arc::new(MemoryWorkspace::new(MemoryOptions::default()));
@@ -386,7 +386,9 @@ fn invalidation_owner_component_file_edit() {
         canonical_id: Some("/c.vue".into()),
         input_id: "/c.vue".into(),
         source: Arc::from(OWNER_EDIT_AFTER_VUE),
-        file_kind: FileKind::from_path("/c.vue"),
+        file_language: verter_session::LanguageRegistry::global()
+            .classify_static("/c.vue")
+            .static_resolution(),
         aliases: vec![],
     });
 

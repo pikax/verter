@@ -8,9 +8,10 @@ use std::sync::Arc;
 
 use crate::instant::Instant;
 
+use verter_language::FileLanguage;
 use verter_scheduler::executor::{ExtractedDeps, StageError, StageExecutor};
 use verter_scheduler::node::{
-    AnalysisSnapshot, ArtifactSnapshot, EmptyData, FileKind, SnapshotData, SourceSnapshot,
+    AnalysisSnapshot, ArtifactSnapshot, EmptyData, SnapshotData, SourceSnapshot,
 };
 
 use crate::types::{HostConfig, ParseSnapshot};
@@ -18,22 +19,24 @@ use crate::types::{HostConfig, ParseSnapshot};
 /// Host-specific data stored in a [`SourceSnapshot`].
 ///
 /// Wraps a `ParseSnapshot` — the result of SFC tokenization, hashing, and analysis.
-/// Also carries the cached parsed SFC (for Vue files), the host-level file kind,
-/// the authoritative `source_type` computed once at parse time, and the measured
-/// parse duration for performance tracking.
+/// Also carries the framework-neutral parse artifact (for carrier files), the
+/// file's language row, the authoritative `source_type` computed once at parse
+/// time, and the measured parse duration for performance tracking.
 #[derive(Debug)]
 #[allow(dead_code)] // Fields read progressively during 3 migration
 pub struct HostSourceData {
     pub(crate) parse: ParseSnapshot,
-    /// Cached parsed SFC from `parse_vue_snapshot`. Reused during compilation
-    /// to avoid re-parsing. `None` for non-SFC files.
-    pub(crate) cached_parse: Option<Arc<verter_compiler::parser::types::ParsedSfc>>,
-    /// Discriminates Vue SFC vs non-SFC (host-level enum, not scheduler's).
-    pub(crate) file_kind: crate::types::FileKind,
+    /// Framework-neutral parse artifact from the carrier producer
+    /// (`parse_vue_snapshot` wraps the Vue parse into it). Reused during
+    /// compilation to avoid re-parsing. `None` for plain scripts.
+    pub(crate) framework_parse: Option<Arc<verter_language::FrameworkParseArtifact>>,
+    /// The file's language row (framework carrier vs. plain script).
+    pub(crate) file_language: FileLanguage,
     /// Authoritative `SourceType` for downstream type-resolution cache keys,
-    /// computed once during `execute_source` with full access to the parsed
-    /// SFC. Readers must prefer this value over recomputing from raw source +
-    /// `cached_parse` (which is unstable when `cached_parse` is dropped).
+    /// computed once during `execute_source` with full access to the parse
+    /// artifact. Readers must prefer this value over recomputing from raw
+    /// source + `framework_parse` (which is unstable when `framework_parse`
+    /// is dropped).
     pub(crate) source_type: oxc_span::SourceType,
     /// Wall-clock parse duration in milliseconds.
     pub(crate) parse_duration_ms: f64,
@@ -158,15 +161,35 @@ impl StageExecutor for HostStageExecutor {
     fn execute_source(
         &self,
         canonical_id: &str,
-        file_kind: FileKind,
+        file_language: FileLanguage,
         content: Arc<str>,
         generation: u64,
     ) -> Result<SourceSnapshot, StageError> {
-        let is_vue = matches!(file_kind, FileKind::VueSfc);
-        let host_file_kind = match file_kind {
-            FileKind::VueSfc => crate::types::FileKind::VueSfc,
-            FileKind::NonSfc => crate::types::FileKind::NonSfc,
+        // Carrier dispatch: a framework CARRIER file whose carrier language
+        // the registry serves routes its parse through the compiler-side
+        // carrier registry — the SINGLE carrier parse path, with Vue served
+        // by its bridge. EVERY OTHER framework row (a framework TEMPLATE, an
+        // unregistered carrier adapter, a same-adapter NON-carrier language)
+        // is the typed unsupported-language state — never a silent empty,
+        // never a panic. Plain scripts take the script parse path. The
+        // dispatchable predicate is keyed on the FULL `(adapter_id, carrier
+        // language id)` row, never adapter id alone.
+        let dispatchable_carrier = match (
+            file_language.adapter_id(),
+            file_language.carrier_language_id(),
+        ) {
+            (Some(adapter_id), Some(carrier_language_id)) => {
+                crate::parse::carrier_compiler_registry()
+                    .compiler_for_carrier_language(adapter_id, carrier_language_id)
+                    .is_some()
+            }
+            _ => false,
         };
+        if let (false, Some(adapter_id)) = (dispatchable_carrier, file_language.adapter_id()) {
+            // A framework row that is NOT a dispatchable carrier (template,
+            // unregistered carrier, same-adapter non-carrier) is unsupported.
+            return Err(StageError::unsupported_language(adapter_id.clone()));
+        }
 
         // Per-file timing capture is gated on the active request's
         // `audit_timing_capture` flag. The host's own `parse_duration_ms`
@@ -177,16 +200,18 @@ impl StageExecutor for HostStageExecutor {
 
         let parse_start = Instant::now();
 
-        let snapshot = if is_vue {
-            let (parse_snapshot, parsed_sfc) = crate::parse::parse_vue_snapshot(
+        let snapshot = if dispatchable_carrier {
+            let (parse_snapshot, framework_parse) = crate::parse::carrier_parse_snapshot(
                 canonical_id,
                 &content,
                 self.config.effective_scope(),
+                &file_language,
                 &self.provenance,
-            );
+            )
+            .expect("a registered carrier compiler produces a snapshot for its own carrier file");
             let parse_duration_ms = parse_start.elapsed().as_secs_f64() * 1000.0;
             let source_type =
-                imported_eval_source_type(canonical_id, content.as_ref(), Some(&parsed_sfc));
+                imported_eval_source_type(&file_language, Some(framework_parse.as_ref()));
             SourceSnapshot {
                 source: content,
                 whole_hash: parse_snapshot.whole_hash,
@@ -194,17 +219,21 @@ impl StageExecutor for HostStageExecutor {
                 generation,
                 data: Arc::new(HostSourceData {
                     parse: parse_snapshot,
-                    cached_parse: Some(Arc::new(parsed_sfc)),
-                    file_kind: host_file_kind,
+                    framework_parse: Some(framework_parse),
+                    file_language,
                     source_type,
                     parse_duration_ms,
                 }),
             }
         } else {
-            let parse_snapshot =
-                crate::parse::parse_non_sfc_snapshot(canonical_id, &content, &self.provenance);
+            let parse_snapshot = crate::parse::parse_non_sfc_snapshot(
+                canonical_id,
+                &content,
+                &file_language,
+                &self.provenance,
+            );
             let parse_duration_ms = parse_start.elapsed().as_secs_f64() * 1000.0;
-            let source_type = imported_eval_source_type(canonical_id, content.as_ref(), None);
+            let source_type = imported_eval_source_type(&file_language, None);
             SourceSnapshot {
                 source: content,
                 whole_hash: parse_snapshot.whole_hash,
@@ -212,8 +241,8 @@ impl StageExecutor for HostStageExecutor {
                 generation,
                 data: Arc::new(HostSourceData {
                     parse: parse_snapshot,
-                    cached_parse: None,
-                    file_kind: host_file_kind,
+                    framework_parse: None,
+                    file_language,
                     source_type,
                     parse_duration_ms,
                 }),
@@ -354,8 +383,8 @@ impl StageExecutor for HostStageExecutor {
 /// this once at [`HostStageExecutor::execute_source`] time and stores the result
 /// on [`HostSourceData::source_type`]. Downstream cache-key callers must prefer
 /// the scheduler-stored value (via [`crate::VerterHost::authoritative_source_type_for`])
-/// over recomputing — recomputation with `cached_parse: None` produces a
-/// different `SourceType` than with `Some(parsed)` for the same `.vue` file
+/// over recomputing — recomputation with `framework_parse: None` produces a
+/// different `SourceType` than with `Some(artifact)` for the same `.vue` file
 /// whose `<script>` block uses `lang="tsx"` / `lang="jsx"` / `lang="js"`.
 ///
 /// The underlying function lives in [`crate::parse::imported_eval_source_type`]

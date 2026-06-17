@@ -38,7 +38,7 @@ use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Arc;
 
 use verter_session::{
-    CompileProfile, FileKind, HostConfig, HostError, UpsertRequest, VerterHost,
+    CompileProfile, FileLanguage, HostConfig, HostError, UpsertRequest, VerterHost,
     VirtualFileResponse, VirtualNodeKind, VirtualQuery,
 };
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
@@ -80,13 +80,13 @@ pub fn workspace_host(files: &[(&str, &str)]) -> (Arc<MemoryWorkspace>, Arc<Vert
 ///
 /// This is the single chokepoint the whole canary suite mutates
 /// through (owner / dependency setup AND the edit under test).
-pub fn upsert(host: &VerterHost, canonical: &str, source: &str, kind: FileKind) {
+pub fn upsert(host: &VerterHost, canonical: &str, source: &str, kind: FileLanguage) {
     let _ = host
         .upsert(UpsertRequest {
             canonical_id: Some(canonical.to_string()),
             input_id: canonical.to_string(),
             source: source.into(),
-            file_kind: kind,
+            file_language: kind,
             aliases: Vec::new(),
         })
         .expect("upsert");

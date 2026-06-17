@@ -1047,7 +1047,7 @@ fn display_source_does_not_call_graph_interning_or_dispatch() {
 
 #[test]
 fn vue_macro_elements_render_is_payload_derived_not_constant() {
-    use verter_parser::utils::oxc::vue::ResolvedElements;
+    use verter_parser::utils::oxc::script::type_surface::ResolvedElements;
 
     let store = SemanticGraphStore::new();
 

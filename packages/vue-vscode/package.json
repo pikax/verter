@@ -453,6 +453,16 @@
         "configuration": "./languages/vue-language-configuration.json"
       },
       {
+        "id": "svelte",
+        "aliases": [
+          "Svelte",
+          "svelte"
+        ],
+        "extensions": [
+          ".svelte"
+        ]
+      },
+      {
         "id": "vue-html",
         "aliases": [
           "Vue-html"
@@ -660,6 +670,7 @@
     "onCommand:verter.showStatistics",
     "onLanguage:javascript",
     "onLanguage:javascriptreact",
+    "onLanguage:svelte",
     "onLanguage:typescript",
     "onLanguage:typescriptreact",
     "onLanguage:vue",

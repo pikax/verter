@@ -135,7 +135,7 @@ fn intern_dedups_structural_values_across_contexts() {
 /// exemption in `push_impl` short-circuits the dedup index.
 #[test]
 fn intern_does_not_dedup_vue_macro_elements_identity_carrier() {
-    use verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements;
+    use verter_compiler::utils::oxc::script::type_surface::ResolvedElements;
     let store = SemanticGraphStore::new();
     let payload = Arc::new(ResolvedElements::default());
     let a = store.intern_node(SemanticNodeData::VueMacroElements(Arc::clone(&payload)));
@@ -3464,8 +3464,8 @@ fn cross_thread_joiner_waits_on_winner_publish() {
 // ──────────────────────────────────────────────────────────────────
 
 use crate::semantic_query::HostResolvedNamedTypeKey;
-use verter_compiler::utils::oxc::vue::resolve_type::cache_keys::ResolvedNamedTypeCacheKey;
-use verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements;
+use verter_compiler::utils::oxc::script::type_surface::ResolvedElements;
+use verter_compiler::utils::oxc::vue::named_type_keys::ResolvedNamedTypeCacheKey;
 
 fn make_key(canonical: &str, whole_hash: [u8; 16], name: &str) -> HostResolvedNamedTypeKey {
     HostResolvedNamedTypeKey {
@@ -4736,7 +4736,7 @@ fn panic_in_cold_build_does_not_leak_in_flight_stats_counter() {
 #[test]
 fn resolved_named_type_refcount_path_unchanged_after_family_rewrite() {
     let host = ctx_host();
-    use verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements;
+    use verter_compiler::utils::oxc::script::type_surface::ResolvedElements;
 
     let store = SemanticGraphStore::new();
     let key = make_key("/w/named.ts", [9u8; 16], "Foo");
@@ -4886,7 +4886,7 @@ fn node_scope_returns_origin_not_reader_scope() {
 /// `Some(Global)`.
 #[test]
 fn vue_macro_elements_nodes_do_not_populate_node_scope_sidecar() {
-    use verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements;
+    use verter_compiler::utils::oxc::script::type_surface::ResolvedElements;
 
     let store = SemanticGraphStore::new();
     let payload = Arc::new(ResolvedElements::default());
@@ -6141,7 +6141,7 @@ fn joiner_outer_tracer_contains_winner_carrier_fact() {
 #[test]
 fn joiner_of_cache_suppress_winner_inherits_carrier_and_suppression() {
     use crate::resolver_core::{FactReadSetFinalise, FactVersionRef};
-    use crate::{FileKind, UpsertRequest};
+    use crate::UpsertRequest;
     use std::sync::mpsc;
     use std::thread;
 
@@ -6155,7 +6155,9 @@ fn joiner_of_cache_suppress_winner_inherits_carrier_and_suppression() {
             canonical_id: Some(keyed_canonical.to_string()),
             input_id: keyed_canonical.to_string(),
             source: Arc::from("export interface Target { base: number; }\n"),
-            file_kind: FileKind::from_path(keyed_canonical),
+            file_language: crate::LanguageRegistry::global()
+                .classify_static(keyed_canonical)
+                .static_resolution(),
             aliases: Vec::new(),
         })
         .expect("upsert of the keyed file succeeds");
@@ -6391,7 +6393,7 @@ fn cross_view_joiner_forks_when_winner_carrier_fails_follower_validation() {
     use crate::fact_signature_helpers::ReadSetSignature;
     use crate::resolver_core::{FactVersionRef, SessionResolverContext};
     use crate::session_view::OverlaidViewRef;
-    use crate::{FileKind, UpsertRequest};
+    use crate::UpsertRequest;
     use rustc_hash::FxHashMap;
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -6407,7 +6409,9 @@ fn cross_view_joiner_forks_when_winner_carrier_fails_follower_validation() {
             source: Arc::from(
                 "export interface Keyed { base: number; }\nexport const keyed = 1;\n",
             ),
-            file_kind: FileKind::from_path(keyed_canonical),
+            file_language: crate::LanguageRegistry::global()
+                .classify_static(keyed_canonical)
+                .static_resolution(),
             aliases: Vec::new(),
         })
         .expect("upsert of the keyed file succeeds");
@@ -6609,7 +6613,7 @@ fn cross_view_joiner_forks_when_winner_carrier_fails_follower_validation() {
 fn same_view_joiner_still_coalesces_onto_winner() {
     use crate::fact_signature_helpers::ReadSetSignature;
     use crate::resolver_core::FactVersionRef;
-    use crate::{FileKind, UpsertRequest};
+    use crate::UpsertRequest;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
     use std::thread;
@@ -6623,7 +6627,9 @@ fn same_view_joiner_still_coalesces_onto_winner() {
             source: Arc::from(
                 "export interface Keyed { base: number; }\nexport const keyed = 1;\n",
             ),
-            file_kind: FileKind::from_path(keyed_canonical),
+            file_language: crate::LanguageRegistry::global()
+                .classify_static(keyed_canonical)
+                .static_resolution(),
             aliases: Vec::new(),
         })
         .expect("upsert of the keyed file succeeds");
@@ -6789,7 +6795,7 @@ fn same_view_joiner_still_coalesces_onto_winner() {
 fn cross_view_joiner_of_suppressed_overflow_winner_forks() {
     use crate::resolver_core::SessionResolverContext;
     use crate::session_view::OverlaidViewRef;
-    use crate::{FileKind, UpsertRequest};
+    use crate::UpsertRequest;
     use rustc_hash::FxHashMap;
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -6803,7 +6809,9 @@ fn cross_view_joiner_of_suppressed_overflow_winner_forks() {
             canonical_id: Some(keyed_canonical.to_string()),
             input_id: keyed_canonical.to_string(),
             source: Arc::from("export interface Keyed { base: number; }\n"),
-            file_kind: FileKind::from_path(keyed_canonical),
+            file_language: crate::LanguageRegistry::global()
+                .classify_static(keyed_canonical)
+                .static_resolution(),
             aliases: Vec::new(),
         })
         .expect("upsert of the keyed file succeeds");
@@ -7047,7 +7055,7 @@ fn cross_view_joiner_of_suppressed_unrootable_winner_forks() {
     use crate::fact_signature_helpers::ReadSetSignature;
     use crate::resolver_core::{FactVersionRef, SessionResolverContext};
     use crate::session_view::OverlaidViewRef;
-    use crate::{FileKind, UpsertRequest};
+    use crate::UpsertRequest;
     use rustc_hash::FxHashMap;
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -7061,7 +7069,9 @@ fn cross_view_joiner_of_suppressed_unrootable_winner_forks() {
             canonical_id: Some(keyed_canonical.to_string()),
             input_id: keyed_canonical.to_string(),
             source: Arc::from("export interface Keyed { base: number; }\n"),
-            file_kind: FileKind::from_path(keyed_canonical),
+            file_language: crate::LanguageRegistry::global()
+                .classify_static(keyed_canonical)
+                .static_resolution(),
             aliases: Vec::new(),
         })
         .expect("upsert of the keyed file succeeds");
@@ -7333,7 +7343,7 @@ fn cross_view_joiner_of_nonsuppressed_miss_winner_without_self_root_forks() {
     use crate::fact_signature_helpers::ReadSetSignature;
     use crate::resolver_core::{FactVersionRef, SessionResolverContext};
     use crate::session_view::OverlaidViewRef;
-    use crate::{FileKind, UpsertRequest};
+    use crate::UpsertRequest;
     use rustc_hash::FxHashMap;
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -7347,7 +7357,9 @@ fn cross_view_joiner_of_nonsuppressed_miss_winner_without_self_root_forks() {
             canonical_id: Some(keyed_canonical.to_string()),
             input_id: keyed_canonical.to_string(),
             source: Arc::from("export interface Other { base: number; }\n"),
-            file_kind: FileKind::from_path(keyed_canonical),
+            file_language: crate::LanguageRegistry::global()
+                .classify_static(keyed_canonical)
+                .static_resolution(),
             aliases: Vec::new(),
         })
         .expect("upsert of the keyed file succeeds");
@@ -8633,8 +8645,8 @@ mod env_scoped_key_identity_guards {
     fn resolved_named_type_key_identity_is_env_scoped() {
         use super::super::SemanticGraphStore;
         use crate::semantic_query::HostResolvedNamedTypeKey;
-        use verter_compiler::utils::oxc::vue::resolve_type::cache_keys::ResolvedNamedTypeCacheKey;
-        use verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements;
+        use verter_compiler::utils::oxc::script::type_surface::ResolvedElements;
+        use verter_compiler::utils::oxc::vue::named_type_keys::ResolvedNamedTypeCacheKey;
 
         let inner = |name: &str| ResolvedNamedTypeCacheKey {
             name: name.as_bytes().to_vec().into_boxed_slice(),

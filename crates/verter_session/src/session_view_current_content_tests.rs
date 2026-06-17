@@ -64,7 +64,9 @@ fn host_with_materialized_ts(path: &str, source: &str) -> (Arc<VerterHost>, [u8;
             canonical_id: Some(path.to_string()),
             input_id: path.to_string(),
             source: Arc::from(source),
-            file_kind: crate::FileKind::from_path(path),
+            file_language: crate::LanguageRegistry::global()
+                .classify_static(path)
+                .static_resolution(),
             aliases: Vec::new(),
         })
         .expect("seed upsert succeeds");
@@ -404,7 +406,9 @@ fn overlay_materialiser_view_lookups_use_raw_canonical_for_normalised_js() {
                 canonical_id: Some(path.to_string()),
                 input_id: path.to_string(),
                 source: Arc::from(source),
-                file_kind: crate::FileKind::from_path(path),
+                file_language: crate::LanguageRegistry::global()
+                    .classify_static(path)
+                    .static_resolution(),
                 aliases: Vec::new(),
             })
             .expect("base seed upsert succeeds");
@@ -538,7 +542,9 @@ fn overlay_artifact_downstream_reachable_for_normalised_js() {
                 canonical_id: Some(path.to_string()),
                 input_id: path.to_string(),
                 source: Arc::from(source),
-                file_kind: crate::FileKind::from_path(path),
+                file_language: crate::LanguageRegistry::global()
+                    .classify_static(path)
+                    .static_resolution(),
                 aliases: Vec::new(),
             })
             .expect("base seed upsert succeeds");
@@ -695,7 +701,9 @@ fn observe_materialize_scope_recovers_parse_facts_for_normalised_js_overlay() {
                 canonical_id: Some(path.to_string()),
                 input_id: path.to_string(),
                 source: Arc::from(source),
-                file_kind: crate::FileKind::from_path(path),
+                file_language: crate::LanguageRegistry::global()
+                    .classify_static(path)
+                    .static_resolution(),
                 aliases: Vec::new(),
             })
             .expect("base seed upsert succeeds");
@@ -885,7 +893,9 @@ fn shallow_file_state_observes_overlay_for_normalised_js() {
                 canonical_id: Some(path.to_string()),
                 input_id: path.to_string(),
                 source: Arc::from(source),
-                file_kind: crate::FileKind::from_path(path),
+                file_language: crate::LanguageRegistry::global()
+                    .classify_static(path)
+                    .static_resolution(),
                 aliases: Vec::new(),
             })
             .expect("base seed upsert succeeds");

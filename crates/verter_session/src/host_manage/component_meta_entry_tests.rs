@@ -52,7 +52,7 @@ use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Arc;
 
 use crate::resolver_core::{DerivedFactKind, FactVersionRef};
-use crate::types::{FileKind, HostConfig, UpsertRequest};
+use crate::types::{FileLanguage, HostConfig, UpsertRequest};
 use crate::VerterHost;
 
 /// `/src/types.ts` — a cross-file dep imported by the owner. Its
@@ -74,13 +74,13 @@ fn build_host() -> Arc<VerterHost> {
     Arc::new(VerterHost::new_standalone(HostConfig::default()))
 }
 
-fn upsert(host: &VerterHost, id: &str, src: &str, kind: FileKind) {
+fn upsert(host: &VerterHost, id: &str, src: &str, kind: FileLanguage) {
     let _ = host
         .upsert(UpsertRequest {
             canonical_id: None,
             input_id: id.to_string(),
             source: Arc::from(src),
-            file_kind: kind,
+            file_language: kind,
             aliases: Vec::new(),
         })
         .expect("upsert");
@@ -123,8 +123,8 @@ fn has_owner_route_fact(facts: &[FactVersionRef], owner: &str) -> bool {
 #[test]
 fn repeated_query_after_route_only_indexed_read_is_warm_hit() {
     let host = build_host();
-    upsert(&host, "/src/types.ts", TYPES_TS, FileKind::NonSfc);
-    upsert(&host, "/src/Comp.vue", OWNER_VUE, FileKind::VueSfc);
+    upsert(&host, "/src/types.ts", TYPES_TS, FileLanguage::script_ts());
+    upsert(&host, "/src/Comp.vue", OWNER_VUE, FileLanguage::vue());
 
     // Materialise the OWNER's `IndexedReady` via a genuine route-only
     // read BEFORE `get_component_meta` runs. This reproduces the
@@ -233,8 +233,8 @@ fn editing_route_dep_still_invalidates_after_route_only_indexed_read() {
     // filter being widened into the broad route-fact removal that
     // would silently drop cross-file route invalidation.
     let host = build_host();
-    upsert(&host, "/src/types.ts", TYPES_TS, FileKind::NonSfc);
-    upsert(&host, "/src/Comp.vue", OWNER_VUE, FileKind::VueSfc);
+    upsert(&host, "/src/types.ts", TYPES_TS, FileLanguage::script_ts());
+    upsert(&host, "/src/Comp.vue", OWNER_VUE, FileLanguage::vue());
 
     // Materialise the owner's IndexedReady first (the route-only-read
     // precondition), then prime the component-meta cache.
@@ -250,7 +250,7 @@ fn editing_route_dep_still_invalidates_after_route_only_indexed_read() {
         &host,
         "/src/types.ts",
         "export interface RProps { a: number; }\n",
-        FileKind::NonSfc,
+        FileLanguage::script_ts(),
     );
 
     let after = host.get_component_meta("/src/Comp.vue");
@@ -301,8 +301,8 @@ fn publish_fence_skips_promotion_under_superseded_token() {
     use crate::host_manage::component_meta_entry::PUBLISH_FENCE_FORCE_SUPERSEDE;
 
     let host = build_host();
-    upsert(&host, "/src/types.ts", TYPES_TS, FileKind::NonSfc);
-    upsert(&host, "/src/Comp.vue", OWNER_VUE, FileKind::VueSfc);
+    upsert(&host, "/src/types.ts", TYPES_TS, FileLanguage::script_ts());
+    upsert(&host, "/src/Comp.vue", OWNER_VUE, FileLanguage::vue());
 
     // Force the fence to observe a superseded token on the next publish.
     PUBLISH_FENCE_FORCE_SUPERSEDE.with(|c| c.set(true));
@@ -367,8 +367,8 @@ fn publish_fence_skips_promotion_when_cold_seed_is_non_current() {
     use std::time::Duration;
 
     let host = build_host();
-    upsert(&host, "/src/types.ts", TYPES_TS, FileKind::NonSfc);
-    upsert(&host, "/src/Comp.vue", OWNER_VUE, FileKind::VueSfc);
+    upsert(&host, "/src/types.ts", TYPES_TS, FileLanguage::script_ts());
+    upsert(&host, "/src/Comp.vue", OWNER_VUE, FileLanguage::vue());
 
     // Confirm the owner is NOT yet published (no prior cold compute).
     assert!(
@@ -454,8 +454,8 @@ fn publish_fence_skips_promotion_when_cold_seed_is_non_current() {
 #[test]
 fn warm_component_meta_hit_is_suppressed_when_store_view_is_not_current() {
     let host = build_host();
-    upsert(&host, "/src/types.ts", TYPES_TS, FileKind::NonSfc);
-    upsert(&host, "/src/Comp.vue", OWNER_VUE, FileKind::VueSfc);
+    upsert(&host, "/src/types.ts", TYPES_TS, FileLanguage::script_ts());
+    upsert(&host, "/src/Comp.vue", OWNER_VUE, FileLanguage::vue());
 
     // Cold prime: publishes a `ComponentMetaResultEntry` whose signature
     // references the dep `/src/types.ts` at its CURRENT (old) whole-hash.
@@ -537,7 +537,7 @@ fn warm_component_meta_hit_is_suppressed_when_store_view_is_not_current() {
         &host,
         "/src/types.ts",
         "export interface RProps { a: number; }\n",
-        FileKind::NonSfc,
+        FileLanguage::script_ts(),
     );
     let recomputed = host
         .get_component_meta("/src/Comp.vue")
@@ -575,8 +575,8 @@ fn overlay_does_not_launder_non_current_base_into_warm_hit() {
     use std::time::Duration;
 
     let host = build_host();
-    upsert(&host, "/src/types.ts", TYPES_TS, FileKind::NonSfc);
-    upsert(&host, "/src/Comp.vue", OWNER_VUE, FileKind::VueSfc);
+    upsert(&host, "/src/types.ts", TYPES_TS, FileLanguage::script_ts());
+    upsert(&host, "/src/Comp.vue", OWNER_VUE, FileLanguage::vue());
 
     // A no-overlay session view over the owner: the warm path still routes
     // through `with_session_overlay` (recomputing the coalescing
@@ -679,8 +679,8 @@ fn warm_meta_payload_hit_is_suppressed_when_store_view_is_not_current() {
     use std::time::Duration;
 
     let host = build_host();
-    upsert(&host, "/src/types.ts", TYPES_TS, FileKind::NonSfc);
-    upsert(&host, "/src/Comp.vue", OWNER_VUE, FileKind::VueSfc);
+    upsert(&host, "/src/types.ts", TYPES_TS, FileLanguage::script_ts());
+    upsert(&host, "/src/Comp.vue", OWNER_VUE, FileLanguage::vue());
 
     // Cold prime the component-meta result so a published signature exists
     // referencing the dep `/src/types.ts` at its CURRENT (old) whole-hash.
@@ -757,7 +757,7 @@ fn warm_meta_payload_hit_is_suppressed_when_store_view_is_not_current() {
         &host,
         "/src/types.ts",
         "export interface RProps { a: number; }\n",
-        FileKind::NonSfc,
+        FileLanguage::script_ts(),
     );
     let recomputed = host
         .get_component_meta("/src/Comp.vue")
@@ -782,8 +782,8 @@ fn warm_meta_payload_hit_is_suppressed_when_store_view_is_not_current() {
 #[test]
 fn meta_payload_under_recorded_signature_misses_after_project_mutation() {
     let host = build_host();
-    upsert(&host, "/src/types.ts", TYPES_TS, FileKind::NonSfc);
-    upsert(&host, "/src/Comp.vue", OWNER_VUE, FileKind::VueSfc);
+    upsert(&host, "/src/types.ts", TYPES_TS, FileLanguage::script_ts());
+    upsert(&host, "/src/Comp.vue", OWNER_VUE, FileLanguage::vue());
 
     // Plant a payload with the EMPTY (under-recorded) signature.
     let planted: Vec<u8> = vec![0x11, 0x22, 0x33];
@@ -863,8 +863,8 @@ fn disarm_materialize_seam(host: &VerterHost) {
 #[test]
 fn fenced_serve_inside_get_component_meta_declines_the_publish() {
     let host = build_host();
-    upsert(&host, "/src/types.ts", TYPES_TS, FileKind::NonSfc);
-    upsert(&host, "/src/Comp.vue", OWNER_VUE, FileKind::VueSfc);
+    upsert(&host, "/src/types.ts", TYPES_TS, FileLanguage::script_ts());
+    upsert(&host, "/src/Comp.vue", OWNER_VUE, FileLanguage::vue());
 
     arm_force_fenced_serve_flag(&host);
     let fenced = host.get_component_meta("/src/Comp.vue");
@@ -902,8 +902,8 @@ fn fenced_serve_inside_get_component_meta_declines_the_publish() {
 #[test]
 fn fenced_serve_inside_with_resolution_declines_the_publish() {
     let host = build_host();
-    upsert(&host, "/src/types.ts", TYPES_TS, FileKind::NonSfc);
-    upsert(&host, "/src/Comp.vue", OWNER_VUE, FileKind::VueSfc);
+    upsert(&host, "/src/types.ts", TYPES_TS, FileLanguage::script_ts());
+    upsert(&host, "/src/Comp.vue", OWNER_VUE, FileLanguage::vue());
 
     arm_force_fenced_serve_flag(&host);
     let fenced = host.get_component_meta_with_resolution("/src/Comp.vue");
@@ -936,8 +936,8 @@ fn fenced_serve_inside_with_resolution_declines_the_publish() {
 #[test]
 fn fenced_serve_inside_via_view_declines_the_publish() {
     let host = build_host();
-    upsert(&host, "/src/types.ts", TYPES_TS, FileKind::NonSfc);
-    upsert(&host, "/src/Comp.vue", OWNER_VUE, FileKind::VueSfc);
+    upsert(&host, "/src/types.ts", TYPES_TS, FileLanguage::script_ts());
+    upsert(&host, "/src/Comp.vue", OWNER_VUE, FileLanguage::vue());
 
     let view = crate::session_view::HostViewRef::new(&host);
     arm_force_fenced_serve_flag(&host);
@@ -969,8 +969,8 @@ fn fenced_serve_inside_via_view_declines_the_publish() {
 #[test]
 fn unfenced_cold_compute_still_publishes_through_the_seam() {
     let host = build_host();
-    upsert(&host, "/src/types.ts", TYPES_TS, FileKind::NonSfc);
-    upsert(&host, "/src/Comp.vue", OWNER_VUE, FileKind::VueSfc);
+    upsert(&host, "/src/types.ts", TYPES_TS, FileLanguage::script_ts());
+    upsert(&host, "/src/Comp.vue", OWNER_VUE, FileLanguage::vue());
 
     *host.materialize_seam_hook.lock() = Some(Arc::new(|| {}));
     let cold = host.get_component_meta("/src/Comp.vue");

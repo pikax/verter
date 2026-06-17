@@ -33,6 +33,7 @@ fn make_key(
         content_hash,
         parse_env_hash,
         parser_version,
+        file_language_id: FileArtifactKey::derived_file_language_id(canonical),
     }
 }
 
@@ -87,19 +88,24 @@ fn identical_inputs_produce_equal_keys() {
 #[test]
 fn r6_key_struct_has_no_fact_dep_signature_field() {
     // R6 codification by structural assertion: the FileArtifactKey type
-    // has exactly four fields (canonical, content_hash, parse_env_hash,
-    // parser_version). If `fact_dep_signature` or similar is added to the
-    // key, this test fails at compile time (the destructuring pattern
-    // below would not match).
+    // has exactly five fields (canonical, content_hash, parse_env_hash,
+    // parser_version, file_language_id). If `fact_dep_signature` or
+    // similar is added to the key, this test fails at compile time (the
+    // destructuring pattern below would not match).
     let key = make_key("/a.ts", [1u8; 16], [2u8; 16], 1);
     let FileArtifactKey {
         canonical,
         content_hash,
         parse_env_hash,
         parser_version,
+        file_language_id,
     } = key;
     assert_eq!(&*canonical, "/a.ts");
     assert_eq!(content_hash, [1u8; 16]);
     assert_eq!(parse_env_hash, [2u8; 16]);
     assert_eq!(parser_version, 1);
+    assert_eq!(
+        file_language_id,
+        verter_language::FileLanguage::script(verter_language::ScriptSourceType::Ts)
+    );
 }

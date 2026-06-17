@@ -52,14 +52,16 @@ impl VerterHost {
 
         let mut bindings = rustc_hash::FxHashMap::default();
 
-        let Some((raw_source, cached_parse, _)) = self.current_eval_state(canonical_id) else {
+        let Some((raw_source, framework_parse, _)) = self.current_eval_state(canonical_id) else {
             return bindings;
         };
 
-        for (idx, param) in
-            Self::sfc_script_setup_type_params(raw_source.as_ref(), cached_parse.as_deref())
-                .into_iter()
-                .enumerate()
+        for (idx, param) in crate::host_resolve::sfc_script_setup_type_params(
+            raw_source.as_ref(),
+            framework_parse.as_deref(),
+        )
+        .into_iter()
+        .enumerate()
         {
             bindings.insert(
                 param.name.clone(),
@@ -78,82 +80,94 @@ impl VerterHost {
         bindings
     }
 
-    pub(crate) fn sfc_script_setup_type_params(
-        source: &str,
-        cached_parse: Option<&verter_compiler::parser::types::ParsedSfc>,
-    ) -> Vec<verter_type_expr::TypeParam> {
-        let Some(setup) = cached_parse.and_then(|parsed| parsed.script_setup()) else {
-            return Vec::new();
-        };
-        let Some(generic_span) = setup.generic else {
-            return Vec::new();
-        };
-        let clause = source[generic_span.start as usize..generic_span.end as usize].trim();
-        if clause.is_empty() {
-            return Vec::new();
-        }
-        verter_semantic::analysis::type_eval_build::parse_type_parameter_clause(clause)
-    }
-
-    pub(crate) fn apply_sfc_script_setup_type_params(
-        env: &mut verter_semantic::analysis::type_eval::EvalEnv,
-        source: &str,
-        cached_parse: Option<&verter_compiler::parser::types::ParsedSfc>,
-    ) {
-        for param in Self::sfc_script_setup_type_params(source, cached_parse) {
-            env.type_bindings.insert(
-                param.name.clone(),
-                Arc::new(verter_type_expr::TypeExpr::type_parameter(param)),
-            );
-        }
-    }
-
     /// Central caller for the `IndexedReady.eval_source` body.
     ///
-    /// For a `.vue` SFC this returns the **position-preserving** script-only
-    /// source (script content at its raw SFC byte offsets, non-script bytes
-    /// whitespace-blanked) so every OXC-produced span — eval-env decls,
-    /// external-type analysis, member/signature spans — is SFC-absolute by
-    /// construction. For a non-SFC file the source is returned unchanged (its
-    /// offsets are already file-absolute).
+    /// For a framework CARRIER (any adapter — Vue, Svelte, …) this returns the
+    /// **position-preserving** script-only source: each script block's content
+    /// sits at its RAW carrier byte offsets and every other byte is
+    /// whitespace-blanked (line terminators preserved), so every OXC-produced
+    /// span — eval-env decls, external-type analysis, member/signature spans —
+    /// is carrier-absolute by construction. The blanking is CARRIER-NEUTRAL: it
+    /// reads the neutral `FrameworkParseCommon.script_regions` the carrier's
+    /// producer populated (BOTH the instance and module script blocks), so a new
+    /// carrier needs no per-adapter eval-source branch here. For a non-carrier
+    /// file the source is returned unchanged (its offsets are already
+    /// file-absolute).
     pub(crate) fn build_eval_script_source(
         source: &str,
-        cached_parse: Option<&verter_compiler::parser::types::ParsedSfc>,
+        framework_parse: Option<&verter_language::FrameworkParseArtifact>,
     ) -> String {
-        Self::build_eval_script_source_with_extraction(source, cached_parse).0
+        Self::build_eval_script_source_with_extraction(source, framework_parse).0
     }
 
-    /// [`Self::build_eval_script_source`] plus the extraction
-    /// provenance: the `bool` is `true` iff the returned text is the
-    /// position-preserving extracted `.vue` script — exactly the case
-    /// where the flight's eval-program parse over this text IS the
-    /// snapshot's script program and can be threaded into the snapshot
-    /// build ([`crate::parse::VueScriptProgram::Shared`]). `false`
-    /// means the raw source passed through unchanged (non-SFC files,
-    /// or a `.vue` with no extractable script), where the eval program
+    /// [`Self::build_eval_script_source`] plus the extraction provenance: the
+    /// `bool` is `true` iff the returned text is the position-preserving
+    /// extracted CARRIER script — exactly the case where the flight's
+    /// eval-program parse over this text IS the snapshot's script program and
+    /// can be threaded into the snapshot build
+    /// ([`crate::parse::VueScriptProgram::Shared`] for Vue,
+    /// [`crate::parse::FrameworkScriptProgram::Shared`] for other carriers).
+    /// `false` means the raw source passed through unchanged (non-carrier
+    /// files, or a carrier with no extractable script), where the eval program
     /// covers different bytes than a script-program walk would.
+    ///
+    /// Carrier-NEUTRAL: a non-Vue carrier blanks from the producer's recorded
+    /// `script_regions` (both instance + module blocks), Vue keeps its exact
+    /// `extract_vue_script_content` behaviour, and a non-carrier passes through.
     pub(crate) fn build_eval_script_source_with_extraction(
         source: &str,
-        cached_parse: Option<&verter_compiler::parser::types::ParsedSfc>,
+        framework_parse: Option<&verter_language::FrameworkParseArtifact>,
     ) -> (String, bool) {
-        match crate::host_resolve::extract_vue_script_content(source, cached_parse) {
+        // A NON-Vue framework carrier blanks NEUTRALLY from the producer's
+        // recorded `script_regions` (BOTH the instance and module script blocks)
+        // — so a `.svelte` eval-source carries both scripts at their raw carrier
+        // offsets with the markup/styles whitespace-blanked. A new carrier needs
+        // no per-adapter branch here. The blanked text IS a position-preserving
+        // extracted script (the eval program over it is shareable), so the
+        // provenance is `true`.
+        if let Some(artifact) = framework_parse {
+            let is_vue = crate::typeinfo::adapters::vue::vue_parse(artifact).is_some();
+            if !is_vue {
+                let mut spans: Vec<(u32, u32)> = artifact
+                    .common
+                    .script_regions
+                    .iter()
+                    .map(|region| (region.span.start, region.span.end))
+                    .filter(|(start, end)| end > start)
+                    .collect();
+                spans.sort_by_key(|(start, _)| *start);
+                // Even with NO script regions (a pure-markup `.svelte`) the
+                // eval-source is the FULLY-BLANKED, line-preserving source — never
+                // the raw markup. `build_position_preserving_script_source` over an
+                // empty span set blanks every non-line-terminator byte, so a shared
+                // eval-source consumer parses an empty TS program, not HTML.
+                let blanked =
+                    crate::host_resolve::build_position_preserving_script_source(source, &spans);
+                return (blanked, true);
+            }
+        }
+        // Vue (and the no-artifact fallback) keep the EXACT existing extraction:
+        // the parser-vs-raw-scan agreement + the forgiving raw scan when no
+        // parsed SFC is available + the inter-script `\n` injection. This is the
+        // byte-identical pre-existing behaviour (a Vue file arriving without a
+        // framework_parse still extracts its `<script>` from the raw markup).
+        let parsed = framework_parse.and_then(crate::typeinfo::adapters::vue::vue_parse);
+        match crate::host_resolve::extract_vue_script_content(source, parsed.map(|p| p.as_ref())) {
             Some(script) => (script, true),
             None => (source.to_string(), false),
         }
     }
 
-    /// Selects the `.vue` snapshot build's script-program input for a
-    /// cold materialise flight — the SINGLE decision point both the
-    /// base and overlay flights share. The flight's eval program IS
-    /// the snapshot's script program exactly when the eval source is
-    /// the position-preserving extracted script:
+    /// Selects the `.vue` snapshot build's script-program input for a cold
+    /// materialise flight — the SINGLE decision point both the base and overlay
+    /// flights share. The flight's eval program IS the snapshot's script program
+    /// exactly when the eval source is the position-preserving extracted script:
     /// [`crate::parse::VueScriptProgram::Shared`] on a live parse,
-    /// [`crate::parse::VueScriptProgram::SharedFatal`] on a fatal one
-    /// (a re-parse of the same bytes under the same source type fails
-    /// identically), and
-    /// [`crate::parse::VueScriptProgram::ParseHere`] when the raw
-    /// source passed through unextracted (the eval program covers
-    /// different bytes than a script-program walk would).
+    /// [`crate::parse::VueScriptProgram::SharedFatal`] on a fatal one (a re-parse
+    /// of the same bytes under the same source type fails identically), and
+    /// [`crate::parse::VueScriptProgram::ParseHere`] when the raw source passed
+    /// through unextracted (the eval program covers different bytes than a
+    /// script-program walk would).
     pub(crate) fn vue_flight_script_program<'a>(
         eval_is_extracted_script: bool,
         parsed_eval_program: Option<&'a crate::ParsedEvalProgram>,
@@ -167,6 +181,25 @@ impl VerterHost {
         }
     }
 
+    /// The carrier-neutral analog of [`Self::vue_flight_script_program`] — the
+    /// SINGLE decision point selecting a non-Vue carrier snapshot's script
+    /// program for a cold materialise flight (Svelte today). The flight's eval
+    /// program IS the snapshot's script program exactly when the eval source is
+    /// the position-preserving extracted carrier script, so the snapshot walks
+    /// the retained parse instead of re-parsing the same bytes.
+    pub(crate) fn framework_flight_script_program<'a>(
+        eval_is_extracted_script: bool,
+        parsed_eval_program: Option<&'a crate::ParsedEvalProgram>,
+    ) -> crate::parse::FrameworkScriptProgram<'a> {
+        if !eval_is_extracted_script {
+            return crate::parse::FrameworkScriptProgram::ParseHere;
+        }
+        match parsed_eval_program {
+            Some(program) => crate::parse::FrameworkScriptProgram::Shared(program),
+            None => crate::parse::FrameworkScriptProgram::SharedFatal,
+        }
+    }
+
     /// Resolve the authoritative `source_type` for cache-key purposes.
     ///
     /// Prefers the scheduler-stored [`crate::host_executor::HostSourceData::source_type`]
@@ -176,15 +209,17 @@ impl VerterHost {
     pub(crate) fn imported_eval_source_type_for(
         &self,
         canonical_id: &str,
-        raw_source: &str,
-        cached_parse: Option<&verter_compiler::parser::types::ParsedSfc>,
+        framework_parse: Option<&verter_language::FrameworkParseArtifact>,
     ) -> oxc_span::SourceType {
         {
             if let Some(st) = self.authoritative_source_type_for(canonical_id) {
                 return st;
             }
         }
-        crate::parse::imported_eval_source_type(canonical_id, raw_source, cached_parse)
+        crate::parse::imported_eval_source_type(
+            &self.language_classifier.classify(canonical_id),
+            framework_parse,
+        )
     }
 
     /// View-aware variant of [`Self::read_analysis_source`].
@@ -363,12 +398,11 @@ impl VerterHost {
 
     /// THE single host parse entry for the borrowed eval-program form.
     ///
-    /// Produces a fresh `ParsedEvalProgram` per call. The parse lives
-    /// and dies on the caller's stack (the OXC arena is `!Send` and
-    /// must never enter host caches or thread-locals); the
-    /// `IndexedReady` materialise closure threads the parsed program by
-    /// reference so a cold canonical build parses exactly once.
-    /// Concurrent cold callers collapse on `indexed_singleflight`.
+    /// Produces a fresh `ParsedEvalProgram` per call. The parse lives and dies
+    /// on the caller's stack (the OXC arena is `!Send` and must never enter host
+    /// caches or thread-locals); the `IndexedReady` materialise closure threads
+    /// the parsed program by reference so a cold canonical build parses exactly
+    /// once. Concurrent cold callers collapse on `indexed_singleflight`.
     ///
     /// Returns `None` when the parse panicked (fatal syntax fault) —
     /// callers fall back to default analysis / an empty env rather than
@@ -428,9 +462,7 @@ impl VerterHost {
         let env = self.host_view_env_hashes_for(canonical_id);
         let project_identity = self.host_view_project_identity_for(canonical_id).fold_u32();
         let adapter: std::sync::Arc<
-            dyn verter_compiler::utils::oxc::vue::resolve_type::cache_keys::NamedTypeCache
-                + Send
-                + Sync,
+            dyn verter_compiler::utils::oxc::vue::named_type_keys::NamedTypeCache + Send + Sync,
         > = std::sync::Arc::new(HostNamedTypeCacheAdapter {
             graph,
             canonical_id: Arc::<str>::from(canonical_id),
@@ -445,7 +477,7 @@ impl VerterHost {
             program,
             |parsed_program| {
                 let program = parsed_program.borrow_dependent();
-                let mut ctx = verter_compiler::utils::oxc::vue::resolve_type::build_type_context(
+                let mut ctx = verter_compiler::utils::oxc::script::type_surface::build_type_context(
                     program,
                     parsed_program.source_bytes(),
                     0,
@@ -523,8 +555,7 @@ impl VerterHost {
                     .map(|serve| serve.indexed)
                 {
                     return Some(ExternalTypeResolutionInputs {
-                        raw_source: Arc::clone(&indexed.raw_source),
-                        cached_parse: indexed.cached_parse.clone(),
+                        framework_parse: indexed.framework_parse.clone(),
                         whole_hash: indexed.whole_hash,
                         eval_source: Arc::clone(&indexed.eval_source),
                         analysis: Arc::clone(&indexed.external_type_analysis),
@@ -559,8 +590,7 @@ impl VerterHost {
             .or_else(|| self.artifact_current_indexed(canonical_id));
         if let Some(facts) = cached_facts {
             let inputs = ExternalTypeResolutionInputs {
-                raw_source: Arc::clone(&facts.raw_source),
-                cached_parse: facts.cached_parse.clone(),
+                framework_parse: facts.framework_parse.clone(),
                 whole_hash: facts.whole_hash,
                 eval_source: Arc::clone(&facts.eval_source),
                 analysis: Arc::clone(&facts.external_type_analysis),
@@ -575,8 +605,7 @@ impl VerterHost {
         // shared with every other reader.
         let indexed = self.ensure_indexed_ready_serve(canonical_id)?.indexed;
         let inputs = ExternalTypeResolutionInputs {
-            raw_source: Arc::clone(&indexed.raw_source),
-            cached_parse: indexed.cached_parse.clone(),
+            framework_parse: indexed.framework_parse.clone(),
             whole_hash: indexed.whole_hash,
             eval_source: Arc::clone(&indexed.eval_source),
             analysis: Arc::clone(&indexed.external_type_analysis),

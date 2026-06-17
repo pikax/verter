@@ -98,8 +98,8 @@ pub(super) async fn handle_hover(
     let child_hover_target = (|| {
         let analysis = server.documents.get_analysis(uri)?;
         let doc = server.documents.get(uri)?;
-        let vue_offset = doc.line_index.position_to_offset(position)?;
-        hover::child_hover_target_at_offset(vue_offset, &doc.source, &analysis)
+        let carrier_offset = doc.line_index.position_to_offset(position)?;
+        hover::child_hover_target_at_offset(carrier_offset, &doc.source, &analysis)
     })();
     if let Some(target) = child_hover_target.as_ref() {
         if let Some(child_hover) = server.child_hover_for_target(uri, target) {
@@ -112,8 +112,8 @@ pub(super) async fn handle_hover(
     if verter_result.is_some() {
         if let Some(analysis) = server.documents.get_analysis(uri) {
             if let Some(doc) = server.documents.get(uri) {
-                if let Some(vue_offset) = doc.line_index.position_to_offset(position) {
-                    if hover::is_on_slot_syntax(vue_offset, &analysis) {
+                if let Some(carrier_offset) = doc.line_index.position_to_offset(position) {
+                    if hover::is_on_slot_syntax(carrier_offset, &analysis) {
                         return Ok(verter_result);
                     }
                 }
@@ -127,9 +127,9 @@ pub(super) async fn handle_hover(
         if let Some(ctx) = server.type_provider_context(uri) {
             // Use validated mapping to avoid querying TSGO at synthetic TSX
             // positions (e.g., <div> → generated JSX) which can crash it.
-            let tsx_offset = merge::vue_position_to_tsx_offset_validated(
+            let tsx_offset = merge::carrier_position_to_tsx_offset_validated(
                 position,
-                &ctx.vue_line_index,
+                &ctx.carrier_line_index,
                 &ctx.mapper,
                 &ctx.tsx_line_index,
             );
@@ -168,7 +168,7 @@ pub(super) async fn handle_hover(
                 }
             } else {
                 tracing::info!(
-                    "hover: vue_to_tsx validation failed for {}:{} — position is in synthetic TSX region",
+                    "hover: carrier_to_tsx validation failed for {}:{} — position is in synthetic TSX region",
                     position.line,
                     position.character
                 );
@@ -182,7 +182,7 @@ pub(super) async fn handle_hover(
                     type_hover,
                     &ctx.mapper,
                     &ctx.tsx_line_index,
-                    &ctx.vue_line_index,
+                    &ctx.carrier_line_index,
                     vue_kind_label.as_deref(),
                 ));
             }
@@ -192,24 +192,26 @@ pub(super) async fn handle_hover(
             // the static attribute's source position maps to removed TSX content.
             // Retry at the dynamic directive's position instead.
             if let Some(analysis) = server.documents.get_analysis(uri) {
-                let vue_offset = ctx.vue_line_index.position_to_offset(position);
-                if let Some(vue_offset) = vue_offset {
+                let carrier_offset = ctx.carrier_line_index.position_to_offset(position);
+                if let Some(carrier_offset) = carrier_offset {
                     if let Some(redirect_offset) =
-                        hover::merged_attribute_redirect_offset(vue_offset, &analysis)
+                        hover::merged_attribute_redirect_offset(carrier_offset, &analysis)
                     {
                         // Convert the redirect SFC offset to a Vue line:col position
                         if let Some(redirect_pos) =
-                            ctx.vue_line_index.offset_to_position(redirect_offset)
+                            ctx.carrier_line_index.offset_to_position(redirect_offset)
                         {
-                            if let Some(redirect_tsx) = merge::vue_position_to_tsx_offset_validated(
-                                &redirect_pos,
-                                &ctx.vue_line_index,
-                                &ctx.mapper,
-                                &ctx.tsx_line_index,
-                            ) {
+                            if let Some(redirect_tsx) =
+                                merge::carrier_position_to_tsx_offset_validated(
+                                    &redirect_pos,
+                                    &ctx.carrier_line_index,
+                                    &ctx.mapper,
+                                    &ctx.tsx_line_index,
+                                )
+                            {
                                 tracing::info!(
                                     "hover: redirecting merged class/style from vue offset {} to {} (tsx offset {})",
-                                    vue_offset, redirect_offset, redirect_tsx
+                                    carrier_offset, redirect_offset, redirect_tsx
                                 );
                                 if let Ok(redirect_hover) =
                                     tp.get_hover(&ctx.tsx_path, redirect_tsx).await
@@ -219,7 +221,7 @@ pub(super) async fn handle_hover(
                                         redirect_hover,
                                         &ctx.mapper,
                                         &ctx.tsx_line_index,
-                                        &ctx.vue_line_index,
+                                        &ctx.carrier_line_index,
                                         vue_kind_label.as_deref(),
                                     ));
                                 }
@@ -234,7 +236,7 @@ pub(super) async fn handle_hover(
                 None,
                 &ctx.mapper,
                 &ctx.tsx_line_index,
-                &ctx.vue_line_index,
+                &ctx.carrier_line_index,
                 vue_kind_label.as_deref(),
             ));
         } else {
@@ -362,7 +364,7 @@ pub(super) async fn handle_completion(
             let try_follow_reexport = |resolved: &str,
                                        comp_name: Option<&str>|
              -> Option<verter_session::FileAnalysisSnapshot> {
-                if resolved.ends_with(".vue") {
+                if crate::server::is_default_export_component_carrier(resolved) {
                     return server.documents.host().get_analysis(resolved);
                 }
                 // Ensure the barrel file is loaded so we can inspect its exports
@@ -376,7 +378,7 @@ pub(super) async fn handle_completion(
                         .host()
                         .get_export_span_follow_reexports(resolved, name)
                     {
-                        if terminal_id.ends_with(".vue") {
+                        if crate::server::is_default_export_component_carrier(&terminal_id) {
                             // Ensure the terminal .vue file is compiled
                             if server.documents.host().get_analysis(&terminal_id).is_none() {
                                 server.documents.host().ensure_loaded(&terminal_id);
@@ -488,7 +490,7 @@ pub(super) async fn handle_completion(
             );
             server.ensure_current_file_synced(uri).await;
         }
-        server.ensure_imported_vue_apis_synced(uri).await;
+        server.ensure_imported_carrier_apis_synced(uri).await;
         let ctx = server.type_provider_context(uri);
         if ctx.is_none() {
             tracing::debug!("completion: no ide_context for {}", uri.as_str());
@@ -497,9 +499,9 @@ pub(super) async fn handle_completion(
             // TSX is always fresh in the type provider — synced eagerly in did_change.
             // Only DTS sync and diagnostics publishing are debounced (300ms via SyncCoordinator).
 
-            let tsx_offset = merge::vue_position_to_tsx_offset_validated(
+            let tsx_offset = merge::carrier_position_to_tsx_offset_validated(
                 position,
-                &ctx.vue_line_index,
+                &ctx.carrier_line_index,
                 &ctx.mapper,
                 &ctx.tsx_line_index,
             );
@@ -616,7 +618,7 @@ pub(super) async fn handle_completion(
                         );
                         server.force_reopen_current_file_in_type_provider(uri).await;
                         server.sync_api_to_provider(uri).await;
-                        server.ensure_imported_vue_apis_synced(uri).await;
+                        server.ensure_imported_carrier_apis_synced(uri).await;
                         tokio::time::sleep(std::time::Duration::from_millis(retry_delay_ms)).await;
                         type_completion_result = tp
                             .get_completions(&ctx.tsx_path, tsx_offset, tp_trigger)
@@ -669,7 +671,7 @@ pub(super) async fn handle_completion(
                             type_result,
                             &ctx.mapper,
                             &ctx.tsx_line_index,
-                            &ctx.vue_line_index,
+                            &ctx.carrier_line_index,
                             Some(&ctx.tsx_path),
                             is_template_attr_context,
                         );
@@ -741,13 +743,15 @@ pub(super) async fn handle_completion_resolve(
                                     let tsx_li =
                                         LineIndex::new(&tsx_content, server.documents.encoding());
                                     // Find the Vue URI from tsx_path
-                                    if let Some(vue_uri) = server.vue_uri_from_ide_path(tsx_path) {
-                                        if let Some(doc) = server.documents.get(&vue_uri) {
+                                    if let Some(carrier_uri) =
+                                        server.carrier_uri_from_ide_path(tsx_path)
+                                    {
+                                        if let Some(doc) = server.documents.get(&carrier_uri) {
                                             let edits: Vec<TextEdit> = resolve_result
                                                 .additional_text_edits
                                                 .iter()
                                                 .filter_map(|e| {
-                                                    let range = merge::tsx_range_to_vue_range(
+                                                    let range = merge::tsx_range_to_carrier_range(
                                                         e.start,
                                                         e.end,
                                                         &tsx_li,
@@ -804,10 +808,12 @@ pub(super) async fn handle_goto_definition(
                         .into_iter()
                         .filter_map(|d| {
                             // Strip virtual suffixes so user navigates to .vue
-                            let vue_source_exists =
+                            let carrier_source_exists =
                                 |p: &str| server.documents.host().get_source(p).is_some();
-                            let target_path =
-                                merge::normalize_vue_path_owned(&d.path, &vue_source_exists);
+                            let target_path = merge::normalize_carrier_path_owned(
+                                &d.path,
+                                &carrier_source_exists,
+                            );
                             let target_uri: Uri = merge::file_path_to_uri(&target_path)?;
                             // Convert byte offsets to positions using vf LineIndex for
                             // same-file refs; for external files, fall back to 0:0
@@ -939,9 +945,9 @@ pub(super) async fn handle_goto_definition(
         if let Some(ctx) = server.type_provider_context(uri) {
             // Use validated mapping to avoid querying TSGO at synthetic TSX
             // positions (e.g., <div> → generated JSX) which can crash it.
-            if let Some(tsx_offset) = merge::vue_position_to_tsx_offset_validated(
+            if let Some(tsx_offset) = merge::carrier_position_to_tsx_offset_validated(
                 position,
-                &ctx.vue_line_index,
+                &ctx.carrier_line_index,
                 &ctx.mapper,
                 &ctx.tsx_line_index,
             ) {
@@ -955,7 +961,7 @@ pub(super) async fn handle_goto_definition(
                             "definition: type provider returned {} locations",
                             type_defs.len()
                         );
-                        let vue_source_exists =
+                        let carrier_source_exists =
                             |p: &str| server.documents.host().get_source(p).is_some();
                         let barrel_resolver =
                             |path: &str, start: u32, end: u32| -> Option<Location> {
@@ -966,10 +972,10 @@ pub(super) async fn handle_goto_definition(
                             type_defs,
                             &ctx.tsx_line_index,
                             &ctx.mapper,
-                            &ctx.vue_line_index,
+                            &ctx.carrier_line_index,
                             Some(&|ide_path: &str| server.external_ide_context(ide_path)),
                             uri,
-                            &vue_source_exists,
+                            &carrier_source_exists,
                             Some(&barrel_resolver),
                         );
                         // Post-process: if type provider resolved to a barrel file,
@@ -1021,15 +1027,17 @@ pub(super) async fn handle_goto_type_definition(
                     let locations: Vec<Location> = type_defs
                         .into_iter()
                         .filter_map(|d| {
-                            let vue_source_exists =
+                            let carrier_source_exists =
                                 |p: &str| server.documents.host().get_source(p).is_some();
                             if let Some(location) = server
                                 .resolve_barrel_type_provider_location(&d.path, d.start, d.end)
                             {
                                 return Some(location);
                             }
-                            let target_path =
-                                merge::normalize_vue_path_owned(&d.path, &vue_source_exists);
+                            let target_path = merge::normalize_carrier_path_owned(
+                                &d.path,
+                                &carrier_source_exists,
+                            );
                             let target_uri: Uri = merge::file_path_to_uri(&target_path)?;
                             let range = if d.path == tsx_path {
                                 Range {
@@ -1057,9 +1065,9 @@ pub(super) async fn handle_goto_type_definition(
     // Type definition is purely a type provider operation — no verter analysis phase.
     if let Some(tp) = &server.type_provider {
         if let Some(ctx) = server.type_provider_context(uri) {
-            if let Some(tsx_offset) = merge::vue_position_to_tsx_offset_validated(
+            if let Some(tsx_offset) = merge::carrier_position_to_tsx_offset_validated(
                 position,
-                &ctx.vue_line_index,
+                &ctx.carrier_line_index,
                 &ctx.mapper,
                 &ctx.tsx_line_index,
             ) {
@@ -1073,7 +1081,7 @@ pub(super) async fn handle_goto_type_definition(
                             "type_definition: type provider returned {} locations",
                             type_defs.len()
                         );
-                        let vue_source_exists =
+                        let carrier_source_exists =
                             |p: &str| server.documents.host().get_source(p).is_some();
                         let barrel_resolver =
                             |path: &str, start: u32, end: u32| -> Option<Location> {
@@ -1084,10 +1092,10 @@ pub(super) async fn handle_goto_type_definition(
                             type_defs,
                             &ctx.tsx_line_index,
                             &ctx.mapper,
-                            &ctx.vue_line_index,
+                            &ctx.carrier_line_index,
                             Some(&|ide_path: &str| server.external_ide_context(ide_path)),
                             uri,
-                            &vue_source_exists,
+                            &carrier_source_exists,
                             Some(&barrel_resolver),
                         ));
                     }
@@ -1136,10 +1144,12 @@ pub(super) async fn handle_references(
                     let locations: Vec<Location> = type_refs
                         .into_iter()
                         .filter_map(|r| {
-                            let vue_source_exists =
+                            let carrier_source_exists =
                                 |p: &str| server.documents.host().get_source(p).is_some();
-                            let target_path =
-                                merge::normalize_vue_path_owned(&r.path, &vue_source_exists);
+                            let target_path = merge::normalize_carrier_path_owned(
+                                &r.path,
+                                &carrier_source_exists,
+                            );
                             let target_uri: Uri = merge::file_path_to_uri(&target_path)?;
                             let range = if r.path == tsx_path {
                                 Range {
@@ -1198,9 +1208,9 @@ pub(super) async fn handle_references(
     // Extract all context synchronously — no DashMap guard held across await.
     if let Some(tp) = &server.type_provider {
         if let Some(ctx) = server.type_provider_context(uri) {
-            if let Some(tsx_offset) = merge::vue_position_to_tsx_offset_validated(
+            if let Some(tsx_offset) = merge::carrier_position_to_tsx_offset_validated(
                 position,
-                &ctx.vue_line_index,
+                &ctx.carrier_line_index,
                 &ctx.mapper,
                 &ctx.tsx_line_index,
             ) {
@@ -1214,16 +1224,16 @@ pub(super) async fn handle_references(
                             "references: type provider returned {} locations",
                             type_refs.len()
                         );
-                        let vue_source_exists =
+                        let carrier_source_exists =
                             |p: &str| server.documents.host().get_source(p).is_some();
                         return Ok(merge::merge_references(
                             verter_result,
                             type_refs,
                             &ctx.tsx_line_index,
                             &ctx.mapper,
-                            &ctx.vue_line_index,
+                            &ctx.carrier_line_index,
                             Some(&|ide_path: &str| server.external_ide_context(ide_path)),
-                            &vue_source_exists,
+                            &carrier_source_exists,
                         ));
                     }
                     Err(e) => {
@@ -1314,27 +1324,36 @@ pub(super) async fn handle_rename(
 
     // Enhance with TypeProvider for cross-file renames.
     // Extract all context synchronously — no DashMap guard held across await.
-    if let Some(tp) = &server.type_provider {
-        if let Some(ctx) = server.type_provider_context(uri) {
-            if let Some(tsx_offset) = merge::vue_position_to_tsx_offset_validated(
-                position,
-                &ctx.vue_line_index,
-                &ctx.mapper,
-                &ctx.tsx_line_index,
-            ) {
-                if let Ok(type_locs) = tp.get_rename_locations(&ctx.tsx_path, tsx_offset).await {
-                    let vue_source_exists =
-                        |p: &str| server.documents.host().get_source(p).is_some();
-                    return Ok(merge::merge_rename_locations(
-                        verter_result,
-                        type_locs,
-                        new_name,
-                        &ctx.tsx_line_index,
-                        &ctx.mapper,
-                        &ctx.vue_line_index,
-                        Some(&|ide_path: &str| server.external_ide_context(ide_path)),
-                        &vue_source_exists,
-                    ));
+    //
+    // GATED OFF for a SELF-FILE rune-module own buffer: its workspace-EDIT
+    // positions are not yet mapped through the self-file mapper, so a returned
+    // edit could land off by the prelude offset (or inside the prelude) and
+    // CORRUPT the module. Rename stays DEFERRED for the self-file projection —
+    // a clean no-op, never a wrong/unmapped edit. (Carrier rename unchanged.)
+    if !server.is_self_file_projection(uri) {
+        if let Some(tp) = &server.type_provider {
+            if let Some(ctx) = server.type_provider_context(uri) {
+                if let Some(tsx_offset) = merge::carrier_position_to_tsx_offset_validated(
+                    position,
+                    &ctx.carrier_line_index,
+                    &ctx.mapper,
+                    &ctx.tsx_line_index,
+                ) {
+                    if let Ok(type_locs) = tp.get_rename_locations(&ctx.tsx_path, tsx_offset).await
+                    {
+                        let carrier_source_exists =
+                            |p: &str| server.documents.host().get_source(p).is_some();
+                        return Ok(merge::merge_rename_locations(
+                            verter_result,
+                            type_locs,
+                            new_name,
+                            &ctx.tsx_line_index,
+                            &ctx.mapper,
+                            &ctx.carrier_line_index,
+                            Some(&|ide_path: &str| server.external_ide_context(ide_path)),
+                            &carrier_source_exists,
+                        ));
+                    }
                 }
             }
         }

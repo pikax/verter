@@ -10,6 +10,7 @@ pub mod project_resolver;
 pub mod provider_sync;
 pub mod server;
 pub mod statistics;
+pub mod svelte_assets;
 pub mod sync_coordinator;
 pub mod tsgo;
 pub mod tsserver;
@@ -89,7 +90,7 @@ pub struct LspConfig {
 pub enum ProjectSyncMode {
     /// Send resolver-managed project files to the type provider.
     /// `.vue` files are exposed as `.vue.tsx` for IDE queries and `.vue.ts`
-    /// for public API resolution; non-Vue files are synced as source files.
+    /// for public API resolution; non-carrier files are synced as source files.
     #[default]
     FullProject,
 }

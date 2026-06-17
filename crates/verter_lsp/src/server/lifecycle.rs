@@ -19,7 +19,7 @@ use std::sync::Arc;
 use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::ls_types::*;
 
-use crate::capabilities::server_capabilities;
+use crate::capabilities::{adapter_module_watch_glob, carrier_watch_glob, server_capabilities};
 use crate::documents::uri_to_canonical_id;
 use crate::provider_sync::ProviderPathKind;
 
@@ -345,42 +345,60 @@ pub(super) async fn handle_initialized(server: &VerterLanguageServer, _params: I
     // build tools, other editors). Enables non-VS Code clients (Neovim, etc.)
     // to get full external change detection via the standard LSP mechanism.
     let watch_kind = Some(WatchKind::Change | WatchKind::Create | WatchKind::Delete);
+    let mut watchers = vec![FileSystemWatcher {
+        // Carrier-file watcher glob, built from the registry's carrier
+        // rows. File-watching is a SERVER concern (the client manifest
+        // carries no watch globs); this glob is the descriptor-derived
+        // authority. It covers carrier extensions today (`.vue`,
+        // `.svelte`) — including carrier rows with no registered
+        // implementation, whose events produce no provider sync state
+        // until a carrier lands.
+        glob_pattern: GlobPattern::String(carrier_watch_glob()),
+        kind: watch_kind,
+    }];
+    // Dedicated ADAPTER-MODULE watcher glob (`**/*.{svelte.js,svelte.ts}`),
+    // built from `LanguageRegistry::all_adapter_module_extensions()`. A rune
+    // module is NOT a carrier and its coverage is its OWN descriptor-derived
+    // glob — the generic TS/JS glob below no longer carries rune-module
+    // responsibility.
+    if let Some(adapter_module_glob) = adapter_module_watch_glob() {
+        watchers.push(FileSystemWatcher {
+            glob_pattern: GlobPattern::String(adapter_module_glob),
+            kind: watch_kind,
+        });
+    }
+    watchers.extend([
+        FileSystemWatcher {
+            // Generic TS/JS glob for ORDINARY TS/JS dependency + config
+            // tracking ONLY (rune-module coverage moved to the dedicated
+            // adapter-module glob above).
+            glob_pattern: GlobPattern::String("**/*.{ts,tsx,js,jsx,mts,mjs,cts,cjs}".to_string()),
+            kind: watch_kind,
+        },
+        FileSystemWatcher {
+            glob_pattern: GlobPattern::String("**/tsconfig*.json".to_string()),
+            kind: watch_kind,
+        },
+        FileSystemWatcher {
+            glob_pattern: GlobPattern::String("**/.verterrc.json".to_string()),
+            kind: watch_kind,
+        },
+        FileSystemWatcher {
+            glob_pattern: GlobPattern::String("**/vite.config.{ts,js,mjs,cjs,mts,cts}".to_string()),
+            kind: watch_kind,
+        },
+        FileSystemWatcher {
+            glob_pattern: GlobPattern::String("**/package.json".to_string()),
+            kind: watch_kind,
+        },
+    ]);
     let _ = server
         .client
         .register_capability(vec![Registration {
             id: "verter-file-watcher".to_string(),
             method: "workspace/didChangeWatchedFiles".to_string(),
             register_options: serde_json::to_value(DidChangeWatchedFilesRegistrationOptions {
-                watchers: vec![
-                    FileSystemWatcher {
-                        glob_pattern: GlobPattern::String("**/*.vue".to_string()),
-                        kind: watch_kind,
-                    },
-                    FileSystemWatcher {
-                        glob_pattern: GlobPattern::String(
-                            "**/*.{ts,tsx,js,jsx,mts,mjs,cts,cjs}".to_string(),
-                        ),
-                        kind: watch_kind,
-                    },
-                    FileSystemWatcher {
-                        glob_pattern: GlobPattern::String("**/tsconfig*.json".to_string()),
-                        kind: watch_kind,
-                    },
-                    FileSystemWatcher {
-                        glob_pattern: GlobPattern::String("**/.verterrc.json".to_string()),
-                        kind: watch_kind,
-                    },
-                    FileSystemWatcher {
-                        glob_pattern: GlobPattern::String(
-                            "**/vite.config.{ts,js,mjs,cjs,mts,cts}".to_string(),
-                        ),
-                        kind: watch_kind,
-                    },
-                    FileSystemWatcher {
-                        glob_pattern: GlobPattern::String("**/package.json".to_string()),
-                        kind: watch_kind,
-                    },
-                ],
+                watchers,
             })
             .ok(),
         }])
@@ -415,8 +433,8 @@ pub(super) async fn handle_did_open(
     // Touch MRU for snapshot drain ordering (after did_open registers the canonical ID)
     if let Some(canonical_id) = current_canonical_id.as_ref() {
         server.touch_mru(canonical_id);
-        if canonical_id.ends_with(".vue") {
-            server.refresh_vue_dependency_tracking(canonical_id);
+        if carrier_language_for(canonical_id).is_some() {
+            server.refresh_carrier_dependency_tracking(canonical_id);
         }
     }
     if result.diagnostics.has_errors {
@@ -427,15 +445,15 @@ pub(super) async fn handle_did_open(
         );
     }
     let startup_policy = did_open_startup_policy(server.type_provider_kind);
-    let prewarm_imported_vue_apis = startup_policy.sync_imported_vue_files
+    let prewarm_imported_carrier_apis = startup_policy.sync_imported_carrier_apis
         && matches!(server.type_provider_kind, crate::TypeProviderKind::Tsserver);
-    let imported_vue_priority_ids = server
+    let imported_carrier_priority_ids = server
         .documents
         .get_analysis(uri)
         .map(|analysis| {
             // Primary: analysis.imports already has resolved_canonical_id from host
             // (works even before background_init builds the resolver snapshot)
-            let mut ids = collect_imported_vue_priority_ids_from_imports_with_fallback(
+            let mut ids = collect_imported_carrier_priority_ids_from_imports_with_fallback(
                 &analysis.imports,
                 current_canonical_id.as_deref(),
                 |parent, specifier| server.resolve_import_specifier(parent, specifier),
@@ -446,12 +464,13 @@ pub(super) async fn handle_did_open(
             if let Some(canonical_id) = current_canonical_id.as_ref() {
                 let snapshot = server.published_resolver();
                 let reader = LspProjectResolverReader::new(&server.documents);
-                let dynamic_ids = collect_priority_vue_targets_from_module_references(
-                    snapshot.as_ref(),
-                    &reader,
-                    canonical_id,
-                    &analysis.module_references,
-                );
+                let dynamic_ids =
+                    collect_priority_carrier_public_api_targets_from_module_references(
+                        snapshot.as_ref(),
+                        &reader,
+                        canonical_id,
+                        &analysis.module_references,
+                    );
                 // Dedup: add only IDs not already in the primary set
                 let seen: HashSet<String> = ids.iter().cloned().collect();
                 for id in dynamic_ids {
@@ -468,33 +487,50 @@ pub(super) async fn handle_did_open(
         if let Some(canonical_id) = current_canonical_id.as_ref() {
             scanner.signal_priority(canonical_id.clone());
         }
-        for import_id in &imported_vue_priority_ids {
+        for import_id in &imported_carrier_priority_ids {
             scanner.signal_priority(import_id.clone());
         }
     }
 
-    if prewarm_imported_vue_apis {
-        for import_id in &imported_vue_priority_ids {
-            server.sync_imported_vue_api_lightweight(import_id).await;
+    if prewarm_imported_carrier_apis {
+        for import_id in &imported_carrier_priority_ids {
+            server
+                .sync_imported_carrier_api_lightweight(import_id)
+                .await;
         }
     }
 
     // Active file IDE sync FIRST (Interactive priority) — enables typed hover immediately.
-    // tsserver is the exception: imported Vue public APIs are warmed above so the initial
-    // open does not snapshot missing `.vue.ts` modules into the configured project.
+    // tsserver is the exception: imported carrier public APIs are warmed above so the
+    // initial open does not snapshot missing carrier provider modules into the
+    // configured project.
     let provider_sync_policy = did_open_provider_sync_policy(server.type_provider_kind);
     if provider_sync_policy.await_ide_sync {
         // Use ensure_current_file_synced for immediate IDE-only sync
         server.ensure_current_file_synced(uri).await;
     }
 
-    // Imported Vue API warmup SECOND (Normal priority, never blocks active file)
-    if startup_policy.sync_imported_vue_files && !prewarm_imported_vue_apis {
-        for import_id in &imported_vue_priority_ids {
+    // A self-file rune module (`.svelte.ts` / `.svelte.js`) is NOT a carrier —
+    // it serves its OWN-path provider buffer. Sync it as UNRESOLVED open-
+    // document shadow state so its own buffer is queryable before resolver
+    // ownership is ready (a no-op for any non-rune document).
+    if current_canonical_id
+        .as_deref()
+        .and_then(adapter_module_language_for)
+        .is_some()
+    {
+        server.sync_self_file_shadow_unresolved(uri).await;
+    }
+
+    // Imported carrier API warmup SECOND (Normal priority, never blocks active file)
+    if startup_policy.sync_imported_carrier_apis && !prewarm_imported_carrier_apis {
+        for import_id in &imported_carrier_priority_ids {
             let should_sync =
                 !server.is_background_loaded_for_source_kind(import_id, ProviderPathKind::Api);
             if should_sync {
-                server.sync_imported_vue_api_lightweight(import_id).await;
+                server
+                    .sync_imported_carrier_api_lightweight(import_id)
+                    .await;
             }
         }
     }
@@ -608,13 +644,13 @@ pub(super) async fn handle_did_change(
                 .hover_provenance_cache
                 .invalidate_canonical(&canonical_id);
 
-            if canonical_id.ends_with(".vue") {
-                server.refresh_vue_dependency_tracking(&canonical_id);
+            if carrier_language_for(&canonical_id).is_some() {
+                server.refresh_carrier_dependency_tracking(&canonical_id);
             }
             server.needs_ide_sync.insert(canonical_id.clone());
             server.needs_deferred_sync.insert(canonical_id.clone());
             if let Some(coordinator) = &server.sync_coordinator {
-                coordinator.signal(canonical_id, uri.as_str().to_string());
+                coordinator.signal(canonical_id.clone(), uri.as_str().to_string());
             }
 
             // Eager TSX sync — send fresh TSX to type provider immediately.
@@ -629,6 +665,17 @@ pub(super) async fn handle_did_change(
                         }
                     }
                 }
+            }
+
+            // A self-file rune module (`.svelte.ts` / `.svelte.js`) is NOT a
+            // carrier — the eager TSX path above never fires for it, and the
+            // coordinator's diagnostics route through carrier IDE state. Re-sync
+            // its OWN-path provider buffer here so an editor edit refreshes the
+            // provider content AND refines the rewrite-aware projection (keeping
+            // `provider_projection_context`'s content and mapper consistent — no
+            // stale own-buffer content, no lost rewrite columns).
+            if adapter_module_language_for(&canonical_id).is_some() {
+                server.sync_self_file_shadow_unresolved(&uri).await;
             }
         }
     }
@@ -646,6 +693,19 @@ pub(super) async fn handle_did_close(
     let _hg = HandlerGuard::new("did_close");
     let uri = &params.text_document.uri;
     tracing::info!("did_close: {}", uri.as_str());
+
+    // A self-file rune module (`.svelte.ts` / `.svelte.js`) has NO IDE TSX —
+    // the carrier-oriented branch below (gated on `get_ide(...).is_some()`)
+    // never fires for it. Close + remove its OWN-path Shadow provider state
+    // explicitly so the open-document buffer does not linger in the provider.
+    if server.documents.get_virtual_source_uri(uri).is_none() && server.project_sync.is_some() {
+        if let Some(canonical_id) = server.documents.get_canonical_id(uri) {
+            if adapter_module_language_for(&canonical_id).is_some() {
+                server.clear_provider_sync_state(&canonical_id).await;
+            }
+        }
+    }
+
     // Virtual files don't have TSX in the provider
     if server.documents.get_virtual_source_uri(uri).is_none()
         && server.project_sync.is_some()
@@ -661,7 +721,7 @@ pub(super) async fn handle_did_close(
             .or_else(|| {
                 server.documents.get_ide(uri).and_then(|ide| {
                     server
-                        .prepare_vue_provider_sync_transition(&canonical_id, ide.is_jsx)
+                        .prepare_carrier_provider_sync_transition(&canonical_id, ide.is_jsx)
                         .map(|transition| transition.next)
                 })
             });
@@ -777,8 +837,10 @@ pub(super) async fn handle_did_change_watched_files(
 
     let mut ts_js_resync_ids = Vec::new();
     let mut ts_js_delete_ids = Vec::new();
-    let mut vue_resync_ids = Vec::new();
-    let mut vue_delete_ids: Vec<(String, String)> = Vec::new(); // (canonical_id, uri_str)
+    let mut carrier_resync_ids = Vec::new();
+    let mut carrier_delete_ids: Vec<(String, String)> = Vec::new(); // (canonical_id, uri_str)
+    let mut adapter_module_resync_ids = Vec::new();
+    let mut adapter_module_delete_ids = Vec::new();
     let mut config_changed = false;
 
     for event in &params.changes {
@@ -801,11 +863,29 @@ pub(super) async fn handle_did_change_watched_files(
             tracing::debug!("did_change_watched_files: config file changed: {canonical_id}");
             // Config files also trigger vite dep check below, but the
             // registry rebuild is the primary action.
-        } else if is_vue_file(&canonical_id) {
+        } else if carrier_language_for(&canonical_id).is_some() {
+            // Any framework CARRIER (`.vue`, `.svelte`, …) routes through the
+            // shared resync/delete queues. The downstream compile + provider
+            // sync is carrier-generic: a carrier-less language's upserts fail
+            // with the typed unsupported-language error before any snapshot
+            // publishes, so an event for it schedules no resync, queues no
+            // provider sync, and touches no provider paths.
             if event.typ == FileChangeType::DELETED {
-                vue_delete_ids.push((canonical_id, event.uri.as_str().to_string()));
+                carrier_delete_ids.push((canonical_id, event.uri.as_str().to_string()));
             } else {
-                vue_resync_ids.push(canonical_id);
+                carrier_resync_ids.push(canonical_id);
+            }
+        } else if adapter_module_language_for(&canonical_id).is_some() {
+            // A standalone ADAPTER MODULE (`.svelte.ts` / `.svelte.js` rune
+            // module) — classified EXPLICITLY (descriptor-derived) rather than
+            // falling through the incidental generic-TS `else` arm. A rune
+            // module is NOT a carrier; its background resync reuses the non-
+            // carrier resync impl (its provider buffer is the own-path rune-
+            // module content).
+            if event.typ == FileChangeType::DELETED {
+                adapter_module_delete_ids.push(canonical_id);
+            } else {
+                adapter_module_resync_ids.push(canonical_id);
             }
         } else {
             // TS/JS source file
@@ -817,14 +897,14 @@ pub(super) async fn handle_did_change_watched_files(
         }
     }
 
-    // ── Vue file deletions ─────────────────────────────────────
+    // ── Carrier file deletions ─────────────────────────────────
     //
     // R3: eager dependent invalidation is forbidden. Cache entries
     // are validated on read against the exact facts they recorded;
     // staleness is detected lazily. Workspace edge updates fire via
     // `host().remove(...)` below so the reverse-dep graph stays
     // current for memory-bound GC and affected-files reporting.
-    for (canonical_id, uri_str) in &vue_delete_ids {
+    for (canonical_id, uri_str) in &carrier_delete_ids {
         if let Some(state) = server.remove_provider_sync_state(canonical_id).or_else(|| {
             let profile = server.documents.tsx_profile.read().clone();
             server
@@ -833,7 +913,7 @@ pub(super) async fn handle_did_change_watched_files(
                 .get_ide(canonical_id, &profile)
                 .and_then(|ide| {
                     server
-                        .prepare_vue_provider_sync_transition(canonical_id, ide.is_jsx)
+                        .prepare_carrier_provider_sync_transition(canonical_id, ide.is_jsx)
                         .map(|transition| transition.next)
                 })
         }) {
@@ -841,17 +921,23 @@ pub(super) async fn handle_did_change_watched_files(
         }
         server.documents.host().remove(canonical_id);
         server.cached_verter_diags.remove(uri_str.as_str());
-        tracing::debug!("did_change_watched_files: removed vue {canonical_id}");
+        tracing::debug!("did_change_watched_files: removed carrier {canonical_id}");
     }
 
-    // ── Vue file creates/changes ───────────────────────────────
-    for canonical_id in &vue_resync_ids {
-        server.resync_background_vue_file(canonical_id).await;
-        tracing::debug!("did_change_watched_files: resynced vue {canonical_id}");
+    // ── Carrier file creates/changes ───────────────────────────
+    for canonical_id in &carrier_resync_ids {
+        server.resync_background_carrier_file(canonical_id).await;
+        tracing::debug!("did_change_watched_files: resynced carrier {canonical_id}");
     }
 
-    // ── TS/JS file deletions ───────────────────────────────────
-    for canonical_id in &ts_js_delete_ids {
+    // ── TS/JS + adapter-module file deletions ──────────────────
+    // A rune module's provider state lives on its OWN canonical path (the
+    // Shadow path), so removal is the same remove-state + host-evict the
+    // non-carrier path uses.
+    for canonical_id in ts_js_delete_ids
+        .iter()
+        .chain(adapter_module_delete_ids.iter())
+    {
         if let Some(state) = server.remove_provider_sync_state(canonical_id) {
             server.close_provider_state(&state).await;
         }
@@ -859,8 +945,15 @@ pub(super) async fn handle_did_change_watched_files(
         tracing::debug!("did_change_watched_files: removed {canonical_id}");
     }
 
-    // ── TS/JS file creates/changes ─────────────────────────────
-    if !ts_js_resync_ids.is_empty() {
+    // ── TS/JS + adapter-module file creates/changes ────────────
+    // Adapter modules (rune modules) reuse the non-carrier resync impl: their
+    // provider buffer is the own-path rune-module content (prelude + rewritten
+    // bytes), produced by the same `prepare_non_carrier_provider_sync` path.
+    let non_carrier_resync_ids: Vec<String> = ts_js_resync_ids
+        .into_iter()
+        .chain(adapter_module_resync_ids)
+        .collect();
+    if !non_carrier_resync_ids.is_empty() {
         if let Some(sync) = &server.project_sync {
             let host = server.documents.host_arc();
             let sync = sync.clone();
@@ -869,8 +962,8 @@ pub(super) async fn handle_did_change_watched_files(
             let is_tsgo = matches!(server.type_provider_kind, crate::TypeProviderKind::Tsgo);
 
             tokio::spawn(async move {
-                for canonical_id in ts_js_resync_ids {
-                    crate::workspace_scanner::resync_non_vue_file(
+                for canonical_id in non_carrier_resync_ids {
+                    crate::workspace_scanner::resync_non_carrier_file(
                         &canonical_id,
                         &host,
                         &sync,
@@ -924,8 +1017,8 @@ pub(super) async fn handle_did_create_files(
 ) {
     let _hg = HandlerGuard::new("did_create_files");
     for file in &params.files {
-        // Only index .vue files
-        if !file.uri.ends_with(".vue") {
+        // Only index framework CARRIER files (`.vue`, `.svelte`, …).
+        if carrier_language_for(&file.uri).is_none() {
             continue;
         }
         let uri: Uri = match file.uri.parse() {
@@ -936,7 +1029,7 @@ pub(super) async fn handle_did_create_files(
         // Load the file through ingress so it's indexed without needing to open in editor
         server.documents.host().ensure_loaded(&canonical_id);
         // Compile and sync to type provider for cross-file type resolution
-        server.resync_background_vue_file(&canonical_id).await;
+        server.resync_background_carrier_file(&canonical_id).await;
         tracing::debug!("did_create_files: indexed {}", file.uri);
     }
 }
@@ -947,7 +1040,8 @@ pub(super) async fn handle_did_delete_files(
 ) {
     let _hg = HandlerGuard::new("did_delete_files");
     for file in &params.files {
-        if !file.uri.ends_with(".vue") {
+        // Only framework CARRIER files (`.vue`, `.svelte`, …).
+        if carrier_language_for(&file.uri).is_none() {
             continue;
         }
         let uri: Uri = match file.uri.parse() {
@@ -965,7 +1059,7 @@ pub(super) async fn handle_did_delete_files(
                     .get_ide(&canonical_id, &profile)
                     .and_then(|ide| {
                         server
-                            .prepare_vue_provider_sync_transition(&canonical_id, ide.is_jsx)
+                            .prepare_carrier_provider_sync_transition(&canonical_id, ide.is_jsx)
                             .map(|transition| transition.next)
                     })
             })

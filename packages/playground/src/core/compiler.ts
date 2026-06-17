@@ -9,6 +9,14 @@ import type {
 import { loadLocalWasm, loadCommitWasm, loadReleaseWasm, type WasmModule } from "./wasmLoader";
 import type { VersionEntry } from "./versions";
 import { combineSourceMaps } from "./sourcemap";
+import {
+  type ClientFramework,
+  type HostFileKind,
+  allFrameworkExtensions,
+  detectFrameworkId,
+  fileKindForFilename,
+  frameworkById,
+} from "./frameworks";
 
 // Inline types matching Rust WASM bindings (avoid @verter/wasm import resolution issues).
 // `spanStart`/`spanEnd` are absolute source offsets in UTF-16 unless a field is
@@ -120,7 +128,10 @@ interface HostBinding {
   upsert(request: {
     inputId: string;
     source: string;
-    fileKind: "vue" | "non_sfc";
+    // The host `fileKind`: a registered framework adapter id (descriptor-driven,
+    // e.g. "vue" / "svelte") or a plain non-framework kind ("non_sfc" / "text" /
+    // "file" / a script dialect). Driven by the manifest, never a Vue+Svelte literal.
+    fileKind: HostFileKind;
     aliases?: string[];
     compileProfile?: HostCompileProfile;
   }): HostUpdateResult;
@@ -230,16 +241,14 @@ function collectUniqueHostDiagnostics(
 
 type KnownFiles = Readonly<Record<string, File>>;
 
-const PLAYGROUND_RESOLVE_EXTENSIONS = [
-  "",
-  ".ts",
-  ".tsx",
-  ".js",
-  ".jsx",
-  ".mts",
-  ".mjs",
-  ".vue",
-] as const;
+// Base TS/JS resolution extensions plus every framework-owned extension derived
+// from the manifest (carrier + adapter-module), so a new framework adapter needs
+// no edit here.
+const BASE_RESOLVE_EXTENSIONS = ["", ".ts", ".tsx", ".js", ".jsx", ".mts", ".mjs"] as const;
+const PLAYGROUND_RESOLVE_EXTENSIONS: readonly string[] = [
+  ...BASE_RESOLVE_EXTENSIONS,
+  ...allFrameworkExtensions(),
+];
 
 function normalizeModuleFileId(fileId: string): string {
   const segments: string[] = [];
@@ -391,7 +400,9 @@ function syncKnownModuleReferenceDependencies(
     const depResult = wasmHost.upsert({
       inputId: depFile.filename,
       source: depFile.code,
-      fileKind: depFile.filename.endsWith(".vue") ? "vue" : "non_sfc",
+      // Descriptor lookup: a framework carrier/adapter-module maps to its
+      // framework id, everything else to the plain non-framework fallback.
+      fileKind: fileKindForFilename(depFile.filename),
       aliases: [],
     });
 
@@ -532,8 +543,40 @@ export function relintFile(file: File, disabledRules?: ReadonlySet<string>): num
   }
 }
 
-function compileVueWithHost(
+/**
+ * Whether a framework's compiled client output is assembled through the Vue
+ * VDOM render-function pipeline (script + template + style virtual files merged
+ * via {@link mergeRenderIntoComponent}, plus an SSR pass). This is the
+ * Vue-runtime assembly convention — the `?vue&type=script|template|style` raw
+ * virtual-file query syntax is owned by the Vue adapter. Other frameworks read
+ * a single main virtual file and never touch `mergeRenderIntoComponent`.
+ */
+function usesVueRenderAssembly(framework: ClientFramework): boolean {
+  return framework.frameworkId === "vue";
+}
+
+/**
+ * Compile a framework carrier file through the host, descriptor-driven: the
+ * upsert `fileKind` is the framework adapter id. Vue uses the VDOM render
+ * assembly; every other framework reads its main virtual file and the shared
+ * IDE-TSX / public-API / analysis / lint surfaces.
+ */
+function compileFrameworkWithHost(
   file: File,
+  framework: ClientFramework,
+  options: CompilerOptions | undefined,
+  disabledRules?: ReadonlySet<string>,
+  knownFiles?: KnownFiles,
+): CompileTiming {
+  if (usesVueRenderAssembly(framework)) {
+    return compileVueRenderAssembly(file, framework, options, disabledRules, knownFiles);
+  }
+  return compileGenericFrameworkSurfaces(file, framework, options, disabledRules, knownFiles);
+}
+
+function compileVueRenderAssembly(
+  file: File,
+  framework: ClientFramework,
   options: CompilerOptions | undefined,
   disabledRules?: ReadonlySet<string>,
   knownFiles?: KnownFiles,
@@ -546,7 +589,7 @@ function compileVueWithHost(
   const upsertResult = wasmHost!.upsert({
     inputId: file.filename,
     source: file.code,
-    fileKind: "vue",
+    fileKind: framework.frameworkId,
     aliases: [],
     compileProfile: profile,
   });
@@ -705,7 +748,7 @@ function compileVueWithHost(
       wasmHost!.upsert({
         inputId: file.filename,
         source: file.code,
-        fileKind: "vue",
+        fileKind: framework.frameworkId,
         aliases: [],
         compileProfile: ssrProfile,
       });
@@ -747,6 +790,118 @@ function compileVueWithHost(
     scriptMs,
     templateMs,
     styleMs,
+    tsxMs,
+    tscMs,
+    lintMs,
+  };
+}
+
+/**
+ * Compile a non-Vue framework carrier through the shared host surfaces: a
+ * single main virtual file for the client JS, plus the shared IDE-TSX,
+ * public-API, analysis, and lint outputs. Never uses the Vue VDOM render
+ * assembly or {@link mergeRenderIntoComponent}.
+ */
+function compileGenericFrameworkSurfaces(
+  file: File,
+  framework: ClientFramework,
+  options: CompilerOptions | undefined,
+  disabledRules?: ReadonlySet<string>,
+  knownFiles?: KnownFiles,
+): CompileTiming {
+  const start = performance.now();
+  const profile = toHostProfile(file, options);
+  profile.ssr = false;
+
+  const upsertResult = wasmHost!.upsert({
+    inputId: file.filename,
+    source: file.code,
+    fileKind: framework.frameworkId,
+    aliases: [],
+    compileProfile: profile,
+  });
+
+  if (knownFiles) {
+    syncKnownModuleReferenceDependencies(file.filename, upsertResult.moduleReferences, knownFiles);
+  }
+
+  const diagnosticsSnapshots: Array<HostDiagnosticsSnapshot | undefined> = [
+    upsertResult.diagnostics,
+  ];
+
+  // Client JS: the single main virtual file (no render-function merge).
+  const main = wasmHost!.getVirtualFile({
+    rawId: file.filename,
+    compileProfile: profile,
+  });
+  diagnosticsSnapshots.push(main.diagnostics);
+
+  const allDiagnostics = collectUniqueHostDiagnostics(diagnosticsSnapshots);
+  file.compiled.js = main.code;
+  file.compiled.css = "";
+  file.compiled.ssrCode = "";
+  file.compiled.verterSourceMap = main.sourceMap ?? "";
+  file.compiled.errors = formatDiagnostics(allDiagnostics);
+  file.compiled.compilerDiagnostics = allDiagnostics;
+
+  let analysis: FileAnalysis | null = null;
+  if (typeof wasmHost!.getAnalysis === "function") {
+    try {
+      analysis = wasmHost!.getAnalysis(file.filename) ?? null;
+    } catch {
+      // Analysis is optional.
+    }
+  }
+  file.compiled.analysis = analysis;
+
+  let lintMs: number | null = null;
+  if (typeof wasmHost!.lint === "function") {
+    try {
+      const t0 = performance.now();
+      file.compiled.lintDiagnostics =
+        wasmHost!.lint(file.filename, buildLintConfig(disabledRules)) ?? [];
+      lintMs = performance.now() - t0;
+    } catch {
+      file.compiled.lintDiagnostics = [];
+    }
+  } else {
+    file.compiled.lintDiagnostics = [];
+  }
+
+  let tsxMs: number | null = null;
+  if (typeof wasmHost!.getIde === "function") {
+    try {
+      const t0 = performance.now();
+      const tsx = wasmHost!.getIde(file.filename, profile);
+      tsxMs = performance.now() - t0;
+      applyTsxOutput(file, tsx);
+    } catch {
+      applyTsxOutput(file, null);
+    }
+  } else {
+    applyTsxOutput(file, null);
+  }
+
+  let tscMs: number | null = null;
+  if (typeof wasmHost!.getPublicApi === "function") {
+    try {
+      const t0 = performance.now();
+      const tsc = wasmHost!.getPublicApi(file.filename);
+      tscMs = performance.now() - t0;
+      file.compiled.tscCode = tsc?.code ?? "";
+    } catch {
+      file.compiled.tscCode = "";
+    }
+  } else {
+    file.compiled.tscCode = "";
+  }
+
+  return {
+    verterNewJs: performance.now() - start,
+    parseDurationMs: upsertResult.parseDurationMs ?? null,
+    scriptMs: null,
+    templateMs: null,
+    styleMs: null,
     tsxMs,
     tscMs,
     lintMs,
@@ -872,12 +1027,17 @@ export async function compileFile(
     lintMs: null,
   };
 
-  if (file.filename.endsWith(".vue")) {
+  // Descriptor-driven dispatch: a registered framework carrier / adapter-module
+  // compiles through the shared framework path (fileKind = framework id).
+  const detectedFrameworkId = detectFrameworkId(file.filename);
+  const framework = detectedFrameworkId ? frameworkById(detectedFrameworkId) : undefined;
+
+  if (framework) {
     if (!wasmHost) {
       file.compiled.errors = [HOST_UNAVAILABLE_ERROR];
       return timing;
     }
-    return compileVueWithHost(file, options, disabledRules, knownFiles);
+    return compileFrameworkWithHost(file, framework, options, disabledRules, knownFiles);
   } else if (file.filename.endsWith(".ts")) {
     if (!wasmHost) {
       file.compiled.js = "";

@@ -8,7 +8,7 @@
   "type": "module",
   "scripts": {
     "dev": "node scripts/fetch-tsgo.mjs && vite",
-    "build": "pnpm --filter @verter/unplugin build && pnpm --filter @verter/wasm build && pnpm --filter @verter/component-meta build && pnpm --filter @verter/types run build && node scripts/fetch-tsgo.mjs && vite build",
+    "build": "pnpm --filter @verter/unplugin build && pnpm --filter @verter/wasm build && pnpm --filter @verter/component-meta build && pnpm --filter @verter/types run build && pnpm --filter @verter/language-shared build && node scripts/fetch-tsgo.mjs && vite build",
     "preview": "vite preview",
     "test": "vitest --run --exclude '**/compiler.spec.ts' --exclude '**/sourceMapMapper.spec.ts' --exclude '**/tsService.spec.ts'",
     "test:e2e": "playwright test",
@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@verter/component-meta": "workspace:*",
+    "@verter/language-shared": "workspace:*",
     "@verter/types": "workspace:*",
     "@verter/wasm": "workspace:*",
     "fflate": "^0.8.3",

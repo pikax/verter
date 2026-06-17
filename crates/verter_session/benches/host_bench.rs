@@ -4,7 +4,8 @@ use criterion::{criterion_group, criterion_main, Criterion};
 use std::hint::black_box;
 use std::sync::Arc;
 use verter_session::{
-    CompileProfile, FileKind, HostConfig, UpsertRequest, VerterHost, VirtualNodeKind, VirtualQuery,
+    CompileProfile, FileLanguage, HostConfig, UpsertRequest, VerterHost, VirtualNodeKind,
+    VirtualQuery,
 };
 
 const SMALL_SFC: &str = r#"<script setup lang="ts">
@@ -97,7 +98,7 @@ fn upsert(host: &VerterHost, id: &str, source: &str) {
             canonical_id: None,
             input_id: id.to_string(),
             source: Arc::from(source),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: Vec::new(),
         })
         .unwrap();

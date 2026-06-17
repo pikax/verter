@@ -6,8 +6,8 @@
 use crossbeam_channel::{Receiver, Sender};
 
 use crate::job::{CompletionSender, RequestResult};
-use crate::source_loader::FileKind;
 use crate::stage::{Priority, TargetStage, TaskKind};
+use verter_language::FileLanguage;
 
 /// One request inside a [`Submission::NewRequestBatch`].
 ///
@@ -21,7 +21,7 @@ pub struct QueuedRequest {
     pub target: TargetStage,
     pub priority: Priority,
     pub source: Option<std::sync::Arc<str>>,
-    pub file_kind: Option<FileKind>,
+    pub file_language: Option<FileLanguage>,
     pub sender: CompletionSender<RequestResult>,
     /// Removal epoch at submission time. If a tombstone exists with a
     /// higher epoch, this submission predates the removal and is rejected.
@@ -42,7 +42,7 @@ pub enum Submission {
         target: TargetStage,
         priority: Priority,
         source: Option<std::sync::Arc<str>>,
-        file_kind: Option<FileKind>,
+        file_language: Option<FileLanguage>,
         sender: CompletionSender<RequestResult>,
         /// Removal epoch at submission time. If a tombstone exists with a
         /// higher epoch, this submission predates the removal and is rejected.

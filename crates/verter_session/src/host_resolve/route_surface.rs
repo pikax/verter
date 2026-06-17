@@ -323,15 +323,15 @@ impl VerterHost {
                 if self.store_view_allows_current_whole_hash(dep_canonical, state.whole_hash) {
                     let eval_source = Arc::<str>::from(Self::build_eval_script_source(
                         state.source.as_ref(),
-                        state.cached_parse.as_deref(),
+                        state.framework_parse.as_deref(),
                     ));
                     component_meta_trace_custom!(
                         "read_dep_source_for_type_resolution_result",
                         format!(
-                            "owner={} source=effective-file-state bytes={} has_cached_parse={} whole_hash={:?}",
+                            "owner={} source=effective-file-state bytes={} has_framework_parse={} whole_hash={:?}",
                             dep_canonical,
                             eval_source.len(),
-                            state.cached_parse.is_some(),
+                            state.framework_parse.is_some(),
                             state.whole_hash,
                         ),
                     );
@@ -344,10 +344,10 @@ impl VerterHost {
         component_meta_trace_custom!(
             "read_dep_source_for_type_resolution_result",
             format!(
-                "owner={} source=module-facts bytes={} has_cached_parse={} whole_hash={:?}",
+                "owner={} source=module-facts bytes={} has_framework_parse={} whole_hash={:?}",
                 dep_canonical,
                 eval_source.len(),
-                facts.cached_parse.is_some(),
+                facts.framework_parse.is_some(),
                 facts.whole_hash,
             )
         );

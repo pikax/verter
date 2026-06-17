@@ -205,10 +205,9 @@ fn opaque_context_guard_install_does_not_recurse() {
 /// observe `None` if the worker populated only the scheduler-side slot.
 #[test]
 fn scheduler_winner_thread_propagates_session_context_via_install_tls() {
+    use verter_language::FileLanguage as SchedFileKind;
     use verter_scheduler::executor::{StageError, StageExecutor};
-    use verter_scheduler::node::{
-        AnalysisSnapshot, ArtifactSnapshot, FileKind as SchedFileKind, SourceSnapshot,
-    };
+    use verter_scheduler::node::{AnalysisSnapshot, ArtifactSnapshot, SourceSnapshot};
     use verter_scheduler::scheduler::{Request, Scheduler, SchedulerConfig};
     use verter_scheduler::source_loader::{MemorySourceLoader, SourceLoader};
     use verter_scheduler::stage::{Priority, TargetStage};
@@ -229,7 +228,7 @@ fn scheduler_winner_thread_propagates_session_context_via_install_tls() {
         fn execute_source(
             &self,
             _canonical_id: &str,
-            _file_kind: SchedFileKind,
+            _file_language: SchedFileKind,
             content: Arc<str>,
             generation: u64,
         ) -> Result<SourceSnapshot, StageError> {
@@ -298,7 +297,7 @@ fn scheduler_winner_thread_propagates_session_context_via_install_tls() {
         target: TargetStage::Artifact { profile_hash: 1 },
         priority: Priority::Interactive,
         source: Some(Arc::from("<template>x</template>")),
-        file_kind: None,
+        file_language: None,
         request_context: Some(opaque),
     });
     handle.wait();

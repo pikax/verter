@@ -23,19 +23,19 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 
 fn build_host() -> Arc<VerterHost> {
     Arc::new(VerterHost::new_standalone(HostConfig::default()))
 }
 
-fn upsert(host: &VerterHost, id: &str, src: &str, kind: FileKind) {
+fn upsert(host: &VerterHost, id: &str, src: &str, kind: FileLanguage) {
     let _ = host
         .upsert(UpsertRequest {
             canonical_id: None,
             input_id: id.to_string(),
             source: Arc::from(src),
-            file_kind: kind,
+            file_language: kind,
             aliases: Vec::new(),
         })
         .expect("upsert");
@@ -67,7 +67,7 @@ fn routed_expression_and_registry_dep_present_for_define_props() {
         &host,
         "/src/props.ts",
         "export interface Foo { a: number; }\n",
-        FileKind::NonSfc,
+        FileLanguage::script_ts(),
     );
     upsert(
         &host,
@@ -77,7 +77,7 @@ fn routed_expression_and_registry_dep_present_for_define_props() {
          defineProps<Foo>();\n\
          </script>\n\
          <template><div /></template>\n",
-        FileKind::VueSfc,
+        FileLanguage::vue(),
     );
     let canons = published_signature_canonicals(&host, "/src/Comp.vue");
     assert!(
@@ -97,7 +97,7 @@ fn slot_binding_graph_carrier_dep_present_for_define_slots() {
         &host,
         "/src/slots.ts",
         "export interface Slots { default(props: { row: string }): any }\n",
-        FileKind::NonSfc,
+        FileLanguage::script_ts(),
     );
     upsert(
         &host,
@@ -107,7 +107,7 @@ fn slot_binding_graph_carrier_dep_present_for_define_slots() {
          defineSlots<Slots>();\n\
          </script>\n\
          <template><div /></template>\n",
-        FileKind::VueSfc,
+        FileLanguage::vue(),
     );
     let canons = published_signature_canonicals(&host, "/src/Comp.vue");
     assert!(
@@ -128,7 +128,7 @@ fn materialization_and_transitive_dep_present_for_pick_over_imported_type() {
         &host,
         "/src/cfg.ts",
         "export interface Cfg { a: number; b: string; c: boolean; }\n",
-        FileKind::NonSfc,
+        FileLanguage::script_ts(),
     );
     upsert(
         &host,
@@ -138,7 +138,7 @@ fn materialization_and_transitive_dep_present_for_pick_over_imported_type() {
          defineProps<Pick<Cfg, 'a'>>();\n\
          </script>\n\
          <template><div /></template>\n",
-        FileKind::VueSfc,
+        FileLanguage::vue(),
     );
     let canons = published_signature_canonicals(&host, "/src/Comp.vue");
     assert!(
@@ -159,13 +159,13 @@ fn owner_import_surface_barrel_dep_present_for_barrel_reexport() {
         &host,
         "/src/leaf.ts",
         "export interface LeafProps { x: number; }\n",
-        FileKind::NonSfc,
+        FileLanguage::script_ts(),
     );
     upsert(
         &host,
         "/src/barrel.ts",
         "export type { LeafProps } from './leaf';\n",
-        FileKind::NonSfc,
+        FileLanguage::script_ts(),
     );
     upsert(
         &host,
@@ -175,7 +175,7 @@ fn owner_import_surface_barrel_dep_present_for_barrel_reexport() {
          defineProps<LeafProps>();\n\
          </script>\n\
          <template><div /></template>\n",
-        FileKind::VueSfc,
+        FileLanguage::vue(),
     );
     let canons = published_signature_canonicals(&host, "/src/Comp.vue");
     assert!(
@@ -213,7 +213,7 @@ fn child_dep_present_for_fallthrough() {
          defineProps<{ childProp: string }>();\n\
          </script>\n\
          <template><div /></template>\n",
-        FileKind::VueSfc,
+        FileLanguage::vue(),
     );
     upsert(
         &host,
@@ -222,7 +222,7 @@ fn child_dep_present_for_fallthrough() {
          import Child from './Child.vue';\n\
          </script>\n\
          <template><Child /></template>\n",
-        FileKind::VueSfc,
+        FileLanguage::vue(),
     );
     let canons = published_signature_canonicals(&host, "/src/Parent.vue");
     assert!(
@@ -246,14 +246,14 @@ fn prepared_decl_dep_present_for_imported_alias_chain() {
         &host,
         "/src/base.ts",
         "export interface Base { id: number; }\n",
-        FileKind::NonSfc,
+        FileLanguage::script_ts(),
     );
     upsert(
         &host,
         "/src/alias.ts",
         "import type { Base } from './base';\n\
          export type AliasProps = Base;\n",
-        FileKind::NonSfc,
+        FileLanguage::script_ts(),
     );
     upsert(
         &host,
@@ -263,7 +263,7 @@ fn prepared_decl_dep_present_for_imported_alias_chain() {
          defineProps<AliasProps>();\n\
          </script>\n\
          <template><div /></template>\n",
-        FileKind::VueSfc,
+        FileLanguage::vue(),
     );
     let canons = published_signature_canonicals(&host, "/src/Comp.vue");
     assert!(

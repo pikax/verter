@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
 #[test]
@@ -26,7 +26,7 @@ fn materialize_structure_producer_counter_advances_under_module_augmentation_fix
         canonical_id: Some("/aug.ts".into()),
         input_id: "/aug.ts".into(),
         source: Arc::from("declare module 'pkg' { interface Foo { extra: string } }"),
-        file_kind: FileKind::NonSfc,
+        file_language: FileLanguage::script_ts(),
         aliases: vec![],
     });
     let _ = host.upsert(UpsertRequest {
@@ -37,7 +37,7 @@ fn materialize_structure_producer_counter_advances_under_module_augmentation_fix
              defineProps<{ label: string }>();\
              </script>",
         ),
-        file_kind: FileKind::VueSfc,
+        file_language: FileLanguage::vue(),
         aliases: vec![],
     });
 

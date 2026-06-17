@@ -28,7 +28,7 @@ use std::sync::Arc;
 use oxc_sourcemap::{SourceMap, Token};
 
 use verter_session::{
-    CompileProfile, CompileTarget, FileKind, HostConfig, UpsertRequest, VerterHost,
+    CompileProfile, CompileTarget, FileLanguage, HostConfig, UpsertRequest, VerterHost,
     VERTER_TYPES_STANDALONE_DTS,
 };
 use verter_span::path::canonicalize_path;
@@ -922,7 +922,7 @@ pub fn materialize(req: &MaterializeRequest) -> Result<MaterializeReport, Materi
                 canonical_id: Some(canonical.clone()),
                 input_id: canonical.clone(),
                 source: Arc::from(content.as_str()),
-                file_kind: FileKind::VueSfc,
+                file_language: FileLanguage::vue(),
                 aliases: vec![],
             })
             .map_err(|e| MaterializeError::Upsert {

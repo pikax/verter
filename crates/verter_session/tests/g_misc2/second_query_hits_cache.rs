@@ -50,7 +50,7 @@
 
 use std::sync::Arc;
 
-use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{HostConfig, UpsertRequest, VerterHost};
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
 const OWNER_VUE: &str = r#"<script setup lang="ts">
@@ -76,7 +76,9 @@ fn second_query_of_same_key_advances_cache_hits_not_misses() {
         canonical_id: Some("/owner.vue".to_string()),
         input_id: "/owner.vue".to_string(),
         source: Arc::from(OWNER_VUE),
-        file_kind: FileKind::from_path("/owner.vue"),
+        file_language: verter_session::LanguageRegistry::global()
+            .classify_static("/owner.vue")
+            .static_resolution(),
         aliases: Vec::new(),
     });
 

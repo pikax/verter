@@ -11,11 +11,11 @@ use std::sync::Arc;
 
 use verter_semantic::analysis::types::AnalyzedMacroKind;
 
-use crate::typeinfo::adapters::vue::{
+use crate::typeinfo::framework_surface::vue_exec::{
     emits_from_typeinfo_surface, props_from_typeinfo_surface, slots_from_typeinfo_surface,
 };
 use crate::typeinfo::types::{TypeInfoQueryLevel, VueMacroSurfaceRequest};
-use crate::types::{FileKind, HostConfig, UpsertRequest};
+use crate::types::{HostConfig, UpsertRequest};
 use crate::VerterHost;
 
 const VUE_PROPS: &str = r#"<script setup lang="ts">
@@ -38,7 +38,9 @@ fn upsert(host: &VerterHost, canonical_id: &str, source: &str) {
         canonical_id: Some(canonical_id.to_string()),
         input_id: canonical_id.to_string(),
         source: Arc::from(source),
-        file_kind: FileKind::from_path(canonical_id),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static(canonical_id)
+            .static_resolution(),
         aliases: Vec::new(),
     });
 }
@@ -961,14 +963,18 @@ fn with_defaults_outer_macro_resolves_inner_define_props_surface() {
     // And its DTO bundle is empty — the props are NOT double-counted here.
     let outer_dtos = host.vue_macro_dtos(&outer_request);
     assert!(
-        outer_dtos.props.is_empty(),
+        outer_dtos.prop_fields().is_empty(),
         "the outer withDefaults macro contributes no props (the inner DefineProps does)"
     );
 
     // The INNER DefineProps macro (routed separately) carries the props.
     let inner_request = props_request(&host, FILE, AnalyzedMacroKind::DefineProps);
     let inner_dtos = host.vue_macro_dtos(&inner_request);
-    let mut names: Vec<&str> = inner_dtos.props.iter().map(|p| p.name.as_str()).collect();
+    let mut names: Vec<&str> = inner_dtos
+        .prop_fields()
+        .iter()
+        .map(|p| p.name.as_str())
+        .collect();
     names.sort_unstable();
     assert_eq!(
         names,

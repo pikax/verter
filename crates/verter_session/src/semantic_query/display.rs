@@ -432,7 +432,7 @@ pub(crate) fn display_type_node(
             let mut s = format!(
                 "<vue-macro props={} emits={}",
                 elements.props.len(),
-                elements.emits.len()
+                elements.call_signatures.len()
             );
             if elements.has_call_signature {
                 s.push_str(" callable");

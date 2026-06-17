@@ -852,9 +852,10 @@ export class AnalysisTreeProvider implements TreeDataProvider<AnalysisItem>, Dis
       const statsItems: LeafItem[] = [];
       statsItems.push({
         type: "leaf",
-        label: `${overview.stats.totalVueFiles} Vue files`,
+        label: `${overview.stats.totalComponentFiles} component files`,
         description: "",
-        tooltip: "Total number of .vue files tracked by the host",
+        tooltip:
+          "Total number of framework carrier component files (.vue, .svelte) tracked by the host",
         icon: new ThemeIcon("file-code"),
       });
       statsItems.push({
@@ -898,7 +899,7 @@ export class AnalysisTreeProvider implements TreeDataProvider<AnalysisItem>, Dis
       // File index
       if (overview.files.length > 0) {
         const fileItems: LeafItem[] = overview.files
-          .filter((f) => f.kind === "vue")
+          .filter((f) => f.kind === "component")
           .map((f) => ({
             type: "leaf" as const,
             label: basename(f.path),
@@ -909,7 +910,7 @@ export class AnalysisTreeProvider implements TreeDataProvider<AnalysisItem>, Dis
         if (fileItems.length > 0) {
           categories.push({
             type: "category",
-            label: "Vue Files",
+            label: "Components",
             children: fileItems,
           });
         }

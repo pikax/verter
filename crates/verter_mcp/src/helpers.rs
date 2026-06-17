@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use rmcp::model::ErrorData as McpError;
-use verter_session::{CompileProfile, FileKind, UpsertRequest, VerterHost};
+use verter_session::{CompileProfile, UpsertRequest, VerterHost};
 
 /// Normalize a path: resolve relative to project root, forward-slash normalize.
 pub fn resolve_path(path: &str, project_root: Option<&Path>) -> String {
@@ -29,18 +29,19 @@ pub fn ensure_loaded(host: &VerterHost, canonical_id: &str) -> Result<(), McpErr
         message: format!("Cannot read file {} via workspace", canonical_id).into(),
         data: None,
     })?;
-    let file_kind = if canonical_id.ends_with(".vue") {
-        FileKind::VueSfc
-    } else {
-        FileKind::NonSfc
-    };
-    let _ = host.upsert(UpsertRequest {
-        canonical_id: Some(canonical_id.to_string()),
-        input_id: canonical_id.to_string(),
-        source: Arc::from(source.as_ref()),
-        file_kind,
-        aliases: vec![],
-    });
+    let _update = host
+        .upsert(UpsertRequest {
+            canonical_id: Some(canonical_id.to_string()),
+            input_id: canonical_id.to_string(),
+            source: Arc::from(source.as_ref()),
+            file_language: host.language_classifier().classify(canonical_id),
+            aliases: vec![],
+        })
+        .map_err(|e| McpError {
+            code: rmcp::model::ErrorCode::INTERNAL_ERROR,
+            message: format!("Cannot load file {canonical_id}: {e}").into(),
+            data: None,
+        })?;
     Ok(())
 }
 
@@ -81,5 +82,50 @@ pub fn mcp_err(msg: impl Into<String>) -> McpError {
         code: rmcp::model::ErrorCode::INTERNAL_ERROR,
         message: msg.into().into(),
         data: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use verter_session::HostConfig;
+
+    fn host_with_file(canonical: &str, source: &str) -> VerterHost {
+        let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        workspace.inject_file(canonical.to_string(), Arc::from(source));
+        VerterHost::new(HostConfig::default(), workspace)
+    }
+
+    /// `ensure_loaded` loads a `.svelte` carrier through the registered Svelte
+    /// carrier (B8a): the path classifies to the carrier row and the load
+    /// produces source state. The B2-era carrier-less rejection on `.svelte`
+    /// is dead now the carrier registers; the typed unsupported-language
+    /// propagation stays exercised at the session layer (the Vue
+    /// framework-template / same-adapter non-carrier rows).
+    #[test]
+    fn ensure_loaded_loads_svelte_through_the_registered_carrier() {
+        let host = host_with_file(
+            "/ws/src/Box.svelte",
+            "<script lang=\"ts\">let { x }: { x: number } = $props();</script>",
+        );
+        ensure_loaded(&host, "/ws/src/Box.svelte")
+            .expect("the registered Svelte carrier loads the .svelte file");
+        assert!(
+            host.get_source("/ws/src/Box.svelte").is_some(),
+            "source state exists after the Svelte carrier load"
+        );
+    }
+
+    /// Plain scripts keep loading exactly as before.
+    #[test]
+    fn ensure_loaded_still_loads_plain_scripts() {
+        let host = host_with_file("/ws/src/util.ts", "export const x = 1;");
+        ensure_loaded(&host, "/ws/src/util.ts").expect("a plain script loads");
+        assert!(
+            host.get_source("/ws/src/util.ts").is_some(),
+            "the script's source state must exist after the load"
+        );
     }
 }

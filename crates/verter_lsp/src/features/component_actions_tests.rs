@@ -38,6 +38,8 @@ fn make_component(
         has_dynamic_class: false,
         dynamic_classes: vec![],
         v_models: vec![],
+        bindings: vec![],
+        events: vec![],
         span: verter_span::Span::new(0, 50),
     }
 }
@@ -289,6 +291,8 @@ fn make_component_with_vmodels(
         has_dynamic_class: false,
         dynamic_classes: vec![],
         v_models: vmodels,
+        bindings: vec![],
+        events: vec![],
         span: verter_span::Span::new(0, 50),
     }
 }

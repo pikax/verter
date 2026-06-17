@@ -266,13 +266,13 @@ impl ShallowSurfaceRequest {
 }
 
 /// Request for the typeinfo Vue-macro surface adapter
-/// ([`crate::typeinfo::adapters::vue::resolve_vue_macro_surface`]).
+/// ([`crate::typeinfo::framework_surface::vue_exec::resolve_vue_macro_surface`]).
 ///
 /// Identifies ONE macro call inside a `.vue` SFC (`owner_canonical` +
 /// `macro_index`) plus its kind and the query level. The adapter resolves the
 /// macro's type-argument surface through the shared typeinfo surface path (the
 /// same `resolve_shallow_surface` machinery, NEVER `surface_view_from_base_node`)
-/// and returns the span-rich [`crate::typeinfo::adapters::vue::VueMacroSurface`].
+/// and returns the span-rich [`crate::typeinfo::framework_surface::vue_exec::VueMacroSurface`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VueMacroSurfaceRequest {
     /// Canonical id of the `.vue` SFC that declares the macro.

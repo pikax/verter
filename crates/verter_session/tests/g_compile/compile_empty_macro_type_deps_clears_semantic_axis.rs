@@ -33,16 +33,17 @@
 
 use verter_session::for_tests::workspace_semantic_transitive_deps_for_tests;
 use verter_session::{
-    CompileProfile, FileKind, HostConfig, UpsertRequest, VerterHost, VirtualNodeKind, VirtualQuery,
+    CompileProfile, FileLanguage, HostConfig, UpsertRequest, VerterHost, VirtualNodeKind,
+    VirtualQuery,
 };
 
-fn upsert(host: &VerterHost, canonical: &str, source: &str, kind: FileKind) {
+fn upsert(host: &VerterHost, canonical: &str, source: &str, kind: FileLanguage) {
     let _ = host
         .upsert(UpsertRequest {
             canonical_id: Some(canonical.to_string()),
             input_id: canonical.to_string(),
             source: source.into(),
-            file_kind: kind,
+            file_language: kind,
             aliases: Vec::new(),
         })
         .expect("upsert");
@@ -88,9 +89,9 @@ fn empty_macro_type_deps_still_clears_semantic_transitive_axis() {
         &host,
         TYPES,
         "export interface Foo { a: number; }\n",
-        FileKind::NonSfc,
+        FileLanguage::script_ts(),
     );
-    upsert(&host, COMP, WITH_MACRO_DEP, FileKind::VueSfc);
+    upsert(&host, COMP, WITH_MACRO_DEP, FileLanguage::vue());
 
     // (1) Compile with the macro type dep present → the semantic axis
     // records the transitive cross-file dependency.
@@ -105,7 +106,7 @@ fn empty_macro_type_deps_still_clears_semantic_transitive_axis() {
     // (2) Remove the macro type dep entirely → empty `macro_type_deps`.
     // The recompute must run `sync_transitive_macro_type_dependencies`
     // with the empty set, CLEARING the stale '/src/types.ts' edge.
-    upsert(&host, COMP, WITHOUT_MACRO_DEP, FileKind::VueSfc);
+    upsert(&host, COMP, WITHOUT_MACRO_DEP, FileLanguage::vue());
     compile_script(&host, COMP);
     let deps_after = workspace_semantic_transitive_deps_for_tests(&host, COMP);
     assert!(

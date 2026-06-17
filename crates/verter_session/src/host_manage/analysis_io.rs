@@ -25,6 +25,7 @@ use crate::resolver_core::{
 use crate::shared::write_lock;
 use crate::types::*;
 use crate::VerterHost;
+use verter_language::FileLanguage;
 
 use super::{
     component_meta_debug, component_meta_debug_enabled,
@@ -49,8 +50,9 @@ impl VerterHost {
     pub(super) fn build_template_analysis(
         &self,
         canonical: &str,
+        file_language: &FileLanguage,
         source: &Arc<str>,
-        cached_parse: Option<Arc<verter_compiler::parser::types::ParsedSfc>>,
+        framework_parse: Option<Arc<verter_language::FrameworkParseArtifact>>,
         src_blocks: &[crate::SrcBlockInfo],
         external_requests: &[crate::ExternalSourceRequest],
         imports: &[verter_semantic::analysis::AnalyzedImport],
@@ -85,53 +87,13 @@ impl VerterHost {
             std::borrow::Cow::Borrowed(source.as_ref())
         };
 
-        let parsed = if src_blocks.is_empty() {
-            cached_parse
-                .as_deref()
-                .map(std::borrow::Cow::Borrowed)
-                .unwrap_or_else(|| {
-                    std::borrow::Cow::Owned(crate::parse::parse_sfc_counted(
-                        &self.provenance,
-                        &merged_source,
-                    ))
-                })
-        } else {
-            std::borrow::Cow::Owned(crate::parse::parse_sfc_counted(
-                &self.provenance,
-                &merged_source,
-            ))
-        };
-
-        let alloc = oxc_allocator::Allocator::new();
-        let options = verter_compiler::compile::CodegenOptions {
-            target: verter_compiler::compile::CompileTarget::META,
-            filename: Some(canonical.to_string()),
-            ..verter_compiler::compile::CodegenOptions::default()
-        };
-        let verter_opts = verter_compiler::compile::VerterCompileOptions {
-            extract_template_data: true,
-            ..verter_compiler::compile::VerterCompileOptions::default()
-        };
-        let compiled = verter_compiler::compile::compile_from_parsed(
+        let raw = crate::parse::compile_template_data(
+            file_language,
             &merged_source,
-            &parsed,
-            &options,
-            &verter_opts,
-            &alloc,
-        );
-
-        let has_structural_errors = compiled.errors.iter().any(|d| {
-            matches!(
-                d.severity,
-                verter_compiler::compile::CompileDiagnosticSeverity::Error,
-            ) && !d.code.starts_with("XInvalidMacroType")
-                && !d.code.starts_with("XMissingMacroType")
-        });
-        if has_structural_errors {
-            return None;
-        }
-
-        let raw = compiled.template_data?;
+            framework_parse.as_deref(),
+            src_blocks.is_empty(),
+            &self.provenance,
+        )?;
         let (imports, unions, props_name) =
             crate::host_resolve::template_converter_inputs(imports, macros, bindings);
         Some(Arc::new(crate::template_convert::convert_raw_to_analysis(
@@ -175,34 +137,40 @@ impl VerterHost {
         if snapshot.template.is_some() {
             return;
         }
-        if !canonical.ends_with(".vue") {
-            return;
-        }
 
         let crate::types::VueTemplateInputs {
             source,
-            cached_parse,
+            framework_parse,
             store_published,
             source_generation,
         } = inputs;
 
-        // ONE SFC structure parse at most on this lane: reuse the
-        // threaded/scheduler parse; a missing parse runs exactly one
-        // counted parse of its own (no caller ran one on this source).
-        let base_parsed = cached_parse
-            .as_deref()
-            .map(std::borrow::Cow::Borrowed)
-            .unwrap_or_else(|| {
-                std::borrow::Cow::Owned(crate::parse::parse_sfc_counted(
-                    &self.provenance,
-                    source.as_ref(),
-                ))
-            });
+        // The file's resolved carrier row — template-data ingestion is gated on
+        // whether its adapter has a registered carrier compiler (NOT a hardcoded
+        // `.vue` / `is_vue()` check), and feeds the registry-dispatched
+        // `compile_template_data` below.
+        let file_language = self.language_classifier().classify(canonical);
+        if !crate::parse::file_language_has_template_data_compiler(&file_language) {
+            return;
+        }
 
-        // External `src=` inventory via the single shared pure walk
-        // (no OXC work) — never a re-parse to rediscover blocks.
-        let (src_blocks, external_requests) =
-            crate::parse::collect_vue_src_blocks(canonical, source.as_ref(), &base_parsed);
+        // ONE carrier parse at most on this lane: reuse the threaded/scheduler
+        // artifact; a missing artifact runs exactly one counted carrier parse of
+        // its own (no caller ran one on this source). The Vue `<template src>`
+        // inventory walks the typed Vue parse opened from the artifact; a
+        // carrier with no src-block surface (Svelte) yields none.
+        let framework_parse = framework_parse.or_else(|| {
+            crate::parse::build_carrier_parse_artifact_from_source(
+                &file_language,
+                source.as_ref(),
+                &self.provenance,
+            )
+        });
+        let (src_blocks, external_requests) = framework_parse
+            .as_deref()
+            .and_then(crate::typeinfo::adapters::vue::vue_parse)
+            .map(|parsed| crate::parse::collect_vue_src_blocks(canonical, source.as_ref(), parsed))
+            .unwrap_or_default();
 
         // Resolve external src blocks (e.g., <template src="./tpl.html">)
         let ext_map = if !src_blocks.is_empty() {
@@ -236,53 +204,20 @@ impl VerterHost {
             std::borrow::Cow::Borrowed(source.as_ref())
         };
 
-        // The merged source is DIFFERENT bytes than the original, so
-        // the external-src arm legitimately parses it; the inline arm
-        // reuses the base parse with zero additional parses.
-        let parsed = if src_blocks.is_empty() {
-            base_parsed
-        } else {
-            std::borrow::Cow::Owned(crate::parse::parse_sfc_counted(
-                &self.provenance,
-                &merged_source,
-            ))
-        };
-
-        // Compile with META target — script codegen + template data, no JS/TSX output
-        let alloc = oxc_allocator::Allocator::new();
-        let options = verter_compiler::compile::CodegenOptions {
-            target: verter_compiler::compile::CompileTarget::META,
-            filename: Some(canonical.to_string()),
-            ..verter_compiler::compile::CodegenOptions::default()
-        };
-        let verter_opts = verter_compiler::compile::VerterCompileOptions {
-            extract_template_data: true,
-            ..verter_compiler::compile::VerterCompileOptions::default()
-        };
-        let compiled = verter_compiler::compile::compile_from_parsed(
+        // Registry-dispatched template-data extraction: route through the file's
+        // carrier compiler (Vue's bridge runs the META compile, Svelte walks the
+        // typed template tree), re-using the carrier parse when no external src
+        // merged the source.
+        let raw = crate::parse::compile_template_data(
+            &file_language,
             &merged_source,
-            &parsed,
-            &options,
-            &verter_opts,
-            &alloc,
+            framework_parse.as_deref(),
+            src_blocks.is_empty(),
+            &self.provenance,
         );
 
-        // Bail on structural compile errors that would invalidate template data.
-        // Skip type-resolution errors (XInvalidMacroType, XMissingMacroType) since
-        // template slot extraction doesn't depend on type resolution.
-        let has_structural_errors = compiled.errors.iter().any(|d| {
-            matches!(
-                d.severity,
-                verter_compiler::compile::CompileDiagnosticSeverity::Error,
-            ) && !d.code.starts_with("XInvalidMacroType")
-                && !d.code.starts_with("XMissingMacroType")
-        });
-        if has_structural_errors {
-            return;
-        }
-
         // Convert RawTemplateData â†’ TemplateAnalysisSnapshot using existing converter
-        if let Some(raw) = compiled.template_data {
+        if let Some(raw) = raw {
             // Build converter inputs from snapshot (already computed, not stale entry)
             let imports: Vec<(String, String)> = snapshot
                 .imports
@@ -428,11 +363,11 @@ impl VerterHost {
                 ));
             };
             let hd = source_snap.downcast_data::<HostSourceData>()?;
-            let file_kind = hd.file_kind;
+            let file_language = hd.file_language.clone();
             let source = source_snap.source.clone();
-            let cached_parse = hd.cached_parse.clone();
+            let framework_parse = hd.framework_parse.clone();
             let scope = self.config.effective_scope();
-            if file_kind == FileKind::VueSfc
+            if file_language.is_vue()
                 && (!scope.needs_script_analysis() || !scope.needs_style_analysis())
             {
                 #[cfg(test)]
@@ -446,7 +381,7 @@ impl VerterHost {
                 // only this branch captures here.
                 let template_inputs = Some(crate::types::VueTemplateInputs {
                     source: source.clone(),
-                    cached_parse: cached_parse.clone(),
+                    framework_parse: framework_parse.clone(),
                     // Live scheduler read — store-authoritative.
                     store_published: true,
                     source_generation: Some(source_snap.generation),
@@ -478,33 +413,21 @@ impl VerterHost {
                 drop(source_snap);
 
                 let mut script_analysis = if !scope.needs_script_analysis() {
-                    if let Some(parsed) = cached_parse.as_deref() {
-                        crate::parse::build_script_analysis_from_parsed(
-                            parsed,
-                            &source,
-                            &self.provenance,
-                        )
-                    } else {
-                        // The worker counts its own structure parse on
-                        // the `sfc_parses` rail (chokepoint-internal).
-                        crate::parse::build_script_analysis_from_source(&source, &self.provenance)
-                    }
+                    crate::parse::build_script_analysis_for_artifact(
+                        framework_parse.as_deref(),
+                        &source,
+                        &self.provenance,
+                    )
                 } else {
                     stored_script
                 };
                 let style_analyses = if !scope.needs_style_analysis() {
-                    if let Some(parsed) = cached_parse.as_deref() {
-                        Arc::new(crate::parse::build_style_analyses_from_parsed(
-                            parsed, &source, canonical,
-                        ))
-                    } else {
-                        // Worker-counted, as above.
-                        Arc::new(crate::parse::build_style_analyses_from_source(
-                            &source,
-                            canonical,
-                            &self.provenance,
-                        ))
-                    }
+                    Arc::new(crate::parse::build_style_analyses_for_artifact(
+                        framework_parse.as_deref(),
+                        &source,
+                        canonical,
+                        &self.provenance,
+                    ))
                 } else {
                     stored_styles
                 };
@@ -1333,7 +1256,7 @@ impl VerterHost {
             }
             let snap = self.scheduler.try_get_source(&canonical)?;
             let hd = snap.downcast_data::<HostSourceData>()?;
-            if hd.file_kind != FileKind::VueSfc {
+            if !hd.file_language.is_vue() {
                 return None;
             }
             #[cfg(test)]
@@ -1459,12 +1382,16 @@ impl VerterHost {
             .filter(|source_snap| source_snap.generation == analysis_snap.generation)
             .and_then(|source_snap| {
                 let hd = source_snap.downcast_data::<HostSourceData>()?;
-                if hd.file_kind != FileKind::VueSfc {
+                // Template-data ingestion is gated on whether the file's adapter
+                // has a registered carrier compiler (registry-dispatched,
+                // Svelte-capable), NOT a hardcoded `is_vue()` check — a `.svelte`
+                // owner reaches `compile_template_data` the same as a `.vue` one.
+                if !crate::parse::file_language_has_template_data_compiler(&hd.file_language) {
                     return None;
                 }
                 Some(crate::types::VueTemplateInputs {
                     source: source_snap.source.clone(),
-                    cached_parse: hd.cached_parse.clone(),
+                    framework_parse: hd.framework_parse.clone(),
                     // Live scheduler reads at one generation —
                     // store-authoritative.
                     store_published: true,
@@ -2139,8 +2066,8 @@ impl VerterHost {
         self.bump_store_view_epoch();
     }
 
-    /// Returns all known canonical file IDs and their file kinds.
-    pub fn list_files(&self) -> Vec<(String, FileKind)> {
+    /// Returns all known canonical file IDs and their file languages.
+    pub fn list_files(&self) -> Vec<(String, FileLanguage)> {
         {
             use crate::host_executor::HostSourceData;
             self.scheduler
@@ -2152,7 +2079,7 @@ impl VerterHost {
                     }
                     let snap = self.scheduler.try_get_source(&id)?;
                     let hd = snap.downcast_data::<HostSourceData>()?;
-                    Some((id, hd.file_kind))
+                    Some((id, hd.file_language.clone()))
                 })
                 .collect()
         }
@@ -2168,7 +2095,10 @@ impl VerterHost {
             }
             // Snapshot + template inputs joined at one generation — a
             // torn join carries `None` inputs and this caller serves
-            // without a template (fail closed, never mixed).
+            // without a template (fail closed, never mixed). The
+            // template-data compiler gate lives inside
+            // `compute_template_analysis_if_missing` (registry-dispatched on the
+            // file's carrier row), so a non-carrier serves no template here.
             let (mut snapshot, template_inputs) =
                 self.build_snapshot_from_scheduler_with_template_inputs(canonical)?;
             if let Some(inputs) = template_inputs {
@@ -2188,10 +2118,12 @@ impl VerterHost {
             cc.content_overrides.get(&profile_hash)?.clone()
         };
 
+        let file_language = self.language_classifier().classify(canonical);
         self.build_template_analysis(
             canonical,
+            &file_language,
             &override_with_parse.source,
-            override_with_parse.cached_parse.clone(),
+            override_with_parse.framework_parse.clone(),
             &override_with_parse.parse.src_blocks,
             &override_with_parse.parse.external_requests,
             &override_with_parse.parse.script_analysis.imports,
@@ -2302,7 +2234,7 @@ impl VerterHost {
         &self,
         canonical_or_alias: &str,
     ) -> Option<(
-        FileKind,
+        FileLanguage,
         Arc<verter_semantic::analysis::ScriptAnalysisSnapshot>,
         Vec<verter_semantic::analysis::ExportSignature>,
     )> {
@@ -2321,13 +2253,14 @@ impl VerterHost {
                     self.scheduler.try_get_source(&canonical),
                     self.scheduler.try_get_analysis(&canonical),
                 ) {
-                    let file_kind = source_snap
+                    let file_language = source_snap
                         .downcast_data::<crate::host_executor::HostSourceData>()?
-                        .file_kind;
+                        .file_language
+                        .clone();
                     let analysis =
                         analysis_snap.downcast_data::<crate::host_executor::HostAnalysisData>()?;
                     return Some((
-                        file_kind,
+                        file_language,
                         Arc::clone(&analysis.script_analysis),
                         analysis.export_signatures.clone(),
                     ));
@@ -2344,11 +2277,7 @@ impl VerterHost {
                 facts.export_signatures.as_ref(),
             ) {
                 return Some((
-                    if canonical.ends_with(".vue") {
-                        FileKind::VueSfc
-                    } else {
-                        FileKind::NonSfc
-                    },
+                    self.language_classifier.classify(&canonical),
                     Arc::clone(script_analysis),
                     export_signatures.as_ref().clone(),
                 ));
@@ -2380,14 +2309,14 @@ impl VerterHost {
             }
             let source_snap = self.scheduler.try_get_source(&canonical)?;
             let hd = source_snap.downcast_data::<HostSourceData>()?;
-            let file_kind = hd.file_kind;
+            let file_language = hd.file_language.clone();
             drop(source_snap);
 
             let analysis_snap = self.scheduler.try_get_analysis(&canonical)?;
             let ad = analysis_snap.downcast_data::<HostAnalysisData>()?;
 
             Self::find_export_span(
-                file_kind,
+                &file_language,
                 &ad.script_analysis,
                 &ad.export_signatures,
                 binding_name,
@@ -2397,12 +2326,12 @@ impl VerterHost {
 
     /// Shared logic for finding an export span from analysis data.
     pub(super) fn find_export_span(
-        file_kind: FileKind,
+        file_language: &FileLanguage,
         script_analysis: &verter_semantic::analysis::ScriptAnalysisSnapshot,
         export_signatures: &[verter_semantic::analysis::ExportSignature],
         binding_name: &str,
     ) -> Option<(u32, u32)> {
-        if file_kind == FileKind::VueSfc {
+        if file_language.is_vue() {
             if let Some(binding) = script_analysis
                 .bindings
                 .iter()

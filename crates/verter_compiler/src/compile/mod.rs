@@ -51,9 +51,11 @@ use crate::template::code_gen::{generate_template, CodeGenMode, TemplateCodeGenO
 use crate::template::oxc::types::OxcParsedAst;
 use crate::tokenizer::byte::{tokenize_sfc, tokenize_sfc_with_delimiters};
 use crate::tsc;
+use crate::utils::oxc::script::type_surface::{
+    extract_companion_types, ResolvedElements, RuntimeType,
+};
 use crate::utils::oxc::vue::{
-    extract_companion_types, parse_script_with_companion, MacroTypeParams, ResolvedElements,
-    RuntimeType, ScriptItem, ScriptMacro, ScriptMode,
+    parse_script_with_companion, MacroTypeParams, ScriptItem, ScriptMacro, ScriptMode,
 };
 
 use helpers::{extract_attrs, extract_block_ranges};
@@ -189,17 +191,15 @@ fn validate_imported_macro_type(
                 );
             }
         }
-        "defineEmits" => {
-            if type_params.resolved.emits.is_empty() {
-                push_invalid_macro_type_diagnostic(
-                    diagnostics,
-                    format!(
-                        "defineEmits() type argument '{}' must resolve to emit call signatures or a named-tuple emits object.",
-                        type_text
-                    ),
-                    type_params,
-                );
-            }
+        "defineEmits" if type_params.resolved.call_signatures.is_empty() => {
+            push_invalid_macro_type_diagnostic(
+                diagnostics,
+                format!(
+                    "defineEmits() type argument '{}' must resolve to emit call signatures or a named-tuple emits object.",
+                    type_text
+                ),
+                type_params,
+            );
         }
         _ => {}
     }

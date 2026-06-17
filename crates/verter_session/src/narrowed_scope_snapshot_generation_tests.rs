@@ -14,7 +14,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use crate::types::{FileKind, HostConfig, UpsertRequest};
+use crate::types::{HostConfig, UpsertRequest};
 use crate::VerterHost;
 use verter_semantic::analysis::AnalysisScope;
 
@@ -69,7 +69,9 @@ fn upsert(host: &VerterHost, source: &str) {
             canonical_id: Some(CANONICAL.to_string()),
             input_id: CANONICAL.to_string(),
             source: Arc::from(source),
-            file_kind: FileKind::from_path(CANONICAL),
+            file_language: verter_language::LanguageRegistry::global()
+                .classify_static(CANONICAL)
+                .static_resolution(),
             aliases: Vec::new(),
         })
         .expect("upsert must succeed");

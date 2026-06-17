@@ -15,7 +15,7 @@
 
 use std::sync::Arc;
 
-use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
 pub fn make_host(canonical: &str, source: &str) -> Arc<VerterHost> {
@@ -26,7 +26,7 @@ pub fn make_host(canonical: &str, source: &str) -> Arc<VerterHost> {
         canonical_id: Some(canonical.to_string()),
         input_id: canonical.to_string(),
         source: Arc::from(source),
-        file_kind: FileKind::NonSfc,
+        file_language: FileLanguage::script_ts(),
         aliases: vec![],
     });
     let _ = host.analyze_with_audit(canonical);

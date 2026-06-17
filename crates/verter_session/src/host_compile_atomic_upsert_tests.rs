@@ -20,7 +20,7 @@ use verter_scheduler::stage::Priority;
 
 use crate::host_compile::{CompileBatchInput, CompileBatchOptions};
 use crate::request_context::{RequestContext, RequestContextGuard};
-use crate::types::{FileKind, HostConfig, HostError, UpsertRequest};
+use crate::types::{FileLanguage, HostConfig, HostError, UpsertRequest};
 use crate::VerterHost;
 
 // ---------------------------------------------------------------------------
@@ -48,7 +48,7 @@ fn upsert_req(canonical_id: &str, source: &str) -> UpsertRequest {
         canonical_id: Some(canonical_id.to_string()),
         input_id: canonical_id.to_string(),
         source: Arc::from(source),
-        file_kind: FileKind::VueSfc,
+        file_language: FileLanguage::vue(),
         aliases: Vec::new(),
     }
 }

@@ -1147,7 +1147,7 @@ fn overlay_set_fingerprint(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{FileKind, UpsertRequest};
+    use crate::types::{FileLanguage, UpsertRequest};
     use crate::{CompileErrorPolicy, HostConfig};
 
     fn fresh_host() -> Arc<VerterHost> {
@@ -1164,7 +1164,7 @@ mod tests {
                 canonical_id: None,
                 input_id: canonical.to_string(),
                 source: Arc::from(source),
-                file_kind: FileKind::NonSfc,
+                file_language: FileLanguage::script_ts(),
                 aliases: Vec::new(),
             })
             .expect("upsert succeeds");

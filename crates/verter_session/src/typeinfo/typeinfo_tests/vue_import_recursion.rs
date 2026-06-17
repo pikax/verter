@@ -43,7 +43,7 @@ use crate::semantic_query::{
     ValueRootKey,
 };
 use crate::typeinfo::types::TypeInfoQueryLevel;
-use crate::types::{FileKind, HostConfig, UpsertRequest};
+use crate::types::{HostConfig, UpsertRequest};
 use crate::VerterHost;
 
 fn make_host_with_files(files: &[(&str, &str)]) -> Arc<VerterHost> {
@@ -69,7 +69,9 @@ fn make_host_with_files(files: &[(&str, &str)]) -> Arc<VerterHost> {
             canonical_id: Some((*path).to_string()),
             input_id: (*path).to_string(),
             source: Arc::from(*source),
-            file_kind: FileKind::from_path(path),
+            file_language: crate::LanguageRegistry::global()
+                .classify_static(path)
+                .static_resolution(),
             aliases: Vec::new(),
         });
         host.ensure_indexed_ready(path);
@@ -410,7 +412,7 @@ fn instantiate_vue_default_resolves_public_instance_object() {
 //          synthesized public instance: the synthesis injection is a no-op
 //          (userland `default` already present), so the resolved
 //          `value_symbol("default")` is the userland Const with
-//          `is_synthesised_vue_default == false`, and the `.vue default` branch
+//          `is_synthesised_component_default == false`, and the `.vue default` branch
 //          / `resolve_vue_public_type` must NOT fire.
 //
 //          DISCRIMINATING: pre-fix the consumer proof was the FILE classifier
@@ -446,7 +448,7 @@ fn vue_userland_default_is_not_treated_as_synthesized_instance() {
         .value_symbol("default")
         .expect("the userland export default binds a `default` value symbol");
     assert!(
-        !default_symbol.is_synthesised_vue_default,
+        !default_symbol.is_synthesised_component_default,
         "a userland export default must NOT carry the synthesized-default provenance flag"
     );
 
@@ -474,7 +476,7 @@ fn vue_userland_default_is_not_treated_as_synthesized_instance() {
 //          `function_signature.return_type`) so the gate is exercised on the
 //          provenance flag rather than trivially passing on a missing `default`.
 //
-//          NEGATIVE GUARD: `is_synthesised_vue_default == false` for the
+//          NEGATIVE GUARD: `is_synthesised_component_default == false` for the
 //          userland `.ts` default, so neither the keyed `.vue default` branch
 //          nor `resolve_vue_public_type` may synthesize an instance. (The prior
 //          interface-only `.ts` test is caught by the missing-`default` check
@@ -497,7 +499,7 @@ fn plain_ts_userland_default_has_no_synthesized_instance() {
         .value_symbol("default")
         .expect("the .ts export default binds a `default` value symbol");
     assert!(
-        !default_symbol.is_synthesised_vue_default,
+        !default_symbol.is_synthesised_component_default,
         "a plain .ts userland default must NOT carry the synthesized-default flag"
     );
 

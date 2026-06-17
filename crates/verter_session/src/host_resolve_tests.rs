@@ -6,7 +6,7 @@ use verter_workspace::WorkspaceRead;
 #[cfg(target_arch = "wasm32")]
 use crate::shared::read_lock;
 use crate::{
-    BlockOverrideEntry, BlockOverrideRequest, CompileErrorPolicy, CompileProfile, FileKind,
+    BlockOverrideEntry, BlockOverrideRequest, CompileErrorPolicy, CompileProfile, FileLanguage,
     HostConfig, HostDiagnostic, HostError, HostSeverity, PreprocessorBlockType, PublicApiMode,
     UpsertRequest, VerterHost, VirtualNodeKind, VirtualQuery,
 };
@@ -28,7 +28,7 @@ fn upsert_vue(host: &VerterHost, id: &str, source: &str) {
             canonical_id: None,
             input_id: id.to_string(),
             source: Arc::from(source),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: Vec::new(),
         })
         .unwrap();
@@ -40,7 +40,7 @@ fn upsert_non_sfc(host: &VerterHost, id: &str, source: &str) {
             canonical_id: None,
             input_id: id.to_string(),
             source: Arc::from(source),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .unwrap();
@@ -3130,7 +3130,7 @@ const height = ref('100px')
             canonical_id: None,
             input_id: "/src/Regression.vue".to_string(),
             source: Arc::from(source),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: Vec::new(),
         })
         .expect("upsert should succeed");
@@ -3976,7 +3976,7 @@ fn macro_type_dep_resolves_types_only_package_exports() {
             canonical_id: None,
             input_id: "/workspace/src/Popup.vue".to_string(),
             source: Arc::from(popup_source),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: Vec::new(),
         })
         .expect("upsert should succeed");
@@ -4223,10 +4223,13 @@ fn type_import_reexport_prefers_declaration_companion_over_runtime_js() {
         .expect("external type resolution should produce a result");
 
     assert!(
-        resolved.emits.iter().any(|emit| emit.name == "openChange"),
+        resolved
+            .call_signatures
+            .iter()
+            .any(|emit| emit.name == "openChange"),
         "emit entries should resolve from the declaration companion: {:?}",
         resolved
-            .emits
+            .call_signatures
             .iter()
             .map(|emit| emit.name.clone())
             .collect::<Vec<_>>()
@@ -4360,7 +4363,7 @@ const SETUP_MARKER = 2;
 }
 
 #[test]
-fn extract_vue_script_content_without_cached_parse_matches_cached() {
+fn extract_vue_script_content_without_parsed_sfc_matches_cached() {
     let source = r#"<script lang="ts">
 const COMPANION = 1;
 </script>
@@ -4446,7 +4449,7 @@ fn resolve_prepared_decl_target_returns_unchanged_for_same_file_decl() {
         canonical_id: None,
         input_id: "/src/decl.ts".to_string(),
         source: Arc::from("export interface LocalProps { a: number; b: string }\n"),
-        file_kind: crate::FileKind::NonSfc,
+        file_language: crate::FileLanguage::script_ts(),
         aliases: Vec::new(),
     });
     // The helper takes a "scope canonical, name" pair. For a
@@ -4497,7 +4500,7 @@ fn resolve_decl_in_scope_with_reexport_chain_returns_declaring_decl_identity() {
         canonical_id: None,
         input_id: "/src/lib.ts".to_string(),
         source: Arc::from("export interface ChildProps { x: number; y: string }\n"),
-        file_kind: crate::FileKind::NonSfc,
+        file_language: crate::FileLanguage::script_ts(),
         aliases: Vec::new(),
     });
     let identity = host
@@ -4519,5 +4522,294 @@ fn resolve_decl_in_scope_with_reexport_chain_returns_declaring_decl_identity() {
     assert_ne!(
         identity.whole_hash, zero_hash,
         "declaring file's whole-hash must be populated, not zero-initialized"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Public-API projector-dispatch byte-identity pins.
+//
+// `get_public_api_with_mode` routes through the framework registry's
+// component-API projector leg (selected by the canonical's resolved framework
+// adapter id) rather than a hard Vue branch. These pins lock the rendered TSX
+// text AND the source-map bytes for a Vue SFC with an external imported macro
+// type in BOTH served modes — a single shifted byte or remapped position fails
+// the gate (it would break LSP hover / go-to-def landing).
+// ─────────────────────────────────────────────────────────────────────────
+
+fn public_api_byte_pin_host() -> VerterHost {
+    let host = strict_host();
+    upsert_vue(
+        &host,
+        "/src/Cap.vue",
+        "<script setup lang=\"ts\">\nimport type { CapProps } from './cap-types';\nconst count = 1;\ndefineProps<CapProps>();\n</script>\n<template><div>{{ count }}</div></template>",
+    );
+    let _ = host.upsert(crate::UpsertRequest {
+        canonical_id: None,
+        input_id: "/src/cap-types.ts".to_string(),
+        source: Arc::from("export interface CapProps { label: string; n: number }\n"),
+        file_language: crate::FileLanguage::script_ts(),
+        aliases: Vec::new(),
+    });
+    host
+}
+
+const PUBLIC_API_PUBLIC_CODE_PIN: &str = "import { defineComponent } from \"vue\"\ntype __OmitNew<T> = { [K in keyof T]: T[K] }\nimport type { CapProps } from './cap-types'\n\nconst __comp = defineComponent({\n})\n\ndeclare const Cap: __OmitNew<typeof __comp> & {\n  new(props?: import(\"vue\").PublicProps & CapProps): {\n    $props: import(\"vue\").PublicProps & CapProps,\n    $emit: (event: string, ...args: unknown[]) => void,\n    $data: {},\n    $attrs: import(\"vue\").HTMLAttributes,\n    $refs: {},\n  }\n}\nexport default Cap\n//# sourceMappingURL=data:application/json;base64,eyJ2ZXJzaW9uIjozLCJuYW1lcyI6W10sInNvdXJjZXMiOlsiL3NyYy9DYXAudnVlIl0sInNvdXJjZXNDb250ZW50IjpbIjxzY3JpcHQgc2V0dXAgbGFuZz1cInRzXCI+XG5pbXBvcnQgdHlwZSB7IENhcFByb3BzIH0gZnJvbSAnLi9jYXAtdHlwZXMnO1xuY29uc3QgY291bnQgPSAxO1xuZGVmaW5lUHJvcHM8Q2FwUHJvcHM+KCk7XG48L3NjcmlwdD5cbjx0ZW1wbGF0ZT48ZGl2Pnt7IGNvdW50IH19PC9kaXY+PC90ZW1wbGF0ZT4iXSwibWFwcGluZ3MiOiIifQ==\n";
+
+const PUBLIC_API_PUBLIC_MAP_PIN: &str = "{\"version\":3,\"names\":[],\"sources\":[\"/src/Cap.vue\"],\"sourcesContent\":[\"<script setup lang=\\\"ts\\\">\\nimport type { CapProps } from './cap-types';\\nconst count = 1;\\ndefineProps<CapProps>();\\n</script>\\n<template><div>{{ count }}</div></template>\"],\"mappings\":\"\"}";
+
+const PUBLIC_API_TESTING_CODE_PIN: &str = "import { defineComponent } from \"vue\"\ntype __OmitNew<T> = { [K in keyof T]: T[K] }\ntype __Verter_UnionToIntersection<U> = (U extends any ? (value: U) => void : never) extends ((value: infer I) => void) ? I : never\ntype __Verter_EmitFn<T> = T extends (...args: any[]) => any ? T : T extends Record<string, any> ? __Verter_UnionToIntersection<{ [K in keyof T]: T[K] extends any[] ? (event: K, ...args: T[K]) => void : T[K] extends (...args: infer A) => any ? (event: K, ...args: A) => void : (event: K, ...args: unknown[]) => void }[keyof T]> : (event: string, ...args: unknown[]) => void\ndeclare function defineProps<TypeProps>(): TypeProps\ndeclare function defineProps<RuntimeProps extends Record<string, any>>(props: RuntimeProps): import(\"vue\").ExtractPropTypes<RuntimeProps>\ndeclare function defineProps<PropName extends string>(props: readonly PropName[]): Record<PropName, unknown>\ndeclare function defineEmits<TypeEmits extends ((...args: any[]) => any) | Record<string, any>>(): __Verter_EmitFn<TypeEmits>\ndeclare function defineEmits<Named extends string>(names: readonly Named[]): __Verter_EmitFn<Record<Named, unknown[]>>\ndeclare function defineEmits<ObjectEmits extends Record<string, any>>(options: ObjectEmits): __Verter_EmitFn<ObjectEmits>\ndeclare function defineExpose<Exposed extends Record<string, any> = Record<string, never>>(exposed?: Exposed): void\ndeclare function defineOptions(options: Record<string, unknown>): void\ndeclare function defineSlots<Slots extends Record<string, any>>(): Slots\ndeclare function withDefaults<Props, Defaults extends Partial<Props>>(props: Props, defaults: Defaults): Omit<Props, keyof Defaults> & { [K in keyof Defaults]-?: K extends keyof Props ? Exclude<Props[K], undefined> : never }\ndeclare function defineModel<Model = unknown>(nameOrOptions?: string | unknown, options?: unknown): import(\"vue\").Ref<Model | undefined>\ndeclare const label: CapProps['label']\ndeclare const n: CapProps['n']\n\nimport type { CapProps } from './cap-types';\nconst count = 1;\ndefineProps<CapProps>();\n\ntype __Verter_TestBindings = import(\"vue\").ShallowUnwrapRef<{\n  count: typeof count;\n}>\n\nconst __comp = defineComponent({\n})\n\ndeclare const Cap: __OmitNew<typeof __comp> & {\n  new(props?: import(\"vue\").PublicProps & CapProps): {\n    $props: import(\"vue\").PublicProps & CapProps,\n    $emit: (event: string, ...args: unknown[]) => void,\n    $data: {},\n    $attrs: import(\"vue\").HTMLAttributes,\n    $refs: {},\n  } & __Verter_TestBindings\n}\nexport default Cap\n//# sourceMappingURL=data:application/json;base64,eyJ2ZXJzaW9uIjozLCJuYW1lcyI6W10sInNvdXJjZXMiOlsiL3NyYy9DYXAudnVlIl0sInNvdXJjZXNDb250ZW50IjpbIjxzY3JpcHQgc2V0dXAgbGFuZz1cInRzXCI+XG5pbXBvcnQgdHlwZSB7IENhcFByb3BzIH0gZnJvbSAnLi9jYXAtdHlwZXMnO1xuY29uc3QgY291bnQgPSAxO1xuZGVmaW5lUHJvcHM8Q2FwUHJvcHM+KCk7XG48L3NjcmlwdD5cbjx0ZW1wbGF0ZT48ZGl2Pnt7IGNvdW50IH19PC9kaXY+PC90ZW1wbGF0ZT4iXSwibWFwcGluZ3MiOiI7Ozs7Ozs7Ozs7Ozs7OztjQUdZO2NBQUE7Ozs7Ozs7RUFETiJ9\n";
+
+const PUBLIC_API_TESTING_MAP_PIN: &str = "{\"version\":3,\"names\":[],\"sources\":[\"/src/Cap.vue\"],\"sourcesContent\":[\"<script setup lang=\\\"ts\\\">\\nimport type { CapProps } from './cap-types';\\nconst count = 1;\\ndefineProps<CapProps>();\\n</script>\\n<template><div>{{ count }}</div></template>\"],\"mappings\":\";;;;;;;;;;;;;;;cAGY;cAAA;;;;;;;EADN\"}";
+
+#[test]
+fn public_api_public_mode_is_byte_identical_through_projector_dispatch() {
+    let host = public_api_byte_pin_host();
+    let r = host
+        .get_public_api_with_mode("/src/Cap.vue", PublicApiMode::Public, None)
+        .expect("public-mode api output");
+    assert_eq!(
+        r.code.as_ref(),
+        PUBLIC_API_PUBLIC_CODE_PIN,
+        "public-mode rendered TSX must stay byte-identical through projector dispatch"
+    );
+    assert_eq!(
+        r.source_map.as_ref().map(|m| m.as_ref()),
+        Some(PUBLIC_API_PUBLIC_MAP_PIN),
+        "public-mode source-map bytes must stay identical through projector dispatch"
+    );
+}
+
+#[test]
+fn public_api_testing_mode_is_byte_identical_through_projector_dispatch() {
+    let host = public_api_byte_pin_host();
+    let r = host
+        .get_public_api_with_mode("/src/Cap.vue", PublicApiMode::Testing, None)
+        .expect("testing-mode api output");
+    assert_eq!(
+        r.code.as_ref(),
+        PUBLIC_API_TESTING_CODE_PIN,
+        "testing-mode rendered TSX must stay byte-identical through projector dispatch"
+    );
+    // The testing-mode map carries NON-EMPTY mappings (`...cAGY;cAAA;...`),
+    // so this pin discriminates a shifted source-map position, not just an
+    // empty placeholder.
+    assert_eq!(
+        r.source_map.as_ref().map(|m| m.as_ref()),
+        Some(PUBLIC_API_TESTING_MAP_PIN),
+        "testing-mode source-map bytes must stay identical through projector dispatch"
+    );
+    assert!(
+        PUBLIC_API_TESTING_MAP_PIN.contains("\"mappings\":\";;"),
+        "the testing-mode pin must carry real VLQ mappings to be discriminating"
+    );
+}
+
+#[test]
+fn public_api_non_vue_canonical_returns_none_through_projector_dispatch() {
+    // A non-Vue canonical has no api-projector leg (its language has no
+    // framework adapter id), so dispatch returns None — exactly the
+    // pre-registry non-Vue behavior, with no Vue branch consulted.
+    let host = strict_host();
+    upsert_non_sfc(
+        &host,
+        "/src/plain.ts",
+        "export interface Foo { a: number }\n",
+    );
+    assert!(
+        host.get_public_api_with_mode("/src/plain.ts", PublicApiMode::Public, None)
+            .is_none(),
+        "a non-Vue canonical must project no public-API surface"
+    );
+    assert!(
+        host.get_public_api_with_mode("/src/plain.ts", PublicApiMode::Testing, None)
+            .is_none(),
+        "a non-Vue canonical must project no public-API surface in testing mode either"
+    );
+}
+
+#[test]
+fn public_api_through_alias_is_byte_identical_to_canonical() {
+    // Aliases are explicitly supported (`UpsertRequest.aliases`). The projector
+    // dispatch resolves the alias and classifies by the RUNTIME-loaded source
+    // language of the resolved canonical — so a request through the alias must
+    // produce byte-identical output to a request through the canonical, in both
+    // modes. (Classifying the raw alias id by static path would mis-route an
+    // alias that lacks a `.vue` suffix to `None`.)
+    let host = strict_host();
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "/src/Aliased.vue".to_string(),
+            source: Arc::from(
+                "<script setup lang=\"ts\">\ndefineProps<{ a: string }>();\n</script>\n<template><div/></template>",
+            ),
+            file_language: FileLanguage::vue(),
+            aliases: vec!["/virtual/aliased-handle".to_string()],
+        })
+        .unwrap();
+
+    for mode in [PublicApiMode::Public, PublicApiMode::Testing] {
+        let via_canonical = host
+            .get_public_api_with_mode("/src/Aliased.vue", mode, None)
+            .unwrap_or_else(|| panic!("canonical request must render for {mode:?}"));
+        let via_alias = host
+            .get_public_api_with_mode("/virtual/aliased-handle", mode, None)
+            .unwrap_or_else(|| panic!("alias request must render for {mode:?}"));
+        assert_eq!(
+            via_alias.code.as_ref(),
+            via_canonical.code.as_ref(),
+            "alias request must produce byte-identical TSX to the canonical for {mode:?}"
+        );
+        assert_eq!(
+            via_alias.source_map.as_ref().map(|m| m.as_ref()),
+            via_canonical.source_map.as_ref().map(|m| m.as_ref()),
+            "alias request must produce identical source-map bytes for {mode:?}"
+        );
+    }
+}
+
+#[test]
+fn public_api_classification_authority_is_runtime_load_language_not_path() {
+    // The classification authority is the RUNTIME-loaded `file_language` the
+    // source was upserted with — NOT a static path re-classification. A `.vue`
+    // PATH loaded explicitly as a plain script projects no public-API surface
+    // (its loaded language carries no framework adapter id); a non-`.vue` path
+    // loaded explicitly as the Vue carrier DOES (matching the pre-registry
+    // gate, which read `HostSourceData.file_language`).
+    let host = strict_host();
+
+    // `.vue` path, but loaded as a plain TS script → no Vue surface.
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "/src/NotReallyVue.vue".to_string(),
+            source: Arc::from("export const x = 1;\n"),
+            file_language: FileLanguage::script_ts(),
+            aliases: Vec::new(),
+        })
+        .unwrap();
+    assert!(
+        host.get_public_api_with_mode("/src/NotReallyVue.vue", PublicApiMode::Public, None)
+            .is_none(),
+        "a `.vue`-path file loaded as a plain script must project no public-API surface"
+    );
+
+    // Non-`.vue` path, but loaded as the Vue carrier → Vue surface renders.
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "/src/carrier-as-vue".to_string(),
+            source: Arc::from(
+                "<script setup lang=\"ts\">\ndefineProps<{ a: string }>();\n</script>\n<template><div/></template>",
+            ),
+            file_language: FileLanguage::vue(),
+            aliases: Vec::new(),
+        })
+        .unwrap();
+    assert!(
+        host.get_public_api_with_mode("/src/carrier-as-vue", PublicApiMode::Public, None)
+            .is_some(),
+        "a file loaded as the Vue carrier must project a public-API surface regardless of path"
+    );
+}
+
+#[test]
+fn vue_api_projector_rejects_a_non_carrier_vue_language() {
+    // Direct unit coverage of the Vue api-projector leg's carrier-narrowness
+    // (the registry-faithful replacement for the old `is_vue()` carrier gate).
+    // A Vue-ADAPTER row that is NOT the SFC carrier (distinct `language_id`)
+    // is routed to the Vue leg by adapter id, but the leg rejects it on the
+    // descriptor `carrier_language` mismatch — never reaching the legacy body.
+    // (This case is also rejected upstream at load time as
+    // `UnsupportedLanguage`, so the leg check is unreachable through `upsert`;
+    // exercising the leg directly is the discriminating coverage.)
+    use crate::framework::api_projector::{ComponentApiProjector, ComponentApiProjectorCtx};
+    use crate::framework::api_projectors::VueComponentApiProjector;
+
+    // Load a REAL Vue SFC so the legacy body would render Some if reached —
+    // making the leg's carrier rejection the SOLE cause of the None below
+    // (a discriminating test: deleting the leg's carrier check makes this
+    // return Some, failing the assertion).
+    let host = strict_host();
+    upsert_vue(
+        &host,
+        "/src/RealSfc.vue",
+        "<script setup lang=\"ts\">\ndefineProps<{ a: string }>();\n</script>\n<template><div/></template>",
+    );
+
+    // Sanity: the carrier language DOES render this loaded SFC through the leg.
+    let carrier = FileLanguage::vue();
+    let via_carrier = VueComponentApiProjector.render_api(ComponentApiProjectorCtx {
+        host: &host,
+        resolved_canonical: "/src/RealSfc.vue",
+        file_language: &carrier,
+        mode: PublicApiMode::Public,
+        profile: None,
+    });
+    assert!(
+        via_carrier.is_some(),
+        "the Vue leg must render a loaded SFC for the carrier language"
+    );
+
+    // The SAME loaded SFC, but presented with a Vue-ADAPTER NON-carrier
+    // language row, is rejected by the leg's carrier-narrowness check BEFORE
+    // the legacy body — even though the body would otherwise render it.
+    let vue_non_carrier = FileLanguage::Framework {
+        adapter_id: verter_language::FrameworkAdapterId::vue(),
+        language_id: verter_language::LanguageId::new("vue_template"),
+    };
+    let rejected = VueComponentApiProjector.render_api(ComponentApiProjectorCtx {
+        host: &host,
+        resolved_canonical: "/src/RealSfc.vue",
+        file_language: &vue_non_carrier,
+        mode: PublicApiMode::Public,
+        profile: None,
+    });
+    assert!(
+        rejected.is_none(),
+        "the Vue leg must reject a Vue-adapter non-carrier language before the legacy body, \
+         even when the canonical is a loaded SFC that would otherwise render"
+    );
+}
+
+#[test]
+fn render_legacy_body_operates_on_the_resolved_canonical_without_re_resolving() {
+    // The legacy body renders the canonical it is GIVEN — it does NOT resolve
+    // aliases. So passing an ALIAS to it directly renders nothing, while
+    // passing the resolved canonical renders. This is what makes the host's
+    // single up-front alias resolution coherent: classification and rendering
+    // share one resolved target (no classify-one / render-another split under
+    // a concurrent alias relabel).
+    let host = strict_host();
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "/src/Coherent.vue".to_string(),
+            source: Arc::from(
+                "<script setup lang=\"ts\">\ndefineProps<{ a: string }>();\n</script>\n<template><div/></template>",
+            ),
+            file_language: FileLanguage::vue(),
+            aliases: vec!["/virtual/coherent-handle".to_string()],
+        })
+        .unwrap();
+
+    assert!(
+        host.render_vue_public_api_legacy("/src/Coherent.vue", PublicApiMode::Public, None)
+            .is_some(),
+        "the legacy body must render the resolved canonical it is given"
+    );
+    assert!(
+        host.render_vue_public_api_legacy("/virtual/coherent-handle", PublicApiMode::Public, None)
+            .is_none(),
+        "the legacy body must NOT resolve an alias itself — the host resolves once up-front"
+    );
+
+    // The full host entry still renders through the alias (it resolves first,
+    // then hands the resolved canonical to the leg) — proving the alias path
+    // is served end-to-end while the leg stays resolution-free.
+    assert!(
+        host.get_public_api_with_mode("/virtual/coherent-handle", PublicApiMode::Public, None)
+            .is_some(),
+        "the host entry must still serve the alias end-to-end via one resolution"
     );
 }

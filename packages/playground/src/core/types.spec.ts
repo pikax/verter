@@ -42,6 +42,12 @@ describe("File", () => {
       expect(new File("App.vue").language).toBe("vue");
     });
 
+    it('returns "svelte" for .svelte files (manifest-driven, not "vue")', () => {
+      const lang = new File("App.svelte").language;
+      expect(lang).toBe("svelte");
+      expect(lang).not.toBe("vue");
+    });
+
     it('returns "typescript" for .ts files', () => {
       expect(new File("utils.ts").language).toBe("typescript");
     });
@@ -105,6 +111,16 @@ describe("File", () => {
     it('returns true for .vue with script (no setup) and lang="ts"', () => {
       const file = new File("App.vue", '<script lang="ts">\nexport default {}\n</script>');
       expect(file.isTS).toBe(true);
+    });
+
+    it('returns true for .svelte with lang="ts" (manifest carrier)', () => {
+      const file = new File("App.svelte", '<script lang="ts">\nlet count = $state(0)\n</script>');
+      expect(file.isTS).toBe(true);
+    });
+
+    it("returns false for .svelte without a lang attribute", () => {
+      const file = new File("App.svelte", "<script>\nlet count = 0\n</script>");
+      expect(file.isTS).toBe(false);
     });
 
     it("returns false for .js files", () => {

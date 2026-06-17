@@ -9,7 +9,6 @@
 use oxc_ast::ast::*;
 
 use super::macros::is_define_component;
-use super::resolve_type::TypeResolutionContext;
 use super::setup::{process_setup_statements, SetupContext};
 use super::shared::ScriptParseContext;
 use super::types::{
@@ -18,6 +17,7 @@ use super::types::{
 };
 use crate::common::Span;
 use crate::types::BindingType;
+use crate::utils::oxc::script::type_surface::TypeResolutionContext;
 
 /// Context for options script parsing
 pub struct OptionsContext;

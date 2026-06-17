@@ -580,11 +580,8 @@ impl VerterHost {
                     continue;
                 };
 
-                resolved.bindings.attrs.extend(summary.attrs.into_iter());
-                resolved
-                    .bindings
-                    .listeners
-                    .extend(summary.listeners.into_iter());
+                resolved.bindings.attrs.extend(summary.attrs);
+                resolved.bindings.listeners.extend(summary.listeners);
                 if !summary.exact {
                     push_partial_reason(
                         &mut resolved.partial_reasons,

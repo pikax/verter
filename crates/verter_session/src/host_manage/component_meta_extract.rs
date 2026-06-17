@@ -192,7 +192,7 @@ fn extract_component_meta_from_inputs(
     }
 
     populate_public_instance_sidecar(&mut meta);
-    populate_sfc_blocks_sidecar(host, &canonical, &mut meta);
+    crate::host_resolve::populate_sfc_blocks_sidecar(host, &canonical, &mut meta);
     meta
 }
 
@@ -954,127 +954,6 @@ fn build_public_instance_slots_member(
         description: None,
         tags: Vec::new(),
     }
-}
-
-fn string_from_span(source: &str, span: Option<verter_compiler::common::Span>) -> Option<String> {
-    span.map(|span| source[span.start as usize..span.end as usize].to_string())
-}
-
-fn sfc_attributes_from_props(
-    props: &[verter_compiler::types::NodeProp],
-    source: &str,
-) -> Vec<verter_semantic::analysis::component_meta::SfcAttributeAnalysis> {
-    crate::parse::extract_attrs(props, source)
-        .into_iter()
-        .map(
-            |(name, value)| verter_semantic::analysis::component_meta::SfcAttributeAnalysis {
-                name: name.to_string(),
-                value: if value.is_empty() {
-                    None
-                } else {
-                    Some(value.to_string())
-                },
-            },
-        )
-        .collect()
-}
-
-fn sfc_custom_block_type(source: &str, tag_open: &verter_compiler::types::NodeTag) -> String {
-    source[tag_open.start as usize + 1..tag_open.name_end as usize].to_string()
-}
-
-pub(crate) fn populate_sfc_blocks_sidecar(
-    host: &VerterHost,
-    canonical_id: &str,
-    meta: &mut verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
-) {
-    if !canonical_id.ends_with(".vue") {
-        return;
-    }
-
-    let Some((source, cached_parse, _)) = host.current_eval_state(canonical_id) else {
-        return;
-    };
-    let Some(parsed) = cached_parse.as_deref() else {
-        return;
-    };
-    let source = source.as_ref();
-
-    let template = parsed.template_ast().map(|template| {
-        let attrs = crate::parse::extract_attrs(&template.root.attributes, source);
-        verter_semantic::analysis::component_meta::TemplateBlockAnalysis {
-            lang: string_from_span(source, template.root.lang),
-            src: crate::parse::find_attr(&attrs, "src"),
-            attributes: sfc_attributes_from_props(&template.root.attributes, source),
-        }
-    });
-
-    let script = parsed.script().map(|script| {
-        let attrs = crate::parse::extract_attrs(&script.attributes, source);
-        verter_semantic::analysis::component_meta::ScriptBlockAnalysis {
-            lang: crate::parse::find_attr(&attrs, "lang").filter(|lang| lang != "true"),
-            src: crate::parse::find_attr(&attrs, "src"),
-            generic: string_from_span(source, script.generic),
-            attrs_type: string_from_span(source, script.attrs),
-            attributes: sfc_attributes_from_props(&script.attributes, source),
-        }
-    });
-
-    let script_setup = parsed.script_setup().map(|script| {
-        let attrs = crate::parse::extract_attrs(&script.attributes, source);
-        verter_semantic::analysis::component_meta::ScriptBlockAnalysis {
-            lang: crate::parse::find_attr(&attrs, "lang").filter(|lang| lang != "true"),
-            src: crate::parse::find_attr(&attrs, "src"),
-            generic: string_from_span(source, script.generic),
-            attrs_type: string_from_span(source, script.attrs),
-            attributes: sfc_attributes_from_props(&script.attributes, source),
-        }
-    });
-
-    let styles = parsed
-        .style_nodes()
-        .iter()
-        .enumerate()
-        .map(|(index, style)| {
-            let attrs = crate::parse::extract_attrs(&style.attributes, source);
-            verter_semantic::analysis::component_meta::StyleBlockInfoAnalysis {
-                index,
-                lang: crate::parse::find_attr(&attrs, "lang").filter(|lang| lang != "true"),
-                src: crate::parse::find_attr(&attrs, "src"),
-                scoped: style.scoped,
-                is_module: style.module,
-                module_name: crate::parse::find_attr(&attrs, "module")
-                    .filter(|value| value != "true"),
-                attributes: sfc_attributes_from_props(&style.attributes, source),
-            }
-        })
-        .collect();
-
-    let custom = parsed
-        .unknown_nodes()
-        .iter()
-        .enumerate()
-        .map(|(index, block)| {
-            let attrs = crate::parse::extract_attrs(&block.attributes, source);
-            verter_semantic::analysis::component_meta::CustomBlockAnalysis {
-                index,
-                block_type: sfc_custom_block_type(source, &block.tag_open),
-                lang: crate::parse::find_attr(&attrs, "lang").filter(|lang| lang != "true"),
-                src: crate::parse::find_attr(&attrs, "src"),
-                attributes: sfc_attributes_from_props(&block.attributes, source),
-            }
-        })
-        .collect();
-
-    meta.sfc_blocks = Some(
-        verter_semantic::analysis::component_meta::SfcBlocksAnalysis {
-            template,
-            script,
-            script_setup,
-            styles,
-            custom,
-        },
-    );
 }
 
 pub(crate) fn populate_public_instance_sidecar(

@@ -2755,7 +2755,7 @@ fn step8_route_hash_pure_content_derived() {
     use verter_semantic::analysis::Hash16;
 
     let analysis = Arc::new(
-        verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default(),
+        verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(),
     );
     let state = ShallowFileState::from_analysis(Hash16::default(), analysis, None);
 
@@ -2918,7 +2918,7 @@ export interface SourceProps {
 }
 "#,
         ),
-        file_kind: crate::FileKind::NonSfc,
+        file_language: crate::FileLanguage::script_ts(),
         aliases: vec![],
     });
 

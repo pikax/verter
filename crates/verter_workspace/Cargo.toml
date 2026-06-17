@@ -23,6 +23,7 @@ parking_lot = "0.12.5"
 smallvec = "1.15"
 thiserror = "2.0"
 verter_audit = { path = "../verter_audit" }
+verter_language = { path = "../verter_language" }
 verter_scheduler = { path = "../verter_scheduler" }
 verter_span = { path = "../verter_span" }
 xxhash-rust = { version = "0.8.15", features = ["xxh3"] }

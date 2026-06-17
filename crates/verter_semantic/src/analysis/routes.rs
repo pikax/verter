@@ -275,6 +275,11 @@ pub fn extract_programmatic_routes(
     project_root: &std::path::Path,
 ) -> Vec<RouteDefinition> {
     let allocator = oxc_allocator::Allocator::default();
+    // TODO(follow-up): derive the dialect from the classified
+    // `FileLanguage` row (the `verter_language` registry) + the shared
+    // neutral->OXC mapping instead of this ad-hoc suffix probe — `.tsx`
+    // misparses here under non-JSX TS grammar. Needs a shared home for
+    // the neutral->OXC mapping below `verter_session`.
     let source_type = if file_path.ends_with(".ts") || file_path.ends_with(".tsx") {
         oxc_span::SourceType::ts()
     } else {
@@ -911,6 +916,8 @@ pub fn discover_layouts(
 /// Extract route guards from script content.
 pub fn extract_route_guards(content: &str, file_path: &str) -> Vec<RouteGuard> {
     let allocator = oxc_allocator::Allocator::default();
+    // TODO(follow-up): same registry-row derivation as
+    // `extract_programmatic_routes` — retire this suffix probe with it.
     let source_type = if file_path.ends_with(".ts") || file_path.ends_with(".tsx") {
         oxc_span::SourceType::ts()
     } else {

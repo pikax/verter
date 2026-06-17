@@ -593,7 +593,7 @@ pub(super) async fn sync_api_to_provider_background_task(sync: ProjectSync) {
     // The approved delegated shape: build `genuinely_stale`, hand it to a leaf
     // primitive. The syncing fn itself has NO inline close loop.
     let delegated = r#"
-async fn sync_owner_resolved_vue_with_close_after_sync(sync: ProjectSync) {
+async fn sync_owner_resolved_carrier_with_close_after_sync(sync: ProjectSync) {
     let result = sync.open_tsx(&ide_path, ide_code).await;
     let genuinely_stale = genuinely_stale_after_sync(&stale_paths, &committed_state, &synced_kinds);
     commit_sync_transition(provider_sync_states, canonical_id, committed_state);
@@ -612,7 +612,7 @@ pub(super) async fn close_stale_provider_paths(sync: &ProjectSync, stale_paths: 
 "#;
     let flagged = functions_with_inline_close_loop(delegated);
     assert!(
-        !flagged.contains("sync_owner_resolved_vue_with_close_after_sync"),
+        !flagged.contains("sync_owner_resolved_carrier_with_close_after_sync"),
         "detector must NOT flag a fn that delegates to a leaf primitive, flagged={flagged:?}"
     );
     assert!(
@@ -660,7 +660,7 @@ async fn resync_vue_evasion(sync: ProjectSync) {
     // APPROVED: a `.vue`-syncing fn that hands the FILTERED `genuinely_stale`
     // slice to the close helper AFTER a successful sync — must NOT flag.
     let approved = r#"
-async fn sync_owner_resolved_vue_with_close_after_sync(sync: ProjectSync) {
+async fn sync_owner_resolved_carrier_with_close_after_sync(sync: ProjectSync) {
     let result = sync.open_tsx(&ide_path, ide_code).await;
     let stale_paths = transition.stale_paths;
     let genuinely_stale = genuinely_stale_after_sync(&stale_paths, &committed_state, &synced_kinds);
@@ -669,7 +669,7 @@ async fn sync_owner_resolved_vue_with_close_after_sync(sync: ProjectSync) {
 "#;
     let flagged_approved = vue_functions_delegating_raw_stale_close(approved);
     assert!(
-        !flagged_approved.contains("sync_owner_resolved_vue_with_close_after_sync"),
+        !flagged_approved.contains("sync_owner_resolved_carrier_with_close_after_sync"),
         "detector must NOT flag the approved `genuinely_stale` close shape, flagged={flagged_approved:?}"
     );
 

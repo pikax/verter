@@ -222,6 +222,55 @@ pub fn build_script_analysis_with_scope_from_program(
     program: &Program<'_>,
     scope: AnalysisScope,
 ) -> ScriptAnalysisSnapshot {
+    // The provider-less entry is the byte-identical pre-existing path: it
+    // captures NO framework script candidates (empty active set) and discards
+    // the empty candidate set. The `script_fact_providers_zero_cost_on_miss`
+    // guard asserts this path does zero capture work.
+    build_script_analysis_with_scope_from_program_with_providers(
+        content,
+        source_type,
+        program,
+        scope,
+        &[],
+    )
+    .0
+}
+
+/// As [`build_script_analysis_with_scope_from_program`], but threads the active
+/// the active framework script-fact providers into the ONE shallow pass and
+/// returns the captured [`FrameworkScriptCandidateSet`] alongside the snapshot.
+///
+/// An EMPTY `active_providers` slice is the byte-identical pre-existing path:
+/// the returned candidate set is empty and `capture_script_candidates` does
+/// zero work. The SESSION caller computes the active set via the
+/// `ActiveProviderIndex` BEFORE the pass (the resolved `FileLanguage` row is the
+/// only host-derived input); the dep graph stays clean — the trait is owned by
+/// `verter_semantic`, registration is session-side.
+pub fn build_script_analysis_with_scope_from_program_with_providers(
+    content: &str,
+    source_type: SourceType,
+    program: &Program<'_>,
+    scope: AnalysisScope,
+    active_providers: &[std::sync::Arc<dyn crate::analysis::framework_facts::ScriptFactProvider>],
+) -> (
+    ScriptAnalysisSnapshot,
+    crate::analysis::framework_facts::FrameworkScriptCandidateSet,
+) {
+    let candidates = crate::analysis::framework_facts::capture_script_candidates(
+        active_providers,
+        content,
+        program,
+    );
+    let snapshot = build_script_analysis_inner(content, source_type, program, scope);
+    (snapshot, candidates)
+}
+
+fn build_script_analysis_inner(
+    content: &str,
+    source_type: SourceType,
+    program: &Program<'_>,
+    scope: AnalysisScope,
+) -> ScriptAnalysisSnapshot {
     // â”€â”€ Single-pass collection â”€â”€
     // Imports always precede declarations in valid ESM, so the import list is
     // complete when we encounter variable/function/class declarations.

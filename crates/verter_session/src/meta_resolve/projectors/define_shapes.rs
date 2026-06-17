@@ -9,8 +9,8 @@
 //! type-parameter collection:
 //!
 //! 1. the macro's normalized DTOs
-//!    ([`crate::typeinfo::adapters::vue::surface::vue_macro_dtos_with_ctx`] —
-//!    the SOLE props/emits/slots/exposed member authority, resolved through the active
+//!    ([`crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx`] —
+//!    the SOLE props/emits/slots member authority, resolved through the active
 //!    `ResolverContext` so overlay sessions read overlay content), and
 //! 2. the flat `evaluated_types.props` / `evaluated_types.emits` fields that
 //!    [`super::project_evaluated_types`] already projected through the shared
@@ -147,7 +147,7 @@ fn define_props_shape(
     ) {
         return None;
     }
-    let dtos = crate::typeinfo::adapters::vue::surface::vue_macro_dtos_with_ctx(
+    let dtos = crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx(
         ctx,
         &dto_request(owner_canonical, macro_index, AnalyzedMacroKind::DefineProps),
     );
@@ -155,9 +155,9 @@ fn define_props_shape(
     let mut exactness = SolverExactness::ExactConcrete;
     let mut execution_status = ExecutionStatus::Completed;
     let mut diagnostics = Vec::new();
-    let mut properties = Vec::with_capacity(dtos.props.len());
+    let mut properties = Vec::with_capacity(dtos.prop_fields().len());
 
-    for prop in &dtos.props {
+    for prop in dtos.prop_fields() {
         if let Some(field) = evaluated_types
             .props
             .iter()
@@ -206,7 +206,7 @@ fn define_props_shape(
             // A props member is `properties + index signatures`: publish the
             // DTO's index signatures (`defineProps<{ [k: string]: string }>()`)
             // so an index-signature-only props surface is not dropped.
-            index_signatures: dtos.prop_index_signatures.clone(),
+            index_signatures: dtos.prop_index_signatures().to_vec(),
             call_signatures: Vec::new(),
         },
         exactness,
@@ -235,7 +235,7 @@ fn define_emits_shape(
     ) {
         return None;
     }
-    let dtos = crate::typeinfo::adapters::vue::surface::vue_macro_dtos_with_ctx(
+    let dtos = crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx(
         ctx,
         &dto_request(owner_canonical, macro_index, AnalyzedMacroKind::DefineEmits),
     );
@@ -243,9 +243,9 @@ fn define_emits_shape(
     let mut exactness = SolverExactness::ExactConcrete;
     let mut execution_status = ExecutionStatus::Completed;
     let mut diagnostics = Vec::new();
-    let mut properties = Vec::with_capacity(dtos.emits.len());
+    let mut properties = Vec::with_capacity(dtos.emit_fields().len());
 
-    for emit in &dtos.emits {
+    for emit in dtos.emit_fields() {
         if let Some(field) = evaluated_types
             .emits
             .iter()
@@ -296,7 +296,7 @@ fn define_emits_shape(
             // emit index signatures (`defineEmits<{ [event: string]: [v: number]
             // }>()`) so an index-signature-only emits surface is not dropped (the
             // retired materialiser surfaced it).
-            index_signatures: dtos.emit_index_signatures.clone(),
+            index_signatures: dtos.emit_index_signatures().to_vec(),
             call_signatures: Vec::new(),
         },
         exactness,
@@ -323,13 +323,13 @@ fn define_slots_shape(
     ) {
         return None;
     }
-    let dtos = crate::typeinfo::adapters::vue::surface::vue_macro_dtos_with_ctx(
+    let dtos = crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx(
         ctx,
         &dto_request(owner_canonical, macro_index, AnalyzedMacroKind::DefineSlots),
     );
 
     let properties = dtos
-        .slots
+        .slot_fields()
         .iter()
         .map(|slot| ExpandedProperty {
             name: slot.name.clone(),

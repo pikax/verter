@@ -16,9 +16,7 @@
 
 use std::sync::Arc;
 
-use crate::types::{
-    CompileProfile, FileKind, HostConfig, UpsertRequest, VirtualNodeKind, VirtualQuery,
-};
+use crate::types::{CompileProfile, HostConfig, UpsertRequest, VirtualNodeKind, VirtualQuery};
 use crate::VerterHost;
 
 const CANONICAL: &str = "/proj/Themed.vue";
@@ -46,7 +44,9 @@ fn upsert(host: &VerterHost) {
             canonical_id: Some(CANONICAL.to_string()),
             input_id: CANONICAL.to_string(),
             source: Arc::from(SOURCE),
-            file_kind: FileKind::from_path(CANONICAL),
+            file_language: verter_language::LanguageRegistry::global()
+                .classify_static(CANONICAL)
+                .static_resolution(),
             aliases: Vec::new(),
         })
         .expect("upsert must succeed");

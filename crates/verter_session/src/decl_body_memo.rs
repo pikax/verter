@@ -32,10 +32,10 @@ use std::sync::{Arc, OnceLock};
 use dashmap::DashMap;
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use verter_compiler::utils::oxc::vue::raw_surface::{
+use verter_compiler::utils::oxc::script::raw_surface::{
     capture_statement_surfaces, merge_overload_groups, RawSourceSurface, SymbolSpace,
 };
-use verter_compiler::utils::oxc::vue::resolve_type::{
+use verter_compiler::utils::oxc::script::type_surface::{
     collect_statement_dependency_names, AnalyzedExternalTypeSource,
 };
 use verter_semantic::analysis::decl_headers::DeclHeaderIndex;
@@ -116,7 +116,7 @@ pub struct DeclBodyMemo {
     key: SnapshotKey,
     eval_source: Arc<str>,
     raw_source: Arc<str>,
-    cached_parse: Option<Arc<verter_compiler::parser::types::ParsedSfc>>,
+    framework_parse: Option<Arc<verter_language::FrameworkParseArtifact>>,
     source_type: oxc_span::SourceType,
     /// `None` on a seeded memo (every entry pre-filled; nothing to
     /// compute lazily).
@@ -161,7 +161,7 @@ impl DeclBodyMemo {
         key: SnapshotKey,
         eval_source: Arc<str>,
         raw_source: Arc<str>,
-        cached_parse: Option<Arc<verter_compiler::parser::types::ParsedSfc>>,
+        framework_parse: Option<Arc<verter_language::FrameworkParseArtifact>>,
         source_type: oxc_span::SourceType,
         service: Arc<DeclLoweringService>,
         header_index: Arc<DeclHeaderIndex>,
@@ -176,7 +176,7 @@ impl DeclBodyMemo {
             key,
             eval_source,
             raw_source,
-            cached_parse,
+            framework_parse,
             source_type,
             service: Some(service),
             lease: lease_cell,
@@ -206,7 +206,7 @@ impl DeclBodyMemo {
             key,
             eval_source: Arc::from(""),
             raw_source: Arc::from(""),
-            cached_parse: None,
+            framework_parse: None,
             source_type: oxc_span::SourceType::ts(),
             service: None,
             lease: OnceLock::new(),
@@ -272,6 +272,16 @@ impl DeclBodyMemo {
 
     pub(crate) fn header_index(&self) -> &Arc<DeclHeaderIndex> {
         &self.header_index
+    }
+
+    /// The retained framework parse artifact for this content generation, when
+    /// the file is a framework carrier. This is the SAME artifact the indexing
+    /// flight resolved — exposed so the component-default synth seam can read
+    /// the carrier's module-script region without re-fetching it through
+    /// `current_eval_state` (which re-enters `current_content_pinned_indexed`
+    /// for the owner and recurses while the owner is mid-index).
+    pub(crate) fn framework_parse(&self) -> Option<&Arc<verter_language::FrameworkParseArtifact>> {
+        self.framework_parse.as_ref()
     }
 
     /// Acquire (once) the lease pinning this memo's retained parse
@@ -482,11 +492,21 @@ impl DeclBodyMemo {
                 self.provenance
                     .decl_bodies_lowered
                     .fetch_add(env.total_decl_count() as u64, Ordering::Relaxed);
-                crate::VerterHost::apply_sfc_script_setup_type_params(
+                crate::host_resolve::apply_sfc_script_setup_type_params(
                     &mut env,
                     self.raw_source.as_ref(),
-                    self.cached_parse.as_deref(),
+                    self.framework_parse.as_deref(),
                 );
+                // A Svelte rune module (`.svelte.ts` / `.svelte.js`) merges the
+                // module-valid runes into its whole env so its exported
+                // rune-derived types infer correctly — per-file scoped, no
+                // eval_source byte change. Classify from the canonical via the
+                // static registry (no host needed) so the lazy memo path stays
+                // self-contained.
+                let file_language = verter_language::LanguageRegistry::global()
+                    .classify_static(self.key.canonical.as_ref())
+                    .static_resolution();
+                crate::host_resolve::apply_svelte_rune_ambient_env(&mut env, &file_language);
                 Arc::new(env)
             })
             .clone()
@@ -535,40 +555,40 @@ impl DeclBodyMemo {
         contributors.sort_unstable();
         contributors.dedup();
 
-        let surfaces = if contributors.is_empty() || self.service.is_none() {
-            Vec::new()
-        } else {
-            self.ensure_lease();
-            let service = self.service.as_ref().expect("checked above");
-            let canonical = self.key.canonical.to_string();
-            let wanted = name.to_string();
-            let outcome = service.run(
-                &self.key,
-                &self.eval_source,
-                self.source_type,
-                move |program| {
-                    let Some(program) = program else {
-                        return Vec::new();
-                    };
-                    let program = program.borrow_dependent();
-                    let captured: Vec<_> = contributors
-                        .iter()
-                        .filter_map(|index| program.body.get(*index as usize))
-                        .flat_map(capture_statement_surfaces)
-                        .collect();
-                    merge_overload_groups(captured)
-                        .into_iter()
-                        .filter(|c| c.name == wanted && c.symbol_space == space)
-                        .map(|c| {
-                            let mut surface = c.surface;
-                            surface.decl_canonical = canonical.clone();
-                            surface
-                        })
-                        .collect::<Vec<_>>()
-                },
-            );
-            outcome.value
-        };
+        let surfaces =
+            if let (false, Some(service)) = (contributors.is_empty(), self.service.as_ref()) {
+                self.ensure_lease();
+                let canonical = self.key.canonical.to_string();
+                let wanted = name.to_string();
+                let outcome = service.run(
+                    &self.key,
+                    &self.eval_source,
+                    self.source_type,
+                    move |program| {
+                        let Some(program) = program else {
+                            return Vec::new();
+                        };
+                        let program = program.borrow_dependent();
+                        let captured: Vec<_> = contributors
+                            .iter()
+                            .filter_map(|index| program.body.get(*index as usize))
+                            .flat_map(capture_statement_surfaces)
+                            .collect();
+                        merge_overload_groups(captured)
+                            .into_iter()
+                            .filter(|c| c.name == wanted && c.symbol_space == space)
+                            .map(|c| {
+                                let mut surface = c.surface;
+                                surface.decl_canonical = canonical.clone();
+                                surface
+                            })
+                            .collect::<Vec<_>>()
+                    },
+                );
+                outcome.value
+            } else {
+                Vec::new()
+            };
 
         let surfaces = Arc::new(surfaces);
         self.raw_surfaces

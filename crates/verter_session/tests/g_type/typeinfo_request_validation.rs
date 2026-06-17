@@ -22,7 +22,8 @@ use verter_session::typeinfo::request_validation::{
     validate_contextual_type_request, validate_evaluate_type_expression_graph_request,
     validate_expand_graph_around_request, validate_flow_narrowing_request,
     validate_framework_surface_request, validate_project_path_graph_request,
-    validate_resolve_symbol_graph_request, validate_type_info_graph_request,
+    validate_resolve_symbol_graph_request, validate_schema_version_for_operation,
+    validate_type_info_graph_request, FRAMEWORK_SURFACE_MIN_SCHEMA_VERSION,
     MAX_EXPANSION_DEPTH_BUDGET, MAX_EXPANSION_NODE_BUDGET, MAX_STRUCTURED_EXPRESSION_DEPTH,
     MIN_TYPEINFO_GRAPH_SCHEMA_VERSION, SUPPORTED_TYPEINFO_GRAPH_SCHEMA_VERSIONS,
 };
@@ -454,14 +455,16 @@ fn expand_around_well_formed_passes() {
     validate_expand_graph_around_request(&request).expect("expand-around request must validate");
 }
 
-#[test]
-fn framework_surface_request_missing_adapter_id_fails() {
-    let request = wire::FrameworkSurfaceRequest {
+fn framework_surface_request_with(
+    adapter_id: &str,
+    schema_version: u32,
+) -> wire::FrameworkSurfaceRequest {
+    wire::FrameworkSurfaceRequest {
         selector: Some(wire::ComponentSelector {
             canonical_id: "/Foo.vue".to_string(),
             export_name: String::new(),
             has_export_name: false,
-            framework_adapter_id: String::new(),
+            framework_adapter_id: adapter_id.to_string(),
         }),
         context: Some(default_context()),
         closure: Some(one_level_closure()),
@@ -469,31 +472,403 @@ fn framework_surface_request_missing_adapter_id_fails() {
         include_provenance: false,
         include_diagnostics: false,
         include_projection: vec![],
-        schema_version: MIN_TYPEINFO_GRAPH_SCHEMA_VERSION,
-    };
+        schema_version,
+    }
+}
+
+#[test]
+fn framework_surface_request_missing_adapter_id_fails() {
+    let request = framework_surface_request_with("", FRAMEWORK_SURFACE_MIN_SCHEMA_VERSION);
     let err = validate_framework_surface_request(&request).unwrap_err();
     assert_eq!(err_variant_label(&err), "MalformedPayload");
 }
 
 #[test]
 fn framework_surface_request_well_formed_passes() {
-    let request = wire::FrameworkSurfaceRequest {
-        selector: Some(wire::ComponentSelector {
-            canonical_id: "/Foo.vue".to_string(),
-            export_name: String::new(),
-            has_export_name: false,
-            framework_adapter_id: "vue".to_string(),
-        }),
-        context: Some(default_context()),
-        closure: Some(one_level_closure()),
-        display_policy: Some(default_display_policy()),
-        include_provenance: false,
-        include_diagnostics: false,
-        include_projection: vec![],
-        schema_version: MIN_TYPEINFO_GRAPH_SCHEMA_VERSION,
-    };
+    let request = framework_surface_request_with("vue", FRAMEWORK_SURFACE_MIN_SCHEMA_VERSION);
     validate_framework_surface_request(&request)
         .expect("a well-formed framework surface request must validate");
+}
+
+// ───────── Per-operation schema-version minimum (legacy-ops-only schema 2) ─────────
+//
+// Schema 2 is LEGACY-OPERATIONS-ONLY: every pre-existing operation
+// accepts `[2, 3]`; the framework-surface operation requires 3. The
+// gate runs through `validate_schema_version_for_operation` — global
+// membership first (UnknownSchemaVersion outside `[2, 3]`), then the
+// per-operation minimum (MalformedPayload below the op minimum — NOT
+// UnknownSchemaVersion, because v2 stays globally supported; NOT a
+// new error oneof arm, because v2 clients could not decode one).
+
+/// Builds a valid envelope for one legacy graph-payload operation at
+/// the given schema version.
+fn legacy_envelope(operation: wire::Operation, schema_version: u32) -> wire::TypeInfoGraphRequest {
+    let payload = match operation {
+        wire::Operation::ResolveSymbol => {
+            wire_request::Payload::ResolveSymbol(valid_resolve_symbol_request())
+        }
+        wire::Operation::EvaluateExpression => {
+            wire_request::Payload::EvaluateTypeExpression(valid_evaluate_type_expression_request())
+        }
+        wire::Operation::ProjectPath => {
+            wire_request::Payload::ProjectPath(valid_project_path_request())
+        }
+        wire::Operation::FlowNarrowingAt => {
+            wire_request::Payload::FlowNarrowing(wire::FlowNarrowingRequest {
+                canonical_id: "/a.ts".to_string(),
+                span: Some(wire::SpanRef {
+                    canonical_id: "/a.ts".to_string(),
+                    start: 1,
+                    end: 4,
+                }),
+                context: Some(default_context()),
+                display_policy: Some(default_display_policy()),
+                include_provenance: false,
+                include_diagnostics: false,
+            })
+        }
+        wire::Operation::ContextualTypeAt => {
+            wire_request::Payload::ContextualType(wire::ContextualTypeRequest {
+                canonical_id: "/a.ts".to_string(),
+                span: Some(wire::SpanRef {
+                    canonical_id: "/a.ts".to_string(),
+                    start: 1,
+                    end: 4,
+                }),
+                context: Some(default_context()),
+                display_policy: Some(default_display_policy()),
+                include_provenance: false,
+                include_diagnostics: false,
+            })
+        }
+        wire::Operation::ExpandAround => {
+            wire_request::Payload::ExpandAround(wire::ExpandGraphAroundRequest {
+                parent_graph: Some(wire::Handle {
+                    opaque: vec![1, 2, 3],
+                }),
+                target: Some(wire::TypeNodeRef {
+                    node_id: 3,
+                    identity: None,
+                    is_canonical: false,
+                }),
+                context: Some(default_context()),
+                closure: Some(one_level_closure()),
+                display_policy: Some(default_display_policy()),
+                include_provenance: false,
+                include_diagnostics: false,
+            })
+        }
+        wire::Operation::Relate | wire::Operation::FrameworkSurfaces => {
+            panic!("legacy_envelope covers the six legacy graph-payload operations only")
+        }
+    };
+    wire::TypeInfoGraphRequest {
+        schema_version,
+        operation: operation as i32,
+        payload: Some(payload),
+    }
+}
+
+/// The six legacy graph-payload operations, asserted OP-BY-OP (not
+/// sampled). `Relate` rides a dedicated request shape outside this
+/// envelope; its op-minimum is pinned through the direct
+/// `validate_schema_version_for_operation` walk below.
+const LEGACY_GRAPH_PAYLOAD_OPERATIONS: &[wire::Operation] = &[
+    wire::Operation::ResolveSymbol,
+    wire::Operation::EvaluateExpression,
+    wire::Operation::ProjectPath,
+    wire::Operation::FlowNarrowingAt,
+    wire::Operation::ContextualTypeAt,
+    wire::Operation::ExpandAround,
+];
+
+#[test]
+fn every_legacy_operation_accepts_schema_two_and_three_op_by_op() {
+    for &operation in LEGACY_GRAPH_PAYLOAD_OPERATIONS {
+        for version in [
+            MIN_TYPEINFO_GRAPH_SCHEMA_VERSION,
+            TYPEINFO_GRAPH_SCHEMA_VERSION,
+        ] {
+            validate_type_info_graph_request(&legacy_envelope(operation, version)).unwrap_or_else(
+                |err| {
+                    panic!(
+                        "legacy operation {operation:?} must accept schema {version}, got {err:?}"
+                    )
+                },
+            );
+        }
+    }
+}
+
+#[test]
+fn schema_versions_one_and_five_are_rejected_with_typed_errors() {
+    // 1 is below the floor; 5 is the first version ABOVE the current supported
+    // set ([2, 3, 4]). Both are outside the closed set and rejected.
+    for version in [1u32, 5u32] {
+        let err = validate_type_info_graph_request(&legacy_envelope(
+            wire::Operation::ResolveSymbol,
+            version,
+        ))
+        .unwrap_err();
+        assert_eq!(
+            err_variant_label(&err),
+            "UnknownSchemaVersion",
+            "schema {version} is outside the closed supported set and must be \
+             rejected with the typed UnknownSchemaVersion error",
+        );
+    }
+}
+
+fn framework_surface_envelope(
+    envelope_version: u32,
+    payload_version: u32,
+) -> wire::TypeInfoGraphRequest {
+    wire::TypeInfoGraphRequest {
+        schema_version: envelope_version,
+        operation: wire::Operation::FrameworkSurfaces as i32,
+        payload: Some(wire_request::Payload::FrameworkSurface(
+            framework_surface_request_with("vue", payload_version),
+        )),
+    }
+}
+
+#[test]
+fn framework_surface_operation_accepts_schema_three() {
+    validate_type_info_graph_request(&framework_surface_envelope(
+        FRAMEWORK_SURFACE_MIN_SCHEMA_VERSION,
+        FRAMEWORK_SURFACE_MIN_SCHEMA_VERSION,
+    ))
+    .expect("a v3 framework-surface request must validate");
+}
+
+/// DISCRIMINATING: the framework-surface operation rejects schema 2
+/// with `MalformedPayload` — and the rejection happens BEFORE any
+/// adapter lookup or semantic dispatch. Both validators exercised
+/// here are pure shape-only functions (no host, no registry, no
+/// resolver access exists in this module — pinned by the
+/// `typeinfo_request_validation_is_a_separate_module` guard), and
+/// `validate_type_info_graph_request` is the gate every
+/// `_with_audit` entry-point runs before semantic execution; a typed
+/// error from the pure validator therefore structurally precedes any
+/// adapter lookup.
+#[test]
+fn framework_surface_operation_rejects_schema_two_with_malformed_payload() {
+    // Envelope path: a v2 framework-surface envelope is rejected.
+    let err = validate_type_info_graph_request(&framework_surface_envelope(
+        MIN_TYPEINFO_GRAPH_SCHEMA_VERSION,
+        MIN_TYPEINFO_GRAPH_SCHEMA_VERSION,
+    ))
+    .unwrap_err();
+    assert_eq!(
+        err_variant_label(&err),
+        "MalformedPayload",
+        "a v2 framework-surface request must be rejected with MalformedPayload — \
+         NOT UnknownSchemaVersion (v2 stays globally supported) and NOT a new \
+         error oneof arm (v2 clients could not decode one)",
+    );
+
+    // Payload path: `validate_framework_surface_request` applies the
+    // same op-minimum gate on the payload's own schema_version.
+    let payload_err = validate_framework_surface_request(&framework_surface_request_with(
+        "vue",
+        MIN_TYPEINFO_GRAPH_SCHEMA_VERSION,
+    ))
+    .unwrap_err();
+    assert_eq!(err_variant_label(&payload_err), "MalformedPayload");
+}
+
+#[test]
+fn framework_surface_envelope_payload_version_mismatch_is_malformed_payload() {
+    let err = validate_type_info_graph_request(&framework_surface_envelope(
+        FRAMEWORK_SURFACE_MIN_SCHEMA_VERSION,
+        MIN_TYPEINFO_GRAPH_SCHEMA_VERSION,
+    ))
+    .unwrap_err();
+    assert_eq!(err_variant_label(&err), "MalformedPayload");
+    let detail = match err.kind.as_ref().expect("error kind") {
+        type_info_request_error::Kind::MalformedPayload(p) => p.detail.as_str(),
+        other => panic!("expected MalformedPayload, got {other:?}"),
+    };
+    assert!(
+        detail.contains("mismatch"),
+        "the envelope/payload version-mismatch rejection must carry a \
+         mismatch detail, got: {detail}",
+    );
+}
+
+#[test]
+fn supported_schema_version_set_is_exactly_two_three_and_four() {
+    assert_eq!(
+        SUPPORTED_TYPEINFO_GRAPH_SCHEMA_VERSIONS,
+        &[
+            MIN_TYPEINFO_GRAPH_SCHEMA_VERSION,
+            3,
+            TYPEINFO_GRAPH_SCHEMA_VERSION
+        ],
+        "the supported set holds every version some operation still accepts: \
+         schema 2 (legacy-operations-only), schema 3 (the framework-surface \
+         floor), and schema 4 (current — adds the member default/origin fields)",
+    );
+    assert_eq!(MIN_TYPEINFO_GRAPH_SCHEMA_VERSION, 2);
+    assert_eq!(TYPEINFO_GRAPH_SCHEMA_VERSION, 4);
+    assert_eq!(FRAMEWORK_SURFACE_MIN_SCHEMA_VERSION, 3);
+}
+
+/// The supported-set advertisement surface: the `UnknownSchemaVersion`
+/// error payload's `server_supported_versions`, populated from
+/// `SUPPORTED_TYPEINFO_GRAPH_SCHEMA_VERSIONS` via
+/// `wire_error_unknown_schema_version` — the single advertisement
+/// source. It reports `[2, 3, 4]`.
+#[test]
+fn unknown_schema_version_error_advertises_two_three_and_four() {
+    // Version 5 is the first version OUTSIDE the supported set — it triggers
+    // the UnknownSchemaVersion rejection (4 is now supported).
+    let err = validate_type_info_graph_request(&legacy_envelope(wire::Operation::ResolveSymbol, 5))
+        .unwrap_err();
+    let payload = match err.kind.as_ref().expect("error kind") {
+        type_info_request_error::Kind::UnknownSchemaVersion(p) => p,
+        other => panic!("expected UnknownSchemaVersion, got {other:?}"),
+    };
+    assert_eq!(
+        payload.server_supported_versions,
+        vec![2, 3, 4],
+        "the advertisement surface must report exactly [2, 3, 4]",
+    );
+    assert_eq!(
+        payload.server_supported_versions,
+        SUPPORTED_TYPEINFO_GRAPH_SCHEMA_VERSIONS.to_vec(),
+        "the advertisement is fed by the supported-set constant — the single source",
+    );
+
+    // The constructor itself is the single advertisement source.
+    let wire_payload = wire::wire_error_unknown_schema_version(
+        5,
+        TYPEINFO_GRAPH_SCHEMA_VERSION,
+        SUPPORTED_TYPEINFO_GRAPH_SCHEMA_VERSIONS,
+    );
+    assert_eq!(wire_payload.server_supported_versions, vec![2, 3, 4]);
+}
+
+/// Walks EVERY operation discriminant through
+/// `validate_schema_version_for_operation`. The mirror match below is
+/// wildcard-free, so a future `Operation` variant fails to compile
+/// here (and in the production gate) until its op-minimum row is
+/// decided.
+#[test]
+fn op_minimum_gate_walks_every_operation_discriminant() {
+    /// Expected per-operation minimum — a wildcard-free mirror of the
+    /// production gate's exhaustive match.
+    fn expected_minimum(operation: wire::Operation) -> u32 {
+        match operation {
+            wire::Operation::ResolveSymbol
+            | wire::Operation::EvaluateExpression
+            | wire::Operation::ProjectPath
+            | wire::Operation::Relate
+            | wire::Operation::ExpandAround
+            | wire::Operation::FlowNarrowingAt
+            | wire::Operation::ContextualTypeAt => MIN_TYPEINFO_GRAPH_SCHEMA_VERSION,
+            wire::Operation::FrameworkSurfaces => FRAMEWORK_SURFACE_MIN_SCHEMA_VERSION,
+        }
+    }
+
+    const EVERY_OPERATION: &[wire::Operation] = &[
+        wire::Operation::ResolveSymbol,
+        wire::Operation::EvaluateExpression,
+        wire::Operation::ProjectPath,
+        wire::Operation::Relate,
+        wire::Operation::FrameworkSurfaces,
+        wire::Operation::ExpandAround,
+        wire::Operation::FlowNarrowingAt,
+        wire::Operation::ContextualTypeAt,
+    ];
+    assert_eq!(
+        EVERY_OPERATION.len(),
+        8,
+        "the walk must cover every operation discriminant",
+    );
+
+    for &operation in EVERY_OPERATION {
+        let minimum = expected_minimum(operation);
+
+        // At or above the minimum (within the supported set): Ok.
+        for version in SUPPORTED_TYPEINFO_GRAPH_SCHEMA_VERSIONS
+            .iter()
+            .copied()
+            .filter(|v| *v >= minimum)
+        {
+            validate_schema_version_for_operation(operation, version).unwrap_or_else(|err| {
+                panic!("{operation:?} must accept schema {version}, got {err:?}")
+            });
+        }
+
+        // Below the minimum but globally supported: MalformedPayload.
+        for version in SUPPORTED_TYPEINFO_GRAPH_SCHEMA_VERSIONS
+            .iter()
+            .copied()
+            .filter(|v| *v < minimum)
+        {
+            let err = validate_schema_version_for_operation(operation, version).unwrap_err();
+            assert_eq!(
+                err_variant_label(&err),
+                "MalformedPayload",
+                "{operation:?} below its op-minimum must reject with MalformedPayload",
+            );
+        }
+
+        // Outside the global set: UnknownSchemaVersion regardless of
+        // the operation (global membership runs first). 1 is below the
+        // floor; 5 is the first version above the current set ([2, 3, 4]).
+        for version in [1u32, 5u32] {
+            let err = validate_schema_version_for_operation(operation, version).unwrap_err();
+            assert_eq!(
+                err_variant_label(&err),
+                "UnknownSchemaVersion",
+                "{operation:?} outside the global set must reject with UnknownSchemaVersion",
+            );
+        }
+    }
+}
+
+/// The rewritten `SUPPORTED_TYPEINFO_GRAPH_SCHEMA_VERSIONS` rustdoc
+/// states the legacy-operations-only contract; the retired
+/// single-version policy text ("single-sourced from", "removes
+/// obsolete ones") may not survive — code and policy text may not
+/// diverge. Also pins the production op-minimum match as
+/// wildcard-free (the compile-time half of the exhaustiveness rule).
+#[test]
+fn supported_versions_rustdoc_states_legacy_operations_only_contract() {
+    let crate_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let source_path = crate_root.join("src/typeinfo/request_validation.rs");
+    let source = std::fs::read_to_string(&source_path)
+        .unwrap_or_else(|err| panic!("read {}: {err}", source_path.display()));
+
+    let const_idx = source
+        .find("pub const SUPPORTED_TYPEINFO_GRAPH_SCHEMA_VERSIONS")
+        .expect("the supported-set constant must exist");
+    let doc_window = &source[const_idx.saturating_sub(2000)..const_idx];
+    assert!(
+        doc_window.contains("legacy-operations-only"),
+        "the supported-set rustdoc must state the legacy-operations-only contract",
+    );
+    assert!(
+        !doc_window.contains("removes obsolete ones in the same"),
+        "the retired single-version policy text must not survive the rewrite",
+    );
+
+    // The production op-minimum gate matches exhaustively with NO
+    // wildcard arm: a future operation cannot compile without an
+    // explicit op-minimum decision.
+    let fn_idx = source
+        .find("pub fn validate_schema_version_for_operation")
+        .expect("the op-minimum gate must exist");
+    let fn_window = &source[fn_idx
+        ..source[fn_idx..]
+            .find("\npub ")
+            .map_or(source.len(), |o| fn_idx + o)];
+    assert!(
+        !fn_window.contains("_ =>"),
+        "validate_schema_version_for_operation must match exhaustively with no wildcard arm",
+    );
 }
 
 // ───────── Exhaustive structured-expression coverage ─────────

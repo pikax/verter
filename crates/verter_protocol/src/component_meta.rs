@@ -12,12 +12,12 @@ use verter_type_expr::{
 
 use crate::verter::v1::{
     self as proto, type_node, AcceptedEventMeta, AcceptedPropMeta, ArrayNode, BindingMeta,
-    BranchStatus, ComponentFlags, ComponentMetaBody, ComponentMetaPayload, ComponentMetaResolution,
-    ComponentPropUsage, ComponentUsage, ConditionalNode, ConsumedRootBindings,
-    CustomBlockMeta as ProtoCustomBlockMeta, EventMeta, ExpansionDiagnostic, ExpansionMetadata,
-    ExposedMeta, FallthroughBranch, FallthroughEventEntry, FallthroughPropEntry,
-    FallthroughSurface, FunctionNode, FunctionParameter, ImportBindingMeta, ImportMeta,
-    IndexedAccessNode, InferNode, InheritedSource, JsdocTag, KeyOfNode, LiteralNode,
+    BranchStatus, ComponentBindingUsage, ComponentEventUsage, ComponentFlags, ComponentMetaBody,
+    ComponentMetaPayload, ComponentMetaResolution, ComponentPropUsage, ComponentUsage,
+    ConditionalNode, ConsumedRootBindings, CustomBlockMeta as ProtoCustomBlockMeta, EventMeta,
+    ExpansionDiagnostic, ExpansionMetadata, ExposedMeta, FallthroughBranch, FallthroughEventEntry,
+    FallthroughPropEntry, FallthroughSurface, FunctionNode, FunctionParameter, ImportBindingMeta,
+    ImportMeta, IndexedAccessNode, InferNode, InheritedSource, JsdocTag, KeyOfNode, LiteralNode,
     MacroExpansionDiagnosticEntry, MappedNode, MemberAvailability, MemberProvenance, ModelMeta,
     ObjectMember as ProtoObjectMember, ObjectNode, OriginEdge as ProtoOriginEdge,
     OriginGraph as ProtoOriginGraph, OriginNode as ProtoOriginNode, ParenthesizedNode,
@@ -31,7 +31,7 @@ use crate::verter::v1::{
     VueApiCallMeta,
 };
 
-pub const COMPONENT_META_SCHEMA_VERSION: u32 = 2;
+pub const COMPONENT_META_SCHEMA_VERSION: u32 = 3;
 
 pub fn component_meta_payload(meta: &FfiComponentMeta) -> ComponentMetaPayload {
     let mut builder = GraphBuilder::new();
@@ -331,6 +331,24 @@ fn component_usage_to_proto(
         static_class_ids: string_ids(builder, &component.static_classes),
         has_dynamic_class: component.has_dynamic_class,
         v_model_ids: string_ids(builder, &component.v_models),
+        bindings: component
+            .bindings
+            .iter()
+            .map(|binding| ComponentBindingUsage {
+                name_id: builder.string_id(&binding.name),
+                modifier_ids: string_ids(builder, &binding.modifiers),
+            })
+            .collect(),
+        events: component
+            .events
+            .iter()
+            .map(|event| ComponentEventUsage {
+                name_id: builder.string_id(&event.name),
+                handler_expression_id: builder.string_id_opt(event.handler_expression.as_deref()),
+                is_inline: event.is_inline,
+                modifier_ids: string_ids(builder, &event.modifiers),
+            })
+            .collect(),
     }
 }
 
@@ -1560,6 +1578,58 @@ mod tests {
             0,
             "graph nodes should be present"
         );
+    }
+
+    #[test]
+    fn component_usage_proto_carries_bindings_and_events() {
+        // The neutral per-usage `bindings` / `events` (proto fields 9/10 +
+        // the `ComponentBindingUsage` / `ComponentEventUsage` messages) encode
+        // through `component_usage_to_proto` and survive — string-interned name /
+        // handler / modifiers resolve back to their original text. Discriminating:
+        // an encoder without fields 9/10 yields empty bindings/events here.
+        use crate::types::{FfiComponentBindingUsage, FfiComponentEventUsage, FfiComponentUsage};
+
+        let usage = FfiComponentUsage {
+            name: "Button".to_string(),
+            import_source: Some("./Button.svelte".to_string()),
+            is_dynamic: false,
+            props: Vec::new(),
+            has_spread: false,
+            slots_used: vec!["icon".to_string()],
+            static_classes: Vec::new(),
+            has_dynamic_class: false,
+            v_models: Vec::new(),
+            v_model_entries: Vec::new(),
+            bindings: vec![FfiComponentBindingUsage {
+                name: "value".to_string(),
+                modifiers: vec!["lazy".to_string()],
+            }],
+            events: vec![FfiComponentEventUsage {
+                name: "focus".to_string(),
+                handler_expression: Some("handler".to_string()),
+                is_inline: false,
+                modifiers: Vec::new(),
+            }],
+        };
+
+        let mut builder = GraphBuilder::new();
+        let proto = super::component_usage_to_proto(&mut builder, &usage);
+        let strings = builder.strings();
+        let s = |id: u32| strings[(id - 1) as usize].as_str();
+
+        assert_eq!(proto.bindings.len(), 1, "the binding must encode");
+        assert_eq!(s(proto.bindings[0].name_id), "value");
+        assert_eq!(proto.bindings[0].modifier_ids.len(), 1);
+        assert_eq!(s(proto.bindings[0].modifier_ids[0]), "lazy");
+
+        assert_eq!(proto.events.len(), 1, "the event must encode");
+        assert_eq!(s(proto.events[0].name_id), "focus");
+        assert_eq!(s(proto.events[0].handler_expression_id), "handler");
+        assert!(!proto.events[0].is_inline);
+        assert!(proto.events[0].modifier_ids.is_empty());
+
+        // SCHEMA bump landed (2 → 3).
+        assert_eq!(super::COMPONENT_META_SCHEMA_VERSION, 3);
     }
 
     #[test]

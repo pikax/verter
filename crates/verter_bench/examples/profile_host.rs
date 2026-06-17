@@ -237,7 +237,7 @@ fn main() {
                 canonical_id: Some(file.canonical_id.clone()),
                 input_id: file.canonical_id.clone(),
                 source: Arc::from(file.content.as_str()),
-                file_kind: verter_session::FileKind::VueSfc,
+                file_language: verter_session::FileLanguage::vue(),
                 aliases: Vec::new(),
             };
             if host.upsert(req).is_ok() {

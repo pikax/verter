@@ -61,12 +61,14 @@ fn intern_empty_object(host: &VerterHost) -> SemanticNodeId {
 /// entry-count invariant — use this decl-rooted fixture instead.
 fn intern_decl_ref_base(host: &VerterHost, canonical: &str, name: &str) -> SemanticNodeId {
     use crate::semantic_query::{DeclIdentity, NodeScopeId};
-    use crate::{FileKind, UpsertRequest};
+    use crate::UpsertRequest;
     let _ = host.upsert(UpsertRequest {
         canonical_id: None,
         input_id: canonical.to_string(),
         source: Arc::from(format!("export type {name} = {{ a: number }};\n")),
-        file_kind: FileKind::from_path(canonical),
+        file_language: verter_language::LanguageRegistry::global()
+            .classify_static(canonical)
+            .static_resolution(),
         aliases: Vec::new(),
     });
     host.ensure_indexed_ready(canonical)
@@ -108,13 +110,15 @@ fn tracked_macro_owner(
     host: &VerterHost,
     canonical: &str,
 ) -> crate::semantic_query::ResolvedDeclSlotIdentity {
-    use crate::{FileKind, UpsertRequest};
+    use crate::UpsertRequest;
     let _ = host
         .upsert(UpsertRequest {
             canonical_id: None,
             input_id: canonical.to_string(),
             source: Arc::from("<script setup lang=\"ts\">defineProps<{ x: string }>()</script>\n"),
-            file_kind: FileKind::from_path(canonical),
+            file_language: crate::LanguageRegistry::global()
+                .classify_static(canonical)
+                .static_resolution(),
             aliases: Vec::new(),
         })
         .expect("owner SFC upsert succeeds");

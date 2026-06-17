@@ -16,6 +16,7 @@ parking_lot = "0.12.5"
 tokio = { version = "1.52", features = ["io-util", "process", "sync", "time", "rt", "macros"] }
 tracing = "0.1.44"
 verter_span = { path = "../verter_span" }
+verter_language = { path = "../verter_language" }
 
 [features]
 default = []

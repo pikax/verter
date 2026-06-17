@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use rustc_hash::{FxHashMap, FxHashSet};
-use verter_compiler::utils::oxc::vue::resolve_type::{
+use verter_compiler::utils::oxc::script::type_surface::{
     analyze_external_type_source, imported_member_name_for_required_alias,
     required_import_alias_names_for_binding, AnalyzedExternalTypeSource, ResolvedElements,
 };
@@ -324,7 +324,7 @@ mod tests {
     use rustc_hash::{FxHashMap, FxHashSet};
     use std::cell::RefCell;
     use std::collections::{BTreeMap, BTreeSet};
-    use verter_compiler::utils::oxc::vue::resolve_type::{
+    use verter_compiler::utils::oxc::script::type_surface::{
         AnalyzedExternalTypeSource, ResolvedElements, RuntimeType,
     };
     use verter_workspace::ResolveRequestKind;
@@ -382,7 +382,7 @@ mod tests {
                 oxc_parser::Parser::new(&allocator, effective_source, oxc_span::SourceType::ts())
                     .parse();
             (!parsed.panicked).then(|| {
-                verter_compiler::utils::oxc::vue::resolve_type::resolve_external_type_in_program_with_analyzed_symbol_companion_and_canonical(
+                verter_compiler::utils::oxc::script::type_surface::resolve_external_type_in_program_with_analyzed_symbol_companion_and_canonical(
                     type_name,
                     &parsed.program,
                     effective_source.as_bytes(),
@@ -428,7 +428,7 @@ mod tests {
     fn empty_elements() -> ResolvedElements {
         ResolvedElements {
             props: Vec::new(),
-            emits: Vec::new(),
+            call_signatures: Vec::new(),
             has_call_signature: false,
             root_runtime_types: vec![RuntimeType::Object],
         }

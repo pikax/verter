@@ -58,6 +58,12 @@ mod env_hash_isolation;
 mod env_hashes_swap_atomically_on_snapshot_bump;
 #[path = "g_misc0/eviction_policy.rs"]
 mod eviction_policy;
+#[path = "g_misc0/framework_adapter_guards.rs"]
+mod framework_adapter_guards;
+#[path = "g_misc0/framework_carrier_compiler_guards.rs"]
+mod framework_carrier_compiler_guards;
+#[path = "g_misc0/framework_carrier_confinement.rs"]
+mod framework_carrier_confinement;
 #[path = "g_misc0/getcomponentmeta_fallthrough_audit_cleanliness.rs"]
 mod getcomponentmeta_fallthrough_audit_cleanliness;
 #[path = "g_misc0/golden_semantic_dump.rs"]
@@ -72,6 +78,10 @@ mod invalidation_coverage;
 mod invalidation_perf;
 #[path = "g_misc0/jsdoc_provenance_p2.rs"]
 mod jsdoc_provenance_p2;
+#[path = "g_misc0/known_but_unsupported_language.rs"]
+mod known_but_unsupported_language;
+#[path = "g_misc0/language_routing_characterization.rs"]
+mod language_routing_characterization;
 #[path = "g_misc0/legacy_dep_signature_field_gone.rs"]
 mod legacy_dep_signature_field_gone;
 #[path = "g_misc0/legacy_walker_parity_baseline.rs"]
@@ -84,6 +94,8 @@ mod materializations_lane_wired;
 mod mcp_audit_e2e;
 #[path = "g_misc0/mcp_audit_tls_propagation.rs"]
 mod mcp_audit_tls_propagation;
+#[path = "g_misc0/neutral_script_analysis_not_under_vue_path.rs"]
+mod neutral_script_analysis_not_under_vue_path;
 #[path = "g_misc0/no_accumulate_dispatch_dep_signature_outside_helpers.rs"]
 mod no_accumulate_dispatch_dep_signature_outside_helpers;
 #[path = "g_misc0/no_default_env_hashes_in_production.rs"]
@@ -98,6 +110,8 @@ mod no_production_caller_of_zero_env_slot_constructors;
 mod origin_graph_consumer_contract;
 #[path = "g_misc0/overlay_prepared_decl_no_base_cache_pollution.rs"]
 mod overlay_prepared_decl_no_base_cache_pollution;
+#[path = "g_misc0/plain_script_dialect_from_file_language.rs"]
+mod plain_script_dialect_from_file_language;
 #[path = "g_misc0/r20_admission_refuses_empty_signature.rs"]
 mod r20_admission_refuses_empty_signature;
 #[path = "g_misc0/relative_path_session_parity.rs"]
@@ -116,6 +130,8 @@ mod semantic_analysis_audit_e2e;
 mod semantic_analysis_audit_tls_propagation;
 #[path = "g_misc0/semantic_graph_production_reads_validated.rs"]
 mod semantic_graph_production_reads_validated;
+#[path = "g_misc0/single_language_classifier.rs"]
+mod single_language_classifier;
 #[path = "g_misc0/slot_binding_graph_dual_emit_arch_guard.rs"]
 mod slot_binding_graph_dual_emit_arch_guard;
 #[path = "g_misc0/slot_binding_graph_matrix_module_aug_index_shape.rs"]
@@ -134,6 +150,8 @@ mod tls_harness_in_crate;
 mod tracer_stack_reentrant_observe_safe;
 #[path = "g_misc0/uniqueness_check_release_active.rs"]
 mod uniqueness_check_release_active;
+#[path = "g_misc0/vue_relocation_no_shim.rs"]
+mod vue_relocation_no_shim;
 #[path = "g_misc0/walker_parity_baselines_have_full_coverage.rs"]
 mod walker_parity_baselines_have_full_coverage;
 #[path = "g_misc0/workspace_audit_production_callsite.rs"]

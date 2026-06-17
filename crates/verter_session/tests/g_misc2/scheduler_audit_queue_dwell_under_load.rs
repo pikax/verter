@@ -44,10 +44,9 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use verter_language::FileLanguage as SchedFileKind;
 use verter_scheduler::executor::{StageError, StageExecutor};
-use verter_scheduler::node::{
-    AnalysisSnapshot, ArtifactSnapshot, FileKind as SchedFileKind, SourceSnapshot,
-};
+use verter_scheduler::node::{AnalysisSnapshot, ArtifactSnapshot, SourceSnapshot};
 use verter_scheduler::request_context::{OpaqueRequestContext, RequestContextLike};
 use verter_scheduler::scheduler::{Request, Scheduler, SchedulerConfig};
 use verter_scheduler::source_loader::{MemorySourceLoader, SourceLoader};
@@ -145,7 +144,7 @@ impl StageExecutor for GatedSourceExecutor {
     fn execute_source(
         &self,
         _canonical_id: &str,
-        _file_kind: SchedFileKind,
+        _file_language: SchedFileKind,
         content: Arc<str>,
         generation: u64,
     ) -> Result<SourceSnapshot, StageError> {
@@ -268,7 +267,7 @@ fn at_least_one_concurrent_request_observes_non_zero_queue_dwell_ms() {
                     target: TargetStage::Artifact { profile_hash: 1 },
                     priority: Priority::Interactive,
                     source: Some(Arc::from("<template>y</template>")),
-                    file_kind: None,
+                    file_language: None,
                     request_context: Some(opaque),
                 });
                 // Signal that this submission has entered the inbox, then

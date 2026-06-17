@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
 #[test]
@@ -18,7 +18,7 @@ fn memo_entry_producer_counter_advances_on_cross_file_dispatch() {
         canonical_id: Some("/types.ts".into()),
         input_id: "/types.ts".into(),
         source: Arc::from("export interface Imported { id: string }"),
-        file_kind: FileKind::NonSfc,
+        file_language: FileLanguage::script_ts(),
         aliases: vec![],
     });
     let _ = host.upsert(UpsertRequest {
@@ -30,7 +30,7 @@ fn memo_entry_producer_counter_advances_on_cross_file_dispatch() {
              defineProps<Imported>();\
              </script>",
         ),
-        file_kind: FileKind::VueSfc,
+        file_language: FileLanguage::vue(),
         aliases: vec![],
     });
 

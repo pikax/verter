@@ -21,6 +21,15 @@ pub enum SchedulerError {
         stage: String,
         message: String,
     },
+    /// The file's language row has no registered carrier implementation
+    /// behind it (a known-but-unsupported framework language). Typed so
+    /// consumers distinguish it structurally — never by parsing a
+    /// message string. Produced when a stage executor returns
+    /// [`crate::executor::StageErrorKind::UnsupportedLanguage`].
+    UnsupportedLanguage {
+        file_id: String,
+        adapter_id: verter_language::FrameworkAdapterId,
+    },
     /// File not found in scheduler or via source loader.
     FileNotFound { file_id: String },
     /// The scheduler was shut down before the request completed.
@@ -96,6 +105,14 @@ impl fmt::Display for SchedulerError {
                 stage,
                 message,
             } => write!(f, "stage {stage} failed for {file_id}: {message}"),
+            SchedulerError::UnsupportedLanguage {
+                file_id,
+                adapter_id,
+            } => write!(
+                f,
+                "unsupported framework language for {file_id}: no carrier \
+                 implementation is registered for adapter '{adapter_id}'"
+            ),
             SchedulerError::FileNotFound { file_id } => write!(f, "file not found: {file_id}"),
             SchedulerError::Shutdown => write!(f, "scheduler shut down"),
             SchedulerError::DependencyFailed { dep_key, cause } => {
@@ -117,6 +134,7 @@ impl std::error::Error for SchedulerError {
         match self {
             SchedulerError::DependencyFailed { cause, .. } => Some(cause.as_ref()),
             SchedulerError::StageFailed { .. }
+            | SchedulerError::UnsupportedLanguage { .. }
             | SchedulerError::FileNotFound { .. }
             | SchedulerError::Shutdown => None,
         }

@@ -38,7 +38,7 @@ fn upsert_vue(host: &VerterHost, id: &str, src: &str) {
             canonical_id: None,
             input_id: id.to_string(),
             source: Arc::from(src),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: Vec::new(),
         })
         .unwrap();
@@ -50,7 +50,7 @@ fn upsert_non_sfc(host: &VerterHost, id: &str, src: &str) {
             canonical_id: None,
             input_id: id.to_string(),
             source: Arc::from(src),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .unwrap();
@@ -154,7 +154,7 @@ impl verter_workspace::WorkspaceRead for CountingWorkspace {
         self.inner.read_package_manifest(canonical_id)
     }
 
-    fn classify_file(&self, canonical_id: &str) -> verter_workspace::FileKind {
+    fn classify_file(&self, canonical_id: &str) -> verter_language::FileLanguage {
         self.inner.classify_file(canonical_id)
     }
 
@@ -314,10 +314,10 @@ fn mutate_lazy_analysis_source(host: &VerterHost) {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn clear_cached_parse(host: &VerterHost) {
+fn clear_framework_parse(host: &VerterHost) {
     let mut files = crate::shared::write_lock(&host.files);
     let entry = files.get_mut("App.vue").expect("App.vue should exist");
-    entry.cached_parse = None;
+    entry.framework_parse = None;
 }
 
 // Legacy trace-line formatting tests 5 ( clean-cut rule). `format_component_meta_trace_line`,
@@ -326,7 +326,7 @@ fn clear_cached_parse(host: &VerterHost) {
 // in `component_meta_audit/structured_event.rs`.
 
 #[test]
-fn build_eval_script_source_without_cached_parse_still_extracts_script_blocks() {
+fn build_eval_script_source_without_parse_artifact_still_extracts_script_blocks() {
     let source = r#"<script lang="ts">
 interface Props {
   label: string
@@ -1976,8 +1976,8 @@ const answer: string = '42'
         "the promoted dependency cache entry should keep the extracted type-resolution source",
     );
     assert!(
-        promoted.cached_parse.is_some(),
-        "the promoted Vue dependency cache entry should retain the cached SFC parse",
+        promoted.framework_parse.is_some(),
+        "the promoted Vue dependency cache entry should retain the carrier parse artifact",
     );
     // In the new IndexedReady model, ensure_indexed_ready eagerly builds a
     // full snapshot, so we just verify the facts are present and well-formed.
@@ -2026,7 +2026,7 @@ export interface Props extends Base {
     );
     // In IndexedReady, snapshot is Arc<FileAnalysisSnapshot> (non-optional).
     assert!(
-        first.cached_parse.is_some(),
+        first.framework_parse.is_some(),
         "cached Vue imported dependency entry should retain parse state",
     );
     assert!(
@@ -2833,13 +2833,13 @@ fn get_analysis_missing_file_unresolved() {
 }
 
 #[test]
-fn get_analysis_uses_cached_parse_for_lazy_analysis() {
+fn get_analysis_uses_parse_artifact_for_lazy_analysis() {
     let host = make_lazy_host();
     upsert_vue(&host, "App.vue", LAZY_ANALYSIS_SFC);
 
     // On the scheduler path, source is immutable in the scheduler snapshot,
     // so mutating host.files has no effect. The scheduler path reads from
-    // HostSourceData.cached_parse directly. We just verify get_analysis()
+    // HostSourceData.framework_parse directly. We just verify get_analysis()
     // returns correct lazy-recomputed data with AnalysisLevel::None.
     #[cfg(target_arch = "wasm32")]
     mutate_lazy_analysis_source(&host);
@@ -2873,15 +2873,15 @@ fn get_analysis_uses_cached_parse_for_lazy_analysis() {
 }
 
 #[test]
-fn get_analysis_falls_back_when_cached_parse_missing() {
+fn get_analysis_falls_back_when_parse_artifact_missing() {
     let host = make_lazy_host();
     upsert_vue(&host, "App.vue", LAZY_ANALYSIS_SFC);
 
-    // On the scheduler path, cached_parse is immutable in HostSourceData
+    // On the scheduler path, framework_parse is immutable in HostSourceData
     // and always present for Vue SFCs. The scheduler path handles both
-    // cached_parse present and absent cases. We just verify correctness.
+    // artifact present and absent cases. We just verify correctness.
     #[cfg(target_arch = "wasm32")]
-    clear_cached_parse(&host);
+    clear_framework_parse(&host);
 
     let analysis = host.get_analysis("App.vue").unwrap();
 
@@ -2954,7 +2954,7 @@ fn get_export_span_ts_file() {
             canonical_id: None,
             input_id: "utils.ts".to_string(),
             source: Arc::from("export function helper() { return 1; }"),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .unwrap();
@@ -3042,7 +3042,7 @@ fn upsert_ts(host: &VerterHost, id: &str, src: &str) {
             canonical_id: None,
             input_id: id.to_string(),
             source: Arc::from(src),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .unwrap();
@@ -3608,7 +3608,7 @@ fn upsert_ts_result(host: &VerterHost, id: &str, src: &str) -> crate::HostUpdate
         canonical_id: None,
         input_id: id.to_string(),
         source: Arc::from(src),
-        file_kind: FileKind::NonSfc,
+        file_language: FileLanguage::script_ts(),
         aliases: Vec::new(),
     })
     .unwrap()
@@ -3977,7 +3977,7 @@ fn macro_dtos_for_resolved(
     host: &VerterHost,
     owner: &str,
     resolved: &crate::meta_resolve::ResolvedMacroMeta,
-) -> std::sync::Arc<crate::typeinfo::adapters::vue::store::VueMacroDtos> {
+) -> std::sync::Arc<crate::typeinfo::framework_surface::MacroSurfaceDtos> {
     host.vue_macro_dtos(&crate::typeinfo::types::VueMacroSurfaceRequest {
         owner_canonical: std::sync::Arc::from(owner),
         macro_index: resolved.macro_index,
@@ -3993,7 +3993,7 @@ fn macro_dtos_by_type(
     owner: &str,
     state: &crate::meta_resolve::ResolvedComponentMetaState,
     type_name: &str,
-) -> std::sync::Arc<crate::typeinfo::adapters::vue::store::VueMacroDtos> {
+) -> std::sync::Arc<crate::typeinfo::framework_surface::MacroSurfaceDtos> {
     macro_dtos_for_resolved(host, owner, resolved_macro_by_type(state, type_name))
 }
 
@@ -4004,7 +4004,7 @@ fn dtos_for_kind(
     owner: &str,
     state: &crate::meta_resolve::ResolvedComponentMetaState,
     kind: verter_semantic::analysis::AnalyzedMacroKind,
-) -> Vec<std::sync::Arc<crate::typeinfo::adapters::vue::store::VueMacroDtos>> {
+) -> Vec<std::sync::Arc<crate::typeinfo::framework_surface::MacroSurfaceDtos>> {
     let mut seen = rustc_hash::FxHashSet::default();
     state
         .resolved_macros
@@ -4022,7 +4022,7 @@ fn names_for_kind(
     owner: &str,
     state: &crate::meta_resolve::ResolvedComponentMetaState,
     kind: verter_semantic::analysis::AnalyzedMacroKind,
-    pick: fn(&crate::typeinfo::adapters::vue::store::VueMacroDtos) -> Vec<String>,
+    pick: fn(&crate::typeinfo::framework_surface::MacroSurfaceDtos) -> Vec<String>,
 ) -> Vec<String> {
     let mut seen = rustc_hash::FxHashSet::default();
     state
@@ -4044,7 +4044,7 @@ fn hm_prop_names(
         owner,
         state,
         verter_semantic::analysis::AnalyzedMacroKind::DefineProps,
-        |d| d.props.iter().map(|p| p.name.clone()).collect(),
+        |d| d.prop_fields().iter().map(|p| p.name.clone()).collect(),
     )
 }
 
@@ -4058,7 +4058,7 @@ fn hm_slot_names(
         owner,
         state,
         verter_semantic::analysis::AnalyzedMacroKind::DefineSlots,
-        |d| d.slots.iter().map(|s| s.name.clone()).collect(),
+        |d| d.slot_fields().iter().map(|s| s.name.clone()).collect(),
     )
 }
 
@@ -4083,7 +4083,11 @@ defineProps<ButtonProps>()
 
     let state = resolve_expanded_state(&host, "/Button.vue");
     let dtos = macro_dtos_by_type(&host, "/Button.vue", &state, "ButtonProps");
-    let props: Vec<&str> = dtos.props.iter().map(|prop| prop.name.as_str()).collect();
+    let props: Vec<&str> = dtos
+        .prop_fields()
+        .iter()
+        .map(|prop| prop.name.as_str())
+        .collect();
 
     assert!(
         props.contains(&"label"),
@@ -4131,7 +4135,11 @@ fn resolve_imported_type_from_vue_dep() {
     let state = resolve_expanded_state(&host, "/Comp.vue");
     let resolved = resolved_macro_by_type(&state, "Props");
     let dtos = macro_dtos_for_resolved(&host, "/Comp.vue", resolved);
-    let props: Vec<&str> = dtos.props.iter().map(|prop| prop.name.as_str()).collect();
+    let props: Vec<&str> = dtos
+        .prop_fields()
+        .iter()
+        .map(|prop| prop.name.as_str())
+        .collect();
     assert!(
         props.contains(&"label"),
         "expanded props should contain 'label', got: {:?}",
@@ -4165,7 +4173,11 @@ fn resolve_imported_type_from_dual_script_vue_dep() {
 
     let state = resolve_expanded_state(&host, "/Comp.vue");
     let dtos = macro_dtos_by_type(&host, "/Comp.vue", &state, "DualProps");
-    let props: Vec<&str> = dtos.props.iter().map(|prop| prop.name.as_str()).collect();
+    let props: Vec<&str> = dtos
+        .prop_fields()
+        .iter()
+        .map(|prop| prop.name.as_str())
+        .collect();
     assert!(
         props.contains(&"title"),
         "expanded props should contain 'title' from companion script, got: {:?}",
@@ -4186,7 +4198,7 @@ fn resolve_imported_type_from_vue_dep_without_vue_suffix_uses_file_kind() {
             source: Arc::from(
                 "<script setup lang=\"ts\">export interface Props { label: string }</script>\n<template><div /></template>",
             ),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: Vec::new(),
         })
         .unwrap();
@@ -4199,7 +4211,11 @@ fn resolve_imported_type_from_vue_dep_without_vue_suffix_uses_file_kind() {
     let state = resolve_expanded_state(&host, "/Comp.vue");
     let resolved = resolved_macro_by_type(&state, "Props");
     let dtos = macro_dtos_for_resolved(&host, "/Comp.vue", resolved);
-    let props: Vec<&str> = dtos.props.iter().map(|prop| prop.name.as_str()).collect();
+    let props: Vec<&str> = dtos
+        .prop_fields()
+        .iter()
+        .map(|prop| prop.name.as_str())
+        .collect();
     assert!(
         props.contains(&"label"),
         "expanded props should contain 'label', got: {:?}",
@@ -4253,7 +4269,11 @@ fn resolve_component_meta_uses_workspace_type_resolution_for_package_declaration
 
     let state = resolve_expanded_state(&host, "/workspace/src/Consumer.vue");
     let dtos = macro_dtos_by_type(&host, "/workspace/src/Consumer.vue", &state, "FancyProps");
-    let props: Vec<&str> = dtos.props.iter().map(|prop| prop.name.as_str()).collect();
+    let props: Vec<&str> = dtos
+        .prop_fields()
+        .iter()
+        .map(|prop| prop.name.as_str())
+        .collect();
     assert!(
         props.contains(&"open"),
         "expanded props should contain fields from the package declaration entrypoint, got: {:?}",
@@ -4367,7 +4387,10 @@ defineEmits<Events>()
         &state,
         verter_semantic::analysis::AnalyzedMacroKind::DefineEmits,
     );
-    let emits: Vec<_> = emit_dtos.iter().flat_map(|d| d.emits.iter()).collect();
+    let emits: Vec<_> = emit_dtos
+        .iter()
+        .flat_map(|d| d.emit_fields().iter())
+        .collect();
     let change = emits.iter().find(|e| e.name == "change");
     assert!(change.is_some(), "should have 'change' emit");
     let payload = change.unwrap().payload_type.as_deref().unwrap_or("");
@@ -4405,7 +4428,10 @@ defineSlots<Slots>()
         &state,
         verter_semantic::analysis::AnalyzedMacroKind::DefineSlots,
     );
-    let slots: Vec<_> = slot_dtos.iter().flat_map(|d| d.slots.iter()).collect();
+    let slots: Vec<_> = slot_dtos
+        .iter()
+        .flat_map(|d| d.slot_fields().iter())
+        .collect();
     let default_slot = slots.iter().find(|s| s.name == "default");
     assert!(default_slot.is_some(), "should have 'default' slot");
     let bindings = &default_slot.unwrap().bindings;
@@ -4527,7 +4553,10 @@ defineSlots<Slots>()
         &state,
         verter_semantic::analysis::AnalyzedMacroKind::DefineSlots,
     );
-    let slots: Vec<_> = slot_dtos.iter().flat_map(|d| d.slots.iter()).collect();
+    let slots: Vec<_> = slot_dtos
+        .iter()
+        .flat_map(|d| d.slot_fields().iter())
+        .collect();
 
     let default_slot = slots.iter().find(|s| s.name == "default").unwrap();
     assert_eq!(
@@ -6094,7 +6123,8 @@ fn edge_currency_oracle_stales_wildcard_surface_after_generation_advance() {
     }
     let make_artifact = |shape: EdgeShape| {
         let analysis = Arc::new(
-            verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default(),
+            verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(
+            ),
         );
         let mut exports = FxHashMap::default();
         let mut wildcard_reexports = Vec::new();
@@ -11993,9 +12023,9 @@ defineProps<SharedProps>()
 fn source_type_is_stable_across_callsites_for_same_canonical() {
     // Single-authority invariant for `source_type`:
     //
-    // A regression that returned `SourceType::ts()` when `cached_parse: None`
-    // but `sfc_script_source_type(parsed, raw_source)` when
-    // `cached_parse: Some(parsed)` would diverge for a `lang="tsx"` SFC —
+    // A regression that returned `SourceType::ts()` when `framework_parse: None`
+    // but the carrier `<script lang>` resolution when
+    // `framework_parse: Some(artifact)` would diverge for a `lang="tsx"` SFC —
     // different cache slots for the same `(canonical, whole_hash)`.
     //
     // The scheduler computes `source_type` once at `execute_source` time with
@@ -12019,7 +12049,7 @@ export type Props = { render: typeof Button }
         .expect("source data should be HostSourceData");
 
     // HostSourceData carries the authoritative source_type — computed once at parse time
-    // using the full parsed SFC, not reconstructed from raw_source + optional cached_parse.
+    // using the full parse artifact, not reconstructed from raw_source + optional artifact.
     assert!(
         hd.source_type.is_jsx(),
         "HostSourceData.source_type should be tsx (JSX-bearing) for lang=tsx SFC, got {:?}",
@@ -12067,7 +12097,7 @@ mod imported_root_trace_dedup_tests {
             canonical_id: Some("/props.ts".into()),
             input_id: "/props.ts".into(),
             source: Arc::from("export interface Props { label: string; }\n"),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: vec![],
         });
         let _ = host.upsert(UpsertRequest {
@@ -12080,7 +12110,7 @@ mod imported_root_trace_dedup_tests {
                  </script>\n\
                  <template><div /></template>\n",
             ),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: vec![],
         });
         host

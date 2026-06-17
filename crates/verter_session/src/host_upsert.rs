@@ -369,10 +369,7 @@ impl VerterHost {
                 target: verter_scheduler::stage::TargetStage::Analysis,
                 priority,
                 source: Some(req.source.clone()),
-                file_kind: Some(match req.file_kind {
-                    FileKind::VueSfc => verter_scheduler::source_loader::FileKind::VueSfc,
-                    FileKind::NonSfc => verter_scheduler::source_loader::FileKind::NonSfc,
-                }),
+                file_language: Some(req.file_language.clone()),
                 request_context: request_context.clone(),
             });
             prepared.push(PreparedUpsertCommit {
@@ -519,7 +516,19 @@ impl VerterHost {
         );
 
         // ── Compute changes ──
-        let changes = compute_upsert_changes_from_parse(old_host_data.map(|h| &h.parse), parse);
+        let mut changes = compute_upsert_changes_from_parse(old_host_data.map(|h| &h.parse), parse);
+        // The language row is part of parse identity: a byte-identical
+        // relabel re-routes parse dispatch (the scheduler re-homes the
+        // node onto the new row), so it is a REAL change even when the
+        // two rows' parse output happens to compare equal today (e.g. a
+        // script-dialect relabel). Folding it here keeps ONE change
+        // predicate: the fast path below and the result builder both
+        // observe the relabel through `changes.changed`.
+        if let Some(old) = old_host_data {
+            if old.file_language != new_host_data.file_language {
+                changes.changed = true;
+            }
+        }
 
         let mut alias_set: BTreeSet<String> = req
             .aliases
@@ -1237,7 +1246,7 @@ impl VerterHost {
             );
             let synthetic_arc: Arc<str> = Arc::from(synthetic_source.as_str());
 
-            let (new_snapshot, new_parsed) = parse_vue_snapshot(
+            let (new_snapshot, new_artifact) = parse_vue_snapshot(
                 &canonical,
                 &synthetic_source,
                 self.config.effective_scope(),
@@ -1257,7 +1266,7 @@ impl VerterHost {
                     ContentOverrideWithParse {
                         layer: layer.clone(),
                         parse: new_snapshot.clone(),
-                        cached_parse: Some(Arc::new(new_parsed)),
+                        framework_parse: Some(new_artifact),
                         source: synthetic_arc,
                     },
                 );

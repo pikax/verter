@@ -22,7 +22,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use verter_session::audited_request::AuditedRequest;
-use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 
 const NUXT_UI_BENCH: &str = ".integration-tests/repos/nuxt-ui-codex-bench";
 
@@ -84,7 +84,7 @@ fn chatmessage_audit_byte_budget_via_host_only() {
             canonical_id: None,
             input_id: "/ChatMessage.vue".to_string(),
             source: Arc::from(chat_message.as_str()),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: Vec::new(),
         })
         .expect("upsert");

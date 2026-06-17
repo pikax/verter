@@ -28,7 +28,7 @@ use verter_diagnostics::Linter;
 use verter_mcp::config::McpServerConfig;
 use verter_mcp::tools::diagnostics::make_lint_config;
 use verter_mcp::VerterMcpServer;
-use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
 const SFC: &str = "<script setup lang=\"ts\">\n\
@@ -53,7 +53,7 @@ fn build_server() -> VerterMcpServer {
         canonical_id: Some("/c.vue".into()),
         input_id: "/c.vue".into(),
         source: Arc::from(SFC),
-        file_kind: FileKind::VueSfc,
+        file_language: FileLanguage::vue(),
         aliases: Vec::new(),
     });
     let linter = Arc::new(Linter::new(make_lint_config("recommended")));

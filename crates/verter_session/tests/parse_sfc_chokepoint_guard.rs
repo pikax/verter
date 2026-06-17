@@ -1,27 +1,30 @@
-//! Architecture guard: the SFC structure parser has exactly ONE counted
+//! Architecture guard: the framework carrier parser has exactly ONE counted
 //! chokepoint in `verter_session` production code.
 //!
-//! `MetaProvenance::sfc_parses` is the dedup suite's rail for "how many
-//! SFC structure parses did this path run" — the cold per-file
-//! artifact-build contract pins exact counts on it. The rail is sound
-//! only if EVERY `verter_compiler::compile::parse_sfc` execution in this
-//! crate increments it, which is guaranteed by routing every call
-//! through `crate::parse::parse_sfc_counted` (the increment lives inside
-//! the chokepoint, not at call sites). A raw `parse_sfc(` call anywhere
-//! else in production source is an uncounted parse the suite cannot see.
+//! `MetaProvenance::carrier_parses` is the dedup suite's framework-neutral rail
+//! for "how many carrier parses did this path run" (with the Vue compatibility
+//! rail `sfc_parses` bumped when the dispatched carrier is Vue) — the cold
+//! per-file artifact-build contract pins exact counts on it. The rail is sound
+//! only if EVERY `CarrierCompiler::parse` execution in this crate increments
+//! it, which is guaranteed by routing every call through
+//! `crate::parse::parse_carrier_counted` (the increment lives inside the
+//! chokepoint, not at call sites). A direct `compiler.parse(` / registry
+//! `.parse()` call anywhere else in production source is an uncounted parse the
+//! suite cannot see.
 //!
-//! Test files (`*_tests.rs`) are exempt: they may parse fixtures
-//! directly without touching a host's provenance rail.
+//! The companion compiler-side guard keeps Vue's raw `parse_sfc` confined to
+//! the Vue bridge (`verter_compiler`); this guard owns the `verter_session`
+//! host-side carrier-parse chokepoint only.
 //!
-//! Honest coverage limits: the rail is textual. The call matcher is
-//! the `parse_sfc(` substring (module-qualified calls like
-//! `compile::parse_sfc(` still contain it); an `as`-renamed import
-//! (`use …::parse_sfc as ps;`) would detach calls from the substring,
-//! so the guard separately rejects ANY `parse_sfc as ` aliasing in
-//! production source. Not covered: a re-export of `parse_sfc` under a
-//! different name in some other crate, and inline `#[cfg(test)]`
-//! modules inside production files (their raw calls FAIL the guard —
-//! fail-closed; route them through a `*_tests.rs` file).
+//! Test files (`*_tests.rs`) are exempt: they may parse fixtures directly
+//! without touching a host's provenance rail.
+//!
+//! Honest coverage limits: the rail is textual. The call matcher is the
+//! `.parse(` substring on a `CarrierCompiler` receiver (`compiler.parse(`); the
+//! counted wrapper's own name (`parse_carrier_counted(`) does not contain it.
+//! Not covered: a re-export of the trait method under a different name, and
+//! inline `#[cfg(test)]` modules inside production files (their raw calls FAIL
+//! the guard — fail-closed; route them through a `*_tests.rs` file).
 
 use std::path::{Path, PathBuf};
 
@@ -40,7 +43,7 @@ fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 #[test]
-fn sfc_structure_parse_routes_through_the_counted_chokepoint() {
+fn carrier_parse_routes_through_the_counted_chokepoint() {
     let src_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut files = Vec::new();
     collect_rs_files(&src_root, &mut files);
@@ -67,7 +70,7 @@ fn sfc_structure_parse_routes_through_the_counted_chokepoint() {
         let text = std::fs::read_to_string(file)
             .unwrap_or_else(|e| panic!("guard must read {}: {e}", file.display()));
         let is_chokepoint_file = file_name == "parse.rs";
-        if is_chokepoint_file && text.contains("pub(crate) fn parse_sfc_counted(") {
+        if is_chokepoint_file && text.contains("pub(crate) fn parse_carrier_counted(") {
             chokepoint_defined = true;
         }
         for (idx, line) in text.lines().enumerate() {
@@ -75,24 +78,11 @@ fn sfc_structure_parse_routes_through_the_counted_chokepoint() {
             if trimmed.starts_with("//") {
                 continue;
             }
-            // `as`-renamed imports detach calls from the `parse_sfc(`
-            // substring rail (`use …::parse_sfc as ps;` then `ps(…)`),
-            // so the aliasing itself is rejected everywhere in
-            // production source, chokepoint file included.
-            if line.contains("parse_sfc as ") {
-                raw_call_sites.push(format!(
-                    "{}:{}: `parse_sfc` must not be `as`-renamed (it \
-                     detaches calls from the textual chokepoint rail): {}",
-                    file.display(),
-                    idx + 1,
-                    line.trim()
-                ));
-                continue;
-            }
-            // Call syntax only: `parse_sfc(`. The counted wrapper's own
-            // name (`parse_sfc_counted(`) does not contain this
-            // substring, and `use ...::parse_sfc;` has no paren.
-            if !line.contains("parse_sfc(") {
+            // Call syntax only: a `CarrierCompiler` receiver's `.parse(`. The
+            // counted wrapper's own name (`parse_carrier_counted(`) does not
+            // contain `.parse(`, and the `parse_sfc(` Vue-bridge call lives in
+            // `verter_compiler`, not here.
+            if !line.contains("compiler.parse(") {
                 continue;
             }
             if is_chokepoint_file {
@@ -105,20 +95,20 @@ fn sfc_structure_parse_routes_through_the_counted_chokepoint() {
 
     assert!(
         chokepoint_defined,
-        "anti-vacuity: the counted chokepoint `parse::parse_sfc_counted` \
+        "anti-vacuity: the counted chokepoint `parse::parse_carrier_counted` \
          must exist (the guard would otherwise pass on a tree with no \
          counting at all)",
     );
     assert_eq!(
         chokepoint_file_raw_calls, 1,
-        "parse.rs must contain exactly ONE raw `parse_sfc(` call — the \
+        "parse.rs must contain exactly ONE raw `compiler.parse(` call — the \
          body of the counted chokepoint (got {chokepoint_file_raw_calls})",
     );
     assert!(
         raw_call_sites.is_empty(),
-        "every SFC structure parse in verter_session production code must \
-         route through the counted chokepoint `parse::parse_sfc_counted` \
-         (an uncounted parse is invisible to the `sfc_parses` dedup rail). \
+        "every framework carrier parse in verter_session production code must \
+         route through the counted chokepoint `parse::parse_carrier_counted` \
+         (an uncounted parse is invisible to the `carrier_parses` dedup rail). \
          Raw call sites found:\n{}",
         raw_call_sites.join("\n"),
     );

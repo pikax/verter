@@ -1,5 +1,5 @@
 //! Free helpers for SFC script extraction and template-converter input
-//! shaping.
+//! shaping — the session's Vue-bridge extraction module.
 //!
 //! Owns:
 //! - `template_converter_inputs` — projects analysed imports / macros /
@@ -9,12 +9,18 @@
 //!   `<script setup>` position-preserving source builder used by the
 //!   eval-program pipeline. It copies each script block's content to its
 //!   RAW SFC byte range and whitespace-blanks every non-script byte, so
-//!   every OXC-produced span is SFC-absolute by construction. Cached-parse
-//!   spans are used when they agree with the raw scan; otherwise it falls
-//!   through to the raw scanner.
+//!   every OXC-produced span is SFC-absolute by construction. Carrier
+//!   parse spans are used when they agree with the raw scan; otherwise it
+//!   falls through to the raw scanner.
 //! - The forgiving raw-byte scanner used as a fall-back when the parser
 //!   produced lossy spans (`script_content_spans_from_*` and the ASCII
 //!   tag/needle helpers).
+//! - The `<script setup generic="…">` type-parameter readers
+//!   (`sfc_script_setup_type_params` / `apply_sfc_script_setup_type_params`)
+//!   and the component-meta `populate_sfc_blocks_sidecar` — Vue-semantic
+//!   leaves that open the neutral parse artifact through the blessed
+//!   `vue_parse()` accessor, keeping `host_manage/**` free of Vue parse
+//!   types.
 
 #[allow(clippy::type_complexity)]
 pub(crate) fn template_converter_inputs(
@@ -66,6 +72,43 @@ pub(crate) fn template_converter_inputs(
     (all_imports, unions, props_binding_name)
 }
 
+/// Read the `<script setup generic="…">` type-parameter clause from the
+/// neutral parse artifact (opened through the blessed `vue_parse()`
+/// accessor). Empty for non-Vue artifacts, plain scripts, and Vue files
+/// without `<script setup>` generics.
+pub(crate) fn sfc_script_setup_type_params(
+    source: &str,
+    framework_parse: Option<&verter_language::FrameworkParseArtifact>,
+) -> Vec<verter_type_expr::TypeParam> {
+    let parsed = framework_parse.and_then(crate::typeinfo::adapters::vue::vue_parse);
+    let Some(setup) = parsed.and_then(|parsed| parsed.script_setup()) else {
+        return Vec::new();
+    };
+    let Some(generic_span) = setup.generic else {
+        return Vec::new();
+    };
+    let clause = source[generic_span.start as usize..generic_span.end as usize].trim();
+    if clause.is_empty() {
+        return Vec::new();
+    }
+    verter_semantic::analysis::type_eval_build::parse_type_parameter_clause(clause)
+}
+
+/// Bind the `<script setup generic="…">` type parameters into an eval
+/// env (see [`sfc_script_setup_type_params`]).
+pub(crate) fn apply_sfc_script_setup_type_params(
+    env: &mut verter_semantic::analysis::type_eval::EvalEnv,
+    source: &str,
+    framework_parse: Option<&verter_language::FrameworkParseArtifact>,
+) {
+    for param in sfc_script_setup_type_params(source, framework_parse) {
+        env.type_bindings.insert(
+            param.name.clone(),
+            std::sync::Arc::new(verter_type_expr::TypeExpr::type_parameter(param)),
+        );
+    }
+}
+
 /// Extract a **position-preserving** script-only source from a Vue SFC string.
 ///
 /// The result is byte-for-byte the SAME LENGTH as `source`: every `<script>` /
@@ -81,10 +124,10 @@ pub(crate) fn template_converter_inputs(
 /// scan so type resolution still sees the original script text.
 pub(crate) fn extract_vue_script_content(
     source: &str,
-    cached_parse: Option<&verter_compiler::parser::types::ParsedSfc>,
+    parsed_sfc: Option<&verter_compiler::parser::types::ParsedSfc>,
 ) -> Option<String> {
     let scanned = script_content_spans_from_source(source);
-    let parsed = cached_parse.and_then(script_content_spans_from_parsed);
+    let parsed = parsed_sfc.and_then(script_content_spans_from_parsed);
 
     // Prefer the parser's spans when they AGREE with the raw scan (same
     // semantics as the previous compact extractor, which compared the two
@@ -174,7 +217,10 @@ fn script_content_spans_from_source(source: &str) -> Option<Vec<(u32, u32)>> {
 /// UTF-8 safety: every replaced byte is a single-byte ASCII value and every
 /// preserved range is copied wholesale from valid UTF-8, so the result is valid
 /// UTF-8 and exactly `source.len()` bytes long.
-fn build_position_preserving_script_source(source: &str, spans: &[(u32, u32)]) -> String {
+pub(crate) fn build_position_preserving_script_source(
+    source: &str,
+    spans: &[(u32, u32)],
+) -> String {
     let src = source.as_bytes();
     // Blank every byte first (line terminators preserved), then stamp script
     // content over its raw range.
@@ -312,4 +358,128 @@ fn find_next_known_root_block(bytes: &[u8], from: usize) -> Option<usize> {
     .into_iter()
     .filter_map(|needle| find_ascii_tag(bytes, needle, from))
     .min()
+}
+
+fn string_from_span(source: &str, span: Option<verter_compiler::common::Span>) -> Option<String> {
+    span.map(|span| source[span.start as usize..span.end as usize].to_string())
+}
+
+fn sfc_attributes_from_props(
+    props: &[verter_compiler::types::NodeProp],
+    source: &str,
+) -> Vec<verter_semantic::analysis::component_meta::SfcAttributeAnalysis> {
+    crate::parse::extract_attrs(props, source)
+        .into_iter()
+        .map(
+            |(name, value)| verter_semantic::analysis::component_meta::SfcAttributeAnalysis {
+                name: name.to_string(),
+                value: if value.is_empty() {
+                    None
+                } else {
+                    Some(value.to_string())
+                },
+            },
+        )
+        .collect()
+}
+
+fn sfc_custom_block_type(source: &str, tag_open: &verter_compiler::types::NodeTag) -> String {
+    source[tag_open.start as usize + 1..tag_open.name_end as usize].to_string()
+}
+
+/// Populate the component-meta SFC-blocks sidecar from the carrier
+/// parse (template/script/style/custom block attrs). Vue-semantic leaf:
+/// opens the neutral artifact through the blessed `vue_parse()`
+/// accessor. No-op for non-Vue canonicals and artifact-less state.
+pub(crate) fn populate_sfc_blocks_sidecar(
+    host: &crate::VerterHost,
+    canonical_id: &str,
+    meta: &mut verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+) {
+    let Some((source, framework_parse, _)) = host.current_eval_state(canonical_id) else {
+        return;
+    };
+    let Some(parsed) = framework_parse
+        .as_deref()
+        .and_then(crate::typeinfo::adapters::vue::vue_parse)
+    else {
+        return;
+    };
+    let source = source.as_ref();
+
+    let template = parsed.template_ast().map(|template| {
+        let attrs = crate::parse::extract_attrs(&template.root.attributes, source);
+        verter_semantic::analysis::component_meta::TemplateBlockAnalysis {
+            lang: string_from_span(source, template.root.lang),
+            src: crate::parse::find_attr(&attrs, "src"),
+            attributes: sfc_attributes_from_props(&template.root.attributes, source),
+        }
+    });
+
+    let script = parsed.script().map(|script| {
+        let attrs = crate::parse::extract_attrs(&script.attributes, source);
+        verter_semantic::analysis::component_meta::ScriptBlockAnalysis {
+            lang: crate::parse::find_attr(&attrs, "lang").filter(|lang| lang != "true"),
+            src: crate::parse::find_attr(&attrs, "src"),
+            generic: string_from_span(source, script.generic),
+            attrs_type: string_from_span(source, script.attrs),
+            attributes: sfc_attributes_from_props(&script.attributes, source),
+        }
+    });
+
+    let script_setup = parsed.script_setup().map(|script| {
+        let attrs = crate::parse::extract_attrs(&script.attributes, source);
+        verter_semantic::analysis::component_meta::ScriptBlockAnalysis {
+            lang: crate::parse::find_attr(&attrs, "lang").filter(|lang| lang != "true"),
+            src: crate::parse::find_attr(&attrs, "src"),
+            generic: string_from_span(source, script.generic),
+            attrs_type: string_from_span(source, script.attrs),
+            attributes: sfc_attributes_from_props(&script.attributes, source),
+        }
+    });
+
+    let styles = parsed
+        .style_nodes()
+        .iter()
+        .enumerate()
+        .map(|(index, style)| {
+            let attrs = crate::parse::extract_attrs(&style.attributes, source);
+            verter_semantic::analysis::component_meta::StyleBlockInfoAnalysis {
+                index,
+                lang: crate::parse::find_attr(&attrs, "lang").filter(|lang| lang != "true"),
+                src: crate::parse::find_attr(&attrs, "src"),
+                scoped: style.scoped,
+                is_module: style.module,
+                module_name: crate::parse::find_attr(&attrs, "module")
+                    .filter(|value| value != "true"),
+                attributes: sfc_attributes_from_props(&style.attributes, source),
+            }
+        })
+        .collect();
+
+    let custom = parsed
+        .unknown_nodes()
+        .iter()
+        .enumerate()
+        .map(|(index, block)| {
+            let attrs = crate::parse::extract_attrs(&block.attributes, source);
+            verter_semantic::analysis::component_meta::CustomBlockAnalysis {
+                index,
+                block_type: sfc_custom_block_type(source, &block.tag_open),
+                lang: crate::parse::find_attr(&attrs, "lang").filter(|lang| lang != "true"),
+                src: crate::parse::find_attr(&attrs, "src"),
+                attributes: sfc_attributes_from_props(&block.attributes, source),
+            }
+        })
+        .collect();
+
+    meta.sfc_blocks = Some(
+        verter_semantic::analysis::component_meta::SfcBlocksAnalysis {
+            template,
+            script,
+            script_setup,
+            styles,
+            custom,
+        },
+    );
 }

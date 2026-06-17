@@ -1,5 +1,5 @@
 /**
- * @ai-generated - Shared helpers for startup timing segmentation and lazy built-in TS plugin activation.
+ * @ai-generated - Shared helpers for startup timing segmentation.
  */
 
 export interface StartupTimingLike {
@@ -19,13 +19,6 @@ export interface StartupSegments {
   typeProviderStartedToReadyMs?: number;
 }
 
-const BUILT_IN_TS_PLUGIN_LANGUAGE_IDS = new Set([
-  "typescript",
-  "typescriptreact",
-  "javascript",
-  "javascriptreact",
-]);
-
 export function computeStartupSegments(timing: StartupTimingLike): StartupSegments {
   return {
     activationToReadyMs: diff(timing.activationStartMs, timing.lspReadyMs),
@@ -41,10 +34,6 @@ export function computeStartupSegments(timing: StartupTimingLike): StartupSegmen
     ),
     typeProviderStartedToReadyMs: diff(timing.typeProviderStartedMs, timing.lspReadyMs),
   };
-}
-
-export function shouldConfigureBuiltInTypeScriptPlugin(languageId?: string): boolean {
-  return languageId !== undefined && BUILT_IN_TS_PLUGIN_LANGUAGE_IDS.has(languageId);
 }
 
 function diff(

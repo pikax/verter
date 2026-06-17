@@ -52,7 +52,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::resolver_store::HostStoreView;
-use crate::types::{FileKind, UpsertRequest};
+use crate::types::{FileLanguage, UpsertRequest};
 use crate::{HostConfig, VerterHost};
 
 /// Build a standalone host with a single resolvable TS declaration.
@@ -64,7 +64,7 @@ fn host_with_decl() -> (Arc<VerterHost>, String) {
             canonical_id: None,
             input_id: canonical.clone(),
             source: Arc::from("export interface Widget { label: string }\n"),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .expect("upsert decl.ts must succeed");
@@ -404,7 +404,7 @@ fn fenced_cold_component_meta_builder_does_not_publish_under_churn() {
             source: Arc::from(
                 "<script setup lang=\"ts\">\ndefineProps<{ msg: string }>()\n</script>\n<template><div /></template>\n",
             ),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: Vec::new(),
         })
         .expect("upsert Comp.vue must succeed");
@@ -833,7 +833,7 @@ fn evaluate_type_expression_cleanup_preserves_concurrently_owned_scratch() {
             source: Arc::from(
                 "export interface OwnershipRaceWidget { ownershipRaceLabel: string }\n",
             ),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .expect("upsert ownership_race_decl.ts must succeed");

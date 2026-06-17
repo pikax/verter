@@ -16,6 +16,17 @@
 
 export { TypeInfoSession } from "./session.js";
 export { decodeResolveResult, TypeResolutionFaultError } from "./decode.js";
+export { decodeFrameworkSurfaceResponse } from "./framework-surface.js";
+
+export type {
+  FrameworkSurface,
+  FrameworkSurfaceError,
+  FrameworkSurfaceKindResult,
+  FrameworkSurfaceMember,
+  FrameworkSurfaceMemberDeclaration,
+  FrameworkSurfaceMemberOrigin,
+  FrameworkSurfaceOriginHop,
+} from "./framework-surface.js";
 
 export type {
   AuditRecord,

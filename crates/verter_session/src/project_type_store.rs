@@ -160,7 +160,7 @@ pub struct IndexedReady {
     pub project_generation: u64,
     /// The owner's live `parse_env_hash` (the R21 parse dimension)
     /// captured at materialise time — the parse environment this
-    /// artifact's `cached_parse` / `shallow_state` / `decl_bodies` were
+    /// artifact's `framework_parse` / `shallow_state` / `decl_bodies` were
     /// built under. Today the base parse env derives from constant
     /// workspace parser flags, but the dimension is load-bearing: the
     /// reuse gates demand equality with the owner's LIVE parse env, so
@@ -180,9 +180,9 @@ pub struct IndexedReady {
     /// so every OXC-produced span is SFC-absolute by construction. For a
     /// non-SFC file this equals the raw source verbatim.
     pub eval_source: Arc<str>,
-    /// Cached parsed SFC payload when the canonical file is a Vue SFC.
-    /// Other file kinds carry `None`.
-    pub cached_parse: Option<Arc<verter_compiler::parser::types::ParsedSfc>>,
+    /// Framework-neutral parse artifact when the canonical file is a
+    /// framework carrier. Plain scripts carry `None`.
+    pub framework_parse: Option<Arc<verter_language::FrameworkParseArtifact>>,
     /// Script-level analysis snapshot (imports/exports/macros/bindings/etc.).
     /// Always present after materialization.
     pub script_analysis: Option<Arc<verter_semantic::analysis::ScriptAnalysisSnapshot>>,
@@ -196,7 +196,7 @@ pub struct IndexedReady {
     /// no dependency names, no raw surfaces — body-derived data lives on
     /// the shallow state's lazy declaration-body memo).
     pub external_type_analysis:
-        Arc<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource>,
+        Arc<verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource>,
     /// Mirror of `script_analysis.flags & DECLARES_INTERFACE_APP_CONFIG`
     /// projected onto `IndexedReady` so the
     /// `AppConfigNoOverrideProofDb` production producer can short-circuit
@@ -244,7 +244,7 @@ impl IndexedReady {
         raw_source: Arc<str>,
         eval_source: Arc<str>,
         external_type_analysis: Arc<
-            verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource,
+            verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource,
         >,
     ) -> Self {
         Self {
@@ -258,7 +258,7 @@ impl IndexedReady {
             parse_env_hash: [0u8; 16],
             raw_source,
             eval_source,
-            cached_parse: None,
+            framework_parse: None,
             script_analysis: None,
             export_signatures: None,
             snapshot: Arc::new(crate::types::FileAnalysisSnapshot::default()),
@@ -279,7 +279,8 @@ impl IndexedReady {
     pub fn new_for_test(whole_hash: Hash16) -> Self {
         use rustc_hash::FxHashMap;
         let analysis = Arc::new(
-            verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default(),
+            verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(
+            ),
         );
         let shallow = crate::resolver_core::shallow_file_state::ShallowFileState::from_analysis(
             whole_hash,
@@ -297,7 +298,7 @@ impl IndexedReady {
             parse_env_hash: [0u8; 16],
             raw_source: Arc::from(""),
             eval_source: Arc::from(""),
-            cached_parse: None,
+            framework_parse: None,
             script_analysis: None,
             export_signatures: None,
             snapshot: Arc::new(crate::types::FileAnalysisSnapshot::default()),
@@ -575,10 +576,6 @@ impl crate::invalidation_domain::InvalidationByCanonical for AnalysisReadyDb {
         self.invalidate_canonical(canonical_id)
     }
 }
-
-// ──────────────────────────────────────────────────────────────────────────
-// ProjectTypeStore
-// ──────────────────────────────────────────────────────────────────────────
 
 // ──────────────────────────────────────────────────────────────────────────
 // Typed-DB shapes (D17 + D18 + D44 + D46 + D48 + D65)
@@ -2254,7 +2251,8 @@ mod tests {
         let hash_v1 = [1u8; 16];
         let hash_v2 = [2u8; 16];
         let analysis = Arc::new(
-            verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default(),
+            verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(
+            ),
         );
         let shallow = Arc::new(
             crate::resolver_core::shallow_file_state::ShallowFileState::from_analysis(
@@ -2274,12 +2272,12 @@ mod tests {
                 parse_env_hash: [0u8; 16],
                 raw_source: Arc::from(""),
                 eval_source: Arc::from(""),
-                cached_parse: None,
+                framework_parse: None,
                 script_analysis: None,
                 export_signatures: None,
                 snapshot: Arc::new(crate::types::FileAnalysisSnapshot::default()),
                 external_type_analysis: Arc::new(
-                    verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default(),
+                    verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(),
                 ),
                 declares_interface_app_config: false,
             }),
@@ -2308,7 +2306,8 @@ mod tests {
     fn indexed_counters_reflect_insertions_and_replacements() {
         let store = ProjectTypeStore::new();
         let analysis = Arc::new(
-            verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default(),
+            verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(
+            ),
         );
         let mk_indexed = |hash: Hash16| {
             Arc::new(IndexedReady {
@@ -2328,7 +2327,7 @@ mod tests {
                 parse_env_hash: [0u8; 16],
                 raw_source: Arc::from(""),
                 eval_source: Arc::from(""),
-                cached_parse: None,
+                framework_parse: None,
                 script_analysis: None,
                 export_signatures: None,
                 snapshot: Arc::new(crate::types::FileAnalysisSnapshot::default()),

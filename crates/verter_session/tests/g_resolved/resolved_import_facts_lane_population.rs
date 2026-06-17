@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use verter_session::session_view::{HostView, SessionView};
 use verter_session::{
-    CompileErrorPolicy, DependencyResolution, FileKind, HostConfig, UpsertRequest, VerterHost,
+    CompileErrorPolicy, DependencyResolution, FileLanguage, HostConfig, UpsertRequest, VerterHost,
 };
 
 const ZERO_HASH: [u8; 16] = [0u8; 16];
@@ -33,7 +33,7 @@ fn admitted_fact_has_both_lanes_populated_and_distinct() {
             canonical_id: None,
             input_id: "/util.ts".to_string(),
             source: Arc::from("export function helper() { return 1; }"),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .expect("util upsert");
@@ -42,7 +42,7 @@ fn admitted_fact_has_both_lanes_populated_and_distinct() {
             canonical_id: None,
             input_id: "/lane.ts".to_string(),
             source: Arc::from("import { helper } from './util';\nexport const k = helper();\n"),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .expect("lane upsert");

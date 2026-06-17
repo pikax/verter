@@ -1199,7 +1199,7 @@ composition table. Summary:
 
 | Layer | Family | Key dimensions |
 |---|---|---|
-| `FileArtifactStore` | Content-addressed | `canonical, content_hash, parse_env_hash, parser_version` — the authoritative per-file storage layer; stores `IndexedReady`, `FileFacts`, `ParsedEdges`, `parse_stable_hash`, `augmentations` |
+| `FileArtifactStore` | Content-addressed | `canonical, content_hash, parse_env_hash, parser_version, file_language_id` — the authoritative per-file storage layer; stores `IndexedReady`, `FileFacts`, `ParsedEdges`, `parse_stable_hash`, `augmentations`. `file_language_id` is the file's `FileLanguage` row (the per-file classification dimension; every key producer currently derives it from the static registry resolution, identical to the host-resolved row while no gated rows exist; the first gated row's producer wiring threads the host-resolved row so a capability flip misses ONLY the affected files' slots) |
 | `ModuleAugmentationIndex` (on `FileArtifactStore`) | Content-addressed | `project_identity, resolve_env_hash, lib_env_hash, population, target` (`population: AugmentationPopulation {Base, Session(overlay-set fingerprint)}`) |
 | `ResolvedImportFacts` | Content-addressed | `canonical, content_hash, parse_env_hash, resolve_env_hash, resolver_version` (**no `lib_env_hash`** — R21) |
 | Typed-IR resolve | Content-addressed | `canonical, content_hash, parse_env_hash, type_env_hash, lib_env_hash, parser_version` |

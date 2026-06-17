@@ -49,7 +49,7 @@ use verter_session::semantic_query::{
     LiteralValue, PathSegment, ProjectionMode, ProjectionReductionContext, QueryResult,
     SemanticNodeData, SemanticNodeId, SemanticQueryKey, SemanticQueryOutput,
 };
-use verter_session::{for_tests, FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{for_tests, FileLanguage, HostConfig, UpsertRequest, VerterHost};
 use verter_type_expr::TypeExpr;
 
 /// Fixture: a Mapped whose `value_expr` is a Tuple containing the
@@ -95,7 +95,9 @@ fn make_host(source: &'static str) -> Arc<VerterHost> {
         canonical_id: Some("/source.ts".to_string()),
         input_id: "/source.ts".to_string(),
         source: Arc::from(source),
-        file_kind: FileKind::from_path("/source.ts"),
+        file_language: verter_session::LanguageRegistry::global()
+            .classify_static("/source.ts")
+            .static_resolution(),
         aliases: Vec::new(),
     });
     host

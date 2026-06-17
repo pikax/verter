@@ -41,6 +41,57 @@ pub struct RawComponentUsage {
     pub has_dynamic_class: bool,
     /// Raw `:class` expression text (for dynamic class name extraction by verter_session).
     pub dynamic_class_expr: Option<String>,
+    /// Framework-neutral two-way bindings passed to this component (the Svelte
+    /// `bind:` family; `bind:this` and `let:` are excluded — they are not model
+    /// bindings). Empty for Vue (Vue carries two-way bindings in
+    /// [`RawTemplateData::v_model_directives`]).
+    pub bindings: Vec<RawComponentBindingUsage>,
+    /// Framework-neutral events listened on this component (the legacy Svelte
+    /// `on:` directive ONLY — a plain `on*` attribute is a prop, never an
+    /// event). Empty for Vue (Vue carries element/component events in
+    /// [`RawTemplateData::event_handlers`]).
+    pub events: Vec<RawComponentEventUsage>,
+    pub span: Span,
+}
+
+/// A two-way binding passed to a child component (the Svelte `bind:` family).
+///
+/// Neutral by design so a future framework's binding maps here without
+/// overloading Vue's `v_model_directives`. The local name is the bound member
+/// (`value` in `bind:value`); modifiers are the `|modifier` list.
+#[derive(Debug, Clone)]
+pub struct RawComponentBindingUsage {
+    /// The bound local member name (`value` in `bind:value`).
+    pub name: String,
+    /// The `|modifier` list, in source order.
+    pub modifiers: Vec<String>,
+    /// Byte span of the binding in the SFC source.
+    pub span: Span,
+}
+
+/// An event listened on a child component via the legacy Svelte `on:`
+/// directive.
+///
+/// The props/events split is SYNTACTIC at the usage site: a plain `on*`
+/// attribute (`onclick`, but also `online`/`once`) is a PROP — in Svelte 5 a
+/// callback handler is a prop, and the CHILD component-meta (not a usage-site
+/// name guess) decides which passed props are callback events. Only the legacy
+/// `on:` directive is unambiguously an event here.
+///
+/// Neutral by design so a future framework's component event maps here without
+/// overloading Vue's element-level `event_handlers`.
+#[derive(Debug, Clone)]
+pub struct RawComponentEventUsage {
+    /// The event name — the legacy directive local (`click` from `on:click`).
+    pub name: String,
+    /// The handler expression text, when present.
+    pub handler_expression: Option<String>,
+    /// Whether the handler is an inline arrow/function expression rather than a
+    /// bare identifier reference.
+    pub is_inline: bool,
+    /// The `|modifier` list (legacy `on:` modifiers), in source order.
+    pub modifiers: Vec<String>,
+    /// Byte span of the event binding in the SFC source.
     pub span: Span,
 }
 
@@ -1066,6 +1117,10 @@ fn extract_component_usage(
         static_classes,
         has_dynamic_class,
         dynamic_class_expr,
+        // Vue carries two-way bindings / events in `v_model_directives` /
+        // `event_handlers`; the neutral per-usage fields stay empty for Vue.
+        bindings: Vec::new(),
+        events: Vec::new(),
         span: Span::new(span_start, span_end),
     });
 }

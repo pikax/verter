@@ -135,10 +135,10 @@ fn type_mentions_world_snapshot(ty: &Type) -> bool {
                                     return true;
                                 }
                             }
-                            syn::GenericArgument::AssocType(assoc) => {
-                                if type_mentions_world_snapshot(&assoc.ty) {
-                                    return true;
-                                }
+                            syn::GenericArgument::AssocType(assoc)
+                                if type_mentions_world_snapshot(&assoc.ty) =>
+                            {
+                                return true;
                             }
                             _ => {}
                         }

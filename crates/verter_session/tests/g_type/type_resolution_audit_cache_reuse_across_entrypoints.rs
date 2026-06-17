@@ -19,7 +19,7 @@
 use std::sync::Arc;
 
 use verter_session::semantic_query::{ResolveDeclKey, ScopeId, SemanticQueryKey};
-use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{HostConfig, UpsertRequest, VerterHost};
 
 const SFC: &str = r#"<script setup lang="ts">
 type Inner = { value: string };
@@ -40,7 +40,9 @@ fn type_resolution_audit_shared_graph_reused_across_entry_points() {
         canonical_id: Some("/Probe.vue".to_string()),
         input_id: "/Probe.vue".to_string(),
         source: Arc::from(SFC),
-        file_kind: FileKind::from_path("/Probe.vue"),
+        file_language: verter_session::LanguageRegistry::global()
+            .classify_static("/Probe.vue")
+            .static_resolution(),
         aliases: Vec::new(),
     });
 

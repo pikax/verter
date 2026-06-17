@@ -20,7 +20,7 @@
 use std::sync::Arc;
 
 use verter_session::semantic_query::{ProjectionMode, SemanticQueryKey};
-use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{HostConfig, UpsertRequest, VerterHost};
 
 const PATHOLOGICAL_PICK_TS: &str = r#"
 type Pick<T, K> = Pick<T, K>;
@@ -38,7 +38,9 @@ fn type_resolution_audit_pathological_recursion_observes_depth_cap_exactly() {
         canonical_id: Some("/pathological.ts".to_string()),
         input_id: "/pathological.ts".to_string(),
         source: Arc::from(PATHOLOGICAL_PICK_TS),
-        file_kind: FileKind::from_path("/pathological.ts"),
+        file_language: verter_session::LanguageRegistry::global()
+            .classify_static("/pathological.ts")
+            .static_resolution(),
         aliases: Vec::new(),
     });
 

@@ -27,6 +27,7 @@ pub mod shallow_file_state;
 pub(crate) mod surface_projector;
 #[cfg(test)]
 mod surface_projector_tests;
+pub mod svelte_default_synth;
 pub mod symbol_resolver;
 pub mod type_expansion;
 pub mod type_expansion_host;
@@ -86,8 +87,8 @@ pub use declaration_metadata::{
 };
 pub use export_graph::{
     get_export_span_follow_reexports_from_graph, resolve_exports_from_graph,
-    resolve_exports_from_graph_best_effort, resolve_named_export_from_graph, ExportGraphFileKind,
-    ExportGraphResolver, ExportSurface, ResolvedGraphExport,
+    resolve_exports_from_graph_best_effort, resolve_named_export_from_graph, ExportGraphResolver,
+    ExportSurface, ResolvedGraphExport,
 };
 pub use external_macro_types::{
     collect_external_macro_types, ExternalMacroTypeCollection, ExternalMacroTypeCollectorHost,

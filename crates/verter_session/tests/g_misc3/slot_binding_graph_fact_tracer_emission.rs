@@ -39,7 +39,7 @@
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Arc;
 
-use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 
 fn build_test_host() -> Arc<VerterHost> {
     Arc::new(VerterHost::new_standalone(HostConfig::default()))
@@ -51,7 +51,7 @@ fn upsert_vue(host: &VerterHost, id: &str, src: &str) {
             canonical_id: None,
             input_id: id.to_string(),
             source: Arc::from(src),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: Vec::new(),
         })
         .expect("upsert vue");
@@ -63,7 +63,7 @@ fn upsert_ts(host: &VerterHost, id: &str, src: &str) {
             canonical_id: None,
             input_id: id.to_string(),
             source: Arc::from(src),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .expect("upsert ts");

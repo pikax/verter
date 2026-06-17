@@ -43,7 +43,9 @@ fn run_one_request(canonical: &str, source: &str) -> (Arc<VerterHost>, u64) {
         canonical_id: Some(canonical.to_string()),
         input_id: canonical.to_string(),
         source: Arc::from(source),
-        file_kind: verter_session::FileKind::from_path(canonical),
+        file_language: verter_session::LanguageRegistry::global()
+            .classify_static(canonical)
+            .static_resolution(),
         aliases: Vec::new(),
     });
     let (_analysis, resolution) = host

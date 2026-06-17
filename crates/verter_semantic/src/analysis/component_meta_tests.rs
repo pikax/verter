@@ -3392,6 +3392,8 @@ fn root_reachability_component_usage_link_preserved() {
         has_dynamic_class: false,
         dynamic_classes: vec![],
         v_models: vec![],
+        bindings: vec![],
+        events: vec![],
         span: verter_span::Span::default(),
     }];
 
@@ -3494,6 +3496,8 @@ fn root_reachability_dynamic_component_static_is_is_not_thrown_away() {
         has_dynamic_class: false,
         dynamic_classes: vec![],
         v_models: vec![],
+        bindings: vec![],
+        events: vec![],
         span: verter_span::Span::default(),
     }];
 
@@ -3979,6 +3983,8 @@ fn root_reachability_v_model_consumes_component_model_members() {
         has_dynamic_class: false,
         dynamic_classes: vec![],
         v_models: vec![],
+        bindings: vec![],
+        events: vec![],
         span: verter_span::Span::default(),
     }];
 

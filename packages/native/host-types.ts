@@ -264,7 +264,7 @@ export interface HostUpsertRequest {
   canonicalId?: string;
   inputId: string;
   source: string;
-  fileKind?: "vue" | "sfc" | "vue_sfc" | "non_sfc" | "text" | "file";
+  fileKind?: "vue" | "sfc" | "vue_sfc" | "svelte" | "non_sfc" | "text" | "file";
   aliases?: string[];
 }
 

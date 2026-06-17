@@ -60,7 +60,7 @@
 use std::sync::Arc;
 
 use crate::resolver_core::{DerivedFactKind, FactVersionRef};
-use crate::types::{FileKind, HostConfig, ProjectionMode, UpsertRequest};
+use crate::types::{FileLanguage, HostConfig, ProjectionMode, UpsertRequest};
 use crate::VerterHost;
 
 /// `/src/types.ts` — a cross-file dep imported by the owner. Its export
@@ -86,13 +86,13 @@ fn build_host() -> Arc<VerterHost> {
     Arc::new(VerterHost::new_standalone(HostConfig::default()))
 }
 
-fn upsert(host: &VerterHost, id: &str, src: &str, kind: FileKind) {
+fn upsert(host: &VerterHost, id: &str, src: &str, kind: FileLanguage) {
     let _ = host
         .upsert(UpsertRequest {
             canonical_id: None,
             input_id: id.to_string(),
             source: Arc::from(src),
-            file_kind: kind,
+            file_language: kind,
             aliases: Vec::new(),
         })
         .expect("upsert");
@@ -193,8 +193,8 @@ fn prime_with_indexed_ready(host: &VerterHost) {
 #[test]
 fn resolve_component_meta_warm_caches_strip_owner_route_fact() {
     let host = build_host();
-    upsert(&host, DEP, TYPES_TS, FileKind::NonSfc);
-    upsert(&host, OWNER, OWNER_VUE, FileKind::VueSfc);
+    upsert(&host, DEP, TYPES_TS, FileLanguage::script_ts());
+    upsert(&host, OWNER, OWNER_VUE, FileLanguage::vue());
     prime_with_indexed_ready(&host);
 
     // ── Legacy mirror ────────────────────────────────────────────────
@@ -260,8 +260,8 @@ fn resolve_component_meta_owner_content_edit_still_invalidates() {
     // NOT break owner-content-edit invalidation — the owner `FileWholeHash`
     // fact survives the strip and gates content edits.
     let host = build_host();
-    upsert(&host, DEP, TYPES_TS, FileKind::NonSfc);
-    upsert(&host, OWNER, OWNER_VUE, FileKind::VueSfc);
+    upsert(&host, DEP, TYPES_TS, FileLanguage::script_ts());
+    upsert(&host, OWNER, OWNER_VUE, FileLanguage::vue());
     prime_with_indexed_ready(&host);
 
     // Warm hit (no edit) baseline — the validated cache reuses the entry.
@@ -281,7 +281,7 @@ fn resolve_component_meta_owner_content_edit_still_invalidates() {
          defineProps<RProps & { extra: boolean }>();\n\
          </script>\n\
          <template><div /></template>\n";
-    upsert(&host, OWNER, edited, FileKind::VueSfc);
+    upsert(&host, OWNER, edited, FileLanguage::vue());
 
     let stale_before = host.resolver_runtime().component_meta.stale_miss_count();
     let after = host
@@ -317,8 +317,8 @@ fn resolve_component_meta_cross_file_edit_still_invalidates() {
     // NOT break cross-file invalidation — the cross-file dep's Route fact
     // (and its FileWholeHash fact) survive the strip and gate dep edits.
     let host = build_host();
-    upsert(&host, DEP, TYPES_TS, FileKind::NonSfc);
-    upsert(&host, OWNER, OWNER_VUE, FileKind::VueSfc);
+    upsert(&host, DEP, TYPES_TS, FileLanguage::script_ts());
+    upsert(&host, OWNER, OWNER_VUE, FileLanguage::vue());
     prime_with_indexed_ready(&host);
 
     let stale_before = host.resolver_runtime().component_meta.stale_miss_count();
@@ -328,7 +328,7 @@ fn resolve_component_meta_cross_file_edit_still_invalidates() {
         &host,
         DEP,
         "export interface RProps { a: number; }\n",
-        FileKind::NonSfc,
+        FileLanguage::script_ts(),
     );
 
     let after = host

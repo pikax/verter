@@ -45,7 +45,7 @@ use crate::semantic_query::{
     PathSegment, ProjectionMode, QueryResult, SemanticNodeData, SemanticQueryKey,
 };
 use crate::types::{AnalysisLevel, HostConfig};
-use crate::{FileKind, UpsertRequest, VerterHost};
+use crate::{FileLanguage, UpsertRequest, VerterHost};
 
 /// Build a host that has audit recording fully enabled. The
 /// regression test for raw-dispatch nesting only matters when
@@ -71,7 +71,7 @@ fn upsert_ts(host: &VerterHost, id: &str, source: &str) {
             canonical_id: None,
             input_id: id.to_string(),
             source: Arc::from(source),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .expect("upsert must succeed for the regression fixture");

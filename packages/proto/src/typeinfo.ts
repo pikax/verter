@@ -22,6 +22,8 @@ export {
   ExpandGraphAroundRequestSchema,
   FrameworkSurfaceRequestSchema,
   FrameworkSurfacePayloadSchema,
+  FrameworkSurfaceKindEntrySchema,
+  FrameworkSurfaceKindStatusSchema,
   ComponentSelectorSchema,
   GraphProjectionRequestSchema,
   // Graph node messages (kept as the prefixed names — the schema is
@@ -46,6 +48,9 @@ export {
   GraphStringTableSchema,
   // Closed enums.
   FrameworkSurfaceKind,
+  FrameworkSurfaceKindSupport,
+  FrameworkSurfaceOriginHopKind,
+  FrameworkSurfaceDeclarationKind,
   FrameworkTag,
   GraphAccessibility,
   GraphBudgetDomain,
@@ -92,6 +97,12 @@ export type {
   ExpandGraphAroundRequest,
   FrameworkSurfaceRequest,
   FrameworkSurfacePayload,
+  FrameworkSurfaceKindEntry,
+  FrameworkSurfaceKindStatus,
+  FrameworkSurfaceMember,
+  FrameworkSurfaceMemberOrigin,
+  FrameworkSurfaceMemberDeclaration,
+  FrameworkSurfaceOriginHop,
   ComponentSelector,
   StructuredTypeExpression,
   GraphTypeNode,
@@ -116,7 +127,14 @@ export type {
 /**
  * The current typeinfo graph wire schema version. Matches the Rust
  * constant `verter_protocol::typeinfo::graph::TYPEINFO_GRAPH_SCHEMA_VERSION`.
- * The taxonomy guard in `crates/verter_session/tests/architecture_guards.rs`
- * keeps the two values in lock-step.
+ * The wire-surface guards under `crates/verter_session/tests/g_block/`
+ * keep the two values in lock-step.
+ *
+ * Schema 3 added the `framework_surface` response arm plus the
+ * per-kind `FrameworkSurfaceKindStatus`. Schema 4 added the add-only
+ * `FrameworkSurfaceMember.default_value_id` + `origin` fields (a
+ * member's runtime default source text and its resolver-known
+ * declaration provenance). Schema 2 stays accepted for the legacy
+ * operations; the framework-surface operation requires 3.
  */
-export const TYPEINFO_GRAPH_SCHEMA_VERSION = 2;
+export const TYPEINFO_GRAPH_SCHEMA_VERSION = 4;

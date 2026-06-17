@@ -41,7 +41,7 @@ use super::frontier_helpers::{
 use super::test_guards::assert_route_frontier_allowed;
 use crate::host_manage::component_meta_trace_custom;
 use crate::VerterHost;
-use verter_compiler::utils::oxc::vue::resolve_type::{
+use verter_compiler::utils::oxc::script::type_surface::{
     imported_member_name_for_required_alias, required_import_alias_names_for_binding,
 };
 
@@ -309,7 +309,7 @@ impl VerterHost {
         tracked_deps: &mut std::collections::BTreeSet<String>,
         resolution_deps: &mut std::collections::BTreeSet<String>,
         view: Option<&dyn crate::session_view::SessionView>,
-    ) -> Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements> {
+    ) -> Option<verter_compiler::utils::oxc::script::type_surface::ResolvedElements> {
         let adapter = HostFrontierAdapter {
             host: self,
             // Frontier routing is already complete before materialization starts.
@@ -352,11 +352,11 @@ impl VerterHost {
         resolution_deps: &mut std::collections::BTreeSet<String>,
         memo: &mut rustc_hash::FxHashMap<
             (String, String),
-            Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>,
+            Option<verter_compiler::utils::oxc::script::type_surface::ResolvedElements>,
         >,
         active: &mut rustc_hash::FxHashSet<(String, String)>,
         view: Option<&dyn crate::session_view::SessionView>,
-    ) -> Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements> {
+    ) -> Option<verter_compiler::utils::oxc::script::type_surface::ResolvedElements> {
         let cache_key = (canonical_id.to_string(), exported_name.to_string());
         if let Some(cached) = memo.get(&cache_key) {
             return cached.clone();

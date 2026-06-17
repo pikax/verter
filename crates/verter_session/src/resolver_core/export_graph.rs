@@ -2,15 +2,9 @@ use rustc_hash::FxHashSet;
 use verter_semantic::analysis::ExportSignature;
 use verter_span::Span;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExportGraphFileKind {
-    VueSfc,
-    NonSfc,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExportSurface {
-    pub file_kind: ExportGraphFileKind,
+    pub file_language: verter_language::FileLanguage,
     pub export_signatures: Vec<ExportSignature>,
 }
 
@@ -105,7 +99,7 @@ fn resolve_named_export_from_graph_inner<R: ExportGraphResolver>(
 
     let surface = resolver.export_surface(canonical_id)?;
 
-    let result = if surface.file_kind == ExportGraphFileKind::VueSfc {
+    let result = if surface.file_language.is_vue() {
         if binding_name == "default" && is_type != Some(true) {
             Some(ResolvedGraphExport {
                 name: "default".to_string(),
@@ -222,15 +216,12 @@ fn follow_reexport_chain_from_graph<R: ExportGraphResolver>(
     let surface = resolver.export_surface(canonical_id)?;
 
     if let Some(local_span) = resolver.local_export_span(canonical_id, binding_name) {
-        if local_span.start > 0
-            || local_span.end > 0
-            || surface.file_kind == ExportGraphFileKind::VueSfc
-        {
+        if local_span.start > 0 || local_span.end > 0 || surface.file_language.is_vue() {
             return Some((canonical_id.to_string(), local_span.start, local_span.end));
         }
     }
 
-    if surface.file_kind == ExportGraphFileKind::VueSfc {
+    if surface.file_language.is_vue() {
         return None;
     }
 
@@ -272,7 +263,7 @@ fn collect_resolved_exports_from_graph<R: ExportGraphResolver>(
         .export_signatures
         .iter()
         .any(|sig| sig.name == "default");
-    if surface.file_kind == ExportGraphFileKind::VueSfc && !has_default_signature {
+    if surface.file_language.is_vue() && !has_default_signature {
         results.push(ResolvedGraphExport {
             name: "default".to_string(),
             is_type: false,
@@ -363,7 +354,7 @@ fn resolve_single_export_from_graph<R: ExportGraphResolver>(
 ) -> Option<(String, String)> {
     let surface = resolver.export_surface(canonical_id)?;
 
-    if surface.file_kind == ExportGraphFileKind::VueSfc {
+    if surface.file_language.is_vue() {
         if name == "default" || surface.export_signatures.iter().any(|sig| sig.name == name) {
             return Some((canonical_id.to_string(), name.to_string()));
         }
@@ -408,7 +399,7 @@ mod tests {
     use super::{
         get_export_span_follow_reexports_from_graph, resolve_exports_from_graph,
         resolve_exports_from_graph_best_effort, resolve_named_export_from_graph,
-        ExportGraphFileKind, ExportGraphResolver, ExportSurface, ResolvedGraphExport,
+        ExportGraphResolver, ExportSurface, ResolvedGraphExport,
     };
     use rustc_hash::FxHashMap;
     use std::cell::RefCell;
@@ -473,7 +464,7 @@ mod tests {
         resolver.surfaces.insert(
             "/src/index.ts".to_string(),
             ExportSurface {
-                file_kind: ExportGraphFileKind::NonSfc,
+                file_language: verter_language::FileLanguage::script_ts(),
                 export_signatures: vec![export_sig(
                     "Props",
                     true,
@@ -486,7 +477,7 @@ mod tests {
         resolver.surfaces.insert(
             "/src/types.ts".to_string(),
             ExportSurface {
-                file_kind: ExportGraphFileKind::NonSfc,
+                file_language: verter_language::FileLanguage::script_ts(),
                 export_signatures: vec![export_sig("Props", true, Span::new(10, 20), None, None)],
             },
         );
@@ -513,7 +504,7 @@ mod tests {
         resolver.surfaces.insert(
             "/src/index.ts".to_string(),
             ExportSurface {
-                file_kind: ExportGraphFileKind::NonSfc,
+                file_language: verter_language::FileLanguage::script_ts(),
                 export_signatures: vec![export_sig(
                     "Props",
                     true,
@@ -526,7 +517,7 @@ mod tests {
         resolver.surfaces.insert(
             "/src/types.ts".to_string(),
             ExportSurface {
-                file_kind: ExportGraphFileKind::VueSfc,
+                file_language: verter_language::FileLanguage::vue(),
                 export_signatures: vec![],
             },
         );
@@ -551,7 +542,7 @@ mod tests {
         resolver.surfaces.insert(
             "/src/App.vue".to_string(),
             ExportSurface {
-                file_kind: ExportGraphFileKind::VueSfc,
+                file_language: verter_language::FileLanguage::vue(),
                 export_signatures: vec![],
             },
         );
@@ -572,7 +563,7 @@ mod tests {
         resolver.surfaces.insert(
             "/src/index.ts".to_string(),
             ExportSurface {
-                file_kind: ExportGraphFileKind::NonSfc,
+                file_language: verter_language::FileLanguage::script_ts(),
                 export_signatures: vec![export_sig(
                     "Props",
                     true,
@@ -601,7 +592,7 @@ mod tests {
         resolver.surfaces.insert(
             "/src/index.ts".to_string(),
             ExportSurface {
-                file_kind: ExportGraphFileKind::NonSfc,
+                file_language: verter_language::FileLanguage::script_ts(),
                 export_signatures: vec![
                     export_sig("*", true, Span::default(), Some("./a"), None),
                     export_sig("*", true, Span::default(), Some("./b"), None),
@@ -611,14 +602,14 @@ mod tests {
         resolver.surfaces.insert(
             "/src/a.ts".to_string(),
             ExportSurface {
-                file_kind: ExportGraphFileKind::NonSfc,
+                file_language: verter_language::FileLanguage::script_ts(),
                 export_signatures: vec![export_sig("Props", true, Span::new(1, 2), None, None)],
             },
         );
         resolver.surfaces.insert(
             "/src/b.ts".to_string(),
             ExportSurface {
-                file_kind: ExportGraphFileKind::NonSfc,
+                file_language: verter_language::FileLanguage::script_ts(),
                 export_signatures: vec![export_sig("Other", true, Span::new(3, 4), None, None)],
             },
         );

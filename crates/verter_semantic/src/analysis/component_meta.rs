@@ -349,6 +349,37 @@ pub struct ComponentUsageAnalysis {
     pub has_dynamic_class: bool,
     pub v_models: Vec<String>,
     pub v_model_entries: Vec<ComponentVModelUsageAnalysis>,
+    /// Framework-neutral two-way bindings (the Svelte `bind:` family). Empty for
+    /// Vue.
+    pub bindings: Vec<ComponentBindingUsageAnalysis>,
+    /// Framework-neutral events (the legacy Svelte `on:` directive only — a
+    /// plain `on*` attribute is a prop, never an event). Empty for Vue.
+    pub events: Vec<ComponentEventUsageAnalysis>,
+}
+
+/// A two-way binding passed to a child component (the Svelte `bind:` family).
+#[derive(Debug, Clone)]
+pub struct ComponentBindingUsageAnalysis {
+    /// The bound local member name (`value` in `bind:value`).
+    pub name: String,
+    /// The `|modifier` list, in source order.
+    pub modifiers: Vec<String>,
+}
+
+/// An event listened on a child component via the legacy Svelte `on:`
+/// directive. A plain `on*` attribute is a prop, never an event (the
+/// props/events split is syntactic — the child component-meta, not a name
+/// guess, decides which passed props are callback events).
+#[derive(Debug, Clone)]
+pub struct ComponentEventUsageAnalysis {
+    /// The event name — the legacy directive local (`click` from `on:click`).
+    pub name: String,
+    /// The handler expression text, when present.
+    pub handler_expression: Option<String>,
+    /// Whether the handler is an inline function expression.
+    pub is_inline: bool,
+    /// The `|modifier` list, in source order.
+    pub modifiers: Vec<String>,
 }
 
 /// A single prop passed to a child component in the template.
@@ -3619,6 +3650,24 @@ fn extract_components(
                 .iter()
                 .map(|model| ComponentVModelUsageAnalysis {
                     binding_name: model.binding_name.clone(),
+                })
+                .collect(),
+            bindings: component
+                .bindings
+                .iter()
+                .map(|binding| ComponentBindingUsageAnalysis {
+                    name: binding.name.clone(),
+                    modifiers: binding.modifiers.clone(),
+                })
+                .collect(),
+            events: component
+                .events
+                .iter()
+                .map(|event| ComponentEventUsageAnalysis {
+                    name: event.name.clone(),
+                    handler_expression: event.handler_expression.clone(),
+                    is_inline: event.is_inline,
+                    modifiers: event.modifiers.clone(),
                 })
                 .collect(),
         })

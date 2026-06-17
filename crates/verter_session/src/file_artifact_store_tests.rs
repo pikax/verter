@@ -24,7 +24,61 @@ fn synth_key(canonical: &str, content_hash: Hash16, parse_env_hash: Hash16) -> F
         content_hash,
         parse_env_hash,
         parser_version: 1,
+        file_language_id: FileArtifactKey::derived_file_language_id(canonical),
     }
+}
+
+/// D-r per-file invalidation column: keys that differ ONLY in
+/// `file_language_id` occupy DISTINCT artifact slots. Inert for static
+/// rows (the column is extension-derived, so one file always builds the
+/// same key today); load-bearing the moment a host-gated classification
+/// row can flip a file's resolved language — the flip misses exactly
+/// that file's slots, with no global env-hash invalidation.
+#[test]
+fn distinct_file_language_id_values_occupy_distinct_slots() {
+    use verter_language::{FileLanguage, ScriptSourceType};
+
+    let store = FileArtifactStore::new();
+    let base = synth_key("/widget.html", [3u8; 16], [4u8; 16]);
+    assert_eq!(
+        base.file_language_id,
+        FileLanguage::script(ScriptSourceType::Ts),
+        "an unregistered extension derives the plain-script fallthrough"
+    );
+    let gated_flip = FileArtifactKey {
+        file_language_id: FileLanguage::FrameworkTemplate {
+            adapter_id: verter_language::FrameworkAdapterId::new("fixture-framework"),
+            owner_hint: None,
+        },
+        ..base.clone()
+    };
+
+    let script_payload = synth_artifacts(0x11);
+    store.insert_artifacts(base.clone(), Arc::clone(&script_payload));
+
+    // The language-flipped key misses the script slot...
+    assert!(
+        store.get_artifacts(&gated_flip).is_none(),
+        "a file_language_id flip MUST miss the other language's slot"
+    );
+
+    // ...and owns its own slot alongside it.
+    let template_payload = synth_artifacts(0x22);
+    store.insert_artifacts(gated_flip.clone(), Arc::clone(&template_payload));
+    assert!(
+        Arc::ptr_eq(
+            &store.get_artifacts(&base).expect("script slot intact"),
+            &script_payload
+        ),
+        "the original slot must survive the flipped insert"
+    );
+    assert!(
+        Arc::ptr_eq(
+            &store.get_artifacts(&gated_flip).expect("template slot"),
+            &template_payload
+        ),
+        "the flipped key must read back its own payload"
+    );
 }
 
 #[test]

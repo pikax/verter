@@ -1,4 +1,6 @@
-use verter_compiler::utils::oxc::vue::resolve_type::{ResolvedElements, ResolvedMemberVisibility};
+use verter_compiler::utils::oxc::script::type_surface::{
+    ResolvedElements, ResolvedMemberVisibility,
+};
 use verter_semantic::analysis::types::AnalyzedMacroKind;
 use verter_type_expr::TypeExpr;
 
@@ -199,7 +201,7 @@ fn collect_native_props(elements: &ResolvedElements) -> Vec<ResolvedNativeProp> 
 
 fn raw_prop_type_text(
     source: Option<&str>,
-    prop: &verter_compiler::utils::oxc::vue::resolve_type::ResolvedProp,
+    prop: &verter_compiler::utils::oxc::script::type_surface::ResolvedProp,
 ) -> Option<String> {
     prop.type_text.clone().or_else(|| {
         prop.type_span

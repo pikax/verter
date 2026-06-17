@@ -25,7 +25,9 @@ use verter_session::resolved_import_facts::{
     ResolvedImportFacts, ResolvedImportFactsKey, RESOLVED_IMPORT_FACTS_RESOLVER_VERSION,
 };
 use verter_session::session_view::{EnvHashes, HostView, SessionView};
-use verter_session::{CompileErrorPolicy, FileKind, Hash16, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{
+    CompileErrorPolicy, FileLanguage, Hash16, HostConfig, UpsertRequest, VerterHost,
+};
 
 /// Construct a fresh `VerterHost` for these unit tests. Hermetic —
 /// no external corpus, no workspace files. The host is wrapped in
@@ -51,7 +53,7 @@ fn upsert(host: &VerterHost, canonical: &str, source: &str) {
             canonical_id: None,
             input_id: canonical.to_string(),
             source: Arc::from(source),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .expect("upsert succeeds");

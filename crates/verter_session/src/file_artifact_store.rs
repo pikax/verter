@@ -64,6 +64,7 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 use smallvec::SmallVec;
+use verter_language::FileLanguage;
 use verter_semantic::analysis::Hash16;
 use verter_semantic::facts::registry as fact_registry;
 
@@ -117,16 +118,29 @@ impl ProjectIdentity {
 /// Cache key for [`FileArtifacts`].
 ///
 /// Keys are content-addressed (R5, R6): identity is the conjunction of
-/// `canonical`, `content_hash`, `parse_env_hash`, and `parser_version`.
-/// Two project envs reading the same canonical at the same `content_hash`
-/// but different `parse_env_hash` coexist; the cache returns the matching
-/// entry for the caller's env.
+/// `canonical`, `content_hash`, `parse_env_hash`, `parser_version`, and
+/// `file_language_id`. Two project envs reading the same canonical at
+/// the same `content_hash` but different `parse_env_hash` coexist; the
+/// cache returns the matching entry for the caller's env.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FileArtifactKey {
     pub canonical: Arc<str>,
     pub content_hash: Hash16,
     pub parse_env_hash: Hash16,
     pub parser_version: u32,
+    /// The file's [`FileLanguage`] row — the PER-FILE classification
+    /// dimension of artifact identity (R21 scoping: nothing
+    /// capability-shaped enters the global `parse_env_hash`).
+    ///
+    /// Every key producer currently derives this column through
+    /// [`Self::derived_file_language_id`] (the static registry
+    /// resolution, extension-derived) — identical to the host-resolved
+    /// row while no gated registry rows exist. The first gated row's
+    /// producer wiring threads the HOST-resolved row into key
+    /// construction so a capability flip misses exactly the affected
+    /// files' artifact slots; until then the column is inert (one
+    /// static value per extension) and pins the key shape.
+    pub file_language_id: FileLanguage,
 }
 
 impl FileArtifactKey {
@@ -136,12 +150,49 @@ impl FileArtifactKey {
     /// hashes through (call sites are migrated incrementally as later
     /// stages introduce real env hashes for each entry point).
     pub(crate) fn base(canonical: Arc<str>, content_hash: Hash16) -> Self {
+        let file_language_id = Self::derived_file_language_id(&canonical);
         Self {
             canonical,
             content_hash,
             parse_env_hash: BASE_PARSE_ENV_HASH,
             parser_version: CURRENT_PARSER_VERSION,
+            file_language_id,
         }
+    }
+
+    /// The extension-derived `file_language_id` column value for a
+    /// canonical path: the static registry resolution. The single
+    /// derivation point for every key producer — mixed derivation
+    /// would split one file's artifacts across two slots. STATIC-ONLY
+    /// by construction (it has the path, not the capability snapshot):
+    /// gated-row producers must thread the host-resolved row instead
+    /// of calling this, in the same change that lands the gated row.
+    ///
+    /// TODO(follow-up): an EXPLICIT-KIND override (an FFI request
+    /// labelling a canonical with a language that differs from its
+    /// extension row, or an editor document honored as Vue on a
+    /// non-`.vue` URI) shares this static slot with the
+    /// extension-labelled parse of the same content — a relabel can
+    /// warm-serve the other label's artifact (a limitation that
+    /// predates the column: the previous key had no language dimension
+    /// at all). The fix is the same live-row threading the gated-row
+    /// wiring needs: readers key from the scheduler-resolved
+    /// `file_language`, writers from the row the artifact was built
+    /// under, and this static derivation remains only for canonicals
+    /// with no live state.
+    /// Threading the already-resolved row (`FileNode.file_language` /
+    /// `HostSourceData.file_language`) also retires this bounded
+    /// per-key static reclassification on warm key-construction paths
+    /// — do not widen this recompute when wiring gated rows. The cost
+    /// is exercised by the hermetic warm `get_component_meta` pass of
+    /// `verter_bench/benches/cache_baseline.rs` (warm revalidation
+    /// constructs artifact keys through this point); the scan is a
+    /// bounded suffix walk with no allocation (carrier rows clone one
+    /// interned `Arc<str>` refcount).
+    pub fn derived_file_language_id(canonical: &str) -> FileLanguage {
+        verter_language::LanguageRegistry::global()
+            .classify_static(canonical)
+            .static_resolution()
     }
 
     /// Overlay-scoped constructor: builds a key whose `parse_env_hash`
@@ -175,11 +226,13 @@ impl FileArtifactKey {
         content_hash: Hash16,
         discriminator: Hash16,
     ) -> Self {
+        let file_language_id = Self::derived_file_language_id(&canonical);
         Self {
             canonical,
             content_hash,
             parse_env_hash: discriminator,
             parser_version: CURRENT_PARSER_VERSION,
+            file_language_id,
         }
     }
 
@@ -238,6 +291,21 @@ impl FileArtifactKey {
 /// The bump evicts any pre-existing compact-layout artifact so a stale entry
 /// cannot serve eval-relative spans after the change.
 pub const CURRENT_PARSER_VERSION: u32 = 2;
+
+/// Parser version stamped on the canonical-keyed legacy surface that
+/// builds [`FileArtifactKey`] inline (the env-hash-threading entry
+/// points, e.g. `eval_program`'s inline key). Bumps invalidate every
+/// entry inserted under the prior version.
+///
+/// Bumped 2 → 3: plain (non-carrier) scripts parse under their
+/// classified `FileLanguage` dialect (`.tsx` → TSX, `.jsx` → JSX,
+/// `.js`/`.mjs`/`.cjs` → JavaScript with their module kinds) instead of
+/// uniformly under plain TypeScript. The key already carries
+/// `file_language_id`, but the parsed VALUE under unchanged keys
+/// changes — a parser-behavior change is exactly what this dimension
+/// owns, so the bump evicts every artifact parsed under the old
+/// uniform-TS dialect.
+pub const LEGACY_PARSER_VERSION: u32 = 3;
 
 /// `parse_env_hash` sentinel marking a BASE artifact key
 /// ([`FileArtifactKey::base`]) — used by the canonical-keyed surface
@@ -1280,7 +1348,7 @@ impl FileArtifactStore {
             }
             // Sort by content_hash for deterministic order; we drop
             // from the front (older / lower-numbered variants).
-            keys.sort_by(|a, b| a.content_hash.cmp(&b.content_hash));
+            keys.sort_by_key(|key| key.content_hash);
             let drop_count = keys.len() - retention;
             drop_keys.extend(keys.into_iter().take(drop_count));
         }
@@ -1629,6 +1697,7 @@ impl FileArtifactStore {
             content_hash: current_content_hash,
             parse_env_hash: captured_key.parse_env_hash,
             parser_version: captured_key.parser_version,
+            file_language_id: captured_key.file_language_id.clone(),
         };
         self.get_artifacts(&current_key)
             .map(|art| (art, Some(current_key)))

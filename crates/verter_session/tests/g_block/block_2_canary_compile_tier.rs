@@ -31,7 +31,7 @@
 
 #![cfg(test)]
 
-use verter_session::{CompileProfile, FileKind};
+use verter_session::{CompileProfile, FileLanguage};
 
 use crate::canary_harness::{compile_main, prime_compile, standalone_host, upsert};
 
@@ -57,7 +57,7 @@ fn cross_file_macro_type_member_edit_invalidates_compile_slot() {
         &host,
         "/src/types.ts",
         "export interface Foo { a: number; }\n",
-        FileKind::NonSfc,
+        FileLanguage::script_ts(),
     );
     upsert(
         &host,
@@ -67,7 +67,7 @@ fn cross_file_macro_type_member_edit_invalidates_compile_slot() {
          const props = defineProps<Foo>();\n\
          </script>\n\
          <template><div>{{ props.a }}</div></template>\n",
-        FileKind::VueSfc,
+        FileLanguage::vue(),
     );
 
     let profile = CompileProfile::default();
@@ -83,7 +83,7 @@ fn cross_file_macro_type_member_edit_invalidates_compile_slot() {
         &host,
         "/src/types.ts",
         "export interface Foo { a: string; }\n",
-        FileKind::NonSfc,
+        FileLanguage::script_ts(),
     );
 
     // Lazy semantics: the warm slot is rejected by fact-validation.
@@ -136,7 +136,7 @@ fn runtime_import_body_edit_invalidates_compile_slot() {
         &host,
         "/src/utils.ts",
         "export function helper() { return 1; }\n",
-        FileKind::NonSfc,
+        FileLanguage::script_ts(),
     );
     upsert(
         &host,
@@ -146,7 +146,7 @@ fn runtime_import_body_edit_invalidates_compile_slot() {
          const n = helper();\n\
          </script>\n\
          <template><div>{{ n }}</div></template>\n",
-        FileKind::VueSfc,
+        FileLanguage::vue(),
     );
 
     let profile = CompileProfile::default();
@@ -161,7 +161,7 @@ fn runtime_import_body_edit_invalidates_compile_slot() {
         &host,
         "/src/utils.ts",
         "export function helper() { return 2; }\n",
-        FileKind::NonSfc,
+        FileLanguage::script_ts(),
     );
 
     assert!(
@@ -214,14 +214,14 @@ fn external_src_template_edit_invalidates_compile_slot() {
         &host,
         "/src/tpl.html",
         "<div>ALPHA</div>\n",
-        FileKind::NonSfc,
+        FileLanguage::script_ts(),
     );
     upsert(
         &host,
         "/src/Comp.vue",
         "<template src=\"./tpl.html\"></template>\n\
          <script setup lang=\"ts\">\nconst n = 1;\n</script>\n",
-        FileKind::VueSfc,
+        FileLanguage::vue(),
     );
 
     let profile = CompileProfile::default();
@@ -244,7 +244,7 @@ fn external_src_template_edit_invalidates_compile_slot() {
         &host,
         "/src/tpl.html",
         "<section>BETA</section>\n",
-        FileKind::NonSfc,
+        FileLanguage::script_ts(),
     );
 
     assert!(
@@ -292,7 +292,7 @@ fn side_effect_import_body_edit_invalidates_compile_slot() {
         &host,
         "/src/setup.ts",
         "globalThis.__verter_setup = 1;\n",
-        FileKind::NonSfc,
+        FileLanguage::script_ts(),
     );
     upsert(
         &host,
@@ -302,7 +302,7 @@ fn side_effect_import_body_edit_invalidates_compile_slot() {
          const n = 1;\n\
          </script>\n\
          <template><div>{{ n }}</div></template>\n",
-        FileKind::VueSfc,
+        FileLanguage::vue(),
     );
 
     let profile = CompileProfile::default();
@@ -318,7 +318,7 @@ fn side_effect_import_body_edit_invalidates_compile_slot() {
         &host,
         "/src/setup.ts",
         "globalThis.__verter_setup = 2;\n",
-        FileKind::NonSfc,
+        FileLanguage::script_ts(),
     );
 
     assert!(
@@ -373,7 +373,7 @@ fn custom_resolve_extensions_dep_edit_invalidates_compile_slot() {
         &host,
         "/src/types.ts",
         "export interface MyType { foo: string }\n",
-        FileKind::NonSfc,
+        FileLanguage::script_ts(),
     );
     upsert(
         &host,
@@ -383,7 +383,7 @@ fn custom_resolve_extensions_dep_edit_invalidates_compile_slot() {
          const props = defineProps<MyType>()\n\
          </script>\n\
          <template><div>{{ props.foo }}</div></template>\n",
-        FileKind::VueSfc,
+        FileLanguage::vue(),
     );
 
     let profile = CompileProfile::default();
@@ -400,7 +400,7 @@ fn custom_resolve_extensions_dep_edit_invalidates_compile_slot() {
         &host,
         "/src/types.ts",
         "export interface MyType { foo: string; bar: number }\n",
-        FileKind::NonSfc,
+        FileLanguage::script_ts(),
     );
 
     assert!(
@@ -453,13 +453,13 @@ fn tier3_dep_type_member_added_invalidates_compile_slot() {
          const props = defineProps<MyType>()\n\
          </script>\n\
          <template><div/></template>\n",
-        FileKind::VueSfc,
+        FileLanguage::vue(),
     );
     upsert(
         &host,
         "/src/types.ts",
         "export interface MyType { foo: string }\n",
-        FileKind::NonSfc,
+        FileLanguage::script_ts(),
     );
 
     let profile = CompileProfile::default();
@@ -475,7 +475,7 @@ fn tier3_dep_type_member_added_invalidates_compile_slot() {
         &host,
         "/src/types.ts",
         "export interface MyType { foo: string; bar: number }\n",
-        FileKind::NonSfc,
+        FileLanguage::script_ts(),
     );
 
     assert!(
@@ -523,13 +523,13 @@ fn tier3_dep_type_member_type_changed_invalidates_compile_slot() {
          const props = defineProps<MyType>()\n\
          </script>\n\
          <template><div>{{ props.foo }}</div></template>\n",
-        FileKind::VueSfc,
+        FileLanguage::vue(),
     );
     upsert(
         &host,
         "/src/types.ts",
         "export interface MyType { foo: string }\n",
-        FileKind::NonSfc,
+        FileLanguage::script_ts(),
     );
 
     let profile = CompileProfile::default();
@@ -545,7 +545,7 @@ fn tier3_dep_type_member_type_changed_invalidates_compile_slot() {
         &host,
         "/src/types.ts",
         "export interface MyType { foo: number }\n",
-        FileKind::NonSfc,
+        FileLanguage::script_ts(),
     );
 
     assert!(
