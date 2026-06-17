@@ -106,12 +106,12 @@ fn svelte_rune_module_not_component_carrier() {
     // VALUES, not a component — it synthesises NO component default. Observed at
     // the public export-graph boundary: the rune module's resolved exports are
     // its REAL value exports (`s`, `d`) — the export graph treats it as an
-    // ordinary module. A `.svelte` COMPONENT carries no plain value exports at
-    // that boundary (its public surface is the SYNTHESISED component, reachable
-    // only through the framework-surface path — see
-    // `svelte_feature_rows_supported_no_diagnostic`). This split is
-    // discriminating: were a rune module synth-gated as a component (the bug),
-    // its reactive value exports would NOT surface here as plain module exports.
+    // ordinary module, and it surfaces NO synthesised `default`. A `.svelte`
+    // COMPONENT is the opposite: a framework CARRIER whose public surface IS the
+    // synthesised `default` component export (reachable cross-file as
+    // `import Box from './Box.svelte'`). This split is discriminating: were a
+    // rune module synth-gated as a component (the bug), it would surface a
+    // synthesised `default` instead of its reactive value exports.
     let host = host();
     upsert(
         &host,
@@ -135,11 +135,12 @@ fn svelte_rune_module_not_component_carrier() {
          (it is not a component); got {rune_names:?}"
     );
 
-    // DISCRIMINATING CONTRAST: a real `.svelte` COMPONENT carries NO plain
-    // module value exports at the export-graph boundary — its public surface is
-    // the synthesised component, not an ordinary module. A rune module is the
-    // opposite (a real value module). The split proves the rune module is NOT
-    // routed through the component build.
+    // DISCRIMINATING CONTRAST: a real `.svelte` COMPONENT surfaces exactly the
+    // SYNTHESISED `default` component export at the export-graph boundary (the
+    // carrier-generic synthesised-default short-circuit), and NONE of the rune
+    // module's userland reactive values. A rune module is the opposite (a real
+    // value module: `s`/`d`, no `default`). The split proves the rune module is
+    // NOT routed through the component build, and the component IS.
     upsert(
         &host,
         "/Box.svelte",
@@ -153,10 +154,16 @@ fn svelte_rune_module_not_component_carrier() {
         .map(|e| e.name)
         .collect();
     assert!(
-        component_value_exports.is_empty(),
-        "a `.svelte` COMPONENT carries no plain module value exports (its surface \
-         is the synthesised component, not an ordinary module); got \
-         {component_value_exports:?}"
+        component_value_exports.iter().any(|n| n == "default"),
+        "a `.svelte` COMPONENT surfaces its synthesised `default` component \
+         export at the export-graph boundary (carrier-generic synthesised \
+         default); got {component_value_exports:?}"
+    );
+    assert!(
+        !component_value_exports.iter().any(|n| n == "s" || n == "d"),
+        "the `.svelte` COMPONENT surface is the synthesised component, NOT a \
+         verbatim module — it carries none of the rune module's userland \
+         reactive values; got {component_value_exports:?}"
     );
 
     // (3) NO COMPONENT API VIRTUAL FILE: the rune module is not a carrier, so

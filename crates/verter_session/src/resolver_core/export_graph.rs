@@ -99,7 +99,7 @@ fn resolve_named_export_from_graph_inner<R: ExportGraphResolver>(
 
     let surface = resolver.export_surface(canonical_id)?;
 
-    let result = if surface.file_language.is_vue() {
+    let result = if surface.file_language.is_framework_carrier() {
         if binding_name == "default" && is_type != Some(true) {
             Some(ResolvedGraphExport {
                 name: "default".to_string(),
@@ -216,12 +216,15 @@ fn follow_reexport_chain_from_graph<R: ExportGraphResolver>(
     let surface = resolver.export_surface(canonical_id)?;
 
     if let Some(local_span) = resolver.local_export_span(canonical_id, binding_name) {
-        if local_span.start > 0 || local_span.end > 0 || surface.file_language.is_vue() {
+        if local_span.start > 0
+            || local_span.end > 0
+            || surface.file_language.is_framework_carrier()
+        {
             return Some((canonical_id.to_string(), local_span.start, local_span.end));
         }
     }
 
-    if surface.file_language.is_vue() {
+    if surface.file_language.is_framework_carrier() {
         return None;
     }
 
@@ -263,7 +266,7 @@ fn collect_resolved_exports_from_graph<R: ExportGraphResolver>(
         .export_signatures
         .iter()
         .any(|sig| sig.name == "default");
-    if surface.file_language.is_vue() && !has_default_signature {
+    if surface.file_language.is_framework_carrier() && !has_default_signature {
         results.push(ResolvedGraphExport {
             name: "default".to_string(),
             is_type: false,
@@ -354,7 +357,7 @@ fn resolve_single_export_from_graph<R: ExportGraphResolver>(
 ) -> Option<(String, String)> {
     let surface = resolver.export_surface(canonical_id)?;
 
-    if surface.file_language.is_vue() {
+    if surface.file_language.is_framework_carrier() {
         if name == "default" || surface.export_signatures.iter().any(|sig| sig.name == name) {
             return Some((canonical_id.to_string(), name.to_string()));
         }
@@ -639,6 +642,69 @@ mod tests {
             resolver.surface_reads.borrow().as_slice(),
             &["/src/index.ts", "/src/a.ts"],
             "later wildcard branches should not be scanned once the requested export is found",
+        );
+    }
+
+    #[test]
+    fn svelte_carrier_default_is_reachable_through_the_export_graph() {
+        // A `.svelte` component synthesizes a `default` component export exactly
+        // like a `.vue` SFC. The synthesized-default short-circuit is gated on
+        // the CARRIER-GENERIC predicate (`is_framework_carrier`), not `is_vue`,
+        // so a Svelte carrier's `default` resolves cross-file
+        // (`import X from './X.svelte'`) and through a barrel re-export.
+        //
+        // DISCRIMINATING: under the pre-fix `is_vue()` gate this falls through to
+        // the `export_signatures` lookup, which is EMPTY for a carrier (its
+        // `default` is synthesized, not a parsed signature), so BOTH resolutions
+        // below return `None`/empty and the assertions fail. The carrier-generic
+        // gate restores the synthesized-default short-circuit for Svelte.
+        let mut resolver = TestResolver::default();
+        resolver.surfaces.insert(
+            "/src/Button.svelte".to_string(),
+            ExportSurface {
+                file_language: verter_language::FileLanguage::svelte(),
+                export_signatures: vec![],
+            },
+        );
+
+        // (1) Direct value import: `import Button from './Button.svelte'`.
+        let direct =
+            resolve_named_export_from_graph(&resolver, "/src/Button.svelte", "default", None, true)
+                .expect("a .svelte carrier's synthesized `default` must resolve as a value export");
+        assert_eq!(
+            direct,
+            ResolvedGraphExport {
+                name: "default".to_string(),
+                is_type: false,
+                source_canonical_id: None,
+                source_name: "default".to_string(),
+            },
+            "the Svelte synthesized default resolves locally, not as a dangling re-export",
+        );
+
+        // (2) Barrel re-export reachability: `resolve_exports_from_graph` must
+        // surface the synthesized `default` for the carrier file itself (the
+        // surface a `export { default } from './Button.svelte'` barrel walks).
+        let exports = resolve_exports_from_graph(&resolver, "/src/Button.svelte");
+        assert!(
+            exports.iter().any(|e| e.name == "default" && !e.is_type),
+            "resolve_exports_from_graph must include the Svelte synthesized `default` value export; got {exports:?}",
+        );
+
+        // (3) A REQUESTED `default` TYPE (`is_type == Some(true)`) must NOT be
+        // short-circuited to the synthesized value default — the synthesized
+        // default is a value, matching the Vue contract. With no type signature
+        // present it resolves to nothing.
+        assert!(
+            resolve_named_export_from_graph(
+                &resolver,
+                "/src/Button.svelte",
+                "default",
+                Some(true),
+                true,
+            )
+            .is_none(),
+            "a TYPE-only `default` request must not resolve to the synthesized value default",
         );
     }
 }
