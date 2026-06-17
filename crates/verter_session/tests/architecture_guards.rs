@@ -7593,6 +7593,10 @@ mod foundations_guards {
             "crates/verter_workspace/src/resolver.rs",
             "doc comment only references `std::fs::canonicalize()` behaviour on Windows for documentation; no actual `std::fs::` callsite. Path-string normalization stays local to the resolver.",
         ),
+        (
+            "crates/verter_compiler/src/svelte_oracle.rs",
+            "Svelte conformance-oracle comparison engine, gated behind the `svelte-oracle` feature (excluded from the default gate). `load_golden` / `load_all_goldens` read the committed golden JSON TEST FIXTURES off disk for the conformance consumers to diff a normalized candidate against — in-repo test corpus, never workspace/semantic state, with no `VerterHost` / `WorkspaceAccess` context. Not a NativeFs/VFS disk-boundary bypass.",
+        ),
     ];
 
     /// Predicate the test reuses: does this file's source contain

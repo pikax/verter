@@ -1,0 +1,55 @@
+{
+  "slug": "reactive/text_interpolation.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "text_interpolation",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "first_child",
+    "next",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "first_child",
+    "from_html",
+    "next"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "first_child": 1,
+    "next": 1,
+    "append": 1
+  },
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<h1></h1> <p>Static text only.</p>",
+      "flag": "1"
+    }
+  ],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

@@ -1,0 +1,40 @@
+{
+  "slug": "runes/derived_and_effect.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "derived_and_effect",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "derived",
+    "escape",
+    "escape"
+  ],
+  "helperSet": [
+    "derived",
+    "escape"
+  ],
+  "helperCounts": {
+    "derived": 1,
+    "escape": 2
+  },
+  "templates": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

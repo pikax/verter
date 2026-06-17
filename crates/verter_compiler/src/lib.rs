@@ -32,6 +32,13 @@ pub mod framework_common;
 
 pub mod svelte;
 
+// Reusable Svelte conformance-oracle comparison engine (the normalized topology
+// schema + the identity/structure/helper-topology diff). Gated behind
+// `svelte-oracle` so the DEFAULT build never compiles it; every conformance
+// consumer imports the SAME diff engine from here rather than its own fork.
+#[cfg(feature = "svelte-oracle")]
+pub mod svelte_oracle;
+
 #[cfg(feature = "bench")]
 pub mod script;
 #[cfg(not(feature = "bench"))]

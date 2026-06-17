@@ -24,6 +24,7 @@ jobs:
       vscode: ${{ steps.filter.outputs.vscode }}
       native: ${{ steps.filter.outputs.native }}
       dx: ${{ steps.filter.outputs.dx }}
+      svelte_oracle: ${{ steps.filter.outputs.svelte_oracle }}
     steps:
       - uses: actions/checkout@v5
       - uses: dorny/paths-filter@v3
@@ -47,6 +48,8 @@ jobs:
               - 'pnpm-workspace.yaml'
               - 'tsconfig*.json'
               - 'scripts/v5-process/**'
+              - 'scripts/gen-svelte-goldens.mjs'
+              - 'crates/verter_compiler/tests/svelte_oracle_corpus/**'
               - '.github/workflows/ci.yml'
             wasm:
               - 'crates/verter_compiler/**'
@@ -119,6 +122,15 @@ jobs:
               - 'packages/dx-harness/**'
               - 'packages/lsp-test-client/**'
               - 'scripts/dx/**'
+              - '.github/workflows/ci.yml'
+            svelte_oracle:
+              - 'scripts/gen-svelte-goldens.mjs'
+              - 'crates/verter_compiler/tests/svelte_oracle_corpus/**'
+              - 'crates/verter_compiler/tests/svelte_oracle_harness.rs'
+              - 'crates/verter_compiler/tests/svelte_goldens_in_sync.rs'
+              - 'crates/verter_compiler/src/svelte_oracle.rs'
+              - 'crates/verter_compiler/Cargo.toml'
+              - 'pnpm-lock.yaml'
               - '.github/workflows/ci.yml'
 
   terminology-check:
@@ -251,6 +263,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Validate v5/process parity manifest
         run: node scripts/v5-process/validate_manifest.mjs
+      - name: Svelte oracle goldens in sync with pinned compiler
+        run: node scripts/gen-svelte-goldens.mjs --check
       - name: Build TS packages
         run: pnpm run build:ts
       - name: Run tests
@@ -266,6 +280,41 @@ jobs:
           fail-on-error: false
       - name: Verify package tarballs
         run: node scripts/verify-packages.mjs
+
+  svelte-oracle:
+    name: Svelte Oracle (live, feature-gated)
+    needs: detect-changes
+    if: needs.detect-changes.outputs.svelte_oracle == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: lts/*
+          cache: pnpm
+      # Installs the pinned `svelte` devDependency so the feature-gated harness
+      # can shell `node scripts/gen-svelte-goldens.mjs` over the live compiler.
+      - run: pnpm install --frozen-lockfile
+      # Compiles AND runs the `svelte-oracle` feature-gated harness — the live
+      # golden-vs-pinned-compiler drift gate, the topology_diff engine, and the
+      # NormalizedGolden schema housed in `verter_compiler::svelte_oracle`.
+      # `node` is present in this job, so the harness's live tests run (they
+      # HARD-FAIL on a missing toolchain rather than skipping). The default
+      # `cargo nextest run --workspace` run never opts into this feature, so it
+      # stays node-free + hermetic.
+      - name: Svelte oracle harness (live)
+        run: cargo test -p verter_compiler --features svelte-oracle
 
   playground-test:
     name: Playground Unit Tests

@@ -75,3 +75,7 @@ rationale = "TS7 oracle harness snapshot GENERATOR (#[cfg(feature = \"oracle-gen
 [[entries]]
 path = "crates/verter_session/src/typeinfo/typeinfo_tests/oracle_gen_spike.rs"
 rationale = "TS7 oracle harness §4 GENERATION SPIKE (#[cfg(all(test, feature = \"oracle-gen\"))], excluded from the default gate). Writes a tsconfig + fixture into a temp dir for the EXTERNAL tsgo subprocess to read off real disk (tsgo cannot read Verter's in-memory VFS), then re-validates the design's BLOCKING tsgo assumptions. External-tool scaffolding, not semantic/VFS state — the same category as the tsserver/tsgo IPC scratch-dir entries above."
+
+[[entries]]
+path = "crates/verter_compiler/src/svelte_oracle.rs"
+rationale = "Svelte conformance-oracle comparison engine (#[cfg(feature = \"svelte-oracle\")], excluded from the default gate). load_golden / load_all_goldens read the committed golden JSON TEST FIXTURES off disk for the conformance consumers to diff a normalized candidate against — in-repo test corpus, no VerterHost/WorkspaceAccess context, never workspace/semantic state. Same category as the TS7 oracle harness fixture readers."

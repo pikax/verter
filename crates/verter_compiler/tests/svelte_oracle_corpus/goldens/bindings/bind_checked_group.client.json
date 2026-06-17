@@ -1,0 +1,85 @@
+{
+  "slug": "bindings/bind_checked_group.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "bind_checked_group",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "state",
+    "state",
+    "proxy",
+    "first_child",
+    "remove_input_defaults",
+    "sibling",
+    "remove_input_defaults",
+    "sibling",
+    "remove_input_defaults",
+    "bind_checked",
+    "get",
+    "set",
+    "bind_group",
+    "get",
+    "set",
+    "bind_group",
+    "get",
+    "set",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "bind_checked",
+    "bind_group",
+    "first_child",
+    "from_html",
+    "get",
+    "proxy",
+    "remove_input_defaults",
+    "set",
+    "sibling",
+    "state"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "state": 2,
+    "proxy": 1,
+    "first_child": 1,
+    "remove_input_defaults": 3,
+    "sibling": 2,
+    "bind_checked": 1,
+    "get": 3,
+    "set": 3,
+    "bind_group": 2,
+    "append": 1
+  },
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<input type=\"checkbox\"/> <input type=\"checkbox\"/> <input type=\"checkbox\"/>",
+      "flag": "1"
+    }
+  ],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}
