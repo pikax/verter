@@ -12,6 +12,15 @@
 //! fully model. The compiler enforces the boundary on the real compiled
 //! program.
 //!
+//! SCOPE. This BY-CONSTRUCTION guarantee covers the three carriers sealed in
+//! THIS module; it does NOT extend automatically to a FUTURE
+//! [`SemanticNodeData`] carrier. The wildcard-free
+//! [`SemanticNodeData::carrier_type_args`] / [`SemanticNodeData::map_carrier_type_args`]
+//! fences force a new variant to be CLASSIFIED (it fails to compile until
+//! classified), but classification is NOT encapsulation: a future named-struct
+//! carrier with a public `type_args` field could compile and re-open the bind.
+//! Closing that enum-wide is recorded debt (see `docs/arch/parselower-design.md`).
+//!
 //! STRUCTURAL CONFINEMENT. The sanctioned
 //! crate-visible accessor surface lives INSIDE this module, in the
 //! `impl SemanticNodeData` block below: `carrier_type_args` /

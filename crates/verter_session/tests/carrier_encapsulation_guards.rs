@@ -14,6 +14,15 @@
 //! the real compiled program — `cfg` / `#[path]` / `include!` / macro / alias
 //! included — which a source scanner could never fully model.
 //!
+//! SCOPE (future carriers). This BY-CONSTRUCTION guarantee, and these
+//! tripwires, cover the three CURRENT carriers only — they inspect just the
+//! three hardcoded `CARRIER_VARIANTS` names. The wildcard-free
+//! `carrier_type_args` / `map_carrier_type_args` fences make a new variant
+//! fail to compile until classified, but CLASSIFICATION ≠ OPAQUE
+//! ENCAPSULATION: a future named-struct carrier could compile while exposing a
+//! bindable `type_args` field, re-opening the anti-tail bind, until the
+//! enum-wide guard (recorded debt, `docs/arch/parselower-design.md`) exists.
+//!
 //! These small, LOCAL tripwires do NOT re-derive that compiler guarantee; they
 //! only FREEZE the shape of the one trusted module so a future IN-FILE edit
 //! cannot grow a second args surface without ALSO editing the guard. Tripwire 2
