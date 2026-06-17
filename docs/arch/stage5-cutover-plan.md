@@ -56,9 +56,32 @@ parsing becomes spans-only; THEN delete the legacy rail. Four NEVERS. Each block
   SemanticNodeData::VueMacroElements + HostResolvedNamedTypeKey + parser NamedTypeCache adapters + graph named-type indexes. dep B10.
   [Q4: native_props FFI carrier route_surface.rs collect_external_types_from_loaded_files_with_view must re-source from B5 DTO or be
   retired FIRST]
+  **MERGED-FRAMEWORK-PRODUCER REPOINT (ahead-of-order substrate; unified §3.1.1).** The framework-adapter
+  merge landed a framework-surface producer ahead of this cutover, so the `VueMacroElements` / `type_surface`
+  sidecar has NEW consumers beyond the original enumeration above: the merged producer
+  (`crates/verter_session/src/typeinfo/framework_surface/vue_exec`,
+  `crates/verter_session/src/typeinfo/framework_surface/graph_export.rs`) and the Vue + Svelte adapter paths
+  themselves consume `VueMacroElements` / `type_surface`. B5–B12 MUST repoint these merged producers onto the
+  one shared `ResolveMacroPayload` dispatch path as well — leaving a second sidecar consumer alive (the
+  framework-surface producer) is the same dual-path failure this gate forbids. B11 therefore additionally
+  repoints/deletes the merged framework-surface producer's `VueMacroElements` / `type_surface` consumption (it
+  resolves through the one shared `ResolveMacroPayload` path, never a second sidecar engine). This does NOT
+  rebuild the merged producer — it re-points its already-merged resolution off the sidecar. The
+  `type_surface` guards (`no_new_type_surface_engine_path_production_file`) shrink/retire as the sidecar engine
+  is removed — they never pin the old engine count past the deletion; that guard's shrink/delete is OWNED at
+  U6 (the block that cuts the legacy return / type-surface machinery), and B10/B11 must drive the count down,
+  never re-pin it.
 - **B12 [5C close]** final absence guards (no prod refs to resolve_type_elements/infer_runtime_type/extract_companion_types/
   ResolvedElements/RuntimeType-type-arg/TypeResolutionContext/VueMacroElements/HostResolvedNamedTypeKey/parse_checker_text_to_type_expr);
   ledgers at empty floor; negative-guard test. dep B10,B11.
+  The absence sweep additionally covers the merged framework-surface producer (`framework_surface/vue_exec`,
+  `graph_export.rs`): after B11's repoint, NO framework-surface producer references `VueMacroElements` /
+  `type_surface` — it resolves through the one shared `ResolveMacroPayload` dispatch. The `type_surface`
+  ledger/guard count is at its empty floor (the shrink/delete authority is U6; B12 confirms the floor, it does
+  not re-pin a non-zero count). **HARD GATE (unified §3.1.1 / §3.1.3 `U8 ← {U6, S5.B12}`): B11/B12 MUST complete
+  before any typeinfo U8+ work** — do NOT build the new typeinfo wire / result / export / projection stack
+  around a sidecar (`VueMacroElements` / `HostResolvedNamedTypeKey` / `resolve_type/`) scheduled for deletion,
+  including via the merged framework-surface producer.
 
 ## OPEN QUESTIONS (to codex binding sign-off)
 - Q1 (B9): RuntimeType/format_runtime_types SHARED w/ surviving object-arg path → plan RELOCATES them, deletes only infer_runtime_type
