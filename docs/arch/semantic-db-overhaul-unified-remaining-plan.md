@@ -2625,7 +2625,7 @@ divergence (`(props?: mapped): string` vs vcm's arrow form).
 
 ### UP — LSP / Compiler Performance Backlog (tracked, not yet scheduled)
 
-Tracked perf follow-ups handed off from the retired lsp-perf line. NOT on the
+Tracked perf follow-ups handed off from the retired perf line. NOT on the
 §3.5 critical path; NO deps-graph edges into the U-chain EXCEPT the explicit
 unblock edges named below. Ungated UP.1 / UP.2 are parallel capacity (like
 U1/U4/U5). Every item is a branch-independent SPEC (the source perf branches are
@@ -2687,7 +2687,10 @@ retired and the SHAs below are the refactor-history commits, branch-independent.
 
 - **G8.2 — scheduler supersede reverse-indices.** **LANDED ✅ (commit
   `24532fbca` in refactor history — branch-independent, source branch retired).**
-  O(1) supersede via per-canonical reverse maps;
+  Supersede via per-canonical reverse maps: no global crate-wide scan; the sweep
+  iterates only the entries in the bumped canonical's reverse-index buckets
+  (node-token / file-waiter / blocker-owner / terminal-failure), so the work is
+  O(affected) — proportional to that file's stale entries — not O(total DAG);
   `verter_scheduler/src/dag.rs` + `dag/{blocker_registry,terminal_failures}.rs`
   (+ `dag_supersede_index_tests.rs`).
 - **G9.1 — workspace realpath memo.** **LANDED ✅ (commit `a4333b753` in

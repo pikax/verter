@@ -9,7 +9,7 @@
 
 ## Base + integration branch
 - Perf work was based on `aa58fdd26`; it was being rebased onto the overhaul via the integration branch
-  `lsp-perf/integration-overhaul` (**historical; retired** — the branch no longer exists in this repo). The
+  `lsp-perf/integration-overhaul` (**historical; retired / not load-bearing**). The
   remaining work is now folded into the master plan's §4 `UP` block; see
   [`perf-handoff-to-semantic-overhaul.md`](./perf-handoff-to-semantic-overhaul.md).
 - A dedicated **rebase/merge/FF manager reconciles the perf work onto the latest `origin/refactor/semantic-db-overhaul`
