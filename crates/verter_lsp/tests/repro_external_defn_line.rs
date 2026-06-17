@@ -19,7 +19,7 @@
 //! These tests exercise the `merge_definitions` boundary directly (no type provider process):
 //! each constructs a `TypeLocation` whose byte offsets point at a known symbol, hands the merge
 //! an in-memory source reader (modeling the host VFS the production merge reads through — see
-//! `LspHost::workspace_read_file` → `verter_workspace::WorkspaceRead::read_file` — rather than
+//! `VerterHost::workspace_read().read_file` → `verter_workspace::WorkspaceRead::read_file` — rather than
 //! direct disk I/O), and asserts the merged definition carries that symbol's EXACT line:col span
 //! (both endpoints) — never `Range::default()`.
 
@@ -47,7 +47,7 @@ fn trivial_mapper() -> PositionMapper {
 
 /// In-memory external source fixture: a synthetic forward-slash path (with `suffix`) plus a
 /// reader returning `content` for that exact path. Models the host VFS the production merge
-/// reads through (`LspHost::workspace_read_file` → `verter_workspace::WorkspaceRead::read_file`):
+/// reads through (`VerterHost::workspace_read().read_file` → `verter_workspace::WorkspaceRead::read_file`):
 /// a definition target carries byte offsets into its own source, so the reader hands that exact
 /// source back for the offset→line:col conversion — no disk I/O, fully hermetic.
 fn ext_source(suffix: &str, content: &str) -> (String, impl Fn(&str) -> Option<Arc<str>>) {

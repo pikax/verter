@@ -187,7 +187,6 @@ real_provider_test!(
                 "{{ greeting }}",
                 6,
                 "greeting",
-                ReadinessPolicy::SkipWithWarning,
             )
             .await
         {
@@ -286,7 +285,6 @@ real_provider_test!(
                 "{{ greeting }}",
                 6,
                 "greeting",
-                ReadinessPolicy::SkipWithWarning,
             )
             .await
         {

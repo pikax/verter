@@ -561,6 +561,24 @@ impl PositionMapper {
         self.helper_preamble_end
     }
 
+    /// The generated-TSX endpoint of the mapped run whose SOURCE extent ends exactly at
+    /// `(line, col)` (both in UTF-16 source-map column space). Used by the completion-only
+    /// member-access boundary fallback: a zero-width `obj.` cursor sits outside every mapped
+    /// run, but the receiver run's source extent ends right at (or just before) the operator,
+    /// so its generated endpoint anchors the boundary. Returns `None` when no run ends exactly
+    /// there.
+    pub(crate) fn mapped_run_ending_at_src(&self, line: u32, col: u32) -> Option<TsPosition> {
+        let line_runs = self.by_src_line.get(line as usize)?;
+        let run = line_runs
+            .iter()
+            .map(|&i| &self.runs[i as usize])
+            .find(|r| r.src_line == line && r.src_end == col)?;
+        Some(TsPosition {
+            line: run.dst_line,
+            character: run.dst_end,
+        })
+    }
+
     /// Map a generated TSX **range** `[start, end)` back to a Vue source range `(start, end)`,
     /// enforcing the half-open endpoint-compatibility rule.
     ///

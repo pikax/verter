@@ -33,7 +33,7 @@ use crate::features::rename::{prepare_rename, rename_at_position};
 use crate::tsgo::auto_import::ProviderImportEdit;
 use crate::tsgo::merge;
 
-use super::handler_guard::HandlerGuard;
+use super::handler_guard::{block_in_place_if_available, HandlerGuard};
 use super::nav_features_completion_resolve::{
     completion_resolve_error, resolve_tsgo_auto_import_edits,
 };
@@ -543,7 +543,25 @@ pub(super) async fn handle_completion(
                 &ctx.vue_line_index,
                 &ctx.mapper,
                 &ctx.tsx_line_index,
-            );
+            )
+            // Completion-only fallback: the strict mapper legitimately returns None for a
+            // zero-width member-access boundary (the cursor right after `obj.` sits OUTSIDE
+            // any mapped run). The completion-only helper anchors on a mapped run whose
+            // source extent ends exactly at the cursor or exactly before the operator, and
+            // accepts ONLY when the generated TSX carries the matching `.`/`?.` operator at
+            // that run's generated endpoint. It is consulted ONLY on strict None, ONLY here
+            // in completion — no other feature path uses it.
+            .or_else(|| {
+                let vue_source = server.documents.get(uri)?.source.clone();
+                merge::vue_completion_member_boundary_offset(
+                    position,
+                    &ctx.vue_line_index,
+                    &ctx.mapper,
+                    &ctx.tsx_line_index,
+                    &ctx.tsx_content,
+                    &vue_source,
+                )
+            });
             if tsx_offset.is_none() {
                 tracing::debug!(
                     "completion: position mapping failed for {}:{},{}",
@@ -872,7 +890,11 @@ pub(super) async fn handle_goto_definition(
                                     d.start,
                                     d.end,
                                     encoding.clone(),
-                                    &|p: &str| server.documents.host().workspace_read_file(p),
+                                    &|p: &str| {
+                                        block_in_place_if_available(|| {
+                                            server.documents.host().workspace_read().read_file(p)
+                                        })
+                                    },
                                 )?
                             } else {
                                 return None;
@@ -1032,7 +1054,11 @@ pub(super) async fn handle_goto_definition(
                             &vue_source_exists,
                             Some(&barrel_resolver),
                             negotiated_encoding,
-                            &|p: &str| server.documents.host().workspace_read_file(p),
+                            &|p: &str| {
+                                block_in_place_if_available(|| {
+                                    server.documents.host().workspace_read().read_file(p)
+                                })
+                            },
                         );
                         // Post-process: if type provider resolved to a barrel file,
                         // follow re-exports to the terminal declaration.
@@ -1109,7 +1135,11 @@ pub(super) async fn handle_goto_type_definition(
                                     d.start,
                                     d.end,
                                     encoding.clone(),
-                                    &|p: &str| server.documents.host().workspace_read_file(p),
+                                    &|p: &str| {
+                                        block_in_place_if_available(|| {
+                                            server.documents.host().workspace_read().read_file(p)
+                                        })
+                                    },
                                 )?
                             } else {
                                 return None;
@@ -1167,7 +1197,11 @@ pub(super) async fn handle_goto_type_definition(
                             &vue_source_exists,
                             Some(&barrel_resolver),
                             negotiated_encoding,
-                            &|p: &str| server.documents.host().workspace_read_file(p),
+                            &|p: &str| {
+                                block_in_place_if_available(|| {
+                                    server.documents.host().workspace_read().read_file(p)
+                                })
+                            },
                         ));
                     }
                     Err(e) => {

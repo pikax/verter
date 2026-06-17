@@ -39,7 +39,6 @@ use verter_session::{HostConfig, VerterHost};
 use verter_lsp::documents::line_index::LineIndex;
 use verter_lsp::documents::position_map::PositionMapper;
 use verter_lsp::documents::DocumentRegistry;
-use verter_lsp::host_access::LspHost;
 use verter_lsp::tsgo::merge;
 
 /// The exact BUG-REPORT case: incomplete member access inside a multi-line arrow.
@@ -62,7 +61,7 @@ struct Opened {
 /// mapper exactly as `ide_context` would hand them to the completion handler.
 fn open(source: &str) -> Opened {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
-    let registry = DocumentRegistry::new(LspHost::new(host));
+    let registry = DocumentRegistry::new(host);
     registry.set_encoding(PositionEncodingKind::UTF16);
     let uri: Uri = "file:///proj/src/Index.vue".parse().unwrap();
     let item = TextDocumentItem {
