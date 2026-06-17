@@ -20,11 +20,14 @@
 // `isFrameworkCarrierLanguageId(...)` is NEVER flagged — the guard targets
 // literal `.vue`/`"vue"` GATES, not the helper identifier.
 //
-// DISCOVERY CAVEAT (documented): this package's `package.json` `test` script is
-// a no-op echo, so `pnpm -r run test` (the root `pnpm test`) does NOT run this
-// spec. It runs under the ROOT vitest config (`pnpm vitest run` /
-// `pnpm test:coverage` / `pnpm vitest run packages/vue-vscode/src`), which does
-// NOT exclude `packages/vue-vscode/src`. Run it via the root vitest.
+// CANONICAL GATE: this package's `package.json` `test` script is a SURGICAL
+// single-file `vitest run src/carrier-routing-no-vue-gate.spec.ts`, so the root
+// `pnpm test` (`pnpm -r --parallel run test`) DOES run this guard. The
+// single-file target deliberately AVOIDS the package's pre-existing broken
+// specs (`packageManifest*.spec` import.meta-in-CJS, `ssrReadiness.spec`
+// enum-casing) that block a blanket `vitest run` for this package — they are
+// not part of the standard gate and stay out of it. The guard also runs under
+// the root vitest config directly (`pnpm vitest run packages/vue-vscode/src`).
 
 import { describe, expect, it } from "vitest";
 import { readdirSync, readFileSync, statSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";

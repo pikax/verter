@@ -270,6 +270,13 @@ jobs:
       - name: Run tests
         run: |
           pnpm --filter @verter/types exec vitest --run --reporter=default --reporter=junit --outputFile=../../test-results/vitest-junit.xml
+      - name: Carrier-routing no-Vue-gate guards (ts-plugin + vue-vscode)
+        # Surgical, by-path run of the two TS carrier-routing static guards so a
+        # re-introduced Vue-only carrier gate is caught in main CI. Explicit file
+        # paths deliberately AVOID the vue-vscode package's pre-existing broken
+        # specs (packageManifest*/ssrReadiness) that block a blanket package run.
+        run: |
+          pnpm vitest run packages/typescript-plugin/src/carrier-routing-no-vue-gate.spec.ts packages/vue-vscode/src/carrier-routing-no-vue-gate.spec.ts
       - name: Test report
         if: always()
         uses: dorny/test-reporter@v1

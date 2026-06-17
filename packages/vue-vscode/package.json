@@ -25,7 +25,7 @@
     "build": "node esbuild.mjs --production",
     "build:dev": "node esbuild.mjs",
     "watch": "node esbuild.mjs --watch",
-    "test": "echo 'verter-vscode has pre-existing spec tsc errors unrelated to audit-footprint (packageManifest.spec + ssrReadiness.spec); E2E runs under test:e2e — documented green-against-HEAD escape hatch per plan Commit 8'",
+    "test": "vitest run src/carrier-routing-no-vue-gate.spec.ts",
     "vscode:prepublish": "node esbuild.mjs --production",
     "prepare:e2e": "cargo build -p verter_lsp --manifest-path ../../Cargo.toml && pnpm --filter @verter/language-shared build && pnpm --filter @verter/typescript-plugin build && pnpm run build:dev && tsc -p tsconfig.test.json",
     "pretest:e2e": "pnpm run prepare:e2e",
