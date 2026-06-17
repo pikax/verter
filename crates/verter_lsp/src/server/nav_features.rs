@@ -3,16 +3,13 @@
 //! Free functions hosting the bodies of `impl LanguageServer for
 //! VerterLanguageServer` navigation feature methods (hover,
 //! completion, completion_resolve, goto_definition,
-//! goto_type_definition, references, prepare_rename, rename) plus
-//! the relocated `enrich_hover_with_provenance` inherent helper and
-//! the `append_markdown` private helper used by hover provenance
-//! enrichment.
+//! goto_type_definition, references, prepare_rename, rename). The
+//! hover-provenance enrichment helpers live in the
+//! `nav_features_hover_provenance` sibling module.
 //!
 //! The trait impl block stays in `mod.rs`; each trait method is a
 //! 1-line stub that delegates to the corresponding `handle_<method>`
 //! free function here.
-
-use std::sync::Arc;
 
 use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::ls_types::*;
@@ -37,6 +34,7 @@ use super::handler_guard::{block_in_place_if_available, HandlerGuard};
 use super::nav_features_completion_resolve::{
     completion_resolve_error, resolve_tsgo_auto_import_edits,
 };
+use super::nav_features_hover_provenance::enrich_hover_with_provenance;
 use super::server_utils::*;
 use super::VerterLanguageServer;
 
@@ -1454,132 +1452,4 @@ pub(super) async fn handle_rename(
     }
 
     Ok(verter_result)
-}
-
-/// Post-process a hover response with provenance enrichment:
-/// - If `hover.provenance` is disabled → return hover unchanged.
-/// - If the enrichment cache has a payload for `(canonical_id,
-///   position)` → append it to the hover body.
-/// - On cache miss → spawn a background blocking task to compute
-///   the payload via `VerterHost::get_component_meta_with_resolution`
-///   and insert it into the cache. The current hover call returns
-///   the legacy payload immediately.
-///
-/// The host must have `audit_enabled + footprint_capture` set for
-/// the background task to produce a useful payload; otherwise the
-/// task returns without populating the cache (graceful degradation).
-pub(super) fn enrich_hover_with_provenance(
-    server: &VerterLanguageServer,
-    uri: &Uri,
-    position: &Position,
-    hover: Option<Hover>,
-) -> Option<Hover> {
-    use std::sync::atomic::Ordering;
-    if !server.hover_provenance_enabled.load(Ordering::Relaxed) {
-        return hover;
-    }
-    let Some(canonical_id) = server.documents.get_canonical_id(uri) else {
-        return hover;
-    };
-    let key =
-        crate::features::hover_provenance::HoverProvenanceKey::new(canonical_id.clone(), *position);
-
-    if let Some(payload) = server.hover_provenance_cache.get(&key) {
-        return Some(append_markdown(hover, &payload.markdown));
-    }
-
-    // Cache miss — check whether the host can actually produce a
-    // useful payload BEFORE spawning. If `audit_enabled` or
-    // `footprint_capture` are off, `get_component_meta_with_resolution`
-    // would run to completion but `take_audit_record` would
-    // return None and the cache would stay empty. That means
-    // every subsequent hover would spawn another futile task.
-    // Short-circuit here so the user sees the legacy hover and
-    // no blocking-pool slots are burned on a capture-disabled
-    // host.
-    let host = server.documents.host_arc();
-    if !host.config().audit_enabled || !host.config().footprint_capture {
-        return hover;
-    }
-
-    // Cache miss + capture enabled — return the legacy payload
-    // immediately and spawn a background AuditedRequest to populate
-    // the cache for the next hover.
-    let cache = Arc::clone(&server.hover_provenance_cache);
-    let canonical_for_task = canonical_id;
-    tokio::task::spawn_blocking(move || {
-        let Some((_analysis, resolution)) =
-            host.get_component_meta_with_resolution(&canonical_for_task)
-        else {
-            return;
-        };
-        let Some(record) = host.take_audit_record(resolution.request_id) else {
-            return;
-        };
-        let markdown = crate::features::hover_provenance::render_provenance_markdown(&record);
-        cache.insert(
-            key,
-            crate::features::hover_provenance::HoverProvenancePayload { markdown },
-        );
-    });
-
-    hover
-}
-
-/// Append a markdown suffix to a hover body. Used by the hover
-/// provenance enrichment to tack on the "Provenance" section below
-/// the legacy hover content. Returns a constructed hover even if the
-/// input was `None` (the enrichment alone counts as useful output).
-fn append_markdown(hover: Option<Hover>, suffix: &str) -> Hover {
-    match hover {
-        Some(mut h) => {
-            let combined = match h.contents {
-                HoverContents::Markup(existing) => {
-                    let mut value = existing.value;
-                    value.push_str(suffix);
-                    HoverContents::Markup(MarkupContent {
-                        kind: existing.kind,
-                        value,
-                    })
-                }
-                HoverContents::Scalar(marked) => {
-                    let value = match marked {
-                        MarkedString::String(s) => s,
-                        MarkedString::LanguageString(ls) => ls.value,
-                    };
-                    HoverContents::Markup(MarkupContent {
-                        kind: MarkupKind::Markdown,
-                        value: format!("{value}{suffix}"),
-                    })
-                }
-                HoverContents::Array(items) => {
-                    let mut combined = String::new();
-                    for item in items {
-                        let part = match item {
-                            MarkedString::String(s) => s,
-                            MarkedString::LanguageString(ls) => ls.value,
-                        };
-                        if !combined.is_empty() {
-                            combined.push_str("\n\n");
-                        }
-                        combined.push_str(&part);
-                    }
-                    combined.push_str(suffix);
-                    HoverContents::Markup(MarkupContent {
-                        kind: MarkupKind::Markdown,
-                        value: combined,
-                    })
-                }
-            };
-            h.contents = combined;
-            h
-        }
-        None => Hover {
-            contents: HoverContents::Markup(MarkupContent {
-                kind: MarkupKind::Markdown,
-                value: suffix.to_string(),
-            }),
-            range: None,
-        },
-    }
 }
