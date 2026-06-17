@@ -47,7 +47,6 @@ const CARRIER_LITERAL_ALLOWLIST: &[&str] = &[
     // Import-resolution extension tables (resolution data, not
     // classification — `extension_priority` / project-coverage /
     // eval-extension lists stay carrier-aware by design).
-    "crates/verter_session/src/host_resolve/frontier_helpers.rs",
     "crates/verter_workspace/src/filesystem.rs",
     "crates/verter_workspace/src/memory.rs",
     "crates/verter_workspace/src/project_graph.rs",
@@ -57,7 +56,6 @@ const CARRIER_LITERAL_ALLOWLIST: &[&str] = &[
     // shrink as each surface moves behind the Vue carrier accessors).
     "crates/verter_session/src/host_manage.rs",
     "crates/verter_session/src/host_manage/prepared_decl.rs",
-    "crates/verter_session/src/host_resolve/frontier_engine.rs",
     "crates/verter_session/src/host_resolve/virtual_file_pipeline.rs",
     "crates/verter_session/src/resolver_core/component_meta/direct_macro.rs",
     // Workspace resolver `.vue`-aware routing (resolution data, not
