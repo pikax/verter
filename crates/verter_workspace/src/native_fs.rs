@@ -539,9 +539,16 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("target.txt");
+        // Canonicalize the tempdir ROOT so the expected values match the memo's
+        // `std::fs::canonicalize` output on hosts where the temp root is itself
+        // under a symlink (macOS: `/var` -> `/private/var`, `/tmp` -> `/private/tmp`).
+        // On Linux this is a no-op (the temp root is already canonical). The leaf
+        // paths the test files actually live at are joined onto this canonical
+        // root, so every expected path is symlink-agnostic.
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let target = root.join("target.txt");
         std::fs::write(&target, "real").unwrap();
-        let link = dir.path().join("link.txt");
+        let link = root.join("link.txt");
         symlink(&target, &link).unwrap();
         let link_canonical = link.to_string_lossy().replace('\\', "/");
         let target_norm = normalize_path_str(&target.to_string_lossy());
@@ -575,11 +582,17 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("target.txt");
+        // Canonicalize the tempdir ROOT so the expected values match the memo's
+        // `std::fs::canonicalize` output on hosts where the temp root is itself
+        // under a symlink (macOS: `/var` -> `/private/var`, `/tmp` -> `/private/tmp`).
+        // On Linux this is a no-op. Every test path is then joined onto the
+        // canonical root, keeping all expected paths symlink-agnostic.
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let target = root.join("target.txt");
         std::fs::write(&target, "real").unwrap();
-        let link = dir.path().join("link.txt");
+        let link = root.join("link.txt");
         symlink(&target, &link).unwrap();
-        let src = dir.path().join("src.txt");
+        let src = root.join("src.txt");
         std::fs::write(&src, "copied").unwrap();
         let link_canonical = link.to_string_lossy().replace('\\', "/");
         let src_canonical = src.to_string_lossy().replace('\\', "/");
