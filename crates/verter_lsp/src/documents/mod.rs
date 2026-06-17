@@ -1280,6 +1280,72 @@ mod tests {
         );
     }
 
+    /// A document EDIT REBUILDS the position-mapper `Arc` rather than mutating
+    /// the existing pointee: after `did_change` recompiles a carrier whose TSX
+    /// changed, `get_position_mapper` hands out an `Arc` that is a FRESH
+    /// allocation — NOT `Arc::ptr_eq` to the pre-edit handle.
+    ///
+    /// This is the companion to the read-path share test: within one document
+    /// version the `Arc` is shared (cheap handle clones), but ACROSS an edit the
+    /// projection is REPLACED whole (`rebuild_carrier` wraps a fresh
+    /// `PositionMapper` in a new `Arc::new`, then overwrites `entry.projection`).
+    ///
+    /// Discriminating: the pre-edit and post-edit handles are captured and
+    /// compared by allocation address. If a future refactor mutated the mapper
+    /// in place behind the SAME `Arc` (e.g. `Arc::get_mut` to overwrite the
+    /// source map + lookup tables) instead of installing a fresh `Arc`, the two
+    /// handles would alias and `Arc::ptr_eq` would be TRUE — failing this
+    /// assertion. The edit changes the `<script>` body so the recompiled TSX
+    /// genuinely differs (`update.changed`), forcing the rebuild branch rather
+    /// than the keep-prior-projection fallback.
+    #[test]
+    fn did_change_installs_a_fresh_position_mapper_arc() {
+        let host = Arc::new(verter_session::VerterHost::new_standalone(
+            verter_session::HostConfig::default(),
+        ));
+        let registry = DocumentRegistry::new(host);
+        let uri: Uri = "file:///x/Comp.svelte".parse().expect("uri");
+
+        let _ = registry.did_open(&TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "svelte".to_string(),
+            version: 1,
+            text: "<script lang=\"ts\">let count = 0;</script>\n<div>{count}</div>".to_string(),
+        });
+
+        // Capture the pre-edit mapper handle's allocation.
+        let before = registry
+            .get_position_mapper(&uri)
+            .expect("a .svelte carrier must expose a source-map mapper before the edit");
+        let ProviderPositionMapper::SourceMap(before_arc) = &before else {
+            panic!("a .svelte carrier mapper must be the SourceMap projection");
+        };
+
+        // Edit the document: change the script body so the recompiled IDE TSX
+        // genuinely differs (drives `update.changed` → the rebuild branch).
+        let _ = registry.did_change(
+            &uri,
+            2,
+            "<script lang=\"ts\">let total = 100; let extra = 1;</script>\n<div>{total}</div>",
+        );
+
+        // The post-edit read must hand out a DIFFERENT allocation: the rebuild
+        // installed a fresh `Arc`, it did not mutate the old pointee in place.
+        let after = registry
+            .get_position_mapper(&uri)
+            .expect("a .svelte carrier must expose a source-map mapper after the edit");
+        let ProviderPositionMapper::SourceMap(after_arc) = &after else {
+            panic!("a .svelte carrier mapper must remain the SourceMap projection");
+        };
+
+        assert!(
+            !std::ptr::eq(before_arc.as_ref(), after_arc.as_ref()),
+            "a doc edit must REPLACE the position-mapper Arc with a fresh \
+             allocation (rebuild installs a new Arc; it must not mutate the \
+             pre-edit pointee in place)"
+        );
+    }
+
     /// A `.svelte.ts` rune module is NOT a carrier; did_open must build a
     /// SELF-FILE projection whose mapper offsets the user-source line by the
     /// rune prelude line count. Without the offset wiring, a source position
