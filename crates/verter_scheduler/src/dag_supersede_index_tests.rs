@@ -104,6 +104,29 @@ fn index_node_tokens(dag: &SchedulerDag, c: &str) -> BTreeSet<SubmissionToken> {
         .unwrap_or_default()
 }
 
+/// The node-token full scan WITHOUT the `!n.cancelled` filter — every node
+/// still present in `nodes` for `c`, cancelled or not.
+///
+/// On the current tree `cancel` removes the node from `nodes` in the SAME call
+/// that sets `cancelled = true`, so a cancelled node never lingers and this
+/// no-filter scan equals both `scan_node_tokens` and the reverse index. The
+/// no-filter form exists to catch a FUTURE refactor that splits "mark
+/// cancelled" from "remove node": a left-behind `cancelled` tombstone in
+/// `nodes` would be hidden by the `!n.cancelled` filter (masking the index
+/// divergence) but is SEEN here, so this oracle fails if the reverse index and
+/// `nodes` ever disagree on the set of present tokens.
+fn scan_node_tokens_no_cancel_filter(dag: &SchedulerDag, c: &str) -> BTreeSet<SubmissionToken> {
+    dag.nodes
+        .iter()
+        .filter(|(_, n)| match &n.identity {
+            WorkNodeIdentity::FileStage { canonical, .. }
+            | WorkNodeIdentity::Artifact { canonical, .. } => canonical.as_ref() == c,
+            WorkNodeIdentity::CacheNode { .. } => false,
+        })
+        .map(|(tok, _)| *tok)
+        .collect()
+}
+
 fn scan_blocker_gens(dag: &SchedulerDag, c: &str) -> BTreeSet<u64> {
     dag.artifact_blocker_deps
         .keys()
@@ -512,4 +535,81 @@ fn supersede_node_candidate_set_is_per_canonical_not_total() {
         let f = format!("/u{i}.vue");
         assert_index_matches_scan(&dag, &f);
     }
+}
+
+/// Supersede keeps the node reverse index in lock-step with `nodes` even under
+/// the STRICTER no-filter oracle: every token the reverse index lists for the
+/// canonical is still present in `nodes`, and vice-versa, with NO reliance on
+/// the `!n.cancelled` filter to paper over a lingering tombstone.
+///
+/// Discriminating two ways:
+/// 1. A freshly submitted node is present in the no-filter scan (the oracle
+///    actually reads `nodes`, it is not vacuously empty).
+/// 2. After supersede cancels the stale generations, the no-filter scan equals
+///    the reverse index. `cancel` removes the node in the same call it sets
+///    `cancelled = true`, so the stale token is gone from BOTH; were a future
+///    refactor to mark-without-removing, the tombstone would survive in `nodes`
+///    (the no-filter scan would still list it) while the reverse index dropped
+///    it — and this equality would FAIL. The `!n.cancelled`-filtered oracle
+///    would NOT catch that split, which is exactly why the no-filter form
+///    exists.
+#[test]
+fn supersede_node_index_matches_no_filter_scan() {
+    let mut dag = SchedulerDag::new();
+    let target = canonical("/target.vue");
+
+    let stale_src = file_stage("/target.vue", 1, FileStageKey::Source);
+    let stale_art = artifact("/target.vue", 1, 9);
+    let live_src = file_stage("/target.vue", 2, FileStageKey::Source);
+    let unrelated = file_stage("/other.vue", 1, FileStageKey::Source);
+    let stale_src_tok = submit_node(&mut dag, stale_src.clone(), WorkKind::Load);
+    submit_node(&mut dag, stale_art, WorkKind::Artifact);
+    let live_tok = submit_node(&mut dag, live_src, WorkKind::Load);
+    submit_node(&mut dag, unrelated, WorkKind::Load);
+
+    // (1) Pre-supersede: the no-filter scan SEES the live nodes — it reads
+    // `nodes`, so it is not trivially empty. All three target tokens (two stale
+    // + one live) are present in both the index and the no-filter scan.
+    let pre = scan_node_tokens_no_cancel_filter(&dag, "/target.vue");
+    assert!(
+        pre.contains(&stale_src_tok) && pre.contains(&live_tok),
+        "the no-filter scan must read live tokens out of `nodes` pre-supersede",
+    );
+    assert_eq!(
+        index_node_tokens(&dag, "/target.vue"),
+        pre,
+        "pre-supersede the reverse index equals the no-filter scan",
+    );
+
+    dag.supersede_old_file_generations(&target, 2);
+
+    // (2) Post-supersede: the reverse index equals the no-filter scan. The
+    // stale tokens are gone from BOTH (cancel removed the node in lock-step);
+    // only the live token remains. A mark-without-remove split would leave a
+    // tombstone in the no-filter scan and break this equality.
+    let post = scan_node_tokens_no_cancel_filter(&dag, "/target.vue");
+    assert_eq!(
+        index_node_tokens(&dag, "/target.vue"),
+        post,
+        "post-supersede the reverse index must EQUAL the no-filter full scan \
+         (no cancelled tombstone may linger in `nodes` behind the filter)",
+    );
+    assert!(
+        !post.contains(&stale_src_tok),
+        "the cancelled stale token must be absent from the no-filter scan \
+         (cancel removed it from `nodes`, not merely flagged it)",
+    );
+    assert_eq!(
+        post,
+        BTreeSet::from([live_tok]),
+        "only the live gen=2 token survives in `nodes` after supersede",
+    );
+    // Cross-check: the filtered oracle agrees on the current tree (both report
+    // the same set because cancel removes). The no-filter form is the stricter
+    // guard that would diverge first under a future mark-without-remove split.
+    assert_eq!(
+        scan_node_tokens(&dag, "/target.vue"),
+        post,
+        "filtered and no-filter scans agree on the current tree",
+    );
 }
