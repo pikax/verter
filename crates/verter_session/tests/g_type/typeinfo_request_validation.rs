@@ -632,6 +632,11 @@ fn framework_surface_envelope(
     }
 }
 
+// PROVISIONAL — OWNED BY block U8. The schema-3 acceptance pinned here is
+// provisional: block U8 bumps `SemanticTypeGraph.schema_version` and retags
+// `FrameworkSurfacePayload.graph` to `TypeInfoGraphPayload`, at which point U8
+// re-versions this acceptance. Until then it pins the current wire surface; the
+// specific version number is not the permanent contract.
 #[test]
 fn framework_surface_operation_accepts_schema_three() {
     validate_type_info_graph_request(&framework_surface_envelope(

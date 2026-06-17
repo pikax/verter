@@ -2698,6 +2698,18 @@ fn no_scheduler_backed_workspace_shim_in_session_src() {
 // Future commits that add a new cache-shaped field on `VerterHost` MUST
 // either rehome the field into `ProjectTypeStore` or extend the
 // allow-list with a phase-report citation justifying the exception.
+//
+// SCOPE GAP (TODO U10): `is_cache_shape` inspects only the TOP-LEVEL rendered
+// field type, so a cache family whose `DashMap`s are nested inside a named
+// struct held behind `Arc<...>` is NOT surveyed. Two such off-`ProjectTypeStore`
+// families exist today and pass this guard without an allow-list entry:
+//   - `framework_script_caches: Arc<FrameworkScriptCaches>` (a content-addressed
+//     candidate store + a fact store), and
+//   - the `FrameworkSurfaceStore`s reached through
+//     `framework_registry: Arc<FrameworkAdapterRegistry>`.
+// Both are fact-validated (correct today). They are PROVISIONAL and are
+// consolidated onto `ProjectTypeStore` at block U10; when rehomed, this gap
+// closes (or the deepened survey added by U10 covers them directly).
 
 /// The Phase-8 allow-list for `no_off_store_host_caches`. Each entry is a
 /// `VerterHost` cache-shape field that Phase 6b classified as
@@ -8718,7 +8730,9 @@ fn no_direct_oxc_parser_calls_outside_scheduler_path() {
         // provider's syntax-only candidate capture over a fresh OXC program. The
         // `/framework-adapters` CRITICAL rule explicitly permits the
         // syntax-capture half to touch OXC (it MUST NOT resolve imports or read
-        // capability bits); it populates no host cache.
+        // capability bits). Its result populates ONLY the content-addressed
+        // `FrameworkScriptCandidateStore` (a syntax-candidate artifact cache) —
+        // never a type-resolution cache.
         ("crates/verter_session/src/framework/script_facts.rs", 1),
         // The scheduler-path parse module itself, four counted parse
         // funnels: `parse_non_sfc_snapshot` is the scheduler snapshot
@@ -15596,6 +15610,13 @@ mod single_resolution_engine_guards {
 
     // -----------------------------------------------------------------------
     // Guard 3: `type_surface` module path — the OXC resolver engine module.
+    //
+    // PROVISIONAL ledger — NOT a permanent invariant. This is a SHRINKING
+    // ledger: every entry is doomed-engine use that later blocks remove. It
+    // shrinks toward the empty floor and is DELETED when blocks S5.B11/B12 + U6
+    // delete the `type_surface` / `resolve_type` eager OXC engine. Do not treat
+    // a green run here as endorsement of these call sites; do not RAISE a count
+    // to admit new engine use.
     //
     // `type_surface` is the eager OXC resolution engine module
     // `verter_parser::utils::oxc::script::type_surface` (referenced as

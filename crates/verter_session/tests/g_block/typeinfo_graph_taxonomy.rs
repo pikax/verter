@@ -284,6 +284,19 @@ fn type_info_graph_response_taxonomy_proto_ts_parity() {
     assert_proto_ts_parity("TypeInfoGraphResponse", "TypeInfoGraphResponse", "kind", 3);
 }
 
+// ---------------------------------------------------------------------------
+// PROVISIONAL framework-surface wire pins — OWNED BY block U8.
+//
+// The field-number / schema-version pins below (the `framework_surface = 3`
+// response arm, the `FrameworkSurface*` field-number-stable assertions, the
+// schema-3 acceptance) are PROVISIONAL. Block U8 bumps
+// `SemanticTypeGraph.schema_version` and retags `FrameworkSurfacePayload.graph`
+// to `TypeInfoGraphPayload`; when it does, these pins are re-tagged/re-versioned
+// by U8 (the new tags go through `reserved`, never recycled). Until U8 lands they
+// pin the current wire surface; do not treat the specific tag/version numbers
+// here as the permanent contract.
+// ---------------------------------------------------------------------------
+
 #[test]
 fn framework_tag_variant_set_is_unchanged() {
     // NEGATIVE pin: NO new `FrameworkTag` values land in this program —

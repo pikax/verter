@@ -260,6 +260,13 @@ impl FrameworkScriptFactStore {
 /// The host-owned caches the resolved-validation half writes through.
 ///
 /// Owned by the host; the registry owns the active-provider index instead.
+///
+/// PROVISIONAL: this cache pair is a host field OUTSIDE the single
+/// `ProjectTypeStore`. Both stores are fact-validated — the candidate store is
+/// content-addressed and [`FrameworkScriptFactStore::publish_if_cacheable`]
+/// admits only `Cacheable` results (ReturnOnly on overflow) — so the logic is
+/// correct today, but the pair is a temporary off-`ProjectTypeStore` cache to be
+/// consolidated onto `ProjectTypeStore` at block U10.
 #[derive(Debug, Default)]
 pub struct FrameworkScriptCaches {
     /// The content-addressed candidate store.

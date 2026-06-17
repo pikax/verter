@@ -95,9 +95,19 @@ pub trait ErasedFrameworkSurfaceStore: Send + Sync {
 /// The generic, content-addressed framework-surface DTO store.
 ///
 /// `DashMap`-backed so concurrent cold requests for distinct keys do not
-/// serialize; concurrent cold requests for the SAME key collapse onto the
-/// first writer's value via the normal `entry` API at the call site. Hands out
-/// immutable `Arc` values.
+/// serialize. Admission is content-addressed and fact-validated; there is NO
+/// in-flight singleflight collapse today — the call sites read via
+/// [`Self::get_with_view`] then publish via [`Self::insert`], so two concurrent
+/// cold callers for the SAME key both materialize and the last writer wins (the
+/// values are content-equivalent, so this is safe; see [`Self::insert`]). True
+/// singleflight is a follow-up when this store is consolidated onto
+/// `ProjectTypeStore` (block U10). Hands out immutable `Arc` values.
+///
+/// PROVISIONAL: this store lives on the framework registry row, OUTSIDE the
+/// single `ProjectTypeStore`. It is fact-validated (content-addressed admission
+/// gated at the call sites), so it is correct today, but it is a temporary
+/// off-`ProjectTypeStore` cache to be consolidated onto `ProjectTypeStore` at
+/// block U10 (which also adds true in-flight singleflight).
 #[derive(Debug)]
 pub struct FrameworkSurfaceStore<K, B>
 where

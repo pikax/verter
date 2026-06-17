@@ -660,6 +660,10 @@ pub struct VerterHost {
     /// Empty for every adapter in this program (no production provider
     /// registers; the fixture provider exercises the path). See
     /// `framework::script_facts::FrameworkScriptCaches`.
+    ///
+    /// PROVISIONAL: a fact-validated cache family OUTSIDE the single
+    /// `ProjectTypeStore`, to be consolidated onto `ProjectTypeStore` at block
+    /// U10.
     pub(crate) framework_script_caches:
         std::sync::Arc<crate::framework::script_facts::FrameworkScriptCaches>,
     /// Host-owned CPU pool for every host batch API's outer coordinator
