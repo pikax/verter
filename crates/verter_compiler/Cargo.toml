@@ -14,7 +14,7 @@ categories = ["compilers", "template-engine"]
 [features]
 bench = []
 dhat-heap = []
-# Gates the live-compiler Svelte conformance oracle harness
+# Gates the Svelte reference-drift / live-compiler harness
 # (`tests/svelte_oracle_harness.rs`), including the live golden-vs-pinned-compiler
 # `--check` drift gate. EXCLUDED from the default canonical run
 # (`cargo nextest run --workspace` + `cargo test -p verter_session --tests`) so
