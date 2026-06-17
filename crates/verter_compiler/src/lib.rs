@@ -32,10 +32,13 @@ pub mod framework_common;
 
 pub mod svelte;
 
-// Reusable Svelte conformance-oracle comparison engine (the normalized topology
-// schema + the identity/structure/helper-topology diff). Gated behind
-// `svelte-oracle` so the DEFAULT build never compiles it; every conformance
+// Reusable Svelte golden topology-diff comparison engine (the normalized
+// topology schema + the identity/structure/helper-topology diff). Gated behind
+// `svelte-oracle` so the DEFAULT build never compiles it; every golden-diff
 // consumer imports the SAME diff engine from here rather than its own fork.
+// Today the consumer is the reference-drift gate (committed goldens vs the
+// pinned Svelte compiler); a Verter-output conformance consumer is a follow-up
+// for when the native Svelte codegen lands.
 #[cfg(feature = "svelte-oracle")]
 pub mod svelte_oracle;
 

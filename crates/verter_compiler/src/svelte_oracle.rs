@@ -1,12 +1,18 @@
-//! Reusable Svelte conformance-oracle comparison engine.
+//! Reusable Svelte golden topology-diff comparison engine.
 //!
 //! The NORMALIZED topology golden schema (`NormalizedGolden`), the field-precise
 //! divergence enum (`TopologyDivergence`), the structure + helper-call TOPOLOGY
 //! diff (`topology_diff`), and the golden loaders (`load_golden` /
-//! `load_all_goldens`) are the shared seam every conformance consumer uses to
-//! diff a normalized candidate against a committed golden. The engine is
-//! importable from one module so each consumer runs the SAME identity +
-//! topology comparison rather than its own fork.
+//! `load_all_goldens`) are the shared seam every consumer uses to diff a
+//! normalized candidate against a committed golden. The engine is importable
+//! from one module so each consumer runs the SAME identity + topology comparison
+//! rather than its own fork.
+//!
+//! Today the sole consumer is the Svelte reference-drift gate
+//! (`tests/svelte_oracle_harness.rs`), which diffs the committed goldens against
+//! the PINNED official Svelte compiler. A Verter-side conformance consumer that
+//! diffs VERTER's own emitted output against these goldens is a follow-up for
+//! when the native Svelte codegen lands (`svelte-native-compiler-plan.md`).
 //!
 //! This module is gated behind the `svelte-oracle` Cargo feature, so the DEFAULT
 //! canonical run never compiles it; the feature is excluded from the default
@@ -55,8 +61,8 @@ pub struct CssTopology {
 }
 
 /// The NORMALIZED helper-topology golden — structure + helper-call topology,
-/// NOT bytes. This is the conformance oracle unit a normalized candidate is
-/// diffed against.
+/// NOT bytes. This is the golden unit a normalized candidate is diffed against
+/// (today: the committed goldens vs the pinned Svelte compiler).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct NormalizedGolden {
     pub slug: String,
@@ -77,7 +83,7 @@ pub struct NormalizedGolden {
 }
 
 // ---------------------------------------------------------------------------
-// The topology diff engine (the shared seam every conformance consumer uses).
+// The topology diff engine (the shared seam every golden-diff consumer uses).
 // ---------------------------------------------------------------------------
 
 /// A single identity / structural / helper-topology divergence between two

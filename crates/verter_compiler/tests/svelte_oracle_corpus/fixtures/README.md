@@ -1,6 +1,9 @@
-# Svelte conformance-oracle corpus
+# Svelte reference-drift corpus
 
-Vendored `.svelte` fixtures for the native-Svelte compiler conformance oracle.
+Vendored `.svelte` fixtures for the Svelte reference-drift gate: the committed
+goldens are pinned against the official Svelte compiler's output, so a golden
+that drifts from the pinned reference fails. (A Verter-output conformance use of
+these same goldens is a follow-up for when the native Svelte codegen lands.)
 
 ## Provenance
 
@@ -37,8 +40,9 @@ One directory per feature family:
 ## Goldens
 
 The committed goldens under `../goldens/` are the NORMALIZED helper-topology
-oracle (structure + helper-call topology, NOT bytes), regenerated mechanically
-from the pinned `svelte@5.56.3` compiler. They are NEVER hand-edited.
+reference (structure + helper-call topology, NOT bytes), regenerated
+mechanically from the pinned `svelte@5.56.3` compiler. They are NEVER
+hand-edited.
 
 Regenerate / verify:
 

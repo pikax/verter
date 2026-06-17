@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 /**
- * Generator — Svelte helper-topology conformance goldens.
+ * Generator — Svelte helper-topology reference goldens.
  *
  * Runs the PINNED official `svelte@5.56.3` compiler over the vendored
  * `.svelte` corpus and writes committed, NORMALIZED golden files that pin
- * STRUCTURE + helper-call TOPOLOGY — NOT bytes. The goldens are the
- * conformance oracle the native-Svelte runtime codegen diffs its emitted
- * output against; byte identity is the bar nowhere.
+ * STRUCTURE + helper-call TOPOLOGY — NOT bytes. The goldens are the pinned
+ * Svelte reference the drift gate compares against; byte identity is the bar
+ * nowhere. (When the native-Svelte runtime codegen lands it will diff its own
+ * emitted output against these same goldens — a follow-up conformance use.)
  *
  * This mirrors the `scripts/gen-corpus-audit-tests.mjs` and
  * `scripts/generate-svelte-bind-contract.mjs` patterns: one idempotent
@@ -47,7 +48,7 @@
  *
  * Whitespace, indentation, and local variable-name noise (`text`, `text_1`,
  * `node`, `var fragment`, …) are intentionally NOT pinned — they are formatting
- * the conformance bar does not require. Helper FAMILIES, the import set, the
+ * the drift bar does not require. Helper FAMILIES, the import set, the
  * export shape, the template skeletons, the scope-hash topology, and the
  * per-backend decisions ARE pinned.
  *

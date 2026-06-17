@@ -1,26 +1,32 @@
-//! Feature-gated Svelte conformance oracle harness (live-compiler).
+//! Feature-gated Svelte reference-drift gate (live-compiler).
 //!
 //! This harness is GATED behind the `svelte-oracle` Cargo feature so the
 //! DEFAULT canonical run (`cargo nextest run --workspace` + `cargo test -p
 //! verter_session --tests`) NEVER invokes the live svelte compiler — the
 //! default suite checks the COMMITTED goldens only (see
 //! `crates/verter_compiler/tests/svelte_goldens_in_sync.rs`). Run the live
-//! oracle explicitly:
+//! drift gate explicitly:
 //!
 //! ```bash
 //! cargo test -p verter_compiler --features svelte-oracle \
 //!   --test svelte_oracle_harness
 //! ```
 //!
-//! ## What it does (the conformance oracle)
+//! ## What it does (Svelte reference-drift gate)
 //!
-//! This is the conformance ORACLE harness. The NORMALIZED structure +
-//! helper-call-TOPOLOGY diff engine (`topology_diff`), the `NormalizedGolden`
-//! schema, and the golden loaders are the REUSABLE comparison engine, housed in
-//! the importable `verter_compiler::svelte_oracle` module (gated behind the
-//! same `svelte-oracle` feature) so every conformance consumer diffs a
-//! normalized candidate against a committed golden through the SAME engine —
-//! the diff engine is the shared seam, one engine rather than a fork per
+//! This pins the committed goldens against the PINNED official Svelte compiler:
+//! every comparison here is Svelte-reference-vs-Svelte-reference (committed
+//! goldens vs the pinned `compiler.compile` output), so it catches a golden that
+//! has DRIFTED from the pinned reference. It is NOT yet a Verter-conformance
+//! gate — there is no native Svelte codegen to diff against (see the follow-up
+//! note below).
+//!
+//! The NORMALIZED structure + helper-call-TOPOLOGY diff engine (`topology_diff`),
+//! the `NormalizedGolden` schema, and the golden loaders are the REUSABLE
+//! comparison engine, housed in the importable `verter_compiler::svelte_oracle`
+//! module (gated behind the same `svelte-oracle` feature) so every drift consumer
+//! diffs a normalized candidate against a committed golden through the SAME
+//! engine — the diff engine is the shared seam, one engine rather than a fork per
 //! consumer. This harness imports it and adds the live-compiler half:
 //!
 //! 1. Loads every committed golden (`load_golden`).
@@ -34,6 +40,13 @@
 //! The diff is normalized STRUCTURE + helper-call TOPOLOGY (helper families, the
 //! call sequence, the import set, the export shape, the template skeletons, the
 //! scope-hash topology), NOT bytes.
+//!
+//! TODO(svelte-native-conformance): once the native Svelte runtime codegen lands
+//! (`svelte-native-compiler-plan.md`), add a Verter-side conformance comparison
+//! that normalizes VERTER's emitted output and runs `topology_diff(golden,
+//! verter_output)` against these same committed goldens — at which point this
+//! becomes a true conformance oracle as well as a reference-drift gate. Until
+//! then this file ONLY pins golden-vs-pinned-compiler drift.
 #![cfg(feature = "svelte-oracle")]
 
 use std::collections::BTreeMap;

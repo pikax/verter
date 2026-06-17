@@ -1,4 +1,4 @@
-//! Svelte conformance-oracle hermetic guards.
+//! Svelte reference-drift hermetic guards.
 //!
 //! These guards run in the DEFAULT canonical suite and are FULLY HERMETIC:
 //! they read only committed files (the goldens + the lockfile + the generator

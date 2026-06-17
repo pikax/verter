@@ -232,10 +232,9 @@ real_provider_test!(
         }
 
         // --- Spread-path $event: the SECOND of a duplicate `@click` routes through
-        // the spread path. JSX contextual typing cannot flow through a spread, so
-        // this is the case that used to leave `$event` as `any` (the eventCallbacks
-        // helper). With the explicit payload annotation it must resolve to the real
-        // MouseEvent. `@click="handle($event.screenX)"` ---
+        // the spread path. JSX contextual typing cannot flow through a spread, so the
+        // codegen annotates the spread `$event` with its explicit payload type; it
+        // resolves to the real MouseEvent, not `any`. `@click="handle($event.screenX)"` ---
         let pos = session.find_position(&uri, "$event.screenX", 7); // after `$event.`
         let labels = session.completion_labels(&uri, pos, Some(".")).await;
         assert!(
@@ -296,13 +295,11 @@ real_provider_test!(
         // Component event typing depends on the TypeProvider resolving the imported
         // component's instance type (`InstanceType<typeof Binding>["$props"][...]`). That
         // requires the consumer's import (`'./EmitChild.vue'` → `'./EmitChild.vue.ts'`) to
-        // resolve to a materialized component `.vue.ts` with a typed default export. Probe
-        // it first on the local-component spread `$event`: if the provider cannot resolve
-        // the component instance in this environment (it returns no members), skip the
-        // component rows with a warning rather than failing — the unresolved piece is
-        // host-side instance-type materialization, not the template codegen, which is
-        // exhaustively pinned by the `ide/template/tests.rs` matrix and the `compile_tests`
-        // end-to-end rows.
+        // resolve to a materialized component `.vue.ts` with a typed default export. The
+        // warm-up probe above already gated on provider readiness, so the local-component
+        // spread `$event` MUST resolve here — fail closed if it does not, so a regression
+        // that drops the component instance-type resolution FAILS this test instead of
+        // vacuously skipping past the payload assertions below.
         let local_dollar = session
             .completion_labels(
                 &uri,
@@ -310,14 +307,12 @@ real_provider_test!(
                 Some("."),
             )
             .await;
-        if local_dollar.is_empty() {
-            eprintln!(
-                "skipping component event-arg rows: TypeProvider did not resolve the imported \
-                 component instance type in this environment (host-side materialization gap; \
-                 the spread-event codegen is pinned by the ide/template matrix and compile_tests)"
-            );
-            return;
-        }
+        assert!(
+            !local_dollar.is_empty(),
+            "the local-component spread $event completion list must be non-empty (the \
+             TypeProvider resolved the imported component instance type); an empty list is \
+             the instance-type resolution regression this row targets, got: {local_dollar:?}"
+        );
 
         // --- Local component, DUPLICATE `@pick`: the second handler is a spread key, so
         // its `$event` is the handler payload `{ pickId, pickLabel }` typed via
