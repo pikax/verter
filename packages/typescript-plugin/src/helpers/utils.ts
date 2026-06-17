@@ -1,3 +1,4 @@
+import path from "node:path";
 import { VIRTUAL_FILE_NAMING, type VirtualPathPolicy } from "../generated/virtual-file-naming";
 
 /**
@@ -244,7 +245,12 @@ export function cleanupCarrierVirtualImportPath(
   fileExists?: (candidate: string) => boolean,
 ): string {
   let result = text;
-  for (const { pattern, carrierExt, virtualSuffix, ambiguous } of CARRIER_VIRTUAL_SUFFIX_STRIPPERS) {
+  for (const {
+    pattern,
+    carrierExt,
+    virtualSuffix,
+    ambiguous,
+  } of CARRIER_VIRTUAL_SUFFIX_STRIPPERS) {
     if (!ambiguous) {
       // Unambiguous (Vue `.vue.ts` / `.vue.d.ts` / `.vue.__verter_test.ts`):
       // a SHAPE match is always a virtual file — strip directly.
@@ -285,6 +291,36 @@ function stripAmbiguousSuffixInToken(
   }
   const backing = token.slice(0, token.length - virtualSuffix.length);
   return fileExists(backing) ? backing : token;
+}
+
+/**
+ * Wrap a host existence predicate so a NON-ABSOLUTE backing candidate is
+ * resolved against `path.dirname(containingFile)` before the underlying check.
+ *
+ * The backing-aware strippers ([`cleanupCarrierVirtualImportPath`],
+ * [`stripVueVirtualSuffixBackingAware`]) reconstruct a backing carrier path
+ * straight from the path token they are stripping — which is frequently
+ * RELATIVE (a completion edit / display token `./Comp.svelte.ts` from a
+ * containing file `/app/Parent.ts`). The underlying TS host `fileExists` only
+ * recognises host-rooted / absolute paths, so a raw `fileExists("./Comp.svelte")`
+ * answers `false` and the AMBIGUOUS Svelte virtual suffix is left un-stripped —
+ * a Svelte-vs-Vue parity gap (Vue strips by shape, never needing the backing
+ * check). Resolving the relative candidate against the containing file's
+ * directory restores the backing proof, while the caller (the stripper) still
+ * returns the ORIGINAL relative text minus the suffix — never an absolutized
+ * path. An already-absolute candidate is passed through unchanged.
+ *
+ * This is a pure predicate wrapper; it never reads or normalises the text being
+ * cleaned, so the unambiguous-Vue shape-strip path is untouched (it never calls
+ * `fileExists` at all).
+ */
+export function containingFileAwareExists(
+  fileExists: (candidate: string) => boolean,
+  containingFile: string,
+): (candidate: string) => boolean {
+  const base = path.dirname(containingFile);
+  return (candidate: string): boolean =>
+    fileExists(path.isAbsolute(candidate) ? candidate : path.resolve(base, candidate));
 }
 
 export function isLikelyTestFileName(fileName: string): boolean {

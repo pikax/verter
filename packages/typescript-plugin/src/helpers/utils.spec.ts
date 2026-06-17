@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   cleanupCarrierVirtualImportPath,
+  containingFileAwareExists,
   getVueVirtualFileInfo,
   isLikelyTestFileName,
   isRelativeVue,
@@ -201,7 +202,9 @@ describe("cleanupCarrierVirtualImportPath", () => {
   it("strips an AMBIGUOUS .svelte.ts ONLY when the backing .svelte carrier exists", () => {
     // Backing carrier present ⇒ proven virtual ⇒ strip.
     const backingExists = (p: string) => p === "./Comp.svelte";
-    expect(cleanupCarrierVirtualImportPath("./Comp.svelte.ts", backingExists)).toBe("./Comp.svelte");
+    expect(cleanupCarrierVirtualImportPath("./Comp.svelte.ts", backingExists)).toBe(
+      "./Comp.svelte",
+    );
     expect(
       cleanupCarrierVirtualImportPath('import Comp from "./Comp.svelte.ts"', backingExists),
     ).toBe('import Comp from "./Comp.svelte"');
@@ -246,5 +249,60 @@ describe("stripVueVirtualSuffixBackingAware (F2 rune-module disambiguation)", ()
     );
     // A plain module with no virtual shape passes through normalised.
     expect(stripVueVirtualSuffixBackingAware("/src/util.ts", () => true)).toBe("/src/util.ts");
+  });
+});
+
+describe("containingFileAwareExists (relative-backing resolution at the cleanup call sites)", () => {
+  // The underlying TS host `fileExists` only recognises host-rooted / absolute
+  // paths — it answers `false` to a relative `./Comp.svelte`. A completion
+  // edit / display token is FREQUENTLY relative (`./Comp.svelte.ts` from a
+  // containing file `/app/Parent.ts`). The wrapper resolves a non-absolute
+  // candidate against `path.dirname(containingFile)` before delegating, so the
+  // backing proof succeeds and the AMBIGUOUS Svelte virtual suffix strips —
+  // closing the Svelte-vs-Vue parity gap — while the cleanup still returns the
+  // ORIGINAL (relative) text minus the suffix, never an absolutized path.
+  //
+  // The host predicate below is FAITHFUL to the real `_fileExists`: it only
+  // knows the ABSOLUTE backing `/app/Comp.svelte`, never the relative spelling.
+  const ONLY_ABS_COMP_SVELTE = (p: string) => p === "/app/Comp.svelte";
+
+  it("strips a RELATIVE virtual ./Comp.svelte.ts when the backing /app/Comp.svelte exists", () => {
+    // RED pre-fix: the raw host predicate sees `fileExists("./Comp.svelte")` →
+    // false (unresolved), so the token is left as `./Comp.svelte.ts`.
+    const exists = containingFileAwareExists(ONLY_ABS_COMP_SVELTE, "/app/Parent.ts");
+    expect(cleanupCarrierVirtualImportPath("./Comp.svelte.ts", exists)).toBe("./Comp.svelte");
+    expect(cleanupCarrierVirtualImportPath('import Comp from "./Comp.svelte.ts"', exists)).toBe(
+      'import Comp from "./Comp.svelte"',
+    );
+  });
+
+  it("leaves a RELATIVE real rune ./store.svelte.ts unchanged when no backing exists (safety)", () => {
+    // The safety invariant: a real `./store.svelte.ts` rune module (no
+    // `/app/store.svelte` carrier) must NEVER be corrupted into `./store.svelte`
+    // even though the candidate is now resolved against the containing dir.
+    const exists = containingFileAwareExists(ONLY_ABS_COMP_SVELTE, "/app/Parent.ts");
+    expect(cleanupCarrierVirtualImportPath("./store.svelte.ts", exists)).toBe("./store.svelte.ts");
+    expect(
+      cleanupCarrierVirtualImportPath('import { count } from "./store.svelte.ts"', exists),
+    ).toBe('import { count } from "./store.svelte.ts"');
+  });
+
+  it("strips a RELATIVE ./Comp.vue.ts by SHAPE regardless of backing (Vue unchanged)", () => {
+    // Unambiguous Vue suffixes strip by shape — the containing-file-aware
+    // predicate must NOT accidentally backing-gate them. A host that knows NO
+    // backing at all still strips `./Comp.vue.ts` → `./Comp.vue`.
+    const noBacking = containingFileAwareExists(() => false, "/app/Parent.ts");
+    expect(cleanupCarrierVirtualImportPath("./Comp.vue.ts", noBacking)).toBe("./Comp.vue");
+    expect(cleanupCarrierVirtualImportPath("./Comp.vue.d.ts", noBacking)).toBe("./Comp.vue");
+    expect(cleanupCarrierVirtualImportPath('import Comp from "./Comp.vue.ts"', noBacking)).toBe(
+      'import Comp from "./Comp.vue"',
+    );
+  });
+
+  it("passes an ABSOLUTE candidate through to the host unchanged", () => {
+    // An already-absolute backing must not be re-resolved (idempotent for the
+    // resolve/upsert path where tokens are already host-rooted).
+    const exists = containingFileAwareExists((p) => p === "/app/Comp.svelte", "/app/Parent.ts");
+    expect(cleanupCarrierVirtualImportPath("/app/Comp.svelte.ts", exists)).toBe("/app/Comp.svelte");
   });
 });

@@ -4,6 +4,7 @@ import path from "node:path";
 // and workspace (Rust VFS) in async contexts.
 import {
   cleanupCarrierVirtualImportPath,
+  containingFileAwareExists,
   getVueVirtualFileInfo,
   isRelativeVue,
   isRelativeVueTs,
@@ -66,8 +67,20 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
     // strips an AMBIGUOUS `X.svelte.ts` virtual suffix when the backing
     // `X.svelte` carrier exists, so a real standalone rune module is never
     // collapsed into a phantom component path on the resolve / hydration path.
-    const stripBackingAware = (fileName: string): string =>
-      stripVueVirtualSuffixBackingAware(fileName, _fileExists);
+    //
+    // When the path may be RELATIVE (a module specifier / display token), pass
+    // its `containingFile` so the backing carrier is resolved against the
+    // containing directory before the host check — the raw host `fileExists`
+    // only recognises host-rooted paths, so a relative `./Comp.svelte` backing
+    // would otherwise never be proven (the Svelte-vs-Vue parity gap). An
+    // already-absolute path is unaffected by the wrapper.
+    const stripBackingAware = (fileName: string, containingFile?: string): string =>
+      stripVueVirtualSuffixBackingAware(
+        fileName,
+        containingFile === undefined
+          ? _fileExists
+          : containingFileAwareExists(_fileExists, containingFile),
+      );
 
     const resolvePublicApiMode = (containingFile: string) =>
       resolveVuePublicApiMode(exposeBindingsTesting, containingFile, (sourceFileName) =>
@@ -286,11 +299,14 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
 
     const languageService = info.languageService;
 
-    function fixVuePath(fileName: string): string {
+    function fixVuePath(fileName: string, containingFile?: string): string {
       // Backing-file-aware: a navigation / completion target that is a real
       // `store.svelte.ts` rune module (no backing `store.svelte`) keeps its own
-      // path, so go-to-definition does not jump to a phantom `store.svelte`.
-      return stripBackingAware(fileName);
+      // path, so go-to-definition does not jump to a phantom `store.svelte`. When
+      // `fileName` may be a RELATIVE module specifier (a completion `entry.source`),
+      // the `containingFile` resolves the backing-carrier proof against its
+      // directory so a relative virtual `./Comp.svelte.ts` strips to `./Comp.svelte`.
+      return stripBackingAware(fileName, containingFile);
     }
 
     function remapDefinitionLike<
@@ -625,12 +641,20 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         preferences,
         data,
       );
+      // Backing proofs for AMBIGUOUS Svelte virtual suffixes embedded in these
+      // tokens resolve relative candidates (`./Comp.svelte`) against the
+      // containing file's directory — the raw host `fileExists` only knows
+      // host-rooted paths, so a relative backing would never strip otherwise.
+      const existsRelToContaining = containingFileAwareExists(_fileExists, fileName);
       if (result?.codeActions) {
         for (const action of result.codeActions) {
-          action.description = cleanupCarrierVirtualImportPath(action.description, _fileExists);
+          action.description = cleanupCarrierVirtualImportPath(
+            action.description,
+            existsRelToContaining,
+          );
           for (const change of action.changes) {
             for (const edit of change.textChanges) {
-              edit.newText = cleanupCarrierVirtualImportPath(edit.newText, _fileExists);
+              edit.newText = cleanupCarrierVirtualImportPath(edit.newText, existsRelToContaining);
             }
           }
         }
@@ -638,7 +662,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       if (result?.sourceDisplay) {
         result.sourceDisplay = result.sourceDisplay.map((part) => ({
           ...part,
-          text: cleanupCarrierVirtualImportPath(part.text, _fileExists),
+          text: cleanupCarrierVirtualImportPath(part.text, existsRelToContaining),
         }));
       }
       return result;
@@ -654,15 +678,19 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
     ) => {
       const result = _getCompletionsAtPosition(fileName, position, options, formattingSettings);
       if (result?.entries) {
+        // `entry.source` is a module specifier (frequently RELATIVE); the
+        // display/edit tokens likewise carry relative paths. Resolve their
+        // backing-carrier proofs against the containing file's directory.
+        const existsRelToContaining = containingFileAwareExists(_fileExists, fileName);
         for (const entry of result.entries) {
           if (entry.sourceDisplay) {
             entry.sourceDisplay = entry.sourceDisplay.map((part) => ({
               ...part,
-              text: cleanupCarrierVirtualImportPath(part.text, _fileExists),
+              text: cleanupCarrierVirtualImportPath(part.text, existsRelToContaining),
             }));
           }
           if (entry.source) {
-            entry.source = fixVuePath(entry.source);
+            entry.source = fixVuePath(entry.source, fileName);
           }
         }
       }
