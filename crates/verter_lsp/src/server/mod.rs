@@ -98,6 +98,11 @@ mod aux_features;
 // `append_markdown` hover-suffix utility.
 mod nav_features;
 
+// Completion-resolve auto-import edit translation:
+// `resolve_tsgo_auto_import_edits` and `completion_resolve_error`, called
+// by `nav_features::handle_completion_resolve`.
+mod nav_features_completion_resolve;
+
 // Audit-aware wrappers for the navigation feature handlers. Each
 // `handle_<method>_with_audit` thunks into the matching plain
 // `handle_<method>` body via `crate::audit_harness::run_with_audit`.
