@@ -77,6 +77,8 @@ mod canary_harness;
 mod compile_slots_encapsulation;
 #[path = "g_block/finalise_signature_or_empty_is_gone.rs"]
 mod finalise_signature_or_empty_is_gone;
+#[path = "g_block/framework_surface_executor.rs"]
+mod framework_surface_executor;
 #[path = "component_meta_audit/harness.rs"]
 mod harness;
 #[path = "g_block/r6_query_identity_keys_content_free.rs"]

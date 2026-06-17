@@ -142,6 +142,7 @@ type WasmHostGetIdeFn = (
   canonicalId: string,
   profile?: HostCompileProfile,
 ) => HostIdeResponse | null;
+type WasmHostEnsureIdeCompiledFn = (canonicalId: string, profile?: HostCompileProfile) => boolean;
 type WasmHostGetAnalysisFn = (canonicalOrAlias: string) => unknown | null;
 type WasmHostSetImportDependenciesFn = (
   canonicalOrAlias: string,
@@ -166,6 +167,7 @@ interface WasmHostBinding {
   upsert: WasmHostUpsertFn;
   applyBlockOverrides: WasmHostApplyBlockOverridesFn;
   getIde: WasmHostGetIdeFn;
+  ensureIdeCompiled: WasmHostEnsureIdeCompiledFn;
   getVirtualFile: WasmHostGetVirtualFileFn;
   listVirtualFiles: WasmHostListVirtualFilesFn;
   remove: WasmHostRemoveFn;
@@ -302,6 +304,19 @@ export class Host {
 
   getIde(canonicalId: string, profile?: HostCompileProfile): HostIdeResponse | null {
     return this.inner.getIde(canonicalId, profile);
+  }
+
+  /**
+   * Ensure the IDE (`CachedTsx`) projection exists for a file + profile.
+   *
+   * The explicit IDE-ensure path — compiles the carrier's IDE surface without
+   * requesting the runtime `Main` node, so a Main-less carrier (Svelte)
+   * populates its `CachedTsx` and a subsequent `getIde` succeeds. `getIde`
+   * stays a pure cached read. Returns `true` when the IDE projection now
+   * exists, `false` when the file has no IDE surface (a non-carrier).
+   */
+  ensureIdeCompiled(canonicalId: string, profile?: HostCompileProfile): boolean {
+    return this.inner.ensureIdeCompiled(canonicalId, profile);
   }
 
   getVirtualFile(query: HostVirtualQuery): HostVirtualFileResponse {

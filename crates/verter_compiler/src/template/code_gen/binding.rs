@@ -214,34 +214,6 @@ impl<'alloc> BindingResolver<'alloc> {
         }
     }
 
-    /// Returns the binding prefix length for a simple identifier expression.
-    ///
-    /// For simple identifiers like `show` → prefix `_ctx.` → returns 5.
-    /// For compound expressions or unresolved identifiers, returns 0.
-    /// The prefix length indicates where the original identifier starts within
-    /// the resolved expression string.
-    pub fn simple_expr_prefix_len(&self, expr: &str) -> usize {
-        let trimmed = expr.trim();
-        if !is_simple_ident(trimmed) {
-            return 0;
-        }
-        let is_kw = is_keyword(trimmed.as_bytes());
-        if (is_kw && !self.bindings.contains_key(trimmed))
-            || is_global(trimmed.as_bytes())
-            || trimmed == "$event"
-        {
-            return 0;
-        }
-        let prefix = self.resolve_prefix(trimmed);
-        if is_kw && !prefix.is_empty() {
-            // Bracket notation: `$props["` → prefix.trim('.').len() + 2
-            let base = prefix.trim_end_matches('.');
-            base.len() + 2 // e.g., `$props["` = 8
-        } else {
-            prefix.len()
-        }
-    }
-
     /// Resolve a simple identifier expression to its prefixed/suffixed form.
     ///
     /// If the expression is a simple identifier (no dots, brackets, operators),
@@ -329,7 +301,7 @@ impl<'alloc> BindingResolver<'alloc> {
             // it to `{ foo: $setup.foo }` to keep valid JS. We prepend "foo: "
             // at the same position before the prefix; stable sort preserves order.
             if binding.is_shorthand && (!prefix.is_empty() || !suffix.is_empty()) {
-                out.prepend_alloc(binding.pos, &format!("{}: ", binding.name));
+                out.prepend_fmt(binding.pos, format_args!("{}: ", binding.name));
             }
 
             if !prefix.is_empty() {

@@ -28,7 +28,6 @@ use crate::parser::types::{
 use crate::tokenizer::{Event as TokenizerEvent, QuoteType};
 use crate::types::{NodeId, NodeProp, NodeTag};
 use crate::utils::vue::{is_html_tag, is_mathml_tag, is_svg_tag, is_void_tag};
-use rustc_hash::FxHashSet;
 use smallvec::SmallVec;
 
 #[cfg(test)]
@@ -136,9 +135,13 @@ pub struct Syntax {
     template_ast: Option<TemplateAst>,
 
     // ---- per-element attribute tracking ----
-    /// Seen attribute/directive names for the current element, used for
-    /// `DuplicateAttribute` detection. Cleared on each `OpenTagName`.
-    seen_attr_names: FxHashSet<Vec<u8>>,
+    /// Source-backed name spans of the static (non-directive) attributes seen
+    /// on the current element, used for `DuplicateAttribute` detection. Each
+    /// entry is a `(start, name_end)` range into the source buffer — never an
+    /// owned byte copy — so duplicate checks borrow against the source. The
+    /// buffer is reused across elements (cleared, not dropped) on each
+    /// `OpenTagName`.
+    seen_attr_spans: Vec<Span>,
 
     // ---- diagnostics ----
     /// Accumulated parse diagnostics (errors / warnings). Stored here because
@@ -201,7 +204,7 @@ impl Syntax {
             ast_builder,
             template_ast: None,
 
-            seen_attr_names: FxHashSet::default(),
+            seen_attr_spans: Vec::new(),
             diagnostics: Vec::new(),
         }
     }
@@ -461,7 +464,7 @@ impl Syntax {
         };
 
         self.stack_elements.push(se);
-        self.seen_attr_names.clear();
+        self.seen_attr_spans.clear();
 
         // If inside <template> (or template_mode), open an element node in the builder.
         // In SFC mode, skip the root element itself (stack len == 1) since it's handled
@@ -1086,11 +1089,18 @@ impl Syntax {
         // directives (e.g., multiple `@click` handlers get merged into an array).
         if !prop.is_directive {
             let attr_name = &ctx.bytes[prop.start as usize..prop.name_end as usize];
-            if !self.seen_attr_names.insert(attr_name.to_vec()) {
+            let is_duplicate = self
+                .seen_attr_spans
+                .iter()
+                .any(|seen| &ctx.bytes[seen.start as usize..seen.end as usize] == attr_name);
+            if is_duplicate {
                 self.diagnostics.push(
                     Diagnostic::error("syntax", CompilerErrorCode::DuplicateAttribute)
                         .with_span(Span::new(prop.start, prop.name_end)),
                 );
+            } else {
+                self.seen_attr_spans
+                    .push(Span::new(prop.start, prop.name_end));
             }
         }
 

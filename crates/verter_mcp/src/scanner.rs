@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use serde::Serialize;
-use verter_session::{FileKind, UpsertRequest, VerterHost};
+use verter_session::{UpsertRequest, VerterHost};
 use walkdir::WalkDir;
 
 /// Result of scanning a project directory.
@@ -49,13 +49,14 @@ pub fn scan_directory(root: &Path, host: &VerterHost, include_script_deps: bool)
         let path = entry.path();
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
-        let file_kind = match ext {
-            "vue" => FileKind::VueSfc,
-            "ts" | "tsx" | "js" | "jsx" if include_script_deps => FileKind::NonSfc,
+        match ext {
+            "vue" => {}
+            "ts" | "tsx" | "js" | "jsx" if include_script_deps => {}
             _ => continue,
-        };
+        }
 
         let canonical = path.to_string_lossy().replace('\\', "/");
+        let file_language = host.language_classifier().classify(&canonical);
 
         let workspace = host.workspace_read();
         match workspace.read_file(&canonical) {
@@ -64,7 +65,7 @@ pub fn scan_directory(root: &Path, host: &VerterHost, include_script_deps: bool)
                     canonical_id: Some(canonical.clone()),
                     input_id: canonical,
                     source: Arc::from(source.as_ref()),
-                    file_kind,
+                    file_language,
                     aliases: vec![],
                 });
                 match result {

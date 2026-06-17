@@ -73,28 +73,32 @@ impl HostResolverState {
 /// Holds a reference to the host's `RwLock<Arc<dyn WorkspaceAccess>>`
 /// so it always reads through the latest workspace, even after
 /// `set_workspace()` swaps it.
-pub(crate) struct WorkspaceSourceLoader(
-    pub(crate) Arc<parking_lot::RwLock<Arc<dyn verter_workspace::WorkspaceAccess>>>,
-);
+///
+/// This impl is the session-implemented trait seam through which
+/// HOST-GATED classification reaches the scheduler: `classify` routes
+/// through the host's [`crate::framework::HostLanguageClassifier`]
+/// (static registry × project capability snapshot), not the pure
+/// static fallback the scheduler's built-in loaders use.
+pub(crate) struct WorkspaceSourceLoader {
+    pub(crate) workspace: Arc<parking_lot::RwLock<Arc<dyn verter_workspace::WorkspaceAccess>>>,
+    pub(crate) language_classifier: crate::framework::HostLanguageClassifier,
+}
 
 impl verter_scheduler::source_loader::SourceLoader for WorkspaceSourceLoader {
     fn load(&self, canonical_id: &str) -> Option<Arc<str>> {
-        self.0.read().read_file(canonical_id)
+        self.workspace.read().read_file(canonical_id)
     }
 
     fn exists(&self, canonical_id: &str) -> bool {
-        self.0.read().file_exists(canonical_id)
+        self.workspace.read().file_exists(canonical_id)
     }
 
-    fn classify(&self, canonical_id: &str) -> verter_scheduler::source_loader::FileKind {
-        match self.0.read().classify_file(canonical_id) {
-            verter_workspace::FileKind::VueSfc => verter_scheduler::source_loader::FileKind::VueSfc,
-            verter_workspace::FileKind::NonSfc => verter_scheduler::source_loader::FileKind::NonSfc,
-        }
+    fn classify(&self, canonical_id: &str) -> verter_language::FileLanguage {
+        self.language_classifier.classify(canonical_id)
     }
 
     fn realpath(&self, canonical_id: &str) -> Option<String> {
-        self.0.read().realpath(canonical_id)
+        self.workspace.read().realpath(canonical_id)
     }
 }
 
@@ -107,6 +111,15 @@ impl VerterHost {
     #[must_use]
     pub fn config(&self) -> &HostConfig {
         &self.config
+    }
+
+    /// The host-level language classification authority (static
+    /// registry × project capability snapshot). Session-level consumers
+    /// resolve a path's [`verter_language::FileLanguage`] through this,
+    /// never through ad-hoc extension checks.
+    #[must_use]
+    pub fn language_classifier(&self) -> &crate::framework::HostLanguageClassifier {
+        &self.language_classifier
     }
 
     /// Create a new host backed by the given workspace.
@@ -140,6 +153,11 @@ impl VerterHost {
         // subsequent host constructions.
         crate::request_context::install_clear_tls_hook();
 
+        // Receive the Vue adapter's carrier registration proof (the
+        // `.vue` `LanguageRegistry` carrier-row token, D-ba) at host
+        // construction; the blessed `vue_parse()` accessor reuses it.
+        crate::typeinfo::adapters::vue::receive_vue_carrier_token();
+
         // Thread the host's configured `resolve_extensions` into the
         // workspace at construction so reverse-dep stem stripping
         // honours the host policy from the start.
@@ -148,9 +166,29 @@ impl VerterHost {
         let workspace_lock = Arc::new(parking_lot::RwLock::new(workspace));
 
         // Constructed before the scheduler so the stage executor can share
-        // the host's provenance counters (`sfc_parses` is bumped on rayon
-        // workers where no capture-token TLS exists).
+        // the host's provenance counters (`carrier_parses` / `sfc_parses`
+        // are bumped on rayon workers where no capture-token TLS exists).
         let provenance = Arc::new(crate::types::MetaProvenance::default());
+
+        // The host's language classification authority. The capability
+        // snapshot is empty: no capability producer exists in the
+        // session yet, so host-gated classification equals the static
+        // registry resolution until one lands.
+        let language_classifier = crate::framework::HostLanguageClassifier::with_built_in_registry(
+            crate::framework::ProjectCapabilitySnapshot::empty(),
+        );
+
+        // The framework adapter registry, built ONCE here. The Vue carrier leg
+        // receives a clone of the SAME minted carrier proof the blessed
+        // `vue_parse()` accessor holds (received just above) — one mint channel,
+        // value-equal receipt, no second mint.
+        let framework_registry =
+            std::sync::Arc::new(crate::framework::FrameworkAdapterRegistry::built_in(
+                crate::typeinfo::adapters::vue::vue_carrier_token_clone(),
+                crate::typeinfo::adapters::svelte::svelte_carrier_token_clone(),
+            ));
+        let framework_script_caches =
+            std::sync::Arc::new(crate::framework::script_facts::FrameworkScriptCaches::new());
 
         let scheduler = {
             let executor = Arc::new(host_executor::HostStageExecutor::new(
@@ -158,7 +196,10 @@ impl VerterHost {
                 Arc::clone(&workspace_lock),
                 Arc::clone(&provenance),
             ));
-            let loader = Arc::new(WorkspaceSourceLoader(Arc::clone(&workspace_lock)));
+            let loader = Arc::new(WorkspaceSourceLoader {
+                workspace: Arc::clone(&workspace_lock),
+                language_classifier: language_classifier.clone(),
+            });
             // Native spawns a driver thread; WASM uses sync mode
             // (wait_or_drive on the host drives stages inline).
             #[cfg(not(target_arch = "wasm32"))]
@@ -271,6 +312,7 @@ impl VerterHost {
         Self {
             instance_id: next_host_instance_id(),
             config,
+            language_classifier,
             workspace: workspace_lock,
             alias_to_canonical: default_shared(FxHashMap::default()),
             tick: std::sync::atomic::AtomicU64::new(1),
@@ -328,8 +370,8 @@ impl VerterHost {
                 Some(cap) => crate::typeinfo::scratch_cache::ScratchCache::with_capacity(cap),
                 None => crate::typeinfo::scratch_cache::ScratchCache::with_default_capacity(),
             }),
-            vue_shallow_metadata_store:
-                crate::typeinfo::adapters::vue::store::VueShallowMetadataStore::new(),
+            framework_registry,
+            framework_script_caches,
             #[cfg(not(target_arch = "wasm32"))]
             host_cpu_pool,
             decl_lowering: Arc::new(crate::decl_lowering::DeclLoweringService::new()),
@@ -664,15 +706,169 @@ impl VerterHost {
         &self.typeinfo_scratch_cache
     }
 
-    /// Host-owned cache of `.vue` macro-surface normalized DTOs (the
-    /// typeinfo Vue adapter's shallow-metadata store). Used by
-    /// [`crate::typeinfo::adapters::vue::resolve_vue_macro_surface`] and the
-    /// normalizer entry points to materialize each `.vue` macro surface once
-    /// per `(canonical, content, macro, level)`.
-    pub(crate) fn vue_shallow_metadata_store(
+    /// The Vue adapter's typed framework-surface DTO store — the host-owned
+    /// cache of `.vue` macro-surface normalized DTOs.
+    ///
+    /// The store lives erased on the Vue registration row
+    /// ([`crate::framework::registry::FrameworkRegistration::surface_store`]);
+    /// this accessor performs the ONE downcast at store acquisition to the typed
+    /// [`FrameworkSurfaceStore<VueSurfaceKey, MacroSurfaceDtos>`](crate::framework::surface_store::FrameworkSurfaceStore),
+    /// exactly the public-hidden downcast doctrine the carriers use. Used by the
+    /// relocated [`crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx`]
+    /// to materialize each `.vue` macro surface once per `(canonical, content,
+    /// macro, level)`.
+    ///
+    /// Panics only on a build defect (the Vue registration absent, or its
+    /// surface store erased to the wrong concrete type) — neither is reachable
+    /// on a correctly-constructed host (`framework_registry_complete` +
+    /// `vue_registration_carries_every_leg` pin the registration).
+    pub(crate) fn vue_surface_store(
         &self,
-    ) -> &crate::typeinfo::adapters::vue::store::VueShallowMetadataStore {
-        &self.vue_shallow_metadata_store
+    ) -> &crate::framework::surface_store::FrameworkSurfaceStore<
+        crate::typeinfo::framework_surface::VueSurfaceKey,
+        crate::typeinfo::framework_surface::MacroSurfaceDtos,
+    > {
+        self.framework_registry()
+            .get(&verter_language::FrameworkAdapterId::vue())
+            .expect("the Vue adapter is registered")
+            .surface_store
+            .as_any()
+            .downcast_ref()
+            .expect(
+                "the Vue surface store is FrameworkSurfaceStore<VueSurfaceKey, MacroSurfaceDtos>",
+            )
+    }
+
+    /// The Svelte adapter's typed framework-surface DTO store — the host-owned
+    /// cache of `.svelte` per-source-family normalized DTOs.
+    ///
+    /// The ONE downcast at store acquisition to the typed
+    /// [`FrameworkSurfaceStore<SvelteSurfaceKey, MacroSurfaceDtos>`](crate::framework::surface_store::FrameworkSurfaceStore),
+    /// keyed by the Svelte adapter remainder (one source family per row, D-bc).
+    /// Used by [`crate::typeinfo::framework_surface::svelte_exec::resolve_svelte_surface`]
+    /// to materialize each Svelte source surface once per `(canonical, content,
+    /// source, level)`.
+    pub(crate) fn svelte_surface_store(
+        &self,
+    ) -> &crate::framework::surface_store::FrameworkSurfaceStore<
+        crate::typeinfo::framework_surface::SvelteSurfaceKey,
+        crate::typeinfo::framework_surface::MacroSurfaceDtos,
+    > {
+        self.framework_registry()
+            .get(&verter_language::FrameworkAdapterId::svelte())
+            .expect("the Svelte adapter is registered")
+            .surface_store
+            .as_any()
+            .downcast_ref()
+            .expect(
+                "the Svelte surface store is FrameworkSurfaceStore<SvelteSurfaceKey, MacroSurfaceDtos>",
+            )
+    }
+
+    /// The framework adapter registry — the executor / synth-injection /
+    /// public-API-projection dispatch authority. Built once at host
+    /// construction and immutable thereafter.
+    pub(crate) fn framework_registry(&self) -> &crate::framework::FrameworkAdapterRegistry {
+        &self.framework_registry
+    }
+
+    /// The framework script-fact caches — the resolved-validation half's
+    /// content-addressed candidate store + resolved-fact store. Empty for every
+    /// adapter in this program (no production provider registers).
+    pub(crate) fn framework_script_caches(
+        &self,
+    ) -> &crate::framework::script_facts::FrameworkScriptCaches {
+        &self.framework_script_caches
+    }
+
+    /// Inject the framework-synthesized `default` value symbol into a file's
+    /// shallow state, dispatched through the registry's synthesis leg.
+    ///
+    /// The synth leg is selected by the canonical's resolved framework adapter
+    /// id. A typeinfo evaluation scratch (`verter://typeinfo/…`) is a
+    /// host-internal surface that inlines an arbitrary scope's eval-source as a
+    /// prelude; it classifies by its own `.ts` suffix yet must synthesize the
+    /// inlined scope's `default`, so it routes to the synthesizing framework's
+    /// leg — Vue is the only framework that synthesizes a `default` in this
+    /// program. A no-op when the canonical has no synth leg, when synthesis
+    /// returns `None`, or when a userland `default` already exists (userland
+    /// always wins).
+    pub(crate) fn inject_component_default_into_shallow_state(
+        &self,
+        canonical_id: &str,
+        state: &mut crate::resolver_core::ShallowFileState,
+        macros: &[verter_semantic::analysis::types::AnalyzedMacro],
+        eval_source: Option<&str>,
+        framework_parse: Option<&Arc<verter_language::FrameworkParseArtifact>>,
+    ) {
+        // Userland `default` always wins — never overwrite it. Probe via the
+        // header-only `has_value_symbol` accessor: it must not materialize a
+        // value body just to test presence.
+        if state.has_value_symbol("default") {
+            return;
+        }
+        let language = self.language_classifier.classify(canonical_id);
+        let adapter_id = match language.adapter_id() {
+            // A typeinfo evaluation scratch inlines a Vue scope's eval-source
+            // (`.vue`-macro prelude); it has no resolved framework language, so
+            // route it to the registry's synthesizing framework leg. When a
+            // single adapter synthesizes a default the registry returns it; when
+            // more than one does (Svelte joined Vue), the scratch is the Vue
+            // macro inliner, so it routes to the Vue leg specifically (REGISTRY
+            // DATA — the carrier-macro synthesizer for the inlined surface, not
+            // a `.min()` over all synth adapters).
+            Some(id) => id.clone(),
+            None if crate::resolver_core::vue_default_synth::is_typeinfo_scratch(canonical_id) => {
+                match self.framework_registry().scratch_synthesizing_adapter_id() {
+                    Some(id) => id,
+                    None => return,
+                }
+            }
+            None => return,
+        };
+        let Some(synth) = self.framework_registry().synth_for(&adapter_id) else {
+            return;
+        };
+        // Capture the adapter's parse-domain script candidates from the
+        // eval-source (the position-preserving blank that carries BOTH script
+        // blocks at their raw offsets) through the registry's active providers
+        // for this file. The capture is SYNTAX-ONLY (no resolver, no capability
+        // bits) and runs once per content hash inside shallow-state
+        // construction. With no active provider (Vue's steady state) the set is
+        // empty and synthesis falls back to `macros`. The OXC parse is owned by
+        // the scheduler-bound `crate::parse` module.
+        let active = self
+            .framework_registry()
+            .active_provider_index()
+            .active_for(language.carrier_language_id(), std::iter::empty());
+        // The MODULE-script byte region (so the provider classifies module vs
+        // instance exports) + the carrier's resolved script dialect — read from
+        // the carrier's neutral script regions. The artifact is the SAME one
+        // the indexing flight already resolved, threaded in by the caller — it
+        // is NEVER re-fetched through `current_eval_state` here, which would
+        // re-enter `current_content_pinned_indexed` for `canonical_id` and
+        // recurse infinitely while the owner is mid-index (its edge-stale
+        // surface re-triggers the refresh that runs this synth).
+        let module_region = framework_parse
+            .map(|fp| fp.as_ref())
+            .and_then(crate::parse::module_script_region);
+        let source_type =
+            crate::parse::carrier_eval_source_type(framework_parse.map(|fp| fp.as_ref()));
+        let candidates = crate::parse::capture_synth_script_candidates(
+            &active,
+            eval_source,
+            module_region,
+            source_type,
+        );
+        let cx = crate::framework::synth::ComponentDefaultSynthCtx {
+            canonical_id,
+            language: &language,
+            macros,
+            script_candidates: &candidates,
+        };
+        if let Some(default_body) = synth.synthesise(cx) {
+            state.insert_synthesised_value_default("default", default_body);
+        }
     }
 
     // ──────────────────────────────────────────────────────────────────

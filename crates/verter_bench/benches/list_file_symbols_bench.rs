@@ -27,7 +27,7 @@ use std::sync::Arc;
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
-use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{HostConfig, UpsertRequest, VerterHost};
 
 /// Top-level `export type T{i}` declarations in the fixture. Every other
 /// line is a `// filler` comment, so this is the exact listed-symbol
@@ -57,7 +57,9 @@ fn upsert_big_ts(host: &VerterHost, source: &str) {
         canonical_id: Some(BIG_TS_CANONICAL.to_string()),
         input_id: BIG_TS_CANONICAL.to_string(),
         source: Arc::from(source),
-        file_kind: FileKind::from_path(BIG_TS_CANONICAL),
+        file_language: verter_session::LanguageRegistry::global()
+            .classify_static(BIG_TS_CANONICAL)
+            .static_resolution(),
         aliases: Vec::new(),
     });
 }

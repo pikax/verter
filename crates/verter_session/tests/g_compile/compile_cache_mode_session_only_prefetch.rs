@@ -27,17 +27,17 @@ use verter_session::for_tests::{
     compile_tier_prefetch_invocations_for_tests, reset_compile_tier_prefetch_invocations_for_tests,
 };
 use verter_session::{
-    CompileCacheMode, CompileProfile, FileKind, HostConfig, UpsertRequest, VerterHost,
+    CompileCacheMode, CompileProfile, FileLanguage, HostConfig, UpsertRequest, VerterHost,
     VirtualNodeKind, VirtualQuery,
 };
 
-fn upsert(host: &VerterHost, canonical: &str, source: &str, kind: FileKind) {
+fn upsert(host: &VerterHost, canonical: &str, source: &str, kind: FileLanguage) {
     let _ = host
         .upsert(UpsertRequest {
             canonical_id: Some(canonical.to_string()),
             input_id: canonical.to_string(),
             source: source.into(),
-            file_kind: kind,
+            file_language: kind,
             aliases: Vec::new(),
         })
         .expect("upsert");
@@ -51,7 +51,7 @@ fn seed_cross_file_sfc(host: &VerterHost) {
         host,
         "/src/types.ts",
         "export interface Foo { a: number; }\n",
-        FileKind::NonSfc,
+        FileLanguage::script_ts(),
     );
     upsert(
         host,
@@ -60,7 +60,7 @@ fn seed_cross_file_sfc(host: &VerterHost) {
          import type { Foo } from './types';\n\
          defineProps<Foo>();\n\
          </script>\n",
-        FileKind::VueSfc,
+        FileLanguage::vue(),
     );
 }
 

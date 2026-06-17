@@ -10,7 +10,7 @@
 //! IS preserved (the in-run offset is added to the run's mapped start), but only inside a
 //! single mapped run.
 //!
-//! A RANGE maps only via `tsx_range_to_vue`, which requires both endpoints to resolve inside
+//! A RANGE maps only via `tsx_range_to_carrier`, which requires both endpoints to resolve inside
 //! COMPATIBLE runs (the same run, or genuinely-contiguous runs with no synthetic/unmapped
 //! content between them). Two endpoints that each map but lie in runs separated by synthetic
 //! content do NOT compose — the range is dropped, never a bogus straddling range.
@@ -62,12 +62,16 @@ fn mapper_methods_take_typed_coordinates_and_return_option() {
     // ── A single UNMAPPED token: an interior query must be None. ──
     let only_unmapped = build_map(&[], &[(0, 0)], "x");
     assert!(
-        only_unmapped.tsx_to_vue(TsPosition::new(0, 3)).is_none(),
+        only_unmapped
+            .tsx_to_carrier(TsPosition::new(0, 3))
+            .is_none(),
         "interior of an unmapped-only map must be None (no cross-token fallback)"
     );
     assert!(
-        only_unmapped.vue_to_tsx(LspPosition::new(0, 3)).is_none(),
-        "vue_to_tsx over an unmapped-only map must be None"
+        only_unmapped
+            .carrier_to_tsx(LspPosition::new(0, 3))
+            .is_none(),
+        "carrier_to_tsx over an unmapped-only map must be None"
     );
 
     // ── A single MAPPED multi-char run: in-run query must be Some with the correct
@@ -75,27 +79,27 @@ fn mapper_methods_take_typed_coordinates_and_return_option() {
     // gen(0,0) -> src(0,10); an unmapped token at gen(0,6) bounds the run to [0,6).
     let mapped = build_map(&[(0, 0, 0, 10)], &[(0, 6)], &" ".repeat(40));
     let m = mapped
-        .tsx_to_vue(TsPosition::new(0, 3))
+        .tsx_to_carrier(TsPosition::new(0, 3))
         .expect("in-run query must map (within-run precision preserved)");
     // Typed return: a TSX position in -> an LSP (Vue) position out.
     assert_eq!(m.pos, LspPosition::new(0, 13));
 
     // Bridging past the run end (onto the unmapped boundary) must be None.
     assert!(
-        mapped.tsx_to_vue(TsPosition::new(0, 6)).is_none(),
+        mapped.tsx_to_carrier(TsPosition::new(0, 6)).is_none(),
         "query at the unmapped run boundary must be None (no bridge into next token)"
     );
 
-    // Symmetric vue_to_tsx within-run precision + None outside the source run.
+    // Symmetric carrier_to_tsx within-run precision + None outside the source run.
     let src_run = build_map(&[(0, 10, 0, 0), (0, 40, 0, 6)], &[], &" ".repeat(40));
     let g = src_run
-        .vue_to_tsx(LspPosition::new(0, 3))
+        .carrier_to_tsx(LspPosition::new(0, 3))
         .expect("in-run source query must map");
     // src run [0,6) -> gen base 10: src 3 -> gen 13.
     assert_eq!(g.pos, TsPosition::new(0, 13));
     // A source line with no mapped token must be None (no snap to a preceding line).
     assert!(
-        src_run.vue_to_tsx(LspPosition::new(5, 0)).is_none(),
+        src_run.carrier_to_tsx(LspPosition::new(5, 0)).is_none(),
         "unmapped source line must be None (no snap-to-closest-preceding)"
     );
 }
@@ -114,13 +118,13 @@ fn strict_in_run_behaviour_discriminates_each_deleted_path() {
     // mapped gen(0,0)->src(0,0) run [0,3); unmapped gen(0,3) (synthetic) follows.
     let m = build_map(&[(0, 0, 0, 0)], &[(0, 3)], &" ".repeat(40));
     assert!(
-        m.tsx_to_vue(TsPosition::new(0, 5)).is_none(),
+        m.tsx_to_carrier(TsPosition::new(0, 5)).is_none(),
         "interior of an unmapped token that FOLLOWS a mapped token must be None — a revived \
          backward-scan would snap to the mapped token and return Some"
     );
     // The preceding mapped run still maps within its true extent [0,3).
     assert_eq!(
-        m.tsx_to_vue(TsPosition::new(0, 2)).unwrap().pos,
+        m.tsx_to_carrier(TsPosition::new(0, 2)).unwrap().pos,
         LspPosition::new(0, 2)
     );
 
@@ -130,7 +134,7 @@ fn strict_in_run_behaviour_discriminates_each_deleted_path() {
     // gen(0,0)->src(0,0) bounded by unmapped gen(0,3); next mapped gen(0,20)->src(0,20).
     let gap = build_map(&[(0, 0, 0, 0), (0, 20, 0, 20)], &[(0, 3)], &" ".repeat(40));
     assert!(
-        gap.vue_to_tsx(LspPosition::new(0, 12)).is_none(),
+        gap.carrier_to_tsx(LspPosition::new(0, 12)).is_none(),
         "source query in an inter-token gap must be None (no snap into the preceding run)"
     );
 
@@ -139,11 +143,11 @@ fn strict_in_run_behaviour_discriminates_each_deleted_path() {
     // Source line "ab" (len 2); single mapped run gen(0,0)->src(0,0) bounded to [0,2).
     let last = build_map(&[(0, 0, 0, 0)], &[], "ab");
     assert_eq!(
-        last.tsx_to_vue(TsPosition::new(0, 1)).unwrap().pos,
+        last.tsx_to_carrier(TsPosition::new(0, 1)).unwrap().pos,
         LspPosition::new(0, 1)
     );
     assert!(
-        last.tsx_to_vue(TsPosition::new(0, 5)).is_none(),
+        last.tsx_to_carrier(TsPosition::new(0, 5)).is_none(),
         "query past the last run's true content end must be None (not extended to EOL)"
     );
 
@@ -153,19 +157,19 @@ fn strict_in_run_behaviour_discriminates_each_deleted_path() {
     // run A gen(0,0)->src(0,0) [0,3); synthetic gen(0,3); run B gen(0,8)->src(0,50).
     let ranges = build_map(&[(0, 0, 0, 0), (0, 8, 0, 50)], &[(0, 3)], &" ".repeat(80));
     assert!(
-        ranges.tsx_to_vue(TsPosition::new(0, 1)).is_some()
-            && ranges.tsx_to_vue(TsPosition::new(0, 9)).is_some(),
+        ranges.tsx_to_carrier(TsPosition::new(0, 1)).is_some()
+            && ranges.tsx_to_carrier(TsPosition::new(0, 9)).is_some(),
         "precondition: both endpoints individually map"
     );
     assert!(
         ranges
-            .tsx_range_to_vue(TsPosition::new(0, 1), TsPosition::new(0, 9))
+            .tsx_range_to_carrier(TsPosition::new(0, 1), TsPosition::new(0, 9))
             .is_none(),
         "a range straddling synthetic content between two runs must be dropped"
     );
     // A range fully inside run A maps.
     let (s, e) = ranges
-        .tsx_range_to_vue(TsPosition::new(0, 1), TsPosition::new(0, 3))
+        .tsx_range_to_carrier(TsPosition::new(0, 1), TsPosition::new(0, 3))
         .expect("range inside one run must map");
     assert_eq!(s, LspPosition::new(0, 1));
     assert_eq!(e, LspPosition::new(0, 3));
@@ -180,13 +184,13 @@ fn strict_in_run_behaviour_discriminates_each_deleted_path() {
     // token at gen 6. A.dst_end (3) == B.dst_col (3); A.src_end (3) != B.src_col (50).
     let reordered = build_map(&[(0, 0, 0, 0), (0, 3, 0, 50)], &[(0, 6)], &" ".repeat(80));
     assert!(
-        reordered.tsx_to_vue(TsPosition::new(0, 1)).is_some()
-            && reordered.tsx_to_vue(TsPosition::new(0, 4)).is_some(),
+        reordered.tsx_to_carrier(TsPosition::new(0, 1)).is_some()
+            && reordered.tsx_to_carrier(TsPosition::new(0, 4)).is_some(),
         "precondition: both endpoints individually map (start in run A, end in run B)"
     );
     assert!(
         reordered
-            .tsx_range_to_vue(TsPosition::new(0, 1), TsPosition::new(0, 4))
+            .tsx_range_to_carrier(TsPosition::new(0, 1), TsPosition::new(0, 4))
             .is_none(),
         "generated-adjacent but source-discontiguous runs must NOT compose a range — a revived \
          dst-only compatibility rule would return Some(bogus straddling range)"
@@ -219,15 +223,15 @@ fn ban_cross_token_extrapolation() {
     const BANNED_EXACT: &[(&str, &str)] = &[
         (
             "best_dst_col",
-            "tsx_to_vue nearest-previous backward-scan accumulator",
+            "tsx_to_carrier nearest-previous backward-scan accumulator",
         ),
         (
             "best_src_col",
-            "vue_to_tsx snap-to-closest-preceding accumulator",
+            "carrier_to_tsx snap-to-closest-preceding accumulator",
         ),
         (
             "best_src_line",
-            "vue_to_tsx snap-to-closest-preceding accumulator",
+            "carrier_to_tsx snap-to-closest-preceding accumulator",
         ),
     ];
     for (marker, what) in BANNED_EXACT {

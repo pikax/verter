@@ -21,6 +21,7 @@
 //! - [`shared`] — Runtime helper constants, patch flag constants, and utility functions.
 
 pub mod binding;
+pub mod expression;
 pub mod shared;
 pub mod ssr;
 pub mod types;

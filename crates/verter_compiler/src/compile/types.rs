@@ -220,7 +220,7 @@ pub enum CompileDiagnosticSeverity {
 }
 
 /// A structured diagnostic emitted during compilation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompileDiagnostic {
     /// Severity level.
     pub severity: CompileDiagnosticSeverity,
@@ -269,8 +269,9 @@ pub struct VerterCompileOptions {
     /// types, enabling `defineProps<ExternalType>()` to resolve types from other files.
     ///
     /// The host is responsible for resolving these from its file store before compilation.
-    pub external_types:
-        Option<rustc_hash::FxHashMap<String, crate::utils::oxc::vue::ResolvedElements>>,
+    pub external_types: Option<
+        rustc_hash::FxHashMap<String, crate::utils::oxc::script::type_surface::ResolvedElements>,
+    >,
     /// Deprecated: use `CodegenOptions::target` with `CompileTarget::TEMPLATE_DATA`.
     /// Kept for backward-compatibility with direct `compile()` callers.
     /// When true, ORs `CompileTarget::TEMPLATE_DATA` into the active target.

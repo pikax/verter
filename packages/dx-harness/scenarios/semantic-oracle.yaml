@@ -1,0 +1,286 @@
+# Curated semantic-oracle scenarios: one per `.vue` counterpart under
+# fixtures/hermetic/semantic-oracle/, each paired with an oracles/semantic/*.ts
+# gold standard. Every probe asserts the `vueSemanticValidity` dimension — verter
+# on the `.vue` is compared to tsgo on the curated `.ts`. The anchored member
+# accesses are script positions, so they map strictly.
+- id: oracle-define-props
+  fixture: semantic-oracle
+  entryFile: define-props.vue
+  anchors: [props.title, props.count]
+  script: []
+  probes:
+    - id: props-title-hover
+      method: hover
+      anchor: props.title
+      mappingPolicy: strict
+      confidence: high
+      dimension: vueSemanticValidity
+      requiresSourceMap: true
+      requiredDrivers: [rawLsp, tsgo]
+      capabilityRequirements: [positionEncoding]
+    - id: props-count-hover
+      method: hover
+      anchor: props.count
+      mappingPolicy: strict
+      confidence: high
+      dimension: vueSemanticValidity
+      requiresSourceMap: true
+      requiredDrivers: [rawLsp, tsgo]
+      capabilityRequirements: [positionEncoding]
+  invariants:
+    - id: props-title-is-string
+      anchor: props.title
+      method: hover
+      assertion: contains
+      value: string
+    - id: props-count-is-number
+      anchor: props.count
+      method: hover
+      assertion: contains
+      value: number
+  baselines:
+    tsgo: required
+    tsserver: requiredForCi
+    volar: optional
+  thresholds:
+    flakeWindows: 2
+- id: oracle-define-emits
+  fixture: semantic-oracle
+  entryFile: define-emits.vue
+  anchors: [emit]
+  script: []
+  probes:
+    - id: emit-overload-hover
+      method: hover
+      anchor: emit
+      mappingPolicy: strict
+      confidence: high
+      dimension: vueSemanticValidity
+      requiresSourceMap: true
+      requiredDrivers: [rawLsp, tsgo]
+      capabilityRequirements: [positionEncoding]
+  invariants:
+    - id: emit-carries-submit-payload
+      anchor: emit
+      method: hover
+      assertion: contains
+      value: submit
+  baselines:
+    tsgo: required
+    tsserver: requiredForCi
+    volar: optional
+  thresholds:
+    flakeWindows: 2
+- id: oracle-define-model
+  fixture: semantic-oracle
+  entryFile: define-model.vue
+  anchors: [model.value]
+  script: []
+  probes:
+    - id: model-value-hover
+      method: hover
+      anchor: model.value
+      mappingPolicy: strict
+      confidence: high
+      dimension: vueSemanticValidity
+      requiresSourceMap: true
+      requiredDrivers: [rawLsp, tsgo]
+      capabilityRequirements: [positionEncoding]
+  invariants:
+    - id: model-value-unwraps-to-boolean
+      anchor: model.value
+      method: hover
+      assertion: contains
+      value: boolean
+  baselines:
+    tsgo: required
+    tsserver: requiredForCi
+    volar: optional
+  thresholds:
+    flakeWindows: 2
+- id: oracle-slots
+  fixture: semantic-oracle
+  entryFile: slots.vue
+  anchors: [slots.default, slots.header]
+  script: []
+  probes:
+    - id: slot-default-hover
+      method: hover
+      anchor: slots.default
+      mappingPolicy: strict
+      confidence: high
+      dimension: vueSemanticValidity
+      requiresSourceMap: true
+      requiredDrivers: [rawLsp, tsgo]
+      capabilityRequirements: [positionEncoding]
+    - id: slot-header-hover
+      method: hover
+      anchor: slots.header
+      mappingPolicy: strict
+      confidence: high
+      dimension: vueSemanticValidity
+      requiresSourceMap: true
+      requiredDrivers: [rawLsp, tsgo]
+      capabilityRequirements: [positionEncoding]
+  invariants:
+    - id: default-slot-exposes-item-prop
+      anchor: slots.default
+      method: hover
+      assertion: contains
+      value: item
+  baselines:
+    tsgo: required
+    tsserver: requiredForCi
+    volar: optional
+  thresholds:
+    flakeWindows: 2
+- id: oracle-template-ref
+  fixture: semantic-oracle
+  entryFile: template-ref.vue
+  anchors: [ref.value]
+  script: []
+  probes:
+    - id: template-ref-value-hover
+      method: hover
+      anchor: ref.value
+      mappingPolicy: strict
+      confidence: high
+      dimension: vueSemanticValidity
+      requiresSourceMap: true
+      requiredDrivers: [rawLsp, tsgo]
+      capabilityRequirements: [positionEncoding]
+  invariants:
+    - id: template-ref-unwraps-to-element-or-null
+      anchor: ref.value
+      method: hover
+      assertion: contains
+      value: HTMLInputElement
+  baselines:
+    tsgo: required
+    tsserver: requiredForCi
+    volar: optional
+  thresholds:
+    flakeWindows: 2
+- id: oracle-fallthrough-attrs
+  fixture: semantic-oracle
+  entryFile: fallthrough-attrs.vue
+  anchors: [attrs.id, attrs.onClick]
+  script: []
+  probes:
+    - id: fallthrough-id-hover
+      method: hover
+      anchor: attrs.id
+      mappingPolicy: strict
+      confidence: high
+      dimension: vueSemanticValidity
+      requiresSourceMap: true
+      requiredDrivers: [rawLsp, tsgo]
+      capabilityRequirements: [positionEncoding]
+    - id: fallthrough-onclick-hover
+      method: hover
+      anchor: attrs.onClick
+      mappingPolicy: strict
+      confidence: high
+      dimension: vueSemanticValidity
+      requiresSourceMap: true
+      requiredDrivers: [rawLsp, tsgo]
+      capabilityRequirements: [positionEncoding]
+  invariants:
+    - id: fallthrough-id-is-string
+      anchor: attrs.id
+      method: hover
+      assertion: contains
+      value: string
+    - id: fallthrough-onclick-is-native-mouseevent
+      anchor: attrs.onClick
+      method: hover
+      assertion: contains
+      value: MouseEvent
+  baselines:
+    tsgo: required
+    tsserver: requiredForCi
+    volar: optional
+  thresholds:
+    flakeWindows: 2
+- id: oracle-auto-import-shape
+  fixture: semantic-oracle
+  entryFile: auto-import-shape.vue
+  anchors: [autoImport.ref, autoImport.value]
+  script: []
+  probes:
+    - id: auto-import-ref-hover
+      method: hover
+      anchor: autoImport.ref
+      mappingPolicy: strict
+      confidence: high
+      dimension: vueSemanticValidity
+      requiresSourceMap: true
+      requiredDrivers: [rawLsp, tsgo]
+      capabilityRequirements: [positionEncoding]
+    - id: auto-import-value-hover
+      method: hover
+      anchor: autoImport.value
+      mappingPolicy: strict
+      confidence: high
+      dimension: vueSemanticValidity
+      requiresSourceMap: true
+      requiredDrivers: [rawLsp, tsgo]
+      capabilityRequirements: [positionEncoding]
+  invariants:
+    - id: auto-import-ref-resolves-to-ref
+      anchor: autoImport.ref
+      method: hover
+      assertion: contains
+      value: Ref
+    - id: auto-import-ref-unwraps-to-number
+      anchor: autoImport.value
+      method: hover
+      assertion: contains
+      value: number
+  baselines:
+    tsgo: required
+    tsserver: requiredForCi
+    volar: optional
+  thresholds:
+    flakeWindows: 2
+- id: oracle-event-args
+  fixture: semantic-oracle
+  entryFile: event-args.vue
+  anchors: [click.event, keydown.event]
+  script: []
+  probes:
+    - id: click-event-arg-hover
+      method: hover
+      anchor: click.event
+      mappingPolicy: strict
+      confidence: high
+      dimension: vueSemanticValidity
+      requiresSourceMap: true
+      requiredDrivers: [rawLsp, tsgo]
+      capabilityRequirements: [positionEncoding]
+    - id: keydown-event-arg-hover
+      method: hover
+      anchor: keydown.event
+      mappingPolicy: strict
+      confidence: high
+      dimension: vueSemanticValidity
+      requiresSourceMap: true
+      requiredDrivers: [rawLsp, tsgo]
+      capabilityRequirements: [positionEncoding]
+  invariants:
+    - id: click-arg-is-mouseevent
+      anchor: click.event
+      method: hover
+      assertion: contains
+      value: MouseEvent
+    - id: keydown-arg-is-keyboardevent
+      anchor: keydown.event
+      method: hover
+      assertion: contains
+      value: KeyboardEvent
+  baselines:
+    tsgo: required
+    tsserver: requiredForCi
+    volar: optional
+  thresholds:
+    flakeWindows: 2

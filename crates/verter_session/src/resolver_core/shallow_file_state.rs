@@ -18,7 +18,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::route_demand::RouteDemand;
 use crate::decl_body_memo::{LoweredTypeDecl, LoweredValueDecl};
-use verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource;
+use verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource;
 use verter_semantic::analysis::decl_headers::{TypeDeclHeader, ValueDeclHeader};
 use verter_semantic::analysis::type_eval::{TypeDeclKind, ValueDeclKind};
 use verter_semantic::analysis::Hash16;
@@ -76,7 +76,7 @@ pub struct ShallowFileState {
 
     /// EAGER synthesised value-symbol HEADERS (the `.vue` implicit
     /// `default` public-instance shape) — header-only records carrying
-    /// the `is_synthesised_vue_default` provenance flag. The matching
+    /// the `is_synthesised_component_default` provenance flag. The matching
     /// eager body lives in [`Self::synthesised_value_bodies`].
     synthesised_value_symbols: FxHashMap<String, Arc<ShallowValueSymbol>>,
 
@@ -223,12 +223,12 @@ pub struct ShallowValueSymbol {
     /// file-classifier `is_synthesis_candidate`, so a `.vue` with a USERLAND
     /// `export default` (synthesis skipped, userland default present) is never
     /// mistreated as the synthesized public instance.
-    pub is_synthesised_vue_default: bool,
+    pub is_synthesised_component_default: bool,
 }
 
 impl ShallowValueSymbol {
     /// Build the slim header view from a shallow value-declaration header.
-    /// `is_synthesised_vue_default` is `false` for every header-index
+    /// `is_synthesised_component_default` is `false` for every header-index
     /// (userland) value symbol.
     fn from_header(header: &ValueDeclHeader) -> Self {
         Self {
@@ -238,7 +238,7 @@ impl ShallowValueSymbol {
                 .iter()
                 .map(|m| m.name.clone())
                 .collect(),
-            is_synthesised_vue_default: false,
+            is_synthesised_component_default: false,
         }
     }
 
@@ -250,7 +250,7 @@ impl ShallowValueSymbol {
         Self {
             kind: lowered.kind,
             object_member_headers: Vec::new(),
-            is_synthesised_vue_default: true,
+            is_synthesised_component_default: true,
         }
     }
 }
@@ -497,7 +497,7 @@ impl ShallowFileState {
             analysis.as_ref(),
             header_index,
         );
-        Self::from_analysis_inner(whole_hash, analysis, Arc::new(memo), &NullResolver)
+        Self::from_analysis_with_memo(whole_hash, analysis, Arc::new(memo), &NullResolver)
     }
 
     /// Test-only counterpart of [`Self::from_analysis_with_resolver`]
@@ -526,7 +526,7 @@ impl ShallowFileState {
             analysis.as_ref(),
             header_index,
         );
-        Self::from_analysis_inner(whole_hash, analysis, Arc::new(memo), resolver)
+        Self::from_analysis_with_memo(whole_hash, analysis, Arc::new(memo), resolver)
     }
 
     /// Test-only constructor with caller-supplied ROUTING tables (exports,
@@ -563,10 +563,20 @@ impl ShallowFileState {
         decl_bodies: Arc<crate::decl_body_memo::DeclBodyMemo>,
         resolver: &dyn ShallowImportResolver,
     ) -> Self {
-        Self::from_analysis_inner(whole_hash, analysis, decl_bodies, resolver)
+        Self::from_analysis_with_memo(whole_hash, analysis, decl_bodies, resolver)
     }
 
-    fn from_analysis_inner(
+    /// Shared routing-table builder for every `ShallowFileState`
+    /// constructor: it reads the ALREADY-extracted `analysis` bindings and
+    /// the SUPPLIED lazy declaration-body `decl_bodies` memo, canonicalizes
+    /// cross-file edges through `resolver`, and assembles the
+    /// export/import/wildcard routing tables. It performs NO reparse, NO
+    /// `parse_and_build_env`, and NO eval-env build — every body materialises
+    /// later on demand through the supplied memo. (This is the routing-only
+    /// successor to the retired `from_analysis_inner` eval-env fallback, which
+    /// re-parsed the file; the retired name is banned in production by the
+    /// `from_analysis_inner_name_is_retired_in_session` guard.)
+    fn from_analysis_with_memo(
         whole_hash: Hash16,
         analysis: Arc<AnalyzedExternalTypeSource>,
         decl_bodies: Arc<crate::decl_body_memo::DeclBodyMemo>,
@@ -2580,9 +2590,10 @@ pub(crate) fn collect_type_refs(expr: &TypeExpr, out: &mut Vec<String>) {
     }
 }
 
-/// Fold one lazily lowered VALUE declaration into the shallow value
-/// symbol shape (synthesised-default provenance is always `false` for a
-/// lowered userland declaration).
+/// Collect the ROOT names of every `typeof <value>` reference reachable in
+/// `expr` (the first path segment of each `TypeOf`), so a `typeof`-bearing
+/// declaration body's import dependencies can be augmented from the imported
+/// value roots.
 pub(crate) fn collect_typeof_roots(expr: &TypeExpr, out: &mut FxHashSet<String>) {
     match expr {
         TypeExpr::TypeOf(value_ref) => {
@@ -2710,7 +2721,7 @@ mod tests {
     fn make_analysis(source: &str) -> Arc<AnalyzedExternalTypeSource> {
         let alloc = oxc_allocator::Allocator::new();
         Arc::new(
-            verter_compiler::utils::oxc::vue::resolve_type::analyze_external_type_source(
+            verter_compiler::utils::oxc::script::type_surface::analyze_external_type_source(
                 source, &alloc,
             ),
         )

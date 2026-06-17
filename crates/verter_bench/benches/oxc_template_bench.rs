@@ -47,7 +47,7 @@ fn run_new_pipeline(source: &str) {
 
     if let Some(ast) = &ast {
         let alloc = Allocator::default();
-        let result = parse_template_expressions(ast, source, &alloc, SourceType::tsx());
+        let result = parse_template_expressions(ast, source, &alloc, SourceType::tsx(), false);
         black_box(result);
     }
 
@@ -255,7 +255,7 @@ fn bench_template_heavy_breakdown(c: &mut Criterion) {
             b.iter(|| {
                 let alloc = Allocator::default();
                 let result =
-                    parse_template_expressions(&pre_ast, &source, &alloc, SourceType::tsx());
+                    parse_template_expressions(&pre_ast, &source, &alloc, SourceType::tsx(), false);
                 black_box(result);
             });
         });

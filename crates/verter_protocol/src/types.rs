@@ -881,6 +881,38 @@ pub struct FfiComponentUsage {
     pub v_models: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub v_model_entries: Vec<FfiComponentVModelEntry>,
+    /// Framework-neutral two-way bindings (the Svelte `bind:` family). Empty for
+    /// Vue.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bindings: Vec<FfiComponentBindingUsage>,
+    /// Framework-neutral events (the legacy Svelte `on:` directive only — a
+    /// plain `on*` attribute is a prop, never an event). Empty for Vue.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub events: Vec<FfiComponentEventUsage>,
+}
+
+/// A two-way binding passed to a child component (the Svelte `bind:` family).
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiComponentBindingUsage {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modifiers: Vec<String>,
+}
+
+/// An event listened on a child component via the legacy Svelte `on:`
+/// directive. A plain `on*` attribute is a prop, never an event (the
+/// props/events split is syntactic — the child component-meta, not a name
+/// guess, decides which passed props are callback events).
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiComponentEventUsage {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub handler_expression: Option<String>,
+    pub is_inline: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modifiers: Vec<String>,
 }
 
 #[derive(Serialize, Clone)]

@@ -1385,7 +1385,7 @@ impl VerterHost {
     pub(crate) fn external_type_analysis(
         &self,
         canonical_id: &str,
-    ) -> Option<Arc<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource>>
+    ) -> Option<Arc<verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource>>
     {
         component_meta_trace_custom!(
             "external_type_analysis",
@@ -1442,7 +1442,7 @@ impl VerterHost {
         &self,
         canonical_id: &str,
         view: Option<&dyn crate::session_view::SessionView>,
-    ) -> Option<Arc<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource>>
+    ) -> Option<Arc<verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource>>
     {
         component_meta_trace_custom!(
             "external_type_analysis_with_view",
@@ -1615,9 +1615,10 @@ impl VerterHost {
         whole_hash: Hash16,
         snapshot: &crate::types::FileAnalysisSnapshot,
         external_type_analysis: &Arc<
-            verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource,
+            verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource,
         >,
         decl_bodies: &Arc<crate::decl_body_memo::DeclBodyMemo>,
+        eval_source: Option<&str>,
     ) -> BuiltIndexedRouteSurface {
         let declaration_file = canonical_id.ends_with(".d.ts")
             || canonical_id.ends_with(".d.mts")
@@ -1831,9 +1832,10 @@ impl VerterHost {
         let resolver = HostShallowImportResolver {
             dep_edges: &dep_edges,
         };
-        // Synthesise the implicit Vue SFC `default` value symbol
-        // from type-based macros — see `vue_default_synth` for
-        // the policy and rationale.
+        // Synthesise the implicit component `default` value symbol from
+        // type-based macros, dispatched through the framework registry's
+        // synthesis leg — see `framework::synth` for the policy and the
+        // per-framework legs (Vue's macro synth, Svelte's, …).
         self.provenance
             .shallow_state_builds
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1844,10 +1846,15 @@ impl VerterHost {
                 Arc::clone(decl_bodies),
                 &resolver,
             );
-        crate::resolver_core::vue_default_synth::inject_vue_default_into_shallow_state(
+        self.inject_component_default_into_shallow_state(
             canonical_id,
             &mut shallow_state_inner,
             &snapshot.macros,
+            eval_source,
+            // The flight's already-resolved carrier artifact — never a
+            // re-fetch through `current_eval_state` (which re-indexes the
+            // owner mid-index and recurses).
+            decl_bodies.framework_parse(),
         );
         let shallow_state = Arc::new(shallow_state_inner);
 
@@ -1870,7 +1877,7 @@ impl VerterHost {
     /// file-set change while the owner's content stayed put).
     ///
     /// The content-addressed payload — `raw_source`, `eval_source`,
-    /// `cached_parse`, `snapshot`, `script_analysis`,
+    /// `framework_parse`, `snapshot`, `script_analysis`,
     /// `external_type_analysis`, the memo-owned whole-env demand product,
     /// the shallow symbol bodies'
     /// inputs — is REUSED (`whole_hash` unchanged, no re-read, no
@@ -1931,6 +1938,7 @@ impl VerterHost {
             // bodies are canonical-free) — only the route surface and
             // its per-state classification caches rebuild.
             stale.shallow_state.decl_bodies(),
+            Some(stale.eval_source.as_ref()),
         );
         let indexed = Arc::new(crate::project_type_store::IndexedReady {
             whole_hash: stale.whole_hash,
@@ -1940,7 +1948,7 @@ impl VerterHost {
             route_hash: surface.route_hash,
             edge_generation: surface.edge_generation,
             project_generation: flight_project_generation,
-            // The refresh reuses `cached_parse` / `eval_env`, so it is
+            // The refresh reuses `framework_parse` / `eval_env`, so it is
             // entered only when the stale artifact's parse env equals
             // the live one at the reuse gate — carry the (equal) stamp
             // forward. A parse-env move AFTER that gate bumps
@@ -1949,7 +1957,7 @@ impl VerterHost {
             parse_env_hash: stale.parse_env_hash,
             raw_source: Arc::clone(&stale.raw_source),
             eval_source: Arc::clone(&stale.eval_source),
-            cached_parse: stale.cached_parse.clone(),
+            framework_parse: stale.framework_parse.clone(),
             script_analysis: stale.script_analysis.clone(),
             export_signatures: stale.export_signatures.clone(),
             snapshot: Arc::clone(&stale.snapshot),
@@ -2204,7 +2212,7 @@ impl VerterHost {
             // the scheduler — the canonical way to materialize a file. If
             // the scheduler still misses after `ensure_loaded`, return None
             // (file doesn't exist in the workspace).
-            let (raw_source, mut cached_parse, whole_hash) = {
+            let (raw_source, mut framework_parse, whole_hash) = {
                 let state = match self.effective_file_state(canonical_id, None) {
                     Some(state) => state,
                     None => {
@@ -2225,41 +2233,40 @@ impl VerterHost {
                 if !self.store_view_allows_current_whole_hash(canonical_id, state.whole_hash) {
                     return None;
                 }
-                (state.source, state.cached_parse, state.whole_hash)
+                (state.source, state.framework_parse, state.whole_hash)
             };
 
-            // A `.vue` canonical the scheduler has not SFC-parsed yet runs
-            // `parse_sfc` once here — the SFC structure parser is the one
-            // legitimately separate parser; everything downstream (eval
-            // source, snapshot, env, analysis) reuses its output. Counted
-            // via the `parse_sfc_counted` chokepoint.
-            if canonical_id.ends_with(".vue") && cached_parse.is_none() {
-                cached_parse = Some(Arc::new(crate::parse::parse_sfc_counted(
-                    &self.provenance,
-                    &raw_source,
-                )));
-            }
-            let cached_parse = cached_parse;
+            let file_language = self.language_classifier.classify(canonical_id);
 
-            // `eval_is_extracted_script` records whether the eval source
-            // is the position-preserving extracted `.vue` script — the
-            // predicate that lets the snapshot build below walk the
-            // flight's single eval-program parse instead of re-parsing
-            // the same script bytes.
+            // A carrier canonical (`.vue`, `.svelte`, …) the scheduler has not
+            // parsed yet runs the carrier parser ONCE here through the counted
+            // chokepoint — the carrier parse is the one legitimately separate
+            // parser; everything downstream (eval source, snapshot, env,
+            // analysis) reuses its framework-neutral artifact.
+            if framework_parse.is_none() && file_language.is_framework_carrier() {
+                framework_parse = crate::parse::build_carrier_parse_artifact_from_source(
+                    &file_language,
+                    &raw_source,
+                    &self.provenance,
+                );
+            }
+            let framework_parse = framework_parse;
+
+            // `eval_is_extracted_script` records whether the eval source is the
+            // position-preserving extracted carrier script — the predicate that
+            // lets the snapshot build below walk the flight's single
+            // eval-program parse instead of re-parsing the same script bytes.
             let (eval_source_text, eval_is_extracted_script) =
                 Self::build_eval_script_source_with_extraction(
                     raw_source.as_ref(),
-                    cached_parse.as_deref(),
+                    framework_parse.as_deref(),
                 );
             let eval_source = Arc::<str>::from(eval_source_text);
             // The authoritative `source_type` is resolved ONCE (scheduler
             // value first) and feeds the single eval-program parse below;
             // per-call recomputation diverged for `.vue` `lang="tsx"`.
-            let source_type = self.imported_eval_source_type_for(
-                canonical_id,
-                raw_source.as_ref(),
-                cached_parse.as_deref(),
-            );
+            let source_type =
+                self.imported_eval_source_type_for(canonical_id, framework_parse.as_deref());
             // THE single eval-program parse for this cold canonical
             // build — performed AND RETAINED on the lazy lowering
             // service's worker (keyed by the content-generation
@@ -2286,17 +2293,22 @@ impl VerterHost {
             struct ColdIndexProducts {
                 header_index: verter_semantic::analysis::decl_headers::DeclHeaderIndex,
                 analysis:
-                    verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource,
+                    verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource,
                 snapshot: Option<crate::types::FileAnalysisSnapshot>,
             }
 
             let job_canonical = canonical_id.to_string();
             let job_raw_source = Arc::clone(&raw_source);
-            let job_cached_parse = cached_parse.clone();
+            let job_framework_parse = framework_parse.clone();
             let job_scope = self.config.effective_scope();
             let job_provenance = Arc::clone(&self.provenance);
             let need_snapshot = scheduler_snapshot.is_none();
-            let is_vue = canonical_id.ends_with(".vue");
+            // A carrier whose neutral artifact opens through the blessed Vue
+            // accessor builds the Vue-shaped snapshot; any other carrier (Svelte
+            // today) builds the carrier-neutral snapshot from its retained eval
+            // program. The dispatch is by the artifact's own carrier — never a
+            // hardcoded extension branch.
+            let is_carrier = file_language.is_framework_carrier();
             // Pin the retained parse for this content generation HERE — at
             // the cold-index parse, the earliest service parse — and hand
             // the lease to the artifact's memo below, so the header-index
@@ -2323,7 +2335,7 @@ impl VerterHost {
                                     body,
                                     parsed.source_str(),
                                 ),
-                                verter_compiler::utils::oxc::vue::resolve_type::analyze_external_type_program_headers(body),
+                                verter_compiler::utils::oxc::script::type_surface::analyze_external_type_program_headers(body),
                             )
                         }
                         // Fatal parse: empty index, default analysis — no
@@ -2331,21 +2343,43 @@ impl VerterHost {
                         // authoritative `source_type` already failed).
                         None => Default::default(),
                     };
+                    let vue_parsed = job_framework_parse
+                        .as_deref()
+                        .and_then(crate::typeinfo::adapters::vue::vue_parse);
                     let snapshot = if !need_snapshot {
                         None
-                    } else if is_vue {
-                        // SFC snapshot from the cached SFC parse. The
-                        // script program is the flight's eval program when
-                        // the eval source IS the extracted script — the
-                        // snapshot walks the SAME retained parse.
-                        job_cached_parse.as_deref().map(|parsed_sfc| {
-                            let parse = crate::parse::build_vue_snapshot_from_parsed(
+                    } else if let Some(parsed_sfc) = vue_parsed {
+                        // Vue SFC snapshot from the artifact's typed parse (opened
+                        // through the blessed `vue_parse` accessor). The script
+                        // program is the flight's eval program when the eval
+                        // source IS the extracted script — the snapshot walks the
+                        // SAME retained parse.
+                        let parse = crate::parse::build_vue_snapshot_from_parsed(
+                            &job_canonical,
+                            job_raw_source.as_ref(),
+                            job_scope,
+                            parsed_sfc,
+                            &job_provenance,
+                            VerterHost::vue_flight_script_program(
+                                eval_is_extracted_script,
+                                program,
+                            ),
+                        );
+                        Some(VerterHost::build_snapshot_from_parse(parse))
+                    } else if is_carrier {
+                        // A non-Vue carrier (Svelte): its eval source IS the
+                        // position-preserving extracted script, so the snapshot's
+                        // script program is the flight's retained eval program —
+                        // walk it, parse nothing. The carrier-neutral snapshot
+                        // builder runs the script analysis over that program.
+                        job_framework_parse.as_deref().map(|artifact| {
+                            let parse = crate::parse::build_carrier_snapshot_from_artifact_with_program(
                                 &job_canonical,
                                 job_raw_source.as_ref(),
                                 job_scope,
-                                parsed_sfc,
+                                artifact,
                                 &job_provenance,
-                                VerterHost::vue_flight_script_program(
+                                VerterHost::framework_flight_script_program(
                                     eval_is_extracted_script,
                                     program,
                                 ),
@@ -2361,7 +2395,7 @@ impl VerterHost {
                         );
                         Some(VerterHost::build_snapshot_from_parse(parse))
                     } else {
-                        // Fatal (panicked) eval-program parse on a non-SFC
+                        // Fatal (panicked) eval-program parse on a non-carrier
                         // canonical: a re-parse over the same bytes under
                         // the same source type panics identically, so the
                         // default-empty snapshot IS the parse outcome.
@@ -2390,7 +2424,7 @@ impl VerterHost {
                 snapshot_key,
                 Arc::clone(&eval_source),
                 Arc::clone(&raw_source),
-                cached_parse.clone(),
+                framework_parse.clone(),
                 source_type,
                 Arc::clone(&self.decl_lowering),
                 Arc::new(products.header_index),
@@ -2404,6 +2438,7 @@ impl VerterHost {
                 snapshot.as_ref(),
                 &external_type_analysis,
                 &decl_bodies,
+                Some(eval_source.as_ref()),
             );
 
             // Prefer the scheduler's file state for script_analysis (it may have
@@ -2460,7 +2495,7 @@ impl VerterHost {
                 parse_env_hash: flight_parse_env_hash,
                 raw_source: Arc::clone(&raw_source),
                 eval_source: Arc::clone(&eval_source),
-                cached_parse,
+                framework_parse,
                 script_analysis,
                 export_signatures,
                 snapshot,
@@ -2599,7 +2634,7 @@ impl VerterHost {
                 // coherent route surface (import_routes, route edges,
                 // route_hash, import_route_hash) rebuilds and republishes
                 // with fresh stamps. This REPLACES the full re-parse
-                // edge-stale rebuild. The refresh REUSES `cached_parse` /
+                // edge-stale rebuild. The refresh REUSES `framework_parse` /
                 // `eval_env`, so it is valid only while the owner's parse
                 // environment (the R21 parse dimension) is unchanged — a
                 // moved parse env falls through to the full re-materialise
@@ -2725,9 +2760,9 @@ impl VerterHost {
         type_name: &str,
         imported_companions: &rustc_hash::FxHashMap<
             String,
-            verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements,
+            verter_compiler::utils::oxc::script::type_surface::ResolvedElements,
         >,
-    ) -> Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements> {
+    ) -> Option<verter_compiler::utils::oxc::script::type_surface::ResolvedElements> {
         self.resolve_external_type_from_indexed_ready_with_view(
             dep_canonical,
             type_name,
@@ -2748,10 +2783,10 @@ impl VerterHost {
         type_name: &str,
         imported_companions: &rustc_hash::FxHashMap<
             String,
-            verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements,
+            verter_compiler::utils::oxc::script::type_surface::ResolvedElements,
         >,
         view: Option<&dyn crate::session_view::SessionView>,
-    ) -> Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements> {
+    ) -> Option<verter_compiler::utils::oxc::script::type_surface::ResolvedElements> {
         component_meta_trace_custom!(
             "resolve_external_type_from_indexed_ready",
             format!(
@@ -2764,8 +2799,7 @@ impl VerterHost {
         let canonical_id_for_source_type = normalized_canonical_id.as_ref();
         let source_type = self.imported_eval_source_type_for(
             canonical_id_for_source_type,
-            inputs.raw_source.as_ref(),
-            inputs.cached_parse.as_deref(),
+            inputs.framework_parse.as_deref(),
         );
         let Some(type_context) = self.build_type_resolution_context(
             canonical_id_for_source_type,
@@ -2786,7 +2820,7 @@ impl VerterHost {
         };
         let program = type_context.borrow_owner().borrow_dependent();
         let base_ctx = type_context.borrow_dependent();
-        let resolved = verter_compiler::utils::oxc::vue::resolve_type::resolve_external_type_in_context_with_analyzed_symbol_companion_and_canonical(
+        let resolved = verter_compiler::utils::oxc::script::type_surface::resolve_external_type_in_context_with_analyzed_symbol_companion_and_canonical(
             type_name,
             program,
             type_context.borrow_owner().source_bytes(),

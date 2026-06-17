@@ -108,17 +108,14 @@ fn extract_v_memo_expr(el: &ElementNode, source: &str) -> Option<String> {
 
 /// Look up the OXC-parsed expression data for a given prop index.
 ///
-/// `OxcParsedProp.prop_index` maps back to `ElementNode.props[prop_index]`,
-/// so this finds the OXC expression data corresponding to a specific directive.
+/// `OxcParsedProp.prop_index` maps back to `ElementNode.props[prop_index]`. This
+/// is an O(1) wrapper over the element's dense `prop_lookup` table
+/// ([`OxcParsedElement::prop`]) — no linear scan over the sparse `props` vec.
 pub(crate) fn find_prop_oxc_exp<'a, 'alloc>(
     oxc_el: Option<&'a OxcParsedElement<'alloc>>,
     prop_index: usize,
 ) -> Option<&'a OxcParsedExpression<'alloc>> {
-    oxc_el?
-        .props
-        .iter()
-        .find(|p| p.prop_index == prop_index)
-        .and_then(|p| p.exp.as_ref())
+    oxc_el?.prop(prop_index).and_then(|p| p.exp.as_ref())
 }
 
 /// Resolve an expression using OXC binding data when available, falling back
@@ -177,6 +174,15 @@ pub struct VaporCodeGen<'ast, 'alloc> {
     options: TemplateCodeGenOptions,
     /// Element state stack for tracking parent context during DFS.
     element_stack: Vec<VaporElementState<'alloc>>,
+    /// Static HTML buffer for the template scope currently being assembled.
+    /// Plain elements and text/interpolation/comment nodes append here directly
+    /// in DFS order, so a maximal run of plain elements is built into ONE buffer
+    /// with no per-level copy. Each template-scope root (root element, component,
+    /// slot outlet, slot template) saves the enclosing buffer on
+    /// `html_scope_stack` and starts a fresh one.
+    html: String,
+    /// Saved enclosing HTML buffers for nested template scopes (see `html`).
+    html_scope_stack: Vec<String>,
     /// Counter allocator for variable names.
     counters: VaporCounters,
     /// Completed root elements (ready for assembly).
@@ -210,6 +216,8 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
             resolver,
             options: options.clone(),
             element_stack: Vec::new(),
+            html: String::new(),
+            html_scope_stack: Vec::new(),
             counters: VaporCounters::default(),
             root_elements: Vec::new(),
             depth: 0,
@@ -220,57 +228,6 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
             pending_vif_chain: None,
             memo_cache_idx: 0,
         }
-    }
-
-    /// Compute the DOM child index for a node within its parent element.
-    ///
-    /// Adjacent Text/Interpolation nodes coalesce into a single DOM child.
-    /// Elements and Comments (when enabled) each count as one DOM child.
-    /// Comments are invisible when `options.comments` is false.
-    ///
-    /// Only called for non-root elements (root elements use `finalize_root_element`).
-    fn compute_dom_child_index(&self, child_id: NodeId) -> u32 {
-        let child_node = &self.ast.nodes[child_id.0];
-        let parent_id = child_node
-            .parent
-            .expect("root elements don't call compute_dom_child_index");
-        let parent_el = match &self.ast.nodes[parent_id.0].kind {
-            AstNodeKind::Element(el) => el,
-            _ => unreachable!("parent of an element must be an element"),
-        };
-        let siblings = &parent_el
-            .content
-            .as_ref()
-            .expect("parent must have content")
-            .children;
-
-        let mut dom_idx = 0u32;
-        let mut in_text = false;
-        for &sib_id in siblings {
-            if sib_id == child_id {
-                break;
-            }
-            match &self.ast.nodes[sib_id.0].kind {
-                AstNodeKind::Text(_) | AstNodeKind::Interpolation(_) => {
-                    if !in_text {
-                        in_text = true;
-                        dom_idx += 1;
-                    }
-                }
-                AstNodeKind::Comment(_) => {
-                    if self.options.comments {
-                        in_text = false;
-                        dom_idx += 1;
-                    }
-                    // When comments disabled, skip — invisible to DOM
-                }
-                AstNodeKind::Element(_) => {
-                    in_text = false;
-                    dom_idx += 1;
-                }
-            }
-        }
-        dom_idx
     }
 
     /// Build the inner closure body for a structural directive (v-if/v-for).
@@ -647,22 +604,35 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
         None
     }
 
+    /// Close the current template scope: hand its accumulated HTML buffer to
+    /// `state.html` and restore the enclosing scope's buffer.
+    ///
+    /// Called when leaving a template-scope root (root element, component, slot
+    /// outlet, or `<template v-slot>`) — the element whose `enter` started this
+    /// scope. The per-kind builders then read the finalized HTML from `state`.
+    fn take_scope_html(&mut self, state: &mut VaporElementState<'alloc>) {
+        let enclosing = self
+            .html_scope_stack
+            .pop()
+            .expect("vapor html scope underflow: leave without matching enter");
+        state.html = std::mem::replace(&mut self.html, enclosing);
+    }
+
     /// Merge a non-root structural element (component, slot outlet) into its parent.
     ///
     /// Emits `_setInsertionState(parentRef, null, domChildIndex, true)` and pushes
     /// the element's creation statements into the parent's `child_statements`.
     fn merge_non_root_into_parent(
         &mut self,
-        child_id: NodeId,
         root: VaporRootElement<'alloc>,
         out: &mut CodeGenOutput<'alloc>,
     ) {
         use super::shared::helpers::push_u32;
 
-        // Compute DOM child index before borrowing element_stack mutably
-        let dom_child_index = self.compute_dom_child_index(child_id);
-
         if let Some(parent) = self.element_stack.last_mut() {
+            // DOM index comes from the parent's running child cursor, advanced
+            // once per observed child instead of rescanning preceding siblings.
+            let dom_child_index = parent.observe_dom_element();
             let ref_idx = parent.ensure_node_ref(&mut self.counters);
 
             // Build _setInsertionState(nN, null, childIndex, true)
@@ -1209,6 +1179,8 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
     ) {
         // Reset state for the template
         self.depth = 0;
+        self.html.clear();
+        self.html_scope_stack.clear();
     }
 
     fn leave_template(
@@ -1251,14 +1223,26 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
             el.tag_open.name_end,
         );
         // Take a recycled state from the pool (retains capacity) or create new
-        let mut state = self.state_pool.pop().unwrap_or_default();
+        let state = self.state_pool.pop().unwrap_or_default();
 
         // Components, slot outlets, and template slot wrappers don't build HTML templates
-        if el.tag_type != TagType::Component
+        let builds_open_tag = el.tag_type != TagType::Component
             && el.tag_type != TagType::SlotOutlet
-            && !(el.tag_type == TagType::Template && el.v_slot.is_some())
-        {
-            element::build_open_tag(el, source, &mut state);
+            && !(el.tag_type == TagType::Template && el.v_slot.is_some());
+
+        // A new template scope begins at every root-level element and at every
+        // component / slot outlet / slot template (each becomes its own
+        // `_template(...)`). Save the enclosing scope's HTML buffer and start a
+        // fresh one; plain descendants append into it directly.
+        if self.depth == 0 || !builds_open_tag {
+            self.html_scope_stack.push(std::mem::replace(
+                &mut self.html,
+                String::with_capacity(128),
+            ));
+        }
+
+        if builds_open_tag {
+            element::build_open_tag(el, source, &mut self.html);
         }
 
         self.element_stack.push(state);
@@ -1268,7 +1252,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
 
     fn leave_element(
         &mut self,
-        id: NodeId,
+        _id: NodeId,
         el: &ElementNode,
         oxc_el: Option<&OxcParsedElement<'alloc>>,
         source: &'alloc str,
@@ -1285,6 +1269,16 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
         let mut state = self.element_stack.pop().expect("leave without enter");
         let tag_name = &source[el.tag_open.start as usize + 1..el.tag_open.name_end as usize];
 
+        // Components, slot outlets, and slot templates accumulated their content
+        // into the scope buffer started at `enter`; hand it to `state.html` and
+        // restore the enclosing buffer before the per-kind builders read it.
+        if el.tag_type == TagType::Component
+            || el.tag_type == TagType::SlotOutlet
+            || (el.tag_type == TagType::Template && el.v_slot.is_some())
+        {
+            self.take_scope_html(&mut state);
+        }
+
         // === Component elements ===
         if el.tag_type == TagType::Component {
             if self.depth == 0 {
@@ -1296,7 +1290,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
             if self.depth == 0 {
                 self.root_elements.push(root);
             } else {
-                self.merge_non_root_into_parent(id, root, out);
+                self.merge_non_root_into_parent(root, out);
             }
             return;
         }
@@ -1311,7 +1305,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
             if self.depth == 0 {
                 self.root_elements.push(root);
             } else {
-                self.merge_non_root_into_parent(id, root, out);
+                self.merge_non_root_into_parent(root, out);
             }
             return;
         }
@@ -1359,8 +1353,11 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
             entry.push_str(&body);
             entry.push_str("    }");
 
-            // Push to parent's named_slots
+            // Push to parent's named_slots. A `<template v-slot>` is still a
+            // DOM sibling for index purposes, so advance the parent's child
+            // cursor even though the slot itself emits no inline DOM node.
             if let Some(parent) = self.element_stack.last_mut() {
+                parent.observe_dom_element();
                 parent.named_slots.push(entry);
             }
             return;
@@ -1368,7 +1365,11 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
 
         // === Normal elements ===
         let is_void = el.is_self_closing || el.content.is_none();
-        element::close_html_tag(&mut state.html, tag_name, is_void);
+        element::close_html_tag(&mut self.html, tag_name, is_void);
+        if self.depth == 0 {
+            // Root-level element owns the scope buffer it opened on `enter`.
+            self.take_scope_html(&mut state);
+        }
 
         // Process dynamic props → effects
         {
@@ -1423,10 +1424,10 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
             }
             self.root_elements.push(root);
         } else {
-            // Non-root → merge into parent with DOM child index from AST
-            // Compute before borrowing element_stack mutably
-            let dom_child_index = self.compute_dom_child_index(id);
+            // Non-root → merge into parent; DOM index from the parent's running
+            // child cursor, advanced once per observed child.
             if let Some(parent) = self.element_stack.last_mut() {
+                let dom_child_index = parent.observe_dom_element();
                 let mut consumed = element::merge_into_parent(
                     state,
                     parent,
@@ -1435,7 +1436,8 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
                     has_dynamic_text,
                     out,
                 );
-                // Recycle the consumed state (vecs drained by append, html still present)
+                // Recycle the consumed state (vecs drained by append; this
+                // element's HTML already lives in the shared scope buffer).
                 consumed.reset();
                 self.state_pool.push(consumed);
             }
@@ -1451,6 +1453,9 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
     ) {
         helpers::debug_assert_slice_bounds(source, text_node.start, text_node.end, "visit_text");
         if let Some(parent) = self.element_stack.last_mut() {
+            // Adjacent text/interpolation coalesce into one DOM child: advance
+            // the parent's running child cursor only at the start of a run.
+            parent.observe_dom_text_run();
             // Check if the parent element has interpolation children.
             // If not, skip text_parts allocation (they'd never be consumed).
             let has_interpolation = self
@@ -1466,7 +1471,14 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
                     _ => false,
                 })
                 .unwrap_or(false);
-            text::process_text(text_node, source, parent, has_interpolation, out);
+            text::process_text(
+                text_node,
+                source,
+                &mut self.html,
+                parent,
+                has_interpolation,
+                out,
+            );
         }
     }
 
@@ -1485,11 +1497,15 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
             "visit_interpolation",
         );
         if let Some(parent) = self.element_stack.last_mut() {
+            // Interpolation coalesces with an adjacent text run into one DOM
+            // child; advance the parent's running child cursor accordingly.
+            parent.observe_dom_text_run();
             interpolation::process_interpolation(
                 interp,
                 source,
                 oxc,
                 &self.resolver,
+                &mut self.html,
                 parent,
                 &mut self.counters,
                 out,
@@ -1511,7 +1527,13 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
             "visit_comment",
         );
         if let Some(parent) = self.element_stack.last_mut() {
-            comment::process_comment(comment_node, source, self.options.comments, parent);
+            // A rendered comment is its own DOM child and breaks any text run.
+            // When comment rendering is disabled the comment is invisible to
+            // the DOM, so it is not counted.
+            if self.options.comments {
+                parent.observe_dom_comment();
+            }
+            comment::process_comment(comment_node, source, self.options.comments, &mut self.html);
         }
     }
 }

@@ -60,7 +60,7 @@
 
 use std::sync::Arc;
 
-use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{HostConfig, UpsertRequest, VerterHost};
 use verter_type_expr::{ObjectMember, TypeExpr};
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
@@ -133,14 +133,18 @@ fn pick_consumer_materialises_only_selected_member_not_others() {
         canonical_id: Some("/shared.ts".to_string()),
         input_id: "/shared.ts".to_string(),
         source: Arc::from(SHARED_TYPE_TS),
-        file_kind: FileKind::from_path("/shared.ts"),
+        file_language: verter_session::LanguageRegistry::global()
+            .classify_static("/shared.ts")
+            .static_resolution(),
         aliases: Vec::new(),
     });
     let _ = host.upsert(UpsertRequest {
         canonical_id: Some("/owner.vue".to_string()),
         input_id: "/owner.vue".to_string(),
         source: Arc::from(OWNER_VUE),
-        file_kind: FileKind::from_path("/owner.vue"),
+        file_language: verter_session::LanguageRegistry::global()
+            .classify_static("/owner.vue")
+            .static_resolution(),
         aliases: Vec::new(),
     });
 

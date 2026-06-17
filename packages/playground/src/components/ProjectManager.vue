@@ -2,7 +2,8 @@
 import { ref, computed, onMounted, onUnmounted } from "vue";
 import type { Store } from "../core/store";
 import { listProjects, type StoredProject } from "../core/projectStorage";
-import { presets } from "../core/presets";
+import { presets, type Preset } from "../core/presets";
+import { FRAMEWORKS, frameworkById, isExperimentalFramework } from "../core/frameworks";
 
 const props = defineProps<{
   store: Store;
@@ -20,6 +21,31 @@ function refreshProjects() {
 }
 
 const displayName = computed(() => props.store.currentProjectName ?? "Untitled");
+
+// Presets grouped by registered framework, in manifest order. A group is only
+// shown when it actually has presets. The label carries the framework id and an
+// experimental marker for non-reference frameworks.
+interface PresetGroup {
+  frameworkId: string;
+  label: string;
+  experimental: boolean;
+  presets: Preset[];
+}
+
+const presetGroups = computed<PresetGroup[]>(() => {
+  const groups: PresetGroup[] = [];
+  for (const framework of FRAMEWORKS) {
+    const groupPresets = presets.filter((p) => p.language === framework.frameworkId);
+    if (groupPresets.length === 0) continue;
+    groups.push({
+      frameworkId: framework.frameworkId,
+      label: framework.frameworkId,
+      experimental: isExperimentalFramework(framework.frameworkId),
+      presets: groupPresets,
+    });
+  }
+  return groups;
+});
 
 function toggle() {
   open.value = !open.value;
@@ -64,7 +90,7 @@ function handleNew() {
   close();
 }
 
-function handleLoadPreset(preset: (typeof presets)[number]) {
+function handleLoadPreset(preset: Preset) {
   props.store.loadProject(preset.name, preset.state);
   close();
 }
@@ -160,11 +186,16 @@ onUnmounted(() => {
         </button>
       </div>
 
-      <!-- Presets -->
-      <div class="section">
-        <div class="section-label">Presets</div>
+      <!-- Presets, grouped by registered framework (manifest order) -->
+      <div v-for="group in presetGroups" :key="group.frameworkId" class="section">
+        <div class="section-label">
+          <span class="group-name">{{ group.label }} Presets</span>
+          <span v-if="group.experimental" class="group-experimental" title="Experimental — not production ready">
+            experimental
+          </span>
+        </div>
         <button
-          v-for="preset in presets"
+          v-for="preset in group.presets"
           :key="preset.name"
           class="item-btn"
           @click="handleLoadPreset(preset)"
@@ -264,11 +295,25 @@ onUnmounted(() => {
 }
 
 .section-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   padding: 4px 8px;
   font-size: 11px;
   font-weight: 600;
   text-transform: uppercase;
   color: var(--text-muted, var(--text-secondary));
+  letter-spacing: 0.5px;
+}
+
+.group-name {
+  text-transform: capitalize;
+}
+
+.group-experimental {
+  font-size: 9px;
+  font-weight: 700;
+  color: #f59e0b;
   letter-spacing: 0.5px;
 }
 

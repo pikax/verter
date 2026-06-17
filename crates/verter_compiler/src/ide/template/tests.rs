@@ -31,6 +31,7 @@ fn gen_tsx_template(source: &str) -> String {
         source,
         &alloc,
         source_type,
+        true,
     );
 
     let mut tpl_ct = CodeTransform::new(source, &alloc);
@@ -95,6 +96,7 @@ fn gen_tsx_template_with_bindings(source: &str, bindings: &[(&str, BindingType)]
         source,
         &alloc,
         source_type,
+        true,
     );
 
     let tpl_alloc = Allocator::new();
@@ -735,6 +737,39 @@ fn v_for_setup_ref_iterable_binding() {
     assert!(
         result.contains("todos).map(") && !result.contains("todos.value"),
         "SetupRef iterable should be bare identifier in TSX mode (no .value), got: {}",
+        result
+    );
+}
+
+/// Discriminating regression guard — an iterable whose only identifier is also
+/// the v-for loop local (`v-for="item in item"`) parses with an OXC v-for present
+/// but ZERO in-range references (the local is filtered out of the reference set).
+/// That sub-case must emit the iterable VERBATIM (`{(item)`), exactly as a
+/// reference-bearing resolver patch over an empty reference set would: the
+/// resolver prefix is never applied because there is no reference to apply it to.
+/// Routing this through the resolver-only simple-expression path instead prefixes
+/// the bare identifier to `___VERTER___instance.item`, a generated-byte regression.
+#[test]
+fn v_for_iterable_only_loop_local_emits_verbatim_not_resolver_prefixed() {
+    let result =
+        gen_tsx_template(r#"<template><div v-for="item in item">{{ item }}</div></template>"#);
+    assert!(
+        !result.contains("v-for"),
+        "v-for must be removed, got: {}",
+        result
+    );
+    // The iterable identifier is the v-for local → OXC yields zero in-range refs.
+    // Parent behavior: emit the iterable verbatim, wrapped `{(item).map(`.
+    assert!(
+        result.contains("{(item).map("),
+        "iterable with only the loop local must stay verbatim `{{(item).map(`, got: {}",
+        result
+    );
+    // It must NOT route through the resolver-only path (which prefixes the bare
+    // identifier as an instance member access).
+    assert!(
+        !result.contains("___VERTER___instance.item"),
+        "iterable must not be resolver-prefixed to `___VERTER___instance.item`, got: {}",
         result
     );
 }
@@ -2121,6 +2156,7 @@ fn gen_tsx_template_with_map(
         source,
         &alloc,
         source_type,
+        true,
     );
 
     let tpl_alloc = Allocator::new();
@@ -5023,6 +5059,7 @@ fn gen_jsx_template(source: &str) -> String {
         source,
         &alloc,
         source_type,
+        true,
     );
 
     let mut tpl_ct = CodeTransform::new(source, &alloc);
@@ -5565,6 +5602,7 @@ fn gen_tsx_template_strict_slots_with_bindings(
         source,
         &alloc,
         source_type,
+        true,
     );
 
     let tpl_alloc = Allocator::new();
@@ -6025,6 +6063,7 @@ fn gen_tsx_template_strict_slots_with_map(
         source,
         &alloc,
         source_type,
+        true,
     );
 
     let tpl_alloc = Allocator::new();
@@ -8069,5 +8108,268 @@ fn synthesized_core_not_found_falls_back_unmapped() {
             .any(|&(dl, dc, sc)| dl == 0 && dc == 0 && sc == 0),
         "the no-core fallback must not map the synthetic string to source col 0. \
          Tokens: {tokens:?}, built: {built:?}"
+    );
+}
+
+#[test]
+fn slot_summary_memoized_warm_requery_builds_zero_extra() {
+    // The overlay builds a component's slot summary on the FIRST demand and
+    // serves every later demand for the same component warm from its memoized
+    // cell. A second query for an already-built component must trigger ZERO
+    // additional builds. Bypassing the cell (rebuilding per query) would make the
+    // second query bump the build count to 2 and fail here.
+    use crate::ast::types::{AstNodeKind, TagType};
+    use crate::template::oxc::{reset_slot_summary_counts, slot_summary_build_count};
+
+    let source = r#"<template>
+  <Card><Panel /></Card>
+</template>"#;
+    let alloc = Allocator::new();
+    let bytes = source.as_bytes();
+    let mut syntax = crate::parser::Syntax::new(false);
+    crate::tokenizer::byte::tokenize_sfc(bytes, |e| {
+        syntax.handle(
+            &e,
+            &crate::diagnostics::SyntaxPluginContext {
+                input: source,
+                bytes,
+                options: &crate::diagnostics::SyntaxPluginOptions::default(),
+                diagnostics: Vec::new(),
+            },
+        )
+    });
+    let template_ast = syntax.take_template_ast().expect("template ast");
+    let oxc_ast = crate::template::oxc::parse_template_expressions(
+        &template_ast,
+        source,
+        &alloc,
+        oxc_span::SourceType::tsx(),
+        true,
+    );
+
+    // First slot-checkable component in source order (`Card`).
+    let comp_id = template_ast
+        .nodes
+        .iter()
+        .enumerate()
+        .find_map(|(idx, node)| match &node.kind {
+            AstNodeKind::Element(el) if el.tag_type == TagType::Component => {
+                Some(crate::types::NodeId(idx))
+            }
+            _ => None,
+        })
+        .expect("a component node");
+
+    reset_slot_summary_counts();
+
+    // Cold demand: builds exactly one summary.
+    let first = oxc_ast.slot_summary(comp_id, &template_ast, source);
+    assert!(first.is_some(), "Card is a slot-checkable component");
+    assert_eq!(
+        slot_summary_build_count(),
+        1,
+        "the first demand for a component must build its summary once"
+    );
+
+    // Warm demand: same component, served from the memoized cell — ZERO rebuilds.
+    let second = oxc_ast.slot_summary(comp_id, &template_ast, source);
+    assert!(second.is_some(), "the warm summary must still resolve");
+    assert_eq!(
+        slot_summary_build_count(),
+        1,
+        "a warm re-query of an already-built component must build ZERO additional summaries"
+    );
+}
+
+// ── Standalone mapped resolver-prefixed expression heads ─────
+
+/// Discriminating — the dynamic `<component :is="expr">` emitter routes its
+/// resolved expression through the shared segmented producer. With an INLINE
+/// resolver, a setup ref `currentView` resolves to `currentView.value`; the
+/// `currentView` identifier maps to its source while the injected `.value` stays
+/// UNMAPPED. The old single-chunk fold mapped the whole `currentView.value` run
+/// at `iife_prefix.len()`, leaving no unmapped token at the `.value` boundary —
+/// the `value_gen` assertion fails on that fold.
+#[test]
+fn dynamic_component_is_setup_ref_keeps_value_unmapped() {
+    let alloc = Allocator::new();
+    let source = r#"<template><component :is="currentView" /></template>"#;
+    let bytes = source.as_bytes();
+
+    let mut syntax = crate::parser::Syntax::new(false);
+    crate::tokenizer::byte::tokenize_sfc(bytes, |e| {
+        syntax.handle(
+            &e,
+            &crate::diagnostics::SyntaxPluginContext {
+                input: source,
+                bytes,
+                options: &crate::diagnostics::SyntaxPluginOptions::default(),
+                diagnostics: Vec::new(),
+            },
+        )
+    });
+    let template_ast = syntax.take_template_ast().expect("template ast");
+    let oxc_ast = crate::template::oxc::parse_template_expressions(
+        &template_ast,
+        source,
+        &alloc,
+        oxc_span::SourceType::tsx(),
+        true,
+    );
+
+    // Locate the dynamic `<component>` element and its OXC data.
+    let (el, oxc_el) = template_ast
+        .nodes
+        .iter()
+        .enumerate()
+        .find_map(|(i, node)| match &node.kind {
+            AstNodeKind::Element(el) if el.tag_type == TagType::Component => {
+                let oxc_el = match &oxc_ast.data[i] {
+                    OxcNodeData::Element(b) => Some(b.as_ref()),
+                    _ => None,
+                };
+                Some((el.as_ref(), oxc_el))
+            }
+            _ => None,
+        })
+        .expect("dynamic <component> element");
+
+    // Inline (non-TSX) resolver so the setup ref takes the `.value` suffix.
+    let mut binding_map: FxHashMap<&str, BindingType> = FxHashMap::default();
+    binding_map.insert("currentView", BindingType::SetupRef);
+    let resolver = BindingResolver::new(binding_map, true);
+
+    let mut out = CodeGenOutput::new(&alloc);
+    let handled = rewrite_component_is(
+        el,
+        oxc_el,
+        source,
+        &mut out,
+        &resolver,
+        &[],
+        EmitContext::JsxChildren,
+    );
+    assert!(handled, "dynamic :is must be handled");
+
+    let mut ct = CodeTransform::new(source, &alloc);
+    out.apply_to(&mut ct);
+    let built = ct.build_string();
+
+    // The resolved expression keeps its `.value` (inline setup ref); bytes unchanged.
+    assert!(
+        built.contains("___VERTER___extractRenderComponent(currentView.value)"),
+        "got: {built}"
+    );
+
+    let iife_prefix =
+        "{(() => { const ___VERTER___component_render=___VERTER___extractRenderComponent(";
+    let cv_gen = el.tag_open.start + iife_prefix.len() as u32;
+    let cv_src = source.find("currentView").unwrap() as u32;
+
+    let map = ct.generate_map(crate::code_transform::SourceMapOptions::new().with_source("t.vue"));
+    let tokens: Vec<_> = map.get_tokens().collect();
+    let dump: Vec<_> = tokens
+        .iter()
+        .map(|t| {
+            (
+                t.get_dst_col(),
+                t.get_src_col(),
+                t.get_source_id().is_some(),
+            )
+        })
+        .collect();
+
+    // `currentView` maps at `iife_prefix.len()` (from the prepend anchor) → its source col.
+    let cv = tokens
+        .iter()
+        .find(|t| t.get_dst_col() == cv_gen && t.get_source_id().is_some());
+    assert!(cv.is_some(), "`currentView` must map; tokens: {dump:?}");
+    assert_eq!(
+        cv.unwrap().get_src_col(),
+        cv_src,
+        "`currentView` must map to its source col, not the synthetic `.value`"
+    );
+
+    // The synthetic `.value` begins its own UNMAPPED segment at iife_prefix.len() + 11.
+    let value_gen = cv_gen + "currentView".len() as u32;
+    assert!(
+        tokens
+            .iter()
+            .any(|t| t.get_dst_col() == value_gen && t.get_source_id().is_none()),
+        "synthetic `.value` must start an unmapped segment at col {value_gen}; tokens: {dump:?}"
+    );
+    // No source token inside the `.value` region.
+    assert!(
+        !tokens.iter().any(|t| t.get_dst_col() >= value_gen
+            && t.get_dst_col() < value_gen + ".value".len() as u32
+            && t.get_source_id().is_some()),
+        "`.value` region must carry no source token; tokens: {dump:?}"
+    );
+}
+
+/// IDE generation always runs in TSX mode, where `resolve_suffix` returns `""`.
+/// A setup ref iterable therefore never gains a `.value`: `v-for="todo in todos"`
+/// resolves the iterable to bare `(todos)`. End-state invariant guarding the
+/// producer routing in production (output bytes are invariant by design).
+#[test]
+fn ide_v_for_iterable_tsx_setup_ref_never_emits_value_suffix() {
+    let source = r#"<template><div v-for="todo in todos">{{ todo }}</div></template>"#;
+    let output = gen_tsx_template_with_bindings(source, &[("todos", BindingType::SetupRef)]);
+    assert!(
+        output.contains("todos).map("),
+        "TSX v-for iterable must read `todos).map(`: {output}"
+    );
+    assert!(
+        !output.contains("todos.value"),
+        "TSX mode must not emit a `.value` suffix on the iterable: {output}"
+    );
+}
+
+/// Structural guard — the standalone mapped resolver-prefixed expression heads
+/// (IDE `v-for` iterable, dynamic `:is`) route through the shared segmented
+/// producer (`build_prefixed_expr_segments` / `resolve_simple_expr_segments` →
+/// `prepend_mapped_generated_text`). No standalone emitter may reintroduce the
+/// per-identifier fold, keep an independent flat references mapper, or fold a
+/// resolved resolver-prefixed expression into one mapped `:is` content chunk.
+#[test]
+fn standalone_mapped_emitters_carry_no_resolver_prefix_fold() {
+    let directives_src = include_str!("directives.rs");
+    let mod_src = include_str!("mod.rs");
+
+    // (1) The v-for per-identifier `prefix+gap+bind_prefix+name+bind_suffix` fold
+    //     must be gone — the iterable resolves through the segmented producer.
+    assert!(
+        !directives_src.contains(concat!(
+            "format!(\"{}{}{}{}{}\", ",
+            "prefix, gap, bind_prefix, name, bind_suffix)"
+        )),
+        "IDE v-for iterable must not fold prefix+gap+bind_prefix+name+bind_suffix into one mapped \
+         chunk; route through build_prefixed_expr_segments / resolve_simple_expr_segments instead"
+    );
+
+    // (2) The independent flat references-walking resolver-prefix/suffix mapper
+    //     must be deleted, not kept alongside the producer.
+    assert!(
+        !directives_src.contains("fn resolve_v_for_iterable"),
+        "resolve_v_for_iterable (the independent resolver-prefix/suffix mapper) must be deleted; \
+         the v-for iterable resolves through the shared segmented producer"
+    );
+
+    // (3) The dynamic `:is` resolved expression must not fold into one mapped
+    //     content chunk; it routes through the producer + wrapped().
+    assert!(
+        !mod_src.contains(concat!("iife_prefix, resolved_expr, ", "ts_comment_text")),
+        "dynamic :is must not fold iife_prefix + resolved_expr into one mapped chunk; route the \
+         resolved expression through the shared segmented producer"
+    );
+
+    // Positive: both emitters lower through the single segmented carrier.
+    assert!(
+        directives_src.contains("prepend_mapped_generated_text"),
+        "IDE v-for iterable must lower via prepend_mapped_generated_text"
+    );
+    assert!(
+        mod_src.contains("prepend_mapped_generated_text"),
+        "dynamic :is must lower via prepend_mapped_generated_text"
     );
 }

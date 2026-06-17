@@ -4,7 +4,8 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
-use verter_compiler::compile::{format_import_specifier, VerterCompileResult};
+use verter_compiler::compile::format_import_specifier;
+use verter_compiler::framework_common::RuntimeCompileOutput;
 
 use crate::id::render_ids;
 use crate::types::{CompileProfile, FileMeta, HmrStrategy, SrcBlockInfo, VirtualNodeKind};
@@ -51,9 +52,18 @@ pub(crate) fn merge_external_sources(
     merged
 }
 
-pub(crate) fn assemble_main_module(
+/// Assemble the Vue `_sfc_main` runtime module from the framework-neutral
+/// [`RuntimeCompileOutput`] the Vue carrier produced.
+///
+/// This is the host's VUE main-module assembly (its virtual-file concern:
+/// style / custom-block virtual imports via [`render_ids`], plus HMR). It
+/// consumes the NEUTRAL bundle — never the Vue-shaped `VerterCompileResult` —
+/// so the carrier owns producing the blocks and the host owns wiring them into
+/// the `_sfc_main` object. The output is byte-identical for the same blocks
+/// regardless of how the carrier produced them.
+pub(crate) fn assemble_vue_main_module(
     canonical_id: &str,
-    compiled: &VerterCompileResult,
+    compiled: &RuntimeCompileOutput,
     meta: &FileMeta,
     profile: &CompileProfile,
 ) -> String {
@@ -498,39 +508,25 @@ mod tests {
     // assemble_main_module tests
     // ═══════════════════════════════════════════════════════════
 
-    use verter_compiler::compile::{
-        VerterCompileResult, VerterCustomBlock, VerterScriptBlock, VerterTemplateBlock,
+    use verter_compiler::framework_common::{
+        RuntimeCompileOutput, RuntimeCustomBlock, RuntimeScriptBlock, RuntimeStyleBlock,
+        RuntimeTemplateBlock,
     };
 
-    fn basic_compiled_result() -> VerterCompileResult {
-        VerterCompileResult {
-            script: Some(VerterScriptBlock {
+    fn basic_compiled_result() -> RuntimeCompileOutput {
+        RuntimeCompileOutput {
+            script: Some(RuntimeScriptBlock {
                 code: "const __sfc__ = _defineComponent({\n  setup(__props) {\n    const n = 1;\n\nreturn { n };\n\n}});\nexport default __sfc__;\n".to_string(),
                 source_map: String::new(),
                 setup: true,
-                attrs: vec![],
-                duration_ms: 0.0,
             }),
-            template: Some(VerterTemplateBlock {
+            template: Some(RuntimeTemplateBlock {
                 code: "function render(_ctx, _cache, $props, $setup) {\n  return $setup.n\n}".to_string(),
                 source_map: String::new(),
-                imports: vec!["_openBlock", "_createElementBlock"],
+                imports: vec!["_openBlock".to_string(), "_createElementBlock".to_string()],
                 ssr_imports: vec![],
-                duration_ms: 0.0,
-                attrs: vec![],
             }),
-            styles: vec![],
-            custom_blocks: vec![],
-            scope_id: String::new(),
-            errors: vec![],
-            parse_duration_ms: 0.0,
-            total_duration_ms: 0.0,
-            tsx: None,
-            tsc: None,
-            template_data: None,
-            requested_mode: verter_audit::payloads::tags::CompileCacheModeTag::Session,
-            actual_mode: verter_audit::payloads::tags::CompileCacheModeTag::Session,
-            downgrade_reason: None,
+            ..RuntimeCompileOutput::default()
         }
     }
 
@@ -549,7 +545,7 @@ mod tests {
             has_template: true,
             ..FileMeta::default()
         };
-        let result = assemble_main_module("Comp.vue", &compiled, &meta, &profile);
+        let result = assemble_vue_main_module("Comp.vue", &compiled, &meta, &profile);
         assert!(!result.contains("import.meta.hot"));
         assert!(!result.contains("module.hot"));
     }
@@ -569,7 +565,7 @@ mod tests {
             has_template: true,
             ..FileMeta::default()
         };
-        let result = assemble_main_module("Comp.vue", &compiled, &meta, &profile);
+        let result = assemble_vue_main_module("Comp.vue", &compiled, &meta, &profile);
         assert!(result.contains("module.hot"));
         assert!(!result.contains("import.meta.hot"));
     }
@@ -577,49 +573,22 @@ mod tests {
     /// @ai-generated - No script and no template → bare `const _sfc_main = {}`
     #[test]
     fn assemble_main_module_no_script_no_template() {
-        let compiled = VerterCompileResult {
-            script: None,
-            template: None,
-            styles: vec![],
-            custom_blocks: vec![],
-            scope_id: String::new(),
-            errors: vec![],
-            parse_duration_ms: 0.0,
-            total_duration_ms: 0.0,
-            tsx: None,
-            tsc: None,
-            template_data: None,
-            requested_mode: verter_audit::payloads::tags::CompileCacheModeTag::Session,
-            actual_mode: verter_audit::payloads::tags::CompileCacheModeTag::Session,
-            downgrade_reason: None,
-        };
+        let compiled = RuntimeCompileOutput::default();
         let profile = CompileProfile::default();
-        let result = assemble_main_module("Comp.vue", &compiled, &FileMeta::default(), &profile);
+        let result =
+            assemble_vue_main_module("Comp.vue", &compiled, &FileMeta::default(), &profile);
         assert!(result.contains("const _sfc_main = {}"));
     }
 
     /// @ai-generated - Custom blocks produce import + invocation lines
     #[test]
     fn assemble_main_module_custom_blocks() {
-        let compiled = VerterCompileResult {
-            script: None,
-            template: None,
-            styles: vec![],
-            custom_blocks: vec![VerterCustomBlock {
+        let compiled = RuntimeCompileOutput {
+            custom_blocks: vec![RuntimeCustomBlock {
                 block_type: "i18n".to_string(),
                 content: "{\"en\":{}}".to_string(),
-                attrs: vec![],
             }],
-            scope_id: String::new(),
-            errors: vec![],
-            parse_duration_ms: 0.0,
-            total_duration_ms: 0.0,
-            tsx: None,
-            tsc: None,
-            template_data: None,
-            requested_mode: verter_audit::payloads::tags::CompileCacheModeTag::Session,
-            actual_mode: verter_audit::payloads::tags::CompileCacheModeTag::Session,
-            downgrade_reason: None,
+            ..RuntimeCompileOutput::default()
         };
         let profile = CompileProfile::default();
         let meta = FileMeta {
@@ -627,7 +596,7 @@ mod tests {
             custom_langs: vec![None],
             ..FileMeta::default()
         };
-        let result = assemble_main_module("Comp.vue", &compiled, &meta, &profile);
+        let result = assemble_vue_main_module("Comp.vue", &compiled, &meta, &profile);
         assert!(result.contains("import block0 from"));
         assert!(result.contains("if (typeof block0 === 'function') block0(_sfc_main)"));
     }
@@ -645,7 +614,7 @@ mod tests {
             has_template: true,
             ..FileMeta::default()
         };
-        let result = assemble_main_module("Comp.vue", &compiled, &meta, &profile);
+        let result = assemble_vue_main_module("Comp.vue", &compiled, &meta, &profile);
         assert!(!result.contains("__file"));
     }
 
@@ -661,45 +630,25 @@ mod tests {
     /// @ai-generated - assemble_main_module with styles produces import lines
     #[test]
     fn assemble_main_module_with_styles_produces_import_lines() {
-        use verter_compiler::compile::VerterStyleBlock;
-
-        let compiled = VerterCompileResult {
-            script: None,
-            template: None,
+        let compiled = RuntimeCompileOutput {
             styles: vec![
-                VerterStyleBlock {
+                RuntimeStyleBlock {
                     code: ".a{}".to_string(),
-                    scoped: false,
                     lang: None,
-                    duration_ms: 0.0,
-                    attrs: vec![],
                 },
-                VerterStyleBlock {
+                RuntimeStyleBlock {
                     code: ".b{}".to_string(),
-                    scoped: false,
                     lang: Some("scss".to_string()),
-                    duration_ms: 0.0,
-                    attrs: vec![],
                 },
             ],
-            custom_blocks: vec![],
-            scope_id: String::new(),
-            errors: vec![],
-            parse_duration_ms: 0.0,
-            total_duration_ms: 0.0,
-            tsx: None,
-            tsc: None,
-            template_data: None,
-            requested_mode: verter_audit::payloads::tags::CompileCacheModeTag::Session,
-            actual_mode: verter_audit::payloads::tags::CompileCacheModeTag::Session,
-            downgrade_reason: None,
+            ..RuntimeCompileOutput::default()
         };
         let meta = FileMeta {
             style_langs: vec![None, Some("scss".to_string())],
             ..FileMeta::default()
         };
         let profile = CompileProfile::default();
-        let result = assemble_main_module("Comp.vue", &compiled, &meta, &profile);
+        let result = assemble_vue_main_module("Comp.vue", &compiled, &meta, &profile);
         assert!(
             result.contains("import \"Comp.vue?vue&type=style&index=0"),
             "should import style 0: {}",
@@ -751,7 +700,7 @@ mod tests {
             has_template: true,
             ..FileMeta::default()
         };
-        let result = assemble_main_module("Comp.vue", &compiled, &meta, &profile);
+        let result = assemble_vue_main_module("Comp.vue", &compiled, &meta, &profile);
         assert!(
             result.contains("import.meta.hot"),
             "should contain Vite HMR code"
@@ -772,7 +721,7 @@ mod tests {
             has_template: true,
             ..FileMeta::default()
         };
-        let result = assemble_main_module("Comp.vue", &compiled, &meta, &profile);
+        let result = assemble_vue_main_module("Comp.vue", &compiled, &meta, &profile);
         assert!(
             result.contains("_sfc_main.render = render"),
             "should bind render function to component"
@@ -829,20 +778,36 @@ mod tests {
     #[test]
     fn assemble_main_module_template_only_sfc() {
         use oxc_allocator::Allocator;
-        use verter_compiler::compile::CodegenOptions;
-        use verter_compiler::compile::{compile as compile_sfc, VerterCompileOptions};
+        use verter_compiler::framework_common::vue_bridge::VueCarrierCompiler;
+        use verter_compiler::framework_common::{
+            CarrierCompiler, ParseOptions, RuntimeCompileOptions,
+        };
 
+        // Drive the Vue CARRIER `compile_bundle` (the registry-routed producer)
+        // so this end-to-end assembly test exercises the neutral bundle path.
         let source = "<template><div>hello</div></template>";
         let alloc = Allocator::new();
-        let opts = CodegenOptions {
-            inline: Some(false),
-            ..CodegenOptions::default()
-        };
-        let vopts = VerterCompileOptions {
-            force_js: true,
-            ..Default::default()
-        };
-        let result = compile_sfc(source, &opts, &vopts, &alloc);
+        let compiler = VueCarrierCompiler::default();
+        // Route the carrier parse through the counted chokepoint (the dedup
+        // rail authority), not a raw `compiler.parse`.
+        let provenance = crate::types::MetaProvenance::default();
+        let artifact = crate::parse::parse_carrier_counted(
+            &provenance,
+            &compiler,
+            source,
+            &ParseOptions::default(),
+        );
+        let result = compiler
+            .compile_bundle(
+                source,
+                &artifact,
+                &RuntimeCompileOptions {
+                    force_js: true,
+                    ..RuntimeCompileOptions::default()
+                },
+                &alloc,
+            )
+            .expect("vue carrier produces a runtime bundle");
 
         // script should be None for template-only SFC
         assert!(
@@ -859,7 +824,7 @@ mod tests {
             has_template: true,
             ..FileMeta::default()
         };
-        let assembled = assemble_main_module("NoScript.vue", &result, &meta, &profile);
+        let assembled = assemble_vue_main_module("NoScript.vue", &result, &meta, &profile);
 
         // Must contain _sfc_main definition (fallback empty object)
         assert!(

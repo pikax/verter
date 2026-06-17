@@ -17,7 +17,7 @@
 use std::sync::Arc;
 
 use crate::semantic_query::ProjectionMode;
-use crate::types::{FileKind, HostConfig, MetaProvenanceSnapshot, UpsertRequest};
+use crate::types::{HostConfig, MetaProvenanceSnapshot, UpsertRequest};
 use crate::VerterHost;
 
 fn make_host(files: &[(&str, &str)]) -> Arc<VerterHost> {
@@ -36,7 +36,9 @@ fn upsert(host: &VerterHost, canonical_id: &str, source: &str) {
             canonical_id: Some(canonical_id.to_string()),
             input_id: canonical_id.to_string(),
             source: Arc::from(source),
-            file_kind: FileKind::from_path(canonical_id),
+            file_language: verter_language::LanguageRegistry::global()
+                .classify_static(canonical_id)
+                .static_resolution(),
             aliases: Vec::new(),
         })
         .expect("upsert must succeed");
@@ -971,7 +973,7 @@ fn moved_parse_env_forces_full_rematerialise_not_edge_refresh() {
         parse_env_hash,
         raw_source: Arc::clone(&built.raw_source),
         eval_source: Arc::clone(&built.eval_source),
-        cached_parse: built.cached_parse.clone(),
+        framework_parse: built.framework_parse.clone(),
         script_analysis: built.script_analysis.clone(),
         export_signatures: built.export_signatures.clone(),
         snapshot: Arc::clone(&built.snapshot),
@@ -2694,7 +2696,7 @@ fn vue_upsert_and_cold_build_run_exactly_one_counted_sfc_parse() {
         .ensure_indexed_ready(canonical)
         .expect("the .vue canonical must materialise");
     assert!(
-        indexed.cached_parse.is_some(),
+        indexed.framework_parse.is_some(),
         "sanity: the cold build carries the SFC parse",
     );
     assert_eq!(

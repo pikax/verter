@@ -1,0 +1,31 @@
+{
+  "name": "@verter/lsp-test-client",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Side-effect-free JSON-RPC LSP stdio client for test and DX harnesses: Content-Length framing, request/notification API, buffered stderr, and position-encoding negotiation.",
+  "license": "MIT",
+  "author": "pikax",
+  "type": "module",
+  "sideEffects": false,
+  "main": "dist/index.js",
+  "module": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "npx shx rm -rf dist tsconfig.tsbuildinfo && tsc -b --force",
+    "dev": "tsc -b --watch",
+    "clean": "npx shx rm -rf .turbo dist tsconfig.tsbuildinfo",
+    "test": "vitest --run"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.1",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.7"
+  }
+}

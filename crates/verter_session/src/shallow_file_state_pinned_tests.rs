@@ -32,7 +32,7 @@
 
 use std::sync::Arc;
 
-use crate::{FileKind, HostConfig, UpsertRequest, VerterHost};
+use crate::{HostConfig, UpsertRequest, VerterHost};
 
 /// Upsert a file through the production [`VerterHost::upsert`] path.
 /// The upsert performs no own-canonical query-identity cache drain, so
@@ -44,7 +44,9 @@ fn upsert(host: &VerterHost, canonical: &str, source: &str) {
             canonical_id: Some(canonical.to_string()),
             input_id: canonical.to_string(),
             source: Arc::from(source),
-            file_kind: FileKind::from_path(canonical),
+            file_language: crate::LanguageRegistry::global()
+                .classify_static(canonical)
+                .static_resolution(),
             aliases: Vec::new(),
         })
         .expect("upsert succeeds");

@@ -158,7 +158,7 @@ pub(super) async fn resync_aliased_imports_for_open_files(
         let Some(canonical_id) = documents.get_canonical_id(&uri) else {
             continue;
         };
-        if !canonical_id.ends_with(".vue") {
+        if carrier_language_for(&canonical_id).is_none() {
             continue;
         }
         let Some(analysis) = host.get_analysis(&canonical_id) else {
@@ -166,7 +166,7 @@ pub(super) async fn resync_aliased_imports_for_open_files(
         };
 
         // Static imports (same pipeline as did_open line 6103)
-        let ids = collect_imported_vue_priority_ids_from_imports_with_fallback(
+        let ids = collect_imported_carrier_priority_ids_from_imports_with_fallback(
             &analysis.imports,
             Some(&canonical_id),
             |parent, specifier| resolve_import_specifier_standalone(host, parent, specifier),
@@ -174,7 +174,7 @@ pub(super) async fn resync_aliased_imports_for_open_files(
 
         // Dynamic imports via module_references
         let reader = LspProjectResolverReader::new(documents);
-        let dynamic_ids = collect_priority_vue_targets_from_module_references(
+        let dynamic_ids = collect_priority_carrier_public_api_targets_from_module_references(
             Some(&snapshot),
             &reader,
             &canonical_id,
@@ -236,7 +236,7 @@ pub(super) async fn resync_aliased_imports_for_open_files(
         if crate::provider_sync::current_owner_binding_for_source(&snapshot.resolver, import_id)
             .is_unresolved()
         {
-            reconcile_unowned_vue_provider_file(
+            reconcile_unowned_carrier_provider_file(
                 sync,
                 documents,
                 provider_sync_states,
@@ -249,9 +249,15 @@ pub(super) async fn resync_aliased_imports_for_open_files(
             continue;
         }
 
-        // Compile to generate public API
+        // Compile to generate public API. IDE-sync: gate on the IDE/TSX surface
+        // (not the runtime `Main`) so a Main-less carrier (Svelte) — which has a
+        // `CachedTsx` but no `Main` — is not skipped. `Ok(false)` (no IDE
+        // surface) skips; otherwise proceed to the owner-aware provider sync.
         let profile = documents.tsx_profile.read().clone();
-        if host.ensure_compiled(import_id, &profile).is_err() {
+        if !host
+            .ensure_ide_compiled(import_id, &profile)
+            .unwrap_or(false)
+        {
             continue;
         }
 
@@ -268,12 +274,14 @@ pub(super) async fn resync_aliased_imports_for_open_files(
         // Owner is present (re-checked above before compile). Build the owner-
         // aware target with the compiled `is_jsx`.
         let is_jsx = ide.as_ref().map(|output| output.is_jsx).unwrap_or(false);
-        let Some(next_state) =
-            crate::provider_sync::vue_sync_state_for_source(&snapshot.resolver, import_id, is_jsx)
-        else {
+        let Some(next_state) = crate::provider_sync::carrier_sync_state_for_source(
+            &snapshot.resolver,
+            import_id,
+            is_jsx,
+        ) else {
             // Owner was lost between the pre-check and here (a mid-flight snapshot
             // change). Reconcile the open file's binding rather than stranding it.
-            reconcile_unowned_vue_provider_file(
+            reconcile_unowned_carrier_provider_file(
                 sync,
                 documents,
                 provider_sync_states,
@@ -294,7 +302,7 @@ pub(super) async fn resync_aliased_imports_for_open_files(
         };
         // Sync NEW paths first, then close stale-after-success (per-kind, skip-
         // active) through the shared discipline.
-        if sync_owner_resolved_vue_with_close_after_sync(
+        if sync_owner_resolved_carrier_with_close_after_sync(
             sync,
             provider_sync_states,
             import_id,
@@ -310,14 +318,14 @@ pub(super) async fn resync_aliased_imports_for_open_files(
     }
 
     // Pass 2 (TSGO only): Sync barrel imports discovered from template component usages.
-    // When a component is imported through a barrel (non-Vue re-export file), the Vue
-    // file collection above misses both the barrel and its Vue re-export targets.
-    // This pass follows the barrel → Vue re-export chain and syncs both.
+    // When a component is imported through a barrel (non-carrier re-export file), the
+    // carrier file collection above misses both the barrel and its carrier re-export
+    // targets. This pass follows the barrel → carrier re-export chain and syncs both.
     if is_tsgo {
         let mut barrel_ids: Vec<String> = Vec::new();
-        let mut barrel_vue_deps: Vec<String> = Vec::new();
+        let mut barrel_carrier_deps: Vec<String> = Vec::new();
         let mut seen_barrels = HashSet::new();
-        let mut seen_barrel_vue = HashSet::new();
+        let mut seen_barrel_carrier = HashSet::new();
 
         for uri_str in documents.open_uris() {
             let Ok(uri) = uri_str.parse::<Uri>() else {
@@ -326,7 +334,7 @@ pub(super) async fn resync_aliased_imports_for_open_files(
             let Some(canonical_id) = documents.get_canonical_id(&uri) else {
                 continue;
             };
-            if !canonical_id.ends_with(".vue") {
+            if carrier_language_for(&canonical_id).is_none() {
                 continue;
             }
             let Some(analysis) = host.get_analysis(&canonical_id) else {
@@ -345,29 +353,30 @@ pub(super) async fn resync_aliased_imports_for_open_files(
                 else {
                     continue;
                 };
-                if resolved.ends_with(".vue") {
-                    continue; // already handled by Vue sync pass
+                if verter_workspace::path_is_carrier(&resolved) {
+                    continue; // a directly-resolved carrier is already handled by the carrier pass
                 }
                 if !seen_barrels.insert(resolved.clone()) {
                     continue;
                 }
 
                 // Load the barrel into the host and scan its module references
-                // for .vue import specifiers. This avoids the chicken-and-egg problem
-                // where get_export_span_follow_reexports needs Vue files already loaded.
+                // for carrier (`.vue`, `.svelte`, …) specifiers. This avoids the
+                // chicken-and-egg problem where get_export_span_follow_reexports
+                // needs carrier files already loaded.
                 host.ensure_loaded(&resolved);
 
                 if let Some(barrel_analysis) = host.get_analysis(&resolved) {
                     for module_ref in barrel_analysis.module_references.iter() {
                         if let Some(specifier) = &module_ref.literal_specifier {
-                            if specifier.ends_with(".vue") {
-                                if let Some(vue_id) =
+                            if verter_workspace::path_is_carrier(specifier) {
+                                if let Some(carrier_id) =
                                     resolve_import_specifier_standalone(host, &resolved, specifier)
                                 {
-                                    if vue_id.ends_with(".vue")
-                                        && seen_barrel_vue.insert(vue_id.clone())
+                                    if verter_workspace::path_is_carrier(&carrier_id)
+                                        && seen_barrel_carrier.insert(carrier_id.clone())
                                     {
-                                        barrel_vue_deps.push(vue_id);
+                                        barrel_carrier_deps.push(carrier_id);
                                     }
                                 }
                             }
@@ -380,21 +389,21 @@ pub(super) async fn resync_aliased_imports_for_open_files(
         }
 
         // Sync Vue dependencies first (so TSGO has .vue.ts targets before barrel)
-        for vue_id in &barrel_vue_deps {
+        for carrier_id in &barrel_carrier_deps {
             // Skip if already synced in the main Vue pass — but only when an OPEN
             // barrel-dep `.vue`'s committed binding STILL matches the live
             // resolution (R2-4). An owner change/loss on an open barrel dep must
             // fall through to reconciliation, never short-circuit on a stale
             // binding. A non-open dep keeps its fully-loaded binding as-is.
-            if let Some(state) = provider_sync_states.get(vue_id.as_str()) {
+            if let Some(state) = provider_sync_states.get(carrier_id.as_str()) {
                 if state.ide_background_loaded && state.api_background_loaded {
-                    let is_open = documents.canonical_id_to_uri(vue_id).is_some();
+                    let is_open = documents.canonical_id_to_uri(carrier_id).is_some();
                     let binding_current = !is_open
                         || crate::provider_sync::committed_binding_matches_current(
                             &state,
                             &crate::provider_sync::current_owner_binding_for_source(
                                 &snapshot.resolver,
-                                vue_id,
+                                carrier_id,
                             ),
                         );
                     if binding_current {
@@ -403,7 +412,7 @@ pub(super) async fn resync_aliased_imports_for_open_files(
                 }
             }
 
-            if !host.ensure_loaded(vue_id) {
+            if !host.ensure_loaded(carrier_id) {
                 continue;
             }
 
@@ -412,47 +421,57 @@ pub(super) async fn resync_aliased_imports_for_open_files(
             // Owner resolution is a pure resolver query, so a COMPILE FAILURE
             // must not strand a previously-`Owned` open barrel-dep on its dead
             // owner. The reconcile corrects the binding without fresh IDE output.
-            if crate::provider_sync::current_owner_binding_for_source(&snapshot.resolver, vue_id)
-                .is_unresolved()
+            if crate::provider_sync::current_owner_binding_for_source(
+                &snapshot.resolver,
+                carrier_id,
+            )
+            .is_unresolved()
             {
-                reconcile_unowned_vue_provider_file(
+                reconcile_unowned_carrier_provider_file(
                     sync,
                     documents,
                     provider_sync_states,
-                    vue_id,
+                    carrier_id,
                     None,
                     snapshot.ownership_ready,
-                    "barrel_vue_dep",
+                    "barrel_carrier_dep",
                 )
                 .await;
                 continue;
             }
 
+            // IDE-sync: gate on the IDE/TSX surface (not the runtime `Main`) so
+            // a Main-less carrier (Svelte) is not skipped here.
             let profile = documents.tsx_profile.read().clone();
-            if host.ensure_compiled(vue_id, &profile).is_err() {
+            if !host
+                .ensure_ide_compiled(carrier_id, &profile)
+                .unwrap_or(false)
+            {
                 continue;
             }
 
-            configure_provider_paths_for_source(sync, &snapshot, vue_id, true).await;
+            configure_provider_paths_for_source(sync, &snapshot, carrier_id, true).await;
 
-            let ide = host.get_ide(vue_id, &profile);
+            let ide = host.get_ide(carrier_id, &profile);
 
             // Owner is present (re-checked above before compile). Build the
             // owner-aware target with the compiled `is_jsx`.
             let is_jsx = ide.as_ref().map(|output| output.is_jsx).unwrap_or(false);
-            let Some(next_state) =
-                crate::provider_sync::vue_sync_state_for_source(&snapshot.resolver, vue_id, is_jsx)
-            else {
+            let Some(next_state) = crate::provider_sync::carrier_sync_state_for_source(
+                &snapshot.resolver,
+                carrier_id,
+                is_jsx,
+            ) else {
                 // Owner lost mid-flight (snapshot changed since the pre-check):
                 // reconcile the open file's binding rather than strand it.
-                reconcile_unowned_vue_provider_file(
+                reconcile_unowned_carrier_provider_file(
                     sync,
                     documents,
                     provider_sync_states,
-                    vue_id,
+                    carrier_id,
                     ide.as_ref(),
                     snapshot.ownership_ready,
-                    "barrel_vue_dep",
+                    "barrel_carrier_dep",
                 )
                 .await;
                 continue;
@@ -460,17 +479,17 @@ pub(super) async fn resync_aliased_imports_for_open_files(
 
             // Owner-resolved: the public API is required to sync the API kind; a
             // miss is transient and leaves the correct `Owned` binding in place.
-            let Some(api) = host.get_public_api(vue_id) else {
+            let Some(api) = host.get_public_api(carrier_id) else {
                 continue;
             };
-            if sync_owner_resolved_vue_with_close_after_sync(
+            if sync_owner_resolved_carrier_with_close_after_sync(
                 sync,
                 provider_sync_states,
-                vue_id,
+                carrier_id,
                 next_state,
                 ide.as_ref().map(|output| &*output.code),
                 &api.code,
-                "barrel_vue_dep",
+                "barrel_carrier_dep",
             )
             .await
             {
@@ -480,7 +499,7 @@ pub(super) async fn resync_aliased_imports_for_open_files(
 
         // Sync barrel files (their rewritten imports now point to .vue.ts)
         for barrel_id in &barrel_ids {
-            if sync_pending_non_vue_provider_file(
+            if sync_pending_non_carrier_provider_file(
                 sync,
                 documents,
                 &snapshot,
@@ -519,6 +538,18 @@ pub(crate) async fn configure_provider_paths_for_source(
         return;
     };
 
+    // Re-inject the Svelte IDE-projection assets (D-av / D-ay) on EVERY
+    // provider path-config — a subsequent owned sync sends the supplied `paths`
+    // verbatim, so without re-injection it would OVERWRITE the startup-injected
+    // `@verter/svelte-jsx` + `svelte/*` rows and strand `.svelte.tsx` module
+    // resolution. The owner project root is the per-project resolution anchor.
+    let owner_root = snapshot
+        .resolver
+        .owner_for_file(canonical_id)
+        .map(|o| o.root.clone())
+        .unwrap_or_default();
+    let paths = crate::svelte_assets::inject_svelte_paths(paths, &owner_root);
+
     let result = if background {
         sync.configure_paths_background(&base_url, paths).await
     } else {
@@ -540,8 +571,8 @@ pub(super) async fn sync_pending_snapshot_provider_file(
     canonical_id: &str,
     is_tsgo: bool,
 ) -> SyncOutcome {
-    if canonical_id.ends_with(".vue") {
-        sync_pending_vue_provider_file(
+    if carrier_language_for(canonical_id).is_some() {
+        sync_pending_carrier_provider_file(
             sync,
             documents,
             snapshot,
@@ -551,8 +582,8 @@ pub(super) async fn sync_pending_snapshot_provider_file(
         )
         .await
     } else {
-        // Non-Vue files have a single Shadow kind: synced fully or not at all.
-        if sync_pending_non_vue_provider_file(
+        // Non-carrier files have a single Shadow kind: synced fully or not at all.
+        if sync_pending_non_carrier_provider_file(
             sync,
             documents,
             snapshot,
@@ -569,7 +600,7 @@ pub(super) async fn sync_pending_snapshot_provider_file(
     }
 }
 
-pub(super) async fn sync_pending_vue_provider_file(
+pub(super) async fn sync_pending_carrier_provider_file(
     sync: &ProjectSync,
     documents: &DocumentRegistry,
     snapshot: &super::PublishedResolverSnapshot,
@@ -587,13 +618,18 @@ pub(super) async fn sync_pending_vue_provider_file(
     documents.host.invalidate_compile_slots(canonical_id);
     documents.host.bump_diagnostics_generation(canonical_id);
     let profile = documents.tsx_profile.read().clone();
-    let _ = block_in_place_if_available(|| documents.host.ensure_compiled(canonical_id, &profile));
+    // IDE-sync: drive the IDE/TSX surface (not the runtime `Main`) so a
+    // Main-less carrier (Svelte) populates its `CachedTsx` before `get_ide`.
+    let _ =
+        block_in_place_if_available(|| documents.host.ensure_ide_compiled(canonical_id, &profile));
     let ide = block_in_place_if_available(|| documents.host.get_ide(canonical_id, &profile));
     let is_jsx = ide.as_ref().map(|output| output.is_jsx).unwrap_or(false);
     let is_open = documents.canonical_id_to_uri(canonical_id).is_some();
-    let Some(next_state) =
-        crate::provider_sync::vue_sync_state_for_source(&snapshot.resolver, canonical_id, is_jsx)
-    else {
+    let Some(next_state) = crate::provider_sync::carrier_sync_state_for_source(
+        &snapshot.resolver,
+        canonical_id,
+        is_jsx,
+    ) else {
         // No owner resolved for this file.
         if is_open {
             // Editor-liveness invariant: an OPEN Vue document keeps a live TSX
@@ -604,7 +640,7 @@ pub(super) async fn sync_pending_vue_provider_file(
             // remove the state or close the TSX merely because owner is None.
             // It is intentionally NOT fully reconciled — it awaits an owner —
             // so it stays queued (`Nothing`).
-            sync_open_unresolved_vue_provider_file(
+            sync_open_unresolved_carrier_provider_file(
                 sync,
                 provider_sync_states,
                 canonical_id,
@@ -762,7 +798,7 @@ pub(super) async fn sync_pending_vue_provider_file(
 /// It never closes the open document's existing paths and never removes its
 /// state. Returns `false` so the drain keeps the file in the pending set for
 /// later owner reconciliation.
-pub(super) async fn sync_open_unresolved_vue_provider_file(
+pub(super) async fn sync_open_unresolved_carrier_provider_file(
     sync: &ProjectSync,
     provider_sync_states: &DashMap<String, ProviderSyncState>,
     canonical_id: &str,
@@ -776,14 +812,14 @@ pub(super) async fn sync_open_unresolved_vue_provider_file(
     // prior `Owned` binding (rather than reusing it) is what lets a later
     // snapshot re-bind the file via `needs_owner_reconcile`.
     let previous = provider_sync_states.get(canonical_id).map(|e| e.clone());
-    let target = open_unresolved_vue_state(previous.as_ref(), canonical_id, is_jsx);
+    let target = open_unresolved_carrier_state(previous.as_ref(), canonical_id, is_jsx);
 
     let Some(ide) = ide else {
         // No compiled IDE output this pass (e.g. a transient compile miss): no
         // IDE sync is attempted, so the IDE kind did NOT go live this pass.
         //
         // Route the commit through the SAME per-kind discipline the owner-
-        // resolved path uses (`open_unresolved_vue_commit`): a non-synced IDE
+        // resolved path uses (`open_unresolved_carrier_commit`): a non-synced IDE
         // kind RETAINS the prior LIVE path (never dropped to a dead/None path
         // while the prior is still open in the provider), the binding is forced
         // `Unresolved`, and the owner-derived API path is dropped+closed.
@@ -791,11 +827,11 @@ pub(super) async fn sync_open_unresolved_vue_provider_file(
         // With NO prior state this commits the EMPTY `Unresolved` (ide_path=None,
         // binding=Unresolved, dropped_api=None → no close) — recording the open
         // file's unresolved status (queued for retry), uniform with the two
-        // `preserve_open_unresolved_vue` callers. This commit is unconditional so
+        // `preserve_open_unresolved_carrier` callers. This commit is unconditional so
         // all three unresolved-preserve entry points share ONE row-1 behavior; an
         // open file's unresolved state is then observable regardless of which
         // path handled it, and `needs_owner_reconcile` picks it up.
-        let commit = open_unresolved_vue_commit(previous.as_ref(), target, false);
+        let commit = open_unresolved_carrier_commit(previous.as_ref(), target, false);
         commit_sync_transition(provider_sync_states, canonical_id, commit.committed);
         close_dropped_owner_api_path(sync, commit.dropped_api.as_ref(), "open_unresolved").await;
         return false;
@@ -825,7 +861,7 @@ pub(super) async fn sync_open_unresolved_vue_provider_file(
     // discipline: the IDE kind reverts to the prior live path on a failed/absent
     // sync (rows 7 & 9), the owner-derived API is dropped+closed unconditionally,
     // and the orphaned prior IDE path is closed ONLY after a successful flip.
-    let commit = open_unresolved_vue_commit(previous.as_ref(), target, ide_synced);
+    let commit = open_unresolved_carrier_commit(previous.as_ref(), target, ide_synced);
     commit_sync_transition(provider_sync_states, canonical_id, commit.committed);
     close_dropped_owner_api_path(sync, commit.dropped_api.as_ref(), "open_unresolved").await;
     if let Some(stale) = commit.stale_ide_after_success.as_ref() {
@@ -861,11 +897,11 @@ async fn close_dropped_owner_api_path(
 /// pass (aliased-import resync, barrel Vue dependency). Single shared discipline
 /// for the editor-liveness invariant:
 ///   * OPEN file → preserve/create `Unresolved` state and keep its IDE TSX live
-///     (delegates to [`sync_open_unresolved_vue_provider_file`]). NEVER removes
+///     (delegates to [`sync_open_unresolved_carrier_provider_file`]). NEVER removes
 ///     the state or closes the TSX merely because the owner is None.
 ///   * closed/deleted file (only once `ownership_ready`) → drop the stale state
 ///     and close its provider paths.
-async fn reconcile_unowned_vue_provider_file(
+async fn reconcile_unowned_carrier_provider_file(
     sync: &ProjectSync,
     documents: &DocumentRegistry,
     provider_sync_states: &DashMap<String, ProviderSyncState>,
@@ -879,7 +915,7 @@ async fn reconcile_unowned_vue_provider_file(
         // `is_jsx` is derived from the compiled IDE output (false when absent —
         // a transient compile miss preserves the prior path regardless).
         let is_jsx = ide.map(|output| output.is_jsx).unwrap_or(false);
-        sync_open_unresolved_vue_provider_file(
+        sync_open_unresolved_carrier_provider_file(
             sync,
             provider_sync_states,
             canonical_id,
@@ -910,7 +946,7 @@ async fn reconcile_unowned_vue_provider_file(
 /// commits, and closes ONLY the genuinely-stale paths (synced kind, not active).
 /// A failed reconciliation leaves the previous path both committed AND open.
 /// Returns `true` if any kind synced.
-async fn sync_owner_resolved_vue_with_close_after_sync(
+async fn sync_owner_resolved_carrier_with_close_after_sync(
     sync: &ProjectSync,
     provider_sync_states: &DashMap<String, ProviderSyncState>,
     canonical_id: &str,
@@ -1048,7 +1084,7 @@ pub(super) async fn sync_api_to_provider_background_task(
     // state + prior API path are retained intact.
 }
 
-pub(super) async fn sync_pending_non_vue_provider_file(
+pub(super) async fn sync_pending_non_carrier_provider_file(
     sync: &ProjectSync,
     documents: &DocumentRegistry,
     snapshot: &super::PublishedResolverSnapshot,
@@ -1059,6 +1095,12 @@ pub(super) async fn sync_pending_non_vue_provider_file(
     let Some(source) = documents.host.get_source(canonical_id) else {
         return false;
     };
+    // Framework carriers never sync to the provider as raw scripts.
+    let Some(file_language) =
+        crate::provider_sync::provider_script_language(&documents.host, canonical_id)
+    else {
+        return false;
+    };
     let module_references = block_in_place_if_available(|| {
         documents
             .host
@@ -1066,14 +1108,14 @@ pub(super) async fn sync_pending_non_vue_provider_file(
                 canonical_id: Some(canonical_id.to_string()),
                 input_id: canonical_id.to_string(),
                 source: source.clone(),
-                file_kind: verter_session::FileKind::NonSfc,
+                file_language,
                 aliases: Vec::new(),
             })
             .map(|result| result.module_references)
             .unwrap_or_default()
     });
     let reader = LspProjectResolverReader::new(documents);
-    let Some(prepared) = prepare_non_vue_provider_sync(
+    let Some(prepared) = prepare_non_carrier_provider_sync(
         Some(snapshot),
         &reader,
         canonical_id,
@@ -1083,7 +1125,7 @@ pub(super) async fn sync_pending_non_vue_provider_file(
         return false;
     };
     let Some(next_state) =
-        crate::provider_sync::non_vue_sync_state_for_source(&snapshot.resolver, canonical_id)
+        crate::provider_sync::non_carrier_sync_state_for_source(&snapshot.resolver, canonical_id)
     else {
         return false;
     };

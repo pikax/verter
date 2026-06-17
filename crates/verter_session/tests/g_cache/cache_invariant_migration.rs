@@ -47,7 +47,7 @@
 
 use std::sync::Arc;
 
-use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
 #[allow(deprecated)]
@@ -275,7 +275,7 @@ fn cache_invalidation_after_dep_edit_surfaces_new_content() {
 }
 "#,
         ),
-        file_kind: FileKind::NonSfc,
+        file_language: FileLanguage::script_ts(),
         aliases: vec![],
     });
     host.evict("/workspace/src/Comp.vue");
@@ -363,7 +363,7 @@ fn evicted_owner_reloads_after_dep_edit() {
             canonical_id: Some("/workspace/src/types.ts".into()),
             input_id: "/workspace/src/types.ts".into(),
             source: Arc::from(edited_types),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: vec![],
         })
         .expect("dep upsert must succeed");

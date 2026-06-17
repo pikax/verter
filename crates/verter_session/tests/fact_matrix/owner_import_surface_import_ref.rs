@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
 #[test]
@@ -20,14 +20,14 @@ fn owner_import_surface_producer_counter_advances_on_each_owner_import() {
         canonical_id: Some("/a.ts".into()),
         input_id: "/a.ts".into(),
         source: Arc::from("export interface A { id: string }"),
-        file_kind: FileKind::NonSfc,
+        file_language: FileLanguage::script_ts(),
         aliases: vec![],
     });
     let _ = host.upsert(UpsertRequest {
         canonical_id: Some("/b.ts".into()),
         input_id: "/b.ts".into(),
         source: Arc::from("export interface B { label: string }"),
-        file_kind: FileKind::NonSfc,
+        file_language: FileLanguage::script_ts(),
         aliases: vec![],
     });
     let _ = host.upsert(UpsertRequest {
@@ -40,7 +40,7 @@ fn owner_import_surface_producer_counter_advances_on_each_owner_import() {
              defineProps<A & B>();\
              </script>",
         ),
-        file_kind: FileKind::VueSfc,
+        file_language: FileLanguage::vue(),
         aliases: vec![],
     });
 

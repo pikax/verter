@@ -50,7 +50,7 @@ pub struct ExpandedProperty {
     /// Whether this member was explicitly declared in the macro's type
     /// argument's own body (vs reached via heritage / Omit / intersection
     /// from an external source). See
-    /// [`verter_compiler::utils::oxc::vue::resolve_type::ResolvedProp::declared_in_macro_type_arg`]
+    /// [`verter_compiler::utils::oxc::script::type_surface::ResolvedProp::declared_in_macro_type_arg`]
     /// for the structural definition. Propagated by
     /// `macro_shapes`-side materialisation and the prepared-surface walker
     /// from the upstream `SurfaceMember` / `ProjectedMember` source.
@@ -276,7 +276,7 @@ pub struct ExpandedField {
     /// Whether this member was explicitly declared in the macro's type
     /// argument's own body (vs reached via heritage / Omit / intersection
     /// from an external source). See
-    /// [`verter_compiler::utils::oxc::vue::resolve_type::ResolvedProp::declared_in_macro_type_arg`]
+    /// [`verter_compiler::utils::oxc::script::type_surface::ResolvedProp::declared_in_macro_type_arg`]
     /// for the structural definition. Propagated by
     /// `expand_macro_types_impl_with_expander` and
     /// `surface_member_to_expanded_field` from the upstream `SurfaceMember`

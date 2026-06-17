@@ -16,10 +16,10 @@ use super::process::source_type_from_lang;
 use crate::parser::types::RootNodeScript;
 use crate::template::code_gen::binding::BindingType;
 use crate::template::code_gen::types::CodeGenOutput;
-use crate::utils::oxc::vue::resolve_type::format_runtime_types;
-use crate::utils::oxc::vue::{
-    extract_companion_types, parse_script, ResolvedElements, ScriptItem, ScriptMacro, ScriptMode,
+use crate::utils::oxc::script::type_surface::{
+    extract_companion_types, format_runtime_types, ResolvedElements,
 };
+use crate::utils::oxc::vue::{parse_script, ScriptItem, ScriptMacro, ScriptMode};
 
 use super::ScriptContext;
 
@@ -219,9 +219,9 @@ pub(super) fn process_macro_item<'a>(
 
             // Type-based defineEmits: extract emit event names from resolved type
             if let Some(tp) = type_params {
-                if !tp.resolved.emits.is_empty() {
+                if !tp.resolved.call_signatures.is_empty() {
                     let mut emit_names: Vec<String> = Vec::new();
-                    for emit in &tp.resolved.emits {
+                    for emit in &tp.resolved.call_signatures {
                         emit_names.push(format!("\"{}\"", emit.name));
                     }
                     state.emits_section = Some(format!("[{}]", emit_names.join(", ")));

@@ -48,8 +48,10 @@ use verter_session::resolver_core::shallow_file_state::{ExportTarget, ShallowFil
 use verter_type_expr::{ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName, TypeExpr};
 
 fn empty_external(
-) -> Arc<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource> {
-    Arc::new(verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default())
+) -> Arc<verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource> {
+    Arc::new(
+        verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(),
+    )
 }
 
 fn build_large_indexed(decl_count: usize) -> Arc<IndexedReady> {

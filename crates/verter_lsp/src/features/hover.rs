@@ -219,7 +219,7 @@ pub fn child_hover_target_at_offset(
         }
     }
 
-    direct_vue_import_binding_hover_target(offset, analysis).map(ChildHoverTarget::ImportBinding)
+    direct_import_binding_hover_target(offset, analysis).map(ChildHoverTarget::ImportBinding)
 }
 
 pub fn build_child_component_hover(
@@ -423,7 +423,7 @@ fn hover_in_script(
     hover_for_word(&word, analysis)
 }
 
-fn direct_vue_import_binding_hover_target(
+fn direct_import_binding_hover_target(
     offset: u32,
     analysis: &FileAnalysisSnapshot,
 ) -> Option<ImportBindingHoverTarget> {
@@ -691,7 +691,7 @@ fn element_css_hover(offset: u32, analysis: &FileAnalysisSnapshot) -> Option<Hov
     }
 
     // Sort by specificity (highest first)
-    matches.sort_by(|a, b| b.1.cmp(&a.1));
+    matches.sort_by_key(|m| std::cmp::Reverse(m.1));
 
     let classes: Vec<&str> = element.static_classes().collect();
     let class_info = if classes.is_empty() {

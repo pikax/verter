@@ -1,5 +1,5 @@
 //! `OwnedTypeResolutionContext` — owned, `Send + Sync + 'static` mirror
-//! of `verter_parser::utils::oxc::vue::script::resolve_type::TypeResolutionContext`.
+//! of `verter_parser::utils::oxc::script::type_surface::TypeResolutionContext`.
 //!
 //! ## Field-by-field mirror contract
 //!
@@ -349,7 +349,7 @@ impl SpanArena {
 // ─────────────────────────────────────────────────────────────────────
 
 /// Owned, `Send + Sync + 'static` mirror of
-/// `verter_parser::utils::oxc::vue::script::resolve_type::TypeResolutionContext`
+/// `verter_parser::utils::oxc::script::type_surface::TypeResolutionContext`
 /// minus borrowed AST pointers. Storable in the
 /// `TypeResolutionContextDb`; currently populated only by tests — no
 /// production lowering path writes owned contexts yet.

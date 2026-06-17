@@ -127,6 +127,7 @@ pub use config::{
     load_project_membership, load_project_references, normalize_path_buf, parse_tsconfig_json,
     raw_paths_json, resolve_tsconfig_extends, strip_json_comments, ParsedTsConfig, TsConfigEntry,
 };
+pub use engine::SVELTE_RUNE_AMBIENT_PARSER_FLAG;
 pub use error::{DirEntry, VfsError};
 pub use exact_resolution::{DependencySnapshotView, EdgeStore};
 pub use filesystem::{FilesystemOptions, FilesystemWorkspace};
@@ -143,6 +144,7 @@ pub use package_index::PackageIndex;
 pub use project_key::ProjectStableKey;
 pub use published_state::{ProjectEnvHashArray, PublishedRoot};
 pub use resolver::{
+    carrier_api_provider_path, carrier_ide_provider_path, path_is_carrier, strip_carrier_extension,
     IdeProjectCompilerOptions, IdeProjectConfig, NativeProjectResolver, ProjectMembership,
     ProjectResolver, WorkspaceAlias,
 };
@@ -154,9 +156,9 @@ pub use traits::{
     WorkspaceResourceSnapshot,
 };
 pub use types::{
-    ExactResolution, ExactResolutionResult, FileKind, PackageManifest, ParsedEdge,
-    ProjectOwnership, ProviderTarget, ResolutionContext, ResolutionKind, ResolvePhase,
-    ResolveRequest, ResolveRequestKind, ResolveResult, VfsProvenanceSnapshot,
+    ExactResolution, ExactResolutionResult, PackageManifest, ParsedEdge, ProjectOwnership,
+    ProviderTarget, ResolutionContext, ResolutionKind, ResolvePhase, ResolveRequest,
+    ResolveRequestKind, ResolveResult, VfsProvenanceSnapshot,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use vite_config::{

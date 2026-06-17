@@ -1,0 +1,25 @@
+import "/src/App.vue?vue&type=style&index=0&lang.css"
+
+import { createElementBlock as _createElementBlock, openBlock as _openBlock, toDisplayString as _toDisplayString } from "vue"
+import { defineComponent as _defineComponent } from "vue"
+import { ref } from 'vue'
+const _sfc_main = /*@__PURE__*/_defineComponent({
+  __name: 'App',
+  setup(__props) {
+
+
+const msg = ref('hi')
+
+const __returned__ = { msg };
+Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
+return __returned__;
+
+}});
+_sfc_main.__scopeId = "data-v-0d04bfeb";
+
+function render(_ctx, _cache, $props, $setup, $data, $options) {
+return (_openBlock(), _createElementBlock("div", null, _toDisplayString( $setup.msg ), 1 /* TEXT */))
+}
+_sfc_main.render = render
+_sfc_main.__file = "/src/App.vue"
+export default _sfc_main

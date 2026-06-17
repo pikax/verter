@@ -23,6 +23,7 @@ jobs:
       playground: ${{ steps.filter.outputs.playground }}
       vscode: ${{ steps.filter.outputs.vscode }}
       native: ${{ steps.filter.outputs.native }}
+      dx: ${{ steps.filter.outputs.dx }}
     steps:
       - uses: actions/checkout@v5
       - uses: dorny/paths-filter@v3
@@ -111,6 +112,13 @@ jobs:
               - 'packages/typescript-plugin/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
+              - '.github/workflows/ci.yml'
+            dx:
+              - 'crates/verter_dx_baseline/**'
+              - 'crates/verter_lsp/**'
+              - 'packages/dx-harness/**'
+              - 'packages/lsp-test-client/**'
+              - 'scripts/dx/**'
               - '.github/workflows/ci.yml'
 
   terminology-check:
@@ -471,3 +479,66 @@ jobs:
         run: pnpm --filter @verter/typescript-plugin test
       - name: Test @verter/unplugin
         run: pnpm --filter @verter/unplugin test
+
+  dx-harness-hermetic:
+    name: DX Harness (raw-LSP hermetic)
+    needs: detect-changes
+    if: needs.detect-changes.outputs.dx == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: lts/*
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # The differential-baseline bridge. The strict gate drives this real binary
+      # over the vendored corpus; the workspace also builds it as a [[bin]] target.
+      - name: Build differential-baseline bridge
+        run: cargo build -p verter_dx_baseline
+      # The verter raw-LSP server itself — the binary the spine smoke drives over
+      # the vendored corpus. Without this the job named "raw-LSP" would never run
+      # the raw-LSP path.
+      - name: Build verter-lsp
+        run: cargo build -p verter_lsp
+      # Build the harness (and its workspace deps, including the lsp-test-client) so
+      # the gates can import the published dist and drive both real binaries.
+      - name: Build DX harness
+        run: pnpm --filter "@verter/dx-harness..." build
+      # Pure-hermetic unit suite (no real binary; the integration specs self-skip
+      # without their bin env gates).
+      - name: DX harness hermetic unit suite
+        run: pnpm --filter @verter/dx-harness test:unit
+      # The non-vacuous strict differential: spawns the real tsserver-backed baseline
+      # over the committed vendored corpus and FAILS unless the pinned tool root,
+      # vendored Vue version-sync, versioned artifact-sync refusal, and baseline-ran>0
+      # all hold.
+      - name: Strict differential baseline gate
+        env:
+          DX_REPO_ROOT: ${{ github.workspace }}
+          DX_BASELINE_BIN: ${{ github.workspace }}/target/debug/verter-dx-baseline
+        run: node scripts/dx/dx-ci-gate.mjs
+      # The verter raw-LSP spine: drives the REAL verter-lsp over the vendored
+      # hermetic corpus (pinned tsserver, no network) and FAILS unless verter-lsp
+      # starts, reaches readiness, RESPONDS to hover/definition/completion, and
+      # produces at least one contentful response. It records the differential but
+      # does NOT enforce verter-vs-tsgo parity — verter's known divergences must not
+      # turn the required gate red. The full record-and-diff corpus sweep is the
+      # scheduled dx-extended.yml job.
+      - name: Verter raw-LSP spine smoke
+        env:
+          DX_REPO_ROOT: ${{ github.workspace }}
+          DX_LSP_BIN: ${{ github.workspace }}/target/debug/verter-lsp
+          DX_BASELINE_BIN: ${{ github.workspace }}/target/debug/verter-dx-baseline
+        run: node scripts/dx/dx-lsp-smoke.mjs

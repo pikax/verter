@@ -14,6 +14,16 @@ import { getDefaultImportMap, extractVueVersion, type ImportMap } from "./import
 import { serializeToHash, deserializeFromHash, type SerializedState } from "./urlState";
 import type { VersionEntry } from "./versions";
 import * as projectStorage from "./projectStorage";
+import {
+  type LanguagePin,
+  detectFrameworkId,
+  frameworkById,
+  frameworkCarrierFilename,
+  frameworkCarrierExtension,
+  isCarrierFilename,
+  isExperimentalFramework,
+} from "./frameworks";
+import { presets } from "./presets";
 
 const defaultAppCode = `<script setup lang="ts">
 import { ref } from 'vue'
@@ -47,7 +57,46 @@ button {
 </style>
 `;
 
+const defaultSvelteAppCode = `<script lang="ts">
+  let count = $state(0)
+</script>
+
+<button onclick={() => count++}>
+  Clicked {count} {count === 1 ? 'time' : 'times'}
+</button>
+`;
+
 export const IMPORT_MAP_FILENAME = "import-map.json";
+
+/**
+ * The default carrier code for a framework (the seed for a fresh main file when
+ * a language is selected). Vue keeps its existing default; other frameworks use
+ * a minimal carrier. Descriptor-driven via the framework id.
+ */
+function defaultCarrierCodeFor(frameworkId: string): string {
+  if (frameworkId === "svelte") return defaultSvelteAppCode;
+  return defaultAppCode;
+}
+
+/**
+ * The minimal child-carrier seed for a NEW carrier file added via the file
+ * tabs (distinct from the full app seed). Vue seeds an empty `<script setup>` +
+ * `<template>`; Svelte seeds an empty rune `<script>` + markup. Keyed by the
+ * framework id (descriptor-resolved by the caller), never by a literal
+ * extension switch. A non-carrier file (`.ts`/`.js`/etc.) seeds empty.
+ */
+function defaultChildCarrierCodeFor(frameworkId: string | null): string {
+  if (frameworkId === "svelte") return `<script lang="ts">\n\n</script>\n\n<div></div>\n`;
+  if (frameworkId === "vue") {
+    return `<script setup lang="ts">\n\n</script>\n\n<template>\n  <div></div>\n</template>\n`;
+  }
+  return "";
+}
+
+/** The first preset registered for a framework, if any. */
+function defaultPresetFor(frameworkId: string): SerializedState | undefined {
+  return presets.find((p) => p.language === frameworkId)?.state;
+}
 
 export interface Store extends StoreState {
   activeFile: File | undefined;
@@ -87,6 +136,17 @@ export interface Store extends StoreState {
   // Click-to-highlight from output panels
   revealSpan: { start: number; end: number } | null;
   requestRevealSpan(start: number, end: number): void;
+  // Framework language selection (descriptor-driven)
+  languagePin: LanguagePin;
+  effectiveLanguage: string;
+  isExperimentalLanguage: boolean;
+  /**
+   * The default carrier extension (incl. leading dot, e.g. `.vue` / `.svelte`)
+   * appended to a bare new-file name, derived from the effective framework.
+   */
+  newFileExtension: string;
+  selectFramework(frameworkId: string): Promise<void>;
+  unpinLanguage(): void;
 }
 
 function normalizeOutputMode(mode: string | undefined): OutputMode {
@@ -120,6 +180,8 @@ export function useStore(): Store {
   const files: Ref<Record<string, File>> = ref({});
   const activeFilename = ref("App.vue");
   const mainFile = ref("App.vue");
+  // The pinned framework language id, or null for Auto (auto-detect).
+  const languagePin = ref<LanguagePin>(null);
   const errors: Ref<string[]> = ref([]);
   const outputMode: Ref<OutputMode> = ref("preview");
   const loading = ref(true);
@@ -166,6 +228,41 @@ export function useStore(): Store {
     return files.value[activeFilename.value];
   });
 
+  // The effective framework language: the explicit pin if set, otherwise
+  // auto-detected (longest-suffix). Detection prefers the main file when it
+  // actually exists, then the active file, then ANY existing carrier/adapter
+  // file in the project (so an unpinned restore whose files are .svelte resolves
+  // to svelte even if mainFile still names the default App.vue). Defaults to
+  // "vue" when nothing resolves.
+  const effectiveLanguage = computed<string>(() => {
+    if (languagePin.value) return languagePin.value;
+    if (files.value[mainFile.value]) {
+      const fromMain = detectFrameworkId(mainFile.value);
+      if (fromMain) return fromMain;
+    }
+    if (files.value[activeFilename.value]) {
+      const fromActive = detectFrameworkId(activeFilename.value);
+      if (fromActive) return fromActive;
+    }
+    for (const name of Object.keys(files.value)) {
+      const id = detectFrameworkId(name);
+      if (id) return id;
+    }
+    // Bare detect of mainFile (handles fresh, files-empty init before seeding).
+    return detectFrameworkId(mainFile.value) ?? "vue";
+  });
+
+  const isExperimentalLanguage = computed<boolean>(() =>
+    isExperimentalFramework(effectiveLanguage.value),
+  );
+
+  // The carrier extension appended to a bare new-file name (descriptor-driven):
+  // the effective framework's primary carrier extension (`.vue`, `.svelte`, …).
+  const newFileExtension = computed<string>(() => {
+    const framework = frameworkById(effectiveLanguage.value);
+    return framework ? frameworkCarrierExtension(framework) : "";
+  });
+
   async function init() {
     loading.value = true;
     await initCompilers();
@@ -208,10 +305,23 @@ export function useStore(): Store {
       if (savedState.typeChecker) {
         typeChecker.value = savedState.typeChecker;
       }
+      // Restore the framework pin only if it names a registered framework;
+      // an invalid / stale id is ignored (falls back to Auto).
+      if (savedState.language && frameworkById(savedState.language)) {
+        languagePin.value = savedState.language;
+      }
     }
 
+    // Derive the main carrier file from the effective framework so a Svelte pin
+    // (or an auto-detected Svelte carrier in the restored files) seeds the right
+    // main file and default code.
+    reconcileMainFileForLanguage();
+
     if (!files.value[mainFile.value]) {
-      files.value[mainFile.value] = new File(mainFile.value, defaultAppCode);
+      files.value[mainFile.value] = new File(
+        mainFile.value,
+        defaultCarrierCodeFor(effectiveLanguage.value),
+      );
     }
 
     // Compile all files on init and capture timing from the last one compiled
@@ -280,6 +390,7 @@ export function useStore(): Store {
         vueVersion: extractVueVersion(importMap),
         verterVersion: verterVersion.value,
         typeChecker: typeChecker.value,
+        language: languagePin.value ?? undefined,
       }),
       (state) => {
         if (saveTimeout) clearTimeout(saveTimeout);
@@ -294,6 +405,52 @@ export function useStore(): Store {
     );
   }
 
+  /**
+   * Point `mainFile` at a carrier file matching the effective framework. If no
+   * file with the framework's carrier extension exists, the main file stays as
+   * the framework's default carrier name (created with default code by the
+   * caller).
+   */
+  function reconcileMainFileForLanguage() {
+    const framework = frameworkById(effectiveLanguage.value);
+    if (!framework) return;
+    const carrierExts = framework.carrierExtensions;
+    // Already pointing at a carrier of the right framework — keep it.
+    if (carrierExts.some((ext) => mainFile.value.endsWith(ext))) return;
+    // Find an existing carrier file for this framework.
+    const existing = Object.keys(files.value).find((name) =>
+      carrierExts.some((ext) => name.endsWith(ext)),
+    );
+    mainFile.value = existing ?? frameworkCarrierFilename(framework);
+  }
+
+  async function selectFramework(frameworkId: string) {
+    const framework = frameworkById(frameworkId);
+    if (!framework) return;
+    languagePin.value = frameworkId;
+    // Load the framework's default preset when available, else seed a minimal
+    // carrier file. Either way the main file swaps to that framework's carrier.
+    const preset = defaultPresetFor(frameworkId);
+    if (preset) {
+      await loadProject("", preset);
+      currentProjectName.value = null;
+      // loadProject reconciled files; re-pin (loadProject may have set it from state).
+      languagePin.value = frameworkId;
+    } else {
+      const carrier = frameworkCarrierFilename(framework);
+      files.value = {
+        [carrier]: new File(carrier, defaultCarrierCodeFor(frameworkId)),
+      };
+      mainFile.value = carrier;
+      activeFilename.value = carrier;
+      await recompile();
+    }
+  }
+
+  function unpinLanguage() {
+    languagePin.value = null;
+  }
+
   function setActiveFile(filename: string) {
     if (filename === IMPORT_MAP_FILENAME || files.value[filename]) {
       activeFilename.value = filename;
@@ -302,11 +459,10 @@ export function useStore(): Store {
 
   function addFile(filename: string) {
     if (!files.value[filename]) {
-      const ext = filename.split(".").pop();
-      let defaultCode = "";
-      if (ext === "vue") {
-        defaultCode = `<script setup lang="ts">\n\n</script>\n\n<template>\n  <div></div>\n</template>\n`;
-      }
+      // Seed the carrier body from the framework that OWNS the filename's
+      // extension (descriptor-resolved). A non-carrier file seeds empty.
+      const carrierFramework = isCarrierFilename(filename) ? detectFrameworkId(filename) : null;
+      const defaultCode = defaultChildCarrierCodeFor(carrierFramework);
       files.value[filename] = new File(filename, defaultCode);
       activeFilename.value = filename;
     }
@@ -406,6 +562,7 @@ export function useStore(): Store {
       vueVersion: extractVueVersion(importMap) ?? undefined,
       verterVersion: verterVersion.value,
       typeChecker: typeChecker.value,
+      language: languagePin.value ?? undefined,
     };
   }
 
@@ -422,8 +579,17 @@ export function useStore(): Store {
     for (const [filename, code] of Object.entries(state.files)) {
       files.value[filename] = new File(filename, code);
     }
+
+    // Restore the framework pin (only if registered), then point the main file
+    // at the matching carrier before seeding any default file.
+    languagePin.value = state.language && frameworkById(state.language) ? state.language : null;
+    reconcileMainFileForLanguage();
+
     if (!files.value[mainFile.value]) {
-      files.value[mainFile.value] = new File(mainFile.value, defaultAppCode);
+      files.value[mainFile.value] = new File(
+        mainFile.value,
+        defaultCarrierCodeFor(effectiveLanguage.value),
+      );
     }
 
     // Restore state
@@ -579,5 +745,12 @@ export function useStore(): Store {
     clearTsxOverride,
     revealSpan,
     requestRevealSpan,
+    // Framework language selection
+    languagePin,
+    effectiveLanguage,
+    isExperimentalLanguage,
+    newFileExtension,
+    selectFramework,
+    unpinLanguage,
   }) as Store;
 }

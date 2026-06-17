@@ -4,8 +4,13 @@
 //! `AstNode` in the arena, there is a corresponding [`OxcNodeData`] entry
 //! containing parsed OXC ASTs, extracted bindings, and static-analysis metadata.
 
+use std::cell::OnceCell;
+
 use oxc_ast::ast::Expression;
 use oxc_diagnostics::OxcDiagnostic;
+
+use crate::ast::types::TemplateAst;
+use crate::types::NodeId;
 
 // Re-export Dynamism so `use self::types::*` in mod.rs picks it up.
 pub use crate::utils::oxc::Dynamism;
@@ -200,8 +205,20 @@ pub struct OxcParsedElement<'alloc> {
     pub v_slot: Option<OxcParsedVSlot<'alloc>>,
 
     /// Parsed regular props (only those with expressions to parse).
-    /// Indexed by `prop_index` back into `ElementNode.props`.
+    /// Sparse — static attributes and value-less directives are skipped.
+    /// Each entry's `prop_index` maps back into `ElementNode.props`.
     pub props: Vec<OxcParsedProp<'alloc>>,
+
+    /// Dense correlation table from `ElementNode.props` index to the slot in
+    /// [`props`] holding that prop's parsed expression, or `None` when the prop
+    /// has nothing to parse (static attribute or value-less directive).
+    ///
+    /// Length equals the FULL `ElementNode.props.len()` (NOT the sparse
+    /// [`props`] length), so [`OxcParsedElement::prop`] is an O(1) index rather
+    /// than a linear scan over `prop_index`.
+    ///
+    /// [`props`]: OxcParsedElement::props
+    pub prop_lookup: Vec<Option<u32>>,
 
     /// Additional ignored bindings from this element's v-for/v-slot locals.
     /// `None` means "same as parent — no locals added" (avoids Vec clone).
@@ -211,6 +228,22 @@ pub struct OxcParsedElement<'alloc> {
     /// Per-element expression analysis flags (static class/style/key/condition).
     /// Codegen combines with `PropFlag` in O(1) for final patch-flag decisions.
     pub expression_flag: ExpressionFlag,
+}
+
+impl<'alloc> OxcParsedElement<'alloc> {
+    /// O(1) lookup of the OXC-parsed prop for a given `ElementNode.props` index.
+    ///
+    /// Returns `None` when the prop carries no parsed expression (static attribute
+    /// or value-less directive) or when `prop_index` is out of range. This is the
+    /// indexed replacement for scanning `props` for a matching `prop_index`.
+    #[inline]
+    pub fn prop(&self, prop_index: usize) -> Option<&OxcParsedProp<'alloc>> {
+        self.prop_lookup
+            .get(prop_index)
+            .copied()
+            .flatten()
+            .map(|slot| &self.props[slot as usize])
+    }
 }
 
 // ======================== Node data enum ========================
@@ -232,6 +265,76 @@ pub enum OxcNodeData<'alloc> {
     None,
 }
 
+// ======================== Slot summary facts ========================
+
+/// Classification of a single slot child for IDE strict-slot checking.
+///
+/// Mirrors the four child shapes the IDE strict-slot emitter understands. The
+/// concrete source positions (tag-name span, text/interpolation start) are NOT
+/// stored here — they are resolved on demand from [`SlotChildFact::node_id`], so
+/// the fact stays a tiny `Copy` value and the byte offsets always come straight
+/// from the AST node the consumer is emitting for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlotChildKind {
+    /// A child Vue component (`<Foo>`); the constructor name is the tag name.
+    Component,
+    /// A child native HTML element (`<div>`); the tag name keys
+    /// `HTMLElementTagNameMap`.
+    HtmlElement,
+    /// A non-whitespace text child.
+    Text,
+    /// An interpolation child (`{{ expr }}`).
+    Interpolation,
+}
+
+/// One classified child inside a slot group.
+///
+/// Carries the originating [`NodeId`] so the strict-slot adapter resolves the
+/// exact tag-name / text source span from the AST node when it emits, rather
+/// than the slot scan eagerly slicing strings into the shared overlay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SlotChildFact {
+    /// AST node this child was classified from.
+    pub node_id: NodeId,
+    /// Which strict-slot child shape this node is.
+    pub kind: SlotChildKind,
+}
+
+/// A named slot group: the children a component receives for one slot name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlotGroup {
+    /// Slot name (`"default"`, `"header"`, …), in first-seen source order.
+    pub name: String,
+    /// Classified children for this slot, in source order. Always non-empty —
+    /// empty groups are never recorded.
+    pub children: Vec<SlotChildFact>,
+}
+
+/// Slot facts for one component element.
+///
+/// Built once per component, lazily, on the first strict-slot demand for that
+/// component (see [`OxcParsedAst::slot_summary`]) and read by the IDE
+/// strict-slot lane. The two fields intentionally model the two distinct
+/// downstream rules:
+///
+/// - `groups` drives `strictRenderSlot` — only NON-EMPTY slot groups, with each
+///   child classified by shape (a `<template #name>` contributes its inner
+///   classified children; direct non-template content contributes the
+///   `"default"` group).
+/// - `provided_slot_names` drives `checkRequiredSlots` — every declared slot
+///   name (including an empty `<template #name>`) plus a trailing `"default"`
+///   when any non-template content (including whitespace text) is present. This
+///   set is deliberately broader than `groups`: a component whose only content
+///   is a named template plus surrounding whitespace records `"default"` here
+///   yet has no default group.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ComponentSlotSummary {
+    /// Non-empty strict-slot groups in first-seen source order.
+    pub groups: Vec<SlotGroup>,
+    /// Provided slot names for `checkRequiredSlots`, in source order.
+    pub provided_slot_names: Vec<String>,
+}
+
 // ======================== Top-level result ========================
 
 /// The complete OXC-parsed overlay for a [`TemplateAst`].
@@ -241,35 +344,78 @@ pub enum OxcNodeData<'alloc> {
 #[derive(Debug)]
 pub struct OxcParsedAst<'alloc> {
     pub data: Vec<OxcNodeData<'alloc>>,
+    /// NodeId-aligned IDE slot summaries, each built lazily and independently on
+    /// first demand: `slot_summaries[id.0]` resolves to `Some` for a static
+    /// component eligible for slot checking and `None` otherwise (non-component
+    /// nodes and dynamic `<component :is>`). The outer cell allocates the
+    /// per-node slot vec once (no AST touch); each inner cell is filled the
+    /// first time the IDE strict-slot lane reaches that component via
+    /// [`OxcParsedAst::slot_summary`], so only components the lane actually
+    /// reaches are scanned and the runtime VDOM/Vapor and SSR lanes pay nothing.
+    /// Owned data (no allocator borrow), so it lives independently of the
+    /// parsed-expression arena.
+    slot_summaries: OnceCell<Vec<OnceCell<Option<ComponentSlotSummary>>>>,
 }
 
 impl<'alloc> OxcParsedAst<'alloc> {
+    /// Wrap the per-node parsed data, with slot summaries unbuilt.
+    pub fn new(data: Vec<OxcNodeData<'alloc>>) -> Self {
+        Self {
+            data,
+            slot_summaries: OnceCell::new(),
+        }
+    }
+
+    /// The IDE slot summary for the component at `id`, built once and memoized.
+    ///
+    /// Returns `Some` for a static, slot-checkable component and `None` for any
+    /// other node. The first call for a given `id` scans that component's direct
+    /// children and caches the result in its per-node cell; every later call for
+    /// the same `id` returns the cached value without rescanning. `ast` and
+    /// `source` are consulted only on the cold (first) call for each component.
+    pub fn slot_summary(
+        &self,
+        id: NodeId,
+        ast: &TemplateAst,
+        source: &str,
+    ) -> Option<&ComponentSlotSummary> {
+        let cells = self.slot_summaries.get_or_init(|| {
+            let mut cells = Vec::with_capacity(ast.nodes.len());
+            cells.resize_with(ast.nodes.len(), OnceCell::new);
+            cells
+        });
+        cells[id.0]
+            .get_or_init(|| super::slot_summary::build_slot_summary(id, ast, source))
+            .as_ref()
+    }
+
     /// Iterate all [`OxcParsedExpression`] references in the AST.
     ///
     /// Yields every expression from interpolations, element conditions,
     /// and directive prop values/args. Useful for applying bulk transforms
     /// (e.g., TypeScript stripping) across all template expressions.
     pub fn iter_expressions(&self) -> impl Iterator<Item = &OxcParsedExpression<'alloc>> {
-        self.data.iter().flat_map(|node| match node {
-            OxcNodeData::Interpolation(expr) => {
-                vec![expr]
-            }
-            OxcNodeData::Element(el) => {
-                let mut exprs = Vec::new();
-                if let Some(ref cond) = el.condition {
-                    exprs.push(cond);
-                }
-                for prop in &el.props {
-                    if let Some(ref arg) = prop.arg {
-                        exprs.push(arg);
-                    }
-                    if let Some(ref exp) = prop.exp {
-                        exprs.push(exp);
-                    }
-                }
-                exprs
-            }
-            OxcNodeData::None => Vec::new(),
+        self.data.iter().flat_map(|node| {
+            // Each node contributes a "primary" optional expression (interpolation
+            // body or element condition) followed by every prop's arg then exp.
+            // Expressing this as borrowed option/slice iterator chains keeps the
+            // traversal allocation-free — no per-node `Vec` is materialized — while
+            // preserving the exact yield order (condition, then each prop arg/exp
+            // in source order).
+            let (primary, props): (
+                Option<&OxcParsedExpression<'alloc>>,
+                &[OxcParsedProp<'alloc>],
+            ) = match node {
+                OxcNodeData::Interpolation(expr) => (Some(expr), &[]),
+                OxcNodeData::Element(el) => (el.condition.as_ref(), el.props.as_slice()),
+                OxcNodeData::None => (None, &[]),
+            };
+
+            primary.into_iter().chain(
+                props
+                    .iter()
+                    .flat_map(|prop| prop.arg.as_ref().into_iter().chain(prop.exp.as_ref())),
+            )
         })
     }
 }
@@ -334,5 +480,88 @@ mod expression_flag_tests {
             ExpressionFlags::AllInterpolationsStatic.name(),
             "ALL_INTERPOLATIONS_STATIC"
         );
+    }
+}
+
+#[cfg(test)]
+mod iter_expressions_tests {
+    //! Characterization locks for the public yield contract of [`OxcParsedAst::iter_expressions`].
+    //!
+    //! The allocation-free option/slice-chain implementation is output-identical to
+    //! a per-node `Vec`, so these assertions pass on either form by design — they
+    //! are not regression tests that distinguish the two. Their purpose is to pin
+    //! the exact yield contract (order, interleaving, empty-skipping) so any FUTURE
+    //! drift in the lazy traversal is caught.
+    use super::*;
+
+    /// Build a minimal parsed expression carrying only a distinct `offset` so the
+    /// yield sequence can be identified unambiguously by offset.
+    fn expr(offset: u32) -> OxcParsedExpression<'static> {
+        OxcParsedExpression {
+            offset,
+            expression: None,
+            errors: None,
+            bindings: None,
+            dynamism: Dynamism::Static,
+        }
+    }
+
+    fn element(
+        condition: Option<u32>,
+        props: &[(Option<u32>, Option<u32>)],
+    ) -> OxcNodeData<'static> {
+        OxcNodeData::Element(Box::new(OxcParsedElement {
+            condition: condition.map(expr),
+            v_for: None,
+            v_slot: None,
+            props: props
+                .iter()
+                .enumerate()
+                .map(|(i, (arg, exp))| OxcParsedProp {
+                    prop_index: i,
+                    arg: arg.map(expr),
+                    exp: exp.map(expr),
+                })
+                .collect(),
+            prop_lookup: Vec::new(),
+            provided_locals: None,
+            expression_flag: ExpressionFlag::empty(),
+        }))
+    }
+
+    /// Pins the yield contract: interpolation bodies, then per element the
+    /// condition followed by each prop's arg then exp, in source order. A future
+    /// reordering or omission changes this offset sequence and fails the test.
+    #[test]
+    fn yields_interleaved_expressions_in_source_order() {
+        let ast = OxcParsedAst::new(vec![
+            OxcNodeData::Interpolation(expr(10)),
+            OxcNodeData::Interpolation(expr(20)),
+            element(
+                Some(30),
+                &[(Some(40), Some(50)), (None, Some(60)), (Some(70), None)],
+            ),
+            OxcNodeData::None,
+            OxcNodeData::Interpolation(expr(80)),
+        ]);
+
+        let got: Vec<u32> = ast.iter_expressions().map(|e| e.offset).collect();
+        assert_eq!(got, vec![10, 20, 30, 40, 50, 60, 70, 80]);
+    }
+
+    /// `None` nodes and elements without a condition or expression-bearing props
+    /// contribute nothing — and an all-empty AST yields an empty sequence.
+    #[test]
+    fn skips_nodes_without_expressions() {
+        let empty = OxcParsedAst::new(vec![
+            OxcNodeData::None,
+            element(None, &[(None, None)]),
+            OxcNodeData::None,
+        ]);
+        assert_eq!(empty.iter_expressions().count(), 0);
+
+        let only_exp = OxcParsedAst::new(vec![element(None, &[(None, Some(7))])]);
+        let got: Vec<u32> = only_exp.iter_expressions().map(|e| e.offset).collect();
+        assert_eq!(got, vec![7]);
     }
 }

@@ -2233,7 +2233,7 @@ fn run_lifted_query_payload(
     spec: &oracle_registry::QuerySpec,
 ) -> verter_audit::TypeResolutionPayload {
     use verter_audit::RequestKindPayload;
-    use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
+    use verter_session::{HostConfig, UpsertRequest, VerterHost};
 
     let host = VerterHost::new_standalone(HostConfig {
         audit_enabled: true,
@@ -2245,7 +2245,9 @@ fn run_lifted_query_payload(
             canonical_id: Some(f.path.to_string()),
             input_id: f.path.to_string(),
             source: std::sync::Arc::from(f.source),
-            file_kind: FileKind::from_path(f.path),
+            file_language: verter_session::LanguageRegistry::global()
+                .classify_static(f.path)
+                .static_resolution(),
             aliases: Vec::new(),
         });
     }

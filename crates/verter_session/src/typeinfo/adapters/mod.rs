@@ -12,5 +12,8 @@
 //! - [`vue`] — the Vue SFC adapter: a `.vue`'s public component type, the
 //!   FullMetadata macro surfaces, and the prop / emit / slot normalizers that
 //!   produce the final component-meta DTOs from the typeinfo surface.
+//! - [`svelte`] — the Svelte carrier's blessed parse accessor (the surface
+//!   adapter is a later vertical; the carrier registers `Deferred` until then).
 
+pub mod svelte;
 pub mod vue;

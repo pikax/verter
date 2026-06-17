@@ -245,7 +245,7 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             // Codebase" (no separate heading).
             "no_new_from_eager_meta_production_site",
             "no_new_duplicate_read_surface_members_definition",
-            "no_new_resolve_type_engine_path_production_file",
+            "no_new_type_surface_engine_path_production_file",
             "no_new_resolved_elements_production_file",
             "no_new_prepared_surface_projection_production_file",
         ],
@@ -507,6 +507,73 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             // The R6 meta-guard itself is anti-stub: a CRITICAL rule
             // must reference a non-empty guard list.
             "every_registry_entry_lists_at_least_one_guard",
+        ],
+    ),
+    (
+        // The framework-adapter substrate: one shared registry +
+        // facts/carrier-only ctx + validation-first framework-surface
+        // executor + two-pass script-fact seam + parse-domain synth +
+        // descriptor-owned virtual-file naming + Vue re-housing.
+        "Framework Adapter Substrate",
+        &[
+            // Validation-first wire entry: validation precedes registry
+            // lookup / selector resolution.
+            "framework_surface_wire_executor_validates_first",
+            // Registry dispatch + per-kind status + Vue parity +
+            // unknown-adapter rejection (the executor integration suite,
+            // which exercises `framework_registry_complete`'s dispatch).
+            "framework_surface_executor",
+            // Facts/carrier-only ctx: exactly two pub ops, no resolver
+            // tokens.
+            "framework_adapter_ctx_closed_surface",
+            // Parse-domain synth ctx: no resolved-validation fact types.
+            "component_default_synth_parse_domain_only",
+            // Syntax-capture half is syntax-only (no import resolution /
+            // capability reads in the capture surface).
+            "script_fact_capture_is_syntax_only",
+            // Empty active-provider set is byte-identical zero-cost.
+            "script_fact_providers_zero_cost_on_miss",
+            // Generated virtual-file naming mirror is byte-equal to the
+            // rendered descriptor column.
+            "virtual_file_naming_ts_freshness",
+            // Generated client framework manifest is byte-equal to the
+            // rendered descriptor registry, and the extension's framework
+            // wiring (activation / document selector / trigger ids / watch
+            // globs) derives from it (Svelte ungated, no per-framework fork).
+            "client_framework_manifest_ts_freshness",
+            "client_framework_manifest_drives_extension_wiring",
+            // Vue re-housing: no re-export shim, deleted files stay
+            // deleted, retired stores absent from production.
+            "vue_relocation_no_shim",
+            "retired_symbols_absent_from_production_source",
+            // Framework-carrier LSP routing is carrier-generic: no Vue-only
+            // gate (`.is_vue(` / `ends_with(".vue")` / `strip_suffix(".vue")` /
+            // bare `"vue"`-prefix language-id classifier) and no hardcoded
+            // carrier provider literal (`.vue.ts`, …) in feature/server routing
+            // outside the narrow SSR-convention / test / comment / `is_svelte()`
+            // allowlist.
+            "carrier_lsp_routing_has_no_hardcoded_vue_gate",
+            // …and NO carrier-generic routing / provider-sync / position-mapper
+            // primitive may carry a Vue-flavoured NAME (`vue_resync_ids`,
+            // `vue_position_to_tsx_offset`, `prepare_non_vue_provider_sync`, …)
+            // — the naming half of the pair that ends the whack-a-mole, banning
+            // `vue`/`Vue`-substring identifiers in the scanned modules outside
+            // the narrow Vue-intrinsic allowlist.
+            "carrier_routing_has_no_vue_named_generic_primitive",
+            // Rune-module (`.svelte.ts` / `.svelte.js`) own-buffer LSP path:
+            // the self-file projection consumes the prelude line count as a
+            // uniform line offset; the self-file mapper drops the prelude +
+            // rewrite regions; the ONE generalized provider-projection context
+            // serves BOTH carrier-IDE and self-file (no parallel rune path);
+            // the rune extension is NOT a carrier extension; the watcher globs
+            // are descriptor-derived (carrier glob + dedicated adapter-module
+            // glob); the rune self-file provider state is closed on did_close.
+            "rune_module_self_file_projection_uses_prelude_line_count",
+            "self_file_mapper_drops_prelude_and_rewrite_regions",
+            "provider_projection_context_serves_both_carrier_and_self_file",
+            "svelte_rune_module_not_in_carrier_extensions",
+            "lifecycle_watch_globs_are_descriptor_derived",
+            "rune_module_self_file_state_closed_on_did_close",
         ],
     ),
     // ──────────────────── SKILL.md additions ──────────────────────

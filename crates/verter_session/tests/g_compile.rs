@@ -14,6 +14,8 @@ mod compile_audit_no_hot_loop_instrumentation;
 mod compile_audit_sourcemap;
 #[path = "g_compile/compile_audit_vdom.rs"]
 mod compile_audit_vdom;
+#[path = "g_compile/compile_audit_vue_only_guard.rs"]
+mod compile_audit_vue_only_guard;
 #[path = "g_compile/compile_cache_mode_classifier.rs"]
 mod compile_cache_mode_classifier;
 #[path = "g_compile/compile_cache_mode_content_reuse.rs"]

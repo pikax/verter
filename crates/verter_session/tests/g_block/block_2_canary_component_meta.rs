@@ -31,7 +31,7 @@
 
 #![cfg(test)]
 
-use verter_session::FileKind;
+use verter_session::FileLanguage;
 
 use crate::canary_harness::{meta_hits, meta_misses, upsert, workspace_host};
 
@@ -112,7 +112,12 @@ fn imported_prop_type_edit_misses_warm_component_meta() {
         "/workspace/src/types.ts".into(),
         std::sync::Arc::from(edited),
     );
-    upsert(&host, "/workspace/src/types.ts", edited, FileKind::NonSfc);
+    upsert(
+        &host,
+        "/workspace/src/types.ts",
+        edited,
+        FileLanguage::script_ts(),
+    );
 
     let after = host
         .get_component_meta("/workspace/src/Comp.vue")
@@ -221,7 +226,7 @@ fn barrel_reexport_leaf_edit_recomputes_with_new_content() {
         &host,
         "/workspace/src/types.ts",
         edited_leaf,
-        FileKind::NonSfc,
+        FileLanguage::script_ts(),
     );
 
     let after = host
@@ -319,7 +324,7 @@ fn transitive_type_dep_edit_misses_warm_component_meta() {
         &host,
         "/workspace/src/nested.ts",
         edited_nested,
-        FileKind::NonSfc,
+        FileLanguage::script_ts(),
     );
 
     let after = host
@@ -395,7 +400,12 @@ fn route_surface_dep_edit_misses_warm_component_meta() {
         "/workspace/src/types.ts".into(),
         std::sync::Arc::from(edited),
     );
-    upsert(&host, "/workspace/src/types.ts", edited, FileKind::NonSfc);
+    upsert(
+        &host,
+        "/workspace/src/types.ts",
+        edited,
+        FileLanguage::script_ts(),
+    );
 
     let after = host
         .get_component_meta("/workspace/src/Comp.vue")
@@ -480,7 +490,12 @@ fn cross_file_define_slots_carrier_edit_recomputes_slot_bindings() {
         "/workspace/src/types.ts".into(),
         std::sync::Arc::from(edited),
     );
-    upsert(&host, "/workspace/src/types.ts", edited, FileKind::NonSfc);
+    upsert(
+        &host,
+        "/workspace/src/types.ts",
+        edited,
+        FileLanguage::script_ts(),
+    );
 
     let post = host
         .get_component_meta("/workspace/src/Comp.vue")

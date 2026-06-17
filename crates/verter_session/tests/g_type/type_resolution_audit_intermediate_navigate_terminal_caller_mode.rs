@@ -21,7 +21,7 @@ use verter_audit::ProjectionModeTag;
 use verter_session::semantic_query::{
     PathSegment, ProjectionMode, QueryError, QueryResult, ResolveDeclKey, ScopeId, SemanticQueryKey,
 };
-use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{HostConfig, UpsertRequest, VerterHost};
 
 const TYPES_TS: &str = r#"
 export type A = {
@@ -45,7 +45,9 @@ fn type_resolution_audit_intermediate_hops_navigate_terminal_uses_caller_mode() 
         canonical_id: Some("/types.ts".to_string()),
         input_id: "/types.ts".to_string(),
         source: Arc::from(TYPES_TS),
-        file_kind: FileKind::from_path("/types.ts"),
+        file_language: verter_session::LanguageRegistry::global()
+            .classify_static("/types.ts")
+            .static_resolution(),
         aliases: Vec::new(),
     });
 

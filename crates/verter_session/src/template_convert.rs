@@ -8,9 +8,10 @@ use verter_compiler::compile::template_data::RawTemplateData;
 use verter_semantic::analysis::template::{
     BindingUsageKind, CommentDirective, CommentDirectiveKind, DefinedSlot, ElementNamespace,
     IfChain, PropValueConstness, TemplateAnalysisSnapshot, TemplateAttribute,
-    TemplateBindingOccurrence, TemplateComponentUsage, TemplateComponentVModel, TemplateDirective,
-    TemplateElement, TemplateEventHandler, TemplatePropUsage, TemplateRef, TemplateTextSegment,
-    UnresolvedBinding, VForDirective, VModelDirective,
+    TemplateBindingOccurrence, TemplateComponentBinding, TemplateComponentEvent,
+    TemplateComponentUsage, TemplateComponentVModel, TemplateDirective, TemplateElement,
+    TemplateEventHandler, TemplatePropUsage, TemplateRef, TemplateTextSegment, UnresolvedBinding,
+    VForDirective, VModelDirective,
 };
 
 /// Convert raw template data from `verter_compiler` into `verter_semantic::analysis` types.
@@ -114,6 +115,29 @@ pub fn convert_raw_to_analysis(
                 })
                 .collect();
 
+            // Framework-neutral bindings/events (the Svelte `bind:` family and
+            // the legacy `on:` directive events). Empty for Vue.
+            let bindings = c
+                .bindings
+                .iter()
+                .map(|b| TemplateComponentBinding {
+                    name: b.name.clone(),
+                    modifiers: b.modifiers.clone(),
+                    span: b.span,
+                })
+                .collect();
+            let events = c
+                .events
+                .iter()
+                .map(|e| TemplateComponentEvent {
+                    name: e.name.clone(),
+                    handler_expression: e.handler_expression.clone(),
+                    is_inline: e.is_inline,
+                    modifiers: e.modifiers.clone(),
+                    span: e.span,
+                })
+                .collect();
+
             TemplateComponentUsage {
                 name: c.tag_name.clone(),
                 import_source,
@@ -125,6 +149,8 @@ pub fn convert_raw_to_analysis(
                 has_dynamic_class: c.has_dynamic_class,
                 dynamic_classes,
                 v_models,
+                bindings,
+                events,
                 span: c.span,
             }
         })
@@ -582,6 +608,8 @@ mod tests {
                 static_classes: vec![],
                 has_dynamic_class: false,
                 dynamic_class_expr: None,
+                bindings: vec![],
+                events: vec![],
                 span: Span::new(10, 40),
             }],
             ..Default::default()
@@ -616,6 +644,8 @@ mod tests {
                 static_classes: vec![],
                 has_dynamic_class: false,
                 dynamic_class_expr: None,
+                bindings: vec![],
+                events: vec![],
                 span: Span::new(0, 20),
             }],
             ..Default::default()
@@ -638,6 +668,8 @@ mod tests {
                 static_classes: vec![],
                 has_dynamic_class: false,
                 dynamic_class_expr: None,
+                bindings: vec![],
+                events: vec![],
                 span: Span::new(0, 20),
             }],
             ..Default::default()
@@ -743,6 +775,8 @@ mod tests {
                 static_classes: vec![],
                 has_dynamic_class: false,
                 dynamic_class_expr: None,
+                bindings: vec![],
+                events: vec![],
                 span: Span::new(0, 50),
             }],
             ..Default::default()
@@ -1191,6 +1225,8 @@ mod tests {
                 static_classes: vec![],
                 has_dynamic_class: true,
                 dynamic_class_expr: Some("variant".to_string()),
+                bindings: vec![],
+                events: vec![],
                 span: Span::new(0, 50),
             }],
             ..Default::default()
@@ -1221,6 +1257,8 @@ mod tests {
                 static_classes: vec![],
                 has_dynamic_class: false,
                 dynamic_class_expr: None,
+                bindings: vec![],
+                events: vec![],
                 span: Span::new(10, 40),
             }],
             elements: vec![RawElementData {

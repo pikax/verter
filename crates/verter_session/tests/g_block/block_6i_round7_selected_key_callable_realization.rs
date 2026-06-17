@@ -51,7 +51,7 @@ use verter_session::semantic_query::{
     PathSegment, ProjectionMode, ProjectionReductionContext, QueryResult, SemanticNodeData,
     SemanticQueryKey, SemanticQueryOutput,
 };
-use verter_session::{for_tests, FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{for_tests, FileLanguage, HostConfig, UpsertRequest, VerterHost};
 use verter_type_expr::TypeExpr;
 
 const PRICING_SLOTS_TS: &str = r#"
@@ -82,7 +82,9 @@ fn selected_key_mapped_materialization_closes_conditional_to_function() {
         canonical_id: Some("/pricing_slots.ts".to_string()),
         input_id: "/pricing_slots.ts".to_string(),
         source: Arc::from(PRICING_SLOTS_TS),
-        file_kind: FileKind::from_path("/pricing_slots.ts"),
+        file_language: verter_session::LanguageRegistry::global()
+            .classify_static("/pricing_slots.ts")
+            .static_resolution(),
         aliases: Vec::new(),
     });
 

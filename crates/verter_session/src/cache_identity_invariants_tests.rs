@@ -614,7 +614,7 @@ fn integrate_re_syncs_bundler_routes_via_one_atomic_workspace_mutation() {
 /// through state no serving path would ever return.
 #[test]
 fn augmentation_probe_rejects_stale_artifact_the_authority_gate_rejects() {
-    use crate::types::{FileKind, UpsertRequest};
+    use crate::types::UpsertRequest;
 
     let owner = "/workspace/src/aug_owner.ts";
     let phantom = "/workspace/src/phantom_barrel.ts";
@@ -635,7 +635,9 @@ fn augmentation_probe_rejects_stale_artifact_the_authority_gate_rejects() {
             canonical_id: Some(owner.to_string()),
             input_id: owner.to_string(),
             source: Arc::from("import \"./phantom_barrel\";\nexport type Owner = 1;\n"),
-            file_kind: FileKind::from_path(owner),
+            file_language: verter_language::LanguageRegistry::global()
+                .classify_static(owner)
+                .static_resolution(),
             aliases: Vec::new(),
         })
         .expect("owner upsert");
@@ -663,7 +665,7 @@ fn augmentation_probe_rejects_stale_artifact_the_authority_gate_rejects() {
             rustc_hash::FxHashSet::default(),
             FxHashMap::default(),
             StdArc::new(
-                verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default(
+                verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(
                 ),
             ),
         );
@@ -673,7 +675,8 @@ fn augmentation_probe_rejects_stale_artifact_the_authority_gate_rejects() {
         Arc::from("export * from \"./real_aug\";\n"),
         Arc::from("export * from \"./real_aug\";\n"),
         StdArc::new(
-            verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default(),
+            verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(
+            ),
         ),
     );
     host.project_type_store()

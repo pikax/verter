@@ -1,0 +1,69 @@
+# Template event-binding hover labels and native event-handler argument types.
+# Template-position hovers are STRUCTURALLY low-confidence (nearest-token mapping);
+# the script-position handler-argument hover maps strictly.
+- id: hover-template-events
+  fixture: template-events
+  entryFile: App.vue
+  anchors: [evt.click, evt.touchmove, evt.ref, evt.handlerArg]
+  script: []
+  probes:
+    - id: click-label-hover
+      method: hover
+      anchor: evt.click
+      mappingPolicy: nearestTokenLowConfidence
+      confidence: low
+      dimension: vueSemanticValidity
+      requiresSourceMap: true
+      requiredDrivers: [rawLsp]
+      capabilityRequirements: [positionEncoding]
+    - id: touchmove-label-hover
+      method: hover
+      anchor: evt.touchmove
+      mappingPolicy: nearestTokenLowConfidence
+      confidence: low
+      dimension: vueSemanticValidity
+      requiresSourceMap: true
+      requiredDrivers: [rawLsp]
+      capabilityRequirements: [positionEncoding]
+    - id: template-ref-attr-hover
+      method: hover
+      anchor: evt.ref
+      mappingPolicy: nearestTokenLowConfidence
+      confidence: low
+      dimension: vueSemanticValidity
+      requiresSourceMap: true
+      requiredDrivers: [rawLsp]
+      capabilityRequirements: [positionEncoding]
+    - id: handler-argument-hover
+      method: hover
+      anchor: evt.handlerArg
+      mappingPolicy: strict
+      confidence: high
+      dimension: vueSemanticValidity
+      requiresSourceMap: true
+      requiredDrivers: [rawLsp, tsgo]
+      capabilityRequirements: [positionEncoding]
+  invariants:
+    - id: click-surfaces-vue-binding
+      anchor: evt.click
+      method: hover
+      assertion: contains
+      value: "@click"
+    - id: click-is-not-the-dom-prop
+      anchor: evt.click
+      method: hover
+      assertion: excludes
+      value: onClick
+    - id: handler-argument-is-native-mouseevent
+      anchor: evt.handlerArg
+      method: hover
+      assertion: contains
+      value: MouseEvent
+  baselines:
+    tsgo: required
+    tsserver: requiredForCi
+    volar: optional
+  thresholds:
+    latency:
+      p95Ms: 250
+    flakeWindows: 2

@@ -7,31 +7,10 @@ use std::sync::Arc;
 use rustc_hash::FxHashMap;
 
 use thiserror::Error;
+pub use verter_language::FileLanguage;
 
 /// 128-bit hash (xxh3) stored as a byte array, used for content and semantic hashing.
 pub type Hash16 = [u8; 16];
-
-/// Discriminates between Vue Single File Components and other file types
-/// (e.g. `.ts` files tracked for cross-file type resolution).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum FileKind {
-    /// A `.vue` Single File Component — parsed into script/template/style blocks.
-    VueSfc,
-    /// A non-SFC file (`.ts`, `.js`, etc.) — tracked for dependency and export signatures.
-    NonSfc,
-}
-
-impl FileKind {
-    /// Infer file kind from a file path's extension.
-    /// Files ending in `.vue` are `VueSfc`; everything else is `NonSfc`.
-    pub fn from_path(path: &str) -> Self {
-        if path.ends_with(".vue") {
-            Self::VueSfc
-        } else {
-            Self::NonSfc
-        }
-    }
-}
 
 /// Hot Module Replacement strategy injected into the assembled main module.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1165,6 +1144,23 @@ pub struct ScriptModuleReference {
     pub expr_span: verter_span::Span,
 }
 
+impl From<&verter_semantic::analysis::AnalyzedModuleReference> for ScriptModuleReference {
+    fn from(reference: &verter_semantic::analysis::AnalyzedModuleReference) -> Self {
+        ScriptModuleReference {
+            syntax: reference.syntax,
+            semantics: reference.semantics,
+            is_type_only: reference.is_type_only,
+            raw_text: reference.raw_text.clone(),
+            literal_specifier: reference.literal_specifier.clone(),
+            finite_specifiers: reference.finite_specifiers.clone(),
+            static_prefix: reference.static_prefix.clone(),
+            analyzability: reference.analyzability,
+            span: reference.span,
+            expr_span: reference.expr_span,
+        }
+    }
+}
+
 /// Result of [`VerterHost::upsert`](crate::VerterHost::upsert) or
 /// [`VerterHost::apply_style_overrides`](crate::VerterHost::apply_style_overrides).
 ///
@@ -1434,8 +1430,8 @@ pub struct UpsertRequest {
     pub input_id: String,
     /// Full source text of the file.
     pub source: Arc<str>,
-    /// Whether this is a Vue SFC or a non-SFC dependency.
-    pub file_kind: FileKind,
+    /// The file's language (framework carrier vs. plain script).
+    pub file_language: FileLanguage,
     /// Additional path aliases that should resolve to this file.
     pub aliases: Vec<String>,
 }
@@ -1716,10 +1712,10 @@ pub(crate) struct SrcBlockInfo {
 /// overlay results never populate base caches.
 pub(crate) struct VueTemplateInputs {
     pub(crate) source: Arc<str>,
-    /// The SFC structure parse of `source`. `None` routes the
-    /// computation through one counted `parse_sfc_counted` of its own
-    /// — a single parse, never a duplicate of one the caller ran.
-    pub(crate) cached_parse: Option<Arc<verter_compiler::parser::types::ParsedSfc>>,
+    /// The framework-neutral carrier parse artifact of `source`. `None`
+    /// routes the computation through one counted carrier parse of its
+    /// own — a single parse, never a duplicate of one the caller ran.
+    pub(crate) framework_parse: Option<Arc<verter_language::FrameworkParseArtifact>>,
     /// Publication status of the state these inputs were captured
     /// from, flowed BY VALUE (the gate works with or without an
     /// installed `RequestContext`): live scheduler/workspace reads are
@@ -1906,8 +1902,9 @@ pub(crate) struct CompileInput {
     /// Local/exported bindings from the effective script analysis.
     /// Used when converting template compiler metadata into host analysis.
     pub(crate) script_bindings: Vec<verter_semantic::analysis::AnalyzedBinding>,
-    /// Cached parsed SFC from upsert, reused during compilation to avoid re-parsing.
-    pub(crate) cached_parse: Option<Arc<verter_compiler::parser::types::ParsedSfc>>,
+    /// Framework-neutral parse artifact from upsert, reused during
+    /// compilation to avoid re-parsing.
+    pub(crate) framework_parse: Option<Arc<verter_language::FrameworkParseArtifact>>,
     /// Binding names referenced in style `v-bind()` expressions.
     /// Extracted from `FileEntry.style_analyses` at cache-miss time.
     pub(crate) style_v_bind_vars: Vec<String>,
@@ -2434,7 +2431,7 @@ pub(crate) struct EffectiveFileState {
     /// scheduler (or the content override) holds. Reading it is a refcount
     /// bump; consumers that need an owned copy call `.as_ref().clone()`.
     pub(crate) script_analysis: std::sync::Arc<verter_semantic::analysis::ScriptAnalysisSnapshot>,
-    pub(crate) cached_parse: Option<std::sync::Arc<verter_compiler::parser::types::ParsedSfc>>,
+    pub(crate) framework_parse: Option<std::sync::Arc<verter_language::FrameworkParseArtifact>>,
     pub(crate) whole_hash: Hash16,
 }
 
@@ -2448,7 +2445,7 @@ pub(crate) struct EffectiveFileState {
 pub(crate) struct ContentOverrideWithParse {
     pub(crate) layer: ContentOverrideLayer,
     pub(crate) parse: ParseSnapshot,
-    pub(crate) cached_parse: Option<Arc<verter_compiler::parser::types::ParsedSfc>>,
+    pub(crate) framework_parse: Option<Arc<verter_language::FrameworkParseArtifact>>,
     pub(crate) source: Arc<str>,
 }
 
@@ -2532,7 +2529,7 @@ pub(crate) struct ResolvedTypeCacheKey {
 /// A resolved external type entry in the host-level cache.
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedTypeCacheEntry {
-    pub resolved: Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>,
+    pub resolved: Option<verter_compiler::utils::oxc::script::type_surface::ResolvedElements>,
     /// Canonical IDs traversed during resolution. Replayed into the caller's
     /// `tracked_deps` on cache hit so the eval path knows which sources to read.
     pub tracked_deps: Vec<String>,
@@ -2783,6 +2780,16 @@ pub struct MetaProvenance {
     pub bundle_cold_flight_runs: std::sync::atomic::AtomicU64,
     pub dep_resolution_calls: std::sync::atomic::AtomicU64,
     pub imported_macro_declaration_builds: std::sync::atomic::AtomicU64,
+    /// Cold compile-output computes: bumped exactly once per cold run of
+    /// `ensure_compile_artifacts` (the path PAST the warm-hit consult, where
+    /// the shared compile actually executes). The deterministic, feature-
+    /// independent observability rail for compile-slot COALESCING: two
+    /// concurrent requests on the SAME `(canonical, profile)` that coalesce
+    /// onto one shared compile bump this ONCE; two independent compiles bump it
+    /// twice. (The `session_metrics` `compile_requests` counter mirrors this
+    /// but is feature-gated; this `MetaProvenance` rail is always on, like the
+    /// cold per-file artifact-build dedup counters below.) `reset()` zeroes it.
+    pub compile_cold_runs: std::sync::atomic::AtomicU64,
 
     // ── Cold per-file artifact-build dedup counters ─────────────────────
     //
@@ -2794,12 +2801,21 @@ pub struct MetaProvenance {
     /// OXC eval-program parses performed through the single host parse
     /// entry (`parse_eval_program`). Exactly 1 per cold canonical build.
     pub eval_program_parses: std::sync::atomic::AtomicU64,
-    /// SFC structure parses (`parse_sfc` / `parse_vue_snapshot`)
-    /// initiated by the host or its scheduler stage executor — covering
-    /// the materialise lanes (base + overlay), the compile/template
-    /// merged-source lanes, and the lazy `get_analysis` re-parse
-    /// fallbacks, so a duplicate-SFC-parse regression on any host lane
-    /// is counter-visible.
+    /// Carrier parses performed through the single counted carrier
+    /// chokepoint (`parse::parse_carrier_counted`) — every framework
+    /// carrier (`.vue`, `.svelte`, …) increments this exactly once per
+    /// `CarrierCompiler::parse`. The framework-neutral parse-once rail:
+    /// a cold build of any carrier file bumps this once, so a duplicate
+    /// carrier parse on any host lane (Vue OR Svelte) is counter-visible
+    /// without naming a framework.
+    pub carrier_parses: std::sync::atomic::AtomicU64,
+    /// SFC structure parses (the Vue carrier compatibility rail) —
+    /// bumped by `parse::parse_carrier_counted` only when the dispatched
+    /// carrier is Vue, covering the materialise lanes (base + overlay),
+    /// the compile/template merged-source lanes, and the lazy
+    /// `get_analysis` re-parse fallbacks, so a duplicate-SFC-parse
+    /// regression on any Vue host lane stays counter-visible alongside
+    /// the neutral `carrier_parses` rail.
     pub sfc_parses: std::sync::atomic::AtomicU64,
     /// Full OXC program parses through `parse_non_sfc_snapshot` —
     /// the scheduler snapshot lane for non-SFC files plus the
@@ -2978,7 +2994,9 @@ impl Default for MetaProvenance {
             bundle_cold_flight_runs: std::sync::atomic::AtomicU64::new(0),
             dep_resolution_calls: std::sync::atomic::AtomicU64::new(0),
             imported_macro_declaration_builds: std::sync::atomic::AtomicU64::new(0),
+            compile_cold_runs: std::sync::atomic::AtomicU64::new(0),
             eval_program_parses: std::sync::atomic::AtomicU64::new(0),
+            carrier_parses: std::sync::atomic::AtomicU64::new(0),
             sfc_parses: std::sync::atomic::AtomicU64::new(0),
             non_sfc_snapshot_parses: std::sync::atomic::AtomicU64::new(0),
             vue_script_snapshot_parses: std::sync::atomic::AtomicU64::new(0),
@@ -3137,6 +3155,7 @@ impl std::fmt::Debug for MetaProvenance {
                 "imported_macro_declaration_builds",
                 &self.imported_macro_declaration_builds.load(Relaxed),
             )
+            .field("compile_cold_runs", &self.compile_cold_runs.load(Relaxed))
             .field(
                 "ensure_loaded_calls",
                 &self.ensure_loaded_calls.load(Relaxed),
@@ -3245,7 +3264,9 @@ impl MetaProvenance {
             bundle_cold_flight_runs: self.bundle_cold_flight_runs.load(Relaxed),
             dep_resolution_calls: self.dep_resolution_calls.load(Relaxed),
             imported_macro_declaration_builds: self.imported_macro_declaration_builds.load(Relaxed),
+            compile_cold_runs: self.compile_cold_runs.load(Relaxed),
             eval_program_parses: self.eval_program_parses.load(Relaxed),
+            carrier_parses: self.carrier_parses.load(Relaxed),
             sfc_parses: self.sfc_parses.load(Relaxed),
             non_sfc_snapshot_parses: self.non_sfc_snapshot_parses.load(Relaxed),
             vue_script_snapshot_parses: self.vue_script_snapshot_parses.load(Relaxed),
@@ -3347,7 +3368,9 @@ impl MetaProvenance {
         self.bundle_cold_flight_runs.store(0, Relaxed);
         self.dep_resolution_calls.store(0, Relaxed);
         self.imported_macro_declaration_builds.store(0, Relaxed);
+        self.compile_cold_runs.store(0, Relaxed);
         self.eval_program_parses.store(0, Relaxed);
+        self.carrier_parses.store(0, Relaxed);
         self.sfc_parses.store(0, Relaxed);
         self.non_sfc_snapshot_parses.store(0, Relaxed);
         self.vue_script_snapshot_parses.store(0, Relaxed);
@@ -3502,7 +3525,9 @@ pub struct MetaProvenanceSnapshot {
     pub bundle_cold_flight_runs: u64,
     pub dep_resolution_calls: u64,
     pub imported_macro_declaration_builds: u64,
+    pub compile_cold_runs: u64,
     pub eval_program_parses: u64,
+    pub carrier_parses: u64,
     pub sfc_parses: u64,
     pub non_sfc_snapshot_parses: u64,
     pub vue_script_snapshot_parses: u64,

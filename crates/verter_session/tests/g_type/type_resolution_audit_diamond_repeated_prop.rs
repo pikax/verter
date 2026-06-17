@@ -18,7 +18,7 @@ use std::sync::Arc;
 use verter_session::semantic_query::{
     PathSegment, ProjectionMode, ResolveDeclKey, ScopeId, SemanticQueryKey,
 };
-use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{HostConfig, UpsertRequest, VerterHost};
 
 const DIAMOND_TS: &str = r#"
 export type Shared = { value: string; flag: boolean };
@@ -38,7 +38,9 @@ fn type_resolution_audit_diamond_intra_request_interning() {
         canonical_id: Some("/diamond.ts".to_string()),
         input_id: "/diamond.ts".to_string(),
         source: Arc::from(DIAMOND_TS),
-        file_kind: FileKind::from_path("/diamond.ts"),
+        file_language: verter_session::LanguageRegistry::global()
+            .classify_static("/diamond.ts")
+            .static_resolution(),
         aliases: Vec::new(),
     });
 

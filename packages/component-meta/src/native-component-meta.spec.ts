@@ -119,6 +119,8 @@ describe("nativeComponentMetaToComponentMeta", () => {
         hasDynamicClass: true,
         vModels: ["modelValue"],
         vModelEntries: [{ bindingName: "modelValue" }],
+        bindings: [],
+        events: [],
       },
     ]);
     expect(meta.templateRefs).toEqual([

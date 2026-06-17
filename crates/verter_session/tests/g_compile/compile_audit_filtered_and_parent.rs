@@ -31,7 +31,7 @@ use verter_audit::payloads::tags::CompileTargetTag;
 use verter_audit::{AuditCaptureState, AuditConfig, AuditConsumerFilter, CompilePayload};
 use verter_compiler::compile::CompileTarget;
 use verter_session::request_context::{RequestContext, RequestContextGuard};
-use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 
 const SFC: &str = "<script setup lang=\"ts\">\n\
                    import { ref } from 'vue';\n\
@@ -44,7 +44,7 @@ fn upsert(host: &VerterHost) {
         canonical_id: Some("/f.vue".into()),
         input_id: "/f.vue".into(),
         source: Arc::from(SFC),
-        file_kind: FileKind::VueSfc,
+        file_language: FileLanguage::vue(),
         aliases: Vec::new(),
     });
 }

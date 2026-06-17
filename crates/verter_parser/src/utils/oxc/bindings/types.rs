@@ -162,6 +162,15 @@ pub struct BindingContext<'a> {
     ignored_identifiers: FxHashSet<&'a str>,
     /// Base offset to add to all positions
     pub base_offset: u32,
+    /// When set, an identifier that is a *prefix* of an in-scope local is also
+    /// treated as ignored. This supports IDE completion inside v-for / v-slot
+    /// scopes, where partial identifiers (`it`, `slotI`) arrive mid-keystroke and
+    /// must stay bare so the type provider can offer scoped completions.
+    ///
+    /// Runtime (VDOM / Vapor) codegen leaves this off: there, a partial identifier
+    /// is a genuine reference to a script binding and must resolve normally, not be
+    /// silently swallowed as a scoped local.
+    completion_prefixes: bool,
 }
 
 impl Default for BindingContext<'_> {
@@ -176,6 +185,7 @@ impl<'a> BindingContext<'a> {
         Self {
             ignored_identifiers: FxHashSet::default(),
             base_offset,
+            completion_prefixes: false,
         }
     }
 
@@ -184,7 +194,17 @@ impl<'a> BindingContext<'a> {
         Self {
             ignored_identifiers: ignored.into_iter().collect(),
             base_offset,
+            completion_prefixes: false,
         }
+    }
+
+    /// Enable or disable completion-prefix matching (see [`completion_prefixes`]).
+    ///
+    /// [`completion_prefixes`]: BindingContext::completion_prefixes
+    #[inline]
+    pub fn completion_aware(mut self, enabled: bool) -> Self {
+        self.completion_prefixes = enabled;
+        self
     }
 
     /// Check if an identifier should be ignored.
@@ -199,14 +219,17 @@ impl<'a> BindingContext<'a> {
             || is_global(bytes)
             || name == "$event"
             || self.ignored_identifiers.contains(name)
-            // In IDE mode, partial completions inside v-for / v-slot scopes arrive as
-            // unfinished identifiers (`it`, `slotI`, etc.). Treat prefixes of ignored
-            // locals as ignored too so the template codegen keeps them bare and the
-            // type provider can offer scoped completions instead of instance members.
-            || self
-                .ignored_identifiers
-                .iter()
-                .any(|ignored| ignored.starts_with(name))
+            // In IDE completion mode, partial completions inside v-for / v-slot scopes
+            // arrive as unfinished identifiers (`it`, `slotI`, etc.). Treat prefixes of
+            // ignored locals as ignored too so the template codegen keeps them bare and
+            // the type provider can offer scoped completions instead of instance members.
+            // Gated off for runtime codegen, where a partial identifier is a real
+            // reference and the per-binding scan is wasted work.
+            || (self.completion_prefixes
+                && self
+                    .ignored_identifiers
+                    .iter()
+                    .any(|ignored| ignored.starts_with(name)))
     }
 
     /// Add an identifier to the ignore list
@@ -222,6 +245,7 @@ impl<'a> BindingContext<'a> {
         Self {
             ignored_identifiers: ignored,
             base_offset: self.base_offset,
+            completion_prefixes: self.completion_prefixes,
         }
     }
 }
@@ -294,6 +318,46 @@ mod tests {
         assert!(!ctx.should_ignore("foo"));
         ctx.add_ignored("foo");
         assert!(ctx.should_ignore("foo"));
+    }
+
+    /// Runtime codegen must NOT treat a partial identifier as a scoped local just
+    /// because it is a prefix of one — `it` is a real reference even when `item` is
+    /// in scope. The completion-prefix scan is gated to IDE completion contexts.
+    #[test]
+    fn completion_prefix_scan_is_gated_to_ide_contexts() {
+        // Runtime context (default): only exact locals are ignored.
+        let mut runtime = BindingContext::new(0);
+        runtime.add_ignored("item");
+        assert!(
+            runtime.should_ignore("item"),
+            "exact local stays ignored in every context"
+        );
+        assert!(
+            !runtime.should_ignore("it"),
+            "runtime must treat a prefix of a local as a real reference"
+        );
+
+        // IDE completion context: prefixes of locals are also ignored.
+        let mut ide = BindingContext::new(0).completion_aware(true);
+        ide.add_ignored("item");
+        assert!(ide.should_ignore("item"));
+        assert!(
+            ide.should_ignore("it"),
+            "IDE completion keeps partial identifiers bare for scoped completion"
+        );
+    }
+
+    /// The completion-prefix flag propagates to child (arrow-function) scopes so a
+    /// nested expression keeps the same gating as its enclosing context.
+    #[test]
+    fn completion_prefix_flag_propagates_to_child_scope() {
+        let runtime_child = BindingContext::new(0).child_with_ignored(smallvec::smallvec!["item"]);
+        assert!(!runtime_child.should_ignore("it"));
+
+        let ide_child = BindingContext::new(0)
+            .completion_aware(true)
+            .child_with_ignored(smallvec::smallvec!["item"]);
+        assert!(ide_child.should_ignore("it"));
     }
 
     #[test]

@@ -11,7 +11,7 @@ pub(super) use verter_type_expr::{PrimitiveName, TypeExpr};
 
 pub(super) use super::super::types::{EvaluateTypeExpressionRequest, ImportSpec, NamedImport};
 pub(super) use crate::semantic_query::ProjectionMode;
-use crate::types::{FileKind, HostConfig, UpsertRequest};
+use crate::types::{HostConfig, UpsertRequest};
 use crate::VerterHost;
 
 pub(super) const COMPONENT_TYPES: &str = include_str!("fixtures/component_types.ts");
@@ -123,7 +123,9 @@ pub(crate) fn upsert_ts(host: &VerterHost, canonical_id: &str, source: &str) {
         canonical_id: Some(canonical_id.to_string()),
         input_id: canonical_id.to_string(),
         source: Arc::from(source),
-        file_kind: FileKind::from_path(canonical_id),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static(canonical_id)
+            .static_resolution(),
         aliases: Vec::new(),
     });
 }

@@ -15,7 +15,7 @@ use std::sync::Arc;
 use rustc_hash::FxHashMap;
 
 use verter_session::session_view::{HostView, OverlaidView, SessionView};
-use verter_session::{CompileErrorPolicy, FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{CompileErrorPolicy, FileLanguage, HostConfig, UpsertRequest, VerterHost};
 
 fn host() -> Arc<VerterHost> {
     Arc::new(VerterHost::new_standalone(HostConfig {
@@ -31,7 +31,7 @@ fn upsert(host: &VerterHost, canonical: &str, source: &str) {
             canonical_id: None,
             input_id: canonical.to_string(),
             source: Arc::from(source),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .expect("upsert succeeds");

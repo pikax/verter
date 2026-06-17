@@ -1,9 +1,7 @@
 use super::*;
 use crate::changes::WorkspaceChange;
 use crate::traits::{WorkspaceAccess, WorkspaceRead};
-use crate::types::{
-    ExactResolution, FileKind, ResolutionContext, ResolvePhase, ResolveRequestKind,
-};
+use crate::types::{ExactResolution, ResolutionContext, ResolvePhase, ResolveRequestKind};
 
 // ── FilesystemWorkspace::read_file with disk fallback ──
 
@@ -272,13 +270,17 @@ fn delete_dir_all_invalidates_cached_children_under_removed_directory() {
 
 #[test]
 fn classify_file_types() {
+    use verter_language::{FileLanguage, ScriptSourceType};
     let ws = FilesystemWorkspace::new(FilesystemOptions::default());
-    assert_eq!(ws.classify_file("d:/project/app.vue"), FileKind::VueSfc);
-    assert_eq!(ws.classify_file("d:/project/utils.ts"), FileKind::NonSfc);
-    assert_ne!(
-        ws.classify_file("d:/project/comp.vue"),
-        FileKind::NonSfc,
-        ".vue should not be NonSfc"
+    assert_eq!(ws.classify_file("d:/project/app.vue"), FileLanguage::vue());
+    assert_eq!(
+        ws.classify_file("d:/project/utils.ts"),
+        FileLanguage::script(ScriptSourceType::Ts)
+    );
+    assert!(
+        ws.classify_file("d:/project/comp.vue")
+            .is_framework_carrier(),
+        ".vue must classify as a framework carrier"
     );
 }
 

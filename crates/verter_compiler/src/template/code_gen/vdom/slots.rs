@@ -227,8 +227,6 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
             kind: ChildKind::Element,
             condition: None,
             condition_prefix: None,
-            condition_expr_start: None,
-            condition_binding_prefix_len: 0,
         }
     }
 
@@ -433,8 +431,6 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
             kind: ChildKind::Element,
             condition: None,
             condition_prefix: None,
-            condition_expr_start: None,
-            condition_binding_prefix_len: 0,
         }
     }
 
@@ -874,12 +870,21 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                     let is_start = child.condition == Some(ConditionChainRole::Start);
                     let is_continuation = child.condition == Some(ConditionChainRole::Continuation);
 
-                    // Separator before this entry
+                    // Separator before this entry.
+                    //
+                    // The dynamic-slot object wrapper (`{ name: …, fn: `) is an
+                    // unmapped prepend at this same anchor that must follow the
+                    // condition head, so the condition is emitted UNMAPPED through
+                    // the same channel to preserve insertion order (the channel
+                    // merge places all mapped prepends after unmapped ones at a
+                    // shared position). This path maps nothing to source, so the
+                    // no-synthetic-bleed invariant holds trivially; the array-mode
+                    // sites (`emit_slot_children_with_cache`, `children.rs`) carry
+                    // the per-segment mapping.
                     if ei > 0 {
                         if is_continuation {
                             if let Some(ref prefix) = child.condition_prefix {
-                                let sep = format!(" : {prefix}");
-                                out.prepend_alloc(child.start, &sep);
+                                out.prepend_fmt(child.start, format_args!(" : {}", prefix.text));
                             } else {
                                 out.prepend_static(child.start, " : ");
                             }
@@ -889,10 +894,10 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                         }
                     }
 
-                    // Condition prefix for v-if start
+                    // Condition prefix for v-if start (unmapped, see above).
                     if is_start {
                         if let Some(ref prefix) = child.condition_prefix {
-                            out.prepend_alloc(child.start, prefix);
+                            out.prepend_alloc(child.start, &prefix.text);
                         }
                     }
 
@@ -900,8 +905,10 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                     let has_vfor = slot_vfor_info.contains_key(&child.start);
                     if has_vfor {
                         let (params, iterable) = slot_vfor_info.get(&child.start).unwrap();
-                        let vfor_open = format!("_renderList({iterable}, ({params}) => {{return ");
-                        out.prepend_alloc(child.start, &vfor_open);
+                        out.prepend_fmt(
+                            child.start,
+                            format_args!("_renderList({iterable}, ({params}) => {{return "),
+                        );
                         out.add_vdom_import(VdomHelper::RenderList);
                     }
 
@@ -1303,14 +1310,18 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                     if child.kind == ChildKind::Text {
                         // Single static text: wrap in _createTextVNode inside cache
                         out.add_vdom_import(VdomHelper::CreateTextVNode);
-                        let prefix = format!(
-                            "_cache[{cache_idx}] || (_cache[{cache_idx}] = _createTextVNode(\""
+                        out.prepend_fmt(
+                            child.start,
+                            format_args!(
+                                "_cache[{cache_idx}] || (_cache[{cache_idx}] = _createTextVNode(\""
+                            ),
                         );
-                        out.prepend_alloc(child.start, &prefix);
                         out.prepend_static(child.end, "\"))");
                     } else {
-                        let prefix = format!("_cache[{cache_idx}] || (_cache[{cache_idx}] = ");
-                        out.prepend_alloc(child.start, &prefix);
+                        out.prepend_fmt(
+                            child.start,
+                            format_args!("_cache[{cache_idx}] || (_cache[{cache_idx}] = "),
+                        );
                         out.prepend_static(child.end, ")");
                     }
                 } else {
@@ -1318,8 +1329,10 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                     let first = &children[run_start];
                     let last = &children[run_end - 1];
 
-                    let prefix = format!("...(_cache[{cache_idx}] || (_cache[{cache_idx}] = [");
-                    out.prepend_alloc(first.start, &prefix);
+                    out.prepend_fmt(
+                        first.start,
+                        format_args!("...(_cache[{cache_idx}] || (_cache[{cache_idx}] = ["),
+                    );
 
                     // Emit inner items: separators + text wrapping within the cache group.
                     // All items are static, so no v-if/interpolation to handle.
@@ -1419,36 +1432,13 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
 
                 if needs_comma && has_prefix {
                     let cond = children[i].condition_prefix.as_ref().unwrap();
-                    if let Some(expr_start) = children[i].condition_expr_start {
-                        out.prepend_static(children[i].start, ", ");
-                        children::emit_condition_prefix_mapped(
-                            out,
-                            children[i].start,
-                            expr_start,
-                            cond,
-                            children[i].condition_binding_prefix_len,
-                        );
-                    } else {
-                        let mut sep = String::with_capacity(4 + cond.len());
-                        sep.push_str(", ");
-                        sep.push_str(cond);
-                        out.prepend_alloc(children[i].start, &sep);
-                    }
+                    out.prepend_static(children[i].start, ", ");
+                    children::emit_condition_prefix_mapped(out, children[i].start, cond);
                 } else if needs_comma {
                     out.prepend_static(prev_item_end, ", ");
                 } else if has_prefix {
                     let cond = children[i].condition_prefix.as_ref().unwrap();
-                    if let Some(expr_start) = children[i].condition_expr_start {
-                        children::emit_condition_prefix_mapped(
-                            out,
-                            children[i].start,
-                            expr_start,
-                            cond,
-                            children[i].condition_binding_prefix_len,
-                        );
-                    } else {
-                        out.prepend_alloc(children[i].start, cond);
-                    }
+                    children::emit_condition_prefix_mapped(out, children[i].start, cond);
                 }
 
                 prev_item_end = children[i].end;

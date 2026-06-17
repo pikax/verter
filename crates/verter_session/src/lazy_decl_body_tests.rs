@@ -16,7 +16,7 @@
 use std::sync::Arc;
 
 use crate::semantic_query::ProjectionMode;
-use crate::types::{FileKind, HostConfig, MetaProvenanceSnapshot, UpsertRequest};
+use crate::types::{HostConfig, MetaProvenanceSnapshot, UpsertRequest};
 use crate::VerterHost;
 
 fn make_host() -> Arc<VerterHost> {
@@ -32,7 +32,9 @@ fn upsert(host: &VerterHost, canonical_id: &str, source: &str) {
             canonical_id: Some(canonical_id.to_string()),
             input_id: canonical_id.to_string(),
             source: Arc::from(source),
-            file_kind: FileKind::from_path(canonical_id),
+            file_language: verter_language::LanguageRegistry::global()
+                .classify_static(canonical_id)
+                .static_resolution(),
             aliases: Vec::new(),
         })
         .expect("upsert must succeed");

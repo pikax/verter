@@ -517,7 +517,7 @@ fn seeded_memo_matches_lazy_fold() {
         "interface Merged { a: string }\ninterface Merged { b: number }\nconst v = { k: 1 };\n";
     let env = verter_semantic::analysis::type_eval_build::parse_and_build_env(source);
     let analysis =
-        verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default();
+        verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default();
     let allocator = oxc_allocator::Allocator::default();
     let parsed = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
     let header_index = Arc::new(

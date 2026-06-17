@@ -23,7 +23,7 @@
 use std::sync::Arc;
 
 use crate::types::{
-    CompileCacheMode, CompileErrorPolicy, CompileProfile, FileKind, HostConfig, UpsertRequest,
+    CompileCacheMode, CompileErrorPolicy, CompileProfile, FileLanguage, HostConfig, UpsertRequest,
     VirtualNodeKind, VirtualQuery,
 };
 use crate::VerterHost;
@@ -119,7 +119,7 @@ fn env_mutation_between_compute_and_publish_declines_the_content_publish() {
             canonical_id: Some(CANONICAL.to_string()),
             input_id: CANONICAL.to_string(),
             source: FACT_FREE.into(),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: Vec::new(),
         })
         .expect("upsert vue");
@@ -217,7 +217,7 @@ fn upsert(host: &VerterHost, source: &str) {
             canonical_id: Some(CANONICAL.to_string()),
             input_id: CANONICAL.to_string(),
             source: source.into(),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: Vec::new(),
         })
         .expect("upsert vue");
@@ -424,7 +424,7 @@ fn stable_env_publish_lands_under_the_captured_identity() {
             canonical_id: Some(CANONICAL.to_string()),
             input_id: CANONICAL.to_string(),
             source: FACT_FREE.into(),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: Vec::new(),
         })
         .expect("upsert vue");

@@ -54,7 +54,7 @@ use verter_session::session_view::{OverlaidView, SessionView};
 // `SessionResolverContext`. The module is gated
 // `cfg(any(test, debug_assertions))` on the crate root.
 use verter_session::tests::overlay_pollution_probe as probe_shim;
-use verter_session::{CompileErrorPolicy, FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{CompileErrorPolicy, HostConfig, UpsertRequest, VerterHost};
 
 /// Raw `.js` runtime file the session overlays.
 const RAW_JS: &str = "/pkg/index.js";
@@ -76,7 +76,9 @@ fn upsert_base(host: &VerterHost, canonical: &str, source: &str) {
         canonical_id: Some(canonical.to_string()),
         input_id: canonical.to_string(),
         source: Arc::from(source),
-        file_kind: FileKind::from_path(canonical),
+        file_language: verter_session::LanguageRegistry::global()
+            .classify_static(canonical)
+            .static_resolution(),
         aliases: Vec::new(),
     });
     assert!(

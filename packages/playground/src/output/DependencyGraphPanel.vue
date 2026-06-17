@@ -1,10 +1,16 @@
 <script setup lang="ts">
 import { computed, ref, onMounted, onUnmounted } from "vue";
 import type { Store } from "../core/store";
+import { isCarrierFilename, allFrameworkExtensions } from "../core/frameworks";
 
 const props = defineProps<{
   store: Store;
 }>();
+
+// Import-resolution extensions: every framework carrier/adapter-module
+// extension (manifest-derived) plus the plain TS/JS module extensions and the
+// no-extension case. Manifest-driven so a `.svelte` import resolves to its node.
+const RESOLVE_EXTENSIONS: readonly string[] = ["", ...allFrameworkExtensions(), ".ts", ".js"];
 
 const svgContainer = ref<HTMLElement>();
 const containerWidth = ref(600);
@@ -13,7 +19,8 @@ const containerHeight = ref(400);
 interface GraphNode {
   id: string;
   label: string;
-  isVue: boolean;
+  /** Whether this node is a framework CARRIER (component) file, e.g. .vue/.svelte. */
+  isComponent: boolean;
   x: number;
   y: number;
 }
@@ -44,7 +51,7 @@ const graph = computed(() => {
     return {
       id: filename,
       label: filename.replace(/^\//, ""),
-      isVue: filename.endsWith(".vue"),
+      isComponent: isCarrierFilename(filename),
       x: PADDING + col * colWidth + NODE_WIDTH / 2,
       y: PADDING + row * rowHeight + NODE_HEIGHT / 2,
     };
@@ -99,9 +106,9 @@ function resolveImport(from: string, source: string): string | null {
   }
 
   let resolved = result.join("/");
-  // Try common extensions
+  // Try the manifest-derived framework extensions plus plain TS/JS.
   const allFiles = Object.keys(props.store.files);
-  for (const ext of ["", ".vue", ".ts", ".js"]) {
+  for (const ext of RESOLVE_EXTENSIONS) {
     if (allFiles.includes(resolved + ext)) return resolved + ext;
   }
   return null;
@@ -207,7 +214,7 @@ onUnmounted(() => {
           :width="NODE_WIDTH"
           :height="NODE_HEIGHT"
           rx="6"
-          :fill="node.isVue ? 'rgba(66, 184, 131, 0.15)' : 'var(--bg-secondary, #2d2d2d)'"
+          :fill="node.isComponent ? 'rgba(66, 184, 131, 0.15)' : 'var(--bg-secondary, #2d2d2d)'"
           :stroke="
             node.id === store.activeFilename
               ? 'var(--accent-color, #4299e1)'
@@ -220,7 +227,7 @@ onUnmounted(() => {
           :y="NODE_HEIGHT / 2"
           text-anchor="middle"
           dominant-baseline="central"
-          :fill="node.isVue ? '#42b883' : 'var(--text-primary, #ddd)'"
+          :fill="node.isComponent ? '#42b883' : 'var(--text-primary, #ddd)'"
           font-size="11"
           font-family="ui-monospace, monospace"
         >

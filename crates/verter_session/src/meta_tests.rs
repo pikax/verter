@@ -92,7 +92,7 @@ fn resolved_macro_prop_names(
                 root_identity: host.current_or_read_whole_hash(owner).unwrap_or([0u8; 16]),
                 level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
             })
-            .props
+            .prop_fields()
             .iter()
             .map(|p| p.name.clone())
             .collect::<Vec<_>>()
@@ -2231,7 +2231,7 @@ defineProps<{
   body: "body",
 }"#,
             ),
-            file_kind: crate::FileKind::NonSfc,
+            file_language: crate::FileLanguage::script_ts(),
             aliases: vec![],
         })
         .unwrap();
@@ -7141,7 +7141,9 @@ fn non_scheduler_upsert_reflects_updated_source_in_subsequent_analysis() {
             canonical_id: Some("/App.vue".to_string()),
             input_id: "/App.vue".to_string(),
             source: Arc::from(updated.as_str()),
-            file_kind: crate::types::FileKind::from_path("/App.vue"),
+            file_language: crate::LanguageRegistry::global()
+                .classify_static("/App.vue")
+                .static_resolution(),
             aliases: Vec::new(),
         })
         .unwrap();
@@ -11150,6 +11152,134 @@ onMounted(() => {
 }
 
 #[test]
+fn svelte_component_meta_carries_template_usage_facts() {
+    // THE discriminating public E2E: a `.svelte` file resolved through
+    // `get_component_meta` carries its template component-USAGE facts on the
+    // published `ComponentMetaBody.components`. It is RED if Svelte's
+    // `template_data` is an empty stub OR template-data ingestion is Vue-gated
+    // (Svelte never reaches the public surface); GREEN with registry-dispatched
+    // ingestion + the typed-IR producer. A producer alone (a populated
+    // `template_data` not yet wired into the public surface) is insufficient.
+    let project = make_project();
+    project
+        .upsert_base(
+            "/App.svelte",
+            r#"<script lang="ts">
+  import Button from './Button.svelte';
+  let value = 0;
+  function handler() {}
+</script>
+<Button size="sm" online={value} onclick={handler} bind:value on:focus={handler}>
+  {#snippet icon()}x{/snippet}
+</Button>
+"#,
+        )
+        .unwrap();
+
+    let session = project.open_session_batch().unwrap();
+    let meta = session
+        .get_component_meta("/App.svelte")
+        .unwrap()
+        .expect("get_component_meta should return metadata for a .svelte file");
+
+    assert_eq!(
+        meta.components.len(),
+        1,
+        "the Svelte template component usage must reach the public meta surface"
+    );
+    let usage = &meta.components[0];
+    assert_eq!(usage.name, "Button");
+    assert!(!usage.is_dynamic);
+
+    // The `size`, `online`, and `onclick` PROPS are published. `online` and
+    // `onclick` are PLAIN `on*` attributes — they are PROPS, never fabricated as
+    // events by a name guess (the P1 regression this discriminates).
+    let prop_names: Vec<&str> = usage.props.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(
+        prop_names,
+        vec!["size", "online", "onclick"],
+        "plain attrs (incl. `online`/`onclick`) reach the surface as PROPS"
+    );
+    // `bind:value` is NOT a prop / NOT a v_model — it is a neutral BINDING.
+    assert!(!prop_names.contains(&"value"));
+
+    let binding_names: Vec<&str> = usage.bindings.iter().map(|b| b.name.as_str()).collect();
+    assert_eq!(
+        binding_names,
+        vec!["value"],
+        "`bind:value` reaches the surface"
+    );
+
+    // Only the LEGACY `on:focus` directive is a neutral EVENT — the plain `on*`
+    // attributes (`online`, `onclick`) are NOT events.
+    let event_names: Vec<&str> = usage.events.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(
+        event_names,
+        vec!["focus"],
+        "only the legacy `on:` directive reaches the surface as an event"
+    );
+    // HARD INVARIANT: no plain `on*` attribute is misclassified as an event.
+    assert!(!event_names.contains(&"online"));
+    assert!(!event_names.contains(&"onclick"));
+
+    // The passed `{#snippet icon}` is recorded in slots_used.
+    assert_eq!(usage.slots_used, vec!["icon".to_string()]);
+}
+
+#[test]
+fn vue_component_meta_keeps_empty_bindings_events_no_regression() {
+    // Vue NO-REGRESSION: the neutral per-usage `bindings` / `events` fields stay
+    // EMPTY for Vue (Vue carries two-way bindings in `v_models` and events at the
+    // template level), while the existing Vue fields are unchanged.
+    let project = make_project();
+    project
+        .upsert_base(
+            "/Child.vue",
+            r#"<script setup lang="ts">
+defineProps<{ label: string; modelValue: number }>()
+</script>
+<template><button>{{ label }}</button></template>"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/Host.vue",
+            r#"<script setup lang="ts">
+import { ref } from 'vue'
+import Child from './Child.vue'
+const count = ref(0)
+</script>
+<template>
+  <Child label="hi" :class="{ active: count > 0 }" v-model="count" />
+</template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session_batch().unwrap();
+    let meta = session
+        .get_component_meta("/Host.vue")
+        .unwrap()
+        .expect("get_component_meta should return metadata");
+
+    assert_eq!(meta.components.len(), 1);
+    let usage = &meta.components[0];
+    assert_eq!(usage.name, "Child");
+    // The Vue fields are byte-identical in shape.
+    assert_eq!(usage.v_models, vec!["modelValue".to_string()]);
+    assert!(usage.has_dynamic_class);
+    assert!(usage.props.iter().any(|p| p.name == "label"));
+    // The new neutral fields are EMPTY for Vue.
+    assert!(
+        usage.bindings.is_empty(),
+        "Vue must not populate the neutral `bindings` field"
+    );
+    assert!(
+        usage.events.is_empty(),
+        "Vue must not populate the neutral `events` field"
+    );
+}
+
+#[test]
 fn get_component_meta_surfaces_sfc_block_metadata() {
     let project = make_project();
     project
@@ -11609,6 +11739,26 @@ defineProps<typeof config>()
 
     // Assert-: no extra fields
     assert_eq!(meta.props.len(), 2, "should have exactly 2 props");
+
+    // `const config = { x: 1, y: 'hello' }` keeps the BINDING constant but
+    // leaves the object PROPERTIES mutable, so `typeof config` widens each
+    // member to its primitive (`{ x: number; y: string }`) exactly as TS does
+    // — literal preservation would require `as const`. Pin the TS-correct
+    // widened published types so the native contract catches a future drift
+    // back to over-narrowed literals.
+    use verter_type_expr::{PrimitiveName, TypeExpr};
+    let x = meta.props.iter().find(|p| p.name == "x").unwrap();
+    assert!(
+        matches!(x.type_expr, TypeExpr::Primitive(PrimitiveName::Number)),
+        "typeof config widens `x: 1` to `number`, got: {:?}",
+        x.type_expr
+    );
+    let y = meta.props.iter().find(|p| p.name == "y").unwrap();
+    assert!(
+        matches!(y.type_expr, TypeExpr::Primitive(PrimitiveName::String)),
+        "typeof config widens `y: 'hello'` to `string`, got: {:?}",
+        y.type_expr
+    );
 }
 
 #[test]
@@ -13593,12 +13743,18 @@ defineProps<ChildProps>()
                 level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
             });
     assert!(
-        button_dtos.props.iter().any(|prop| prop.name == "loading"),
+        button_dtos
+            .prop_fields()
+            .iter()
+            .any(|prop| prop.name == "loading"),
         "resolved ButtonProps should include inherited props, got: {:?}",
         button_dtos.props
     );
     assert!(
-        button_dtos.props.iter().any(|prop| prop.name == "label"),
+        button_dtos
+            .prop_fields()
+            .iter()
+            .any(|prop| prop.name == "label"),
         "resolved ButtonProps should include button props, got: {:?}",
         button_dtos.props
     );
@@ -16861,7 +17017,7 @@ const props = defineProps<ButtonProps>()
 /// declaring file's cache-owned `IndexedReady.raw_source` via the typeinfo
 /// member spans, never a fresh parse.
 #[test]
-fn imported_jsdoc_enrichment_uses_cached_parse_and_does_not_reparse_source() {
+fn imported_jsdoc_enrichment_uses_parse_artifact_and_does_not_reparse_source() {
     let project = make_project();
     project
         .upsert_base(

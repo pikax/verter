@@ -4568,8 +4568,11 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
                     if self.in_push {
                         out.overwrite(el.tag_open.start, el.tag_open.end, &self.buf);
                     } else {
-                        let s = format!("_push(`{}`)\n", self.buf);
-                        out.overwrite(el.tag_open.start, el.tag_open.end, &s);
+                        out.overwrite_fmt(
+                            el.tag_open.start,
+                            el.tag_open.end,
+                            format_args!("_push(`{}`)\n", self.buf),
+                        );
                     }
                     self.elem_ctx.push(ElemCtx::TransitionGroupTag(tg_tag));
                     return super::WalkAction::Continue;
@@ -5738,13 +5741,15 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
             }
             ElemCtx::TransitionGroupTag(ref tg_tag) => {
                 // Emit closing tag for TransitionGroup: `</ul>`
-                let closing = format!("</{}>", tg_tag);
                 if let Some(ref tc) = el.tag_close {
                     if self.in_push {
-                        out.overwrite(tc.start, tc.end, &closing);
+                        out.overwrite_fmt(tc.start, tc.end, format_args!("</{}>", tg_tag));
                     } else {
-                        let s = format!("_push(`{}`)\n", closing);
-                        out.overwrite(tc.start, tc.end, &s);
+                        out.overwrite_fmt(
+                            tc.start,
+                            tc.end,
+                            format_args!("_push(`</{}>`)\n", tg_tag),
+                        );
                     }
                 }
             }
@@ -5917,11 +5922,14 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
 // ======================== OXC lookup helper ========================
 
 /// Find the OXC parsed prop data for a given element prop index.
+///
+/// O(1) lookup through the element's dense `prop_lookup` table — no linear scan
+/// over the sparse `props` vec.
 fn find_oxc_prop<'a, 'alloc>(
     oxc: &'a OxcParsedElement<'alloc>,
     prop_index: usize,
 ) -> Option<&'a crate::template::oxc::types::OxcParsedProp<'alloc>> {
-    oxc.props.iter().find(|p| p.prop_index == prop_index)
+    oxc.prop(prop_index)
 }
 
 // ======================== Utility functions ========================

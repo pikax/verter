@@ -14,10 +14,6 @@ use super::macros::{
     detect_macro_kind, MacroArrayArg, MacroDeclarator, MacroObjectArg, MacroProperty,
     MacroTypeParams, ScriptMacro, VueMacroKind,
 };
-use super::resolve_type::{
-    infer_runtime_type, resolve_type_elements_with_ctx_ref, ResolvedElements, RuntimeType,
-    TypeResolutionContext,
-};
 use super::shared::ScriptParseContext;
 use super::types::{
     AsyncKind, DeclarationKind, ScriptAsync, ScriptBinding, ScriptDeclaration, ScriptError,
@@ -29,6 +25,10 @@ use super::usage::{
     SyncContextUsage, TemplateUtilUsage, UsageCollector, VueApiCategory, VueApiKind, WatcherUsage,
 };
 use crate::common::Span;
+use crate::utils::oxc::script::type_surface::{
+    infer_runtime_type, resolve_type_elements_with_ctx_ref, ResolvedElements, RuntimeType,
+    TypeResolutionContext,
+};
 
 /// Context for setup script parsing
 pub struct SetupContext {
@@ -830,7 +830,7 @@ fn extract_type_params<'a>(
         .any(|ty| !matches!(ty, RuntimeType::Unknown));
     let unresolved_type_ref = is_type_reference
         && resolved.props.is_empty()
-        && resolved.emits.is_empty()
+        && resolved.call_signatures.is_empty()
         && !resolved.has_call_signature
         && !has_resolved_root_runtime;
 

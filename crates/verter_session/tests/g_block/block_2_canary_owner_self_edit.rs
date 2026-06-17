@@ -32,7 +32,7 @@
 
 #![cfg(test)]
 
-use verter_session::{CompileProfile, FileKind};
+use verter_session::{CompileProfile, FileLanguage};
 use verter_type_expr::{PrimitiveName, TypeExpr};
 
 use crate::canary_harness::{compile_main, prime_compile, standalone_host, upsert};
@@ -98,7 +98,7 @@ fn owner_self_edit_to_local_prop_type_recomputes_component_meta() {
          defineProps<LocalProps>()\n\
          </script>\n\
          <template><div/></template>\n",
-        FileKind::VueSfc,
+        FileLanguage::vue(),
     );
 
     let pre = host
@@ -123,7 +123,7 @@ fn owner_self_edit_to_local_prop_type_recomputes_component_meta() {
          defineProps<LocalProps>()\n\
          </script>\n\
          <template><div/></template>\n",
-        FileKind::VueSfc,
+        FileLanguage::vue(),
     );
 
     let post = host
@@ -172,7 +172,7 @@ fn owner_self_edit_adding_local_prop_member_recomputes_component_meta() {
          defineProps<LocalProps>()\n\
          </script>\n\
          <template><div/></template>\n",
-        FileKind::VueSfc,
+        FileLanguage::vue(),
     );
 
     let pre = host
@@ -193,7 +193,7 @@ fn owner_self_edit_adding_local_prop_member_recomputes_component_meta() {
          defineProps<LocalProps>()\n\
          </script>\n\
          <template><div/></template>\n",
-        FileKind::VueSfc,
+        FileLanguage::vue(),
     );
 
     let post = host
@@ -238,7 +238,7 @@ fn owner_self_edit_to_local_slot_type_recomputes_slot_bindings() {
          defineSlots<LocalSlots>()\n\
          </script>\n\
          <template><div/></template>\n",
-        FileKind::VueSfc,
+        FileLanguage::vue(),
     );
 
     let pre = host
@@ -259,7 +259,7 @@ fn owner_self_edit_to_local_slot_type_recomputes_slot_bindings() {
          defineSlots<LocalSlots>()\n\
          </script>\n\
          <template><div/></template>\n",
-        FileKind::VueSfc,
+        FileLanguage::vue(),
     );
 
     let post = host
@@ -301,7 +301,7 @@ fn owner_self_edit_to_template_recompiles_compile_slot() {
         "/src/Comp.vue",
         "<script setup lang=\"ts\">\nconst n = 1;\n</script>\n\
          <template><div>ALPHA</div></template>\n",
-        FileKind::VueSfc,
+        FileLanguage::vue(),
     );
 
     let profile = CompileProfile::default();
@@ -320,7 +320,7 @@ fn owner_self_edit_to_template_recompiles_compile_slot() {
         "/src/Comp.vue",
         "<script setup lang=\"ts\">\nconst n = 1;\n</script>\n\
          <template><section>BETA</section></template>\n",
-        FileKind::VueSfc,
+        FileLanguage::vue(),
     );
 
     host.ensure_compiled("/src/Comp.vue", &profile)
@@ -369,7 +369,7 @@ fn owner_self_edit_to_local_prop_type_recomputes_evaluate_types() {
          defineProps<Shape>()\n\
          </script>\n\
          <template><div/></template>\n",
-        FileKind::VueSfc,
+        FileLanguage::vue(),
     );
 
     let pre = host
@@ -395,7 +395,7 @@ fn owner_self_edit_to_local_prop_type_recomputes_evaluate_types() {
          defineProps<Shape>()\n\
          </script>\n\
          <template><div/></template>\n",
-        FileKind::VueSfc,
+        FileLanguage::vue(),
     );
 
     let post = host

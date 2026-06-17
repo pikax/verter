@@ -43,7 +43,7 @@ use crate::resolver_core::{
     CanonicalCompletionOverlay, HostResolverContext, ResolverContext, SessionResolverContext,
 };
 use crate::resolver_store::HOST_STORE_VIEW_FROM_HOST_BUILDS;
-use crate::types::FileKind;
+use crate::types::FileLanguage;
 use crate::{HostConfig, UpsertRequest, VerterHost};
 
 fn small_host_with_one_component() -> (VerterHost, String) {
@@ -64,7 +64,7 @@ defineProps<ButtonProps>()
 <template><button :disabled="disabled">{{ label }}</button></template>
 "#,
             ),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: Vec::new(),
         })
         .expect("upsert Button.vue must succeed");
@@ -504,7 +504,7 @@ fn request_store_view_validates_resolve_imports_for_overlay_promoted_canonical()
     // and does not need the store-mutation surface.
     use crate::session_view::{HostView, SessionView};
     use crate::types::DependencyResolution;
-    use crate::{CompileErrorPolicy, FileKind, HostConfig, UpsertRequest, VerterHost};
+    use crate::{CompileErrorPolicy, FileLanguage, HostConfig, UpsertRequest, VerterHost};
     use verter_semantic::facts::registry::{FactKey, FactLane, InternedName, InternedSpecifier};
 
     let host = VerterHost::new_standalone(HostConfig {
@@ -522,7 +522,7 @@ fn request_store_view_validates_resolve_imports_for_overlay_promoted_canonical()
             canonical_id: None,
             input_id: "/dep.ts".to_string(),
             source: Arc::from("export const v = 1;"),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .expect("dep upsert");
@@ -532,7 +532,7 @@ fn request_store_view_validates_resolve_imports_for_overlay_promoted_canonical()
             canonical_id: None,
             input_id: "/owner.ts".to_string(),
             source: Arc::from("import { v } from './dep';\nexport const o = v;\n"),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .expect("owner upsert");

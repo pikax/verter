@@ -15,15 +15,15 @@ use rustc_hash::FxHashMap;
 use crate::instant::Instant;
 
 use super::vue_script_extract::template_converter_inputs;
-use crate::compile::{assemble_main_module, merge_external_sources};
+use crate::compile::{assemble_vue_main_module, merge_external_sources};
 use crate::hash::compile_profile_hash;
 use crate::id::{parse_raw_id, render_ids, render_single_id};
 use crate::types::*;
 use crate::VerterHost;
 use oxc_allocator::Allocator;
-use verter_compiler::compile::CodegenOptions;
-use verter_compiler::compile::{
-    compile as compile_sfc, compile_from_parsed, format_import_specifier, VerterCompileOptions,
+use verter_compiler::compile::format_import_specifier;
+use verter_compiler::framework_common::{
+    CompileUnsupported, RuntimeCompileOptions, RuntimeDiagnosticSeverity,
 };
 
 /// Host-scoped RAII guard that arms and clears the per-host compile-tier
@@ -110,6 +110,48 @@ fn compiler_version_hash() -> Hash16 {
 /// lockstep with [`compiler_version_hash`].
 fn plugin_versions_hash() -> Hash16 {
     crate::hash::hash_16(concat!("verter.plugins.v1:", env!("CARGO_PKG_VERSION")).as_bytes())
+}
+
+/// What a compile request demands of the shared compile result.
+///
+/// The shared compile (`ensure_compile_artifacts`) produces the WHOLE
+/// artifact set — every virtual node PLUS the IDE `CachedTsx` — in one pass;
+/// the demand is checked AFTER that shared result. `get_virtual_file` demands
+/// a specific virtual node; the IDE-ensure path demands the IDE projection
+/// WITHOUT requesting any virtual node (notably NOT `Main`), so a carrier that
+/// projects only an IDE surface (Svelte) satisfies it without a runtime
+/// `Main`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CompileDemand {
+    /// A specific virtual node (the `get_virtual_file` projection target).
+    VirtualNode(VirtualNodeKind),
+    /// The IDE (`CachedTsx`) projection — satisfied iff the served result
+    /// carries a `tsx`. NEVER routed through `VirtualNode(Main)`.
+    Ide,
+}
+
+/// The shared compile result `ensure_compile_artifacts` returns: the full
+/// served virtual-node map, the IDE `CachedTsx` (populated even when no
+/// `Main` node exists), and the request metadata callers project from.
+pub(crate) struct CompileServe {
+    /// Per-virtual-node-kind outputs for this `(canonical, profile)`.
+    pub(crate) outputs: FxHashMap<VirtualNodeKind, CachedVirtualFile>,
+    /// The combined IDE output, present when the compile produced one.
+    pub(crate) tsx: Option<CachedTsx>,
+    /// The effective file meta for `render_single_id`.
+    pub(crate) meta: FileMeta,
+    /// The diagnostics snapshot from this serve.
+    pub(crate) diagnostics: DiagnosticsSnapshot,
+    /// Whether this serve fell back to a stale last-known-good output.
+    pub(crate) stale: bool,
+    /// Whether the serve was a cache hit (no fresh compile).
+    pub(crate) cache_hit: bool,
+    /// The caller-requested cache mode.
+    pub(crate) requested_mode: CompileCacheMode,
+    /// The cache mode the runtime actually ran under.
+    pub(crate) actual_mode: CompileCacheMode,
+    /// The first downgrade reason, when one fired.
+    pub(crate) downgrade_reason: Option<DowngradeReason>,
 }
 
 impl VerterHost {
@@ -505,7 +547,12 @@ impl VerterHost {
                         canonical_id: canonical.clone(),
                     }
                 })?;
-                if hd.file_kind == FileKind::NonSfc {
+                // Framework-CARRIER gate: the compile path behind this
+                // validator is the carrier's IDE projection (Vue OR Svelte —
+                // every carrier with a registered compiler). A non-carrier
+                // (plain script) never reaches it — its source execution
+                // rejects with the typed unsupported-language error first.
+                if !hd.file_language.is_framework_carrier() {
                     return Ok(());
                 }
                 // TOP-LEVEL warm validator: a compile warm hit returns
@@ -774,9 +821,15 @@ impl VerterHost {
     /// Retrieve a compiled virtual file (script, template, style, or main bundle).
     ///
     /// On cache hit, returns immediately. On cache miss, compiles the file using
-    /// `verter_compiler::compile`, caches the result, and returns the requested node.
+    /// the carrier registry, caches the result, and returns the requested node.
     /// In dev mode with [`CompileErrorPolicy::DevServeLastKnownGood`], falls back
     /// to the last successful compilation when the current source has errors.
+    ///
+    /// A thin projector over [`ensure_compile_artifacts`](Self::ensure_compile_artifacts):
+    /// it parses the query to `(canonical, node_kind)`, drives the shared
+    /// compile under [`CompileDemand::VirtualNode`], then projects the
+    /// requested node from the served artifacts (a missing node is a typed
+    /// [`HostError::MissingVirtualNode`]).
     pub fn get_virtual_file(&self, query: VirtualQuery) -> Result<VirtualFileResponse, HostError> {
         #[cfg(feature = "session_metrics")]
         self.metrics
@@ -802,8 +855,50 @@ impl VerterHost {
             return Err(HostError::InvalidQuery);
         };
 
-        let profile_hash = compile_profile_hash(&query.compile_profile);
-        let requested_mode = query.compile_profile.requested_mode;
+        let served = self.ensure_compile_artifacts(
+            canonical_id.clone(),
+            &query.compile_profile,
+            CompileDemand::VirtualNode(node_kind.clone()),
+        )?;
+
+        let found =
+            served
+                .outputs
+                .get(&node_kind)
+                .ok_or_else(|| HostError::MissingVirtualNode {
+                    canonical_id: canonical_id.clone(),
+                })?;
+
+        Ok(VirtualFileResponse {
+            id: render_single_id(&canonical_id, &node_kind, &served.meta, raw_was_lsp),
+            code: found.code.clone(),
+            source_map: found.source_map.clone(),
+            lang: found.lang.clone(),
+            stale: served.stale,
+            diagnostics: served.diagnostics.clone(),
+            meta: found.meta.clone(),
+            cache_hit: served.cache_hit,
+            requested_mode: served.requested_mode,
+            actual_mode: served.actual_mode,
+            downgrade_reason: served.downgrade_reason,
+        })
+    }
+
+    /// Drive the shared compile for `(canonical, profile)` and return the
+    /// full artifact set ([`CompileServe`]): every virtual node PLUS the IDE
+    /// `CachedTsx`, produced in one pass. The `demand` is consulted ONLY to
+    /// gate the warm-hit consult and validate the served result — it is
+    /// checked AFTER the shared compute, never steering it. `Ide` never
+    /// requests a virtual node (and notably never `Main`): a carrier that
+    /// projects only an IDE surface satisfies it through the served `tsx`.
+    pub(crate) fn ensure_compile_artifacts(
+        &self,
+        canonical_id: String,
+        profile: &CompileProfile,
+        demand: CompileDemand,
+    ) -> Result<CompileServe, HostError> {
+        let profile_hash = compile_profile_hash(profile);
+        let requested_mode = profile.requested_mode;
 
         // Cache hit check and compile input extraction under a single read lock.
         // This avoids cloning the full FileEntry (with all compile_slots, style_overrides, etc.)
@@ -992,7 +1087,7 @@ impl VerterHost {
                     script_imports: efs.script_analysis.imports.clone(),
                     script_macros: efs.script_analysis.macros.clone(),
                     script_bindings: efs.script_analysis.bindings.clone(),
-                    cached_parse: efs.cached_parse,
+                    framework_parse: efs.framework_parse,
                     style_v_bind_vars: style_analyses
                         .iter()
                         .flat_map(|sa| {
@@ -1027,7 +1122,7 @@ impl VerterHost {
                     requested_mode,
                     &crate::compile_cache_mode::EligibilityInputs {
                         input: &compile_input,
-                        profile: &query.compile_profile,
+                        profile,
                         config: &self.config,
                         workspace_aliases: &self.workspace_aliases_for_canonical(&canonical_id),
                         owner_has_module_augmentation,
@@ -1044,11 +1139,7 @@ impl VerterHost {
                 // below (one key construction per request).
                 let content_publish_stamp = (actual_mode == CompileCacheMode::Content).then(|| {
                     (
-                        self.compile_pure_content_key(
-                            &canonical_id,
-                            effective_whole_hash,
-                            &query.compile_profile,
-                        ),
+                        self.compile_pure_content_key(&canonical_id, effective_whole_hash, profile),
                         self.project_type_store.current_project_generation(),
                     )
                 });
@@ -1063,6 +1154,7 @@ impl VerterHost {
                 struct WarmHit {
                     outputs: FxHashMap<VirtualNodeKind, CachedVirtualFile>,
                     diagnostics: DiagnosticsSnapshot,
+                    tsx: Option<CachedTsx>,
                 }
                 let warm_hit: Option<WarmHit> = match actual_mode {
                     CompileCacheMode::Stateless => None,
@@ -1107,6 +1199,7 @@ impl VerterHost {
                             .map(|hit| WarmHit {
                                 outputs: hit.outputs,
                                 diagnostics: hit.diagnostics,
+                                tsx: hit.tsx,
                             })
                     }),
                     CompileCacheMode::Content => {
@@ -1118,6 +1211,7 @@ impl VerterHost {
                             .map(|value| WarmHit {
                                 outputs: value.outputs.clone(),
                                 diagnostics: value.diagnostics.clone(),
+                                tsx: value.tsx.clone(),
                             })
                     }
                 };
@@ -1142,32 +1236,36 @@ impl VerterHost {
                         }
                     }
 
-                    if let Some(found) = hit.outputs.get(&node_kind) {
-                        // A warm hit is served only for the classified mode.
-                        // A `Content` warm hit implies no reason fired —
-                        // a reason would have downgraded the request to
-                        // `Stateless`, which bypasses this consult — so a
-                        // `Content` hit always carries `actual == requested`
-                        // with no downgrade reason. A `Session` warm hit is
-                        // served from the validated session node and may
-                        // still carry `Some(reason)`: `Session` stays
-                        // `Session` under every reason and retains the
-                        // reasons for telemetry, so `downgrade_reason`
-                        // (`first_downgrade_reason()`, below) can be
-                        // `Some(reason)` while `actual == requested`.
-                        return Ok(VirtualFileResponse {
-                            id: render_single_id(&canonical_id, &node_kind, &hit_meta, raw_was_lsp),
-                            code: found.code.clone(),
-                            source_map: found.source_map.clone(),
-                            lang: found.lang.clone(),
-                            stale: false,
-                            diagnostics: hit.diagnostics.clone(),
-                            meta: found.meta.clone(),
-                            cache_hit: true,
-                            requested_mode,
-                            actual_mode,
-                            downgrade_reason: classification.first_downgrade_reason(),
-                        });
+                    // A warm hit is served only for the classified mode.
+                    // A `Content` warm hit implies no reason fired — a reason
+                    // would have downgraded the request to `Stateless`, which
+                    // bypasses this consult — so a `Content` hit always carries
+                    // `actual == requested` with no downgrade reason. A
+                    // `Session` warm hit is served from the validated session
+                    // node and may still carry `Some(reason)`: `Session` stays
+                    // `Session` under every reason and retains the reasons for
+                    // telemetry, so `downgrade_reason` can be `Some(reason)`
+                    // while `actual == requested`.
+                    //
+                    // The DEMAND is checked AFTER the shared warm result: a
+                    // warm hit serves only when it actually satisfies the
+                    // demand (`VirtualNode` ⇒ the node is present;
+                    // `Ide` ⇒ a `tsx` is present). An unsatisfied warm hit
+                    // falls through to a cold recompute that produces the
+                    // missing surface.
+                    let serve = CompileServe {
+                        outputs: hit.outputs,
+                        tsx: hit.tsx,
+                        meta: hit_meta,
+                        diagnostics: hit.diagnostics,
+                        stale: false,
+                        cache_hit: true,
+                        requested_mode,
+                        actual_mode,
+                        downgrade_reason: classification.first_downgrade_reason(),
+                    };
+                    if Self::compile_serve_satisfies_demand(&serve, &demand) {
+                        return Ok(serve);
                     }
                 }
 
@@ -1196,6 +1294,14 @@ impl VerterHost {
         #[cfg(feature = "session_metrics")]
         self.metrics
             .compile_requests
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        // Feature-independent cold-compile rail (see
+        // `MetaProvenance::compile_cold_runs`): bumped once per cold run past
+        // the warm-hit consult — the deterministic observability of compile-slot
+        // COALESCING that the `session_metrics`-gated `compile_requests` mirrors.
+        self.provenance
+            .compile_cold_runs
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         #[cfg(feature = "session_metrics")]
@@ -1302,7 +1408,7 @@ impl VerterHost {
                         );
                     }
                 }
-                self.compile_entry(&compile_input, &query.compile_profile)
+                self.compile_entry(&compile_input, profile)
             });
             // `Cacheable(sig)` → publish the compile-output slot through
             // the typed session node under the path-precise signature.
@@ -1330,7 +1436,7 @@ impl VerterHost {
             (result, Some(admission))
         } else {
             // `Content` / `Stateless`: no tracer, no fact signature.
-            let result = self.compile_entry(&compile_input, &query.compile_profile);
+            let result = self.compile_entry(&compile_input, profile);
             (result, None)
         };
         let (compiled_outputs, diagnostics, stale, compiled_tsx, compiled_template_analysis) =
@@ -1469,7 +1575,7 @@ impl VerterHost {
                                 self.compile_pure_content_key(
                                     &canonical_id,
                                     live_hd.parse.whole_hash,
-                                    &query.compile_profile,
+                                    profile,
                                 )
                             })
                     });
@@ -1529,9 +1635,7 @@ impl VerterHost {
                                 store_published: compile_input.content_override_layer.is_none(),
                                 source_generation: Some(source_snap.generation),
                                 has_src_blocks: !compile_input.src_blocks.is_empty(),
-                                default_extraction: !query
-                                    .compile_profile
-                                    .has_parse_affecting_template_options(),
+                                default_extraction: !profile.has_parse_affecting_template_options(),
                             },
                         );
                     }
@@ -1581,26 +1685,113 @@ impl VerterHost {
 
         // Write per-profile state to files (WASM path only).
 
-        let found =
-            compiled_outputs
-                .get(&node_kind)
-                .ok_or_else(|| HostError::MissingVirtualNode {
-                    canonical_id: canonical_id.clone(),
-                })?;
-
-        Ok(VirtualFileResponse {
-            id: render_single_id(&canonical_id, &node_kind, &meta, raw_was_lsp),
-            code: found.code.clone(),
-            source_map: found.source_map.clone(),
-            lang: found.lang.clone(),
-            stale,
+        // The shared cold compile produced the WHOLE artifact set (every
+        // virtual node + the IDE `CachedTsx`). Return it; the caller projects
+        // the surface its demand requires (`get_virtual_file` projects a node;
+        // `ensure_ide_compiled` checks the `tsx`). The demand is NOT consulted
+        // here — a complete compute serves both surfaces.
+        Ok(CompileServe {
+            outputs: compiled_outputs,
+            tsx: compiled_tsx,
+            meta,
             diagnostics,
-            meta: found.meta.clone(),
+            stale,
             cache_hit: false,
             requested_mode: classification.requested_mode,
             actual_mode,
             downgrade_reason,
         })
+    }
+
+    /// Whether a served compile result satisfies the demand. The shared
+    /// authority for the WARM-hit serve gate: a `VirtualNode` demand needs the
+    /// node present; an `Ide` demand needs a `tsx`.
+    fn compile_serve_satisfies_demand(serve: &CompileServe, demand: &CompileDemand) -> bool {
+        match demand {
+            CompileDemand::VirtualNode(kind) => serve.outputs.contains_key(kind),
+            CompileDemand::Ide => serve.tsx.is_some(),
+        }
+    }
+
+    /// Normalize a caller profile to one that REQUESTS the IDE/TSX surface.
+    ///
+    /// The IDE TSX is produced only when the compile profile's target carries
+    /// the `TSX` bit (`want_ide = profile.target.needs_tsx()`). A caller's
+    /// runtime profile (e.g. the bundler default, no TSX) would otherwise drive
+    /// a compile that yields no `CachedTsx`, so the IDE-ensure path (and the
+    /// `get_ide` peek) MUST first add the `TSX` bit. Adding it is idempotent for
+    /// an already-IDE profile (the LSP `tsx_profile`), so the normalized
+    /// `profile_hash` is stable across both paths: `ensure_ide_compiled`
+    /// populates exactly the slot `get_ide` peeks. Every other knob
+    /// (source-map, production, SSR, overrides) is preserved verbatim, so the
+    /// IDE projection still reflects the caller's source-map / production
+    /// choices.
+    fn ide_normalized_profile(profile: &CompileProfile) -> CompileProfile {
+        let mut normalized = profile.clone();
+        normalized.target |= verter_compiler::compile::CompileTarget::TSX;
+        normalized
+    }
+
+    /// Ensure the IDE (`CachedTsx`) projection exists for `(canonical, profile)`.
+    ///
+    /// Drives the shared compile under [`CompileDemand::Ide`] — it NEVER
+    /// requests `VirtualNodeKind::Main`, so a carrier that projects only an IDE
+    /// surface (Svelte today) succeeds without a runtime `Main`. The caller's
+    /// profile is normalized to an IDE/TSX-bearing target INTERNALLY (see
+    /// [`Self::ide_normalized_profile`]) so the compile produces the IDE surface
+    /// regardless of the caller's runtime target. Return contract:
+    ///
+    /// * `Ok(true)` — `(canonical, profile)` now has a cached `CachedTsx` (an
+    ///   immediate [`get_ide`](Self::get_ide) returns `Some`). This holds
+    ///   WHENEVER the carrier has an IDE surface — even when the caller passed a
+    ///   bundler / runtime profile with no `TSX` bit.
+    /// * `Ok(false)` — the loaded file has NO IDE projection surface (e.g. a
+    ///   non-carrier / a carrier that declined IDE): no error, simply nothing
+    ///   to project. `Ok(false)` means a genuine no-IDE-surface, never "the
+    ///   caller's profile happened to lack the TSX target".
+    /// * `Err(_)` — a real failure (missing source, compile error, …); a real
+    ///   failure is NEVER collapsed into `Ok(false)`.
+    ///
+    /// `get_ide` stays a PURE cached read — it never computes on read; this is
+    /// the explicit ensure path callers invoke first.
+    pub fn ensure_ide_compiled(
+        &self,
+        canonical_id: &str,
+        profile: &CompileProfile,
+    ) -> Result<bool, HostError> {
+        use crate::host_executor::HostSourceData;
+        let canonical = self.resolve_alias_or_canonical(canonical_id);
+
+        // No IDE projection surface for a NON-carrier (a plain script): the
+        // contract's `Ok(false)`, never a compile attempt. The carrier gate
+        // mirrors `ensure_compiled`'s — every framework carrier (Vue OR
+        // Svelte) projects an IDE surface; everything else does not.
+        {
+            let snap = self.scheduler.try_get_source(&canonical).ok_or_else(|| {
+                HostError::MissingSource {
+                    canonical_id: canonical.clone(),
+                }
+            })?;
+            let hd =
+                snap.downcast_data::<HostSourceData>()
+                    .ok_or_else(|| HostError::MissingSource {
+                        canonical_id: canonical.clone(),
+                    })?;
+            if !hd.file_language.is_framework_carrier() {
+                return Ok(false);
+            }
+        }
+
+        // A real failure (missing source, compile error) propagates as `Err`
+        // — never collapsed into `Ok(false)`. A successful compile that
+        // produced no IDE artifact (a non-carrier surface) is `Ok(false)`. The
+        // profile is normalized to carry the `TSX` target bit so `want_ide` is
+        // driven regardless of the caller's runtime target; the compile + the
+        // subsequent `get_ide` read share the SAME normalized profile, so the
+        // slot the `CachedTsx` lands in is exactly the one `get_ide` peeks.
+        let ide_profile = Self::ide_normalized_profile(profile);
+        let served = self.ensure_compile_artifacts(canonical, &ide_profile, CompileDemand::Ide)?;
+        Ok(served.tsx.is_some())
     }
 
     /// List all virtual node kinds for a file (Main, Script, Template, Style, Custom).
@@ -1615,7 +1806,13 @@ impl VerterHost {
     /// output is only consumed by the LSP and playground, never by bundlers.
     pub fn get_ide(&self, canonical_id: &str, profile: &CompileProfile) -> Option<IdeResponse> {
         let canonical = self.resolve_alias_or_canonical(canonical_id);
-        let profile_hash = compile_profile_hash(profile);
+        // Peek the IDE/TSX-normalized slot — the SAME slot `ensure_ide_compiled`
+        // populates. A caller that ensured with a bundler / runtime profile (no
+        // TSX bit) lands its `CachedTsx` in the TSX-normalized slot; peeking the
+        // un-normalized profile_hash would miss it. Normalization is idempotent
+        // for an already-IDE profile, so the LSP `tsx_profile` path is unchanged.
+        let ide_profile = Self::ide_normalized_profile(profile);
+        let profile_hash = compile_profile_hash(&ide_profile);
 
         {
             if self.is_canonical_evicted(&canonical) {
@@ -1660,22 +1857,73 @@ impl VerterHost {
         mode: PublicApiMode,
         profile: Option<&CompileProfile>,
     ) -> Option<TscResponse> {
+        // Dispatch through the framework registry's component-API projector
+        // leg, selected by the canonical's framework adapter id. The
+        // classification AUTHORITY is the RUNTIME-loaded source language (the
+        // explicit `UpsertRequest.file_language` the file was loaded with),
+        // resolved over the ALIAS-resolved canonical — exactly what the
+        // pre-registry Vue gate consulted, so aliases and explicit
+        // load-language stay byte-faithful. A canonical whose source is not
+        // loaded, whose language has no framework adapter id, or whose adapter
+        // registers no api-projector leg, projects no public-API surface —
+        // the pre-registry non-Vue behavior. The host method stays the single
+        // entry every consumer calls.
         let canonical = self.resolve_alias_or_canonical(canonical_id);
+        let file_language = self.scheduler.try_get_source(&canonical).and_then(|snap| {
+            snap.downcast_data::<crate::host_executor::HostSourceData>()
+                .map(|hd| hd.file_language.clone())
+        })?;
+        let adapter_id = file_language.adapter_id()?;
+        let projector = self.framework_registry().api_projector_for(adapter_id)?;
+        projector.render_api(crate::framework::api_projector::ComponentApiProjectorCtx {
+            host: self,
+            resolved_canonical: &canonical,
+            file_language: &file_language,
+            mode,
+            profile,
+        })
+    }
+
+    /// The Vue public-API extraction body — the EXEMPT legacy producer the
+    /// `vue` component-API projector leg delegates to.
+    ///
+    /// Consumes deep pipeline internals (`cached_tsc_extract` /
+    /// `extract_tsc_state` / `generate_tsc_from_state` /
+    /// `collect_external_types_from_loaded_files` /
+    /// `sync_transitive_macro_type_dependencies`) so it stays in this module.
+    /// Both [`Self::get_public_api_with_mode`] and the registry's `vue`
+    /// component-API projector leg
+    /// ([`crate::framework::api_projectors::VueComponentApiProjector`])
+    /// converge on this one body. The caller passes the ALREADY-alias-resolved
+    /// canonical (the host classified it against the same resolution), so this
+    /// body renders that exact target without re-resolving — classification
+    /// and rendering stay coherent under concurrent alias relabels.
+    pub(crate) fn render_vue_public_api_legacy(
+        &self,
+        resolved_canonical: &str,
+        mode: PublicApiMode,
+        profile: Option<&CompileProfile>,
+    ) -> Option<TscResponse> {
+        // Already alias-resolved by the caller; own it for the body's
+        // existing `&canonical` / `.clone()` consumers without re-resolving.
+        let canonical = resolved_canonical.to_string();
         let profile_hash = profile.map(compile_profile_hash);
 
         if self.is_canonical_evicted(&canonical) {
             return None;
         }
 
-        let (source, file_kind, macro_type_deps, script_imports, cached_extract, whole_hash) = {
+        let (source, macro_type_deps, script_imports, cached_extract, whole_hash) = {
             let efs = self.effective_file_state(&canonical, profile_hash)?;
-            let file_kind = self.scheduler.try_get_source(&canonical).and_then(|snap| {
+            // Require the source to be loaded — the rest of the flow reads
+            // its derived state. (Framework classification is decided once,
+            // up-front, by the registry dispatch in `get_public_api_with_mode`
+            // that selected this Vue projector leg; this body carries no
+            // framework gate of its own.)
+            self.scheduler.try_get_source(&canonical).and_then(|snap| {
                 snap.downcast_data::<crate::host_executor::HostSourceData>()
-                    .map(|hd| hd.file_kind)
+                    .map(|hd| hd.file_language.clone())
             })?;
-            if file_kind != FileKind::VueSfc {
-                return None;
-            }
             // cached_tsc_extract lives on DerivedRawState (D48 split).
             let cached = self.derived_raw_cache().get(&canonical).and_then(|cc| {
                 cc.cached_tsc_extract.as_ref().and_then(|(hash, extract)| {
@@ -1688,7 +1936,6 @@ impl VerterHost {
             });
             (
                 efs.source,
-                file_kind,
                 efs.script_analysis.macro_type_deps.clone(),
                 efs.script_analysis.imports.clone(),
                 cached,
@@ -1696,9 +1943,6 @@ impl VerterHost {
             )
         };
 
-        if file_kind != FileKind::VueSfc {
-            return None;
-        }
         // Derive component name from canonical_id: last path segment, strip .vue extension.
         let component_name = canonical
             .rsplit('/')
@@ -1876,28 +2120,6 @@ impl VerterHost {
         }
 
         let alloc = Allocator::new();
-        let core_opts = CodegenOptions {
-            filename: profile
-                .filename
-                .clone()
-                .or_else(|| Some(snapshot.canonical_id.clone())),
-            is_production: profile.is_production,
-            // Host always assembles a standalone `function render()` via
-            // assemble_main_module, so inline mode must be off â€” otherwise the
-            // template emits bare identifiers (missing `$setup.` prefix).
-            inline: Some(false),
-            component_id: profile.component_id.clone(),
-            delimiters: profile.delimiters.clone(),
-            custom_elements: profile.custom_elements.clone(),
-            comments: profile.comments,
-            runtime_module_name: profile.runtime_module_name.clone(),
-            types_module_name: profile.types_module_name.clone(),
-            target: profile.target,
-            embed_ambient_types: profile.embed_ambient_types,
-            conditional_root_narrowing: profile.conditional_root_narrowing,
-            strict_slots: profile.strict_slots,
-            ..CodegenOptions::default()
-        };
 
         let mut unresolved_macro_type_diags = Vec::new();
         let profile_hash = compile_profile_hash(profile);
@@ -1950,49 +2172,155 @@ impl VerterHost {
         }
 
         let scope = self.config.effective_scope();
-        let verter_opts = VerterCompileOptions {
-            force_vapor: profile.force_vapor,
-            force_js: profile.force_js,
+
+        // The host-resolved Vue cross-file inputs ride opaquely on the neutral
+        // options' `framework_extras` slot — Vue's eager type-surface output
+        // type stays OUT of the cross-framework carrier contract. A non-Vue
+        // carrier ignores the extras; Vue downcasts them.
+        let vue_extras: std::sync::Arc<dyn std::any::Any + Send + Sync> = std::sync::Arc::new(
+            verter_compiler::framework_common::vue_bridge::VueRuntimeCompileExtras {
+                external_types,
+                prop_constness_overrides: None, // populated by the cross-file optimizer
+                style_v_bind_vars: snapshot.style_v_bind_vars.clone(),
+            },
+        );
+
+        // The neutral runtime-compile options the carrier consults. The host
+        // owns the IDE/template-data demand (from the request scope + target
+        // bits) and the source-map / production / SSR profile knobs; the
+        // framework-private resolved inputs ride on `framework_extras`. The
+        // carrier reads only what it supports.
+        let runtime_opts = RuntimeCompileOptions {
+            filename: profile
+                .filename
+                .clone()
+                .or_else(|| Some(snapshot.canonical_id.clone())),
+            is_production: profile.is_production,
             source_map: profile.source_map,
             ssr: profile.ssr,
-            external_types,
-            extract_template_data: scope.needs_template_analysis(),
-            prop_constness_overrides: None, // TODO: populated by cross-file optimizer,
-            style_v_bind_vars: snapshot.style_v_bind_vars.clone(),
+            runtime_module_name: profile.runtime_module_name.clone(),
+            component_id: profile.component_id.clone(),
+            force_js: profile.force_js,
+            force_vapor: profile.force_vapor,
+            comments: profile.comments,
+            delimiters: profile.delimiters.clone(),
+            custom_elements: profile.custom_elements.clone(),
+            // IDE TSX is requested when the profile target carries the TSX bit.
+            want_ide: profile.target.needs_tsx(),
+            // Template facts are requested by the active analysis scope OR an
+            // explicit TEMPLATE_DATA target bit. (The Vue runtime path always
+            // requests `extract_template_data = scope.needs_template_analysis()`.)
+            want_template_data: scope.needs_template_analysis()
+                || profile.target.needs_template_data(),
+            types_module_name: profile.types_module_name.clone(),
+            embed_ambient_types: profile.embed_ambient_types,
+            conditional_root_narrowing: profile.conditional_root_narrowing,
+            strict_slots: profile.strict_slots,
+            framework_extras: Some(vue_extras),
         };
 
-        // Reuse cached parse when source wasn't modified by external src= merging
-        // and no custom delimiters/elements that would change parse behavior.
+        // Route the runtime compile through the carrier registry, selected
+        // by the file's framework-neutral parse artifact. The artifact is
+        // the SINGLE dispatch authority — there is no per-framework branch.
+        // A canonical with no carrier artifact (e.g. a plain script that
+        // reached this path) has no runtime surface to produce.
+        let Some(artifact) = snapshot.framework_parse.as_ref() else {
+            return Err(
+                diagnostics.merge(DiagnosticsSnapshot::from_vec(vec![HostDiagnostic {
+                    severity: HostSeverity::Error,
+                    code: "HOST_NO_CARRIER_ARTIFACT".to_string(),
+                    message: format!(
+                        "no framework parse artifact for '{}' — cannot route the runtime compile",
+                        snapshot.canonical_id
+                    ),
+                    span: None,
+                }])),
+            );
+        };
+        let Some(compiler) = crate::parse::carrier_compiler_registry()
+            .compiler_for_carrier_language(&artifact.adapter_id, &artifact.language_id)
+        else {
+            return Err(
+                diagnostics.merge(DiagnosticsSnapshot::from_vec(vec![HostDiagnostic {
+                    severity: HostSeverity::Error,
+                    code: "HOST_NO_CARRIER_COMPILER".to_string(),
+                    message: format!(
+                        "no carrier compiler for adapter '{}' / language '{}'",
+                        artifact.adapter_id.as_str(),
+                        artifact.language_id.as_str()
+                    ),
+                    span: None,
+                }])),
+            );
+        };
+
+        // The host OWNS the cached-parse validity decision: a cached
+        // artifact is reused ONLY when the source was not modified by
+        // external `src=` merging and the profile carries no
+        // parse-affecting template options (custom delimiters / custom
+        // elements). Otherwise the carrier re-parses the merged source.
+        // Either way the carrier owns the typed downcast + native compile.
         let can_use_cache =
             snapshot.src_blocks.is_empty() && !profile.has_parse_affecting_template_options();
-
-        let compiled = if can_use_cache {
-            if let Some(ref cached) = snapshot.cached_parse {
-                compile_from_parsed(&merged_source, cached, &core_opts, &verter_opts, &alloc)
-            } else {
-                compile_sfc(&merged_source, &core_opts, &verter_opts, &alloc)
-            }
+        let fresh_artifact = if can_use_cache {
+            None
         } else {
-            compile_sfc(&merged_source, &core_opts, &verter_opts, &alloc)
+            // Route the re-parse through the COUNTED chokepoint so it stays
+            // visible to the `carrier_parses` dedup rail (an uncounted raw
+            // `compiler.parse` is invisible to it).
+            Some(crate::parse::parse_carrier_counted(
+                &self.provenance,
+                compiler.as_ref(),
+                &merged_source,
+                &verter_compiler::framework_common::ParseOptions {
+                    delimiters: profile.delimiters.clone(),
+                    custom_elements: profile.custom_elements.clone(),
+                },
+            ))
+        };
+        let compile_artifact = fresh_artifact.as_deref().unwrap_or(artifact);
+
+        let compiled = match compiler.compile_bundle(
+            &merged_source,
+            compile_artifact,
+            &runtime_opts,
+            &alloc,
+        ) {
+            Ok(bundle) => bundle,
+            Err(unsupported) => {
+                let code = match unsupported {
+                    CompileUnsupported::TargetMissingIde(_) => "HOST_COMPILE_TARGET_MISSING_IDE",
+                    CompileUnsupported::NoIdeProjection { .. } => "HOST_COMPILE_UNSUPPORTED",
+                };
+                return Err(diagnostics.merge(DiagnosticsSnapshot::from_vec(vec![
+                    HostDiagnostic {
+                        severity: HostSeverity::Error,
+                        code: code.to_string(),
+                        message: format!(
+                            "carrier '{}' cannot produce a runtime bundle for '{}'",
+                            artifact.adapter_id.as_str(),
+                            snapshot.canonical_id
+                        ),
+                        span: None,
+                    },
+                ])));
+            }
         };
 
+        // Lift the bundle's framework-neutral diagnostics into the host
+        // `DiagnosticsSnapshot` (a Svelte projector diagnostic reaches the
+        // snapshot through THIS path).
         let mut compile_diags = diagnostics.clone();
-        if !compiled.errors.is_empty() {
+        if !compiled.diagnostics.is_empty() {
             compile_diags = compile_diags.merge(DiagnosticsSnapshot::from_vec(
                 compiled
-                    .errors
+                    .diagnostics
                     .iter()
                     .map(|d| HostDiagnostic {
                         severity: match d.severity {
-                            verter_compiler::compile::CompileDiagnosticSeverity::Error => {
-                                HostSeverity::Error
-                            }
-                            verter_compiler::compile::CompileDiagnosticSeverity::Warning => {
-                                HostSeverity::Warning
-                            }
-                            verter_compiler::compile::CompileDiagnosticSeverity::Info => {
-                                HostSeverity::Info
-                            }
+                            RuntimeDiagnosticSeverity::Error => HostSeverity::Error,
+                            RuntimeDiagnosticSeverity::Warning => HostSeverity::Warning,
+                            RuntimeDiagnosticSeverity::Info => HostSeverity::Info,
                         },
                         code: d.code.clone(),
                         message: d.message.clone(),
@@ -2008,14 +2336,27 @@ impl VerterHost {
 
         let mut outputs = FxHashMap::default();
 
-        let main_code =
-            assemble_main_module(&snapshot.canonical_id, &compiled, &snapshot.meta, profile);
-        outputs.insert(
-            VirtualNodeKind::Main,
-            CachedVirtualFile {
-                code: Arc::from(main_code),
-                source_map: None,
-                lang: Some(if profile.force_js {
+        // The `Main` virtual node is the framework RUNTIME module. A carrier
+        // that produced a runtime surface assembles it; a carrier that
+        // projects ONLY an IDE surface (Svelte today) emits NO `Main` node —
+        // `get_virtual_file(Main)` then reports missing until a later block
+        // lands Svelte runtime generation.
+        if compiled.has_runtime_surface() {
+            let main_code = match &compiled.main.body_code {
+                // A carrier that emits its own self-contained ESM body uses it
+                // verbatim (Svelte's official-shaped output, later blocks).
+                Some(body) => body.clone(),
+                // Vue: the host assembles the `_sfc_main` module from the
+                // neutral block fields (its virtual-file concern).
+                None => assemble_vue_main_module(
+                    &snapshot.canonical_id,
+                    &compiled,
+                    &snapshot.meta,
+                    profile,
+                ),
+            };
+            let main_lang = compiled.main.lang.clone().unwrap_or_else(|| {
+                if profile.force_js {
                     "js".to_string()
                 } else {
                     snapshot
@@ -2024,17 +2365,29 @@ impl VerterHost {
                         .as_deref()
                         .unwrap_or("js")
                         .to_string()
-                }),
-                meta: VirtualMeta {
-                    scope_id: if compiled.scope_id.is_empty() {
+                }
+            });
+            outputs.insert(
+                VirtualNodeKind::Main,
+                CachedVirtualFile {
+                    code: Arc::from(main_code),
+                    source_map: if compiled.main.source_map.is_empty() {
                         None
                     } else {
-                        Some(compiled.scope_id.clone())
+                        Some(Arc::from(compiled.main.source_map.clone()))
                     },
-                    ..VirtualMeta::default()
+                    lang: Some(main_lang),
+                    meta: VirtualMeta {
+                        scope_id: if compiled.scope_id.is_empty() {
+                            None
+                        } else {
+                            Some(compiled.scope_id.clone())
+                        },
+                        ..VirtualMeta::default()
+                    },
                 },
-            },
-        );
+            );
+        }
 
         if let Some(script) = compiled.script {
             outputs.insert(

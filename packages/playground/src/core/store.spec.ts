@@ -106,6 +106,39 @@ describe("store", () => {
       expect(store.files["helpers.js"]).toBeDefined();
       expect(store.files["helpers.js"].code).toBe("");
     });
+
+    it("creates a new .svelte file with the Svelte child seed (not the Vue seed)", () => {
+      store.addFile("Child.svelte");
+      const code = store.files["Child.svelte"].code;
+      // Svelte carrier: a rune <script> + plain markup, NOT a Vue <template>.
+      expect(code).toContain('<script lang="ts">');
+      expect(code).not.toContain("<script setup");
+      expect(code).not.toContain("<template>");
+    });
+  });
+
+  describe("newFileExtension (descriptor-driven default carrier extension)", () => {
+    it("defaults to .vue when the effective language is Vue", () => {
+      expect(store.newFileExtension).toBe(".vue");
+    });
+
+    it("is .svelte when Svelte is the effective (pinned) language", () => {
+      store.languagePin = "svelte";
+      expect(store.effectiveLanguage).toBe("svelte");
+      expect(store.newFileExtension).toBe(".svelte");
+    });
+
+    it("creates Child.svelte from a bare name once Svelte is the effective language", () => {
+      // Simulates the FileSelector flow: a bare name gains the effective
+      // framework's carrier extension before reaching addFile.
+      store.languagePin = "svelte";
+      const bare = "Child";
+      const filename = bare.includes(".") ? bare : bare + store.newFileExtension;
+      expect(filename).toBe("Child.svelte");
+      store.addFile(filename);
+      expect(store.files["Child.svelte"]).toBeDefined();
+      expect(store.files["Child.vue"]).toBeUndefined();
+    });
   });
 
   describe("deleteFile", () => {
@@ -362,6 +395,75 @@ describe("store", () => {
     it("returns undefined for non-existent file", () => {
       store.activeFilename = "NonExistent.vue";
       expect(store.activeFile).toBeUndefined();
+    });
+  });
+
+  describe("framework language selection", () => {
+    it("defaults to Auto (no pin) and resolves vue from the default main file", () => {
+      expect(store.languagePin).toBeNull();
+      expect(store.effectiveLanguage).toBe("vue");
+      expect(store.isExperimentalLanguage).toBe(false);
+    });
+
+    it("auto-detects svelte from a .svelte main file when not pinned", () => {
+      store.files = {} as Store["files"];
+      store.files["App.svelte"] = new File("App.svelte", "<h1>hi</h1>");
+      store.mainFile = "App.svelte";
+      expect(store.languagePin).toBeNull();
+      expect(store.effectiveLanguage).toBe("svelte");
+      expect(store.isExperimentalLanguage).toBe(true);
+    });
+
+    it("selectFramework pins the language and swaps to that framework's carrier", async () => {
+      await store.selectFramework("svelte");
+      expect(store.languagePin).toBe("svelte");
+      expect(store.effectiveLanguage).toBe("svelte");
+      expect(store.mainFile.endsWith(".svelte")).toBe(true);
+      expect(store.files[store.mainFile]).toBeTruthy();
+    });
+
+    it("a pin overrides auto-detection", () => {
+      store.files = {} as Store["files"];
+      store.files["App.vue"] = new File("App.vue", "<template/>");
+      store.mainFile = "App.vue";
+      store.languagePin = "svelte";
+      expect(store.effectiveLanguage).toBe("svelte");
+    });
+
+    it("unpinLanguage returns to Auto", async () => {
+      await store.selectFramework("svelte");
+      expect(store.languagePin).toBe("svelte");
+      store.unpinLanguage();
+      expect(store.languagePin).toBeNull();
+    });
+
+    it("selectFramework ignores an unregistered framework id", async () => {
+      const before = store.languagePin;
+      await store.selectFramework("does-not-exist");
+      expect(store.languagePin).toBe(before);
+    });
+
+    it("an UNPINNED svelte-only project resolves svelte even if mainFile still names App.vue", () => {
+      // Reproduces the Auto-restore case: files are svelte, no pin, mainFile
+      // still defaulted to App.vue. effectiveLanguage must scan the files.
+      store.languagePin = null;
+      store.files = {} as Store["files"];
+      store.files["App.svelte"] = new File("App.svelte", "<h1>hi</h1>");
+      store.mainFile = "App.vue"; // stale default, no such file present
+      expect(store.effectiveLanguage).toBe("svelte");
+      expect(store.isExperimentalLanguage).toBe(true);
+    });
+
+    it("loadProject restores an unpinned svelte project as svelte", async () => {
+      await store.loadProject("svelte-proj", {
+        files: { "App.svelte": "<h1>hi</h1>" },
+        activeFile: "App.svelte",
+        outputMode: "files",
+        compilerOptions: { isProduction: false, ssr: false },
+      });
+      expect(store.languagePin).toBeNull();
+      expect(store.effectiveLanguage).toBe("svelte");
+      expect(store.mainFile).toBe("App.svelte");
     });
   });
 });

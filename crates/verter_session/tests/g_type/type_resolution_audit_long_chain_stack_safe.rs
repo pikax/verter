@@ -14,7 +14,7 @@
 use std::sync::Arc;
 
 use verter_session::semantic_query::{ResolveDeclKey, ScopeId, SemanticQueryKey};
-use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{HostConfig, UpsertRequest, VerterHost};
 
 const CHAIN_LENGTH: usize = 200;
 
@@ -41,7 +41,9 @@ fn type_resolution_audit_long_chain_terminates_without_stack_overflow() {
         canonical_id: Some("/chain.ts".to_string()),
         input_id: "/chain.ts".to_string(),
         source: Arc::from(chain_source.as_str()),
-        file_kind: FileKind::from_path("/chain.ts"),
+        file_language: verter_session::LanguageRegistry::global()
+            .classify_static("/chain.ts")
+            .static_resolution(),
         aliases: Vec::new(),
     });
 

@@ -1727,6 +1727,263 @@ fn duplicate_v_once_emits_warning() {
 }
 
 // ========================================================================
+// Duplicate static-attribute detection (span-backed)
+// ========================================================================
+
+/// Duplicate static HTML attributes emit exactly one `DuplicateAttribute`
+/// error, anchored on the SECOND occurrence's name span.
+#[test]
+fn duplicate_static_attr_emits_error_on_second_occurrence() {
+    let input = "<template><div id=\"a\" id=\"b\"></div></template>";
+    let opts = SyntaxPluginOptions::default();
+    let ctx = make_ctx(input, &opts);
+    let mut syn = Syntax::new(false);
+
+    tokenize_and_feed(&mut syn, input, &ctx);
+
+    let dup: Vec<_> = syn
+        .diagnostics
+        .iter()
+        .filter(|d| d.code == CompilerErrorCode::DuplicateAttribute)
+        .collect();
+    assert_eq!(
+        dup.len(),
+        1,
+        "expected exactly 1 duplicate-attribute error, got {:?}",
+        syn.diagnostics
+    );
+    assert_eq!(
+        dup[0].severity,
+        crate::diagnostics::DiagnosticSeverity::Error
+    );
+
+    // The error span must anchor on the SECOND `id` name (start..name_end).
+    let first_id = input.find("id=").expect("first id");
+    let second_id = first_id + 3 + input[first_id + 3..].find("id=").expect("second id");
+    let span = dup[0].span.expect("duplicate diagnostic carries a span");
+    assert_eq!(
+        (span.start, span.end),
+        (second_id as u32, (second_id + 2) as u32),
+        "span must cover the second `id` name"
+    );
+    assert_eq!(span_str(input, span.start, span.end), "id");
+}
+
+/// The duplicate check compares raw attribute-name source bytes, so it is
+/// case-sensitive: `id` and `ID` are distinct names and are NOT flagged as a
+/// duplicate. This pins the byte-equality comparison against any future drift
+/// toward case-insensitive (ASCII-folded) matching.
+#[test]
+fn duplicate_attr_check_is_case_sensitive() {
+    let input = "<template><div id=\"a\" ID=\"b\"></div></template>";
+    let opts = SyntaxPluginOptions::default();
+    let ctx = make_ctx(input, &opts);
+    let mut syn = Syntax::new(false);
+
+    tokenize_and_feed(&mut syn, input, &ctx);
+
+    assert!(
+        syn.diagnostics
+            .iter()
+            .all(|d| d.code != CompilerErrorCode::DuplicateAttribute),
+        "case-variant names (`id` vs `ID`) differ by byte and must NOT be \
+         flagged as duplicate, got {:?}",
+        syn.diagnostics
+    );
+}
+
+/// Namespaced (colon-bearing) static attribute names are compared literally by
+/// their full source bytes: two byte-identical `xlink:href` names ARE a
+/// duplicate, while a colon does not turn the attribute into a directive that
+/// would be exempt from the check.
+#[test]
+fn duplicate_namespaced_attr_is_flagged_literally() {
+    let input = "<template><a xlink:href=\"x\" xlink:href=\"y\"></a></template>";
+    let opts = SyntaxPluginOptions::default();
+    let ctx = make_ctx(input, &opts);
+    let mut syn = Syntax::new(false);
+
+    tokenize_and_feed(&mut syn, input, &ctx);
+
+    let dup: Vec<_> = syn
+        .diagnostics
+        .iter()
+        .filter(|d| d.code == CompilerErrorCode::DuplicateAttribute)
+        .collect();
+    assert_eq!(
+        dup.len(),
+        1,
+        "byte-identical namespaced names must be flagged exactly once, got {:?}",
+        syn.diagnostics
+    );
+    // Anchored on the SECOND `xlink:href` name.
+    let first = input.find("xlink:href").expect("first xlink:href");
+    let second = first + 10 + input[first + 10..].find("xlink:href").expect("second");
+    let span = dup[0].span.expect("duplicate diagnostic carries a span");
+    assert_eq!(
+        (span.start, span.end),
+        (second as u32, (second + 10) as u32),
+        "span must cover the second `xlink:href` name"
+    );
+    assert_eq!(span_str(input, span.start, span.end), "xlink:href");
+}
+
+/// A non-duplicate attribute list emits zero `DuplicateAttribute` diagnostics
+/// AND parses to the exact expected prop set. Asserting the parsed names,
+/// values, and spans (not just the absence of the diagnostic) means any
+/// AST/prop drift in the duplicate-detection path would fail this test, not
+/// only duplicate-diagnostic drift.
+#[test]
+fn distinct_static_attrs_emit_no_duplicate_error() {
+    let input = "<template><div id=\"a\" class=\"b\" data-x=\"c\"></div></template>";
+    let opts = SyntaxPluginOptions::default();
+    let ctx = make_ctx(input, &opts);
+    let mut syn = Syntax::new(false);
+
+    tokenize_and_feed(&mut syn, input, &ctx);
+
+    assert!(
+        syn.diagnostics
+            .iter()
+            .all(|d| d.code != CompilerErrorCode::DuplicateAttribute),
+        "expected no duplicate-attribute diagnostics, got {:?}",
+        syn.diagnostics
+    );
+
+    // The parse RESULT must be byte-identical to the expected prop set: each
+    // static attribute is preserved with its name span and quoted value span.
+    let ast = syn.template_ast.as_ref().unwrap();
+    let div_id = ast.root.content.as_ref().unwrap().children[0];
+    let AstNodeKind::Element(el) = &ast.nodes[div_id.0].kind else {
+        panic!("expected Element")
+    };
+    assert_eq!(el.props.len(), 3, "all three attributes must be retained");
+    let observed: Vec<(&str, &str)> = el
+        .props
+        .iter()
+        .map(|p| {
+            assert!(!p.is_directive, "static attrs must not be directives");
+            let vs = p.value_start.expect("value_start set for quoted attr");
+            let ve = p.value_end.expect("value_end set for quoted attr");
+            (
+                span_str(input, p.start, p.name_end),
+                span_str(input, vs, ve),
+            )
+        })
+        .collect();
+    assert_eq!(observed, vec![("id", "a"), ("class", "b"), ("data-x", "c")]);
+
+    // Spans index the real source positions, not synthesized offsets. Pin the
+    // EXACT (start, name_end, value_start, value_end) tuple for every prop so
+    // any drift in any single span field fails this test.
+    // <template><div id="a" class="b" data-x="c"></div></template>
+    //           1111111111222222222233333333334444
+    // 0123456789012345678901234567890123456789012345
+    let span_tuple = |p: &NodeProp| {
+        (
+            p.start,
+            p.name_end,
+            p.value_start.expect("value_start set for quoted attr"),
+            p.value_end.expect("value_end set for quoted attr"),
+        )
+    };
+    assert_eq!(span_tuple(&el.props[0]), (15, 17, 19, 20), "id span");
+    assert_eq!(span_tuple(&el.props[1]), (22, 27, 29, 30), "class span");
+    assert_eq!(span_tuple(&el.props[2]), (32, 38, 40, 41), "data-x span");
+}
+
+/// Duplicate directives are NOT reported as duplicate attributes — Vue allows
+/// e.g. multiple `@click` handlers, so the static-attr check must skip them.
+#[test]
+fn duplicate_directive_is_not_a_duplicate_attribute() {
+    let input = "<template><div @click=\"a\" @click=\"b\"></div></template>";
+    let opts = SyntaxPluginOptions::default();
+    let ctx = make_ctx(input, &opts);
+    let mut syn = Syntax::new(false);
+
+    tokenize_and_feed(&mut syn, input, &ctx);
+
+    assert!(
+        syn.diagnostics
+            .iter()
+            .all(|d| d.code != CompilerErrorCode::DuplicateAttribute),
+        "directives must not trigger DuplicateAttribute, got {:?}",
+        syn.diagnostics
+    );
+}
+
+/// Seen-name tracking is reset per element: the same attribute name on two
+/// SIBLING elements is not a duplicate.
+#[test]
+fn same_attr_on_sibling_elements_is_not_duplicate() {
+    let input = "<template><div id=\"a\"></div><span id=\"b\"></span></template>";
+    let opts = SyntaxPluginOptions::default();
+    let ctx = make_ctx(input, &opts);
+    let mut syn = Syntax::new(false);
+
+    tokenize_and_feed(&mut syn, input, &ctx);
+
+    assert!(
+        syn.diagnostics
+            .iter()
+            .all(|d| d.code != CompilerErrorCode::DuplicateAttribute),
+        "sibling elements sharing an attr name must not be duplicates, got {:?}",
+        syn.diagnostics
+    );
+}
+
+/// Allocation invariant: seen attribute names are tracked as source-backed
+/// spans (byte offsets into the source), never owned byte copies. Each
+/// recorded span must locate its name within the source buffer, and duplicate
+/// detection compares those borrowed source-byte ranges directly.
+#[test]
+fn seen_attr_tracking_is_span_backed() {
+    let input = "<template><div id=\"a\" data-x=\"b\"></div></template>";
+    let opts = SyntaxPluginOptions::default();
+    let ctx = make_ctx(input, &opts);
+    let mut syn = Syntax::new(false);
+
+    // Feed everything up to (but not past) the <div>'s open-tag end so the
+    // per-element span buffer still reflects the div's attributes (the first
+    // `OpenTagEnd` belongs to <template>, the second to <div>).
+    let events = tokenize_events(input);
+    let mut open_tag_ends = 0;
+    for event in &events {
+        syn.handle(event, &ctx);
+        if matches!(event, TokenizerEvent::OpenTagEnd { .. }) {
+            open_tag_ends += 1;
+            if open_tag_ends == 2 {
+                break;
+            }
+        }
+    }
+
+    assert_eq!(
+        syn.seen_attr_spans.len(),
+        2,
+        "both static attribute names should be recorded as spans"
+    );
+    // Spans index into the source buffer and reproduce the original names.
+    let names: Vec<&str> = syn
+        .seen_attr_spans
+        .iter()
+        .map(|s| {
+            assert!(
+                (s.end as usize) <= input.len() && s.start < s.end,
+                "span must be a valid source range: {s:?}"
+            );
+            span_str(input, s.start, s.end)
+        })
+        .collect();
+    assert_eq!(names, vec!["id", "data-x"]);
+    // The recorded spans point at the actual source positions of the names.
+    assert_eq!(
+        syn.seen_attr_spans[0].start as usize,
+        input.find("id=").expect("id position")
+    );
+}
+
+// ========================================================================
 // 43. Non-cached directives don't populate cache fields
 // ========================================================================
 

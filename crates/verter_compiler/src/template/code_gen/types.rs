@@ -4,6 +4,7 @@
 //! Nothing is applied to the source until [`CodeGenOutput::apply_to()`] is called.
 
 use oxc_allocator::Allocator;
+use smallvec::SmallVec;
 
 use crate::code_transform::CodeTransform;
 
@@ -60,6 +61,13 @@ pub struct CodeGenOutput<'alloc> {
 
     /// Allocator reference for bump-allocating generated strings.
     alloc: &'alloc Allocator,
+
+    /// One reusable scratch buffer for the `write!`-style format sinks
+    /// (`overwrite_fmt`, `prepend_fmt`, and the mapped variants). Each sink
+    /// clears and reuses it, so a formatted emission costs the retained heap
+    /// capacity plus one bump copy — never a fresh `String` per call. It is
+    /// an operation-construction helper only; it never holds built output.
+    scratch: String,
 }
 
 impl<'alloc> CodeGenOutput<'alloc> {
@@ -76,6 +84,7 @@ impl<'alloc> CodeGenOutput<'alloc> {
             moves: Vec::new(),
             wrapped_moves: Vec::new(),
             alloc,
+            scratch: String::new(),
         }
     }
 
@@ -153,6 +162,137 @@ impl<'alloc> CodeGenOutput<'alloc> {
             .push((pos, source_pos, content_offset, allocated));
     }
 
+    /// Write `args` into the reusable scratch buffer and bump-allocate the
+    /// result once. The buffer is cleared first and its capacity is retained
+    /// for the next emission, so repeated formatted emissions reuse one
+    /// allocation instead of allocating a fresh `String` per call.
+    ///
+    /// This is the arena-string companion to the op-recording format sinks
+    /// (`overwrite_fmt` / `prepend_fmt` / …): those record a `CodeTransform`
+    /// operation, whereas this returns the bump-allocated `&'alloc str` for
+    /// content that is stored and assembled later rather than applied at a
+    /// source position — e.g. the Vapor navigation (`const pN = _child(nM)`)
+    /// and text-creation (`const xN = _txt(pP)`) lines accumulated for the
+    /// render-function body. It produces a string through the SAME reusable
+    /// scratch + single-bump path, never by editing already-emitted output in
+    /// place.
+    #[inline]
+    pub(in crate::template::code_gen) fn alloc_fmt(
+        &mut self,
+        args: std::fmt::Arguments<'_>,
+    ) -> &'alloc str {
+        use std::fmt::Write as _;
+        self.scratch.clear();
+        // Appending to a `String` never fails; `write_fmt` can only return
+        // `Err` if a `Display`/`Debug` impl inside `args` does. Surface that
+        // as a panic rather than silently recording partial content.
+        self.scratch
+            .write_fmt(args)
+            .expect("CodeGenOutput format sink: Display impl must not fail");
+        self.alloc.alloc_str(&self.scratch)
+    }
+
+    /// Push an overwrite whose content is produced by a `write!`-style format
+    /// directly into the reusable scratch buffer, then bump-allocated once.
+    ///
+    /// Output-equivalent to `overwrite(start, end, &format!(...))` but avoids
+    /// the intermediate per-call `String` allocation. The recorded operation
+    /// is an ordinary overwrite — only the string PRODUCTION changes.
+    #[inline]
+    pub fn overwrite_fmt(&mut self, start: u32, end: u32, args: std::fmt::Arguments<'_>) {
+        let allocated = self.alloc_fmt(args);
+        self.overwrites.push((start, end, allocated));
+    }
+
+    /// Push a prepend-left whose content is produced by a `write!`-style
+    /// format into the reusable scratch buffer, then bump-allocated once.
+    ///
+    /// Output-equivalent to `prepend_alloc(pos, &format!(...))`.
+    #[inline]
+    pub fn prepend_fmt(&mut self, pos: u32, args: std::fmt::Arguments<'_>) {
+        let allocated = self.alloc_fmt(args);
+        self.prepends.push((pos, allocated));
+    }
+
+    /// Push a source-mapped prepend-left whose content is produced by a
+    /// `write!`-style format into the reusable scratch buffer. The source map
+    /// token is placed at the start of the content (offset 0).
+    ///
+    /// Output-equivalent to `prepend_alloc_mapped(pos, source_pos, &format!(...))`.
+    ///
+    /// Rounds out the format-sink family alongside its `*_with_offset` peer;
+    /// exercised by the format-sink equivalence tests.
+    #[allow(dead_code)]
+    #[inline]
+    pub fn prepend_fmt_mapped(&mut self, pos: u32, source_pos: u32, args: std::fmt::Arguments<'_>) {
+        let allocated = self.alloc_fmt(args);
+        self.mapped_prepends.push((pos, source_pos, 0, allocated));
+    }
+
+    /// Push a source-mapped prepend-left with an explicit content offset whose
+    /// content is produced by a `write!`-style format into the reusable
+    /// scratch buffer. Characters before `content_offset` are unmapped; the
+    /// source map token is placed at `content_offset`, pointing to `source_pos`.
+    ///
+    /// Output-equivalent to
+    /// `prepend_alloc_mapped_with_offset(pos, source_pos, content_offset, &format!(...))`.
+    ///
+    /// Rounds out the format-sink family alongside its zero-offset peer;
+    /// exercised by the format-sink equivalence tests.
+    #[allow(dead_code)]
+    #[inline]
+    pub fn prepend_fmt_mapped_with_offset(
+        &mut self,
+        pos: u32,
+        source_pos: u32,
+        content_offset: u32,
+        args: std::fmt::Arguments<'_>,
+    ) {
+        let allocated = self.alloc_fmt(args);
+        self.mapped_prepends
+            .push((pos, source_pos, content_offset, allocated));
+    }
+
+    /// Lower a [`MappedGeneratedText`] segment plan at `pos`: each source
+    /// segment maps its first byte to the recorded file offset; each synthetic
+    /// segment emits no source-map token. The concatenation of the segments
+    /// equals `mgt.text`, so the inserted bytes are identical to emitting the
+    /// flat string — only the source-map tokens become per-segment precise.
+    ///
+    /// This is the sole sourcemap-aware lowering for resolved condition / IIFE
+    /// expression heads: scaffolding (`__props.`, `.value`, brackets, the
+    /// `(` … `) ? ` wrapper, shorthand keys) stays unmapped, only authored
+    /// identifiers and verbatim source runs carry tokens.
+    #[inline]
+    pub fn prepend_mapped_generated_text(&mut self, pos: u32, mgt: &MappedGeneratedText) {
+        for seg in &mgt.segments {
+            let content = &mgt.text[seg.generated_start as usize..seg.generated_end as usize];
+            self.push_prepend_segment(pos, content, seg.source_start);
+        }
+    }
+
+    /// Record one prepend segment into the shared `mapped_prepends` channel.
+    /// `Some(source_pos)` places a single token at the content start; `None`
+    /// uses the content-offset-past-end form the source-map emitter treats as
+    /// fully unmapped (mirroring [`prepend_ordered_unmapped`](Self::prepend_ordered_unmapped)).
+    #[inline]
+    fn push_prepend_segment(&mut self, pos: u32, content: &str, source: Option<u32>) {
+        if content.is_empty() {
+            return;
+        }
+        let allocated = self.alloc.alloc_str(content);
+        match source {
+            // Source-derived: token at the segment start (offset 0).
+            Some(source_pos) => self.mapped_prepends.push((pos, source_pos, 0, allocated)),
+            // Synthetic: content_offset == len → the emitter places the whole
+            // run as an unmapped prefix and emits no source token.
+            None => {
+                let len = allocated.len() as u32;
+                self.mapped_prepends.push((pos, 0, len, allocated));
+            }
+        }
+    }
+
     /// Push a move operation: move source range [start, end) to target position.
     #[inline]
     pub fn move_slice(&mut self, start: u32, end: u32, target: u32) {
@@ -216,6 +356,15 @@ impl<'alloc> CodeGenOutput<'alloc> {
         self.vapor_imports
     }
 
+    /// Current capacity of the reusable format-sink scratch buffer.
+    /// Lets tests prove the buffer is reused (capacity retained) across
+    /// formatted emissions rather than reallocated per call.
+    #[cfg(test)]
+    #[inline]
+    pub fn scratch_capacity(&self) -> usize {
+        self.scratch.capacity()
+    }
+
     /// Sort and apply all accumulated operations to a CodeTransform.
     /// Called once after the entire tree walk.
     ///
@@ -266,20 +415,14 @@ impl<'alloc> CodeGenOutput<'alloc> {
             self.prepends.sort_by_key(|(pos, _)| *pos);
             ct.batch_prepend_left_static(&self.prepends);
         } else {
-            // Merge regular prepends (unmapped) and mapped prepends into a
-            // unified vec for batch_prepend_left_with_source_map.
-            type PrependItem<'b> = (u32, Option<(u32, u32)>, &'b str);
-            let mut all_prepends: Vec<PrependItem<'_>> =
-                Vec::with_capacity(self.prepends.len() + self.mapped_prepends.len());
-            for &(pos, content) in &self.prepends {
-                all_prepends.push((pos, None, content));
-            }
-            for &(pos, src_pos, content_offset, content) in &self.mapped_prepends {
-                all_prepends.push((pos, Some((src_pos, content_offset)), content));
-            }
-            // Stable sort to preserve insertion order for same-position prepends.
-            all_prepends.sort_by_key(|(pos, _, _)| *pos);
-            ct.batch_prepend_left_with_source_map(&all_prepends);
+            // Merge the unmapped (`prepends`) and source-mapped (`mapped_prepends`)
+            // channels DIRECTLY during one chunk rebuild — no third temporary Vec.
+            // Each channel is stably sorted by position; the merge emits every
+            // unmapped prepend before any mapped prepend at an equal position, so
+            // the two channels interleave at a shared anchor in unmapped-first order.
+            self.prepends.sort_by_key(|&(pos, _)| pos);
+            self.mapped_prepends.sort_by_key(|&(pos, ..)| pos);
+            ct.batch_prepend_left_merged(&self.prepends, &self.mapped_prepends);
         }
 
         // Apply deferred move operations (e.g., slot reordering)
@@ -326,6 +469,118 @@ impl TemplateImports {
     }
 }
 
+// ======================== MappedGeneratedText ========================
+
+/// One contiguous run of generated text within a [`MappedGeneratedText`].
+///
+/// `[generated_start, generated_end)` indexes into the owning plan's `text`.
+/// A `Some(source_start)` run is an authored source token whose first byte
+/// maps to that file offset; a `None` run is resolver scaffolding (`__props.`,
+/// `.value`, `["`, `"]`, the `(` … `) ? ` wrapper, shorthand keys) that must
+/// NEVER carry a source-map token.
+#[derive(Debug, Clone)]
+pub struct MappedSegment {
+    pub generated_start: u32,
+    pub generated_end: u32,
+    pub source_start: Option<u32>,
+}
+
+/// A resolved generated expression plus an ordered plan classifying each byte
+/// run as authored source (mapped) or synthetic scaffolding (unmapped).
+///
+/// The concatenation of every segment's slice equals `text` exactly, so a
+/// consumer emits byte-identical output whether it uses the flat `text` or the
+/// segment plan — the plan only refines the source map. Producers
+/// (`build_prefixed_expr_segments` / `resolve_simple_expr_segments`) record one
+/// source segment per identifier or verbatim run and one synthetic segment per
+/// inserted prefix / suffix / bracket / wrapper, upholding the invariant that
+/// no synthetic byte ever maps to source. Lowered via
+/// [`CodeGenOutput::prepend_mapped_generated_text`].
+#[derive(Debug, Clone, Default)]
+pub struct MappedGeneratedText {
+    pub text: String,
+    pub segments: SmallVec<[MappedSegment; 8]>,
+}
+
+impl MappedGeneratedText {
+    /// A single authored-source run mapping its first byte to `source_start`.
+    /// Empty `text` yields an empty plan.
+    pub fn source(text: &str, source_start: u32) -> Self {
+        let mut mgt = Self {
+            text: String::new(),
+            segments: SmallVec::new(),
+        };
+        mgt.push(text, Some(source_start));
+        mgt
+    }
+
+    /// A single synthetic run with no source mapping. Empty `text` yields an
+    /// empty plan.
+    pub fn synthetic(text: &str) -> Self {
+        let mut mgt = Self {
+            text: String::new(),
+            segments: SmallVec::new(),
+        };
+        mgt.push(text, None);
+        mgt
+    }
+
+    /// Append `text` as one segment, classified by `source_start`. Empty input
+    /// is skipped so the plan never carries zero-length segments.
+    pub(crate) fn push(&mut self, text: &str, source_start: Option<u32>) {
+        if text.is_empty() {
+            return;
+        }
+        let generated_start = self.text.len() as u32;
+        self.text.push_str(text);
+        let generated_end = self.text.len() as u32;
+        self.segments.push(MappedSegment {
+            generated_start,
+            generated_end,
+            source_start,
+        });
+    }
+
+    /// Wrap the plan with an unmapped `prefix` and `suffix`, shifting the inner
+    /// segment offsets. Used to add the `(` … `) ? ` ternary head around a
+    /// resolved condition expression while keeping the wrapper synthetic.
+    pub fn wrapped(&self, prefix: &str, suffix: &str) -> Self {
+        let mut text = String::with_capacity(prefix.len() + self.text.len() + suffix.len());
+        let mut segments = SmallVec::with_capacity(self.segments.len() + 2);
+
+        if !prefix.is_empty() {
+            text.push_str(prefix);
+            segments.push(MappedSegment {
+                generated_start: 0,
+                generated_end: prefix.len() as u32,
+                source_start: None,
+            });
+        }
+
+        let shift = prefix.len() as u32;
+        for seg in &self.segments {
+            segments.push(MappedSegment {
+                generated_start: seg.generated_start + shift,
+                generated_end: seg.generated_end + shift,
+                source_start: seg.source_start,
+            });
+        }
+        text.push_str(&self.text);
+
+        if !suffix.is_empty() {
+            let generated_start = text.len() as u32;
+            text.push_str(suffix);
+            segments.push(MappedSegment {
+                generated_start,
+                generated_end: text.len() as u32,
+                source_start: None,
+            });
+        }
+
+        Self { text, segments }
+    }
+}
+
 // ======================== ChildRecord ========================
 
 /// Record of a child node, used by the parent's leave phase to decide
@@ -339,21 +594,15 @@ pub struct ChildRecord {
     /// v-if/v-else-if/v-else chain. `None` for non-element children and
     /// elements without v-if.
     pub condition: Option<ConditionChainRole>,
-    /// Condition prefix for v-if/v-else-if elements (e.g., `"(show) ? "`).
-    /// Emitted by the parent's separator logic to ensure correct ordering
-    /// relative to comma separators. `None` for non-conditional elements
-    /// and v-else (which has no prefix — the `: ` comes from the previous
-    /// branch's scope close).
-    pub condition_prefix: Option<String>,
-    /// Byte offset of the v-if/v-else-if expression value in source.
-    /// Used to emit source-mapped condition prefixes so the LSP can map
-    /// the ternary condition back to the directive expression.
-    pub condition_expr_start: Option<u32>,
-    /// Length of the binding prefix (e.g., `__props.` = 9, `_ctx.` = 5) within
-    /// the resolved expression inside `condition_prefix`. Used to split the
-    /// condition prefix into unmapped prefix + mapped identifier + unmapped suffix
-    /// for accurate per-identifier source mapping.
-    pub condition_binding_prefix_len: usize,
+    /// Condition prefix for v-if/v-else-if elements (e.g. `(show) ? `), carried
+    /// as an ordered segment plan so the emitter maps each authored identifier
+    /// back to source while leaving the synthetic binding prefixes (`__props.`),
+    /// suffixes (`.value`), keyword brackets, and the `(` … `) ? ` wrapper
+    /// unmapped. Emitted by the parent's separator logic to ensure correct
+    /// ordering relative to comma separators. `None` for non-conditional
+    /// elements and v-else (whose `: ` comes from the previous branch's scope
+    /// close).
+    pub condition_prefix: Option<MappedGeneratedText>,
 }
 
 /// Role of an element in a v-if/v-else-if/v-else chain.
@@ -603,13 +852,18 @@ impl VaporEffect<'_> {
 
 /// Per-element state for Vapor codegen.
 ///
-/// Pushed onto the stack when entering an element, popped on leave.
-/// Contains only genuine output buffers — metadata like tag name, is_root,
-/// is_void, depth, child_index, and has_dynamic_text are derived from the
-/// AST on-demand in the caller.
+/// Pushed onto the stack when entering an element, popped on leave. Holds this
+/// element's render-side output buffers plus the traversal-local DOM child
+/// cursor used to index its children. Static facts about the element itself
+/// (tag name, is_root, is_void, depth, has_dynamic_text) are derived from the
+/// AST on demand in the caller rather than stored here.
 #[derive(Debug)]
 pub struct VaporElementState<'a> {
-    /// Accumulated static HTML for this element's subtree.
+    /// Finalized static HTML for this element's subtree. Only template-scope
+    /// roots (root elements, components, slot outlets, slot templates) carry
+    /// content here, handed over once when the shared scope buffer is closed;
+    /// plain descendants append into that shared buffer directly, so their own
+    /// field stays empty and is never read.
     pub html: String,
     /// Dynamic text parts for the current text group.
     pub text_parts: Vec<VaporTextPart<'a>>,
@@ -630,6 +884,17 @@ pub struct VaporElementState<'a> {
     /// Named slot closure entries built from `<template v-slot>` children.
     /// Each string is a complete slot entry (e.g., `header: () => { ... }`).
     pub named_slots: Vec<String>,
+    /// Running count of this element's DOM children observed so far during the
+    /// DFS — i.e. the DOM index the next element child will occupy. Adjacent
+    /// text/interpolation nodes coalesce into a single DOM child, comments
+    /// count only when rendered, and every element counts once. Maintained
+    /// incrementally as each child is walked, replacing a per-child rescan of
+    /// the preceding siblings.
+    pub dom_child_cursor: u32,
+    /// Whether the most recently observed child was part of a text/
+    /// interpolation run, so the next adjacent text/interpolation coalesces
+    /// into the same DOM child rather than advancing the cursor.
+    pub dom_in_text_run: bool,
 }
 
 impl Default for VaporElementState<'_> {
@@ -641,7 +906,7 @@ impl Default for VaporElementState<'_> {
 impl VaporElementState<'_> {
     pub fn new() -> Self {
         Self {
-            html: String::with_capacity(128),
+            html: String::new(),
             text_parts: Vec::new(),
             node_ref: None,
             text_node_ref: None,
@@ -651,6 +916,8 @@ impl VaporElementState<'_> {
             child_effects: Vec::new(),
             child_statements: Vec::new(),
             named_slots: Vec::new(),
+            dom_child_cursor: 0,
+            dom_in_text_run: false,
         }
     }
 
@@ -667,6 +934,35 @@ impl VaporElementState<'_> {
         self.child_effects.clear();
         self.child_statements.clear();
         self.named_slots.clear();
+        self.dom_child_cursor = 0;
+        self.dom_in_text_run = false;
+    }
+
+    /// Observe an adjacent text or interpolation child while walking this
+    /// element's children: adjacent text/interpolation nodes coalesce into a
+    /// single DOM child, so only the first of a run advances the cursor.
+    pub fn observe_dom_text_run(&mut self) {
+        if !self.dom_in_text_run {
+            self.dom_in_text_run = true;
+            self.dom_child_cursor += 1;
+        }
+    }
+
+    /// Observe a rendered comment child: it breaks any text run and counts as
+    /// one DOM child. Callers invoke this only when comment rendering is on.
+    pub fn observe_dom_comment(&mut self) {
+        self.dom_in_text_run = false;
+        self.dom_child_cursor += 1;
+    }
+
+    /// Observe an element child, returning its 0-based DOM index within this
+    /// element and advancing the cursor past it. An element breaks any text
+    /// run and counts as one DOM child.
+    pub fn observe_dom_element(&mut self) -> u32 {
+        let index = self.dom_child_cursor;
+        self.dom_in_text_run = false;
+        self.dom_child_cursor += 1;
+        index
     }
 
     /// Ensure a node ref is allocated for this element.
@@ -716,401 +1012,5 @@ pub struct VaporRootElement<'a> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use oxc_allocator::Allocator;
-
-    #[test]
-    fn code_gen_output_overwrite_pushes_to_vec() {
-        let alloc = Allocator::default();
-        let mut out = CodeGenOutput::new(&alloc);
-        out.overwrite(0, 5, "hello");
-        assert_eq!(out.overwrites.len(), 1);
-        assert_eq!(out.overwrites[0].0, 0);
-        assert_eq!(out.overwrites[0].1, 5);
-        assert_eq!(out.overwrites[0].2, "hello");
-    }
-
-    #[test]
-    fn code_gen_output_prepend_static_pushes_to_vec() {
-        let alloc = Allocator::default();
-        let mut out = CodeGenOutput::new(&alloc);
-        out.prepend_static(10, "_ctx.");
-        assert_eq!(out.prepends.len(), 1);
-        assert_eq!(out.prepends[0].0, 10);
-        assert_eq!(out.prepends[0].1, "_ctx.");
-    }
-
-    #[test]
-    fn code_gen_output_prepend_alloc_pushes_to_vec() {
-        let alloc = Allocator::default();
-        let mut out = CodeGenOutput::new(&alloc);
-        out.prepend_alloc(5, "dynamic");
-        assert_eq!(out.prepends.len(), 1);
-        assert_eq!(out.prepends[0].0, 5);
-        assert_eq!(out.prepends[0].1, "dynamic");
-    }
-
-    #[test]
-    fn apply_to_sorts_overwrites_by_start() {
-        let alloc = Allocator::default();
-        let mut out = CodeGenOutput::new(&alloc);
-        // Push in reverse order
-        out.overwrite(10, 15, "b");
-        out.overwrite(0, 5, "a");
-
-        let mut ct = crate::code_transform::CodeTransform::new("0123456789ABCDE", &alloc);
-        out.apply_to(&mut ct);
-        let result = ct.build_string();
-        assert_eq!(result, "a56789b");
-    }
-
-    #[test]
-    fn apply_to_sorts_prepends_by_position() {
-        let alloc = Allocator::default();
-        let mut out = CodeGenOutput::new(&alloc);
-        // Push in reverse order
-        out.prepend_static(5, "Y");
-        out.prepend_static(2, "X");
-
-        let mut ct = crate::code_transform::CodeTransform::new("ABCDEFGH", &alloc);
-        out.apply_to(&mut ct);
-        let result = ct.build_string();
-        assert_eq!(result, "ABXCDEYFGH");
-    }
-
-    /// @ai-generated - Regression test: prepends at the same position must
-    /// preserve insertion order (stable sort). This matters when scope_close
-    /// suffixes and sibling comma separators are both prepended at an
-    /// element's end position. Without stable sort, the comma can appear
-    /// before the scope_close, producing invalid JS like `, : _createCommentVNode`.
-    #[test]
-    fn apply_to_preserves_same_position_prepend_order() {
-        let alloc = Allocator::default();
-        let mut out = CodeGenOutput::new(&alloc);
-
-        // Simulate the real compilation pattern: scope_close is pushed early
-        // (during child's leave_element), then many other prepends are added
-        // for other parts of the template, then the sibling comma is pushed
-        // (during parent's add_children_separators).
-        // The target position where both scope_close and comma land:
-        let target = 50u32;
-
-        // First batch: prepends BEFORE the scope_close (from earlier template processing)
-        for i in 0..40u32 {
-            out.prepend_static(i, "x");
-        }
-        // scope_close is pushed at target position
-        out.prepend_static(target, "SCOPE_CLOSE");
-        // Second batch: many more prepends from other template elements
-        // (these go to positions AFTER target, interleaved)
-        for i in 0..60u32 {
-            out.prepend_static(target + 1 + i, "y");
-        }
-        // Sibling comma is pushed much later at the SAME target position
-        out.prepend_static(target, "COMMA");
-
-        let source = &"_".repeat(200);
-        let mut ct = crate::code_transform::CodeTransform::new(source, &alloc);
-        out.apply_to(&mut ct);
-        let result = ct.build_string();
-
-        // The two same-position prepends must appear in insertion order
-        assert!(
-            result.contains("SCOPE_CLOSECOMMA"),
-            "Same-position prepends must preserve insertion order.\n\
-             Expected 'SCOPE_CLOSECOMMA' but got:\n{}",
-            result
-        );
-    }
-
-    // ==================== Imports ====================
-
-    #[test]
-    fn add_vdom_import_sets_flag() {
-        let alloc = Allocator::default();
-        let mut out = CodeGenOutput::new(&alloc);
-        out.add_vdom_import(VdomHelper::CreateElementVNode);
-        assert!(out.vdom_imports().has(VdomHelper::CreateElementVNode));
-    }
-
-    #[test]
-    fn add_vdom_import_deduplicates() {
-        let alloc = Allocator::default();
-        let mut out = CodeGenOutput::new(&alloc);
-        out.add_vdom_import(VdomHelper::ToDisplayString);
-        out.add_vdom_import(VdomHelper::CreateElementVNode);
-        out.add_vdom_import(VdomHelper::ToDisplayString); // duplicate
-        let imports = out.vdom_imports().to_imports();
-        assert_eq!(imports.len(), 2);
-    }
-
-    #[test]
-    fn apply_to_returns_vdom_imports() {
-        let alloc = Allocator::default();
-        let mut out = CodeGenOutput::new(&alloc);
-        out.add_vdom_import(VdomHelper::CreateCommentVNode);
-        out.add_vdom_import(VdomHelper::ToDisplayString);
-
-        let mut ct = crate::code_transform::CodeTransform::new("hello", &alloc);
-        let imports = out.apply_to(&mut ct);
-        assert_eq!(imports.vue.len(), 2);
-        assert!(imports.vue.contains(&"_createCommentVNode"));
-        assert!(imports.vue.contains(&"_toDisplayString"));
-        assert!(imports.ssr.is_empty());
-    }
-
-    #[test]
-    fn apply_to_returns_vapor_imports() {
-        let alloc = Allocator::default();
-        let mut out = CodeGenOutput::new(&alloc);
-        out.add_vapor_import(VaporHelper::Template);
-        out.add_vapor_import(VaporHelper::RenderEffect);
-
-        let mut ct = crate::code_transform::CodeTransform::new("hello", &alloc);
-        let imports = out.apply_to(&mut ct);
-        assert_eq!(imports.vue.len(), 2);
-        assert!(imports.vue.contains(&"_template"));
-        assert!(imports.vue.contains(&"_renderEffect"));
-        assert!(imports.ssr.is_empty());
-    }
-
-    #[test]
-    fn empty_output_returns_empty_imports() {
-        let alloc = Allocator::default();
-        let out = CodeGenOutput::new(&alloc);
-
-        let mut ct = crate::code_transform::CodeTransform::new("hello", &alloc);
-        let imports = out.apply_to(&mut ct);
-        assert!(imports.is_empty());
-    }
-
-    // ==================== VaporCounters ====================
-
-    #[test]
-    fn vapor_counters_increment() {
-        let mut c = VaporCounters::default();
-        assert_eq!(c.next_node(), 0);
-        assert_eq!(c.next_node(), 1);
-        assert_eq!(c.next_text(), 0);
-        assert_eq!(c.next_text(), 1);
-        assert_eq!(c.next_path(), 0);
-        assert_eq!(c.next_template(), 0);
-        assert_eq!(c.next_template(), 1);
-    }
-
-    // ==================== VaporTextPart ====================
-
-    #[test]
-    fn vapor_text_part_static() {
-        let part = VaporTextPart::Static("\"hello\"");
-        assert_eq!(part.to_js(), "\"hello\"");
-        assert!(!part.is_dynamic());
-    }
-
-    #[test]
-    fn vapor_text_part_dynamic() {
-        let part = VaporTextPart::Dynamic("_toDisplayString(_ctx.msg)");
-        assert_eq!(part.to_js(), "_toDisplayString(_ctx.msg)");
-        assert!(part.is_dynamic());
-    }
-
-    // ==================== VaporEffect ====================
-
-    #[test]
-    fn vapor_effect_set_text() {
-        let effect = VaporEffect::SetText {
-            text_ref: 0,
-            parts: vec![
-                VaporTextPart::Static("\"hello \""),
-                VaporTextPart::Dynamic("_toDisplayString(_ctx.msg)"),
-            ],
-        };
-        assert_eq!(
-            effect.to_code(),
-            "_setText(x0, \"hello \" + _toDisplayString(_ctx.msg))"
-        );
-    }
-
-    #[test]
-    fn vapor_effect_set_text_single_part() {
-        let effect = VaporEffect::SetText {
-            text_ref: 1,
-            parts: vec![VaporTextPart::Dynamic("_toDisplayString(_ctx.count)")],
-        };
-        assert_eq!(
-            effect.to_code(),
-            "_setText(x1, _toDisplayString(_ctx.count))"
-        );
-    }
-
-    #[test]
-    fn vapor_effect_set_class() {
-        let effect = VaporEffect::SetClass {
-            node_ref: 0,
-            expr: "_ctx.cls",
-        };
-        assert_eq!(effect.to_code(), "_setClass(n0, _ctx.cls)");
-    }
-
-    #[test]
-    fn vapor_effect_set_style() {
-        let effect = VaporEffect::SetStyle {
-            node_ref: 2,
-            expr: "_ctx.sty",
-        };
-        assert_eq!(effect.to_code(), "_setStyle(n2, _ctx.sty)");
-    }
-
-    #[test]
-    fn vapor_effect_set_prop() {
-        let effect = VaporEffect::SetProp {
-            node_ref: 0,
-            attr: "title",
-            expr: "_ctx.title",
-        };
-        assert_eq!(effect.to_code(), "_setProp(n0, \"title\", _ctx.title)");
-    }
-
-    #[test]
-    fn vapor_effect_set_attr() {
-        let effect = VaporEffect::SetAttr {
-            node_ref: 1,
-            attr: "data-id",
-            expr: "_ctx.id",
-        };
-        assert_eq!(effect.to_code(), "_setAttr(n1, \"data-id\", _ctx.id)");
-    }
-
-    #[test]
-    fn vapor_effect_set_html() {
-        let effect = VaporEffect::SetHtml {
-            node_ref: 0,
-            expr: "_ctx.rawHtml",
-        };
-        assert_eq!(effect.to_code(), "_setHtml(n0, _ctx.rawHtml)");
-    }
-
-    #[test]
-    fn vapor_effect_set_html_with_resolved_ref() {
-        let effect = VaporEffect::SetHtml {
-            node_ref: 1,
-            expr: "rawHtml.value",
-        };
-        assert_eq!(effect.to_code(), "_setHtml(n1, rawHtml.value)");
-    }
-
-    #[test]
-    fn vapor_effect_set_dynamic_props() {
-        let effect = VaporEffect::SetDynamicProps {
-            node_ref: 0,
-            expr: "_ctx.obj",
-        };
-        assert_eq!(effect.to_code(), "_setDynamicProps(n0, [_ctx.obj])");
-    }
-
-    #[test]
-    fn vapor_effect_set_dynamic_props_with_resolved_ref() {
-        let effect = VaporEffect::SetDynamicProps {
-            node_ref: 2,
-            expr: "obj.value",
-        };
-        assert_eq!(effect.to_code(), "_setDynamicProps(n2, [obj.value])");
-    }
-
-    // ==================== VaporElementState ====================
-
-    #[test]
-    fn vapor_element_state_new() {
-        let state = VaporElementState::new();
-        assert!(state.node_ref.is_none());
-        assert!(state.text_node_ref.is_none());
-        assert!(state.html.is_empty());
-        assert!(state.text_parts.is_empty());
-        assert!(state.own_effects.is_empty());
-        assert!(state.child_nav.is_empty());
-    }
-
-    #[test]
-    fn vapor_element_state_ensure_node_ref() {
-        let mut counters = VaporCounters::default();
-        let mut state = VaporElementState::new();
-        let r1 = state.ensure_node_ref(&mut counters);
-        assert_eq!(r1, 0);
-        // Second call returns same ref
-        let r2 = state.ensure_node_ref(&mut counters);
-        assert_eq!(r2, 0);
-        // Counter only incremented once
-        assert_eq!(counters.n, 1);
-    }
-
-    #[test]
-    fn vapor_element_state_ensure_text_ref() {
-        let mut counters = VaporCounters::default();
-        let mut state = VaporElementState::new();
-        let r1 = state.ensure_text_ref(&mut counters);
-        assert_eq!(r1, 0);
-        let r2 = state.ensure_text_ref(&mut counters);
-        assert_eq!(r2, 0);
-        assert_eq!(counters.x, 1);
-    }
-
-    // ==================== Mapped Prepends ====================
-
-    /// @ai-generated — prepend_alloc_mapped pushes to mapped_prepends vec
-    #[test]
-    fn prepend_alloc_mapped_pushes_to_vec() {
-        let alloc = Allocator::default();
-        let mut out = CodeGenOutput::new(&alloc);
-        out.prepend_alloc_mapped(10, 20, "(show) ? ");
-        assert_eq!(out.mapped_prepends.len(), 1);
-        assert_eq!(out.mapped_prepends[0].0, 10); // insertion pos
-        assert_eq!(out.mapped_prepends[0].1, 20); // source pos
-        assert_eq!(out.mapped_prepends[0].2, 0); // content_offset
-        assert_eq!(out.mapped_prepends[0].3, "(show) ? ");
-    }
-
-    /// @ai-generated — apply_to merges mapped and regular prepends correctly
-    #[test]
-    fn apply_to_merges_mapped_and_regular_prepends() {
-        let alloc = Allocator::default();
-        let mut out = CodeGenOutput::new(&alloc);
-        // Regular prepend at position 5
-        out.prepend_static(5, "_ctx.");
-        // Mapped prepend at position 3
-        out.prepend_alloc_mapped(3, 100, "(show) ? ");
-
-        let source = "ABCDEFGHIJ";
-        let mut ct = crate::code_transform::CodeTransform::new(source, &alloc);
-        out.apply_to(&mut ct);
-        let result = ct.build_string();
-        // Position 3: "(show) ? " inserted, position 5: "_ctx." inserted
-        assert_eq!(result, "ABC(show) ? DE_ctx.FGHIJ");
-    }
-
-    /// @ai-generated — apply_to with mapped prepends produces source-mapped tokens
-    #[test]
-    fn apply_to_mapped_prepend_produces_source_map_token() {
-        let alloc = Allocator::default();
-        let mut out = CodeGenOutput::new(&alloc);
-        // Insert "(show) ? " at position 5, mapped to source position 20
-        out.prepend_alloc_mapped(5, 20, "(show) ? ");
-
-        let source = "0123456789ABCDEFGHIJKLMNOP";
-        let mut ct = crate::code_transform::CodeTransform::new(source, &alloc);
-        out.apply_to(&mut ct);
-
-        let map =
-            ct.generate_map(crate::code_transform::SourceMapOptions::new().with_source("test.vue"));
-        let tokens: Vec<_> = map.get_tokens().collect();
-
-        // Find token mapping to source col 20
-        let mapped = tokens
-            .iter()
-            .find(|t| t.get_src_col() == 20 && t.get_source_id().is_some());
-        assert!(
-            mapped.is_some(),
-            "should have source-mapped token at src col 20"
-        );
-    }
-}
+#[path = "types_tests.rs"]
+mod tests;

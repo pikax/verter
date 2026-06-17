@@ -34,19 +34,19 @@ use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Arc;
 
 use verter_session::resolver_core::{DerivedFactKind, FactVersionRef};
-use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 
 fn build_host() -> Arc<VerterHost> {
     Arc::new(VerterHost::new_standalone(HostConfig::default()))
 }
 
-fn upsert(host: &VerterHost, id: &str, src: &str, kind: FileKind) {
+fn upsert(host: &VerterHost, id: &str, src: &str, kind: FileLanguage) {
     let _ = host
         .upsert(UpsertRequest {
             canonical_id: None,
             input_id: id.to_string(),
             source: Arc::from(src),
-            file_kind: kind,
+            file_language: kind,
             aliases: Vec::new(),
         })
         .expect("upsert");
@@ -68,8 +68,8 @@ fn cross_file_route_facts_flow_owner_route_filtered() {
     // the owner's, as the importer is a route participant) into the
     // fact tracer.
     let host = build_host();
-    upsert(&host, "/src/types.ts", TYPES_A, FileKind::NonSfc);
-    upsert(&host, "/src/Comp.vue", OWNER_VUE, FileKind::VueSfc);
+    upsert(&host, "/src/types.ts", TYPES_A, FileLanguage::script_ts());
+    upsert(&host, "/src/Comp.vue", OWNER_VUE, FileLanguage::vue());
 
     let meta = host.get_component_meta("/src/Comp.vue");
     assert!(meta.is_some(), "cold get_component_meta must resolve");
@@ -132,8 +132,8 @@ fn cross_file_route_facts_flow_owner_route_filtered() {
 #[test]
 fn editing_route_dep_invalidates_warm_hit() {
     let host = build_host();
-    upsert(&host, "/src/types.ts", TYPES_A, FileKind::NonSfc);
-    upsert(&host, "/src/Comp.vue", OWNER_VUE, FileKind::VueSfc);
+    upsert(&host, "/src/types.ts", TYPES_A, FileLanguage::script_ts());
+    upsert(&host, "/src/Comp.vue", OWNER_VUE, FileLanguage::vue());
 
     // Prime — cold compute publishes the entry with the route facts.
     let prime = host.get_component_meta("/src/Comp.vue");
@@ -156,7 +156,7 @@ fn editing_route_dep_invalidates_warm_hit() {
     let misses_before = prov.component_meta_result_cache_misses.load(Relaxed);
 
     // Edit the route source type — `RProps` gains `b`.
-    upsert(&host, "/src/types.ts", TYPES_B, FileKind::NonSfc);
+    upsert(&host, "/src/types.ts", TYPES_B, FileLanguage::script_ts());
 
     let after = host.get_component_meta("/src/Comp.vue");
     assert!(after.is_some(), "post-edit call must still resolve");

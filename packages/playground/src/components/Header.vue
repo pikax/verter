@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { Store } from "../core/store";
 import ProjectManager from "./ProjectManager.vue";
+import LanguageSelect from "./LanguageSelect.vue";
 import VersionSelect from "./VersionSelect.vue";
 import VueVersionSelect from "./VueVersionSelect.vue";
 
@@ -25,6 +26,7 @@ function verterTimingTitle(): string {
       <span class="logo-text">Verter Playground</span>
     </div>
     <ProjectManager :store="store" />
+    <LanguageSelect :store="store" />
     <VersionSelect :store="store" />
     <VueVersionSelect :store="store" />
     <div class="actions">

@@ -23,8 +23,8 @@ use crate::tsgo::merge;
 
 use super::server_utils::{
     event_name_match_rank, extract_word_at_offset, goto_response_from_locations,
-    listener_prop_candidates, location_from_span, push_unique_location, resolve_component_for,
-    resolve_import_path, to_pascal_case,
+    is_default_export_component_carrier, listener_prop_candidates, location_from_span,
+    push_unique_location, resolve_component_for, resolve_import_path, to_pascal_case,
 };
 use super::{ResolvedComponentDocument, VerterLanguageServer};
 
@@ -88,7 +88,7 @@ impl VerterLanguageServer {
         }
 
         let child_canonical_id = resolved_targets.into_iter().find_map(|resolved_target| {
-            if resolved_target.ends_with(".vue") {
+            if is_default_export_component_carrier(&resolved_target) {
                 return Some(resolved_target);
             }
 
@@ -97,7 +97,7 @@ impl VerterLanguageServer {
                     .host()
                     .get_export_span_follow_reexports(&resolved_target, binding)
                     .map(|(resolved_id, _, _)| resolved_id)
-                    .filter(|resolved_id| resolved_id.ends_with(".vue"))
+                    .filter(|resolved_id| is_default_export_component_carrier(resolved_id))
             })
         })?;
 
@@ -139,7 +139,7 @@ impl VerterLanguageServer {
         }
 
         let child_canonical_id = resolved_targets.into_iter().find_map(|resolved_target| {
-            if resolved_target.ends_with(".vue") {
+            if is_default_export_component_carrier(&resolved_target) {
                 return Some(resolved_target);
             }
 
@@ -147,7 +147,7 @@ impl VerterLanguageServer {
                 .host()
                 .get_export_span_follow_reexports(&resolved_target, binding_name)
                 .map(|(resolved_id, _, _)| resolved_id)
-                .filter(|resolved_id| resolved_id.ends_with(".vue"))
+                .filter(|resolved_id| is_default_export_component_carrier(resolved_id))
         })?;
 
         let child_analysis = self.documents.host().get_analysis(&child_canonical_id)?;
@@ -310,7 +310,7 @@ impl VerterLanguageServer {
                     {
                         return Some(GotoDefinitionResponse::Scalar(location));
                     }
-                    if canonical_id.ends_with(".vue") {
+                    if is_default_export_component_carrier(canonical_id) {
                         if let Some(location) =
                             self.resolve_precise_export_location(canonical_id, "default")
                         {
@@ -327,7 +327,7 @@ impl VerterLanguageServer {
                     {
                         return Some(GotoDefinitionResponse::Scalar(location));
                     }
-                    if resolved.ends_with(".vue") {
+                    if is_default_export_component_carrier(&resolved) {
                         if let Some(location) =
                             self.resolve_precise_export_location(&resolved, "default")
                         {
@@ -952,7 +952,7 @@ impl VerterLanguageServer {
         // Follow barrel re-export chains: if the resolved file is not a .vue file
         // and we know the component name, look up the re-export chain to find the
         // terminal .vue file (e.g. ./components/index.ts → ./components/Button.vue).
-        if !child_canonical_id.ends_with(".vue") {
+        if !is_default_export_component_carrier(&child_canonical_id) {
             if let Some(name) = component_name {
                 // Ensure the barrel file is loaded so we can inspect its exports
                 if self
@@ -968,7 +968,7 @@ impl VerterLanguageServer {
                     .host()
                     .get_export_span_follow_reexports(&child_canonical_id, name)
                 {
-                    if resolved_id.ends_with(".vue") {
+                    if is_default_export_component_carrier(&resolved_id) {
                         child_canonical_id = resolved_id;
                     }
                 }
@@ -989,6 +989,12 @@ impl VerterLanguageServer {
             if !self.documents.host().ensure_loaded(&child_canonical_id) {
                 return None;
             }
+            // ANALYSIS-facing (NOT IDE-sync): this drives the shared compile so
+            // the imported component's analysis is populated, then reads
+            // `get_analysis` below — it does NOT consume IDE TSX. The result is
+            // ignored; the compile side-effect lands the analysis before any
+            // (Main-less-carrier) `MissingVirtualNode`, so a Svelte child's
+            // analysis still resolves. Kept on `ensure_compiled` deliberately.
             let profile = self.documents.tsx_profile.read().clone();
             let _ = self
                 .documents
@@ -1002,7 +1008,7 @@ impl VerterLanguageServer {
 
         // If the analysis came from the barrel file but we resolved to a .vue file,
         // prefer the .vue file's analysis for accurate prop/emit information.
-        let analysis = if child_canonical_id.ends_with(".vue") {
+        let analysis = if is_default_export_component_carrier(&child_canonical_id) {
             self.documents
                 .host()
                 .get_analysis(&child_canonical_id)

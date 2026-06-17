@@ -116,7 +116,7 @@ impl ProviderSyncState {
     /// open Vue document whose owning project is not yet resolved. This is the
     /// state the drain / foreground sync create (or preserve) so an open Vue
     /// file keeps a live TSX in the provider while ownership is unresolved.
-    pub fn unresolved_vue(source_id: &str, is_jsx: bool) -> Self {
+    pub fn unresolved_carrier(source_id: &str, is_jsx: bool) -> Self {
         let ext = if is_jsx { ".jsx" } else { ".tsx" };
         Self::unresolved(format!("{source_id}{ext}"))
     }
@@ -146,7 +146,7 @@ pub struct ProviderSyncTransition {
     pub stale_paths: Vec<(ProviderPathKind, String)>,
 }
 
-pub fn vue_sync_state_for_source(
+pub fn carrier_sync_state_for_source(
     resolver: &NativeProjectResolver,
     source_id: &str,
     is_jsx: bool,
@@ -170,7 +170,7 @@ pub fn vue_sync_state_for_source(
 /// The owner binding the CURRENT snapshot resolver would assign to `source_id`.
 ///
 /// `Owned(key)` when a single project owns the file (the same `tsconfig_path`-
-/// else-`root` key [`vue_sync_state_for_source`] uses), otherwise `Unresolved`
+/// else-`root` key [`carrier_sync_state_for_source`] uses), otherwise `Unresolved`
 /// (unowned or ambiguous). This is the cheap owner-only projection — it does not
 /// compile or build paths — used to decide whether an already-loaded open `.vue`
 /// file's committed binding still matches the live resolution.
@@ -206,7 +206,27 @@ pub fn committed_binding_matches_current(
     committed.owner_binding == *current
 }
 
-pub fn non_vue_sync_state_for_source(
+/// Resolve the [`verter_session::FileLanguage`] for a non-carrier
+/// provider-sync target.
+///
+/// `Some(language)` for plain-script rows — the target upserts and
+/// syncs to the type provider as that script language (the SAME row the
+/// workspace-scan and editor ingresses resolve for the path, via the
+/// host's language classifier). `None` for framework-carrier rows: a
+/// carrier dependency must never be upserted and synced to the provider
+/// as a raw script — the Vue carrier syncs through the dedicated Vue
+/// public-api path, and a carrier without a registered implementation
+/// produces no provider sync state at all (its own requests surface the
+/// typed unsupported-language error).
+pub fn provider_script_language(
+    host: &verter_session::VerterHost,
+    canonical_id: &str,
+) -> Option<verter_session::FileLanguage> {
+    let language = host.language_classifier().classify(canonical_id);
+    (!language.is_framework_carrier()).then_some(language)
+}
+
+pub fn non_carrier_sync_state_for_source(
     resolver: &NativeProjectResolver,
     source_id: &str,
 ) -> Option<ProviderSyncState> {
@@ -336,18 +356,22 @@ const ALL_PATH_KINDS: [ProviderPathKind; 3] = [
 /// live (`prev.ide_background_loaded`). The caller reads this purely to choose
 /// `sync_tsx` (in-place update of an already-live path) vs `open_tsx` (first
 /// open). It is NOT the committed-liveness decision: the committed `ide_path` /
-/// `ide_background_loaded` are produced by [`open_unresolved_vue_commit`], which
+/// `ide_background_loaded` are produced by [`open_unresolved_carrier_commit`], which
 /// routes the IDE kind through the shared per-kind revert/retain discipline
 /// (`revert_unsynced_kinds` + `genuinely_stale_after_sync`) so a failed/absent
 /// sync RETAINS the prior live path rather than advertising a dead/None one.
 ///
 /// The owner-independent API path is always dropped here (it is owner-derived).
-pub fn open_unresolved_vue_state(
+pub fn open_unresolved_carrier_state(
     previous: Option<&ProviderSyncState>,
     source_id: &str,
     is_jsx: bool,
 ) -> ProviderSyncState {
-    let desired_ide_path = format!("{source_id}{}", if is_jsx { ".jsx" } else { ".tsx" });
+    // Route the IDE-path naming through the shared column-backed derivation
+    // (D-x) rather than re-deriving the `{src}.tsx`/`.jsx` formula locally — the
+    // single naming authority, so a `.svelte` carrier projects `.tsx` exactly
+    // as the column dictates.
+    let desired_ide_path = verter_workspace::carrier_ide_provider_path(source_id, is_jsx);
     // Syncability hint: the desired path is already live ONLY when the prior IDE
     // path is the SAME desired-extension artifact AND was genuinely loaded. The
     // caller reads this to choose `sync_tsx` (update) vs `open_tsx` (first open).
@@ -372,7 +396,7 @@ pub fn open_unresolved_vue_state(
 /// conversion, if any — so the caller (which holds the provider `sync` handle)
 /// can CLOSE the orphaned `.vue.ts` after committing the converted state.
 ///
-/// [`open_unresolved_vue_state`] is a pure state transform: it forces the
+/// [`open_unresolved_carrier_state`] is a pure state transform: it forces the
 /// binding to `Unresolved`, preserves the owner-independent live IDE TSX, and
 /// DROPS the owner-derived `api_path`. Dropping it from committed state is not
 /// enough — the provider still holds the `.vue.ts` open, so it leaks as an
@@ -474,7 +498,7 @@ pub fn genuinely_stale_after_sync(
 /// owner-INDEPENDENT IDE TSX. The owner-derived API (`.vue.ts`) is dropped from
 /// the committed state and surfaced for an UNCONDITIONAL close (R2-8); it is
 /// never a participating kind of the unresolved target.
-pub struct OpenUnresolvedVueCommit {
+pub struct OpenUnresolvedCarrierCommit {
     /// The state to commit. Its `ide_path` is the path CURRENTLY LIVE in the
     /// provider: the freshly-synced desired path if it synced this pass, else
     /// the retained prior LIVE path, else `None`. Binding forced `Unresolved`,
@@ -509,7 +533,7 @@ pub struct OpenUnresolvedVueCommit {
 ///     failed/absent IDE sync therefore retains the prior live path AND never
 ///     closes it (the invariant rows 7 & 9 violated).
 ///
-/// `target` is the desired Unresolved state from [`open_unresolved_vue_state`]
+/// `target` is the desired Unresolved state from [`open_unresolved_carrier_state`]
 /// (it carries the desired-extension IDE path and the open-vs-update syncability
 /// hint via `ide_background_loaded`). `ide_synced` is whether the caller's IDE
 /// sync of `target.ide_path` succeeded this pass.
@@ -517,18 +541,18 @@ pub struct OpenUnresolvedVueCommit {
 /// INVARIANT: the committed `ide_path` is the path CURRENTLY LIVE in the
 /// provider — never a path the provider has not opened, never `None` while a
 /// prior live path is still open.
-pub fn open_unresolved_vue_commit(
+pub fn open_unresolved_carrier_commit(
     previous: Option<&ProviderSyncState>,
     target: ProviderSyncState,
     ide_synced: bool,
-) -> OpenUnresolvedVueCommit {
+) -> OpenUnresolvedCarrierCommit {
     debug_assert!(
         target.owner_binding.is_unresolved(),
-        "open_unresolved_vue_commit target must be Unresolved-bound"
+        "open_unresolved_carrier_commit target must be Unresolved-bound"
     );
     debug_assert!(
         target.api_path.is_none(),
-        "open_unresolved_vue_commit target must not carry an owner-derived API path"
+        "open_unresolved_carrier_commit target must not carry an owner-derived API path"
     );
 
     // The kinds that successfully went live this pass. Only the IDE kind is ever
@@ -602,7 +626,7 @@ pub fn open_unresolved_vue_commit(
     // close UNCONDITIONALLY (independent of the IDE outcome — R2-8).
     let dropped_api = dropped_api_path_on_unowned_conversion(previous, &committed);
 
-    OpenUnresolvedVueCommit {
+    OpenUnresolvedCarrierCommit {
         committed,
         dropped_api,
         stale_ide_after_success,

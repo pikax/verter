@@ -20,7 +20,7 @@ use verter_type_expr::{PrimitiveName, TypeExpr};
 
 use super::types::{EvaluateTypeExpressionRequest, ImportSpec, NamedImport, SymbolKind};
 use crate::semantic_query::{ProjectionMode, SemanticNodeData};
-use crate::types::{FileKind, HostConfig, UpsertRequest};
+use crate::types::{HostConfig, UpsertRequest};
 use crate::VerterHost;
 
 // ---------------------------------------------------------------------------
@@ -40,7 +40,9 @@ fn upsert_ts(host: &VerterHost, canonical_id: &str, source: &str) {
         canonical_id: Some(canonical_id.to_string()),
         input_id: canonical_id.to_string(),
         source: Arc::from(source),
-        file_kind: FileKind::from_path(canonical_id),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static(canonical_id)
+            .static_resolution(),
         aliases: Vec::new(),
     });
 }

@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use verter_audit::payloads::tags::CompileTargetTag;
 use verter_compiler::compile::CompileTarget;
-use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
 const SFC: &str = "<script setup lang=\"ts\">\n\
@@ -34,7 +34,7 @@ fn build_host() -> Arc<VerterHost> {
         canonical_id: Some("/i.vue".into()),
         input_id: "/i.vue".into(),
         source: Arc::from(SFC),
-        file_kind: FileKind::VueSfc,
+        file_language: FileLanguage::vue(),
         aliases: Vec::new(),
     });
     host

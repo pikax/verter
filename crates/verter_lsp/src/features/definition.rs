@@ -80,7 +80,7 @@ pub fn definition_at_position(
                         }
                         // Default import of .vue file: the local name won't match script
                         // bindings, so retry with "default" which handles Vue SFC exports.
-                        if canonical_id.ends_with(".vue") {
+                        if crate::server::is_default_export_component_carrier(canonical_id) {
                             if let Some(result) = try_precise_cross_file(
                                 canonical_id,
                                 "default",
@@ -101,7 +101,7 @@ pub fn definition_at_position(
                         ) {
                             return Some(result);
                         }
-                        if resolved.ends_with(".vue") {
+                        if crate::server::is_default_export_component_carrier(&resolved) {
                             if let Some(result) = try_precise_cross_file(
                                 &resolved,
                                 "default",
@@ -251,7 +251,7 @@ pub fn definition_at_position(
                                         ) {
                                             return Some(result);
                                         }
-                                        if cid.ends_with(".vue") {
+                                        if crate::server::is_default_export_component_carrier(cid) {
                                             if let Some(result) = try_precise_cross_file(
                                                 cid,
                                                 "default",
@@ -273,7 +273,9 @@ pub fn definition_at_position(
                                         ) {
                                             return Some(result);
                                         }
-                                        if resolved.ends_with(".vue") {
+                                        if crate::server::is_default_export_component_carrier(
+                                            &resolved,
+                                        ) {
                                             if let Some(result) = try_precise_cross_file(
                                                 &resolved,
                                                 "default",
@@ -341,7 +343,7 @@ pub fn definition_at_position(
                             ) {
                                 return Some(result);
                             }
-                            if canonical_id.ends_with(".vue") {
+                            if crate::server::is_default_export_component_carrier(canonical_id) {
                                 if let Some(result) = try_precise_cross_file(
                                     canonical_id,
                                     "default",
@@ -363,7 +365,7 @@ pub fn definition_at_position(
                             ) {
                                 return Some(result);
                             }
-                            if resolved.ends_with(".vue") {
+                            if crate::server::is_default_export_component_carrier(&resolved) {
                                 if let Some(result) = try_precise_cross_file(
                                     &resolved,
                                     "default",

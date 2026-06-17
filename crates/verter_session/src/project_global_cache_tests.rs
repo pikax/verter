@@ -31,7 +31,7 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
-use crate::{CompileErrorPolicy, FileKind, HostConfig, UpsertRequest, VerterHost};
+use crate::{CompileErrorPolicy, FileLanguage, HostConfig, UpsertRequest, VerterHost};
 
 fn host() -> VerterHost {
     VerterHost::new_standalone(HostConfig {
@@ -47,7 +47,7 @@ fn upsert_ts(host: &VerterHost, id: &str, source: &str) {
             canonical_id: None,
             input_id: id.to_string(),
             source: Arc::from(source),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .unwrap();
@@ -59,7 +59,7 @@ fn upsert_vue(host: &VerterHost, id: &str, source: &str) {
             canonical_id: None,
             input_id: id.to_string(),
             source: Arc::from(source),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: Vec::new(),
         })
         .unwrap();
@@ -1431,8 +1431,8 @@ fn derived_semantic_query_records_project_generation_anchor_slice11() {
 #[test]
 fn evict_canonical_drops_resolved_named_types_for_that_canonical_only() {
     use crate::semantic_query::HostResolvedNamedTypeKey;
-    use verter_compiler::utils::oxc::vue::resolve_type::cache_keys::ResolvedNamedTypeCacheKey;
-    use verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements;
+    use verter_compiler::utils::oxc::script::type_surface::ResolvedElements;
+    use verter_compiler::utils::oxc::vue::named_type_keys::ResolvedNamedTypeCacheKey;
 
     let host = host();
     let store = host.project_type_store();
@@ -1479,8 +1479,8 @@ fn evict_canonical_drops_resolved_named_types_for_that_canonical_only() {
 #[test]
 fn bump_project_generation_clears_resolved_named_types() {
     use crate::semantic_query::HostResolvedNamedTypeKey;
-    use verter_compiler::utils::oxc::vue::resolve_type::cache_keys::ResolvedNamedTypeCacheKey;
-    use verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements;
+    use verter_compiler::utils::oxc::script::type_surface::ResolvedElements;
+    use verter_compiler::utils::oxc::vue::named_type_keys::ResolvedNamedTypeCacheKey;
 
     let host = host();
     let store = host.project_type_store();

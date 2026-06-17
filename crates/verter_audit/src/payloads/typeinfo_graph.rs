@@ -124,6 +124,39 @@ pub enum ExactnessTag {
     Cycle,
 }
 
+/// Closed mirror of the per-kind framework-surface support
+/// discriminator (`FrameworkSurfaceKindSupport` on the typeinfo
+/// wire). Producers map the wire enum to this tag at the audit
+/// emission boundary, keeping the substrate decoupled from
+/// `verter_protocol`.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    ts_rs::TS,
+)]
+#[ts(export_to = "audit.generated.ts")]
+pub enum FrameworkSurfaceKindSupportTag {
+    /// Wire default — invalid in server-produced v3 payloads; a
+    /// nonzero count here flags a producer bug.
+    #[default]
+    Unspecified,
+    /// Members are authoritative (empty = supported-empty).
+    Supported,
+    /// Members empty, exactness UNSUPPORTED, ≥1 diagnostic.
+    Unsupported,
+    /// Usable subset plus explaining diagnostics.
+    Partial,
+}
+
 /// Closed mirror of the typeinfo degradation classifier used in
 /// `StructuredAuditEvent::TypeInfoGraphDegraded`. Captures WHY a
 /// publication was admitted as degraded.
@@ -226,6 +259,19 @@ pub struct TypeInfoGraphPayload {
     /// deduplicated by producers. Empty on clean success.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub degradation_reasons: Vec<TypeInfoDegradationReasonTag>,
+    /// Number of `FrameworkSurfaceKindEntry` items in the
+    /// framework-surface response payload. Zero (the default) for
+    /// every non-framework-surface operation — additive coverage for
+    /// `GraphOperationTag::FrameworkSurfaces`.
+    #[serde(default)]
+    pub framework_surface_entry_count: u32,
+    /// Per-support-status counts of the framework-surface response's
+    /// kind entries, keyed by [`FrameworkSurfaceKindSupportTag`].
+    /// Absent statuses count as zero; the populated sum equals
+    /// [`Self::framework_surface_entry_count`]. Empty (the default)
+    /// for every non-framework-surface operation.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub framework_surface_support_counts: BTreeMap<FrameworkSurfaceKindSupportTag, u32>,
 }
 
 impl TypeInfoGraphPayload {
@@ -257,6 +303,17 @@ impl TypeInfoGraphPayload {
     #[must_use]
     pub fn total_exactness_counted(&self) -> u32 {
         self.exactness_counts
+            .values()
+            .copied()
+            .fold(0, u32::saturating_add)
+    }
+
+    /// Sum of every per-support framework-surface counter. Producers
+    /// can call this in tests to assert the counters partition
+    /// [`Self::framework_surface_entry_count`].
+    #[must_use]
+    pub fn total_framework_surface_support_counted(&self) -> u32 {
+        self.framework_surface_support_counts
             .values()
             .copied()
             .fold(0, u32::saturating_add)
@@ -293,6 +350,64 @@ mod tests {
             .exactness_counts
             .insert(ExactnessTag::Cycle, u32::MAX);
         assert_eq!(payload.total_exactness_counted(), u32::MAX);
+    }
+
+    /// The framework-surface coverage fields are ADDITIVE with
+    /// default-zero values: a payload serialized before the fields
+    /// existed (no such keys in the JSON) deserializes with zero /
+    /// empty values, and a non-framework-surface payload leaves them
+    /// at their defaults.
+    #[test]
+    fn framework_surface_fields_are_additive_default_zero() {
+        let legacy_json = r#"{"operation":"ResolveSymbol","mode":"Identity",
+            "demand":"Published","roots_count":0,"closure":"RootOnly",
+            "schema_version":2,"snapshot_node_count":0,"snapshot_edge_count":0,
+            "snapshot_symbol_count":0,"cache_hit":false,"publication_retries":0,
+            "merged_decl_count":0,"augmentation_count":0,
+            "overload_signature_count":0,"relation_check_count":0,
+            "origin_edges_emitted":0,"display_projection_emitted":false,
+            "zod_projection_emitted":false,"json_schema_projection_emitted":false,
+            "storybook_projection_emitted":false,"docs_projection_emitted":false,
+            "type_descriptor_projection_emitted":false,"degraded":false}"#;
+        let decoded: TypeInfoGraphPayload =
+            serde_json::from_str(legacy_json).expect("a pre-addition payload must deserialize");
+        assert_eq!(decoded.framework_surface_entry_count, 0);
+        assert!(decoded.framework_surface_support_counts.is_empty());
+        assert_eq!(decoded.total_framework_surface_support_counted(), 0);
+    }
+
+    #[test]
+    fn framework_surface_support_counts_round_trip_and_partition() {
+        let payload = TypeInfoGraphPayload {
+            operation: GraphOperationTag::FrameworkSurfaces,
+            framework_surface_entry_count: 6,
+            framework_surface_support_counts: BTreeMap::from([
+                (FrameworkSurfaceKindSupportTag::Supported, 4),
+                (FrameworkSurfaceKindSupportTag::Unsupported, 1),
+                (FrameworkSurfaceKindSupportTag::Partial, 1),
+            ]),
+            ..TypeInfoGraphPayload::default()
+        };
+        assert_eq!(
+            payload.total_framework_surface_support_counted(),
+            payload.framework_surface_entry_count,
+        );
+
+        let json = serde_json::to_string(&payload).expect("serialize");
+        let back: TypeInfoGraphPayload = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.operation, GraphOperationTag::FrameworkSurfaces);
+        assert_eq!(back.framework_surface_entry_count, 6);
+        assert_eq!(
+            back.framework_surface_support_counts
+                .get(&FrameworkSurfaceKindSupportTag::Supported),
+            Some(&4)
+        );
+        assert_eq!(
+            back.framework_surface_support_counts
+                .get(&FrameworkSurfaceKindSupportTag::Unsupported),
+            Some(&1)
+        );
+        assert_eq!(back.total_framework_surface_support_counted(), 6);
     }
 
     #[test]

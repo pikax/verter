@@ -18,7 +18,7 @@ use verter_session::semantic_query::ProjectionMode;
 use verter_session::typeinfo::types::{
     EvaluateTypeExpressionRequest, ImportSpec, NamedImport, SymbolKind,
 };
-use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{HostConfig, UpsertRequest, VerterHost};
 
 const TS_FIXTURE: &str = r#"
 export interface IFoo { a: number }
@@ -33,7 +33,9 @@ fn list_file_symbols_returns_inventory() {
         canonical_id: Some("/types.ts".to_string()),
         input_id: "/types.ts".to_string(),
         source: Arc::from(TS_FIXTURE),
-        file_kind: FileKind::from_path("/types.ts"),
+        file_language: verter_session::LanguageRegistry::global()
+            .classify_static("/types.ts")
+            .static_resolution(),
         aliases: Vec::new(),
     });
 
@@ -61,7 +63,9 @@ fn resolve_named_symbol_with_audit_returns_record() {
         canonical_id: Some("/types.ts".to_string()),
         input_id: "/types.ts".to_string(),
         source: Arc::from("export type T = string;\n"),
-        file_kind: FileKind::from_path("/types.ts"),
+        file_language: verter_session::LanguageRegistry::global()
+            .classify_static("/types.ts")
+            .static_resolution(),
         aliases: Vec::new(),
     });
 
@@ -89,7 +93,9 @@ fn evaluate_type_expression_with_audit_resolves_primitive() {
         canonical_id: Some("/scope.ts".to_string()),
         input_id: "/scope.ts".to_string(),
         source: Arc::from("export type Anchor = number;\n"),
-        file_kind: FileKind::from_path("/scope.ts"),
+        file_language: verter_session::LanguageRegistry::global()
+            .classify_static("/scope.ts")
+            .static_resolution(),
         aliases: Vec::new(),
     });
 
@@ -120,14 +126,18 @@ fn evaluate_with_extra_imports_round_trip() {
         canonical_id: Some("/types.ts".to_string()),
         input_id: "/types.ts".to_string(),
         source: Arc::from("export type Foo = { v: number };\n"),
-        file_kind: FileKind::from_path("/types.ts"),
+        file_language: verter_session::LanguageRegistry::global()
+            .classify_static("/types.ts")
+            .static_resolution(),
         aliases: Vec::new(),
     });
     let _ = host.upsert(UpsertRequest {
         canonical_id: Some("/scope.ts".to_string()),
         input_id: "/scope.ts".to_string(),
         source: Arc::from("export type Anchor = number;\n"),
-        file_kind: FileKind::from_path("/scope.ts"),
+        file_language: verter_session::LanguageRegistry::global()
+            .classify_static("/scope.ts")
+            .static_resolution(),
         aliases: Vec::new(),
     });
 

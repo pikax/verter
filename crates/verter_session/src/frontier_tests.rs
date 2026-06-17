@@ -12,7 +12,7 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use crate::{CompileErrorPolicy, FileKind, HostConfig, UpsertRequest, VerterHost};
+use crate::{CompileErrorPolicy, FileLanguage, HostConfig, UpsertRequest, VerterHost};
 use rustc_hash::FxHashSet;
 
 // ---------------------------------------------------------------------------
@@ -33,7 +33,7 @@ fn upsert_vue(host: &VerterHost, id: &str, source: &str) {
             canonical_id: None,
             input_id: id.to_string(),
             source: Arc::from(source),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: Vec::new(),
         })
         .unwrap();
@@ -45,7 +45,7 @@ fn upsert_non_sfc(host: &VerterHost, id: &str, source: &str) {
             canonical_id: None,
             input_id: id.to_string(),
             source: Arc::from(source),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .unwrap();
@@ -56,7 +56,7 @@ fn resolve_type(
     owner: &str,
     import_source: &str,
     type_name: &str,
-) -> Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements> {
+) -> Option<verter_compiler::utils::oxc::script::type_surface::ResolvedElements> {
     let mut tracked = BTreeSet::new();
     let mut resolution = BTreeSet::new();
     let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
@@ -141,7 +141,7 @@ impl verter_workspace::WorkspaceRead for CountingWorkspace {
         self.inner.read_package_manifest(canonical_id)
     }
 
-    fn classify_file(&self, canonical_id: &str) -> verter_workspace::FileKind {
+    fn classify_file(&self, canonical_id: &str) -> verter_language::FileLanguage {
         self.inner.classify_file(canonical_id)
     }
 

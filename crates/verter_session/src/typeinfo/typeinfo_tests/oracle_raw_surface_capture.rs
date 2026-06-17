@@ -10,9 +10,9 @@
 
 use std::sync::Arc;
 
-use verter_compiler::utils::oxc::vue::raw_surface::{RawKey, RawMemberKind, SymbolSpace};
+use verter_compiler::utils::oxc::script::raw_surface::{RawKey, RawMemberKind, SymbolSpace};
 
-use crate::types::{FileKind, HostConfig, UpsertRequest};
+use crate::types::{HostConfig, UpsertRequest};
 use crate::VerterHost;
 
 fn make_host() -> Arc<VerterHost> {
@@ -24,7 +24,9 @@ fn upsert(host: &VerterHost, canonical_id: &str, source: &str) {
         canonical_id: Some(canonical_id.to_string()),
         input_id: canonical_id.to_string(),
         source: Arc::from(source),
-        file_kind: FileKind::from_path(canonical_id),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static(canonical_id)
+            .static_resolution(),
         aliases: Vec::new(),
     });
 }

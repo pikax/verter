@@ -36,8 +36,13 @@ use crate::ast::types::{
 use crate::ide::condition::{self, ConditionScope};
 use crate::ide::template::emit::emit_synthesized_shorthand_value;
 use crate::template::code_gen::binding::{BindingResolver, BindingType};
+use crate::template::code_gen::expression::{
+    build_prefixed_expr_segments, resolve_simple_expr_segments,
+};
 use crate::template::code_gen::types::CodeGenOutput;
-use crate::template::oxc::types::{OxcNodeData, OxcParsedAst, OxcParsedElement};
+use crate::template::oxc::types::{
+    ComponentSlotSummary, OxcNodeData, OxcParsedAst, OxcParsedElement, SlotChildFact, SlotChildKind,
+};
 use crate::types::NodeId;
 
 use super::IdeTemplateOptions;
@@ -624,10 +629,18 @@ fn walk_element<'a, 'alloc>(
     }
 
     // ── Strict slot children collection ────────────────────────────
+    // Both checks read the SAME per-component slot summary from the shared
+    // overlay (built once on first demand for this component, then memoized)
+    // instead of each re-scanning the component's children. `None` covers
+    // dynamic `<component :is>` (no checks).
     if ctx.options.strict_slots && !ctx.options.is_jsx && el.tag_type == TagType::Component {
-        collect_strict_slot_children(el, tag_name, ctx);
-        // Collect provided slot names for checkRequiredSlots
-        collect_required_slots_check(el, tag_name, ctx);
+        let oxc_ast = ctx.oxc_ast;
+        let ast = ctx.ast;
+        let source = ctx.source;
+        if let Some(summary) = oxc_ast.slot_summary(id, ast, source) {
+            collect_strict_slot_children(summary, el, ctx);
+            collect_required_slots_check(summary, el, ctx);
+        }
     }
 
     // Close slot IIFE: </>)(extractArgumentsFromRenderSlot(...))}
@@ -1556,18 +1569,20 @@ fn rewrite_component_is<'alloc>(
         return false;
     }
 
-    // All dynamic :is expressions use extractRenderComponent wrapper.
-    // Resolve binding prefixes (e.g., _ctx. for Data bindings)
-    let oxc_prop = oxc_el.and_then(|el| el.props.iter().find(|p| p.prop_index == bind_is_index));
-    let resolved_expr = if let Some(oxc_p) = oxc_prop {
+    // All dynamic :is expressions use the extractRenderComponent wrapper. The
+    // raw `:is` expression resolves through the shared segmented producer so the
+    // authored identifiers carry their source offsets while the resolver
+    // scaffolding (`_ctx.` / `__props.` prefixes, `.value` suffixes) stays
+    // unmapped.
+    let oxc_prop = oxc_el.and_then(|el| el.prop(bind_is_index));
+    let resolved = if let Some(oxc_p) = oxc_prop {
         if let Some(ref exp) = oxc_p.exp {
-            use crate::template::code_gen::vapor::interpolation::build_prefixed_expr;
-            build_prefixed_expr(value_expr, value_start, exp, resolver, &[])
+            build_prefixed_expr_segments(value_expr, value_start, exp, resolver, &[])
         } else {
-            resolver.resolve_simple_expr(value_expr)
+            resolve_simple_expr_segments(resolver, value_expr, value_start)
         }
     } else {
-        resolver.resolve_simple_expr(value_expr)
+        resolve_simple_expr_segments(resolver, value_expr, value_start)
     };
 
     // Wrap in IIFE so the `const` declaration is valid in any context.
@@ -1598,18 +1613,14 @@ fn rewrite_component_is<'alloc>(
         }
         buf
     };
-    let content = format!(
-        "{}{});{} return ",
-        iife_prefix, resolved_expr, ts_comment_text
-    );
-    // Use mapped emission so the expression gets a source map token.
-    // This allows TSGO to map hover positions back to the Vue template.
-    out.prepend_alloc_mapped_with_offset(
-        el.tag_open.start,
-        value_start,
-        iife_prefix.len() as u32,
-        &content,
-    );
+    // Assemble the IIFE scaffolding around the mapped expression into one plan:
+    // `iife_prefix` opens the wrapper call, the suffix closes it (`);`), emits any
+    // TS directive comments, then ` return `. Both wrappers are synthetic, so only
+    // the authored `:is` identifiers carry source-map tokens — TSGO maps hover
+    // positions back to the Vue template through them.
+    let suffix = format!(");{} return ", ts_comment_text);
+    let plan = resolved.wrapped(&iife_prefix, &suffix);
+    out.prepend_mapped_generated_text(el.tag_open.start, &plan);
     rewrite_component_tag_name(el, temp_name, out);
 
     // Remove `:is="..."`
@@ -1755,8 +1766,7 @@ fn collect_slot_props(
                         let key = quote_prop_key_if_needed(arg);
                         if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
                             let raw = &source[vs as usize..ve as usize];
-                            let oxc_prop =
-                                oxc_el.and_then(|e| e.props.iter().find(|p| p.prop_index == i));
+                            let oxc_prop = oxc_el.and_then(|e| e.prop(i));
                             let resolved = if let Some(oxc_p) = oxc_prop {
                                 if let Some(ref exp) = oxc_p.exp {
                                     build_prefixed_expr(raw, vs, exp, resolver, &[])
@@ -2048,171 +2058,69 @@ fn visit_comment(
 
 // ── Strict slot children ────────────────────────────────────────
 
-/// Collect children of a component element for strict slot type checking.
+/// Emit `strictRenderSlot` entries for a component from its slot summary.
 ///
-/// Groups children by slot name and classifies each child as Component,
-/// HtmlElement, Text, or Interpolation. Entries are stored in `ctx.strict_slot_entries`.
+/// Reads the shared overlay's per-component [`ComponentSlotSummary`] (built once
+/// for this component, then memoized) instead of re-scanning the component's
+/// children. Each non-empty slot group becomes one [`StrictSlotEntry`]; the
+/// per-child source spans are resolved from each fact's AST node so the emitted
+/// bytes match a direct scan.
 fn collect_strict_slot_children(
+    summary: &ComponentSlotSummary,
     el: &ElementNode,
-    tag_name: &str,
     ctx: &mut IdeTemplateCtx<'_, '_>,
 ) {
-    // Skip dynamic <component :is> — type is unreliable
-    if tag_name == "component" {
-        return;
-    }
-
-    let content = match &el.content {
-        Some(c) => c,
-        None => return,
-    };
-
-    if content.children.is_empty() {
-        return;
-    }
+    #[cfg(test)]
+    crate::template::oxc::slot_summary::record_slot_summary_read();
 
     let parent_offset = el.tag_open.start;
-
-    // Group children by slot name
-    let mut slot_map: Vec<(String, Vec<StrictSlotChild>)> = Vec::new();
-
-    for &child_id in &content.children {
-        let child_node = &ctx.ast.nodes[child_id.0];
-        match &child_node.kind {
-            AstNodeKind::Element(child_el) => {
-                if child_el.tag_type == TagType::Template && child_el.v_slot.is_some() {
-                    // Named slot: <template #name>children</template>
-                    let slot_name = extract_template_slot_name(child_el, ctx.source);
-                    let children = collect_children_from_element(child_el, ctx);
-                    if !children.is_empty() {
-                        push_to_slot_map(&mut slot_map, slot_name, children);
-                    }
-                } else {
-                    // Direct child → default slot
-                    if let Some(child) = classify_element_child(child_el, ctx.source) {
-                        push_to_slot_map(&mut slot_map, "default".to_string(), vec![child]);
-                    }
-                }
-            }
-            AstNodeKind::Text(text) => {
-                let text_content = &ctx.source[text.start as usize..text.end as usize];
-                if !text_content.trim().is_empty() {
-                    push_to_slot_map(
-                        &mut slot_map,
-                        "default".to_string(),
-                        vec![StrictSlotChild::Text {
-                            source_pos: text.start,
-                        }],
-                    );
-                }
-            }
-            AstNodeKind::Interpolation(interp) => {
-                push_to_slot_map(
-                    &mut slot_map,
-                    "default".to_string(),
-                    vec![StrictSlotChild::Interpolation {
-                        source_pos: interp.start,
-                    }],
-                );
-            }
-            AstNodeKind::Comment(_) => {
-                // Skip comments
-            }
-        }
-    }
-
-    // Create entries for non-empty slot groups
-    for (slot_name, children) in slot_map {
-        if !children.is_empty() {
-            ctx.strict_slot_entries.push(StrictSlotEntry {
-                parent_comp_offset: parent_offset,
-                slot_name,
-                children,
-            });
-        }
+    for group in &summary.groups {
+        let children = group
+            .children
+            .iter()
+            .map(|fact| strict_child_from_fact(fact, ctx.ast, ctx.source))
+            .collect();
+        ctx.strict_slot_entries.push(StrictSlotEntry {
+            parent_comp_offset: parent_offset,
+            slot_name: group.name.clone(),
+            children,
+        });
     }
 }
 
-/// Push children into the named slot group in the slot map.
-fn push_to_slot_map(
-    slot_map: &mut Vec<(String, Vec<StrictSlotChild>)>,
-    slot_name: String,
-    children: Vec<StrictSlotChild>,
-) {
-    if let Some(entry) = slot_map.iter_mut().find(|(name, _)| *name == slot_name) {
-        entry.1.extend(children);
-    } else {
-        slot_map.push((slot_name, children));
-    }
-}
-
-/// Extract slot name from a `<template #name>` or `<template v-slot:name>` element.
-fn extract_template_slot_name(el: &ElementNode, source: &str) -> String {
-    if let Some(ref v_slot) = el.v_slot {
-        if let (Some(arg_start), Some(arg_end)) = (v_slot.arg_start, v_slot.arg_end) {
-            return source[arg_start as usize..arg_end as usize].to_string();
-        }
-    }
-    "default".to_string()
-}
-
-/// Collect children from a `<template>` wrapper element for strict slot checking.
-fn collect_children_from_element(
-    el: &ElementNode,
-    ctx: &IdeTemplateCtx<'_, '_>,
-) -> Vec<StrictSlotChild> {
-    let content = match &el.content {
-        Some(c) => c,
-        None => return Vec::new(),
-    };
-
-    let mut children = Vec::new();
-    for &child_id in &content.children {
-        let child_node = &ctx.ast.nodes[child_id.0];
-        match &child_node.kind {
-            AstNodeKind::Element(child_el) => {
-                if let Some(child) = classify_element_child(child_el, ctx.source) {
-                    children.push(child);
-                }
+/// Resolve a recorded [`SlotChildFact`] into the emit-time strict-slot child
+/// reference, reading the tag-name / text source span straight from the fact's
+/// AST node. The slot scan records each fact's kind from the node it came from,
+/// so the fact kind always matches its node kind here.
+fn strict_child_from_fact(
+    fact: &SlotChildFact,
+    ast: &crate::ast::types::TemplateAst,
+    source: &str,
+) -> StrictSlotChild {
+    match (fact.kind, &ast.nodes[fact.node_id.0].kind) {
+        (SlotChildKind::Component, AstNodeKind::Element(el)) => {
+            let name_start = el.tag_open.start + 1;
+            StrictSlotChild::Component {
+                name: source[name_start as usize..el.tag_open.name_end as usize].to_string(),
+                source_pos: name_start,
             }
-            AstNodeKind::Text(text) => {
-                let text_content = &ctx.source[text.start as usize..text.end as usize];
-                if !text_content.trim().is_empty() {
-                    children.push(StrictSlotChild::Text {
-                        source_pos: text.start,
-                    });
-                }
-            }
-            AstNodeKind::Interpolation(interp) => {
-                children.push(StrictSlotChild::Interpolation {
-                    source_pos: interp.start,
-                });
-            }
-            AstNodeKind::Comment(_) => {}
         }
-    }
-    children
-}
-
-/// Classify an element child for strict slot checking.
-fn classify_element_child(el: &ElementNode, source: &str) -> Option<StrictSlotChild> {
-    let tag_name_start = el.tag_open.start + 1; // skip `<`
-    let tag_name = &source[tag_name_start as usize..el.tag_open.name_end as usize];
-
-    match el.tag_type {
-        TagType::Component => Some(StrictSlotChild::Component {
-            name: tag_name.to_string(),
-            source_pos: tag_name_start,
-        }),
-        TagType::Element => Some(StrictSlotChild::HtmlElement {
-            tag: tag_name.to_string(),
-            source_pos: tag_name_start,
-        }),
-        TagType::Template => {
-            // <template> wrappers without v-slot are transparent
-            None
+        (SlotChildKind::HtmlElement, AstNodeKind::Element(el)) => {
+            let name_start = el.tag_open.start + 1;
+            StrictSlotChild::HtmlElement {
+                tag: source[name_start as usize..el.tag_open.name_end as usize].to_string(),
+                source_pos: name_start,
+            }
         }
-        TagType::SlotOutlet => None,
+        (SlotChildKind::Text, AstNodeKind::Text(text)) => StrictSlotChild::Text {
+            source_pos: text.start,
+        },
+        (SlotChildKind::Interpolation, AstNodeKind::Interpolation(interp)) => {
+            StrictSlotChild::Interpolation {
+                source_pos: interp.start,
+            }
+        }
+        _ => unreachable!("slot child fact kind does not match its AST node kind"),
     }
 }
 
@@ -2307,66 +2215,26 @@ fn emit_strict_slot_checks(ctx: &mut IdeTemplateCtx<'_, '_>, emit_pos: u32) {
     }
 }
 
-/// Collect provided slot names for a component element for required slot checking.
+/// Emit a `checkRequiredSlots` entry for a component from its slot summary.
 ///
-/// For every component usage, records which slot names the parent provides.
-/// Self-closing components (no children) get an empty `provided_slot_names`.
+/// Reads the shared overlay's `provided_slot_names` (the same per-component
+/// summary that feeds [`collect_strict_slot_children`], built once then
+/// memoized) instead of re-scanning the component's children. Every component
+/// usage records a check — a self-closing component yields an empty
+/// provided-names list.
 fn collect_required_slots_check(
+    summary: &ComponentSlotSummary,
     el: &ElementNode,
-    tag_name: &str,
     ctx: &mut IdeTemplateCtx<'_, '_>,
 ) {
-    // Skip dynamic <component :is>
-    if tag_name == "component" {
-        return;
-    }
+    #[cfg(test)]
+    crate::template::oxc::slot_summary::record_slot_summary_read();
 
     let comp_offset = el.tag_open.start;
-    let source_pos = el.tag_open.start;
-
-    // Collect provided slot names from children
-    let mut provided_slot_names: Vec<String> = Vec::new();
-
-    if let Some(content) = &el.content {
-        if content.children.is_empty() {
-            // Empty tag like <Child></Child> — no slots provided
-        } else {
-            // Check for default slot (direct children that aren't templates with #name)
-            let mut has_non_template_child = false;
-            for &child_id in &content.children {
-                let child_node = &ctx.ast.nodes[child_id.0];
-                match &child_node.kind {
-                    crate::ast::types::AstNodeKind::Element(child_el) => {
-                        let child_tag_name = &ctx.source[(child_el.tag_open.start + 1) as usize
-                            ..child_el.tag_open.name_end as usize];
-                        if child_tag_name == "template" && child_el.v_slot.is_some() {
-                            // Named slot: <template #header> or <template v-slot:name>
-                            let slot_name = extract_template_slot_name(child_el, ctx.source);
-                            if !provided_slot_names.contains(&slot_name) {
-                                provided_slot_names.push(slot_name);
-                            }
-                        } else {
-                            has_non_template_child = true;
-                        }
-                    }
-                    crate::ast::types::AstNodeKind::Text(_)
-                    | crate::ast::types::AstNodeKind::Interpolation(_) => {
-                        has_non_template_child = true;
-                    }
-                    _ => {}
-                }
-            }
-            if has_non_template_child && !provided_slot_names.contains(&"default".to_string()) {
-                provided_slot_names.push("default".to_string());
-            }
-        }
-    }
-    // Self-closing: no content → empty provided_slot_names
-
     ctx.required_slot_checks.push(RequiredSlotsCheck {
         comp_offset,
-        provided_slot_names,
-        source_pos,
+        provided_slot_names: summary.provided_slot_names.clone(),
+        source_pos: comp_offset,
     });
 }
 

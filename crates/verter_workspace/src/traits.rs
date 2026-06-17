@@ -16,10 +16,11 @@ use crate::exact_resolution::DependencySnapshotView;
 use crate::project_key::ProjectStableKey;
 use crate::published_state::ProjectEnvHashArray;
 use crate::types::{
-    ExactResolution, ExactResolutionResult, FileKind, PackageManifest, ParsedEdge,
-    ProjectOwnership, ResolutionContext, ResolvePhase, ResolveRequestKind, ResolveResult,
+    ExactResolution, ExactResolutionResult, PackageManifest, ParsedEdge, ProjectOwnership,
+    ResolutionContext, ResolvePhase, ResolveRequestKind, ResolveResult,
 };
 use crate::workspace_snapshot::ProjectId;
+use verter_language::FileLanguage;
 
 /// Lightweight resource snapshot for first-class Rust audit.
 #[derive(Debug, Clone, Default)]
@@ -88,14 +89,17 @@ pub trait WorkspaceRead: Send + Sync {
         Some(crate::package_index::parse_package_json(&source))
     }
 
-    /// Classify a file by extension.
-    /// Default: classifies `.vue` as `VueSfc`, everything else as `NonSfc`.
-    fn classify_file(&self, canonical_id: &str) -> FileKind {
-        if canonical_id.ends_with(".vue") {
-            FileKind::VueSfc
-        } else {
-            FileKind::NonSfc
-        }
+    /// Classify a file through the PURE static extension registry.
+    ///
+    /// Workspace-level classification is static-only: project-gated
+    /// candidate rows resolve to their ungated fallback here. Host-gated
+    /// classification (capability-resolved rows) is composed at the
+    /// session level and reaches the scheduler through the
+    /// session-implemented `SourceLoader` seam, never from this crate.
+    fn classify_file(&self, canonical_id: &str) -> FileLanguage {
+        verter_language::LanguageRegistry::global()
+            .classify_static(canonical_id)
+            .static_resolution()
     }
 
     // ── Resolution ──
@@ -869,8 +873,8 @@ pub trait SourceLoader: Send + Sync {
     /// Check whether a file exists.
     fn exists(&self, canonical_id: &str) -> bool;
 
-    /// Classify a file by extension.
-    fn classify(&self, canonical_id: &str) -> FileKind;
+    /// Classify a file through the static extension registry.
+    fn classify(&self, canonical_id: &str) -> FileLanguage;
 
     /// Resolve symlinks to real path.
     fn realpath(&self, canonical_id: &str) -> Option<String>;

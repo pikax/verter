@@ -29,7 +29,9 @@ use crate::job::{
 };
 use crate::node::{AnalysisSnapshot, ArtifactSnapshot, FileNode, SourceSnapshot};
 use crate::overlay::OverlayMap;
-use crate::source_loader::{FileKind as SourceFileKind, SourceLoader};
+use verter_language::FileLanguage;
+
+use crate::source_loader::SourceLoader;
 use crate::stage::{Priority, TargetStage, TaskKind};
 
 /// Contention instrumentation counters for the scheduler. Owned by
@@ -561,7 +563,7 @@ pub struct Request {
     pub target: TargetStage,
     pub priority: Priority,
     pub source: Option<Arc<str>>,
-    pub file_kind: Option<SourceFileKind>,
+    pub file_language: Option<FileLanguage>,
     /// Optional session-side request context. When present, the
     /// scheduler stores the winner's context on the dedup group,
     /// fires `on_dedup_joiner` callbacks when this request joins an
@@ -1228,7 +1230,7 @@ impl Scheduler {
             target: request.target,
             priority: request.priority,
             source: request.source,
-            file_kind: request.file_kind,
+            file_language: request.file_language,
             sender: sender.clone(),
             submitted_epoch: self.removal_epoch.load(Ordering::Acquire),
             request_context: request.request_context,
@@ -1297,7 +1299,7 @@ impl Scheduler {
                 target: request.target,
                 priority: request.priority,
                 source: request.source,
-                file_kind: request.file_kind,
+                file_language: request.file_language,
                 sender,
                 submitted_epoch,
                 request_context: request.request_context,
@@ -1691,7 +1693,7 @@ impl Scheduler {
                     target: TargetStage::Analysis,
                     priority: std::cmp::min(inherited_priority, Priority::Interactive),
                     source: None,
-                    file_kind: None,
+                    file_language: None,
                     request_context: None,
                     sender: {
                         let (_, s) = completion_pair::<RequestResult>();
@@ -1898,12 +1900,9 @@ impl Scheduler {
 
     /// Create a FileNode for a file, respecting the generation floor
     /// from prior incarnations so stale completions never match.
-    fn create_node(&self, file_id: &str, file_kind: Option<SourceFileKind>) -> Arc<FileNode> {
-        let kind = file_kind.unwrap_or_else(|| self.source_loader.classify(file_id));
-        let node = Arc::new(FileNode::new(
-            file_id.to_string(),
-            crate::node::FileKind::from_source_loader_kind(kind),
-        ));
+    fn create_node(&self, file_id: &str, file_language: Option<FileLanguage>) -> Arc<FileNode> {
+        let language = file_language.unwrap_or_else(|| self.source_loader.classify(file_id));
+        let node = Arc::new(FileNode::new(file_id.to_string(), language));
         // Set generation above any prior incarnation's floor.
         if let Some(floor) = self.generation_floors.get(file_id) {
             let floor_val = *floor;
@@ -2250,7 +2249,7 @@ impl Scheduler {
             target: TargetStage::Analysis,
             priority: Priority::Background,
             source: None,
-            file_kind: None,
+            file_language: None,
             submitted_epoch: self.removal_epoch.load(Ordering::Acquire),
             request_context: None,
             sender: {
@@ -2373,7 +2372,7 @@ impl Scheduler {
                 target,
                 priority,
                 source,
-                file_kind,
+                file_language,
                 sender,
                 submitted_epoch,
                 request_context,
@@ -2383,7 +2382,7 @@ impl Scheduler {
                     target,
                     priority,
                     source,
-                    file_kind,
+                    file_language,
                     sender,
                     submitted_epoch,
                     request_context,
@@ -2417,7 +2416,7 @@ impl Scheduler {
         target: TargetStage,
         priority: Priority,
         source: Option<Arc<str>>,
-        file_kind: Option<SourceFileKind>,
+        file_language: Option<FileLanguage>,
         sender: CompletionSender<RequestResult>,
         submitted_epoch: u64,
         request_context: Option<crate::request_context::OpaqueRequestContext>,
@@ -2427,7 +2426,7 @@ impl Scheduler {
             target,
             priority,
             source,
-            file_kind,
+            file_language,
             sender,
             submitted_epoch,
             request_context,
@@ -2587,7 +2586,7 @@ impl Scheduler {
             target,
             priority,
             source,
-            file_kind,
+            file_language,
             sender,
             submitted_epoch,
             request_context,
@@ -2625,11 +2624,31 @@ impl Scheduler {
         // Ensure node exists. Clone the `Arc<FileNode>` out and drop the
         // `nodes` shard `Ref` BEFORE returning so no caller holds it
         // across `dag.lock()`.
-        let node = self
-            .nodes
-            .entry(file_id.clone())
-            .or_insert_with(|| self.create_node(&file_id, file_kind))
-            .clone();
+        //
+        // A request that carries a DIFFERENT resolved language than the
+        // stored node re-homes the file onto a fresh node: the node's
+        // language routes the Source stage's parse dispatch, so
+        // executing with the stale row would parse the file through the
+        // wrong implementation (or keep failing a request whose
+        // language changed back to a supported row). The fresh node
+        // starts above the old incarnation's generation so in-flight
+        // work on the old node supersedes cleanly.
+        let node = {
+            let mut entry = self
+                .nodes
+                .entry(file_id.clone())
+                .or_insert_with(|| self.create_node(&file_id, file_language.clone()));
+            if let Some(requested) = file_language {
+                if entry.file_language != requested {
+                    let fresh = self.create_node(&file_id, Some(requested));
+                    while fresh.generation() <= entry.generation() {
+                        fresh.bump_generation();
+                    }
+                    *entry.value_mut() = fresh;
+                }
+            }
+            entry.value().clone()
+        };
         let canonical: Arc<str> = Arc::from(file_id.as_str());
 
         Some(PreparedRequest {
@@ -4935,23 +4954,31 @@ impl Scheduler {
 
         let snapshot = match executor.execute_source(
             &node.canonical_id,
-            node.file_kind,
+            node.file_language.clone(),
             content,
             generation,
         ) {
             Ok(snap) => Arc::new(snap),
             Err(e) => {
-                let stranded = Self::terminalize_failure(
-                    &dag,
-                    &canonical,
-                    generation,
-                    &TaskKind::Load,
-                    SchedulerError::StageFailed {
+                // Preserve the executor's typed failure discriminant:
+                // a known-but-unsupported framework language surfaces
+                // as the typed `UnsupportedLanguage` error, everything
+                // else as `StageFailed`.
+                let error = match e.kind {
+                    crate::executor::StageErrorKind::UnsupportedLanguage { adapter_id } => {
+                        SchedulerError::UnsupportedLanguage {
+                            file_id: node.canonical_id.clone(),
+                            adapter_id,
+                        }
+                    }
+                    crate::executor::StageErrorKind::Generic => SchedulerError::StageFailed {
                         file_id: node.canonical_id.clone(),
                         stage: "Source".to_string(),
                         message: e.message,
                     },
-                );
+                };
+                let stranded =
+                    Self::terminalize_failure(&dag, &canonical, generation, &TaskKind::Load, error);
                 Self::requeue_terminalize_stranded(inbox_sender, &stranded);
                 return;
             }
@@ -5631,16 +5658,6 @@ impl Drop for Scheduler {
     }
 }
 
-// Bridge between source_loader::FileKind and node::FileKind
-impl crate::node::FileKind {
-    pub(crate) fn from_source_loader_kind(kind: crate::source_loader::FileKind) -> Self {
-        match kind {
-            crate::source_loader::FileKind::VueSfc => crate::node::FileKind::VueSfc,
-            crate::source_loader::FileKind::NonSfc => crate::node::FileKind::NonSfc,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5670,7 +5687,7 @@ mod tests {
             target: TargetStage::Source,
             priority: Priority::Interactive,
             source: None,
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
 
@@ -5698,7 +5715,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: None,
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
 
@@ -5725,7 +5742,7 @@ mod tests {
             target: TargetStage::Artifact { profile_hash: 42 },
             priority: Priority::Interactive,
             source: None,
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
 
@@ -5759,7 +5776,7 @@ mod tests {
             target: TargetStage::Source,
             priority: Priority::Interactive,
             source: None,
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
 
@@ -5959,7 +5976,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: None,
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         sched.drive_all();
@@ -5992,6 +6009,7 @@ mod tests {
         ) -> Result<(), crate::executor::StageError> {
             self.calls.fetch_add(1, Ordering::AcqRel);
             Err(crate::executor::StageError {
+                kind: crate::executor::StageErrorKind::Generic,
                 message: "synthetic cache-node materialisation failure".to_string(),
             })
         }
@@ -6192,7 +6210,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: None,
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         sched.drive_all();
@@ -6205,7 +6223,7 @@ mod tests {
             target: TargetStage::Artifact { profile_hash: 42 },
             priority: Priority::Interactive,
             source: None,
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         sched.drain_inbox();
@@ -6279,7 +6297,7 @@ mod tests {
             target: TargetStage::Artifact { profile_hash: 42 },
             priority: Priority::Interactive,
             source: None,
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
 
@@ -6318,7 +6336,7 @@ mod tests {
             target: TargetStage::Source,
             priority: Priority::Interactive,
             source: Some(Arc::from("provided content")),
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
 
@@ -6347,7 +6365,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: Some(Arc::from("v1")),
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
 
@@ -6357,7 +6375,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: Some(Arc::from("v2")),
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
 
@@ -6390,7 +6408,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: None,
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         sched.drive_all();
@@ -6402,7 +6420,7 @@ mod tests {
             target: TargetStage::Source,
             priority: Priority::Interactive,
             source: None,
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         // Process the submission (but no stage work needed)
@@ -6426,7 +6444,7 @@ mod tests {
             target: TargetStage::Artifact { profile_hash: 0 },
             priority: Priority::Interactive,
             source: None,
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         let hb = sched.submit_request(Request {
@@ -6434,7 +6452,7 @@ mod tests {
             target: TargetStage::Artifact { profile_hash: 0 },
             priority: Priority::Interactive,
             source: None,
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         let hc = sched.submit_request(Request {
@@ -6442,7 +6460,7 @@ mod tests {
             target: TargetStage::Artifact { profile_hash: 0 },
             priority: Priority::Interactive,
             source: None,
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
 
@@ -6468,7 +6486,7 @@ mod tests {
             target: TargetStage::Source,
             priority: Priority::Interactive,
             source: None,
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         sched.drive_all();
@@ -6492,7 +6510,7 @@ mod tests {
             target: TargetStage::Source,
             priority: Priority::Interactive,
             source: Some(Arc::from("editor content")),
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         sched.drive_all();
@@ -6520,7 +6538,7 @@ mod tests {
             target: TargetStage::Artifact { profile_hash: 0 },
             priority: Priority::Background,
             source: None,
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
 
@@ -6558,7 +6576,7 @@ mod tests {
             target: TargetStage::Source,
             priority: Priority::Background,
             source: None,
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         // Submit high priority second
@@ -6567,7 +6585,7 @@ mod tests {
             target: TargetStage::Source,
             priority: Priority::Critical,
             source: None,
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
 
@@ -6597,7 +6615,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Critical,
             source: None,
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
 
@@ -6662,7 +6680,7 @@ mod tests {
             target: TargetStage::Artifact { profile_hash: 42 },
             priority: Priority::Critical,
             source: None,
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
 
@@ -6712,7 +6730,7 @@ mod tests {
             target: TargetStage::Artifact { profile_hash: 7 },
             priority: Priority::Interactive,
             source: None,
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
 
@@ -6738,7 +6756,7 @@ mod tests {
             target: TargetStage::Source,
             priority: Priority::Interactive,
             source: None,
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
 
@@ -6775,11 +6793,12 @@ mod tests {
         fn execute_source(
             &self,
             _canonical_id: &str,
-            _file_kind: crate::node::FileKind,
+            _file_language: FileLanguage,
             _content: Arc<str>,
             _generation: u64,
         ) -> Result<SourceSnapshot, crate::executor::StageError> {
             Err(crate::executor::StageError {
+                kind: crate::executor::StageErrorKind::Generic,
                 message: "synthetic source failure".to_string(),
             })
         }
@@ -6798,6 +6817,7 @@ mod tests {
             _generation: u64,
         ) -> Result<AnalysisSnapshot, crate::executor::StageError> {
             Err(crate::executor::StageError {
+                kind: crate::executor::StageErrorKind::Generic,
                 message: "synthetic analysis failure".to_string(),
             })
         }
@@ -6819,6 +6839,7 @@ mod tests {
             _generation: u64,
         ) -> Result<ArtifactSnapshot, crate::executor::StageError> {
             Err(crate::executor::StageError {
+                kind: crate::executor::StageErrorKind::Generic,
                 message: "synthetic artifact failure".to_string(),
             })
         }
@@ -6833,7 +6854,7 @@ mod tests {
         fn execute_source(
             &self,
             _canonical_id: &str,
-            _file_kind: crate::node::FileKind,
+            _file_language: FileLanguage,
             _content: Arc<str>,
             _generation: u64,
         ) -> Result<SourceSnapshot, crate::executor::StageError> {
@@ -6870,7 +6891,7 @@ mod tests {
             target: TargetStage::Source,
             priority: Priority::Interactive,
             source: None,
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         sched.drive_all();
@@ -6896,7 +6917,7 @@ mod tests {
             target: TargetStage::Source,
             priority: Priority::Interactive,
             source: None,
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         sched.drive_all();
@@ -6934,7 +6955,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: None,
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         sched.drive_all();
@@ -6957,7 +6978,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: None,
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         sched.drive_all();
@@ -6983,7 +7004,7 @@ mod tests {
             target: TargetStage::Artifact { profile_hash: 42 },
             priority: Priority::Interactive,
             source: None,
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         sched.drive_all();
@@ -7006,7 +7027,7 @@ mod tests {
             target: TargetStage::Artifact { profile_hash: 99 },
             priority: Priority::Interactive,
             source: None,
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         sched.drive_all();
@@ -7034,7 +7055,7 @@ mod tests {
             target: TargetStage::Source,
             priority: Priority::Interactive,
             source: None,
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         sched.drive_all();
@@ -7057,7 +7078,7 @@ mod tests {
             target: TargetStage::Source,
             priority: Priority::Interactive,
             source: None,
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         sched.drive_all();
@@ -7094,7 +7115,7 @@ mod tests {
             target: TargetStage::Source,
             priority: Priority::Interactive,
             source: None,
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         // Wait for the panic-catch arm to surface the failure.
@@ -7139,7 +7160,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: Some(Arc::from("v1")),
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         sched.drive_all();
@@ -7159,7 +7180,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: Some(Arc::from("v2")),
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         sched.drive_all();
@@ -7223,7 +7244,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: Some(Arc::from("a content")),
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         sched.drive_all();
@@ -7245,7 +7266,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: Some(Arc::from("a content v2")),
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         sched.drive_all();
@@ -7294,7 +7315,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: Some(Arc::from("v1")),
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
 
@@ -7341,7 +7362,7 @@ mod tests {
             target: TargetStage::Artifact { profile_hash: 1 },
             priority: Priority::Interactive,
             source: Some(Arc::from("a")),
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         sched.drive_all();
@@ -7382,7 +7403,7 @@ mod tests {
             target: TargetStage::Artifact { profile_hash: 1 },
             priority: Priority::Interactive,
             source: Some(Arc::from("a")),
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         sched.drive_all();
@@ -7408,7 +7429,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: Some(Arc::from("a")),
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         h.wait();
@@ -7432,7 +7453,7 @@ mod tests {
             target: TargetStage::Source,
             priority: Priority::Interactive,
             source: Some(Arc::from("a v2")),
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         let state = h2.wait();
@@ -7474,7 +7495,7 @@ mod tests {
             target: TargetStage::Source,
             priority: Priority::Interactive,
             source: Some(Arc::from("a")),
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         h.wait();
@@ -7577,7 +7598,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: Some(Arc::from("a")),
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         let pre_gen = match h.wait() {
@@ -7595,7 +7616,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: Some(Arc::from("a v2")),
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         let post_gen = match h2.wait() {
@@ -7640,7 +7661,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: Some(Arc::from("a")),
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         sched.drive_all();
@@ -7655,7 +7676,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: Some(Arc::from("a v2")),
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         // DON'T drive yet — the new gen hasn't been assigned
@@ -7695,7 +7716,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: Some(Arc::from("a")),
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         sched.drive_all();
@@ -7760,7 +7781,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: Some(Arc::from("a v1")),
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         sched.drive_all();
@@ -7772,7 +7793,7 @@ mod tests {
             target: TargetStage::Artifact { profile_hash: 1 },
             priority: Priority::Interactive,
             source: Some(Arc::from("a v2")),
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         // Node is still at gen G — the G+1 bump hasn't happened yet.
@@ -7822,7 +7843,7 @@ mod tests {
             target: TargetStage::Source,
             priority: Priority::Interactive,
             source: Some(Arc::from("a")),
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         sched.drive_one(); // processes the Source job only
@@ -7869,7 +7890,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: Some(Arc::from("a v1")),
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         sched.drive_all();
@@ -7887,7 +7908,7 @@ mod tests {
             target: TargetStage::Artifact { profile_hash: 1 },
             priority: Priority::Interactive,
             source: Some(Arc::from("a v2")),
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         sched.drive_all();
@@ -7912,7 +7933,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: Some(Arc::from("a")),
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         // DON'T drive — scheduler hasn't processed anything
@@ -7979,7 +8000,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: Some(Arc::from("a")),
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         sched.drive_all();
@@ -8045,7 +8066,7 @@ mod tests {
             target: TargetStage::Artifact { profile_hash: 7 },
             priority: Priority::Interactive,
             source: None,
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         sched.drain_inbox();
@@ -8162,7 +8183,7 @@ mod tests {
             target: TargetStage::Artifact { profile_hash: 11 },
             priority: Priority::Interactive,
             source: None,
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
 
@@ -8287,6 +8308,7 @@ mod tests {
         ) -> Result<AnalysisSnapshot, crate::executor::StageError> {
             if canonical_id == self.dep_id {
                 Err(crate::executor::StageError {
+                    kind: crate::executor::StageErrorKind::Generic,
                     message: "synthetic dep Analysis failure".to_string(),
                 })
             } else {
@@ -8331,7 +8353,7 @@ mod tests {
             target: TargetStage::Artifact { profile_hash: 23 },
             priority: Priority::Interactive,
             source: None,
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
 
@@ -8382,7 +8404,7 @@ mod tests {
         fn execute_source(
             &self,
             canonical_id: &str,
-            _file_kind: crate::node::FileKind,
+            _file_language: FileLanguage,
             _content: Arc<str>,
             _generation: u64,
         ) -> Result<SourceSnapshot, crate::executor::StageError> {
@@ -8435,7 +8457,7 @@ mod tests {
             target: TargetStage::Source,
             priority: Priority::Interactive,
             source: None,
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
 
@@ -8582,7 +8604,7 @@ mod tests {
             target: TargetStage::Artifact { profile_hash: 17 },
             priority: Priority::Interactive,
             source: None,
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
 
@@ -8757,7 +8779,7 @@ mod tests {
         fn execute_source(
             &self,
             _canonical_id: &str,
-            _file_kind: crate::node::FileKind,
+            _file_language: FileLanguage,
             content: Arc<str>,
             generation: u64,
         ) -> Result<SourceSnapshot, crate::executor::StageError> {
@@ -8817,7 +8839,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: None,
-            file_kind: None,
+            file_language: None,
             request_context: Some(opaque),
         });
         let state = handle.wait();
@@ -8847,7 +8869,7 @@ mod tests {
             target: TargetStage::Source,
             priority: Priority::Interactive,
             source: None,
-            file_kind: None,
+            file_language: None,
             request_context: Some(opaque),
         });
         let state = handle.wait();
@@ -8878,7 +8900,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: None,
-            file_kind: None,
+            file_language: None,
             request_context: Some(opaque),
         });
         h1.wait();
@@ -8891,7 +8913,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: Some(Arc::from("<template>y</template>")),
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         h2.wait();
@@ -8919,7 +8941,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: None,
-            file_kind: None,
+            file_language: None,
             request_context: Some(opaque),
         });
         let state = handle.wait();
@@ -8940,7 +8962,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: Some(Arc::from("<template>z</template>")),
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         h2.wait();
@@ -8969,7 +8991,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: None,
-            file_kind: None,
+            file_language: None,
             request_context: Some(opaque),
         });
         h1.wait();
@@ -8981,7 +9003,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: Some(Arc::from("<template>q</template>")),
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         h2.wait();
@@ -9002,7 +9024,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: None,
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         handle.wait();
@@ -9171,7 +9193,7 @@ mod tests {
             fn execute_source(
                 &self,
                 canonical_id: &str,
-                _file_kind: crate::node::FileKind,
+                _file_language: FileLanguage,
                 content: Arc<str>,
                 generation: u64,
             ) -> Result<SourceSnapshot, crate::executor::StageError> {
@@ -9221,7 +9243,7 @@ mod tests {
             target: TargetStage::Artifact { profile_hash: 0 },
             priority: Priority::Interactive,
             source: None,
-            file_kind: None,
+            file_language: None,
             request_context: Some(opaque),
         });
         let state = handle.wait();
@@ -9302,7 +9324,7 @@ mod tests {
                         target: TargetStage::Analysis,
                         priority: Priority::Interactive,
                         source: None,
-                        file_kind: None,
+                        file_language: None,
                         request_context: Some(opaque),
                     });
                     h.wait()
@@ -9337,7 +9359,7 @@ mod tests {
             target: TargetStage::Source,
             priority: Priority::Interactive,
             source: None,
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         sched.drive_all();
@@ -9387,7 +9409,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: Some(Arc::from("a v1")),
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         sched.drive_all();
@@ -9422,7 +9444,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: Some(Arc::from("a v2")),
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         sched.drive_all();
@@ -9512,7 +9534,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: Some(Arc::from("a")),
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         sched.drive_all();
@@ -9574,7 +9596,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: Some(Arc::from("a")),
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         sched.drive_all();
@@ -9637,7 +9659,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: Some(Arc::from("a")),
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         sched.drive_all();
@@ -9724,7 +9746,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: Some(Arc::from("a")),
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         sched.drive_all();
@@ -9793,7 +9815,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: Some(Arc::from("a")),
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         sched.drive_all();
@@ -9861,7 +9883,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: Some(Arc::from("a")),
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         sched.drive_all();
@@ -9931,7 +9953,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: Some(Arc::from("a")),
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         sched.drive_all();
@@ -10036,7 +10058,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: Some(Arc::from("a")),
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         sched.submit_request(Request {
@@ -10044,7 +10066,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: Some(Arc::from("dep")),
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         sched.drive_all();
@@ -10125,7 +10147,7 @@ mod tests {
             target: TargetStage::Source,
             priority: Priority::Interactive,
             source: None,
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         sched.drive_all();
@@ -10147,7 +10169,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: Some(Arc::from("a")),
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         sched.drive_all();
@@ -10244,7 +10266,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: Some(Arc::from("a")),
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         sched.drive_all();
@@ -10397,7 +10419,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: Some(Arc::from("a")),
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         sched.drive_all();
@@ -10862,7 +10884,7 @@ mod tests {
         fn execute_source(
             &self,
             canonical_id: &str,
-            _file_kind: crate::node::FileKind,
+            _file_language: FileLanguage,
             content: Arc<str>,
             generation: u64,
         ) -> Result<crate::node::SourceSnapshot, crate::executor::StageError> {
@@ -10876,6 +10898,7 @@ mod tests {
                 // which we treat as release.
                 let _ = gate.release_rx.recv();
                 return Err(crate::executor::StageError {
+                    kind: crate::executor::StageErrorKind::Generic,
                     message: format!("gated source failure for {canonical_id}"),
                 });
             }
@@ -10988,7 +11011,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: Some(Arc::from("a content")),
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         let analysis_state = poll_resolved(&analysis_handle, Duration::from_secs(5))
@@ -11052,7 +11075,7 @@ mod tests {
             target: TargetStage::Artifact { profile_hash: 77 },
             priority: Priority::Interactive,
             source: None,
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
 
@@ -11391,7 +11414,7 @@ mod tests {
             target: TargetStage::Source,
             priority: Priority::Background,
             source: Some(Arc::from("r")),
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         sched.drain_inbox();
@@ -11516,7 +11539,7 @@ mod tests {
                 target: TargetStage::Analysis,
                 priority: Priority::Interactive,
                 source: Some(Arc::from("v")),
-                file_kind: None,
+                file_language: None,
                 request_context: None,
             });
         }
@@ -11715,7 +11738,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: Some(Arc::from("a content")),
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         let analysis_state = analysis_handle.wait();
@@ -11791,7 +11814,7 @@ mod tests {
             target: TargetStage::Artifact { profile_hash: 77 },
             priority: Priority::Interactive,
             source: None,
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         let artifact_state = artifact_handle.wait();
@@ -11902,7 +11925,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: Some(Arc::from("owner content")),
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         // Drain inbox to process the NewRequest (Source admitted).
@@ -12089,7 +12112,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: None,
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         let dep_state = dep_handle.wait();
@@ -12139,7 +12162,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: Some(Arc::from("a content")),
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
 
@@ -12183,7 +12206,7 @@ mod tests {
             target: TargetStage::Artifact { profile_hash: 42 },
             priority: Priority::Interactive,
             source: None,
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         let artifact_state = {
@@ -12308,7 +12331,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: None,
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         let dep_state = dep_handle.wait();
@@ -12355,7 +12378,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: Some(Arc::from("a content")),
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         let analysis_state = analysis_handle.wait();
@@ -12423,7 +12446,7 @@ mod tests {
             target: TargetStage::Artifact { profile_hash: 77 },
             priority: Priority::Interactive,
             source: None,
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         let state = {
@@ -12550,6 +12573,7 @@ mod tests {
                     let _ = gate.entered_tx.send(());
                     let _ = gate.release_rx.recv();
                     return Err(crate::executor::StageError {
+                        kind: crate::executor::StageErrorKind::Generic,
                         message: format!("gated analysis failure for {canonical_id}"),
                     });
                 }
@@ -12597,7 +12621,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: Some(Arc::from("a content")),
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         let analysis_state = poll_resolved(&analysis_handle, Duration::from_secs(5))
@@ -12634,7 +12658,7 @@ mod tests {
             target: TargetStage::Artifact { profile_hash: 99 },
             priority: Priority::Interactive,
             source: None,
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
 
@@ -13041,7 +13065,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: Some(Arc::from("a content")),
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         let analysis_state = analysis_handle.wait();
@@ -13092,7 +13116,7 @@ mod tests {
             target: TargetStage::Artifact { profile_hash: 77 },
             priority: Priority::Interactive,
             source: None,
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         let artifact_state = artifact_handle.wait();
@@ -13200,7 +13224,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: Some(Arc::from("a content")),
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         let analysis_state = {
@@ -13240,7 +13264,7 @@ mod tests {
             target: TargetStage::Artifact { profile_hash: 77 },
             priority: Priority::Interactive,
             source: None,
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
 
@@ -13728,7 +13752,7 @@ mod tests {
         fn execute_source(
             &self,
             _canonical_id: &str,
-            _file_kind: crate::node::FileKind,
+            _file_language: FileLanguage,
             content: Arc<str>,
             generation: u64,
         ) -> Result<crate::node::SourceSnapshot, crate::executor::StageError> {
@@ -13789,7 +13813,7 @@ mod tests {
                     target: TargetStage::Analysis,
                     priority: Priority::Interactive,
                     source: None,
-                    file_kind: None,
+                    file_language: None,
                     request_context: None,
                 });
                 *inner_state_for_hook.lock() =
@@ -13815,7 +13839,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: None,
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
 
@@ -13895,7 +13919,7 @@ mod tests {
                     target: TargetStage::Analysis,
                     priority: Priority::Interactive,
                     source: None,
-                    file_kind: None,
+                    file_language: None,
                     request_context: None,
                 });
                 let state = sched.wait_or_drive_with_caller(&inner, CallerKind::CpuWorker);
@@ -13921,7 +13945,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: None,
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
 
@@ -14094,7 +14118,7 @@ mod tests {
                     target: TargetStage::Source,
                     priority: Priority::Interactive,
                     source: None,
-                    file_kind: None,
+                    file_language: None,
                     request_context: None,
                 })
             })
@@ -14159,7 +14183,7 @@ mod tests {
             target: TargetStage::Source,
             priority: Priority::Interactive,
             source: None,
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
 
@@ -14444,7 +14468,7 @@ mod tests {
             target: TargetStage::Source,
             priority: Priority::Interactive,
             source: Some(Arc::from("a content")),
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         let b_handle = sched.submit_request(Request {
@@ -14452,7 +14476,7 @@ mod tests {
             target: TargetStage::Source,
             priority: Priority::Interactive,
             source: Some(Arc::from("b content")),
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
         let _ = a_handle.wait();
@@ -14580,7 +14604,7 @@ mod tests {
                 target: TargetStage::Artifact { profile_hash: 7 },
                 priority: Priority::Interactive,
                 source: Some(Arc::from("a content")),
-                file_kind: None,
+                file_language: None,
                 request_context: None,
             });
             sched.wait_or_drive_with_caller(&handle, CallerKind::CpuWorker)
@@ -14636,7 +14660,7 @@ mod tests {
             fn execute_source(
                 &self,
                 canonical_id: &str,
-                _file_kind: crate::node::FileKind,
+                _file_language: FileLanguage,
                 content: Arc<str>,
                 generation: u64,
             ) -> Result<crate::node::SourceSnapshot, crate::executor::StageError> {
@@ -14674,7 +14698,7 @@ mod tests {
                     target: TargetStage::Source,
                     priority: Priority::Interactive,
                     source: None,
-                    file_kind: None,
+                    file_language: None,
                     request_context: None,
                 });
                 *inner_state_for_hook.lock() =
@@ -14698,7 +14722,7 @@ mod tests {
             target: TargetStage::Source,
             priority: Priority::Interactive,
             source: None,
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
 
@@ -14764,7 +14788,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: Some(Arc::from("a content")),
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
 
@@ -14879,7 +14903,7 @@ mod tests {
                         target: TargetStage::Analysis,
                         priority: Priority::Interactive,
                         source: None,
-                        file_kind: None,
+                        file_language: None,
                         request_context: Some(OpaqueRequestContext(
                             ctx_inner as Arc<dyn RequestContextLike>,
                         )),
@@ -14914,7 +14938,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: None,
-            file_kind: None,
+            file_language: None,
             request_context: None,
         });
 
@@ -14980,7 +15004,7 @@ mod tests {
             fn execute_source(
                 &self,
                 canonical_id: &str,
-                _file_kind: crate::node::FileKind,
+                _file_language: FileLanguage,
                 content: Arc<str>,
                 generation: u64,
             ) -> Result<crate::node::SourceSnapshot, crate::executor::StageError> {
@@ -15069,7 +15093,7 @@ mod tests {
                     target: TargetStage::Source,
                     priority: Priority::Interactive,
                     source: None,
-                    file_kind: None,
+                    file_language: None,
                     request_context: Some(OpaqueRequestContext(
                         inner_ctx as Arc<dyn RequestContextLike>,
                     )),
@@ -15098,7 +15122,7 @@ mod tests {
             target: TargetStage::Source,
             priority: Priority::Interactive,
             source: None,
-            file_kind: None,
+            file_language: None,
             request_context: Some(OpaqueRequestContext(
                 outer_ctx as Arc<dyn RequestContextLike>,
             )),
@@ -15198,7 +15222,7 @@ mod tests {
                         target: TargetStage::Analysis,
                         priority: Priority::Interactive,
                         source: None,
-                        file_kind: None,
+                        file_language: None,
                         request_context: None,
                     });
                     let _ = sched.wait_or_drive_with_caller(&inner, CallerKind::CpuWorker);
@@ -15239,7 +15263,7 @@ mod tests {
             target: TargetStage::Analysis,
             priority: Priority::Interactive,
             source: None,
-            file_kind: None,
+            file_language: None,
             request_context: Some(OpaqueRequestContext(
                 outer_ctx as Arc<dyn RequestContextLike>,
             )),
@@ -15881,7 +15905,7 @@ mod tests {
                 target: TargetStage::Source,
                 priority: Priority::Interactive,
                 source: None,
-                file_kind: None,
+                file_language: None,
                 request_context: None,
             })
             .collect();
@@ -16245,7 +16269,7 @@ mod tests {
                 target: TargetStage::Analysis,
                 priority: Priority::Interactive,
                 source: None,
-                file_kind: None,
+                file_language: None,
                 request_context: Some(winner_ctx),
             },
             Request {
@@ -16253,7 +16277,7 @@ mod tests {
                 target: TargetStage::Analysis,
                 priority: Priority::Interactive,
                 source: None,
-                file_kind: None,
+                file_language: None,
                 request_context: Some(joiner_ctx),
             },
         ];
@@ -16318,7 +16342,7 @@ mod tests {
                 target: TargetStage::Source,
                 priority: Priority::Interactive,
                 source: None,
-                file_kind: None,
+                file_language: None,
                 request_context: None,
             })
             .collect();
@@ -16446,7 +16470,7 @@ mod tests {
                 target: TargetStage::Source,
                 priority: Priority::Interactive,
                 source: Some(Arc::from("<template>updated</template>")),
-                file_kind: None,
+                file_language: None,
                 request_context: None,
             })
             .collect();
@@ -16681,7 +16705,7 @@ mod tests {
                 fn execute_source(
                     &self,
                     _c: &str,
-                    _k: crate::node::FileKind,
+                    _k: FileLanguage,
                     content: Arc<str>,
                     generation: u64,
                 ) -> Result<SourceSnapshot, crate::executor::StageError> {
@@ -16758,7 +16782,7 @@ mod tests {
                 target: TargetStage::Analysis,
                 priority: Priority::Interactive,
                 source: Some(Arc::from("<template>x</template>")),
-                file_kind: None,
+                file_language: None,
                 request_context: None,
             });
             let state = handle.wait();
@@ -16813,7 +16837,7 @@ mod tests {
             fn execute_source(
                 &self,
                 canonical_id: &str,
-                _file_kind: crate::node::FileKind,
+                _file_language: FileLanguage,
                 content: Arc<str>,
                 generation: u64,
             ) -> Result<crate::node::SourceSnapshot, crate::executor::StageError> {
@@ -16909,7 +16933,7 @@ mod tests {
                     target: TargetStage::Source,
                     priority: Priority::Interactive,
                     source: None,
-                    file_kind: None,
+                    file_language: None,
                     request_context: None,
                 }));
             }
@@ -17056,7 +17080,7 @@ mod tests {
                 target: TargetStage::Source,
                 priority: Priority::Interactive,
                 source: None,
-                file_kind: None,
+                file_language: None,
                 request_context: None,
             });
             // The faulted job terminalizes as Failed — NOT a hang.
@@ -17076,7 +17100,7 @@ mod tests {
                 target: TargetStage::Source,
                 priority: Priority::Interactive,
                 source: None,
-                file_kind: None,
+                file_language: None,
                 request_context: None,
             });
             let state_b = h_b.wait();

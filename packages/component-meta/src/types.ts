@@ -353,6 +353,34 @@ export interface ComponentVModelUsage {
   bindingName: string;
 }
 
+/** A two-way binding passed to a child component (the Svelte `bind:` family). */
+export interface ComponentBindingUsage {
+  /** The bound local member name (`value` in `bind:value`). */
+  name: string;
+  /** The `|modifier` list, in source order. */
+  modifiers: string[];
+}
+
+/**
+ * An event listened on a child component via the legacy Svelte `on:` directive.
+ *
+ * The props/events split is SYNTACTIC at the usage site: a plain `on*`
+ * attribute (`onclick`, but also `online`/`once`) is a PROP, never an event —
+ * in Svelte 5 a callback handler is a prop, and the CHILD component-meta (not a
+ * usage-site name guess) decides which passed props are callback events. Only
+ * the legacy `on:` directive is unambiguously an event here.
+ */
+export interface ComponentEventUsage {
+  /** The event name — the legacy directive local (`click` from `on:click`). */
+  name: string;
+  /** The handler expression text, when present. */
+  handlerExpression?: string;
+  /** Whether the handler is an inline function expression. */
+  isInline: boolean;
+  /** The `|modifier` list, in source order. */
+  modifiers: string[];
+}
+
 /** A child component used in the template. */
 export interface ComponentUsage {
   /** PascalCase component name. */
@@ -375,6 +403,10 @@ export interface ComponentUsage {
   vModels: string[];
   /** Structured v-model usage entries for call-site-aware consumers. */
   vModelEntries?: ComponentVModelUsage[];
+  /** Framework-neutral two-way bindings (the Svelte `bind:` family). Empty for Vue. */
+  bindings?: ComponentBindingUsage[];
+  /** Framework-neutral events (the legacy Svelte `on:` directive only — a plain `on*` attr is a prop). Empty for Vue. */
+  events?: ComponentEventUsage[];
 }
 
 /** A template ref usage (`ref="foo"` or `:ref="expr"`). */

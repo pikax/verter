@@ -17,7 +17,7 @@ use std::sync::Arc;
 use rustc_hash::FxHashMap;
 
 use crate::session_view::OverlaidView;
-use crate::types::{FileKind, HostConfig, UpsertRequest};
+use crate::types::{HostConfig, UpsertRequest};
 use crate::VerterHost;
 
 const CANONICAL: &str = "/proj/Owner.vue";
@@ -50,7 +50,9 @@ fn make_host() -> Arc<VerterHost> {
             canonical_id: Some(CANONICAL.to_string()),
             input_id: CANONICAL.to_string(),
             source: Arc::from(BASE_SOURCE),
-            file_kind: FileKind::from_path(CANONICAL),
+            file_language: verter_language::LanguageRegistry::global()
+                .classify_static(CANONICAL)
+                .static_resolution(),
             aliases: Vec::new(),
         })
         .expect("base upsert must succeed");

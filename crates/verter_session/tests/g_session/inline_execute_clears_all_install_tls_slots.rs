@@ -31,10 +31,11 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering as MOrd};
 use std::sync::Arc;
 
 use verter_audit::current_observer;
+use verter_language::FileLanguage as SchedFileKind;
 use verter_scheduler::caller_kind::CallerKind;
 use verter_scheduler::executor::{StageError, StageExecutor};
 use verter_scheduler::job::CompletionState;
-use verter_scheduler::node::{AnalysisSnapshot, FileKind as SchedFileKind, SourceSnapshot};
+use verter_scheduler::node::{AnalysisSnapshot, SourceSnapshot};
 use verter_scheduler::request_context::{OpaqueRequestContext, RequestContextLike};
 use verter_scheduler::scheduler::{Request, Scheduler, SchedulerConfig};
 use verter_scheduler::source_loader::{MemorySourceLoader, SourceLoader};
@@ -61,7 +62,7 @@ impl StageExecutor for InlineReentryExecutor {
     fn execute_source(
         &self,
         _canonical_id: &str,
-        _file_kind: SchedFileKind,
+        _file_language: SchedFileKind,
         content: Arc<str>,
         generation: u64,
     ) -> Result<SourceSnapshot, StageError> {
@@ -139,7 +140,7 @@ fn inline_execute_none_winner_ctx_clears_session_and_audit_slots_too() {
                     target: TargetStage::Analysis,
                     priority: Priority::Interactive,
                     source: None,
-                    file_kind: None,
+                    file_language: None,
                     // CRITICAL — the None here forces the inline
                     // path to the `AllSlotsClearGuard` branch.
                     request_context: None,
@@ -245,7 +246,7 @@ fn inline_execute_none_winner_ctx_clears_session_and_audit_slots_too() {
         target: TargetStage::Analysis,
         priority: Priority::Interactive,
         source: None,
-        file_kind: None,
+        file_language: None,
         request_context: Some(OpaqueRequestContext(
             Arc::clone(&outer_ctx) as Arc<dyn RequestContextLike>
         )),

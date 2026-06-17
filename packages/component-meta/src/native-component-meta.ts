@@ -246,6 +246,18 @@ export interface NativeComponentVModelEntry {
   bindingName: string;
 }
 
+export interface NativeComponentBindingUsage {
+  name: string;
+  modifiers: string[];
+}
+
+export interface NativeComponentEventUsage {
+  name: string;
+  handlerExpression?: string;
+  isInline: boolean;
+  modifiers: string[];
+}
+
 export interface NativeComponentUsage {
   name: string;
   importSource?: string;
@@ -257,6 +269,10 @@ export interface NativeComponentUsage {
   hasDynamicClass: boolean;
   vModels: string[];
   vModelEntries?: NativeComponentVModelEntry[];
+  /** Framework-neutral two-way bindings (the Svelte `bind:` family). Empty for Vue. */
+  bindings?: NativeComponentBindingUsage[];
+  /** Framework-neutral events (the legacy Svelte `on:` directive only — a plain `on*` attr is a prop). Empty for Vue. */
+  events?: NativeComponentEventUsage[];
 }
 
 export interface NativeTemplateRefMeta {
@@ -641,6 +657,18 @@ export function nativeComponentMetaToComponentMeta(meta: NativeComponentMetaResu
         component.vModelEntries ?? component.vModels.map((bindingName) => ({ bindingName }))
       ).map((entry) => ({
         bindingName: entry.bindingName,
+      })),
+      bindings: (component.bindings ?? []).map((binding) => ({
+        name: binding.name,
+        modifiers: [...binding.modifiers],
+      })),
+      events: (component.events ?? []).map((event) => ({
+        name: event.name,
+        ...(event.handlerExpression !== undefined
+          ? { handlerExpression: event.handlerExpression }
+          : {}),
+        isInline: event.isInline,
+        modifiers: [...event.modifiers],
       })),
     })),
     templateRefs: meta.templateRefs.map((templateRef) => ({

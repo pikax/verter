@@ -1,8 +1,9 @@
 import * as path from "path";
 import * as fs from "fs";
 import { execSync } from "child_process";
-import { runTests, downloadAndUnzipVSCode } from "@vscode/test-electron";
+import { runTests } from "@vscode/test-electron";
 import * as os from "os";
+import { copyLspBinaryToTemp, readE2eEnv, resolveVscodeExecutablePath } from "./sharedLaunch";
 
 /**
  * Fixture entries: plain name uses auto type provider,
@@ -42,81 +43,6 @@ function parseFixtureEntry(entry: string): { fixture: string; typeProvider?: str
     fixture: entry.slice(0, atIndex),
     typeProvider: entry.slice(atIndex + 1),
   };
-}
-
-function readE2eEnv(name: string): string | undefined {
-  return process.env[`VERTER_E2E_${name}`] ?? process.env[`E2E_${name}`];
-}
-
-/**
- * Find the verter-lsp binary in the monorepo.
- * Searches: target/debug/, target/release/, dist/, PATH.
- * Returns undefined if not found.
- */
-function findLspBinary(extensionPath: string): string | undefined {
-  const ext = process.platform === "win32" ? ".exe" : "";
-  const binaryName = `verter-lsp${ext}`;
-
-  // Check monorepo target/ (walk upward to find the monorepo root)
-  let dir = extensionPath;
-  for (let i = 0; i < 5; i++) {
-    for (const profile of ["debug", "release"]) {
-      const candidate = path.join(dir, "target", profile, binaryName);
-      if (fs.existsSync(candidate)) {
-        return candidate;
-      }
-    }
-    dir = path.dirname(dir);
-  }
-
-  // Check dist/ in extension path
-  const distPath = path.join(extensionPath, "dist", binaryName);
-  if (fs.existsSync(distPath)) {
-    return distPath;
-  }
-
-  // Check bin/ in extension path
-  const binPath = path.join(extensionPath, "bin", binaryName);
-  if (fs.existsSync(binPath)) {
-    return binPath;
-  }
-
-  return undefined;
-}
-
-/**
- * Copy the LSP binary to a temp directory to prevent file locking issues.
- * On Windows, a running .exe is locked and can't be overwritten by cargo build.
- * On Unix, keep the original path to avoid location-sensitive startup issues
- * when running ad-hoc signed debug binaries from a temp directory.
- * Returns the path to use for tests, or undefined if source not found.
- */
-function copyLspBinaryToTemp(extensionPath: string): string | undefined {
-  const sourcePath = findLspBinary(extensionPath);
-  if (!sourcePath) {
-    console.warn("Warning: LSP binary not found — tests will use PATH fallback");
-    return undefined;
-  }
-
-  if (process.platform !== "win32") {
-    console.log(`LSP binary using source path: ${sourcePath}`);
-    return sourcePath;
-  }
-
-  const ext = process.platform === "win32" ? ".exe" : "";
-  const tempDir = path.join(os.tmpdir(), `verter-e2e-bin-${process.pid}`);
-  fs.mkdirSync(tempDir, { recursive: true });
-
-  const destPath = path.join(tempDir, `verter-lsp${ext}`);
-  fs.copyFileSync(sourcePath, destPath);
-
-  // Ensure executable permission on Unix
-  if (process.platform !== "win32") {
-    fs.chmodSync(destPath, 0o755);
-  }
-
-  console.log(`LSP binary copied: ${sourcePath} → ${destPath}`);
-  return destPath;
 }
 
 /**
@@ -160,17 +86,7 @@ async function main() {
         ? FIXTURES.filter((entry) => parseFixtureEntry(entry).typeProvider === envTypeProvider)
         : FIXTURES;
 
-  let vscodeExecutablePath = await downloadAndUnzipVSCode(vscodeVersion);
-
-  // VS Code 1.111+ changed its binary layout: Code.exe is now a Node.js
-  // launcher that doesn't accept CLI flags like --disable-extensions.
-  // Use bin/code.cmd (the CLI entry point) instead.
-  if (process.platform === "win32") {
-    const cliPath = path.resolve(vscodeExecutablePath, "../bin/code.cmd");
-    if (fs.existsSync(cliPath)) {
-      vscodeExecutablePath = cliPath;
-    }
-  }
+  const vscodeExecutablePath = await resolveVscodeExecutablePath(vscodeVersion);
 
   // Copy LSP binary to temp to prevent file locking
   const lspBinaryPath = copyLspBinaryToTemp(extensionDevelopmentPath);

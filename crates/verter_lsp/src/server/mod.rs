@@ -7,13 +7,14 @@ use tower_lsp_server::{Client, LanguageServer};
 
 use crate::documents::line_index::LineIndex;
 use crate::documents::position_map::PositionMapper;
+use crate::documents::provider_projection::ProviderPositionMapper;
 use crate::documents::{uri_to_canonical_id, DocumentRegistry};
 use crate::features::cursor_context::ExpressionContext;
 use crate::features::diagnostics::map_diagnostics;
 use crate::provider_sync::{
-    commit_sync_transition, genuinely_stale_after_sync, open_unresolved_vue_commit,
-    open_unresolved_vue_state, prepare_sync_transition, revert_unsynced_kinds, ProviderPathKind,
-    ProviderSyncState,
+    commit_sync_transition, genuinely_stale_after_sync, open_unresolved_carrier_commit,
+    open_unresolved_carrier_state, prepare_sync_transition, revert_unsynced_kinds,
+    ProviderPathKind, ProviderSyncState,
 };
 use crate::statistics::Statistics;
 use crate::tsgo::project_sync::ProjectSync;
@@ -57,7 +58,7 @@ mod component_resolve;
 
 // Provider-sync orchestration. Inherent-impl extension
 // methods on `VerterLanguageServer` covering diagnostics publishing,
-// IDE/API/non-Vue sync, ensure_*_synced family, unresolved (pre-snapshot) sync,
+// IDE/API/non-carrier sync, ensure_*_synced family, unresolved (pre-snapshot) sync,
 // target_ide_path helpers, and the background-init bootstrap.
 mod sync_orchestration;
 
@@ -115,7 +116,9 @@ pub use self::protocol_types::*;
 mod server_utils;
 use self::server_utils::*;
 pub(crate) use self::server_utils::{
-    compute_verter_diagnostics_for_with_views, prepare_non_vue_provider_sync,
+    adapter_module_language_for, carrier_language_for, compute_verter_diagnostics_for_with_views,
+    is_default_export_component_carrier, prepare_non_carrier_provider_sync,
+    self_file_provider_content, sync_self_file_shadow_state,
 };
 
 #[path = "../background_drain.rs"]
@@ -123,7 +126,7 @@ mod background_drain;
 #[path = "../background_init.rs"]
 mod background_init;
 // Glob re-export so `server_tests.rs` (a child of `server`) sees
-// `drain_pending_snapshot_provider_sync`, `sync_pending_vue_provider_file`,
+// `drain_pending_snapshot_provider_sync`, `sync_pending_carrier_provider_file`,
 // `is_generated_verter_types_event`, etc. via its `use super::*;`.
 pub(crate) use self::background_drain::configure_provider_paths_for_source;
 #[cfg(test)]
@@ -148,13 +151,32 @@ pub(crate) struct PublishedResolverSnapshot {
 pub(crate) struct TypeProviderContext {
     pub(crate) tsx_path: String,
     pub(crate) tsx_content: Arc<str>,
-    pub(crate) mapper: PositionMapper,
+    pub(crate) mapper: ProviderPositionMapper,
     pub(crate) tsx_line_index: LineIndex,
-    pub(crate) vue_line_index: LineIndex,
+    pub(crate) carrier_line_index: LineIndex,
+}
+
+/// The generalized per-document provider-projection query context, serving BOTH
+/// the carrier-IDE projection and the self-file rune-module projection. The
+/// SOLE query path for a document's provider buffer (no parallel rune path).
+pub(crate) struct ProviderProjectionContext {
+    /// The path the TypeProvider opened: the carrier IDE path, or the rune
+    /// module's OWN canonical id (self-file provider buffer served from its own
+    /// path).
+    pub(crate) provider_path: String,
+    /// The bytes the TypeProvider type-checks (IDE TSX, or `<rune prelude> +
+    /// <rewritten module bytes>`).
+    pub(crate) provider_content: Arc<str>,
+    /// The unified source↔provider position mapper (projection-agnostic).
+    pub(crate) mapper: ProviderPositionMapper,
+    /// Line index over [`Self::provider_content`].
+    pub(crate) provider_line_index: LineIndex,
+    /// Line index over the user source.
+    pub(crate) source_line_index: LineIndex,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct PreparedNonVueProviderSync {
+pub(crate) struct PreparedNonCarrierProviderSync {
     pub(crate) provider_path: String,
     pub(crate) rewritten: String,
     pub(crate) resolved_dependencies: Vec<crate::project_resolver::ResolveResult>,

@@ -1,0 +1,400 @@
+//! The open file-language descriptor.
+
+use std::sync::Arc;
+
+use crate::ids::{FrameworkAdapterId, LanguageId};
+
+/// Module grammar of a JavaScript dialect (closed set, mirroring OXC's
+/// own `ModuleKind` extension model).
+///
+/// `import` / `export` are MODULE-ONLY syntax: collapsing every
+/// JavaScript file onto one module kind either rejects module `.js` /
+/// `.mjs` dependencies (classic-script grammar) or mislabels CommonJS
+/// `.cjs` files (module grammar), so the neutral descriptor carries the
+/// kind explicitly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum JsModuleKind {
+    /// Module-or-script, decided by the presence of ESM syntax after
+    /// parse (`.js`, `.jsx`).
+    Unambiguous,
+    /// Always an ES module (`.mjs`).
+    Module,
+    /// CommonJS (`.cjs`).
+    CommonJs,
+    /// Always a classic script — no `import`/`export`. No registry row
+    /// produces this; it exists for carrier regions whose producer
+    /// resolves a classic-script dialect (the Vue `<script lang="js">`
+    /// mapping).
+    Script,
+}
+
+/// Source dialect of a plain script file (closed set).
+///
+/// This is descriptor data on [`FileLanguage::Script`]: it records what
+/// the extension says the file is. Parse-time source-type computation
+/// for embedded carrier scripts stays with the carrier's own parse data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum ScriptSourceType {
+    /// TypeScript (`.ts`, `.mts`, `.cts`).
+    Ts,
+    /// TypeScript with JSX (`.tsx`).
+    Tsx,
+    /// JavaScript (`.js`, `.mjs`, `.cjs`), with its module kind.
+    Js(JsModuleKind),
+    /// JavaScript with JSX (`.jsx`), with its module kind.
+    Jsx(JsModuleKind),
+    /// TypeScript declaration file (`.d.ts`, `.d.mts`, `.d.cts`).
+    Dts,
+}
+
+impl ScriptSourceType {
+    /// The `.js` dialect: JavaScript, module-or-script decided by ESM
+    /// syntax (OXC's extension model for `js`).
+    pub const fn js() -> Self {
+        Self::Js(JsModuleKind::Unambiguous)
+    }
+
+    /// The `.mjs` dialect: JavaScript, always an ES module.
+    pub const fn mjs() -> Self {
+        Self::Js(JsModuleKind::Module)
+    }
+
+    /// The `.cjs` dialect: JavaScript, CommonJS.
+    pub const fn cjs() -> Self {
+        Self::Js(JsModuleKind::CommonJs)
+    }
+
+    /// The `.jsx` dialect: JavaScript with JSX, module-or-script
+    /// decided by ESM syntax (OXC's extension model for `jsx`).
+    pub const fn jsx() -> Self {
+        Self::Jsx(JsModuleKind::Unambiguous)
+    }
+}
+
+/// The flavor of a [`FileLanguage::Script`] file.
+///
+/// A script is either PLAIN (an ordinary `.ts`/`.js`/… file with no
+/// framework involvement) or an ADAPTER MODULE — a framework adapter's
+/// standalone, NON-COMPONENT module file (a Svelte 5 `.svelte.ts` /
+/// `.svelte.js` rune module). An adapter module is still a SCRIPT, not a
+/// carrier: it has no embedded template/style regions, no component API,
+/// and never dispatches through the carrier parse path. The flavor records
+/// the owning adapter so later stages can scope the adapter's module-level
+/// ambient typing (the rune surface) to exactly these files without
+/// classifying them as carriers.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ScriptFlavor {
+    /// An ordinary script with no framework involvement.
+    Plain,
+    /// A framework adapter's standalone non-component module file (e.g. a
+    /// Svelte `.svelte.ts` / `.svelte.js` rune module). NOT a carrier.
+    AdapterModule {
+        /// The owning adapter (open set).
+        adapter_id: FrameworkAdapterId,
+        /// The adapter's concrete module language id (open set), e.g.
+        /// `"svelte_rune_module"`.
+        language_id: LanguageId,
+    },
+}
+
+/// The single open language descriptor every Verter crate routes files
+/// through.
+///
+/// * [`FileLanguage::Script`] — a plain script tracked for dependency,
+///   export, and type resolution, OR a framework adapter's standalone
+///   NON-COMPONENT module (a Svelte rune module — see [`ScriptFlavor`]).
+/// * [`FileLanguage::Framework`] — a framework CARRIER file (a file that
+///   embeds script/template/style regions, e.g. a Vue SFC). The adapter
+///   id is open; whether a registered carrier implementation exists
+///   behind it is a dispatch-time question, not a classification-time
+///   one — a carrier row without an implementation dispatches to the
+///   typed unsupported-language error.
+/// * [`FileLanguage::FrameworkTemplate`] — an external template owned by
+///   a framework component (e.g. an Angular `templateUrl` target). Never
+///   produced by a built-in row; project-gated rows resolve it at the
+///   host level.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum FileLanguage {
+    /// A script file — either plain or a framework adapter's standalone
+    /// non-component module (see [`ScriptFlavor`]).
+    Script {
+        /// Extension-derived source dialect.
+        source_type: ScriptSourceType,
+        /// Whether this is a plain script or an adapter module.
+        flavor: ScriptFlavor,
+    },
+    /// A framework carrier file.
+    Framework {
+        /// Owning adapter (open set).
+        adapter_id: FrameworkAdapterId,
+        /// Concrete language within the adapter (open set).
+        language_id: LanguageId,
+    },
+    /// An external framework template routed to its owning component.
+    FrameworkTemplate {
+        /// Owning adapter (open set).
+        adapter_id: FrameworkAdapterId,
+        /// Canonical id of the owning component file, when known at
+        /// classification time. Static classification leaves this
+        /// `None`; owner binding is host-level work.
+        owner_hint: Option<Arc<str>>,
+    },
+}
+
+impl FileLanguage {
+    /// A plain script of the given dialect.
+    pub fn script(source_type: ScriptSourceType) -> Self {
+        Self::Script {
+            source_type,
+            flavor: ScriptFlavor::Plain,
+        }
+    }
+
+    /// A framework adapter's standalone NON-COMPONENT module script (a
+    /// Svelte rune module) of the given dialect.
+    ///
+    /// This is a SCRIPT, not a carrier — [`Self::is_framework_carrier`]
+    /// stays `false` and [`Self::carrier_language_id`] stays `None`, so the
+    /// row never dispatches through the carrier parse path, the component
+    /// synth, the component api-projector, the framework-surface executor,
+    /// or the carrier watcher globs. The owning adapter is exposed only via
+    /// [`Self::adapter_script_language`].
+    pub fn adapter_module(
+        source_type: ScriptSourceType,
+        adapter_id: FrameworkAdapterId,
+        language_id: LanguageId,
+    ) -> Self {
+        Self::Script {
+            source_type,
+            flavor: ScriptFlavor::AdapterModule {
+                adapter_id,
+                language_id,
+            },
+        }
+    }
+
+    /// The catch-all plain-script routing used when no registry row
+    /// matches (unknown extensions route as TypeScript scripts).
+    pub fn script_ts() -> Self {
+        Self::script(ScriptSourceType::Ts)
+    }
+
+    /// The built-in Vue SFC carrier language.
+    ///
+    /// Memoized: this constructor runs on hot per-file/per-request
+    /// paths, so the row is built once and cloned (two refcount
+    /// bumps) — never re-locking the intern table.
+    pub fn vue() -> Self {
+        static VUE: std::sync::OnceLock<FileLanguage> = std::sync::OnceLock::new();
+        VUE.get_or_init(|| Self::Framework {
+            adapter_id: FrameworkAdapterId::vue(),
+            language_id: LanguageId::new("vue"),
+        })
+        .clone()
+    }
+
+    /// The built-in Svelte carrier language. Memoized like
+    /// [`Self::vue`].
+    pub fn svelte() -> Self {
+        static SVELTE: std::sync::OnceLock<FileLanguage> = std::sync::OnceLock::new();
+        SVELTE
+            .get_or_init(|| Self::Framework {
+                adapter_id: FrameworkAdapterId::svelte(),
+                language_id: LanguageId::new("svelte"),
+            })
+            .clone()
+    }
+
+    /// `true` for any framework CARRIER file ([`FileLanguage::Framework`]).
+    pub fn is_framework_carrier(&self) -> bool {
+        matches!(self, Self::Framework { .. })
+    }
+
+    /// `true` when this language is the built-in Vue SFC carrier.
+    ///
+    /// Checks the FULL row — adapter id AND language id. `language_id`
+    /// exists so one adapter can own several languages; only the SFC
+    /// carrier row may dispatch into the Vue SFC parse path.
+    pub fn is_vue(&self) -> bool {
+        matches!(
+            self,
+            Self::Framework {
+                adapter_id,
+                language_id,
+            } if adapter_id.is_vue() && language_id.as_str() == "vue"
+        )
+    }
+
+    /// `true` when this language is the built-in Svelte component carrier.
+    ///
+    /// Mirrors [`Self::is_vue`] — checks the FULL row (adapter id AND carrier
+    /// language id) so only the Svelte CARRIER row matches, not a same-adapter
+    /// template row.
+    pub fn is_svelte(&self) -> bool {
+        matches!(
+            self,
+            Self::Framework {
+                adapter_id,
+                language_id,
+            } if adapter_id.is_svelte() && language_id.as_str() == "svelte"
+        )
+    }
+
+    /// The owning adapter id, for framework carriers and templates.
+    pub fn adapter_id(&self) -> Option<&FrameworkAdapterId> {
+        match self {
+            Self::Script { .. } => None,
+            Self::Framework { adapter_id, .. } | Self::FrameworkTemplate { adapter_id, .. } => {
+                Some(adapter_id)
+            }
+        }
+    }
+
+    /// The concrete CARRIER language id, for framework CARRIER rows only.
+    ///
+    /// `None` for plain scripts AND for framework TEMPLATE rows (a template
+    /// is not a carrier — it has no own carrier language id). A consumer that
+    /// dispatches by [`Self::adapter_id`] uses this to confirm the row is the
+    /// adapter's CARRIER language (matching the descriptor's
+    /// `carrier_language`), not a same-adapter template.
+    pub fn carrier_language_id(&self) -> Option<&LanguageId> {
+        match self {
+            Self::Framework { language_id, .. } => Some(language_id),
+            Self::Script { .. } | Self::FrameworkTemplate { .. } => None,
+        }
+    }
+
+    /// The script dialect, for plain scripts AND adapter-module scripts.
+    pub fn script_source_type(&self) -> Option<ScriptSourceType> {
+        match self {
+            Self::Script { source_type, .. } => Some(*source_type),
+            _ => None,
+        }
+    }
+
+    /// The owning adapter id + module language id, for a framework adapter's
+    /// standalone NON-COMPONENT module script (a Svelte rune module) ONLY.
+    ///
+    /// This is the SOLE accessor that answers for the
+    /// [`ScriptFlavor::AdapterModule`] flavor. It deliberately does NOT widen
+    /// [`Self::adapter_id`] or [`Self::carrier_language_id`] — those answer
+    /// for CARRIER rows and route through carrier dispatch, which a rune
+    /// module must never enter. A consumer that wants to scope an adapter's
+    /// module-level ambient typing (the rune prelude) reads THIS accessor;
+    /// `None` for a plain script and for every framework carrier/template.
+    pub fn adapter_script_language(&self) -> Option<(&FrameworkAdapterId, &LanguageId)> {
+        match self {
+            Self::Script {
+                flavor:
+                    ScriptFlavor::AdapterModule {
+                        adapter_id,
+                        language_id,
+                    },
+                ..
+            } => Some((adapter_id, language_id)),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn helpers_discriminate_variants() {
+        assert!(FileLanguage::vue().is_framework_carrier());
+        assert!(FileLanguage::vue().is_vue());
+        assert!(FileLanguage::svelte().is_framework_carrier());
+        assert!(!FileLanguage::svelte().is_vue());
+        assert!(FileLanguage::svelte().is_svelte());
+        assert!(!FileLanguage::vue().is_svelte());
+        assert!(!FileLanguage::script_ts().is_framework_carrier());
+        assert!(!FileLanguage::script_ts().is_vue());
+        assert!(!FileLanguage::script_ts().is_svelte());
+
+        assert_eq!(
+            FileLanguage::svelte().adapter_id(),
+            Some(&FrameworkAdapterId::svelte())
+        );
+        assert_eq!(FileLanguage::script_ts().adapter_id(), None);
+        assert_eq!(
+            FileLanguage::script(ScriptSourceType::Dts).script_source_type(),
+            Some(ScriptSourceType::Dts)
+        );
+        assert_eq!(FileLanguage::vue().script_source_type(), None);
+    }
+
+    /// `is_vue()` accepts ONLY the built-in Vue SFC carrier row — the
+    /// adapter id alone is not enough. `language_id` exists precisely
+    /// so one adapter can own several languages; a future Vue-adapter
+    /// non-carrier language must not dispatch into the Vue SFC parse
+    /// path.
+    #[test]
+    fn is_vue_requires_the_carrier_language_id_not_just_the_adapter() {
+        let vue_adapter_other_language = FileLanguage::Framework {
+            adapter_id: FrameworkAdapterId::vue(),
+            language_id: LanguageId::new("vue_template"),
+        };
+        assert!(vue_adapter_other_language.is_framework_carrier());
+        assert!(
+            !vue_adapter_other_language.is_vue(),
+            "a Vue-adapter language that is not the SFC carrier must not be is_vue"
+        );
+        assert!(FileLanguage::vue().is_vue());
+    }
+
+    /// `carrier_language_id()` returns the concrete CARRIER language id for
+    /// `Framework` rows ONLY — the registry-faithful decomposition a
+    /// public-API projector uses (after adapter-id dispatch) to confirm the
+    /// row is the adapter's carrier, not a same-adapter template. It must NOT
+    /// answer for a plain script or a framework template (neither is a
+    /// carrier).
+    #[test]
+    fn carrier_language_id_answers_for_framework_carriers_only() {
+        assert_eq!(
+            FileLanguage::vue().carrier_language_id(),
+            Some(&LanguageId::new("vue"))
+        );
+        assert_eq!(
+            FileLanguage::svelte().carrier_language_id(),
+            Some(&LanguageId::new("svelte"))
+        );
+        // A Vue-ADAPTER non-carrier language reports its OWN id — distinct
+        // from the carrier id, so a `carrier_language` equality check rejects
+        // it (the byte-faithful replacement for the `is_vue()` carrier gate).
+        let vue_template = FileLanguage::Framework {
+            adapter_id: FrameworkAdapterId::vue(),
+            language_id: LanguageId::new("vue_template"),
+        };
+        assert_eq!(
+            vue_template.carrier_language_id(),
+            Some(&LanguageId::new("vue_template"))
+        );
+        assert_ne!(
+            vue_template.carrier_language_id(),
+            FileLanguage::vue().carrier_language_id(),
+            "a Vue-adapter non-carrier language must not match the carrier language id"
+        );
+        // Plain scripts and framework TEMPLATE rows are not carriers.
+        assert_eq!(FileLanguage::script_ts().carrier_language_id(), None);
+        assert_eq!(
+            FileLanguage::FrameworkTemplate {
+                adapter_id: FrameworkAdapterId::vue(),
+                owner_hint: None,
+            }
+            .carrier_language_id(),
+            None
+        );
+    }
+
+    #[test]
+    fn descriptor_equality_is_structural() {
+        assert_eq!(FileLanguage::vue(), FileLanguage::vue());
+        assert_ne!(FileLanguage::vue(), FileLanguage::svelte());
+        assert_ne!(
+            FileLanguage::script(ScriptSourceType::Ts),
+            FileLanguage::script(ScriptSourceType::Dts)
+        );
+    }
+}

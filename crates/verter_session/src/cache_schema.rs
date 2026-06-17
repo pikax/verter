@@ -2,7 +2,7 @@
 //!
 //! Every host-owned cache that stores a value transitively containing
 //! analyzer / parser-published types (`Analyzed*Field`, `ResolvedLocalType`,
-//! `ProjectedMacroSurfaces`, `ResolvedProp`, `ResolvedEmit`, etc.) participates
+//! `ProjectedMacroSurfaces`, `ResolvedProp`, `ResolvedNamedCallSignature`, etc.) participates
 //! in a single shared schema version. When the wire shape of those types
 //! changes, this constant is bumped and every participating cache must reject
 //! any entry that was stored under a prior version on first read.
@@ -53,7 +53,7 @@
 /// value gains, drops, or renames a field — including the planned addition of
 /// `*_expr` and `*_expr_scope` fields on `Analyzed*Field` /
 /// `ResolvedLocalType` / `ProjectedMacroSurfaces` / `ResolvedProp` /
-/// `ResolvedEmit`.
+/// `ResolvedNamedCallSignature`.
 ///
 /// History:
 /// - `1` — original cohort (`FileArtifactStore`, `AnalysisReadyDb`,

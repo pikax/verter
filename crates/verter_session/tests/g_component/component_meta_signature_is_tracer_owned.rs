@@ -34,19 +34,19 @@
 use std::sync::Arc;
 
 use verter_session::resolver_core::{DerivedFactKind, FactReadSetFinalise, FactVersionRef};
-use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 
 fn build_host() -> Arc<VerterHost> {
     Arc::new(VerterHost::new_standalone(HostConfig::default()))
 }
 
-fn upsert(host: &VerterHost, id: &str, src: &str, kind: FileKind) {
+fn upsert(host: &VerterHost, id: &str, src: &str, kind: FileLanguage) {
     let _ = host
         .upsert(UpsertRequest {
             canonical_id: None,
             input_id: id.to_string(),
             source: Arc::from(src),
-            file_kind: kind,
+            file_language: kind,
             aliases: Vec::new(),
         })
         .expect("upsert");
@@ -79,8 +79,8 @@ fn published_component_meta_signature_equals_finalized_tracer_read_set() {
     // Cross-file `defineProps<Foo>()` — the cold compute observes the
     // dep `/src/types.ts` through the resolver tier; the tracer
     // captures the full read set.
-    upsert(&host, "/src/types.ts", TYPES_TS, FileKind::NonSfc);
-    upsert(&host, "/src/Comp.vue", COMP_VUE, FileKind::VueSfc);
+    upsert(&host, "/src/types.ts", TYPES_TS, FileLanguage::script_ts());
+    upsert(&host, "/src/Comp.vue", COMP_VUE, FileLanguage::vue());
 
     // Prime: cold compute publishes the entry. The publish path
     // sources the `facts` rail from the finalized tracer read set.
@@ -107,8 +107,13 @@ fn published_component_meta_signature_equals_finalized_tracer_read_set() {
     // Identical content ⇒ identical content hashes ⇒ the traced fact
     // set must equal the first host's published `facts` rail.
     let trace_host = build_host();
-    upsert(&trace_host, "/src/types.ts", TYPES_TS, FileKind::NonSfc);
-    upsert(&trace_host, "/src/Comp.vue", COMP_VUE, FileKind::VueSfc);
+    upsert(
+        &trace_host,
+        "/src/types.ts",
+        TYPES_TS,
+        FileLanguage::script_ts(),
+    );
+    upsert(&trace_host, "/src/Comp.vue", COMP_VUE, FileLanguage::vue());
     let traced = verter_session::for_tests::component_meta_cold_traced_read_set_for_tests(
         &trace_host,
         "/src/Comp.vue",

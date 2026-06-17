@@ -49,10 +49,8 @@ fn parse_diag_line(line: &str) -> Option<Diag> {
 
     let rest = if let Some(after) = rest.strip_prefix("error ") {
         after
-    } else if let Some(after) = rest.strip_prefix("warning ") {
-        after
     } else {
-        return None;
+        rest.strip_prefix("warning ")?
     };
 
     let rest = rest.strip_prefix("TS")?;

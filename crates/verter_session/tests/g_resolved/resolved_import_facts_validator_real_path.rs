@@ -24,7 +24,7 @@ use verter_session::resolver_core::{
 };
 use verter_session::session_view::{HostView, SessionView};
 use verter_session::{
-    CompileErrorPolicy, DependencyResolution, FileKind, HostConfig, UpsertRequest, VerterHost,
+    CompileErrorPolicy, DependencyResolution, FileLanguage, HostConfig, UpsertRequest, VerterHost,
 };
 
 #[test]
@@ -40,7 +40,7 @@ fn validator_warms_then_invalidates_after_source_edit() {
             canonical_id: None,
             input_id: "/dep.ts".to_string(),
             source: Arc::from("export const v = 1;"),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .expect("dep upsert");
@@ -50,7 +50,7 @@ fn validator_warms_then_invalidates_after_source_edit() {
             canonical_id: None,
             input_id: "/owner.ts".to_string(),
             source: Arc::from("import { v } from './dep';\nexport const o = v;\n"),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .expect("owner upsert v1");
@@ -112,7 +112,7 @@ fn validator_warms_then_invalidates_after_source_edit() {
             canonical_id: None,
             input_id: "/owner.ts".to_string(),
             source: Arc::from("// edited\nimport { v } from './dep';\nexport const o = v;\n"),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .expect("owner upsert v2");

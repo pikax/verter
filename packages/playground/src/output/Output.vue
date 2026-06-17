@@ -2,7 +2,9 @@
 import { computed } from "vue";
 import type { Store } from "../core/store";
 import type { OutputMode } from "../core/types";
+import { supportsRuntimePreview } from "../core/frameworks";
 import Preview from "./Preview.vue";
+import PreviewUnsupported from "./PreviewUnsupported.vue";
 import CodeOutput from "./CodeOutput.vue";
 import AnalysisPanel from "./AnalysisPanel.vue";
 import LintPanel from "./LintPanel.vue";
@@ -18,6 +20,11 @@ import DependencyGraphPanel from "./DependencyGraphPanel.vue";
 const props = defineProps<{
   store: Store;
 }>();
+
+// Runtime preview is only available for frameworks with a browser preview
+// runtime (the PreviewRuntime registry). Other frameworks show an unsupported
+// state and MUST NOT reach the Vue mount code in Preview.vue.
+const canRuntimePreview = computed(() => supportsRuntimePreview(props.store.effectiveLanguage));
 
 const allTabs: { mode: OutputMode; label: string }[] = [
   { mode: "preview", label: "Preview" },
@@ -150,7 +157,10 @@ function isEditedMode(_mode: OutputMode): boolean {
       </button>
     </div>
     <div class="output-content">
-      <Preview v-if="store.outputMode === 'preview'" :store="store" />
+      <template v-if="store.outputMode === 'preview'">
+        <Preview v-if="canRuntimePreview" :store="store" />
+        <PreviewUnsupported v-else :store="store" />
+      </template>
       <AnalysisPanel v-else-if="store.outputMode === 'analysis'" :store="store" />
       <LintPanel v-else-if="store.outputMode === 'lint'" :store="store" />
       <OutlinePanel v-else-if="store.outputMode === 'outline'" :store="store" />

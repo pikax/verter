@@ -22,7 +22,7 @@ fn upsert_vue(host: &VerterHost, id: &str, src: &str) -> HostUpdateResult {
         canonical_id: None,
         input_id: id.to_string(),
         source: Arc::from(src),
-        file_kind: FileKind::VueSfc,
+        file_language: FileLanguage::vue(),
         aliases: Vec::new(),
     })
     .unwrap()
@@ -296,7 +296,7 @@ fn external_upsert_invalidates_dependent_owner() {
             canonical_id: None,
             input_id: "tpl.html".to_string(),
             source: Arc::from("<div>A</div>"),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .unwrap();
@@ -315,7 +315,7 @@ fn external_upsert_invalidates_dependent_owner() {
             canonical_id: None,
             input_id: "tpl.html".to_string(),
             source: Arc::from("<section>B</section>"),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .unwrap();
@@ -342,7 +342,7 @@ fn remove_cleans_up_file_and_aliases() {
             canonical_id: None,
             input_id: "Comp.vue".to_string(),
             source: Arc::from(src),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: vec!["@/Comp.vue".to_string()],
         })
         .unwrap();
@@ -398,7 +398,7 @@ fn alias_resolution_maps_to_same_canonical() {
             canonical_id: Some("/src/Comp.vue".to_string()),
             input_id: "./Comp.vue".to_string(),
             source: Arc::from(src),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: vec!["@/Comp.vue".to_string(), "~/Comp.vue".to_string()],
         })
         .unwrap();
@@ -734,7 +734,7 @@ fn alias_update_on_reupsert_removes_old() {
             canonical_id: None,
             input_id: "Comp.vue".to_string(),
             source: Arc::from(src),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: vec!["old-alias".to_string()],
         })
         .unwrap();
@@ -746,7 +746,7 @@ fn alias_update_on_reupsert_removes_old() {
             canonical_id: None,
             input_id: "Comp.vue".to_string(),
             source: Arc::from(src),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: vec!["new-alias".to_string()],
         })
         .unwrap();
@@ -764,7 +764,7 @@ fn non_sfc_upsert_produces_only_main() {
             canonical_id: None,
             input_id: "helper.ts".to_string(),
             source: Arc::from("export const x = 1"),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .unwrap();
@@ -783,7 +783,7 @@ fn remove_by_alias_works() {
             canonical_id: None,
             input_id: "Comp.vue".to_string(),
             source: Arc::from(src),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: vec!["@/Comp.vue".to_string()],
         })
         .unwrap();
@@ -813,7 +813,7 @@ fn non_sfc_reupsert_with_different_content_reports_changed() {
             canonical_id: None,
             input_id: "helper.ts".to_string(),
             source: Arc::from("export const x = 1"),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .unwrap();
@@ -824,7 +824,7 @@ fn non_sfc_reupsert_with_different_content_reports_changed() {
             canonical_id: None,
             input_id: "helper.ts".to_string(),
             source: Arc::from("export const x = 2"),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .unwrap();
@@ -850,7 +850,7 @@ fn non_sfc_reupsert_with_same_content_reports_not_changed() {
             canonical_id: None,
             input_id: "helper.ts".to_string(),
             source: Arc::from("export const x = 1"),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .unwrap();
@@ -860,7 +860,7 @@ fn non_sfc_reupsert_with_same_content_reports_not_changed() {
             canonical_id: None,
             input_id: "helper.ts".to_string(),
             source: Arc::from("export const x = 1"),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .unwrap();
@@ -883,7 +883,7 @@ fn non_sfc_reupsert_still_invalidates_dependents() {
             canonical_id: None,
             input_id: "/src/tpl.html".to_string(),
             source: Arc::from("<div>A</div>"),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .unwrap();
@@ -904,7 +904,7 @@ fn non_sfc_reupsert_still_invalidates_dependents() {
             canonical_id: None,
             input_id: "/src/tpl.html".to_string(),
             source: Arc::from("<section>B</section>"),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .unwrap();
@@ -1495,7 +1495,7 @@ fn upsert_with_explicit_canonical_id() {
             canonical_id: Some("/canonical/path/Comp.vue".to_string()),
             input_id: "./relative/Comp.vue".to_string(),
             source: Arc::from(src),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: Vec::new(),
         })
         .unwrap();
@@ -1582,7 +1582,7 @@ fn remove_invalidates_dependent_compile_slots() {
             canonical_id: None,
             input_id: "/src/tpl.html".to_string(),
             source: Arc::from("<div>A</div>"),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .unwrap();
@@ -1672,7 +1672,7 @@ fn smart_invalidation_type_dep_changed_invalidates_sfc() {
             canonical_id: None,
             input_id: "/src/types.ts".to_string(),
             source: Arc::from("export interface MyType { a: string }"),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .unwrap();
@@ -1694,7 +1694,7 @@ fn smart_invalidation_type_dep_changed_invalidates_sfc() {
             canonical_id: None,
             input_id: "/src/types.ts".to_string(),
             source: Arc::from("export interface MyType { a: string; b: number }"),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .unwrap();
@@ -1767,7 +1767,7 @@ fn recompile_after_type_change_works_correctly() {
             canonical_id: None,
             input_id: "/src/types.ts".to_string(),
             source: Arc::from("export interface MyType { foo: string }"),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .unwrap();
@@ -1789,7 +1789,7 @@ fn recompile_after_type_change_works_correctly() {
             canonical_id: None,
             input_id: "/src/types.ts".to_string(),
             source: Arc::from("export interface MyType { foo: string; bar: number }"),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .unwrap();
@@ -1826,7 +1826,7 @@ fn scoped_style_scope_id_consistency_between_script_and_css() {
             canonical_id: None,
             input_id: "Comp.vue".to_string(),
             source: Arc::from(src),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: Vec::new(),
         })
         .unwrap();
@@ -1918,7 +1918,7 @@ const count = ref(0)
             canonical_id: None,
             input_id: "Test.vue".to_string(),
             source: Arc::from(src),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: vec![],
         })
         .unwrap();
@@ -1954,7 +1954,7 @@ const count = ref(0)
             canonical_id: None,
             input_id: "Test.vue".to_string(),
             source: Arc::from(src),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: vec![],
         })
         .unwrap();
@@ -1987,7 +1987,7 @@ defineProps<{ msg: string }>()
             canonical_id: None,
             input_id: "Test.vue".to_string(),
             source: Arc::from(src),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: vec![],
         })
         .unwrap();
@@ -2018,7 +2018,7 @@ const count = ref(0)
             canonical_id: None,
             input_id: "Test.vue".to_string(),
             source: Arc::from(src),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: vec![],
         })
         .unwrap();
@@ -2047,7 +2047,7 @@ const msg = 'hello'
             canonical_id: None,
             input_id: "Test.vue".to_string(),
             source: Arc::from(src),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: vec![],
         })
         .unwrap();
@@ -2077,7 +2077,7 @@ const size = ref(12)
             canonical_id: None,
             input_id: "VBind.vue".to_string(),
             source: Arc::from(src),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: vec![],
         })
         .unwrap();
@@ -2118,7 +2118,7 @@ const msg = 'hello'
             canonical_id: None,
             input_id: "Test.vue".to_string(),
             source: Arc::from(src),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: vec![],
         })
         .unwrap();
@@ -2379,7 +2379,7 @@ fn cross_file_type_resolution_resolves_external_props() {
             canonical_id: None,
             input_id: "/src/types.ts".to_string(),
             source: Arc::from("export interface MyProps { title: string; count: number }"),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .unwrap();
@@ -3171,7 +3171,7 @@ fn css_var_flow_across_files() {
 .container { color: var(--theme-color); }
 </style>"#,
         ),
-        file_kind: FileKind::VueSfc,
+        file_language: FileLanguage::vue(),
         aliases: Vec::new(),
     });
 

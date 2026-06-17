@@ -452,6 +452,36 @@ impl WasmVerterHost {
         }))
     }
 
+    /// Ensure the IDE (`CachedTsx`) projection exists for a file + profile.
+    ///
+    /// The explicit IDE-ensure path: it compiles the carrier's IDE surface
+    /// (never requesting the runtime `Main` node), so a Main-less carrier
+    /// (Svelte) populates its `CachedTsx` and a subsequent [`get_ide`](Self::get_ide)
+    /// succeeds. `getIde` itself stays a pure cached read.
+    ///
+    /// The caller profile is OPTIONAL and is normalized to an IDE/TSX-bearing
+    /// target INTERNALLY, so a default / bundler profile (no TSX bit) still
+    /// produces the IDE surface. Returns `true` whenever the carrier HAS an IDE
+    /// surface — regardless of the caller's runtime target — and `false` ONLY
+    /// for a genuine no-IDE-surface file (a non-carrier / plain script). A real
+    /// failure (missing source / compile error) throws.
+    #[wasm_bindgen(js_name = ensureIdeCompiled)]
+    pub fn ensure_ide_compiled(
+        &self,
+        canonical_id: &str,
+        profile: JsValue,
+    ) -> Result<bool, JsValue> {
+        let ffi_profile: Option<FfiCompileProfile> = if profile.is_undefined() || profile.is_null()
+        {
+            None
+        } else {
+            Some(parse_wasm_input(profile)?)
+        };
+        let host_profile = ffi_profile_to_host(ffi_profile).map_err(ffi_err)?;
+        catch_panic(|| self.inner.ensure_ide_compiled(canonical_id, &host_profile))?
+            .map_err(host_err)
+    }
+
     /// Retrieve TSC declaration output for a file.
     ///
     /// Generates a minimal TypeScript declaration file for a Vue SFC.
@@ -1030,6 +1060,42 @@ impl WasmVerterHost {
                 type_expr: type_expr_json,
                 audit_record: audit_json,
                 error,
+            };
+            to_wasm_value(&result)
+        }))?
+    }
+
+    /// Resolve a component's framework surfaces, returning the wire
+    /// `TypeInfoGraphResponse` (as protobuf bytes) plus the per-request
+    /// audit record. Mirrors the NAPI `resolveFrameworkSurfaceWithAudit`.
+    ///
+    /// `request` is the protobuf-encoded
+    /// `verter_protocol::typeinfo::graph::TypeInfoGraphRequest` envelope
+    /// carrying the `GRAPH_OPERATION_FRAMEWORK_SURFACES` operation. The
+    /// host runs the envelope validator FIRST, so a malformed envelope
+    /// returns the typed wire `error` arm BEFORE any registry lookup or
+    /// semantic dispatch.
+    ///
+    /// Returns `{ response, auditRecord }` — `response` is the
+    /// protobuf-encoded `TypeInfoGraphResponse` byte array (always
+    /// present); `auditRecord` is the JSON `RequestAuditRecord` or `null`.
+    #[wasm_bindgen(js_name = "resolveFrameworkSurfaceWithAudit")]
+    pub fn resolve_framework_surface_with_audit(&self, request: &[u8]) -> Result<JsValue, JsValue> {
+        let envelope = crate::typeinfo::decode_type_info_graph_request(request)?;
+        let host = std::sync::Arc::clone(&self.inner);
+        catch_panic(AssertUnwindSafe(move || {
+            let (outcome, record) = host
+                .resolve_framework_surface_with_audit(envelope)
+                .into_parts();
+            let response = match outcome {
+                Ok(response) => response,
+                Err(error) => crate::typeinfo::framework_error_response(error),
+            };
+            let response_bytes = crate::typeinfo::encode_type_info_graph_response(&response);
+            let audit_json = crate::typeinfo::encode_stored_audit_record(&record)?;
+            let result = crate::typeinfo::WasmFrameworkSurfaceResult {
+                response: response_bytes,
+                audit_record: audit_json,
             };
             to_wasm_value(&result)
         }))?

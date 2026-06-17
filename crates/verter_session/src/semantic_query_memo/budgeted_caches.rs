@@ -1067,7 +1067,7 @@ mod tests {
     /// (assertion PASSES).
     /// Build a distinct [`HostResolvedNamedTypeKey`] for index tests.
     fn named_type_key(canonical: &str, name: &str) -> super::HostResolvedNamedTypeKey {
-        use verter_compiler::utils::oxc::vue::resolve_type::cache_keys::ResolvedNamedTypeCacheKey;
+        use verter_compiler::utils::oxc::vue::named_type_keys::ResolvedNamedTypeCacheKey;
         super::HostResolvedNamedTypeKey {
             canonical_id: StdArc::from(canonical),
             whole_hash: [0u8; 16],

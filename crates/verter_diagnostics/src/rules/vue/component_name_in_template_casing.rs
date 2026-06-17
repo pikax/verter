@@ -133,6 +133,8 @@ mod tests {
                 dynamic_classes: vec![],
                 span: Span::new(0, 20),
                 v_models: vec![],
+                bindings: vec![],
+                events: vec![],
             }],
             ..Default::default()
         };

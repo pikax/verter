@@ -96,7 +96,7 @@ pub fn mine_footprint(
         .collect();
 
     // ── 3. Sort and assign NodeId = index ──────────────────────────
-    nodes.sort_by(|a, b| node_sort_key(&a.1).cmp(&node_sort_key(&b.1)));
+    nodes.sort_by_key(|node| node_sort_key(&node.1));
     // Post-canonicalisation node cap. The raw-edge push surface
     // already capped the upstream growth (via `caps.derivation_edges`
     // at the accumulator); this is the corresponding cap on the

@@ -303,7 +303,7 @@ impl AuditedRequestBuilder {
                 canonical_id: Some(canonical.clone()),
                 input_id: canonical.clone(),
                 source: Arc::from(content.as_str()),
-                file_kind: crate::types::FileKind::from_path(canonical),
+                file_language: host.language_classifier().classify(canonical),
                 aliases: Vec::new(),
             });
         }

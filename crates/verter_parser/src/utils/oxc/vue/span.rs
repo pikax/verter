@@ -11,24 +11,18 @@ use oxc_ast::ast::{
     ExportDefaultDeclarationKind, Expression, ForStatementInit, FormalParameter, FormalParameters,
     ImportExpression, LogicalExpression, MemberExpression, NewExpression, ObjectExpression,
     ObjectPattern, ObjectPropertyKind, ParenthesizedExpression, PrivateFieldExpression, Program,
-    SequenceExpression, SimpleAssignmentTarget, SpreadElement, Statement, StaticMemberExpression,
-    TSAsExpression, TSNonNullExpression, TSSatisfiesExpression, TSTypeAssertion,
-    TaggedTemplateExpression, TemplateLiteral, UnaryExpression, UpdateExpression, YieldExpression,
+    PropertyKey, SequenceExpression, SimpleAssignmentTarget, SpreadElement, Statement,
+    StaticMemberExpression, TSAsExpression, TSNonNullExpression, TSSatisfiesExpression,
+    TSTypeAssertion, TaggedTemplateExpression, TemplateLiteral, UnaryExpression, UpdateExpression,
+    YieldExpression,
 };
 use oxc_span::{GetSpanMut, Span};
 
 /// Adjust a span by adding an offset to both start and end.
 #[inline]
-fn adjust_span(span: &mut Span, offset: u32) {
+pub(super) fn adjust_span(span: &mut Span, offset: u32) {
     span.start += offset;
     span.end += offset;
-}
-
-/// Adjust a span by subtracting an offset from both start and end.
-#[inline]
-fn adjust_span_subtract(span: &mut Span, offset: u32) {
-    span.start = span.start.saturating_sub(offset);
-    span.end = span.end.saturating_sub(offset);
 }
 
 /// Adjust all spans in an Expression by adding the given offset.
@@ -210,14 +204,31 @@ fn adjust_object_expression_spans(obj: &mut ObjectExpression<'_>, offset: u32) {
         match prop {
             ObjectPropertyKind::ObjectProperty(p) => {
                 adjust_span(&mut p.span, offset);
-                if let Some(key_expr) = p.key.as_expression_mut() {
-                    adjust_expression_spans(key_expr, offset);
-                }
+                adjust_property_key_spans(&mut p.key, offset);
                 adjust_expression_spans(&mut p.value, offset);
             }
             ObjectPropertyKind::SpreadProperty(spread) => {
                 adjust_span(&mut spread.span, offset);
                 adjust_expression_spans(&mut spread.argument, offset);
+            }
+        }
+    }
+}
+
+/// Adjust the span of an object/property key.
+///
+/// Identifier-name keys (`{ foo }`, `{ foo: bar }`) and private keys are not
+/// `Expression` variants, so `as_expression_mut()` returns `None` for them and
+/// they would otherwise be left at their pre-shift positions. Shorthand keys in
+/// particular are the binding sites consumers read for v-for locals, so the key
+/// span must move with the rest of the tree to stay source-relative.
+fn adjust_property_key_spans(key: &mut PropertyKey<'_>, offset: u32) {
+    match key {
+        PropertyKey::StaticIdentifier(ident) => adjust_span(&mut ident.span, offset),
+        PropertyKey::PrivateIdentifier(ident) => adjust_span(&mut ident.span, offset),
+        _ => {
+            if let Some(key_expr) = key.as_expression_mut() {
+                adjust_expression_spans(key_expr, offset);
             }
         }
     }
@@ -435,7 +446,7 @@ fn adjust_import_expression_spans(import: &mut ImportExpression<'_>, offset: u32
     }
 }
 
-fn adjust_assignment_target_spans(target: &mut AssignmentTarget<'_>, offset: u32) {
+pub(super) fn adjust_assignment_target_spans(target: &mut AssignmentTarget<'_>, offset: u32) {
     match target {
         AssignmentTarget::ArrayAssignmentTarget(arr) => {
             adjust_span(&mut arr.span, offset);
@@ -612,158 +623,6 @@ fn adjust_array_pattern_spans(arr: &mut ArrayPattern<'_>, offset: u32) {
     }
     if let Some(rest) = &mut arr.rest {
         adjust_binding_rest_element_spans(rest, offset);
-    }
-}
-
-// =============================================================================
-// Subtraction variants for unwrapping parsed content
-// =============================================================================
-
-/// Subtract offset from all spans in FormalParameters.
-///
-/// This is used when parsing wrapped content (e.g., `(content)=>{}`) to
-/// adjust spans back to the original content positions.
-pub fn subtract_formal_parameters_spans(params: &mut FormalParameters<'_>, offset: u32) {
-    if offset == 0 {
-        return;
-    }
-
-    adjust_span_subtract(&mut params.span, offset);
-    for param in &mut params.items {
-        subtract_formal_parameter_spans(param, offset);
-    }
-    if let Some(rest) = &mut params.rest {
-        adjust_span_subtract(&mut rest.span, offset);
-        subtract_binding_pattern_spans(&mut rest.rest.argument, offset);
-    }
-}
-
-fn subtract_formal_parameter_spans(param: &mut FormalParameter<'_>, offset: u32) {
-    adjust_span_subtract(&mut param.span, offset);
-    subtract_binding_pattern_spans(&mut param.pattern, offset);
-    if let Some(init) = &mut param.initializer {
-        subtract_expression_spans(init, offset);
-    }
-}
-
-fn subtract_binding_pattern_spans(pattern: &mut BindingPattern<'_>, offset: u32) {
-    match pattern {
-        BindingPattern::BindingIdentifier(id) => {
-            adjust_span_subtract(&mut id.span, offset);
-        }
-        BindingPattern::ObjectPattern(obj) => {
-            subtract_object_pattern_spans(obj, offset);
-        }
-        BindingPattern::ArrayPattern(arr) => {
-            subtract_array_pattern_spans(arr, offset);
-        }
-        BindingPattern::AssignmentPattern(assign) => {
-            adjust_span_subtract(&mut assign.span, offset);
-            subtract_binding_pattern_spans(&mut assign.left, offset);
-            subtract_expression_spans(&mut assign.right, offset);
-        }
-    }
-}
-
-fn subtract_object_pattern_spans(obj: &mut ObjectPattern<'_>, offset: u32) {
-    adjust_span_subtract(&mut obj.span, offset);
-    for prop in &mut obj.properties {
-        subtract_binding_property_spans(prop, offset);
-    }
-    if let Some(rest) = &mut obj.rest {
-        subtract_binding_rest_element_spans(rest, offset);
-    }
-}
-
-fn subtract_binding_property_spans(prop: &mut BindingProperty<'_>, offset: u32) {
-    adjust_span_subtract(&mut prop.span, offset);
-    // Key might not be convertible to expression (e.g., shorthand properties)
-    if let Some(key_expr) = prop.key.as_expression_mut() {
-        subtract_expression_spans(key_expr, offset);
-    }
-    subtract_binding_pattern_spans(&mut prop.value, offset);
-}
-
-fn subtract_array_pattern_spans(arr: &mut ArrayPattern<'_>, offset: u32) {
-    adjust_span_subtract(&mut arr.span, offset);
-    for elem in arr.elements.iter_mut().flatten() {
-        subtract_binding_pattern_spans(elem, offset);
-    }
-    if let Some(rest) = &mut arr.rest {
-        subtract_binding_rest_element_spans(rest, offset);
-    }
-}
-
-fn subtract_binding_rest_element_spans(rest: &mut BindingRestElement<'_>, offset: u32) {
-    adjust_span_subtract(&mut rest.span, offset);
-    subtract_binding_pattern_spans(&mut rest.argument, offset);
-}
-
-/// Subtract offset from all spans in an Expression.
-fn subtract_expression_spans(expr: &mut Expression<'_>, offset: u32) {
-    if offset == 0 {
-        return;
-    }
-
-    match expr {
-        Expression::Identifier(id) => {
-            adjust_span_subtract(&mut id.span, offset);
-        }
-        Expression::BooleanLiteral(lit) => {
-            adjust_span_subtract(&mut lit.span, offset);
-        }
-        Expression::NullLiteral(lit) => {
-            adjust_span_subtract(&mut lit.span, offset);
-        }
-        Expression::NumericLiteral(lit) => {
-            adjust_span_subtract(&mut lit.span, offset);
-        }
-        Expression::StringLiteral(lit) => {
-            adjust_span_subtract(&mut lit.span, offset);
-        }
-        Expression::CallExpression(call) => {
-            adjust_span_subtract(&mut call.span, offset);
-            subtract_expression_spans(&mut call.callee, offset);
-            for arg in &mut call.arguments {
-                if let Some(expr) = arg.as_expression_mut() {
-                    subtract_expression_spans(expr, offset);
-                }
-            }
-        }
-        Expression::StaticMemberExpression(mem) => {
-            adjust_span_subtract(&mut mem.span, offset);
-            subtract_expression_spans(&mut mem.object, offset);
-            adjust_span_subtract(&mut mem.property.span, offset);
-        }
-        Expression::ComputedMemberExpression(mem) => {
-            adjust_span_subtract(&mut mem.span, offset);
-            subtract_expression_spans(&mut mem.object, offset);
-            subtract_expression_spans(&mut mem.expression, offset);
-        }
-        Expression::ArrayExpression(arr) => {
-            adjust_span_subtract(&mut arr.span, offset);
-            for elem in &mut arr.elements {
-                if let Some(expr) = elem.as_expression_mut() {
-                    subtract_expression_spans(expr, offset);
-                }
-            }
-        }
-        Expression::ObjectExpression(obj) => {
-            adjust_span_subtract(&mut obj.span, offset);
-            for prop in &mut obj.properties {
-                if let ObjectPropertyKind::ObjectProperty(p) = prop {
-                    adjust_span_subtract(&mut p.span, offset);
-                    if let Some(key_expr) = p.key.as_expression_mut() {
-                        subtract_expression_spans(key_expr, offset);
-                    }
-                    subtract_expression_spans(&mut p.value, offset);
-                }
-            }
-        }
-        _ => {
-            // For other expression types in default values, just adjust the span
-            // This is a simplified version - extend as needed
-        }
     }
 }
 

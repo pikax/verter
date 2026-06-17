@@ -1,5 +1,7 @@
 //! Types for the lightningcss-based CSS style processor.
 
+use std::borrow::Cow;
+
 /// Errors that can occur during CSS processing.
 #[derive(Debug, Clone)]
 pub enum CssError {
@@ -46,10 +48,21 @@ pub struct ProcessStyleOptions<'a> {
 }
 
 /// Result of processing a style block.
+///
+/// `code` is a [`Cow`] over the input CSS: a zero-marker `<style>` (no scoped,
+/// module, deep, slotted, or v-bind) is returned by borrowing the input
+/// verbatim, so the passthrough costs no allocation. Any transformed surface
+/// (scoping, module hashing, v-bind/deep/slotted rewrite) yields an owned buffer.
+///
+/// Alongside the code, the result carries the structural facts the owner path
+/// discovered while processing — whether scoping was applied, whether a
+/// `:deep()`/`:slotted()` selector was rewritten, and whether lightningcss
+/// normalization ran. Consumers read these facts instead of re-deriving them by
+/// re-scanning the CSS text.
 #[derive(Debug, Clone)]
-pub struct ProcessStyleResult {
-    /// Transformed CSS code
-    pub code: String,
+pub struct ProcessStyleResult<'a> {
+    /// Transformed CSS code — borrowed from the input on a zero-marker passthrough.
+    pub code: Cow<'a, str>,
     /// Source map as JSON string (if sourcemap was requested)
     pub source_map: Option<String>,
     /// CSS module class mappings (original → hashed)
@@ -59,6 +72,16 @@ pub struct ProcessStyleResult {
     pub module_name: Option<String>,
     /// v-bind() expressions found and replaced
     pub v_bind_vars: Vec<VBindVar>,
+    /// Whether scoped attribute selectors (`[data-v-…]`) were applied to the surface.
+    pub scoped: bool,
+    /// Whether a `:deep()` / `::v-deep()` selector was found and rewritten.
+    pub has_deep: bool,
+    /// Whether a `:slotted()` / `::v-slotted()` selector was found and rewritten.
+    pub has_slotted: bool,
+    /// Whether lightningcss normalization ran. True only when a CSS-modules or
+    /// scoped transform required a flattened, well-formed AST; a marker-free or
+    /// v-bind-only surface skips normalization and leaves this `false`.
+    pub normalization_needed: bool,
 }
 
 /// A v-bind() expression that was replaced with a CSS variable.

@@ -51,6 +51,7 @@ fn typeinfo_graph_payload_tags_are_exported() {
         "export type GraphClosurePolicyTag",
         "export type ExactnessTag",
         "export type TypeInfoDegradationReasonTag",
+        "export type FrameworkSurfaceKindSupportTag",
     ];
     let mut missing: Vec<&str> = Vec::new();
     for symbol in expected {

@@ -10,23 +10,24 @@ use crate::template::code_gen::types::{CodeGenOutput, VaporElementState, VaporTe
 
 /// Process a text node in Vapor mode.
 ///
-/// - Appends the text content to the parent element's HTML buffer.
+/// - Appends the text content to `html`, the shared scope buffer for the
+///   enclosing template.
 /// - If the text contains characters needing JS escaping (only matters for
 ///   template string), we use the raw source since HTML templates don't need
 ///   JS escaping — they're HTML context.
-/// - Tracks the text child region on the parent (for DOM child counting).
-/// - Adds a static text part for dynamic text assembly if needed.
+/// - Records a static text part on `parent` for dynamic text assembly if needed.
 pub fn process_text<'a>(
     text: &TextNode,
     source: &str,
+    html: &mut String,
     parent: &mut VaporElementState<'a>,
     has_interpolation: bool,
     out: &CodeGenOutput<'a>,
 ) {
     let content = &source[text.start as usize..text.end as usize];
 
-    // Append raw text to HTML buffer (HTML context, no JS escaping needed)
-    parent.html.push_str(content);
+    // Append raw text to the scope HTML buffer (HTML context, no JS escaping needed)
+    html.push_str(content);
 
     // Only record text parts when the parent has interpolation children.
     // For purely static elements, text_parts are never consumed, so skip the allocation.
@@ -59,6 +60,7 @@ mod tests {
     fn plain_text_appends_to_html() {
         let alloc = Allocator::default();
         let out = CodeGenOutput::new(&alloc);
+        let mut html = String::new();
         let mut parent = make_parent();
         let text = TextNode {
             start: 0,
@@ -67,15 +69,16 @@ mod tests {
             is_whitespace_only: false,
         };
         let source = "hello";
-        process_text(&text, source, &mut parent, true, &out);
+        process_text(&text, source, &mut html, &mut parent, true, &out);
 
-        assert_eq!(parent.html, "hello");
+        assert_eq!(html, "hello");
     }
 
     #[test]
     fn multiple_text_nodes_append_to_html() {
         let alloc = Allocator::default();
         let out = CodeGenOutput::new(&alloc);
+        let mut html = String::new();
         let mut parent = make_parent();
         let source = "hello world";
         let t1 = TextNode {
@@ -90,10 +93,10 @@ mod tests {
             is_entity: false,
             is_whitespace_only: false,
         };
-        process_text(&t1, source, &mut parent, true, &out);
-        process_text(&t2, source, &mut parent, true, &out);
+        process_text(&t1, source, &mut html, &mut parent, true, &out);
+        process_text(&t2, source, &mut html, &mut parent, true, &out);
 
-        assert_eq!(parent.html, "hello world");
+        assert_eq!(html, "hello world");
         assert_eq!(parent.text_parts.len(), 2);
     }
 
@@ -101,6 +104,7 @@ mod tests {
     fn text_records_static_part() {
         let alloc = Allocator::default();
         let out = CodeGenOutput::new(&alloc);
+        let mut html = String::new();
         let mut parent = make_parent();
         let text = TextNode {
             start: 0,
@@ -108,7 +112,7 @@ mod tests {
             is_entity: false,
             is_whitespace_only: false,
         };
-        process_text(&text, "hello", &mut parent, true, &out);
+        process_text(&text, "hello", &mut html, &mut parent, true, &out);
 
         assert_eq!(parent.text_parts.len(), 1);
         assert_eq!(parent.text_parts[0].to_js(), "\"hello\"");
@@ -119,6 +123,7 @@ mod tests {
     fn text_with_quotes_escapes_in_part() {
         let alloc = Allocator::default();
         let out = CodeGenOutput::new(&alloc);
+        let mut html = String::new();
         let mut parent = make_parent();
         let source = r#"say "hi""#;
         let text = TextNode {
@@ -127,10 +132,10 @@ mod tests {
             is_entity: false,
             is_whitespace_only: false,
         };
-        process_text(&text, source, &mut parent, true, &out);
+        process_text(&text, source, &mut html, &mut parent, true, &out);
 
         // HTML buffer has raw content
-        assert_eq!(parent.html, r#"say "hi""#);
+        assert_eq!(html, r#"say "hi""#);
         // Text part has JS-escaped content
         assert_eq!(parent.text_parts[0].to_js(), r#""say \"hi\"""#);
     }
@@ -139,6 +144,7 @@ mod tests {
     fn static_only_skips_text_parts() {
         let alloc = Allocator::default();
         let out = CodeGenOutput::new(&alloc);
+        let mut html = String::new();
         let mut parent = make_parent();
         let text = TextNode {
             start: 0,
@@ -146,10 +152,10 @@ mod tests {
             is_entity: false,
             is_whitespace_only: false,
         };
-        process_text(&text, "hello", &mut parent, false, &out);
+        process_text(&text, "hello", &mut html, &mut parent, false, &out);
 
         // HTML buffer still populated
-        assert_eq!(parent.html, "hello");
+        assert_eq!(html, "hello");
         // But no text_parts recorded (no sibling interpolations)
         assert!(parent.text_parts.is_empty());
     }
@@ -158,6 +164,7 @@ mod tests {
     fn text_with_newline_escapes_in_part() {
         let alloc = Allocator::default();
         let out = CodeGenOutput::new(&alloc);
+        let mut html = String::new();
         let mut parent = make_parent();
         let source = "line1\nline2";
         let text = TextNode {
@@ -166,9 +173,9 @@ mod tests {
             is_entity: false,
             is_whitespace_only: false,
         };
-        process_text(&text, source, &mut parent, true, &out);
+        process_text(&text, source, &mut html, &mut parent, true, &out);
 
-        assert_eq!(parent.html, "line1\nline2");
+        assert_eq!(html, "line1\nline2");
         assert_eq!(parent.text_parts[0].to_js(), "\"line1\\nline2\"");
     }
 }

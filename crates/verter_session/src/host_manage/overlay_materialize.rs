@@ -556,34 +556,34 @@ impl VerterHost {
         let overlay_source = view.source(canonical_id)?;
         let overlay_whole_hash = view.content_hash_for(canonical_id)?;
         let raw_source: Arc<str> = Arc::clone(&overlay_source);
-        // The overlay source never carries a scheduler SFC parse; a `.vue`
-        // overlay runs `parse_sfc` once here (the legitimately separate
-        // SFC structure parser) and everything downstream reuses it.
-        // Counted via the `parse_sfc_counted` chokepoint.
-        let cached_parse: Option<Arc<verter_compiler::parser::types::ParsedSfc>> =
-            analysis_canonical_id.ends_with(".vue").then(|| {
-                Arc::new(crate::parse::parse_sfc_counted(
-                    &self.provenance,
-                    &raw_source,
-                ))
-            });
+        let overlay_file_language = self.language_classifier.classify(analysis_canonical_id);
+        // The overlay source never carries a scheduler carrier parse; a carrier
+        // overlay (`.vue` / `.svelte`) runs the carrier parser ONCE here through
+        // the counted chokepoint (the carrier-neutral producer) and everything
+        // downstream reuses its framework-neutral artifact.
+        let framework_parse: Option<Arc<verter_language::FrameworkParseArtifact>> =
+            crate::parse::build_carrier_parse_artifact_from_source(
+                &overlay_file_language,
+                raw_source.as_ref(),
+                &self.provenance,
+            );
         let whole_hash = overlay_whole_hash;
 
         // `eval_is_extracted_script` records whether the eval source is
-        // the position-preserving extracted `.vue` script — the
+        // the position-preserving extracted carrier script — the
         // predicate that lets the snapshot build below walk the
         // flight's single eval-program parse instead of re-parsing the
         // same script bytes.
         let (eval_source_text, eval_is_extracted_script) =
             Self::build_eval_script_source_with_extraction(
                 raw_source.as_ref(),
-                cached_parse.as_deref(),
+                framework_parse.as_deref(),
             );
         let eval_source = Arc::<str>::from(eval_source_text);
         // Single source type + single eval-program parse — the arena
         // stays on this flight's stack. The source type derives from the
         // OVERLAY content (the pure derivation over `raw_source` +
-        // `cached_parse`, the exact inputs the snapshot below is built
+        // `framework_parse`, the exact inputs the snapshot below is built
         // from) — NEVER from the scheduler stamp
         // (`imported_eval_source_type_for`), which covers BASE content:
         // an overlay flipping the script lang would parse the overlay
@@ -593,9 +593,8 @@ impl VerterHost {
         // base-passthrough view the pure derivation equals the scheduler
         // stamp (same pure function over the same content).
         let source_type = crate::parse::imported_eval_source_type(
-            analysis_canonical_id,
-            raw_source.as_ref(),
-            cached_parse.as_deref(),
+            &overlay_file_language,
+            framework_parse.as_deref(),
         );
         // THE single eval-program parse for this overlay flight —
         // performed and retained on the lazy lowering service's worker,
@@ -612,15 +611,15 @@ impl VerterHost {
         };
         struct ColdIndexProducts {
             header_index: verter_semantic::analysis::decl_headers::DeclHeaderIndex,
-            analysis: verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource,
+            analysis: verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource,
             snapshot: Option<crate::types::FileAnalysisSnapshot>,
         }
         let job_canonical = analysis_canonical_id.to_string();
         let job_raw_source = Arc::clone(&raw_source);
-        let job_cached_parse = cached_parse.clone();
+        let job_framework_parse = framework_parse.clone();
         let job_scope = self.config.effective_scope();
         let job_provenance = Arc::clone(&self.provenance);
-        let is_vue = analysis_canonical_id.ends_with(".vue");
+        let is_carrier = overlay_file_language.is_framework_carrier();
         // Pin the overlay's retained parse HERE (the cold-index parse) and
         // hand the lease to the overlay artifact's memo below, so the
         // header-index parse and every later overlay body demand share ONE
@@ -646,20 +645,39 @@ impl VerterHost {
                                 body,
                                 parsed.source_str(),
                             ),
-                            verter_compiler::utils::oxc::vue::resolve_type::analyze_external_type_program_headers(body),
+                            verter_compiler::utils::oxc::script::type_surface::analyze_external_type_program_headers(body),
                         )
                     }
                     None => Default::default(),
                 };
-                let snapshot = if is_vue {
-                    job_cached_parse.as_deref().map(|parsed_sfc| {
-                        let parse = crate::parse::build_vue_snapshot_from_parsed(
+                let vue_parsed = job_framework_parse
+                    .as_deref()
+                    .and_then(crate::typeinfo::adapters::vue::vue_parse);
+                let snapshot = if let Some(parsed_sfc) = vue_parsed {
+                    let parse = crate::parse::build_vue_snapshot_from_parsed(
+                        &job_canonical,
+                        job_raw_source.as_ref(),
+                        job_scope,
+                        parsed_sfc,
+                        &job_provenance,
+                        VerterHost::vue_flight_script_program(
+                            eval_is_extracted_script,
+                            program,
+                        ),
+                    );
+                    Some(VerterHost::build_snapshot_from_parse(parse))
+                } else if is_carrier {
+                    // A non-Vue carrier (Svelte) overlay: the snapshot's script
+                    // program is the flight's retained eval program — walk it,
+                    // parse nothing.
+                    job_framework_parse.as_deref().map(|artifact| {
+                        let parse = crate::parse::build_carrier_snapshot_from_artifact_with_program(
                             &job_canonical,
                             job_raw_source.as_ref(),
                             job_scope,
-                            parsed_sfc,
+                            artifact,
                             &job_provenance,
-                            VerterHost::vue_flight_script_program(
+                            VerterHost::framework_flight_script_program(
                                 eval_is_extracted_script,
                                 program,
                             ),
@@ -675,7 +693,7 @@ impl VerterHost {
                     );
                     Some(VerterHost::build_snapshot_from_parse(parse))
                 } else {
-                    // Fatal (panicked) eval-program parse on a non-SFC
+                    // Fatal (panicked) eval-program parse on a non-carrier
                     // overlay: a re-parse over the same bytes under the
                     // same source type panics identically, so the
                     // default-empty snapshot IS the parse outcome.
@@ -703,7 +721,7 @@ impl VerterHost {
             snapshot_key,
             Arc::clone(&eval_source),
             Arc::clone(&raw_source),
-            cached_parse.clone(),
+            framework_parse.clone(),
             source_type,
             Arc::clone(&self.decl_lowering),
             Arc::new(products.header_index),
@@ -886,10 +904,12 @@ impl VerterHost {
                 Arc::clone(&decl_bodies),
                 &resolver,
             );
-        crate::resolver_core::vue_default_synth::inject_vue_default_into_shallow_state(
+        self.inject_component_default_into_shallow_state(
             analysis_canonical_id,
             &mut shallow_state_inner,
             &snapshot.macros,
+            Some(eval_source.as_ref()),
+            decl_bodies.framework_parse(),
         );
         let shallow_state = Arc::new(shallow_state_inner);
 
@@ -927,7 +947,7 @@ impl VerterHost {
             parse_env_hash: flight_parse_env_hash,
             raw_source: Arc::clone(&raw_source),
             eval_source: Arc::clone(&eval_source),
-            cached_parse,
+            framework_parse,
             script_analysis,
             export_signatures,
             snapshot,

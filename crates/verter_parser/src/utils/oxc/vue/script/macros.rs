@@ -5,9 +5,10 @@
 
 #![allow(dead_code)]
 
-use crate::common::Span;
+use oxc_ast::ast::{Argument, Expression, Program, Statement, TSType};
 
-use super::resolve_type::{ResolvedElements, RuntimeType};
+use crate::common::Span;
+use crate::utils::oxc::script::type_surface::{ResolvedElements, RuntimeType};
 
 /// Type parameters info: defineProps<Props>() or defineEmits<{ (e: 'change'): void }>()
 #[derive(Debug)]
@@ -278,6 +279,90 @@ pub mod names {
     pub const DEFINE_SLOTS: &[u8] = b"defineSlots";
     pub const WITH_DEFAULTS: &[u8] = b"withDefaults";
     pub const DEFINE_COMPONENT: &[u8] = b"defineComponent";
+}
+
+/// Find the first TSType from a call expression's type parameters at the given span.
+///
+/// This walks the program AST to find a CallExpression whose span matches,
+/// then extracts the first type parameter.
+pub fn find_macro_type_param<'a>(
+    program: &'a Program<'a>,
+    macro_span: Span,
+) -> Option<&'a TSType<'a>> {
+    for stmt in &program.body {
+        if let Some(ts_type) = find_call_type_param_in_statement(stmt, macro_span) {
+            return Some(ts_type);
+        }
+    }
+    None
+}
+
+fn find_call_type_param_in_statement<'a>(
+    stmt: &'a Statement<'a>,
+    target: Span,
+) -> Option<&'a TSType<'a>> {
+    match stmt {
+        Statement::ExpressionStatement(expr_stmt) => {
+            find_call_type_param_in_expr(&expr_stmt.expression, target)
+        }
+        Statement::VariableDeclaration(var_decl) => {
+            for decl in &var_decl.declarations {
+                if let Some(init) = &decl.init {
+                    if let Some(ts_type) = find_call_type_param_in_expr(init, target) {
+                        return Some(ts_type);
+                    }
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn find_call_type_param_in_expr<'a>(
+    expr: &'a Expression<'a>,
+    target: Span,
+) -> Option<&'a TSType<'a>> {
+    match expr {
+        Expression::CallExpression(call) => {
+            // Check if this is our target call
+            if call.span.start == target.start && call.span.end == target.end {
+                if let Some(type_args) = &call.type_arguments {
+                    return type_args.params.first();
+                }
+            }
+            // Check nested calls in arguments
+            for arg in &call.arguments {
+                if let Argument::SpreadElement(spread) = arg {
+                    if let Some(ts_type) = find_call_type_param_in_expr(&spread.argument, target) {
+                        return Some(ts_type);
+                    }
+                } else if let Some(expr) = arg.as_expression() {
+                    if let Some(ts_type) = find_call_type_param_in_expr(expr, target) {
+                        return Some(ts_type);
+                    }
+                }
+            }
+            // Check callee if it's an expression
+            find_call_type_param_in_expr(&call.callee, target)
+        }
+        Expression::ParenthesizedExpression(paren) => {
+            find_call_type_param_in_expr(&paren.expression, target)
+        }
+        Expression::SequenceExpression(seq) => {
+            for expr in &seq.expressions {
+                if let Some(ts_type) = find_call_type_param_in_expr(expr, target) {
+                    return Some(ts_type);
+                }
+            }
+            None
+        }
+        Expression::ConditionalExpression(cond) => {
+            find_call_type_param_in_expr(&cond.consequent, target)
+                .or_else(|| find_call_type_param_in_expr(&cond.alternate, target))
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]

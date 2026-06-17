@@ -50,7 +50,7 @@ use oracle::admission::{
     admit_source_walk, admit_type_expr, lower_hover_rhs, AdmissionVerdict, RejectReason,
 };
 use oracle::source_walk::{resolve_source_declarations, SourceLocator};
-use verter_compiler::utils::oxc::vue::raw_surface::SymbolSpace;
+use verter_compiler::utils::oxc::script::raw_surface::SymbolSpace;
 
 const MAPPED_TEMPLATE: &str = include_str!("fixtures/mapped_template.ts");
 const INDEXED_UTILITIES: &str = include_str!("fixtures/indexed_utilities.ts");

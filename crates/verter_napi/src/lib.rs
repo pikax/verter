@@ -80,6 +80,14 @@ fn host_error(err: host::HostError) -> Error {
         host::HostError::InvalidQuery
         | host::HostError::MissingSource { .. }
         | host::HostError::MissingVirtualNode { .. } => Status::InvalidArg,
+        // Typed unsupported-language failure: the request named a
+        // language row with no registered implementation — same status
+        // family as the classify errors (the caller's input names a
+        // language the host cannot serve), distinguishable from a
+        // generic internal failure.
+        host::HostError::Scheduler(
+            verter_scheduler::job::SchedulerError::UnsupportedLanguage { .. },
+        ) => Status::InvalidArg,
         host::HostError::CompileError(_) => Status::GenericFailure,
         #[allow(unreachable_patterns)]
         _ => Status::GenericFailure,
@@ -158,7 +166,7 @@ pub fn process_style(css: Buffer, options: ProcessStyleOptions) -> Result<Proces
             .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))
     }))?
     .map(|result| ProcessStyleResult {
-        code: result.code,
+        code: result.code.into_owned(),
         sourceMap: result.source_map,
         moduleClasses: result
             .module_classes
@@ -1407,8 +1415,9 @@ impl NapiVerterHost {
     ///
     /// - `request.inputId` — the file path used for import resolution.
     /// - `request.source` — SFC source as a UTF-8 `Buffer`.
-    /// - `request.fileKind` — optional override (`"vue"` or `"ts"`); inferred
-    ///   from extension when `None`.
+    /// - `request.fileKind` — optional explicit kind (`"vue"`/`"sfc"`/
+    ///   `"vue_sfc"`, `"svelte"`, or `"non_sfc"`/`"text"`/`"file"`);
+    ///   classified from the canonical path when `None`.
     ///
     /// Returns an error if the source is not valid UTF-8 or if the file kind
     /// is unrecognised.
@@ -1674,6 +1683,34 @@ impl NapiVerterHost {
                 destructuredBlock: destructured_block,
             }
         }))
+    }
+
+    /// Ensure the IDE (`CachedTsx`) projection exists for a file + profile.
+    ///
+    /// The explicit IDE-ensure path: it compiles the carrier's IDE surface
+    /// (never requesting the runtime `Main` node), so a Main-less carrier
+    /// (Svelte) populates its `CachedTsx` and a subsequent `getIde` succeeds.
+    /// `getIde` itself stays a pure cached read.
+    ///
+    /// The caller profile is OPTIONAL and is normalized to an IDE/TSX-bearing
+    /// target INTERNALLY, so a default / bundler profile (no TSX bit) still
+    /// produces the IDE surface. Returns `true` whenever the carrier HAS an IDE
+    /// surface — regardless of the caller's runtime target — and `false` ONLY
+    /// for a genuine no-IDE-surface file (a non-carrier / plain script). A real
+    /// failure (missing source / compile error) rejects.
+    #[napi(js_name = "ensureIdeCompiled")]
+    pub fn ensure_ide_compiled(
+        &self,
+        canonical_id: String,
+        profile: Option<NapiCompileProfile>,
+    ) -> Result<bool> {
+        let ffi_profile: Option<FfiCompileProfile> = profile.map(Into::into);
+        let host_profile = ffi_profile_to_host(ffi_profile)
+            .map_err(|e| Error::new(Status::InvalidArg, format!("invalid profile: {e}")))?;
+        catch_panic(std::panic::AssertUnwindSafe(|| {
+            self.inner.ensure_ide_compiled(&canonical_id, &host_profile)
+        }))?
+        .map_err(host_error)
     }
 
     /// Generates TSC output (minimal TypeScript declarations) for a Vue SFC.
@@ -2490,6 +2527,52 @@ impl NapiVerterHost {
             })
         }))?
     }
+
+    /// Resolve a component's framework surfaces and return the wire
+    /// `TypeInfoGraphResponse` plus the per-request audit record.
+    ///
+    /// `request` is a protobuf-encoded
+    /// `verter_protocol::typeinfo::graph::TypeInfoGraphRequest` envelope
+    /// carrying the `GRAPH_OPERATION_FRAMEWORK_SURFACES` operation (the
+    /// framework-surface operation rides the existing graph envelope — no
+    /// dedicated request type). The host runs the envelope validator FIRST,
+    /// so a malformed envelope returns the typed wire `error` arm in
+    /// `response` BEFORE any registry lookup or semantic dispatch.
+    ///
+    /// `response` is the protobuf-encoded `TypeInfoGraphResponse` — the
+    /// `framework_surface` arm on success, the `error` arm on a typed
+    /// rejection — and is ALWAYS present (the validation-first executor
+    /// always produces a typed response). `auditRecord` is `null` when
+    /// audit is disabled / filtered; the audit envelope rides BOTH the
+    /// success AND the rejection outcome.
+    #[napi(js_name = "resolveFrameworkSurfaceWithAudit")]
+    pub fn resolve_framework_surface_with_audit(
+        &self,
+        request: Buffer,
+    ) -> Result<typeinfo::NapiFrameworkSurfaceResult> {
+        let envelope = typeinfo::decode_type_info_graph_request(request)?;
+        let host = std::sync::Arc::clone(&self.inner);
+        catch_panic(std::panic::AssertUnwindSafe(move || {
+            let (outcome, record) = host
+                .resolve_framework_surface_with_audit(envelope)
+                .into_parts();
+            // The validation-first executor always yields a typed wire
+            // response: the `framework_surface` arm on success, the
+            // `error` arm on a typed rejection. The `AuditedResult` Err
+            // arm drops the (error-arm) response, so re-form it here so
+            // the JS side always decodes a `TypeInfoGraphResponse`.
+            let response = match outcome {
+                Ok(response) => response,
+                Err(error) => typeinfo::framework_error_response(error),
+            };
+            let response_buf = typeinfo::encode_type_info_graph_response(&response);
+            let audit_buf = typeinfo::encode_stored_audit_record(&record)?;
+            Ok(typeinfo::NapiFrameworkSurfaceResult {
+                response: response_buf,
+                auditRecord: audit_buf,
+            })
+        }))?
+    }
 }
 
 // =============================================================================
@@ -2826,6 +2909,27 @@ pub struct NapiCompileBatchEntry {
 mod tests {
     use super::*;
 
+    /// The typed unsupported-language failure surfaces at the NAPI
+    /// boundary in the SAME status family as the classify errors
+    /// (`InvalidArg` — the request named a language the host cannot
+    /// serve), not as a generic failure. DISCRIMINATING: the catch-all
+    /// arm maps it to `GenericFailure`.
+    #[test]
+    fn unsupported_language_maps_to_invalid_arg_status() {
+        let err = host_error(host::HostError::Scheduler(
+            verter_scheduler::job::SchedulerError::UnsupportedLanguage {
+                file_id: "/src/Box.svelte".to_string(),
+                adapter_id: verter_session::FrameworkAdapterId::svelte(),
+            },
+        ));
+        assert_eq!(err.status, Status::InvalidArg);
+        assert!(
+            err.reason.contains("svelte"),
+            "the message names the adapter: {}",
+            err.reason
+        );
+    }
+
     #[test]
     fn host_update_to_napi_exposes_module_references() {
         let result = host_update_to_napi(
@@ -2869,7 +2973,7 @@ mod tests {
                 source: std::sync::Arc::from(
                     "export { default as Button } from './Button.vue';\nexport type { Props } from './types';",
                 ),
-                file_kind: host::FileKind::NonSfc,
+                file_language: host::FileLanguage::script_ts(),
                 aliases: Vec::new(),
             })
             .unwrap();
@@ -2904,7 +3008,7 @@ mod tests {
                 source: std::sync::Arc::from(
                     "export function greet() {}\nexport type Color = string;",
                 ),
-                file_kind: host::FileKind::NonSfc,
+                file_language: host::FileLanguage::script_ts(),
                 aliases: Vec::new(),
             })
             .unwrap();

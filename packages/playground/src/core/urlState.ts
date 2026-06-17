@@ -13,6 +13,12 @@ export interface SerializedState {
   tsVersion?: string; // TypeScript version (from _tsVersion)
   verterVersion?: string; // Verter WASM version (from _verterVersion)
   typeChecker?: TypeCheckerMode; // Type checker engine (tsc/tsgo)
+  /**
+   * The pinned framework adapter id (descriptor-driven, e.g. "vue" / "svelte"),
+   * from `_language`. Absent ⇒ the "Auto" state (auto-detect from the active
+   * file extension). An invalid / stale id is ignored by the store on restore.
+   */
+  language?: string;
 }
 
 // Known metadata keys that map to SerializedState fields (not user files)
@@ -25,6 +31,7 @@ const METADATA_KEYS = new Set([
   "_isProduction",
   "_ssr",
   "_typeChecker",
+  "_language",
 ]);
 
 export function serializeToHash(state: SerializedState): void {
@@ -80,6 +87,10 @@ export function serializeToHash(state: SerializedState): void {
   }
   if (state.typeChecker && state.typeChecker !== "tsc") {
     flat["_typeChecker"] = state.typeChecker;
+  }
+  // Pinned framework language id; absent ⇒ Auto (auto-detect).
+  if (state.language) {
+    flat["_language"] = state.language;
   }
 
   // Encode: JSON → fflate zlib level 9 → base64
@@ -153,5 +164,6 @@ function flatToState(flat: Record<string, string>): SerializedState {
     tsVersion: flat["_tsVersion"],
     verterVersion: flat["_verterVersion"],
     typeChecker: (flat["_typeChecker"] as TypeCheckerMode) || undefined,
+    language: flat["_language"] || undefined,
   };
 }

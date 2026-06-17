@@ -17,10 +17,10 @@ use std::sync::Arc;
 
 use verter_semantic::analysis::types::AnalyzedMacroKind;
 
-use crate::typeinfo::adapters::vue::slots_from_typeinfo_surface;
+use crate::typeinfo::framework_surface::vue_exec::slots_from_typeinfo_surface;
 use crate::typeinfo::types::{TypeInfoQueryLevel, VueMacroSurfaceRequest};
 use crate::typeinfo::{CanonicalSpan, TypeInfoSurface, TypeInfoSurfaceMember};
-use crate::types::{FileKind, HostConfig, UpsertRequest};
+use crate::types::{HostConfig, UpsertRequest};
 use crate::VerterHost;
 
 fn make_host() -> Arc<VerterHost> {
@@ -32,7 +32,9 @@ fn upsert(host: &VerterHost, canonical_id: &str, source: &str) {
         canonical_id: Some(canonical_id.to_string()),
         input_id: canonical_id.to_string(),
         source: Arc::from(source),
-        file_kind: FileKind::from_path(canonical_id),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static(canonical_id)
+            .static_resolution(),
         aliases: Vec::new(),
     });
 }
@@ -275,7 +277,7 @@ fn dual_block_member_spans_slice_raw_from_both_blocks() {
 
 /// Raise a surface member's value node to its `TypeExpr` through the SAME
 /// shared structural raiser the production normalizer uses
-/// (`adapters::vue::surface::raise_member_value`: store view + completion
+/// (`framework_surface::vue_exec::raise_member_value`: store view + completion
 /// overlay + `ProjectSemanticDispatch::raise_node_to_type_expr`). The member's
 /// `value` is a shallow `SemanticNodeId`; for a function-like slot member it
 /// raises to `TypeExpr::Function`.

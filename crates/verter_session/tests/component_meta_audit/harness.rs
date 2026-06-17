@@ -35,7 +35,7 @@ use std::sync::Arc;
 use verter_session::audited_request::AuditedRequest;
 pub use verter_session::component_meta_audit::assertions::RequestAuditRecordAssertions;
 use verter_session::component_meta_audit::{RequestAuditRecord, RequestFootprintAudit};
-use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 use verter_workspace::{
     AmbientLibSpec, IdeProjectCompilerOptions, MemoryOptions, MemoryWorkspace, ProjectGraph,
     ProjectMembership, ProjectRank, VfsProjectConfig, WorkspaceAccess,
@@ -90,7 +90,9 @@ pub fn build_preupserted_host(files: &[(&str, &str)], entry_canonical: &str) -> 
         canonical_id: Some(entry_canonical.into()),
         input_id: entry_canonical.into(),
         source: Arc::from(source),
-        file_kind: FileKind::from_path(entry_canonical),
+        file_language: verter_session::LanguageRegistry::global()
+            .classify_static(entry_canonical)
+            .static_resolution(),
         aliases: vec![],
     });
     host

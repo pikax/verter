@@ -509,6 +509,8 @@ mod tests {
             has_dynamic_class: false,
             dynamic_classes: vec![],
             v_models: vec![],
+            bindings: vec![],
+            events: vec![],
             span: verter_span::Span::new(0, 50),
         }
     }
@@ -589,6 +591,8 @@ mod tests {
             has_dynamic_class: false,
             dynamic_classes: vec![],
             v_models: vec![],
+            bindings: vec![],
+            events: vec![],
             span: verter_span::Span::new(0, 50),
         }];
 
@@ -609,6 +613,8 @@ mod tests {
             has_dynamic_class: false,
             dynamic_classes: vec![],
             v_models: vec![],
+            bindings: vec![],
+            events: vec![],
             span: verter_span::Span::new(0, 50),
         }];
         let child = make_child(&[], &[], false);
@@ -633,6 +639,8 @@ mod tests {
                 binding_name: "title".to_string(),
                 span: verter_span::Span::new(10, 30),
             }],
+            bindings: vec![],
+            events: vec![],
             span: verter_span::Span::new(0, 50),
         }];
         let child = make_child(&[], &[], false);
@@ -658,6 +666,8 @@ mod tests {
                 binding_name: "modelValue".to_string(),
                 span: verter_span::Span::new(10, 30),
             }],
+            bindings: vec![],
+            events: vec![],
             span: verter_span::Span::new(0, 50),
         }];
         let child = make_child(&[], &["modelValue"], false);

@@ -6,16 +6,15 @@
 //! The slot content is wrapped as arrow function parameters and parsed:
 //! `{ foo, bar }` → `({ foo, bar })=>{}`
 
-use oxc_allocator::Allocator;
+use oxc_allocator::{Allocator, StringBuilder};
 use oxc_ast::ast::{Expression, FormalParameters};
 use oxc_diagnostics::OxcDiagnostic;
 use oxc_parser::Parser;
 use oxc_span::SourceType;
 use rustc_hash::FxHashSet;
 
-use super::span::{
-    adjust_diagnostics_spans, adjust_formal_parameters_spans, subtract_formal_parameters_spans,
-};
+use super::span::adjust_diagnostics_spans;
+use super::span_shift::shift_formal_parameters_spans;
 use crate::common::Span;
 use crate::utils::oxc::bindings::{
     collect_expression_reference_spans, collect_pattern_local_spans,
@@ -89,13 +88,17 @@ impl<'a> VSlotWithBindings<'a> {
     }
 }
 
-/// Extract binding spans from FormalParameters.
+/// Extract binding spans from the file-relative FormalParameters.
 ///
-/// This is an internal function used by `parse_vslot_with_bindings`.
-/// Returns spans instead of string references to avoid self-referential struct issues.
+/// The params tree has already been shifted to file-relative, so locals and
+/// default-value references slice `input` directly. Type-annotation reference
+/// spans are read from nodes that keep the synthetic arrow-wrapper prefix
+/// (display-only positions that are never source-mapped), so they take only the
+/// `file_offset` shift to reach their published position.
 fn extract_slot_bindings_internal(
     params: &FormalParameters<'_>,
-    source: &str,
+    input: &str,
+    file_offset: u32,
     ignored_extra: &[&str],
 ) -> (Vec<Span>, Vec<Span>) {
     let mut locals = Vec::new();
@@ -112,7 +115,7 @@ fn extract_slot_bindings_internal(
     // Build ignored set from local names (need the actual strings to filter references)
     let mut ignored: FxHashSet<&[u8]> = locals
         .iter()
-        .map(|span| span.slice(source).as_bytes())
+        .map(|span| span.slice(input).as_bytes())
         .collect();
 
     if !ignored_extra.is_empty() {
@@ -121,23 +124,33 @@ fn extract_slot_bindings_internal(
         }
     }
 
+    // Type-annotation reference spans keep the wrapper prefix; collect them apart
+    // and apply only the file shift so they land at their published position.
+    let mut type_refs: FxHashSet<Span> = FxHashSet::default();
+
     // Extract reference spans from type annotations and default values
     for param in &params.items {
-        // Default value (initializer)
+        // Default value (initializer) — already file-relative.
         if let Some(init) = &param.initializer {
             collect_expression_reference_spans(init, &ignored, &mut references_set);
         }
         // Type annotation on the parameter (on FormalParameter, not BindingPattern)
         if let Some(annotation) = &param.type_annotation {
-            collect_type_reference_spans(&annotation.type_annotation, &mut references_set);
+            collect_type_reference_spans(&annotation.type_annotation, &mut type_refs);
         }
-        // References in default values within the pattern
+        // References in default values within the pattern — already file-relative.
         collect_pattern_reference_spans(&param.pattern, &ignored, &mut references_set);
     }
     if let Some(rest) = &params.rest {
         if let Some(annotation) = &rest.type_annotation {
-            collect_type_reference_spans(&annotation.type_annotation, &mut references_set);
+            collect_type_reference_spans(&annotation.type_annotation, &mut type_refs);
         }
+    }
+
+    for mut span in type_refs {
+        span.start += file_offset;
+        span.end += file_offset;
+        references_set.insert(span);
     }
 
     let references: Vec<Span> = references_set.into_iter().collect();
@@ -184,17 +197,15 @@ pub fn parse_vslot_sliced<'a>(
 
     let source = &input[span.start as usize..span.end as usize];
 
-    // Parse substring-relative, then adjust to file-relative
+    // Parse the wrapped slice, then shift every span straight to file-relative
+    // in a single walk (strip the arrow-wrapper prefix and add the file offset).
     let mut result = parse_vslot_internal(allocator, source, source_type);
 
-    // Adjust all AST spans to be file-relative
-    if span.start > 0 {
-        if let Some(params) = &mut result.params {
-            adjust_formal_parameters_spans(params, span.start);
-        }
-        if let Some(errors) = &mut result.errors {
-            adjust_diagnostics_spans(errors, span.start);
-        }
+    if let Some(params) = &mut result.params {
+        shift_formal_parameters_spans(params, result.offset, span.start);
+    }
+    if let Some(errors) = &mut result.errors {
+        adjust_diagnostics_spans(errors, span.start);
     }
 
     result
@@ -216,10 +227,18 @@ pub fn parse_vslot<'a>(
     source: &str,
     source_type: SourceType,
 ) -> VSlotParseResult<'a> {
-    parse_vslot_internal(allocator, source, source_type)
+    let mut result = parse_vslot_internal(allocator, source, source_type);
+    // No file offset: shifting by the wrapper offset alone strips the synthetic
+    // prefix and yields source-relative spans.
+    if let Some(params) = &mut result.params {
+        shift_formal_parameters_spans(params, result.offset, 0);
+    }
+    result
 }
 
-/// Internal v-slot parsing logic. Returns substring-relative spans.
+/// Internal v-slot parsing logic. Returns wrapped-relative spans (positions in
+/// the synthetic `({content})=>{}` wrapper); callers shift them to source- or
+/// file-relative via [`shift_formal_parameters_spans`].
 fn parse_vslot_internal<'a>(
     allocator: &'a Allocator,
     source: &str,
@@ -234,12 +253,11 @@ fn parse_vslot_internal<'a>(
         };
     }
 
-    // Wrap as arrow function parameters: `({content})=>{}`
-    // The opening `(` adds 1 byte offset
+    // Wrap as arrow-function parameters — `({content})=>{}` — concatenated
+    // straight into the parser arena in a single allocation, with no transient
+    // heap `String`. The leading `(` shifts every parsed span by one byte.
     const WRAPPER_OFFSET: u32 = 1;
-    let wrapped_string = format!("({})=>{{}}", source);
-    // Allocate the wrapped string in the allocator so it lives as long as the allocator
-    let wrapped = allocator.alloc_str(&wrapped_string);
+    let wrapped = StringBuilder::from_strs_array_in(["(", source, ")=>{}"], allocator).into_str();
 
     // Parse as expression
     let parser = Parser::new(allocator, wrapped, source_type);
@@ -249,9 +267,7 @@ fn parse_vslot_internal<'a>(
         Ok(expr) => {
             // Extract FormalParameters from ArrowFunctionExpression
             if let Expression::ArrowFunctionExpression(arrow) = expr {
-                let mut params = arrow.unbox().params.unbox();
-                // Adjust spans to reflect original source positions (subtract wrapper offset)
-                subtract_formal_parameters_spans(&mut params, WRAPPER_OFFSET);
+                let params = arrow.unbox().params.unbox();
                 VSlotParseResult {
                     params: Some(params),
                     offset: WRAPPER_OFFSET,
@@ -302,35 +318,23 @@ pub fn parse_vslot_with_bindings_sliced<'a>(
         _ => ("", 0),
     };
 
-    // Parse with substring — spans are substring-relative
+    // Parse the wrapped slice, then shift every AST span straight to file-relative
+    // in one walk; binding extraction reads that file-relative tree directly.
     let mut result = parse_vslot_internal(allocator, source, source_type);
+    if let Some(params) = &mut result.params {
+        shift_formal_parameters_spans(params, result.offset, offset);
+    }
+    if let Some(errors) = &mut result.errors {
+        adjust_diagnostics_spans(errors, offset);
+    }
 
-    // Extract bindings while spans are still substring-relative
-    let (mut locals, mut references) = if result.errors.is_some() {
+    let (locals, references) = if result.errors.is_some() {
         (Vec::new(), Vec::new())
     } else if let Some(params) = &result.params {
-        extract_slot_bindings_internal(params, source, ignored)
+        extract_slot_bindings_internal(params, input, offset, ignored)
     } else {
         (Vec::new(), Vec::new())
     };
-
-    // Adjust everything to file-relative
-    if offset > 0 {
-        if let Some(params) = &mut result.params {
-            adjust_formal_parameters_spans(params, offset);
-        }
-        if let Some(errors) = &mut result.errors {
-            adjust_diagnostics_spans(errors, offset);
-        }
-        for s in &mut locals {
-            s.start += offset;
-            s.end += offset;
-        }
-        for s in &mut references {
-            s.start += offset;
-            s.end += offset;
-        }
-    }
 
     VSlotWithBindings {
         result,
@@ -599,22 +603,19 @@ mod tests {
         let params = result.params.unwrap();
         assert_eq!(params.items.len(), 1);
 
-        // "data" binding should be at file-relative position
+        // "data" binding lands at its exact file-relative position 22..26.
         if let BindingPattern::ObjectPattern(obj) = &params.items[0].pattern {
+            assert_eq!((obj.span.start, obj.span.end), (20, 28));
             if let BindingPattern::BindingIdentifier(id) = &obj.properties[0].value {
                 assert_eq!(id.name.as_str(), "data");
-                // "data" is at position 22..26 in the full input
-                assert!(
-                    id.span.start >= 20,
-                    "span.start {} should be >= 20",
-                    id.span.start
-                );
-                assert!(
-                    id.span.end <= 28,
-                    "span.end {} should be <= 28",
-                    id.span.end
-                );
+                assert_eq!(id.span.start, 22);
+                assert_eq!(id.span.end, 26);
+                assert_eq!(&input[id.span.start as usize..id.span.end as usize], "data");
+            } else {
+                panic!("Expected BindingIdentifier");
             }
+        } else {
+            panic!("Expected ObjectPattern");
         }
     }
 
@@ -665,10 +666,9 @@ mod tests {
 
         assert!(wb.is_ok());
 
-        // Local "data" should be at file-relative position
+        // Local "data" lands at its exact file-relative position 22..26.
         assert_eq!(wb.locals.len(), 1);
-        assert!(wb.locals[0].start >= 20);
-        assert!(wb.locals[0].end <= 28);
+        assert_eq!((wb.locals[0].start, wb.locals[0].end), (22, 26));
         assert_eq!(wb.locals[0].slice(input), "data");
     }
 
@@ -723,18 +723,16 @@ mod tests {
 
         assert!(wb.is_ok());
 
-        // Local "data" should be within [start, end)
+        // Local "data" lands at its exact file-relative position 9..13.
         assert_eq!(wb.locals.len(), 1);
-        assert!(wb.locals[0].start >= start);
-        assert!(wb.locals[0].end <= end);
+        assert_eq!((wb.locals[0].start, wb.locals[0].end), (9, 13));
         assert_eq!(wb.locals[0].slice(input), "data");
 
-        // Reference "MyType" should be within [start, end)
-        assert!(!wb.references.is_empty());
-        for s in &wb.references {
-            assert!(s.start >= start);
-            assert!(s.end <= end);
-        }
+        // The lone reference is the `MyType` type-annotation identifier. Its span
+        // keeps the one-byte arrow-wrapper prefix (a display-only position), so it
+        // sits one byte after the textual `MyType` start — pinned exactly here.
+        assert_eq!(wb.references.len(), 1);
+        assert_eq!((wb.references[0].start, wb.references[0].end), (26, 32));
     }
 
     /// @ai-generated - Ignored identifiers are excluded from references.
@@ -747,5 +745,235 @@ mod tests {
 
         assert!(wb.is_ok());
         assert!(wb.references.is_empty());
+    }
+
+    // ── exact single-pass span characterization ────────────────────
+    //
+    // These pin absolute byte positions so a one-byte placement drift in the
+    // wrapped→file-relative shift fails. They lock in the published positions
+    // of every v-slot output category: structural param spans, the saturating
+    // synthetic-prefix mapping, default-value references, display-only
+    // type-annotation references, and malformed-diagnostic label offsets.
+
+    /// @ai-generated - Structural param spans land at exact absolute positions.
+    #[test]
+    fn exact_sliced_structural_param_spans_at_offset() {
+        let allocator = Box::leak(Box::new(Allocator::default()));
+        let input = r#"<template #default="{ data }"></template>"#;
+        // "{ data }" occupies bytes 20..28.
+        let result = parse_vslot_sliced(allocator, Span::new(20, 28), input, SourceType::tsx());
+        assert!(result.is_ok());
+        let params = result.params.unwrap();
+
+        // The FormalParameters span covers the synthetic `(...)` wrapper, so its
+        // end maps one byte past the slice; its start saturates to the slice start.
+        assert_eq!((params.span.start, params.span.end), (20, 29));
+        assert_eq!(
+            (params.items[0].span.start, params.items[0].span.end),
+            (20, 28)
+        );
+        if let BindingPattern::ObjectPattern(obj) = &params.items[0].pattern {
+            assert_eq!((obj.span.start, obj.span.end), (20, 28));
+            assert_eq!(
+                (obj.properties[0].span.start, obj.properties[0].span.end),
+                (22, 26)
+            );
+        } else {
+            panic!("Expected ObjectPattern");
+        }
+    }
+
+    /// @ai-generated - The synthetic arrow-wrapper `(` maps to no source byte: its
+    /// position saturates to the content start rather than underflowing below it.
+    #[test]
+    fn exact_negative_synthetic_prefix_saturates_to_content_start() {
+        let allocator = Box::leak(Box::new(Allocator::default()));
+
+        // Raw parse: the wrapper paren at wrapped offset 0 saturates to 0, it does
+        // not wrap around to u32::MAX. "data" itself starts at byte 0.
+        let raw = parse_vslot(allocator, "data", SourceType::tsx());
+        let rp = raw.params.unwrap();
+        assert_eq!(rp.span.start, 0);
+        if let BindingPattern::BindingIdentifier(id) = &rp.items[0].pattern {
+            assert_eq!((id.span.start, id.span.end), (0, 4));
+        } else {
+            panic!("Expected BindingIdentifier");
+        }
+
+        // Sliced parse: params.span.start lands on the slice start (the content),
+        // never one byte earlier where the synthetic `(` would otherwise map.
+        let input = r#"<div #s="data">"#;
+        let sliced = parse_vslot_sliced(allocator, Span::new(9, 13), input, SourceType::tsx());
+        let sp = sliced.params.unwrap();
+        assert_eq!(sp.span.start, 9);
+        if let BindingPattern::BindingIdentifier(id) = &sp.items[0].pattern {
+            assert_eq!((id.span.start, id.span.end), (9, 13));
+            assert_eq!(&input[id.span.start as usize..id.span.end as usize], "data");
+        } else {
+            panic!("Expected BindingIdentifier");
+        }
+    }
+
+    /// @ai-generated - Default-value references are unwrapped to their true source
+    /// position; type-annotation references keep the display-only wrapper prefix.
+    #[test]
+    fn exact_default_and_type_references_at_offset() {
+        let allocator = Box::leak(Box::new(Allocator::default()));
+        let input = "prefix { data = fallback }: { data: MyType } suffix";
+        let start = 7u32;
+        let end = start + "{ data = fallback }: { data: MyType }".len() as u32;
+        let wb = parse_vslot_with_bindings_sliced(
+            allocator,
+            Some(Span::new(start, end)),
+            input,
+            SourceType::tsx(),
+            &[],
+        );
+        assert!(wb.is_ok());
+
+        let params = wb.result.params.as_ref().unwrap();
+        assert_eq!((params.span.start, params.span.end), (7, 45));
+        // The type-annotation span keeps the wrapper prefix (display-only).
+        let ta = params.items[0].type_annotation.as_ref().unwrap();
+        assert_eq!((ta.span.start, ta.span.end), (27, 45));
+
+        // Exactly one local, at its true source position.
+        assert_eq!(wb.locals.len(), 1);
+        assert_eq!((wb.locals[0].start, wb.locals[0].end), (9, 13));
+        assert_eq!(wb.locals[0].slice(input), "data");
+
+        let mut refs: Vec<(u32, u32)> = wb.references.iter().map(|s| (s.start, s.end)).collect();
+        refs.sort_unstable();
+        // `fallback` (default value) is unwrapped to its true source span; the
+        // `MyType` type reference keeps the one-byte wrapper prefix.
+        assert_eq!(refs, vec![(16, 24), (37, 43)]);
+        assert_eq!(input.get(16..24), Some("fallback"));
+    }
+
+    /// @ai-generated - Default-value references inside compound expressions are
+    /// value-position references, so they are unwrapped to their TRUE source byte
+    /// — never left one byte high carrying the synthetic arrow-wrapper prefix.
+    ///
+    /// Every kind exercised here (binary, conditional, logical, unary, and a nested
+    /// mix whose binary parent contains a call + member access) reaches the
+    /// reference collector, so each operand must land on its exact source span. A
+    /// walker that lets any compound kind fall through to a file-offset-only
+    /// adjustment leaves these one byte too high and fails here.
+    #[test]
+    fn exact_complex_default_value_references() {
+        let allocator = Box::leak(Box::new(Allocator::default()));
+
+        // `{ x = a + b }` — `a` is source byte 6, `b` is byte 10.
+        let binary = parse_vslot_with_bindings(allocator, "{ x = a + b }", SourceType::tsx(), &[]);
+        let mut br: Vec<(u32, u32)> = binary.references.iter().map(|s| (s.start, s.end)).collect();
+        br.sort_unstable();
+        assert_eq!(br, vec![(6, 7), (10, 11)]);
+        assert_eq!("{ x = a + b }".get(6..7), Some("a"));
+        assert_eq!("{ x = a + b }".get(10..11), Some("b"));
+
+        // `{ x = c ? d : e }` — `c` byte 6, `d` byte 10, `e` byte 14.
+        let cond =
+            parse_vslot_with_bindings(allocator, "{ x = c ? d : e }", SourceType::tsx(), &[]);
+        let mut cr: Vec<(u32, u32)> = cond.references.iter().map(|s| (s.start, s.end)).collect();
+        cr.sort_unstable();
+        assert_eq!(cr, vec![(6, 7), (10, 11), (14, 15)]);
+        assert_eq!("{ x = c ? d : e }".get(6..7), Some("c"));
+        assert_eq!("{ x = c ? d : e }".get(14..15), Some("e"));
+
+        // `{ x = a && b }` — logical operands at bytes 6 and 11.
+        let logical =
+            parse_vslot_with_bindings(allocator, "{ x = a && b }", SourceType::tsx(), &[]);
+        let mut lr: Vec<(u32, u32)> = logical
+            .references
+            .iter()
+            .map(|s| (s.start, s.end))
+            .collect();
+        lr.sort_unstable();
+        assert_eq!(lr, vec![(6, 7), (11, 12)]);
+        assert_eq!("{ x = a && b }".get(11..12), Some("b"));
+
+        // `{ x = !a }` — unary operand at byte 7.
+        let unary = parse_vslot_with_bindings(allocator, "{ x = !a }", SourceType::tsx(), &[]);
+        let ur: Vec<(u32, u32)> = unary.references.iter().map(|s| (s.start, s.end)).collect();
+        assert_eq!(ur, vec![(7, 8)]);
+        assert_eq!("{ x = !a }".get(7..8), Some("a"));
+
+        // `{ x = f(a) + b.c }` — the binary parent (a kind the old whitelist dropped
+        // to offset-only) must not strand its call + member operands one byte high:
+        // `f` byte 6, `a` byte 8, `b` byte 13 (`c` is a property, not a reference).
+        let nested =
+            parse_vslot_with_bindings(allocator, "{ x = f(a) + b.c }", SourceType::tsx(), &[]);
+        let mut nr: Vec<(u32, u32)> = nested.references.iter().map(|s| (s.start, s.end)).collect();
+        nr.sort_unstable();
+        assert_eq!(nr, vec![(6, 7), (8, 9), (13, 14)]);
+        assert_eq!("{ x = f(a) + b.c }".get(6..7), Some("f"));
+        assert_eq!("{ x = f(a) + b.c }".get(13..14), Some("b"));
+    }
+
+    /// @ai-generated - A shorthand-object default (`{ x = { foo } }`) collects the
+    /// shorthand key `foo` as its reference; that key is a value-position binding
+    /// site and must be unwrapped to its true source byte, not left wrapper-high.
+    #[test]
+    fn exact_shorthand_object_default_reference_unwrapped() {
+        let allocator = Box::leak(Box::new(Allocator::default()));
+        // `{ x = { foo } }` — `foo` is source byte 8.
+        let wb = parse_vslot_with_bindings(allocator, "{ x = { foo } }", SourceType::tsx(), &[]);
+        assert!(wb.is_ok());
+        let refs: Vec<(u32, u32)> = wb.references.iter().map(|s| (s.start, s.end)).collect();
+        assert_eq!(refs, vec![(8, 11)]);
+        assert_eq!("{ x = { foo } }".get(8..11), Some("foo"));
+    }
+
+    /// @ai-generated - Raw type-annotation reference keeps the wrapper prefix.
+    #[test]
+    fn exact_raw_type_reference_retains_wrapper_prefix() {
+        let allocator = Box::leak(Box::new(Allocator::default()));
+        let wb = parse_vslot_with_bindings(
+            allocator,
+            "{ data }: { data: MyType }",
+            SourceType::tsx(),
+            &[],
+        );
+        assert_eq!(wb.references.len(), 1);
+        // Textual `MyType` starts at byte 18; the published span keeps the wrapper
+        // prefix and so begins one byte later, at 19.
+        assert_eq!((wb.references[0].start, wb.references[0].end), (19, 25));
+    }
+
+    /// @ai-generated - Malformed slot diagnostic label offset equals the raw label
+    /// offset plus the slice start (a single uniform file shift, no wrapper unwrap).
+    #[test]
+    fn exact_malformed_diagnostic_label_offset_is_raw_plus_slice_start() {
+        let allocator = Box::leak(Box::new(Allocator::default()));
+        let malformed = "{ invalid: }";
+        let raw = parse_vslot(allocator, malformed, SourceType::tsx());
+        let raw_off = raw
+            .errors
+            .as_ref()
+            .and_then(|e| e.first())
+            .and_then(|d| d.labels.as_ref())
+            .and_then(|l| l.first())
+            .map(|l| l.offset())
+            .expect("raw malformed parse must produce a labelled diagnostic");
+
+        let slice_start = 13u32;
+        let prefix = "x".repeat(slice_start as usize);
+        let input = format!("{prefix}{malformed}");
+        let sliced = parse_vslot_sliced(
+            allocator,
+            Span::new(slice_start, slice_start + malformed.len() as u32),
+            &input,
+            SourceType::tsx(),
+        );
+        let sliced_off = sliced
+            .errors
+            .as_ref()
+            .and_then(|e| e.first())
+            .and_then(|d| d.labels.as_ref())
+            .and_then(|l| l.first())
+            .map(|l| l.offset())
+            .expect("sliced malformed parse must produce a labelled diagnostic");
+
+        assert_eq!(sliced_off, raw_off + slice_start as usize);
     }
 }

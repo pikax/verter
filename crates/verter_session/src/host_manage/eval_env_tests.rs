@@ -23,7 +23,7 @@ use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn base_eval_env_reflects_content_edit_without_eager_clear() {
-    use crate::types::{FileKind, HostConfig, UpsertRequest};
+    use crate::types::{FileLanguage, HostConfig, UpsertRequest};
     use crate::VerterHost;
 
     let host = VerterHost::new_standalone(HostConfig::default());
@@ -34,7 +34,7 @@ fn base_eval_env_reflects_content_edit_without_eager_clear() {
             canonical_id: Some("/src/types.ts".to_string()),
             input_id: "/src/types.ts".to_string(),
             source: Arc::from("export interface Foo { a: number }"),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .expect("initial upsert");
@@ -61,7 +61,7 @@ fn base_eval_env_reflects_content_edit_without_eager_clear() {
             source: Arc::from(
                 "export interface Foo { a: number }\nexport interface Bar { b: string }",
             ),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .expect("content edit upsert");
@@ -86,7 +86,7 @@ fn base_eval_env_reflects_content_edit_without_eager_clear() {
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn base_eval_env_arc_is_the_memo_owned_whole_env() {
-    use crate::types::{FileKind, HostConfig, UpsertRequest};
+    use crate::types::{FileLanguage, HostConfig, UpsertRequest};
     use crate::VerterHost;
 
     let host = VerterHost::new_standalone(HostConfig::default());
@@ -95,7 +95,7 @@ fn base_eval_env_arc_is_the_memo_owned_whole_env() {
             canonical_id: Some("/src/types.ts".to_string()),
             input_id: "/src/types.ts".to_string(),
             source: Arc::from("export interface Foo { a: number }"),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .expect("upsert");

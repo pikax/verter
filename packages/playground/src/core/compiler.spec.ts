@@ -17,6 +17,7 @@ import {
 } from "./compiler";
 import { File } from "./types";
 import { combineSourceMaps, lookupGenerated, lookupSource, parseMappings } from "./sourcemap";
+import { allFrameworkExtensions } from "./frameworks";
 
 async function generateRealTsxOutput(
   vueSource: string,
@@ -287,7 +288,8 @@ describe("resolveKnownModuleReferenceDependencies", () => {
         "src/App.vue",
         expect.any(Array),
         ["src/App.vue", "src/types.ts"],
-        ["", ".ts", ".tsx", ".js", ".jsx", ".mts", ".mjs", ".vue"],
+        // Base TS/JS resolution extensions + every manifest framework extension.
+        ["", ".ts", ".tsx", ".js", ".jsx", ".mts", ".mjs", ...allFrameworkExtensions()],
       );
       expect(host.setImportDependencies).toHaveBeenCalledWith("src/App.vue", [
         { specifier: "src/types.ts", resolvedCanonicalId: "src/types.ts" },
@@ -581,6 +583,49 @@ defineProps<Props>()
     expect(main.diagnostics.diagnostics).toEqual([]);
     expect(main.code).toContain("name");
     expect(main.code).toContain("count");
+  });
+});
+
+// @ai-generated - Real WASM smoke: a minimal .svelte carrier upserts with
+// fileKind:"svelte" and produces a non-empty main virtual file (client JS).
+// Discriminates the descriptor-driven svelte path against a Vue-only host
+// wiring. NOTE: the dedicated `getIde` TSX projection is not yet wired for
+// svelte through the WASM host method (the LSP serves svelte TSX via a
+// different path) — carry-forward, tracked in the feedback file.
+describe("svelte WASM smoke", () => {
+  it("upserts a .svelte file with fileKind:'svelte' and returns non-empty main virtual file", async () => {
+    const host = await loadWasmHost();
+    const profile = { sourceMap: true, target: "ide", forceJs: true };
+    const source = `<script lang="ts">\n  let count = $state(0)\n</script>\n\n<h1>{count}</h1>\n`;
+
+    const upsert = host.upsert({
+      inputId: "App.svelte",
+      source,
+      fileKind: "svelte",
+      aliases: [],
+      compileProfile: profile,
+    });
+    expect(upsert.moduleReferences).toBeDefined();
+
+    const main = host.getVirtualFile({ rawId: "App.svelte", compileProfile: profile });
+    expect(main.code.length).toBeGreaterThan(0);
+    expect(main.diagnostics.diagnostics).toEqual([]);
+  });
+
+  it("upserts a .svelte.ts adapter module with fileKind:'svelte'", async () => {
+    const host = await loadWasmHost();
+    const profile = { sourceMap: true, target: "ide", forceJs: true };
+    const source = `export function createCounter() {\n  let v = $state(0)\n  return { get value() { return v } }\n}\n`;
+
+    host.upsert({
+      inputId: "counter.svelte.ts",
+      source,
+      fileKind: "svelte",
+      aliases: [],
+      compileProfile: profile,
+    });
+    const main = host.getVirtualFile({ rawId: "counter.svelte.ts", compileProfile: profile });
+    expect(main.code.length).toBeGreaterThan(0);
   });
 });
 

@@ -6,8 +6,10 @@
 //! `JsValue` ↔ string boundary). The Rust-side substrate is identical
 //! to NAPI; only the encoding shape changes.
 
+use prost::Message;
 use serde::Serialize;
 use verter_audit::RequestAuditRecord;
+use verter_protocol::typeinfo::graph::{TypeInfoGraphRequest, TypeInfoGraphResponse};
 use verter_protocol::typeinfo::{FfiEvaluateTypeExpressionRequest, FfiSymbolEntry};
 use verter_session::host_resolve_type_audit::TypeResolutionRequestError;
 use verter_session::semantic_query::{ProjectionMode, SemanticNodeId};
@@ -110,4 +112,47 @@ pub(crate) fn parse_resolve_mode(mode: Option<String>) -> Result<Option<Projecti
     let parsed = verter_ffi::convert::parse_projection_mode(&tag)
         .map_err(|e| JsValue::from_str(&format!("resolve-symbol mode error: {e}")))?;
     Ok(Some(parsed))
+}
+
+/// Combined response shape for `resolveFrameworkSurfaceWithAudit` (WASM).
+///
+/// `response` is the protobuf-encoded `TypeInfoGraphResponse` (always
+/// present — the validation-first executor always yields a typed
+/// response). `audit_record` carries the per-request `RequestAuditRecord`
+/// JSON string; `null` when audit is off / filtered.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct WasmFrameworkSurfaceResult {
+    /// Protobuf-encoded `TypeInfoGraphResponse` bytes (always present).
+    /// `serde-wasm-bindgen` maps the byte slice to a JS array of numbers;
+    /// the consumer reconstructs a `Uint8Array` from it before decoding.
+    pub response: Vec<u8>,
+    /// JSON-serialised `RequestAuditRecord`; `null` when audit is off.
+    pub audit_record: Option<String>,
+}
+
+/// Decode a protobuf-encoded [`TypeInfoGraphRequest`] envelope from
+/// raw bytes.
+pub(crate) fn decode_type_info_graph_request(
+    bytes: &[u8],
+) -> Result<TypeInfoGraphRequest, JsValue> {
+    TypeInfoGraphRequest::decode(bytes)
+        .map_err(|e| JsValue::from_str(&format!("type-info graph request decode error: {e}")))
+}
+
+/// Encode a [`TypeInfoGraphResponse`] to protobuf bytes.
+pub(crate) fn encode_type_info_graph_response(resp: &TypeInfoGraphResponse) -> Vec<u8> {
+    resp.encode_to_vec()
+}
+
+/// Wrap a typed `TypeInfoRequestError` back into the `error` arm of a
+/// [`TypeInfoGraphResponse`] (parity with the NAPI binding — the
+/// `AuditedResult` Err arm drops the error-arm response).
+pub(crate) fn framework_error_response(
+    error: verter_protocol::typeinfo::graph::TypeInfoRequestError,
+) -> TypeInfoGraphResponse {
+    use verter_protocol::verter::v1::type_info_graph_response;
+    TypeInfoGraphResponse {
+        kind: Some(type_info_graph_response::Kind::Error(error)),
+    }
 }

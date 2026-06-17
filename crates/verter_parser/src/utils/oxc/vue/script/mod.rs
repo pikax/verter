@@ -15,9 +15,8 @@
 
 pub mod bindings;
 pub mod macros;
+pub mod named_type_keys;
 pub mod options;
-pub mod raw_surface;
-pub mod resolve_type;
 pub mod setup;
 pub mod shared;
 pub mod types;
@@ -25,16 +24,11 @@ pub mod usage;
 
 use oxc_ast::ast::Program;
 
+use crate::utils::oxc::script::type_surface::{build_type_context, ResolvedElements};
+
 pub use macros::{
     detect_macro_kind, is_define_component, MacroArrayArg, MacroDeclarator, MacroObjectArg,
     MacroProperty, MacroTypeParams, ScriptMacro, VueMacroKind,
-};
-pub use resolve_type::{
-    build_type_context, extract_companion_types, format_runtime_types, resolve_type_elements,
-    resolve_type_elements_with_ctx, resolve_type_elements_with_ctx_ref,
-    take_last_resolution_budget_exceeded, DiagnosticLocation, ResolutionBudgetExceeded,
-    ResolutionDiagnostic, ResolutionDiagnosticKind, ResolvedElements, ResolvedEmit,
-    ResolvedEmitSignature, RuntimeType, TypeResolutionContext, PARSER_SYNTACTIC_DEPTH_LIMIT,
 };
 pub use shared::ScriptParseContext;
 pub use types::*;
@@ -119,7 +113,7 @@ pub fn parse_script_with_companion<'a>(
     mode: ScriptMode,
     content_offset: u32,
     source: &'a str,
-    companion_types: Option<rustc_hash::FxHashMap<String, resolve_type::ResolvedElements>>,
+    companion_types: Option<rustc_hash::FxHashMap<String, ResolvedElements>>,
 ) -> ScriptParseResult<'a> {
     let ctx = ScriptParseContext::new(content_offset, source.as_bytes());
     let mut items = Vec::new();
@@ -267,6 +261,3 @@ fn collect_vue_dynamic_imports(program: &Program<'_>) -> Vec<crate::common::Span
 
 #[cfg(test)]
 mod tests;
-
-#[cfg(test)]
-mod resolve_type_typed_form_tests;

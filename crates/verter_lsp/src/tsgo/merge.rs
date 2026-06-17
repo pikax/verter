@@ -8,7 +8,7 @@ use tower_lsp_server::ls_types::*;
 use verter_span::{LspPosition, TsPosition};
 
 use crate::documents::line_index::LineIndex;
-use crate::documents::position_map::PositionMapper;
+use crate::documents::provider_projection::ProviderPositionMapper;
 #[cfg(test)]
 use crate::tsgo::protocol::Completion;
 use crate::tsgo::protocol::{
@@ -18,15 +18,17 @@ use crate::tsgo::protocol::{
 };
 use crate::uri::path_to_file_uri;
 
-/// External IDE context for resolving positions in a foreign `.vue.tsx` file.
+/// External IDE context for resolving positions in a foreign carrier IDE TSX
+/// file (`Comp.vue.tsx`, `Comp.svelte.tsx`, …).
 ///
-/// For cross-file navigation (e.g., CTRL+CLICK navigates to another `.vue` file),
-/// the merge functions need the target file's TSX line index, position mapper, and
-/// Vue line index. This struct carries those, and the resolver closure produces it.
+/// For cross-file navigation (e.g., CTRL+CLICK navigates to another carrier
+/// file), the merge functions need the target file's TSX line index, position
+/// mapper, and carrier-source line index. This struct carries those, and the
+/// resolver closure produces it.
 pub struct ExternalIdeContext {
     pub tsx_line_index: LineIndex,
-    pub mapper: PositionMapper,
-    pub vue_line_index: LineIndex,
+    pub mapper: ProviderPositionMapper,
+    pub carrier_line_index: LineIndex,
 }
 
 /// Resolver for looking up IDE context by IDE path (e.g., `/path/to/Comp.vue.tsx`).
@@ -42,19 +44,20 @@ pub type ExternalIdeResolver<'a> = &'a dyn Fn(&str) -> Option<ExternalIdeContext
 /// original provider location unchanged.
 pub type BarrelResolver<'a> = &'a dyn Fn(&str, u32, u32) -> Option<Location>;
 
-/// Map an LSP `Position` (in the Vue file) to a byte offset in the generated TSX.
+/// Map an LSP `Position` (in the carrier source file) to a byte offset in the
+/// generated TSX.
 ///
 /// Steps: LSP Position → byte offset via LineIndex → line/col → PositionMapper → TSX line/col → TSX byte offset via TSX LineIndex.
 ///
 /// Returns `None` if any mapping step fails.
-pub fn vue_position_to_tsx_offset(
+pub fn carrier_position_to_tsx_offset(
     position: &Position,
-    _vue_line_index: &LineIndex,
-    mapper: &PositionMapper,
+    _carrier_line_index: &LineIndex,
+    mapper: &ProviderPositionMapper,
     tsx_line_index: &LineIndex,
 ) -> Option<u32> {
     let tsx_pos = mapper
-        .vue_to_tsx(LspPosition::new(position.line, position.character))?
+        .carrier_to_tsx(LspPosition::new(position.line, position.character))?
         .pos;
     tsx_line_index.position_to_offset(&Position {
         line: tsx_pos.line,
@@ -62,18 +65,20 @@ pub fn vue_position_to_tsx_offset(
     })
 }
 
-/// Map a Vue position to a TSX byte offset, with round-trip validation.
+/// Map a carrier-source position to a TSX byte offset, with round-trip validation.
 ///
-/// After mapping Vue→TSX, verifies the TSX offset maps back to the same Vue line.
-/// Returns `None` if the round-trip fails (indicating the TSX offset is in a synthetic
-/// region like generated JSX for HTML elements, where TSGO queries would crash).
-pub fn vue_position_to_tsx_offset_validated(
+/// After mapping carrier→TSX, verifies the TSX offset maps back to the same
+/// carrier-source line. Returns `None` if the round-trip fails (indicating the
+/// TSX offset is in a synthetic region like generated JSX for HTML elements,
+/// where TSGO queries would crash).
+pub fn carrier_position_to_tsx_offset_validated(
     position: &Position,
-    vue_line_index: &LineIndex,
-    mapper: &PositionMapper,
+    carrier_line_index: &LineIndex,
+    mapper: &ProviderPositionMapper,
     tsx_line_index: &LineIndex,
 ) -> Option<u32> {
-    let tsx_offset = vue_position_to_tsx_offset(position, vue_line_index, mapper, tsx_line_index)?;
+    let tsx_offset =
+        carrier_position_to_tsx_offset(position, carrier_line_index, mapper, tsx_line_index)?;
     if let Some(exact_offset) =
         find_exact_roundtrip_offset(position, tsx_offset, mapper, tsx_line_index)
     {
@@ -82,13 +87,13 @@ pub fn vue_position_to_tsx_offset_validated(
 
     // Round-trip: TSX offset → TSX position → Vue position
     let tsx_pos = tsx_line_index.offset_to_position(tsx_offset)?;
-    let vue_roundtrip = mapper
-        .tsx_to_vue(TsPosition::new(tsx_pos.line, tsx_pos.character))?
+    let carrier_roundtrip = mapper
+        .tsx_to_carrier(TsPosition::new(tsx_pos.line, tsx_pos.character))?
         .pos;
 
     // The round-trip Vue position should be on the same line as the original.
     // If not, the TSX offset is in a synthetic region with no valid source correlation.
-    if vue_roundtrip.line == position.line {
+    if carrier_roundtrip.line == position.line {
         Some(tsx_offset)
     } else {
         None
@@ -98,7 +103,7 @@ pub fn vue_position_to_tsx_offset_validated(
 fn find_exact_roundtrip_offset(
     position: &Position,
     initial_offset: u32,
-    mapper: &PositionMapper,
+    mapper: &ProviderPositionMapper,
     tsx_line_index: &LineIndex,
 ) -> Option<u32> {
     const SEARCH_WINDOW: u32 = 256;
@@ -110,10 +115,10 @@ fn find_exact_roundtrip_offset(
         if tsx_pos.line != initial_pos.line {
             return Some(false);
         }
-        let vue_pos = mapper
-            .tsx_to_vue(TsPosition::new(tsx_pos.line, tsx_pos.character))?
+        let carrier_pos = mapper
+            .tsx_to_carrier(TsPosition::new(tsx_pos.line, tsx_pos.character))?
             .pos;
-        Some(vue_pos.line == position.line && vue_pos.character == position.character)
+        Some(carrier_pos.line == position.line && carrier_pos.character == position.character)
     };
 
     if roundtrips_exact(initial_offset)? {
@@ -139,39 +144,39 @@ fn find_exact_roundtrip_offset(
 
 /// Map a TSX byte offset range back to an LSP `Range` in the Vue source.
 ///
-/// Routes through the mapper's strict [`PositionMapper::tsx_range_to_vue`], which enforces
+/// Routes through the mapper's strict [`PositionMapper::tsx_range_to_carrier`], which enforces
 /// the half-open endpoint-compatibility rule: the range maps ONLY when both endpoints resolve
 /// inside compatible mapped runs (the same run, or genuinely-contiguous runs with no
 /// synthetic/unmapped content between them). A range whose endpoints fall in two runs
 /// separated by synthetic content — even though each endpoint individually maps — is dropped.
 ///
 /// Returns `None` if any mapping step fails or the endpoints are incompatible.
-pub fn tsx_range_to_vue_range(
+pub fn tsx_range_to_carrier_range(
     tsx_start: u32,
     tsx_end: u32,
     tsx_line_index: &LineIndex,
-    mapper: &PositionMapper,
-    vue_line_index: &LineIndex,
+    mapper: &ProviderPositionMapper,
+    carrier_line_index: &LineIndex,
 ) -> Option<Range> {
     let start_pos = tsx_line_index.offset_to_position(tsx_start)?;
     let end_pos = tsx_line_index.offset_to_position(tsx_end)?;
 
-    let (vue_start, vue_end) = mapper.tsx_range_to_vue(
+    let (carrier_start, carrier_end) = mapper.tsx_range_to_carrier(
         TsPosition::new(start_pos.line, start_pos.character),
         TsPosition::new(end_pos.line, end_pos.character),
     )?;
 
     // Validate the mapped positions produce valid byte offsets
     let start_lsp = Position {
-        line: vue_start.line,
-        character: vue_start.character,
+        line: carrier_start.line,
+        character: carrier_start.character,
     };
     let end_lsp = Position {
-        line: vue_end.line,
-        character: vue_end.character,
+        line: carrier_end.line,
+        character: carrier_end.character,
     };
-    vue_line_index.position_to_offset(&start_lsp)?;
-    vue_line_index.position_to_offset(&end_lsp)?;
+    carrier_line_index.position_to_offset(&start_lsp)?;
+    carrier_line_index.position_to_offset(&end_lsp)?;
 
     Some(Range {
         start: start_lsp,
@@ -190,9 +195,9 @@ pub fn tsx_range_to_vue_range(
 pub fn merge_hover(
     verter_hover: Option<Hover>,
     type_hover: Option<HoverInfo>,
-    _mapper: &PositionMapper,
+    _mapper: &ProviderPositionMapper,
     _tsx_line_index: &LineIndex,
-    _vue_line_index: &LineIndex,
+    _carrier_line_index: &LineIndex,
     vue_kind_label: Option<&str>,
 ) -> Option<Hover> {
     match (verter_hover, type_hover) {
@@ -471,9 +476,9 @@ fn is_internal_dunder(label: &str) -> bool {
 pub fn merge_completions(
     verter_items: Vec<CompletionItem>,
     type_result: CompletionResult,
-    mapper: &PositionMapper,
+    mapper: &ProviderPositionMapper,
     tsx_line_index: &LineIndex,
-    vue_line_index: &LineIndex,
+    carrier_line_index: &LineIndex,
     tsx_path: Option<&str>,
     template_attr_context: bool,
 ) -> (Vec<CompletionItem>, bool) {
@@ -521,7 +526,7 @@ pub fn merge_completions(
 
         let edit_range =
             if let (Some(start), Some(end)) = (item.edit_range_start, item.edit_range_end) {
-                tsx_range_to_vue_range(start, end, tsx_line_index, mapper, vue_line_index)
+                tsx_range_to_carrier_range(start, end, tsx_line_index, mapper, carrier_line_index)
             } else {
                 None
             };
@@ -601,15 +606,20 @@ pub fn merge_diagnostics(
     verter_diags: Vec<Diagnostic>,
     type_diags: Vec<TypeDiagnostic>,
     tsx_line_index: &LineIndex,
-    mapper: &PositionMapper,
-    vue_line_index: &LineIndex,
+    mapper: &ProviderPositionMapper,
+    carrier_line_index: &LineIndex,
 ) -> Vec<Diagnostic> {
     let mut result = verter_diags;
     let mut dropped = 0u32;
 
     for diag in &type_diags {
-        let range =
-            tsx_range_to_vue_range(diag.start, diag.end, tsx_line_index, mapper, vue_line_index);
+        let range = tsx_range_to_carrier_range(
+            diag.start,
+            diag.end,
+            tsx_line_index,
+            mapper,
+            carrier_line_index,
+        );
 
         if let Some(range) = range {
             result.push(Diagnostic {
@@ -657,13 +667,13 @@ fn convert_severity(sev: TypeDiagnosticSeverity) -> DiagnosticSeverity {
 /// Prioritizes the external resolver (which looks up the target file's actual IDE context)
 /// over the current file's mapper. Only falls back to the current file's context if
 /// no external resolver is provided or the resolver doesn't know about the target.
-fn resolve_vue_tsx_range(
+fn resolve_carrier_tsx_range(
     path: &str,
     start: u32,
     end: u32,
     current_tsx_line_index: &LineIndex,
-    current_mapper: &PositionMapper,
-    current_vue_line_index: &LineIndex,
+    current_mapper: &ProviderPositionMapper,
+    current_carrier_line_index: &LineIndex,
     external_resolver: Option<ExternalIdeResolver<'_>>,
 ) -> Range {
     // Try external resolver first — it provides the correct mapper for the target file.
@@ -671,12 +681,12 @@ fn resolve_vue_tsx_range(
     // wrong positions (e.g., (0,0) or positions from the wrong file).
     if let Some(resolver) = external_resolver {
         if let Some(ctx) = resolver(path) {
-            if let Some(range) = tsx_range_to_vue_range(
+            if let Some(range) = tsx_range_to_carrier_range(
                 start,
                 end,
                 &ctx.tsx_line_index,
                 &ctx.mapper,
-                &ctx.vue_line_index,
+                &ctx.carrier_line_index,
             ) {
                 return range;
             }
@@ -684,12 +694,12 @@ fn resolve_vue_tsx_range(
     }
 
     // Fallback: use current file context (works when target is same file being queried)
-    tsx_range_to_vue_range(
+    tsx_range_to_carrier_range(
         start,
         end,
         current_tsx_line_index,
         current_mapper,
-        current_vue_line_index,
+        current_carrier_line_index,
     )
     .unwrap_or_default()
 }
@@ -712,21 +722,21 @@ pub fn merge_definitions(
     verter_def: Option<GotoDefinitionResponse>,
     type_defs: Vec<TypeLocation>,
     tsx_line_index: &LineIndex,
-    mapper: &PositionMapper,
-    vue_line_index: &LineIndex,
+    mapper: &ProviderPositionMapper,
+    carrier_line_index: &LineIndex,
     external_resolver: Option<ExternalIdeResolver<'_>>,
     document_uri: &Uri,
-    vue_source_exists: &dyn Fn(&str) -> bool,
+    carrier_source_exists: &dyn Fn(&str) -> bool,
 ) -> Option<GotoDefinitionResponse> {
     merge_definitions_with_barrel_resolver(
         verter_def,
         type_defs,
         tsx_line_index,
         mapper,
-        vue_line_index,
+        carrier_line_index,
         external_resolver,
         document_uri,
-        vue_source_exists,
+        carrier_source_exists,
         None,
     )
 }
@@ -739,11 +749,11 @@ pub fn merge_definitions_with_barrel_resolver(
     verter_def: Option<GotoDefinitionResponse>,
     type_defs: Vec<TypeLocation>,
     tsx_line_index: &LineIndex,
-    mapper: &PositionMapper,
-    vue_line_index: &LineIndex,
+    mapper: &ProviderPositionMapper,
+    carrier_line_index: &LineIndex,
     external_resolver: Option<ExternalIdeResolver<'_>>,
     document_uri: &Uri,
-    vue_source_exists: &dyn Fn(&str) -> bool,
+    carrier_source_exists: &dyn Fn(&str) -> bool,
     barrel_resolver: Option<BarrelResolver<'_>>,
 ) -> Option<GotoDefinitionResponse> {
     // If verter provides a definition, prefer it when:
@@ -768,9 +778,7 @@ pub fn merge_definitions_with_barrel_resolver(
         let mut locations: Vec<Location> = type_defs
             .into_iter()
             .filter_map(|loc| {
-                if !(loc.path.ends_with(".vue.tsx")
-                    || loc.path.ends_with(".vue.jsx")
-                    || loc.path.ends_with(".vue"))
+                if !(is_carrier_ide_path(&loc.path) || verter_workspace::path_is_carrier(&loc.path))
                 {
                     if let Some(resolver) = barrel_resolver {
                         if let Some(location) = resolver(&loc.path, loc.start, loc.end) {
@@ -780,19 +788,20 @@ pub fn merge_definitions_with_barrel_resolver(
                 }
 
                 // TypeProvider returns paths; convert to URIs
-                // For .vue files, strip virtual suffixes (.tsx or .d.ts)
-                let file_path = normalize_vue_path(&loc.path, vue_source_exists);
+                // For carrier files, strip virtual suffixes (.tsx or .d.ts)
+                let file_path = normalize_carrier_path(&loc.path, carrier_source_exists);
                 let uri = path_to_uri(file_path)?;
-                // Map TSX byte offsets back to Vue positions for .vue.tsx targets
-                // (.vue.d.ts targets use Range::default — no position mapping available)
-                let range = if loc.path.ends_with(".vue.tsx") || loc.path.ends_with(".vue.jsx") {
-                    resolve_vue_tsx_range(
+                // Map TSX byte offsets back to carrier positions for the IDE
+                // virtual file (`{carrier}.d.ts` targets use Range::default —
+                // no position mapping available)
+                let range = if is_carrier_ide_path(&loc.path) {
+                    resolve_carrier_tsx_range(
                         &loc.path,
                         loc.start,
                         loc.end,
                         tsx_line_index,
                         mapper,
-                        vue_line_index,
+                        carrier_line_index,
                         external_resolver,
                     )
                 } else {
@@ -810,12 +819,14 @@ pub fn merge_definitions_with_barrel_resolver(
         let mut seen = std::collections::HashSet::new();
         locations.retain(|loc| seen.insert(loc.uri.clone()));
 
-        // Prefer non-.vue definitions over .vue re-export sites.
+        // Prefer non-carrier definitions over carrier re-export sites.
         // When CTRL+CLICKing a library symbol (e.g., `onClickOutside` from @vueuse/core),
-        // TSGO may return both the real definition (.d.mts) and .vue consumer files.
-        let has_non_vue = locations.iter().any(|l| !l.uri.as_str().ends_with(".vue"));
-        if has_non_vue {
-            locations.retain(|l| !l.uri.as_str().ends_with(".vue"));
+        // TSGO may return both the real definition (.d.mts) and carrier consumer files.
+        let has_non_carrier = locations
+            .iter()
+            .any(|l| !verter_workspace::path_is_carrier(l.uri.as_str()));
+        if has_non_carrier {
+            locations.retain(|l| !verter_workspace::path_is_carrier(l.uri.as_str()));
         }
 
         return Some(if locations.len() == 1 {
@@ -835,32 +846,76 @@ pub fn merge_definitions_with_barrel_resolver(
 /// - `.vue.ts` → `.vue` (public API / DTS output)
 /// - `.vue.d.ts` → `.vue` (published type declarations)
 ///
-/// The `vue_source_exists` predicate guards against collisions with real
+/// The `carrier_source_exists` predicate guards against collisions with real
 /// `.vue.tsx`/`.vue.ts` files on disk: if the backing `.vue` source does
 /// not exist in the host, the path is left unchanged. The `.vue.d.ts`
 /// case (from node_modules) has no collision risk and skips the check.
-fn normalize_vue_path<'a>(path: &'a str, vue_source_exists: &dyn Fn(&str) -> bool) -> &'a str {
-    if path.ends_with(".vue.tsx") || path.ends_with(".vue.jsx") {
+fn normalize_carrier_path<'a>(
+    path: &'a str,
+    carrier_source_exists: &dyn Fn(&str) -> bool,
+) -> &'a str {
+    // The IDE virtual file is `{carrier}.tsx`/`.jsx`; stripping the trailing
+    // `.tsx`/`.jsx` yields a carrier path (`Foo.vue.tsx` → `Foo.vue`,
+    // `Bar.svelte.tsx` → `Bar.svelte`). The carrier-extension set is the
+    // registry's (`path_is_carrier`), not a `.vue` literal.
+    if (path.ends_with(".tsx") || path.ends_with(".jsx"))
+        && verter_workspace::path_is_carrier(&path[..path.len() - 4])
+    {
         let candidate = &path[..path.len() - 4]; // strip .tsx/.jsx
-        if vue_source_exists(candidate) {
+        if carrier_source_exists(candidate) {
             return candidate;
         }
-    } else if path.ends_with(".vue.ts") {
+    } else if path.ends_with(".d.ts") && verter_workspace::path_is_carrier(&path[..path.len() - 5])
+    {
+        // The `{carrier}.d.ts` accepted-spelling alias — from node_modules, no
+        // collision risk.
+        return &path[..path.len() - 5];
+    } else if path.ends_with(".ts") && verter_workspace::path_is_carrier(&path[..path.len() - 3]) {
         let candidate = &path[..path.len() - 3]; // strip .ts
-        if vue_source_exists(candidate) {
+        if carrier_source_exists(candidate) {
             return candidate;
         }
-    } else if path.ends_with(".vue.d.ts") {
-        // .d.ts is from node_modules — no collision risk
-        return path.trim_end_matches(".d.ts");
     }
     path
 }
 
-/// Like `normalize_vue_path` but returns an owned String.
+/// Whether `path` is a carrier IDE virtual file (`{carrier}.tsx` / `.jsx`) —
+/// the TSGO IDE output that maps back to a carrier source through the source
+/// map. Generalized to the registry carrier-extension set (Vue + Svelte).
+fn is_carrier_ide_path(path: &str) -> bool {
+    (path.ends_with(".tsx") || path.ends_with(".jsx"))
+        && verter_workspace::path_is_carrier(&path[..path.len() - 4])
+}
+
+/// Whether `path` is a carrier API / DTS virtual file (`{carrier}.ts` /
+/// `{carrier}.d.ts`) — the declaration surface (default-range, no position map).
+///
+/// CRITICAL (D-bk): a `{carrier}.ts` form is AMBIGUOUS for Svelte — appending
+/// `.ts` to `Foo.svelte` is the component API virtual file, but `store.svelte.ts`
+/// is also a REAL first-class rune module (classifies as a non-component
+/// adapter-module Script). We disambiguate by the backing carrier source: a
+/// `{carrier}.ts` is the component API virtual file ONLY when the backing
+/// `{carrier}` source EXISTS. A real rune module (no backing source) is NOT a
+/// carrier virtual file — it serves its own canonical path directly. The
+/// `{carrier}.d.ts` accepted-spelling alias (from node_modules) has no such
+/// collision and skips the check — matching `normalize_carrier_path`'s guard.
+fn is_carrier_api_or_dts_path(path: &str, carrier_source_exists: &dyn Fn(&str) -> bool) -> bool {
+    if path.ends_with(".d.ts") && verter_workspace::path_is_carrier(&path[..path.len() - 5]) {
+        return true;
+    }
+    if path.ends_with(".ts") && verter_workspace::path_is_carrier(&path[..path.len() - 3]) {
+        return carrier_source_exists(&path[..path.len() - 3]);
+    }
+    false
+}
+
+/// Like `normalize_carrier_path` but returns an owned String.
 /// Used by server.rs for inline path normalization.
-pub fn normalize_vue_path_owned(path: &str, vue_source_exists: &dyn Fn(&str) -> bool) -> String {
-    normalize_vue_path(path, vue_source_exists).to_string()
+pub fn normalize_carrier_path_owned(
+    path: &str,
+    carrier_source_exists: &dyn Fn(&str) -> bool,
+) -> String {
+    normalize_carrier_path(path, carrier_source_exists).to_string()
 }
 
 /// Convert a file path to a `file://` URI.
@@ -888,27 +943,27 @@ pub fn merge_references(
     verter_refs: Option<Vec<Location>>,
     type_refs: Vec<TypeLocation>,
     tsx_line_index: &LineIndex,
-    mapper: &PositionMapper,
-    vue_line_index: &LineIndex,
+    mapper: &ProviderPositionMapper,
+    carrier_line_index: &LineIndex,
     external_resolver: Option<ExternalIdeResolver<'_>>,
-    vue_source_exists: &dyn Fn(&str) -> bool,
+    carrier_source_exists: &dyn Fn(&str) -> bool,
 ) -> Option<Vec<Location>> {
     let mut result = verter_refs.unwrap_or_default();
 
     for loc in &type_refs {
         // For .vue.tsx/.vue.jsx targets, map back to .vue positions
-        if loc.path.ends_with(".vue.tsx") || loc.path.ends_with(".vue.jsx") {
-            let range = resolve_vue_tsx_range(
+        if is_carrier_ide_path(&loc.path) {
+            let range = resolve_carrier_tsx_range(
                 &loc.path,
                 loc.start,
                 loc.end,
                 tsx_line_index,
                 mapper,
-                vue_line_index,
+                carrier_line_index,
                 external_resolver,
             );
-            let vue_path = normalize_vue_path(&loc.path, vue_source_exists);
-            if let Some(uri) = path_to_uri(vue_path) {
+            let carrier_path = normalize_carrier_path(&loc.path, carrier_source_exists);
+            if let Some(uri) = path_to_uri(carrier_path) {
                 // Deduplicate: skip if we already have a ref at this position
                 let dup = result
                     .iter()
@@ -917,10 +972,10 @@ pub fn merge_references(
                     result.push(Location { uri, range });
                 }
             }
-        } else if loc.path.ends_with(".vue.d.ts") || loc.path.ends_with(".vue.ts") {
+        } else if is_carrier_api_or_dts_path(&loc.path, carrier_source_exists) {
             // DTS declarations (.vue.d.ts or .vue.ts): strip suffix, use default range
-            let vue_path = normalize_vue_path(&loc.path, vue_source_exists);
-            if let Some(uri) = path_to_uri(vue_path) {
+            let carrier_path = normalize_carrier_path(&loc.path, carrier_source_exists);
+            if let Some(uri) = path_to_uri(carrier_path) {
                 result.push(Location {
                     uri,
                     range: Range::default(),
@@ -958,10 +1013,10 @@ pub fn merge_rename_locations(
     type_locations: Vec<RenameLocation>,
     new_name: &str,
     tsx_line_index: &LineIndex,
-    mapper: &PositionMapper,
-    vue_line_index: &LineIndex,
+    mapper: &ProviderPositionMapper,
+    carrier_line_index: &LineIndex,
     external_resolver: Option<ExternalIdeResolver<'_>>,
-    vue_source_exists: &dyn Fn(&str) -> bool,
+    carrier_source_exists: &dyn Fn(&str) -> bool,
 ) -> Option<WorkspaceEdit> {
     let mut edit = verter_edit.unwrap_or_else(|| WorkspaceEdit {
         changes: Some(std::collections::HashMap::new()),
@@ -973,18 +1028,18 @@ pub fn merge_rename_locations(
         .get_or_insert_with(std::collections::HashMap::new);
 
     for loc in &type_locations {
-        if loc.path.ends_with(".vue.tsx") || loc.path.ends_with(".vue.jsx") {
-            let range = resolve_vue_tsx_range(
+        if is_carrier_ide_path(&loc.path) {
+            let range = resolve_carrier_tsx_range(
                 &loc.path,
                 loc.start,
                 loc.end,
                 tsx_line_index,
                 mapper,
-                vue_line_index,
+                carrier_line_index,
                 external_resolver,
             );
-            let vue_path = normalize_vue_path(&loc.path, vue_source_exists);
-            if let Some(uri) = path_to_uri(vue_path) {
+            let carrier_path = normalize_carrier_path(&loc.path, carrier_source_exists);
+            if let Some(uri) = path_to_uri(carrier_path) {
                 let edits = changes.entry(uri).or_default();
                 let dup = edits.iter().any(|e| e.range.start == range.start);
                 if !dup {
@@ -994,9 +1049,9 @@ pub fn merge_rename_locations(
                     });
                 }
             }
-        } else if loc.path.ends_with(".vue.d.ts") || loc.path.ends_with(".vue.ts") {
-            let vue_path = normalize_vue_path(&loc.path, vue_source_exists);
-            if let Some(uri) = path_to_uri(vue_path) {
+        } else if is_carrier_api_or_dts_path(&loc.path, carrier_source_exists) {
+            let carrier_path = normalize_carrier_path(&loc.path, carrier_source_exists);
+            if let Some(uri) = path_to_uri(carrier_path) {
                 let edits = changes.entry(uri).or_default();
                 edits.push(TextEdit {
                     range: Range::default(),
@@ -1032,14 +1087,14 @@ pub fn merge_document_highlights(
     verter_highlights: Option<Vec<DocumentHighlight>>,
     type_highlights: Vec<TypeDocumentHighlight>,
     tsx_line_index: &LineIndex,
-    mapper: &PositionMapper,
-    vue_line_index: &LineIndex,
+    mapper: &ProviderPositionMapper,
+    carrier_line_index: &LineIndex,
 ) -> Option<Vec<DocumentHighlight>> {
     let mut result = verter_highlights.unwrap_or_default();
 
     for th in type_highlights {
         if let Some(range) =
-            tsx_range_to_vue_range(th.start, th.end, tsx_line_index, mapper, vue_line_index)
+            tsx_range_to_carrier_range(th.start, th.end, tsx_line_index, mapper, carrier_line_index)
         {
             let dup = result.iter().any(|h| h.range.start == range.start);
             if !dup {
@@ -1115,9 +1170,9 @@ pub fn merge_signature_help(
 pub fn merge_code_actions(
     type_actions: Vec<TypeCodeAction>,
     tsx_line_index: &LineIndex,
-    mapper: &PositionMapper,
-    vue_line_index: &LineIndex,
-    vue_source_exists: &dyn Fn(&str) -> bool,
+    mapper: &ProviderPositionMapper,
+    carrier_line_index: &LineIndex,
+    carrier_source_exists: &dyn Fn(&str) -> bool,
 ) -> Vec<CodeActionOrCommand> {
     type_actions
         .into_iter()
@@ -1126,25 +1181,26 @@ pub fn merge_code_actions(
                 std::collections::HashMap::new();
 
             for edit in action.edits {
-                if edit.path.ends_with(".vue.tsx") || edit.path.ends_with(".vue.jsx") {
-                    if let Some(range) = tsx_range_to_vue_range(
+                if is_carrier_ide_path(&edit.path) {
+                    if let Some(range) = tsx_range_to_carrier_range(
                         edit.start,
                         edit.end,
                         tsx_line_index,
                         mapper,
-                        vue_line_index,
+                        carrier_line_index,
                     ) {
-                        let vue_path = normalize_vue_path(&edit.path, vue_source_exists);
-                        if let Some(uri) = path_to_uri(vue_path) {
+                        let carrier_path =
+                            normalize_carrier_path(&edit.path, carrier_source_exists);
+                        if let Some(uri) = path_to_uri(carrier_path) {
                             changes.entry(uri).or_default().push(TextEdit {
                                 range,
                                 new_text: edit.new_text,
                             });
                         }
                     }
-                } else if edit.path.ends_with(".vue.d.ts") || edit.path.ends_with(".vue.ts") {
-                    let vue_path = normalize_vue_path(&edit.path, vue_source_exists);
-                    if let Some(uri) = path_to_uri(vue_path) {
+                } else if is_carrier_api_or_dts_path(&edit.path, carrier_source_exists) {
+                    let carrier_path = normalize_carrier_path(&edit.path, carrier_source_exists);
+                    if let Some(uri) = path_to_uri(carrier_path) {
                         changes.entry(uri).or_default().push(TextEdit {
                             range: Range::default(),
                             new_text: edit.new_text,
@@ -1184,8 +1240,8 @@ pub fn merge_code_actions(
 pub fn merge_semantic_tokens(
     type_tokens: Vec<protocol::SemanticToken>,
     tsx_line_index: &LineIndex,
-    mapper: &PositionMapper,
-    vue_line_index: &LineIndex,
+    mapper: &ProviderPositionMapper,
+    carrier_line_index: &LineIndex,
 ) -> Vec<tower_lsp_server::ls_types::SemanticToken> {
     // Map each token's whole half-open range `[start, start+length)` from TSX to Vue
     // through the strict run-compatible range API. A token is emitted ONLY when both
@@ -1195,34 +1251,34 @@ pub fn merge_semantic_tokens(
     let mut mapped: Vec<(u32, u32, u32, u32, u32)> = Vec::new(); // (line, char, length, type, mods)
 
     for token in type_tokens {
-        let Some(vue_range) = tsx_range_to_vue_range(
+        let Some(carrier_range) = tsx_range_to_carrier_range(
             token.start,
             token.start + token.length,
             tsx_line_index,
             mapper,
-            vue_line_index,
+            carrier_line_index,
         ) else {
             continue;
         };
 
         // The strict range API only composes compatible runs, but a multi-line token would
         // produce a cross-line range; semantic tokens are single-line, so require it.
-        if vue_range.start.line != vue_range.end.line
-            || vue_range.end.character < vue_range.start.character
+        if carrier_range.start.line != carrier_range.end.line
+            || carrier_range.end.character < carrier_range.start.character
         {
             continue;
         }
-        let vue_length = vue_range.end.character - vue_range.start.character;
+        let carrier_length = carrier_range.end.character - carrier_range.start.character;
 
         // Skip zero-length tokens (collapsed by mapping)
-        if vue_length == 0 {
+        if carrier_length == 0 {
             continue;
         }
 
         mapped.push((
-            vue_range.start.line,
-            vue_range.start.character,
-            vue_length,
+            carrier_range.start.line,
+            carrier_range.start.character,
+            carrier_length,
             token.token_type,
             token.token_modifiers,
         ));
@@ -1269,8 +1325,8 @@ pub fn merge_semantic_tokens(
 pub fn merge_inlay_hints(
     type_hints: Vec<InlayHint>,
     tsx_line_index: &LineIndex,
-    mapper: &PositionMapper,
-    vue_line_index: &LineIndex,
+    mapper: &ProviderPositionMapper,
+    carrier_line_index: &LineIndex,
 ) -> Vec<tower_lsp_server::ls_types::InlayHint> {
     let mut result = Vec::with_capacity(type_hints.len());
 
@@ -1281,20 +1337,23 @@ pub fn merge_inlay_hints(
         };
 
         // Map TSX line/col → Vue line/col via sourcemap
-        let Some(vue_mapped) = mapper
-            .tsx_to_vue(TsPosition::new(tsx_pos.line, tsx_pos.character))
+        let Some(carrier_mapped) = mapper
+            .tsx_to_carrier(TsPosition::new(tsx_pos.line, tsx_pos.character))
             .map(|m| m.pos)
         else {
             continue;
         };
 
-        let vue_pos = Position {
-            line: vue_mapped.line,
-            character: vue_mapped.character,
+        let carrier_pos = Position {
+            line: carrier_mapped.line,
+            character: carrier_mapped.character,
         };
 
         // Validate the Vue position is within bounds
-        if vue_line_index.position_to_offset(&vue_pos).is_none() {
+        if carrier_line_index
+            .position_to_offset(&carrier_pos)
+            .is_none()
+        {
             continue;
         }
 
@@ -1304,7 +1363,7 @@ pub fn merge_inlay_hints(
         });
 
         result.push(tower_lsp_server::ls_types::InlayHint {
-            position: vue_pos,
+            position: carrier_pos,
             label: tower_lsp_server::ls_types::InlayHintLabel::String(hint.label),
             kind,
             text_edits: None,
@@ -1321,42 +1380,43 @@ pub fn merge_inlay_hints(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::documents::position_map::PositionMapper;
 
     // ── Position mapping tests ─────────────────────────────────────
 
-    fn make_mapper_and_indexes() -> (PositionMapper, LineIndex, LineIndex) {
+    fn make_mapper_and_indexes() -> (ProviderPositionMapper, LineIndex, LineIndex) {
         // Vue source (line 0-1: template, line 3-4: script)
-        let vue_source = "<template>\n  <div>{{ msg }}</div>\n</template>\n\n<script setup>\nconst msg = \"hello\";\n</script>";
+        let carrier_source = "<template>\n  <div>{{ msg }}</div>\n</template>\n\n<script setup>\nconst msg = \"hello\";\n</script>";
         // TSX source (script at line 0)
         let tsx_source = "const msg = \"hello\";\n";
 
         // Source map: TSX line 0 col 0 → Vue line 5 col 0
         let mut builder = oxc_sourcemap::SourceMapBuilder::default();
-        let source_id = builder.set_source_and_content("App.vue", vue_source);
+        let source_id = builder.set_source_and_content("App.vue", carrier_source);
         builder.add_token(0, 0, 5, 0, Some(source_id), None);
         builder.add_token(0, 6, 5, 6, Some(source_id), None);
         builder.add_token(0, 10, 5, 10, Some(source_id), None);
         let json = builder.into_sourcemap().to_json_string();
 
-        let mapper = PositionMapper::from_json(&json).unwrap();
-        let vue_li = LineIndex::new_utf16(vue_source);
+        let mapper = ProviderPositionMapper::source_map(PositionMapper::from_json(&json).unwrap());
+        let carrier_li = LineIndex::new_utf16(carrier_source);
         let tsx_li = LineIndex::new_utf16(tsx_source);
 
-        (mapper, vue_li, tsx_li)
+        (mapper, carrier_li, tsx_li)
     }
 
     /// @ai-generated — Vue position maps to correct TSX byte offset
     #[test]
     fn vue_position_maps_to_tsx_offset() {
-        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+        let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
 
         // Vue line 5, col 6 ("msg") → TSX line 0, col 6 → byte offset 6
-        let offset = vue_position_to_tsx_offset(
+        let offset = carrier_position_to_tsx_offset(
             &Position {
                 line: 5,
                 character: 6,
             },
-            &vue_li,
+            &carrier_li,
             &mapper,
             &tsx_li,
         );
@@ -1366,15 +1426,15 @@ mod tests {
     /// @ai-generated — Unmappable Vue position returns None
     #[test]
     fn unmappable_vue_position_returns_none() {
-        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+        let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
 
         // Line 0 is in the template, not mapped in our source map
-        let offset = vue_position_to_tsx_offset(
+        let offset = carrier_position_to_tsx_offset(
             &Position {
                 line: 0,
                 character: 0,
             },
-            &vue_li,
+            &carrier_li,
             &mapper,
             &tsx_li,
         );
@@ -1383,7 +1443,7 @@ mod tests {
 
     /// Range endpoint compatibility: build a mapper with TWO mapped runs separated by
     /// synthetic/unmapped content. A TSX range whose endpoints fall in the two DIFFERENT
-    /// runs must be DROPPED by `tsx_range_to_vue_range` (the strict run-compatibility
+    /// runs must be DROPPED by `tsx_range_to_carrier_range` (the strict run-compatibility
     /// check), while a range fully inside ONE run maps correctly.
     ///
     /// Discriminating: a per-endpoint composer maps each endpoint independently and returns
@@ -1394,10 +1454,10 @@ mod tests {
         // TSX single line "abcXXXXdef" (byte offset == UTF-16 col).
         let tsx_source = "abcXXXXdef";
         // Vue single line, long enough to hold the mapped source columns.
-        let vue_source = &" ".repeat(80);
+        let carrier_source = &" ".repeat(80);
 
         let mut builder = oxc_sourcemap::SourceMapBuilder::default();
-        let source_id = builder.set_source_and_content("App.vue", vue_source);
+        let source_id = builder.set_source_and_content("App.vue", carrier_source);
         // mapped run A: gen(0,0)->src(0,0), bounded to [0,3) by the unmapped token at 3.
         builder.add_token(0, 0, 0, 0, Some(source_id), None);
         // unmapped synthetic token at gen col 3 ("XXXX").
@@ -1406,24 +1466,25 @@ mod tests {
         builder.add_token(0, 7, 0, 50, Some(source_id), None);
         let json = builder.into_sourcemap().to_json_string();
 
-        let mapper = PositionMapper::from_json(&json).unwrap();
+        let pm = PositionMapper::from_json(&json).unwrap();
         let tsx_li = LineIndex::new_utf16(tsx_source);
-        let vue_li = LineIndex::new_utf16(vue_source);
+        let carrier_li = LineIndex::new_utf16(carrier_source);
 
         // Precondition: both endpoints individually map (start byte 1 -> run A,
         // end byte 9 -> run B), so the *old* per-endpoint composer returned Some.
-        assert!(mapper.tsx_to_vue(TsPosition::new(0, 1)).is_some());
-        assert!(mapper.tsx_to_vue(TsPosition::new(0, 9)).is_some());
+        assert!(pm.tsx_to_carrier(TsPosition::new(0, 1)).is_some());
+        assert!(pm.tsx_to_carrier(TsPosition::new(0, 9)).is_some());
+        let mapper = ProviderPositionMapper::source_map(pm);
 
         // Cross-run range straddling the synthetic "XXXX" -> dropped.
         assert!(
-            tsx_range_to_vue_range(1, 9, &tsx_li, &mapper, &vue_li).is_none(),
+            tsx_range_to_carrier_range(1, 9, &tsx_li, &mapper, &carrier_li).is_none(),
             "a TSX range whose endpoints land in two runs separated by synthetic content \
              must be dropped, not composed into a bogus Vue range"
         );
 
         // In-run range fully inside run A [0,3) -> maps.
-        let r = tsx_range_to_vue_range(1, 3, &tsx_li, &mapper, &vue_li)
+        let r = tsx_range_to_carrier_range(1, 3, &tsx_li, &mapper, &carrier_li)
             .expect("range fully inside one mapped run must map");
         assert_eq!(
             r.start,
@@ -1456,7 +1517,7 @@ mod tests {
     /// @ai-generated — Both verter and type hover are merged
     #[test]
     fn merge_hover_both_present() {
-        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+        let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
         let verter = make_verter_hover("**msg** (SetupConst)");
         let type_hover = HoverInfo {
             contents: "const msg: string".to_string(),
@@ -1469,7 +1530,7 @@ mod tests {
             Some(type_hover),
             &mapper,
             &tsx_li,
-            &vue_li,
+            &carrier_li,
             None,
         );
         let text = extract_hover_text(&result.unwrap());
@@ -1480,10 +1541,10 @@ mod tests {
     /// @ai-generated — Only verter hover present
     #[test]
     fn merge_hover_verter_only() {
-        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+        let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
         let verter = make_verter_hover("**msg** (SetupConst)");
 
-        let result = merge_hover(Some(verter), None, &mapper, &tsx_li, &vue_li, None);
+        let result = merge_hover(Some(verter), None, &mapper, &tsx_li, &carrier_li, None);
         assert!(result.is_some());
         let text = extract_hover_text(&result.unwrap());
         assert!(text.contains("SetupConst"));
@@ -1492,14 +1553,14 @@ mod tests {
     /// @ai-generated — Only type hover present
     #[test]
     fn merge_hover_type_only() {
-        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+        let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
         let type_hover = HoverInfo {
             contents: "const msg: string".to_string(),
             range_start: None,
             range_end: None,
         };
 
-        let result = merge_hover(None, Some(type_hover), &mapper, &tsx_li, &vue_li, None);
+        let result = merge_hover(None, Some(type_hover), &mapper, &tsx_li, &carrier_li, None);
         assert!(result.is_some());
         let text = extract_hover_text(&result.unwrap());
         assert!(text.contains("const msg: string"));
@@ -1508,8 +1569,8 @@ mod tests {
     /// @ai-generated — Neither hover present returns None
     #[test]
     fn merge_hover_neither() {
-        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
-        let result = merge_hover(None, None, &mapper, &tsx_li, &vue_li, None);
+        let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
+        let result = merge_hover(None, None, &mapper, &tsx_li, &carrier_li, None);
         assert!(result.is_none());
     }
 
@@ -1540,15 +1601,22 @@ mod tests {
     /// @ai-generated — TypeProvider completions are added alongside verter completions
     #[test]
     fn merge_completions_combines_both() {
-        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+        let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
         let verter = vec![make_verter_completion("msg")];
         let type_result = CompletionResult {
             items: vec![make_type_completion("count"), make_type_completion("name")],
             is_incomplete: false,
         };
 
-        let (result, is_incomplete) =
-            merge_completions(verter, type_result, &mapper, &tsx_li, &vue_li, None, false);
+        let (result, is_incomplete) = merge_completions(
+            verter,
+            type_result,
+            &mapper,
+            &tsx_li,
+            &carrier_li,
+            None,
+            false,
+        );
         assert_eq!(result.len(), 3);
         assert!(!is_incomplete);
         let labels: Vec<&str> = result.iter().map(|i| i.label.as_str()).collect();
@@ -1560,15 +1628,22 @@ mod tests {
     /// @ai-generated — Duplicate labels are deduplicated (verter wins)
     #[test]
     fn merge_completions_deduplicates() {
-        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+        let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
         let verter = vec![make_verter_completion("msg")];
         let type_result = CompletionResult {
             items: vec![make_type_completion("msg")], // duplicate
             is_incomplete: false,
         };
 
-        let (result, _) =
-            merge_completions(verter, type_result, &mapper, &tsx_li, &vue_li, None, false);
+        let (result, _) = merge_completions(
+            verter,
+            type_result,
+            &mapper,
+            &tsx_li,
+            &carrier_li,
+            None,
+            false,
+        );
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].label, "msg");
     }
@@ -1576,7 +1651,7 @@ mod tests {
     /// @ai-generated — ___VERTER___ prefixed completions are filtered
     #[test]
     fn merge_completions_filters_verter_internal() {
-        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+        let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
         let verter = vec![];
         let type_result = CompletionResult {
             items: vec![
@@ -1586,8 +1661,15 @@ mod tests {
             is_incomplete: false,
         };
 
-        let (result, _) =
-            merge_completions(verter, type_result, &mapper, &tsx_li, &vue_li, None, false);
+        let (result, _) = merge_completions(
+            verter,
+            type_result,
+            &mapper,
+            &tsx_li,
+            &carrier_li,
+            None,
+            false,
+        );
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].label, "msg");
     }
@@ -1595,15 +1677,22 @@ mod tests {
     /// @ai-generated — is_incomplete flag is propagated from TypeProvider result
     #[test]
     fn merge_completions_propagates_is_incomplete() {
-        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+        let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
         let verter = vec![make_verter_completion("msg")];
         let type_result = CompletionResult {
             items: vec![make_type_completion("count")],
             is_incomplete: true,
         };
 
-        let (result, is_incomplete) =
-            merge_completions(verter, type_result, &mapper, &tsx_li, &vue_li, None, false);
+        let (result, is_incomplete) = merge_completions(
+            verter,
+            type_result,
+            &mapper,
+            &tsx_li,
+            &carrier_li,
+            None,
+            false,
+        );
         assert_eq!(result.len(), 2);
         assert!(
             is_incomplete,
@@ -1614,7 +1703,7 @@ mod tests {
     /// @ai-generated — $V_ prefixed type helpers are filtered
     #[test]
     fn merge_completions_filters_dollar_v_prefix() {
-        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+        let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
         let verter = vec![];
         let type_result = CompletionResult {
             items: vec![
@@ -1624,8 +1713,15 @@ mod tests {
             is_incomplete: false,
         };
 
-        let (result, _) =
-            merge_completions(verter, type_result, &mapper, &tsx_li, &vue_li, None, false);
+        let (result, _) = merge_completions(
+            verter,
+            type_result,
+            &mapper,
+            &tsx_li,
+            &carrier_li,
+            None,
+            false,
+        );
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].label, "msg");
     }
@@ -1633,7 +1729,7 @@ mod tests {
     /// @ai-generated — TSGO-internal duplicates are deduplicated
     #[test]
     fn merge_completions_deduplicates_tsgo_internal() {
-        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+        let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
         let verter = vec![make_verter_completion("msg")];
         let type_result = CompletionResult {
             items: vec![
@@ -1643,8 +1739,15 @@ mod tests {
             is_incomplete: false,
         };
 
-        let (result, _) =
-            merge_completions(verter, type_result, &mapper, &tsx_li, &vue_li, None, false);
+        let (result, _) = merge_completions(
+            verter,
+            type_result,
+            &mapper,
+            &tsx_li,
+            &carrier_li,
+            None,
+            false,
+        );
         let on_mounted_count = result.iter().filter(|i| i.label == "onMounted").count();
         assert_eq!(
             on_mounted_count, 1,
@@ -1656,7 +1759,7 @@ mod tests {
     /// @ai-generated — Labels present in both verter and TSGO are deduplicated (verter wins)
     #[test]
     fn merge_completions_deduplicates_across_all_sources() {
-        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+        let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
         let verter = vec![make_verter_completion("onMounted")];
         let type_result = CompletionResult {
             items: vec![
@@ -1667,8 +1770,15 @@ mod tests {
             is_incomplete: false,
         };
 
-        let (result, _) =
-            merge_completions(verter, type_result, &mapper, &tsx_li, &vue_li, None, false);
+        let (result, _) = merge_completions(
+            verter,
+            type_result,
+            &mapper,
+            &tsx_li,
+            &carrier_li,
+            None,
+            false,
+        );
         let on_mounted_count = result.iter().filter(|i| i.label == "onMounted").count();
         assert_eq!(
             on_mounted_count, 1,
@@ -1680,7 +1790,7 @@ mod tests {
     /// Internal compiler identifiers like __props, __emit should be filtered
     #[test]
     fn merge_completions_filters_dunder_internal() {
-        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+        let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
         let verter = vec![];
         let type_result = CompletionResult {
             items: vec![
@@ -1693,8 +1803,15 @@ mod tests {
             is_incomplete: false,
         };
 
-        let (result, _) =
-            merge_completions(verter, type_result, &mapper, &tsx_li, &vue_li, None, false);
+        let (result, _) = merge_completions(
+            verter,
+            type_result,
+            &mapper,
+            &tsx_li,
+            &carrier_li,
+            None,
+            false,
+        );
         let labels: Vec<&str> = result.iter().map(|i| i.label.as_str()).collect();
         assert_eq!(
             labels,
@@ -1718,7 +1835,7 @@ mod tests {
     /// @ai-generated — Type diagnostics are mapped and added to verter diagnostics
     #[test]
     fn merge_diagnostics_combines_both() {
-        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+        let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
         let verter = vec![make_verter_diagnostic("parse error")];
         let types = vec![TypeDiagnostic {
             message: "Type 'number' is not assignable to type 'string'".to_string(),
@@ -1728,7 +1845,7 @@ mod tests {
             code: Some("2322".to_string()),
         }];
 
-        let result = merge_diagnostics(verter, types, &tsx_li, &mapper, &vue_li);
+        let result = merge_diagnostics(verter, types, &tsx_li, &mapper, &carrier_li);
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].source.as_deref(), Some("verter"));
         assert_eq!(result[1].source.as_deref(), Some("ts"));
@@ -1738,7 +1855,7 @@ mod tests {
     /// @ai-generated — Type diagnostics in unmapped regions are filtered out
     #[test]
     fn merge_diagnostics_filters_unmapped() {
-        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+        let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
         let verter = vec![];
         // Offset 100 is beyond the TSX source
         let types = vec![TypeDiagnostic {
@@ -1749,7 +1866,7 @@ mod tests {
             code: None,
         }];
 
-        let result = merge_diagnostics(verter, types, &tsx_li, &mapper, &vue_li);
+        let result = merge_diagnostics(verter, types, &tsx_li, &mapper, &carrier_li);
         assert!(result.is_empty(), "unmapped diagnostics should be filtered");
     }
 
@@ -1762,7 +1879,7 @@ mod tests {
     /// @ai-generated — Verter definition is preferred when no type definitions
     #[test]
     fn merge_definitions_verter_only() {
-        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+        let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
         let verter = Some(GotoDefinitionResponse::Scalar(Location {
             uri: "file:///test.vue".parse().unwrap(),
             range: Range::default(),
@@ -1773,10 +1890,10 @@ mod tests {
             vec![],
             &tsx_li,
             &mapper,
-            &vue_li,
+            &carrier_li,
             None,
             &test_doc_uri(),
-            &vue_exists,
+            &carrier_exists,
         );
         assert!(result.is_some());
     }
@@ -1784,7 +1901,7 @@ mod tests {
     /// @ai-generated — Type definitions used when verter has none
     #[test]
     fn merge_definitions_type_only() {
-        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+        let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
         let types = vec![TypeLocation {
             path: "/project/utils.ts".to_string(),
             start: 0,
@@ -1796,10 +1913,10 @@ mod tests {
             types,
             &tsx_li,
             &mapper,
-            &vue_li,
+            &carrier_li,
             None,
             &test_doc_uri(),
-            &vue_exists,
+            &carrier_exists,
         );
         assert!(result.is_some());
     }
@@ -1807,16 +1924,16 @@ mod tests {
     /// @ai-generated — Neither source returns None
     #[test]
     fn merge_definitions_neither() {
-        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+        let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
         let result = merge_definitions(
             None,
             vec![],
             &tsx_li,
             &mapper,
-            &vue_li,
+            &carrier_li,
             None,
             &test_doc_uri(),
-            &vue_exists,
+            &carrier_exists,
         );
         assert!(result.is_none());
     }
@@ -1842,7 +1959,7 @@ mod tests {
     /// @ai-generated — TypeProvider references are merged with verter refs
     #[test]
     fn merge_references_both_present() {
-        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+        let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
         let verter = Some(vec![Location {
             uri: "file:///test.vue".parse().unwrap(),
             range: Range::default(),
@@ -1858,9 +1975,9 @@ mod tests {
             type_refs,
             &tsx_li,
             &mapper,
-            &vue_li,
+            &carrier_li,
             None,
-            &vue_exists,
+            &carrier_exists,
         );
         assert!(result.is_some());
         assert_eq!(result.unwrap().len(), 2);
@@ -1869,21 +1986,37 @@ mod tests {
     /// @ai-generated — Empty refs from both returns None
     #[test]
     fn merge_references_neither() {
-        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
-        let result = merge_references(None, vec![], &tsx_li, &mapper, &vue_li, None, &vue_exists);
+        let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
+        let result = merge_references(
+            None,
+            vec![],
+            &tsx_li,
+            &mapper,
+            &carrier_li,
+            None,
+            &carrier_exists,
+        );
         assert!(result.is_none());
     }
 
     /// @ai-generated — Verter-only refs returned as-is
     #[test]
     fn merge_references_verter_only() {
-        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+        let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
         let verter = Some(vec![Location {
             uri: "file:///test.vue".parse().unwrap(),
             range: Range::default(),
         }]);
 
-        let result = merge_references(verter, vec![], &tsx_li, &mapper, &vue_li, None, &vue_exists);
+        let result = merge_references(
+            verter,
+            vec![],
+            &tsx_li,
+            &mapper,
+            &carrier_li,
+            None,
+            &carrier_exists,
+        );
         assert!(result.is_some());
         assert_eq!(result.unwrap().len(), 1);
     }
@@ -1893,7 +2026,7 @@ mod tests {
     /// @ai-generated — Type highlights mapped and merged with verter highlights
     #[test]
     fn merge_highlights_both_present() {
-        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+        let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
         let verter = Some(vec![DocumentHighlight {
             range: Range {
                 start: Position {
@@ -1914,7 +2047,8 @@ mod tests {
             kind: TypeDocumentHighlightKind::Write,
         }];
 
-        let result = merge_document_highlights(verter, type_highlights, &tsx_li, &mapper, &vue_li);
+        let result =
+            merge_document_highlights(verter, type_highlights, &tsx_li, &mapper, &carrier_li);
         assert!(result.is_some());
         // Should be 1 (deduplicated since both point to line 5, col 6)
         assert_eq!(result.unwrap().len(), 1);
@@ -1923,8 +2057,8 @@ mod tests {
     /// @ai-generated — Neither highlights returns None
     #[test]
     fn merge_highlights_neither() {
-        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
-        let result = merge_document_highlights(None, vec![], &tsx_li, &mapper, &vue_li);
+        let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
+        let result = merge_document_highlights(None, vec![], &tsx_li, &mapper, &carrier_li);
         assert!(result.is_none());
     }
 
@@ -1965,7 +2099,7 @@ mod tests {
     /// @ai-generated — Code actions with mappable edits are returned
     #[test]
     fn merge_code_actions_with_edits() {
-        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+        let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
         let actions = vec![TypeCodeAction {
             title: "Add missing import".to_string(),
             kind: Some("quickfix".to_string()),
@@ -1977,15 +2111,15 @@ mod tests {
             }],
         }];
 
-        let result = merge_code_actions(actions, &tsx_li, &mapper, &vue_li, &vue_exists);
+        let result = merge_code_actions(actions, &tsx_li, &mapper, &carrier_li, &carrier_exists);
         assert_eq!(result.len(), 1);
     }
 
     /// @ai-generated — Empty actions returns empty vec
     #[test]
     fn merge_code_actions_empty() {
-        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
-        let result = merge_code_actions(vec![], &tsx_li, &mapper, &vue_li, &vue_exists);
+        let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
+        let result = merge_code_actions(vec![], &tsx_li, &mapper, &carrier_li, &carrier_exists);
         assert!(result.is_empty());
     }
 
@@ -1994,7 +2128,7 @@ mod tests {
     /// @ai-generated — Semantic tokens mapped from TSX to Vue
     #[test]
     fn merge_semantic_tokens_basic() {
-        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+        let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
         // Token at TSX offset 6 (= "msg"), length 3
         let tokens = vec![protocol::SemanticToken {
             start: 6,
@@ -2003,7 +2137,7 @@ mod tests {
             token_modifiers: 0,
         }];
 
-        let result = merge_semantic_tokens(tokens, &tsx_li, &mapper, &vue_li);
+        let result = merge_semantic_tokens(tokens, &tsx_li, &mapper, &carrier_li);
         assert_eq!(result.len(), 1);
         // Should map to Vue line 5, col 6
         assert_eq!(result[0].length, 3);
@@ -2013,8 +2147,8 @@ mod tests {
     /// @ai-generated — Empty tokens returns empty vec
     #[test]
     fn merge_semantic_tokens_empty() {
-        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
-        let result = merge_semantic_tokens(vec![], &tsx_li, &mapper, &vue_li);
+        let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
+        let result = merge_semantic_tokens(vec![], &tsx_li, &mapper, &carrier_li);
         assert!(result.is_empty());
     }
 
@@ -2027,7 +2161,7 @@ mod tests {
         // Vue: line 5 has `const msg = "hello";` (col 6 = 'msg', length 3)
         // TSX: line 0 has `const msg = "hello";` (col 6 = 'msg', length 3)
         // In this case TSX and Vue lengths match, but the mechanism should map end too.
-        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+        let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
 
         let tokens = vec![protocol::SemanticToken {
             start: 6,  // TSX offset of 'msg'
@@ -2036,7 +2170,7 @@ mod tests {
             token_modifiers: 0,
         }];
 
-        let result = merge_semantic_tokens(tokens, &tsx_li, &mapper, &vue_li);
+        let result = merge_semantic_tokens(tokens, &tsx_li, &mapper, &carrier_li);
         assert_eq!(result.len(), 1);
         // Both start AND end should be mapped — length should be 3 in Vue coordinates
         assert_eq!(
@@ -2048,7 +2182,7 @@ mod tests {
     /// Token whose end position maps to a different line should be filtered out.
     #[test]
     fn merge_semantic_tokens_cross_line_filtered() {
-        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+        let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
 
         // TSX: "const msg = \"hello\";\n" (20 chars)
         // Token spanning from col 0 with excessive length that crosses line boundary
@@ -2059,7 +2193,7 @@ mod tests {
             token_modifiers: 0,
         }];
 
-        let result = merge_semantic_tokens(tokens, &tsx_li, &mapper, &vue_li);
+        let result = merge_semantic_tokens(tokens, &tsx_li, &mapper, &carrier_li);
         // Should be filtered out because end position mapping crosses line or is out of bounds
         // (or length should be clamped to line end)
         if !result.is_empty() {
@@ -2076,7 +2210,7 @@ mod tests {
     /// @ai-generated — Verter-only rename returns as-is
     #[test]
     fn merge_rename_verter_only() {
-        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+        let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
         let verter = Some(WorkspaceEdit {
             changes: Some({
                 let mut m = std::collections::HashMap::new();
@@ -2098,9 +2232,9 @@ mod tests {
             "newName",
             &tsx_li,
             &mapper,
-            &vue_li,
+            &carrier_li,
             None,
-            &vue_exists,
+            &carrier_exists,
         );
         assert!(result.is_some());
     }
@@ -2108,16 +2242,16 @@ mod tests {
     /// @ai-generated — Empty rename from both returns None
     #[test]
     fn merge_rename_neither() {
-        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+        let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
         let result = merge_rename_locations(
             None,
             vec![],
             "newName",
             &tsx_li,
             &mapper,
-            &vue_li,
+            &carrier_li,
             None,
-            &vue_exists,
+            &carrier_exists,
         );
         assert!(result.is_none());
     }
@@ -2130,7 +2264,7 @@ mod tests {
     /// for all .vue.tsx targets instead of mapping TSX byte offsets back to Vue positions.
     #[test]
     fn merge_definitions_maps_vue_tsx_to_vue_positions() {
-        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+        let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
 
         // Simulate TSGO returning a definition in App.vue.tsx
         // TSX offset 6..9 = "msg" (in "const msg = ...")
@@ -2146,10 +2280,10 @@ mod tests {
             type_defs,
             &tsx_li,
             &mapper,
-            &vue_li,
+            &carrier_li,
             None,
             &test_doc_uri(),
-            &vue_exists,
+            &carrier_exists,
         );
         assert!(result.is_some(), "Expected definition response");
 
@@ -2189,8 +2323,8 @@ mod tests {
 
     /// @ai-generated — merge_definitions passes through non-.vue targets unchanged
     #[test]
-    fn merge_definitions_non_vue_targets_unchanged() {
-        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+    fn merge_definitions_non_carrier_targets_unchanged() {
+        let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
 
         let type_defs = vec![TypeLocation {
             path: "/home/user/utils.ts".to_string(),
@@ -2203,17 +2337,17 @@ mod tests {
             type_defs,
             &tsx_li,
             &mapper,
-            &vue_li,
+            &carrier_li,
             None,
             &test_doc_uri(),
-            &vue_exists,
+            &carrier_exists,
         );
         assert!(result.is_some());
     }
 
     #[test]
-    fn merge_definitions_uses_barrel_resolver_for_non_vue_targets() {
-        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+    fn merge_definitions_uses_barrel_resolver_for_non_carrier_targets() {
+        let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
         let type_defs = vec![TypeLocation {
             path: "/home/user/index.ts".to_string(),
             start: 20,
@@ -2245,10 +2379,10 @@ mod tests {
             type_defs,
             &tsx_li,
             &mapper,
-            &vue_li,
+            &carrier_li,
             None,
             &test_doc_uri(),
-            &vue_exists,
+            &carrier_exists,
             Some(&resolver),
         );
 
@@ -2263,7 +2397,7 @@ mod tests {
     /// must win — verter's same-file import is just an intermediate step.
     #[test]
     fn merge_definitions_tsgo_external_overrides_verter_same_file() {
-        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+        let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
 
         // Verter found the import statement (same file — uses SAME_FILE_URI sentinel)
         let verter_def = Some(GotoDefinitionResponse::Scalar(Location {
@@ -2292,10 +2426,10 @@ mod tests {
             type_defs,
             &tsx_li,
             &mapper,
-            &vue_li,
+            &carrier_li,
             None,
             &test_doc_uri(),
-            &vue_exists,
+            &carrier_exists,
         );
         assert!(result.is_some(), "should return TSGO's external definition");
 
@@ -2321,7 +2455,7 @@ mod tests {
     /// @ai-generated — merge_definitions prefers verter when type_defs is empty
     #[test]
     fn merge_definitions_verter_preferred_when_no_type_defs() {
-        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+        let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
 
         let verter_def = Some(GotoDefinitionResponse::Scalar(Location {
             uri: "file:///test.vue".parse().unwrap(),
@@ -2342,10 +2476,10 @@ mod tests {
             vec![],
             &tsx_li,
             &mapper,
-            &vue_li,
+            &carrier_li,
             None,
             &test_doc_uri(),
-            &vue_exists,
+            &carrier_exists,
         );
         assert!(result.is_some());
         match result.unwrap() {
@@ -2363,7 +2497,7 @@ mod tests {
     /// the type provider's .vue.tsx byte offsets may fail position mapping.
     #[test]
     fn merge_definitions_prefers_verter_same_file_over_type_provider() {
-        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+        let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
 
         // Verter resolved to line 5 in the same file (sentinel already replaced)
         let verter_def = Some(GotoDefinitionResponse::Scalar(Location {
@@ -2393,10 +2527,10 @@ mod tests {
             type_defs,
             &tsx_li,
             &mapper,
-            &vue_li,
+            &carrier_li,
             None,
             &test_doc_uri(),
-            &vue_exists,
+            &carrier_exists,
         );
         assert!(
             result.is_some(),
@@ -2421,106 +2555,156 @@ mod tests {
 
     // ── Hover merge tests ──────────────────────────────────────────
 
-    // ── normalize_vue_path tests ────────────────────────────────────
+    // ── normalize_carrier_path tests ────────────────────────────────────
 
     /// Predicate that always returns true — for tests where the .vue source is known to exist.
-    fn vue_exists(_: &str) -> bool {
+    fn carrier_exists(_: &str) -> bool {
         true
     }
 
     /// Predicate that always returns false — simulates a real .vue.tsx file with no backing .vue.
-    fn vue_missing(_: &str) -> bool {
+    fn carrier_missing(_: &str) -> bool {
         false
     }
 
     #[test]
-    fn normalize_vue_path_strips_tsx() {
+    fn normalize_carrier_path_strips_tsx() {
         assert_eq!(
-            normalize_vue_path("/src/App.vue.tsx", &vue_exists),
+            normalize_carrier_path("/src/App.vue.tsx", &carrier_exists),
             "/src/App.vue"
         );
     }
 
     #[test]
-    fn normalize_vue_path_strips_dts() {
+    fn normalize_carrier_path_strips_dts() {
         assert_eq!(
-            normalize_vue_path("/node_modules/lib/Comp.vue.d.ts", &vue_exists),
+            normalize_carrier_path("/node_modules/lib/Comp.vue.d.ts", &carrier_exists),
             "/node_modules/lib/Comp.vue"
         );
     }
 
     #[test]
-    fn normalize_vue_path_strips_vue_ts() {
+    fn normalize_carrier_path_strips_vue_ts() {
         assert_eq!(
-            normalize_vue_path("/src/App.vue.ts", &vue_exists),
+            normalize_carrier_path("/src/App.vue.ts", &carrier_exists),
             "/src/App.vue"
         );
     }
 
     #[test]
-    fn normalize_vue_path_strips_vue_jsx() {
+    fn normalize_carrier_path_strips_vue_jsx() {
         assert_eq!(
-            normalize_vue_path("/src/App.vue.jsx", &vue_exists),
+            normalize_carrier_path("/src/App.vue.jsx", &carrier_exists),
             "/src/App.vue"
         );
     }
 
     #[test]
-    fn normalize_vue_path_passthrough_plain_dts() {
+    fn normalize_carrier_path_strips_svelte_virtual_suffixes() {
+        // Generalized to the carrier-extension set: a `.svelte` IDE/api/dts
+        // virtual file normalizes back to the `.svelte` source.
+        assert_eq!(
+            normalize_carrier_path("/src/Comp.svelte.tsx", &carrier_exists),
+            "/src/Comp.svelte"
+        );
+        assert_eq!(
+            normalize_carrier_path("/src/Comp.svelte.ts", &carrier_exists),
+            "/src/Comp.svelte"
+        );
+        assert_eq!(
+            normalize_carrier_path("/node_modules/lib/C.svelte.d.ts", &carrier_exists),
+            "/node_modules/lib/C.svelte"
+        );
+        assert!(is_carrier_ide_path("/src/Comp.svelte.tsx"));
+        // `Comp.svelte.ts` is the api virtual file ONLY when `Comp.svelte`
+        // EXISTS (D-bg disambiguation against a real `.svelte.ts` rune module).
+        assert!(is_carrier_api_or_dts_path(
+            "/src/Comp.svelte.ts",
+            &carrier_exists
+        ));
+        // A plain `.ts`/`.tsx` is NOT a carrier virtual file (negative).
+        assert!(!is_carrier_ide_path("/src/plain.tsx"));
+        assert_eq!(
+            normalize_carrier_path("/src/plain.ts", &carrier_exists),
+            "/src/plain.ts"
+        );
+    }
+
+    #[test]
+    fn real_svelte_rune_module_is_not_a_carrier_virtual_file() {
+        // D-bk co-existence: `store.svelte.ts` with NO backing `store.svelte` is
+        // a REAL first-class rune module — NOT the `{carrier}.ts` component API
+        // virtual file. The existence guard disambiguates it from `Foo.svelte` +
+        // `.ts` (the component API virtual file exists ONLY when `Foo.svelte`
+        // backs it); the rune module's own provider surface is served from its
+        // own canonical path, never normalized to a sibling `.svelte` component.
+        assert!(!is_carrier_api_or_dts_path(
+            "/src/store.svelte.ts",
+            &carrier_missing
+        ));
+        // And it is NOT normalized to a sibling `.svelte` (the strip is guarded).
+        assert_eq!(
+            normalize_carrier_path("/src/store.svelte.ts", &carrier_missing),
+            "/src/store.svelte.ts"
+        );
+    }
+
+    #[test]
+    fn normalize_carrier_path_passthrough_plain_dts() {
         // Non-.vue .d.ts files should NOT be stripped
         assert_eq!(
-            normalize_vue_path(
+            normalize_carrier_path(
                 "/node_modules/@vue/runtime-dom/dist/runtime-dom.d.ts",
-                &vue_exists
+                &carrier_exists
             ),
             "/node_modules/@vue/runtime-dom/dist/runtime-dom.d.ts"
         );
     }
 
     #[test]
-    fn normalize_vue_path_passthrough_plain_ts() {
+    fn normalize_carrier_path_passthrough_plain_ts() {
         // Non-.vue .ts files should NOT be stripped
         assert_eq!(
-            normalize_vue_path("/src/utils.ts", &vue_exists),
+            normalize_carrier_path("/src/utils.ts", &carrier_exists),
             "/src/utils.ts"
         );
     }
 
     #[test]
-    fn normalize_vue_path_skips_real_vue_tsx() {
+    fn normalize_carrier_path_skips_real_vue_tsx() {
         // A real .vue.tsx file on disk (no backing .vue source) must NOT be stripped
         assert_eq!(
-            normalize_vue_path("/src/App.vue.tsx", &vue_missing),
+            normalize_carrier_path("/src/App.vue.tsx", &carrier_missing),
             "/src/App.vue.tsx",
             "real .vue.tsx should be left unchanged when no .vue source exists"
         );
     }
 
     #[test]
-    fn normalize_vue_path_skips_real_vue_ts() {
+    fn normalize_carrier_path_skips_real_vue_ts() {
         assert_eq!(
-            normalize_vue_path("/src/App.vue.ts", &vue_missing),
+            normalize_carrier_path("/src/App.vue.ts", &carrier_missing),
             "/src/App.vue.ts",
             "real .vue.ts should be left unchanged when no .vue source exists"
         );
     }
 
     #[test]
-    fn normalize_vue_path_strips_virtual_vue_tsx() {
+    fn normalize_carrier_path_strips_virtual_vue_tsx() {
         // Virtual .vue.tsx with a backing .vue source SHOULD be stripped
         let exists_for_app = |path: &str| path == "/src/App.vue";
         assert_eq!(
-            normalize_vue_path("/src/App.vue.tsx", &exists_for_app),
+            normalize_carrier_path("/src/App.vue.tsx", &exists_for_app),
             "/src/App.vue",
             "virtual .vue.tsx should strip to .vue when source exists"
         );
     }
 
     #[test]
-    fn normalize_vue_path_dts_always_strips_regardless_of_predicate() {
+    fn normalize_carrier_path_dts_always_strips_regardless_of_predicate() {
         // .vue.d.ts from node_modules has no collision risk — always strip
         assert_eq!(
-            normalize_vue_path("/node_modules/lib/Comp.vue.d.ts", &vue_missing),
+            normalize_carrier_path("/node_modules/lib/Comp.vue.d.ts", &carrier_missing),
             "/node_modules/lib/Comp.vue",
             ".vue.d.ts should always strip regardless of predicate"
         );
@@ -2531,7 +2715,7 @@ mod tests {
     /// TypeProvider returning .vue.d.ts should navigate to .vue
     #[test]
     fn merge_definitions_vue_dts_maps_to_vue() {
-        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+        let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
 
         let type_defs = vec![TypeLocation {
             path: "/node_modules/my-lib/dist/Button.vue.d.ts".to_string(),
@@ -2544,10 +2728,10 @@ mod tests {
             type_defs,
             &tsx_li,
             &mapper,
-            &vue_li,
+            &carrier_li,
             None,
             &test_doc_uri(),
-            &vue_exists,
+            &carrier_exists,
         );
         assert!(result.is_some());
         match result.unwrap() {
@@ -2570,7 +2754,7 @@ mod tests {
     /// .vue.d.ts references should map to .vue
     #[test]
     fn merge_references_vue_dts_maps_to_vue() {
-        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+        let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
 
         let type_refs = vec![TypeLocation {
             path: "/node_modules/my-lib/dist/Button.vue.d.ts".to_string(),
@@ -2583,9 +2767,9 @@ mod tests {
             type_refs,
             &tsx_li,
             &mapper,
-            &vue_li,
+            &carrier_li,
             None,
-            &vue_exists,
+            &carrier_exists,
         );
         assert!(result.is_some());
         let locs = result.unwrap();
@@ -2604,7 +2788,7 @@ mod tests {
     /// .vue.d.ts rename locations should map to .vue
     #[test]
     fn merge_rename_vue_dts_maps_to_vue() {
-        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+        let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
 
         let type_locations = vec![RenameLocation {
             path: "/node_modules/my-lib/dist/Button.vue.d.ts".to_string(),
@@ -2618,9 +2802,9 @@ mod tests {
             "NewName",
             &tsx_li,
             &mapper,
-            &vue_li,
+            &carrier_li,
             None,
-            &vue_exists,
+            &carrier_exists,
         );
         assert!(result.is_some());
         let edit = result.unwrap();
@@ -2655,7 +2839,7 @@ mod tests {
     #[test]
     fn merge_hover_no_duplicate_fences() {
         let (mapper, _, tsx_li) = make_mapper_and_indexes();
-        let vue_li = LineIndex::new_utf16("");
+        let carrier_li = LineIndex::new_utf16("");
 
         let verter = Some(Hover {
             contents: HoverContents::Markup(MarkupContent {
@@ -2670,7 +2854,7 @@ mod tests {
             contents: "const count: Ref<number>".to_string(),
         });
 
-        let result = merge_hover(verter, tsgo, &mapper, &tsx_li, &vue_li, None);
+        let result = merge_hover(verter, tsgo, &mapper, &tsx_li, &carrier_li, None);
         assert!(result.is_some());
 
         let text = match result.unwrap().contents {
@@ -2689,7 +2873,7 @@ mod tests {
     #[test]
     fn merge_hover_verter_only_code_block() {
         let (mapper, _, tsx_li) = make_mapper_and_indexes();
-        let vue_li = LineIndex::new_utf16("");
+        let carrier_li = LineIndex::new_utf16("");
 
         let verter = Some(Hover {
             contents: HoverContents::Markup(MarkupContent {
@@ -2704,7 +2888,7 @@ mod tests {
             contents: "const x: string".to_string(),
         });
 
-        let result = merge_hover(verter, tsgo, &mapper, &tsx_li, &vue_li, None);
+        let result = merge_hover(verter, tsgo, &mapper, &tsx_li, &carrier_li, None);
         assert!(result.is_some());
 
         let text = match result.unwrap().contents {
@@ -2721,7 +2905,7 @@ mod tests {
     #[test]
     fn merge_hover_tsgo_already_markdown_no_double_fence() {
         let (mapper, _, tsx_li) = make_mapper_and_indexes();
-        let vue_li = LineIndex::new_utf16("");
+        let carrier_li = LineIndex::new_utf16("");
 
         let tsgo = Some(HoverInfo {
             range_start: None,
@@ -2729,7 +2913,7 @@ mod tests {
             contents: "```typescript\n(property) msg: string\n```\nThe message.".to_string(),
         });
 
-        let result = merge_hover(None, tsgo, &mapper, &tsx_li, &vue_li, None);
+        let result = merge_hover(None, tsgo, &mapper, &tsx_li, &carrier_li, None);
         assert!(result.is_some());
 
         let text = match result.unwrap().contents {
@@ -2758,7 +2942,7 @@ mod tests {
     #[test]
     fn merge_hover_tsgo_plain_text_gets_wrapped() {
         let (mapper, _, tsx_li) = make_mapper_and_indexes();
-        let vue_li = LineIndex::new_utf16("");
+        let carrier_li = LineIndex::new_utf16("");
 
         let tsgo = Some(HoverInfo {
             range_start: None,
@@ -2766,7 +2950,7 @@ mod tests {
             contents: "(property) msg: string".to_string(),
         });
 
-        let result = merge_hover(None, tsgo, &mapper, &tsx_li, &vue_li, None);
+        let result = merge_hover(None, tsgo, &mapper, &tsx_li, &carrier_li, None);
         assert!(result.is_some());
 
         let text = match result.unwrap().contents {
@@ -2780,7 +2964,7 @@ mod tests {
     #[test]
     fn merge_hover_tsgo_with_jsdoc_newlines_preserved() {
         let (mapper, _, tsx_li) = make_mapper_and_indexes();
-        let vue_li = LineIndex::new_utf16("");
+        let carrier_li = LineIndex::new_utf16("");
 
         let tsgo = Some(HoverInfo {
             range_start: None,
@@ -2788,7 +2972,7 @@ mod tests {
             contents: "```typescript\n(property) select: (action: Action) => true\n```\nEmitted when selected.\n当选择时触发。".to_string(),
         });
 
-        let result = merge_hover(None, tsgo, &mapper, &tsx_li, &vue_li, None);
+        let result = merge_hover(None, tsgo, &mapper, &tsx_li, &carrier_li, None);
         assert!(result.is_some());
 
         let text = match result.unwrap().contents {
@@ -2815,7 +2999,7 @@ mod tests {
     #[test]
     fn merge_hover_verter_and_tsgo_combined_markdown() {
         let (mapper, _, tsx_li) = make_mapper_and_indexes();
-        let vue_li = LineIndex::new_utf16("");
+        let carrier_li = LineIndex::new_utf16("");
 
         let verter = Some(Hover {
             contents: HoverContents::Markup(MarkupContent {
@@ -2830,7 +3014,7 @@ mod tests {
             contents: "```typescript\nconst count: Ref<number>\n```\nA counter.".to_string(),
         });
 
-        let result = merge_hover(verter, tsgo, &mapper, &tsx_li, &vue_li, None);
+        let result = merge_hover(verter, tsgo, &mapper, &tsx_li, &carrier_li, None);
         assert!(result.is_some());
 
         let text = match result.unwrap().contents {
@@ -2858,7 +3042,7 @@ mod tests {
     #[test]
     fn wrap_type_block_plain_text_with_blank_line_separator() {
         let (mapper, _, tsx_li) = make_mapper_and_indexes();
-        let vue_li = LineIndex::new_utf16("");
+        let carrier_li = LineIndex::new_utf16("");
 
         // TSGO returns plain text with type and doc separated by blank line
         let tsgo = Some(HoverInfo {
@@ -2868,7 +3052,7 @@ mod tests {
                 .to_string(),
         });
 
-        let result = merge_hover(None, tsgo, &mapper, &tsx_li, &vue_li, None);
+        let result = merge_hover(None, tsgo, &mapper, &tsx_li, &carrier_li, None);
         let text = match result.unwrap().contents {
             HoverContents::Markup(m) => m.value,
             _ => panic!("expected markup"),
@@ -2898,7 +3082,7 @@ mod tests {
     #[test]
     fn wrap_type_block_plain_text_with_single_newline_separator() {
         let (mapper, _, tsx_li) = make_mapper_and_indexes();
-        let vue_li = LineIndex::new_utf16("");
+        let carrier_li = LineIndex::new_utf16("");
 
         // TSGO returns plain text with type and doc separated by single newline
         let tsgo = Some(HoverInfo {
@@ -2907,7 +3091,7 @@ mod tests {
             contents: "(property) game: GameVo\nThe game data.".to_string(),
         });
 
-        let result = merge_hover(None, tsgo, &mapper, &tsx_li, &vue_li, None);
+        let result = merge_hover(None, tsgo, &mapper, &tsx_li, &carrier_li, None);
         let text = match result.unwrap().contents {
             HoverContents::Markup(m) => m.value,
             _ => panic!("expected markup"),
@@ -2932,7 +3116,7 @@ mod tests {
         // When there's no newline separator, everything goes in the fence
         // (can't reliably split type from doc without a separator)
         let (mapper, _, tsx_li) = make_mapper_and_indexes();
-        let vue_li = LineIndex::new_utf16("");
+        let carrier_li = LineIndex::new_utf16("");
 
         let tsgo = Some(HoverInfo {
             range_start: None,
@@ -2940,7 +3124,7 @@ mod tests {
             contents: "(property) msg: string".to_string(),
         });
 
-        let result = merge_hover(None, tsgo, &mapper, &tsx_li, &vue_li, None);
+        let result = merge_hover(None, tsgo, &mapper, &tsx_li, &carrier_li, None);
         let text = match result.unwrap().contents {
             HoverContents::Markup(m) => m.value,
             _ => panic!("expected markup"),
@@ -2967,7 +3151,7 @@ mod tests {
 
     #[test]
     fn merge_hover_with_vue_kind_label() {
-        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+        let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
         let verter =
             make_verter_hover("```typescript\nconst count\n```\n\n*(ref — needs `.value`)*");
         let type_hover = HoverInfo {
@@ -2981,7 +3165,7 @@ mod tests {
             Some(type_hover),
             &mapper,
             &tsx_li,
-            &vue_li,
+            &carrier_li,
             Some("ref"),
         );
         let text = match result.unwrap().contents {
@@ -3000,7 +3184,7 @@ mod tests {
 
     #[test]
     fn merge_hover_component_event_rewrites_primary_label_to_vue_syntax() {
-        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+        let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
         let verter = make_verter_hover("**Component event** â€” `@custom(payload: string)`");
         let type_hover = HoverInfo {
             contents: "(property) onCustom: (payload: string) => void".to_string(),
@@ -3013,7 +3197,7 @@ mod tests {
             Some(type_hover),
             &mapper,
             &tsx_li,
-            &vue_li,
+            &carrier_li,
             None,
         );
         let text = match result.unwrap().contents {
@@ -3037,20 +3221,21 @@ mod tests {
     /// current file's mapper.
     #[test]
     fn merge_definitions_uses_external_resolver_for_cross_file() {
-        let (_mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+        let (_mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
 
         // Build target file's mapper: TSX line 0 col 0 → Vue line 1 col 0
-        let target_vue = "<script setup>\ndefineComponent({})\n</script>";
+        let target_carrier = "<script setup>\ndefineComponent({})\n</script>";
         let target_tsx = "defineComponent({});\n";
-        let target_vue_li = LineIndex::new_utf16(target_vue);
+        let target_carrier_li = LineIndex::new_utf16(target_carrier);
         let target_tsx_li = LineIndex::new_utf16(target_tsx);
 
         let mut builder = oxc_sourcemap::SourceMapBuilder::default();
-        let sid = builder.set_source_and_content("Target.vue", target_vue);
+        let sid = builder.set_source_and_content("Target.vue", target_carrier);
         builder.add_token(0, 0, 1, 0, Some(sid), None); // TSX 0:0 → Vue 1:0
         builder.add_token(0, 16, 1, 16, Some(sid), None); // TSX 0:16 → Vue 1:16
         let json = builder.into_sourcemap().to_json_string();
-        let target_mapper = PositionMapper::from_json(&json).unwrap();
+        let target_mapper =
+            ProviderPositionMapper::source_map(PositionMapper::from_json(&json).unwrap());
 
         let type_defs = vec![TypeLocation {
             path: "/src/components/Target.vue.tsx".to_string(),
@@ -3064,10 +3249,10 @@ mod tests {
             type_defs.clone(),
             &tsx_li,
             &_mapper,
-            &vue_li,
+            &carrier_li,
             None,
             &test_doc_uri(),
-            &vue_exists,
+            &carrier_exists,
         );
         assert!(result_no_resolver.is_some());
         match result_no_resolver.unwrap() {
@@ -3087,7 +3272,7 @@ mod tests {
                 Some(ExternalIdeContext {
                     tsx_line_index: target_tsx_li.clone(),
                     mapper: target_mapper.clone(),
-                    vue_line_index: target_vue_li.clone(),
+                    carrier_line_index: target_carrier_li.clone(),
                 })
             } else {
                 None
@@ -3099,10 +3284,10 @@ mod tests {
             type_defs,
             &tsx_li,
             &_mapper,
-            &vue_li,
+            &carrier_li,
             Some(&resolver),
             &test_doc_uri(),
-            &vue_exists,
+            &carrier_exists,
         );
         assert!(result_with_resolver.is_some());
         match result_with_resolver.unwrap() {
@@ -3133,7 +3318,7 @@ mod tests {
     #[test]
     fn merge_definitions_deduplicates_vue_locations() {
         // Bug: multiple .vue.tsx targets for the same .vue file should deduplicate
-        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+        let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
 
         let type_defs = vec![
             TypeLocation {
@@ -3153,10 +3338,10 @@ mod tests {
             type_defs,
             &tsx_li,
             &mapper,
-            &vue_li,
+            &carrier_li,
             None,
             &test_doc_uri(),
-            &vue_exists,
+            &carrier_exists,
         );
         match result {
             Some(GotoDefinitionResponse::Scalar(_)) => {
@@ -3173,10 +3358,10 @@ mod tests {
     }
 
     #[test]
-    fn merge_definitions_filters_vue_when_non_vue_exists() {
+    fn merge_definitions_filters_vue_when_non_carrier_exists() {
         // Bug: when CTRL+CLICKing on an import from a library, both .d.mts (real def)
         // and .vue.tsx (consumer) are returned. Should filter out .vue targets.
-        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+        let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
 
         let type_defs = vec![
             TypeLocation {
@@ -3201,10 +3386,10 @@ mod tests {
             type_defs,
             &tsx_li,
             &mapper,
-            &vue_li,
+            &carrier_li,
             None,
             &test_doc_uri(),
-            &vue_exists,
+            &carrier_exists,
         );
         match result {
             Some(GotoDefinitionResponse::Scalar(loc)) => {
@@ -3316,14 +3501,14 @@ mod tests {
             is_incomplete: false,
         };
 
-        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+        let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
 
         let (items, _) = merge_completions(
             vec![],
             type_result,
             &mapper,
             &tsx_li,
-            &vue_li,
+            &carrier_li,
             None,
             true, // template_attr_context
         );
@@ -3389,14 +3574,14 @@ mod tests {
             is_incomplete: false,
         };
 
-        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+        let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
 
         let (items, _) = merge_completions(
             vec![],
             type_result,
             &mapper,
             &tsx_li,
-            &vue_li,
+            &carrier_li,
             None,
             false, // NOT in template attr context — expression context
         );
@@ -3430,7 +3615,7 @@ mod tests {
 
     #[test]
     fn merge_enriches_verter_kind_from_type_provider() {
-        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+        let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
         // Verter item has VARIABLE kind
         let verter = vec![CompletionItem {
             label: "inc".to_string(),
@@ -3453,8 +3638,15 @@ mod tests {
             is_incomplete: false,
         };
 
-        let (result, _) =
-            merge_completions(verter, type_result, &mapper, &tsx_li, &vue_li, None, false);
+        let (result, _) = merge_completions(
+            verter,
+            type_result,
+            &mapper,
+            &tsx_li,
+            &carrier_li,
+            None,
+            false,
+        );
         assert_eq!(result.len(), 1, "duplicate should be deduped");
         assert_eq!(
             result[0].kind,
@@ -3465,7 +3657,7 @@ mod tests {
 
     #[test]
     fn merge_does_not_enrich_with_text_kind() {
-        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+        let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
         // Verter item has VARIABLE kind
         let verter = vec![CompletionItem {
             label: "msg".to_string(),
@@ -3488,8 +3680,15 @@ mod tests {
             is_incomplete: false,
         };
 
-        let (result, _) =
-            merge_completions(verter, type_result, &mapper, &tsx_li, &vue_li, None, false);
+        let (result, _) = merge_completions(
+            verter,
+            type_result,
+            &mapper,
+            &tsx_li,
+            &carrier_li,
+            None,
+            false,
+        );
         assert_eq!(result.len(), 1);
         assert_eq!(
             result[0].kind,

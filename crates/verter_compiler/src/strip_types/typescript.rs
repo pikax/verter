@@ -231,10 +231,8 @@ impl<'a, 'ct> TypeStripper<'a, 'ct> {
                     }
                 }
             },
-            Statement::ExportAllDeclaration(export) => {
-                if export.export_kind.is_type() {
-                    self.remove(export.span.start, export.span.end);
-                }
+            Statement::ExportAllDeclaration(export) if export.export_kind.is_type() => {
+                self.remove(export.span.start, export.span.end);
             }
             _ => {}
         }

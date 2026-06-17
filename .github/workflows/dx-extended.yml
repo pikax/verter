@@ -1,0 +1,161 @@
+name: DX Extended
+
+# Non-required DX surfaces kept OFF the pull-request gate: the extension-host DX
+# suite (held to its stable unit gate while VS Code E2E is disabled for flake) and
+# the external-corpus differential (env-gated, never run by default, per the
+# testing-hermeticity rule). The required, hermetic raw-LSP DX gate lives in ci.yml.
+
+on:
+  schedule:
+    - cron: "0 5 * * 1" # weekly, Monday 05:00 UTC
+  workflow_dispatch:
+    inputs:
+      external_corpus_repo:
+        description: "External corpus repo (owner/name) to run the DX differential over; leave empty to skip"
+        required: false
+        default: ""
+        type: string
+      external_corpus_ref:
+        description: "Ref/branch of the external corpus repo"
+        required: false
+        default: "main"
+        type: string
+      external_corpus_subdir:
+        description: "Subdirectory within the external corpus holding .vue sources"
+        required: false
+        default: "."
+        type: string
+
+concurrency:
+  group: dx-extended-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Stabilized, NON-REQUIRED extension-host DX gate. Runs the hermetic UNIT suite
+  # for the ext-host driver (launcher / readiness / canary / scenario) — no real
+  # VS Code, deterministic. Scheduled + manual only; never a PR-required gate.
+  #
+  # The full real-VS-Code DX launch (`test:e2e:dx`) is intentionally NOT wired:
+  # it needs a complete DX_HARNESS_* scenario handoff (workspace + entry + anchors
+  # + expected completion/accept) that has no committed producer yet, and VS Code
+  # E2E is held disabled for flake (see ci.yml). It stays out of CI until both a
+  # handoff producer exists and the flake rate is measured.
+  extension-host-dx:
+    name: Extension-host DX (unit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: lts/*
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Build DX harness
+        run: pnpm --filter "@verter/dx-harness..." build
+      - name: Extension-host DX unit suite
+        run: pnpm --filter verter-vscode test:e2e:dx:unit
+
+  # The full raw-LSP corpus sweep: drives the REAL verter-lsp over EVERY committed
+  # hermetic scenario on materialized workspaces, differences each DX signal against
+  # the tsgo gold standard, and RECORDS every divergence as a finding. It is
+  # record-only (it asserts the run was non-vacuous — baseline-ran > 0 and at least
+  # one event/outcome — but never enforces verter-vs-tsgo parity), and it is heavier
+  # than the required smoke (whole corpus, tsgo bridge), so it lives here on the
+  # weekly schedule + manual dispatch, NOT on the PR-required gate in ci.yml. The
+  # required gate proves the spine; this sweep maps the differential surface.
+  corpus-sweep-dx:
+    name: Raw-LSP corpus sweep (record-only)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: lts/*
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # The sweep drives verter-lsp + the baseline bridge against a real tsgo (the
+      # gold standard), so tsgo must be discoverable — prewarm its cache.
+      - name: Prewarm tsgo cache
+        run: npx -y @typescript/native-preview@latest --version
+      - name: Build differential-baseline bridge
+        run: cargo build -p verter_dx_baseline
+      - name: Build verter-lsp
+        run: cargo build -p verter_lsp
+      - name: Build DX harness
+        run: pnpm --filter "@verter/dx-harness..." build
+      # Findings go to a runner-temp dir (never the repo) and upload as an artifact;
+      # the run is gated on DX_LSP_BIN + DX_BASELINE_BIN and self-skips without them.
+      - name: Raw-LSP corpus sweep
+        env:
+          DX_LSP_BIN: ${{ github.workspace }}/target/debug/verter-lsp
+          DX_BASELINE_BIN: ${{ github.workspace }}/target/debug/verter-dx-baseline
+          DX_FINDINGS_OUT: ${{ runner.temp }}/dx-run
+        run: pnpm --filter @verter/dx-harness exec vitest --run test/dxCorpusSweep.run.test.ts
+      - name: Upload DX findings
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: dx-corpus-sweep-findings
+          path: ${{ runner.temp }}/dx-run
+          if-no-files-found: ignore
+
+  # External-corpus DX differential. workflow_dispatch ONLY and gated on an explicit
+  # external corpus repo input, so it never runs by default, never on a pull
+  # request, and never in the required gate — per the testing-hermeticity rule
+  # (external corpora are not vendored). Compile errors against the vendored shims
+  # are tolerated for third-party sources; the strict pinned-tool-root, versioned
+  # artifact-sync, and baseline-ran>0 invariants still hold.
+  external-corpus-dx:
+    name: External-corpus DX
+    if: github.event_name == 'workflow_dispatch' && inputs.external_corpus_repo != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Checkout external corpus
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ inputs.external_corpus_repo }}
+          ref: ${{ inputs.external_corpus_ref }}
+          path: .dx-external-corpus
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: lts/*
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Build differential-baseline bridge
+        run: cargo build -p verter_dx_baseline
+      - name: Build DX harness
+        run: pnpm --filter "@verter/dx-harness..." build
+      - name: External-corpus DX differential
+        env:
+          DX_REPO_ROOT: ${{ github.workspace }}
+          DX_BASELINE_BIN: ${{ github.workspace }}/target/debug/verter-dx-baseline
+          DX_FIXTURE_DIR: ${{ github.workspace }}/.dx-external-corpus/${{ inputs.external_corpus_subdir }}
+          DX_ALLOW_COMPILE_ERRORS: "1"
+        run: node scripts/dx/dx-ci-gate.mjs

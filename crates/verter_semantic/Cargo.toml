@@ -16,6 +16,12 @@ hotpath = ["dep:hotpath", "hotpath/hotpath"]
 verter_span = { path = "../verter_span" }
 verter_parser = { path = "../verter_parser" }
 verter_workspace = { path = "../verter_workspace" }
+# The stage-1 framework script-fact trait names the framework adapter / language
+# ids and the carrier-language syntax gate. `verter_language` is a
+# `verter_span`-only leaf, so this edge introduces no cycle (verter_semantic
+# already depends on parser/workspace/span; verter_language depends on none of
+# them).
+verter_language = { path = "../verter_language" }
 verter_type_expr = { workspace = true }
 verter_type_expr_oxc = { workspace = true }
 rustc-hash = { workspace = true }

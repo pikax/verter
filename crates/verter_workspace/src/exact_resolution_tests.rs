@@ -651,8 +651,18 @@ fn reverse_deps_for_target_strips_d_ts_d_mts_d_cts() {
 
 // ── Test #24 ──
 #[test]
-fn reverse_deps_for_target_returns_empty_for_unknown_extension() {
-    // Unknown extension (`.svelte`) falls through to canonical-only lookup.
+fn reverse_deps_for_target_known_carrier_outside_resolution_extension_list() {
+    // `.svelte` is a KNOWN carrier language (it classifies through its
+    // `LanguageRegistry` row), but carrier extensions do not join the
+    // import-resolution extension-strip list: a stem bucket never
+    // matches a `.svelte` target, so the lookup is canonical-only.
+    assert!(
+        verter_language::LanguageRegistry::global()
+            .classify_static("/src/comp.svelte")
+            .static_resolution()
+            .is_framework_carrier(),
+        ".svelte must classify as a known framework carrier"
+    );
     let mut store = EdgeStore::new();
     // Set up a stem bucket for /src/comp (no extension).
     store.replace_parsed_edges(
@@ -664,8 +674,9 @@ fn reverse_deps_for_target_returns_empty_for_unknown_extension() {
         )],
         vec![],
     );
-    // Querying with `.svelte` (not in extension list) — only canonical hit.
-    // Caller passes `None` for stripped_target since `.svelte` doesn't strip.
+    // Querying with `.svelte` (not in the resolution extension list) —
+    // only canonical hit. Caller passes `None` for stripped_target since
+    // `.svelte` doesn't strip.
     let got = store.reverse_deps_for_target("/src/comp.svelte", None);
     assert!(
         got.is_empty(),

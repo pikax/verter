@@ -272,6 +272,8 @@ mod tests {
                         has_dynamic_class: false,
                         dynamic_classes: vec![],
                         v_models: vec![],
+                        bindings: vec![],
+                        events: vec![],
                         span: verter_span::Span::new(60, 67),
                     }],
                     ..Default::default()

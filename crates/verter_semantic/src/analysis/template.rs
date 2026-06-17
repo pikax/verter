@@ -109,7 +109,51 @@ pub struct TemplateComponentUsage {
     pub dynamic_classes: Vec<String>,
     /// v-model directives used on this component.
     pub v_models: Vec<TemplateComponentVModel>,
+    /// Framework-neutral two-way bindings passed to this component (the Svelte
+    /// `bind:` family). Empty for Vue (two-way bindings are carried in
+    /// `v_models`).
+    pub bindings: Vec<TemplateComponentBinding>,
+    /// Framework-neutral events listened on this component (the legacy Svelte
+    /// `on:` directive only — a plain `on*` attribute is a prop, never an
+    /// event). Empty for Vue.
+    pub events: Vec<TemplateComponentEvent>,
     /// Byte span in SFC source.
+    pub span: Span,
+}
+
+/// A two-way binding passed to a child component (the Svelte `bind:` family).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TemplateComponentBinding {
+    /// The bound local member name (`value` in `bind:value`).
+    pub name: String,
+    /// The `|modifier` list, in source order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modifiers: Vec<String>,
+    /// Byte span in SFC source.
+    #[serde(default)]
+    pub span: Span,
+}
+
+/// An event listened on a child component via the legacy Svelte `on:`
+/// directive. A plain `on*` attribute is a prop, never an event (the
+/// props/events split is syntactic — the child component-meta, not a name
+/// guess, decides which passed props are callback events).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TemplateComponentEvent {
+    /// The event name — the legacy directive local (`click` from `on:click`).
+    pub name: String,
+    /// The handler expression text, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handler_expression: Option<String>,
+    /// Whether the handler is an inline function expression.
+    pub is_inline: bool,
+    /// The `|modifier` list, in source order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modifiers: Vec<String>,
+    /// Byte span in SFC source.
+    #[serde(default)]
     pub span: Span,
 }
 
@@ -1341,6 +1385,12 @@ impl serde::Serialize for TemplateComponentUsage {
         if !self.v_models.is_empty() {
             s.serialize_field("vModels", &self.v_models)?;
         }
+        if !self.bindings.is_empty() {
+            s.serialize_field("bindings", &self.bindings)?;
+        }
+        if !self.events.is_empty() {
+            s.serialize_field("events", &self.events)?;
+        }
         s.serialize_field("spanStart", &self.span.start)?;
         s.serialize_field("spanEnd", &self.span.end)?;
         s.end()
@@ -1372,6 +1422,10 @@ impl<'de> serde::Deserialize<'de> for TemplateComponentUsage {
             #[serde(default)]
             v_models: Vec<TemplateComponentVModel>,
             #[serde(default)]
+            bindings: Vec<TemplateComponentBinding>,
+            #[serde(default)]
+            events: Vec<TemplateComponentEvent>,
+            #[serde(default)]
             span_start: u32,
             #[serde(default)]
             span_end: u32,
@@ -1388,6 +1442,8 @@ impl<'de> serde::Deserialize<'de> for TemplateComponentUsage {
             has_dynamic_class: w.has_dynamic_class,
             dynamic_classes: w.dynamic_classes,
             v_models: w.v_models,
+            bindings: w.bindings,
+            events: w.events,
             span: Span::new(w.span_start, w.span_end),
         })
     }
@@ -2371,6 +2427,8 @@ mod tests {
                 has_dynamic_class: false,
                 dynamic_classes: vec![],
                 v_models: vec![],
+                bindings: vec![],
+                events: vec![],
                 span: Span::new(10, 50),
             }],
             binding_occurrences: vec![TemplateBindingOccurrence {
@@ -2619,6 +2677,8 @@ mod tests {
             has_dynamic_class: false,
             dynamic_classes: vec![],
             v_models: vec![],
+            bindings: vec![],
+            events: vec![],
             span: Span::new(0, 30),
         };
 
@@ -3234,6 +3294,8 @@ mod tests {
                 has_dynamic_class: false,
                 dynamic_classes: vec![],
                 v_models: vec![],
+                bindings: vec![],
+                events: vec![],
                 span: Span::new(10, 20),
             };
             assert_uses_struct(&v);

@@ -17,6 +17,7 @@
 mod helpers;
 pub mod macro_dto;
 pub mod template_data;
+mod template_expr_overlay;
 pub mod types;
 
 pub use helpers::*;
@@ -47,13 +48,14 @@ use crate::script::{generate_script, ScriptCodeGenOptions};
 use crate::style::generate_style;
 use crate::template::code_gen::vdom::element::to_pascal_case;
 use crate::template::code_gen::{generate_template, CodeGenMode, TemplateCodeGenOptions};
-use crate::template::oxc::parse_template_expressions;
 use crate::template::oxc::types::OxcParsedAst;
 use crate::tokenizer::byte::{tokenize_sfc, tokenize_sfc_with_delimiters};
 use crate::tsc;
+use crate::utils::oxc::script::type_surface::{
+    extract_companion_types, ResolvedElements, RuntimeType,
+};
 use crate::utils::oxc::vue::{
-    extract_companion_types, parse_script_with_companion, MacroTypeParams, ResolvedElements,
-    RuntimeType, ScriptItem, ScriptMacro, ScriptMode,
+    parse_script_with_companion, MacroTypeParams, ScriptItem, ScriptMacro, ScriptMode,
 };
 
 use helpers::{extract_attrs, extract_block_ranges};
@@ -189,20 +191,33 @@ fn validate_imported_macro_type(
                 );
             }
         }
-        "defineEmits" => {
-            if type_params.resolved.emits.is_empty() {
-                push_invalid_macro_type_diagnostic(
-                    diagnostics,
-                    format!(
-                        "defineEmits() type argument '{}' must resolve to emit call signatures or a named-tuple emits object.",
-                        type_text
-                    ),
-                    type_params,
-                );
-            }
+        "defineEmits" if type_params.resolved.call_signatures.is_empty() => {
+            push_invalid_macro_type_diagnostic(
+                diagnostics,
+                format!(
+                    "defineEmits() type argument '{}' must resolve to emit call signatures or a named-tuple emits object.",
+                    type_text
+                ),
+                type_params,
+            );
         }
         _ => {}
     }
+}
+
+/// Byte span `[start, end)` of the `<template>` region in the SFC source.
+///
+/// Used as part of the shared template-expression overlay key so the parsed
+/// facts are identified by the region they cover.
+fn template_region_span(template_ast: &crate::ast::types::TemplateAst) -> (u32, u32) {
+    let root = &template_ast.root;
+    let end = root.tag_close.as_ref().map(|tc| tc.end).unwrap_or_else(|| {
+        root.content
+            .as_ref()
+            .map(|c| c.end)
+            .unwrap_or(root.tag_open.end)
+    });
+    (root.tag_open.start, end)
 }
 
 /// Collect OXC expression parse errors from template expressions and emit them
@@ -576,7 +591,7 @@ fn compile_inner(
                         sourcemap: false,
                     };
                     match process_style(&modified_css, &process_opts) {
-                        Ok(result) => result.code,
+                        Ok(result) => result.code.into_owned(),
                         Err(e) => {
                             all_diagnostics.push(Diagnostic {
                                 severity: DiagnosticSeverity::Error,
@@ -628,8 +643,25 @@ fn compile_inner(
     // ── 4. Script codegen ─────────────────────────────────────────
     // Script codegen is skipped when the target only needs TSX or TSC,
     // since those paths have their own independent codegen.
+    //
+    // The template expressions parse into a per-compile overlay store, shared
+    // read-only by every lane that requests identical parse facts. The runtime,
+    // template-data, and script-import-elision consumers all reuse the single
+    // `ide_completion = false` `tsx()` entry; the IDE/TSX lane keys
+    // `ide_completion = true` (its scoped-completion binding facts differ), so
+    // it never reuses the runtime overlay and stays a separate output owner. The
+    // key holds the full `SourceType` and `ide_completion` flag, so a `jsx()`
+    // lane or a `true` completion lane can never reuse a `tsx()`/`false` overlay.
+    // Built in the top compile allocator so the facts outlive every lane that
+    // borrows them.
     let source_type = SourceType::tsx();
-    let mut early_oxc_ast: Option<OxcParsedAst<'_>> = None;
+    // Exact parse-affecting options shared across every lane in this compile.
+    // Held by value (not hashed) so overlay reuse is an exact-content match.
+    let parse_options = template_expr_overlay::ParseOptionsKey::new(
+        options.delimiters.clone(),
+        options.custom_elements.clone(),
+    );
+    let mut expr_store = template_expr_overlay::TemplateExprStore::new();
     let mut script_bindings: rustc_hash::FxHashMap<
         &str,
         crate::template::code_gen::binding::BindingType,
@@ -644,18 +676,19 @@ fn compile_inner(
         // Parse template expressions early so we can collect the set of identifiers
         // actually used in the template (for import elision in script codegen).
         // This avoids the text-based heuristic and correctly handles TS type positions.
-        early_oxc_ast = if !has_parse_errors {
-            parsed.template_ast().map(|template_ast_ref| {
-                parse_template_expressions(template_ast_ref, input, allocator, source_type)
-            })
-        } else {
-            None
-        };
-
         let template_used_vars: Option<FxHashSet<String>> =
-            if let (Some(ref oxc_ast), Some(template_ast_ref)) =
-                (&early_oxc_ast, parsed.template_ast())
-            {
+            if let (false, Some(template_ast_ref)) = (has_parse_errors, parsed.template_ast()) {
+                // Runtime / script-import-elision lane — completion-prefix
+                // matching off so partial identifiers stay real references.
+                let oxc_ast = expr_store.get_or_build(
+                    template_ast_ref,
+                    input,
+                    allocator,
+                    template_region_span(template_ast_ref),
+                    &parse_options,
+                    source_type,
+                    false,
+                );
                 let mut vars = FxHashSet::default();
 
                 // 1. Collect identifiers from all expression bindings
@@ -928,20 +961,29 @@ fn compile_inner(
             } else {
                 let tpl_start = Instant::now();
 
-                // Reuse early-parsed OxcParsedAst if available, otherwise parse now
-                let oxc_ast = match early_oxc_ast {
-                    Some(ast) => ast,
-                    None => parse_template_expressions(template_ast, input, allocator, source_type),
-                };
+                // Reuse the runtime overlay — the single `ide_completion = false`
+                // `tsx()` entry the early script-elision lane built (or build it
+                // cold here when this is the first runtime consumer). Runtime
+                // (VDOM/Vapor) codegen keeps completion-prefix matching off so
+                // partial identifiers stay real references.
+                let oxc_ast = expr_store.get_or_build(
+                    template_ast,
+                    input,
+                    allocator,
+                    template_region_span(template_ast),
+                    &parse_options,
+                    source_type,
+                    false,
+                );
 
                 // Collect OXC expression parse errors as XInvalidExpression diagnostics
-                collect_expression_errors(&oxc_ast, &mut all_diagnostics);
+                collect_expression_errors(oxc_ast, &mut all_diagnostics);
 
                 // Extract raw template data for cross-file analysis (before bindings are moved)
                 let raw_template_data = if needs_tpl_data {
                     Some(template_data::extract_raw_template_data(
                         template_ast,
-                        &oxc_ast,
+                        oxc_ast,
                         input,
                         &script_bindings,
                     ))
@@ -1003,7 +1045,7 @@ fn compile_inner(
 
                     let tpl_imports = generate_template(
                         template_ast,
-                        &oxc_ast,
+                        oxc_ast,
                         input,
                         &mut tpl_ct,
                         &tpl_alloc,
@@ -1197,16 +1239,28 @@ fn compile_inner(
                     !v.is_empty() && v != "html"
                 });
                 if !is_non_html {
+                    // The IDE/TSX lane keys `ide_completion = true`, so even a TS
+                    // SFC — whose runtime and TSX lanes both use `tsx()` — parses
+                    // a distinct overlay entry from the runtime lane's `false`
+                    // entry, because their stored binding facts differ for scoped
+                    // completion. A JS SFC additionally parses with `jsx()`,
+                    // another distinct key. Built in the top compile allocator so
+                    // the facts outlive the lane that borrows them.
                     let tsx_source_type = if is_jsx {
                         SourceType::jsx()
                     } else {
                         SourceType::tsx()
                     };
-                    let tsx_oxc = parse_template_expressions(
+                    // IDE/TSX codegen — enable completion-prefix matching so partial
+                    // identifiers inside v-for / v-slot scopes stay bare for completion.
+                    let tsx_oxc = expr_store.get_or_build(
                         template_ast,
                         input,
-                        &tsx_alloc,
+                        allocator,
+                        template_region_span(template_ast),
+                        &parse_options,
                         tsx_source_type,
+                        true,
                     );
                     let mut tsx_out =
                         crate::template::code_gen::types::CodeGenOutput::new(&tsx_alloc);
@@ -1218,7 +1272,7 @@ fn compile_inner(
                     };
                     ide::template::generate_ide_template(
                         template_ast,
-                        &tsx_oxc,
+                        tsx_oxc,
                         input,
                         &mut tsx_out,
                         &tsx_alloc,

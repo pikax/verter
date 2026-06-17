@@ -243,8 +243,13 @@ describe("Phase 8: Correctness", () => {
 
     // Assert-: exactly 2 props
     expect(props.length).toBe(2);
-    expect(props.find((p) => p.name === "x")?.type).toBe("1");
-    expect(props.find((p) => p.name === "y")?.type).toBe('"hello"');
+    // `const config = { x: 1, y: "hello" }` keeps the BINDING constant but
+    // leaves the object's PROPERTIES mutable, so `typeof config` is
+    // `{ x: number; y: string }` (literal preservation requires `as const`).
+    // The compat layer is a vue-component-meta (TS-checker-backed) interop
+    // projection, so it follows TS: the members widen to their primitives.
+    expect(props.find((p) => p.name === "x")?.type).toBe("number");
+    expect(props.find((p) => p.name === "y")?.type).toBe("string");
   });
 
   // ReturnType stays as opaque type string without JS resolver expansion.

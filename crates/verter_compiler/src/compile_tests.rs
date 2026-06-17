@@ -13886,6 +13886,206 @@ import TabItem from './TabItem.vue'
     );
 }
 
+// ── Slot-summary representative SFCs (shared by counter + byte tests) ──
+
+const SLOT_SFC_NESTED: &str = r#"<script setup lang="ts">
+import Card from './Card.vue'
+import Panel from './Panel.vue'
+import Row from './Row.vue'
+</script>
+<template>
+  <Card>
+    <template #header="{ title }">
+      <Row>{{ title }}</Row>
+    </template>
+    <template #default>
+      <Panel />
+      leading text
+    </template>
+  </Card>
+</template>"#;
+
+const SLOT_SFC_NO_SLOT: &str = r#"<script setup lang="ts">
+const msg = 'hi'
+</script>
+<template>
+  <div class="a"><span>{{ msg }}</span></div>
+</template>"#;
+
+const SLOT_SFC_DEEP: &str = r#"<script setup lang="ts">
+import Outer from './Outer.vue'
+import Inner from './Inner.vue'
+import Leaf from './Leaf.vue'
+</script>
+<template>
+  <div>
+    <section>
+      <Outer>
+        <template #body>
+          <Inner>
+            <Leaf />
+          </Inner>
+        </template>
+      </Outer>
+    </section>
+  </div>
+</template>"#;
+
+/// Normalize line endings before a byte comparison. The repo is LF-only, but
+/// the cross-platform rule requires normalizing checked-out text before a
+/// byte-equality assertion.
+fn norm_eol(s: &str) -> String {
+    s.replace("\r\n", "\n")
+}
+
+/// Assert the compiled TSX's `code` AND `source_map` both equal their committed
+/// goldens (byte-for-byte after EOL normalization). Sharing one per-component
+/// slot summary between the two collectors is a pure compute change, so it must
+/// leave BOTH the emitted code and its source map identical to the output the
+/// two independent scans produced.
+fn assert_tsx_code_and_map_match(tsx: &VerterTsxBlock, code_golden: &str, map_golden: &str) {
+    assert_eq!(
+        norm_eol(&tsx.code),
+        norm_eol(code_golden),
+        "emitted TSX code must be byte-identical to its golden"
+    );
+    assert!(
+        !tsx.source_map.is_empty(),
+        "source maps are enabled, so a source map must be emitted"
+    );
+    assert_eq!(
+        norm_eol(&tsx.source_map),
+        norm_eol(map_golden),
+        "emitted TSX source map must be byte-identical to its golden"
+    );
+}
+
+#[test]
+fn strict_slots_nested_output_is_byte_identical() {
+    // Nested components with named (#header, scoped) + default slots. Routing
+    // both strict-slot and required-slot collection through the one shared
+    // per-component slot summary must leave the emitted TSX — code AND source
+    // map — byte-identical.
+    let result = compile_tsx_strict_slots(SLOT_SFC_NESTED);
+    let tsx = result.tsx.as_ref().expect("tsx output");
+    assert_tsx_code_and_map_match(
+        tsx,
+        include_str!("ide/template/fixtures/strict_slots_nested.tsx.golden"),
+        include_str!("ide/template/fixtures/strict_slots_nested.tsx.map.golden"),
+    );
+    // Negative: both slot checks present, no raw Vue directive leaked.
+    let code = &tsx.code;
+    assert!(
+        code.contains("strictRenderSlot(") && code.contains("checkRequiredSlots("),
+        "both slot checks must still be emitted, got:\n{code}"
+    );
+    assert!(
+        !code.contains("v-slot"),
+        "v-slot must not appear in TSX output, got:\n{code}"
+    );
+}
+
+#[test]
+fn strict_slots_deep_output_is_byte_identical() {
+    // A deeply nested slot (component inside section inside div, with a named
+    // slot wrapping a further-nested component) proves the per-component summary
+    // reaches arbitrarily deep components without changing output bytes.
+    let result = compile_tsx_strict_slots(SLOT_SFC_DEEP);
+    let tsx = result.tsx.as_ref().expect("tsx output");
+    assert_tsx_code_and_map_match(
+        tsx,
+        include_str!("ide/template/fixtures/strict_slots_deep.tsx.golden"),
+        include_str!("ide/template/fixtures/strict_slots_deep.tsx.map.golden"),
+    );
+    // The innermost components and the named slot must all surface.
+    let code = &tsx.code;
+    assert!(
+        code.contains("'body'") && code.contains("Inner") && code.contains("Leaf"),
+        "deep slot facts (body slot, Inner, Leaf) must survive, got:\n{code}"
+    );
+}
+
+#[test]
+fn strict_slots_no_slot_subtree_is_byte_identical_and_emits_no_checks() {
+    // A component-free subtree provides no slots: no summary is built and no
+    // slot check is emitted. Output (code AND source map) stays byte-identical.
+    let result = compile_tsx_strict_slots(SLOT_SFC_NO_SLOT);
+    let tsx = result.tsx.as_ref().expect("tsx output");
+    assert_tsx_code_and_map_match(
+        tsx,
+        include_str!("ide/template/fixtures/strict_slots_no_slot.tsx.golden"),
+        include_str!("ide/template/fixtures/strict_slots_no_slot.tsx.map.golden"),
+    );
+    // Negative: no slot-check call sites for a component-free template.
+    let code = &tsx.code;
+    assert!(
+        !code.contains("strictRenderSlot(") && !code.contains("checkRequiredSlots("),
+        "a component-free template must emit no slot checks, got:\n{code}"
+    );
+}
+
+#[test]
+fn slot_summary_built_once_consumed_twice() {
+    // The discriminating build-once assertion. The nested SFC has exactly three
+    // slot-checkable components (Card, Row, Panel). Each is consumed by BOTH the
+    // strict-slot and required-slot collectors, so the summaries are READ six
+    // times — yet each component's summary is BUILT exactly once (three builds)
+    // and the second consumption is served warm from its memoized overlay cell.
+    //
+    // This is the load-bearing invariant: a summary is built once per component
+    // regardless of how many collectors consume it, so reads scale with the
+    // collector count while builds stay fixed at one per component. With two
+    // collectors `reads == 2 * builds`: exactly half the consumptions trigger a
+    // build and the other half are warm cache hits. A per-collector rescan would
+    // build on every read instead, making builds equal reads (6) and failing this
+    // assertion.
+    use crate::template::oxc::{
+        reset_slot_summary_counts, slot_summary_build_count, slot_summary_read_count,
+    };
+
+    reset_slot_summary_counts();
+    let result = compile_tsx_strict_slots(SLOT_SFC_NESTED);
+    assert!(result.tsx.is_some(), "tsx output missing");
+
+    let builds = slot_summary_build_count();
+    let reads = slot_summary_read_count();
+    assert_eq!(
+        builds, 3,
+        "each slot-checkable component (Card, Row, Panel) must build its summary exactly once, got {builds}"
+    );
+    assert_eq!(
+        reads, 6,
+        "two collectors must each consume all three component summaries (3 x 2), got {reads}"
+    );
+    assert_eq!(
+        reads,
+        2 * builds,
+        "every summary must be consumed twice but built once: the second consumption is a warm cache hit, not a rebuild (builds {builds}, reads {reads})"
+    );
+}
+
+#[test]
+fn runtime_lane_builds_no_slot_summaries() {
+    // The IDE-only slot summary must never be built for a pure runtime (BUNDLER)
+    // compile: the VDOM/Vapor lane owns its own slot handling and pays nothing.
+    use crate::template::oxc::{
+        reset_slot_summary_counts, slot_summary_build_count, slot_summary_read_count,
+    };
+
+    reset_slot_summary_counts();
+    let _ = compile_with_target(SLOT_SFC_NESTED, CompileTarget::BUNDLER, false);
+    assert_eq!(
+        slot_summary_build_count(),
+        0,
+        "the runtime lane must not build IDE slot summaries"
+    );
+    assert_eq!(
+        slot_summary_read_count(),
+        0,
+        "the runtime lane must not read IDE slot summaries"
+    );
+}
+
 #[test]
 fn dual_script_tsx_does_not_leak_raw_template() {
     // Vuetify pattern: <script setup> + <script> (Options API) + <template>
@@ -14193,5 +14393,509 @@ const arrowPos = ref({})
             .map(|e| e.to_string())
             .collect::<Vec<_>>(),
         code
+    );
+}
+
+// ── Shared read-only template-expression overlay ──────────────────────
+//
+// A TS SFC compiled for a combined runtime + TSX target parses its template
+// expressions once per `ide_completion` value: the runtime lane (`false`) and
+// the IDE/TSX lane (`true`) record different binding facts, so each keeps its
+// own overlay entry while reusing it across every consumer in that lane.
+// A JS SFC must NOT share across source types either: its TSX lane parses with
+// `jsx()` while the runtime lane parses with `tsx()`, so the two never reuse
+// one overlay.
+
+use crate::template::oxc::{
+    parse_template_expressions_call_count, parse_template_expressions_source_types,
+    reset_parse_template_expressions_calls,
+};
+
+fn compile_with_target(source: &str, target: CompileTarget, force_js: bool) -> VerterCompileResult {
+    let alloc = Allocator::new();
+    let options = CodegenOptions {
+        filename: Some("App.vue".to_string()),
+        target,
+        ..Default::default()
+    };
+    let verter_opts = VerterCompileOptions {
+        force_js,
+        ..Default::default()
+    };
+    compile(source, &options, &verter_opts, &alloc)
+}
+
+const TS_OVERLAY_SFC: &str = r#"<script setup lang="ts">
+const msg: string = 'hello'
+const count: number = 1
+</script>
+
+<template>
+  <div :class="msg" v-if="count > 0">{{ msg }}{{ count }}</div>
+  <span v-for="(item, i) in [count]" :key="i">{{ item }}</span>
+</template>
+"#;
+
+const JS_OVERLAY_SFC: &str = r#"<script setup>
+const msg = 'hello'
+const count = 1
+</script>
+
+<template>
+  <div :class="msg" v-if="count > 0">{{ msg }}{{ count }}</div>
+  <span v-for="(item, i) in [count]" :key="i">{{ item }}</span>
+</template>
+"#;
+
+#[test]
+fn ts_combined_target_parses_once_per_ide_completion_value() {
+    reset_parse_template_expressions_calls();
+    let result = compile_with_target(
+        TS_OVERLAY_SFC,
+        CompileTarget::BUNDLER | CompileTarget::TSX,
+        false,
+    );
+    let calls = parse_template_expressions_call_count();
+    assert!(
+        result.errors.is_empty(),
+        "compile errors: {:?}",
+        result.errors
+    );
+    assert!(result.template.is_some(), "runtime template missing");
+    assert!(result.tsx.is_some(), "tsx block missing");
+    // Both lanes use `tsx()`, but completion mode differs: the runtime lane
+    // parses with `ide_completion = false` and the IDE/TSX lane with `true`.
+    // Those store different binding facts, so the overlay keeps one entry per
+    // value — two parses, each reused within its lane (the early script-elision
+    // and runtime template-codegen consumers share the single `false` entry).
+    assert_eq!(
+        calls, 2,
+        "combined TS BUNDLER|TSX must parse once per ide_completion value (runtime false + TSX true), got {calls}"
+    );
+    // Both parses are `tsx()` — `(is_typescript, is_jsx)`; they differ only in
+    // the (unrecorded) ide_completion flag (runtime false, then TSX true).
+    assert_eq!(
+        parse_template_expressions_source_types(),
+        vec![(true, true), (true, true)],
+        "both TS overlay parses must use tsx() (runtime false, then TSX true)"
+    );
+}
+
+#[test]
+fn pure_runtime_ts_target_parses_template_expressions_once() {
+    reset_parse_template_expressions_calls();
+    let _ = compile_with_target(TS_OVERLAY_SFC, CompileTarget::BUNDLER, false);
+    assert_eq!(
+        parse_template_expressions_call_count(),
+        1,
+        "pure runtime target parses template expressions exactly once"
+    );
+}
+
+#[test]
+fn pure_tsx_ts_target_parses_template_expressions_once() {
+    reset_parse_template_expressions_calls();
+    let _ = compile_with_target(TS_OVERLAY_SFC, CompileTarget::IDE, false);
+    assert_eq!(
+        parse_template_expressions_call_count(),
+        1,
+        "pure TSX target parses template expressions exactly once"
+    );
+}
+
+#[test]
+fn js_combined_target_does_not_share_overlay_across_source_types() {
+    reset_parse_template_expressions_calls();
+    let _ = compile_with_target(
+        JS_OVERLAY_SFC,
+        CompileTarget::BUNDLER | CompileTarget::TSX,
+        false,
+    );
+    let calls = parse_template_expressions_call_count();
+    // Runtime lane parses with `tsx()`, TSX lane parses with `jsx()` — two
+    // distinct overlays, never shared.
+    assert_eq!(
+        calls, 2,
+        "JS BUNDLER|TSX must parse twice (tsx runtime + jsx TSX), got {calls}"
+    );
+    // Prove WHICH source types parsed — not just that there were two parses.
+    // `tsx()` records `(is_typescript = true, is_jsx = true)`; `jsx()` records
+    // `(is_typescript = false, is_jsx = true)`. The JS combined compile must
+    // parse the runtime lane with `tsx()` and the TSX lane with `jsx()`, in
+    // that order — proving the TSX lane genuinely parsed as JavaScript (`jsx()`),
+    // not merely that it built a second overlay.
+    let source_types = parse_template_expressions_source_types();
+    assert_eq!(
+        source_types,
+        vec![(true, true), (false, true)],
+        "JS combined must parse runtime=tsx() then TSX=jsx(); got {source_types:?}"
+    );
+}
+
+/// Discriminating guard for rule-ledger #2 (Two Template Codegen Paths):
+/// a TS SFC reuses one read-only expression overlay PER `ide_completion` value
+/// (the runtime lane and the IDE/TSX lane store different binding facts) and
+/// emits byte-identical output to the unshared baseline, while a JS SFC cannot
+/// share across source types — its TSX lane parses with `jsx()` and the runtime
+/// lane with `tsx()`, an impossibility-by-key-construction enforced separately
+/// by the overlay unit tests.
+#[test]
+fn template_expression_overlay_source_type_matrix() {
+    // (a) TS SFC: combined target parses once per ide_completion value (runtime
+    //     `false` + TSX `true`) and produces output byte-identical to compiling
+    //     each lane independently.
+    reset_parse_template_expressions_calls();
+    let ts_combined = compile_with_target(
+        TS_OVERLAY_SFC,
+        CompileTarget::BUNDLER | CompileTarget::TSX,
+        false,
+    );
+    let ts_combined_calls = parse_template_expressions_call_count();
+    assert_eq!(
+        ts_combined_calls, 2,
+        "TS combined target must parse once per ide_completion value across runtime + TSX, got {ts_combined_calls}"
+    );
+
+    let ts_runtime_only = compile_with_target(TS_OVERLAY_SFC, CompileTarget::BUNDLER, false);
+    let ts_tsx_only = compile_with_target(TS_OVERLAY_SFC, CompileTarget::IDE, false);
+
+    let combined_runtime = ts_combined
+        .template
+        .as_ref()
+        .expect("combined runtime block");
+    let runtime_baseline = ts_runtime_only
+        .template
+        .as_ref()
+        .expect("runtime-only block");
+    assert_eq!(
+        combined_runtime.code, runtime_baseline.code,
+        "shared overlay must not change runtime output (byte-identical to unshared baseline)"
+    );
+
+    let combined_tsx = ts_combined.tsx.as_ref().expect("combined tsx block");
+    let tsx_baseline = ts_tsx_only.tsx.as_ref().expect("tsx-only block");
+    assert_eq!(
+        combined_tsx.code, tsx_baseline.code,
+        "shared overlay must not change TSX output (byte-identical to unshared baseline)"
+    );
+
+    // Diagnostics must be identical too — the shared overlay carries the same
+    // parse facts an independent parse would. This valid fixture yields none on
+    // either side; the non-empty case (a malformed interpolation) with FULL
+    // per-field diagnostic identity is covered by
+    // `malformed_template_expression_diagnostic_identical_across_shared_overlay`.
+    assert_eq!(
+        ts_combined.errors, ts_runtime_only.errors,
+        "shared overlay must not change runtime diagnostics"
+    );
+    assert!(
+        ts_combined.errors.is_empty(),
+        "valid fixture must produce no diagnostics, got {:?}",
+        ts_combined.errors
+    );
+
+    // (b) JS SFC: combined target parses twice (tsx runtime + jsx TSX) — no
+    //     sharing across source types — and output stays byte-identical to
+    //     compiling each lane independently.
+    reset_parse_template_expressions_calls();
+    let js_combined = compile_with_target(
+        JS_OVERLAY_SFC,
+        CompileTarget::BUNDLER | CompileTarget::TSX,
+        false,
+    );
+    let js_combined_calls = parse_template_expressions_call_count();
+    assert_eq!(
+        js_combined_calls, 2,
+        "JS combined target must parse twice (no cross-source-type sharing), got {js_combined_calls}"
+    );
+
+    let js_runtime_only = compile_with_target(JS_OVERLAY_SFC, CompileTarget::BUNDLER, false);
+    let js_tsx_only = compile_with_target(JS_OVERLAY_SFC, CompileTarget::IDE, false);
+
+    assert_eq!(
+        js_combined
+            .template
+            .as_ref()
+            .expect("js combined runtime")
+            .code,
+        js_runtime_only
+            .template
+            .as_ref()
+            .expect("js runtime-only")
+            .code,
+        "JS runtime output unchanged"
+    );
+    let js_combined_tsx = js_combined.tsx.as_ref().expect("js combined tsx");
+    assert_eq!(
+        js_combined_tsx.code,
+        js_tsx_only.tsx.as_ref().expect("js tsx-only").code,
+        "JS TSX output unchanged"
+    );
+    // The JS TSX lane emits a `.jsx` (JavaScript) surface, not a `.tsx` one:
+    // the JS SFC's TSX block must remain valid when parsed as JSX.
+    let jsx_alloc = Allocator::new();
+    let jsx_parsed = oxc_parser::Parser::new(
+        &jsx_alloc,
+        &js_combined_tsx.code,
+        oxc_span::SourceType::jsx(),
+    )
+    .parse();
+    assert!(
+        jsx_parsed.errors.is_empty(),
+        "JS SFC TSX output must parse as JSX: {:?}",
+        jsx_parsed
+            .errors
+            .iter()
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>()
+    );
+}
+
+// A TS SFC whose only interpolation `{{ it }}` is a PARTIAL prefix of the
+// `v-for` scope local `item`. This is the exact case where the two lanes
+// diverge: the runtime lane (`ide_completion = false`) treats `it` as a real
+// reference, while the IDE/TSX lane (`ide_completion = true`) keeps it bare for
+// scoped completion. A shared overlay keyed without `ide_completion` would hand
+// both lanes one set of binding facts and corrupt one of the two outputs.
+const TS_OVERLAY_SCOPED_COMPLETION_SFC: &str = r#"<script setup lang="ts">
+const items = [1]
+</script>
+
+<template>
+  <span v-for="item in items">{{ it }}</span>
+</template>
+"#;
+
+#[test]
+fn combined_target_keeps_ide_completion_overlay_separate_for_scoped_prefix() {
+    reset_parse_template_expressions_calls();
+
+    let combined = compile_with_target(
+        TS_OVERLAY_SCOPED_COMPLETION_SFC,
+        CompileTarget::BUNDLER | CompileTarget::TSX,
+        false,
+    );
+    assert!(
+        combined.errors.is_empty(),
+        "compile errors: {:?}",
+        combined.errors
+    );
+    assert_eq!(
+        parse_template_expressions_call_count(),
+        2,
+        "combined TS target must parse once for runtime(false) and once for TSX(true)"
+    );
+
+    let runtime_only = compile_with_target(
+        TS_OVERLAY_SCOPED_COMPLETION_SFC,
+        CompileTarget::BUNDLER,
+        false,
+    );
+    let tsx_only = compile_with_target(TS_OVERLAY_SCOPED_COMPLETION_SFC, CompileTarget::IDE, false);
+
+    let combined_runtime = &combined.template.as_ref().expect("combined runtime").code;
+    let combined_tsx = &combined.tsx.as_ref().expect("combined tsx").code;
+
+    assert_eq!(
+        combined_runtime,
+        &runtime_only.template.as_ref().expect("runtime-only").code,
+        "combined runtime must stay byte-identical to runtime-only false parse"
+    );
+    assert_eq!(
+        combined_tsx,
+        &tsx_only.tsx.as_ref().expect("tsx-only").code,
+        "combined TSX must stay byte-identical to IDE-only true parse"
+    );
+
+    assert!(
+        combined_runtime.contains("_ctx.it"),
+        "runtime false parse must keep partial scoped-prefix identifier as a real instance reference"
+    );
+    assert!(
+        combined_tsx.contains("{ it }") || combined_tsx.contains("{it}"),
+        "TSX true parse must keep partial scoped-prefix identifier bare for completion"
+    );
+    assert!(
+        !combined_tsx.contains("___VERTER___instance.it"),
+        "TSX true parse must not use the runtime false binding facts"
+    );
+}
+
+// A minimal TS SFC whose runtime and TSX outputs are pinned byte-for-byte
+// below. It exercises the shared overlay (a bound attribute `:title="msg"` and
+// an interpolation `{{ msg }}` both parse through it) while keeping the pinned
+// output small enough to review.
+const TS_OVERLAY_GOLDEN_SFC: &str = r#"<script setup lang="ts">
+const msg = 'hi'
+</script>
+
+<template>
+  <p :title="msg">{{ msg }}</p>
+</template>
+"#;
+
+// The exact runtime render-function output for `TS_OVERLAY_GOLDEN_SFC`. Pinning
+// the absolute bytes (not just combined-equals-pure) proves the shared overlay
+// path emits the same output an independent parse would, anchoring the relative
+// byte-identity checks against a known-good baseline.
+const TS_OVERLAY_GOLDEN_RUNTIME: &str = r#"const _hoisted_1 = ["title"]
+
+function render(_ctx, _cache, $props, $setup, $data, $options) {
+return (_openBlock(), _createElementBlock("p", { title: $setup.msg }, _toDisplayString( $setup.msg ), 9 /* TEXT, PROPS */, _hoisted_1)
+)
+}"#;
+
+// The exact TSX output for `TS_OVERLAY_GOLDEN_SFC` (combined target). The
+// destructure line ends with a trailing space in the real output; it is spliced
+// in as the explicit `" \n"` segment so no source line carries (invisible,
+// strip-prone) trailing whitespace while the golden still pins the exact bytes.
+const TS_OVERLAY_GOLDEN_TSX: &str = concat!(
+    r#"import type { Prettify as ___VERTER___Prettify, ExtractComponentProps as ___VERTER___ExtractComponentProps, ExtractLeafElement as ___VERTER___ExtractLeafElement } from "@verter/types";
+import { shallowUnwrapRef as ___VERTER___shallowUnwrapRef, enhanceElementWithProps as ___VERTER___enhanceElementWithProps, extractRenderComponent as ___VERTER___extractRenderComponent, instantiateComponent as ___VERTER___instantiateComponent, extractArgumentsFromRenderSlot as ___VERTER___extractArgumentsFromRenderSlot, runCustomDirective as ___VERTER___runCustomDirective, retrieveSetupDirectives as ___VERTER___retrieveSetupDirectives, strictRenderSlot as ___VERTER___strictRenderSlot, checkRequiredSlots as ___VERTER___checkRequiredSlots, eventCallbacks as ___VERTER___eventCallbacks } from "@verter/types";
+;export function ___VERTER___TemplateBindingFN() {
+
+const msg = 'hi'
+
+// @ts-ignore
+let ___VERTER___instance!: Omit<InstanceType<import('./App.vue.ts')['default']>, '$attrs'> & { $attrs: ___VERTER___Attrs };
+void ___VERTER___instance;
+const ___VERTER___directiveAccessor = ___VERTER___retrieveSetupDirectives(___VERTER___instance);
+void ___VERTER___directiveAccessor;
+
+const ___VERTER___unwrapped = ___VERTER___shallowUnwrapRef({
+    msg: msg as unknown as typeof msg
+  });
+{ /* verter-destructured-start */const {"#,
+    " \n",
+    r#"    msg } = ___VERTER___unwrapped; /* verter-destructured-end */
+<>
+  <p title={msg}>{ msg }</p>
+</>
+} // close block scope
+
+function ___VERTER___Comp66() {
+  return {} as HTMLElementTagNameMap["p"];
+}
+function ___VERTER___getRootComponent() { return ___VERTER___Comp66(); }
+function ___VERTER___getRootComponentPassedProps() { return {"title": msg}; }
+type ___VERTER___RootElement = ReturnType<typeof ___VERTER___getRootComponent>;
+type ___VERTER___RootElementProps = ___VERTER___Prettify<Omit<
+  ___VERTER___ExtractComponentProps<___VERTER___RootElement>,
+  keyof ReturnType<typeof ___VERTER___getRootComponentPassedProps>
+>>;
+
+type ___VERTER___Attrs = ___VERTER___attributes & ___VERTER___RootElementProps;
+
+void ___VERTER___getRootComponent; void ___VERTER___getRootComponentPassedProps;
+void ___VERTER___Comp66;
+void (___VERTER___instance).valueOf;
+
+return {};
+} // close templateBindingFN
+
+type ___VERTER___attributes = {};
+"#
+);
+
+// A TS SFC with a deliberately malformed interpolation (`{{ count + }}` — a
+// binary expression missing its right operand). The interpolation tokenizes
+// cleanly at the SFC level (so template codegen still runs), but OXC fails to
+// parse the inner expression, surfacing an `XInvalidExpression` warning.
+const TS_OVERLAY_MALFORMED_SFC: &str = r#"<script setup lang="ts">
+const count: number = 1
+</script>
+
+<template>
+  <div>{{ count + }}</div>
+</template>
+"#;
+
+/// Absolute-bytes anchor: the shared-overlay compile path emits exactly the
+/// pinned runtime and TSX bytes. Because both goldens are hand-verified literal
+/// output (not another run of the same path), this breaks the circularity of
+/// the combined-equals-pure checks — a regression in the shared overlay that
+/// also moved the pure-target output would still break these absolute goldens.
+#[test]
+fn template_expression_overlay_pins_absolute_output_bytes() {
+    let combined = compile_with_target(
+        TS_OVERLAY_GOLDEN_SFC,
+        CompileTarget::BUNDLER | CompileTarget::TSX,
+        false,
+    );
+    assert!(
+        combined.errors.is_empty(),
+        "golden fixture must compile cleanly: {:?}",
+        combined.errors
+    );
+
+    let runtime = combined
+        .template
+        .as_ref()
+        .expect("runtime block")
+        .code
+        .as_str();
+    assert_eq!(
+        runtime, TS_OVERLAY_GOLDEN_RUNTIME,
+        "shared-overlay runtime output drifted from the pinned absolute bytes"
+    );
+
+    let tsx = combined.tsx.as_ref().expect("tsx block").code.as_str();
+    assert_eq!(
+        tsx, TS_OVERLAY_GOLDEN_TSX,
+        "shared-overlay TSX output drifted from the pinned absolute bytes"
+    );
+
+    // Guard the goldens themselves against accidental triviality.
+    assert!(TS_OVERLAY_GOLDEN_RUNTIME.contains("_createElementBlock(\"p\""));
+    assert!(TS_OVERLAY_GOLDEN_TSX.contains("<p title={msg}>{ msg }</p>"));
+}
+
+/// A malformed template interpolation surfaces an identical diagnostic whether
+/// the SFC is compiled for the combined target (shared overlay) or the runtime
+/// target alone. Asserts the FULL diagnostic (severity, code, span, message),
+/// and that the diagnostic set is non-empty — so the parity is real, not an
+/// empty-vs-empty comparison.
+#[test]
+fn malformed_template_expression_diagnostic_identical_across_shared_overlay() {
+    let combined = compile_with_target(
+        TS_OVERLAY_MALFORMED_SFC,
+        CompileTarget::BUNDLER | CompileTarget::TSX,
+        false,
+    );
+    let runtime_only = compile_with_target(TS_OVERLAY_MALFORMED_SFC, CompileTarget::BUNDLER, false);
+
+    // The malformed interpolation MUST surface at least one diagnostic, else
+    // this parity check would be vacuous.
+    assert!(
+        !runtime_only.errors.is_empty(),
+        "malformed interpolation must surface a diagnostic"
+    );
+    let invalid_expr = runtime_only
+        .errors
+        .iter()
+        .find(|d| d.code == "XInvalidExpression")
+        .expect("malformed interpolation must surface an XInvalidExpression diagnostic");
+    assert_eq!(invalid_expr.severity, CompileDiagnosticSeverity::Warning);
+    assert!(
+        !invalid_expr.message.is_empty(),
+        "diagnostic must carry a non-empty message"
+    );
+
+    // FULL diagnostic identity (severity + code + span + message, the four
+    // fields of `CompileDiagnostic`) between the shared-overlay combined target
+    // and the runtime baseline — the shared overlay must neither drop nor alter
+    // any diagnostic.
+    assert_eq!(
+        combined.errors, runtime_only.errors,
+        "shared overlay changed the diagnostics surfaced for a malformed interpolation"
+    );
+
+    // The TSX lane consumes the SAME malformed `tsx()` overlay: the combined
+    // target's TSX output is byte-identical to the TSX-only baseline.
+    let tsx_only = compile_with_target(TS_OVERLAY_MALFORMED_SFC, CompileTarget::IDE, false);
+    assert_eq!(
+        combined.tsx.as_ref().expect("combined tsx").code,
+        tsx_only.tsx.as_ref().expect("tsx-only").code,
+        "shared overlay changed the TSX output for a malformed interpolation"
     );
 }

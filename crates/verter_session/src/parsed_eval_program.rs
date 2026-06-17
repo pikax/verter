@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 type CachedEvalProgramAst<'a> = oxc_ast::ast::Program<'a>;
 type CachedTypeResolutionContext<'a> =
-    verter_compiler::utils::oxc::vue::resolve_type::TypeResolutionContext<'a, 'a>;
+    verter_compiler::utils::oxc::script::type_surface::TypeResolutionContext<'a, 'a>;
 
 struct ParsedEvalProgramOwner {
     allocator: oxc_allocator::Allocator,

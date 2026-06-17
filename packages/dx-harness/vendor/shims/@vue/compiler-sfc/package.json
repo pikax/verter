@@ -1,0 +1,6 @@
+{
+  "name": "@vue/compiler-sfc",
+  "version": "3.5.34",
+  "description": "Hermetic version-pinned `@vue/compiler-sfc` marker for the DX differential baseline (committed; never installed at runtime).",
+  "types": "index.d.ts"
+}

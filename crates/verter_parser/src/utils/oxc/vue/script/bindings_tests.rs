@@ -774,3 +774,74 @@ fn export_default_no_binding() {
     let b = classify("export default {};");
     assert!(b.is_empty());
 }
+
+// ── Full-program classification pin ──────────────────────────────────
+
+/// Pins the COMPLETE ordered `(name, BindingType)` output of
+/// `extract_bindings` for a representative `<script setup>` program
+/// covering every classification family: imports (value, type-only),
+/// reactivity helpers, literals, `defineProps` destructuring with
+/// individual-prop extraction, plain consts, `let` bindings, and
+/// function / class / enum declarations. The Vue classification layer
+/// delegates generic statement/pattern inventory to the neutral script
+/// bindings module; this pin holds that delegation byte-stable.
+#[test]
+fn full_script_setup_classification_pin() {
+    let source = r#"
+import Comp from './Comp.vue';
+import { helper, util } from './helpers';
+import type { OnlyType } from './types';
+import { computed, ref, reactive } from 'vue';
+
+const { foo, bar } = defineProps<{ foo: string; bar?: number }>();
+const count = ref(0);
+const doubled = computed(() => count.value * 2);
+const state = reactive({ on: false });
+const label = 'static';
+const pieces = [1, 2, 3];
+let mutable = 0;
+
+function describe(): string {
+  return label;
+}
+class Widget {}
+enum Mode {
+  A,
+  B,
+}
+type Ignored = string;
+interface AlsoIgnored {
+  x: number;
+}
+"#;
+    let actual = classify(source);
+    let expected: Vec<(String, BindingType)> = vec![
+        ("Comp".to_string(), BindingType::SetupImport),
+        ("helper".to_string(), BindingType::SetupImport),
+        ("util".to_string(), BindingType::SetupImport),
+        ("computed".to_string(), BindingType::SetupImport),
+        ("ref".to_string(), BindingType::SetupImport),
+        ("reactive".to_string(), BindingType::SetupImport),
+        ("foo".to_string(), BindingType::PropsAliased),
+        ("bar".to_string(), BindingType::PropsAliased),
+        ("foo".to_string(), BindingType::Props),
+        ("bar".to_string(), BindingType::Props),
+        ("count".to_string(), BindingType::SetupRef),
+        ("doubled".to_string(), BindingType::SetupRef),
+        ("state".to_string(), BindingType::SetupReactiveConst),
+        ("label".to_string(), BindingType::LiteralConst),
+        ("pieces".to_string(), BindingType::SetupConst),
+        ("mutable".to_string(), BindingType::SetupLet),
+        ("describe".to_string(), BindingType::SetupConst),
+        ("Widget".to_string(), BindingType::SetupConst),
+        ("Mode".to_string(), BindingType::SetupConst),
+    ];
+    assert_eq!(
+        actual, expected,
+        "Vue <script setup> binding classification changed"
+    );
+    // Type-only constructs never produce runtime bindings.
+    assert_eq!(find(&actual, "OnlyType"), None);
+    assert_eq!(find(&actual, "Ignored"), None);
+    assert_eq!(find(&actual, "AlsoIgnored"), None);
+}

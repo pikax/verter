@@ -15,7 +15,7 @@
 
 use std::sync::Arc;
 
-use crate::types::FileKind;
+use crate::types::FileLanguage;
 use crate::{HostConfig, UpsertRequest, VerterHost};
 
 fn host_with_one_file() -> (Arc<VerterHost>, String) {
@@ -26,7 +26,7 @@ fn host_with_one_file() -> (Arc<VerterHost>, String) {
             canonical_id: None,
             input_id: canonical.clone(),
             source: Arc::from("export interface A { x: number }\n"),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .expect("upsert a.ts must succeed");
@@ -44,7 +44,7 @@ fn token_advances_on_source_content_upsert() {
             canonical_id: None,
             input_id: canonical.clone(),
             source: Arc::from("export interface A { x: number; y: string }\n"),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .expect("re-upsert with changed content must succeed");
@@ -148,7 +148,7 @@ fn token_advances_on_lazy_indexed_artifact_publication() {
             canonical_id: None,
             input_id: "/proj/b.ts".to_string(),
             source: Arc::from("export interface B { y: number }\n"),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .expect("upsert b.ts");
@@ -344,7 +344,7 @@ fn token_advances_on_keyed_artifact_removal_gc() {
             canonical_id: None,
             input_id: "/proj/gc.ts".to_string(),
             source: Arc::from("export interface G { z: number }\n"),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .expect("upsert gc.ts");
@@ -403,7 +403,7 @@ fn token_does_not_advance_on_byte_identical_reupsert() {
             canonical_id: None,
             input_id: canonical.clone(),
             source: Arc::from("export interface A { x: number }\n"),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .expect("byte-identical re-upsert must succeed");
@@ -427,7 +427,7 @@ fn token_does_not_advance_on_noop_reachability_gc() {
             canonical_id: None,
             input_id: "/proj/keep.ts".to_string(),
             source: Arc::from("export interface K { k: number }\n"),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .expect("upsert keep.ts");
@@ -535,7 +535,7 @@ fn from_host_rebuilds_after_token_change() {
             canonical_id: None,
             input_id: canonical.clone(),
             source: Arc::from("export interface A { x: number; z: boolean }\n"),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .expect("re-upsert with changed content must succeed");
@@ -997,7 +997,7 @@ fn compat_token_lane_oracle_ignores_additive_generations() {
             canonical_id: None,
             input_id: "/proj/lazy.ts".to_string(),
             source: Arc::from("export interface Z { z: number }\n"),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .expect("upsert lazy.ts");
@@ -1458,7 +1458,7 @@ fn woken_waiter_recaptures_live_token_and_warm_hits_instead_of_resweeping() {
             canonical_id: None,
             input_id: canonical.clone(),
             source: Arc::from("export interface A { x: number; t1: boolean }\n"),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .expect("mid-flight content upsert must succeed");
@@ -2379,7 +2379,9 @@ fn schema_mismatch_sweep_advances_artifact_generation_token() {
             canonical_id: Some(canonical.to_string()),
             input_id: canonical.to_string(),
             source: std::sync::Arc::from("export type T = number;\n"),
-            file_kind: FileKind::from_path(canonical),
+            file_language: verter_language::LanguageRegistry::global()
+                .classify_static(canonical)
+                .static_resolution(),
             aliases: Vec::new(),
         })
         .expect("upsert");

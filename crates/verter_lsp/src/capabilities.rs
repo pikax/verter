@@ -4,6 +4,43 @@ use tower_lsp_server::ls_types::*;
 /// Build the server capabilities to advertise during initialization.
 ///
 /// `encoding` is the negotiated position encoding to announce to the client.
+/// Watcher glob covering every registered framework-carrier extension,
+/// built from `LanguageRegistry::carrier_extensions()` (e.g.
+/// `**/*.{svelte,vue}`). Carrier rows without a registered carrier
+/// implementation widen the glob too — their watched events are inert
+/// (no virtual-file wiring exists for them), so watching is harmless
+/// and the glob stays registry-derived rather than hand-enumerated.
+pub(crate) fn carrier_watch_glob() -> String {
+    let extensions = verter_session::LanguageRegistry::global().carrier_extensions();
+    glob_for_extensions(&extensions)
+}
+
+/// Watcher glob covering every registered ADAPTER-MODULE extension across all
+/// adapters (e.g. `**/*.{svelte.js,svelte.ts}`), built from
+/// `LanguageRegistry::adapter_module_extensions(...)`. An adapter module is a
+/// standalone NON-component rune module (`.svelte.ts` / `.svelte.js`) — NOT a
+/// carrier — so it is NOT covered by [`carrier_watch_glob`]; this dedicated
+/// glob is the descriptor-derived authority for its coverage (the generic
+/// `**/*.{ts,tsx,…}` glob no longer carries rune-module responsibility).
+/// Returns `None` when no adapter registers any module extension.
+pub(crate) fn adapter_module_watch_glob() -> Option<String> {
+    let registry = verter_session::LanguageRegistry::global();
+    let extensions = registry.all_adapter_module_extensions();
+    if extensions.is_empty() {
+        return None;
+    }
+    Some(glob_for_extensions(&extensions))
+}
+
+/// Build a `**/*.{a,b,…}` watcher glob for a set of extensions (single-element
+/// sets render as `**/*.ext`).
+fn glob_for_extensions(extensions: &[&str]) -> String {
+    match extensions {
+        [single] => format!("**/*.{single}"),
+        many => format!("**/*.{{{}}}", many.join(",")),
+    }
+}
+
 pub fn server_capabilities(encoding: &PositionEncodingKind) -> ServerCapabilities {
     ServerCapabilities {
         position_encoding: Some(encoding.clone()),
@@ -160,7 +197,7 @@ pub fn server_capabilities(encoding: &PositionEncodingKind) -> ServerCapabilitie
                     filters: vec![FileOperationFilter {
                         scheme: Some("file".to_string()),
                         pattern: FileOperationPattern {
-                            glob: "**/*.vue".to_string(),
+                            glob: carrier_watch_glob(),
                             matches: None,
                             options: None,
                         },
@@ -170,7 +207,7 @@ pub fn server_capabilities(encoding: &PositionEncodingKind) -> ServerCapabilitie
                     filters: vec![FileOperationFilter {
                         scheme: Some("file".to_string()),
                         pattern: FileOperationPattern {
-                            glob: "**/*.vue".to_string(),
+                            glob: carrier_watch_glob(),
                             matches: None,
                             options: None,
                         },

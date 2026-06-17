@@ -17,8 +17,7 @@ use std::sync::Arc;
 
 use crate::hash::compile_profile_hash;
 use crate::types::{
-    CompileCacheMode, CompileProfile, FileKind, HostConfig, UpsertRequest, VirtualNodeKind,
-    VirtualQuery,
+    CompileCacheMode, CompileProfile, HostConfig, UpsertRequest, VirtualNodeKind, VirtualQuery,
 };
 use crate::VerterHost;
 
@@ -46,7 +45,9 @@ fn upsert(host: &VerterHost, canonical_id: &str, source: &str) {
             canonical_id: Some(canonical_id.to_string()),
             input_id: canonical_id.to_string(),
             source: Arc::from(source),
-            file_kind: FileKind::from_path(canonical_id),
+            file_language: verter_language::LanguageRegistry::global()
+                .classify_static(canonical_id)
+                .static_resolution(),
             aliases: Vec::new(),
         })
         .expect("upsert must succeed");

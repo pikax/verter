@@ -9,7 +9,6 @@ use oxc_ast::ast::Program;
 use oxc_parser::{ParseOptions, Parser};
 use oxc_span::SourceType;
 
-use verter_compiler::compile::parse_sfc;
 use verter_compiler::diagnostics::DiagnosticSeverity;
 use verter_compiler::parser::types::ParsedSfc;
 use verter_compiler::types::NodeProp;
@@ -97,55 +96,420 @@ pub(crate) fn try_resolve_src_block(
     }
 }
 
-/// The single counted SFC structure-parse chokepoint for
-/// `verter_session`. EVERY `parse_sfc` execution in this crate routes
-/// through here so the per-host `MetaProvenance::sfc_parses` rail counts
-/// each SFC structure parse exactly once — a raw
-/// `verter_compiler::compile::parse_sfc` call anywhere else in the crate
-/// is an uncounted parse the dedup suite cannot see (guard:
-/// `sfc_structure_parse_routes_through_the_counted_chokepoint`).
-pub(crate) fn parse_sfc_counted(
+/// The single counted carrier-parse chokepoint for `verter_session`.
+///
+/// EVERY framework carrier parse the host materializes — Vue, Svelte,
+/// and every later vertical — routes through here. It bumps the
+/// framework-neutral `MetaProvenance::carrier_parses` rail exactly once
+/// per `CarrierCompiler::parse`, and the Vue compatibility rail
+/// `sfc_parses` when (and only when) the dispatched carrier is Vue.
+/// Counting lives in the HOST, not the carrier: the compiler is the
+/// parser/producer only — it owns no provenance, lease, or lifecycle
+/// state. A direct `CarrierCompiler::parse` / registry `.parse()` call
+/// anywhere else in the crate is an uncounted parse the dedup suite
+/// cannot see (guard:
+/// `carrier_parse_routes_through_the_counted_chokepoint`).
+pub(crate) fn parse_carrier_counted(
     provenance: &crate::types::MetaProvenance,
+    compiler: &dyn verter_compiler::framework_common::CarrierCompiler,
     source: &str,
-) -> ParsedSfc {
-    provenance
-        .sfc_parses
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    parse_sfc(source, None, None)
+    opts: &verter_compiler::framework_common::ParseOptions,
+) -> Arc<verter_language::FrameworkParseArtifact> {
+    use std::sync::atomic::Ordering::Relaxed;
+    provenance.carrier_parses.fetch_add(1, Relaxed);
+    if compiler.adapter_id().is_vue() {
+        // Vue compatibility rail: every Vue carrier parse stays visible
+        // on the historical `sfc_parses` counter the dedup suite pins.
+        provenance.sfc_parses.fetch_add(1, Relaxed);
+    }
+    compiler.parse(source, opts)
 }
 
+/// The process-wide compiler-side carrier-compiler registry.
+///
+/// The carrier parse dispatch (`execute_source` → [`carrier_parse_snapshot`])
+/// looks the file's adapter compiler up here. The registry is stateless
+/// (it owns the per-framework [`CarrierCompiler`](verter_compiler::framework_common::CarrierCompiler)
+/// implementations), so one process-wide instance serves every host.
+pub(crate) fn carrier_compiler_registry(
+) -> &'static verter_compiler::framework_common::CarrierCompilerRegistry {
+    use std::sync::OnceLock;
+    static REGISTRY: OnceLock<verter_compiler::framework_common::CarrierCompilerRegistry> =
+        OnceLock::new();
+    REGISTRY.get_or_init(verter_compiler::framework_common::CarrierCompilerRegistry::built_in)
+}
+
+/// Produce a carrier file's `ParseSnapshot` + framework-neutral artifact by
+/// dispatching the parse through the compiler-side carrier registry.
+///
+/// The SINGLE carrier parse dispatch the host executor reaches: it interns the
+/// file's adapter id, looks up its [`CarrierCompiler`](verter_compiler::framework_common::CarrierCompiler)
+/// (Vue via the bridge), and produces the framework-neutral artifact through
+/// the counted carrier chokepoint ([`parse_carrier_counted`]). The host then
+/// reaches the artifact's typed carrier back out (the blessed `vue_parse`
+/// accessor) to build the Vue-shaped `ParseSnapshot`. Routing the parse through
+/// the registry keeps Vue's compile output byte-identical (the bridge calls
+/// `parse_sfc(source, None, None)` and stamps the same parser version) while a
+/// later carrier vertical's compiler drops in without a second dispatch branch.
+///
+/// This is the SCHEDULER Source-stage dispatch: it has no flight-shared eval
+/// program, so the Vue snapshot's script walk parses once here
+/// ([`VueScriptProgram::ParseHere`]). The cold-materialise flight reaches its
+/// own reuse decision (sharing the retained eval program) in
+/// `ensure_indexed_ready_serve`.
+pub(crate) fn carrier_parse_snapshot(
+    canonical_id: &str,
+    source: &str,
+    analysis_scope: verter_semantic::analysis::AnalysisScope,
+    file_language: &verter_language::FileLanguage,
+    provenance: &crate::types::MetaProvenance,
+) -> Option<(ParseSnapshot, Arc<verter_language::FrameworkParseArtifact>)> {
+    // The row must be a true CARRIER (it carries a carrier language id) AND
+    // the registry must serve THAT carrier language — a same-adapter
+    // non-carrier row (an external template) is NOT dispatched by adapter
+    // id alone.
+    let adapter_id = file_language.adapter_id()?;
+    let carrier_language_id = file_language.carrier_language_id()?;
+    let compiler = carrier_compiler_registry()
+        .compiler_for_carrier_language(adapter_id, carrier_language_id)?;
+    let artifact = parse_carrier_counted(
+        provenance,
+        compiler.as_ref(),
+        source,
+        &verter_compiler::framework_common::ParseOptions::default(),
+    );
+    // Vue builds the Vue-shaped snapshot through the blessed `vue_parse`
+    // accessor; Svelte builds its snapshot from the neutral artifact's script
+    // regions (the script analysis runs over the position-preserving
+    // eval-source). The carrier-row dispatch chose the compiler, so the artifact
+    // is that carrier's — open it through the matching accessor.
+    if let Some(parsed) = crate::typeinfo::adapters::vue::vue_parse(&artifact) {
+        let snapshot = build_vue_snapshot_from_parsed(
+            canonical_id,
+            source,
+            analysis_scope,
+            parsed,
+            provenance,
+            VueScriptProgram::ParseHere,
+        );
+        return Some((snapshot, artifact));
+    }
+    if crate::typeinfo::adapters::svelte::svelte_parse(&artifact).is_some() {
+        let eval_source = compiler.eval_source(source, &artifact);
+        let snapshot = build_svelte_snapshot_from_eval_source(
+            canonical_id,
+            source,
+            eval_source.as_ref(),
+            &artifact,
+            provenance,
+            FrameworkScriptProgram::ParseHere,
+        );
+        return Some((snapshot, artifact));
+    }
+    None
+}
+
+/// Capture a file's active framework script-fact candidates from its
+/// eval-source (the synth-injection parse-domain inputs).
+///
+/// Returns an empty set when no provider is active or no eval-source is
+/// available. The OXC parse lives HERE (the scheduler-bound parse module) rather
+/// than in the host body — the synth injection threads the resolved active
+/// provider set in. Syntax-only: no resolver, no capability bits.
+pub(crate) fn capture_synth_script_candidates(
+    active_providers: &[std::sync::Arc<
+        dyn verter_semantic::analysis::framework_facts::ScriptFactProvider,
+    >],
+    eval_source: Option<&str>,
+    module_script_region: Option<(u32, u32)>,
+    source_type: SourceType,
+) -> verter_semantic::analysis::framework_facts::FrameworkScriptCandidateSet {
+    use verter_semantic::analysis::framework_facts::FrameworkScriptCandidateSet;
+    if active_providers.is_empty() {
+        return FrameworkScriptCandidateSet::default();
+    }
+    let Some(source) = eval_source else {
+        return FrameworkScriptCandidateSet::default();
+    };
+    // Parse the eval-source ONCE under the carrier's resolved script dialect (so
+    // a `lang="tsx"` `.svelte` parses as TSX) and capture across the active
+    // providers. The eval-source carries both script blocks at raw offsets.
+    let alloc = Allocator::new();
+    let program = Parser::new(&alloc, source, source_type)
+        .with_options(ParseOptions {
+            parse_regular_expression: false,
+            ..ParseOptions::default()
+        })
+        .parse()
+        .program;
+    verter_semantic::analysis::framework_facts::capture_script_candidates_with_module_region(
+        active_providers,
+        source,
+        &program,
+        module_script_region,
+    )
+}
+
+/// The OXC [`SourceType`] for a carrier artifact's eval-source — the first
+/// script region's resolved dialect (carrier scripts share one dialect), TS by
+/// default. So a `lang="tsx"` `.svelte` captures under TSX.
+pub(crate) fn carrier_eval_source_type(
+    framework_parse: Option<&verter_language::FrameworkParseArtifact>,
+) -> SourceType {
+    framework_parse
+        .and_then(|artifact| artifact.common.script_regions.first())
+        .map(|region| oxc_source_type_from_neutral(region.source_type))
+        .unwrap_or_else(SourceType::ts)
+}
+
+/// The MODULE-script byte region (`<script module>` / legacy
+/// `context="module"`) of a framework carrier artifact, when it records one — so
+/// a script-fact provider can classify a declaration's owning block. Reads the
+/// neutral `FrameworkParseCommon.script_regions` (no per-carrier downcast).
+pub(crate) fn module_script_region(
+    artifact: &verter_language::FrameworkParseArtifact,
+) -> Option<(u32, u32)> {
+    artifact
+        .common
+        .script_regions
+        .iter()
+        .find(|region| region.kind == verter_language::ScriptRegionKind::Module)
+        .map(|region| (region.span.start, region.span.end))
+}
+
+/// Build a Svelte carrier file's `ParseSnapshot` from its position-preserving
+/// eval-source.
+///
+/// The eval-source carries BOTH script blocks (instance + module) at their raw
+/// carrier-absolute offsets and blanks everything else, so the script analysis
+/// over it produces carrier-absolute spans for free (the same property the Vue
+/// path relies on). The `whole_hash` hashes the ORIGINAL component source (the
+/// file content identity), while the analysis runs over the eval-source. The
+/// `script_hash` slice covers each script region's content so a script-only edit
+/// invalidates distinctly from a template-only edit.
+fn build_svelte_snapshot_from_eval_source(
+    canonical_id: &str,
+    source: &str,
+    eval_source: &str,
+    artifact: &verter_language::FrameworkParseArtifact,
+    provenance: &crate::types::MetaProvenance,
+    script_program: FrameworkScriptProgram<'_>,
+) -> ParseSnapshot {
+    let whole_hash = hash_16(source.as_bytes());
+
+    // Per-script content hashes (source-ordered) so a script edit invalidates
+    // distinctly. The semantic hash folds them; with no script regions it
+    // degrades to the whole hash.
+    let mut script_hashes = Vec::new();
+    for region in &artifact.common.script_regions {
+        let (s, e) = (region.span.start as usize, region.span.end as usize);
+        let content = source.as_bytes().get(s..e).unwrap_or(b"");
+        script_hashes.push(hash_16(content));
+    }
+    let semantic_hash = if script_hashes.is_empty() {
+        whole_hash
+    } else {
+        let mut buf = Vec::with_capacity(script_hashes.len() * 16);
+        for h in &script_hashes {
+            buf.extend_from_slice(h);
+        }
+        hash_16(&buf)
+    };
+
+    // Run the shallow analysis over the eval-source under the carrier's RESOLVED
+    // script dialect (the producer stamped `lang="ts"/"tsx"/"jsx"/"js"` onto the
+    // script regions) so a `lang="tsx"` `.svelte` parses as TSX, not plain TS.
+    // The eval-source's blanked geometry keeps every span carrier-absolute.
+    let source_type = artifact
+        .common
+        .script_regions
+        .first()
+        .map(|region| oxc_source_type_from_neutral(region.source_type))
+        .unwrap_or_else(SourceType::ts);
+
+    let fatal_snapshot = || ParseSnapshot {
+        whole_hash,
+        semantic_hash,
+        slices: SliceHashes::default(),
+        descriptor: DescriptorMin::default(),
+        meta: FileMeta::default(),
+        external_requests: Vec::new(),
+        src_blocks: Vec::new(),
+        parse_diagnostics: DiagnosticsSnapshot::default(),
+        script_analysis: Arc::new(verter_semantic::analysis::ScriptAnalysisSnapshot::default()),
+        export_signatures: Vec::new(),
+        style_analyses: Vec::new(),
+        preprocessor_requests: Vec::new(),
+    };
+
+    // The eval-source IS the carrier's position-preserving extracted script — so
+    // the cold-materialise flight's retained eval program (which parsed exactly
+    // these bytes) IS this snapshot's program: walk it, parse nothing. A lane
+    // with no flight-shared program (the scheduler Source stage) parses once
+    // here. Either way the Svelte cold build pays exactly one parse of the
+    // script bytes.
+    let mut snapshot = match script_program {
+        FrameworkScriptProgram::Shared(program) => {
+            debug_assert_eq!(
+                program.source_str(),
+                eval_source,
+                "a shared eval program must carry this carrier file's \
+                 position-preserving eval source",
+            );
+            build_non_sfc_snapshot_from_program(
+                canonical_id,
+                eval_source,
+                source_type,
+                program.borrow_dependent(),
+            )
+        }
+        FrameworkScriptProgram::SharedFatal => return fatal_snapshot(),
+        FrameworkScriptProgram::ParseHere => {
+            // No flight-shared program: parse the eval source once here. This is
+            // the scheduler Source-stage snapshot lane — counted on the same
+            // full-program rail as the non-SFC snapshot lane.
+            provenance
+                .non_sfc_snapshot_parses
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let alloc = Allocator::new();
+            let parser = Parser::new(&alloc, eval_source, source_type).with_options(ParseOptions {
+                parse_regular_expression: false,
+                ..ParseOptions::default()
+            });
+            let result = parser.parse();
+            if result.panicked {
+                return fatal_snapshot();
+            }
+            build_non_sfc_snapshot_from_program(
+                canonical_id,
+                eval_source,
+                source_type,
+                &result.program,
+            )
+        }
+    };
+    // The component identity is the ORIGINAL source, not the eval-source.
+    snapshot.whole_hash = whole_hash;
+    snapshot.semantic_hash = semantic_hash;
+    snapshot
+}
+
+/// Where a framework carrier snapshot build gets its script PROGRAM from — the
+/// framework-neutral analog of [`VueScriptProgram`] for carriers whose snapshot
+/// is built by walking the position-preserving eval program (Svelte today).
+///
+/// A cold-materialise flight already OXC-parses the position-preserving eval
+/// source ONCE as its eval program; the snapshot build walks that SAME program
+/// instead of paying a second parse over the same bytes. Lanes with no
+/// flight-shared program (the scheduler Source stage) parse here.
+pub(crate) enum FrameworkScriptProgram<'a> {
+    /// No flight-shared program: parse the eval source once here (counted on
+    /// the `non_sfc_snapshot_parses` full-program rail).
+    ParseHere,
+    /// The flight's eval program IS the snapshot's script program (the eval
+    /// source was the position-preserving extracted script): walk it, parse
+    /// nothing.
+    Shared(&'a crate::ParsedEvalProgram),
+    /// The flight's single eval-program parse was fatal (recovered panic). A
+    /// re-parse over the same bytes under the same source type fails
+    /// identically, so the snapshot defaults directly with zero additional
+    /// parses — the carrier mirror of [`VueScriptProgram::SharedFatal`].
+    SharedFatal,
+}
+
+/// Produce a Vue carrier file's `ParseSnapshot` + artifact.
+///
+/// A thin Vue-pinned entry over [`carrier_parse_snapshot`]: every Vue parse
+/// routes through the carrier registry (the bridge) and the counted carrier
+/// chokepoint — there is no second Vue direct-parse path. The dispatch is
+/// infallible for Vue (the registry always registers the Vue bridge, the
+/// produced artifact is always a Vue carrier), so an unexpected miss is a build
+/// defect, surfaced loudly rather than silently re-parsed.
 pub(crate) fn parse_vue_snapshot(
     canonical_id: &str,
     source: &str,
     analysis_scope: verter_semantic::analysis::AnalysisScope,
     provenance: &crate::types::MetaProvenance,
-) -> (ParseSnapshot, ParsedSfc) {
-    // Counted INSIDE the worker (via the chokepoint) so every lane
-    // counts — caller-side increments left the template source-miss
-    // fallback and the content-override upsert lane invisible to the
-    // dedup suite.
-    let parsed = parse_sfc_counted(provenance, source);
-    let snapshot = build_vue_snapshot_from_parsed(
+) -> (ParseSnapshot, Arc<verter_language::FrameworkParseArtifact>) {
+    carrier_parse_snapshot(
         canonical_id,
         source,
         analysis_scope,
-        &parsed,
+        &verter_language::FileLanguage::vue(),
         provenance,
-        VueScriptProgram::ParseHere,
-    );
-
-    (snapshot, parsed)
+    )
+    .expect("the carrier registry registers the Vue bridge; Vue parse cannot miss")
 }
 
-pub(crate) fn non_sfc_source_type(canonical_id: &str) -> SourceType {
-    if canonical_id.ends_with(".d.ts")
-        || canonical_id.ends_with(".d.mts")
-        || canonical_id.ends_with(".d.cts")
-    {
-        SourceType::d_ts()
-    } else {
-        SourceType::ts()
-    }
+/// Parse Vue SFC source straight into the framework-neutral parse
+/// artifact (the route-owned cold-parse producer's entry — no
+/// `ParseSnapshot` is needed there).
+///
+/// Routes through the carrier registry (the Vue bridge) — the SAME single
+/// dispatch path as [`carrier_parse_snapshot`], so there is no second
+/// session-side Vue direct-parse producer. The dispatch is infallible for
+/// Vue (the registry always registers the Vue bridge serving the `vue`
+/// carrier language).
+pub(crate) fn build_vue_parse_artifact_from_source(
+    source: &str,
+    provenance: &crate::types::MetaProvenance,
+) -> Arc<verter_language::FrameworkParseArtifact> {
+    let vue = verter_language::FileLanguage::vue();
+    let adapter_id = vue.adapter_id().expect("the Vue row carries an adapter id");
+    let carrier_language_id = vue
+        .carrier_language_id()
+        .expect("the Vue row carries a carrier language id");
+    let compiler = carrier_compiler_registry()
+        .compiler_for_carrier_language(adapter_id, carrier_language_id)
+        .expect("the carrier registry registers the Vue bridge serving the vue carrier language");
+    parse_carrier_counted(
+        provenance,
+        compiler.as_ref(),
+        source,
+        &verter_compiler::framework_common::ParseOptions::default(),
+    )
+}
+
+/// Build the framework-neutral parse artifact for ANY carrier file from its
+/// source, dispatching through the carrier registry by the file's resolved
+/// carrier row. Returns `None` for a non-carrier file (a plain script) or a
+/// carrier row whose adapter has no registered compiler — the caller then uses
+/// the plain-script path. This is the CARRIER-NEUTRAL cold-parse producer the
+/// route-owned / overlay materialization paths use (so a `.svelte` cold parse
+/// produces a Svelte artifact, not `None`).
+pub(crate) fn build_carrier_parse_artifact_from_source(
+    file_language: &verter_language::FileLanguage,
+    source: &str,
+    provenance: &crate::types::MetaProvenance,
+) -> Option<Arc<verter_language::FrameworkParseArtifact>> {
+    let adapter_id = file_language.adapter_id()?;
+    let carrier_language_id = file_language.carrier_language_id()?;
+    let compiler = carrier_compiler_registry()
+        .compiler_for_carrier_language(adapter_id, carrier_language_id)?;
+    Some(parse_carrier_counted(
+        provenance,
+        compiler.as_ref(),
+        source,
+        &verter_compiler::framework_common::ParseOptions::default(),
+    ))
+}
+
+/// The OXC [`SourceType`] of a plain (non-carrier) script file,
+/// derived from its classified [`FileLanguage`](verter_language::FileLanguage)
+/// row — the language registry is the SOLE plain-script dialect
+/// authority (`.d.ts`-family detection included: the registry `Dts`
+/// rows own it; session parse code never re-sniffs path extensions).
+///
+/// Non-script rows (a framework carrier or template reaching a plain
+/// parse path, an unclassifiable input) fall back to the registry's
+/// own unknown-extension routing: TypeScript.
+pub(crate) fn plain_script_source_type(
+    file_language: &verter_language::FileLanguage,
+) -> SourceType {
+    file_language
+        .script_source_type()
+        .map(oxc_source_type_from_neutral)
+        .unwrap_or_else(SourceType::ts)
 }
 
 /// Pure source-type computation for an imported eval target.
@@ -154,19 +518,57 @@ pub(crate) fn non_sfc_source_type(canonical_id: &str) -> SourceType {
 /// [`crate::host_executor::HostSourceData::source_type`] so cache-key callers
 /// can read the authoritative value via
 /// [`crate::VerterHost::authoritative_source_type_for`] instead of recomputing
-/// from `(canonical_id, raw_source, cached_parse)` — a pair that is unstable
-/// when `cached_parse` is dropped mid-resolution.
+/// from `(canonical_id, raw_source, framework_parse)` — a pair that is
+/// unstable when `framework_parse` is dropped mid-resolution.
+///
+/// Dispatches on the file's resolved [`FileLanguage`](verter_language::FileLanguage)
+/// row: framework carriers read the neutral
+/// `FrameworkParseCommon.script_regions[].source_type` their producer
+/// populated at parse time (UNIFORMLY — no per-carrier downcast); plain
+/// scripts derive from the row's classified dialect
+/// ([`plain_script_source_type`]).
 pub(crate) fn imported_eval_source_type(
-    canonical_id: &str,
-    raw_source: &str,
-    cached_parse: Option<&ParsedSfc>,
+    file_language: &verter_language::FileLanguage,
+    framework_parse: Option<&verter_language::FrameworkParseArtifact>,
 ) -> SourceType {
-    if canonical_id.ends_with(".vue") {
-        cached_parse
-            .map(|parsed| sfc_script_source_type(parsed, raw_source))
+    if file_language.is_framework_carrier() {
+        framework_parse
+            .and_then(|artifact| artifact.common.script_regions.first())
+            .map(|region| oxc_source_type_from_neutral(region.source_type))
             .unwrap_or_else(SourceType::ts)
     } else {
-        non_sfc_source_type(canonical_id)
+        plain_script_source_type(file_language)
+    }
+}
+
+/// Map the neutral [`verter_language::ScriptSourceType`] dialect onto
+/// the OXC [`SourceType`] the parser pipeline consumes.
+///
+/// JavaScript dialects carry their [`verter_language::JsModuleKind`]
+/// through to OXC's module kind: `import`/`export` are module-only
+/// syntax, so the kind decides whether module `.js`/`.mjs` content
+/// parses (Unambiguous/Module), CommonJS stays CommonJS (`.cjs`), and
+/// the Vue carrier's classic-script `lang="js"` row keeps its
+/// historical `SourceType::script()`.
+pub(crate) fn oxc_source_type_from_neutral(
+    source_type: verter_language::ScriptSourceType,
+) -> SourceType {
+    match source_type {
+        verter_language::ScriptSourceType::Ts => SourceType::ts(),
+        verter_language::ScriptSourceType::Tsx => SourceType::tsx(),
+        verter_language::ScriptSourceType::Js(kind) => oxc_js_base(kind),
+        verter_language::ScriptSourceType::Jsx(kind) => oxc_js_base(kind).with_jsx(true),
+        verter_language::ScriptSourceType::Dts => SourceType::d_ts(),
+    }
+}
+
+/// The JavaScript [`SourceType`] for a neutral module kind.
+fn oxc_js_base(kind: verter_language::JsModuleKind) -> SourceType {
+    match kind {
+        verter_language::JsModuleKind::Unambiguous => SourceType::unambiguous(),
+        verter_language::JsModuleKind::Module => SourceType::mjs(),
+        verter_language::JsModuleKind::CommonJs => SourceType::cjs(),
+        verter_language::JsModuleKind::Script => SourceType::script(),
     }
 }
 
@@ -765,20 +1167,13 @@ fn catch_analysis_panic<T: Default>(
     }
 }
 
-pub(crate) fn sfc_script_source_type(parsed: &ParsedSfc, source: &str) -> SourceType {
-    let lang = [parsed.script(), parsed.script_setup()]
-        .into_iter()
-        .flatten()
-        .find_map(|script| {
-            find_attr(&extract_attrs(&script.attributes, source), "lang").filter(|v| v != "true")
-        });
-
-    match lang.as_deref().map(|value| value.to_ascii_lowercase()) {
-        Some(lang) if lang == "tsx" => SourceType::tsx(),
-        Some(lang) if lang == "jsx" => SourceType::jsx(),
-        Some(lang) if lang == "js" => SourceType::script(),
-        _ => SourceType::ts(),
-    }
+/// The SFC's OXC source type, resolved from `<script lang>` through the
+/// Vue carrier producer's resolver (the one `<script lang>` authority —
+/// the same data the producer stamps onto `ScriptRegion.source_type`).
+fn vue_oxc_source_type(parsed: &ParsedSfc, source: &str) -> SourceType {
+    oxc_source_type_from_neutral(
+        verter_compiler::framework_common::vue_bridge::vue_script_source_type(parsed, source),
+    )
 }
 
 /// Build script analysis from an already-parsed SFC.
@@ -923,7 +1318,7 @@ fn build_vue_script_outputs(
     else {
         return outputs;
     };
-    let source_type = sfc_script_source_type(parsed, source);
+    let source_type = vue_oxc_source_type(parsed, source);
     provenance
         .vue_script_snapshot_parses
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -966,14 +1361,18 @@ fn build_vue_script_outputs(
 /// Compute script analysis on demand from SFC source. Used by get_analysis()
 /// when eager_analysis was false during upsert().
 ///
-/// Counted INSIDE the worker (via the `parse_sfc_counted` chokepoint) so
-/// every caller's SFC structure parse lights up the `sfc_parses` rail.
+/// Counted INSIDE the worker (via the `parse_carrier_counted` chokepoint) so
+/// every caller's carrier parse lights up the `carrier_parses` / `sfc_parses`
+/// rails.
 pub(crate) fn build_script_analysis_from_source(
     source: &str,
     provenance: &crate::types::MetaProvenance,
 ) -> verter_semantic::analysis::ScriptAnalysisSnapshot {
-    let parsed = parse_sfc_counted(provenance, source);
-    build_script_analysis_from_parsed(&parsed, source, provenance)
+    // On-demand Vue re-parse routes through the Vue carrier producer (the
+    // counted chokepoint) so the artifact stays the one post-parse
+    // representation.
+    let artifact = build_vue_parse_artifact_from_source(source, provenance);
+    build_script_analysis_for_artifact(Some(&artifact), source, provenance)
 }
 
 pub(crate) fn build_script_analysis_from_parsed(
@@ -992,15 +1391,19 @@ pub(crate) fn build_script_analysis_from_parsed(
 /// Compute style analyses on demand from SFC source. Used by get_analysis()
 /// when eager_analysis was false during upsert().
 ///
-/// Counted INSIDE the worker (via the `parse_sfc_counted` chokepoint) so
-/// every caller's SFC structure parse lights up the `sfc_parses` rail.
+/// Counted INSIDE the worker (via the `parse_carrier_counted` chokepoint) so
+/// every caller's carrier parse lights up the `carrier_parses` / `sfc_parses`
+/// rails.
 pub(crate) fn build_style_analyses_from_source(
     source: &str,
     canonical_id: &str,
     provenance: &crate::types::MetaProvenance,
 ) -> Vec<verter_semantic::analysis::StyleBlockAnalysis> {
-    let parsed = parse_sfc_counted(provenance, source);
-    build_style_analyses_from_parsed(&parsed, source, canonical_id)
+    // On-demand Vue re-parse routes through the Vue carrier producer (the
+    // counted chokepoint) so the artifact stays the one post-parse
+    // representation.
+    let artifact = build_vue_parse_artifact_from_source(source, provenance);
+    build_style_analyses_for_artifact(Some(&artifact), source, canonical_id, provenance)
 }
 
 pub(crate) fn build_style_analyses_from_parsed(
@@ -1013,6 +1416,146 @@ pub(crate) fn build_style_analyses_from_parsed(
         .iter()
         .map(|style| build_single_style_analysis(style, source, canonical_id))
         .collect()
+}
+
+/// Artifact-facing script-analysis builder: reuse the carrier parse
+/// when the neutral artifact opens through the blessed Vue accessor,
+/// else re-parse from source.
+pub(crate) fn build_script_analysis_for_artifact(
+    framework_parse: Option<&verter_language::FrameworkParseArtifact>,
+    source: &str,
+    provenance: &crate::types::MetaProvenance,
+) -> verter_semantic::analysis::ScriptAnalysisSnapshot {
+    match framework_parse.and_then(crate::typeinfo::adapters::vue::vue_parse) {
+        Some(parsed) => build_script_analysis_from_parsed(parsed, source, provenance),
+        None => build_script_analysis_from_source(source, provenance),
+    }
+}
+
+/// Artifact-facing style-analysis builder (see
+/// [`build_script_analysis_for_artifact`]).
+pub(crate) fn build_style_analyses_for_artifact(
+    framework_parse: Option<&verter_language::FrameworkParseArtifact>,
+    source: &str,
+    canonical_id: &str,
+    provenance: &crate::types::MetaProvenance,
+) -> Vec<verter_semantic::analysis::StyleBlockAnalysis> {
+    match framework_parse.and_then(crate::typeinfo::adapters::vue::vue_parse) {
+        Some(parsed) => build_style_analyses_from_parsed(parsed, source, canonical_id),
+        None => build_style_analyses_from_source(source, canonical_id, provenance),
+    }
+}
+
+/// The cold-flight variant of [`build_carrier_snapshot_from_artifact`]: builds a
+/// non-Vue carrier snapshot reusing the flight's retained eval program (so the
+/// cold build pays exactly one parse of the script bytes). The eval source is
+/// re-derived from the artifact's recorded script regions — byte-identical to
+/// the flight's `IndexedReady.eval_source` — and the script PROGRAM is threaded
+/// in (`Shared` on a live parse, `SharedFatal` on a fatal one). Returns `None`
+/// for a non-carrier / Vue artifact (the cold path routes Vue through
+/// `build_vue_snapshot_from_parsed` directly).
+pub(crate) fn build_carrier_snapshot_from_artifact_with_program(
+    canonical_id: &str,
+    source: &str,
+    _analysis_scope: verter_semantic::analysis::AnalysisScope,
+    framework_parse: &verter_language::FrameworkParseArtifact,
+    provenance: &crate::types::MetaProvenance,
+    script_program: FrameworkScriptProgram<'_>,
+) -> ParseSnapshot {
+    let mut spans: Vec<(u32, u32)> = framework_parse
+        .common
+        .script_regions
+        .iter()
+        .map(|region| (region.span.start, region.span.end))
+        .filter(|(s, e)| e > s)
+        .collect();
+    spans.sort_by_key(|(s, _)| *s);
+    let eval_source = crate::host_resolve::build_position_preserving_script_source(source, &spans);
+    build_svelte_snapshot_from_eval_source(
+        canonical_id,
+        source,
+        &eval_source,
+        framework_parse,
+        provenance,
+        script_program,
+    )
+}
+
+/// Whether a file's resolved carrier row has a registered carrier compiler that
+/// can extract template data — the REGISTRY-DISPATCHED ingestion gate that
+/// replaces the hardcoded `.vue` / `is_vue()` check. A plain script (no carrier
+/// row) or a carrier whose adapter has no registered compiler answers `false`.
+#[must_use]
+pub(crate) fn file_language_has_template_data_compiler(
+    file_language: &verter_language::FileLanguage,
+) -> bool {
+    let Some(adapter_id) = file_language.adapter_id() else {
+        return false;
+    };
+    let Some(carrier_language_id) = file_language.carrier_language_id() else {
+        return false;
+    };
+    carrier_compiler_registry()
+        .compiler_for_carrier_language(adapter_id, carrier_language_id)
+        .is_some()
+}
+
+/// The carrier-NEUTRAL template-data extraction half shared by
+/// `build_template_analysis` / `compute_template_analysis_if_missing`.
+///
+/// This is the SINGLE registry-dispatched template-data path: it interns the
+/// file's resolved carrier row and dispatches the extraction through that
+/// carrier's [`CarrierCompiler::template_data`](verter_compiler::framework_common::CarrierCompiler::template_data)
+/// (Vue's bridge runs the META-target `compile_from_parsed` for
+/// `referenced_bindings` / constness; Svelte's walks the typed template tree).
+/// There is no Vue-only branch here.
+///
+/// When `reuse_carrier_parse` is set and `framework_parse` matches the file's
+/// carrier, the cached artifact's parse is reused; otherwise a fresh artifact is
+/// parsed from `compile_source` through the same registry (the external-src
+/// merge case, where the compile source differs from the file content). Returns
+/// `None` for a non-carrier file or a carrier row with no registered compiler.
+pub(crate) fn compile_template_data(
+    file_language: &verter_language::FileLanguage,
+    compile_source: &str,
+    framework_parse: Option<&verter_language::FrameworkParseArtifact>,
+    reuse_carrier_parse: bool,
+    provenance: &crate::types::MetaProvenance,
+) -> Option<verter_compiler::compile::RawTemplateData> {
+    let adapter_id = file_language.adapter_id()?;
+    let carrier_language_id = file_language.carrier_language_id()?;
+    let compiler = carrier_compiler_registry()
+        .compiler_for_carrier_language(adapter_id, carrier_language_id)?;
+
+    // Reuse the cached artifact only when the caller permits it AND the artifact
+    // belongs to THIS carrier (adapter id + carrier language id match) — a
+    // foreign / stale artifact forces a fresh parse rather than a misrouted
+    // dispatch.
+    let reuse = reuse_carrier_parse
+        && framework_parse.is_some_and(|artifact| {
+            artifact.adapter_id == *adapter_id && artifact.language_id == *carrier_language_id
+        });
+
+    let fresh_artifact = if reuse {
+        None
+    } else {
+        Some(parse_carrier_counted(
+            provenance,
+            compiler.as_ref(),
+            compile_source,
+            &verter_compiler::framework_common::ParseOptions::default(),
+        ))
+    };
+    let artifact = if reuse {
+        framework_parse.expect("reuse implies a present artifact")
+    } else {
+        fresh_artifact
+            .as_ref()
+            .expect("a fresh artifact is built when the cached one is not reused")
+            .as_ref()
+    };
+
+    Some(compiler.template_data(compile_source, artifact).data)
 }
 
 pub(crate) fn build_non_sfc_snapshot_from_program(
@@ -1062,17 +1605,19 @@ pub(crate) fn build_non_sfc_snapshot_from_program(
 pub(crate) fn parse_non_sfc_snapshot(
     canonical_id: &str,
     source: &str,
+    file_language: &verter_language::FileLanguage,
     provenance: &crate::types::MetaProvenance,
 ) -> ParseSnapshot {
     // A full OXC program parse outside the `parse_eval_program` funnel —
-    // counted on its own provenance rail (it is not an SFC structure
-    // parse and not an eval-program parse) so every full-program
-    // snapshot lane (scheduler Source stage, analysis read path) is
-    // dedup-suite-visible.
+    // counted on its own provenance rail (it is not a carrier parse and
+    // not an eval-program parse) so every full-program snapshot lane
+    // (scheduler Source stage, analysis read path) is dedup-suite-visible.
+    // The dialect comes from the language registry (the SOLE plain-script
+    // dialect authority), never a path-extension re-sniff.
     provenance
         .non_sfc_snapshot_parses
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let source_type = non_sfc_source_type(canonical_id);
+    let source_type = plain_script_source_type(file_language);
     let alloc = Allocator::new();
     let parser = Parser::new(&alloc, source, source_type).with_options(ParseOptions {
         parse_regular_expression: false,
@@ -1102,6 +1647,128 @@ pub(crate) fn parse_non_sfc_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The statically classified registry row for a path — tests
+    /// thread it exactly like production call sites thread the
+    /// host-resolved row.
+    fn classified(id: &str) -> verter_language::FileLanguage {
+        verter_language::LanguageRegistry::global()
+            .classify_static(id)
+            .static_resolution()
+    }
+
+    /// Runtime half of the `plain_script_dialect_from_file_language`
+    /// guard: the neutral-dialect → OXC `SourceType` mapping, pinned
+    /// EXHAUSTIVELY over the `ScriptSourceType` vocabulary (every
+    /// variant × every `JsModuleKind`).
+    #[test]
+    fn neutral_dialect_to_oxc_source_type_parity_matrix_is_exhaustive() {
+        use verter_language::{JsModuleKind, ScriptSourceType};
+
+        let matrix: &[(ScriptSourceType, SourceType)] = &[
+            (ScriptSourceType::Ts, SourceType::ts()),
+            (ScriptSourceType::Tsx, SourceType::tsx()),
+            (ScriptSourceType::Dts, SourceType::d_ts()),
+            (
+                ScriptSourceType::Js(JsModuleKind::Unambiguous),
+                SourceType::unambiguous(),
+            ),
+            (
+                ScriptSourceType::Js(JsModuleKind::Module),
+                SourceType::mjs(),
+            ),
+            (
+                ScriptSourceType::Js(JsModuleKind::CommonJs),
+                SourceType::cjs(),
+            ),
+            (
+                ScriptSourceType::Js(JsModuleKind::Script),
+                SourceType::script(),
+            ),
+            (
+                ScriptSourceType::Jsx(JsModuleKind::Unambiguous),
+                SourceType::unambiguous().with_jsx(true),
+            ),
+            (
+                ScriptSourceType::Jsx(JsModuleKind::Module),
+                SourceType::jsx(),
+            ),
+            (
+                ScriptSourceType::Jsx(JsModuleKind::CommonJs),
+                SourceType::cjs().with_jsx(true),
+            ),
+            (
+                ScriptSourceType::Jsx(JsModuleKind::Script),
+                SourceType::script().with_jsx(true),
+            ),
+        ];
+        for (neutral, expected) in matrix {
+            assert_eq!(
+                oxc_source_type_from_neutral(*neutral),
+                *expected,
+                "dialect parity drifted for {neutral:?}"
+            );
+        }
+
+        // Exhaustiveness pin: every `ScriptSourceType` discriminant and
+        // every `JsModuleKind` appears in the matrix above. A new
+        // variant fails this match (and the compiler walks the author
+        // back here to extend the matrix).
+        let covered = |st: &ScriptSourceType| match st {
+            ScriptSourceType::Ts
+            | ScriptSourceType::Tsx
+            | ScriptSourceType::Dts
+            | ScriptSourceType::Js(
+                JsModuleKind::Unambiguous
+                | JsModuleKind::Module
+                | JsModuleKind::CommonJs
+                | JsModuleKind::Script,
+            )
+            | ScriptSourceType::Jsx(
+                JsModuleKind::Unambiguous
+                | JsModuleKind::Module
+                | JsModuleKind::CommonJs
+                | JsModuleKind::Script,
+            ) => true,
+        };
+        assert!(matrix.iter().all(|(neutral, _)| covered(neutral)));
+        assert_eq!(matrix.len(), 11, "matrix must cover the full vocabulary");
+    }
+
+    /// Plain-script source types derive from the classified row — the
+    /// registry rows map straight onto their parse dialects, and
+    /// non-script rows (carriers) fall back to TypeScript.
+    #[test]
+    fn plain_script_source_type_derives_from_the_classified_row() {
+        let cases: &[(&str, SourceType)] = &[
+            ("/x/a.ts", SourceType::ts()),
+            ("/x/a.mts", SourceType::ts()),
+            ("/x/a.cts", SourceType::ts()),
+            ("/x/a.tsx", SourceType::tsx()),
+            ("/x/a.js", SourceType::unambiguous()),
+            ("/x/a.mjs", SourceType::mjs()),
+            ("/x/a.cjs", SourceType::cjs()),
+            ("/x/a.jsx", SourceType::unambiguous().with_jsx(true)),
+            ("/x/a.d.ts", SourceType::d_ts()),
+            ("/x/a.d.mts", SourceType::d_ts()),
+            ("/x/a.d.cts", SourceType::d_ts()),
+            // Unknown extensions route as TypeScript scripts.
+            ("/x/a.weird", SourceType::ts()),
+        ];
+        for (id, expected) in cases {
+            assert_eq!(
+                plain_script_source_type(&classified(id)),
+                *expected,
+                "plain-script dialect drifted for {id}"
+            );
+        }
+        // A carrier row reaching the plain-script derivation falls
+        // back to TypeScript (no script dialect on the row).
+        assert_eq!(
+            plain_script_source_type(&verter_language::FileLanguage::vue()),
+            SourceType::ts()
+        );
+    }
     use smallvec::SmallVec;
     use verter_compiler::types::NodeProp;
     use verter_semantic::analysis::AnalysisScope;
@@ -1114,18 +1781,27 @@ mod tests {
         canonical_id: &str,
         source: &str,
         analysis_scope: AnalysisScope,
-    ) -> (ParseSnapshot, ParsedSfc) {
-        super::parse_vue_snapshot(
+    ) -> (ParseSnapshot, Arc<ParsedSfc>) {
+        let (snapshot, artifact) = super::parse_vue_snapshot(
             canonical_id,
             source,
             analysis_scope,
             &crate::types::MetaProvenance::default(),
-        )
+        );
+        let parsed = crate::typeinfo::adapters::vue::vue_parse(&artifact)
+            .expect("a Vue carrier artifact carries a ParsedSfc")
+            .clone();
+        (snapshot, parsed)
     }
-    fn parse_non_sfc_snapshot(canonical_id: &str, source: &str) -> ParseSnapshot {
+    fn parse_non_sfc_snapshot(
+        canonical_id: &str,
+        source: &str,
+        file_language: &verter_language::FileLanguage,
+    ) -> ParseSnapshot {
         super::parse_non_sfc_snapshot(
             canonical_id,
             source,
+            file_language,
             &crate::types::MetaProvenance::default(),
         )
     }
@@ -1556,8 +2232,8 @@ const isOpen = computed(() => props.visible)
     /// @ai-generated - Non-SFC whole_hash differs per content
     #[test]
     fn parse_non_sfc_whole_hash_differs() {
-        let a = parse_non_sfc_snapshot("a.ts", "export const x = 1");
-        let b = parse_non_sfc_snapshot("b.ts", "export const y = 2");
+        let a = parse_non_sfc_snapshot("a.ts", "export const x = 1", &classified("a.ts"));
+        let b = parse_non_sfc_snapshot("b.ts", "export const y = 2", &classified("b.ts"));
         assert_ne!(a.whole_hash, b.whole_hash);
     }
 
@@ -1565,8 +2241,8 @@ const isOpen = computed(() => props.visible)
     /// can detect when an imported .ts file changes.
     #[test]
     fn parse_non_sfc_semantic_hash_content_dependent() {
-        let a = parse_non_sfc_snapshot("a.ts", "export const x = 1");
-        let b = parse_non_sfc_snapshot("b.ts", "export const y = 2");
+        let a = parse_non_sfc_snapshot("a.ts", "export const x = 1", &classified("a.ts"));
+        let b = parse_non_sfc_snapshot("b.ts", "export const y = 2", &classified("b.ts"));
         assert_ne!(
             a.semantic_hash, b.semantic_hash,
             "different non-SFC content must produce different semantic hashes"
@@ -1576,8 +2252,8 @@ const isOpen = computed(() => props.visible)
     /// @ai-generated - Non-SFC semantic_hash is deterministic
     #[test]
     fn parse_non_sfc_semantic_hash_deterministic() {
-        let a = parse_non_sfc_snapshot("a.ts", "export const x = 1");
-        let b = parse_non_sfc_snapshot("a.ts", "export const x = 1");
+        let a = parse_non_sfc_snapshot("a.ts", "export const x = 1", &classified("a.ts"));
+        let b = parse_non_sfc_snapshot("a.ts", "export const x = 1", &classified("a.ts"));
         assert_eq!(a.semantic_hash, b.semantic_hash);
     }
 
@@ -1652,7 +2328,7 @@ const isOpen = computed(() => props.visible)
     /// @ai-generated - Non-SFC has no blocks
     #[test]
     fn parse_non_sfc_no_blocks() {
-        let snap = parse_non_sfc_snapshot("helper.ts", "const x = 1");
+        let snap = parse_non_sfc_snapshot("helper.ts", "const x = 1", &classified("helper.ts"));
         assert!(!snap.meta.has_script);
         assert!(!snap.meta.has_template);
         assert_eq!(snap.descriptor.script_count, 0);
@@ -1931,6 +2607,7 @@ export type VNodeRef = string | Ref | ((ref: Element | null, refs: Record<string
         let snapshot = parse_non_sfc_snapshot(
             "node_modules/@vue/runtime-core/dist/runtime-core.d.ts",
             dts_content,
+            &classified("node_modules/@vue/runtime-core/dist/runtime-core.d.ts"),
         );
         // Verify no panic diagnostics were emitted
         assert!(
@@ -1949,7 +2626,7 @@ const count = ref(0)
 provide('counter', count)
 onMounted(() => { console.log('mounted') })
 "#;
-        let snap = parse_non_sfc_snapshot("composable.ts", source);
+        let snap = parse_non_sfc_snapshot("composable.ts", source, &classified("composable.ts"));
         let analysis = &snap.script_analysis;
         // Positive: VUE_API_USAGE should detect provide() and onMounted() calls
         assert!(
@@ -1992,7 +2669,7 @@ onMounted(() => { console.log('mounted') })
         // All .d.ts extension variants should use the correct SourceType
         let content = "export declare const foo: string;";
         for id in &["types.d.ts", "index.d.mts", "utils.d.cts"] {
-            let snapshot = parse_non_sfc_snapshot(id, content);
+            let snapshot = parse_non_sfc_snapshot(id, content, &classified(id));
             assert!(
                 snapshot.parse_diagnostics.diagnostics.is_empty(),
                 "{id} should parse without diagnostics"

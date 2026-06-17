@@ -786,7 +786,7 @@ impl VerterHost {
                 // host's scheduler and caches stay untouched).
                 let template_inputs = crate::types::VueTemplateInputs {
                     source: Arc::clone(&facts.raw_source),
-                    cached_parse: facts.cached_parse.clone(),
+                    framework_parse: facts.framework_parse.clone(),
                     store_published: false,
                     // Overlay artifact read — no scheduler node
                     // generation to attest (and the persist is
@@ -805,7 +805,7 @@ impl VerterHost {
                 .unwrap_or(0.0);
             let owner_eval_source = VerterHost::build_eval_script_source(
                 &facts.raw_source,
-                facts.cached_parse.as_deref(),
+                facts.framework_parse.as_deref(),
             );
             let direct_import_started = audit_enabled.then(Instant::now);
             let direct_dependency_candidates =
@@ -3070,23 +3070,23 @@ impl VerterHost {
             // computed template serves THIS caller only — with no
             // scheduler node generation to attest, the
             // `derived_raw_cache` persist declines (fenced or not).
-            let template_inputs =
-                canonical
-                    .ends_with(".vue")
-                    .then(|| crate::types::VueTemplateInputs {
-                        source: Arc::clone(&facts.raw_source),
-                        cached_parse: facts.cached_parse.clone(),
-                        store_published: serve.store_published,
-                        // Artifact-serve read — no scheduler node
-                        // generation to attest; the template serves
-                        // this caller, the persist declines (an entry
-                        // without a rail cannot be validated by the
-                        // scheduler-backed readers).
-                        source_generation: None,
-                    });
-            if let Some(inputs) = template_inputs {
-                self.compute_template_analysis_if_missing(canonical, &mut snapshot, inputs);
-            }
+            // Build the inputs unconditionally — `compute_template_analysis_if_missing`
+            // gates internally on the file's registered carrier compiler
+            // (registry-dispatched, Svelte-capable), so a `.svelte` owner ingests
+            // its template the same as a `.vue` one and a carrier-less file is a
+            // no-op there. No hardcoded `.vue` extension gate.
+            let template_inputs = crate::types::VueTemplateInputs {
+                source: Arc::clone(&facts.raw_source),
+                framework_parse: facts.framework_parse.clone(),
+                store_published: serve.store_published,
+                // Artifact-serve read — no scheduler node
+                // generation to attest; the template serves
+                // this caller, the persist declines (an entry
+                // without a rail cannot be validated by the
+                // scheduler-backed readers).
+                source_generation: None,
+            };
+            self.compute_template_analysis_if_missing(canonical, &mut snapshot, template_inputs);
         }
         component_meta_trace_custom!(
             "get_raw_analysis_snapshot_result",

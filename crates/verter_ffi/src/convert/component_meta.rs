@@ -206,6 +206,24 @@ pub fn component_meta_analysis_to_ffi_with_resolution(
                         binding_name: entry.binding_name,
                     })
                     .collect(),
+                bindings: component
+                    .bindings
+                    .into_iter()
+                    .map(|binding| FfiComponentBindingUsage {
+                        name: binding.name,
+                        modifiers: binding.modifiers,
+                    })
+                    .collect(),
+                events: component
+                    .events
+                    .into_iter()
+                    .map(|event| FfiComponentEventUsage {
+                        name: event.name,
+                        handler_expression: event.handler_expression,
+                        is_inline: event.is_inline,
+                        modifiers: event.modifiers,
+                    })
+                    .collect(),
             })
             .collect(),
         template_refs: analysis

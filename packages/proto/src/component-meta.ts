@@ -27,7 +27,7 @@ export type ProtoOriginGraph = ProtoRecord<"verter.v1.OriginGraph"> & RawOriginG
 export type ProtoOriginNode = ProtoRecord<"verter.v1.OriginNode"> & RawOriginNode;
 export type ProtoOriginEdge = ProtoRecord<"verter.v1.OriginEdge"> & RawOriginEdge;
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 const PRIMITIVE_STRING = 1;
 const PRIMITIVE_UNDEFINED = 11;
 const OBJECT_MEMBER_PROPERTY = 1;

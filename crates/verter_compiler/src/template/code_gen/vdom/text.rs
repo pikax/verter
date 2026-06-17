@@ -154,8 +154,6 @@ pub fn process_text<'alloc>(
         kind,
         condition: None,
         condition_prefix: None,
-        condition_expr_start: None,
-        condition_binding_prefix_len: 0,
     })
 }
 

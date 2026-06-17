@@ -250,7 +250,7 @@ export type Button = ComponentConfig<typeof theme, AppConfig, 'variants'>
         canonical_id: Some(no_app_config_canonical.to_string()),
         input_id: no_app_config_canonical.to_string(),
         source: Arc::from("export type Foo = { theme: string };"),
-        file_kind: crate::types::FileKind::NonSfc,
+        file_language: crate::types::FileLanguage::script_ts(),
         aliases: vec![],
     });
     let _ = host.analyze_with_audit(no_app_config_canonical);
@@ -315,7 +315,7 @@ export type Button = ComponentConfig<typeof theme, AppConfig, 'variants'>
         canonical_id: Some(no_app_config_canonical.to_string()),
         input_id: no_app_config_canonical.to_string(),
         source: Arc::from("export interface AppConfig { theme: string };"),
-        file_kind: crate::types::FileKind::NonSfc,
+        file_language: crate::types::FileLanguage::script_ts(),
         aliases: vec![],
     });
     let _ = host.analyze_with_audit(no_app_config_canonical);

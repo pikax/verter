@@ -203,7 +203,7 @@ fn collect_vfor_left_local_spans(expr: &Expression<'_>, locals: &mut Vec<Span>) 
 /// Returns spans instead of string references to avoid self-referential struct issues.
 fn extract_vfor_bindings_internal(
     result: &VForParseResult<'_>,
-    source: &str,
+    input: &str,
     ignored_extra: &[&str],
 ) -> (Vec<Span>, Vec<Span>) {
     let mut locals = Vec::new();
@@ -214,10 +214,11 @@ fn extract_vfor_bindings_internal(
         collect_vfor_left_local_spans(left, &mut locals);
     }
 
-    // Build ignored set from local names (need the actual strings to filter references)
+    // Build ignored set from local names (need the actual strings to filter
+    // references). The result's spans are file-relative, so they slice `input`.
     let mut ignored: FxHashSet<&[u8]> = locals
         .iter()
-        .map(|span| span.slice(source).as_bytes())
+        .map(|span| span.slice(input).as_bytes())
         .collect();
 
     if !ignored_extra.is_empty() {
@@ -270,7 +271,7 @@ fn extract_vfor_bindings_internal(
 pub fn parse_vfor_sliced<'a>(
     allocator: &'a Allocator,
     span: Span,
-    input: &str,
+    input: &'a str,
     source_type: SourceType,
 ) -> VForParseResult<'a> {
     if span.start >= span.end {
@@ -320,21 +321,18 @@ pub fn parse_vfor_sliced<'a>(
         }
     };
 
-    // Split into left and right parts
+    // Split into left and right parts. Both are borrowed slices of `input`
+    // (lifetime `'a`), so they feed the parser directly — no arena copy.
     let left_str = &source[..separator_pos];
     let right_start = separator_pos + 4; // " of " or " in " is 4 bytes
     let right_str = &source[right_start..];
 
-    // Allocate strings in the allocator for lifetime safety
-    let left_alloc = allocator.alloc_str(left_str);
-    let right_alloc = allocator.alloc_str(right_str);
-
     // Parse left side as expression
-    let left_parser = Parser::new(allocator, left_alloc, source_type);
+    let left_parser = Parser::new(allocator, left_str, source_type);
     let left_result = left_parser.parse_expression();
 
     // Parse right side as expression
-    let right_parser = Parser::new(allocator, right_alloc, source_type);
+    let right_parser = Parser::new(allocator, right_str, source_type);
     let right_result = right_parser.parse_expression();
 
     // The right expression offset within the v-for substring
@@ -392,7 +390,7 @@ pub fn parse_vfor_sliced<'a>(
 /// ```
 pub fn parse_vfor<'a>(
     allocator: &'a Allocator,
-    source: &str,
+    source: &'a str,
     source_type: SourceType,
 ) -> VForParseResult<'a> {
     parse_vfor_sliced(
@@ -431,53 +429,20 @@ pub fn extract_vfor_positions(bytes: &[u8], start: u32, end: u32) -> Option<(u32
 pub fn parse_vfor_with_bindings_sliced<'a>(
     allocator: &'a Allocator,
     span: Span,
-    input: &str,
+    input: &'a str,
     source_type: SourceType,
     ignored: &[&str],
 ) -> VForWithBindings<'a> {
-    if span.start >= span.end {
-        let result = parse_vfor_sliced(allocator, span, input, source_type);
-        return VForWithBindings {
-            result,
-            locals: Vec::new(),
-            references: Vec::new(),
-        };
-    }
+    // `parse_vfor_sliced` returns file-relative spans for the left and right
+    // expressions, so bindings are collected against `input` directly in a single
+    // pass — no re-slice, no re-parse, no per-span shift.
+    let result = parse_vfor_sliced(allocator, span, input, source_type);
 
-    let source = &input[span.start as usize..span.end as usize];
-
-    // Parse with substring — result has substring-relative spans so that
-    // extract_vfor_bindings_internal can use span.slice(source) correctly.
-    let mut result = parse_vfor(allocator, source, source_type);
-
-    // Extract bindings while spans are still substring-relative
-    let (mut locals, mut references) = if result.has_left_errors() || result.has_right_errors() {
+    let (locals, references) = if result.has_left_errors() || result.has_right_errors() {
         (Vec::new(), Vec::new())
     } else {
-        extract_vfor_bindings_internal(&result, source, ignored)
+        extract_vfor_bindings_internal(&result, input, ignored)
     };
-
-    // Adjust everything to file-relative
-    if span.start > 0 {
-        if let Some(left) = &mut result.left {
-            adjust_expression_spans(left, span.start);
-        }
-        if let Some(right) = &mut result.right {
-            adjust_expression_spans(right, span.start);
-        }
-        adjust_diagnostics_spans(&mut result.left_errors, span.start);
-        adjust_diagnostics_spans(&mut result.right_errors, span.start);
-        result.left_offset += span.start;
-        result.right_offset += span.start;
-        for s in &mut locals {
-            s.start += span.start;
-            s.end += span.start;
-        }
-        for s in &mut references {
-            s.start += span.start;
-            s.end += span.start;
-        }
-    }
 
     VForWithBindings {
         result,
@@ -499,7 +464,7 @@ pub fn parse_vfor_with_bindings_sliced<'a>(
 /// ```
 pub fn parse_vfor_with_bindings<'a>(
     allocator: &'a Allocator,
-    source: &str,
+    source: &'a str,
     source_type: SourceType,
     ignored: &[&str],
 ) -> VForWithBindings<'a> {

@@ -94,7 +94,7 @@ fn invalid_delimiters_count() {
 
 #[test]
 fn invalid_file_kind() {
-    let err = ffi_file_kind_to_host(Some("binary")).unwrap_err();
+    let err = ffi_file_language_to_host(Some("binary"), Some("/a.vue")).unwrap_err();
     assert!(matches!(err, FfiConversionError::InvalidFileKind(_)));
 }
 
@@ -457,15 +457,85 @@ fn component_meta_ffi_exposes_root_info_summary() {
 }
 
 #[test]
-fn file_kind_vue_default() {
-    let kind = ffi_file_kind_to_host(None).unwrap();
-    assert_eq!(kind, host::FileKind::VueSfc);
+fn absent_kind_classifies_vue_path_as_vue() {
+    let language = ffi_file_language_to_host(None, Some("/src/App.vue")).unwrap();
+    assert_eq!(language, host::FileLanguage::vue());
+}
+
+#[test]
+fn absent_kind_classifies_ts_path_as_script() {
+    // DISCRIMINATING vs the retired silent default: an absent kind used
+    // to produce the Vue carrier REGARDLESS of the path; it now
+    // classifies through the static registry.
+    let language = ffi_file_language_to_host(None, Some("/src/util.ts")).unwrap();
+    assert_eq!(
+        language,
+        host::FileLanguage::script(host::ScriptSourceType::Ts)
+    );
+    assert!(
+        !language.is_vue(),
+        ".ts must NOT classify as the Vue carrier"
+    );
+}
+
+#[test]
+fn absent_kind_without_path_is_a_typed_error() {
+    let err = ffi_file_language_to_host(None, None).unwrap_err();
+    assert!(matches!(err, FfiConversionError::MissingFileLanguagePath));
+}
+
+#[test]
+fn svelte_kind_maps_to_the_svelte_carrier_row() {
+    // Paired with the `.svelte` registry row (D-ao): the accepted string
+    // names a registered row; the row has no carrier implementation, so
+    // dispatch serves the typed unsupported-language state.
+    assert_eq!(
+        ffi_file_language_to_host(Some("svelte"), None).unwrap(),
+        host::FileLanguage::svelte()
+    );
+    assert_eq!(
+        ffi_file_language_to_host(None, Some("/src/Box.svelte")).unwrap(),
+        host::FileLanguage::svelte()
+    );
+}
+
+#[test]
+fn gated_extension_requires_explicit_kind_at_the_ffi_boundary() {
+    use verter_session::{
+        CapabilityId, FileLanguage, FrameworkAdapterId, GatedCandidate, LanguageRow,
+    };
+    // FFI-time classification is STATIC-ONLY: it can never consult the
+    // project capability snapshot, so a gated-candidate extension can
+    // NEVER classify as its candidate by inference here — explicit kind
+    // string or typed error.
+    let registry = verter_session::LanguageRegistry::new(vec![
+        LanguageRow::fixed("vue", FileLanguage::vue()),
+        LanguageRow::gated(
+            "html",
+            GatedCandidate {
+                capability: CapabilityId::new("fixture-capability"),
+                candidate: FileLanguage::FrameworkTemplate {
+                    adapter_id: FrameworkAdapterId::new("fixture-framework"),
+                    owner_hint: None,
+                },
+                fallback: FileLanguage::script_ts(),
+            },
+        ),
+    ]);
+    let err = classify_ffi_file_language(&registry, None, Some("/src/page.html")).unwrap_err();
+    assert!(matches!(
+        err,
+        FfiConversionError::GatedFileLanguageRequiresExplicitKind(_)
+    ));
 }
 
 #[test]
 fn file_kind_non_sfc() {
-    let kind = ffi_file_kind_to_host(Some("non_sfc")).unwrap();
-    assert_eq!(kind, host::FileKind::NonSfc);
+    let language = ffi_file_language_to_host(Some("non_sfc"), None).unwrap();
+    assert_eq!(
+        language,
+        host::FileLanguage::script(host::ScriptSourceType::Ts)
+    );
 }
 
 #[test]
@@ -732,9 +802,9 @@ fn profile_delimiters_empty_vec() {
 fn file_kind_all_vue_variants() {
     for v in &["vue", "sfc", "vue_sfc", "VUE", "SFC", "Vue_Sfc"] {
         assert_eq!(
-            ffi_file_kind_to_host(Some(v)).unwrap(),
-            host::FileKind::VueSfc,
-            "'{v}' should map to VueSfc"
+            ffi_file_language_to_host(Some(v), None).unwrap(),
+            host::FileLanguage::vue(),
+            "'{v}' should map to the Vue carrier"
         );
     }
 }
@@ -743,9 +813,9 @@ fn file_kind_all_vue_variants() {
 fn file_kind_all_non_sfc_variants() {
     for v in &["non_sfc", "text", "file", "NON_SFC", "TEXT", "FILE"] {
         assert_eq!(
-            ffi_file_kind_to_host(Some(v)).unwrap(),
-            host::FileKind::NonSfc,
-            "'{v}' should map to NonSfc"
+            ffi_file_language_to_host(Some(v), None).unwrap(),
+            host::FileLanguage::script(host::ScriptSourceType::Ts),
+            "'{v}' should map to a plain script"
         );
     }
 }
@@ -805,7 +875,7 @@ fn upsert_basic() {
     assert_eq!(result.canonical_id, Some("/src/Comp.vue".to_string()));
     assert_eq!(result.input_id, "src/Comp.vue");
     assert_eq!(&*result.source, "<template>hi</template>");
-    assert_eq!(result.file_kind, host::FileKind::VueSfc);
+    assert_eq!(result.file_language, host::FileLanguage::vue());
     assert!(result.aliases.is_empty());
 }
 
@@ -820,7 +890,10 @@ fn upsert_with_aliases_and_non_sfc() {
     };
     let result = ffi_upsert_to_host(ffi).unwrap();
     assert!(result.canonical_id.is_none());
-    assert_eq!(result.file_kind, host::FileKind::NonSfc);
+    assert_eq!(
+        result.file_language,
+        host::FileLanguage::script(host::ScriptSourceType::Ts)
+    );
     assert_eq!(result.aliases, vec!["@/types", "~/types"]);
 }
 
@@ -1089,7 +1162,7 @@ fn update_result_full_round_trip() {
                 canonical_id: Some("/src/dynamic.ts".to_string()),
                 input_id: "/src/dynamic.ts".to_string(),
                 source: std::sync::Arc::from("const mod = import('./Foo.vue');"),
-                file_kind: host::FileKind::NonSfc,
+                file_language: host::FileLanguage::script_ts(),
                 aliases: Vec::new(),
             })
             .expect("upsert should extract module references")
@@ -1171,7 +1244,7 @@ fn host_update_to_ffi_export_signatures() {
             source: std::sync::Arc::from(
                 "export { default as Button } from './Button.vue';\nexport type { Props } from './types';",
             ),
-            file_kind: host::FileKind::NonSfc,
+            file_language: host::FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .unwrap();
@@ -1207,7 +1280,7 @@ fn host_update_to_ffi_export_signatures_local_exports() {
             canonical_id: Some("/src/utils.ts".to_string()),
             input_id: "/src/utils.ts".to_string(),
             source: std::sync::Arc::from("export function greet() {}\nexport type Color = string;"),
-            file_kind: host::FileKind::NonSfc,
+            file_language: host::FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .unwrap();

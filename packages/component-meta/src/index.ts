@@ -25,6 +25,8 @@ export type {
   JsdocTag,
   ComponentPropUsage,
   ComponentUsage,
+  ComponentBindingUsage,
+  ComponentEventUsage,
   TemplateRefMeta,
   ImportMeta,
   BindingMeta,

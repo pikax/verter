@@ -108,7 +108,7 @@ fn run_pipeline(source: &str) {
 
     if let Some(ast) = &ast {
         let alloc = Allocator::default();
-        let result = parse_template_expressions(ast, source, &alloc, SourceType::tsx());
+        let result = parse_template_expressions(ast, source, &alloc, SourceType::tsx(), false);
         std::hint::black_box(result);
     }
 

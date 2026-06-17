@@ -62,8 +62,10 @@ fn fixture(name: &str) -> String {
 }
 
 fn empty_external(
-) -> Arc<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource> {
-    Arc::new(verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default())
+) -> Arc<verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource> {
+    Arc::new(
+        verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(),
+    )
 }
 
 fn build_indexed_with_source(raw: &str, whole_hash: [u8; 16]) -> Arc<IndexedReady> {
@@ -106,6 +108,7 @@ fn insert_artifact_from_fixture(
         content_hash,
         parse_env_hash: [0u8; 16],
         parser_version: CURRENT_PARSER_VERSION,
+        file_language_id: FileArtifactKey::derived_file_language_id(canonical),
     };
     store.insert_artifacts(key.clone(), artifacts);
     key
@@ -134,6 +137,7 @@ fn insert_artifact_with_raw_source(
         content_hash,
         parse_env_hash: [0u8; 16],
         parser_version: CURRENT_PARSER_VERSION,
+        file_language_id: FileArtifactKey::derived_file_language_id(canonical),
     };
     store.insert_artifacts(key.clone(), artifacts);
     key
@@ -693,12 +697,10 @@ fn edit_augmenting_file_invalidates_consumer() {
         }
         fn validates(&self, fact: &FactVersionRef) -> bool {
             match fact {
-                FactVersionRef::FileWholeHash { canonical_id, hash } => {
-                    if canonical_id == &self.edited_canonical {
-                        hash == &self.new_hash
-                    } else {
-                        true
-                    }
+                FactVersionRef::FileWholeHash { canonical_id, hash }
+                    if canonical_id == &self.edited_canonical =>
+                {
+                    hash == &self.new_hash
                 }
                 // RouteSurface facts validate trivially in this test.
                 _ => true,
@@ -795,15 +797,11 @@ fn edit_unrelated_file_does_not_invalidate_consumer() {
         }
         fn validates(&self, fact: &FactVersionRef) -> bool {
             match fact {
-                FactVersionRef::FileWholeHash { canonical_id, hash } => {
+                FactVersionRef::FileWholeHash { canonical_id, hash }
                     // The augmenter's hash MUST still match (no edit to it).
-                    if canonical_id == &self.aug_canonical {
+                    if canonical_id == &self.aug_canonical => {
                         hash == &self.aug_hash
-                    } else {
-                        // Unrelated files default-accept.
-                        true
                     }
-                }
                 _ => true,
             }
         }
@@ -1157,6 +1155,7 @@ fn effective_export_set_session_view_stitches_overlay_augmenter() {
         content_hash: [99u8; 16],
         parse_env_hash: overlay_discriminator,
         parser_version: CURRENT_PARSER_VERSION,
+        file_language_id: FileArtifactKey::derived_file_language_id("/aug-overlay.ts"),
     };
     store.insert_artifacts(
         overlay_key,
@@ -1304,6 +1303,7 @@ fn session_overlay_augmenter_isolated_from_base_index() {
         content_hash: [99u8; 16],
         parse_env_hash: overlay_discriminator,
         parser_version: CURRENT_PARSER_VERSION,
+        file_language_id: FileArtifactKey::derived_file_language_id("/aug-overlay.ts"),
     };
     store.insert_artifacts(
         overlay_key,
@@ -1936,6 +1936,7 @@ fn seed_base_and_overlay_augmenters(
         content_hash: [99u8; 16],
         parse_env_hash: overlay_discriminator,
         parser_version: CURRENT_PARSER_VERSION,
+        file_language_id: FileArtifactKey::derived_file_language_id("/aug-overlay.ts"),
     };
     store.insert_artifacts(
         overlay_key,
@@ -2465,6 +2466,9 @@ fn relative_augmenter_resolver_runs_off_artifacts_guard() {
                 },
                 parse_env_hash: [0u8; 16],
                 parser_version: 1,
+                file_language_id: FileArtifactKey::derived_file_language_id(
+                    format!("/dir/reentrant-{n}-{j}.ts").as_str(),
+                ),
             };
             store.insert_artifacts(key, Arc::clone(&reentrant_payload));
         }
@@ -2519,5 +2523,142 @@ fn relative_augmenter_resolver_runs_off_artifacts_guard() {
         "a ResolvedRelativeCanonical target whose canonical does NOT \
          match the augmenter's resolved relative specifier MUST yield \
          an empty augmenter set"
+    );
+}
+
+// ────────────────────────────────────────────────────────────────
+// parser_version invalidation — a base augmenter stamped at a STALE
+// parser_version is EXCLUDED from the stitched augmentation surface.
+//
+// The augmentation-index base scan filters candidates on `key.is_base()`,
+// and `is_base()` is `parse_env_hash == BASE_PARSE_ENV_HASH &&
+// parser_version == CURRENT_PARSER_VERSION`. So an artifact whose
+// `parser_version` is stale (a pre-bump entry that survived in the store)
+// is NOT a base candidate and contributes ZERO augmenters, even though its
+// `parse_env_hash` is the base sentinel and its source carries a matching
+// `declare module "vue" {}`.
+//
+// - **Against a hypothetical regression** where `is_base()` ignored
+//   `parser_version` (folded only `parse_env_hash`): BOTH the
+//   current-version augmenter AND the stale-version augmenter would pass the
+//   base filter, the scan would return TWO entries, and the
+//   `assert_eq!(canonicals, vec!["/aug-current.ts"])` below would FAIL.
+// - **Current tree**: the stale-version augmenter is excluded, the scan
+//   returns exactly the current-version augmenter — PASSES.
+// ────────────────────────────────────────────────────────────────
+
+/// Insert a file artifact stamped with an explicit `parser_version`
+/// (every other dimension matches the base helper). Used to plant a
+/// stale-parser-version augmenter the base scan must exclude.
+fn insert_artifact_at_parser_version(
+    store: &FileArtifactStore,
+    canonical: &str,
+    fixture_name: &str,
+    content_hash: [u8; 16],
+    parser_version: u32,
+) -> FileArtifactKey {
+    let raw = fixture(fixture_name);
+    let indexed = build_indexed_with_source(&raw, content_hash);
+    let emission = emit_parse_facts(&indexed);
+    let parse_stable_hash = verter_session::parse_stable_hash::compute_parse_stable_hash(&indexed);
+    let artifacts = Arc::new(FileArtifacts {
+        indexed,
+        facts: Arc::new(emission.facts),
+        parsed_edges: Arc::new(verter_session::file_artifact_store::ParsedEdges::empty()),
+        parse_stable_hash,
+        augmentations: Arc::new(emission.augmentations),
+    });
+    let key = FileArtifactKey {
+        canonical: Arc::from(canonical),
+        content_hash,
+        parse_env_hash: [0u8; 16],
+        parser_version,
+        file_language_id: FileArtifactKey::derived_file_language_id(canonical),
+    };
+    store.insert_artifacts(key.clone(), artifacts);
+    key
+}
+
+#[test]
+fn stale_parser_version_augmenter_excluded_current_version_contributes() {
+    // Stamp the stale augmenter one parser version BELOW current
+    // (`CURRENT_PARSER_VERSION` is >= 1, so this never underflows — a 0
+    // current version would itself fail to compile this subtraction).
+    let stale_parser_version = CURRENT_PARSER_VERSION - 1;
+
+    let store = FileArtifactStore::new();
+
+    // (a) current-version augmenter — a true base candidate.
+    let current_key = insert_artifact_from_fixture(
+        &store,
+        "/aug-current.ts",
+        "module_augmentation_external.ts",
+        [71u8; 16],
+    );
+    assert_eq!(
+        current_key.parser_version, CURRENT_PARSER_VERSION,
+        "the current-version augmenter MUST be stamped CURRENT_PARSER_VERSION"
+    );
+
+    // (b) stale-version augmenter — same base `parse_env_hash` sentinel,
+    // same matching `declare module "vue" {}` source, DIFFERENT canonical,
+    // but stamped at the PRIOR parser version. It is NOT `is_base()`.
+    let stale_key = insert_artifact_at_parser_version(
+        &store,
+        "/aug-stale.ts",
+        "module_augmentation_external.ts",
+        [72u8; 16],
+        stale_parser_version,
+    );
+    assert_ne!(
+        stale_key.parser_version, CURRENT_PARSER_VERSION,
+        "the stale augmenter MUST carry a non-current parser_version"
+    );
+    // The two artifacts coexist in the store (the stale one is not drained
+    // by the current-version insert — distinct content hash + version key).
+    assert!(
+        store.get_artifacts(&current_key).is_some(),
+        "current-version augmenter MUST be live in the store"
+    );
+    assert!(
+        store.get_artifacts(&stale_key).is_some(),
+        "stale-version augmenter MUST also be live in the store (distinct key)"
+    );
+
+    let target = AugmentationTargetKind::ExternalSpecifier(InternedSpecifier::from("vue"));
+    let base_key = AugmentationTargetKey {
+        project_identity: ProjectIdentity([1u8; 16]),
+        resolve_env_hash: [2u8; 16],
+        lib_env_hash: [3u8; 16],
+        population: verter_session::file_artifact_store::AugmentationPopulation::Base,
+        target,
+    };
+
+    let base_set = store.ensure_augmentation_index_populated(&base_key, |_, _| None, None);
+    let canonicals: Vec<&str> = base_set
+        .entries
+        .iter()
+        .map(|e| e.canonical().as_ref())
+        .collect();
+
+    // DISCRIMINATING assertion: ONLY the current-version augmenter
+    // contributes. A regression ignoring parser_version would also admit
+    // `/aug-stale.ts` and this exact-vector equality would fail.
+    assert_eq!(
+        canonicals,
+        vec!["/aug-current.ts"],
+        "the stale-parser-version augmenter MUST be EXCLUDED from the base \
+         augmentation surface; only the CURRENT_PARSER_VERSION augmenter \
+         contributes"
+    );
+    assert_eq!(
+        base_set.entries.len(),
+        1,
+        "exactly one augmenter (the current-version one) contributes"
+    );
+    assert!(
+        !canonicals.contains(&"/aug-stale.ts"),
+        "the stale-parser-version augmenter contributes ZERO to the stitched \
+         surface"
     );
 }

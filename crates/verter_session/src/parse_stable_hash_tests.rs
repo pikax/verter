@@ -25,8 +25,10 @@ use crate::resolver_core::shallow_file_state::{ShallowFileState, ShallowImportRe
 use crate::types::MetaProvenance;
 
 fn empty_external(
-) -> Arc<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource> {
-    Arc::new(verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default())
+) -> Arc<verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource> {
+    Arc::new(
+        verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(),
+    )
 }
 
 /// A no-op import resolver — these fixtures declare no cross-file edges.

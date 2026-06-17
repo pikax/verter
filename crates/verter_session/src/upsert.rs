@@ -163,19 +163,8 @@ pub(crate) fn build_upsert_result(
         .collect();
     let module_references = data
         .module_references
-        .into_iter()
-        .map(|reference| ScriptModuleReference {
-            syntax: reference.syntax,
-            semantics: reference.semantics,
-            is_type_only: reference.is_type_only,
-            raw_text: reference.raw_text,
-            literal_specifier: reference.literal_specifier,
-            finite_specifiers: reference.finite_specifiers,
-            static_prefix: reference.static_prefix,
-            analyzability: reference.analyzability,
-            span: reference.span,
-            expr_span: reference.expr_span,
-        })
+        .iter()
+        .map(ScriptModuleReference::from)
         .collect();
 
     Ok(HostUpdateResult {
