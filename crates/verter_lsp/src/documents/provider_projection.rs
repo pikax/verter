@@ -17,6 +17,8 @@
 //! [`ProviderPositionMapper`], so every LSP feature maps positions uniformly
 //! regardless of which projection produced the buffer.
 
+use std::sync::Arc;
+
 use verter_span::{LspPosition, TsPosition};
 
 use super::position_map::{GeneratedMapped, PositionMapper, RunId, SourceMapped};
@@ -29,12 +31,15 @@ use super::position_map::{GeneratedMapped, PositionMapper, RunId, SourceMapped};
 #[derive(Clone)]
 pub enum DocumentProviderProjection {
     /// A framework carrier projecting into an IDE TSX file via a source map.
-    /// The source-map-backed [`PositionMapper`] is boxed (it is the large
-    /// variant — keeping the enum small so an `Option<DocumentProviderProjection>`
-    /// field stays cheap to move).
+    /// The source-map-backed [`PositionMapper`] is held behind an [`Arc`]: it
+    /// is the large variant (it owns the `OwnedSourceMap` plus three precomputed
+    /// lookup tables), and the hot read path (`get_position_mapper` →
+    /// [`DocumentProviderProjection::mapper`]) hands out a CHEAP handle clone per
+    /// request instead of deep-copying the whole mapper. Sharing the allocation
+    /// also keeps an `Option<DocumentProviderProjection>` field cheap to move.
     CarrierIde {
-        /// The source-map-backed position mapper.
-        mapper: Box<PositionMapper>,
+        /// The shared source-map-backed position mapper.
+        mapper: Arc<PositionMapper>,
     },
     /// A non-component rune module projecting into its own-path provider buffer
     /// (`<rune prelude> + <rewritten module bytes>`).
@@ -49,7 +54,7 @@ impl DocumentProviderProjection {
     #[must_use]
     pub fn carrier_ide(mapper: PositionMapper) -> Self {
         DocumentProviderProjection::CarrierIde {
-            mapper: Box::new(mapper),
+            mapper: Arc::new(mapper),
         }
     }
 
@@ -90,8 +95,11 @@ impl DocumentProviderProjection {
 /// agnostic.
 #[derive(Clone)]
 pub enum ProviderPositionMapper {
-    /// Source-map-backed mapping (carrier IDE TSX). Boxed: the large variant.
-    SourceMap(Box<PositionMapper>),
+    /// Source-map-backed mapping (carrier IDE TSX). The large variant: the
+    /// `PositionMapper` is held behind an [`Arc`] so cloning this mapper (the
+    /// per-request read path) shares ONE allocation instead of deep-copying the
+    /// source map and its precomputed lookup tables.
+    SourceMap(Arc<PositionMapper>),
     /// Line-only rewrite-aware mapping (self-file rune module).
     SelfFile(SelfFileProviderMapper),
 }
@@ -100,7 +108,7 @@ impl ProviderPositionMapper {
     /// Wrap a source-map-backed [`PositionMapper`] as a provider mapper.
     #[must_use]
     pub fn source_map(mapper: PositionMapper) -> Self {
-        ProviderPositionMapper::SourceMap(Box::new(mapper))
+        ProviderPositionMapper::SourceMap(Arc::new(mapper))
     }
 
     /// Map a generated provider-buffer position back to the user-source

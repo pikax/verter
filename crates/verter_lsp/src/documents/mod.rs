@@ -1230,6 +1230,56 @@ mod tests {
         );
     }
 
+    /// The hot read path hands out a SHARED source-map mapper: two
+    /// `get_position_mapper` results for the SAME carrier document must point at
+    /// ONE `PositionMapper` allocation, not two deep copies of its
+    /// `OwnedSourceMap` + precomputed lookup tables.
+    ///
+    /// Discriminating: with the mapper owned behind a `Box`, `.mapper()`
+    /// deep-clones the whole `PositionMapper` pointee on every call, so the two
+    /// results point at DISTINCT allocations and the address comparison FAILS.
+    /// With the mapper owned behind an `Arc`, `.mapper()` clones the handle and
+    /// both results share ONE allocation, so the comparison PASSES.
+    #[test]
+    fn get_position_mapper_shares_one_allocation() {
+        let host = Arc::new(verter_session::VerterHost::new_standalone(
+            verter_session::HostConfig::default(),
+        ));
+        let registry = DocumentRegistry::new(host);
+        let uri: Uri = "file:///x/Comp.svelte".parse().expect("uri");
+
+        let _ = registry.did_open(&TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "svelte".to_string(),
+            version: 1,
+            text: "<script lang=\"ts\">let count = 0;</script>\n<div>{count}</div>".to_string(),
+        });
+
+        // Two independent reads of the unified mapper for the same document.
+        let first = registry
+            .get_position_mapper(&uri)
+            .expect("a .svelte carrier must expose a source-map mapper");
+        let second = registry
+            .get_position_mapper(&uri)
+            .expect("a .svelte carrier must expose a source-map mapper");
+
+        // Both reads project the same carrier into its IDE TSX, so both are the
+        // SourceMap arm. Compare the address of the underlying `PositionMapper`
+        // pointee: a shared handle yields one allocation, a per-call deep clone
+        // yields two.
+        let (ProviderPositionMapper::SourceMap(a), ProviderPositionMapper::SourceMap(b)) =
+            (&first, &second)
+        else {
+            panic!("a .svelte carrier mapper must be the SourceMap projection");
+        };
+        assert!(
+            std::ptr::eq(a.as_ref(), b.as_ref()),
+            "two get_position_mapper reads must share ONE PositionMapper allocation \
+             (the read path hands out a cheap handle clone, not a deep copy of the \
+             source map + lookup tables)"
+        );
+    }
+
     /// A `.svelte.ts` rune module is NOT a carrier; did_open must build a
     /// SELF-FILE projection whose mapper offsets the user-source line by the
     /// rune prelude line count. Without the offset wiring, a source position
