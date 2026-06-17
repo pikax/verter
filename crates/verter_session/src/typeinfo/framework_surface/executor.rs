@@ -467,8 +467,8 @@ impl ExecutorResolveCtx<'_> {
 
     /// Resolve ONE planned demand through the shared engine.
     ///
-    /// EXHAUSTIVE match over the closed 5-variant [`PlannedDemand`] taxonomy —
-    /// NO wildcard arm. Adding a variant breaks this match (the closed-vocabulary
+    /// EXHAUSTIVE match over the closed [`PlannedDemand`] taxonomy — NO wildcard
+    /// arm. Adding a variant breaks this match (the closed-vocabulary
     /// discipline).
     fn resolve_demand(
         &self,
@@ -477,9 +477,6 @@ impl ExecutorResolveCtx<'_> {
         demand: PlannedDemand,
     ) -> ResolvedDemand {
         match demand {
-            PlannedDemand::PublicTypeInstance { canonical } => {
-                ResolvedDemand::PublicType(self.resolve_public_type(&canonical))
-            }
             PlannedDemand::MacroPayload { owner, selector } => ResolvedDemand::MacroPayload(
                 self.resolve_macro_payload(&owner, requested_kind, &selector),
             ),
@@ -494,23 +491,6 @@ impl ExecutorResolveCtx<'_> {
                     self.host, self.ctx, &owner, source,
                 ),
             ),
-        }
-    }
-
-    /// Resolve a component's public instance type through the relocated Vue
-    /// public-type delegate (the shared `Instantiate` dispatch).
-    fn resolve_public_type(
-        &self,
-        canonical: &str,
-    ) -> ResolvedOutcome<crate::typeinfo::surface::TypeInfoSurface> {
-        match self
-            .host
-            .resolve_vue_public_type(canonical, TypeInfoQueryLevel::PublicType)
-        {
-            Some(surface) => ResolvedOutcome::Resolved(surface),
-            // No synthesized public instance (a plain `.ts`, or a `.vue` with no
-            // type-based macros) — the selector has no public surface.
-            None => ResolvedOutcome::Missing,
         }
     }
 

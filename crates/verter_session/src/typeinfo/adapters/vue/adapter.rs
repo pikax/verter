@@ -84,14 +84,7 @@ impl FrameworkSurfaceAdapter for VueFrameworkAdapter {
         requested: &[FrameworkSurfaceKind],
     ) -> FrameworkSurfacePlan {
         let owner = Arc::clone(&selector.canonical);
-        let mut items = Vec::with_capacity(requested.len() + 1);
-        // The public instance type the synthesized `default` projects through.
-        items.push(PlannedResolve {
-            kind: FrameworkSurfaceKind::Props,
-            demand: PlannedDemand::PublicTypeInstance {
-                canonical: Arc::clone(&owner),
-            },
-        });
+        let mut items = Vec::with_capacity(requested.len());
         // One macro-payload demand per requested macro surface kind. Planning is
         // KIND-PRIMARY: it has no snapshot access, so it never fabricates a
         // macro index — `macro_index: None` tells the executor to select the
@@ -119,9 +112,9 @@ impl FrameworkSurfaceAdapter for VueFrameworkAdapter {
     ) -> NormalizedSurfaces {
         let mut surfaces = Vec::new();
         for item in resolved.items {
-            // Only macro-payload resolutions carry a per-kind DTO bundle; the
-            // public-instance resolution feeds the synthesized-default surface,
-            // not a wire surface kind, so it is not normalized here.
+            // Vue plans only macro-payload demands, and only a macro-payload
+            // resolution carries a per-kind DTO bundle; any other resolved-demand
+            // arm in the closed taxonomy is not a Vue wire surface and is skipped.
             let ResolvedDemand::MacroPayload(payload) = item.result else {
                 continue;
             };

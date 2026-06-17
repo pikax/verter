@@ -1,9 +1,9 @@
 #![deny(missing_docs)]
 //! The closed framework-surface PLAN + RESOLVED vocabulary.
 //!
-//! An adapter PLANS its surfaces as typed [`PlannedDemand`] — a CLOSED five-arm
-//! taxonomy carrying ONLY typed demand data (a canonical id, a typed macro
-//! selector, a stable node handle, a path + projection mode). No arm carries
+//! An adapter PLANS its surfaces as typed [`PlannedDemand`] — a CLOSED four-arm
+//! taxonomy carrying ONLY typed demand data (a typed macro selector, a stable
+//! node handle, a path + projection mode, a Svelte source family). No arm carries
 //! source text, raw byte ranges standing in for source, OXC handles, closures,
 //! or raw semantic query keys (a `Custom`/`Raw` arm is forbidden — the closed
 //! taxonomy is the typed-demand discipline). The executor resolves each
@@ -26,9 +26,9 @@ use crate::typeinfo::surface::TypeInfoSurface;
 /// across a generation flip; a plan demand is data the executor resolves at a
 /// stable point, so it carries the OWNER canonical + the node's stable identity
 /// rather than a live graph id. Vue's `plan_surfaces` only emits
-/// [`PlannedDemand::PublicTypeInstance`] / [`PlannedDemand::MacroPayload`], so
-/// the handle is the substrate the path/shallow demands need for later
-/// framework verticals; it never carries a live generation-scoped id.
+/// [`PlannedDemand::MacroPayload`], so the handle is the substrate the
+/// path/shallow demands need for later framework verticals; it never carries a
+/// live generation-scoped id.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeNodeHandle {
     /// The canonical id of the file owning the referenced node.
@@ -103,12 +103,6 @@ pub struct MacroPayloadSelector {
 /// closed-vocabulary guard).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlannedDemand {
-    /// Instantiate a component's public instance type (the synthesized
-    /// `{ $props, $emit, $slots }` surface for a carrier component).
-    PublicTypeInstance {
-        /// The component's canonical id.
-        canonical: Arc<str>,
-    },
     /// Resolve one macro's payload surface.
     MacroPayload {
         /// The owner component's canonical id.
@@ -168,8 +162,6 @@ pub struct FrameworkSurfacePlan {
 /// unsupported distinction).
 #[derive(Debug, Clone, PartialEq)]
 pub enum ResolvedDemand {
-    /// A resolved public-instance surface.
-    PublicType(ResolvedOutcome<TypeInfoSurface>),
     /// A resolved macro payload.
     MacroPayload(ResolvedMacroPayload),
     /// A resolved path projection.
@@ -229,9 +221,6 @@ mod tests {
     #[test]
     fn planned_demand_is_closed_no_wildcard() {
         let demands = [
-            PlannedDemand::PublicTypeInstance {
-                canonical: Arc::from("/a.vue"),
-            },
             PlannedDemand::MacroPayload {
                 owner: Arc::from("/a.vue"),
                 selector: MacroPayloadSelector {
@@ -261,13 +250,12 @@ mod tests {
         for d in &demands {
             // Exhaustive match, no wildcard — adding a variant breaks this.
             let tag = match d {
-                PlannedDemand::PublicTypeInstance { .. } => 0,
-                PlannedDemand::MacroPayload { .. } => 1,
-                PlannedDemand::PathProjection { .. } => 2,
-                PlannedDemand::ShallowSurface { .. } => 3,
-                PlannedDemand::SvelteSurface { .. } => 4,
+                PlannedDemand::MacroPayload { .. } => 0,
+                PlannedDemand::PathProjection { .. } => 1,
+                PlannedDemand::ShallowSurface { .. } => 2,
+                PlannedDemand::SvelteSurface { .. } => 3,
             };
-            assert!(tag < 5);
+            assert!(tag < 4);
         }
     }
 
