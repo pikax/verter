@@ -6250,6 +6250,131 @@ mod foundations_guards {
                 i += 1;
             }
         }
+        // `D-<letters>` — the framework-adapters plan's dominant block
+        // code-name family (`D-m`, `D-ap`, `D-bk`, `D-bg`, `D-ba`, …),
+        // emitted parenthesised (`(D-m)`) or standalone (`D-bk:`). Shape:
+        // word-boundary `D` + `-` + a run of 1..=3 ASCII LOWERCASE letters
+        // at a trailing word boundary. The discriminators that keep this
+        // from false-flagging legitimate source prose:
+        //   - leading word boundary (the `D` is start-of-line or preceded
+        //     by a non-word byte) → `3D`/`2D`/`fooD-x` do NOT match (the
+        //     `D` is preceded by a digit/letter), and a mid-identifier
+        //     `D` never starts the token;
+        //   - the separator is `-` (hyphen), so the underscore identifier
+        //     forms `D_FLAG` / `D_MAX` (separator `_`) are NOT matched;
+        //   - the tail is 1..=3 LOWERCASE letters bounded by a word
+        //     boundary, so `D-Bus` (uppercase second letter) and a longer
+        //     run like `D-something` (4+ letters) do NOT match — the plan
+        //     code-names are all the short `D-<1..3 lowercase>` form.
+        // Case-sensitive on the leading `D` (the code-name is uppercase);
+        // a lowercase `d-foo` is ordinary kebab-case prose and preserved.
+        {
+            let b = line.as_bytes();
+            let mut i = 0usize;
+            while i < b.len() {
+                if b[i] == b'D' && i + 1 < b.len() && b[i + 1] == b'-' {
+                    let leading_ok =
+                        i == 0 || !(b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_');
+                    if leading_ok {
+                        let mut j = i + 2;
+                        let letter_start = j;
+                        while j < b.len() && b[j].is_ascii_lowercase() {
+                            j += 1;
+                        }
+                        let letters = j - letter_start;
+                        let trailing_word_boundary =
+                            j >= b.len() || !(b[j].is_ascii_alphanumeric() || b[j] == b'_');
+                        if (1..=3).contains(&letters) && trailing_word_boundary {
+                            return true;
+                        }
+                    }
+                }
+                i += 1;
+            }
+        }
+        // `B<digits><lowercase letter>` — the framework-adapters plan's
+        // block ids (`B8c`, `B8e`, `B8h`, `B8a`, `B1a`, `B1b`). Shape:
+        // word-boundary `B` + a run of ASCII digits + exactly one trailing
+        // ASCII LOWERCASE letter at a trailing word boundary. The
+        // discriminators:
+        //   - leading word boundary excludes hex (`0xB8` → preceding `x`)
+        //     and identifier tails (`fooB8a`);
+        //   - the REQUIRED trailing lowercase letter excludes the bare hex
+        //     bytes `0xB5`/`0xB0`/`0xB2` (no trailing lowercase) and the
+        //     `0xB2B2_B2B2` literal (the byte after the digits is `B`,
+        //     uppercase, not lowercase);
+        //   - the trailing word boundary excludes longer identifiers like
+        //     `B8config` (more than one trailing lowercase letter ⇒ the
+        //     byte after the single letter is still a word byte).
+        // Case-sensitive on the leading `B` (the code-name is uppercase).
+        // The bare `B5` codename form (no trailing letter, e.g. `B5 /
+        // D-bk`) is intentionally NOT matched here — it co-occurs with a
+        // `D-<letters>` token on its line and is caught by that scan, so
+        // flagging the bare `B<digit>` form (which collides with hex /
+        // register names) is unnecessary.
+        {
+            let b = line.as_bytes();
+            let mut i = 0usize;
+            while i < b.len() {
+                if b[i] == b'B' {
+                    let leading_ok =
+                        i == 0 || !(b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_');
+                    let mut j = i + 1;
+                    let digit_start = j;
+                    while j < b.len() && b[j].is_ascii_digit() {
+                        j += 1;
+                    }
+                    let has_digits = j > digit_start;
+                    if leading_ok && has_digits && j < b.len() && b[j].is_ascii_lowercase() {
+                        let after_letter = j + 1;
+                        let trailing_word_boundary = after_letter >= b.len()
+                            || !(b[after_letter].is_ascii_alphanumeric()
+                                || b[after_letter] == b'_');
+                        if trailing_word_boundary {
+                            return true;
+                        }
+                    }
+                    // Resume past the `B<digits>` run.
+                    i = j.max(i + 1);
+                    continue;
+                }
+                i += 1;
+            }
+        }
+        // `gap <digit>` — the framework-adapters plan's numbered-gap
+        // markers (`gap 2`, `gap 3`). A SPACE then an ASCII digit after
+        // the `gap` token is the archaeology discriminator; ordinary
+        // prose where `gap` is a common noun (`gap between`, `fills the
+        // gap`, `gap b…`) has a letter (not a digit) after the space and
+        // is preserved. ONLY the space-separated form is matched: the
+        // hyphenated `gap-<digit>` form is DELIBERATELY excluded because
+        // it collides with the Tailwind CSS gap utility class (`gap-1`,
+        // `gap-2`, `md:gap-2`) that appears verbatim in scanned `.vue` /
+        // `.tsx` template + className text — the plan markers never use
+        // the hyphen form. Scanned against the lowercased line so every
+        // capitalisation (including `Gap 2`) trips in one pass;
+        // lowercasing preserves byte indices and word-char-ness, so the
+        // leading word-boundary check stays sound.
+        {
+            let prefix = "gap ";
+            let lower_bytes = lower.as_bytes();
+            let mut search_from = 0usize;
+            while let Some(rel) = lower[search_from..].find(prefix) {
+                let abs = search_from + rel;
+                // Leading word boundary so `bandgap 2`/`mind the gap 2`-in-
+                // identifier forms (e.g. `treegap 2`) do not match — the
+                // byte before `gap` must be start-of-line or a non-word
+                // byte.
+                let leading_ok = abs == 0
+                    || !(lower_bytes[abs - 1].is_ascii_alphanumeric()
+                        || lower_bytes[abs - 1] == b'_');
+                let after = abs + prefix.len();
+                if leading_ok && after < lower_bytes.len() && lower_bytes[after].is_ascii_digit() {
+                    return true;
+                }
+                search_from = abs + prefix.len();
+            }
+        }
         false
     }
 
@@ -6311,6 +6436,7 @@ mod foundations_guards {
             "post_c",                    // post_C<digit> cutover marker
             "postc",                     // postC<digit> cutover marker
             "pass c",                    // Pass C<digit> cutover marker
+            "gap ",                      // gap <digit> framework-adapter marker
         ];
         let lower = src.to_ascii_lowercase();
         if LOWER_ROOTS.iter().any(|r| lower.contains(r)) {
@@ -6339,6 +6465,31 @@ mod foundations_guards {
         // `Γ.<alnum>` scan to fire.
         if src.chars().any(|c| ('\u{0391}'..='\u{03A9}').contains(&c)) {
             return true;
+        }
+        // `D-<letters>` framework-adapter code-name branch: case-sensitive
+        // (uppercase `D` immediately followed by `-`). The per-line scan
+        // applies the word-boundary + 1..=3-lowercase-letter tail
+        // discriminator; the cheap necessary condition is the literal `D`
+        // followed by `-` anywhere in the file.
+        {
+            let raw = src.as_bytes();
+            if (0..raw.len().saturating_sub(1)).any(|i| raw[i] == b'D' && raw[i + 1] == b'-') {
+                return true;
+            }
+        }
+        // `B<digits><letter>` framework-adapter block-id branch:
+        // case-sensitive (uppercase `B` immediately followed by an ASCII
+        // digit). The per-line scan applies the word-boundary + trailing
+        // single-lowercase-letter discriminator; the cheap necessary
+        // condition is the literal `B` followed by a digit anywhere in the
+        // file.
+        {
+            let raw = src.as_bytes();
+            if (0..raw.len().saturating_sub(1))
+                .any(|i| raw[i] == b'B' && raw[i + 1].is_ascii_digit())
+            {
+                return true;
+            }
         }
         // `U<digit>B`-anchored plan-block branch: case-sensitive (the
         // marker is uppercase `U…B`). A necessary condition is the
@@ -7451,6 +7602,104 @@ mod foundations_guards {
             assert!(
                 !line_has_phase_archaeology(line),
                 "guard 7 H19 predicate must NOT flag legitimate line: {line:?}",
+            );
+        }
+    }
+
+    /// Framework-adapter code-name families: the `D-<letters>` block
+    /// code-names, the `B<digits><letter>` block ids, and the `gap
+    /// <digit>` numbered-gap markers. Each fabricated positive line models
+    /// a real comment form observed in the framework-adapters surface; each
+    /// negative line is a superficially-similar construct that the
+    /// discriminators must preserve. Mirrors
+    /// `guard7_predicate_rejects_block_vocabulary`.
+    #[test]
+    fn guard7_predicate_rejects_framework_adapter_codenames() {
+        let violations = [
+            // `D-<letters>` — parenthesised and standalone forms.
+            "//! The compiler-side blessed carrier downcast (D-m).",
+            "//! Syntactic detection of experimental Svelte await-expressions (D-bg).",
+            "/// minted here (D-ba: `verter_language` is the sole authority).",
+            "// D-bk: a `.svelte.ts` rune module gets ONLY the module-valid runes",
+            "/// claimed here (an owner-gated `$slots` contract, D-ap).",
+            // Three-letter tail (the longest code-name form).
+            "//! the rune-module row (D-bk) uses the same-file model.",
+            // `B<digits><letter>` — block ids.
+            "//! shallow state behind B8c's `Foo.svelte.ts` api file.",
+            "// B8e test-3: a `bind:value={expr}` bound token maps back to",
+            "/// claimed here (an owner-gated `$slots` contract, B8h).",
+            "//! the REGISTERED Svelte carrier (B8a): the upsert path.",
+            // Pre-existing base-branch block ids (same family).
+            "// Admission-time canonicalisation per plan B1a:",
+            "// B1b family-memo backfill matrix",
+            // `gap <digit>` — numbered-gap markers.
+            "/// surface (gap 2 — the framework-neutral sidecar).",
+            "/// The Svelte-specific snippet-slot normalizer (gap 3).",
+            // Capitalisation variant of the gap marker.
+            "// Gap 2 owns the framework-neutral capture.",
+        ];
+        for line in violations {
+            assert!(
+                line_has_phase_archaeology(line),
+                "guard 7 predicate must reject framework-adapter code-name line: {line:?}",
+            );
+            // Prefilter parity: a flagged line must never be pre-skipped.
+            assert!(
+                file_may_have_phase_archaeology(line),
+                "prefilter SKIPS a flagged framework-adapter code-name line: {line:?}",
+            );
+        }
+
+        // Superficially-similar constructs that the discriminators MUST
+        // preserve — these are the exact false-positive classes the
+        // patterns are anchored against.
+        let benign = [
+            // `<digit>D` dimensionality — NOT the `D-<letters>` form (no
+            // hyphen; the `D` is preceded by a digit so the leading word
+            // boundary fails).
+            "// 3D transform applied to the projected node.",
+            "// the 2D layout pass packs the glyph atlas.",
+            // `D_<UPPER>` SCREAMING_SNAKE constant — separator is `_`, not
+            // `-`.
+            "// the D_MAX constant bounds the recursion depth.",
+            "// set the D_FLAG bit before dispatch.",
+            // `D-<uppercase>` / `D-<4+ letters>` — not the short
+            // lowercase code-name form.
+            "// the D-Bus connection is opened lazily.",
+            "// kebab-case attribute `D-something` parses as a directive.",
+            // Lowercase `d-foo` — ordinary kebab-case prose.
+            "// the d-pad input maps to arrow keys.",
+            // Hex bytes `0xB5`/`0xB0`/`0xB2` — `B` preceded by `x`, and no
+            // trailing lowercase letter after the digit.
+            "// the byte 0xB5 marks the key boundary.",
+            "// validity_fingerprint: 0xB2B2_B2B2,",
+            "                key.push(0xB0);",
+            // `B<digit>` with NO trailing lowercase letter — bare register
+            // / count form, not a block id.
+            "// the B5 register holds the carry flag.",
+            "// reserve B8 entries in the ring buffer.",
+            // `B<digit><UPPER>` — uppercase trailing letter is not the
+            // lowercase block-id form.
+            "// the B2B settlement path is out of scope.",
+            // `gap` common-noun prose — a letter (not a digit) follows.
+            "// fills the gap between the two declarators.",
+            "// the gap between hops is normalised away.",
+            "// mind the gap before the terminal hop.",
+            // `gap` with no following token / non-digit.
+            "// close the gap.",
+            // Tailwind CSS gap utility classes (`gap-1`, `gap-2`,
+            // `md:gap-2`) — the HYPHENATED form. These appear verbatim in
+            // scanned `.vue`/`.tsx` template + className text; the
+            // space-separated marker scan must NOT flag the hyphen form.
+            r#"    <div class="flex items-center gap-1 md:gap-2">"#,
+            "// the grid uses gap-4 between cells.",
+            r#"const cls = "flex gap-2 gap-y-1";"#,
+        ];
+        for line in benign {
+            assert!(
+                !line_has_phase_archaeology(line),
+                "guard 7 predicate must NOT flag legitimate framework-adapter-adjacent line: \
+                 {line:?}",
             );
         }
     }
