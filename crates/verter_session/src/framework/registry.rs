@@ -380,10 +380,9 @@ impl FrameworkAdapterRegistry {
                     None
                 }
             }
-            // Svelte's adapter id is registered (carrier legs + a Deferred
-            // surface arm); its surface resolution is the deferred half, but the
-            // adapter ID itself is REGISTERED — the completeness oracle keys on
-            // registration, not on the surface arm.
+            // Svelte's adapter id is registered with all legs, including the
+            // real `SvelteFrameworkAdapter` surface arm; the completeness oracle
+            // keys on registration.
             FrameworkTag::Svelte => {
                 let id = FrameworkAdapterId::svelte();
                 if self.contains(&id) {
@@ -555,15 +554,15 @@ mod tests {
                         "Vue must resolve to a registered adapter"
                     );
                 }
-                // Svelte's adapter id is now REGISTERED (carrier legs + a
-                // Deferred surface arm). The completeness oracle keys on
-                // registration, not the surface arm.
+                // Svelte's adapter id is REGISTERED with all legs, including the
+                // real surface adapter. The completeness oracle keys on
+                // registration.
                 FrameworkTag::Svelte => {
                     assert_eq!(
                         disposition,
                         Some(TagDisposition::Registered(FrameworkAdapterId::svelte())),
-                        "Svelte's adapter id is registered (carrier legs); only its surface \
-                         resolution is deferred"
+                        "Svelte's adapter id is registered with all legs, including its \
+                         surface adapter"
                     );
                 }
                 // React / Solid are out of scope.

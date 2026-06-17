@@ -213,11 +213,11 @@ pub fn built_in_descriptors() -> Vec<FrameworkAdapterDescriptor> {
 ///
 /// The single source of truth for the Svelte carrier's identity, carrier
 /// language, and virtual-file naming. `supported_surfaces` is the §9 Svelte set
-/// ([`SVELTE_SUPPORTED_SURFACE_KINDS`] — OPTIONS omitted), so the executor fills
-/// OPTIONS structurally UNSUPPORTED and every other kind supported-empty-or-
-/// resolved once the real `SvelteFrameworkAdapter` is registered.
-/// the `.ts` import-surface API file is matched by the registered Svelte api-projector
-/// leg (the `framework_registry_complete` api-leg clause).
+/// ([`SVELTE_SUPPORTED_SURFACE_KINDS`] — OPTIONS omitted), so the executor
+/// reports OPTIONS structurally UNSUPPORTED and resolves every other kind
+/// through the registered `SvelteFrameworkAdapter`. The `.ts` import-surface
+/// API file is matched by the registered Svelte api-projector leg (the
+/// `framework_registry_complete` api-leg clause).
 #[must_use]
 pub fn svelte_descriptor() -> FrameworkAdapterDescriptor {
     FrameworkAdapterDescriptor {
