@@ -46,6 +46,36 @@ fn finds_with_defaults() {
 }
 
 #[test]
+fn binding_scan_is_utf8_boundary_safe_with_multibyte_before_ident() {
+    // A multibyte char adjacent to the binding identifier means the backward
+    // ident walk stops on a UTF-8 boundary where a FIXED-WIDTH back-slice for the
+    // `const`/`let`/`var` keyword would land mid-codepoint. Scanning must not
+    // panic ("byte index N is not a char boundary"); it simply finds no clean
+    // `const NAME =` binding here and reports the macro with no binding name.
+    for src in [
+        "const😀x = defineProps()",
+        "let😀x = defineEmits()",
+        "var😀x = defineModel()",
+        "const x😀 = defineProps()",
+    ] {
+        let r = scan(src);
+        assert_eq!(r.macros.len(), 1, "[{src}] the macro is still detected");
+        assert!(
+            r.macros[0].binding_name.is_none(),
+            "[{src}] a binding broken by a multibyte char has no clean keyword \
+             prefix, so no binding name is recovered, got {:?}",
+            r.macros[0].binding_name
+        );
+    }
+
+    // Control: the SAME shape with an ASCII boundary DOES recover the binding —
+    // proving the multibyte cases above are exercising the real backward scan,
+    // not a vacuous no-binding path.
+    let ok = scan("const x = defineProps()");
+    assert_eq!(ok.macros[0].binding_name, Some("x"));
+}
+
+#[test]
 fn finds_define_model() {
     let r = scan("const modelValue = defineModel<string>()");
     assert_eq!(r.macros.len(), 1);

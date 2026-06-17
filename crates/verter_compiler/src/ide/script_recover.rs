@@ -855,13 +855,17 @@ impl<'a> ScriptTokenScanner<'a> {
             before_kw == 0 || !is_ident_continue(self.bytes[before_kw - 1])
         };
 
-        if p >= 3 && &self.source[p - 3..p] == "var" && is_word_boundary(p - 3) {
+        // `.get(..)` is char-boundary-safe: when `p` lands mid-codepoint (the
+        // backward ident walk stops on a UTF-8 boundary because a multibyte byte
+        // is not an ident char), the fixed-width slice returns `None` instead of
+        // panicking, and the keyword simply does not match.
+        if p >= 3 && self.source.get(p - 3..p) == Some("var") && is_word_boundary(p - 3) {
             return (Some(name), Some(make_span()));
         }
-        if p >= 3 && &self.source[p - 3..p] == "let" && is_word_boundary(p - 3) {
+        if p >= 3 && self.source.get(p - 3..p) == Some("let") && is_word_boundary(p - 3) {
             return (Some(name), Some(make_span()));
         }
-        if p >= 5 && &self.source[p - 5..p] == "const" && is_word_boundary(p - 5) {
+        if p >= 5 && self.source.get(p - 5..p) == Some("const") && is_word_boundary(p - 5) {
             return (Some(name), Some(make_span()));
         }
 

@@ -1329,3 +1329,17 @@ const $style = useCssModule()
         "should not emit duplicate $style declarations: found {count} in:\n{code}"
     );
 }
+
+#[test]
+fn ide_script_with_multibyte_char_adjacent_to_binding_does_not_panic() {
+    // A multibyte char wedged against a `defineProps` binding ident makes the
+    // script un-parseable, so IDE error recovery runs its backward binding scan.
+    // That scan must be UTF-8-boundary-safe: generating IDE TSX (CompileTarget::IDE
+    // script half) must NOT panic ("byte index N is not a char boundary").
+    let source = "<script setup lang=\"ts\">\nconst😀x = defineProps()\n</script>\n";
+    let (code, _, _) = gen_tsx_script_full(source);
+    assert!(
+        !code.is_empty(),
+        "IDE TSX generation must produce output for a recoverable broken setup, not panic"
+    );
+}
