@@ -1,4 +1,5 @@
 import type { VerterHost, HostDependencyResolution } from "@verter/native";
+import { stripVueVirtualSuffix } from "./utils";
 
 interface MacroTypeDep {
   importSource: string;
@@ -18,27 +19,18 @@ export interface MacroTypeDependencyAccess {
   readSource(fileName: string): string | undefined;
 }
 
-function normalizePath(fileName: string): string {
-  return fileName.replace(/\\/g, "/");
-}
-
+/**
+ * Strip a carrier virtual-file suffix (`*.vue.ts` / `*.vue.d.ts` /
+ * `*.svelte.ts` / …) back to the bare carrier path, falling through to a
+ * normalised plain path. Carrier-generic: derived from the manifest naming
+ * table via `stripVueVirtualSuffix`, NOT a hardcoded `.vue` suffix list.
+ */
 function normalizeSourcePath(fileName: string): string {
-  const normalized = normalizePath(fileName);
-  if (normalized.endsWith(".vue.d.ts")) {
-    return normalized.slice(0, -5);
-  }
-  if (normalized.endsWith(".vue.ts")) {
-    return normalized.slice(0, -3);
-  }
-  return normalized;
+  return stripVueVirtualSuffix(fileName);
 }
 
 function isRelativeImport(specifier: string): boolean {
   return specifier.startsWith(".");
-}
-
-function isVueFile(fileName: string): boolean {
-  return normalizePath(fileName).endsWith(".vue");
 }
 
 function parseAnalysis(host: VerterHost, fileName: string): FileAnalysisSnapshot | null {
@@ -131,10 +123,15 @@ export function hydrateMacroTypeDependencies(
         continue;
       }
 
+      // No `fileKind` hint: the host classifies the carrier from the canonical
+      // path (`LanguageRegistry::classify_static`), which resolves `.vue` AND
+      // `.svelte` as non-gated carrier rows. A Vue-only `"vue_sfc"` hint forces
+      // `FileLanguage::vue()` and would mis-key a `.svelte` dependency (the old
+      // `"non_sfc"` branch stripped its carrier outright), so we defer to the
+      // host's carrier-generic path classifier — the single language authority.
       host.upsert({
         inputId: sourcePath,
         source: nextSource,
-        fileKind: isVueFile(sourcePath) ? "vue_sfc" : "non_sfc",
       });
       queue.push(sourcePath);
     }

@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  cleanupCarrierVirtualImportPath,
   getVueVirtualFileInfo,
   isLikelyTestFileName,
   isRelativeVue,
@@ -165,5 +166,37 @@ describe("resolveVuePublicApiMode", () => {
         (fileName) => fileName === "/src/__tests__/App.spec.ts",
       ),
     ).toBe("testing");
+  });
+});
+
+describe("cleanupCarrierVirtualImportPath", () => {
+  it("strips the Vue carrier virtual suffixes back to the bare carrier path", () => {
+    expect(cleanupCarrierVirtualImportPath("./Foo.vue.ts")).toBe("./Foo.vue");
+    expect(cleanupCarrierVirtualImportPath("./Foo.vue.d.ts")).toBe("./Foo.vue");
+    expect(cleanupCarrierVirtualImportPath("./Foo.vue.__verter_test.ts")).toBe("./Foo.vue");
+  });
+
+  it("strips the Svelte carrier virtual suffixes too (carrier-generic, not Vue-only)", () => {
+    // The pre-change implementation hardcoded `.vue` and left `.svelte.ts`
+    // untouched — this is the discriminating assertion for the carrier-generic
+    // rewrite.
+    expect(cleanupCarrierVirtualImportPath("./Bar.svelte.ts")).toBe("./Bar.svelte");
+    expect(cleanupCarrierVirtualImportPath("./Bar.svelte.d.ts")).toBe("./Bar.svelte");
+  });
+
+  it("strips suffixes embedded in free-form text (quick-fix descriptions / edits)", () => {
+    expect(cleanupCarrierVirtualImportPath('import Foo from "./Foo.vue.ts"')).toBe(
+      'import Foo from "./Foo.vue"',
+    );
+    expect(cleanupCarrierVirtualImportPath('Update import from "../Card.svelte.d.ts"')).toBe(
+      'Update import from "../Card.svelte"',
+    );
+  });
+
+  it("leaves a bare carrier path and a plain .ts module untouched", () => {
+    expect(cleanupCarrierVirtualImportPath("./Foo.vue")).toBe("./Foo.vue");
+    expect(cleanupCarrierVirtualImportPath("./Bar.svelte")).toBe("./Bar.svelte");
+    expect(cleanupCarrierVirtualImportPath("./util.ts")).toBe("./util.ts");
+    expect(cleanupCarrierVirtualImportPath("nothing to strip here")).toBe("nothing to strip here");
   });
 });

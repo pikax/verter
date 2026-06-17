@@ -1,4 +1,5 @@
 import type tsModule from "typescript/lib/tsserverlibrary";
+import { isVue } from "./utils";
 
 export interface AliasedDefinitionInfo {
   fileName: string;
@@ -340,7 +341,7 @@ export function getModuleSpecifierNavigationResult(
     return undefined;
   }
 
-  if (!literal.text.endsWith(".vue")) {
+  if (!isVue(literal.text)) {
     return undefined;
   }
 

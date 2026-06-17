@@ -130,6 +130,43 @@ export function stripVueVirtualSuffix(fileName: string): string {
   return getVueVirtualFileInfo(fileName)?.sourceFileName ?? normalizePath(fileName);
 }
 
+/**
+ * The carrier virtual-suffix strip rules, derived ONCE from the carrier naming
+ * table, longest-suffix-first so `*.vue.__verter_test.ts` and `*.vue.d.ts` win
+ * over `*.vue.ts` (and every carrier — `.vue`, `.svelte` — is covered). Each
+ * rule maps a carrier virtual-file suffix (e.g. `.vue.ts`) embedded anywhere in
+ * a string back to the bare carrier extension (`.vue`).
+ */
+const CARRIER_VIRTUAL_SUFFIX_STRIPPERS: readonly { pattern: RegExp; carrierExt: string }[] = CARRIERS.flatMap(
+  (c) => {
+    const suffixes: string[] = [];
+    if (c.testingApiSuffix) suffixes.push(`${c.extension}${c.testingApiSuffix}`);
+    // The `.d.ts` accepted-spelling alias is `{carrier_ext}.d.ts` uniformly.
+    suffixes.push(`${c.extension}.d.ts`);
+    if (c.apiSuffix) suffixes.push(`${c.extension}${c.apiSuffix}`);
+    return suffixes.map((suffix) => ({
+      pattern: new RegExp(escapeRegExp(suffix), "g"),
+      carrierExt: c.extension,
+    }));
+  },
+);
+
+/**
+ * Strip carrier virtual-file suffixes (`*.vue.ts` / `*.vue.d.ts` /
+ * `*.vue.__verter_test.ts` / `*.svelte.ts` / …) embedded ANYWHERE in free-form
+ * text (quick-fix descriptions, edit `newText`, display-part text) back to the
+ * bare carrier path (`*.vue` / `*.svelte`). Carrier-generic: derived from the
+ * manifest naming table, NOT a hardcoded `.vue` regex. Longest-suffix-first so
+ * the `.d.ts` / testing variants are stripped before the bare `.ts` API suffix.
+ */
+export function cleanupCarrierVirtualImportPath(text: string): string {
+  let result = text;
+  for (const { pattern, carrierExt } of CARRIER_VIRTUAL_SUFFIX_STRIPPERS) {
+    result = result.replace(pattern, carrierExt);
+  }
+  return result;
+}
+
 export function isLikelyTestFileName(fileName: string): boolean {
   const normalized = normalizePath(fileName);
   return (

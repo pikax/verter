@@ -3,6 +3,7 @@ import path from "node:path";
 // File access uses info.serverHost (TS server's filesystem) in sync contexts
 // and workspace (Rust VFS) in async contexts.
 import {
+  cleanupCarrierVirtualImportPath,
   getVueVirtualFileInfo,
   isRelativeVue,
   isRelativeVueTs,
@@ -272,10 +273,6 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       return stripVueVirtualSuffix(fileName);
     }
 
-    function cleanupVueVirtualImportPath(text: string): string {
-      return text.replace(/\.vue\.__verter_test\.ts/g, ".vue").replace(/\.vue\.(d\.)?ts/g, ".vue");
-    }
-
     function remapDefinitionLike<
       T extends {
         fileName: string;
@@ -284,7 +281,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         originalTextSpan?: tsModule.TextSpan;
       },
     >(definition: T): T {
-      if (definition.fileName.endsWith(".vue")) {
+      if (isVue(definition.fileName)) {
         return definition;
       }
 
@@ -610,10 +607,10 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       );
       if (result?.codeActions) {
         for (const action of result.codeActions) {
-          action.description = cleanupVueVirtualImportPath(action.description);
+          action.description = cleanupCarrierVirtualImportPath(action.description);
           for (const change of action.changes) {
             for (const edit of change.textChanges) {
-              edit.newText = cleanupVueVirtualImportPath(edit.newText);
+              edit.newText = cleanupCarrierVirtualImportPath(edit.newText);
             }
           }
         }
@@ -621,7 +618,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       if (result?.sourceDisplay) {
         result.sourceDisplay = result.sourceDisplay.map((part) => ({
           ...part,
-          text: cleanupVueVirtualImportPath(part.text),
+          text: cleanupCarrierVirtualImportPath(part.text),
         }));
       }
       return result;
@@ -641,7 +638,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
           if (entry.sourceDisplay) {
             entry.sourceDisplay = entry.sourceDisplay.map((part) => ({
               ...part,
-              text: cleanupVueVirtualImportPath(part.text),
+              text: cleanupCarrierVirtualImportPath(part.text),
             }));
           }
           if (entry.source) {
