@@ -502,11 +502,16 @@ impl<'a> CodeTransform<'a> {
 /// `TsPosition` (`{"line":<u32>,"character":<u32>}`).
 fn inject_helper_preamble_end(json: String, preamble_end: Option<(u32, u32)>) -> String {
     match preamble_end {
-        Some((line, character)) if json.starts_with('{') => format!(
-            "{{\"x_verter_helper_preamble_end\":{{\"line\":{line},\"character\":{character}}},{}",
-            &json[1..]
-        ),
-        _ => json,
+        // `strip_prefix('{')` both confirms the leading `{` and yields the remainder
+        // without an explicit byte slice — safe even if the encoder ever emits an
+        // empty / short string.
+        Some((line, character)) => match json.strip_prefix('{') {
+            Some(rest) => format!(
+                "{{\"x_verter_helper_preamble_end\":{{\"line\":{line},\"character\":{character}}},{rest}"
+            ),
+            None => json,
+        },
+        None => json,
     }
 }
 
