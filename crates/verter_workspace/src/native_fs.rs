@@ -76,6 +76,11 @@ impl NativeFs {
         if let Some(resolved) = self.realpath_memo.read().get(&key) {
             return Some(resolved.clone());
         }
+        // `Relaxed` is sound here: this is only a snapshot of the epoch to
+        // compare later. The authoritative recheck happens in `commit_realpath`
+        // UNDER the memo write lock — that lock is the real synchronization rail,
+        // so this read carries no ordering obligation. Do not move the decisive
+        // epoch comparison out from under that write lock.
         let epoch_before = self.realpath_epoch.load(Ordering::Relaxed);
         let os_path = to_os_path(&key);
         let resolved = std::fs::canonicalize(&os_path)
@@ -94,6 +99,10 @@ impl NativeFs {
     /// rather than poisoning the memo.
     fn commit_realpath(&self, key: String, resolved: &str, epoch_before: u64) {
         let mut memo = self.realpath_memo.write();
+        // `Relaxed` suffices: the held memo write lock — not atomic ordering — is
+        // the synchronization rail. It serializes this compare+insert against the
+        // bump+evict in `invalidate_realpath_under` (which advances the epoch and
+        // retains under the SAME lock), so an epoch move is always observed here.
         if self.realpath_epoch.load(Ordering::Relaxed) == epoch_before {
             memo.insert(key, resolved.to_string());
         }
@@ -117,6 +126,10 @@ impl NativeFs {
     pub fn invalidate_realpath_under(&self, prefix: &str) {
         let prefix = normalize_path_str(prefix);
         let mut memo = self.realpath_memo.write();
+        // `Relaxed` suffices: the held memo write lock is the synchronization
+        // rail. The bump and the retain below run together under this lock, and
+        // `commit_realpath` rechecks the epoch under the SAME lock, so an
+        // in-flight realpath cannot commit a stale result past this point.
         self.realpath_epoch.fetch_add(1, Ordering::Relaxed);
         memo.retain(|key, value| {
             !path_matches_prefix(key, &prefix) && !path_matches_prefix(value, &prefix)
