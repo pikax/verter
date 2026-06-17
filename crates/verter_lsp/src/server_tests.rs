@@ -9651,6 +9651,106 @@ async fn provider_projection_context_serves_both_carrier_and_self_file() {
     drain.abort();
 }
 
+/// Fail-closed auto-import completion-resolve for a self-file rune module.
+///
+/// The TSGO auto-import re-anchor (`resolve_tsgo_auto_import_edits`) maps a
+/// provider edit back through a Vue `<script setup>` carrier. A self-file rune
+/// module (Svelte `.svelte.ts` / `.svelte.js`) has NO `<script setup>` carrier
+/// to re-anchor into — its provider path reverse-maps to itself, not to a
+/// carrier source. Accepting such a completion must NOT error and must NOT
+/// synthesize a bogus Vue block: it returns `Ok(None)`, leaving the completion
+/// item unchanged (self-file auto-import placement is a separate capability).
+///
+/// Discriminating: this asserts `Ok(None)` for a NON-EMPTY provider-edit set on
+/// a `.svelte.ts` self-file projection. The pre-fix carrier-only resolver had no
+/// self-file gate — it either rejected the resolve with a structured error (no
+/// resolvable carrier URI) or drove the Vue-specific `resolve_script_import_anchor`
+/// over the rune-module source; neither yields the fail-closed `Ok(None)`. The
+/// companion assertion pins that a real `.vue` carrier is NOT classified as a
+/// self-file projection, so the Vue carrier re-anchor path stays reachable.
+#[tokio::test]
+async fn self_file_auto_import_resolve_fails_closed_with_no_edits() {
+    use crate::tsgo::auto_import::ProviderImportEdit;
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let host_for_server = Arc::clone(&host);
+    let type_provider_for_server = Arc::clone(&type_provider);
+    let (service, socket) = tower_lsp_server::LspService::new(move |client| {
+        VerterLanguageServer::new(
+            client,
+            LspConfig {
+                host: Arc::clone(&host_for_server),
+                type_provider: Some(Arc::clone(&type_provider_for_server)),
+                project_sync_mode: crate::ProjectSyncMode::FullProject,
+                type_provider_kind: crate::TypeProviderKind::Tsserver,
+                suggest_tsgo: false,
+                mcp_port: None,
+                type_provider_none_reason: None,
+            },
+        )
+    });
+    let drain = tokio::spawn(async move {
+        let mut socket = socket;
+        while socket.next().await.is_some() {}
+    });
+    let server = service.inner();
+    install_test_resolver(server);
+
+    // A self-file rune module: its provider buffer is served from its OWN
+    // canonical path, so the completion item's stored `tsx_path` IS the
+    // `.svelte.ts` path — not a Vue carrier IDE path.
+    let rune_uri: Uri = "file:///workspace/store.svelte.ts".parse().unwrap();
+    let _ = server.documents.did_open(&TextDocumentItem {
+        uri: rune_uri.clone(),
+        language_id: "typescript".to_string(),
+        version: 1,
+        text: "export const s = $state(0);\n".to_string(),
+    });
+    assert!(
+        server.is_self_file_projection(&rune_uri),
+        "precondition: a `.svelte.ts` rune module is a self-file projection"
+    );
+
+    // A NON-EMPTY auto-import edit set (the only case the carrier re-anchor runs
+    // for). The bytes are a faithful new-import insertion as TSGO would emit.
+    let provider_edits = vec![ProviderImportEdit {
+        start: 0,
+        end: 0,
+        new_text: "import { foo } from './foo';\n".to_string(),
+    }];
+    let resolved = super::nav_features_completion_resolve::resolve_tsgo_auto_import_edits(
+        server,
+        "/workspace/store.svelte.ts",
+        &provider_edits,
+    );
+    assert_eq!(
+        resolved,
+        Ok(None),
+        "a self-file (`.svelte.ts`) auto-import resolve fails closed: no edits, no internal error"
+    );
+
+    // Companion: a real `.vue` carrier is a carrier-IDE projection, NOT a
+    // self-file one — so the fail-closed self-file gate never fires for it and
+    // the Vue carrier re-anchor path stays reachable.
+    let vue_uri: Uri = "file:///workspace/App.vue".parse().unwrap();
+    let _ = server.documents.did_open(&TextDocumentItem {
+        uri: vue_uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: "<script setup lang=\"ts\">\nconst x = 1;\n</script>\n<template>{{ x }}</template>"
+            .to_string(),
+    });
+    server.ensure_current_file_synced(&vue_uri).await;
+    assert!(
+        !server.is_self_file_projection(&vue_uri),
+        "a `.vue` carrier is a carrier-IDE projection, never gated as self-file"
+    );
+
+    drain.abort();
+}
+
 /// Open-before-ownership: `did_open` on a `.svelte.ts` rune module makes
 /// `provider_projection_context` available at the module's OWN canonical path
 /// BEFORE any resolver ownership is published (no `install_test_resolver`). The

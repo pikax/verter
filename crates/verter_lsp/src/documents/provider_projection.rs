@@ -202,7 +202,7 @@ struct RewriteSegment {
 /// A line-only, rewrite-aware source↔provider mapper for a self-file provider
 /// buffer (`<rune prelude> + <rewritten module bytes>`).
 ///
-/// Mapping rules (the codex-ratified contract):
+/// Mapping rules (the source↔provider contract):
 /// - **source → provider**: `line + prelude_line_count`; column shifted by the
 ///   cumulative rewrite delta of every rewrite earlier on the same line; DROP
 ///   if the source position falls INSIDE a rewritten specifier span.

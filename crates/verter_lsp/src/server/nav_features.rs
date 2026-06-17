@@ -818,7 +818,7 @@ pub(super) async fn handle_completion_resolve(
                                         new_text: e.new_text.clone(),
                                     })
                                     .collect();
-                                let edits = resolve_tsgo_auto_import_edits(
+                                let resolved = resolve_tsgo_auto_import_edits(
                                     server,
                                     tsx_path,
                                     &provider_edits,
@@ -830,7 +830,13 @@ pub(super) async fn handle_completion_resolve(
                                     );
                                     completion_resolve_error(&reason)
                                 })?;
-                                item.additional_text_edits = Some(edits);
+                                // `None` ⇒ the provider path is not a resolvable Vue carrier (a
+                                // self-file rune module such as a Svelte `.svelte.ts`); the carrier
+                                // re-anchor does not apply. Fail closed: leave the item unchanged
+                                // rather than error or synthesize a Vue block into a non-Vue source.
+                                if let Some(edits) = resolved {
+                                    item.additional_text_edits = Some(edits);
+                                }
                             }
                         }
                     }
