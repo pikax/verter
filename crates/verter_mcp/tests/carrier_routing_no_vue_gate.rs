@@ -346,7 +346,7 @@ fn pattern_head_is_match_arm(head: &str) -> bool {
     let all_literals = alts.iter().all(|a| {
         a.len() >= 2 && a.starts_with('"') && a.ends_with('"') && !a[1..a.len() - 1].contains('"')
     });
-    all_literals && alts.iter().any(|a| *a == "\"vue\"")
+    all_literals && alts.contains(&"\"vue\"")
 }
 
 /// Classify a single (comment-stripped) executable code line as a Vue-only
@@ -566,7 +566,9 @@ fn match_arm_vue_gate_is_flagged_but_value_side_vue_is_not() {
     )));
     // …but a `"vue"` literal on the VALUE side of an arm (display / mapping) is
     // NOT a gate, and neither is a plain comparison.
-    assert!(!line_flags(&strip_comment("label => format!(\"{}.vue\", s),")));
+    assert!(!line_flags(&strip_comment(
+        "label => format!(\"{}.vue\", s),"
+    )));
     assert!(!line_flags(&strip_comment("kind => \"vue\".to_string(),")));
     assert!(!line_flags(&strip_comment(
         "let label = \"vue\"; // a value, not a gate"
