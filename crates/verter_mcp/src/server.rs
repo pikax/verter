@@ -690,7 +690,7 @@ impl VerterMcpServer {
 
         let vue_ids: Vec<&str> = files
             .iter()
-            .filter(|(_, k)| k.is_vue())
+            .filter(|(_, k)| k.is_framework_carrier())
             .map(|(id, _)| id.as_str())
             .collect();
         let analyses = batch_analysis_with_template(&self.host, &vue_ids);
@@ -877,7 +877,7 @@ impl VerterMcpServer {
 
         let vue_ids: Vec<&str> = files
             .iter()
-            .filter(|(_, k)| k.is_vue())
+            .filter(|(_, k)| k.is_framework_carrier())
             .map(|(id, _)| id.as_str())
             .collect();
         let analyses = batch_analysis_with_template(&self.host, &vue_ids);
@@ -933,7 +933,7 @@ impl VerterMcpServer {
         }
 
         let response = serde_json::json!({
-            "files_checked": files.iter().filter(|(_, k)| k.is_vue()).count(),
+            "files_checked": files.iter().filter(|(_, k)| k.is_framework_carrier()).count(),
             "summary": {
                 "errors": total_errors,
                 "warnings": total_warnings,
@@ -1131,7 +1131,7 @@ impl VerterMcpServer {
         let root_resolved = params.root.as_ref().map(|r| self.resolve(r));
         let vue_ids: Vec<&str> = files
             .iter()
-            .filter(|(_, k)| k.is_vue())
+            .filter(|(_, k)| k.is_framework_carrier())
             .filter(|(id, _)| {
                 root_resolved
                     .as_ref()
@@ -1176,7 +1176,7 @@ impl VerterMcpServer {
         let files = self.host.list_files();
         let vue_files: HashSet<String> = files
             .iter()
-            .filter(|(_, k)| k.is_vue())
+            .filter(|(_, k)| k.is_framework_carrier())
             .map(|(id, _)| id.clone())
             .collect();
 
@@ -1312,7 +1312,7 @@ impl VerterMcpServer {
 
         let vue_ids: Vec<&str> = files
             .iter()
-            .filter(|(_, k)| k.is_vue())
+            .filter(|(_, k)| k.is_framework_carrier())
             .map(|(id, _)| id.as_str())
             .collect();
         let analyses = batch_analysis_with_template(&self.host, &vue_ids);
@@ -1357,7 +1357,7 @@ impl VerterMcpServer {
 
         // Check prop usage against definitions
         for (id, kind) in &files {
-            if !kind.is_vue() {
+            if !kind.is_framework_carrier() {
                 continue;
             }
             if let Some(path) = &params.path {
@@ -1603,7 +1603,10 @@ impl VerterMcpServer {
     )]
     async fn get_project_stats(&self) -> Result<CallToolResult, ErrorData> {
         let files = self.host.list_files();
-        let vue_files: Vec<_> = files.iter().filter(|(_, k)| k.is_vue()).collect();
+        let component_files: Vec<_> = files
+            .iter()
+            .filter(|(_, k)| k.is_framework_carrier())
+            .collect();
 
         let mut quality_scores: Vec<(String, u32)> = Vec::new();
         let mut total_errors = 0usize;
@@ -1618,7 +1621,7 @@ impl VerterMcpServer {
         let mut total_elements = 0usize;
         let mut total_bindings = 0usize;
 
-        let ids: Vec<&str> = vue_files.iter().map(|(id, _)| id.as_str()).collect();
+        let ids: Vec<&str> = component_files.iter().map(|(id, _)| id.as_str()).collect();
         let analyses = batch_analysis_with_template(&self.host, &ids);
         for (canonical, analysis) in &analyses {
             let source = self.host.get_source(canonical);
@@ -1687,7 +1690,9 @@ impl VerterMcpServer {
         let response = serde_json::json!({
             "overview": {
                 "total_files": files.len(),
-                "vue_files": vue_files.len(),
+                "componentFiles": component_files.len(),
+                // deprecated alias: kept for back-compat
+                "vue_files": component_files.len(),
                 "script_deps": files.iter().filter(|(_, k)| !k.is_framework_carrier()).count(),
             },
             "component_stats": {
@@ -2042,7 +2047,7 @@ impl VerterMcpServer {
 
         let vue_ids: Vec<&str> = files
             .iter()
-            .filter(|(_, k)| k.is_vue())
+            .filter(|(_, k)| k.is_framework_carrier())
             .map(|(id, _)| id.as_str())
             .collect();
         let analyses = batch_analysis_with_template(&self.host, &vue_ids);
@@ -2454,7 +2459,7 @@ impl VerterMcpServer {
 
         let vue_ids: Vec<&str> = files
             .iter()
-            .filter(|(_, k)| k.is_vue())
+            .filter(|(_, k)| k.is_framework_carrier())
             .map(|(id, _)| id.as_str())
             .collect();
         let analyses = batch_analysis_with_template(&self.host, &vue_ids);
@@ -2521,7 +2526,7 @@ impl VerterMcpServer {
 
         let vue_ids: Vec<&str> = files
             .iter()
-            .filter(|(_, k)| k.is_vue())
+            .filter(|(_, k)| k.is_framework_carrier())
             .map(|(id, _)| id.as_str())
             .collect();
         let analyses = batch_analysis_with_template(&self.host, &vue_ids);
@@ -2573,7 +2578,7 @@ impl VerterMcpServer {
 
         let vue_ids: Vec<&str> = files
             .iter()
-            .filter(|(_, k)| k.is_vue())
+            .filter(|(_, k)| k.is_framework_carrier())
             .map(|(id, _)| id.as_str())
             .collect();
         let analyses = batch_analysis_with_template(&self.host, &vue_ids);
@@ -2655,7 +2660,7 @@ impl VerterMcpServer {
                 }
             }
 
-            if !found_test && file.ends_with(".vue") {
+            if !found_test && verter_workspace::path_is_carrier(file) {
                 untested.push(file.clone());
             }
         }
@@ -2822,7 +2827,7 @@ impl VerterMcpServer {
         let files = self.host.list_files();
         let vue_ids: Vec<&str> = files
             .iter()
-            .filter(|(_, k)| k.is_vue())
+            .filter(|(_, k)| k.is_framework_carrier())
             .map(|(id, _)| id.as_str())
             .collect();
 
