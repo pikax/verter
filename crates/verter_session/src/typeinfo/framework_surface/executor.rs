@@ -22,7 +22,7 @@
 //! 5. A [`SurfaceRegistration::Adapter`] adapter PLANS its demands against the
 //!    facts/carrier-only [`FrameworkAdapterCtx`], the executor RESOLVES each
 //!    [`PlannedDemand`] through the module-private [`ExecutorResolveCtx`] (an
-//!    EXHAUSTIVE match — no wildcard arm — over the closed 5-variant taxonomy),
+//!    EXHAUSTIVE match — no wildcard arm — over the closed 4-variant taxonomy),
 //!    the adapter NORMALIZES the resolved data, and [`graph_export`] encodes the
 //!    `FrameworkSurfacePayload`.
 //!

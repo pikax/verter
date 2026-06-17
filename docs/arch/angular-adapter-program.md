@@ -628,13 +628,13 @@ only.
 8. **Adapter trait, plan vocabulary, ctx surface, registration legs** [D-f/D-ai/D-am/D-as/D-ag].
    `FrameworkSurfaceAdapter { descriptor(), plan_surfaces(ctx, selector, requested) ->
    FrameworkSurfacePlan, normalize(ctx, resolved) -> FrameworkSurfaceDtoBundle }` — the EXECUTOR
-   owns resolution BY CONSTRUCTION; the plan is the CLOSED `PlannedDemand { PublicTypeInstance,
-   MacroPayload, PathProjection, ShallowSurface }` (no source text, no OXC handles, no raw
+   owns resolution BY CONSTRUCTION; the plan is the CLOSED `PlannedDemand { MacroPayload,
+   PathProjection, ShallowSurface, SvelteSurface }` (no source text, no OXC handles, no raw
    `SemanticQueryKey`, no escape arm; exhaustive executor match). `FrameworkAdapterCtx` — what
    `plan_surfaces`/`normalize` receive — is a CLOSED op surface exposing carrier metadata +
    validated facts ONLY: exactly `carrier_for::<T>(canonical)` + `script_facts_for::<T>`. NO
    resolve method exists on any adapter-visible ctx — the four resolve ops
-   (`instantiate_public_type`/`resolve_macro_payload`/`project_path`/`shallow_surface`) and
+   (`resolve_macro_payload`/`project_path`/`shallow_surface`/`svelte_surface`) and
    `export_graph` live on the executor-private resolve surface (module-private to the
    framework-surface executor, never passed to adapter code); the executor consumes
    `PlannedDemand` and drives them itself, and `normalize` receives the resolved results as

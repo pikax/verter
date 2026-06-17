@@ -12,6 +12,13 @@ the co-architect's three-seam design, and the relaxed-constraint substrate facto
 reconciliation is recorded in the Decisions Log (§3). All file:line references were verified
 against the live tree on branch `refactor/semantic-db-overhaul`.
 
+> SUPERSEDED (framework-adapters integration, 2026-06-17): the `PublicTypeInstance` demand /
+> `instantiate_public_type` executor op described in the decision rows below was REMOVED — it
+> resolved a public-type instance the framework-surface normalizer discarded. The CURRENT closed
+> contract is the four-arm `PlannedDemand { MacroPayload, PathProjection, ShallowSurface,
+> SvelteSurface }` (mirrored by `ResolvedDemand`). Sections below that predate this removal are
+> historical record.
+
 ---
 
 ## 1. Context
@@ -1686,7 +1693,8 @@ the six wire kinds.
   runes-mode callback props stay PROPS — Svelte 5 semantics); EXPOSE = exported instance-script
   members. **Resolve routing (D-bh, codex-ratified):** each SOURCE FAMILY is ONE planned
   `PlannedDemand::SvelteSurface { owner, source: SvelteSurfaceSource }` demand (the closed
-  5th `PlannedDemand` variant, mirrored by `ResolvedDemand::SvelteSurface`); SLOTS plans TWO
+  5th `PlannedDemand` variant, mirrored by `ResolvedDemand::SvelteSurface`) (superseded: now four
+  arms after the PublicTypeInstance removal — see the supersession note at the top); SLOTS plans TWO
   demands (`SnippetProps`, `LegacySlotInventory`) and `normalize` merges them. The executor's
   private resolve surface (D-as) gains ONE `SvelteSurface` arm that SELECTS the typed Svelte
   facts/candidates for the requested source family from the registration's
@@ -1696,7 +1704,8 @@ the six wire kinds.
   the synth-backed `default`/`$props` path — against the executor's ONE captured request view
   (NOT a helper that captures a second current view). NO source text, NO query-time OXC parse,
   NO custom member walker — one engine. The closed-`PlannedDemand` and exhaustive-match guards
-  move from 4 to 5 variants.
+  move from 4 to 5 variants (superseded: now four arms after the PublicTypeInstance removal — see
+  the supersession note at the top).
 - Registry registration updated (D-ag): the Svelte `SurfaceRegistration::Deferred` arm is
   REPLACED by `SurfaceRegistration::Adapter(SvelteFrameworkAdapter)` — one field flip; the B8a
   deferred-state test is superseded by the e2e round-trip below in the same change.
