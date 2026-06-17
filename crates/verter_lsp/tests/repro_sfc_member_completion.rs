@@ -1,4 +1,5 @@
-//! Regression coverage (Track-L clusters E + C) at the LSP layer.
+//! Regression coverage at the LSP layer: incomplete `<script setup>` member access
+//! (`a.`) ships a valid IDE TSX virtual file with correct completion mapping.
 //!
 //! Drives the REAL LSP document pipeline (`DocumentRegistry::did_open` →
 //! `host.upsert` → `ensure_compiled` → `get_ide` → `PositionMapper`) — the exact
@@ -6,18 +7,18 @@
 //! `type_provider_context` → `ide_context`.
 //!
 //! BUG-REPORT.md symptoms these tests guard against regressing:
-//!   * cluster E "Intellisense is lost": typing `a.` in `<script setup>` → the LSP
+//!   * "Intellisense is lost": typing `a.` in `<script setup>` → the LSP
 //!     compiles the SFC to a `.vue.tsx` virtual file that is shipped to
 //!     tsgo/tsserver. Without recovery that virtual file would be STRUCTURALLY
 //!     INVALID TSX (the trailing `.` absorbing adjacent synthetic scaffolding),
 //!     degrading the language service → "No Suggestions"; these tests assert it
 //!     ships VALID TSX.
-//!   * cluster C "position mapping failed for …": the completion handler maps the
+//!   * "position mapping failed for …": the completion handler maps the
 //!     cursor via `merge::vue_position_to_tsx_offset_validated`; a strict-None at
 //!     the zero-width member boundary is by design, but the virtual file around the
 //!     mapped region must be well-formed so the completion-boundary fallback has
 //!     valid TSX to anchor in.
-//!   * cluster C "diagnostics show `let` as invalid": the TSX tsgo type-checks must
+//!   * "diagnostics show `let` as invalid": the TSX tsgo type-checks must
 //!     stay well-formed so a parse error cannot land on the user's `let`.
 //!
 //! These all share ONE codegen root cause (the verbatim trailing-dot emission in
@@ -113,7 +114,7 @@ fn working_script_setup_ships_valid_virtual_tsx() {
     );
 }
 
-/// HEADLINE (cluster E root, observed at the LSP layer): the LSP must ship a VALID
+/// HEADLINE (the root cause, observed at the LSP layer): the LSP must ship a VALID
 /// `.vue.tsx` virtual file to the type provider for the `a.` case. This is the
 /// virtual file tsgo/tsserver type-checks and offers completions against; a parse
 /// error spanning the cursor would degrade the whole-file language service.
@@ -127,7 +128,7 @@ fn broken_member_access_ships_valid_virtual_tsx_to_type_provider() {
     eprintln!("--- OXC parse errors: {errs:?}");
     assert!(
         errs.is_empty(),
-        "REGRESSION (cluster E): the LSP ships INVALID TSX to tsgo/tsserver for the incomplete `a.` \
+        "REGRESSION: the LSP ships INVALID TSX to tsgo/tsserver for the incomplete `a.` \
          member access (the trailing dot would absorb adjacent synthetic scaffolding). A parse error \
          spanning the completion cursor degrades the whole virtual file → \"No Suggestions\". \
          OXC errors: {errs:?}\n--- TSX ---\n{}",
@@ -135,7 +136,7 @@ fn broken_member_access_ships_valid_virtual_tsx_to_type_provider() {
     );
 }
 
-/// cluster C "spurious `let` invalid diagnostic": the virtual file tsgo
+/// "spurious `let` invalid diagnostic": the virtual file tsgo
 /// type-checks must stay well-formed around the user's `let a = 1;` line. Without
 /// recovery the trailing dot would corrupt the statement stream and a parse error
 /// would sit ON / right after `let`, surfacing a bogus `let`-invalid diagnostic on
@@ -152,13 +153,13 @@ fn broken_member_access_keeps_let_bearing_body_region_valid() {
     // `let`. Correct codegen keeps the body well-formed.
     assert!(
         oxc_parse_errors(&o.ide_code).is_empty(),
-        "REGRESSION (cluster C): the `let a = 1;`-bearing virtual file is not valid TSX, so the \
+        "REGRESSION: the `let a = 1;`-bearing virtual file is not valid TSX, so the \
          type-checker's parse error maps back onto the user's `let`.\n--- TSX ---\n{}",
         o.ide_code
     );
 }
 
-/// cluster C "position mapping failed for …": the completion handler maps the
+/// "position mapping failed for …": the completion handler maps the
 /// cursor with `merge::vue_position_to_tsx_offset_validated`. A strict-None at the
 /// zero-width `a.` member boundary is BY DESIGN (the nav_features `position mapping
 /// failed` path then uses the completion-boundary fallback). The invariant: the
@@ -198,17 +199,17 @@ fn broken_member_access_completion_mapping_operates_over_valid_virtual_file() {
     // design; the invariant is that the fallback + tsgo have a well-formed file.)
     assert!(
         oxc_parse_errors(&o.ide_code).is_empty(),
-        "REGRESSION (cluster C): completion position mapping for `a.` operates over a corrupt \
+        "REGRESSION: completion position mapping for `a.` operates over a corrupt \
          virtual file; the strict mapper is None ({strict:?}) and the fallback can only anchor in \
          broken TSX.\n--- TSX ---\n{}",
         o.ide_code
     );
 }
 
-/// cluster C structural invariant: the `a.` recovery keeps the setup body nested
+/// Structural invariant: the `a.` recovery keeps the setup body nested
 /// inside `___VERTER___TemplateBindingFN` (body AFTER the wrapper opening), the same
 /// as the working case. A regression that stranded the body at MODULE scope (before
-/// the wrapper) would reintroduce the ownership/snapshot churn seen in the C logs.
+/// the wrapper) would reintroduce the ownership/snapshot churn seen in the logs.
 #[test]
 fn broken_member_access_keeps_body_inside_binding_wrapper() {
     let o = open(BROKEN);
@@ -219,7 +220,7 @@ fn broken_member_access_keeps_body_inside_binding_wrapper() {
     let body_idx = o.ide_code.find("let a = 1;").expect("user body present");
     assert!(
         body_idx > wrapper_idx,
-        "REGRESSION (cluster C): recovery strands the user's setup body at MODULE scope \
+        "REGRESSION: recovery strands the user's setup body at MODULE scope \
          (before the ___VERTER___TemplateBindingFN wrapper) instead of nesting it inside, unlike \
          the working case.\n--- TSX ---\n{}",
         o.ide_code

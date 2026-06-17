@@ -1,6 +1,5 @@
-//! Regression coverage (Track-L cluster E, HEADLINE): `<script setup>` incomplete
-//! member access (`a.`) must compile to VALID IDE TSX through the token-scan
-//! recovery path.
+//! Regression coverage: `<script setup>` incomplete member access (`a.`) must
+//! compile to VALID IDE TSX through the token-scan recovery path.
 //!
 //! User symptom that motivated this (BUG-REPORT.md "Intellisense is lost (CRITICAL DX)"):
 //! ```vue
@@ -92,7 +91,7 @@ fn member_access_dot_in_multiline_arrow_emits_valid_ide_tsx() {
     let errors = oxc_parse_errors(&code);
     assert!(
         errors.is_empty(),
-        "BUG (cluster E): `a.` inside a multi-line arrow emits INVALID IDE TSX \
+        "BUG: `a.` inside a multi-line arrow emits INVALID IDE TSX \
          (trailing dot absorbs the next token). The LSP ships this to tsgo → \"No Suggestions\". \
          OXC errors: {errors:?}\n--- TSX ---\n{code}"
     );
@@ -109,7 +108,7 @@ fn member_access_dot_top_level_emits_valid_ide_tsx() {
     let errors = oxc_parse_errors(&code);
     assert!(
         errors.is_empty(),
-        "BUG (cluster E): top-level `a.` absorbs the synthetic scaffolding emitted after the \
+        "BUG: top-level `a.` absorbs the synthetic scaffolding emitted after the \
          setup body (`a.var ___VERTER___instance`). OXC errors: {errors:?}\n--- TSX ---\n{code}"
     );
 }
@@ -123,7 +122,7 @@ fn member_access_dot_assignment_rhs_emits_valid_ide_tsx() {
     let errors = oxc_parse_errors(&code);
     assert!(
         errors.is_empty(),
-        "BUG (cluster E): `const x = a.` absorbs the following synthetic scaffolding. \
+        "BUG: `const x = a.` absorbs the following synthetic scaffolding. \
          OXC errors: {errors:?}\n--- TSX ---\n{code}"
     );
 }
@@ -137,7 +136,7 @@ fn member_access_dot_before_brace_emits_valid_ide_tsx() {
     let errors = oxc_parse_errors(&code);
     assert!(
         errors.is_empty(),
-        "BUG (cluster E): `a.` before the closing brace absorbs the `}}` (`a.}}`). \
+        "BUG: `a.` before the closing brace absorbs the `}}` (`a.}}`). \
          OXC errors: {errors:?}\n--- TSX ---\n{code}"
     );
 }
@@ -161,7 +160,7 @@ fn member_access_dot_multiline_keeps_template_binding_wrapper() {
     let body_idx = code.find("let a = 1;").expect("user body present");
     assert!(
         body_idx > wrapper_idx,
-        "REGRESSION (cluster E/C): the user's setup body (`let a = 1; () => {{ a. }}`) is stranded \
+        "REGRESSION: the user's setup body (`let a = 1; () => {{ a. }}`) is stranded \
          at MODULE scope BEFORE the ___VERTER___TemplateBindingFN wrapper (recovery dropped the \
          wrapper). The body must stay nested INSIDE the wrapper as in the working case. \n--- TSX ---\n{code}"
     );
@@ -282,7 +281,7 @@ fn clean_script_setup_output_is_not_reshaped_by_recovery() {
     );
 }
 
-// ── Finding 3: open-delimiter recovery ──────────────────────────────
+// ── Open-delimiter recovery ──────────────────────────────
 // An open delimiter that requires a non-empty expression (grouping paren,
 // computed-member bracket, arrow parenthesized body) must recover with a
 // placeholder operand BEFORE the closer, not collapse to invalid empty
@@ -295,7 +294,7 @@ fn open_grouping_paren_emits_valid_ide_tsx() {
     let errors = oxc_parse_errors(&code);
     assert!(
         errors.is_empty(),
-        "BUG (finding 3): `const x = (` must recover to `const x = (undefined)`, not invalid \
+        "BUG: `const x = (` must recover to `const x = (undefined)`, not invalid \
          `const x = ()`. OXC errors: {errors:?}\n--- TSX ---\n{code}"
     );
 }
@@ -307,7 +306,7 @@ fn computed_member_bracket_emits_valid_ide_tsx() {
     let errors = oxc_parse_errors(&code);
     assert!(
         errors.is_empty(),
-        "BUG (finding 3): `foo[` must recover to `foo[undefined]`, not invalid `foo[]`. \
+        "BUG: `foo[` must recover to `foo[undefined]`, not invalid `foo[]`. \
          OXC errors: {errors:?}\n--- TSX ---\n{code}"
     );
 }
@@ -319,12 +318,12 @@ fn arrow_parenthesized_body_emits_valid_ide_tsx() {
     let errors = oxc_parse_errors(&code);
     assert!(
         errors.is_empty(),
-        "BUG (finding 3): `const f = () => (` must recover to `() => (undefined)`, not invalid \
+        "BUG: `const f = () => (` must recover to `() => (undefined)`, not invalid \
          `() => ()`. OXC errors: {errors:?}\n--- TSX ---\n{code}"
     );
 }
 
-// ── Finding 3 (whole class): control/condition-keyword header parens ──
+// ── Control/condition-keyword header parens (whole class) ──
 // A `(` directly after a control/condition keyword (`if`/`while`/`for`/`switch`/
 // `catch`/`with`) is a REQUIRED header paren, NOT empty-valid call arguments. An
 // open header must recover to VALID TSX with the keyword-specific completion — an
@@ -438,7 +437,7 @@ fn valid_empty_delimiters_and_member_calls_stay_placeholder_free() {
     );
 }
 
-// ── Finding 3 (interaction): member hole × control-keyword header ────
+// ── Member hole × control-keyword header (interaction) ────
 // A dangling member access (`a.`) immediately FOLLOWED by a control/condition
 // keyword on the next line. The recovered `a.valueOf` is a COMPLETED operand, so
 // the following keyword must classify normally and complete its required header.
@@ -486,7 +485,7 @@ fn dangling_member_then_control_keyword_emits_valid_ide_tsx() {
     }
 }
 
-// ── Finding 1: top-level fact gate ──────────────────────────────────
+// ── Top-level fact gate ──────────────────────────────────
 
 /// A block-local declaration (inside a function body) must NOT be registered as a
 /// setup binding — only top-level facts feed binding registration, mirroring the
@@ -509,11 +508,11 @@ fn block_local_declaration_not_registered_as_binding() {
     // `inner: inner as unknown as typeof inner` in the shallowUnwrapRef block.
     assert!(
         !code.contains("typeof inner"),
-        "BUG (finding 1): block-local `inner` leaked into setup bindings\n--- TSX ---\n{code}"
+        "BUG: block-local `inner` leaked into setup bindings\n--- TSX ---\n{code}"
     );
 }
 
-// ── Finding 2: recovered macro LHS keeps macro semantics ────────────
+// ── Recovered macro LHS keeps macro semantics ────────────
 
 /// A recovered `defineProps` binding used in the template must resolve. Template
 /// `props.x` lowers to `__props.x`; recovery must emit the `const __props = props;`
@@ -530,7 +529,7 @@ fn recovered_define_props_template_resolves_without_dangling_props() {
     );
     assert!(
         code.contains("const __props = props"),
-        "BUG (finding 2): recovery must emit the `__props` alias for the recovered defineProps \
+        "BUG: recovery must emit the `__props` alias for the recovered defineProps \
          binding (template `props.x` → `__props.x` would otherwise dangle)\n--- TSX ---\n{code}"
     );
     // No dangling `__props`: any `__props` member reference must be backed by a decl.
@@ -540,7 +539,7 @@ fn recovered_define_props_template_resolves_without_dangling_props() {
     );
 }
 
-// ── Finding 4: clean-path GOLDEN preservation ───────────────────────
+// ── Clean-path GOLDEN preservation ───────────────────────
 
 /// GOLDEN: a representative VALID `<script setup>` (import + props + setup binding +
 /// template) must produce EXACTLY this IDE TSX. Recovery work must never reshape the

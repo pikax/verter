@@ -3,7 +3,7 @@
 //! This is the single source of truth for the human-readable description of each
 //! `v-on` / `@event` modifier. Two consumers share it:
 //! - completion (offering `.stop`/`.prevent`/… after `@event.`), and
-//! - hover (F2 — describing a `.stop` modifier token sitting on an event directive).
+//! - hover (describing a `.stop` modifier token sitting on an event directive).
 //!
 //! Keeping one table avoids the descriptions drifting between the two surfaces.
 
@@ -117,7 +117,7 @@ mod tests {
 
     #[test]
     fn mouse_event_picks_mouse_button_reading_for_left_right() {
-        // F2: `@click.left` must describe the LEFT MOUSE BUTTON, not Arrow Left.
+        // `@click.left` must describe the LEFT MOUSE BUTTON, not Arrow Left.
         assert_eq!(
             modifier_description_for_event("click", "left"),
             Some("Left mouse button")

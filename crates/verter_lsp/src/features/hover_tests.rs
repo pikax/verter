@@ -1013,7 +1013,7 @@ fn markup(hover: &VerterHoverResult) -> String {
 
 #[test]
 fn native_event_directive_hover_shows_vue_source_token() {
-    // F1: hovering on a native `@click` event directive must return a SOURCE-OWNED
+    // Hovering on a native `@click` event directive must return a SOURCE-OWNED
     // hover that names the Vue token (`@click`), never the generated JSX prop
     // (`onClick`). The hover range stays on the source `@click` token so the merge
     // layer can rewrite a paired `onClick` TypeProvider hover back to `@click`.
@@ -1109,7 +1109,7 @@ fn v_on_long_form_hover_canonicalizes_provenance_to_at_form() {
 
 #[test]
 fn event_modifier_stop_hover() {
-    // F2: hovering on a `.stop` modifier token must return a source-owned modifier
+    // Hovering on a `.stop` modifier token must return a source-owned modifier
     // hover describing `stopPropagation`, sourced from the shared modifier table.
     let source = r#"<template><button @click.stop="increment">x</button></template>"#;
     let blocks = scan_sfc_blocks(source);
@@ -1219,7 +1219,7 @@ fn mouse_event_modifier_left_is_mouse_button_not_arrow_key() {
 
 #[test]
 fn no_value_event_modifier_hover() {
-    // F2: the exact user example `<div @touchmove.stop />` — a no-value event
+    // The exact user example `<div @touchmove.stop />` — a no-value event
     // directive deleted entirely from the generated TSX — must still resolve a
     // source-owned hover for BOTH the event token and the modifier, with no
     // dependency on any generated TSX anchor.

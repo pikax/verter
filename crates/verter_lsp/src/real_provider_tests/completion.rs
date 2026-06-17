@@ -169,7 +169,7 @@ real_provider_test!(
 );
 
 // ---------------------------------------------------------------------------
-// F4/G — event-argument intellisense (inline arrow params + $event)
+// Event-argument intellisense (inline arrow params + $event)
 // ---------------------------------------------------------------------------
 
 real_provider_test!(

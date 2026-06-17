@@ -3859,10 +3859,10 @@ const outerLabel = 'outer'
     );
 }
 
-/// HEADLINE (cluster E): incomplete member access in `<script setup>` (`a.`).
+/// HEADLINE: incomplete member access in `<script setup>` (`a.`).
 ///
-/// The recovery codegen keeps the virtual file valid TSX, and E-P2 classifies the
-/// SCRIPT dot boundary as `MemberAccess` so the dot-trigger + member-filtering
+/// The recovery codegen keeps the virtual file valid TSX, and the completion handler
+/// classifies the SCRIPT dot boundary as `MemberAccess` so the dot-trigger + member-filtering
 /// machinery runs (it previously ran for template expressions only). The provider
 /// returns number members; the LSP surfaces them with NO `___VERTER___` recovery
 /// token leaking into a label.
@@ -3925,7 +3925,7 @@ async fn script_member_access_completion_returns_number_members() {
     })
     .expect("the `a.` dot boundary must map to a TSX offset (strict or fallback)");
 
-    // The script position must classify as member access (E-P2).
+    // The script position must classify as member access.
     let expr_ctx =
         classify_expression_context_with_trigger(&ctx.tsx_content, tsx_offset as usize, Some("."));
     assert!(
@@ -3972,7 +3972,7 @@ async fn script_member_access_completion_returns_number_members() {
     }
 }
 
-/// NEGATIVE (E-P2): an ordinary `<script setup>` IDENTIFIER position must NOT
+/// NEGATIVE: an ordinary `<script setup>` IDENTIFIER position must NOT
 /// inherit the template-only `IdentifierExpected` TypeProvider suppression — TS
 /// globals and imports are valid in script, so the provider's results flow
 /// through. (In a template the same context skips the provider; in script it must

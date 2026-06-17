@@ -863,11 +863,11 @@ fn resolve_vue_tsx_range(
 /// Callers MUST then drop the location — never substitute `Range::default()`, which silently
 /// sends the editor to line 0 of the wrong place (the original bug this replaces).
 ///
-/// Interim double-read: the provider already read this file to compute the offsets, and this
-/// re-reads it (through the VFS) to convert them back. The lossless design is the typed range
-/// protocol (carry a resolved line:col `Range` on the location), which removes both the re-read
-/// and the byte-offset round trip; this narrow resolver only covers definition/type-definition,
-/// where the offsets are guaranteed to index the target's own source.
+/// This resolves an external definition/type-definition range from the target's own on-disk
+/// source: the provider already read this file to compute the offsets, and this re-reads it
+/// (through the VFS) to convert those byte offsets back to a line:col `Range`. The resolver
+/// covers definition/type-definition only, where the offsets are guaranteed to index the
+/// target's own source.
 pub(crate) fn resolve_external_target_range(
     path: &str,
     start: u32,
@@ -903,8 +903,8 @@ pub(crate) fn resolve_external_target_range(
 /// `Range::default()`, which silently sends the editor to line 0.
 ///
 /// Scope: definition and type-definition only (both route through
-/// [`merge_definitions_with_barrel_resolver`]). References / rename / code actions keep their
-/// own packed-position handling until the gated `TypeLocation` range protocol lands.
+/// [`merge_definitions_with_barrel_resolver`]). References / rename / code actions handle their
+/// own packed positions separately and do not use this resolver.
 #[expect(
     clippy::too_many_arguments,
     reason = "current-file context (path + indexes + mapper) plus the foreign-file resolver"
