@@ -119,8 +119,8 @@ permanent "no schema change" guarantee. Flow:
    type-resolution engine, then `normalize`, then `graph_export`.
 
 The executor is NOT a second resolver: it plans, dispatches to the shared
-engine, and encodes. `PlannedDemand` is a closed 5-variant taxonomy
-(`PublicTypeInstance` / `MacroPayload` / `PathProjection` / `ShallowSurface`
+engine, and encodes. `PlannedDemand` is a closed 4-variant taxonomy
+(`MacroPayload` / `PathProjection` / `ShallowSurface`
 plus the Svelte arm `SvelteSurface` — its own `SvelteSurfaceSource` family,
 NOT the Vue-coupled `MacroPayload` arm) — no `Custom` / `Raw` arm, no source
 text, no OXC handles, no raw `SemanticQueryKey`s. `ResolvedOutcome` (Resolved / Partial / Unsupported /
