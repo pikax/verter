@@ -18155,8 +18155,9 @@ fn store_view_capability_split_guard_is_discriminating() {
 // and publishes one `IndexedReady`. The route-owned shallow system (a
 // parallel whole-file artifact build whose output the IndexedReady
 // build never read) is deleted, not shimmed; the eval-env fallback that
-// re-parsed the file inside `ShallowFileState::from_analysis_inner` is
-// likewise gone from every production path.
+// re-parsed the file inside `ShallowFileState` (the retired
+// `from_analysis_inner` name) is likewise gone from every production path
+// — its routing-only successor `from_analysis_with_memo` does no reparse.
 // ─────────────────────────────────────────────────────────────────────────
 
 /// Byte mask over `body`: `true` for every byte inside a line comment,
@@ -19361,6 +19362,44 @@ fn no_production_parse_and_build_env_in_session() {
         hits.is_empty(),
         "`parse_and_build_env` called from verter_session production code — \
          thread the materialise closure's single EvalEnv instead: {hits:#?}"
+    );
+}
+
+/// `from_analysis_inner` is a RETIRED production-symbol NAME — it was the
+/// eval-env fallback that re-parsed the file inside `ShallowFileState`.
+/// That path is gone; its routing-only successor is named
+/// `from_analysis_with_memo` (no reparse / no `parse_and_build_env` / no
+/// eval-env build — it reads the already-extracted analysis bindings and the
+/// supplied lazy memo). The retired NAME must never reappear in
+/// `verter_session` production source, so a future reconstruction can't
+/// quietly resurrect it under the old identity.
+#[test]
+fn from_analysis_inner_name_is_retired_in_session() {
+    let hits = session_production_ident_hits(&["from_analysis_inner"]);
+    assert!(
+        hits.is_empty(),
+        "`from_analysis_inner` is a retired production-symbol name (the \
+         deleted eval-env reparse fallback) — it must not appear in \
+         verter_session production source; the routing-only successor is \
+         `from_analysis_with_memo`: {hits:#?}"
+    );
+    // Anti-vacuity: the scanner must actually flag the retired name when it
+    // IS present in a production body (no live reference remains after the
+    // rename, so the discriminating check is synthetic).
+    let planted = "fn build() {\n    Self::from_analysis_inner(h, a, m, r);\n}\n";
+    let planted_hits = ident_hits_in_production_body(planted, &["from_analysis_inner"]);
+    assert_eq!(
+        planted_hits,
+        vec![(2, "from_analysis_inner".to_string())],
+        "anti-vacuity: the guard must FLAG a planted `from_analysis_inner` \
+         production reference"
+    );
+    // The current successor name must NOT trip the retired-name needle.
+    let successor = "fn build() {\n    Self::from_analysis_with_memo(h, a, m, r);\n}\n";
+    assert!(
+        ident_hits_in_production_body(successor, &["from_analysis_inner"]).is_empty(),
+        "the routing-only successor `from_analysis_with_memo` must not match \
+         the retired `from_analysis_inner` needle"
     );
 }
 

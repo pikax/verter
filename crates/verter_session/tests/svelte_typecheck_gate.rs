@@ -14,7 +14,10 @@
 //! The harness is GATED behind the locally-resolvable `tsgo` binary: when no
 //! `tsgo`/`tsc` is found (a machine without the native-preview install) the
 //! tests skip with a clear message rather than failing spuriously. On CI with
-//! the binary present they run for real.
+//! the binary present they run for real. When the environment REQUIRES a
+//! checker (`CI` or `VERTER_REQUIRE_TYPECHECKER` set), a missing checker is a
+//! HARD failure — the gate must never silently skip where it is meant to run,
+//! which would mask a Svelte projection regression.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -36,9 +39,30 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
+/// Returns `true` when the environment REQUIRES a type checker to be present:
+/// CI runs (`CI` set) or an explicit opt-in (`VERTER_REQUIRE_TYPECHECKER`).
+/// On such machines a missing checker is a HARD failure, not a silent skip —
+/// otherwise the whole gate could mask a Svelte projection regression by
+/// quietly skipping every test.
+fn require_type_checker() -> bool {
+    fn truthy(name: &str) -> bool {
+        std::env::var_os(name).is_some_and(|v| {
+            let v = v.to_string_lossy();
+            let v = v.trim();
+            !v.is_empty() && !v.eq_ignore_ascii_case("0") && !v.eq_ignore_ascii_case("false")
+        })
+    }
+    truthy("CI") || truthy("VERTER_REQUIRE_TYPECHECKER")
+}
+
 /// Locate a `tsgo` (or `tsc`) binary via the workspace `node_modules/.bin`.
-/// Returns `None` when neither is present — the gate then SKIPS (hermetic
-/// machines without the native-preview install).
+///
+/// Returns `None` when neither is present, so the gate SKIPS on hermetic
+/// dev machines without the native-preview install. BUT when the environment
+/// REQUIRES a checker ([`require_type_checker`] — CI, or an explicit
+/// `VERTER_REQUIRE_TYPECHECKER`), a missing checker is a HARD failure: the
+/// gate must not silently skip every test (and thereby mask a regression)
+/// exactly where it is meant to run for real.
 fn locate_type_checker() -> Option<(PathBuf, bool)> {
     let bin = workspace_root().join("node_modules/.bin");
     let tsgo = bin.join("tsgo");
@@ -49,6 +73,15 @@ fn locate_type_checker() -> Option<(PathBuf, bool)> {
     if tsc.exists() {
         return Some((tsc, false));
     }
+    assert!(
+        !require_type_checker(),
+        "the Svelte typecheck gate REQUIRES a type checker here \
+         (CI / VERTER_REQUIRE_TYPECHECKER is set) but neither `tsgo` nor \
+         `tsc` was found in {}. A silent skip would mask Svelte projection \
+         regressions — install the native-preview type checker or unset the \
+         env var for a local dev skip.",
+        bin.display()
+    );
     None
 }
 

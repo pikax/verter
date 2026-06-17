@@ -497,7 +497,7 @@ impl ShallowFileState {
             analysis.as_ref(),
             header_index,
         );
-        Self::from_analysis_inner(whole_hash, analysis, Arc::new(memo), &NullResolver)
+        Self::from_analysis_with_memo(whole_hash, analysis, Arc::new(memo), &NullResolver)
     }
 
     /// Test-only counterpart of [`Self::from_analysis_with_resolver`]
@@ -526,7 +526,7 @@ impl ShallowFileState {
             analysis.as_ref(),
             header_index,
         );
-        Self::from_analysis_inner(whole_hash, analysis, Arc::new(memo), resolver)
+        Self::from_analysis_with_memo(whole_hash, analysis, Arc::new(memo), resolver)
     }
 
     /// Test-only constructor with caller-supplied ROUTING tables (exports,
@@ -563,10 +563,20 @@ impl ShallowFileState {
         decl_bodies: Arc<crate::decl_body_memo::DeclBodyMemo>,
         resolver: &dyn ShallowImportResolver,
     ) -> Self {
-        Self::from_analysis_inner(whole_hash, analysis, decl_bodies, resolver)
+        Self::from_analysis_with_memo(whole_hash, analysis, decl_bodies, resolver)
     }
 
-    fn from_analysis_inner(
+    /// Shared routing-table builder for every `ShallowFileState`
+    /// constructor: it reads the ALREADY-extracted `analysis` bindings and
+    /// the SUPPLIED lazy declaration-body `decl_bodies` memo, canonicalizes
+    /// cross-file edges through `resolver`, and assembles the
+    /// export/import/wildcard routing tables. It performs NO reparse, NO
+    /// `parse_and_build_env`, and NO eval-env build — every body materialises
+    /// later on demand through the supplied memo. (This is the routing-only
+    /// successor to the retired `from_analysis_inner` eval-env fallback, which
+    /// re-parsed the file; the retired name is banned in production by the
+    /// `from_analysis_inner_name_is_retired_in_session` guard.)
+    fn from_analysis_with_memo(
         whole_hash: Hash16,
         analysis: Arc<AnalyzedExternalTypeSource>,
         decl_bodies: Arc<crate::decl_body_memo::DeclBodyMemo>,
