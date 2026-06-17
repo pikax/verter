@@ -523,7 +523,7 @@ export async function activateVueLanguageServer(
     revealOutputChannelOn: RevealOutputChannelOn.Never,
     middleware: {
       provideCompletionItem: async (document, position, context, token, next) => {
-        if (document.languageId !== "vue") {
+        if (!isFrameworkCarrierLanguageId(document.languageId)) {
           return next(document, position, context, token);
         }
 
@@ -559,7 +559,7 @@ export async function activateVueLanguageServer(
       },
 
       provideHover: async (document, position, token, next) => {
-        if (document.languageId !== "vue") {
+        if (!isFrameworkCarrierLanguageId(document.languageId)) {
           return next(document, position, token);
         }
 
@@ -594,7 +594,7 @@ export async function activateVueLanguageServer(
       },
 
       provideDocumentColors: async (document, token, next) => {
-        if (document.languageId !== "vue") {
+        if (!isFrameworkCarrierLanguageId(document.languageId)) {
           return next(document, token);
         }
 
@@ -622,7 +622,7 @@ export async function activateVueLanguageServer(
       },
 
       provideColorPresentations: async (color, context, token, next) => {
-        if (context.document.languageId !== "vue") {
+        if (!isFrameworkCarrierLanguageId(context.document.languageId)) {
           return next(color, context, token);
         }
 
@@ -651,7 +651,7 @@ export async function activateVueLanguageServer(
       },
 
       provideDocumentHighlights: async (document, position, token, next) => {
-        if (document.languageId !== "vue") {
+        if (!isFrameworkCarrierLanguageId(document.languageId)) {
           return next(document, position, token);
         }
 
@@ -917,7 +917,7 @@ export async function activateVueLanguageServer(
   // CSS validation diagnostics — update on document change (debounced per URI)
   const cssDiagTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const updateCssDiagnostics = async (document: TextDocument) => {
-    if (document.languageId !== "vue") return;
+    if (!isFrameworkCarrierLanguageId(document.languageId)) return;
     try {
       const uri = document.uri.toString();
       const source = document.getText();
@@ -965,7 +965,7 @@ export async function activateVueLanguageServer(
 
   context.subscriptions.push(
     workspace.onDidChangeTextDocument((e) => {
-      if (e.document.languageId === "vue") {
+      if (isFrameworkCarrierLanguageId(e.document.languageId)) {
         debouncedCssDiag(e.document);
         startupProbe?.maybeTrackDocument(e.document);
       }
@@ -1157,7 +1157,7 @@ function addCompilePreviewCommand(
 ) {
   context.subscriptions.push(
     commands.registerTextEditorCommand("verter.showCompiledCodeToSide", async (editor) => {
-      if (editor?.document?.languageId !== "vue") {
+      if (!isFrameworkCarrierLanguageId(editor?.document?.languageId)) {
         window.showInformationMessage("Not a Vue file");
         return;
       }
@@ -1182,7 +1182,7 @@ function addWriteVirtualFilesCommand(
 ) {
   context.subscriptions.push(
     commands.registerTextEditorCommand("verter.writeVirtualFiles", async (editor) => {
-      if (editor?.document?.languageId !== "vue") {
+      if (!isFrameworkCarrierLanguageId(editor?.document?.languageId)) {
         window.showInformationMessage("Not a Vue file");
         return;
       }
@@ -1290,25 +1290,28 @@ function addVerterAnalysis(getClient: GetClient, context: ExtensionContext) {
     }),
   );
 
-  // Track last active Vue file URI so sidebar persists when virtual files or non-.vue files are focused
-  let lastVueFileUri: string | undefined;
-  const getLastVueUri = () => lastVueFileUri;
-  const updateLastVueFile = () => {
+  // Track last active framework-carrier file URI so the sidebar persists when
+  // virtual files or non-carrier files are focused (any carrier: .vue/.svelte).
+  let lastCarrierFileUri: string | undefined;
+  const getLastCarrierUri = () => lastCarrierFileUri;
+  const updateLastCarrierFile = () => {
     const editor = window.activeTextEditor;
-    if (editor?.document?.languageId === "vue") {
-      lastVueFileUri = editor.document.uri.toString();
+    if (isFrameworkCarrierLanguageId(editor?.document?.languageId)) {
+      lastCarrierFileUri = editor!.document.uri.toString();
     }
   };
-  updateLastVueFile();
-  context.subscriptions.push(window.onDidChangeActiveTextEditor(updateLastVueFile));
+  updateLastCarrierFile();
+  context.subscriptions.push(window.onDidChangeActiveTextEditor(updateLastCarrierFile));
 
-  // Track whether active editor is a Vue file
-  const updateHasActiveVueFile = () => {
-    const isVue = window.activeTextEditor?.document?.languageId === "vue";
-    commands.executeCommand("setContext", "verter.hasActiveVueFile", isVue);
+  // Track whether the active editor is a framework-carrier file (.vue/.svelte).
+  const updateHasActiveCarrierFile = () => {
+    const isCarrier = isFrameworkCarrierLanguageId(
+      window.activeTextEditor?.document?.languageId,
+    );
+    commands.executeCommand("setContext", "verter.hasActiveCarrierFile", isCarrier);
   };
-  updateHasActiveVueFile();
-  context.subscriptions.push(window.onDidChangeActiveTextEditor(updateHasActiveVueFile));
+  updateHasActiveCarrierFile();
+  context.subscriptions.push(window.onDidChangeActiveTextEditor(updateHasActiveCarrierFile));
 
   // Create content provider for virtual files (no disk writes — uses verter-virtual:// scheme)
   const contentProvider = new VirtualFileContentProvider();
@@ -1323,11 +1326,11 @@ function addVerterAnalysis(getClient: GetClient, context: ExtensionContext) {
   const virtualFilesProvider = new UnifiedVirtualFilesProvider(
     getClient,
     contentProvider,
-    getLastVueUri,
+    getLastCarrierUri,
   );
-  const componentTreeProvider = new ComponentTreeProvider(getClient, getLastVueUri);
-  const routeTreeProvider = new RouteTreeProvider(getClient, getLastVueUri);
-  const analysisProvider = new AnalysisTreeProvider(getClient, getLastVueUri);
+  const componentTreeProvider = new ComponentTreeProvider(getClient, getLastCarrierUri);
+  const routeTreeProvider = new RouteTreeProvider(getClient, getLastCarrierUri);
+  const analysisProvider = new AnalysisTreeProvider(getClient, getLastCarrierUri);
   const decorationProvider = new VueApiDecorationProvider(getClient);
   const bindingColorProvider = new BindingColorDecorationProvider(getClient);
   const propConstnessProvider = new PropConstnessDecorationProvider(getClient);
@@ -1400,7 +1403,7 @@ function addVerterAnalysis(getClient: GetClient, context: ExtensionContext) {
       }
     }),
     commands.registerCommand("verter.showSourceMapVisualization", async () => {
-      const sourceUri = getLastVueUri();
+      const sourceUri = getLastCarrierUri();
       if (!sourceUri) {
         window.showInformationMessage("No Vue file active");
         return;
@@ -1422,7 +1425,7 @@ function addVerterAnalysis(getClient: GetClient, context: ExtensionContext) {
     commands.registerCommand(
       "verter.showSourceMapForFile",
       async (item: UnifiedVirtualFileItem) => {
-        const sourceUri = item.sourceUri || getLastVueUri();
+        const sourceUri = item.sourceUri || getLastCarrierUri();
         if (!sourceUri) {
           window.showInformationMessage("No Vue file active");
           return;

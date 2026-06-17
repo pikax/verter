@@ -20,6 +20,7 @@ import type {
   TemplatePropUsage,
 } from "@verter/language-shared";
 import { basename, dirname, resolve } from "path";
+import { isCarrierComponentImport, isFrameworkCarrierLanguageId } from "./frameworkWiring";
 
 // ── Node types for the component tree ──────────────────────────
 
@@ -74,7 +75,7 @@ export class ComponentTreeProvider implements TreeDataProvider<ComponentTreeItem
   ) {
     this.subscriptions.push(
       window.onDidChangeActiveTextEditor((editor) => {
-        if (editor?.document?.languageId === "vue") {
+        if (isFrameworkCarrierLanguageId(editor?.document?.languageId)) {
           this.refresh();
         }
       }),
@@ -83,7 +84,7 @@ export class ComponentTreeProvider implements TreeDataProvider<ComponentTreeItem
     this.subscriptions.push(
       workspace.onDidChangeTextDocument(
         debounce((e) => {
-          if (e.document.languageId === "vue") {
+          if (isFrameworkCarrierLanguageId(e.document.languageId)) {
             this.refresh();
           }
         }, 500),
@@ -191,7 +192,7 @@ export class ComponentTreeProvider implements TreeDataProvider<ComponentTreeItem
       .join("\n");
 
     // Click opens the defining file
-    if (comp.importSource?.endsWith(".vue")) {
+    if (isCarrierComponentImport(comp.importSource)) {
       item.command = {
         command: "verter.goToComponent",
         title: "Go to Component",
@@ -283,10 +284,9 @@ export class ComponentTreeProvider implements TreeDataProvider<ComponentTreeItem
 
   private async getRootChildren(): Promise<ComponentTreeItem[]> {
     const editor = window.activeTextEditor;
-    const sourceUri =
-      editor?.document?.languageId === "vue"
-        ? editor.document.uri.toString()
-        : this.getLastVueUri();
+    const sourceUri = isFrameworkCarrierLanguageId(editor?.document?.languageId)
+      ? editor!.document.uri.toString()
+      : this.getLastVueUri();
 
     if (!sourceUri) return [];
 
@@ -407,7 +407,7 @@ export class ComponentTreeProvider implements TreeDataProvider<ComponentTreeItem
    */
   async goToComponent(node: ComponentNode): Promise<void> {
     const comp = node.component;
-    if (!comp.importSource?.endsWith(".vue")) return;
+    if (!isCarrierComponentImport(comp.importSource)) return;
 
     const sourceUri = node.sourceFileUri || this.cachedSourceUri;
     if (!sourceUri) return;

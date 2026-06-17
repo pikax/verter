@@ -9,6 +9,7 @@ import {
   type Uri,
 } from "vscode";
 import { appendFileSync } from "fs";
+import { isFrameworkCarrierLanguageId } from "./frameworkWiring";
 
 export interface StartupProbeConfig {
   relativePath: string;
@@ -127,7 +128,7 @@ export class StartupProbe {
   }
 
   private isTargetDocument(document: TextDocument): boolean {
-    if (document.languageId !== "vue") {
+    if (!isFrameworkCarrierLanguageId(document.languageId)) {
       return false;
     }
 

@@ -3,6 +3,7 @@ import { CLIENT_FRAMEWORKS, CLIENT_FRAMEWORK_LANGUAGE_IDS } from "@verter/langua
 import {
   frameworkDocumentSelector,
   frameworkClientLanguageIds,
+  isCarrierComponentImport,
   isFrameworkCarrierLanguageId,
   shouldConfigureTypeScriptPluginForLanguageId,
 } from "./frameworkWiring";
@@ -41,6 +42,18 @@ describe("framework wiring (manifest-driven)", () => {
     expect(isFrameworkCarrierLanguageId("svelte")).toBe(true);
     expect(isFrameworkCarrierLanguageId("typescript")).toBe(false);
     expect(isFrameworkCarrierLanguageId(undefined)).toBe(false);
+  });
+
+  it("recognises a framework-carrier component import by ANY carrier extension", () => {
+    // Carrier-generic: both `.vue` and `.svelte` component imports are carriers.
+    expect(isCarrierComponentImport("./Foo.vue")).toBe(true);
+    expect(isCarrierComponentImport("../components/Bar.svelte")).toBe(true);
+    expect(isCarrierComponentImport("@/widgets/Baz.vue")).toBe(true);
+    // A non-carrier import (npm package, plain module, bare specifier) is not.
+    expect(isCarrierComponentImport("vue")).toBe(false);
+    expect(isCarrierComponentImport("./helpers/util")).toBe(false);
+    expect(isCarrierComponentImport("./types.ts")).toBe(false);
+    expect(isCarrierComponentImport(undefined)).toBe(false);
   });
 
   it("configures the built-in TS plugin for the manifest trigger language ids", () => {

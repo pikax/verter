@@ -18,6 +18,7 @@ import { RequestType, type PatchClient } from "@verter/language-shared";
 import type { FileAnalysisSnapshot, ProjectOverview } from "@verter/language-shared";
 import { basename } from "path";
 import { utf16OffsetToPosition } from "./utils";
+import { isCarrierComponentImport, isFrameworkCarrierLanguageId } from "./frameworkWiring";
 import { computeSsrReadiness } from "./ssrReadiness";
 
 export type AnalysisItem = CategoryItem | LeafItem;
@@ -104,7 +105,7 @@ export class AnalysisTreeProvider implements TreeDataProvider<AnalysisItem>, Dis
       workspace.onDidChangeTextDocument(
         debounce((e) => {
           if (
-            e.document.languageId === "vue" ||
+            isFrameworkCarrierLanguageId(e.document.languageId) ||
             e.document.languageId === "typescript" ||
             e.document.languageId === "javascript"
           ) {
@@ -162,8 +163,8 @@ export class AnalysisTreeProvider implements TreeDataProvider<AnalysisItem>, Dis
     const editor = window.activeTextEditor;
     const lang = editor?.document?.languageId;
 
-    // For .vue files: fetch full analysis from the LSP
-    if (lang === "vue") {
+    // For framework-carrier files (.vue/.svelte): fetch full analysis from the LSP
+    if (isFrameworkCarrierLanguageId(lang)) {
       return this.getVueAnalysis(editor!.document.uri.toString());
     }
 
@@ -279,7 +280,7 @@ export class AnalysisTreeProvider implements TreeDataProvider<AnalysisItem>, Dis
     // Component imports (*.vue)
     const componentImports: LeafItem[] = [];
     for (const imp of imports) {
-      if (imp.source.endsWith(".vue")) {
+      if (isCarrierComponentImport(imp.source)) {
         componentImports.push({
           type: "leaf",
           label: imp.bindings[0] ?? imp.source,

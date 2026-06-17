@@ -19,6 +19,7 @@
 
 import {
   BASE_TYPESCRIPT_LANGUAGE_IDS,
+  CLIENT_CARRIER_EXTENSIONS,
   CLIENT_DOCUMENT_SELECTOR_LANGUAGE_IDS,
   CLIENT_FRAMEWORK_LANGUAGE_IDS,
 } from "@verter/language-shared";
@@ -49,6 +50,27 @@ const FRAMEWORK_CARRIER_LANGUAGE_IDS = new Set(CLIENT_FRAMEWORK_LANGUAGE_IDS);
  */
 export function isFrameworkCarrierLanguageId(languageId: string | undefined): boolean {
   return languageId !== undefined && FRAMEWORK_CARRIER_LANGUAGE_IDS.has(languageId);
+}
+
+/**
+ * Whether `importSource` is a framework-carrier component import — a module
+ * specifier or path ending in ANY registered carrier extension (`.vue` /
+ * `.svelte`). Carrier-generic, manifest-derived (`CLIENT_CARRIER_EXTENSIONS`),
+ * NOT a hardcoded `.endsWith(".vue")`. Drives the "this import targets a
+ * framework component file" decision in the analysis/component tree views.
+ *
+ * A type guard: a truthy result narrows `importSource` to `string`, so callers
+ * keep the control-flow narrowing the prior optional-chained `?.endsWith(".vue")`
+ * provided (it accepts the carrier-neutral `importSource: string | null`).
+ */
+export function isCarrierComponentImport(
+  importSource: string | null | undefined,
+): importSource is string {
+  return (
+    importSource !== null &&
+    importSource !== undefined &&
+    CLIENT_CARRIER_EXTENSIONS.some((ext) => importSource.endsWith(ext))
+  );
 }
 
 /** The set of language ids the built-in TypeScript plugin is configured for. */

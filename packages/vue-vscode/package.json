@@ -415,12 +415,12 @@
         {
           "id": "verterVirtualFiles",
           "name": "Virtual Files & Source Map",
-          "when": "verter.analysisEnabled && verter.hasActiveVueFile"
+          "when": "verter.analysisEnabled && verter.hasActiveCarrierFile"
         },
         {
           "id": "verterComponentTree",
           "name": "Component Tree",
-          "when": "verter.analysisEnabled && verter.hasActiveVueFile"
+          "when": "verter.analysisEnabled && verter.hasActiveCarrierFile"
         },
         {
           "id": "verterAnalysis",
