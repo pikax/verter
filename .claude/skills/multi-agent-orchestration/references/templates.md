@@ -4,7 +4,7 @@ Copy-and-fill skeletons for the orchestrator. These are starting points — adap
 
 ## 1. Self-contained implementer brief
 
-Write this to a file (e.g. `block-<N>-brief.md`); the dispatch prompt points the agent at it.
+Pass this brief as the Agent tool's `prompt` (the default mechanism) — or write it to a file the agent reads, or feed it to a `claude -p` stdin file on the opt-in CLI path. Either way the implementer sees only the brief, so give it everything. For any gate-bearing dispatch (independent reviewer, §1a/verification, confirm, anti-rogue — any mechanism, Agent or `claude -p`), persist the exact prompt/brief AND the verbatim final report to files with a recorded input id/hash plus the resolved model and effort before acting on the result — inline-only briefs are not allowed for those roles, because anti-rogue and never-prime checks need post-hoc inspection of the exact prompt and output.
 
 ```
 # Implementer Brief — Block <N>: <title>

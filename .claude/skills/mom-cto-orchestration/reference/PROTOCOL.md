@@ -48,13 +48,13 @@ Layer 2: MoM confirm manager independently reruns discovery post-land on the lan
 
 High suspicion always demands adversarial codex: changed guard assertion/needles/exemptions/rationale/comment, new `#[ignore]`, relaxed `assert`, new allowlist/exemption, weakened rule clause.
 
-## Active Regime / Accounts
+## Active Regime / Capacity
 
-Read account→role mapping from the live brief/ledger after smoke tests; never hard-code account names. Roles required: implementer/fix fresh context, claude review/§1a/confirm fresh context, codex. Separate accounts are preferred, not required. Single account = separate fresh `-p` invocations, unprimed prompts, codex cross-model check, serialized heavy gates. Stop/escalate if all implementation accounts are capped/logged out or codex unavailable.
+Roles required: implementer/fix fresh context, claude review/§1a/confirm fresh context, codex. The default Agent/Task mechanism gives fresh-context role separation on a single account (harness-managed), bounded by harness Agent concurrency capacity, ONLY WHEN the harness guarantees no inherited transcript/hidden state beyond the passed prompt, a distinct agent identity, status/stop/continue control, and child-agent spawning where required; if any of those is absent or unknown, fall back to `claude -p` for an explicit fresh-process boundary. On the opt-in `claude -p` path, read the account→role mapping from the live brief/ledger after smoke tests and never hard-code account names; separate accounts are then an availability/parallelism optimization, not required. Single account = separate fresh Agent sub-agents (unprimed prompts), codex cross-model check, serialized heavy gates. Stop/escalate if no implementation agent capacity is available or codex unavailable.
 
-Run file-disjoint blocks in parallel, one block per available account. No 300s spacing, one-claude-at-a-time throttle, or sub-agent-count limit. Triple-review legs run in parallel. Canonical/full-suite/heavy gates are globally serialized under one gate lock.
+Run file-disjoint blocks in parallel (the default). No artificial 300s spacing or one-claude-at-a-time throttle; respect harness Agent concurrency capacity. On the opt-in `claude -p` path, map separate-account instances explicitly, one block per account, with no artificial sub-agent-count limit. Triple-review legs run in parallel. Canonical/full-suite/heavy gates are globally serialized under one gate lock.
 
-Bind highest available claude model + `--effort max` explicitly for every claude agent; codex uses highest reasoning (`gpt-5.5`/xhigh here). Never downgrade reviewers. Watch `CLAUDE_CONFIG_DIR`: a wrapper account exports it into children, so bare `claude` may silently use the wrapper account. Override at loop start (`export CLAUDE_CONFIG_DIR=$HOME/.claude`) when dispatching bare `claude`; identical reset times across "different" accounts indicate the trap.
+codex uses highest reasoning (`gpt-5.5`/xhigh here); never downgrade reviewers. Every gate-bearing Claude role — block manager, reviewer, §1a verifier, confirm manager, integration-confirm manager, implementer/fix (the block and integration-confirm managers own the landing and integration gates and are explicitly covered) — MUST run on the highest available Claude model at max/highest effort, bound either by an explicit `model`/`effort` arg at spawn OR by an audited agent-definition whose model+effort are recorded in `PROGRESS.md`; an unknown or default model/effort BLOCKS the dispatch — never silently downgrade any gate-bearing role. On the opt-in `claude -p` path, bind that highest model + `--effort max` explicitly per agent and watch `CLAUDE_CONFIG_DIR`: a wrapper account exports it into children, so bare `claude` may silently use the wrapper account — override at loop start (`export CLAUDE_CONFIG_DIR=$HOME/.claude`) when dispatching bare `claude`; identical reset times across "different" accounts indicate the trap.
 
 ## Repo / Worktree
 
@@ -62,9 +62,15 @@ Repo root: `/Users/carlosrodrigues/Documents/dev/verter`. Integration branch: `r
 
 Every phase/stage has its own worktree. Implementers may commit `wip:` checkpoints after cheap checks. After CONFIRMED, each landed block squashes to exactly ONE clean conventional commit; a stage/phase may contain multiple block commits only because multiple blocks landed independently. Only conventional commits require the full gate.
 
-## CLI Dispatch
+## Dispatch
 
-Use CLI subprocesses only; never Task/Agent tools. Each agent gets a self-contained brief file and starts cold.
+Default mechanism is the **Agent/Task tool**, gated on harness support. The CTO spawns each manager as an Agent sub-agent; managers spawn their implementer/fix/review/verify (§1a) agents as Agent sub-agents too (agents may spawn child agents — the manager→children topology). Managers NEVER spawn the confirm manager — only the CTO/MoM dispatches the separate unprimed confirm (and integration-confirm) MANAGER after land, so the post-land gate stays independent of the author. The Agent tool is the default ONLY WHEN the harness guarantees (a) no inherited transcript/hidden state beyond the passed prompt, (b) a distinct agent identity, (c) status/stop/continue control, and (d) child-agent spawning where the role needs it. This capability is not assumed: it MUST be proven and recorded once per session as a `CAPABILITY mechanism=agent isolation=<result> identity=<result> stopcontinue=<result> childspawn=<result> result=PASS` line in `PROGRESS.md`/the CTO ledger BEFORE the first Agent dispatch (see `CHECKPOINT-PROTOCOL.md`). An absent or stale capability proof counts as "unknown" and forces the `claude -p` fallback — an explicit fresh-process boundary; any single missing/failed property does the same. Each starts cold with a self-contained brief as its prompt; the agent's final message IS its report — and for gate-bearing roles (review, §1a, confirm, anti-rogue) the exact prompt and the verbatim final report are persisted to files with a recorded input id, never inline-only (see `CHECKPOINT-PROTOCOL.md`). A blocking Agent call returns that report; a background (`run_in_background`) Agent call notifies the spawner on completion — no resume-loop wrapper, no stream/marker watchdog. Continue a still-live agent with its context via its id/name; a fresh Agent call starts cold.
+
+The dispatch mechanism affects oversight-gate PROPERTIES — confirm independence, reviewer model quality, fresh-context isolation, and durable auditability — not just transport; those are preserved by the safeguards above, not by the swap alone. Each gate is conditioned on a recorded precondition, never asserted: confirm/integration-confirm independence on CTO-only dispatch; fresh-context isolation on the recorded `CAPABILITY … result=PASS` proof (absent/stale ⇒ `claude -p`); reviewer/manager quality on the recorded highest-model+max-effort binding per gate-bearing role (unknown/default ⇒ BLOCK); auditability on the persisted brief+report+input-id+model+effort. The 3/3 review, §1a, confirm, and anti-rogue gates pass only when their preconditions are recorded — a missing or stale precondition leaves that gate unmet. CTO dispatches only managers; managers dispatch implementers/fix/review/verify (§1a) agents, never the confirm manager. Trust but verify: every report is INTENT, not fact — confirm "done"/test-counts/commits/deletion claims against `git show --stat`, `git log`, `grep`, and gate summaries before acting.
+
+Codex is unchanged — read-only reviewer/architect/decider only, a Bash-invoked CLI subprocess (never `claude -p`); all code/tests/fixes are by claude; any codex-written code is suspect and redone by claude.
+
+`claude -p` CLI subprocesses are **OPT-IN only**: (a) explicit user request, or (b) a genuinely separate account instance for multi-instance parallelism or work that must outlive the parent session. Default Agent mode is single-account harness-managed parallelism; the opt-in `claude -p` path is what restores multi-account claude instances, and it ALONE carries the `WAIT-PROTOCOL.md` foreground-poll + resume-loop + `CLAUDE_CONFIG_DIR` discipline:
 
 ```
 <CLI> -p --model '<model>' --effort max --dangerously-skip-permissions \
@@ -72,9 +78,7 @@ Use CLI subprocesses only; never Task/Agent tools. Each agent gets a self-contai
   < BRIEF.md > OUT.jsonl 2>&1 &
 ```
 
-Detach resume-loop wrappers (`nohup`/`setsid`) and monitor stream growth plus status/report/marker/git activity. Do NOT kill an idle resume-loop wrapper that is still self-healing; intervene only on a true hang — no activity on ANY signal (stream/status/git/markers) across multiple bounded windows — by killing both the wrapper and the inner `claude -p` (`pkill -f BRIEF` misses the inner, which reads stdin), confirming `ps` count 0, then redispatching. Conversely a LIVE agent with repeated activity but zero durable artifacts across multiple windows despite an explicit tests-first/outputs brief is non-converging: kill it and redispatch with a tightened forcing-function brief.
-
-CTO dispatches only managers. Managers dispatch implementers/fix/review/verify agents. Codex is read-only reviewer/architect/decider only; all code/tests/fixes are by claude. Any codex-written code is suspect and redone by claude. Trust but verify: every sub-agent report is INTENT, not fact — confirm "done"/test-counts/commits/deletion claims against `git show --stat`, `git log`, `grep`, and gate summaries before acting.
+On that path, detach resume-loop wrappers (`nohup`/`setsid`) and monitor stream/status/report/marker/git activity; intervene only on a true hang — no activity on ANY signal across multiple bounded windows — by killing both the wrapper and the inner `claude -p` (`pkill -f BRIEF` misses the inner, which reads stdin), confirming `ps` count 0, then redispatching. A LIVE agent with repeated activity but zero durable artifacts across multiple windows is non-converging: kill and redispatch with a tightened forcing-function brief.
 
 ## codex Invocation
 
@@ -108,7 +112,7 @@ Single yes/no architecture question → one neutral codex leg. Genuine multiple-
 Modes:
 - `escalate-to-user`: codex produces architecture analysis; user ratifies/rejects. Product/priority forks go to user.
 - `full-autonomous`: auto-adopt codex architecture verdict; derive product/priority from approved plan.
-User never adjudicates architecture instead of codex. Stop/user boundaries: no implementation account, destructive operation (force-push/history rewrite/irreversible shared state), unrecoverable lost/corrupt worktree with no trusted commit, codex unavailable/contradicts evidence, or product/priority choice not derivable from plan.
+User never adjudicates architecture instead of codex. Stop/user boundaries: no implementation agent capacity (on opt-in `claude -p`, no usable implementation account), destructive operation (force-push/history rewrite/irreversible shared state), unrecoverable lost/corrupt worktree with no trusted commit, codex unavailable/contradicts evidence, or product/priority choice not derivable from plan.
 
 ## Verification Gate
 
@@ -151,7 +155,7 @@ Mid-plan deferrals require codex-DEFER ruling and debt-ledger row in `docs/arch`
 
 ## Confirm / Integration Gates
 
-After every manager land, CTO dispatches a separate unprimed confirm MANAGER. It independently verifies four bars and writes `VERDICT:CONFIRMED` only when all hold:
+After every manager land, the CTO — never the block manager — dispatches a separate unprimed confirm MANAGER. It independently verifies four bars and writes `VERDICT:CONFIRMED` only when all hold:
 1. CORRECT + additive/non-breaking-as-claimed + full gate GREEN first-hand; re-grep legacy deletion; re-prove every correctness-bearing test/guard discriminates in throwaway worktree (plant violation → RED → restore → GREEN); sampling one is invalid; `cmp` design mirrors.
 2. NOT SHALLOW: real inputs and edges; no non-discriminating characterization.
 3. NO STUBS: no empty/always-true tests or unconditional default/unknown/OK returns as implementation.
@@ -161,7 +165,7 @@ On REOPEN, CTO dispatches fresh fix manager → re-land → re-confirm. Per-stag
 
 Integration-confirm MANAGER runs at every phase/milestone boundary, before any dependent phase, before final close-out, and after every 5 confirmed blocks. It derives done-bar from binding plan, not reports; reviews integrated diff/tree; runs canonical gate; checks cross-block invariants, manifests, design mirrors, debt honesty, legacy deletion, hollow fronts, cache/perf/warm-state. Issues are classified via codex as REOPEN vs FEED-FORWARD. FEED-FORWARD only mid-plan. Only `VERDICT:INTEGRATION-CONFIRMED` closes phase.
 
-Stage/phase cleanup only after land + confirmation: `git worktree remove` + `git worktree prune`, remove transient briefs/jsonl/review outputs/markers, preserve CTO ledger/MOM-NOTES, landed reports, debt ledger, design docs, verify clean status. At phase boundary clear all closed-stage worktrees/temp. Never delete live `/tmp` evidence mid-flight.
+Stage/phase cleanup only after land + confirmation: `git worktree remove` + `git worktree prune`, remove transient briefs/reports/review outputs (and `jsonl`/markers on the opt-in `claude -p` path), preserve CTO ledger/MOM-NOTES, landed reports, debt ledger, design docs, verify clean status. At phase boundary clear all closed-stage worktrees/temp. Never delete live `/tmp` evidence mid-flight.
 
 ## Status Reporting
 

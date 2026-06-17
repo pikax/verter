@@ -2,6 +2,8 @@
 
 > Governance: any change to this protocol requires prior neutral codex-architect approval — see PROTOCOL.md → GOVERNANCE.
 
+**Scope: the OPT-IN `claude -p` path only.** Default Agent/Task-tool dispatch is harness-managed — a blocking Agent call returns the sub-agent's final message; a `run_in_background` Agent call notifies the spawner on completion. No foreground-poll, no resume-loop, no marker watchdog. Everything below applies ONLY when you have explicitly opted into `claude -p` CLI subprocesses (separate-account / out-of-session work).
+
 Headless `claude -p` agents are not interactive. When they stop tool calls and emit a final message, the process exits. They are not re-invoked by background notifications.
 
 ## Forbidden Waits

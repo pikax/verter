@@ -37,16 +37,18 @@ Every block/stage/phase runs: manager-owned implementation → full 3/3 review �
 | Role | Owner | Access | Rule |
 |---|---|---|---|
 | CTO | interactive session | orchestration only | dispatch/decide/checkpoint; never implements |
-| Block manager | claude `-p` fresh context | full worktree | owns one unit through land |
-| Implementer/fix | claude `-p` | full | writes all code/tests/fixes; new commit per finding |
+| Block manager | Agent sub-agent (fresh ctx) | full worktree | owns one unit through land |
+| Implementer/fix | Agent sub-agent | full | writes all code/tests/fixes; new commit per finding |
 | Review legs x2 | codex | read-only | latest/high reasoning, distinct lenses |
-| Review leg x1 | claude `-p` fresh context | read-only | separate from author when accounts allow |
-| §1a verifier | claude `-p` fresh context | full/throwaway | proves discrimination + gate + rule integrity |
-| Confirm manager | claude `-p` fresh context | full/throwaway | independent post-land best-implementation gate |
+| Review leg x1 | Agent sub-agent (fresh ctx) | read-only | separate fresh agent from author; separate account when available/opt-in |
+| §1a verifier | Agent sub-agent (fresh ctx) | full/throwaway | proves discrimination + gate + rule integrity |
+| Confirm manager | Agent sub-agent (fresh ctx) | full/throwaway | independent post-land best-implementation gate |
 | Architect/decider | codex only | read-only | all architecture forks; never code |
-| Diagnostic | claude `-p` | throwaway/full | empirical check when reports conflict |
+| Diagnostic | Agent sub-agent | throwaway/full | empirical check when reports conflict |
 
-Role separation is required; account separation is optional. On one account, use separate fresh `-p` invocations, neutral prompts, codex second opinions, and serialized heavy gates. Stop/escalate if all implementation accounts are capped/logged out or codex is unavailable. Read live account mapping from the brief/ledger; never hard-code it.
+**Dispatch mechanism (default): the Agent/Task tool — gated on harness support.** The CTO spawns each manager as an Agent sub-agent; managers spawn their own implementer/reviewer/fix/verify (§1a) agents as Agent sub-agents (agents may spawn child agents — the manager→children topology). Managers NEVER spawn the confirm manager — only the CTO/MoM dispatches the separate unprimed confirm (and integration-confirm) MANAGER after land, keeping the post-land gate independent of the author. Each starts fresh with a self-contained brief as its prompt; its final message is its report. Agent is the default ONLY WHEN the harness guarantees (a) no inherited transcript/hidden state beyond the passed prompt, (b) a distinct agent identity, (c) status/stop/continue control, and (d) child-agent spawning where the role needs it; if any property is absent or unknown, fall back to `claude -p` (a separate process is an explicit fresh boundary). `claude -p` is otherwise OPT-IN only — explicit user request, or a separate account instance for multi-instance parallelism / work that must outlive the parent session (default Agent mode is single-account harness-managed parallelism; `claude -p` restores multi-account instances). Codex is unchanged either way: a Bash-invoked CLI for the two review legs + architecture, never `claude -p`. The mechanism affects oversight-gate PROPERTIES — confirm independence, reviewer model quality, fresh-context isolation, durable auditability — not just transport; those are preserved by the safeguards here, not by the swap alone. Each gate rests on a recorded precondition, not an assertion: confirm/integration-confirm independence on CTO-only dispatch; Agent-default on the recorded `CAPABILITY … result=PASS` proof (absent/stale ⇒ `claude -p`); reviewer/manager quality on the recorded highest-model+max-effort binding (unknown/default ⇒ BLOCK); auditability on the persisted brief+report+input-id+model+effort. A gate whose precondition is missing or stale is unmet.
+
+Role separation is required; account separation is optional. On one account, use separate fresh Agent sub-agents (or fresh `-p` invocations on the opt-in path), neutral prompts, codex second opinions, and serialized heavy gates. Stop/escalate if no implementation agent capacity is available or codex is unavailable. Read live account mapping from the brief/ledger; never hard-code it.
 
 ## CTO Rules
 
@@ -54,9 +56,9 @@ Role separation is required; account separation is optional. On one account, use
 - Never prime any reviewer, consult, verifier, confirmer, or adjudicator. Ask neutral questions; do not state the desired conclusion.
 - Every codex architecture/review/approval/adversarial/best-impl prompt prepends the mandate in `reference/PROTOCOL.md`.
 - Multiple-choice/high-stakes architecture forks use two neutral codex legs; disagreement uses a third code-verifying codex decider. Claude implements; codex never writes code.
-- The CTO is interactive: arm one background watchdog per block and yield between wakes; judge manager liveness by git-commit / worktree / stream / status / marker activity, not the watchdog's own mtime. Headless `-p` managers and sub-agents never background-then-yield — they foreground-poll (`reference/WAIT-PROTOCOL.md`).
+- Default Agent-tool dispatch is harness-managed: a blocking Agent call returns the manager's report; a background (`run_in_background`) Agent call notifies the CTO on completion — no watchdog, no liveness-by-mtime. The watchdog / foreground-poll discipline (`reference/WAIT-PROTOCOL.md`) applies ONLY to the opt-in `claude -p` path, where headless `-p` managers and sub-agents never background-then-yield.
 - Every review round is 2 codex + 1 claude, parallel, neutral, distinct lenses, to 3/3 LAND or NIT-only carried forward. Designs/docs/skills get the same bar; skill/design/doc codex review rounds cap at 3 except substantive or anti-rogue findings.
-- After land, a separate confirm MANAGER must prove: correct/additive/full-gate green, not shallow, no stubs, and best implementation by unprimed codex judgment. `VERDICT:CONFIRMED` alone closes.
+- After land, the CTO — never the block manager — dispatches a separate confirm MANAGER that must prove: correct/additive/full-gate green, not shallow, no stubs, and best implementation by unprimed codex judgment. `VERDICT:CONFIRMED` alone closes.
 - Integration-confirm MANAGER runs at phase/milestone boundaries, before dependent phases, before final close-out, and after every 5 confirmed blocks. Only `VERDICT:INTEGRATION-CONFIRMED` closes a phase.
 - Plan-end has zero open deferrals. Mid-plan deferrals require a codex-DEFER ruling and a `docs/arch` debt ledger row.
 - Binding designs live in `docs/arch/<name>-design.md` and the master-plan locked-designs index; scratch-only designs are invalid.
@@ -71,4 +73,4 @@ Role separation is required; account separation is optional. On one account, use
 - `reference/PROTOCOL.md` — Verter overlay and full rule detail: governance, mandate, decision modes, dispatch, review, gates, invariants, cleanliness, anti-rogue, confirm/integration.
 - `reference/LANDING-PROTOCOL.md` — pre-land sync, re-review triggers, design mirror, teeth'd squash, true ff, cleanup, CTO confirm handoff.
 - `reference/CHECKPOINT-PROTOCOL.md` — append-only progress ledger, artifact validity, idempotence, corruption recovery.
-- `reference/WAIT-PROTOCOL.md` — headless `-p` waiting: foreground chunked poll-loop only; no background-then-yield.
+- `reference/WAIT-PROTOCOL.md` — OPT-IN `claude -p` path only: headless `-p` waiting via foreground chunked poll-loop; no background-then-yield. Default Agent-tool dispatch is harness-managed and needs none of it.

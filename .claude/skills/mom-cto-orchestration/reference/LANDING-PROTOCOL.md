@@ -2,7 +2,7 @@
 
 > Governance: any change to this protocol requires prior neutral codex-architect approval — see PROTOCOL.md → GOVERNANCE.
 
-The block MANAGER lands; the CTO never lands and dispatches an independent confirm manager afterward.
+The block MANAGER lands; the CTO never lands and dispatches the independent confirm manager afterward — the block manager never spawns its own confirmer, so the post-land gate stays independent of the author.
 
 ## Preconditions
 
@@ -10,7 +10,7 @@ Do not start landing until all hold:
 - Full block diff has 3/3 LAND: 2 codex + 1 claude, or only NIT residuals carried forward.
 - §1a `VERDICT:LAND`: diff-scope, every new/changed correctness-bearing test/guard proven discriminating (plant/revert RED→GREEN) plus unplanted control, cold full gate, rule/plan integrity.
 - Anti-rogue layer 1 complete per `PROTOCOL.md`: full discovery over all changed paths, deleted hunks, deletions/renames/copies, and clean unprimed adversarial codex confirmation for each rule-bearing change.
-- No in-flight worker in the worktree (`ps` count 0 for that worker); no uncommitted junk.
+- No in-flight worker for this block — Agent status/stop result confirms none live on the default path, `ps` count 0 on the opt-in `claude -p` path; no uncommitted junk.
 
 ## 1. Pre-Land Sync
 
@@ -47,7 +47,7 @@ Remove worktree and prune:
 - `git worktree remove <worktree>`
 - `git worktree prune`
 
-Do NOT remove transient scratch yet — the CTO confirm + anti-rogue layer 2 still need it. At land remove only the worktree/build dirs (above); PRESERVE briefs, jsonl logs, review outputs, markers, gate logs, `PROGRESS.md`, design `cmp`/`diff` evidence, and the durable record (CTO ledger/MOM-NOTES, landed report, debt ledger, design docs). Transient scratch is removed only AFTER land + CONFIRMED, per `PROTOCOL.md` stage/phase cleanup.
+Do NOT remove transient scratch yet — the CTO confirm + anti-rogue layer 2 still need it. At land remove only the worktree/build dirs (above); PRESERVE briefs, reports/logs, review outputs, gate logs, `PROGRESS.md`, design `cmp`/`diff` evidence (and on the opt-in `claude -p` path, `jsonl` stream logs + markers), and the durable record (CTO ledger/MOM-NOTES, landed report, debt ledger, design docs). Transient scratch is removed only AFTER land + CONFIRMED, per `PROTOCOL.md` stage/phase cleanup.
 
 Write `MANAGER-LANDED.md` with land SHA, summary, three review verdicts, §1a verdict, gate pass line, load-bearing proofs (legacy deletion grep, design `cmp`/`diff`). Touch done marker and append CTO ledger. Verify repo status clean.
 
