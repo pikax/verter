@@ -1032,9 +1032,8 @@ consumers and call the relocated delegates.
   ctx drives the artifact materialization INTERNALLY and hands back only the adapter's own typed
   carrier, never the host artifact wrapper; (2) `script_facts_for::<T>(canonical)` (validated
   read of D-o facts, drives stage 2 on demand). NO resolve method exists on it (D-as): the four
-  resolve ops — `instantiate_public_type(canonical)` (the shared `Instantiate` key),
-  `resolve_macro_payload(owner, selector)`, `project_path(base, path, mode)`,
-  `shallow_surface(node)`, 1:1 with `PlannedDemand` (D-ai) — and `export_graph(…)` (the wire
+  resolve ops — `resolve_macro_payload(owner, selector)`, `project_path(base, path, mode)`,
+  `shallow_surface(node)`, `svelte_surface(node)`, 1:1 with `PlannedDemand` (D-ai) — and `export_graph(…)` (the wire
   `SemanticTypeGraph` export for the payload) live on the EXECUTOR-PRIVATE resolve surface
   (`ExecutorResolveCtx`, module-private to the executor module
   `typeinfo/framework_surface/mod.rs`, never exported,
@@ -1052,10 +1051,10 @@ consumers and call the relocated delegates.
   **`FrameworkSurfacePlan` is a CLOSED typed demand vocabulary (D-ai)**:
   `FrameworkSurfacePlan { items: Vec<PlannedResolve> }`,
   `PlannedResolve { kind: FrameworkSurfaceKind, demand: PlannedDemand }`, closed
-  `PlannedDemand { PublicTypeInstance { canonical }, MacroPayload { owner, selector },
-  PathProjection { base, path, mode }, ShallowSurface { node } }` — each variant maps 1:1 onto
-  the corresponding EXECUTOR-PRIVATE resolve operation (`instantiate_public_type`,
-  `resolve_macro_payload`, `project_path`, `shallow_surface` — D-as: these live on the
+  `PlannedDemand { MacroPayload { owner, selector },
+  PathProjection { base, path, mode }, ShallowSurface { node }, SvelteSurface { node } }` — each variant maps 1:1 onto
+  the corresponding EXECUTOR-PRIVATE resolve operation (`resolve_macro_payload`,
+  `project_path`, `shallow_surface`, `svelte_surface` — D-as: these live on the
   executor's private resolve surface, NOT on the adapter ctx); NO variant carries source text,
   raw byte ranges standing in for source, OXC handles, closures, or raw `SemanticQueryKey`s; NO
   `Custom`/`Raw` escape arm exists; the executor matches EXHAUSTIVELY over `PlannedDemand` (no
@@ -1134,12 +1133,10 @@ consumers and call the relocated delegates.
   | NEW `adapter.rs` | `VueFrameworkAdapter` — the TRUE plan/normalize impl (below); the only resolution currency in the vue dir is declarative `PlannedDemand` data |
 
   `VueFrameworkAdapter` holds NO resolve entry point (D-as): `plan_surfaces(ctx, selector,
-  requested)` emits, per requested surface, `PlannedDemand::PublicTypeInstance { canonical }`
-  (the public component type, `PublicType` query level) and one `PlannedDemand::MacroPayload
+  requested)` emits one `PlannedDemand::MacroPayload
   { owner, selector }` per requested macro surface kind (PROPS / EMITS / SLOTS / OPTIONS /
   EXPOSE / MODEL — the §9 Vue column); the EXECUTOR resolves each demand through its private
-  ops — `instantiate_public_type` delegates to the relocated `resolve_vue_public_type`,
-  `resolve_macro_payload` to the relocated `resolve_vue_macro_surface` → `vue_macro_dtos`
+  ops — `resolve_macro_payload` delegates to the relocated `resolve_vue_macro_surface` → `vue_macro_dtos`
   pipeline — all byte-pinned; `normalize(ctx, resolved)` consumes the resolved results AS DATA:
   per-kind bundling of the resolved DTOs into the `FrameworkSurfaceDtoBundle`, D-s status
   assignment, runtime-constructor classification via `runtime_ctor.rs` over already-resolved
