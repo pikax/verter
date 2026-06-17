@@ -140,6 +140,86 @@ fn sourcemap_token_buffer_reservation_covers_every_emitted_token() {
     }
 }
 
+/// The helper-import-preamble boundary is the generated-TSX position immediately AFTER the recorded
+/// preamble insertion. Here a two-line preamble is prepended at offset 0, so user source begins at
+/// `(line 2, col 0)` — the boundary. Pointer identity (the same `&str` flows into the `Inserted`
+/// chunk) is what lets generation locate it; a mismatch would surface as `None`.
+#[test]
+fn generate_map_with_preamble_reports_position_after_recorded_preamble() {
+    let alloc = Allocator::default();
+    let mut ct = CodeTransform::new("const a = 1;\n", &alloc);
+    let preamble = ct.alloc_str("import x;\nimport y;\n");
+    ct.batch_prepend_left_static(&[(0, preamble)]);
+    ct.set_helper_preamble_content(preamble);
+
+    let (_, end) = ct.generate_map_with_preamble(
+        SourceMapOptions::new()
+            .with_source("App.vue")
+            .include_content(true),
+    );
+    assert_eq!(
+        end,
+        Some((2, 0)),
+        "boundary is the start of the line after the two-line preamble"
+    );
+    // The preamble is the leading generated content, so the boundary is the start of `const a`.
+    assert!(ct
+        .build_string()
+        .starts_with("import x;\nimport y;\nconst a = 1;\n"));
+}
+
+/// With no preamble recorded, the boundary is `None` (and `generate_map` still works).
+#[test]
+fn generate_map_with_preamble_is_none_without_recorded_preamble() {
+    let alloc = Allocator::default();
+    let mut ct = CodeTransform::new("const a = 1;\n", &alloc);
+    ct.batch_prepend_left_static(&[(0, ct.alloc_str("import x;\n"))]);
+
+    let (_, end) = ct.generate_map_with_preamble(SourceMapOptions::new().with_source("App.vue"));
+    assert_eq!(end, None, "no recorded preamble ⇒ no boundary");
+}
+
+/// `generate_map_json_with_preamble` injects the `x_verter_helper_preamble_end` member, and the
+/// augmented JSON still round-trips as a valid source map (the member is ignored on decode).
+#[test]
+fn generate_map_json_with_preamble_emits_boundary_member() {
+    let alloc = Allocator::default();
+    let mut ct = CodeTransform::new("const a = 1;\n", &alloc);
+    let preamble = ct.alloc_str("import x;\nimport y;\n");
+    ct.batch_prepend_left_static(&[(0, preamble)]);
+    ct.set_helper_preamble_content(preamble);
+
+    let json = ct.generate_map_json_with_preamble(
+        SourceMapOptions::new()
+            .with_source("App.vue")
+            .include_content(true),
+    );
+    assert!(
+        json.contains(r#""x_verter_helper_preamble_end":{"line":2,"character":0}"#),
+        "boundary member present at the right position: {json}"
+    );
+    let map = SourceMap::from_json_string(&json).expect("augmented JSON is a valid source map");
+    assert_eq!(
+        map.get_sources().count(),
+        1,
+        "decoder ignores the extra member"
+    );
+}
+
+/// Without a recorded preamble, no boundary member is emitted (a plain source map).
+#[test]
+fn generate_map_json_with_preamble_omits_member_without_preamble() {
+    let alloc = Allocator::default();
+    let mut ct = CodeTransform::new("const a = 1;\n", &alloc);
+    ct.batch_prepend_left_static(&[(0, ct.alloc_str("import x;\n"))]);
+
+    let json = ct.generate_map_json_with_preamble(SourceMapOptions::new().with_source("App.vue"));
+    assert!(
+        !json.contains("x_verter_helper_preamble_end"),
+        "no boundary member without a recorded preamble: {json}"
+    );
+}
+
 #[test]
 fn test_source_map_generation() {
     let allocator = Allocator::default();

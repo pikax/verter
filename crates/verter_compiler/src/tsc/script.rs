@@ -1286,7 +1286,7 @@ fn render_resolved_prop_ts_type(
 fn process_props<'a>(
     type_params: Option<&MacroTypeParams>,
     object_arg: Option<&MacroObjectArg<'a>>,
-    array_arg: Option<&MacroArrayArg>,
+    array_arg: Option<&MacroArrayArg<'a>>,
     sfc_source: &'a str,
     content_str: &'a str,
     content_offset: u32,
@@ -1410,19 +1410,18 @@ fn process_props<'a>(
         }
         state.props_ts = Some(PropsTs::Inline(entries));
     } else if let Some(arr) = array_arg {
+        // Array syntax names props by string literal; the name is read from the
+        // AST (unwrapping any TS wrapper), never sliced off the element span.
         state.testing_props = arr
-            .element_spans
+            .elements
             .iter()
-            .map(|elem_span| {
-                let elem = content_str[elem_span.start as usize..elem_span.end as usize].trim();
-                TestingPropBinding {
-                    name: elem
-                        .trim_matches(|c: char| c == '\'' || c == '"')
-                        .to_string(),
+            .filter_map(|elem| {
+                elem.name.map(|name| TestingPropBinding {
+                    name: name.to_string(),
                     ts_type: "unknown".to_string(),
                     optional: true,
-                    map_span: Some(local_to_sfc_span(*elem_span, content_offset)),
-                }
+                    map_span: Some(local_to_sfc_span(elem.span, content_offset)),
+                })
             })
             .collect();
     }
@@ -1500,7 +1499,7 @@ fn runtime_type_to_constructor(rt: &RuntimeType) -> &'static str {
 fn process_emits<'a>(
     type_params: Option<&MacroTypeParams>,
     object_arg: Option<&MacroObjectArg<'a>>,
-    array_arg: Option<&MacroArrayArg>,
+    array_arg: Option<&MacroArrayArg<'a>>,
     content_str: &str,
     content_offset: u32,
     type_usage_tracker: &mut TypeUsageTracker<'a>,
@@ -1529,17 +1528,17 @@ fn process_emits<'a>(
             });
         }
     } else if let Some(arr) = array_arg {
-        for elem_span in &arr.element_spans {
-            let elem = content_str[elem_span.start as usize..elem_span.end as usize].trim();
-            let name = elem
-                .trim_matches(|c: char| c == '\'' || c == '"')
-                .to_string();
-            state.emits_names.push(name.clone());
-            state.emits_ts.push(EmitEntry {
-                name,
-                payload: EmitPayload::Unknown,
-                map_span: Some(local_to_sfc_span(*elem_span, content_offset)),
-            });
+        // Array syntax names events by string literal; the name is read from the
+        // AST (unwrapping any TS wrapper), never sliced off the element span.
+        for elem in &arr.elements {
+            if let Some(name) = elem.name {
+                state.emits_names.push(name.to_string());
+                state.emits_ts.push(EmitEntry {
+                    name: name.to_string(),
+                    payload: EmitPayload::Unknown,
+                    map_span: Some(local_to_sfc_span(elem.span, content_offset)),
+                });
+            }
         }
     } else if let Some(obj) = object_arg {
         for prop in &obj.properties {

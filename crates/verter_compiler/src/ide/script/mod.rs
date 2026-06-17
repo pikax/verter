@@ -6,17 +6,16 @@
 //!
 //! ## Error Recovery
 //!
-//! When OXC encounters parse errors (common during typing), a truncate-and-reparse
-//! strategy recovers as much IDE functionality as possible:
-//!
-//! 1. Find the earliest error offset from OXC diagnostics.
-//! 2. Truncate source at the last newline before that offset — the "clean prefix".
-//! 3. Re-parse only the clean prefix (which succeeds since the error is removed).
-//! 4. Use the clean prefix AST for normal codegen (import hoisting, binding extraction,
-//!    macro processing), while the broken tail passes through unchanged.
-//!
-//! A lightweight token scanner ([`script_recover::ScriptTokenScanner`]) recovers
-//! macro binding names from the broken tail so template resolution still works.
+//! OXC parses the original `<script setup>` content exactly ONCE. When it parses
+//! cleanly, the full codegen path runs. When it has a genuine syntax error
+//! (common while typing — e.g. an incomplete `a.`), there is NO reparse: a single
+//! token scan of the REAL source ([`script_recover::ScriptTokenScanner::recover_plan`])
+//! produces a [`script_recover::ScriptSetupRecoveryPlan`] whose original-span
+//! import / macro / variable / function facts feed hoisting and binding
+//! registration, and whose OUTPUT-ONLY member / expression holes and scope closers
+//! keep the user's body valid TSX while it stays inside the `TemplateBindingFN`
+//! wrapper. Synthetic recovery chunks are never treated as bindings, macros,
+//! imports, or any other source fact.
 //!
 //! ## Output structure
 //!
@@ -60,13 +59,13 @@ use crate::parser::types::RootNodeScript;
 use crate::template::code_gen::binding::BindingType;
 use crate::template::code_gen::types::CodeGenOutput;
 
-use crate::ide::IdeScriptOptions;
+use crate::ide::{IdeScriptOptions, TemplateComponentBindings};
 
 use crate::compile::types::DestructuredBlockMeta;
 
 mod comp_emit;
 mod detectors;
-mod event_inference;
+pub(crate) mod event_inference;
 mod macros;
 mod options_api;
 mod recovery;
@@ -95,9 +94,10 @@ use type_constructs::{
     emit_helper_imports, emit_helper_imports_with_define_component, emit_type_constructs,
 };
 use wrapper::{
-    directive_accessor_declaration, emit_global_component_fallbacks, emit_minimal_wrapper,
-    instance_declaration, instance_declaration_ambient, instance_probe_line,
-    should_infer_function_types, to_pascal_case, PREFIX,
+    collect_global_component_fallbacks, directive_accessor_declaration,
+    emit_global_component_fallbacks, emit_minimal_wrapper, instance_declaration,
+    instance_declaration_ambient, instance_probe_line, should_infer_function_types, to_pascal_case,
+    PREFIX,
 };
 
 pub use type_constructs::{VERTER_TYPES_AMBIENT_MODULE, VERTER_TYPES_STANDALONE_DTS};
@@ -124,6 +124,10 @@ pub struct IdeScriptGenResult<'alloc> {
     pub return_close_pos: Option<u32>,
     /// Structured metadata for the destructured block, if present.
     pub destructured_block: Option<DestructuredBlockMeta>,
+    /// Inventory of GlobalComponents fallback consts emitted into the templateBindingFN,
+    /// shared with template event typing so a globally-registered component's `@event`
+    /// payload resolves through the same in-scope const that was emitted for it.
+    pub template_component_bindings: TemplateComponentBindings,
 }
 
 /// Generate TSX script output from script blocks.
@@ -148,6 +152,9 @@ pub fn generate_ide_script<'alloc>(
     let mut return_close: Option<String> = None;
 
     let mut destructured_block: Option<DestructuredBlockMeta> = None;
+    // GlobalComponents fallback consts emitted into the templateBindingFN. Only the
+    // `<script setup>` arm emits them; the options-API and no-script arms emit none.
+    let mut global_component_fallbacks: Vec<String> = Vec::new();
 
     match (script, script_setup) {
         (_, Some(setup)) => {
@@ -164,6 +171,7 @@ pub fn generate_ide_script<'alloc>(
                 options,
                 &builtin_components,
                 template_end,
+                &mut global_component_fallbacks,
             );
             return_close = result.0;
             destructured_block = result.1;
@@ -227,6 +235,7 @@ pub fn generate_ide_script<'alloc>(
         return_close,
         return_close_pos,
         destructured_block,
+        template_component_bindings: TemplateComponentBindings::new(global_component_fallbacks),
     }
 }
 

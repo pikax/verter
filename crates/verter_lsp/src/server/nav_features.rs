@@ -3,16 +3,13 @@
 //! Free functions hosting the bodies of `impl LanguageServer for
 //! VerterLanguageServer` navigation feature methods (hover,
 //! completion, completion_resolve, goto_definition,
-//! goto_type_definition, references, prepare_rename, rename) plus
-//! the relocated `enrich_hover_with_provenance` inherent helper and
-//! the `append_markdown` private helper used by hover provenance
-//! enrichment.
+//! goto_type_definition, references, prepare_rename, rename). The
+//! hover-provenance enrichment helpers live in the
+//! `nav_features_hover_provenance` sibling module.
 //!
 //! The trait impl block stays in `mod.rs`; each trait method is a
 //! 1-line stub that delegates to the corresponding `handle_<method>`
 //! free function here.
-
-use std::sync::Arc;
 
 use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::ls_types::*;
@@ -30,9 +27,14 @@ use crate::features::hover;
 use crate::features::hover::hover_at_position;
 use crate::features::references::references_at_position;
 use crate::features::rename::{prepare_rename, rename_at_position};
+use crate::tsgo::auto_import::ProviderImportEdit;
 use crate::tsgo::merge;
 
-use super::handler_guard::HandlerGuard;
+use super::handler_guard::{block_in_place_if_available, HandlerGuard};
+use super::nav_features_completion_resolve::{
+    completion_resolve_error, resolve_tsgo_auto_import_edits,
+};
+use super::nav_features_hover_provenance::enrich_hover_with_provenance;
 use super::server_utils::*;
 use super::VerterLanguageServer;
 
@@ -93,6 +95,7 @@ pub(super) async fn handle_hover(
         )
     })();
     let vue_kind_label = verter_full.as_ref().and_then(|r| r.vue_kind_label.clone());
+    let source_token = verter_full.as_ref().and_then(|r| r.source_token.clone());
     let verter_result = verter_full.map(|r| r.hover);
 
     let child_hover_target = (|| {
@@ -184,6 +187,7 @@ pub(super) async fn handle_hover(
                     &ctx.tsx_line_index,
                     &ctx.carrier_line_index,
                     vue_kind_label.as_deref(),
+                    source_token.as_ref(),
                 ));
             }
 
@@ -223,6 +227,7 @@ pub(super) async fn handle_hover(
                                         &ctx.tsx_line_index,
                                         &ctx.carrier_line_index,
                                         vue_kind_label.as_deref(),
+                                        source_token.as_ref(),
                                     ));
                                 }
                             }
@@ -238,6 +243,7 @@ pub(super) async fn handle_hover(
                 &ctx.tsx_line_index,
                 &ctx.carrier_line_index,
                 vue_kind_label.as_deref(),
+                source_token.as_ref(),
             ));
         } else {
             tracing::info!("hover: no ide_context for {}", uri.as_str());
@@ -256,6 +262,35 @@ pub(super) async fn handle_hover(
         position,
         verter_result,
     ))
+}
+
+/// Where the completion cursor sits in the SFC, as a first-class context.
+///
+/// Replaces the historical `(is_template_attr_context, in_expression_context)`
+/// boolean pair so that `<script setup>` positions are classified explicitly.
+/// Both `TemplateExpression` and `Script` compute an [`ExpressionContext`] (so
+/// member-access completion works in scripts), but the template-only
+/// `IdentifierExpected` TypeProvider suppression stays fenced to
+/// `TemplateExpression` — ordinary script identifier completions (TS globals,
+/// imports) must NOT be suppressed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompletionSourceContext {
+    /// Template attribute-name position (`<div cla|`).
+    TemplateAttr,
+    /// Template expression / interpolation (`:prop="x|"`, `{{ x| }}`).
+    TemplateExpression,
+    /// Inside `<script>` / `<script setup>`.
+    Script,
+    /// Anywhere else (tag name, text, style, root level, …).
+    Other,
+}
+
+impl CompletionSourceContext {
+    /// Whether this context should compute an [`ExpressionContext`] from the
+    /// mapped TSX (member access, literal, type position, …).
+    fn computes_expression_context(self) -> bool {
+        matches!(self, Self::TemplateExpression | Self::Script)
+    }
 }
 
 pub(super) async fn handle_completion(
@@ -460,23 +495,27 @@ pub(super) async fn handle_completion(
         .unwrap_or(false);
     let verter_items = verter_result.map(|r| r.items);
 
-    // Compute cursor context once — derive attribute vs expression context
-    let (is_template_attr_context, in_expression_context) = (|| {
+    // Compute the cursor's source context once — template attribute, template
+    // expression, script, or other.
+    let source_ctx = (|| {
         let doc = server.documents.get(uri)?;
         let analysis = server.documents.get_analysis(uri);
         let blocks = scan_sfc_blocks(&doc.source);
         let offset = doc.line_index.position_to_offset(position)?;
         let context = classify_cursor_context(offset, &doc.source, &blocks, analysis.as_ref());
         Some(match &context {
-            CursorContext::Template(TemplateCursorContext::AttributeName { .. }) => (true, false),
+            CursorContext::Template(TemplateCursorContext::AttributeName { .. }) => {
+                CompletionSourceContext::TemplateAttr
+            }
             CursorContext::Template(
                 TemplateCursorContext::Expression { .. } | TemplateCursorContext::Interpolation,
-            ) => (false, true),
-            CursorContext::Template(_) => (false, false),
-            _ => (false, false),
+            ) => CompletionSourceContext::TemplateExpression,
+            CursorContext::Script => CompletionSourceContext::Script,
+            _ => CompletionSourceContext::Other,
         })
     })()
-    .unwrap_or((false, false));
+    .unwrap_or(CompletionSourceContext::Other);
+    let is_template_attr_context = matches!(source_ctx, CompletionSourceContext::TemplateAttr);
 
     // Enhance with TypeProvider if available.
     // Extract all context synchronously — no DashMap guard held across await.
@@ -504,7 +543,25 @@ pub(super) async fn handle_completion(
                 &ctx.carrier_line_index,
                 &ctx.mapper,
                 &ctx.tsx_line_index,
-            );
+            )
+            // Completion-only fallback: the strict mapper legitimately returns None for a
+            // zero-width member-access boundary (the cursor right after `obj.` sits OUTSIDE
+            // any mapped run). The completion-only helper anchors on a mapped run whose
+            // source extent ends exactly at the cursor or exactly before the operator, and
+            // accepts ONLY when the generated TSX carries the matching `.`/`?.` operator at
+            // that run's generated endpoint. It is consulted ONLY on strict None, ONLY here
+            // in completion — no other feature path uses it.
+            .or_else(|| {
+                let carrier_source = server.documents.get(uri)?.source.clone();
+                merge::carrier_completion_member_boundary_offset(
+                    position,
+                    &ctx.carrier_line_index,
+                    &ctx.mapper,
+                    &ctx.tsx_line_index,
+                    &ctx.tsx_content,
+                    &carrier_source,
+                )
+            });
             if tsx_offset.is_none() {
                 tracing::debug!(
                     "completion: position mapping failed for {}:{},{}",
@@ -531,7 +588,10 @@ pub(super) async fn handle_completion(
             // | MemberAccess         | true            | false              |
             // | Literal/Type/PropKey | true            | false              |
             // | Unknown              | false           | false (filtered)   |
-            let expr_context = if in_expression_context {
+            // Compute the expression sub-context for BOTH template expressions
+            // and `<script setup>` positions, so member-access completion works
+            // in scripts (`a.` → MemberAccess → dot-trigger + member filtering).
+            let expr_context = if source_ctx.computes_expression_context() {
                 tsx_offset.map(|off| {
                     classify_expression_context_with_trigger(
                         &ctx.tsx_content,
@@ -567,13 +627,20 @@ pub(super) async fn handle_completion(
                     .map(str::to_string)
                 });
 
-                let skip_type_provider = expr_context
-                    .as_ref()
-                    .map(|ec| {
-                        matches!(ec, ExpressionContext::IdentifierExpected)
-                            && identifier_prefix.is_none()
-                    })
-                    .unwrap_or(false);
+                // FENCED to template expressions only: the template render proxy
+                // exposes only script bindings, so verter's own completions are
+                // the correct set and the TypeProvider's globals are noise. In
+                // SCRIPT, by contrast, TS globals and imports ARE valid — never
+                // suppress the TypeProvider for a bare script identifier position.
+                let skip_type_provider =
+                    matches!(source_ctx, CompletionSourceContext::TemplateExpression)
+                        && expr_context
+                            .as_ref()
+                            .map(|ec| {
+                                matches!(ec, ExpressionContext::IdentifierExpected)
+                                    && identifier_prefix.is_none()
+                            })
+                            .unwrap_or(false);
 
                 if skip_type_provider {
                     tracing::debug!(
@@ -736,39 +803,39 @@ pub(super) async fn handle_completion_resolve(
                             tp.resolve_completion(tsx_path, original_data.clone()).await
                         {
                             if !resolve_result.additional_text_edits.is_empty() {
-                                // Map TSX positions to Vue positions
-                                if let Some((_, tsx_content, mapper)) =
-                                    server.ide_context_by_path(tsx_path)
-                                {
-                                    let tsx_li =
-                                        LineIndex::new(&tsx_content, server.documents.encoding());
-                                    // Find the Vue URI from tsx_path
-                                    if let Some(carrier_uri) =
-                                        server.carrier_uri_from_ide_path(tsx_path)
-                                    {
-                                        if let Some(doc) = server.documents.get(&carrier_uri) {
-                                            let edits: Vec<TextEdit> = resolve_result
-                                                .additional_text_edits
-                                                .iter()
-                                                .filter_map(|e| {
-                                                    let range = merge::tsx_range_to_carrier_range(
-                                                        e.start,
-                                                        e.end,
-                                                        &tsx_li,
-                                                        &mapper,
-                                                        &doc.line_index,
-                                                    )?;
-                                                    Some(TextEdit {
-                                                        range,
-                                                        new_text: e.new_text.clone(),
-                                                    })
-                                                })
-                                                .collect();
-                                            if !edits.is_empty() {
-                                                item.additional_text_edits = Some(edits);
-                                            }
-                                        }
-                                    }
+                                // The provider returned auto-import edits that MUST be placed. From
+                                // here on, missing IDE context / carrier URI / document OR an
+                                // unplaceable edit returns a STRUCTURED resolve error — never an
+                                // apparently-successful item with the import edits silently dropped
+                                // (which recreates "accepted completion but no import"). Map
+                                // completely or reject.
+                                let provider_edits: Vec<ProviderImportEdit> = resolve_result
+                                    .additional_text_edits
+                                    .iter()
+                                    .map(|e| ProviderImportEdit {
+                                        start: e.start,
+                                        end: e.end,
+                                        new_text: e.new_text.clone(),
+                                    })
+                                    .collect();
+                                let resolved = resolve_tsgo_auto_import_edits(
+                                    server,
+                                    tsx_path,
+                                    &provider_edits,
+                                )
+                                .map_err(|reason| {
+                                    tracing::warn!(
+                                        "completion_resolve: rejecting auto-import for \
+                                                 {tsx_path}: {reason}"
+                                    );
+                                    completion_resolve_error(&reason)
+                                })?;
+                                // `None` ⇒ the provider path is not a resolvable Vue carrier (a
+                                // self-file rune module such as a Svelte `.svelte.ts`); the carrier
+                                // re-anchor does not apply. Fail closed: leave the item unchanged
+                                // rather than error or synthesize a Vue block into a non-Vue source.
+                                if let Some(edits) = resolved {
+                                    item.additional_text_edits = Some(edits);
                                 }
                             }
                         }
@@ -804,6 +871,7 @@ pub(super) async fn handle_goto_definition(
         if let Some((tsx_path, vf_li)) = server.virtual_file_context(uri) {
             if let Some(offset) = vf_li.position_to_offset(position) {
                 if let Ok(type_defs) = tp.get_definition(&tsx_path, offset).await {
+                    let encoding = server.position_encoding.read().clone();
                     let locations: Vec<Location> = type_defs
                         .into_iter()
                         .filter_map(|d| {
@@ -815,15 +883,29 @@ pub(super) async fn handle_goto_definition(
                                 &carrier_source_exists,
                             );
                             let target_uri: Uri = merge::file_path_to_uri(&target_path)?;
-                            // Convert byte offsets to positions using vf LineIndex for
-                            // same-file refs; for external files, fall back to 0:0
+                            // Same-file refs use the virtual-file LineIndex. When path
+                            // normalization is a no-op the emitted URI IS the file the
+                            // provider's byte offsets index, so read it back and convert.
+                            // Fail closed otherwise — never manufacture a line-0 range.
                             let range = if d.path == tsx_path {
                                 Range {
-                                    start: vf_li.offset_to_position(d.start).unwrap_or_default(),
-                                    end: vf_li.offset_to_position(d.end).unwrap_or_default(),
+                                    start: vf_li.offset_to_position(d.start)?,
+                                    end: vf_li.offset_to_position(d.end)?,
                                 }
+                            } else if target_path == d.path {
+                                merge::resolve_external_target_range(
+                                    &d.path,
+                                    d.start,
+                                    d.end,
+                                    encoding.clone(),
+                                    &|p: &str| {
+                                        block_in_place_if_available(|| {
+                                            server.documents.host().workspace_read().read_file(p)
+                                        })
+                                    },
+                                )?
                             } else {
-                                Range::default()
+                                return None;
                             };
                             Some(Location {
                                 uri: target_uri,
@@ -967,9 +1049,11 @@ pub(super) async fn handle_goto_definition(
                             |path: &str, start: u32, end: u32| -> Option<Location> {
                                 server.resolve_barrel_type_provider_location(path, start, end)
                             };
+                        let negotiated_encoding = server.position_encoding.read().clone();
                         let merged = merge::merge_definitions_with_barrel_resolver(
                             verter_result,
                             type_defs,
+                            &ctx.tsx_path,
                             &ctx.tsx_line_index,
                             &ctx.mapper,
                             &ctx.carrier_line_index,
@@ -977,6 +1061,12 @@ pub(super) async fn handle_goto_definition(
                             uri,
                             &carrier_source_exists,
                             Some(&barrel_resolver),
+                            negotiated_encoding,
+                            &|p: &str| {
+                                block_in_place_if_available(|| {
+                                    server.documents.host().workspace_read().read_file(p)
+                                })
+                            },
                         );
                         // Post-process: if type provider resolved to a barrel file,
                         // follow re-exports to the terminal declaration.
@@ -1024,6 +1114,7 @@ pub(super) async fn handle_goto_type_definition(
         if let Some((tsx_path, vf_li)) = server.virtual_file_context(uri) {
             if let Some(offset) = vf_li.position_to_offset(position) {
                 if let Ok(type_defs) = tp.get_type_definition(&tsx_path, offset).await {
+                    let encoding = server.position_encoding.read().clone();
                     let locations: Vec<Location> = type_defs
                         .into_iter()
                         .filter_map(|d| {
@@ -1039,13 +1130,29 @@ pub(super) async fn handle_goto_type_definition(
                                 &carrier_source_exists,
                             );
                             let target_uri: Uri = merge::file_path_to_uri(&target_path)?;
+                            // Same-file refs use the virtual-file LineIndex. When path
+                            // normalization is a no-op the emitted URI IS the file the
+                            // provider's byte offsets index, so read it back and convert.
+                            // Fail closed otherwise — never manufacture a line-0 range.
                             let range = if d.path == tsx_path {
                                 Range {
-                                    start: vf_li.offset_to_position(d.start).unwrap_or_default(),
-                                    end: vf_li.offset_to_position(d.end).unwrap_or_default(),
+                                    start: vf_li.offset_to_position(d.start)?,
+                                    end: vf_li.offset_to_position(d.end)?,
                                 }
+                            } else if target_path == d.path {
+                                merge::resolve_external_target_range(
+                                    &d.path,
+                                    d.start,
+                                    d.end,
+                                    encoding.clone(),
+                                    &|p: &str| {
+                                        block_in_place_if_available(|| {
+                                            server.documents.host().workspace_read().read_file(p)
+                                        })
+                                    },
+                                )?
                             } else {
-                                Range::default()
+                                return None;
                             };
                             Some(Location {
                                 uri: target_uri,
@@ -1087,9 +1194,11 @@ pub(super) async fn handle_goto_type_definition(
                             |path: &str, start: u32, end: u32| -> Option<Location> {
                                 server.resolve_barrel_type_provider_location(path, start, end)
                             };
+                        let negotiated_encoding = server.position_encoding.read().clone();
                         return Ok(merge::merge_definitions_with_barrel_resolver(
                             None,
                             type_defs,
+                            &ctx.tsx_path,
                             &ctx.tsx_line_index,
                             &ctx.mapper,
                             &ctx.carrier_line_index,
@@ -1097,6 +1206,12 @@ pub(super) async fn handle_goto_type_definition(
                             uri,
                             &carrier_source_exists,
                             Some(&barrel_resolver),
+                            negotiated_encoding,
+                            &|p: &str| {
+                                block_in_place_if_available(|| {
+                                    server.documents.host().workspace_read().read_file(p)
+                                })
+                            },
                         ));
                     }
                     Err(e) => {
@@ -1360,132 +1475,4 @@ pub(super) async fn handle_rename(
     }
 
     Ok(verter_result)
-}
-
-/// Post-process a hover response with provenance enrichment:
-/// - If `hover.provenance` is disabled → return hover unchanged.
-/// - If the enrichment cache has a payload for `(canonical_id,
-///   position)` → append it to the hover body.
-/// - On cache miss → spawn a background blocking task to compute
-///   the payload via `VerterHost::get_component_meta_with_resolution`
-///   and insert it into the cache. The current hover call returns
-///   the legacy payload immediately.
-///
-/// The host must have `audit_enabled + footprint_capture` set for
-/// the background task to produce a useful payload; otherwise the
-/// task returns without populating the cache (graceful degradation).
-pub(super) fn enrich_hover_with_provenance(
-    server: &VerterLanguageServer,
-    uri: &Uri,
-    position: &Position,
-    hover: Option<Hover>,
-) -> Option<Hover> {
-    use std::sync::atomic::Ordering;
-    if !server.hover_provenance_enabled.load(Ordering::Relaxed) {
-        return hover;
-    }
-    let Some(canonical_id) = server.documents.get_canonical_id(uri) else {
-        return hover;
-    };
-    let key =
-        crate::features::hover_provenance::HoverProvenanceKey::new(canonical_id.clone(), *position);
-
-    if let Some(payload) = server.hover_provenance_cache.get(&key) {
-        return Some(append_markdown(hover, &payload.markdown));
-    }
-
-    // Cache miss — check whether the host can actually produce a
-    // useful payload BEFORE spawning. If `audit_enabled` or
-    // `footprint_capture` are off, `get_component_meta_with_resolution`
-    // would run to completion but `take_audit_record` would
-    // return None and the cache would stay empty. That means
-    // every subsequent hover would spawn another futile task.
-    // Short-circuit here so the user sees the legacy hover and
-    // no blocking-pool slots are burned on a capture-disabled
-    // host.
-    let host = server.documents.host_arc();
-    if !host.config().audit_enabled || !host.config().footprint_capture {
-        return hover;
-    }
-
-    // Cache miss + capture enabled — return the legacy payload
-    // immediately and spawn a background AuditedRequest to populate
-    // the cache for the next hover.
-    let cache = Arc::clone(&server.hover_provenance_cache);
-    let canonical_for_task = canonical_id;
-    tokio::task::spawn_blocking(move || {
-        let Some((_analysis, resolution)) =
-            host.get_component_meta_with_resolution(&canonical_for_task)
-        else {
-            return;
-        };
-        let Some(record) = host.take_audit_record(resolution.request_id) else {
-            return;
-        };
-        let markdown = crate::features::hover_provenance::render_provenance_markdown(&record);
-        cache.insert(
-            key,
-            crate::features::hover_provenance::HoverProvenancePayload { markdown },
-        );
-    });
-
-    hover
-}
-
-/// Append a markdown suffix to a hover body. Used by the hover
-/// provenance enrichment to tack on the "Provenance" section below
-/// the legacy hover content. Returns a constructed hover even if the
-/// input was `None` (the enrichment alone counts as useful output).
-fn append_markdown(hover: Option<Hover>, suffix: &str) -> Hover {
-    match hover {
-        Some(mut h) => {
-            let combined = match h.contents {
-                HoverContents::Markup(existing) => {
-                    let mut value = existing.value;
-                    value.push_str(suffix);
-                    HoverContents::Markup(MarkupContent {
-                        kind: existing.kind,
-                        value,
-                    })
-                }
-                HoverContents::Scalar(marked) => {
-                    let value = match marked {
-                        MarkedString::String(s) => s,
-                        MarkedString::LanguageString(ls) => ls.value,
-                    };
-                    HoverContents::Markup(MarkupContent {
-                        kind: MarkupKind::Markdown,
-                        value: format!("{value}{suffix}"),
-                    })
-                }
-                HoverContents::Array(items) => {
-                    let mut combined = String::new();
-                    for item in items {
-                        let part = match item {
-                            MarkedString::String(s) => s,
-                            MarkedString::LanguageString(ls) => ls.value,
-                        };
-                        if !combined.is_empty() {
-                            combined.push_str("\n\n");
-                        }
-                        combined.push_str(&part);
-                    }
-                    combined.push_str(suffix);
-                    HoverContents::Markup(MarkupContent {
-                        kind: MarkupKind::Markdown,
-                        value: combined,
-                    })
-                }
-            };
-            h.contents = combined;
-            h
-        }
-        None => Hover {
-            contents: HoverContents::Markup(MarkupContent {
-                kind: MarkupKind::Markdown,
-                value: suffix.to_string(),
-            }),
-            range: None,
-        },
-    }
 }

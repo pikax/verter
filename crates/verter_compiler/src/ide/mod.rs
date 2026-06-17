@@ -321,6 +321,117 @@ pub(crate) fn event_to_jsx_name(event_name: &str) -> String {
     result
 }
 
+/// Build the event-handler PARAMETER TUPLE type for a template event binding.
+///
+/// Derives the parameter-tuple shape from the element's event surface:
+/// - Native element: `Parameters<NonNullable<import('vue').IntrinsicElementAttributes["tag"]["onEvent"]>>`
+/// - Component: `Parameters<NonNullable<Required<InstanceType<typeof Binding>["$props"]>["onEvent"]>>`
+///
+/// Used by the script-handler inference path (`event_inference`), which annotates a
+/// function declaration's params as `...[e]: <this type>`, and — for the COMPONENT
+/// case only — by the template `$event` spread path (`template::von`, indexed
+/// `<this type>[0]`). The native spread `$event` instead uses the ambient
+/// [`native_dom_event_payload_type`], because the `import('vue')` indexed formula
+/// here resolves only under a full `tsserver`, not the native preview (`tsgo`).
+///
+/// `event_prop` is the JSX prop name produced by [`event_to_jsx_name`] (`onClick`).
+/// Returns `None` for a component whose binding could not be resolved, or for a tag
+/// kind that has no typed event surface.
+pub(crate) fn event_handler_params_type(
+    tag_name: &str,
+    tag_type: crate::ast::types::TagType,
+    component_binding: Option<&str>,
+    event_prop: &str,
+) -> Option<String> {
+    use crate::ast::types::TagType;
+    match tag_type {
+        TagType::Element => Some(format!(
+            "Parameters<NonNullable<import('vue').IntrinsicElementAttributes[\"{tag_name}\"][\"{event_prop}\"]>>"
+        )),
+        TagType::Component => Some(format!(
+            "Parameters<NonNullable<Required<InstanceType<typeof {}>[\"$props\"]>[\"{event_prop}\"]>>",
+            component_binding?
+        )),
+        _ => None,
+    }
+}
+
+/// Ambient DOM event-payload type for a NATIVE-element `$event`, keyed by the Vue
+/// event name (`click`, `mousedown`, `click-overlay`).
+///
+/// Used by the template `$event` spread path (`template::von`) where JSX contextual
+/// typing cannot flow and an explicit annotation is required. Unlike the
+/// `import('vue').IntrinsicElementAttributes[...]` formula, this references ONLY
+/// ambient lib.dom types, so it resolves under every TypeProvider — including the
+/// native preview (`tsgo`), which does not resolve `import('vue')` *type queries*
+/// from the generated virtual `.vue.tsx` and treats `JSX.IntrinsicElements[...]`
+/// indexed access as `any` (the arbitrary-element index signature on Vue's global
+/// JSX namespace). A real `<button onClick={…}>` still type-checks under `tsgo`
+/// because JSX element checking resolves the named member — only *manual* indexed
+/// access collapses; the spread object literal cannot use JSX element checking.
+///
+/// `GlobalEventHandlersEventMap[name]` is the canonical DOM event type for a known
+/// event (`"click"` → `PointerEvent`). The intersected `{ [k: string]: Event }`
+/// fallback keeps a non-standard / custom native event name (e.g. `click-overlay`)
+/// typed as the base `Event` instead of producing a `ts(2339)` "property does not
+/// exist" error — a precise type where one exists, a safe base type otherwise.
+pub(crate) fn native_dom_event_payload_type(event_name: &str) -> String {
+    format!("(GlobalEventHandlersEventMap & {{ [___VERTER___EventKey: string]: Event }})[\"{event_name}\"]")
+}
+
+/// Shared inventory of the component bindings visible to the generated IDE TSX template.
+///
+/// A component referenced in a template types through an in-scope const: either a local
+/// script binding (an import or setup const, known to the `BindingResolver` /
+/// `available_bindings`) OR a GlobalComponents fallback const synthesized by
+/// [`crate::ide::script::wrapper::emit_global_component_fallbacks`] for a globally-registered
+/// component that the script never imports.
+///
+/// Before this inventory existed, template event typing consulted only the resolver, so a
+/// globally-registered component's `@event` payload could not see its fallback const and
+/// fell back to `$event: any`. This inventory carries the fallback const names — collected
+/// ONCE via [`crate::ide::script::wrapper::collect_global_component_fallbacks`] and shared by
+/// the emission, the template `$event`/arrow spread path ([`crate::ide::template::von`]), and
+/// the simple-handler param inference ([`crate::ide::script::event_inference`]) — so every
+/// surface resolves the same component to the same typed const.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct TemplateComponentBindings {
+    /// PascalCase GlobalComponents fallback const names, in first-seen source order.
+    fallback_consts: Vec<String>,
+}
+
+impl TemplateComponentBindings {
+    /// Build from a collected fallback list (see `collect_global_component_fallbacks`).
+    pub(crate) fn new(fallback_consts: Vec<String>) -> Self {
+        Self { fallback_consts }
+    }
+
+    /// Whether `name` is a GlobalComponents fallback const emitted for this template.
+    pub(crate) fn is_fallback_const(&self, name: &str) -> bool {
+        self.fallback_consts.iter().any(|c| c == name)
+    }
+
+    /// Resolve a template tag to the in-scope const that types it, consulting local script
+    /// bindings (`local_is_known`) first and the GlobalComponents fallback consts second.
+    ///
+    /// Returns `None` for non-component tags and for components with neither a local binding
+    /// nor a fallback const (builtins, member-expression tags, or unregistered components —
+    /// the cases that fall through to explicit `any`).
+    pub(crate) fn resolve(
+        &self,
+        tag_name: &str,
+        tag_type: crate::ast::types::TagType,
+        local_is_known: impl Fn(&str) -> bool,
+    ) -> Option<String> {
+        if !matches!(tag_type, crate::ast::types::TagType::Component) {
+            return None;
+        }
+        crate::ide::script::event_inference::resolve_component_binding_name(tag_name, |n| {
+            local_is_known(n) || self.is_fallback_const(n)
+        })
+    }
+}
+
 // ── Utilities ──────────────────────────────────────────────────────
 
 /// Sanitize a filename into a valid JavaScript identifier.

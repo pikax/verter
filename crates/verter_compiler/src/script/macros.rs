@@ -8,20 +8,40 @@
 //! Also processes companion `<script>` blocks to extract `export default`
 //! options and type declarations for cross-block type resolution.
 
-use oxc_parser::Parser;
-use oxc_span::SourceType;
 use rustc_hash::FxHashMap;
 
-use super::process::source_type_from_lang;
-use crate::parser::types::RootNodeScript;
+use super::prepared::PreparedCompanion;
 use crate::template::code_gen::binding::BindingType;
 use crate::template::code_gen::types::CodeGenOutput;
-use crate::utils::oxc::script::type_surface::{
-    extract_companion_types, format_runtime_types, ResolvedElements,
-};
-use crate::utils::oxc::vue::{parse_script, ScriptItem, ScriptMacro, ScriptMode};
+use crate::utils::oxc::script::type_surface::format_runtime_types;
+use crate::utils::oxc::vue::{ScriptItem, ScriptMacro};
 
 use super::ScriptContext;
+
+/// Force-js-stripped text for a macro-argument expression, keyed by its
+/// content-local `(start, end)` span. Built once per setup parse (see
+/// [`super::process`]); `None` when TS types are kept.
+pub(super) type StrippedSections = FxHashMap<(u32, u32), String>;
+
+/// Return the section source for the macro-argument expression spanning
+/// `[start, end)` (content-local): the force-js-stripped text when the caller
+/// supplied a stripped-sections map containing it, otherwise the raw slice.
+///
+/// The synthesized props/emits sections copy macro arguments verbatim, and the
+/// macro call range is overwritten before the whole-program force-js pass runs,
+/// so a section is stripped here — at the point it is produced — keyed by the
+/// exact span the synthesis slices.
+fn section_text<'a>(
+    start: u32,
+    end: u32,
+    content_str: &'a str,
+    stripped: Option<&'a StrippedSections>,
+) -> &'a str {
+    stripped
+        .and_then(|m| m.get(&(start, end)))
+        .map(String::as_str)
+        .unwrap_or(&content_str[start as usize..end as usize])
+}
 
 // ======================== Helpers ========================
 
@@ -91,17 +111,19 @@ impl MacroState {
 /// metadata in [`MacroState`] for later use in the component definition.
 ///
 /// Also extracts prop names directly from defineProps arguments and
-/// adds them to bindings with `BindingType::Props`. This avoids
-/// relying on `parse_result.bindings` for Props, which has inconsistent
-/// span coordinate systems (object-syntax keys are SFC-absolute, while
-/// array-syntax keys are content-relative).
+/// adds them to bindings with `BindingType::Props`. The names come from the
+/// macro AST surfaced by the single parse (object property keys and array
+/// string-literal elements), not from `parse_result.bindings`, whose Props have
+/// inconsistent span coordinate systems (object-syntax keys are SFC-absolute,
+/// while array-syntax keys are content-relative).
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub(super) fn process_macro_item<'a>(
-    mac: &ScriptMacro<'_>,
+    mac: &ScriptMacro<'a>,
     content_start: u32,
     content_str: &'a str,
     ctx: &mut ScriptContext<'a>,
     state: &mut MacroState,
+    stripped: Option<&StrippedSections>,
 ) {
     match mac {
         ScriptMacro::DefineExpose { span, .. } => {
@@ -134,19 +156,24 @@ pub(super) fn process_macro_item<'a>(
             let abs_start = content_start + span.start;
             let abs_end = content_start + span.end;
 
-            // Extract props section from runtime argument and prop names for bindings.
-            // We extract prop names here (not from parse_result.bindings) because
-            // parse_script returns inconsistent span coordinate systems for Props.
+            // Extract props section from runtime argument and prop names for
+            // bindings. Prop names come from the macro AST surfaced by the single
+            // parse — the object property keys and the array string-literal
+            // elements — not from a second text reparse.
             if let Some(obj) = object_arg {
-                let obj_text = &content_str[obj.span.start as usize..obj.span.end as usize];
+                let obj_text = section_text(obj.span.start, obj.span.end, content_str, stripped);
                 state.props_section = Some(obj_text.to_string());
-                // Extract property key names from the object
-                extract_object_prop_names(obj_text, content_str, obj.span.start, &mut ctx.bindings);
+                for prop in &obj.properties {
+                    ctx.bindings.insert(prop.name, BindingType::Props);
+                }
             } else if let Some(arr) = array_arg {
-                let arr_text = &content_str[arr.span.start as usize..arr.span.end as usize];
+                let arr_text = section_text(arr.span.start, arr.span.end, content_str, stripped);
                 state.props_section = Some(arr_text.to_string());
-                // Extract prop names from array strings
-                extract_array_prop_names(arr_text, content_str, arr.span.start, &mut ctx.bindings);
+                for elem in &arr.elements {
+                    if let Some(name) = elem.name {
+                        ctx.bindings.insert(name, BindingType::Props);
+                    }
+                }
             }
 
             // Type-based defineProps: extract prop names from resolved type elements
@@ -210,10 +237,10 @@ pub(super) fn process_macro_item<'a>(
 
             // Extract emits section from runtime argument
             if let Some(obj) = object_arg {
-                let obj_text = &content_str[obj.span.start as usize..obj.span.end as usize];
+                let obj_text = section_text(obj.span.start, obj.span.end, content_str, stripped);
                 state.emits_section = Some(obj_text.to_string());
             } else if let Some(arr) = array_arg {
-                let arr_text = &content_str[arr.span.start as usize..arr.span.end as usize];
+                let arr_text = section_text(arr.span.start, arr.span.end, content_str, stripped);
                 state.emits_section = Some(arr_text.to_string());
             }
 
@@ -344,7 +371,7 @@ pub(super) fn process_macro_item<'a>(
                             .and_then(|d| d.properties.iter().find(|p| p.name == name));
                         let default_value = default_prop.and_then(|p| {
                             p.value_span
-                                .map(|vs| &content_str[vs.start as usize..vs.end as usize])
+                                .map(|vs| section_text(vs.start, vs.end, content_str, stripped))
                         });
 
                         if let Some(val) = default_value {
@@ -378,7 +405,7 @@ pub(super) fn process_macro_item<'a>(
                         for (i, prop) in d.properties.iter().enumerate() {
                             let val = prop
                                 .value_span
-                                .map(|vs| &content_str[vs.start as usize..vs.end as usize])
+                                .map(|vs| section_text(vs.start, vs.end, content_str, stripped))
                                 .unwrap_or("undefined");
                             props_obj.push_str("    ");
                             props_obj.push_str(prop.name);
@@ -399,7 +426,7 @@ pub(super) fn process_macro_item<'a>(
                     } else if let Some(arg_span) = defaults_arg_span {
                         // Variable reference: convert at runtime using IIFE
                         let defaults_src =
-                            &content_str[arg_span.start as usize..arg_span.end as usize];
+                            section_text(arg_span.start, arg_span.end, content_str, stripped);
                         state.props_section = Some(format!(
                             "((d)=>{{const p={{}};for(const k in d)p[k]={{default:d[k]}};return p}})({})",
                             defaults_src
@@ -420,46 +447,27 @@ pub(super) fn process_macro_item<'a>(
 
 // ======================== Companion script processing ========================
 
-/// Process the companion `<script>` block when `<script setup>` is present.
+/// Apply the companion `<script>` codegen when `<script setup>` is present.
 ///
 /// The companion script's tags are already stripped by `compile.rs`, so its
 /// content remains in the output. This function:
 /// 1. Finds `export default { ... }` and removes it (to avoid duplicate exports)
 /// 2. Extracts the object's inner content as component-level options (like
 ///    `defineOptions`)
-/// 3. Extracts type declarations (interfaces, type aliases) for cross-block
-///    type resolution in `defineProps<T>()`
-/// 4. Extracts non-type import binding names for template resolution
+/// 3. Collects non-type import binding names for template resolution
 ///
-/// Returns `(companion_types, companion_import_names)`.
+/// The companion was parsed once when the prepared script was built, and its
+/// type declarations were already folded into the setup parse, so this reads the
+/// prepared parse facts rather than re-parsing. Returns the companion import
+/// names.
 pub(super) fn process_companion_script(
-    script: &RootNodeScript,
+    prepared: &PreparedCompanion<'_>,
     source: &str,
     out: &mut CodeGenOutput<'_>,
     macro_state: &mut MacroState,
-) -> (FxHashMap<String, ResolvedElements>, Vec<String>) {
-    let content_span = match &script.content {
-        Some(span) => span,
-        None => return (FxHashMap::default(), Vec::new()),
-    };
-
-    let content_start = content_span.start;
-    let content_str = &source[content_span.start as usize..content_span.end as usize];
-
-    // Parse with OXC to find the default export
-    let oxc_alloc = oxc_allocator::Allocator::default();
-    let source_type = source_type_from_lang(script.lang.as_ref());
-    let parser_ret = Parser::new(&oxc_alloc, content_str, source_type).parse();
-    let parse_result = parse_script(
-        &parser_ret.program,
-        ScriptMode::Options,
-        content_start,
-        content_str,
-    );
-
-    // Extract type declarations for cross-block type resolution
-    let companion_types =
-        extract_companion_types(&parser_ret.program, content_str.as_bytes(), content_start);
+) -> Vec<String> {
+    let content_start = prepared.content_start();
+    let parse_result = prepared.parse_result();
 
     // Collect non-type import binding names for template resolution
     let mut companion_import_names = Vec::new();
@@ -502,247 +510,5 @@ pub(super) fn process_companion_script(
         }
     }
 
-    (companion_types, companion_import_names)
-}
-
-// ======================== Prop name extraction ========================
-
-/// Extract property key names from a defineProps object literal text.
-///
-/// Given text like `{ title: String, count: Number }`, extracts "title" and "count"
-/// and inserts them into bindings as `BindingType::Props`.
-///
-/// Uses the full `content_str` with `obj_offset` to get `&'a str` slices with the
-/// correct lifetime (tied to source).
-pub(super) fn extract_object_prop_names<'a>(
-    _obj_text: &str,
-    content_str: &'a str,
-    obj_offset: u32,
-    bindings: &mut FxHashMap<&'a str, BindingType>,
-) {
-    // Re-parse the object expression to extract property keys reliably.
-    // We parse just the object text as an expression statement.
-    let oxc_alloc = oxc_allocator::Allocator::default();
-    let expr_src = &content_str[obj_offset as usize..];
-    // Find the end of the object expression (matching brace)
-    let obj_end = find_matching_brace(expr_src);
-    if obj_end == 0 {
-        return;
-    }
-    let obj_src = &expr_src[..obj_end];
-    // Wrap in parens to make it a valid expression statement
-    let wrapped = format!("({})", obj_src);
-    let source_type = SourceType::tsx();
-    let parser_ret = Parser::new(&oxc_alloc, &wrapped, source_type).parse();
-    // Walk the parsed AST to find property keys
-    for stmt in &parser_ret.program.body {
-        if let oxc_ast::ast::Statement::ExpressionStatement(es) = stmt {
-            if let oxc_ast::ast::Expression::ParenthesizedExpression(paren) = &es.expression {
-                if let oxc_ast::ast::Expression::ObjectExpression(obj) = &paren.expression {
-                    for prop_kind in &obj.properties {
-                        if let oxc_ast::ast::ObjectPropertyKind::ObjectProperty(p) = prop_kind {
-                            if let oxc_ast::ast::PropertyKey::StaticIdentifier(ident) = &p.key {
-                                // ident.span is relative to `wrapped`, offset by 1 for the opening paren
-                                let name_start = obj_offset + ident.span.start - 1; // -1 for wrapping paren
-                                let name_end = obj_offset + ident.span.end - 1;
-                                let name = &content_str[name_start as usize..name_end as usize];
-                                bindings.insert(name, BindingType::Props);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Find the position of the matching closing brace for text starting with `{`.
-///
-/// Handles strings (single/double/template literal) and comments so that
-/// braces inside `'{}' ` or `/* {} */` don't affect the depth counter.
-pub(super) fn find_matching_brace(s: &str) -> usize {
-    if !s.starts_with('{') {
-        return 0;
-    }
-    let bytes = s.as_bytes();
-    let len = bytes.len();
-    let mut depth = 0i32;
-    let mut i = 0;
-
-    while i < len {
-        let b = bytes[i];
-        match b {
-            b'\'' | b'"' => {
-                // Skip string literal
-                let quote = b;
-                i += 1;
-                while i < len {
-                    if bytes[i] == b'\\' {
-                        i += 2; // skip escaped char
-                        continue;
-                    }
-                    if bytes[i] == quote {
-                        break;
-                    }
-                    i += 1;
-                }
-            }
-            b'`' => {
-                // Skip template literal (including nested ${...})
-                i += 1;
-                let mut tmpl_depth = 0u32;
-                while i < len {
-                    if bytes[i] == b'\\' {
-                        i += 2;
-                        continue;
-                    }
-                    if bytes[i] == b'`' && tmpl_depth == 0 {
-                        break;
-                    }
-                    if bytes[i] == b'$' && i + 1 < len && bytes[i + 1] == b'{' {
-                        tmpl_depth += 1;
-                        i += 1; // skip the '{', loop will advance past it
-                    } else if bytes[i] == b'}' && tmpl_depth > 0 {
-                        tmpl_depth -= 1;
-                    }
-                    i += 1;
-                }
-            }
-            b'/' if i + 1 < len && bytes[i + 1] == b'/' => {
-                // Skip line comment
-                i += 2;
-                while i < len && bytes[i] != b'\n' {
-                    i += 1;
-                }
-            }
-            b'/' if i + 1 < len && bytes[i + 1] == b'*' => {
-                // Skip block comment
-                i += 2;
-                while i + 1 < len && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
-                    i += 1;
-                }
-                if i + 1 < len {
-                    i += 1; // skip the '/'
-                }
-            }
-            b'{' => depth += 1,
-            b'}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return i + 1;
-                }
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    0
-}
-
-/// Extract prop names from a defineProps array literal text.
-///
-/// Given text like `['title', 'count']`, extracts "title" and "count"
-/// from content_str with correct lifetime.
-pub(super) fn extract_array_prop_names<'a>(
-    arr_text: &str,
-    content_str: &'a str,
-    arr_offset: u32,
-    bindings: &mut FxHashMap<&'a str, BindingType>,
-) {
-    // Simple parsing: find string literals in the array
-    let mut i = 0;
-    let bytes = arr_text.as_bytes();
-    while i < bytes.len() {
-        if bytes[i] == b'\'' || bytes[i] == b'"' {
-            let quote = bytes[i];
-            let start = i + 1;
-            i += 1;
-            while i < bytes.len() && bytes[i] != quote {
-                if bytes[i] == b'\\' && i + 1 < bytes.len() {
-                    i += 1; // skip escaped character
-                }
-                i += 1;
-            }
-            if i < bytes.len() {
-                // Found a string literal from start..i
-                let abs_start = arr_offset as usize + start;
-                let abs_end = arr_offset as usize + i;
-                if abs_end <= content_str.len() {
-                    let name = &content_str[abs_start..abs_end];
-                    bindings.insert(name, BindingType::Props);
-                }
-            }
-        }
-        i += 1;
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_extract_array_prop_names_basic() {
-        let arr_text = "['title', \"count\"]";
-        let content_str = arr_text;
-        let mut bindings = FxHashMap::default();
-        extract_array_prop_names(arr_text, content_str, 0, &mut bindings);
-        assert_eq!(bindings.len(), 2);
-        assert!(bindings.contains_key("title"));
-        assert!(bindings.contains_key("count"));
-    }
-
-    #[test]
-    fn test_extract_array_prop_names_escaped_quote() {
-        // Prop name with escaped quote should be extracted correctly
-        let arr_text = r#"['foo\'bar']"#;
-        let content_str = arr_text;
-        let mut bindings = FxHashMap::default();
-        extract_array_prop_names(arr_text, content_str, 0, &mut bindings);
-        assert_eq!(bindings.len(), 1);
-        assert!(
-            bindings.contains_key(r"foo\'bar"),
-            "Expected foo\\'bar, got: {:?}",
-            bindings.keys().collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn find_matching_brace_basic() {
-        assert_eq!(find_matching_brace("{ a: 1 }"), 8);
-        assert_eq!(find_matching_brace("{}"), 2);
-    }
-
-    #[test]
-    fn find_matching_brace_nested() {
-        assert_eq!(find_matching_brace("{ a: { b: 1 } }"), 15);
-    }
-
-    #[test]
-    fn find_matching_brace_string_with_braces() {
-        // Braces inside strings should not affect depth
-        assert_eq!(find_matching_brace("{ msg: '{}' }"), 13);
-        assert_eq!(find_matching_brace("{ msg: \"{}\" }"), 13);
-    }
-
-    #[test]
-    fn find_matching_brace_template_literal() {
-        assert_eq!(find_matching_brace("{ msg: `${}` }"), 14);
-    }
-
-    #[test]
-    fn find_matching_brace_comment_with_braces() {
-        assert_eq!(find_matching_brace("{ /* } */ a: 1 }"), 16);
-        assert_eq!(find_matching_brace("{ // }\na: 1 }"), 13);
-    }
-
-    #[test]
-    fn find_matching_brace_not_starting_with_brace() {
-        assert_eq!(find_matching_brace("hello"), 0);
-    }
-
-    #[test]
-    fn find_matching_brace_unbalanced() {
-        assert_eq!(find_matching_brace("{ a: 1"), 0);
-    }
+    companion_import_names
 }

@@ -17,7 +17,7 @@ use crate::ide::template::emit::{
     emit_expr_plan, emit_op, emit_synthesized_shorthand_value, plan_user_expr, trim_span, EmitOp,
     EmitText, ExprOptions, Placement,
 };
-use crate::ide::{event_to_jsx_name, get_directive_name};
+use crate::ide::{event_to_jsx_name, get_directive_name, TemplateComponentBindings};
 use crate::template::code_gen::binding::BindingResolver;
 use crate::template::code_gen::types::CodeGenOutput;
 use crate::template::code_gen::vapor::interpolation::build_prefixed_expr;
@@ -71,6 +71,7 @@ pub fn process_element_props<'alloc>(
     out: &mut CodeGenOutput<'alloc>,
     alloc: &'alloc Allocator,
     resolver: &BindingResolver<'alloc>,
+    components: &TemplateComponentBindings,
     condition_guard: Option<&str>,
     is_jsx: bool,
 ) -> Vec<CollectedDirective> {
@@ -261,7 +262,8 @@ pub fn process_element_props<'alloc>(
                     false
                 };
                 super::von::process_v_on(
-                    prop, oxc_prop, source, out, alloc, resolver, v_if_guard, use_spread,
+                    prop, el, oxc_prop, source, out, alloc, resolver, components, v_if_guard,
+                    use_spread,
                 );
             }
             "html" => process_v_html(prop, oxc_prop, source, out, resolver),

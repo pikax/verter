@@ -1,0 +1,111 @@
+{
+  "slug": "blocks/if_each_key.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "if_each_key",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "from_html",
+    "from_html",
+    "from_html",
+    "from_html",
+    "proxy",
+    "first_child",
+    "each",
+    "child",
+    "reset",
+    "template_effect",
+    "set_text",
+    "get",
+    "append",
+    "reset",
+    "append",
+    "append",
+    "if",
+    "sibling",
+    "key",
+    "append",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "child",
+    "each",
+    "first_child",
+    "from_html",
+    "get",
+    "if",
+    "key",
+    "proxy",
+    "reset",
+    "set_text",
+    "sibling",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 5,
+    "proxy": 1,
+    "first_child": 1,
+    "each": 1,
+    "child": 1,
+    "reset": 2,
+    "template_effect": 1,
+    "set_text": 1,
+    "get": 1,
+    "append": 5,
+    "if": 1,
+    "sibling": 1,
+    "key": 1
+  },
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<li> </li>",
+      "flag": null
+    },
+    {
+      "factory": "from_html",
+      "html": "<ul></ul>",
+      "flag": null
+    },
+    {
+      "factory": "from_html",
+      "html": "<p>nothing</p>",
+      "flag": null
+    },
+    {
+      "factory": "from_html",
+      "html": "<span></span>",
+      "flag": null
+    },
+    {
+      "factory": "from_html",
+      "html": "<!> <!>",
+      "flag": "1"
+    }
+  ],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

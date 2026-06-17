@@ -2,6 +2,78 @@
 
 use super::*;
 
+// ── Helper-import-preamble boundary (auto-import re-anchoring) ──
+
+/// IDE codegen publishes the typed helper-import-preamble end boundary on the source map for an
+/// EMPTY `<script setup>` — the case with NO mapped runs, where the boundary is the LSP auto-import
+/// classifier's only signal separating the leading preamble from trailing synthetic component code.
+/// The boundary points at the first non-import (synthetic) line; everything before it is a helper
+/// import (or blank).
+#[test]
+fn ide_source_map_publishes_helper_preamble_boundary_for_empty_setup() {
+    let (code, json) = gen_tsx_script_with_sourcemap("<script setup lang=\"ts\">\n</script>\n");
+
+    let map: serde_json::Value = serde_json::from_str(&json).expect("valid source map JSON");
+    let boundary = &map["x_verter_helper_preamble_end"];
+    assert!(
+        boundary.is_object(),
+        "IDE source map must publish x_verter_helper_preamble_end: {json}"
+    );
+    let line = boundary["line"].as_u64().expect("boundary line") as usize;
+    let character = boundary["character"].as_u64().expect("boundary character");
+    assert_eq!(
+        character, 0,
+        "the boundary is the start of the line immediately after the helper imports"
+    );
+    assert!(
+        line >= 1,
+        "at least one helper-import line precedes the boundary"
+    );
+
+    let lines: Vec<&str> = code.lines().collect();
+    for (i, l) in lines.iter().enumerate().take(line) {
+        assert!(
+            l.is_empty() || l.starts_with("import "),
+            "line {i} before the boundary must be a helper import (or blank), got: {l:?}"
+        );
+    }
+    let boundary_line = lines.get(line).copied().unwrap_or("");
+    assert!(
+        !boundary_line.starts_with("import "),
+        "the boundary line must be the first non-import (synthetic) line, got: {boundary_line:?}"
+    );
+}
+
+/// The boundary is correct for a `<script setup>` WITH user code too: it lands after the helper
+/// imports and before the user/synthetic body, never inside the trailing component wrapper.
+#[test]
+fn ide_source_map_helper_preamble_boundary_precedes_user_body() {
+    let (code, json) = gen_tsx_script_with_sourcemap(
+        "<script setup lang=\"ts\">\nconst count = 0\n</script>\n<template><div>{{ count }}</div></template>\n",
+    );
+
+    let map: serde_json::Value = serde_json::from_str(&json).expect("valid source map JSON");
+    let line = map["x_verter_helper_preamble_end"]["line"]
+        .as_u64()
+        .expect("boundary line") as usize;
+
+    let lines: Vec<&str> = code.lines().collect();
+    for (i, l) in lines.iter().enumerate().take(line) {
+        assert!(
+            l.is_empty() || l.starts_with("import "),
+            "line {i} before the boundary must be a helper import (or blank), got: {l:?}"
+        );
+    }
+    assert!(
+        !lines
+            .get(line)
+            .copied()
+            .unwrap_or("")
+            .starts_with("import "),
+        "the boundary line is the first non-import line"
+    );
+}
+
 // ── End-to-end tests ─────────────────────────────────────────
 
 #[test]

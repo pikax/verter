@@ -1,8 +1,12 @@
 //! Setup pipeline (ownership-domain analysis).
 //!
-//! Hosts the two large entry points that drive `<script setup>` processing:
-//! `process_tsx_script_setup` (clean parse path) and
-//! `process_tsx_script_setup_error_mode` (truncate-and-reparse fallback).
+//! Hosts `process_tsx_script_setup`, the single entry point that drives
+//! `<script setup>` processing. OXC parses the original content once; a clean
+//! parse takes the full codegen path, while a genuine syntax error routes
+//! through error-tolerant recovery (a single token scan of the real source via
+//! [`crate::ide::script_recover::ScriptSetupRecoveryPlan`]) that keeps the user's
+//! body valid TSX and inside the `___VERTER___TemplateBindingFN` wrapper without
+//! ever reparsing a synthetic view.
 
 use oxc_allocator::Allocator;
 use oxc_parser::Parser;
@@ -21,9 +25,9 @@ use crate::utils::oxc::vue::{parse_script_with_companion, ScriptItem, ScriptMode
 
 use super::{
     apply_event_handler_param_inference, apply_template_ref_call_inference,
-    build_binding_source_info, collect_binding_names, detect_get_current_instance,
-    detect_use_attrs_calls, directive_accessor_declaration, emit_attrs_type_aliases,
-    emit_comp_functions_to_string, emit_get_root_component_to_string,
+    build_binding_source_info, collect_binding_names, collect_global_component_fallbacks,
+    detect_get_current_instance, detect_use_attrs_calls, directive_accessor_declaration,
+    emit_attrs_type_aliases, emit_comp_functions_to_string, emit_get_root_component_to_string,
     emit_global_component_fallbacks, emit_helper_imports, emit_minimal_wrapper,
     emit_type_constructs, instance_declaration, instance_probe_line, kebab_to_pascal_case,
     process_companion_for_tsx, process_macros, rewrite_ts_type_assertions,
@@ -46,6 +50,7 @@ pub(super) fn process_tsx_script_setup<'alloc>(
     options: &IdeScriptOptions<'_>,
     builtin_components: &[&str],
     template_end: Option<u32>,
+    template_component_fallbacks: &mut Vec<String>,
 ) -> (Option<String>, Option<DestructuredBlockMeta>) {
     let content_span = match &setup.content {
         Some(span) => span,
@@ -89,120 +94,39 @@ pub(super) fn process_tsx_script_setup<'alloc>(
         rewrite_ts_type_assertions(content_str, content_start, ct);
     }
 
-    // ── Partial AST Recovery ──────────────────────────────────────
-    // OXC (0.116) doesn't produce partial ASTs on errors (body is empty).
-    // When real parse errors exist, we find the clean prefix before the first
-    // error, re-parse it, and use that for normal codegen. The broken tail
-    // passes through as-is in the CodeTransform output.
-    //
-    // Only enter recovery if TS-mode parse also fails. If only TSX fails
-    // (but TS succeeds), the errors are from angle bracket type assertions
-    // which `rewrite_ts_type_assertions` already handled.
-    let mut damaged_macro_spans: Vec<verter_span::Span> = Vec::new();
-
-    // This allocator + clean_prefix_str live for the rest of the function,
-    // so parse results borrowing from them remain valid.
-    let recovery_alloc;
-    let mut clean_prefix_str: &str = "";
-    let mut use_recovery_parse = false;
-
-    if !parser_ret.errors.is_empty() {
-        let ts_alloc = Allocator::default();
-        let ts_check = Parser::new(&ts_alloc, content_str, SourceType::ts()).parse();
-        if !ts_check.errors.is_empty() {
-            // Find the earliest error offset (relative to content_str)
-            let earliest_error = parser_ret
-                .errors
-                .iter()
-                .flat_map(|e| e.labels.iter().flatten())
-                .map(|label| label.offset())
-                .min()
-                .unwrap_or(0);
-
-            // Find the last complete line boundary before the error.
-            // If the error is at EOF, back up past any trailing newline first.
-            let search_end = if earliest_error >= content_str.len() {
-                content_str.trim_end().len()
+    // ── Error-Tolerant Recovery ───────────────────────────────────
+    // OXC parses the ORIGINAL `content_str` exactly once (above). On a clean
+    // parse the full codegen path below runs unchanged. On a GENUINE syntax
+    // error — both the TSX parse AND a TS-mode parse fail (a TSX-only failure is
+    // an angle-bracket assertion already handled by `rewrite_ts_type_assertions`)
+    // — we DO NOT reparse anything. A single token scan of the REAL source
+    // produces a `ScriptSetupRecoveryPlan`: its original-span import/macro/binding
+    // facts feed hoisting and binding registration, and its OUTPUT-ONLY member /
+    // expression holes plus scope closers keep the user's body valid AND inside
+    // the `___VERTER___TemplateBindingFN` wrapper. OXC (0.116) yields an empty
+    // body on error, so `parser_ret.program` contributes nothing on this path —
+    // every recovered fact comes from the real-source scan, never a synthetic view.
+    let recovery_plan: Option<crate::ide::script_recover::ScriptSetupRecoveryPlan> =
+        if parser_ret.errors.is_empty() {
+            None
+        } else {
+            let ts_alloc = Allocator::default();
+            let ts_check = Parser::new(&ts_alloc, content_str, SourceType::ts()).parse();
+            if ts_check.errors.is_empty() {
+                // TSX-only failure (angle-bracket assertion) — clean-path metadata.
+                None
             } else {
-                earliest_error
-            };
-            let truncate_at = content_str[..search_end]
-                .rfind('\n')
-                .map(|p| p + 1) // include the newline
-                .unwrap_or(0);
-
-            if truncate_at == 0 {
-                // Error is on the first line — nothing useful to recover
-                return (
-                    process_tsx_script_setup_error_mode(
-                        setup,
-                        source,
-                        out,
-                        type_constructs,
-                        options,
-                        builtin_components,
-                        template_end,
-                        hoist_pos,
-                    ),
-                    None,
-                );
-            }
-
-            // Re-parse only the clean prefix
-            clean_prefix_str = &content_str[..truncate_at];
-            recovery_alloc = Allocator::default();
-            let reparse_ret =
-                Parser::new(&recovery_alloc, clean_prefix_str, SourceType::tsx()).parse();
-
-            if reparse_ret.errors.is_empty() && !reparse_ret.program.body.is_empty() {
-                use_recovery_parse = true;
-                // parser_ret will be shadowed below with the re-parsed result
-
-                // Use tokenizer to detect macros in the broken tail region
-                let recovery =
+                Some(
                     crate::ide::script_recover::ScriptTokenScanner::new(content_str, content_start)
-                        .recover();
-                for m in &recovery.macros {
-                    if m.call_span.end > content_start + truncate_at as u32 {
-                        damaged_macro_spans.push(m.call_span);
-                    }
-                }
-            } else {
-                // Clean prefix also has errors — truly broken, use error recovery
-                return (
-                    process_tsx_script_setup_error_mode(
-                        setup,
-                        source,
-                        out,
-                        type_constructs,
-                        options,
-                        builtin_components,
-                        template_end,
-                        hoist_pos,
-                    ),
-                    None,
-                );
+                        .recover_plan(),
+                )
             }
-        }
-    }
+        };
 
-    // Use either the original full parse or the clean-prefix re-parse.
-    // The recovery allocator must outlive `effective_program` which borrows from it.
-    let recovery_alloc2 = Allocator::default();
-    let recovery_ret = if use_recovery_parse {
-        Some(Parser::new(&recovery_alloc2, clean_prefix_str, SourceType::tsx()).parse())
-    } else {
-        None
-    };
-    let effective_program = recovery_ret
-        .as_ref()
-        .map(|r| &r.program)
-        .unwrap_or(&parser_ret.program);
-    let effective_content_str = if use_recovery_parse {
-        clean_prefix_str
-    } else {
-        content_str
-    };
+    // On the failure path OXC gives an empty body; the codegen below degrades to
+    // wrapper + recovered facts. On the clean path this is the full parse.
+    let effective_program = &parser_ret.program;
+    let effective_content_str = content_str;
 
     let parse_result = parse_script_with_companion(
         effective_program,
@@ -259,6 +183,20 @@ pub(super) fn process_tsx_script_setup<'alloc>(
                 ct.prepend_left(quote_pos, ".ts");
             }
             ct.move_with_suffix(abs_start, abs_end, hoist_pos, "\n");
+        }
+    }
+
+    // On the recovery path the empty parse contributes no `ScriptItem::Import`, so
+    // hoist the imports the token scanner recovered from the REAL source instead.
+    // Their spans are already SFC-absolute. This keeps top-level imports out of the
+    // function wrapper (TS1232) while the user types a broken statement below them.
+    if let Some(plan) = &recovery_plan {
+        for imp in &plan.imports {
+            if imp.source.ends_with(".vue") {
+                let quote_pos = imp.source_span.end - 1;
+                ct.prepend_left(quote_pos, ".ts");
+            }
+            ct.move_with_suffix(imp.span.start, imp.span.end, hoist_pos, "\n");
         }
     }
 
@@ -375,8 +313,9 @@ pub(super) fn process_tsx_script_setup<'alloc>(
         }
     }
 
-    // Process macros: emit type aliases only (no boxing).
-    // Skip macros whose spans overlap with parse errors (damaged by typing).
+    // The clean parse drives macro lowering; on the recovery path `parse_result`
+    // is empty, so there are no AST macros to lower here (recovered macro facts
+    // register their bindings below). No macro spans are ever "damaged" anymore.
     let mut macro_ctx = MacroSourceCtx {
         source,
         content_str,
@@ -384,33 +323,24 @@ pub(super) fn process_tsx_script_setup<'alloc>(
         out,
         is_jsx: options.is_jsx,
     };
-    let macro_state = process_macros(&parse_result.items, &mut macro_ctx, &damaged_macro_spans);
+    let macro_state = process_macros(&parse_result.items, &mut macro_ctx, &[]);
     let out = macro_ctx.out;
 
-    // For NormalSkipDamagedMacros: recover binding names from damaged macros,
-    // variables, and functions using the lightweight token scanner, so templates
-    // can still reference them.
-    if !damaged_macro_spans.is_empty() {
-        let recovery =
-            crate::ide::script_recover::ScriptTokenScanner::new(content_str, content_start)
-                .recover();
-        for m in &recovery.macros {
+    // ── Failure-path recovery application ──────────────────────────
+    // Register bindings the token scanner recovered from the REAL source (so the
+    // template still resolves them) and emit the OUTPUT-ONLY holes that keep the
+    // user's broken body valid TSX. Every fact here comes from an original source
+    // span; the synthetic hole placeholders are never registered as bindings.
+    if let Some(plan) = &recovery_plan {
+        for m in &plan.macros {
             if let Some(name) = m.binding_name {
                 let bt = match m.kind {
-                    crate::ide::script_recover::RecoveredMacroKind::DefineProps => {
+                    crate::ide::script_recover::RecoveredMacroKind::DefineProps
+                    | crate::ide::script_recover::RecoveredMacroKind::WithDefaults => {
                         BindingType::Props
-                    }
-                    crate::ide::script_recover::RecoveredMacroKind::WithDefaults => {
-                        BindingType::Props
-                    }
-                    crate::ide::script_recover::RecoveredMacroKind::DefineEmits => {
-                        BindingType::SetupConst
                     }
                     crate::ide::script_recover::RecoveredMacroKind::DefineModel => {
                         BindingType::SetupRef
-                    }
-                    crate::ide::script_recover::RecoveredMacroKind::DefineSlots => {
-                        BindingType::SetupConst
                     }
                     _ => BindingType::SetupConst,
                 };
@@ -418,8 +348,7 @@ pub(super) fn process_tsx_script_setup<'alloc>(
                 bindings.entry(alloc_name).or_insert(bt);
             }
         }
-        // Recover variable bindings from the broken tail
-        for v in &recovery.variables {
+        for v in &plan.variables {
             let bt = match v.kind {
                 crate::ide::script_recover::RecoveredVarKind::Const => BindingType::SetupConst,
                 _ => BindingType::SetupLet,
@@ -427,12 +356,37 @@ pub(super) fn process_tsx_script_setup<'alloc>(
             let alloc_name = alloc.alloc_str(v.name);
             bindings.entry(alloc_name).or_insert(bt);
         }
-        // Recover function bindings from the broken tail
-        for f in &recovery.functions {
+        for f in &plan.functions {
             let alloc_name = alloc.alloc_str(f.name);
             bindings
                 .entry(alloc_name)
                 .or_insert(BindingType::SetupConst);
+        }
+        // Imported value bindings (type-only imports introduce no value binding).
+        for imp in &plan.imports {
+            if imp.is_type_only {
+                continue;
+            }
+            for name in &imp.binding_names {
+                let alloc_name = alloc.alloc_str(name);
+                bindings
+                    .entry(alloc_name)
+                    .or_insert(BindingType::SetupImport);
+            }
+        }
+        // Emit the OUTPUT-ONLY recovery holes (unmapped synthetic chunks). A
+        // member hole fills a dangling `a.` / `a?.` with a universal member so the
+        // dot cannot absorb the following token; an expression hole completes a
+        // trailing operator / assignment / arm. Neither becomes a source fact.
+        for insert in &plan.inserts {
+            match insert {
+                crate::ide::script_recover::RecoveryInsert::MemberHole { at } => {
+                    out.prepend_static(*at, "valueOf");
+                }
+                crate::ide::script_recover::RecoveryInsert::ExpressionHole { at } => {
+                    out.prepend_static(*at, "(undefined)");
+                }
+            }
         }
     }
 
@@ -558,13 +512,46 @@ pub(super) fn process_tsx_script_setup<'alloc>(
     if let Some(tag_close) = &setup.tag_close {
         let mut wrapper_end = String::with_capacity(512);
 
-        // Inject __props alias so template codegen's `__props.xxx` references resolve.
-        if let Some(props_var) = macro_state
+        // The defineProps/withDefaults LHS binding name — from the clean lowered
+        // `macro_state` OR, on the recovery path, from the recovered macro fact.
+        // Template codegen maps a Props binding to `__props.`, so the `__props`
+        // alias MUST exist in BOTH paths or the template reference dangles. Recovery
+        // marks the LHS Props (script/setup binding registration above); this gives
+        // it the same alias semantics as clean macro lowering.
+        let define_props_var: Option<&str> = macro_state
             .macro_bindings
             .iter()
             .find(|e| e.macro_name == "defineProps")
             .and_then(|e| e.var_name.as_deref())
-        {
+            .or_else(|| {
+                recovery_plan.as_ref().and_then(|plan| {
+                    plan.macros
+                        .iter()
+                        .filter(|m| {
+                            matches!(
+                                m.kind,
+                                crate::ide::script_recover::RecoveredMacroKind::DefineProps
+                                    | crate::ide::script_recover::RecoveredMacroKind::WithDefaults
+                            )
+                        })
+                        .find_map(|m| m.binding_name)
+                })
+            });
+
+        // Recovery boundary (failure path only): this string is emitted right
+        // after the user's body (it overwrites `</script>`). First close any
+        // brackets the user left open, then terminate the now-complete trailing
+        // statement, so the generated scaffolding below starts at a clean
+        // statement boundary instead of being absorbed by a dangling expression.
+        // These chunks are OUTPUT-ONLY (unmapped) and never become source facts.
+        if let Some(plan) = &recovery_plan {
+            wrapper_end.push_str(&plan.scope_closers);
+            wrapper_end.push(';');
+        }
+
+        // Inject __props alias so template codegen's `__props.xxx` references resolve
+        // (clean path and recovery path share the same alias semantics).
+        if let Some(props_var) = define_props_var {
             wrapper_end.push_str(&format!("\nconst __props = {};", props_var));
         }
 
@@ -586,7 +573,7 @@ pub(super) fn process_tsx_script_setup<'alloc>(
         //  1. IntelliSense always shows unwrapped types in the template
         //  2. TS flags unused destructured bindings (the LSP remaps these
         //     diagnostics to the original declaration via the offset comments)
-        let import_names: FxHashSet<&str> = parse_result
+        let mut import_names: FxHashSet<&str> = parse_result
             .items
             .iter()
             .filter_map(|item| {
@@ -598,6 +585,15 @@ pub(super) fn process_tsx_script_setup<'alloc>(
             })
             .flatten()
             .collect();
+        // Recovered imports are in scope via hoisting, not destructuring — exclude
+        // their local names from the shallowUnwrapRef block just like clean imports.
+        if let Some(plan) = &recovery_plan {
+            for imp in &plan.imports {
+                for name in &imp.binding_names {
+                    import_names.insert(name);
+                }
+            }
+        }
 
         let setup_bindings: Vec<(&str, BindingType)> = bindings
             .iter()
@@ -609,17 +605,17 @@ pub(super) fn process_tsx_script_setup<'alloc>(
             .map(|(name, bt)| (*name, *bt))
             .collect();
 
-        // Emit global component fallback consts BEFORE the block scope.
+        // Collect, then emit, global component fallback consts BEFORE the block scope.
         // These provide types for globally registered components (e.g. RouterLink,
         // RouterView) that aren't imported. They must be declared before the block
         // scope so the template JSX inside can reference them without TDZ errors.
-        emit_global_component_fallbacks(
-            &mut wrapper_end,
-            template_ast,
-            source,
-            bindings,
-            options.is_jsx,
-        );
+        // The collected list is also handed back to the template-typing inventory so a
+        // global component's `@event` payload resolves through the same `InstanceType<typeof
+        // Pascal>["$props"]` const that is emitted here.
+        let global_fallbacks =
+            collect_global_component_fallbacks(template_ast, source, |n| bindings.contains_key(n));
+        emit_global_component_fallbacks(&mut wrapper_end, &global_fallbacks, options.is_jsx);
+        *template_component_fallbacks = global_fallbacks;
 
         // Emit self-referencing component declaration (#28).
         // When a component's template uses its own name (e.g., <TreeNode /> inside
@@ -901,12 +897,9 @@ pub(super) fn process_tsx_script_setup<'alloc>(
                     P = PREFIX,
                 ));
             }
-            // Suppress TS6133 for generated variables that may not be referenced in template
-            if macro_state
-                .macro_bindings
-                .iter()
-                .any(|e| e.macro_name == "defineProps" && e.var_name.is_some())
-            {
+            // Suppress TS6133 for generated variables that may not be referenced in
+            // template (matches the `__props` alias above on both paths).
+            if define_props_var.is_some() {
                 tail.push_str("\nvoid __props;");
             }
             for entry in &macro_state.macro_bindings {
@@ -951,71 +944,4 @@ pub(super) fn process_tsx_script_setup<'alloc>(
     );
 
     (deferred_return_close, destructured_block_meta)
-}
-
-// ── Script Setup Error Recovery ─────────────────────────────────
-
-/// Error recovery mode for `<script setup>` when OXC has parse errors.
-///
-/// Keeps the script body at **file scope** (no function wrapper) so
-/// TypeScript can still resolve variables for IntelliSense completions.
-/// Emits a minimal `___VERTER___TemplateBindingFN` wrapper for the template
-/// only. Skips shallowUnwrapRef destructuring, macro processing, and
-/// binding extraction since the OXC AST is unreliable.
-#[allow(clippy::too_many_arguments)]
-fn process_tsx_script_setup_error_mode(
-    setup: &RootNodeScript,
-    source: &str,
-    out: &mut CodeGenOutput<'_>,
-    type_constructs: &mut String,
-    options: &IdeScriptOptions<'_>,
-    builtin_components: &[&str],
-    template_end: Option<u32>,
-    hoist_pos: u32,
-) -> Option<String> {
-    // Replace <script setup> tag with newline — script body stays at file scope.
-    out.overwrite(setup.tag_open.start, setup.tag_open.end, "\n");
-
-    // Replace </script> tag with TemplateBindingFN wrapper for template.
-    let mut deferred_return_close: Option<String> = None;
-    if let Some(tag_close) = &setup.tag_close {
-        if template_end.is_some() {
-            // Template exists: open the wrapper, defer the close
-            let mut wrapper_open = format!("\nexport function {}TemplateBindingFN() {{\n", PREFIX);
-            // Declare instance for instance property access in template.
-            // Error mode: no Comp functions, so no $attrs override
-            wrapper_open.push_str(&instance_declaration(
-                options.filename,
-                options.is_jsx,
-                false,
-            ));
-            wrapper_open.push_str(&directive_accessor_declaration(options.is_jsx));
-            out.overwrite(tag_close.start, tag_close.end, &wrapper_open);
-            let mut close = String::from("\n");
-            close.push_str(&instance_probe_line());
-            close.push_str("return {};\n} // close templateBindingFN\n");
-            deferred_return_close = Some(close);
-        } else {
-            // No template: just remove the tag
-            out.overwrite(tag_close.start, tag_close.end, "\n");
-        }
-    }
-
-    // Emit helper imports (hoisted before script body).
-    // In error mode we still import shallowUnwrapRef — it's harmless and
-    // avoids the need for a separate helper-import variant.
-    emit_helper_imports(out, hoist_pos, options, builtin_components, None);
-
-    // Emit minimal type constructs (instance type for self-import).
-    emit_type_constructs(
-        type_constructs,
-        &None, // no generic info
-        &None, // no attrs
-        source,
-        options,
-        false, // no getCurrentInstance detection
-        true,  // emit attributes type (error mode still needs it)
-    );
-
-    deferred_return_close
 }

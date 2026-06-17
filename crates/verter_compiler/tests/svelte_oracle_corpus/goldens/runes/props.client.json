@@ -1,0 +1,66 @@
+{
+  "slug": "runes/props.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "props",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "prop",
+    "prop",
+    "child",
+    "reset",
+    "template_effect",
+    "set_text",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "child",
+    "from_html",
+    "prop",
+    "reset",
+    "set_text",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "prop": 2,
+    "child": 1,
+    "reset": 1,
+    "template_effect": 1,
+    "set_text": 1,
+    "append": 1
+  },
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<p> </p>",
+      "flag": null
+    }
+  ],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

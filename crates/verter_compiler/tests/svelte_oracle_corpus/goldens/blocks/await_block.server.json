@@ -1,0 +1,38 @@
+{
+  "slug": "blocks/await_block.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "await_block",
+    "params": [
+      "$$renderer"
+    ]
+  },
+  "helperSequence": [
+    "await",
+    "escape"
+  ],
+  "helperSet": [
+    "await",
+    "escape"
+  ],
+  "helperCounts": {
+    "await": 1,
+    "escape": 1
+  },
+  "templates": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

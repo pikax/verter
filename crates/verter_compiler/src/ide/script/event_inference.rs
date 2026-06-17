@@ -9,8 +9,9 @@
 use oxc_ast::ast::{BindingPattern, Declaration, Function, Statement};
 use rustc_hash::{FxHashMap, FxHashSet};
 
+use super::collect_global_component_fallbacks;
 use crate::ast::types::{AstNodeKind, TagType, TemplateAst};
-use crate::ide::{event_to_jsx_name, get_directive_name};
+use crate::ide::{event_to_jsx_name, get_directive_name, TemplateComponentBindings};
 use crate::template::code_gen::binding::is_simple_ident;
 use crate::template::code_gen::types::CodeGenOutput;
 
@@ -148,12 +149,22 @@ fn collect_event_handler_type_hints(
         return hints;
     };
 
+    // The same GlobalComponents fallback inventory the template/spread paths consume, so a
+    // globally-registered component's simple handler types through its emitted
+    // `InstanceType<typeof Pascal>["$props"]` const — consistent with the spread path.
+    let components = TemplateComponentBindings::new(collect_global_component_fallbacks(
+        Some(ast),
+        source,
+        |n| available_bindings.contains(n),
+    ));
+
     for &child in content.children.iter() {
         collect_event_handler_type_hints_from_node(
             child,
             ast,
             source,
             available_bindings,
+            &components,
             &mut hints,
         );
     }
@@ -166,6 +177,7 @@ fn collect_event_handler_type_hints_from_node(
     ast: &TemplateAst,
     source: &str,
     available_bindings: &FxHashSet<String>,
+    components: &TemplateComponentBindings,
     hints: &mut FxHashMap<String, String>,
 ) {
     let node = &ast.nodes[id.0];
@@ -200,23 +212,27 @@ fn collect_event_handler_type_hints_from_node(
         }
 
         let event_prop = event_to_jsx_name(event_name);
-        let type_expr = match el.tag_type {
-            TagType::Element => format!(
-                "Parameters<NonNullable<import('vue').IntrinsicElementAttributes[\"{}\"][\"{}\"]>>",
-                tag_name, event_prop
-            ),
+        let component_binding = match el.tag_type {
             TagType::Component => {
-                let Some(component_binding) =
-                    resolve_component_binding_name(tag_name, available_bindings)
-                else {
-                    continue;
-                };
-                format!(
-                    "Parameters<NonNullable<Required<InstanceType<typeof {}>[\"$props\"]>[\"{}\"]>>",
-                    component_binding, event_prop
-                )
+                // Resolve through the shared inventory: a local script binding OR a
+                // GlobalComponents fallback const. An unresolved component (no binding,
+                // no fallback) is skipped.
+                match components.resolve(tag_name, el.tag_type, |name| {
+                    available_bindings.contains(name)
+                }) {
+                    Some(binding) => Some(binding),
+                    None => continue,
+                }
             }
-            _ => continue,
+            _ => None,
+        };
+        let Some(type_expr) = crate::ide::event_handler_params_type(
+            tag_name,
+            el.tag_type,
+            component_binding.as_deref(),
+            &event_prop,
+        ) else {
+            continue;
         };
 
         // Keep first discovered hint for deterministic behavior.
@@ -230,23 +246,30 @@ fn collect_event_handler_type_hints_from_node(
                 ast,
                 source,
                 available_bindings,
+                components,
                 hints,
             );
         }
     }
 }
 
-fn resolve_component_binding_name(
+/// Resolve a template tag name to the script binding that declares the component.
+///
+/// `is_known` reports whether a given identifier is an in-scope script binding —
+/// the script path passes `|n| available_bindings.contains(n)`, the template `$event`
+/// spread path passes `|n| resolver.get(n).is_some()`. A simple identifier tag
+/// resolves directly; a kebab-case tag resolves via its PascalCase binding.
+pub(crate) fn resolve_component_binding_name(
     tag_name: &str,
-    available_bindings: &FxHashSet<String>,
+    is_known: impl Fn(&str) -> bool,
 ) -> Option<String> {
-    if is_simple_ident(tag_name) && available_bindings.contains(tag_name) {
+    if is_simple_ident(tag_name) && is_known(tag_name) {
         return Some(tag_name.to_string());
     }
 
     if tag_name.contains('-') {
         let pascal = kebab_to_pascal_case(tag_name);
-        if available_bindings.contains(&pascal) {
+        if is_known(&pascal) {
             return Some(pascal);
         }
     }

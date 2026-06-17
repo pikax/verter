@@ -1,0 +1,52 @@
+{
+  "slug": "options/svelte_options_namespace.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "svelte_options_namespace",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_svg",
+    "set_attribute",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "from_svg",
+    "set_attribute"
+  ],
+  "helperCounts": {
+    "from_svg": 1,
+    "set_attribute": 1,
+    "append": 1
+  },
+  "templates": [
+    {
+      "factory": "from_svg",
+      "html": "<circle cx=\"50\" cy=\"50\"></circle>",
+      "flag": null
+    }
+  ],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

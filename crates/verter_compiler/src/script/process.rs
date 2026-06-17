@@ -7,19 +7,18 @@
 //! Macro processing (`defineProps`, `defineEmits`, etc.) is in [`super::macros`].
 
 use oxc_allocator::Allocator;
-use oxc_parser::Parser;
-use oxc_span::SourceType;
+use oxc_ast::ast::{Expression, ObjectPropertyKind, Program, Statement};
+use oxc_span::{GetSpan, SourceType};
 use rustc_hash::{FxHashMap, FxHashSet};
 
+use crate::code_transform::CodeTransform;
 use crate::cursor::ScriptLanguage;
 use crate::parser::types::RootNodeScript;
+use crate::script::prepared::{PreparedCompanion, PreparedScript};
 use crate::template::code_gen::binding::BindingType;
-use crate::utils::oxc::vue::{
-    parse_script, parse_script_with_companion, AsyncKind, ImportSpecifierKind, ScriptImport,
-    ScriptItem, ScriptMode,
-};
+use crate::utils::oxc::vue::{AsyncKind, ImportSpecifierKind, ScriptImport, ScriptItem};
 
-use super::macros::{process_companion_script, process_macro_item, MacroState};
+use super::macros::{process_companion_script, process_macro_item, MacroState, StrippedSections};
 use super::{ScriptCodeGenOptions, ScriptContext};
 
 /// Determine OXC SourceType from a script block's `lang` attribute.
@@ -52,21 +51,25 @@ pub(super) fn source_type_from_lang(lang: Option<&ScriptLanguage>) -> SourceType
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub fn process_script_setup<'alloc>(
     setup: &RootNodeScript,
-    normal_script: Option<&RootNodeScript>,
+    prepared: &PreparedScript<'alloc>,
     ctx: &mut ScriptContext<'alloc>,
     options: &ScriptCodeGenOptions<'_>,
 ) {
-    let content_span = match &setup.content {
-        Some(span) => span,
-        None => {
-            // Self-closing <script setup /> — emit empty component
-            emit_minimal_component(setup, ctx, options);
-            return;
-        }
-    };
+    if setup.content.is_none() {
+        // Self-closing <script setup /> — emit empty component
+        emit_minimal_component(setup, ctx, options);
+        return;
+    }
 
-    let content_start = content_span.start;
-    let content_str = &ctx.source[content_span.start as usize..content_span.end as usize];
+    // The setup block (and its companion) were parsed once when the prepared
+    // script was built — read the macro surfaces, bindings, and async status
+    // from that single parse. A present setup content span guarantees a prepared
+    // setup parse.
+    let prepared_setup = prepared
+        .setup()
+        .expect("setup content present implies a prepared setup parse");
+    let content_start = prepared_setup.content_start();
+    let content_str = prepared_setup.content_str();
 
     // Hoist insertion point: just before the open tag
     let hoist_pos = setup.tag_open.start;
@@ -74,51 +77,40 @@ pub fn process_script_setup<'alloc>(
     // Collect macro state
     let mut macro_state = MacroState::new();
 
-    // Process companion <script> block FIRST: extract `export default` options,
-    // remove duplicate default exports, extract type declarations for cross-block
-    // type resolution, and collect non-type import names for template resolution.
-    let (companion_types, companion_import_names) = match normal_script {
-        Some(normal) => {
-            let (types, imports) =
-                process_companion_script(normal, ctx.source, &mut ctx.out, &mut macro_state);
-            (Some(types), imports)
+    // Apply the companion <script> codegen FIRST: remove its duplicate default
+    // export, lift `export default { ... }` options, and collect non-type import
+    // names for template resolution. Its type inventory was already folded into
+    // the setup parse, so only the import names flow back here.
+    let companion_import_names = match prepared.companion() {
+        Some(companion) => {
+            process_companion_script(companion, ctx.source, &mut ctx.out, &mut macro_state)
         }
-        None => (None, Vec::new()),
+        None => Vec::new(),
     };
 
-    // Parse setup script with OXC, passing companion types for cross-block resolution
-    let oxc_alloc = oxc_allocator::Allocator::default();
-    let source_type = source_type_from_lang(setup.lang.as_ref());
-    let parser_ret = Parser::new(&oxc_alloc, content_str, source_type).parse();
-
-    // Merge external types (from host's cross-file resolution) into companion types
-    let companion_types = match (companion_types, options.external_types.as_ref()) {
-        (Some(mut ct), Some(ext)) => {
-            for (k, v) in ext {
-                ct.entry(k.clone()).or_insert_with(|| v.clone());
-            }
-            Some(ct)
-        }
-        (Some(ct), None) => Some(ct),
-        (None, Some(ext)) => Some(ext.clone()),
-        (None, None) => None,
-    };
-
-    let parse_result = parse_script_with_companion(
-        &parser_ret.program,
-        ScriptMode::Setup,
-        content_start,
-        content_str,
-        companion_types,
-    );
+    let parse_result = prepared_setup.parse_result();
 
     // In force_js mode, compute type-stripped script content (sans imports) to
     // determine which import specifiers have runtime references vs type-only usage.
     let runtime_text = if !options.keep_ts_types {
-        Some(compute_runtime_text(content_str, &parse_result.items))
+        Some(compute_runtime_text(
+            prepared_setup.program(),
+            content_str,
+            &parse_result.items,
+        ))
     } else {
         None
     };
+
+    // In force_js mode, pre-strip every macro-argument expression the synthesized
+    // props/emits sections copy verbatim — `defineProps` / `defineEmits` object &
+    // array arguments and the `withDefaults` defaults — keyed by content-local
+    // span. The macro synthesis reads these so each section is TypeScript-free no
+    // matter its shape (`withDefaults`, multi-declarator, object, array); the
+    // macro call range is overwritten before the whole-program force-js pass, so
+    // that pass can never reach inside the emitted sections.
+    let stripped_sections = (!options.keep_ts_types)
+        .then(|| collect_stripped_macro_sections(prepared_setup.program(), content_str));
 
     // Process items
     for item in &parse_result.items {
@@ -164,7 +156,14 @@ pub fn process_script_setup<'alloc>(
                 }
             }
             ScriptItem::Macro(mac) => {
-                process_macro_item(mac, content_start, content_str, ctx, &mut macro_state);
+                process_macro_item(
+                    mac,
+                    content_start,
+                    content_str,
+                    ctx,
+                    &mut macro_state,
+                    stripped_sections.as_ref(),
+                );
             }
             // Transform `await <arg>` → _withAsyncContext wrapper.
             // Vue wraps each top-level await to preserve component instance context.
@@ -231,23 +230,6 @@ pub fn process_script_setup<'alloc>(
             &mut ctx.out,
             &mut ctx.imports,
         );
-    }
-
-    // Strip TS types from macro-extracted sections.
-    // These sections contain raw source text that was extracted from within macro
-    // calls (defineProps, defineEmits, defineOptions). Since the macro call range
-    // has been overwritten (to `__props`, `__emit`, or ""), the strip_types pass
-    // that runs later on the original positions can't reach inside them.
-    if !options.keep_ts_types {
-        if let Some(ref mut section) = macro_state.props_section {
-            *section = force_js_in_section(section, ctx.alloc);
-        }
-        if let Some(ref mut section) = macro_state.emits_section {
-            *section = force_js_in_section(section, ctx.alloc);
-        }
-        if let Some(ref mut section) = macro_state.options_section {
-            *section = force_js_in_section(section, ctx.alloc);
-        }
     }
 
     // Merge defineModel declarations into props/emits sections.
@@ -396,27 +378,18 @@ pub fn process_script_setup<'alloc>(
 /// 3. Appending `export default __sfc__`
 pub fn process_script_only<'alloc>(
     script: &RootNodeScript,
+    prepared_companion: Option<&PreparedCompanion<'alloc>>,
     ctx: &mut ScriptContext<'alloc>,
     options: &ScriptCodeGenOptions<'_>,
 ) {
-    let content_span = match &script.content {
-        Some(span) => span,
-        None => return,
+    // The Options-API standalone `<script>` was parsed once into the prepared
+    // companion; a present companion mirrors a present content span.
+    let Some(prepared_companion) = prepared_companion else {
+        return;
     };
-
-    let content_start = content_span.start;
-    let content_str = &ctx.source[content_span.start as usize..content_span.end as usize];
-
-    // Parse with OXC to find default export
-    let oxc_alloc = oxc_allocator::Allocator::default();
-    let source_type = source_type_from_lang(script.lang.as_ref());
-    let parser_ret = Parser::new(&oxc_alloc, content_str, source_type).parse();
-    let parse_result = parse_script(
-        &parser_ret.program,
-        ScriptMode::Options,
-        content_start,
-        content_str,
-    );
+    let content_start = prepared_companion.content_start();
+    let content_str = prepared_companion.content_str();
+    let parse_result = prepared_companion.parse_result();
 
     // Extract Options API bindings (data, props, computed, methods, inject)
     // so the template codegen can use the correct accessor prefix ($data., $props., _ctx.).
@@ -714,17 +687,26 @@ fn is_identifier_used_in_text(ident: &str, text: &str) -> bool {
     false
 }
 
+/// Type-strip the setup `program` into a fresh JavaScript string, without
+/// re-parsing the content.
+fn strip_program_to_string(program: &Program, content_str: &str) -> String {
+    let alloc = Allocator::new();
+    let mut ct = CodeTransform::new(content_str, &alloc);
+    crate::strip_types::typescript::strip_typescript_types(program, &mut ct, 0, content_str);
+    ct.build_string()
+}
+
 /// Compute type-stripped script content with import lines blanked out.
 ///
 /// Used to determine which import specifiers have runtime references (appear in
 /// the script body after type annotations are removed) vs type-only usage.
-fn compute_runtime_text(content_str: &str, items: &[ScriptItem]) -> String {
-    let alloc = Allocator::new();
-    let stripped = crate::strip_types::strip_types(content_str, &alloc);
-
+/// Strips from the already-parsed setup `program` rather than re-parsing the
+/// content. The blanked string is a throwaway used only for identifier-presence
+/// scanning — it is never emitted, so it carries no source map.
+fn compute_runtime_text(program: &Program, content_str: &str, items: &[ScriptItem]) -> String {
     // Blank out import statement regions so specifier names in the import line
     // itself don't cause false positives.
-    let mut result = stripped.code;
+    let mut result = strip_program_to_string(program, content_str);
     for item in items {
         if let ScriptItem::Import(imp) = item {
             let start = imp.span.start as usize;
@@ -831,29 +813,116 @@ fn is_specifier_runtime_used(
     runtime_text.is_none() && template_used_vars.is_none()
 }
 
-/// Strip TypeScript type annotations from a section string (props/emits/options).
+/// Pre-strip every force-js-eligible macro-argument expression in the setup
+/// program to plain JavaScript, keyed by its content-local `(start, end)` span.
 ///
-/// These sections are raw source text extracted from macro calls. Since they're
-/// inserted into the generated component definition as literal strings, the main
-/// `strip_types` pass (which runs on original source positions) can't reach them.
-///
-/// Wraps the section in a parseable expression context, strips types,
-/// then extracts the inner content back out.
-fn force_js_in_section(section: &str, _allocator: &Allocator) -> String {
-    // Wrap the section as a variable initializer so OXC can parse it.
-    // The section may be a complete expression (object, array) or a fragment
-    // of object properties — use `var _ = (...)` to handle both.
-    let prefix = "var _ = (";
-    let suffix = ")";
-    let wrapped = format!("{}{}{}", prefix, section, suffix);
+/// The synthesized props/emits sections copy these expressions verbatim, and the
+/// macro call range is overwritten before the whole-program force-js pass runs,
+/// so the section text is stripped here — at the point it is produced. Scanning
+/// the top-level statements (standalone calls and every `const x = …, y = …`
+/// declarator) keys the strip to the actual macro section, so it is robust to
+/// `withDefaults`, multi-declarator statements, and object/array shapes alike.
+/// A shallow scan over the existing parse — never a re-parse.
+fn collect_stripped_macro_sections<'a>(
+    program: &Program<'a>,
+    content_str: &str,
+) -> StrippedSections {
     let alloc = Allocator::new();
-    let result = crate::strip_types::strip_types(&wrapped, &alloc);
-    if result.code.starts_with(prefix) && result.code.ends_with(suffix) {
-        result.code[prefix.len()..result.code.len() - suffix.len()].to_string()
-    } else {
-        // Fallback: return as-is if wrapper was altered
-        section.to_string()
+    let mut sections = StrippedSections::default();
+    for stmt in &program.body {
+        match stmt {
+            Statement::ExpressionStatement(es) => {
+                collect_call_section(&es.expression, content_str, &alloc, &mut sections);
+            }
+            Statement::VariableDeclaration(decl) => {
+                for d in &decl.declarations {
+                    if let Some(init) = &d.init {
+                        collect_call_section(init, content_str, &alloc, &mut sections);
+                    }
+                }
+            }
+            _ => {}
+        }
     }
+    sections
+}
+
+/// Strip the force-js-eligible argument expressions of a single top-level macro
+/// call into `sections`. `defineProps` / `defineEmits` copy their first runtime
+/// argument (object or array literal) verbatim; `withDefaults` copies its
+/// defaults — each object-literal value individually, or any other defaults
+/// expression whole.
+fn collect_call_section<'a>(
+    expr: &Expression<'a>,
+    content_str: &str,
+    alloc: &Allocator,
+    sections: &mut StrippedSections,
+) {
+    let Expression::CallExpression(call) = expr else {
+        return;
+    };
+    let Expression::Identifier(callee) = &call.callee else {
+        return;
+    };
+    match callee.name.as_str() {
+        "defineProps" | "defineEmits" => {
+            if let Some(arg) = call.arguments.first().and_then(|a| a.as_expression()) {
+                if matches!(
+                    arg,
+                    Expression::ObjectExpression(_) | Expression::ArrayExpression(_)
+                ) {
+                    strip_section(arg, content_str, alloc, sections);
+                }
+            }
+        }
+        "withDefaults" => {
+            if let Some(arg) = call.arguments.get(1).and_then(|a| a.as_expression()) {
+                match arg {
+                    Expression::ObjectExpression(obj) => {
+                        for prop in &obj.properties {
+                            if let ObjectPropertyKind::ObjectProperty(p) = prop {
+                                strip_section(&p.value, content_str, alloc, sections);
+                            }
+                        }
+                    }
+                    other => strip_section(other, content_str, alloc, sections),
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Strip one expression and record its plain-JS text keyed by its span.
+fn strip_section(
+    expr: &Expression,
+    content_str: &str,
+    alloc: &Allocator,
+    sections: &mut StrippedSections,
+) {
+    let span = expr.span();
+    sections
+        .entry((span.start, span.end))
+        .or_insert_with(|| strip_expression_to_string(expr, content_str, alloc));
+}
+
+/// Type-strip a macro-argument expression and return the resulting JavaScript.
+///
+/// Strips through the shared expression visitor (the same one the whole-program
+/// force-js pass uses), then slices the expression's region back out. All
+/// removals fall inside the expression's span, so the unchanged prefix and
+/// suffix bound the stripped region exactly.
+fn strip_expression_to_string<'a>(
+    expr: &Expression,
+    content_str: &'a str,
+    alloc: &'a Allocator,
+) -> String {
+    let span = expr.span();
+    let mut ct = CodeTransform::new(content_str, alloc);
+    crate::strip_types::typescript::strip_typescript_from_expression(expr, &mut ct, 0, content_str);
+    let output = ct.build_string();
+    let tail = content_str.len() - span.end as usize;
+    output[span.start as usize..output.len() - tail].to_string()
 }
 
 #[cfg(test)]

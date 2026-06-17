@@ -139,6 +139,37 @@ impl ProviderPositionMapper {
             ProviderPositionMapper::SelfFile(m) => m.tsx_range_to_carrier(start, end),
         }
     }
+
+    /// Find the mapped run whose carrier-source extent ends exactly at `(line, col)` and
+    /// return its provider-side endpoint, for the completion-only incomplete-member-access
+    /// (`obj.` / `obj?.`) boundary anchor.
+    ///
+    /// This is a source-map-run concept: only the `SourceMap` variant has mapped runs. A
+    /// `SelfFile` rune-module projection has no synthetic JSX runs — its member boundary is
+    /// the strict line-only mapper's normal path — so it returns `None` (fail-closed), and the
+    /// completion handler stays mapper-agnostic.
+    #[must_use]
+    pub(crate) fn mapped_run_ending_at_src(&self, line: u32, col: u32) -> Option<TsPosition> {
+        match self {
+            ProviderPositionMapper::SourceMap(m) => m.mapped_run_ending_at_src(line, col),
+            ProviderPositionMapper::SelfFile(_) => None,
+        }
+    }
+
+    /// The generated provider-buffer position immediately after the last emitted synthetic
+    /// helper import, the authoritative gate for classifying a TypeProvider auto-import
+    /// insertion (see [`crate::tsgo::auto_import`]).
+    ///
+    /// Only the carrier-IDE `SourceMap` projection emits a synthetic helper-import preamble; a
+    /// `SelfFile` rune-module projection has none, so it returns `None` (the auto-import
+    /// translator then rejects a non-round-tripping edit rather than re-anchoring on a guess).
+    #[must_use]
+    pub(crate) fn helper_preamble_end(&self) -> Option<TsPosition> {
+        match self {
+            ProviderPositionMapper::SourceMap(m) => m.helper_preamble_end(),
+            ProviderPositionMapper::SelfFile(_) => None,
+        }
+    }
 }
 
 /// One contiguous import-specifier rewrite on a single user-source line.
@@ -171,7 +202,7 @@ struct RewriteSegment {
 /// A line-only, rewrite-aware source↔provider mapper for a self-file provider
 /// buffer (`<rune prelude> + <rewritten module bytes>`).
 ///
-/// Mapping rules (the codex-ratified contract):
+/// Mapping rules (the source↔provider contract):
 /// - **source → provider**: `line + prelude_line_count`; column shifted by the
 ///   cumulative rewrite delta of every rewrite earlier on the same line; DROP
 ///   if the source position falls INSIDE a rewritten specifier span.

@@ -18,8 +18,8 @@ use verter_workspace::WorkspaceRead;
 
 use crate::documents::line_index::LineIndex;
 use crate::documents::provider_projection::ProviderPositionMapper;
-use crate::documents::sfc_scanner::scan_sfc_blocks;
 use crate::provider_sync::ProviderPathKind;
+use crate::tsgo::auto_import::{resolve_script_import_anchor, ScriptImportInsertionAnchor};
 use crate::tsgo::merge;
 
 use super::background_drain::configure_provider_paths_for_source;
@@ -140,51 +140,31 @@ impl VerterLanguageServer {
     ) -> Option<TextEdit> {
         let uri: Uri = doc_uri_str.parse().ok()?;
         let doc = self.documents.get(&uri)?;
-        let blocks = scan_sfc_blocks(&doc.source);
+        let analysis = self.documents.get_analysis(&uri)?;
 
-        // Find the script setup block
-        let script_block = blocks
-            .iter()
-            .find(|b| b.tag_name == "script" && b.attrs_raw.contains("setup"))?;
-
-        let (content_start, _content_end) = script_block.content_range();
-
-        // Check if the component is already imported
-        if let Some(analysis) = self.documents.get_analysis(&uri) {
-            for import in &analysis.imports {
-                if import.bindings.iter().any(|b| b.name == component_name) {
-                    return None; // Already imported
-                }
+        // Skip if the component is already imported.
+        for import in &analysis.imports {
+            if import.bindings.iter().any(|b| b.name == component_name) {
+                return None;
             }
-
-            // Find the position after the last import statement
-            let last_import_end = analysis.imports.iter().map(|imp| imp.span.end).max();
-
-            let insert_offset = if let Some(end) = last_import_end {
-                // Insert after the last import — the span_end is relative to script content
-                let abs_offset = content_start + end;
-                // Skip past the newline after the import
-                let rest = &doc.source[abs_offset as usize..];
-                let newline_skip = rest
-                    .bytes()
-                    .take_while(|&b| b == b'\n' || b == b'\r')
-                    .count();
-                abs_offset + newline_skip as u32
-            } else {
-                // No existing imports — insert at the beginning of the script block
-                content_start
-            };
-
-            let import_stmt = format!("import {} from '{}'\n", component_name, import_path);
-            let pos = doc.line_index.offset_to_position(insert_offset)?;
-
-            Some(TextEdit {
-                range: Range::new(pos, pos),
-                new_text: import_stmt,
-            })
-        } else {
-            None
         }
+
+        // Resolve the insertion anchor from the SFC's own block/import facts (shared with the
+        // TypeProvider auto-import path). `AnalyzedImport.span` is SFC-absolute; pass the spans
+        // straight through. Component auto-import only targets an existing `<script setup>` block;
+        // defer when none exists.
+        let user_import_spans: Vec<(u32, u32)> = analysis
+            .imports
+            .iter()
+            .map(|imp| (imp.span.start, imp.span.end))
+            .collect();
+        let anchor = resolve_script_import_anchor(&doc.source, &user_import_spans);
+        let ScriptImportInsertionAnchor::ExistingScriptSetup { .. } = anchor else {
+            return None;
+        };
+
+        let import_stmt = format!("import {} from '{}'\n", component_name, import_path);
+        anchor.build_edit(&[import_stmt], &doc.line_index)
     }
 
     #[allow(dead_code)] // Used by sync_coordinator, may be useful for future callers

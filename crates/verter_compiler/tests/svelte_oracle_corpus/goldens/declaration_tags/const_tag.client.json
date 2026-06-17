@@ -1,0 +1,86 @@
+{
+  "slug": "declaration_tags/const_tag.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "const_tag",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "from_html",
+    "proxy",
+    "each",
+    "index",
+    "derived",
+    "get",
+    "get",
+    "child",
+    "reset",
+    "template_effect",
+    "set_text",
+    "get",
+    "append",
+    "reset",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "child",
+    "derived",
+    "each",
+    "from_html",
+    "get",
+    "index",
+    "proxy",
+    "reset",
+    "set_text",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 2,
+    "proxy": 1,
+    "each": 1,
+    "index": 1,
+    "derived": 1,
+    "get": 3,
+    "child": 1,
+    "reset": 2,
+    "template_effect": 1,
+    "set_text": 1,
+    "append": 2
+  },
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<li> </li>",
+      "flag": null
+    },
+    {
+      "factory": "from_html",
+      "html": "<ul></ul>",
+      "flag": null
+    }
+  ],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

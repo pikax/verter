@@ -59,6 +59,13 @@ pub struct CodeGenOutput<'alloc> {
     /// Preserves sourcemap for the moved content while wrapping it.
     wrapped_moves: Vec<(u32, u32, u32, &'alloc str, &'alloc str)>,
 
+    /// The bump-allocated content of the leading helper-import preamble insertion, when codegen
+    /// emitted one via [`prepend_helper_preamble`](Self::prepend_helper_preamble). Transferred to
+    /// the [`CodeTransform`] in [`apply_to`](Self::apply_to) so source-map generation can report
+    /// the generated-TSX position immediately after it (the typed preamble-end boundary). `None`
+    /// when no helper-import preamble was emitted.
+    helper_preamble: Option<&'alloc str>,
+
     /// Allocator reference for bump-allocating generated strings.
     alloc: &'alloc Allocator,
 
@@ -83,6 +90,7 @@ impl<'alloc> CodeGenOutput<'alloc> {
             builtin_imports: BuiltinComponentFlags::empty(),
             moves: Vec::new(),
             wrapped_moves: Vec::new(),
+            helper_preamble: None,
             alloc,
             scratch: String::new(),
         }
@@ -113,6 +121,19 @@ impl<'alloc> CodeGenOutput<'alloc> {
     pub fn prepend_alloc(&mut self, pos: u32, content: &str) {
         let allocated = self.alloc.alloc_str(content);
         self.prepends.push((pos, allocated));
+    }
+
+    /// Push the leading helper-import preamble as an (unmapped) prepend-left AND record its content
+    /// reference so source-map generation can report the generated-TSX position immediately after
+    /// it — the typed helper-import-preamble end boundary consumed by the LSP auto-import
+    /// classifier. Behaves exactly like [`prepend_alloc`](Self::prepend_alloc) for output (the
+    /// imports themselves stay unmapped synthetic text); the only addition is the recorded identity.
+    /// Called once per IDE script generation from `emit_helper_imports`.
+    #[inline]
+    pub fn prepend_helper_preamble(&mut self, pos: u32, content: &str) {
+        let allocated = self.alloc.alloc_str(content);
+        self.prepends.push((pos, allocated));
+        self.helper_preamble = Some(allocated);
     }
 
     /// Push a source-mapped prepend-left with bump-allocated content.
@@ -372,6 +393,13 @@ impl<'alloc> CodeGenOutput<'alloc> {
     /// Vue helpers go to `vue`, SSR helpers go to `ssr` (from `vue/server-renderer`).
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn apply_to(mut self, ct: &mut CodeTransform<'alloc>) -> TemplateImports {
+        // Carry the recorded helper-import preamble identity into the transform. The same `&'alloc
+        // str` becomes an `Inserted` chunk below, so source-map generation can locate it by pointer
+        // and report the typed preamble-end boundary. No-op when no preamble was emitted.
+        if let Some(preamble) = self.helper_preamble {
+            ct.set_helper_preamble_content(preamble);
+        }
+
         // Apply wrapped moves FIRST — they operate on Original chunks and must
         // run before overwrites replace those chunks. This preserves sourcemap
         // for moved content (e.g., defineProps type params).

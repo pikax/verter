@@ -6,12 +6,11 @@
 //! emission helpers, the global-component fallback emitter, and the
 //! `to_pascal_case` / `should_infer_function_types` glue helpers.
 
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashSet;
 
 use crate::ast::types::{AstNodeKind, TemplateAst};
 use crate::cursor::ScriptLanguage;
 use crate::ide::IdeScriptOptions;
-use crate::template::code_gen::binding::BindingType;
 use crate::template::code_gen::types::CodeGenOutput;
 
 /// Prefix for all emitted ___VERTER___ types/functions.
@@ -21,20 +20,31 @@ pub(super) fn should_infer_function_types(lang: Option<ScriptLanguage>) -> bool 
     matches!(lang, Some(ScriptLanguage::TypeScript | ScriptLanguage::TSX))
 }
 
-/// Emit global component fallback consts for unresolved components inside templateBindingFN.
-pub(super) fn emit_global_component_fallbacks(
-    buf: &mut String,
+/// Collect the GlobalComponents fallback const names for every unresolved component
+/// referenced in the template.
+///
+/// A fallback const is materialized for each component tag that is NOT a builtin, NOT a
+/// member-expression tag (`Foo.Bar`), and NOT already bound by `is_bound` — exactly the
+/// set [`emit_global_component_fallbacks`] writes. Names are returned in first-seen
+/// source order and deduplicated.
+///
+/// Collection is split from emission so that ONE list feeds both the emitted consts and
+/// the template/event-typing inventory ([`crate::ide::TemplateComponentBindings`]): a
+/// globally-registered component then types identically wherever it is referenced
+/// (`@event` spread payloads, simple-handler param inference), via the in-scope
+/// `InstanceType<typeof Pascal>["$props"]` const rather than `import('vue').GlobalComponents[...]`
+/// (which the `tsgo` TypeProvider cannot resolve).
+pub(super) fn collect_global_component_fallbacks(
     template_ast: Option<&TemplateAst>,
     source: &str,
-    bindings: &FxHashMap<&str, BindingType>,
-    is_jsx: bool,
-) {
+    is_bound: impl Fn(&str) -> bool,
+) -> Vec<String> {
+    let mut fallbacks: Vec<String> = Vec::new();
     let ast = match template_ast {
         Some(a) => a,
-        None => return,
+        None => return fallbacks,
     };
 
-    let binding_names: FxHashSet<&str> = bindings.keys().copied().collect();
     let mut seen = FxHashSet::default();
 
     for node in &ast.nodes {
@@ -52,7 +62,7 @@ pub(super) fn emit_global_component_fallbacks(
 
             // Convert to PascalCase for binding lookup
             let pascal = to_pascal_case(tag_name);
-            if binding_names.contains(pascal.as_str()) || binding_names.contains(tag_name) {
+            if is_bound(pascal.as_str()) || is_bound(tag_name) {
                 continue;
             }
 
@@ -62,23 +72,39 @@ pub(super) fn emit_global_component_fallbacks(
             }
 
             if seen.insert(pascal.clone()) {
-                use std::fmt::Write;
-                if is_jsx {
-                    write!(
-                        buf,
-                        "\nconst {pascal} = /** @type {{unknown}} */ ({{}});",
-                        pascal = pascal,
-                    )
-                    .expect("write to String is infallible");
-                } else {
-                    write!(
-                        buf,
-                        "\nconst {pascal} = {{}} as import('vue').GlobalComponents extends {{ {pascal}: infer C }} ? C : unknown;",
-                        pascal = pascal,
-                    )
-                    .expect("write to String is infallible");
-                }
+                fallbacks.push(pascal);
             }
+        }
+    }
+
+    fallbacks
+}
+
+/// Emit global component fallback consts inside templateBindingFN from a collected list
+/// (see [`collect_global_component_fallbacks`]). The emitted const names are exactly the
+/// list members, so the template/event-typing inventory and the emitted scaffolding never
+/// disagree.
+pub(super) fn emit_global_component_fallbacks(
+    buf: &mut String,
+    fallbacks: &[String],
+    is_jsx: bool,
+) {
+    use std::fmt::Write;
+    for pascal in fallbacks {
+        if is_jsx {
+            write!(
+                buf,
+                "\nconst {pascal} = /** @type {{unknown}} */ ({{}});",
+                pascal = pascal,
+            )
+            .expect("write to String is infallible");
+        } else {
+            write!(
+                buf,
+                "\nconst {pascal} = {{}} as import('vue').GlobalComponents extends {{ {pascal}: infer C }} ? C : unknown;",
+                pascal = pascal,
+            )
+            .expect("write to String is infallible");
         }
     }
 }

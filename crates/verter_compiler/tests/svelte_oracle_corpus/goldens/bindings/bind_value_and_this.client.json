@@ -1,0 +1,89 @@
+{
+  "slug": "bindings/bind_value_and_this.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "bind_value_and_this",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "state",
+    "state",
+    "first_child",
+    "remove_input_defaults",
+    "sibling",
+    "child",
+    "reset",
+    "bind_this",
+    "set",
+    "get",
+    "template_effect",
+    "set_text",
+    "get",
+    "bind_value",
+    "get",
+    "set",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "bind_this",
+    "bind_value",
+    "child",
+    "first_child",
+    "from_html",
+    "get",
+    "remove_input_defaults",
+    "reset",
+    "set",
+    "set_text",
+    "sibling",
+    "state",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "state": 2,
+    "first_child": 1,
+    "remove_input_defaults": 1,
+    "sibling": 1,
+    "child": 1,
+    "reset": 1,
+    "bind_this": 1,
+    "set": 2,
+    "get": 3,
+    "template_effect": 1,
+    "set_text": 1,
+    "bind_value": 1,
+    "append": 1
+  },
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<input/> <div> </div>",
+      "flag": "1"
+    }
+  ],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

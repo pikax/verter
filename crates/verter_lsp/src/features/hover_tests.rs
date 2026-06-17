@@ -889,8 +889,9 @@ fn test_hover_on_div_class_attr_does_not_show_css() {
 
 #[test]
 fn test_hover_on_ref_attr_does_not_show_import() {
-    // Hovering on `ref` as an attribute name in <span ref="el"> should NOT show
-    // the Vue `ref()` import info — it should return None.
+    // Hovering on a static `ref` attribute name in <span ref="el"> must return a
+    // SOURCE-OWNED template-ref hover: it names the `ref` attribute and its `el`
+    // target, and must NOT surface the imported Vue `ref()` symbol.
     let source = "<template>\n  <span ref=\"el\">text</span>\n</template>\n\n<script setup>\nimport { ref } from 'vue'\n</script>\n";
     let blocks = scan_sfc_blocks(source);
     let line_index = LineIndex::new_utf16(source);
@@ -958,23 +959,335 @@ fn test_hover_on_ref_attr_does_not_show_import() {
         ..Default::default()
     };
 
-    // Hover on "ref" attribute name — should NOT show import hover
+    // Hover on "ref" attribute name — must return a source-owned template-ref hover
     let pos = line_index
         .offset_to_position(template_ref_offset as u32)
         .unwrap();
-    let hover = hover_at_position(&pos, source, &blocks, Some(&analysis), &line_index, false);
+    let hover = hover_at_position(&pos, source, &blocks, Some(&analysis), &line_index, false)
+        .expect("template ref attribute hover should exist");
+    let contents = match hover.hover.contents {
+        HoverContents::Markup(m) => m.value,
+        _ => panic!("expected markup"),
+    };
+    assert!(
+        contents.contains("ref"),
+        "template ref hover should mention `ref`, got: {}",
+        contents
+    );
+    assert!(
+        contents.contains("el"),
+        "template ref hover should name the `el` target, got: {}",
+        contents
+    );
+    assert!(
+        !contents.contains("import"),
+        "hovering on ref attr should NOT show import hover, got: {}",
+        contents
+    );
+}
 
-    if let Some(h) = hover {
-        let contents = match h.hover.contents {
-            HoverContents::Markup(m) => m.value,
-            _ => panic!("expected markup"),
-        };
-        assert!(
-            !contents.contains("import"),
-            "hovering on ref attr should NOT show import hover, got: {}",
-            contents
-        );
+/// Build a native (non-component) `<{tag}>` element carrying a single `v-on`
+/// directive, for the source-owned event-hover tests below.
+fn native_event_element(tag: &str, dir: TemplateDirective) -> TemplateElement {
+    TemplateElement {
+        tag: tag.into(),
+        is_component: false,
+        directives: vec![dir],
+        ..Default::default()
     }
+}
+
+fn template_only_analysis(el: TemplateElement) -> FileAnalysisSnapshot {
+    FileAnalysisSnapshot {
+        template: Some(
+            TemplateAnalysisSnapshot {
+                elements: vec![el],
+                ..Default::default()
+            }
+            .into(),
+        ),
+        ..Default::default()
+    }
+}
+
+fn markup(hover: &VerterHoverResult) -> String {
+    match &hover.hover.contents {
+        HoverContents::Markup(m) => m.value.clone(),
+        _ => panic!("expected markup hover"),
+    }
+}
+
+#[test]
+fn native_event_directive_hover_shows_vue_source_token() {
+    // Hovering on a native `@click` event directive must return a SOURCE-OWNED
+    // hover that names the Vue token (`@click`), never the generated JSX prop
+    // (`onClick`). The hover range stays on the source `@click` token so the merge
+    // layer can rewrite a paired `onClick` TypeProvider hover back to `@click`.
+    let source = r#"<template><button @click="increment">x</button></template>"#;
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+
+    let at_pos = source.find("@click").unwrap() as u32;
+    let click_pos = at_pos + 1; // 'click' arg starts right after '@'
+    let arg_span = verter_span::Span::new(click_pos, click_pos + 5);
+    let dir = TemplateDirective {
+        name: "on".into(),
+        raw_name: "@click".into(),
+        argument: Some("click".into()),
+        modifiers: vec![],
+        expression: Some("increment".into()),
+        span: verter_span::Span::new(at_pos, click_pos + 5),
+        name_end: click_pos,
+        arg_span: Some(arg_span),
+        expression_span: None,
+        modifier_spans: vec![],
+    };
+    let analysis = template_only_analysis(native_event_element("button", dir));
+
+    // Hover inside `click`.
+    let pos = line_index.offset_to_position(click_pos + 2).unwrap();
+    let hover = hover_at_position(&pos, source, &blocks, Some(&analysis), &line_index, false)
+        .expect("native event directive hover should exist");
+    let contents = markup(&hover);
+    assert!(
+        contents.contains("@click"),
+        "event hover must name the Vue source token `@click`, got: {contents}"
+    );
+    assert!(
+        !contents.contains("onClick"),
+        "event hover must NOT surface the generated JSX prop `onClick`, got: {contents}"
+    );
+    // Range must stay on the source `@click` token, not the generated prop.
+    let expected_start = line_index.offset_to_position(at_pos).unwrap();
+    assert_eq!(
+        hover.hover.range.expect("hover range").start,
+        expected_start,
+        "event hover range must start on the source `@` token"
+    );
+    // The onClick→@click rewrite must ride TYPED provenance, not the rendered text:
+    // the hover carries a structured `EventDirective` token with the canonical label.
+    assert_eq!(
+        hover.source_token,
+        Some(HoverSourceToken::EventDirective {
+            vue_attr: "@click".to_string()
+        }),
+        "native event hover must carry typed event-directive provenance"
+    );
+}
+
+#[test]
+fn v_on_long_form_hover_canonicalizes_provenance_to_at_form() {
+    // `v-on:click` is the long form of `@click`. The DISPLAY token reflects what the
+    // user wrote, but the TYPED provenance canonicalizes to `@click` so the merge
+    // layer rewrites a paired `onClick` TypeProvider label to `@click`.
+    let source = r#"<template><button v-on:click="increment">x</button></template>"#;
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+
+    let dir_start = source.find("v-on:click").unwrap() as u32;
+    let click_pos = source.find("click").unwrap() as u32;
+    let arg_span = verter_span::Span::new(click_pos, click_pos + 5);
+    let dir = TemplateDirective {
+        name: "on".into(),
+        raw_name: "v-on:click".into(),
+        argument: Some("click".into()),
+        modifiers: vec![],
+        expression: Some("increment".into()),
+        span: verter_span::Span::new(dir_start, click_pos + 5),
+        name_end: dir_start + 4, // `v-on`
+        arg_span: Some(arg_span),
+        expression_span: None,
+        modifier_spans: vec![],
+    };
+    let analysis = template_only_analysis(native_event_element("button", dir));
+
+    let pos = line_index.offset_to_position(click_pos + 2).unwrap();
+    let hover = hover_at_position(&pos, source, &blocks, Some(&analysis), &line_index, false)
+        .expect("v-on:click hover should exist");
+    assert_eq!(
+        hover.source_token,
+        Some(HoverSourceToken::EventDirective {
+            vue_attr: "@click".to_string()
+        }),
+        "v-on:click provenance must canonicalize to the `@click` form"
+    );
+}
+
+#[test]
+fn event_modifier_stop_hover() {
+    // Hovering on a `.stop` modifier token must return a source-owned modifier
+    // hover describing `stopPropagation`, sourced from the shared modifier table.
+    let source = r#"<template><button @click.stop="increment">x</button></template>"#;
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+
+    let at_pos = source.find("@click").unwrap() as u32;
+    let click_pos = at_pos + 1;
+    let dot_pos = source.find(".stop").unwrap() as u32;
+    let stop_pos = dot_pos + 1;
+    let mod_span = verter_span::Span::new(stop_pos, stop_pos + 4);
+    let dir = TemplateDirective {
+        name: "on".into(),
+        raw_name: "@click".into(),
+        argument: Some("click".into()),
+        modifiers: vec!["stop".into()],
+        expression: Some("increment".into()),
+        span: verter_span::Span::new(at_pos, stop_pos + 4),
+        name_end: click_pos,
+        arg_span: Some(verter_span::Span::new(click_pos, click_pos + 5)),
+        expression_span: None,
+        modifier_spans: vec![mod_span],
+    };
+    let analysis = template_only_analysis(native_event_element("button", dir));
+
+    // Hover inside `stop`.
+    let pos = line_index.offset_to_position(stop_pos + 1).unwrap();
+    let hover = hover_at_position(&pos, source, &blocks, Some(&analysis), &line_index, false)
+        .expect("event modifier hover should exist");
+    let contents = markup(&hover);
+    assert!(
+        contents.contains(".stop"),
+        "modifier hover must name `.stop`, got: {contents}"
+    );
+    assert!(
+        contents.contains("stopPropagation"),
+        "modifier hover must describe stopPropagation, got: {contents}"
+    );
+    // F2a: the hover range must include the leading `.`, so the highlighted token
+    // is `.stop` (not just `stop`). The compiler span is name-only; hover expands it.
+    let expected_dot_start = line_index.offset_to_position(dot_pos).unwrap();
+    let expected_end = line_index.offset_to_position(stop_pos + 4).unwrap();
+    let range = hover.hover.range.expect("modifier hover range");
+    assert_eq!(
+        range.start, expected_dot_start,
+        "modifier hover range must start at the leading `.`"
+    );
+    assert_eq!(
+        range.end, expected_end,
+        "modifier hover range must end after the modifier name"
+    );
+    // Hovering directly on the `.` must also resolve the modifier hover.
+    let dot_hover_pos = line_index.offset_to_position(dot_pos).unwrap();
+    assert!(
+        hover_at_position(
+            &dot_hover_pos,
+            source,
+            &blocks,
+            Some(&analysis),
+            &line_index,
+            false
+        )
+        .is_some(),
+        "hovering on the leading `.` of a modifier should resolve a hover"
+    );
+}
+
+#[test]
+fn mouse_event_modifier_left_is_mouse_button_not_arrow_key() {
+    // F2b: `@click.left` must describe the LEFT MOUSE BUTTON. The context-free
+    // modifier table would return "Arrow Left" (key family) — passing the event name
+    // (`click`) disambiguates to the mouse-button family.
+    let source = r#"<template><button @click.left="pick">x</button></template>"#;
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+
+    let at_pos = source.find("@click").unwrap() as u32;
+    let click_pos = at_pos + 1;
+    let dot_pos = source.find(".left").unwrap() as u32;
+    let left_pos = dot_pos + 1;
+    let dir = TemplateDirective {
+        name: "on".into(),
+        raw_name: "@click".into(),
+        argument: Some("click".into()),
+        modifiers: vec!["left".into()],
+        expression: Some("pick".into()),
+        span: verter_span::Span::new(at_pos, left_pos + 4),
+        name_end: click_pos,
+        arg_span: Some(verter_span::Span::new(click_pos, click_pos + 5)),
+        expression_span: None,
+        modifier_spans: vec![verter_span::Span::new(left_pos, left_pos + 4)],
+    };
+    let analysis = template_only_analysis(native_event_element("button", dir));
+
+    let pos = line_index.offset_to_position(left_pos + 1).unwrap();
+    let hover = hover_at_position(&pos, source, &blocks, Some(&analysis), &line_index, false)
+        .expect("mouse-button modifier hover should exist");
+    let contents = markup(&hover);
+    assert!(
+        contents.contains("mouse button"),
+        "@click.left must describe the mouse button, got: {contents}"
+    );
+    assert!(
+        !contents.contains("Arrow"),
+        "@click.left must NOT use the arrow-key reading, got: {contents}"
+    );
+}
+
+#[test]
+fn no_value_event_modifier_hover() {
+    // The exact user example `<div @touchmove.stop />` — a no-value event
+    // directive deleted entirely from the generated TSX — must still resolve a
+    // source-owned hover for BOTH the event token and the modifier, with no
+    // dependency on any generated TSX anchor.
+    let source = r#"<template><div @touchmove.stop></div></template>"#;
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+
+    let at_pos = source.find("@touchmove").unwrap() as u32;
+    let event_pos = at_pos + 1; // 'touchmove' = 9 chars
+    let dot_pos = source.find(".stop").unwrap() as u32;
+    let stop_pos = dot_pos + 1;
+    let dir = TemplateDirective {
+        name: "on".into(),
+        raw_name: "@touchmove".into(),
+        argument: Some("touchmove".into()),
+        modifiers: vec!["stop".into()],
+        expression: None,
+        span: verter_span::Span::new(at_pos, stop_pos + 4),
+        name_end: event_pos,
+        arg_span: Some(verter_span::Span::new(event_pos, event_pos + 9)),
+        expression_span: None,
+        modifier_spans: vec![verter_span::Span::new(stop_pos, stop_pos + 4)],
+    };
+    let analysis = template_only_analysis(native_event_element("div", dir));
+
+    // Hover on the event token `touchmove`.
+    let event_hover_pos = line_index.offset_to_position(event_pos + 2).unwrap();
+    let event_hover = hover_at_position(
+        &event_hover_pos,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        false,
+    )
+    .expect("no-value event token hover should exist");
+    assert!(
+        markup(&event_hover).contains("@touchmove"),
+        "no-value event hover must name `@touchmove`, got: {}",
+        markup(&event_hover)
+    );
+
+    // Hover on the modifier `stop`.
+    let mod_hover_pos = line_index.offset_to_position(stop_pos + 1).unwrap();
+    let mod_hover = hover_at_position(
+        &mod_hover_pos,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        false,
+    )
+    .expect("no-value modifier hover should exist");
+    let mod_contents = markup(&mod_hover);
+    assert!(
+        mod_contents.contains(".stop"),
+        "no-value modifier hover must name `.stop`, got: {mod_contents}"
+    );
+    assert!(
+        mod_contents.contains("stopPropagation"),
+        "no-value modifier hover must describe stopPropagation, got: {mod_contents}"
+    );
 }
 
 #[test]

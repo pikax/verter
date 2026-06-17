@@ -15,17 +15,16 @@ use oxc_ast::ast::{
     Statement, TSTypeParameterInstantiation, VariableDeclaration, VariableDeclarationKind,
 };
 
+use super::shared::ScriptParseContext;
+use crate::common::Span;
+use crate::types::BindingType;
 use crate::utils::oxc::script::bindings::{
     callee_identifier_name, collect_import_binding_spans, collect_pattern_binding_spans,
     declaration_binding_span,
 };
 use crate::utils::oxc::script::type_surface::{
-    build_type_context, resolve_type_elements_with_ctx_ref, TypeResolutionContext,
+    resolve_type_elements_with_ctx_ref, TypeResolutionContext,
 };
-
-use super::shared::ScriptParseContext;
-use crate::common::Span;
-use crate::types::BindingType;
 
 /// Extract binding metadata from a parsed `<script setup>` program.
 ///
@@ -35,15 +34,23 @@ use crate::types::BindingType;
 /// - Function/class/enum declarations → `SetupConst`
 /// - TypeScript type/interface declarations → skipped (no runtime binding)
 /// - Vue macros (defineProps, defineModel, etc.) → per-macro classification
+///
+/// `type_ctx` is the shared, companion-aware type-resolution context built once
+/// for the whole setup parse. `macro_prop_keys`, when `Some`, supplies the
+/// `defineProps<T>` prop-key spans the macro pass already resolved through the
+/// shared resolver, so the binding pass reuses them instead of resolving the
+/// macro type a second time. A `None` (standalone callers without a macro pass)
+/// resolves the type parameter locally.
 pub fn extract_bindings<'a>(
     program: &oxc_ast::ast::Program<'a>,
     ctx: &ScriptParseContext<'a>,
+    type_ctx: &TypeResolutionContext<'a, 'a>,
+    macro_prop_keys: Option<&[Span]>,
 ) -> Vec<(Span, BindingType)> {
     let mut entries = Vec::new();
-    let type_ctx = build_type_context(program, ctx.source_bytes, ctx.content_offset);
 
     for stmt in &program.body {
-        classify_statement(stmt, &mut entries, ctx, &type_ctx);
+        classify_statement(stmt, &mut entries, ctx, type_ctx, macro_prop_keys);
     }
 
     entries
@@ -55,16 +62,23 @@ fn classify_statement<'a>(
     entries: &mut Vec<(Span, BindingType)>,
     ctx: &ScriptParseContext<'a>,
     type_ctx: &TypeResolutionContext<'a, 'a>,
+    macro_prop_keys: Option<&[Span]>,
 ) {
     match stmt {
         Statement::VariableDeclaration(decl) => {
-            classify_variable_declaration(decl, entries, ctx, type_ctx);
+            classify_variable_declaration(decl, entries, ctx, type_ctx, macro_prop_keys);
         }
         Statement::ImportDeclaration(import) => {
             classify_import(import, entries, ctx);
         }
         Statement::ExpressionStatement(expr_stmt) => {
-            classify_expression_statement(&expr_stmt.expression, entries, ctx, type_ctx);
+            classify_expression_statement(
+                &expr_stmt.expression,
+                entries,
+                ctx,
+                type_ctx,
+                macro_prop_keys,
+            );
         }
         // Function / class / enum declarations all bind a runtime value;
         // the neutral inventory yields the identifier span.
@@ -87,6 +101,7 @@ fn classify_variable_declaration<'a>(
     entries: &mut Vec<(Span, BindingType)>,
     ctx: &ScriptParseContext<'a>,
     type_ctx: &TypeResolutionContext<'a, 'a>,
+    macro_prop_keys: Option<&[Span]>,
 ) {
     let is_const = decl.kind == VariableDeclarationKind::Const;
 
@@ -98,7 +113,13 @@ fn classify_variable_declaration<'a>(
                     extract_destructured_props(&declarator.id, entries);
                     // Also extract individual prop names so the template can use $props.propName
                     // even when the whole object is assigned to a variable.
-                    extract_individual_props_from_expr(init, entries, ctx, type_ctx);
+                    extract_individual_props_from_expr(
+                        init,
+                        entries,
+                        ctx,
+                        type_ctx,
+                        macro_prop_keys,
+                    );
                     continue;
                 }
             }
@@ -262,18 +283,25 @@ fn classify_expression_statement<'a>(
     entries: &mut Vec<(Span, BindingType)>,
     ctx: &ScriptParseContext<'a>,
     type_ctx: &TypeResolutionContext<'a, 'a>,
+    macro_prop_keys: Option<&[Span]>,
 ) {
     if let Expression::CallExpression(call) = expr {
         let callee_name = callee_identifier_name(&call.callee);
         match callee_name.as_deref() {
             Some("defineProps") => {
-                extract_props_from_define_props(call, entries, ctx, type_ctx);
+                extract_props_from_define_props(call, entries, ctx, type_ctx, macro_prop_keys);
             }
             Some("withDefaults") => {
                 if let Some(first_arg) = call.arguments.first() {
                     if let Some(Expression::CallExpression(inner_call)) = first_arg.as_expression()
                     {
-                        extract_props_from_define_props(inner_call, entries, ctx, type_ctx);
+                        extract_props_from_define_props(
+                            inner_call,
+                            entries,
+                            ctx,
+                            type_ctx,
+                            macro_prop_keys,
+                        );
                     }
                 }
             }
@@ -290,18 +318,25 @@ fn extract_individual_props_from_expr<'a>(
     entries: &mut Vec<(Span, BindingType)>,
     ctx: &ScriptParseContext<'a>,
     type_ctx: &TypeResolutionContext<'a, 'a>,
+    macro_prop_keys: Option<&[Span]>,
 ) {
     if let Expression::CallExpression(call) = expr {
         let callee_name = callee_identifier_name(&call.callee);
         match callee_name.as_deref() {
             Some("defineProps") => {
-                extract_props_from_define_props(call, entries, ctx, type_ctx);
+                extract_props_from_define_props(call, entries, ctx, type_ctx, macro_prop_keys);
             }
             Some("withDefaults") => {
                 if let Some(first_arg) = call.arguments.first() {
                     if let Some(Expression::CallExpression(inner_call)) = first_arg.as_expression()
                     {
-                        extract_props_from_define_props(inner_call, entries, ctx, type_ctx);
+                        extract_props_from_define_props(
+                            inner_call,
+                            entries,
+                            ctx,
+                            type_ctx,
+                            macro_prop_keys,
+                        );
                     }
                 }
             }
@@ -320,10 +355,11 @@ fn extract_props_from_define_props<'a>(
     entries: &mut Vec<(Span, BindingType)>,
     ctx: &ScriptParseContext<'a>,
     type_ctx: &TypeResolutionContext<'a, 'a>,
+    macro_prop_keys: Option<&[Span]>,
 ) {
     // 1. Type parameters: defineProps<{ foo: string }>() or defineProps<MyInterface>()
     if let Some(type_args) = &call.type_arguments {
-        extract_props_from_type_params(type_args, entries, ctx, type_ctx);
+        extract_props_from_type_params(type_args, entries, ctx, type_ctx, macro_prop_keys);
         return;
     }
 
@@ -342,7 +378,20 @@ fn extract_props_from_type_params<'a>(
     entries: &mut Vec<(Span, BindingType)>,
     ctx: &ScriptParseContext<'a>,
     type_ctx: &TypeResolutionContext<'a, 'a>,
+    macro_prop_keys: Option<&[Span]>,
 ) {
+    // The macro pass already resolved this `defineProps<T>` type argument through
+    // the shared resolver. When those prop-key spans are supplied, reuse them
+    // verbatim rather than resolving the type a second time — the binding pass
+    // only needs the local prop-key spans (cross-file members carry no usable
+    // setup-content span and are excluded by the caller).
+    if let Some(keys) = macro_prop_keys {
+        for key in keys {
+            entries.push((*key, BindingType::Props));
+        }
+        return;
+    }
+
     if let Some(first_param) = type_params.params.first() {
         // Use the type resolution infrastructure to resolve all type variants:
         // TSTypeLiteral, TSTypeReference (interfaces/aliases), unions, intersections, etc.

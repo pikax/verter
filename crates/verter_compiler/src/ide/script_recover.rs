@@ -1,21 +1,26 @@
-//! Lightweight token scanner for recovering macro/function info from broken scripts.
+//! Token-scan recovery for `<script setup>` content that does not parse cleanly.
 //!
-//! When OXC's partial AST has damaged macros (e.g., user is typing inside a
-//! `defineProps<{...}>()` call), the normal AST-based macro detection fails.
-//! This scanner performs a single-pass token scan to recover:
+//! This is the SINGLE recovery surface for the IDE failure path: when OXC fails to
+//! parse the original `<script setup>` content (the user is mid-edit — a dangling
+//! `a.`, an open delimiter, an unbalanced brace), [`ScriptTokenScanner::recover_plan`]
+//! produces a [`ScriptSetupRecoveryPlan`] from a single token scan of the REAL
+//! source. There is no synthesize-then-reparse step and no synthetic view is ever
+//! parsed. The scanner handles comments, strings, template literals, and bracket
+//! matching but does NOT build an AST or parse expressions/types.
 //!
-//! - **Macro calls**: `defineProps`, `defineEmits`, `withDefaults`, `defineModel`,
-//!   `defineExpose`, `defineOptions`, `defineSlots` — with optional binding name
-//!   from `const NAME = macroCall(...)`.
-//! - **Function declarations**: `function name(...)` — with name and params span
-//!   for hover annotation.
+//! The plan has two distinct kinds of output:
 //!
-//! The scanner handles comments, strings, template literals, and bracket matching
-//! but does NOT build an AST or parse expressions/types.
-//!
-//! Currently only macro recovery is used in production (for `NormalSkipDamagedMacros`
-//! strategy). Function recovery and `binding_span` are tested and available for
-//! future hover annotation of event handler params from the broken tail.
+//! - **Recovered FACTS** — top-level (bracket depth 0) imports, macro calls
+//!   (`defineProps`/`defineEmits`/`withDefaults`/`defineModel`/`defineExpose`/
+//!   `defineOptions`/`defineSlots`, with the optional `const NAME = …` binding),
+//!   variables, and functions. These carry ORIGINAL-source spans and feed hoisting
+//!   and binding registration. Facts are gated to top level, mirroring the clean
+//!   top-level parser (`block_depth == 0`), so block-local declarations never become
+//!   setup bindings/imports.
+//! - **OUTPUT-ONLY recovery chunks** — member/expression holes and scope closers
+//!   (with empty-delimiter placeholders) detected over the WHOLE source regardless
+//!   of nesting depth. These make the generated TSX parse for the language service
+//!   and are NEVER turned into bindings, macros, imports, or any other source fact.
 
 use verter_span::Span;
 
@@ -41,7 +46,10 @@ pub struct RecoveredMacro<'a> {
     /// Span of the binding name identifier (used in tests; reserved for future hover annotation).
     #[allow(dead_code)]
     pub binding_span: Option<Span>,
-    /// Span of the entire macro call expression (from identifier to closing paren/bracket).
+    /// Span of the entire macro call expression (from identifier to closing
+    /// paren/bracket). Exercised by the scanner tests; retained for span-precise
+    /// recovery uses.
+    #[allow(dead_code)]
     pub call_span: Span,
 }
 
@@ -78,12 +86,135 @@ pub enum RecoveredVarKind {
     Var,
 }
 
-/// Result of token-based recovery scanning.
+/// An `import` statement recovered by the token scanner from the REAL source.
+///
+/// All spans are SFC-absolute (the `content_start` offset is baked in), exactly
+/// like [`RecoveredMacro::call_span`], so the failure-path codegen can hoist the
+/// import and rewrite its specifier without any reparse.
 #[derive(Debug)]
-pub struct TokenizerRecovery<'a> {
+pub struct RecoveredImport<'a> {
+    /// Span of the full `import … '<source>'` statement (SFC-absolute), including
+    /// a trailing `;` when one immediately follows. Suitable for `move_with_suffix`.
+    pub span: Span,
+    /// Module specifier text WITHOUT the surrounding quotes (e.g. `vue`, `./Foo.vue`).
+    pub source: &'a str,
+    /// Span of the source string literal INCLUDING quotes (SFC-absolute), used to
+    /// rewrite `.vue` → `.vue.ts`.
+    pub source_span: Span,
+    /// Local binding names introduced by this import (default / namespace / named
+    /// locals). Empty for side-effect imports (`import './x'`).
+    pub binding_names: Vec<&'a str>,
+    /// Whether the entire import is type-only (`import type … from …`).
+    pub is_type_only: bool,
+}
+
+/// A synthetic, OUTPUT-ONLY insertion the recovery plan emits to make broken
+/// `<script setup>` content parse as valid TSX. These chunks exist purely so the
+/// TypeScript language service receives a recoverable program; they are NEVER
+/// turned into bindings, macros, imports, or any other source fact, and they
+/// carry no source-map mapping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryInsert {
+    /// A dangling member access (`a.` / `a?.`): insert a member-name placeholder
+    /// immediately after the operator so the dot cannot absorb the following token.
+    MemberHole { at: u32 },
+    /// A trailing operator / assignment RHS / conditional arm / arrow body: insert
+    /// an operand placeholder so the expression is complete.
+    ExpressionHole { at: u32 },
+}
+
+/// Structured, original-span tolerant recovery plan for a `<script setup>` block
+/// whose content does NOT parse cleanly with OXC.
+///
+/// Every field is derived from a single token scan of the REAL source — there is
+/// no synthesize-then-reparse step and no synthetic view is ever parsed. The
+/// `inserts` and `scope_closers` describe OUTPUT-ONLY `CodeTransform` chunks; the
+/// `imports` / `macros` / `functions` / `variables` carry original-span facts the
+/// failure-path codegen reuses for hoisting and binding registration.
+#[derive(Debug, Default)]
+pub struct ScriptSetupRecoveryPlan<'a> {
+    pub imports: Vec<RecoveredImport<'a>>,
     pub macros: Vec<RecoveredMacro<'a>>,
     pub functions: Vec<RecoveredFunction<'a>>,
     pub variables: Vec<RecoveredVariable<'a>>,
+    /// OUTPUT-ONLY synthetic insertions (member / expression holes).
+    pub inserts: Vec<RecoveryInsert>,
+    /// Closers for brackets the user left open, innermost-first, appended at the
+    /// recovery boundary (e.g. `})`). A delimiter that requires a non-empty body but
+    /// was left empty carries a placeholder operand before its closer (`undefined)`,
+    /// `undefined]`). OUTPUT-ONLY.
+    pub scope_closers: String,
+}
+
+/// The kind of REQUIRED `(...)` header a control/condition keyword introduces.
+/// Used to give the keyword's `(` the correct empty-body completion when the user
+/// leaves it open. This is TYPED token state derived from the keyword token itself
+/// — never a text/substring match on the surrounding source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ControlKind {
+    /// `if` / `while` / `with` — a condition paren whose body is a statement; an
+    /// empty discriminant is invalid (`if ()`), so it needs an `undefined` operand
+    /// and the trailing `;` completes the (empty) statement body.
+    Condition,
+    /// `for` — a C-style (`for (a; b; c)`) or iterator (`for (x of y)`) header;
+    /// completed by filling the MISSING `;` separators (none for an iterator).
+    For,
+    /// `switch` / `catch` — a header whose `)` MUST be followed by a block
+    /// (`switch (x) {}`, `catch (e) {}`): needs an `undefined` operand if empty
+    /// AND a trailing `{}`.
+    Block,
+}
+
+/// Classification of the last significant token, used to decide whether the body
+/// ends mid-expression (needing an expression hole) at EOF, and how to classify a
+/// following open delimiter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LastTok {
+    /// Nothing significant seen yet.
+    None,
+    /// A completed operand (identifier, literal, or a closing bracket).
+    Operand,
+    /// A member-access dot just consumed (handled via the pending-dot state).
+    Dot,
+    /// An operator / assignment / conditional arm / arrow that expects an operand.
+    Operator,
+    /// An opening bracket — closed by `scope_closers`, never an expression hole.
+    Open,
+    /// A keyword, `;`, or other token that needs no completion.
+    Other,
+    /// A control/condition keyword (`if`/`while`/`for`/`switch`/`catch`/`with`)
+    /// whose following `(` is a REQUIRED header paren — distinct from an operand,
+    /// so the `(` is NOT classified as empty-valid call arguments.
+    ControlKeyword(ControlKind),
+}
+
+/// A bracket the user left open, tracked on the recovery scan's bracket stack so
+/// the closer sequence can be emitted innermost-first AND so a delimiter that
+/// requires a non-empty body (a grouping/arrow-body paren or a computed-member
+/// bracket) can be given a placeholder operand when it is closed empty.
+#[derive(Debug, Clone, Copy)]
+struct BracketFrame {
+    /// The matching close character (`)`, `]`, or `}`).
+    close: u8,
+    /// Whether closing this delimiter with an empty body would be INVALID TSX
+    /// (`const x = ()`, `foo[]`, `() => ()`), determined from the token preceding
+    /// the open delimiter. Ignored when `control` is set (the control kind drives
+    /// completion instead). Call args, array literals, and blocks/objects are valid
+    /// empty and never need a placeholder.
+    needs_content: bool,
+    /// Whether any significant token has been seen inside this delimiter since it
+    /// was opened (a nested bracket counts as content for its parent).
+    has_content: bool,
+    /// Set when this is a control/condition-keyword header paren; drives the
+    /// keyword-specific empty-body completion (condition discriminant, `for`
+    /// separators, trailing `switch`/`catch` block) instead of `needs_content`.
+    control: Option<ControlKind>,
+    /// For a `for` header (`control == Some(ControlKind::For)`): the number of
+    /// top-level `;` separators seen so far inside this paren.
+    for_semis: u8,
+    /// For a `for` header: whether a top-level `of`/`in` was seen (iterator form,
+    /// `for (x of y)` / `for (k in o)`, which needs no `;` separators).
+    for_iter: bool,
 }
 
 /// Lightweight token scanner for recovering structural info from broken scripts.
@@ -118,57 +249,192 @@ impl<'a> ScriptTokenScanner<'a> {
         }
     }
 
-    /// Run the recovery scan and return all recovered macros, functions, and variables.
-    pub fn recover(mut self) -> TokenizerRecovery<'a> {
-        let mut macros = Vec::new();
-        let mut functions = Vec::new();
-        let mut variables = Vec::new();
+    /// Run the full structured recovery scan over the REAL source, producing a
+    /// [`ScriptSetupRecoveryPlan`]: original-span import / macro / function /
+    /// variable facts plus OUTPUT-ONLY member / expression holes and scope
+    /// closers for a `<script setup>` whose content does not parse cleanly.
+    ///
+    /// Single pass; never builds an AST and never reparses a synthetic view.
+    /// Member-access holes are detected structurally: a `.` / `?.` is dangling
+    /// when EOF or a newline follows the operator before the property name, or
+    /// when the next token cannot be a property name — this never false-positives
+    /// on well-formed multi-line chains (`foo\n  .bar`), where the newline sits
+    /// BEFORE the dot.
+    ///
+    /// Holes and scope closers are detected over the WHOLE source regardless of
+    /// nesting depth, but recovered FACTS (imports / macros / variables / functions)
+    /// are emitted ONLY at top level (bracket depth 0) — mirroring the clean
+    /// top-level parser (`block_depth == 0`), so block-local declarations never
+    /// become setup bindings/imports.
+    pub fn recover_plan(mut self) -> ScriptSetupRecoveryPlan<'a> {
+        let mut plan = ScriptSetupRecoveryPlan::default();
+        // Stack of brackets the user left open (close char + content-requirement +
+        // content-seen), used for scope closers and empty-delimiter placeholders.
+        let mut bracket_stack: Vec<BracketFrame> = Vec::new();
+        // SFC-absolute position just after a `.` / `?.` whose property is not yet seen.
+        let mut pending_dot: Option<u32> = None;
+        // Whether a newline has been crossed since `pending_dot` was set.
+        let mut pending_dot_newline = false;
+        let mut last_tok = LastTok::None;
 
-        while self.pos < self.bytes.len() {
-            // Skip whitespace
-            if self.bytes[self.pos].is_ascii_whitespace() {
-                self.pos += 1;
-                continue;
+        loop {
+            let saw_newline = self.skip_trivia();
+            if pending_dot.is_some() && saw_newline {
+                pending_dot_newline = true;
+            }
+            if self.pos >= self.bytes.len() {
+                break;
+            }
+            let b = self.bytes[self.pos];
+
+            // Resolve a pending dangling-dot against the upcoming significant token.
+            if let Some(at) = pending_dot {
+                let next_is_property = is_ident_start(b) || b == b'#';
+                if pending_dot_newline || !next_is_property {
+                    plan.inserts.push(RecoveryInsert::MemberHole { at });
+                    // The recovered `a.valueOf` IS a completed operand, so reset the
+                    // token state from `Dot`: the current token begins a NEW statement
+                    // (the dangling member ended the previous one). Without this, a
+                    // dangling member followed by a control keyword (`a.\nif (`) would
+                    // keep `last_tok == Dot`, the member-name guard below would
+                    // suppress the keyword's required-header classification, and `if (`
+                    // would close as empty call args → invalid `a.valueOf\nif ();`. A
+                    // REAL same-line member (`p.catch(`) pushes NO hole, so its
+                    // `last_tok == Dot` survives and the keyword stays a method name.
+                    last_tok = LastTok::Operand;
+                }
+                pending_dot = None;
+                pending_dot_newline = false;
+                // Fall through and process the current token normally (it is either
+                // the property name on the same line, or the token after the hole).
             }
 
-            // Line comment
-            if self.looking_at(b"//") {
-                self.skip_line_comment();
-                continue;
+            // Any non-closing token is content for the enclosing bracket. For an
+            // OPEN bracket this marks the PARENT before the child frame is pushed;
+            // for a CLOSE bracket we skip, so an empty pair stays empty. This drives
+            // placeholder injection for delimiters that require a non-empty body.
+            if !matches!(b, b')' | b']' | b'}') {
+                if let Some(top) = bracket_stack.last_mut() {
+                    top.has_content = true;
+                }
             }
 
-            // Block comment
-            if self.looking_at(b"/*") {
-                self.skip_block_comment();
+            // String / template literals are complete operands.
+            if b == b'"' || b == b'\'' {
+                self.skip_string(b);
+                last_tok = LastTok::Operand;
                 continue;
             }
-
-            // String literals
-            if self.bytes[self.pos] == b'"' || self.bytes[self.pos] == b'\'' {
-                self.skip_string(self.bytes[self.pos]);
-                continue;
-            }
-
-            // Template literal
-            if self.bytes[self.pos] == b'`' {
+            if b == b'`' {
                 self.skip_template_literal();
+                last_tok = LastTok::Operand;
                 continue;
             }
 
-            // Identifier
-            if is_ident_start(self.bytes[self.pos]) {
+            // Brackets — track balance for scope closers + content requirement.
+            if b == b'(' || b == b'[' || b == b'{' {
+                // Classify the delimiter from the TYPED preceding-token state so an
+                // empty body recovers to VALID TSX:
+                //   control/condition keyword + `(` → header paren (`if (…)`, `for
+                //     (…;…;…)`, `switch (…) {}`), completed per its `ControlKind`;
+                //   operand + `(`                  → call args, valid empty (`f()`);
+                //   operator / start + `(`         → grouping / arrow body, needs an
+                //     operand (`(undefined)`);
+                //   operand + `[`                  → computed member, needs a key
+                //     (`foo[undefined]`);
+                //   operator / start + `[`         → array literal, valid empty (`[]`);
+                //   `{`                            → block / object, valid empty (`{}`).
+                let (close, needs_content, control) = match b {
+                    b'(' => match last_tok {
+                        LastTok::ControlKeyword(kind) => (b')', true, Some(kind)),
+                        LastTok::Operand => (b')', false, None),
+                        _ => (b')', true, None),
+                    },
+                    b'[' => (b']', last_tok == LastTok::Operand, None),
+                    _ => (b'}', false, None),
+                };
+                bracket_stack.push(BracketFrame {
+                    close,
+                    needs_content,
+                    has_content: false,
+                    control,
+                    for_semis: 0,
+                    for_iter: false,
+                });
+                self.pos += 1;
+                last_tok = LastTok::Open;
+                continue;
+            }
+            if b == b')' || b == b']' || b == b'}' {
+                if bracket_stack.last().map(|f| f.close) == Some(b) {
+                    bracket_stack.pop();
+                }
+                self.pos += 1;
+                last_tok = LastTok::Operand;
+                continue;
+            }
+
+            // Member access / optional chain / spread.
+            if b == b'.' {
+                if self.looking_at(b"...") {
+                    self.pos += 3;
+                    last_tok = LastTok::Operator; // spread expects an operand
+                    continue;
+                }
+                self.pos += 1;
+                pending_dot = Some(self.content_start + self.pos as u32);
+                pending_dot_newline = false;
+                last_tok = LastTok::Dot;
+                continue;
+            }
+            if b == b'?' {
+                if self.looking_at(b"?.") {
+                    self.pos += 2;
+                    pending_dot = Some(self.content_start + self.pos as u32);
+                    pending_dot_newline = false;
+                    last_tok = LastTok::Dot;
+                    continue;
+                }
+                // `??` (nullish) and `?` (ternary) both expect an operand next.
+                self.pos += if self.looking_at(b"??") { 2 } else { 1 };
+                last_tok = LastTok::Operator;
+                continue;
+            }
+
+            // Identifiers / keywords — replicates the historical detection exactly,
+            // plus `import` recovery. FACTS (imports / functions / variables / macros)
+            // are recovered ONLY at top level (bracket depth 0); a keyword nested in a
+            // block is treated as a plain identifier so the body keeps walking (its
+            // holes/closers are still tracked) but no block-local binding is fabricated.
+            if is_ident_start(b) {
+                let at_top_level = bracket_stack.is_empty();
                 let ident_start = self.pos;
                 let ident = self.read_ident();
 
-                // Check for `function` keyword
-                if ident == "function" {
-                    if let Some(func) = self.try_recover_function() {
-                        functions.push(func);
+                if ident == "import" {
+                    if at_top_level {
+                        if let Some(imp) = self.try_recover_import(ident_start) {
+                            plan.imports.push(imp);
+                        }
+                        last_tok = LastTok::Other;
+                        continue;
                     }
+                    // Nested `import` (e.g. a dynamic import inside a block) is not a
+                    // top-level statement — fall through to plain-identifier handling.
+                    last_tok = LastTok::Operand;
                     continue;
                 }
 
-                // Check for variable declaration keywords
+                if ident == "function" {
+                    if at_top_level {
+                        if let Some(func) = self.try_recover_function() {
+                            plan.functions.push(func);
+                        }
+                    }
+                    last_tok = LastTok::Operand;
+                    continue;
+                }
+
                 let var_kind = match ident {
                     "const" => Some(RecoveredVarKind::Const),
                     "let" => Some(RecoveredVarKind::Let),
@@ -176,48 +442,166 @@ impl<'a> ScriptTokenScanner<'a> {
                     _ => None,
                 };
                 if let Some(kind) = var_kind {
-                    // Must be at a word boundary (not part of a larger identifier)
-                    if !self.is_ident_at(self.pos) {
+                    // Top-level only, and at a word boundary (not part of a larger
+                    // identifier). Block-local declarations are not setup bindings.
+                    if at_top_level && !self.is_ident_at(self.pos) {
                         if let Some(var) = self.try_recover_variable(kind) {
-                            // Check if the initializer is a known macro — if so, skip
-                            // (the macro branch handles its own binding)
-                            variables.push(var);
+                            plan.variables.push(var);
                         }
                     }
+                    last_tok = LastTok::Other;
                     continue;
                 }
 
-                // Check for known macro names
-                if let Some(&(_, kind)) = MACRO_NAMES.iter().find(|&&(name, _)| name == ident) {
-                    if let Some(call_end) = self.try_match_macro_call() {
-                        let call_span = Span::new(
-                            self.content_start + ident_start as u32,
-                            self.content_start + call_end as u32,
-                        );
-                        let (binding_name, binding_span) =
-                            self.scan_backward_for_binding(ident_start);
-                        macros.push(RecoveredMacro {
-                            kind,
-                            binding_name,
-                            binding_span,
-                            call_span,
-                        });
+                if at_top_level {
+                    if let Some(&(_, kind)) = MACRO_NAMES.iter().find(|&&(name, _)| name == ident) {
+                        if let Some(call_end) = self.try_match_macro_call() {
+                            let call_span = Span::new(
+                                self.content_start + ident_start as u32,
+                                self.content_start + call_end as u32,
+                            );
+                            let (binding_name, binding_span) =
+                                self.scan_backward_for_binding(ident_start);
+                            plan.macros.push(RecoveredMacro {
+                                kind,
+                                binding_name,
+                                binding_span,
+                                call_span,
+                            });
+                            last_tok = LastTok::Operand;
+                            continue;
+                        }
                     }
-                    continue;
                 }
 
+                // A keyword that follows a `.` / `?.` is a MEMBER NAME, not a
+                // statement keyword (`promise.catch(`, `arr.for(`, `obj.if(` are
+                // method calls), so skip control-keyword / iterator classification.
+                if last_tok != LastTok::Dot {
+                    // Control/condition keywords introduce a REQUIRED header paren;
+                    // a following `(` must be treated as a condition/header paren
+                    // (needs content) rather than empty-valid call arguments.
+                    // Classified from the keyword token itself — no text match — and
+                    // NOT gated to top level: the requirement holds at any depth.
+                    if let Some(kind) = control_paren_kind(ident) {
+                        last_tok = LastTok::ControlKeyword(kind);
+                        continue;
+                    }
+
+                    // Inside a `for (` header, a top-level `of`/`in` marks the
+                    // iterator form (`for (x of y)` / `for (k in o)`), which needs
+                    // no `;` separators when the header is completed.
+                    if (ident == "of" || ident == "in")
+                        && matches!(
+                            bracket_stack.last(),
+                            Some(f) if f.control == Some(ControlKind::For)
+                        )
+                    {
+                        if let Some(top) = bracket_stack.last_mut() {
+                            top.for_iter = true;
+                        }
+                        last_tok = LastTok::Operand;
+                        continue;
+                    }
+                }
+
+                // Plain identifier or keyword — completes an expression position.
+                last_tok = LastTok::Operand;
                 continue;
             }
 
-            // Skip anything else
-            self.pos += 1;
+            // Operators / punctuation. Only the forms that genuinely expect a
+            // following operand mark the body as ending mid-expression.
+            match b {
+                b'=' => {
+                    if self.looking_at(b"=>") {
+                        self.pos += 2; // arrow — expects a body
+                    } else if self.looking_at(b"===") {
+                        self.pos += 3;
+                    } else if self.looking_at(b"==") {
+                        self.pos += 2;
+                    } else {
+                        self.pos += 1; // assignment
+                    }
+                    last_tok = LastTok::Operator;
+                }
+                b'+' | b'-' | b'*' | b'/' | b'%' | b'&' | b'|' | b'^' | b':' | b',' => {
+                    self.pos += 1;
+                    last_tok = LastTok::Operator;
+                }
+                b';' => {
+                    // A top-level `;` directly inside a `for (` header is a clause
+                    // separator — count it so completion fills only the MISSING
+                    // separators (`for (a; b;)` → one more, `for (a; b; c)` → none).
+                    if let Some(top) = bracket_stack.last_mut() {
+                        if top.control == Some(ControlKind::For) {
+                            top.for_semis = top.for_semis.saturating_add(1);
+                        }
+                    }
+                    self.pos += 1;
+                    last_tok = LastTok::Other;
+                }
+                _ => {
+                    // `<` `>` `!` etc.: no operand hole, no bracket tracking.
+                    self.pos += 1;
+                    last_tok = LastTok::Other;
+                }
+            }
         }
 
-        TokenizerRecovery {
-            macros,
-            functions,
-            variables,
+        // EOF: a still-pending dangling dot is a member hole.
+        if let Some(at) = pending_dot {
+            plan.inserts.push(RecoveryInsert::MemberHole { at });
         }
+        // EOF: a trailing operator / assignment / conditional arm / arrow needs an operand.
+        else if last_tok == LastTok::Operator {
+            plan.inserts.push(RecoveryInsert::ExpressionHole {
+                at: self.content_start + self.bytes.len() as u32,
+            });
+        }
+
+        // Remaining open brackets → emit closers innermost-first, each completed to
+        // VALID TSX. A grouping / computed-member delimiter left empty gets an
+        // `undefined` operand (`const x = (undefined)`, `foo[undefined]`); a
+        // control-keyword header is completed per its kind (`if (undefined);`,
+        // `for (;;)`, `for (a; b;)`, `switch (undefined) {}`, `catch (e) {}`).
+        while let Some(frame) = bracket_stack.pop() {
+            match frame.control {
+                Some(ControlKind::Condition) => {
+                    if !frame.has_content {
+                        plan.scope_closers.push_str("undefined");
+                    }
+                    plan.scope_closers.push(frame.close as char);
+                }
+                Some(ControlKind::For) => {
+                    // Fill only the MISSING `;` separators: a C-style header needs
+                    // two (`for (;;)`, `for (a; b;)`); an iterator header (`of`/`in`)
+                    // needs none (`for (x of y)`).
+                    if !(frame.for_iter && frame.for_semis == 0) {
+                        for _ in 0..2u8.saturating_sub(frame.for_semis) {
+                            plan.scope_closers.push(';');
+                        }
+                    }
+                    plan.scope_closers.push(frame.close as char);
+                }
+                Some(ControlKind::Block) => {
+                    if !frame.has_content {
+                        plan.scope_closers.push_str("undefined");
+                    }
+                    plan.scope_closers.push(frame.close as char);
+                    // A `switch`/`catch` header MUST be followed by a block.
+                    plan.scope_closers.push_str(" {}");
+                }
+                None => {
+                    if frame.needs_content && !frame.has_content {
+                        plan.scope_closers.push_str("undefined");
+                    }
+                    plan.scope_closers.push(frame.close as char);
+                }
+            }
+        }
+
+        plan
     }
 
     // ── Helpers ──────────────────────────────────────────────────────
@@ -315,6 +699,49 @@ impl<'a> ScriptTokenScanner<'a> {
             break;
         }
         self.pos > start
+    }
+
+    /// Skip whitespace and comments, returning true if a newline was crossed.
+    /// Used by the structured plan scan to detect dangling member-access dots
+    /// (a `.` followed by a newline before its property name).
+    fn skip_trivia(&mut self) -> bool {
+        let mut saw_newline = false;
+        loop {
+            if self.pos >= self.bytes.len() {
+                break;
+            }
+            let b = self.bytes[self.pos];
+            if b.is_ascii_whitespace() {
+                if b == b'\n' {
+                    saw_newline = true;
+                }
+                self.pos += 1;
+                continue;
+            }
+            if self.looking_at(b"//") {
+                self.skip_line_comment();
+                continue;
+            }
+            if self.looking_at(b"/*") {
+                let before = self.pos;
+                self.skip_block_comment();
+                if self.source.as_bytes()[before..self.pos].contains(&b'\n') {
+                    saw_newline = true;
+                }
+                continue;
+            }
+            break;
+        }
+        saw_newline
+    }
+
+    /// Whether the identifier at the current position is exactly `kw` (word-boundary checked).
+    fn peek_ident_is(&self, kw: &str) -> bool {
+        self.bytes[self.pos..].starts_with(kw.as_bytes())
+            && self
+                .bytes
+                .get(self.pos + kw.len())
+                .is_none_or(|&c| !is_ident_continue(c))
     }
 
     /// Try to match a macro call after the macro identifier has been consumed.
@@ -527,6 +954,107 @@ impl<'a> ScriptTokenScanner<'a> {
             ),
         })
     }
+
+    /// Try to recover an `import` statement after the `import` keyword has been
+    /// consumed (`self.pos` is just past `import`). Scans forward to the module
+    /// source string literal, collecting local binding names along the way.
+    ///
+    /// Returns the structured import (SFC-absolute spans) on success and leaves
+    /// `self.pos` past the statement. On failure (no module source before a `;`
+    /// or EOF — a half-typed import) it RESTORES `self.pos` to just after the
+    /// `import` keyword and returns `None`, so the surrounding scan continues
+    /// without losing later tokens.
+    fn try_recover_import(&mut self, import_kw_start: usize) -> Option<RecoveredImport<'a>> {
+        let save = self.pos;
+        let mut binding_names: Vec<&'a str> = Vec::new();
+        let mut is_type_only = false;
+        let mut depth: i32 = 0;
+
+        // Optional leading `type` (whole-import type-only) — but NOT when `type`
+        // is itself the default binding name (`import type from '…'`).
+        self.skip_ws_and_comments();
+        if self.peek_ident_is("type") {
+            let save_t = self.pos;
+            let _ = self.read_ident();
+            self.skip_ws_and_comments();
+            let next = self.bytes.get(self.pos).copied();
+            let is_clause = matches!(next, Some(b'{') | Some(b'*'))
+                || (next.is_some_and(is_ident_start) && !self.peek_ident_is("from"));
+            if is_clause {
+                is_type_only = true;
+            } else {
+                self.pos = save_t;
+            }
+        }
+
+        loop {
+            self.skip_ws_and_comments();
+            let b = match self.bytes.get(self.pos).copied() {
+                Some(b) => b,
+                None => {
+                    self.pos = save;
+                    return None;
+                }
+            };
+            match b {
+                b'"' | b'\'' if depth == 0 => {
+                    let src_start = self.pos;
+                    self.skip_string(b);
+                    let src_end = self.pos;
+                    if src_end <= src_start + 1 {
+                        self.pos = save;
+                        return None;
+                    }
+                    let source = &self.source[src_start + 1..src_end - 1];
+                    let mut end = src_end;
+                    if self.bytes.get(end).copied() == Some(b';') {
+                        end += 1;
+                        self.pos = end;
+                    }
+                    return Some(RecoveredImport {
+                        span: Span::new(
+                            self.content_start + import_kw_start as u32,
+                            self.content_start + end as u32,
+                        ),
+                        source,
+                        source_span: Span::new(
+                            self.content_start + src_start as u32,
+                            self.content_start + src_end as u32,
+                        ),
+                        binding_names,
+                        is_type_only,
+                    });
+                }
+                b'{' | b'(' | b'[' => {
+                    depth += 1;
+                    self.pos += 1;
+                }
+                b'}' | b')' | b']' => {
+                    depth -= 1;
+                    self.pos += 1;
+                }
+                b';' if depth == 0 => {
+                    self.pos = save;
+                    return None;
+                }
+                _ if is_ident_start(b) => {
+                    let name = self.read_ident();
+                    match name {
+                        "from" | "type" => {}
+                        // `X as Y`: the previously collected `X` is the imported
+                        // name, not the local — drop it; the next ident is local.
+                        "as" => {
+                            binding_names.pop();
+                        }
+                        _ => binding_names.push(name),
+                    }
+                }
+                _ => {
+                    self.pos += 1;
+                }
+            }
+        }
+    }
 }
 
 fn is_ident_start(b: u8) -> bool {
@@ -537,468 +1065,18 @@ fn is_ident_continue(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_' || b == b'$'
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn scan(source: &str) -> TokenizerRecovery<'_> {
-        ScriptTokenScanner::new(source, 0).recover()
-    }
-
-    fn scan_offset(source: &str, offset: u32) -> TokenizerRecovery<'_> {
-        ScriptTokenScanner::new(source, offset).recover()
-    }
-
-    // ── Macro detection ─────────────────────────────────────────────
-
-    #[test]
-    fn finds_define_props() {
-        let r = scan("defineProps<{ count: number }>()");
-        assert_eq!(r.macros.len(), 1);
-        assert_eq!(r.macros[0].kind, RecoveredMacroKind::DefineProps);
-        assert!(r.macros[0].binding_name.is_none());
-    }
-
-    #[test]
-    fn finds_define_props_with_binding() {
-        let r = scan("const props = defineProps<{ count: number }>()");
-        assert_eq!(r.macros.len(), 1);
-        assert_eq!(r.macros[0].kind, RecoveredMacroKind::DefineProps);
-        assert_eq!(r.macros[0].binding_name, Some("props"));
-    }
-
-    #[test]
-    fn finds_define_emits_with_binding() {
-        let r = scan("const emit = defineEmits<{ click: [e: MouseEvent] }>()");
-        assert_eq!(r.macros.len(), 1);
-        assert_eq!(r.macros[0].kind, RecoveredMacroKind::DefineEmits);
-        assert_eq!(r.macros[0].binding_name, Some("emit"));
-    }
-
-    #[test]
-    fn finds_with_defaults() {
-        let r = scan("const props = withDefaults(defineProps<Props>(), { count: 0 })");
-        // withDefaults is the outermost macro — scanner consumes defineProps inside bracket match
-        assert!(r
-            .macros
-            .iter()
-            .any(|m| m.kind == RecoveredMacroKind::WithDefaults));
-        assert_eq!(r.macros[0].binding_name, Some("props"));
-    }
-
-    #[test]
-    fn finds_define_model() {
-        let r = scan("const modelValue = defineModel<string>()");
-        assert_eq!(r.macros.len(), 1);
-        assert_eq!(r.macros[0].kind, RecoveredMacroKind::DefineModel);
-        assert_eq!(r.macros[0].binding_name, Some("modelValue"));
-    }
-
-    #[test]
-    fn finds_define_expose() {
-        let r = scan("defineExpose({ foo: 1 })");
-        assert_eq!(r.macros.len(), 1);
-        assert_eq!(r.macros[0].kind, RecoveredMacroKind::DefineExpose);
-    }
-
-    #[test]
-    fn finds_define_options() {
-        let r = scan("defineOptions({ name: 'Foo' })");
-        assert_eq!(r.macros.len(), 1);
-        assert_eq!(r.macros[0].kind, RecoveredMacroKind::DefineOptions);
-    }
-
-    #[test]
-    fn finds_define_slots() {
-        let r = scan("const slots = defineSlots<{ default(): any }>()");
-        assert_eq!(r.macros.len(), 1);
-        assert_eq!(r.macros[0].kind, RecoveredMacroKind::DefineSlots);
-        assert_eq!(r.macros[0].binding_name, Some("slots"));
-    }
-
-    #[test]
-    fn finds_multiple_macros() {
-        let r = scan(
-            "const props = defineProps<{ x: number }>()\nconst emit = defineEmits<{ click: [] }>()",
-        );
-        assert_eq!(r.macros.len(), 2);
-    }
-
-    // ── Comment/string skipping ─────────────────────────────────────
-
-    #[test]
-    fn ignores_macro_in_line_comment() {
-        let r = scan("// defineProps<{ count: number }>()");
-        assert!(r.macros.is_empty(), "should not find macro in line comment");
-    }
-
-    #[test]
-    fn ignores_macro_in_block_comment() {
-        let r = scan("/* defineProps<{ count: number }>() */");
-        assert!(
-            r.macros.is_empty(),
-            "should not find macro in block comment"
-        );
-    }
-
-    #[test]
-    fn ignores_macro_in_string() {
-        let r = scan(r#""defineProps<{ count: number }>()""#);
-        assert!(r.macros.is_empty(), "should not find macro in string");
-    }
-
-    #[test]
-    fn ignores_macro_in_single_quote_string() {
-        let r = scan("'defineProps()'");
-        assert!(
-            r.macros.is_empty(),
-            "should not find macro in single-quote string"
-        );
-    }
-
-    #[test]
-    fn ignores_macro_in_template_literal() {
-        let r = scan("`defineProps()`");
-        assert!(
-            r.macros.is_empty(),
-            "should not find macro in template literal"
-        );
-    }
-
-    #[test]
-    fn finds_macro_after_block_comment() {
-        let r = scan("/* comment */\ndefineProps()");
-        assert_eq!(r.macros.len(), 1);
-        assert_eq!(r.macros[0].kind, RecoveredMacroKind::DefineProps);
-    }
-
-    #[test]
-    fn handles_template_literal_with_interpolation() {
-        let r = scan("`${defineProps()}` \n defineEmits()");
-        // defineProps inside template literal interpolation should be found
-        // (it's real code in the interpolation)
-        // Actually, the ${...} content IS executable code, so we should find it
-        // But our simple scanner skips the entire template literal including interpolation
-        // This is acceptable — the scanner is conservative
-        assert!(
-            !r.macros.is_empty(),
-            "should find at least defineEmits after template literal"
-        );
-        assert!(
-            r.macros
-                .iter()
-                .any(|m| m.kind == RecoveredMacroKind::DefineEmits),
-            "should find defineEmits"
-        );
-    }
-
-    // ── Bracket matching ────────────────────────────────────────────
-
-    #[test]
-    fn handles_nested_brackets_in_type_params() {
-        let r = scan("defineProps<{ items: Array<{ name: string }> }>()");
-        assert_eq!(r.macros.len(), 1);
-        assert_eq!(r.macros[0].kind, RecoveredMacroKind::DefineProps);
-    }
-
-    #[test]
-    fn handles_nested_parens_in_call() {
-        let r = scan("defineProps(foo(bar()))");
-        assert_eq!(r.macros.len(), 1);
-    }
-
-    #[test]
-    fn handles_strings_inside_brackets() {
-        let r = scan(r#"defineProps<{ foo: "bar<baz>" }>()"#);
-        assert_eq!(r.macros.len(), 1);
-    }
-
-    // ── Backward binding scan ───────────────────────────────────────
-
-    #[test]
-    fn backward_scan_const() {
-        let r = scan("const props = defineProps()");
-        assert_eq!(r.macros[0].binding_name, Some("props"));
-    }
-
-    #[test]
-    fn backward_scan_let() {
-        let r = scan("let props = defineProps()");
-        assert_eq!(r.macros[0].binding_name, Some("props"));
-    }
-
-    #[test]
-    fn backward_scan_var() {
-        let r = scan("var props = defineProps()");
-        assert_eq!(r.macros[0].binding_name, Some("props"));
-    }
-
-    #[test]
-    fn no_binding_without_keyword() {
-        let r = scan("props = defineProps()");
-        assert!(
-            r.macros[0].binding_name.is_none(),
-            "should not find binding without const/let/var"
-        );
-    }
-
-    #[test]
-    fn backward_scan_with_extra_whitespace() {
-        let r = scan("const   props   =   defineProps()");
-        assert_eq!(r.macros[0].binding_name, Some("props"));
-    }
-
-    // ── Function detection ──────────────────────────────────────────
-
-    #[test]
-    fn finds_function_declaration() {
-        let r = scan("function handleClick(event) {}");
-        assert_eq!(r.functions.len(), 1);
-        assert_eq!(r.functions[0].name, "handleClick");
-    }
-
-    #[test]
-    fn finds_function_with_multiple_params() {
-        let r = scan("function handleDrag(startEvent, endEvent) {}");
-        assert_eq!(r.functions.len(), 1);
-        assert_eq!(r.functions[0].name, "handleDrag");
-    }
-
-    #[test]
-    fn finds_function_with_type_params() {
-        let r = scan("function foo<T>(x: T) {}");
-        assert_eq!(r.functions.len(), 1);
-        assert_eq!(r.functions[0].name, "foo");
-    }
-
-    #[test]
-    fn finds_multiple_functions() {
-        let r = scan("function foo() {}\nfunction bar() {}");
-        assert_eq!(r.functions.len(), 2);
-        assert_eq!(r.functions[0].name, "foo");
-        assert_eq!(r.functions[1].name, "bar");
-    }
-
-    #[test]
-    fn ignores_function_in_comment() {
-        let r = scan("// function foo() {}");
-        assert!(r.functions.is_empty());
-    }
-
-    // ── Edge cases ──────────────────────────────────────────────────
-
-    #[test]
-    fn macro_at_start_of_file() {
-        let r = scan("defineProps()");
-        assert_eq!(r.macros.len(), 1);
-    }
-
-    #[test]
-    fn macro_at_end_of_file_no_trailing_newline() {
-        let r = scan("const x = defineProps()");
-        assert_eq!(r.macros.len(), 1);
-        assert_eq!(r.macros[0].binding_name, Some("x"));
-    }
-
-    #[test]
-    fn adjacent_macros() {
-        let r = scan("defineProps()\ndefineEmits()");
-        assert_eq!(r.macros.len(), 2);
-    }
-
-    #[test]
-    fn macro_after_comment() {
-        let r = scan("// This sets up props\nconst props = defineProps()");
-        assert_eq!(r.macros.len(), 1);
-        assert_eq!(r.macros[0].binding_name, Some("props"));
-    }
-
-    #[test]
-    fn empty_source() {
-        let r = scan("");
-        assert!(r.macros.is_empty());
-        assert!(r.functions.is_empty());
-    }
-
-    #[test]
-    fn only_whitespace() {
-        let r = scan("   \n\n  ");
-        assert!(r.macros.is_empty());
-        assert!(r.functions.is_empty());
-    }
-
-    #[test]
-    fn unclosed_string_doesnt_panic() {
-        let r = scan(r#"const x = "unclosed"#);
-        // Should not panic, just stop scanning
-        let _ = r;
-    }
-
-    #[test]
-    fn unclosed_template_literal_doesnt_panic() {
-        let r = scan("const x = `unclosed");
-        let _ = r;
-    }
-
-    #[test]
-    fn unclosed_block_comment_doesnt_panic() {
-        let r = scan("/* unclosed block comment\ndefineProps()");
-        // macro should not be found (inside block comment)
-        assert!(r.macros.is_empty());
-    }
-
-    // ── Span offsets ────────────────────────────────────────────────
-
-    #[test]
-    fn spans_include_content_start_offset() {
-        let r = scan_offset("defineProps()", 100);
-        assert_eq!(r.macros.len(), 1);
-        assert_eq!(r.macros[0].call_span.start, 100);
-        assert_eq!(r.macros[0].call_span.end, 113); // 100 + 13
-    }
-
-    #[test]
-    fn binding_span_includes_offset() {
-        let r = scan_offset("const props = defineProps()", 50);
-        assert_eq!(r.macros[0].binding_span.unwrap().start, 56); // 50 + 6
-        assert_eq!(r.macros[0].binding_span.unwrap().end, 61); // 50 + 11
-    }
-
-    #[test]
-    fn function_spans_include_offset() {
-        let r = scan_offset("function foo() {}", 200);
-        assert_eq!(r.functions[0].name_span.start, 209); // 200 + 9
-        assert_eq!(r.functions[0].name_span.end, 212); // 200 + 12
-        assert_eq!(r.functions[0].params_span.start, 212); // 200 + 12
-        assert_eq!(r.functions[0].params_span.end, 214); // 200 + 14
-    }
-
-    // ── Mixed scenarios ─────────────────────────────────────────────
-
-    #[test]
-    fn macros_and_functions_together() {
-        let r = scan("const props = defineProps<{ x: number }>()\nfunction handleClick(event) {}");
-        assert_eq!(r.macros.len(), 1);
-        assert_eq!(r.functions.len(), 1);
-        assert_eq!(r.macros[0].binding_name, Some("props"));
-        assert_eq!(r.functions[0].name, "handleClick");
-    }
-
-    #[test]
-    fn broken_macro_no_parens() {
-        // defineProps< — no closing > or ()
-        let r = scan("defineProps<");
-        // Should not find a complete macro call (missing parens)
-        assert!(
-            r.macros.is_empty(),
-            "incomplete macro should not be recovered"
-        );
-    }
-
-    #[test]
-    fn broken_macro_unclosed_generic() {
-        // defineProps<{ count. — error in type, no closing
-        let r = scan("defineProps<{ count.");
-        assert!(
-            r.macros.is_empty(),
-            "unclosed generic should not produce a macro"
-        );
-    }
-
-    #[test]
-    fn partial_define_props_but_later_valid_macro() {
-        let r = scan("defineProps<{\nconst emit = defineEmits()");
-        // First defineProps is broken (unclosed generic), second is valid
-        assert!(r
-            .macros
-            .iter()
-            .any(|m| m.kind == RecoveredMacroKind::DefineEmits));
-    }
-
-    #[test]
-    fn keyword_const_not_partial_match() {
-        // "constant" should NOT match "const" prefix
-        let r = scan("constant = defineProps()");
-        assert!(
-            r.macros[0].binding_name.is_none(),
-            "constant should not match const"
-        );
-    }
-
-    // ── Variable recovery ───────────────────────────────────────────
-
-    #[test]
-    fn finds_const_variable() {
-        let r = scan("const count = ref(0)");
-        assert_eq!(r.variables.len(), 1);
-        assert_eq!(r.variables[0].name, "count");
-        assert_eq!(r.variables[0].kind, RecoveredVarKind::Const);
-    }
-
-    #[test]
-    fn finds_let_variable() {
-        let r = scan("let x = 1");
-        assert_eq!(r.variables.len(), 1);
-        assert_eq!(r.variables[0].name, "x");
-        assert_eq!(r.variables[0].kind, RecoveredVarKind::Let);
-    }
-
-    #[test]
-    fn finds_var_variable() {
-        let r = scan("var y = 2");
-        assert_eq!(r.variables.len(), 1);
-        assert_eq!(r.variables[0].name, "y");
-        assert_eq!(r.variables[0].kind, RecoveredVarKind::Var);
-    }
-
-    #[test]
-    fn finds_multiple_variables() {
-        let r = scan("const a = 1\nlet b = 2\nvar c = 3");
-        assert_eq!(r.variables.len(), 3);
-        assert_eq!(r.variables[0].name, "a");
-        assert_eq!(r.variables[1].name, "b");
-        assert_eq!(r.variables[2].name, "c");
-    }
-
-    #[test]
-    fn variable_span_includes_offset() {
-        let r = scan_offset("const count = 1", 100);
-        assert_eq!(r.variables[0].name_span.start, 106); // 100 + 6
-        assert_eq!(r.variables[0].name_span.end, 111); // 100 + 11
-    }
-
-    #[test]
-    fn const_in_comment_not_variable() {
-        let r = scan("// const x = 1\nconst y = 2");
-        assert_eq!(r.variables.len(), 1);
-        assert_eq!(r.variables[0].name, "y");
-    }
-
-    #[test]
-    fn const_in_string_not_variable() {
-        let r = scan(r#""const x = 1""#);
-        assert!(r.variables.is_empty());
-    }
-
-    #[test]
-    fn variables_with_macros_and_functions() {
-        let r = scan("const count = ref(0)\nconst props = defineProps()\nfunction handle() {}");
-        assert_eq!(r.variables.len(), 2); // count + props (const keyword parsed)
-        assert_eq!(r.macros.len(), 1); // defineProps
-        assert_eq!(r.functions.len(), 1); // handle
-    }
-
-    #[test]
-    fn constant_keyword_not_variable() {
-        // "constant" is not "const"
-        let r = scan("constant = 1");
-        assert!(r.variables.is_empty());
-    }
-
-    #[test]
-    fn letter_keyword_not_variable() {
-        // "letter" is not "let"
-        let r = scan("letter = 1");
-        assert!(r.variables.is_empty());
+/// Maps a control/condition keyword to the kind of REQUIRED `(...)` header it
+/// introduces, or `None` for any other identifier/keyword. Token-level only — the
+/// caller has already read the identifier; this never inspects raw source text.
+fn control_paren_kind(ident: &str) -> Option<ControlKind> {
+    match ident {
+        "if" | "while" | "with" => Some(ControlKind::Condition),
+        "for" => Some(ControlKind::For),
+        "switch" | "catch" => Some(ControlKind::Block),
+        _ => None,
     }
 }
+
+#[cfg(test)]
+#[path = "script_recover_tests.rs"]
+mod tests;

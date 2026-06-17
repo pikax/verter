@@ -94,10 +94,18 @@ mod aux_features;
 // LSP navigation feature handlers. Trait methods on
 // `LanguageServer for VerterLanguageServer` covering hover, completion,
 // completion_resolve, goto_definition, goto_type_definition, references,
-// prepare_rename, rename. Also hosts the relocated
-// `enrich_hover_with_provenance` inherent helper and the
-// `append_markdown` hover-suffix utility.
+// prepare_rename, rename.
 mod nav_features;
+
+// Completion-resolve auto-import edit translation:
+// `resolve_tsgo_auto_import_edits` and `completion_resolve_error`, called
+// by `nav_features::handle_completion_resolve`.
+mod nav_features_completion_resolve;
+
+// Hover-provenance enrichment: `enrich_hover_with_provenance` and its
+// `append_markdown` hover-suffix helper, called by
+// `nav_features::handle_hover`.
+mod nav_features_hover_provenance;
 
 // Audit-aware wrappers for the navigation feature handlers. Each
 // `handle_<method>_with_audit` thunks into the matching plain

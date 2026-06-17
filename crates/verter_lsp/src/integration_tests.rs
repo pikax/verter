@@ -3438,6 +3438,7 @@ const count = 42
         &tsx_li,
         &doc.line_index,
         None,
+        None,
     );
 
     // Positive: merged result contains TSGO type signature
@@ -5243,6 +5244,7 @@ async fn integration_hover_slot_merge_preserves_verter_info() {
         &mapper,
         &tsx_li,
         &doc.line_index,
+        None,
         None,
     );
     assert!(merged.is_some(), "merged hover should exist");
