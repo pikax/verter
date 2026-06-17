@@ -410,7 +410,13 @@ async fn scanner_loop(
             if !&host.ensure_loaded(&path_clone) {
                 return false;
             }
-            host.ensure_compiled(&path_clone, &profile).is_ok()
+            // IDE-sync: gate on the IDE/TSX surface, NOT the runtime `Main`
+            // node. A Main-less carrier (Svelte) projects only `CachedTsx`, so
+            // `ensure_compiled` (which demands `Main`) would report failure and
+            // the file would never reach the type provider. `ensure_ide_compiled`
+            // gates on the IDE surface: `Ok(true)` ⇒ sync to the provider.
+            host.ensure_ide_compiled(&path_clone, &profile)
+                .unwrap_or(false)
         })
         .await
         .unwrap_or(false);
@@ -774,7 +780,9 @@ async fn sync_file_to_provider(
         return;
     };
     host.ensure_loaded(canonical_id);
-    let _ = host.ensure_compiled(canonical_id, profile);
+    // IDE-sync: drive the IDE/TSX surface (not the runtime `Main`) so a
+    // Main-less carrier (Svelte) populates its `CachedTsx` before `get_ide`.
+    let _ = host.ensure_ide_compiled(canonical_id, profile);
     let ide = host.get_ide(canonical_id, profile);
     let is_jsx = ide.as_ref().map(|ide| ide.is_jsx).unwrap_or(false);
     let Some(next_state) = crate::provider_sync::carrier_sync_state_for_source(

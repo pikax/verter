@@ -45,6 +45,27 @@ describe("VerterHost", () => {
     expect(ide!.code).toBeTruthy();
   });
 
+  it("ensureIdeCompiled normalizes a default/bundler profile to the IDE surface (returns true + populates CachedTsx)", () => {
+    // Profile-normalization contract: `ensureIdeCompiled` normalizes the caller profile to an
+    // IDE/TSX-bearing target INTERNALLY, so it returns `true` and populates
+    // `CachedTsx` whenever the carrier HAS an IDE surface — even with NO profile
+    // (the NAPI wrapper defaults to the bundler target, no TSX bit). `getIde`
+    // reads the SAME normalized slot under the same (omitted) profile.
+    // DISCRIMINATING: before the fix, the omitted/bundler profile produced no
+    // TSX and `ensureIdeCompiled` returned `false` for a file that DOES have an
+    // IDE surface; `getIde` then peeked the empty bundler slot.
+    const host = new VerterHost();
+    host.upsert({ inputId: "Bundler.vue", source: SFC_INPUT, fileKind: "vue" });
+
+    // No profile argument — the wrapper defaults to the bundler target.
+    const ensured = host.ensureIdeCompiled("Bundler.vue");
+    expect(ensured).toBe(true);
+
+    const ide = host.getIde("Bundler.vue");
+    expect(ide).not.toBeNull();
+    expect(ide!.code).toBeTruthy();
+  });
+
   it("ensureIdeCompiled populates CachedTsx for a Main-less Svelte carrier; getVirtualFile(Main) stays absent", () => {
     // The Main-less Svelte carrier: `ensureIdeCompiled` succeeds with a
     // `CachedTsx` (Svelte-specific TSX), `getIde` reads it, and

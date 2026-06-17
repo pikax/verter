@@ -174,12 +174,15 @@ impl DocumentRegistry {
             aliases: vec![],
         });
 
-        // Trigger compilation to populate TSX cache (upsert only parses).
-        // ensure_compiled() compiles lazily and caches TSX + source map.
+        // Trigger compilation to populate the TSX cache (upsert only parses).
+        // IDE-sync: drive the IDE/TSX surface, NOT the runtime `Main` node — a
+        // Main-less carrier (Svelte) projects only `CachedTsx`, so
+        // `ensure_ide_compiled` populates it where `ensure_compiled` (which
+        // demands `Main`) would not. `get_ide` below then reads the source map.
         if is_carrier {
             let _ = self
                 .host
-                .ensure_compiled(&canonical_id, &self.tsx_profile.read());
+                .ensure_ide_compiled(&canonical_id, &self.tsx_profile.read());
         }
 
         let line_index = LineIndex::new(&source, self.encoding());
@@ -273,12 +276,15 @@ impl DocumentRegistry {
         #[cfg(not(target_arch = "wasm32"))]
         self.host.notify_upsert(&canonical_id, source.clone());
 
-        // Trigger re-compilation for framework carriers (Vue / Svelte SFCs)
+        // Trigger re-compilation for framework carriers (Vue / Svelte SFCs).
+        // IDE-sync: drive the IDE/TSX surface (not the runtime `Main`) so a
+        // Main-less carrier (Svelte) re-populates its `CachedTsx`; `get_ide`
+        // below rebuilds the position mapper from the fresh source map.
         if is_carrier {
             let compile_start = std::time::Instant::now();
             let _ = self
                 .host
-                .ensure_compiled(&canonical_id, &self.tsx_profile.read());
+                .ensure_ide_compiled(&canonical_id, &self.tsx_profile.read());
             tracing::info!(
                 "DocumentRegistry::did_change ENSURE_COMPILED_DONE elapsed={:?} thread={:?}",
                 compile_start.elapsed(),
@@ -491,7 +497,19 @@ impl DocumentRegistry {
             return None;
         }
 
-        self.host.ensure_compiled(&canonical_id, &profile).ok()?;
+        // IDE-sync: drive the IDE/TSX surface, NOT the runtime `Main` node. A
+        // Main-less carrier (Svelte) has a `CachedTsx` but no `Main`, so
+        // `ensure_compiled` (which demands `Main`) would return
+        // `MissingVirtualNode` and abort here even though the IDE TSX exists.
+        // `ensure_ide_compiled` resolves through the `Ide` demand; `Ok(false)`
+        // (a genuine no-IDE surface) skips, `Ok(true)` proceeds to `get_ide`.
+        if !self
+            .host
+            .ensure_ide_compiled(&canonical_id, &profile)
+            .ok()?
+        {
+            return None;
+        }
         let resp = self.host.get_ide(&canonical_id, &profile)?;
 
         // Rebuild position mapper since TSX output was regenerated
@@ -528,7 +546,16 @@ impl DocumentRegistry {
             return None;
         }
         let profile = self.tsx_profile.read().clone();
-        self.host.ensure_compiled(&canonical_id, &profile).ok()?;
+        // IDE-sync: drive the IDE/TSX surface (not the runtime `Main`) so a
+        // Main-less carrier (Svelte) refreshes its mapper. `Ok(false)` (no IDE
+        // surface) returns None; `Ok(true)` proceeds to `get_ide`.
+        if !self
+            .host
+            .ensure_ide_compiled(&canonical_id, &profile)
+            .ok()?
+        {
+            return None;
+        }
         let resp = self.host.get_ide(&canonical_id, &profile)?;
         // Always rebuild mapper from fresh source map
         if let Some(mut entry) = self.documents.get_mut(uri.as_str()) {
@@ -1038,6 +1065,75 @@ mod tests {
                 .get_source("/home/user/App.svelte")
                 .is_some(),
             "the registered Svelte carrier must parse the .svelte document"
+        );
+    }
+
+    /// End-to-end: a Main-less `.svelte` carrier's IDE TSX reaches the
+    /// LSP IDE-sync path. `DocumentRegistry::get_ide`'s SLOW path (compile slots
+    /// cleared) drove `host.ensure_compiled(canonical, profile).ok()?` before
+    /// the migration — which DEMANDS `VirtualNodeKind::Main`. A Svelte carrier
+    /// projects ONLY an IDE `CachedTsx` (no runtime `Main`), so the old
+    /// `ensure_compiled` returned `MissingVirtualNode` → `.ok()?` short-circuited
+    /// to `None` and the Svelte IDE surface NEVER reached the LSP, even though
+    /// the TSX existed. After the migration to `ensure_ide_compiled` (which
+    /// resolves through the `Ide` demand, never `Main`), the slow path restores
+    /// the IDE TSX.
+    ///
+    /// DISCRIMINATING: this FAILS against the pre-migration `ensure_compiled`-
+    /// gated slow path (it returns `None` for the Main-less carrier) and PASSES
+    /// after the migration. A Vue file would not discriminate — Vue has a `Main`
+    /// node, so its old gate succeeded; only a Main-less carrier exposes the bug.
+    #[test]
+    fn main_less_svelte_ide_tsx_reaches_lsp_get_ide_slow_path() {
+        let host = Arc::new(verter_session::VerterHost::new_standalone(
+            verter_session::HostConfig::default(),
+        ));
+        let registry = DocumentRegistry::new(Arc::clone(&host));
+        let uri: Uri = "file:///home/user/Counter.svelte".parse().unwrap();
+        let canonical = "/home/user/Counter.svelte";
+
+        // Open a Main-less Svelte carrier (no runtime Main; IDE TSX only).
+        registry.did_open(&TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "svelte".to_string(),
+            version: 1,
+            text: "<script lang=\"ts\">let count = 0;</script>\n<button onclick={() => count++}>{count}</button>\n".to_string(),
+        });
+
+        // Force `get_ide`'s SLOW path: clear the compile slots so the host's
+        // fast-path `get_ide` peek misses and the registry must recompile. This
+        // is exactly the dependency-invalidation scenario the slow path exists
+        // for — and the one that gated on `ensure_compiled` before the fix.
+        registry.host().invalidate_compile_slots(canonical);
+        assert!(
+            registry
+                .host()
+                .get_ide(canonical, &registry.tsx_profile.read())
+                .is_none(),
+            "precondition: the fast-path peek must miss after invalidating the compile slots, \
+             so `get_ide` takes the slow recompile path under test"
+        );
+
+        // The slow path now drives `ensure_ide_compiled` (Ide demand), so the
+        // Main-less Svelte carrier's IDE TSX reaches the LSP.
+        let ide = registry.get_ide(&uri);
+        assert!(
+            ide.is_some(),
+            "the Main-less Svelte carrier's IDE TSX must reach the LSP `get_ide` slow path — \
+             pre-migration this returned None because `ensure_compiled` demanded a runtime Main \
+             the Svelte carrier never produces"
+        );
+        let ide = ide.unwrap();
+        // Svelte-specific IDE output (the @verter/svelte-jsx pragma) — NOT Vue
+        // TSX. This confirms the carrier-correct surface reached the LSP.
+        assert!(
+            ide.code.contains("@jsxImportSource @verter/svelte-jsx"),
+            "the LSP must receive the Svelte-specific IDE TSX, got:\n{}",
+            ide.code
+        );
+        assert!(
+            !ide.code.contains("_sfc_main"),
+            "the LSP must NOT receive Vue SFC TSX residue for a .svelte carrier"
         );
     }
 

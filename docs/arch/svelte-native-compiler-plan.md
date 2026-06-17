@@ -1220,6 +1220,17 @@ perf job is MODELED on this — the same package, the same workflow shape — no
 - Hardcoded `compile_sfc` / `compile_from_parsed` / `vue_parse` routing in
   `crates/verter_session/src/host_resolve/virtual_file_pipeline.rs::compile_entry()` — DELETED, replaced
   by `CarrierCompilerRegistry::compile_bundle` dispatch (Block 1, LANDED).
+- **CARRY-FORWARD (audit / helper compile callers → carrier registry).** The audited compile entry
+  `crates/verter_session/src/host_compile_audit.rs::compile_with_audit_options()` still drives the
+  hardcoded Vue SFC compiler (`verter_compiler::compile::compile`) directly — a second Vue runtime-compile
+  path outside the carrier registry. STEP-0 explicitly deferred migrating the audit / helper compile
+  callers in Block 1, so the full carrier migration (route it through `compile_bundle`, returning per-carrier
+  output) is NOT done in Block 1. To close the SILENT-WRONG-OUTPUT risk in the interim, `compile_with_audit`
+  is made explicitly VUE-ONLY: it classifies the file and FAILS CLOSED on a non-Vue framework carrier
+  (a `.svelte` file) with a typed `VerterE001` diagnostic rather than silently Vue-compiling it (Block 1).
+  Follow-on: migrate `compile_with_audit_options` (and any other audit/helper compile caller) to the carrier
+  registry so the audited path compiles every registered carrier — tracked here; `TODO(follow-up)` at the
+  `host_compile_audit.rs` callsite.
 - Generic `assemble_main_module` consuming the Vue-shaped `VerterCompileResult` — renamed
   `assemble_vue_main_module`, consumes the NEUTRAL `RuntimeCompileOutput` (Block 1, D-6, LANDED).
 - Any dual-path / framework-branch / feature-flag in `compile_entry()` after Block 1 — forbidden by

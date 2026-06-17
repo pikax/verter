@@ -989,6 +989,12 @@ impl VerterLanguageServer {
             if !self.documents.host().ensure_loaded(&child_canonical_id) {
                 return None;
             }
+            // ANALYSIS-facing (NOT IDE-sync): this drives the shared compile so
+            // the imported component's analysis is populated, then reads
+            // `get_analysis` below — it does NOT consume IDE TSX. The result is
+            // ignored; the compile side-effect lands the analysis before any
+            // (Main-less-carrier) `MissingVirtualNode`, so a Svelte child's
+            // analysis still resolves. Kept on `ensure_compiled` deliberately.
             let profile = self.documents.tsx_profile.read().clone();
             let _ = self
                 .documents

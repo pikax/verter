@@ -1296,6 +1296,14 @@ impl VerterHost {
             .compile_requests
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
+        // Feature-independent cold-compile rail (see
+        // `MetaProvenance::compile_cold_runs`): bumped once per cold run past
+        // the warm-hit consult — the deterministic observability of compile-slot
+        // COALESCING that the `session_metrics`-gated `compile_requests` mirrors.
+        self.provenance
+            .compile_cold_runs
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
         #[cfg(feature = "session_metrics")]
         let compile_start = Instant::now();
 
@@ -1705,18 +1713,42 @@ impl VerterHost {
         }
     }
 
+    /// Normalize a caller profile to one that REQUESTS the IDE/TSX surface.
+    ///
+    /// The IDE TSX is produced only when the compile profile's target carries
+    /// the `TSX` bit (`want_ide = profile.target.needs_tsx()`). A caller's
+    /// runtime profile (e.g. the bundler default, no TSX) would otherwise drive
+    /// a compile that yields no `CachedTsx`, so the IDE-ensure path (and the
+    /// `get_ide` peek) MUST first add the `TSX` bit. Adding it is idempotent for
+    /// an already-IDE profile (the LSP `tsx_profile`), so the normalized
+    /// `profile_hash` is stable across both paths: `ensure_ide_compiled`
+    /// populates exactly the slot `get_ide` peeks. Every other knob
+    /// (source-map, production, SSR, overrides) is preserved verbatim, so the
+    /// IDE projection still reflects the caller's source-map / production
+    /// choices.
+    fn ide_normalized_profile(profile: &CompileProfile) -> CompileProfile {
+        let mut normalized = profile.clone();
+        normalized.target |= verter_compiler::compile::CompileTarget::TSX;
+        normalized
+    }
+
     /// Ensure the IDE (`CachedTsx`) projection exists for `(canonical, profile)`.
     ///
     /// Drives the shared compile under [`CompileDemand::Ide`] — it NEVER
     /// requests `VirtualNodeKind::Main`, so a carrier that projects only an IDE
-    /// surface (Svelte today) succeeds without a runtime `Main`. Return
-    /// contract:
+    /// surface (Svelte today) succeeds without a runtime `Main`. The caller's
+    /// profile is normalized to an IDE/TSX-bearing target INTERNALLY (see
+    /// [`Self::ide_normalized_profile`]) so the compile produces the IDE surface
+    /// regardless of the caller's runtime target. Return contract:
     ///
     /// * `Ok(true)` — `(canonical, profile)` now has a cached `CachedTsx` (an
-    ///   immediate [`get_ide`](Self::get_ide) returns `Some`).
+    ///   immediate [`get_ide`](Self::get_ide) returns `Some`). This holds
+    ///   WHENEVER the carrier has an IDE surface — even when the caller passed a
+    ///   bundler / runtime profile with no `TSX` bit.
     /// * `Ok(false)` — the loaded file has NO IDE projection surface (e.g. a
     ///   non-carrier / a carrier that declined IDE): no error, simply nothing
-    ///   to project.
+    ///   to project. `Ok(false)` means a genuine no-IDE-surface, never "the
+    ///   caller's profile happened to lack the TSX target".
     /// * `Err(_)` — a real failure (missing source, compile error, …); a real
     ///   failure is NEVER collapsed into `Ok(false)`.
     ///
@@ -1752,13 +1784,13 @@ impl VerterHost {
 
         // A real failure (missing source, compile error) propagates as `Err`
         // — never collapsed into `Ok(false)`. A successful compile that
-        // produced no IDE artifact (a carrier whose profile target did not
-        // request the IDE projection) is `Ok(false)`. The compile + the
-        // subsequent `get_ide` read share the SAME profile, so the slot the
-        // `CachedTsx` lands in is exactly the one `get_ide` peeks; the IDE
-        // profile carries the `TSX` target bit (`CompileTarget::IDE`), which
-        // drives `want_ide` through `ensure_compile_artifacts`.
-        let served = self.ensure_compile_artifacts(canonical, profile, CompileDemand::Ide)?;
+        // produced no IDE artifact (a non-carrier surface) is `Ok(false)`. The
+        // profile is normalized to carry the `TSX` target bit so `want_ide` is
+        // driven regardless of the caller's runtime target; the compile + the
+        // subsequent `get_ide` read share the SAME normalized profile, so the
+        // slot the `CachedTsx` lands in is exactly the one `get_ide` peeks.
+        let ide_profile = Self::ide_normalized_profile(profile);
+        let served = self.ensure_compile_artifacts(canonical, &ide_profile, CompileDemand::Ide)?;
         Ok(served.tsx.is_some())
     }
 
@@ -1774,7 +1806,13 @@ impl VerterHost {
     /// output is only consumed by the LSP and playground, never by bundlers.
     pub fn get_ide(&self, canonical_id: &str, profile: &CompileProfile) -> Option<IdeResponse> {
         let canonical = self.resolve_alias_or_canonical(canonical_id);
-        let profile_hash = compile_profile_hash(profile);
+        // Peek the IDE/TSX-normalized slot — the SAME slot `ensure_ide_compiled`
+        // populates. A caller that ensured with a bundler / runtime profile (no
+        // TSX bit) lands its `CachedTsx` in the TSX-normalized slot; peeking the
+        // un-normalized profile_hash would miss it. Normalization is idempotent
+        // for an already-IDE profile, so the LSP `tsx_profile` path is unchanged.
+        let ide_profile = Self::ide_normalized_profile(profile);
+        let profile_hash = compile_profile_hash(&ide_profile);
 
         {
             if self.is_canonical_evicted(&canonical) {

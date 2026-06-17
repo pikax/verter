@@ -823,6 +823,13 @@ pub(crate) fn resolve_component_for(
                 target: verter_session::CompileTarget::ANALYSIS,
                 ..Default::default()
             };
+            // ANALYSIS-facing (NOT IDE-sync): this drives the shared compile to
+            // populate the file's analysis/template-data, then reads
+            // `get_analysis` — it does NOT consume IDE TSX. The result is
+            // ignored; the compile side-effect populates the analysis store
+            // before the (Main-less-carrier) `MissingVirtualNode`, so a Svelte
+            // carrier's analysis still lands. Kept on `ensure_compiled`
+            // deliberately: it wants the analysis surface, not the IDE surface.
             let _ = host.ensure_compiled(canonical_id, &profile);
             analysis = host.get_analysis(canonical_id);
         }

@@ -191,20 +191,29 @@ fn forbidden_producer_calls_in_compile_entry(file: &File) -> Vec<String> {
     };
     collector.visit_block(&entry.block);
 
-    // One-level local helper expansion: any free fn `compile_entry` calls is
-    // also scanned (an indirection like `fn h() { compile_sfc(...) }` reached
-    // from the entry body would otherwise evade a body-only scan).
-    let mut reached: Vec<String> = collector.free_calls.clone();
+    // One-level local helper expansion: any free fn OR same-impl method
+    // `compile_entry` calls is also scanned. `index_free_fns` keys BOTH free
+    // functions and impl methods by name, so a free-call indirection
+    // (`fn h() { compile_sfc(...) }`) AND a method-call indirection
+    // (`self.helper()` where `fn helper(&self) { compile_sfc(...) }`) are both
+    // followed one level. A body-only scan that ignored `self.method()` would
+    // let a future `compile_entry` hide a forbidden producer call behind a
+    // sibling method — this expansion closes that.
+    let mut seed: Vec<String> = collector.free_calls.clone();
+    seed.extend(collector.method_calls.clone());
     let mut helper_calls: Vec<String> = Vec::new();
-    for callee in &reached.clone() {
+    for callee in &seed {
         if let Some(f) = fns.get(callee) {
             let mut hc = CallNameCollector {
                 free_calls: Vec::new(),
                 method_calls: Vec::new(),
             };
             hc.visit_block(&f.block);
-            helper_calls.extend(hc.free_calls.clone());
-            reached.extend(hc.free_calls);
+            // Both the free CALLS and the method CALLS inside the reached
+            // helper count — the helper could itself call the producer as a
+            // free fn (`compile_sfc(...)`) or as a method (`self.compile(...)`).
+            helper_calls.extend(hc.free_calls);
+            helper_calls.extend(hc.method_calls);
         }
     }
 
@@ -328,6 +337,65 @@ fn no_hardcode_guard_catches_a_renamed_producer_import_and_call() {
     assert!(
         !all_use_bindings(&unrelated_glob).compiler_compile_glob,
         "the guard wrongly flagged an unrelated `crate::types::*` glob — it does not discriminate"
+    );
+}
+
+/// NEGATIVE self-test: the guard MUST follow `self.method()` indirection one
+/// level into a SAME-IMPL sibling method. A `compile_entry` that calls
+/// `self.helper()` where `helper` invokes a forbidden producer would evade a
+/// body-only / free-call-only scan; the method-call expansion catches it. This
+/// proves the method-indirection hardening discriminates — it fails against a
+/// tree that hides a producer behind a sibling method.
+#[test]
+fn no_hardcode_guard_follows_self_method_indirection_to_a_hidden_producer() {
+    // `compile_entry` calls NO forbidden producer directly and NO free helper —
+    // it only calls `self.assemble_runtime()`, a sibling method that itself
+    // calls the forbidden `compile_sfc()`. A free-call-only one-level expansion
+    // (a free-call-only guard) would miss this; the method-call expansion follows it.
+    let hidden_via_method = r#"
+        struct H;
+        impl H {
+            fn compile_entry(&self) -> u32 {
+                self.assemble_runtime()
+            }
+            fn assemble_runtime(&self) -> u32 {
+                let _ = compile_sfc();
+                0
+            }
+        }
+    "#;
+    let file =
+        syn::parse_file(hidden_via_method).expect("parse self.method()-hidden producer file");
+    let bad = forbidden_producer_calls_in_compile_entry(&file);
+    assert!(
+        bad.contains(&"compile_sfc".to_string()),
+        "the no-hardcode guard FAILED to follow `self.assemble_runtime()` indirection into the \
+         sibling method that calls `compile_sfc()` — the guard does not catch a method-hidden \
+         producer call. Got: {bad:?}"
+    );
+
+    // Discrimination floor: a SAME-SHAPED file whose sibling method calls a
+    // NON-forbidden function must NOT be flagged (the expansion follows the
+    // method but only forbidden producers count).
+    let clean_via_method = r#"
+        struct H;
+        impl H {
+            fn compile_entry(&self) -> u32 {
+                self.assemble_runtime()
+            }
+            fn assemble_runtime(&self) -> u32 {
+                let _ = compile_bundle();
+                0
+            }
+        }
+    "#;
+    let clean_file =
+        syn::parse_file(clean_via_method).expect("parse clean method-indirection file");
+    let clean = forbidden_producer_calls_in_compile_entry(&clean_file);
+    assert!(
+        clean.is_empty(),
+        "the guard wrongly flagged a clean `self.assemble_runtime()` → `compile_bundle()` \
+         indirection — it does not discriminate. Got: {clean:?}"
     );
 }
 

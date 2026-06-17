@@ -1,5 +1,13 @@
 //! `VerterHost::compile_with_audit` — single-file audited compile entry-point.
 //!
+//! VUE-ONLY: this entry drives the hardcoded Vue SFC runtime compiler
+//! ([`verter_compiler::compile::compile`]) directly — it is NOT the
+//! framework-neutral carrier path. It fails closed on a non-Vue framework
+//! carrier (a `.svelte` file) with a typed `VerterE001` diagnostic rather than
+//! silently Vue-compiling it. Routing this audited path through the carrier
+//! registry so it compiles every registered carrier is a tracked follow-up
+//! (docs/arch/svelte-native-compiler-plan.md §11).
+//!
 //! Wraps one [`verter_compiler::compile::compile`] call in the same
 //! audit-registration / TLS-observer machinery the component-meta entry-point
 //! uses. The producer crate (`verter_compiler`) emits `record_phase_timing`
@@ -159,6 +167,67 @@ impl VerterHost {
             }
         };
         let source: &str = source_arc.as_ref();
+
+        // Vue-only guard. `compile_sfc` (`verter_compiler::compile::compile`) is
+        // the hardcoded Vue SFC runtime compiler — it is NOT the framework-
+        // neutral carrier path (`compile_entry` → `CarrierCompilerRegistry::
+        // compile_bundle`). Driving a NON-Vue framework carrier (a `.svelte`
+        // file) through it would silently produce WRONG output (Vue-compiling a
+        // Svelte component). This audited path stays Vue-only and FAILS CLOSED
+        // on a non-Vue carrier with a clear typed diagnostic rather than
+        // emitting wrong bytes.
+        //
+        // TODO(follow-up): route `compile_with_audit` through the carrier
+        // registry (`compile_bundle`) so the audit path compiles every
+        // registered carrier — see docs/arch/svelte-native-compiler-plan.md §11
+        // (the audit/helper compile-caller carrier migration follow-up).
+        let language = self.language_classifier().classify(canonical_id);
+        if language.is_framework_carrier() && !language.is_vue() {
+            let mut unsupported = VerterCompileResult {
+                script: None,
+                template: None,
+                styles: Vec::new(),
+                custom_blocks: Vec::new(),
+                scope_id: String::new(),
+                errors: Vec::new(),
+                parse_duration_ms: 0.0,
+                total_duration_ms: 0.0,
+                tsx: None,
+                tsc: None,
+                template_data: None,
+                requested_mode: verter_audit::payloads::tags::CompileCacheModeTag::Session,
+                actual_mode: verter_audit::payloads::tags::CompileCacheModeTag::Session,
+                downgrade_reason: None,
+            };
+            unsupported
+                .errors
+                .push(verter_compiler::compile::CompileDiagnostic {
+                    severity: verter_compiler::compile::CompileDiagnosticSeverity::Error,
+                    code: "VerterE001".to_string(),
+                    message: format!(
+                        "compile_with_audit is the Vue-only audited compile path; the non-Vue \
+                         framework carrier '{canonical_id}' is not supported here (route it \
+                         through the carrier registry)"
+                    ),
+                    span: None,
+                });
+            let request_id = self.next_request_id();
+            let state = if self.config.audit_enabled {
+                verter_audit::AuditCaptureState::FilteredNoop
+            } else {
+                verter_audit::AuditCaptureState::AuditDisabled
+            };
+            let parent_request_id =
+                verter_scheduler::request_context::current_request_id().map(|id| id.to_string());
+            let record = noop_compile_record(
+                request_id,
+                canonical_id,
+                parent_request_id,
+                request_tag,
+                state,
+            );
+            return AuditedResult::ok(unsupported, record);
+        }
 
         let codegen_options = CodegenOptions {
             target,

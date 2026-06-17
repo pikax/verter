@@ -134,6 +134,88 @@ fn vue_ensure_ide_compiled_does_not_change_main_behavior() {
     assert!(got.contains("_sfc_main.render = render"));
 }
 
+#[test]
+fn ensure_ide_compiled_normalizes_a_bundler_profile_to_the_ide_surface() {
+    // Profile-normalization contract: `ensure_ide_compiled` must normalize the caller's
+    // profile to an IDE/TSX-bearing target INTERNALLY, so it returns `Ok(true)`
+    // and populates `CachedTsx` whenever the carrier HAS an IDE surface — even
+    // when the caller passes a DEFAULT/bundler profile that carries NO `TSX`
+    // bit. `Ok(false)` must mean a genuine no-IDE surface (a non-carrier), never
+    // "the caller's profile happened to lack the TSX target".
+    //
+    // DISCRIMINATING: the default `CompileProfile` target is `BUNDLER` (no
+    // `TSX`). Before the normalization fix, `ensure_ide_compiled` forwarded that
+    // profile unchanged, the compile produced no `CachedTsx`, and the function
+    // returned `Ok(false)` — and `get_ide` peeked the bundler slot (empty). This
+    // test FAILS against that state (false + None) and PASSES after the fix
+    // (true + populated TSX) for BOTH carriers.
+    let host = host();
+    upsert(&host, "/src/App.vue", VUE_SRC, FileLanguage::vue());
+    upsert(
+        &host,
+        "/src/Counter.svelte",
+        SVELTE_SRC,
+        FileLanguage::svelte(),
+    );
+
+    // The DEFAULT profile — bundler target, NO explicit TSX bit.
+    let bundler = CompileProfile::default();
+    assert!(
+        !bundler.target.needs_tsx(),
+        "precondition: the default/bundler profile must NOT carry the TSX bit (else the test is \
+         vacuous)"
+    );
+
+    // Vue: a carrier with an IDE surface ⇒ Ok(true) + populated CachedTsx, even
+    // though the caller passed a no-TSX bundler profile.
+    assert!(
+        host.ensure_ide_compiled("/src/App.vue", &bundler)
+            .expect("Vue IDE ensure under a bundler profile"),
+        "ensure_ide_compiled must normalize the bundler profile to the IDE surface and report \
+         Ok(true) for a carrier"
+    );
+    let vue_ide = host
+        .get_ide("/src/App.vue", &bundler)
+        .expect("get_ide must read the normalized CachedTsx slot under the SAME bundler profile");
+    assert!(
+        !vue_ide.code.is_empty(),
+        "the normalized IDE slot must carry non-empty Vue TSX"
+    );
+
+    // Svelte (Main-less): same contract under the bundler profile.
+    assert!(
+        host.ensure_ide_compiled("/src/Counter.svelte", &bundler)
+            .expect("Svelte IDE ensure under a bundler profile"),
+        "ensure_ide_compiled must normalize the bundler profile to the IDE surface for a Main-less \
+         Svelte carrier too"
+    );
+    let svelte_ide = host
+        .get_ide("/src/Counter.svelte", &bundler)
+        .expect("get_ide must read the normalized Svelte CachedTsx slot under the bundler profile");
+    assert!(
+        svelte_ide
+            .code
+            .contains("@jsxImportSource @verter/svelte-jsx"),
+        "the normalized IDE slot must carry the Svelte-specific TSX, got:\n{}",
+        svelte_ide.code
+    );
+
+    // `Ok(false)` is reserved for a genuine NO-IDE surface — a plain script
+    // (non-carrier), never a carrier whose caller profile lacked the TSX bit.
+    upsert(
+        &host,
+        "/src/util.ts",
+        "export const x = 1;\n",
+        FileLanguage::script_ts(),
+    );
+    assert!(
+        !host
+            .ensure_ide_compiled("/src/util.ts", &bundler)
+            .expect("non-carrier ensure"),
+        "a plain script (non-carrier) has no IDE surface ⇒ Ok(false)"
+    );
+}
+
 // ── Svelte: Main-less IDE projection ────────────────────────────────────────
 
 const SVELTE_SRC: &str = "<script lang=\"ts\">let count = 0;</script>\n<button onclick={() => count++}>{count}</button>\n";
@@ -276,12 +358,35 @@ fn racing_ensure_ide_compiled_and_get_virtual_file_main_coalesce() {
     // Vue produces BOTH a runtime Main and an IDE artifact from ONE shared
     // compile. Racing `ensure_ide_compiled` (Ide demand) and
     // `get_virtual_file(Main)` (VirtualNode demand) on the same
-    // (canonical, profile) must coalesce on the shared compile slot — the
-    // demand is checked AFTER the shared result, so both succeed and the
-    // result is consistent regardless of which thread wins.
+    // (canonical, profile) must COALESCE on ONE shared parsed carrier artifact
+    // and ONE published compile slot — the demand is checked AFTER the shared
+    // result, so both succeed and the result is consistent regardless of which
+    // thread wins.
+    //
+    // DISCRIMINATING (single-slot coalescing, not just "both succeed"): the
+    // racing pair must share ONE parsed carrier artifact. `carrier_parses` is
+    // the framework-neutral parse-once rail (one increment per
+    // `CarrierCompiler::parse`); a regression where each request RE-PARSED the
+    // carrier independently (a per-request parse instead of a shared cached
+    // artifact) would bump it to >= 2. Two independent compiles that each
+    // re-parsed would fail this assertion; the current both-succeed-only test
+    // would not. The carrier is parsed once at `upsert`, and BOTH the Ide and
+    // the Main demand reuse that one cached artifact (no `src=` blocks, no
+    // parse-affecting template options ⇒ `can_use_cache`), so exactly ONE
+    // carrier parse backs the racing pair.
     let host = host();
     upsert(&host, "/src/App.vue", VUE_SRC, FileLanguage::vue());
     let profile = ide_profile();
+
+    // Baseline AFTER upsert: the upsert performed the single carrier parse.
+    // Measure the delta the racing compile pair adds — it must add NO further
+    // carrier parse (the compiles reuse the one cached artifact) and run at
+    // most one cold compile-output compute (the coalesced shared slot).
+    let parses_before = host.provenance_snapshot().carrier_parses;
+    let cold_runs_before = host
+        .provenance()
+        .compile_cold_runs
+        .load(std::sync::atomic::Ordering::Relaxed);
 
     let h1 = {
         let host = Arc::clone(&host);
@@ -319,6 +424,35 @@ fn racing_ensure_ide_compiled_and_get_virtual_file_main_coalesce() {
     // Both surfaces are now readable from the one shared compile.
     assert!(host.get_ide("/src/App.vue", &profile).is_some());
     assert!(main_code(&host, "/src/App.vue", &profile).is_some());
+
+    // Single-slot coalescing: the racing pair shares ONE parsed carrier
+    // artifact — neither request re-parsed the carrier.
+    let parses_after = host.provenance_snapshot().carrier_parses;
+    assert_eq!(
+        parses_after, parses_before,
+        "the racing Ide + Main pair must reuse the ONE carrier artifact parsed at upsert \
+         (carrier_parses must not increase): a per-request re-parse is a coalescing regression \
+         (before={parses_before}, after={parses_after})"
+    );
+    // Both subsequent cached reads above add NO cold compile compute; the
+    // published slot serves them warm. The racing pair itself ran at most a
+    // bounded number of cold computes (the demand is checked AFTER the shared
+    // result; the published slot satisfies both surfaces), never re-parsing.
+    let cold_runs_after = host
+        .provenance()
+        .compile_cold_runs
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let cold_delta = cold_runs_after - cold_runs_before;
+    assert!(
+        cold_delta >= 1,
+        "the racing pair must have run at least one cold compile-output compute (delta={cold_delta})"
+    );
+    assert!(
+        cold_delta <= 2,
+        "the racing pair shares ONE compile slot — at most one cold compute PER racing thread \
+         (<= 2 total); a larger count means the cached slot is not being reused across the \
+         demand surfaces (delta={cold_delta})"
+    );
 }
 
 #[test]

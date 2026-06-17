@@ -2780,6 +2780,16 @@ pub struct MetaProvenance {
     pub bundle_cold_flight_runs: std::sync::atomic::AtomicU64,
     pub dep_resolution_calls: std::sync::atomic::AtomicU64,
     pub imported_macro_declaration_builds: std::sync::atomic::AtomicU64,
+    /// Cold compile-output computes: bumped exactly once per cold run of
+    /// `ensure_compile_artifacts` (the path PAST the warm-hit consult, where
+    /// the shared compile actually executes). The deterministic, feature-
+    /// independent observability rail for compile-slot COALESCING: two
+    /// concurrent requests on the SAME `(canonical, profile)` that coalesce
+    /// onto one shared compile bump this ONCE; two independent compiles bump it
+    /// twice. (The `session_metrics` `compile_requests` counter mirrors this
+    /// but is feature-gated; this `MetaProvenance` rail is always on, like the
+    /// cold per-file artifact-build dedup counters below.) `reset()` zeroes it.
+    pub compile_cold_runs: std::sync::atomic::AtomicU64,
 
     // ── Cold per-file artifact-build dedup counters ─────────────────────
     //
@@ -2984,6 +2994,7 @@ impl Default for MetaProvenance {
             bundle_cold_flight_runs: std::sync::atomic::AtomicU64::new(0),
             dep_resolution_calls: std::sync::atomic::AtomicU64::new(0),
             imported_macro_declaration_builds: std::sync::atomic::AtomicU64::new(0),
+            compile_cold_runs: std::sync::atomic::AtomicU64::new(0),
             eval_program_parses: std::sync::atomic::AtomicU64::new(0),
             carrier_parses: std::sync::atomic::AtomicU64::new(0),
             sfc_parses: std::sync::atomic::AtomicU64::new(0),
@@ -3144,6 +3155,7 @@ impl std::fmt::Debug for MetaProvenance {
                 "imported_macro_declaration_builds",
                 &self.imported_macro_declaration_builds.load(Relaxed),
             )
+            .field("compile_cold_runs", &self.compile_cold_runs.load(Relaxed))
             .field(
                 "ensure_loaded_calls",
                 &self.ensure_loaded_calls.load(Relaxed),
@@ -3252,6 +3264,7 @@ impl MetaProvenance {
             bundle_cold_flight_runs: self.bundle_cold_flight_runs.load(Relaxed),
             dep_resolution_calls: self.dep_resolution_calls.load(Relaxed),
             imported_macro_declaration_builds: self.imported_macro_declaration_builds.load(Relaxed),
+            compile_cold_runs: self.compile_cold_runs.load(Relaxed),
             eval_program_parses: self.eval_program_parses.load(Relaxed),
             carrier_parses: self.carrier_parses.load(Relaxed),
             sfc_parses: self.sfc_parses.load(Relaxed),
@@ -3355,6 +3368,7 @@ impl MetaProvenance {
         self.bundle_cold_flight_runs.store(0, Relaxed);
         self.dep_resolution_calls.store(0, Relaxed);
         self.imported_macro_declaration_builds.store(0, Relaxed);
+        self.compile_cold_runs.store(0, Relaxed);
         self.eval_program_parses.store(0, Relaxed);
         self.carrier_parses.store(0, Relaxed);
         self.sfc_parses.store(0, Relaxed);
@@ -3511,6 +3525,7 @@ pub struct MetaProvenanceSnapshot {
     pub bundle_cold_flight_runs: u64,
     pub dep_resolution_calls: u64,
     pub imported_macro_declaration_builds: u64,
+    pub compile_cold_runs: u64,
     pub eval_program_parses: u64,
     pub carrier_parses: u64,
     pub sfc_parses: u64,

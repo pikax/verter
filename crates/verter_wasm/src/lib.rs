@@ -459,9 +459,12 @@ impl WasmVerterHost {
     /// (Svelte) populates its `CachedTsx` and a subsequent [`get_ide`](Self::get_ide)
     /// succeeds. `getIde` itself stays a pure cached read.
     ///
-    /// Returns `true` when `(canonical, profile)` now has a cached IDE
-    /// projection, `false` when the loaded file has no IDE surface (a
-    /// non-carrier). A real failure (missing source / compile error) throws.
+    /// The caller profile is OPTIONAL and is normalized to an IDE/TSX-bearing
+    /// target INTERNALLY, so a default / bundler profile (no TSX bit) still
+    /// produces the IDE surface. Returns `true` whenever the carrier HAS an IDE
+    /// surface — regardless of the caller's runtime target — and `false` ONLY
+    /// for a genuine no-IDE-surface file (a non-carrier / plain script). A real
+    /// failure (missing source / compile error) throws.
     #[wasm_bindgen(js_name = ensureIdeCompiled)]
     pub fn ensure_ide_compiled(
         &self,

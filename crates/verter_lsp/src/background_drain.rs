@@ -249,9 +249,15 @@ pub(super) async fn resync_aliased_imports_for_open_files(
             continue;
         }
 
-        // Compile to generate public API
+        // Compile to generate public API. IDE-sync: gate on the IDE/TSX surface
+        // (not the runtime `Main`) so a Main-less carrier (Svelte) — which has a
+        // `CachedTsx` but no `Main` — is not skipped. `Ok(false)` (no IDE
+        // surface) skips; otherwise proceed to the owner-aware provider sync.
         let profile = documents.tsx_profile.read().clone();
-        if host.ensure_compiled(import_id, &profile).is_err() {
+        if !host
+            .ensure_ide_compiled(import_id, &profile)
+            .unwrap_or(false)
+        {
             continue;
         }
 
@@ -434,8 +440,13 @@ pub(super) async fn resync_aliased_imports_for_open_files(
                 continue;
             }
 
+            // IDE-sync: gate on the IDE/TSX surface (not the runtime `Main`) so
+            // a Main-less carrier (Svelte) is not skipped here.
             let profile = documents.tsx_profile.read().clone();
-            if host.ensure_compiled(carrier_id, &profile).is_err() {
+            if !host
+                .ensure_ide_compiled(carrier_id, &profile)
+                .unwrap_or(false)
+            {
                 continue;
             }
 
@@ -607,7 +618,10 @@ pub(super) async fn sync_pending_carrier_provider_file(
     documents.host.invalidate_compile_slots(canonical_id);
     documents.host.bump_diagnostics_generation(canonical_id);
     let profile = documents.tsx_profile.read().clone();
-    let _ = block_in_place_if_available(|| documents.host.ensure_compiled(canonical_id, &profile));
+    // IDE-sync: drive the IDE/TSX surface (not the runtime `Main`) so a
+    // Main-less carrier (Svelte) populates its `CachedTsx` before `get_ide`.
+    let _ =
+        block_in_place_if_available(|| documents.host.ensure_ide_compiled(canonical_id, &profile));
     let ide = block_in_place_if_available(|| documents.host.get_ide(canonical_id, &profile));
     let is_jsx = ide.as_ref().map(|output| output.is_jsx).unwrap_or(false);
     let is_open = documents.canonical_id_to_uri(canonical_id).is_some();

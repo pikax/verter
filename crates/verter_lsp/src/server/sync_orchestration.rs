@@ -1738,11 +1738,14 @@ impl VerterLanguageServer {
 
                 self.documents.host().ensure_loaded(canonical_id);
 
+                // IDE-sync: gate on the IDE/TSX surface (not the runtime
+                // `Main`) so a Main-less carrier (Svelte) is not skipped — its
+                // IDE TSX still syncs to the provider below.
                 let profile = self.documents.tsx_profile.read().clone();
                 self.documents
                     .host
-                    .ensure_compiled(canonical_id, &profile)
-                    .is_ok()
+                    .ensure_ide_compiled(canonical_id, &profile)
+                    .unwrap_or(false)
             });
 
             if compiled {
@@ -1806,13 +1809,15 @@ impl VerterLanguageServer {
 
             self.documents.host().ensure_loaded(canonical_id);
 
-            // Compile
+            // Compile. IDE-sync: gate on the IDE/TSX surface (not the runtime
+            // `Main`) so a Main-less carrier (Svelte) is not stranded — its IDE
+            // TSX feeds `sync_compiled_carrier_to_provider` below.
             let profile = self.documents.tsx_profile.read().clone();
-            if self
+            if !self
                 .documents
                 .host
-                .ensure_compiled(canonical_id, &profile)
-                .is_err()
+                .ensure_ide_compiled(canonical_id, &profile)
+                .unwrap_or(false)
             {
                 return None;
             }

@@ -201,10 +201,15 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
         return;
     }
 
-    // Sync IDE (TSX) output to type provider
+    // Sync IDE (TSX) output to type provider. IDE-sync: drive the IDE/TSX
+    // surface (not the runtime `Main`) so a Main-less carrier (Svelte)
+    // populates its `CachedTsx` before the `get_ide` read below.
     let profile = deps.documents.tsx_profile.read().clone();
-    let _ =
-        tokio::task::block_in_place(|| deps.documents.host.ensure_compiled(canonical_id, &profile));
+    let _ = tokio::task::block_in_place(|| {
+        deps.documents
+            .host
+            .ensure_ide_compiled(canonical_id, &profile)
+    });
     tracing::info!("sync_coordinator: HOST_GET_IDE_START {canonical_id}");
     let ide = tokio::task::block_in_place(|| deps.documents.host.get_ide(canonical_id, &profile));
     let is_jsx = ide.as_ref().map(|ide| ide.is_jsx).unwrap_or(false);
