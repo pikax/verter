@@ -585,8 +585,8 @@ impl ExecutorResolveCtx<'_> {
     /// Resolve a path projection off a base node handle through the shared
     /// path-projection dispatch.
     ///
-    /// Not exercised by the Vue adapter (Vue plans only public-type +
-    /// macro-payload demands), but a real, non-stub resolution for later
+    /// Not exercised by the Vue adapter (Vue plans only macro-payload
+    /// demands), but a real, non-stub resolution for later
     /// framework verticals: it resolves the base declaration's carrier then
     /// projects `path` through the shared shallow-surface dispatch.
     ///
