@@ -286,7 +286,11 @@ pub fn append_component_candidate_branches<H: FallthroughResolverHost>(
         host.current_dependency_fact_versions(&child_id),
     );
 
-    if !child_id.ends_with(".vue") {
+    if !verter_language::LanguageRegistry::global()
+        .classify_static(&child_id)
+        .static_resolution()
+        .is_framework_carrier()
+    {
         *any_unresolved = true;
         fallthrough_branches.push(unresolved_child_resolution_branch(
             branch_key,
@@ -1651,6 +1655,111 @@ mod tests {
         assert!(!any_unresolved);
         assert_eq!(branches.len(), 1);
         assert_eq!(branches[0].branch_key, "0.0");
+        assert_eq!(facts.len(), 2);
+    }
+
+    #[test]
+    fn append_component_candidate_branches_resolves_svelte_child_fallthrough() {
+        // A `.svelte` child component is a framework CARRIER, exactly like a
+        // `.vue` SFC. The child-resolution gate is carrier-generic
+        // (`is_framework_carrier()`, via the static classifier), so a resolved
+        // `.svelte` child's fallthrough / root-attr inheritance IS computed —
+        // its resolution branch is NOT forced unresolved.
+        //
+        // DISCRIMINATING: under the pre-fix `child_id.ends_with(".vue")` gate a
+        // `.svelte` child fails the suffix check, so `*any_unresolved` is set,
+        // an `unresolved_child_resolution_branch` (status `Unresolved`,
+        // branch_key `"0"`) is pushed, and the function returns BEFORE calling
+        // `resolve_child_fallthrough` — so the child resolution's facts never
+        // merge. Every assertion below (no unresolved, the `"0.0"` resolved
+        // branch_key, `Resolved` status, two facts) FAILS against the old gate
+        // and PASSES with the carrier-generic one. This mirrors the `.vue`
+        // sibling test above, swapping the carrier extension.
+        let mut host = TestHost::default();
+        host.canonical_routes.insert(
+            ("/App.vue".to_string(), "./Child.svelte".to_string()),
+            "/Child.svelte".to_string(),
+        );
+        host.child_resolutions.insert(
+            "/Child.svelte".to_string(),
+            TestResolution {
+                accepted_props: vec![AcceptedPropAnalysis {
+                    name: "title".to_string(),
+                    type_expr: TypeExpr::primitive(PrimitiveName::String),
+                    raw_type: Some("string".to_string()),
+                    raw_type_expr: None,
+                    required: false,
+                    provenance: MemberProvenance::Declared,
+                    availability: MemberAvailability::Always,
+                    kind: AcceptedPropKind::DeclaredProp,
+                }],
+                accepted_events: vec![],
+                fallthrough_surface: FallthroughSurface::Branches {
+                    branches: vec![FallthroughBranch {
+                        branch_key: "0".to_string(),
+                        condition_text: None,
+                        props: vec![],
+                        events: vec![],
+                        root_chain: vec![ResolvedRootStep::NativeTag {
+                            tag: "div".to_string(),
+                        }],
+                        status: BranchStatus::Resolved,
+                    }],
+                },
+                fact_versions: vec![crate::resolver_core::FactVersionRef::FileWholeHash {
+                    canonical_id: "/Child.svelte".to_string(),
+                    hash: [2; 16],
+                }],
+            },
+        );
+
+        let mut branches = Vec::new();
+        let mut any_partial = false;
+        let mut any_unresolved = false;
+        let mut facts = Vec::new();
+        append_component_candidate_branches(
+            &host,
+            "/App.vue",
+            "Child",
+            "./Child.svelte",
+            None,
+            None,
+            "0".to_string(),
+            None,
+            &[],
+            &[],
+            &[],
+            None,
+            &FxHashSet::default(),
+            &FxHashSet::default(),
+            &FxHashSet::default(),
+            &mut branches,
+            &mut any_partial,
+            &mut any_unresolved,
+            &mut facts,
+            &mut FxHashSet::default(),
+        );
+
+        // The `.svelte` child resolved: NOT forced into the unresolved branch.
+        assert!(!any_partial);
+        assert!(
+            !any_unresolved,
+            "a resolved `.svelte` carrier child must not force the unresolved branch"
+        );
+        assert_eq!(branches.len(), 1);
+        // The resolved-child fallthrough composition produces the nested
+        // `"0.0"` branch_key, NOT the bare `"0"` of an unresolved branch.
+        assert_eq!(
+            branches[0].branch_key, "0.0",
+            "the resolved-child fallthrough branch must be composed, not stubbed unresolved"
+        );
+        assert_eq!(
+            branches[0].status,
+            BranchStatus::Resolved,
+            "the `.svelte` child branch must be Resolved, not Unresolved"
+        );
+        // The child resolution's fact version merged in (it would be absent had
+        // the gate returned early before `resolve_child_fallthrough`).
         assert_eq!(facts.len(), 2);
     }
 
