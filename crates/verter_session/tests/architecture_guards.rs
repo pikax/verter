@@ -15658,6 +15658,15 @@ mod single_resolution_engine_guards {
     const TYPE_SURFACE_PATH_FILE_ALLOWLIST: &[(&str, usize)] = &[
         ("crates/verter_compiler/src/compile/mod.rs", 4),
         ("crates/verter_compiler/src/compile/types.rs", 1),
+        // The Vue carrier's PRIVATE runtime-compile extras sidecar
+        // (`VueRuntimeCompileExtras.external_types`, typed via the
+        // `type_surface::ResolvedElements` path). A Vue-module pass-through that
+        // keeps the eager type-surface engine OUT of the neutral cross-framework
+        // `RuntimeCompileOptions` — NOT a new type-surface engine path.
+        (
+            "crates/verter_compiler/src/framework_common/vue_bridge.rs",
+            1,
+        ),
         ("crates/verter_compiler/src/script/macros.rs", 5),
         ("crates/verter_compiler/src/script/mod.rs", 1),
         ("crates/verter_compiler/src/tsc/script.rs", 35),
@@ -15796,6 +15805,16 @@ mod single_resolution_engine_guards {
     const RESOLVED_ELEMENTS_FILE_ALLOWLIST: &[(&str, usize)] = &[
         ("crates/verter_compiler/src/compile/mod.rs", 2),
         ("crates/verter_compiler/src/compile/types.rs", 1),
+        // The Vue carrier's PRIVATE runtime-compile extras
+        // (`VueRuntimeCompileExtras.external_types`): the host-resolved external
+        // macro types forwarded into `compile_from_parsed`. This is a Vue-module
+        // sidecar that keeps `ResolvedElements` OUT of the neutral cross-framework
+        // `RuntimeCompileOptions` (the carrier-runtime cutover) — a pass-through of
+        // already-resolved data, NOT a new resolution engine.
+        (
+            "crates/verter_compiler/src/framework_common/vue_bridge.rs",
+            1,
+        ),
         ("crates/verter_compiler/src/script/macros.rs", 2),
         ("crates/verter_compiler/src/script/mod.rs", 1),
         ("crates/verter_compiler/src/tsc/script.rs", 5),

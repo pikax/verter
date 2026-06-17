@@ -29,7 +29,10 @@ pub mod vue_bridge;
 pub mod sourcemap_e2e_helpers;
 
 pub use carrier_compiler::{
-    CarrierCompiler, CompileUnsupported, IdeCompileOptions, IdeOutput, ParseOptions, TemplateFacts,
+    CarrierCompiler, CompileUnsupported, IdeCompileOptions, IdeOutput, ParseOptions,
+    RuntimeCompileOptions, RuntimeCompileOutput, RuntimeCustomBlock, RuntimeDiagnostic,
+    RuntimeDiagnosticSeverity, RuntimeMainModule, RuntimeScriptBlock, RuntimeStyleBlock,
+    RuntimeTemplateBlock, TemplateFacts,
 };
 pub use ctx::CarrierCompilerCtx;
 pub use registry::CarrierCompilerRegistry;

@@ -26,7 +26,7 @@ use std::sync::Arc;
 use verter_language::{FrameworkAdapterId, FrameworkParseArtifact, LanguageId};
 
 use crate::compile::template_data::RawTemplateData;
-use crate::compile::types::{CompileTarget, DestructuredBlockMeta};
+use crate::compile::types::{CompileDiagnosticSeverity, CompileTarget, DestructuredBlockMeta};
 
 /// Parse-affecting options threaded into [`CarrierCompiler::parse`].
 ///
@@ -119,11 +119,229 @@ pub struct TemplateFacts {
     pub data: RawTemplateData,
 }
 
+/// Runtime-codegen options threaded into [`CarrierCompiler::compile_bundle`].
+///
+/// The neutral, framework-shared subset of the host's compile profile a
+/// carrier consults to produce its executable module. Each carrier reads
+/// only the options it supports (Vue ignores Svelte-specific output knobs
+/// and vice-versa). A framework whose runtime output needs a richer option
+/// extends this struct (a compile-visible decision), never a side channel.
+#[derive(Debug, Clone, Default)]
+pub struct RuntimeCompileOptions {
+    /// The carrier file name for component-name + source-map identity.
+    /// `None` falls back to the framework default.
+    pub filename: Option<String>,
+    /// Production mode: strips dev-only code (`__file`, HMR, dev instrumentation).
+    pub is_production: bool,
+    /// Generate source maps for the produced runtime output.
+    pub source_map: bool,
+    /// Server-side rendering mode (the carrier emits its SSR backend).
+    pub ssr: bool,
+    /// Runtime module name for helper imports (Vue default `"vue"`).
+    pub runtime_module_name: Option<String>,
+    /// Explicit component / scope id for scoped-style hashing.
+    pub component_id: Option<String>,
+    /// Force JavaScript output (strip TypeScript syntax).
+    pub force_js: bool,
+    /// Force Vapor-mode codegen regardless of template attributes (Vue).
+    pub force_vapor: bool,
+    /// Preserve HTML comments in template output (`None` = framework default).
+    pub comments: Option<bool>,
+    /// Custom template expression delimiters (Vue `{{ }}` override).
+    pub delimiters: Option<(String, String)>,
+    /// Tag names treated as custom elements (skip component resolution).
+    pub custom_elements: Option<Vec<String>>,
+    /// When true, ALSO request the IDE (`tsx`) artifact in the same pass so
+    /// the host populates its `CachedTsx` slot from one compile.
+    pub want_ide: bool,
+    /// When true, ALSO extract framework-neutral template facts in the same
+    /// pass (for template analysis).
+    pub want_template_data: bool,
+    /// Types module name for IDE/TSX helper imports (default `"$verter/types"`).
+    pub types_module_name: Option<String>,
+    /// Embed `declare module "@verter/types"` in any produced IDE output.
+    pub embed_ambient_types: bool,
+    /// Experimental: enable conditional root generic narrowing (IDE codegen).
+    pub conditional_root_narrowing: bool,
+    /// Experimental: strict slot children type checking (IDE codegen).
+    pub strict_slots: bool,
+    /// Framework-PRIVATE resolved compile inputs, opaque to the neutral
+    /// surface. A carrier downcasts this to its own typed extras
+    /// (`vue_bridge::VueRuntimeCompileExtras` — the host-resolved
+    /// `external_types` / `prop_constness` / `style_v_bind_vars`); a carrier
+    /// without a private extras shape ignores it. Keeping it opaque keeps any
+    /// framework's resolution-specific types (e.g. Vue's eager type-surface
+    /// output) OUT of the cross-framework contract.
+    pub framework_extras: Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>,
+}
+
+/// A framework-neutral severity for a runtime-bundle diagnostic.
+///
+/// Mirrors [`CompileDiagnosticSeverity`] in a carrier-shared shape so the
+/// host lifts bundle diagnostics into its `DiagnosticsSnapshot` without
+/// naming any framework-specific diagnostic type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeDiagnosticSeverity {
+    /// A hard error (fails the compile).
+    Error,
+    /// A non-fatal warning.
+    Warning,
+    /// Informational.
+    Info,
+}
+
+impl From<CompileDiagnosticSeverity> for RuntimeDiagnosticSeverity {
+    fn from(value: CompileDiagnosticSeverity) -> Self {
+        match value {
+            CompileDiagnosticSeverity::Error => Self::Error,
+            CompileDiagnosticSeverity::Warning => Self::Warning,
+            CompileDiagnosticSeverity::Info => Self::Info,
+        }
+    }
+}
+
+/// A framework-neutral runtime-bundle diagnostic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeDiagnostic {
+    /// Severity.
+    pub severity: RuntimeDiagnosticSeverity,
+    /// A framework-defined code string.
+    pub code: String,
+    /// Human-readable message.
+    pub message: String,
+    /// Optional carrier-absolute source span.
+    pub span: Option<verter_span::Span>,
+}
+
+/// The framework-OWNED ESM body the carrier emits for the runtime module.
+///
+/// Vue's carrier currently produces NO standalone body here — the Vue
+/// `_sfc_main` shape is assembled host-side from the neutral block fields
+/// (host virtual-file concern: style/custom virtual imports + HMR), so Vue
+/// leaves `body_code` `None` and the host assembles. A framework whose
+/// runtime module is a single self-contained ESM (Svelte's official-shaped
+/// output, later blocks) returns `Some` here and the host emits it verbatim.
+#[derive(Debug, Clone, Default)]
+pub struct RuntimeMainModule {
+    /// The framework-owned ESM body, when the carrier emits one directly.
+    /// `None` ⇒ the host assembles the main module from the block fields.
+    pub body_code: Option<String>,
+    /// Source map for `body_code` (empty when none / disabled).
+    pub source_map: String,
+    /// The language id of the produced body (`"js"` / `"ts"`), when known.
+    pub lang: Option<String>,
+}
+
+/// A framework-neutral compiled `<script>` block.
+#[derive(Debug, Clone)]
+pub struct RuntimeScriptBlock {
+    /// The generated script code.
+    pub code: String,
+    /// Source map (empty when none / disabled).
+    pub source_map: String,
+    /// Whether the block is a `<script setup>` (Vue) / instance script.
+    pub setup: bool,
+}
+
+/// A framework-neutral compiled template / render-function block.
+#[derive(Debug, Clone)]
+pub struct RuntimeTemplateBlock {
+    /// The generated template / render-function code.
+    pub code: String,
+    /// Source map (empty when none / disabled).
+    pub source_map: String,
+    /// Runtime helper imports from the runtime module.
+    pub imports: Vec<String>,
+    /// SSR runtime helper imports (empty for non-SSR builds).
+    pub ssr_imports: Vec<String>,
+}
+
+/// A framework-neutral compiled `<style>` block.
+#[derive(Debug, Clone)]
+pub struct RuntimeStyleBlock {
+    /// The processed CSS code.
+    pub code: String,
+    /// Optional explicit language (`scss`, …); `None` ⇒ plain CSS.
+    pub lang: Option<String>,
+}
+
+/// A framework-neutral custom block (`<i18n>`, `<docs>`, …).
+#[derive(Debug, Clone)]
+pub struct RuntimeCustomBlock {
+    /// The block tag (e.g. `"i18n"`).
+    pub block_type: String,
+    /// Raw block content.
+    pub content: String,
+}
+
+/// The neutral runtime bundle a [`CarrierCompiler::compile_bundle`] produces.
+///
+/// NOT `VerterCompileResult` (which is Vue-shaped). It losslessly carries
+/// every field the host's runtime assembly + virtual-file population needs:
+/// the framework-owned main body (when the carrier emits one directly), the
+/// block side-files, styles + custom blocks, the scope id, the IDE artifact
+/// (when requested in the same pass), template facts, and diagnostics. A
+/// carrier that cannot produce a runtime module (Svelte today) returns the
+/// bundle with `main.body_code = None` AND no block side-files — the host
+/// detects the absence of a runtime surface and populates only the IDE slot.
+///
+/// Not `Clone` — `RawTemplateData` is move-only, and the bundle is consumed
+/// once by the host's virtual-file population.
+#[derive(Debug, Default)]
+pub struct RuntimeCompileOutput {
+    /// The framework-owned main module (body / map / lang). `body_code`
+    /// `None` ⇒ the host assembles from the block fields (Vue) OR there is
+    /// no runtime surface (Svelte).
+    pub main: RuntimeMainModule,
+    /// The compiled `<script>` block, when present.
+    pub script: Option<RuntimeScriptBlock>,
+    /// The compiled template / render-function block, when present.
+    pub template: Option<RuntimeTemplateBlock>,
+    /// Compiled `<style>` blocks in source order.
+    pub styles: Vec<RuntimeStyleBlock>,
+    /// Custom blocks in source order.
+    pub custom_blocks: Vec<RuntimeCustomBlock>,
+    /// The scope id (`data-v-xxxxxxxx`), empty when none.
+    pub scope_id: String,
+    /// The IDE (TSX/JSX) artifact, present when `want_ide` was requested AND
+    /// the carrier projects one.
+    pub tsx: Option<IdeOutput>,
+    /// Framework-neutral template facts, present when `want_template_data`
+    /// was requested AND the carrier extracts them.
+    pub template_data: Option<RawTemplateData>,
+    /// Diagnostics emitted during the runtime compile. The host lifts these
+    /// into its `DiagnosticsSnapshot`; an error here fails the compile.
+    pub diagnostics: Vec<RuntimeDiagnostic>,
+}
+
+impl RuntimeCompileOutput {
+    /// Whether this bundle carries a RUNTIME surface (a directly-emitted
+    /// body OR host-assemblable block side-files). A carrier that produced
+    /// only an IDE artifact (Svelte) returns `false` — the host populates
+    /// the `CachedTsx` slot and emits no `Main` virtual node.
+    #[must_use]
+    pub fn has_runtime_surface(&self) -> bool {
+        self.main.body_code.is_some()
+            || self.script.is_some()
+            || self.template.is_some()
+            || !self.styles.is_empty()
+            || !self.custom_blocks.is_empty()
+    }
+
+    /// Whether any diagnostic in the bundle is an error.
+    #[must_use]
+    pub fn has_errors(&self) -> bool {
+        self.diagnostics
+            .iter()
+            .any(|d| d.severity == RuntimeDiagnosticSeverity::Error)
+    }
+}
+
 /// The compiler-side carrier framework trait.
 ///
 /// One impl per carrier framework. The host's carrier dispatch reaches
-/// these four operations through the [`super::registry`] lookup; Vue's
-/// impl (`vue_bridge::VueCarrierCompiler`) delegates to the existing Vue
+/// these operations through the [`super::registry`] lookup; Vue's impl
+/// (`vue_bridge::VueCarrierCompiler`) delegates to the existing Vue
 /// pipeline without editing any Vue parser/codegen module.
 pub trait CarrierCompiler: Send + Sync {
     /// The adapter id this compiler answers to (the registry key).
@@ -172,6 +390,33 @@ pub trait CarrierCompiler: Send + Sync {
 
     /// Extract framework-neutral template facts from the carrier parse.
     fn template_data(&self, source: &str, artifact: &FrameworkParseArtifact) -> TemplateFacts;
+
+    /// Produce the framework-neutral RUNTIME bundle for the carrier.
+    ///
+    /// `artifact` MUST match `source` plus the parse-affecting options the
+    /// carrier requires (the same precondition the per-framework
+    /// pre-parsed compile entry requires today): the host owns the
+    /// cached-parse validity decision and hands over either the valid
+    /// cached artifact or a fresh carrier parse of the merged source.
+    ///
+    /// The carrier owns the typed downcast and native compile and returns a
+    /// neutral [`RuntimeCompileOutput`] re-expressing every field the host's
+    /// runtime assembly + virtual-file population needs. A carrier that
+    /// cannot yet produce a runtime module for the requested target returns
+    /// a typed [`CompileUnsupported`]. A carrier whose framework projects
+    /// ONLY an IDE surface (Svelte today) returns a bundle whose `main`
+    /// body is absent and that carries the IDE artifact when `want_ide`.
+    ///
+    /// The adapter's codegen owns its own `CodeTransform` (the single
+    /// source of truth for generated-code edits); the returned `code` /
+    /// `source_map` pairs are produced by that transform verbatim.
+    fn compile_bundle(
+        &self,
+        source: &str,
+        artifact: &FrameworkParseArtifact,
+        opts: &RuntimeCompileOptions,
+        alloc: &oxc_allocator::Allocator,
+    ) -> Result<RuntimeCompileOutput, CompileUnsupported>;
 }
 
 #[cfg(test)]
@@ -286,6 +531,20 @@ mod contract_tests {
             _artifact: &FrameworkParseArtifact,
         ) -> TemplateFacts {
             TemplateFacts::default()
+        }
+
+        fn compile_bundle(
+            &self,
+            _source: &str,
+            _artifact: &FrameworkParseArtifact,
+            _opts: &RuntimeCompileOptions,
+            _alloc: &oxc_allocator::Allocator,
+        ) -> Result<RuntimeCompileOutput, CompileUnsupported> {
+            // The fixture produces no runtime module — the typed unsupported
+            // answer (invariant 4), never a silent empty bundle.
+            Err(CompileUnsupported::NoIdeProjection {
+                adapter_id: self.adapter_id(),
+            })
         }
     }
 

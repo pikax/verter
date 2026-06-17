@@ -27,7 +27,9 @@ use verter_language::{
 use verter_span::Span;
 
 use crate::framework_common::carrier_compiler::{
-    CarrierCompiler, CompileUnsupported, IdeCompileOptions, IdeOutput, ParseOptions, TemplateFacts,
+    CarrierCompiler, CompileUnsupported, IdeCompileOptions, IdeOutput, ParseOptions,
+    RuntimeCompileOptions, RuntimeCompileOutput, RuntimeDiagnostic, RuntimeDiagnosticSeverity,
+    TemplateFacts,
 };
 use crate::framework_common::ctx::{receive_svelte_carrier_token, CarrierCompilerCtx};
 
@@ -207,6 +209,62 @@ impl SvelteCarrierCompiler {
             .carrier_for::<SvelteParseCarrier>(artifact)
             .map(|carrier| carrier.parsed())
     }
+
+    /// Run the Svelte IDE projection once and return BOTH the rendered
+    /// [`IdeOutput`] and the neutral diagnostics it produced.
+    ///
+    /// The Svelte IDE codegen owns its OWN `CodeTransform` (the single source
+    /// of truth for generated-code edits): the projection is a pure syntactic
+    /// transform, NO type lowering (the thin-adapters guard). The output is a
+    /// `.svelte.tsx` that type-checks clean through TSGO.
+    ///
+    /// This is the SINGLE projection entry the carrier reaches; both
+    /// `compile_ide` (drops the diagnostics — the trait method has no
+    /// diagnostic channel) and `compile_bundle` (LIFTS them into the bundle)
+    /// route through it.
+    fn project_ide(
+        parsed: &ParsedSvelte,
+        source: &str,
+        opts: &IdeCompileOptions,
+    ) -> (IdeOutput, Vec<RuntimeDiagnostic>) {
+        let start = std::time::Instant::now();
+        let projection = crate::svelte::ide::project_svelte_ide(
+            source,
+            parsed,
+            opts.filename.as_deref(),
+            opts.skip_source_map,
+        );
+        let duration_ms = start.elapsed().as_secs_f64() * 1000.0;
+
+        let diagnostics = projection
+            .diagnostics
+            .iter()
+            .map(|d| RuntimeDiagnostic {
+                severity: match d.severity {
+                    crate::svelte::ide::DiagnosticSeverity::Error => {
+                        RuntimeDiagnosticSeverity::Error
+                    }
+                    crate::svelte::ide::DiagnosticSeverity::Information => {
+                        RuntimeDiagnosticSeverity::Info
+                    }
+                },
+                code: d.code.to_string(),
+                message: d.message.clone(),
+                span: Some(d.span),
+            })
+            .collect();
+
+        let ide = IdeOutput {
+            code: projection.code,
+            source_map: projection.source_map,
+            // A `.svelte` always projects TS `.tsx` (D-x): the projection emits
+            // TS with the `@jsxImportSource` pragma; it is never `.jsx`.
+            is_jsx: false,
+            duration_ms,
+            destructured_block: None,
+        };
+        (ide, diagnostics)
+    }
 }
 
 impl CarrierCompiler for SvelteCarrierCompiler {
@@ -263,41 +321,15 @@ impl CarrierCompiler for SvelteCarrierCompiler {
             });
         };
 
-        // The Svelte IDE codegen owns its OWN `CodeTransform` (the single
-        // source of truth for generated-code edits): the projection is a pure
-        // syntactic transform, NO type lowering (the thin-adapters guard). The
-        // output is a `.svelte.tsx` that type-checks clean through TSGO.
-        let start = std::time::Instant::now();
-        let projection = crate::svelte::ide::project_svelte_ide(
-            source,
-            parsed,
-            opts.filename.as_deref(),
-            opts.skip_source_map,
-        );
-        let duration_ms = start.elapsed().as_secs_f64() * 1000.0;
-
-        // TODO(follow-up): the projection's typed-unsupported diagnostics
-        // (`projection.diagnostics` — `svelte-await-experimental` and the
-        // remaining out-of-scope codes) are produced here but `IdeOutput` has no
-        // framework-neutral diagnostic
-        // channel, so they do not yet reach the host `DiagnosticsSnapshot` / the
-        // LSP. Delivering them end-to-end requires threading a diagnostics field
-        // through `IdeOutput` → `VerterTsxBlock` → the framework executor →
-        // `CachedTsx`/`CompileSlot.diagnostics`. This is a pre-existing gap (the
-        // Vue carrier path has the same shape — IDE-compile diagnostics flow
-        // through the parse artifact's `common.diagnostics`, not `IdeOutput`) and
-        // is tracked as its own work item; the projector-level production of
-        // these typed-unsupported diagnostics is complete and tested.
-        let _ = &projection.diagnostics;
-        Ok(IdeOutput {
-            code: projection.code,
-            source_map: projection.source_map,
-            // A `.svelte` always projects TS `.tsx` (D-x): the projection emits
-            // TS with the `@jsxImportSource` pragma; it is never `.jsx`.
-            is_jsx: false,
-            duration_ms,
-            destructured_block: None,
-        })
+        // The trait `compile_ide` surface has no framework-neutral diagnostic
+        // channel — the projection's typed-unsupported diagnostics are LIFTED
+        // by `compile_bundle` instead (the host's IDE-ensure path), where the
+        // `RuntimeCompileOutput.diagnostics` channel reaches the host
+        // `DiagnosticsSnapshot`. Here they are produced-and-dropped (matching
+        // the Vue carrier `compile_ide`, whose IDE diagnostics flow through the
+        // parse artifact's `common.diagnostics`, not `IdeOutput`).
+        let (ide, _diagnostics) = Self::project_ide(parsed, source, opts);
+        Ok(ide)
     }
 
     fn template_data(&self, source: &str, artifact: &FrameworkParseArtifact) -> TemplateFacts {
@@ -313,6 +345,51 @@ impl CarrierCompiler for SvelteCarrierCompiler {
         // the carrier source. No structural source scan.
         super::template_facts::collect_component_usages(&parsed.template, source, &mut data);
         TemplateFacts { data }
+    }
+
+    fn compile_bundle(
+        &self,
+        source: &str,
+        artifact: &FrameworkParseArtifact,
+        opts: &RuntimeCompileOptions,
+        _alloc: &oxc_allocator::Allocator,
+    ) -> Result<RuntimeCompileOutput, CompileUnsupported> {
+        // A foreign artifact (not a Svelte carrier) declines with the typed
+        // answer — never a silent empty bundle.
+        let Some(parsed) = self.parsed_svelte(artifact) else {
+            return Err(CompileUnsupported::NoIdeProjection {
+                adapter_id: self.adapter_id(),
+            });
+        };
+
+        // Svelte's native RUNTIME compiler (source `.svelte` → JS importing
+        // `svelte/internal/client`) is a later block. Today the carrier
+        // projects ONLY the IDE surface: it yields the IDE `tsx` (when the host
+        // requests it) and NO runtime `main` / block side-files. The host
+        // detects the absent runtime surface (`has_runtime_surface() == false`)
+        // and populates only its `CachedTsx` slot — it emits no `Main` virtual
+        // node. The projection's typed-unsupported diagnostics are LIFTED into
+        // the bundle so they reach the host `DiagnosticsSnapshot`.
+        let mut bundle = RuntimeCompileOutput::default();
+
+        if opts.want_ide {
+            let ide_opts = IdeCompileOptions {
+                filename: opts.filename.clone(),
+                skip_source_map: !opts.source_map,
+                embed_ambient_types: opts.embed_ambient_types,
+            };
+            let (ide, diagnostics) = Self::project_ide(parsed, source, &ide_opts);
+            bundle.tsx = Some(ide);
+            bundle.diagnostics = diagnostics;
+        }
+
+        if opts.want_template_data {
+            let mut data = crate::compile::RawTemplateData::default();
+            super::template_facts::collect_component_usages(&parsed.template, source, &mut data);
+            bundle.template_data = Some(data);
+        }
+
+        Ok(bundle)
     }
 }
 

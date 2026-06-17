@@ -178,10 +178,29 @@ implements, exposing EXACTLY four compiler-domain ops:
   (invariant 4), never a silent empty.
 - `template_data(source, artifact) -> TemplateFacts` — neutral template
   facts (wraps `RawTemplateData`).
+- `compile_bundle(source, artifact, opts: &RuntimeCompileOptions, alloc) ->
+  Result<RuntimeCompileOutput, CompileUnsupported>` — the framework-neutral
+  RUNTIME bundle. The host owns the cached-parse validity decision and hands
+  over either the valid cached artifact or a fresh carrier parse of the merged
+  source; the carrier owns the typed downcast + native compile and returns a
+  NEUTRAL `RuntimeCompileOutput` (a `RuntimeMainModule` body + neutral
+  script/template/style/custom blocks + scope id + optional IDE `tsx` (when
+  `want_ide`) + optional template facts + neutral `diagnostics`). Vue uses
+  `VerterCompileResult` INTERNALLY then re-expresses it neutrally
+  (`vue_result_to_runtime_bundle`); it leaves `main.body_code = None` so the
+  host assembles the `_sfc_main` module from the block fields
+  (`assemble_vue_main_module`). A carrier that projects ONLY an IDE surface
+  (Svelte today) returns a bundle with no runtime surface
+  (`has_runtime_surface() == false`) carrying just the `tsx` — the host
+  populates `CachedTsx` and emits NO `Main` virtual node. Framework-PRIVATE
+  resolved inputs (Vue's `external_types` / `prop_constness` /
+  `style_v_bind_vars`) ride OPAQUELY on `RuntimeCompileOptions.framework_extras`
+  (`Arc<dyn Any>`, downcast to `vue_bridge::VueRuntimeCompileExtras`) so Vue's
+  eager type-surface output type never enters the cross-framework contract.
 
 There is NO `analyze_script_facts` method — script-fact extraction for
 EVERY framework goes through the one `ScriptFactProvider` seam; the carrier
-compiler is parse / eval / IDE / template only.
+compiler is parse / eval / IDE / template / runtime-bundle only.
 
 The host's carrier PARSE dispatch is rehoused through this registry: the
 `FileLanguage::Framework` branch in `host_executor::execute_source` routes
@@ -234,6 +253,35 @@ The compiler-side `CarrierCompilerCtx::carrier_for::<T>` is the third
 blessed carrier-downcast home (D-m); `receive_vue_carrier_token` is the
 compiler's sanctioned carrier-proof receipt site (the bridge reaches its
 own `VueParseCarrier` back out of the type-erased artifact through it).
+
+## Host RUNTIME-compile routing + the IDE-ensure path
+
+The host's RUNTIME compile (`virtual_file_pipeline::compile_entry`) is routed
+through the registry the SAME way as parse/template-data: it resolves the
+carrier from `snapshot.framework_parse`'s `(adapter_id, language_id)`, KEEPS
+the cached-parse validity decision (`can_use_cache` — src-merge + custom
+delimiters/elements force a fresh carrier parse through the COUNTED chokepoint
+`parse::parse_carrier_counted`), and calls `CarrierCompiler::compile_bundle`.
+There is NO hardcoded `compile_sfc` / `compile_from_parsed` / `vue_parse` in
+`compile_entry` and NO `is_vue` branch — pinned by the AST/`syn` guard
+`compile_entry_routes_through_carrier_registry_not_hardcoded_vue` (catches
+imports / aliases / renames / globs / calls of the forbidden producers, with a
+negative self-test). Vue's runtime + IDE virtual-file outputs stay
+byte-identical (golden-pinned by `svelte_compiler_block1::vue_*_byte_identical_*`,
+`include_str!` goldens).
+
+`get_virtual_file` is a thin projector over `ensure_compile_artifacts(canonical,
+profile, demand: CompileDemand)` (`CompileDemand::{VirtualNode(kind), Ide}`):
+the shared compile produces the WHOLE artifact set (every virtual node + the
+IDE `CachedTsx`) in one pass, and the demand is checked AFTER the shared result
+(warm-hit + cold). `ensure_ide_compiled(canonical, profile) -> Result<bool>`
+is the EXPLICIT IDE-ensure path: it resolves through `CompileDemand::Ide`
+(NEVER requests `VirtualNodeKind::Main`), so a Main-less carrier (Svelte)
+populates its `CachedTsx` and succeeds without a runtime `Main`. `get_ide`
+stays a PURE cached read (`peek_tsx`) — it NEVER computes on read. Both pinned
+by the static guards `get_ide_is_a_pure_cached_read_no_compute` and
+`ensure_ide_compiled_never_requests_virtual_node_main`. Exposed on WASM + NAPI
+as `ensureIdeCompiled(canonicalId, profile?)` (binding-parity tested).
 
 ## Two-pass script-fact seam
 

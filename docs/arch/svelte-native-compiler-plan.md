@@ -801,18 +801,25 @@ Before the cutover, capture characterization tests pinning Vue output byte-ident
 - Script / template virtual-file outputs byte-identical.
 - Template analysis output unchanged.
 
-### 4.5 No dual-path shim survives the Block 1 cutover (D5 guard)
+### 4.5 No dual-path shim survives the Block 1 routing (D5 guard) — LANDED
 
-The Block 1 cutover is a CLEAN replacement, not a dual path (CLAUDE.md legacy-deletion rule). After
-Block 1, the direct `compile_sfc` / `compile_from_parsed` call in `compile_entry()` MUST be GONE —
-replaced wholesale by `CarrierCompilerRegistry` dispatch, with Vue a registered runtime carrier. No
-`if framework == Vue { old_path } else { registry }` branch, no feature flag preserving the old
-routing, no `assemble_main_module` call left reachable outside the Vue bridge. A named static guard,
-**`compile_entry_has_no_direct_compile_sfc_call`**, asserts `virtual_file_pipeline.rs::compile_entry`
-contains no direct `compile_sfc`/`compile_from_parsed`/`assemble_main_module` call (routing is
-registry-only), and **`no_framework_branch_in_compile_entry`** asserts there is no per-framework
-conditional in the runtime router. This pairs with the §4.4 byte-identity suite: Vue output is
-identical AND the old path is physically deleted.
+The Block 1 routing is a CLEAN replacement, not a dual path (CLAUDE.md legacy-deletion rule). After
+Block 1, the direct `compile_sfc` / `compile_from_parsed` / `vue_parse` calls in `compile_entry()`
+are GONE — replaced wholesale by `CarrierCompilerRegistry::compile_bundle` dispatch, with Vue a
+registered runtime carrier. No `if framework == Vue { old_path } else { registry }` branch, no
+feature flag preserving the old routing; `assemble_main_module` was renamed `assemble_vue_main_module`
+and consumes the NEUTRAL `RuntimeCompileOutput` (Vue still leaves `main.body_code = None` so the host
+assembles `_sfc_main`). The landed AST/`syn` static guard
+**`compile_entry_routes_through_carrier_registry_not_hardcoded_vue`**
+(`crates/verter_session/tests/svelte_compiler_block1_guards.rs`) asserts `compile_entry` (and its
+one-level local helpers) calls none of `compile` / `compile_from_parsed` / `compile_sfc` / `vue_parse`,
+AND that `virtual_file_pipeline.rs` imports none of them under any alias / rename / glob — with a
+negative self-test proving the guard catches a renamed import. This pairs with the §4.4 byte-identity
+suite (`svelte_compiler_block1::vue_runtime_main_is_byte_identical_through_the_carrier` +
+`vue_ide_output_is_byte_identical_through_the_carrier`, `include_str!` goldens): Vue output is
+identical AND the old path is physically deleted. The §APIDECISION ruling-B IDE-ensure path landed as
+`ensure_ide_compiled` (+ the `CompileDemand` enum), pinned by `get_ide_is_a_pure_cached_read_no_compute`
+and `ensure_ide_compiled_never_requests_virtual_node_main`.
 
 ---
 
@@ -1210,13 +1217,13 @@ perf job is MODELED on this — the same package, the same workflow shape — no
 - The "runtime codegen for non-Vue frameworks is out of scope" invariant in
   `docs/arch/multi-framework-adapters-plan.md` (Invariant 4) — superseded for Svelte (D-7); update it
   to reference this plan.
-- Hardcoded `compile_sfc` / `compile_from_parsed` routing in
-  `crates/verter_session/src/host_resolve/virtual_file_pipeline.rs::compile_entry()` — replaced by
-  registry dispatch (Block 1).
-- Generic use of `assemble_main_module` as if all frameworks are Vue-shaped — becomes Vue-only,
-  Vue-bridge-owned (Block 1, D-6).
+- Hardcoded `compile_sfc` / `compile_from_parsed` / `vue_parse` routing in
+  `crates/verter_session/src/host_resolve/virtual_file_pipeline.rs::compile_entry()` — DELETED, replaced
+  by `CarrierCompilerRegistry::compile_bundle` dispatch (Block 1, LANDED).
+- Generic `assemble_main_module` consuming the Vue-shaped `VerterCompileResult` — renamed
+  `assemble_vue_main_module`, consumes the NEUTRAL `RuntimeCompileOutput` (Block 1, D-6, LANDED).
 - Any dual-path / framework-branch / feature-flag in `compile_entry()` after Block 1 — forbidden by
-  the §4.5 guards (`compile_entry_has_no_direct_compile_sfc_call`, `no_framework_branch_in_compile_entry`).
+  the §4.5 guard `compile_entry_routes_through_carrier_registry_not_hardcoded_vue` (LANDED).
 - The `.vue`-only default filter in `packages/unplugin/src/index.ts::createFilter()` — replaced by a
   filter matching `.vue` AND `.svelte` (Block I, D2).
 - Svelte runtime typed-unsupported (`CompileUnsupported`) diagnostics — removed for each surface once

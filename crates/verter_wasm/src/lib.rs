@@ -452,6 +452,33 @@ impl WasmVerterHost {
         }))
     }
 
+    /// Ensure the IDE (`CachedTsx`) projection exists for a file + profile.
+    ///
+    /// The explicit IDE-ensure path: it compiles the carrier's IDE surface
+    /// (never requesting the runtime `Main` node), so a Main-less carrier
+    /// (Svelte) populates its `CachedTsx` and a subsequent [`get_ide`](Self::get_ide)
+    /// succeeds. `getIde` itself stays a pure cached read.
+    ///
+    /// Returns `true` when `(canonical, profile)` now has a cached IDE
+    /// projection, `false` when the loaded file has no IDE surface (a
+    /// non-carrier). A real failure (missing source / compile error) throws.
+    #[wasm_bindgen(js_name = ensureIdeCompiled)]
+    pub fn ensure_ide_compiled(
+        &self,
+        canonical_id: &str,
+        profile: JsValue,
+    ) -> Result<bool, JsValue> {
+        let ffi_profile: Option<FfiCompileProfile> = if profile.is_undefined() || profile.is_null()
+        {
+            None
+        } else {
+            Some(parse_wasm_input(profile)?)
+        };
+        let host_profile = ffi_profile_to_host(ffi_profile).map_err(ffi_err)?;
+        catch_panic(|| self.inner.ensure_ide_compiled(canonical_id, &host_profile))?
+            .map_err(host_err)
+    }
+
     /// Retrieve TSC declaration output for a file.
     ///
     /// Generates a minimal TypeScript declaration file for a Vue SFC.

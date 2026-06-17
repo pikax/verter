@@ -1685,6 +1685,31 @@ impl NapiVerterHost {
         }))
     }
 
+    /// Ensure the IDE (`CachedTsx`) projection exists for a file + profile.
+    ///
+    /// The explicit IDE-ensure path: it compiles the carrier's IDE surface
+    /// (never requesting the runtime `Main` node), so a Main-less carrier
+    /// (Svelte) populates its `CachedTsx` and a subsequent `getIde` succeeds.
+    /// `getIde` itself stays a pure cached read.
+    ///
+    /// Returns `true` when `(canonical, profile)` now has a cached IDE
+    /// projection, `false` when the loaded file has no IDE surface (a
+    /// non-carrier). A real failure (missing source / compile error) rejects.
+    #[napi(js_name = "ensureIdeCompiled")]
+    pub fn ensure_ide_compiled(
+        &self,
+        canonical_id: String,
+        profile: Option<NapiCompileProfile>,
+    ) -> Result<bool> {
+        let ffi_profile: Option<FfiCompileProfile> = profile.map(Into::into);
+        let host_profile = ffi_profile_to_host(ffi_profile)
+            .map_err(|e| Error::new(Status::InvalidArg, format!("invalid profile: {e}")))?;
+        catch_panic(std::panic::AssertUnwindSafe(|| {
+            self.inner.ensure_ide_compiled(&canonical_id, &host_profile)
+        }))?
+        .map_err(host_error)
+    }
+
     /// Generates TSC output (minimal TypeScript declarations) for a Vue SFC.
     ///
     /// Unlike `getTsx`, this does NOT require a prior `getVirtualFile` call.

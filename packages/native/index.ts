@@ -382,6 +382,20 @@ export declare class VerterHost {
     canonicalId: string,
     profile?: import("./host-types").HostCompileProfile,
   ): import("./host-types").HostIdeResponse | null;
+  /**
+   * Ensure the IDE (`CachedTsx`) projection exists for a file + profile.
+   *
+   * The explicit IDE-ensure path — it compiles the carrier's IDE surface
+   * without requesting the runtime `Main` node, so a Main-less carrier
+   * (Svelte) populates its `CachedTsx` and a subsequent `getIde` succeeds.
+   * `getIde` itself stays a pure cached read. Returns `true` when the IDE
+   * projection now exists, `false` when the file has no IDE surface (a
+   * non-carrier); a real failure throws.
+   */
+  ensureIdeCompiled(
+    canonicalId: string,
+    profile?: import("./host-types").HostCompileProfile,
+  ): boolean;
   getVirtualFile(
     query: import("./host-types").HostVirtualQuery,
   ): import("./host-types").HostVirtualFileResponse | null;

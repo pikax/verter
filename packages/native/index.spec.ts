@@ -30,6 +30,55 @@ describe("VerterHost", () => {
     expect(mainFile.code).toContain("_sfc_main");
   });
 
+  it("ensureIdeCompiled populates the IDE CachedTsx for a Vue SFC without requiring getVirtualFile(Main)", () => {
+    // §APIDECISION ruling B: the explicit IDE-ensure path populates the IDE
+    // `CachedTsx`; `getIde` then reads it — WITHOUT a prior `getVirtualFile(Main)`.
+    const host = new VerterHost();
+    host.upsert({ inputId: "IdeOnly.vue", source: SFC_INPUT, fileKind: "vue" });
+
+    const profile = { target: "ide" };
+    const ensured = host.ensureIdeCompiled("IdeOnly.vue", profile);
+    expect(ensured).toBe(true);
+
+    const ide = host.getIde("IdeOnly.vue", profile);
+    expect(ide).not.toBeNull();
+    expect(ide!.code).toBeTruthy();
+  });
+
+  it("ensureIdeCompiled populates CachedTsx for a Main-less Svelte carrier; getVirtualFile(Main) stays absent", () => {
+    // The Main-less Svelte carrier: `ensureIdeCompiled` succeeds with a
+    // `CachedTsx` (Svelte-specific TSX), `getIde` reads it, and
+    // `getVirtualFile(Main)` reports no runtime Main (Svelte runtime is a later
+    // block). Discriminating: a Vue-only path would have routed `.svelte`
+    // through the Vue SFC compiler and either errored or produced Vue TSX.
+    const host = new VerterHost();
+    host.upsert({
+      inputId: "Counter.svelte",
+      source:
+        '<script lang="ts">let count = 0;</script>\n<button onclick={() => count++}>{count}</button>\n',
+      fileKind: "svelte",
+    });
+
+    const profile = { target: "ide" };
+    const ensured = host.ensureIdeCompiled("Counter.svelte", profile);
+    expect(ensured).toBe(true);
+
+    const ide = host.getIde("Counter.svelte", profile);
+    expect(ide).not.toBeNull();
+    // Svelte-specific IDE output — the @verter/svelte-jsx pragma, NOT Vue TSX.
+    expect(ide!.code).toContain("@jsxImportSource @verter/svelte-jsx");
+    expect(ide!.code).not.toContain("_sfc_main");
+
+    // No runtime Main virtual node yet for the Main-less carrier — the binding
+    // maps the missing node to null.
+    const mainFile = host.getVirtualFile({
+      canonicalId: "Counter.svelte",
+      nodeKind: { kind: "main" },
+      compileProfile: profile,
+    });
+    expect(mainFile).toBeNull();
+  });
+
   it("should accept Buffer as source in upsert", () => {
     const host = new VerterHost();
     const result = host.upsert({
@@ -599,6 +648,7 @@ describe("VerterHost type declarations in sync with native binary", () => {
       "compileMany",
       "compileWithAudit",
       "configureProjects",
+      "ensureIdeCompiled",
       "evaluateTypeExpressionWithAudit",
       "evaluateTypes",
       "getAnalysis",

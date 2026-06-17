@@ -29,7 +29,9 @@ use verter_parser::types::NodeProp;
 use crate::compile::types::{CodegenOptions, CompileTarget, VerterCompileOptions};
 use crate::compile::{compile_from_parsed, parse_sfc};
 use crate::framework_common::carrier_compiler::{
-    CarrierCompiler, CompileUnsupported, IdeCompileOptions, IdeOutput, ParseOptions, TemplateFacts,
+    CarrierCompiler, CompileUnsupported, IdeCompileOptions, IdeOutput, ParseOptions,
+    RuntimeCompileOptions, RuntimeCompileOutput, RuntimeCustomBlock, RuntimeDiagnostic,
+    RuntimeMainModule, RuntimeScriptBlock, RuntimeStyleBlock, RuntimeTemplateBlock, TemplateFacts,
 };
 use crate::framework_common::ctx::{receive_vue_carrier_token, CarrierCompilerCtx};
 
@@ -223,6 +225,31 @@ pub fn build_vue_parse_artifact(
     ))
 }
 
+/// Vue-PRIVATE resolved runtime-compile inputs, carried opaquely through
+/// [`RuntimeCompileOptions::framework_extras`](crate::framework_common::RuntimeCompileOptions::framework_extras)
+/// and downcast here.
+///
+/// These are the host-resolved cross-file inputs the Vue runtime compile
+/// consumes: `external_types` (the resolved macro-type surface for
+/// `defineProps<ExternalType>()`), `prop_constness_overrides`, and
+/// `style_v_bind_vars`. They live HERE (the Vue module) rather than on the
+/// neutral [`RuntimeCompileOptions`] so Vue's eager type-surface output type
+/// never enters the cross-framework carrier contract — a non-Vue carrier never
+/// names or sees it.
+#[derive(Debug, Default)]
+pub struct VueRuntimeCompileExtras {
+    /// Pre-resolved external macro types, keyed by type name. The host resolves
+    /// these before the compile; the Vue codegen merges them into its
+    /// type-resolution context.
+    pub external_types: Option<
+        rustc_hash::FxHashMap<String, crate::utils::oxc::script::type_surface::ResolvedElements>,
+    >,
+    /// Props known const across all call sites (cross-file analysis).
+    pub prop_constness_overrides: Option<rustc_hash::FxHashSet<String>>,
+    /// Binding names referenced in style `v-bind()` expressions.
+    pub style_v_bind_vars: Vec<String>,
+}
+
 /// The Vue carrier parser version stamped on the produced artifact's
 /// `parser_version` field. Bumps invalidate every Vue artifact whose
 /// post-parse shape this producer owns.
@@ -386,6 +413,145 @@ impl CarrierCompiler for VueCarrierCompiler {
         TemplateFacts {
             data: result.template_data.unwrap_or_default(),
         }
+    }
+
+    fn compile_bundle(
+        &self,
+        source: &str,
+        artifact: &FrameworkParseArtifact,
+        opts: &RuntimeCompileOptions,
+        alloc: &oxc_allocator::Allocator,
+    ) -> Result<RuntimeCompileOutput, CompileUnsupported> {
+        let Some(parsed) = self.parsed_sfc(artifact) else {
+            return Err(CompileUnsupported::NoIdeProjection {
+                adapter_id: self.adapter_id(),
+            });
+        };
+
+        // The Vue runtime target. The host's old `compile_entry` always
+        // emitted the bundler blocks (script/template/styles/custom) and
+        // additionally requested the IDE TSX + template-data bits when its
+        // scope required them; the `want_*` flags drive the SAME target
+        // composition so the produced blocks stay byte-identical.
+        let mut target = CompileTarget::BUNDLER;
+        if opts.want_ide {
+            target |= CompileTarget::TSX;
+        }
+        if opts.want_template_data {
+            target |= CompileTarget::TEMPLATE_DATA;
+        }
+
+        let core_opts = CodegenOptions {
+            filename: opts.filename.clone(),
+            is_production: opts.is_production,
+            // The host always assembles a standalone `function render()` via
+            // its main-module assembly, so inline mode is off (otherwise the
+            // template emits bare identifiers missing the `$setup.` prefix).
+            inline: Some(false),
+            component_id: opts.component_id.clone(),
+            delimiters: opts.delimiters.clone(),
+            custom_elements: opts.custom_elements.clone(),
+            comments: opts.comments,
+            runtime_module_name: opts.runtime_module_name.clone(),
+            types_module_name: opts.types_module_name.clone(),
+            target,
+            embed_ambient_types: opts.embed_ambient_types,
+            conditional_root_narrowing: opts.conditional_root_narrowing,
+            strict_slots: opts.strict_slots,
+            ..CodegenOptions::default()
+        };
+        // The Vue-private resolved inputs ride opaquely on `framework_extras`;
+        // downcast them here (a foreign / absent extras yields defaults, so a
+        // generic caller that did not supply Vue extras still compiles).
+        let extras = opts
+            .framework_extras
+            .as_ref()
+            .and_then(|any| any.downcast_ref::<VueRuntimeCompileExtras>());
+        let verter_opts = VerterCompileOptions {
+            force_vapor: opts.force_vapor,
+            force_js: opts.force_js,
+            source_map: opts.source_map,
+            ssr: opts.ssr,
+            external_types: extras.and_then(|e| e.external_types.clone()),
+            extract_template_data: opts.want_template_data,
+            prop_constness_overrides: extras.and_then(|e| e.prop_constness_overrides.clone()),
+            style_v_bind_vars: extras
+                .map(|e| e.style_v_bind_vars.clone())
+                .unwrap_or_default(),
+        };
+
+        // Vue uses `VerterCompileResult` INTERNALLY here; the returned bundle
+        // re-expresses every field neutrally so session assembly never sees
+        // the Vue-shaped result.
+        let result = compile_from_parsed(source, parsed, &core_opts, &verter_opts, alloc);
+
+        Ok(vue_result_to_runtime_bundle(result))
+    }
+}
+
+/// Re-express a Vue [`VerterCompileResult`] as the framework-neutral
+/// [`RuntimeCompileOutput`]. Vue leaves `main.body_code` `None` — the host
+/// assembles the `_sfc_main` module from the neutral block fields (its
+/// virtual-file concern: style/custom virtual imports + HMR).
+fn vue_result_to_runtime_bundle(
+    result: crate::compile::VerterCompileResult,
+) -> RuntimeCompileOutput {
+    let script = result.script.map(|s| RuntimeScriptBlock {
+        code: s.code,
+        source_map: s.source_map,
+        setup: s.setup,
+    });
+    let template = result.template.map(|t| RuntimeTemplateBlock {
+        code: t.code,
+        source_map: t.source_map,
+        imports: t.imports.iter().map(|s| (*s).to_string()).collect(),
+        ssr_imports: t.ssr_imports.iter().map(|s| (*s).to_string()).collect(),
+    });
+    let styles = result
+        .styles
+        .into_iter()
+        .map(|s| RuntimeStyleBlock {
+            code: s.code,
+            lang: s.lang,
+        })
+        .collect();
+    let custom_blocks = result
+        .custom_blocks
+        .into_iter()
+        .map(|b| RuntimeCustomBlock {
+            block_type: b.block_type,
+            content: b.content,
+        })
+        .collect();
+    let tsx = result.tsx.map(|tsx| IdeOutput {
+        code: tsx.code,
+        source_map: tsx.source_map,
+        is_jsx: tsx.is_jsx,
+        duration_ms: tsx.duration_ms,
+        destructured_block: tsx.destructured_block,
+    });
+    let diagnostics = result
+        .errors
+        .into_iter()
+        .map(|d| RuntimeDiagnostic {
+            severity: d.severity.into(),
+            code: d.code,
+            message: d.message,
+            span: d.span,
+        })
+        .collect();
+
+    RuntimeCompileOutput {
+        // Vue: host-assembled main module — no directly-emitted body.
+        main: RuntimeMainModule::default(),
+        script,
+        template,
+        styles,
+        custom_blocks,
+        scope_id: result.scope_id,
+        tsx,
+        template_data: result.template_data,
+        diagnostics,
     }
 }
 
