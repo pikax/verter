@@ -9751,6 +9751,104 @@ async fn self_file_auto_import_resolve_fails_closed_with_no_edits() {
     drain.abort();
 }
 
+/// A REAL Vue carrier whose IDE context is MISSING (stale / not committed) is a
+/// hard error on completion-resolve — never a dropped-edit success.
+///
+/// Contract: `resolve_tsgo_auto_import_edits` returns `Ok(None)` ONLY for the
+/// no-carrier / self-file cases. A path that DOES reverse-map to a `.vue`
+/// carrier (not self-file) but has no live IDE context (no committed provider
+/// sync state → `ide_context_by_path` is `None`) is a genuine carrier-resolve
+/// FAILURE: it must return `Err`, so the caller reports a structured resolve
+/// error rather than silently dropping the provider's non-empty auto-import
+/// edits (which recreates "accepted completion but no import").
+///
+/// Discriminating: the carrier reverse-map is PRESENT (the `.vue` is open +
+/// owned), the projection is NOT self-file, the edit set is NON-EMPTY, and only
+/// the IDE context is absent. The pre-fix code returned `Ok(None)` on that
+/// missing-context branch (dropping the edits); this asserts `Err`, so it FAILS
+/// on the pre-fix success and PASSES once the branch fails closed.
+#[tokio::test]
+async fn missing_ide_context_for_real_carrier_fails_resolve_not_drops_edits() {
+    use crate::tsgo::auto_import::ProviderImportEdit;
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let host_for_server = Arc::clone(&host);
+    let type_provider_for_server = Arc::clone(&type_provider);
+    let (service, socket) = tower_lsp_server::LspService::new(move |client| {
+        VerterLanguageServer::new(
+            client,
+            LspConfig {
+                host: Arc::clone(&host_for_server),
+                type_provider: Some(Arc::clone(&type_provider_for_server)),
+                project_sync_mode: crate::ProjectSyncMode::FullProject,
+                type_provider_kind: crate::TypeProviderKind::Tsserver,
+                suggest_tsgo: false,
+                mcp_port: None,
+                type_provider_none_reason: None,
+            },
+        )
+    });
+    let drain = tokio::spawn(async move {
+        let mut socket = socket;
+        while socket.next().await.is_some() {}
+    });
+    let server = service.inner();
+    install_test_resolver(server);
+
+    // Open a real `.vue` carrier: the host now has the `.vue` source and the
+    // canonical↔uri mapping, so the carrier IDE path reverse-maps. We do NOT
+    // establish a committed provider sync state (`ensure_current_file_synced`),
+    // so `active_ide_path_for_uri` is None ⇒ `ide_context_by_path` is None: the
+    // IDE-context-missing branch the fix must fail closed on.
+    let vue_uri: Uri = open_test_vue(
+        server,
+        "/workspace/App.vue",
+        "<script setup lang=\"ts\">\nconst x = 1;\n</script>\n<template>{{ x }}</template>",
+    );
+    let tsx_path = "/workspace/App.vue.tsx";
+
+    // Precondition 1: the carrier reverse-map IS present (real carrier).
+    assert_eq!(
+        server.carrier_uri_from_ide_path(tsx_path).as_ref(),
+        Some(&vue_uri),
+        "precondition: the carrier IDE path reverse-maps to the open `.vue` URI"
+    );
+    // Precondition 2: it is NOT a self-file projection (so the `Ok(None)`
+    // self-file branch is not what fires).
+    assert!(
+        !server.is_self_file_projection(&vue_uri),
+        "precondition: a `.vue` carrier is not a self-file projection"
+    );
+    // Precondition 3: the IDE context IS missing (no committed sync state).
+    assert!(
+        server.ide_context_by_path(tsx_path).is_none(),
+        "precondition: with no committed provider sync state the carrier has no live IDE context"
+    );
+
+    // A NON-EMPTY auto-import edit set — the only case the carrier re-anchor
+    // runs for. These MUST be placed or the resolve must fail; they may never be
+    // silently dropped.
+    let provider_edits = vec![ProviderImportEdit {
+        start: 0,
+        end: 0,
+        new_text: "import { foo } from './foo';\n".to_string(),
+    }];
+    let resolved = super::nav_features_completion_resolve::resolve_tsgo_auto_import_edits(
+        server,
+        tsx_path,
+        &provider_edits,
+    );
+    assert!(
+        resolved.is_err(),
+        "a missing IDE context for a REAL carrier must be a structured Err (the \
+         non-empty auto-import edits are NOT silently dropped); got {resolved:?}"
+    );
+
+    drain.abort();
+}
+
 /// Open-before-ownership: `did_open` on a `.svelte.ts` rune module makes
 /// `provider_projection_context` available at the module's OWN canonical path
 /// BEFORE any resolver ownership is published (no `install_test_resolver`). The

@@ -5,9 +5,9 @@
 //! carrier-source [`TextEdit`]s — and `completion_resolve_error`, the
 //! structured JSON-RPC error it reports those failures through.
 //!
-//! Extracted from `nav_features` to keep that source under the
-//! file-size guard (`no_oversize_files`); `handle_completion_resolve`
-//! calls both functions through this sibling module.
+//! `handle_completion_resolve` calls both functions through this sibling
+//! module; it lives apart from `nav_features` so each stays within the
+//! file-size guard (`no_oversize_files`).
 
 use tower_lsp_server::ls_types::*;
 
@@ -34,9 +34,11 @@ use super::VerterLanguageServer;
 ///   as a Svelte `.svelte.ts` / `.svelte.js`, or any non-carrier projection). The carrier
 ///   re-anchor does not apply; fail closed by leaving the item unchanged rather than synthesizing
 ///   a Vue `<script setup>` block into a non-Vue source. (Self-file auto-import edit placement is a
-///   separate capability, not handled by this carrier re-anchor.)
-/// * `Err(reason)` — a genuine carrier-resolve failure (missing IDE context / open document, or an
-///   edit that cannot be placed). The caller turns the reason into a structured resolve error.
+///   separate capability, not handled by this carrier re-anchor.) `Ok(None)` is reserved for THIS
+///   no-carrier / self-file case — a real carrier that cannot place the edits is an `Err`.
+/// * `Err(reason)` — a genuine carrier-resolve failure for a path that DID reverse-map to a Vue
+///   carrier: missing IDE context / open document, or an edit that cannot be placed. The caller
+///   turns the reason into a structured resolve error rather than dropping the import edits.
 pub(super) fn resolve_tsgo_auto_import_edits(
     server: &VerterLanguageServer,
     tsx_path: &str,
@@ -55,8 +57,13 @@ pub(super) fn resolve_tsgo_auto_import_edits(
     if server.is_self_file_projection(&carrier_uri) {
         return Ok(None);
     }
+    // The path reverse-mapped to a REAL `.vue` carrier (not self-file), so a
+    // missing IDE context is a genuine carrier-resolve FAILURE, not a no-carrier
+    // case. Fail with a structured `Err` so the caller reports it — never an
+    // `Ok(None)` success, which would silently drop the provider's non-empty
+    // auto-import edits ("accepted completion but no import").
     let Some((_, tsx_content, mapper)) = server.ide_context_by_path(tsx_path) else {
-        return Ok(None);
+        return Err(format!("no IDE context for {tsx_path}"));
     };
     let doc = server
         .documents
