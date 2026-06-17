@@ -380,7 +380,7 @@ pub(crate) fn encode_framework_surfaces(
 
 /// As [`encode_framework_surfaces`], but with a caller-supplied UNSUPPORTED
 /// diagnostic message — a `Deferred` registration passes the
-/// surfaces-not-yet-registered message (D-ag), distinct from a supported
+/// surfaces-not-yet-registered message, distinct from a supported
 /// adapter's per-kind unsupport.
 pub(crate) fn encode_framework_surfaces_with_unsupported_message(
     normalized: &NormalizedSurfaces,

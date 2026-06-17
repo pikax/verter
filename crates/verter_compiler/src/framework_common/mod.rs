@@ -12,8 +12,8 @@
 //! On top of the carrier wrappers it owns the compiler-side carrier
 //! framework substrate: the [`CarrierCompiler`] trait (parse / eval /
 //! IDE / template), the [`CarrierCompilerRegistry`] the host's carrier
-//! dispatch looks up, and the blessed [`CarrierCompilerCtx`] downcast
-//! (D-m). Vue is the reference implementation
+//! dispatch looks up, and the blessed [`CarrierCompilerCtx`] downcast.
+//! Vue is the reference implementation
 //! ([`vue_bridge::VueCarrierCompiler`]), delegating call-for-call to the
 //! existing Vue pipeline with ZERO edits to any Vue parser/codegen
 //! module.

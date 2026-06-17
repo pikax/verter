@@ -1,18 +1,18 @@
 //! The Svelte IDE-projection ambient prelude.
 //!
 //! Every projected `.svelte.tsx` opens with one UNMAPPED prelude inserted at
-//! output offset 0 (D-u / D-ad / D-ae). It carries three things, none of which
+//! output offset 0. It carries three things, none of which
 //! shift a mapped position (the prelude is pure insertion — every original
 //! script/template byte keeps its source offset):
 //!
 //! 1. the per-file `@jsxImportSource @verter/svelte-jsx` pragma — overriding
-//!    the provider's project-level `jsxImportSource: "vue"` for THIS file only
-//!    (D-ae(a)), even under `jsx: "preserve"`;
+//!    the provider's project-level `jsxImportSource: "vue"` for THIS file only,
+//!    even under `jsx: "preserve"`;
 //! 2. the COMPLETE audited Svelte 5 rune surface as ambient `declare`s
 //!    (`$props`/`$bindable`/`$state`/`$derived`/`$effect`/`$inspect`/`$host`,
 //!    every namespace member, and `import type { Snippet } from "svelte"`) —
-//!    rune CALL SITES stay verbatim, the prelude only TYPES them (D-u);
-//! 3. the projection checkers/declarators (D-ae(c)): `__verter_attach` (the
+//!    rune CALL SITES stay verbatim, the prelude only TYPES them;
+//! 3. the projection checkers/declarators: `__verter_attach` (the
 //!    `{@attach}` target), the `__verter_snippet` brand declarator, and the
 //!    `__verter_void` value checker (out-of-scope expressions route through it).
 //!    `class` clsx forms (5.16) are typed by `SvelteHTMLElements`'
@@ -263,7 +263,7 @@ const COMPONENT_ONLY_RUNE_HOST: &str =
 /// The module-VALID rune surface — shared VERBATIM between the component and
 /// module preludes. These are the runes Svelte 5 allows OUTSIDE a component
 /// (`$state`/`$derived`/`$effect`/`$inspect` + every namespace member,
-/// per the D-u/D-ad audit, 5.56.x). This is the ONE rune-declaration source;
+/// per the audit, 5.56.x). This is the ONE rune-declaration source;
 /// neither mode re-declares them.
 const SHARED_MODULE_RUNES: &str = r#"declare function $state<T>(initial: T): T;
 declare function $state<T>(): T | undefined;
@@ -424,10 +424,10 @@ function $inspect(...values) {
 $inspect.trace = function (name) {};
 "#;
 
-/// The component projection checkers/declarators section (D-ae(c)) — the
+/// The component projection checkers/declarators section — the
 /// `__verter_*` helpers + the host-element / event helper types. Component
 /// mode only; a non-component module never references any of them.
-const COMPONENT_PROJECTION_CHECKERS: &str = r#"// --- Verter projection checkers/declarators (D-ae(c)) ---
+const COMPONENT_PROJECTION_CHECKERS: &str = r#"// --- Verter projection checkers/declarators ---
 declare function __verter_attach<E extends EventTarget>(attachment: Attachment<E>): void;
 declare function __verter_snippet<Params extends unknown[]>(render: (...args: Params) => unknown): Snippet<Params>;
 declare function __verter_void(...values: unknown[]): void;
@@ -440,7 +440,7 @@ declare function __verter_void(...values: unknown[]): void;
 // `Awaited<typeof fetchUser()>`.
 declare function __verter_await_expr<T extends PromiseLike<unknown>>(value: T): Awaited<T>;
 // The host-element instance type for a projected tag (the `transition:`/`in:`/
-// `out:`/`animate:` host node, D-ae). A known HTML/SVG tag resolves to its
+// `out:`/`animate:` host node). A known HTML/SVG tag resolves to its
 // precise DOM instance type; an unknown/custom-element/dynamic host falls back
 // to `Element`. The projector emits the host node as `(null! as
 // __VerterHostEl<"tag">)` and CALLS the directive's transition/animate function
@@ -878,7 +878,7 @@ mod tests {
 
     #[test]
     fn ts_rune_module_prelude_is_the_module_local_module_rune_subset() {
-        // D-bk: a `.svelte.ts` rune module gets ONLY the module-valid runes
+        // A `.svelte.ts` rune module gets ONLY the module-valid runes
         // ($state/$derived/$effect/$inspect + namespaces), module-local via a
         // leading `export {};` so the declarations do not leak globally.
         let p = render_rune_prelude(RunePreludeMode::Module {
@@ -937,7 +937,7 @@ mod tests {
 
     #[test]
     fn js_rune_module_prelude_is_js_valid_and_module_local() {
-        // D-bk: a `.svelte.js` rune module (checked under checkJs) gets the
+        // A `.svelte.js` rune module (checked under checkJs) gets the
         // JS-valid JSDoc-typed-function form — TS `declare function` is not
         // valid JS. Same rune surface, module-local.
         let p = render_rune_prelude(RunePreludeMode::Module {

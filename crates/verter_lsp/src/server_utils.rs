@@ -614,7 +614,7 @@ pub(crate) fn prepare_non_carrier_provider_sync(
         source,
         module_references,
     );
-    // Channel B (D-bk): a standalone Svelte rune module (`.svelte.ts`/
+    // Channel B: a standalone Svelte rune module (`.svelte.ts`/
     // `.svelte.js`) serves `<module rune prelude> + <bytes>` from its OWN
     // canonical path so a consumer resolving it from disk sees the inferred
     // rune-derived exported types. The prelude is module-local (`export {};`),

@@ -402,7 +402,7 @@ pub(crate) fn peek_member_shape_known(
             // per-query workspace-snapshot rebuild cost the peek path
             // exists to avoid).
             let ctx: &dyn ResolverContext = query_engine.ctx;
-            // gap1: key the operator-shape slot by the EXACT reduction
+            // Key the operator-shape slot by the EXACT reduction
             // context the whole-expression materialiser
             // (`materialize_component_meta_type_expr_until_stable_full`)
             // writes under, so this peek and that publish share one
@@ -830,7 +830,7 @@ fn member_shape_peek_or_compute(
     use crate::project_semantic_dispatch::raise::MaterializedTypeExpr;
 
     let ctx: &dyn ResolverContext = query_engine.ctx;
-    // gap1: key the per-member SemanticNode slot by the EXACT reduction
+    // Key the per-member SemanticNode slot by the EXACT reduction
     // context the cold path reduces under
     // (`type_expr_materializer_context(mode)` — `StructuralTransit` for
     // `Navigate`, `Published` otherwise). A bare `published(mode)` key
@@ -1192,7 +1192,7 @@ fn admit_type_expr_shape_if_possible(
         dep_signature,
         result_is_partial: false,
     };
-    // gap1: admit into the SAME slot identity the whole-expression
+    // Admit into the SAME slot identity the whole-expression
     // materialiser + `peek_member_shape_known` use — keyed by the exact
     // reduction context, not a bare `published(mode)`.
     let key = crate::component_meta_caches::ShapeCacheKey::type_expr_whole_with_context(
@@ -1330,7 +1330,7 @@ pub(crate) fn surface_member_to_expanded_field(
         "ExpandedField (surface member `{}`) shallow_type_expr/shallow_type_expr_scope pairing violated",
         member.name.as_ref(),
     );
-    // Gap3 provenance downgrade through transparent carriers: a member reached
+    // Provenance downgrade through transparent carriers: a member reached
     // ONLY via REAL heritage (`extends PlainProps` / `extends Vendor`) is NOT an
     // own-body member of the macro type argument, so it MUST carry
     // `declared_in_macro_type_arg = false` even though the macro-T own-body

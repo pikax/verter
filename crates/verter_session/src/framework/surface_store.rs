@@ -237,7 +237,7 @@ mod tests {
         assert_eq!(adapter_key.macro_index, 0);
     }
 
-    /// The Svelte adapter remainder (D-bc): a `FullKey` carrying the
+    /// The Svelte adapter remainder: a `FullKey` carrying the
     /// `SvelteSurfaceKey { source }` remainder destructures whole-struct, and
     /// two distinct source families never alias. Pins the Svelte adapter's one
     /// key column (the program's flagship non-Vue vertical).

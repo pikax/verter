@@ -1943,7 +1943,7 @@ impl VerterHost {
             deps
         };
         // Replace import_routes on DerivedRawState.
-        // R3/R26/R28 Gap 2: for each known-miss in the new map,
+        // R3/R26/R28: for each known-miss in the new map,
         // record the workspace `content_generation` at admission so
         // the reader can detect when a new canonical (which advances
         // content_generation) may now satisfy the previously

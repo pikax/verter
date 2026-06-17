@@ -1,4 +1,4 @@
-//! Syntactic detection of EXPERIMENTAL Svelte await-expressions (D-bg).
+//! Syntactic detection of experimental Svelte await-expressions.
 //!
 //! The experimental Svelte await-expression is an `await` evaluated OUTSIDE an
 //! async-function body — at a reactive position: an instance-script top-level

@@ -37,7 +37,7 @@ pub struct TypeNodeHandle {
     pub symbol_name: Arc<str>,
 }
 
-/// The CLOSED Svelte source-family discriminant (D-bc).
+/// The CLOSED Svelte source-family discriminant.
 ///
 /// A Svelte component has at most ONE declaration site per source family
 /// (derived from the §9 mapping), so the family alone is the minimal structural
@@ -124,7 +124,7 @@ pub enum PlannedDemand {
         /// The node handle.
         node: TypeNodeHandle,
     },
-    /// Resolve one Svelte source family's surface (D-bh).
+    /// Resolve one Svelte source family's surface.
     ///
     /// The executor's resolve arm reads the owner's typed Svelte facts for
     /// `source`, dispatches the captured `TypeExpr`(s) through the SHARED
@@ -260,7 +260,7 @@ mod tests {
     }
 
     /// The Svelte source-family discriminant is CLOSED and `Eq + Hash` (the
-    /// D-bc store-key remainder + the demand discriminant). Every variant is
+    /// store-key remainder + the demand discriminant). Every variant is
     /// matched explicitly here so a new family forces an acknowledgement.
     #[test]
     fn svelte_surface_source_is_closed_and_hashable() {

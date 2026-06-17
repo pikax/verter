@@ -1626,7 +1626,7 @@ pub struct IndexSignature {
 /// One-level surface view of a semantic node. Members are ordered to keep
 /// hashing stable.
 ///
-/// Extended in B1a to carry the full
+/// Carries the full
 /// member + signature metadata previously held by the soon-to-be-retired
 /// `ProjectedMember` / `ProjectedSurface` / `ProjectedKeyspace` types in
 /// `verter_semantic::analysis::type_solver::query_engine`. Consumers should
@@ -5578,7 +5578,7 @@ mod tests {
     /// `decl_subexpression_lowering_count` that drives the strict form
     /// is a post-track refinement per follow-up item 4.
     ///
-    /// Today the invariant is enforced by the family memo (B1b) which
+    /// Today the invariant is enforced by the family memo, which
     /// dedups every `ProjectPath(member, path, mode)` sub-query across
     /// distinct `Instantiate` calls that visit the same path.
     #[test]

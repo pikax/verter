@@ -143,7 +143,7 @@ impl VirtualFileNaming {
 }
 
 /// How a virtual surface (IDE or import-resolution) is named relative to a
-/// file. Explicit path policies (B5 / D-bk): a component carrier appends a
+/// file. Explicit path policies: a component carrier appends a
 /// distinct-file suffix; a standalone rune module serves its own file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VirtualPathPolicy {
@@ -226,15 +226,15 @@ pub fn svelte_descriptor() -> FrameworkAdapterDescriptor {
         supported_surfaces: SVELTE_SUPPORTED_SURFACE_KINDS,
         carrier_language: Some(LanguageId::new("svelte")),
         virtual_file_naming: Some(VirtualFileNaming {
-            // A `.svelte` COMPONENT always projects a fixed `.tsx` IDE file
-            // (D-x): the projection emits TS with the `@jsxImportSource`
+            // A `.svelte` COMPONENT always projects a fixed `.tsx` IDE file:
+            // the projection emits TS with the `@jsxImportSource`
             // pragma — it is never JSX-conditional the way a Vue
             // `<script lang="jsx">` carrier is, so there is no `.jsx`
             // alternative. Its import surface is the `.ts` API file.
             ide: VirtualPathPolicy::Suffix(".tsx"),
             import_surface: VirtualPathPolicy::Suffix(".ts"),
             // No testing-API surface for Svelte (the testing surface is
-            // Vue-only, D-ak/D-al).
+            // Vue-only).
             testing_api_suffix: None,
             sidecar_suffixes: &[],
         }),
@@ -246,7 +246,7 @@ pub fn svelte_descriptor() -> FrameworkAdapterDescriptor {
 }
 
 /// The Svelte standalone rune-module (`.svelte.ts`/`.svelte.js`) virtual-file
-/// naming (D-bk).
+/// naming.
 ///
 /// A rune module is NOT a component carrier — it has no dual-file model. Its
 /// IDE surface and its import-resolution surface are the SAME `SelfFile`: the
@@ -326,7 +326,7 @@ mod tests {
             .virtual_file_naming
             .as_ref()
             .expect("the Svelte descriptor carries a virtual-file naming column");
-        // D-x: a `.svelte` COMPONENT projects a fixed `.tsx` IDE file and a
+        // A `.svelte` COMPONENT projects a fixed `.tsx` IDE file and a
         // `.ts` import surface, and has NO testing-API surface (Vue-only).
         assert_eq!(naming.ide, VirtualPathPolicy::Suffix(".tsx"));
         assert_ne!(
@@ -345,7 +345,7 @@ mod tests {
 
     #[test]
     fn svelte_rune_module_naming_is_same_file_with_no_component_surface() {
-        // D-bk: a standalone rune module uses the SAME-FILE model (NOT the
+        // A standalone rune module uses the SAME-FILE model (NOT the
         // component dual-file model). Its IDE and import surfaces are BOTH
         // `SelfFile` (it serves its own canonical path), and it has NO testing
         // surface. This is the discriminating contrast with the component

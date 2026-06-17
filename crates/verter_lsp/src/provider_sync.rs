@@ -368,7 +368,7 @@ pub fn open_unresolved_carrier_state(
     is_jsx: bool,
 ) -> ProviderSyncState {
     // Route the IDE-path naming through the shared column-backed derivation
-    // (D-x) rather than re-deriving the `{src}.tsx`/`.jsx` formula locally — the
+    // rather than re-deriving the `{src}.tsx`/`.jsx` formula locally — the
     // single naming authority, so a `.svelte` carrier projects `.tsx` exactly
     // as the column dictates.
     let desired_ide_path = verter_workspace::carrier_ide_provider_path(source_id, is_jsx);

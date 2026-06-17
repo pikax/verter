@@ -114,7 +114,7 @@ describe("carrier generalization (Svelte)", () => {
   it("recognizes the .svelte.ts api virtual-file SHAPE (suffix-only)", () => {
     // These are pure PATH functions: `Comp.svelte.ts` matches the api
     // virtual-file SHAPE. The `.svelte.ts` ambiguity against a real rune module
-    // (`store.svelte.ts`, D-bg) is disambiguated by the CONSUMER's file-exists
+    // (`store.svelte.ts`) is disambiguated by the CONSUMER's file-exists
     // check (the `readFile`/`fileExists` overrides fall through to the real
     // file when the backing `.svelte` source is absent) — not in this function.
     expect(isVueTs("./Comp.svelte.ts")).toBe(true);

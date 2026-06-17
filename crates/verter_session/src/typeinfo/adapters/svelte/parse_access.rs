@@ -19,7 +19,7 @@ use verter_language::{
 /// The Svelte adapter's carrier registration proof.
 ///
 /// Received once per process from `LanguageRegistry` carrier-row construction
-/// (the `.svelte` row's minted token, D-ba).
+/// (the `.svelte` row's minted token).
 fn svelte_carrier_token() -> &'static CarrierAccessToken {
     static TOKEN: OnceLock<CarrierAccessToken> = OnceLock::new();
     TOKEN.get_or_init(|| {

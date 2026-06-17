@@ -1,5 +1,5 @@
 //! Host-side materialization + path-mapping for the `@verter/svelte-jsx`
-//! shim and its transitive `svelte` dependency (D-av / D-ay).
+//! shim and its transitive `svelte` dependency.
 //!
 //! The Svelte IDE projection opens each `.svelte.tsx` with the per-file pragma
 //! `/** @jsxImportSource @verter/svelte-jsx */`. TSGO and the inferred project
@@ -16,7 +16,7 @@
 //! injection adds per-owner-project `paths` rows mapping `svelte` + `svelte/*`
 //! to the OWNER WORKSPACE's installed `svelte` package. A workspace with NO
 //! `svelte` install gets NO `svelte` rows and fails CLOSED (module-not-found +
-//! the typed `svelte-package-missing` diagnostic, D-ae(d)).
+//! the typed `svelte-package-missing` diagnostic).
 
 use std::path::{Path, PathBuf};
 
@@ -31,8 +31,8 @@ use verter_session::framework::svelte_jsx_assets::{
     SVELTE_JSX_SVG_RUNTIME_SPECIFIER,
 };
 
-/// The typed Verter diagnostic code for a missing `svelte` package install
-/// (D-ae(d) / D-ay). Emitted on a `.svelte` source file whose owner workspace
+/// The typed Verter diagnostic code for a missing `svelte` package install.
+/// Emitted on a `.svelte` source file whose owner workspace
 /// has no `svelte` install — the shim's `import … from "svelte"` then fails
 /// CLOSED (module-not-found), and this typed diagnostic explains WHY.
 pub(crate) const SVELTE_PACKAGE_MISSING_CODE: &str = "svelte-package-missing";
@@ -115,7 +115,7 @@ pub(crate) fn resolve_owner_svelte(workspace_root: &str) -> Option<PathBuf> {
 }
 
 /// Inject the svelte-jsx shim + transitive `svelte` rows into a `paths` JSON
-/// object for `configure_paths` (D-av / D-ay).
+/// object for `configure_paths`.
 ///
 /// * `@verter/svelte-jsx/jsx-runtime` + `jsx-dev-runtime` map to the
 ///   host-materialized shim copy;
@@ -180,7 +180,7 @@ pub(crate) fn inject_svelte_paths(
 }
 
 /// Produce the typed `svelte-package-missing` diagnostic for a `.svelte` source
-/// file (D-ae(d) / D-ay) when its owner workspace has NO `svelte` install.
+/// file when its owner workspace has NO `svelte` install.
 ///
 /// Returns `Some(Diagnostic)` exactly when `resolve_owner_svelte(owner_root)`
 /// is `None` — the same fail-closed condition that suppresses the `svelte`
@@ -298,7 +298,7 @@ mod tests {
 
     #[test]
     fn svelte_package_missing_diagnostic_emitted_when_owner_has_no_svelte() {
-        // D-ae(d): a `.svelte` file in a workspace WITHOUT `svelte` gets the
+        // A `.svelte` file in a workspace WITHOUT `svelte` gets the
         // typed `svelte-package-missing` diagnostic on the source file.
         let diag = svelte_package_missing_diagnostic(
             "/ws/src/App.svelte",
@@ -348,7 +348,7 @@ mod tests {
         assert!(obj.contains_key("@verter/svelte-jsx/jsx-runtime"));
     }
 
-    // --- D-ay PRODUCTION-TOPOLOGY + D-av ASSET-RESOLUTION TSGO fixtures ---
+    // --- PRODUCTION-TOPOLOGY + ASSET-RESOLUTION TSGO fixtures ---
     //
     // These exercise the REAL row-injection mechanism (`inject_svelte_paths`):
     // the shim materializes OUTSIDE the fixture workspace (host data dir), and
@@ -454,7 +454,7 @@ mod tests {
         vendor_svelte_into(root);
         let root_str = root.to_string_lossy().to_string();
 
-        // D-ay PRODUCTION TOPOLOGY: shim materialized OUTSIDE the workspace; the
+        // PRODUCTION TOPOLOGY: shim materialized OUTSIDE the workspace; the
         // ONLY `@verter/svelte-jsx` + `svelte` mapping is what the injection adds.
         let injected = inject_svelte_paths(serde_json::Value::Null, &root_str);
         let (ok, out) = typecheck_with_paths(root, &injected);
@@ -466,7 +466,7 @@ mod tests {
 
         // DISCRIMINATING: remove the injected rows → the shim's imports can no
         // longer resolve → module-not-found (fails). Proves ONLY the mechanism's
-        // rows make it work (D-av asset-resolution).
+        // rows make it work (asset-resolution).
         let (ok_without, out_without) = typecheck_with_paths(root, &serde_json::json!({}));
         assert!(
             !ok_without,
@@ -477,7 +477,7 @@ mod tests {
 
     #[test]
     fn asset_resolution_without_workspace_svelte_npm_dep_resolves_shim_via_mapping() {
-        // D-av ASSET-RESOLUTION: a workspace with NO `@verter/svelte-jsx` npm
+        // ASSET-RESOLUTION: a workspace with NO `@verter/svelte-jsx` npm
         // dependency resolves the shim PURELY through the provider mapping (the
         // injected rows), and removing the shim mapping fails the pragma import.
         let Some(_) = locate_type_checker() else {

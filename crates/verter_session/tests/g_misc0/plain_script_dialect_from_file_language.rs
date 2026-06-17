@@ -1,5 +1,5 @@
 //! LEGACY_GATE_SELF — `plain_script_dialect_from_file_language`
-//! static architecture guard (D-bf).
+//! static architecture guard.
 //!
 //! Plain (non-carrier) script files parse under the dialect their
 //! classified [`verter_language::FileLanguage`] row declares. The

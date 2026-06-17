@@ -5,10 +5,10 @@
 //! synthesized `default` symbol/export inventory. It runs NO `Instantiate`, NO
 //! semantic dispatch, and NO OXC at render time (static-guarded by
 //! `non_vue_api_projector_has_no_dispatch_or_oxc`): every input is already-cached
-//! shallow state. It produces the content behind B8c's `Foo.svelte.ts` api file.
+//! shallow state. It produces the content behind the `Foo.svelte.ts` api file.
 //!
 //! Rendered declarations, in order:
-//! 1. the D-at TYPE-ONLY import / re-export prelude — minimal `import type` lines
+//! 1. the TYPE-ONLY import / re-export prelude — minimal `import type` lines
 //!    derived from the carrier's shallow import facts for every PRESERVED type
 //!    reference (unused imports dropped);
 //! 2. `type __VerterProps` — the `$props()` type / legacy export-let object (refs
@@ -17,8 +17,8 @@
 //! 4. `declare const __VerterComponent: { new (...args: any[]): __VerterInstance }`;
 //! 5. `export default __VerterComponent`.
 //!
-//! `PublicApiMode::Testing` returns `None` (the testing surface is Vue-only,
-//! D-ak/D-al). No new content cache — a pure cheap render over already-cached
+//! `PublicApiMode::Testing` returns `None` (the testing surface is
+//! Vue-only). No new content cache — a pure cheap render over already-cached
 //! shallow inputs.
 
 use std::collections::BTreeSet;
@@ -75,7 +75,7 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
             return None;
         }
 
-        // The testing-API surface is Vue-only (D-ak/D-al) — Svelte returns None
+        // The testing-API surface is Vue-only — Svelte returns None
         // for `Testing`, distinct from the `Public` mode's `Some`.
         if mode == PublicApiMode::Testing {
             return None;
@@ -146,7 +146,7 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
 
         let mut out = ShimBuilder::default();
 
-        // 1. The D-at type-only import / re-export prelude — minimal
+        // 1. The type-only import / re-export prelude — minimal
         //    `import type` lines for each PRESERVED reference whose binding the
         //    shallow import facts resolve to an import.
         for name in &referenced {

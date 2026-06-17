@@ -99,9 +99,9 @@ mod tests {
     }
 
     /// `ensure_loaded` loads a `.svelte` carrier through the registered Svelte
-    /// carrier (B8a): the path classifies to the carrier row and the load
-    /// produces source state. The B2-era carrier-less rejection on `.svelte`
-    /// is dead now the carrier registers; the typed unsupported-language
+    /// carrier: the path classifies to the carrier row and the load
+    /// produces source state. A `.svelte` path is never carrier-less
+    /// rejected now the carrier registers; the typed unsupported-language
     /// propagation stays exercised at the session layer (the Vue
     /// framework-template / same-adapter non-carrier rows).
     #[test]

@@ -574,7 +574,7 @@ fn audit_mining_traces_dropped_prefix_edges() {
 /// pre-fix the ledger has N entries and `duplicate_edges == N - 1`.
 /// Asserts `duplicate_edges / origin_edge_count < 0.05` post-fix.
 ///
-/// On real corpora (B-B7d's diagnosis: Avatar/Button/Modal × 4
+/// On real corpora (Avatar/Button/Modal × 4
 /// scenarios), the pre-fix ratio is 12.8%-18.7%; post-fix the dedup
 /// drives it to ~0%. This unit test gates the structural property.
 #[test]

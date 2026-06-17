@@ -3598,7 +3598,7 @@ fn resolved_named_type_repeated_insert_overwrites_identity_mapping() {
 }
 
 // ──────────────────────────────────────────────────────────────────
-// B1b family-memo backfill matrix
+// Family-memo backfill matrix
 // ──────────────────────────────────────────────────────────────────
 
 fn family_test_path() -> Arc<[PathSegment]> {

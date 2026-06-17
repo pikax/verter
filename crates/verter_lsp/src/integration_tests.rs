@@ -5513,7 +5513,7 @@ const actions: Action[] = [{ label: 'ok', disabled: false }]
     );
 }
 
-/// Gap 1: workspace-symbol search includes `.svelte` components.
+/// Workspace-symbol search includes `.svelte` components.
 /// DISCRIMINATING: under the pre-change `!file_language.is_vue()` gate the
 /// Svelte file was skipped and contributed zero symbols; a plain `.ts` is NOT
 /// a carrier and is also excluded here.
@@ -5560,7 +5560,7 @@ fn workspace_symbols_includes_svelte_components() {
     );
 }
 
-/// Gap 3: a `.svelte` carrier dropped into a template produces a component
+/// A `.svelte` carrier dropped into a template produces a component
 /// tag + import insertion. DISCRIMINATING: the pre-change
 /// `!dropped_uri.ends_with(".vue")` gate returned `None` for a `.svelte`
 /// drop; a plain `.ts` drop still returns `None`.
@@ -5617,7 +5617,7 @@ fn document_drop_edit_accepts_svelte_carrier() {
     assert!(none.is_none(), "a non-carrier .ts drop must return None");
 }
 
-/// Gap 5: a default import of a `.svelte` child retries export resolution
+/// A default import of a `.svelte` child retries export resolution
 /// with `"default"` (the carrier's default export IS the component).
 /// DISCRIMINATING: the pre-change `canonical_id.ends_with(".vue")` gate did
 /// not retry for a `.svelte` import, so the default-export location was never

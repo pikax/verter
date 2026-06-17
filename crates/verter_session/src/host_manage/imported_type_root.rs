@@ -59,7 +59,7 @@ impl VerterHost {
     /// Like [`Self::resolve_imported_type_root`] but ALSO returns
     /// the full route-chain fact list the resolution observed.
     /// Producers that thread the recorded facts into a downstream
-    /// cache entry (e.g. `OwnerImportSurfaceDb` — Gap 1, R3/R26/R28)
+    /// cache entry (e.g. `OwnerImportSurfaceDb`, R3/R26/R28)
     /// consume this variant so the dependent cache observes every
     /// barrel/reexport participant — not only the final target's
     /// `FileWholeHash`.

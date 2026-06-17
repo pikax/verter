@@ -486,7 +486,7 @@ fn absent_kind_without_path_is_a_typed_error() {
 
 #[test]
 fn svelte_kind_maps_to_the_svelte_carrier_row() {
-    // Paired with the `.svelte` registry row (D-ao): the accepted string
+    // Paired with the `.svelte` registry row: the accepted string
     // names a registered row; the row has no carrier implementation, so
     // dispatch serves the typed unsupported-language state.
     assert_eq!(

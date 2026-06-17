@@ -13,7 +13,7 @@
  *   touch the interned id space).
  * - {@link FrameworkSurfaceError} — the typed wire error arm.
  *
- * **Status semantics (D-s).** Per-kind status is surfaced VERBATIM from
+ * **Status semantics.** Per-kind status is surfaced VERBATIM from
  * the wire `FrameworkSurfaceKindStatus`: a SUPPORTED kind with zero
  * members is supported-empty (a real-but-empty surface), DISTINCT from
  * an UNSUPPORTED kind (which also carries zero members). The decoded

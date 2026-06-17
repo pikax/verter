@@ -176,7 +176,7 @@ impl TemplateProjector<'_, '_> {
     /// construct): its children project UNWRAPPED (like `{#key}`), the open +
     /// close tags are removed, and the `slot` value is void-checked once so a
     /// dynamic `slot={expr}` stays type-checked. Slot-NAME precision is NOT
-    /// claimed here (an owner-gated `$slots` contract, B8h).
+    /// claimed here (an owner-gated `$slots` contract).
     fn project_fragment(&mut self, el: &SvelteElement) {
         // Void-check the `slot` value (literal or expression) — emitted in place
         // of the open tag, then children render transparently as siblings.

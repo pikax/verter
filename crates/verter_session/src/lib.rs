@@ -170,7 +170,7 @@ pub mod resolved_import_facts_producer;
 // single-file `upsert` + `get_virtual_file`.
 #[cfg(test)]
 mod cache_identity_invariants_tests;
-// The B8a Svelte vertical: parse + shallow + synth + api-content behaviour.
+// The Svelte vertical: parse + shallow + synth + api-content behaviour.
 #[cfg(test)]
 mod svelte_vertical_tests;
 // Content-pinned artifact-read discriminators.

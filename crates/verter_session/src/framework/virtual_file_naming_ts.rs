@@ -59,7 +59,7 @@ pub fn render_virtual_file_naming_ts() -> String {
         );
     }
 
-    // The Svelte standalone rune-module naming (D-bk) — NOT a carrier
+    // The Svelte standalone rune-module naming — NOT a carrier
     // descriptor row (a rune module is a script). It is keyed by the
     // rune-module language id and carries the carrier extension `.svelte.ts`
     // (the longest-suffix the rune-module classification matches). Its
@@ -228,7 +228,7 @@ mod tests {
         assert!(a.contains("ide: { kind: \"suffix\", suffix: \".tsx\" }"));
         // The Svelte row's testing surface is null (no `.svelte.__verter_test`).
         assert!(!a.contains(".svelte.__verter_test"));
-        // The rune-module row (D-bk): same-file model (selfFile/selfFile),
+        // The rune-module row: same-file model (selfFile/selfFile),
         // carrier extension `.svelte.ts`, no testing surface.
         assert!(a.contains("SVELTE_RUNE_MODULE: {"));
         assert!(a.contains("carrierExtension: \".svelte.ts\""));

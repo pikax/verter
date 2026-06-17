@@ -136,7 +136,7 @@ fn plain_jsx_dependency_parses_under_jsx_and_keeps_its_export_surface() {
     );
 }
 
-// ───────────── JS module-kind hazard pins (D-bf) ─────────────
+// ───────────── JS module-kind hazard pins ────────────────────
 
 #[test]
 fn module_js_dependency_keeps_its_import_export_surface() {
@@ -384,7 +384,7 @@ fn vue_carrier_source_types_are_byte_identical_at_full_fidelity() {
 
 #[test]
 fn cjs_with_esm_syntax_stays_commonjs_and_keeps_a_recovered_surface() {
-    // D-bf pins `.cjs` to the CommonJS grammar. Module-only `export`
+    // `.cjs` is pinned to the CommonJS grammar. Module-only `export`
     // syntax is erroneous there, but OXC's recovering parser does not
     // panick on it — the declaration still surfaces, so a `.cjs` file
     // that (incorrectly) uses ESM syntax loses nothing vs the old

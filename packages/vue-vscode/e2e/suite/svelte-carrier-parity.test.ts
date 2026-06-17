@@ -43,7 +43,7 @@ suite(`Svelte carrier parity [${FIXTURE_NAME}]`, function () {
     parentDoc = await openVueFile(SVELTE_PARENT);
   });
 
-  // Gap 1: workspace symbols include `.svelte` components.
+  // Workspace symbols include `.svelte` components.
   test("workspace-symbol search finds a Svelte component's symbols", async function () {
     if (FIXTURE_NAME !== "single-project") {
       console.log("    svelte fixtures only in single-project — N/A");
@@ -62,7 +62,7 @@ suite(`Svelte carrier parity [${FIXTURE_NAME}]`, function () {
     ).to.be.greaterThan(0);
   });
 
-  // Gap 2: component auto-import offers a Svelte component with the correct
+  // Component auto-import offers a Svelte component with the correct
   // (extension-stripped) name.
   test("completion offers a Svelte component auto-import with the stripped name", async function () {
     if (FIXTURE_NAME !== "single-project") {
@@ -85,7 +85,7 @@ suite(`Svelte carrier parity [${FIXTURE_NAME}]`, function () {
     ).to.be.true;
   });
 
-  // Gap 5: definition on a Svelte child usage lands on the `.svelte` child.
+  // Definition on a Svelte child usage lands on the `.svelte` child.
   test("definition on a Svelte child usage lands on the .svelte component", async function () {
     if (FIXTURE_NAME !== "single-project") {
       console.log("    svelte fixtures only in single-project — N/A");

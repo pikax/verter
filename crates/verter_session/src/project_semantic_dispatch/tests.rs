@@ -665,7 +665,7 @@ fn key_of_object_yields_string_union() {
     }
 }
 
-/// B1a: `ProjectMember { base, member, mode }` and the equivalent
+/// `ProjectMember { base, member, mode }` and the equivalent
 /// `ProjectPath { base, path: [Member(member)], mode }` admission-rewrite
 /// to the same canonical key, so two repeated calls — sugar then
 /// canonical — share one warm memo entry.
@@ -752,7 +752,7 @@ fn project_path_of_length_one_dedups_with_project_member_at_memo() {
     );
 }
 
-/// B1a: `IndexedAccess { base, index, mode }` admission-canonicalises to
+/// `IndexedAccess { base, index, mode }` admission-canonicalises to
 /// `ProjectPath { base, path: [Index(index)], mode }` BEFORE hashing.
 #[test]
 fn indexed_access_canonicalises_to_project_path_before_admission() {
@@ -1176,7 +1176,7 @@ fn raise_path_indexed_access_intermediate_stays_navigate_terminal_expands() {
     );
 }
 
-/// B1a: `SurfaceView::members` carries the full TypeScript member
+/// `SurfaceView::members` carries the full TypeScript member
 /// metadata via [`SurfaceMember`]. The struct's `optional`, `readonly`,
 /// and `is_method` fields round-trip through interning unchanged so
 /// downstream consumers (component-meta, LSP hover) can read them
@@ -1241,7 +1241,7 @@ fn surface_view_carries_surface_member_optional_readonly_is_method() {
     }
 }
 
-/// B1a: `SurfaceView` carries `call_signatures` and `construct_signatures`
+/// `SurfaceView` carries `call_signatures` and `construct_signatures`
 /// arrays alongside `members` so callable / newable types' signatures
 /// flow through interning.
 #[test]
@@ -1270,10 +1270,10 @@ fn surface_view_carries_call_signatures_and_construct_signatures() {
     }
 }
 
-/// B1a: `SemanticQueryKey::Expand`, `ExpandMode`, `SemanticQueryApi::expand`,
+/// `SemanticQueryKey::Expand`, `ExpandMode`, `SemanticQueryApi::expand`,
 /// `build_expand`, and `ExpandMode::` are absent across the workspace's
-/// Rust crate sources and TypeScript packages. The B1a commit retires
-/// these identifiers; this test fails loudly if any survive.
+/// Rust crate sources and TypeScript packages. These identifiers are not
+/// part of the four-mode surface; this test fails loudly if any survive.
 ///
 /// The terminology script (`tools/check-four-mode-terminology.sh`) also
 /// catches this at CI time, but the in-repo test surfaces the failure
@@ -1369,7 +1369,7 @@ fn expand_variant_and_expand_mode_absent_from_workspace() {
     );
     assert!(
         violations.is_empty(),
-        "Found Expand/ExpandMode/build_expand references after B1a retirement:\n{}",
+        "Found forbidden Expand/ExpandMode/build_expand references (not part of the four-mode surface):\n{}",
         violations.join("\n")
     );
 }
@@ -1499,7 +1499,7 @@ fn resolved_named_type_dispatch_returns_value_after_insert() {
     }
 }
 
-/// B1a: two concurrent threads — one calling the `ProjectMember` sugar
+/// Two concurrent threads — one calling the `ProjectMember` sugar
 /// form and one calling the canonical `ProjectPath` form for the
 /// equivalent member — admission-rewrite to the same canonical key and
 /// share one in-flight wait graph. Only one cold build runs, both

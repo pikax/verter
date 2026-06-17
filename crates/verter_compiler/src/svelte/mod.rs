@@ -7,7 +7,7 @@
 //! drives the four [`CarrierCompiler`](crate::framework_common::CarrierCompiler)
 //! operations.
 //!
-//! It performs NO type lowering (D-o; the thin-adapters guard). The IDE TSX
+//! It performs NO type lowering (the thin-adapters guard). The IDE TSX
 //! projection ([`ide`]) is a pure syntactic transform via `CodeTransform` —
 //! never type resolution.
 

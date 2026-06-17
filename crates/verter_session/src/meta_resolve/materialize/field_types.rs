@@ -34,7 +34,7 @@ pub(crate) fn type_expr_materializer_context(
 /// materialiser lowers + reduces `expr` under, given the caller's
 /// `mode`.
 ///
-/// gap1: the `ShapeCacheDb` peek/publish slot MUST be keyed by this
+/// The `ShapeCacheDb` peek/publish slot MUST be keyed by this
 /// context so a cache entry's stored value (reduced under this context)
 /// is only ever served to a consumer that lowered under the SAME
 /// context. The whole-expression materialiser has TWO reduction
@@ -53,7 +53,7 @@ pub(crate) fn type_expr_materializer_context(
 /// Keying the slot on a bare `published(mode)` while reducing under
 /// `StructuralTransit(mode)` stored a transit-lowered value at a
 /// published-keyed slot and served it to a published consumer — the
-/// gap1 poisoning. This helper is the single source for both the
+/// slot-key poisoning. This helper is the single source for both the
 /// reduction and the cache key.
 pub(crate) fn type_expr_materialize_reduction_context(
     expr: &verter_type_expr::TypeExpr,
@@ -156,7 +156,7 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
     #[cfg(test)]
     MTL_CALL_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
-    // gap1: the host-owned `ShapeCacheDb` is THE materialiser cache.
+    // The host-owned `ShapeCacheDb` is THE materialiser cache.
     // The former request-local `materialize_memo` keyed on
     // `(scope, expr, navigate_bool)` was a SECOND authoritative cache
     // (a host-owned-cache-principle violation) AND keyed only on a
@@ -273,7 +273,7 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
             scope_canonical_id, mode
         );
     }
-    // `reduction_context` was computed at function entry (gap1) so the
+    // `reduction_context` was computed at function entry so the
     // ShapeCacheDb peek/publish key shares one identity with the value.
     let _us_lower_t0 = Instant::now();
     let lowered = dispatch.shallow_lower_type_expr_with_context(
@@ -402,7 +402,7 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
         }
     }
 
-    // gap1: no request-local write-through. The host-owned
+    // No request-local write-through. The host-owned
     // `ShapeCacheDb` get_or_compute above is the SOLE materialiser
     // cache; the same request's later reduce calls re-peek it (a warm
     // hit under the exact `reduction_context` identity).

@@ -82,7 +82,7 @@ pub struct VueSurfaceKey {
 }
 
 /// The Svelte adapter's typed [`crate::framework::surface_store::FullKey`]
-/// remainder (D-bc).
+/// remainder.
 ///
 /// The four framework-neutral identity columns live on `FullKey`; this is the
 /// Svelte adapter's typed remainder — the CLOSED source-family discriminant. A

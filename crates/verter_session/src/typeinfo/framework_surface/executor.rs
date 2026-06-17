@@ -378,7 +378,7 @@ impl VerterHost {
 
         // The descriptor's supported set decides supported-empty vs structural
         // UNSUPPORTED per kind. A Deferred registration's normalized set is
-        // empty, so every kind fills supported-empty — but the design's D-s
+        // empty, so every kind fills supported-empty — but the design's
         // requirement is a Deferred adapter answers UNSUPPORTED; pass an EMPTY
         // supported set for Deferred so every kind fills structurally
         // UNSUPPORTED.
@@ -388,7 +388,7 @@ impl VerterHost {
         };
 
         // A Deferred adapter's per-kind UNSUPPORTED diagnostic names the
-        // intermediate state explicitly (D-ag) — the surfaces are not yet
+        // intermediate state explicitly — the surfaces are not yet
         // registered, distinct from a supported adapter's per-kind unsupport.
         let encoded = match &registration.surface {
             SurfaceRegistration::Deferred => encode_framework_surfaces_with_unsupported_message(

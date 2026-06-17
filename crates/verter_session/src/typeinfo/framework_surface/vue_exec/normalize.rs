@@ -97,8 +97,8 @@ pub(crate) fn props_from_typeinfo_surface(
 }
 
 /// Normalize a `defineOptions<T>()` / `defineExpose<T>()` macro surface into the
-/// neutral [`NamedTypeMember`] set — the pass-through object surface (D-s
-/// options/expose are an object-member surface, NOT a prop/emit/slot normalize).
+/// neutral [`NamedTypeMember`] set — the pass-through object surface
+/// (options/expose are an object-member surface, NOT a prop/emit/slot normalize).
 ///
 /// The macro surface is ALREADY the one-level object surface
 /// [`VerterHost::resolve_vue_macro_surface_with_ctx`] projected from the type

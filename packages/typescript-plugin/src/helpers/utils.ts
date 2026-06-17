@@ -51,7 +51,7 @@ const CARRIERS: readonly CarrierNaming[] = Object.values(VIRTUAL_FILE_NAMING)
   // A true COMPONENT carrier projects a DISTINCT import-surface virtual file
   // (a `suffix` policy → `*.vue.ts`). A standalone rune module (`selfFile`
   // import surface) serves its OWN path — it is NOT a carrier virtual file, so
-  // it must not enter the carrier naming table (D-bk).
+  // it must not enter the carrier naming table.
   .filter((row) => row.carrierExtension !== null && policySuffix(row.importSurface) !== null)
   .map((row) => {
     const ext = row.carrierExtension as string;

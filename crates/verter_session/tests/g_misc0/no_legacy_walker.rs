@@ -221,7 +221,7 @@ const RETIRED_SYMBOLS: &[&str] = &[
     "ExportGraphFileKind",
     "ffi_file_kind_to_host",
     "is_vue_file",
-    // Framework parse-artifact carrier substrate (D-af): every production
+    // Framework parse-artifact carrier substrate: every production
     // `cached_parse` carrier field — `IndexedReady`,
     // `RouteOwnedShallowEntry`, `HostSourceData`, `CompileInput`,
     // `EffectiveFileState`, `ContentOverrideWithParse`,

@@ -58,7 +58,7 @@ fn captures_bindable_members() {
 
 #[test]
 fn captures_destructuring_default_value() {
-    // GAP 1: a destructuring default `size = 'md'` captures the RHS source
+    // A destructuring default `size = 'md'` captures the RHS source
     // text as the prop default. DISCRIMINATING: a member with NO default
     // (`label`) records no default entry.
     let c = capture("let { size = 'md', label } = $props();");
@@ -81,7 +81,7 @@ fn captures_destructuring_default_value() {
 
 #[test]
 fn captures_bindable_default_first_argument() {
-    // GAP 1: `value = $bindable(false)` captures the `$bindable` first arg
+    // `value = $bindable(false)` captures the `$bindable` first arg
     // `false` as the prop default AND marks `value` bindable.
     let c = capture("let { value = $bindable(false) } = $props();");
     let props = c.props.expect("props candidate");
@@ -96,7 +96,7 @@ fn captures_bindable_default_first_argument() {
 
 #[test]
 fn bindable_no_arg_is_bindable_with_no_default() {
-    // GAP 1 DISCRIMINATING: `value = $bindable()` (NO arg) is bindable but
+    // DISCRIMINATING: `value = $bindable()` (NO arg) is bindable but
     // contributes NO default — distinct from `$bindable(false)`.
     let c = capture("let { value = $bindable() } = $props();");
     let props = c.props.expect("props candidate");
@@ -110,7 +110,7 @@ fn bindable_no_arg_is_bindable_with_no_default() {
 
 #[test]
 fn prop_defaults_fold_into_stable_candidate_hash() {
-    // GAP 1 DISCRIMINATING: editing a default VALUE changes the stable
+    // DISCRIMINATING: editing a default VALUE changes the stable
     // candidate hash (so the content-addressed candidate cache misses).
     let a = capture("let { size = 'md' } = $props();");
     let b = capture("let { size = 'lg' } = $props();");

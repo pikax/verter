@@ -3,9 +3,9 @@
 //! This leaf crate owns the single open language descriptor
 //! ([`FileLanguage`]) and the pure static classification registry
 //! ([`LanguageRegistry`]) every Verter crate routes files through. It is
-//! the ONE definition of "what kind of file is this" in the workspace —
-//! per-crate file-kind enums and ad-hoc `ends_with(".vue")` checks are
-//! retired in its favour.
+//! the ONE definition of "what kind of file is this" in the workspace: no
+//! crate carries its own file-kind enum or ad-hoc `ends_with(".vue")`
+//! check.
 //!
 //! Two authority levels split classification across the workspace:
 //!

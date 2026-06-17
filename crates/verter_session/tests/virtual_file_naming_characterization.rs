@@ -1,5 +1,5 @@
-//! D-x / D-al characterization: the `VirtualFileNaming` column reproduces the
-//! live PRODUCTION virtual-file derivations byte-for-byte.
+//! Virtual-file-naming characterization: the `VirtualFileNaming` column
+//! reproduces the live PRODUCTION virtual-file derivations byte-for-byte.
 //!
 //! The column is the single naming authority; the LSP `provider_id_for_source`
 //! / `provider_ide_id_for_source` derivations (in `verter_workspace`) and the
@@ -90,7 +90,7 @@ fn svelte_column_reproduces_production_provider_derivations() {
 
 #[test]
 fn testing_api_suffix_implies_api_suffix_and_svelte_forms_no_testing_name() {
-    // D-al structural rule: testing is a MODE of the api producer.
+    // Structural rule: testing is a MODE of the api producer.
     let vue = vue_descriptor().virtual_file_naming.expect("vue naming");
     assert!(vue.is_structurally_valid());
     assert!(

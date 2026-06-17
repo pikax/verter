@@ -890,7 +890,7 @@ fn is_carrier_ide_path(path: &str) -> bool {
 /// Whether `path` is a carrier API / DTS virtual file (`{carrier}.ts` /
 /// `{carrier}.d.ts`) — the declaration surface (default-range, no position map).
 ///
-/// CRITICAL (D-bk): a `{carrier}.ts` form is AMBIGUOUS for Svelte — appending
+/// CRITICAL: a `{carrier}.ts` form is AMBIGUOUS for Svelte — appending
 /// `.ts` to `Foo.svelte` is the component API virtual file, but `store.svelte.ts`
 /// is also a REAL first-class rune module (classifies as a non-component
 /// adapter-module Script). We disambiguate by the backing carrier source: a
@@ -2617,7 +2617,7 @@ mod tests {
         );
         assert!(is_carrier_ide_path("/src/Comp.svelte.tsx"));
         // `Comp.svelte.ts` is the api virtual file ONLY when `Comp.svelte`
-        // EXISTS (D-bg disambiguation against a real `.svelte.ts` rune module).
+        // EXISTS (disambiguation against a real `.svelte.ts` rune module).
         assert!(is_carrier_api_or_dts_path(
             "/src/Comp.svelte.ts",
             &carrier_exists
@@ -2632,7 +2632,7 @@ mod tests {
 
     #[test]
     fn real_svelte_rune_module_is_not_a_carrier_virtual_file() {
-        // D-bk co-existence: `store.svelte.ts` with NO backing `store.svelte` is
+        // Co-existence: `store.svelte.ts` with NO backing `store.svelte` is
         // a REAL first-class rune module — NOT the `{carrier}.ts` component API
         // virtual file. The existence guard disambiguates it from `Foo.svelte` +
         // `.ts` (the component API virtual file exists ONLY when `Foo.svelte`

@@ -100,7 +100,7 @@ fn collect_rs_recursive(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
 #[test]
 fn framework_codegen_uses_code_transform() {
     // The carrier-compiler IDE codegen lives across EVERY carrier-bearing
-    // compiler module, not a single hardcoded bridge. GENERALIZED (B8a): scan
+    // compiler module, not a single hardcoded bridge. GENERALIZED: scan
     // ALL of `framework_common/` PLUS each framework's `src/<framework>/**`
     // (Vue's bridge under framework_common, Svelte's carrier under
     // `src/svelte/**`). None may post-hoc string-munge built codegen output.
@@ -181,7 +181,7 @@ fn carrier_descriptors_have_compilers() {
     // descriptor (a descriptor whose `carrier_language` is `Some`) MUST
     // have a registered `CarrierCompiler` in the compiler-side registry.
     //
-    // GENERALIZED (B8a): iterate every built-in descriptor and filter the
+    // GENERALIZED: iterate every built-in descriptor and filter the
     // carrier-bearing rows, rather than hardcoding Vue. A new carrier vertical's
     // descriptor is covered automatically; if Svelte's carrier registers without
     // a compiler, this is RED.

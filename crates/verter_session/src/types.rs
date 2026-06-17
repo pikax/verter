@@ -2241,8 +2241,8 @@ pub struct DerivedRawState {
 
     /// Per-specifier workspace `content_generation` recorded when a
     /// known-miss `DependencyResolution` (no resolved canonical and
-    /// no candidates) was admitted to `import_routes`. R3/R26/R28
-    /// Gap 2: the reader must re-resolve once the workspace's
+    /// no candidates) was admitted to `import_routes`. R3/R26/R28:
+    /// the reader must re-resolve once the workspace's
     /// `content_generation` advances past the recorded value — a new
     /// canonical may now satisfy the specifier. Missing entries are
     /// treated as "never recorded" → the reader forces a fresh

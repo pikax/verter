@@ -154,7 +154,7 @@ impl VerterHost {
         crate::request_context::install_clear_tls_hook();
 
         // Receive the Vue adapter's carrier registration proof (the
-        // `.vue` `LanguageRegistry` carrier-row token, D-ba) at host
+        // `.vue` `LanguageRegistry` carrier-row token) at host
         // construction; the blessed `vue_parse()` accessor reuses it.
         crate::typeinfo::adapters::vue::receive_vue_carrier_token();
 
@@ -744,7 +744,7 @@ impl VerterHost {
     ///
     /// The ONE downcast at store acquisition to the typed
     /// [`FrameworkSurfaceStore<SvelteSurfaceKey, MacroSurfaceDtos>`](crate::framework::surface_store::FrameworkSurfaceStore),
-    /// keyed by the Svelte adapter remainder (one source family per row, D-bc).
+    /// keyed by the Svelte adapter remainder (one source family per row).
     /// Used by [`crate::typeinfo::framework_surface::svelte_exec::resolve_svelte_surface`]
     /// to materialize each Svelte source surface once per `(canonical, content,
     /// source, level)`.

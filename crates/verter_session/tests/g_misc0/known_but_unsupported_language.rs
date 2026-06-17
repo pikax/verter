@@ -1,15 +1,14 @@
 //! Known-but-unsupported language semantics (structural) + the Svelte carrier
-//! positive-routing tests that superseded the B2-era Svelte rejection assertions.
+//! positive-routing tests.
 //!
 //! The typed `UnsupportedLanguage` state is the STRUCTURAL pre-vertical state for
 //! EVERY carrier-less row: host dispatch finds the registry row, finds no
 //! carrier, and returns the typed error (never a silent empty, never a panic).
-//! `.svelte` USED to exercise it (B2's row-without-carrier); now that the Svelte
-//! carrier registers (B8a), the `.svelte` upsert SUCCEEDS — the B2-era rejection
-//! assertions are superseded by the positive parse/routing tests below, and the
-//! typed `UnsupportedLanguage` path STAYS in the substrate (exercised by the Vue
+//! Because the Svelte carrier registers, the `.svelte` upsert SUCCEEDS — the
+//! positive parse/routing tests below exercise that path, and the typed
+//! `UnsupportedLanguage` path STAYS in the substrate (exercised by the Vue
 //! framework-template + same-adapter-non-carrier rows further down — the
-//! structural pre-vertical state for every FUTURE row).
+//! structural pre-vertical state for every carrier-less row).
 
 use std::sync::Arc;
 
@@ -32,8 +31,8 @@ fn upsert_svelte(host: &VerterHost, file_language: FileLanguage) -> Result<(), H
 }
 
 /// An explicit-kind request (the FFI `"svelte"` string maps to this language)
-/// now PARSES through the registered Svelte carrier — the B2-era typed-rejection
-/// is dead. DISCRIMINATING: the upsert SUCCEEDS and a source snapshot exists.
+/// PARSES through the registered Svelte carrier — a `.svelte` request is never
+/// typed-rejected. DISCRIMINATING: the upsert SUCCEEDS and a source snapshot exists.
 #[test]
 fn explicit_svelte_kind_parses_through_the_registered_carrier() {
     let host = VerterHost::new_standalone(HostConfig::default());

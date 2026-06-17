@@ -24,8 +24,7 @@
 //!   variant. `ProjectMember { base, member, mode }` and
 //!   `IndexedAccess { base, index, mode }` admission-canonicalise to the
 //!   length-1 `ProjectPath` form **before** memo hashing so sugar and
-//!   canonical share one warm entry and one in-flight wait graph (plan
-//!   B1a).
+//!   canonical share one warm entry and one in-flight wait graph.
 //! - `NormalizeUnion` / `NormalizeIntersection` — structural dedup over the
 //!   supplied members with stable ordering.
 //! - `KeyOf` / `MappedType` / `Conditional` — navigation operations that
@@ -1007,7 +1006,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             ctx.record_dispatched_query_tag(key.tag());
         }
 
-        // Admission-time canonicalisation per plan B1a:
+        // Admission-time canonicalisation:
         //   - `ProjectMember { base, member, mode }` rewrites to
         //     `ProjectPath { base, path: [Member(member)], mode }` BEFORE the
         //     key is hashed into the memo, so sugar and canonical share one

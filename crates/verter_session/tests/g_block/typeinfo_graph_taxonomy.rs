@@ -500,9 +500,8 @@ fn framework_surface_member_default_and_origin_field_numbers_are_stable() {
         "typeinfo_pb.ts must declare the `FrameworkSurfaceDeclarationKind` enum",
     );
 
-    // The component-meta wire must NOT carry the retired dead `PropOrigin`
-    // (the wrong-wire B8k addition was removed; Vue public origin is a separate
-    // follow-up).
+    // The component-meta wire must NOT carry the dead `PropOrigin` tag on
+    // the wrong wire; Vue public origin is carried separately.
     let component_meta =
         read_workspace_file("crates/verter_protocol/proto/verter/v1/component_meta.proto");
     assert!(

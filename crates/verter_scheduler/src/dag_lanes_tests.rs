@@ -1,4 +1,4 @@
-//! B7b — priority-lane + weighted-credit readiness selector tests.
+//! Priority-lane + weighted-credit readiness selector tests.
 //!
 //! These tests characterize the lane/credit selector that replaces
 //! the linear scan + time-based aging. Every test is discriminating:

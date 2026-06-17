@@ -767,7 +767,7 @@ impl ProjectResolver {
 // ── Private helpers ──
 
 /// The IDE virtual-file suffix for a carrier source — the SINGLE naming
-/// derivation every consumer routes through (D-x). `is_jsx` selects `.jsx`
+/// derivation every consumer routes through. `is_jsx` selects `.jsx`
 /// (JavaScript carriers) vs `.tsx` (TypeScript carriers); a `.svelte` carrier
 /// always reports `is_jsx = false`, so it always projects `.tsx`. Appends to
 /// the FULL carrier canonical (`Foo.svelte` + `.tsx` → `Foo.svelte.tsx`).

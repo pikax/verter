@@ -370,7 +370,7 @@ pub(crate) fn resolve_script_facts<T: FrameworkScriptFactPayload>(
 /// CALLER's request view (`ctx`) instead of opening a fresh
 /// `current_store_view_for_query`. The framework-surface executor's Svelte arm
 /// uses this so the facts read shares the ONE coherent request view the rest of
-/// the response resolves under (D-bh) — a fact validated/published against a
+/// the response resolves under — a fact validated/published against a
 /// newer view can never warm an entry keyed under the executor's older content
 /// view.
 pub(crate) fn resolve_script_facts_with_ctx<T: FrameworkScriptFactPayload>(
@@ -523,8 +523,8 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
     };
 
     // Warm read against the CALLER's request view when one is supplied (the
-    // framework-surface executor's Svelte arm threads its single captured view,
-    // D-bh); otherwise open a proven-current view for the standalone facts
+    // framework-surface executor's Svelte arm threads its single captured
+    // view); otherwise open a proven-current view for the standalone facts
     // entry-point. Either way the read validates the recorded fact signature +
     // generation, so a stale entry misses.
     if let Some(ctx) = request_ctx {
@@ -715,7 +715,7 @@ impl VerterHost {
     /// Drive the Svelte resolved-validation half against the CALLER's request
     /// view `ctx` — the framework-surface executor's Svelte arm uses this so the
     /// facts read shares the ONE coherent request view the rest of the response
-    /// resolves under (D-bh), never a second `current_store_view_for_query`.
+    /// resolves under, never a second `current_store_view_for_query`.
     #[must_use]
     pub(crate) fn resolve_svelte_script_facts_with_ctx(
         &self,

@@ -18,7 +18,7 @@ use verter_language::{CarrierAccessToken, FrameworkParseArtifact, LanguageRegist
 /// The Vue adapter's carrier registration proof.
 ///
 /// Received once per process from `LanguageRegistry` carrier-row
-/// construction (the `.vue` row's minted token, D-ba). `VerterHost`
+/// construction (the `.vue` row's minted token). `VerterHost`
 /// construction calls [`receive_vue_carrier_token`] so the receipt
 /// happens at host construction; `vue_parse` reuses the held proof.
 fn vue_carrier_token() -> &'static CarrierAccessToken {

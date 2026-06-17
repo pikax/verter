@@ -8,7 +8,7 @@
 //! the leading bytes — the `@jsxImportSource` pragma must lead; unmapped). The
 //! whole template is wrapped in a `__verter_render` scope function, with
 //! snippet declarators and declaration-tag bindings hoisted to the top of that
-//! scope in source order (D-ap) via CodeTransform MOVE operations.
+//! scope in source order via CodeTransform MOVE operations.
 
 use oxc_allocator::Allocator;
 
@@ -336,11 +336,11 @@ struct TemplateProjector<'ct, 'a> {
     source: &'a str,
     diagnostics: &'ct mut Vec<SvelteIdeUnsupportedDiagnostic>,
     /// Snippet declarator MOVE requests collected during the walk, applied
-    /// after the body so they hoist to the TOP of the scope (D-ap order).
+    /// after the body so they hoist to the TOP of the scope (source order).
     snippet_moves: Vec<SnippetMove>,
     /// Declaration-tag (`{const}`/`{let}`/`{@const}`) MOVE requests, hoisted to
     /// the render scope top so the declared binding is a real statement VISIBLE
-    /// to sibling references (D-ap sibling-run scope) — an in-place IIFE would
+    /// to sibling references (sibling-run scope) — an in-place IIFE would
     /// scope the binding locally and a following sibling could not see it.
     decl_moves: Vec<DeclMove>,
     /// Whether a `<svelte:self>` was projected — its LOCAL self-component
@@ -411,7 +411,7 @@ impl TemplateProjector<'_, '_> {
         // Snippet declarators are hoisted to MODULE scope, ABOVE the render
         // fragment's `return` (Svelte snippets are visible to preceding
         // siblings; an in-place `const` would TDZ-error a preceding `{@render}`
-        // under the clean-type-check gate, D-ap). Module-scope `const`
+        // under the clean-type-check gate). Module-scope `const`
         // declarations are visible inside the render fn with no TDZ. The
         // declarator MOVEs land before the render-header insertion at `first`
         // (verified by the ordering test).
@@ -422,7 +422,7 @@ impl TemplateProjector<'_, '_> {
         // Hoist snippet declarators to MODULE scope (before the render fn).
         // Module-scope `const`s are visible inside the render fn with no TDZ,
         // and a preceding `{@render}` sibling references a later-declared
-        // snippet cleanly (D-ap). We move each declarator to `first` FIRST,
+        // snippet cleanly. We move each declarator to `first` FIRST,
         // then prepend the render header at `first` with `prepend_left` — which
         // inserts at the chunk boundary BEFORE the already-moved declarator
         // chunks, landing the header below the declarators (module-scope
@@ -434,7 +434,7 @@ impl TemplateProjector<'_, '_> {
         // Hoist declaration-tag bindings to MODULE scope too (before the render
         // fn). They reference script-/module-level symbols, so module scope is
         // valid, and as real statements every sibling reference resolves them
-        // (D-ap sibling-run scope) — an in-place IIFE would not.
+        // (sibling-run scope) — an in-place IIFE would not.
         let decl_moves = std::mem::take(&mut self.decl_moves);
         for decl in &decl_moves {
             let kw = if decl.is_let { "let " } else { "const " };
@@ -636,7 +636,7 @@ impl TemplateProjector<'_, '_> {
     fn project_element(&mut self, el: &SvelteElement) {
         match &el.kind {
             SvelteElementKind::NestedStyle => {
-                // Nested `<style>` — opaque, stripped from projection (D-ap).
+                // Nested `<style>` — opaque, stripped from projection.
                 remove_span(self.ct, el.open_span);
                 for child in &el.children {
                     if let SvelteNode::Text(span) = child {
@@ -751,7 +751,7 @@ impl TemplateProjector<'_, '_> {
                 }
                 if is_css_custom_property(name) {
                     // CSS custom property `--x={expr}`: strip the attribute,
-                    // void-check the value (D-ap).
+                    // void-check the value.
                     self.strip_custom_property_attr(attr, value.as_ref());
                     return;
                 }
@@ -796,7 +796,7 @@ impl TemplateProjector<'_, '_> {
 
     /// Project an inline-tag attribute (`{@attach expr}` used in an element
     /// open tag). The `{@attach}` form is element-attachment machinery: it has
-    /// NO published prop (D-bg). We project it to a JSX spread that void-checks
+    /// NO published prop. We project it to a JSX spread that void-checks
     /// the attachment expression through `__verter_attach` while contributing
     /// no props: `{...(__verter_attach(expr), {})}`.
     fn project_inline_tag_attribute(&mut self, attr: &SvelteAttribute, inner: Span) {
@@ -824,7 +824,7 @@ impl TemplateProjector<'_, '_> {
     }
 
     /// Strip a CSS custom-property attribute (`--x={expr}`) from the JSX
-    /// position and void-check its value (D-ap). A `--`-prefixed name is not a
+    /// position and void-check its value. A `--`-prefixed name is not a
     /// valid JSX attribute identifier, so the WHOLE `--name=` attribute name is
     /// removed; the `{expr}` value is rewritten into a JSX spread that
     /// void-checks the expression while contributing NO props:
@@ -891,7 +891,7 @@ impl TemplateProjector<'_, '_> {
             }
             SvelteDirectiveKind::Use => {
                 // `use:action` (+ parameter) — SUPPORTED (basic action parameter
-                // checking, D-u). Strip from the JSX position but void-check the
+                // checking). Strip from the JSX position but void-check the
                 // parameter so its type errors / hover survive.
                 self.strip_directive_void_checking_value(attr, dir);
             }
@@ -1332,7 +1332,7 @@ impl TemplateProjector<'_, '_> {
             SvelteTagKind::Const | SvelteTagKind::LegacyConst => {
                 // `{const x = e}` / `{@const x = e}` → a `const x = e;` HOISTED
                 // to the render scope top (a real statement, visible to sibling
-                // references — D-ap sibling-run scope). The inner `x = e` is
+                // references — sibling-run scope). The inner `x = e` is
                 // moved (kept mapped); the original tag is removed in place.
                 self.hoist_declaration_tag(tag, false);
             }

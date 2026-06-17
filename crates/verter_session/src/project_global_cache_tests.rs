@@ -577,7 +577,7 @@ fn owner_import_surface_picks_up_barrel_retargeting() {
     );
 }
 
-/// R3/R26/R28 Gap 1 discriminator: the producer-side observation
+/// R3/R26/R28 discriminator: the producer-side observation
 /// inside `owner_import_surface` must record every barrel-chain
 /// participant in `fact_dep_signature` — not only the owner +
 /// final-target `FileWholeHash`. Without the barrel's
@@ -626,7 +626,7 @@ fn owner_import_surface_fact_signature_includes_barrel_route() {
     assert!(
         barrel_route_fact.is_some(),
         "OwnerImportSurface.fact_dep_signature MUST include the barrel's \
-         DerivedFactHash::Route fact (Gap 1). Recorded facts: {:?}",
+         DerivedFactHash::Route fact. Recorded facts: {:?}",
         surface.read_set_signature.facts
     );
 
@@ -715,11 +715,11 @@ fn owner_import_surface_fact_signature_changes_on_barrel_retarget() {
     assert_ne!(
         pre_route_hash, post_route_hash,
         "barrel retargeting must change the recorded DerivedFactHash::Route \
-         hash so the fact-validation oracle detects the chain shift (Gap 1)"
+         hash so the fact-validation oracle detects the chain shift"
     );
 }
 
-/// R3/R26/R28 Gap 2: negative resolutions in
+/// R3/R26/R28: negative resolutions in
 /// `cached_import_route_resolution` must invalidate when the
 /// workspace's `content_generation` advances. Setup: the bundler
 /// (via `set_import_dependencies`) records a known-miss for a
@@ -775,7 +775,7 @@ fn import_route_negative_cache_invalidates_on_workspace_content_generation_bump(
         .unwrap_or(false);
     assert!(
         !is_negative_still_served,
-        "Gap 2: known-miss must invalidate once workspace content_generation \
+        "known-miss must invalidate once workspace content_generation \
          advances. Observed {:?}",
         post
     );

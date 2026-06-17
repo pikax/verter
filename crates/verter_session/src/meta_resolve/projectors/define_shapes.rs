@@ -27,7 +27,7 @@
 //!   `define_props` shape is EMPTY — no prop is yielded.
 //! - **Emits**: event payload semantics are preserved from the DTO emit
 //!   normalization (`AnalyzedEmitField.payload_expr`), which already applied the
-//!   gap4 carrier-aware conditional path + the leading-event-name strip; the
+//!   carrier-aware conditional path + the leading-event-name strip; the
 //!   flat `evaluated_types.emits` field supplies the projected type when present.
 //! - **Slots**: one slot function entry per DTO slot; the per-slot bindings are
 //!   published separately by `resolve_slot_bindings_graph_native`.
@@ -217,7 +217,7 @@ fn define_props_shape(
 
 /// Build the `define_emits` shape: one [`ExpandedProperty`] per DTO emit, typed
 /// from the matching already-projected `evaluated_types.emits` field and
-/// falling back to the DTO emit's payload-preserving `payload_expr` (the gap4
+/// falling back to the DTO emit's payload-preserving `payload_expr` (the
 /// carrier-aware emit normalization already applied the event-name strip).
 fn define_emits_shape(
     ctx: &dyn ResolverContext,

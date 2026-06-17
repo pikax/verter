@@ -16611,11 +16611,11 @@ mod tests {
         assert_eq!(gen_of(&results[1]), 9, "by-value result[1] follows input 1");
     }
 
-    /// B7c — scheduler pool topology: host-injected
+    /// Scheduler pool topology: host-injected
     /// `SchedulerCpuPool`/`SchedulerIoPool`, nonblocking `try_submit`,
     /// and the typed `try_submit`-full invariant-violation contract.
     #[cfg(not(target_arch = "wasm32"))]
-    mod b7c_pool_topology {
+    mod pool_topology {
         use super::*;
         use crate::dag::DagCapacityBudget;
         use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as AtomOrd};

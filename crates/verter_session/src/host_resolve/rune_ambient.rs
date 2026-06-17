@@ -1,6 +1,6 @@
 //! Per-file ambient rune typing for standalone Svelte rune modules.
 //!
-//! A `.svelte.ts` / `.svelte.js` rune module (D-bk) uses Svelte 5 runes at
+//! A `.svelte.ts` / `.svelte.js` rune module uses Svelte 5 runes at
 //! module scope (`export const s = $state(0)`). For Verter's own
 //! type-resolution engine to infer the exported rune-derived types correctly
 //! (Channel A — the session side), the module-valid rune declarations

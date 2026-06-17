@@ -28,7 +28,7 @@ fn synth_key(canonical: &str, content_hash: Hash16, parse_env_hash: Hash16) -> F
     }
 }
 
-/// D-r per-file invalidation column: keys that differ ONLY in
+/// Per-file invalidation column: keys that differ ONLY in
 /// `file_language_id` occupy DISTINCT artifact slots. Inert for static
 /// rows (the column is extension-derived, so one file always builds the
 /// same key today); load-bearing the moment a host-gated classification

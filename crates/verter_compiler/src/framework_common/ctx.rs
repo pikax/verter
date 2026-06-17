@@ -1,4 +1,4 @@
-//! The compiler-side blessed carrier downcast (D-m).
+//! The compiler-side blessed carrier downcast.
 //!
 //! [`CarrierCompilerCtx`] is one of the THREE blessed homes of the raw
 //! `verter_language` carrier downcast (`__carrier_downcast_ref` /
@@ -13,7 +13,7 @@
 //! The ctx holds the adapter's [`CarrierAccessToken`] — RECEIVED from
 //! `verter_language`'s carrier-row registration channel
 //! (`LanguageRegistry::__built_in_with_carrier_tokens`), never minted
-//! here (D-ba: `verter_language` is the sole minting authority).
+//! here (`verter_language` is the sole minting authority).
 
 use std::sync::Arc;
 

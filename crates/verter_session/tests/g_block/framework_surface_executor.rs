@@ -11,7 +11,7 @@
 //!   the registry → `VueFrameworkAdapter` plan/normalize → relocated `vue_exec`
 //!   resolution and yields the SAME members the live `vue_macro_dtos` path
 //!   produces (behavior parity).
-//! - D-s STATUS: the response carries EXACTLY ONE entry per known kind; a
+//! - STATUS: the response carries EXACTLY ONE entry per known kind; a
 //!   supported-but-empty kind is SUPPORTED-empty, distinct from an UNSUPPORTED
 //!   kind.
 
@@ -348,7 +348,7 @@ fn vue_props_emits_slots_match_live_macro_dtos() {
 #[test]
 fn supported_empty_kind_is_distinct_from_unsupported() {
     // The fixture has no defineOptions; Options is a SUPPORTED kind for the Vue
-    // adapter, so its entry is SUPPORTED-empty (not UNSUPPORTED) — the D-s
+    // adapter, so its entry is SUPPORTED-empty (not UNSUPPORTED) — the
     // supported-empty vs unsupported distinction on the wire.
     let host = build_host();
     let envelope = framework_envelope("/Parity.vue", "vue");

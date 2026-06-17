@@ -1,7 +1,7 @@
 //! Byte-pin freshness guard for the embedded `@verter/svelte-jsx` shim.
 //!
 //! The real workspace package `packages/svelte-jsx/` is the SINGLE
-//! hand-written content authority for the Svelte JSX namespace shim (D-av).
+//! hand-written content authority for the Svelte JSX namespace shim.
 //! `verter_session` carries IN-CRATE MIRROR files
 //! (`crates/verter_session/src/framework/svelte_jsx_assets/`) and embeds
 //! THOSE via crate-relative `include_str!` (a cross-tree `include_str!` of
@@ -135,7 +135,7 @@ fn embedded_mirror_is_byte_equal_to_the_canonical_package_file() {
 
 #[test]
 fn the_canonical_package_does_not_stub_the_svelte_package() {
-    // D-ae(d): the shim never stubs `svelte` itself — it imports the real
+    // The shim never stubs `svelte` itself — it imports the real
     // package. A workspace without `svelte` must fail CLOSED, not be rescued
     // by an ambient stub. So the package file imports `svelte` and never
     // `declare module "svelte"`.

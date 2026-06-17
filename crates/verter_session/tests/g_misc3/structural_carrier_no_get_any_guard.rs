@@ -124,7 +124,7 @@ fn body_contains_banned(body: &str, banned: &str) -> bool {
     strip_punct_adjacent_whitespace(body).contains(&strip_punct_adjacent_whitespace(banned))
 }
 
-/// Each D-owned producer / route-fact helper body MUST be free of the
+/// Each structural-carrier producer / route-fact helper body MUST be free of the
 /// banned permissive reads.
 #[test]
 fn structural_carrier_producers_use_no_permissive_get_any() {

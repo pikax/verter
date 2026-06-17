@@ -2916,7 +2916,7 @@ impl VerterHost {
         }
         let derived = self.derived_raw_cache().get(canonical_id)?;
         let resolution = derived.import_routes.get(import_source).cloned()?;
-        // R3/R26/R28 Gap 2: the shared per-entry freshness oracle. A
+        // R3/R26/R28: the shared per-entry freshness oracle. A
         // known-miss must invalidate once `content_generation` advances
         // past its admission stamp — a NEW canonical may now satisfy the
         // previously-unresolvable specifier. HOST-MEMOIZED positives are
@@ -3256,7 +3256,7 @@ impl VerterHost {
             type SurfaceBuildEntry = (Arc<str>, Arc<str>, Arc<str>, Option<Hash16>);
             let mut entries: Vec<SurfaceBuildEntry> =
                 Vec::with_capacity(shallow.import_targets.len());
-            // R3/R26/R28 Gap 1: accumulate every chain fact observed by
+            // R3/R26/R28: accumulate every chain fact observed by
             // each direct import's route walk. The producer threads these
             // into the surface's `fact_dep_signature` so dependent caches
             // detect intermediate barrel changes via fact-validation

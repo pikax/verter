@@ -1,7 +1,7 @@
 #![deny(missing_docs)]
 //! Standalone Svelte rune-module (`.svelte.ts`/`.svelte.js`) provider surface.
 //!
-//! A rune module (D-bk) is a NON-COMPONENT carrier: it has no template, no
+//! A rune module is a NON-COMPONENT carrier: it has no template, no
 //! component API, and never dispatches through the carrier parse path. Its
 //! TypeProvider surface (Channel B) is `<module rune prelude> + <real module
 //! bytes>`, served from the module's OWN canonical path so a consumer resolving

@@ -3,7 +3,7 @@
 //! source family.
 //!
 //! [`resolve_svelte_surface`] is the executor's `PlannedDemand::SvelteSurface`
-//! arm (D-bh). It READS the owner's typed Svelte facts
+//! arm. It READS the owner's typed Svelte facts
 //! ([`SvelteScriptFacts`](verter_semantic::analysis::framework_facts::svelte::SvelteScriptFacts))
 //! — the SAME parse-domain inventory the synth consumed, provenance-validated —
 //! and dispatches the captured `TypeExpr`(s) through the ONE shared resolver
@@ -68,7 +68,7 @@ fn store_kind_for_source(source: SvelteSurfaceSource) -> FrameworkSurfaceKind {
 }
 
 /// Resolve ONE Svelte source family into a single-source [`MacroSurfaceDtos`]
-/// bundle (D-bh).
+/// bundle.
 ///
 /// The result outcome distinguishes:
 /// - [`ResolvedOutcome::Resolved`] — the family is PRESENT (possibly empty); the
@@ -96,7 +96,7 @@ pub(crate) fn resolve_svelte_surface(
     let owner_arc: Arc<str> = Arc::from(owner);
 
     // The framework-neutral key plus the Svelte adapter's typed remainder (one
-    // source family per row, D-bc). Content-addressed via `owner_whole_hash`.
+    // source family per row). Content-addressed via `owner_whole_hash`.
     let key = FullKey {
         kind: store_kind_for_source(source),
         query_level: TypeInfoQueryLevel::FullMetadata,
@@ -154,7 +154,7 @@ fn compute_svelte_surface(
     source: SvelteSurfaceSource,
 ) -> ResolvedMacroPayload {
     // The typed Svelte facts (provenance-validated) for every script-derived
-    // family, resolved against the executor's ONE request view `ctx` (D-bh — NOT
+    // family, resolved against the executor's ONE request view `ctx` (NOT
     // a second `current_store_view_for_query`). The legacy-slot family reads the
     // content-addressed parse carrier instead.
     let facts = host.resolve_svelte_script_facts_with_ctx(ctx, owner);
@@ -251,7 +251,7 @@ fn resolve_runes_props(
 }
 
 /// Derive each prop's MEMBER-DECLARATION origin from the resolved props object
-/// surface (gap 2 — framework-neutral SIDECAR).
+/// surface (the framework-neutral sidecar).
 ///
 /// The origin is the member's DECLARATION provenance (where the prop's
 /// `name`/`: T` is written), NOT its value-type provenance. The shared
@@ -496,7 +496,7 @@ fn resolve_snippet_props(
     ResolvedOutcome::Resolved(Arc::new(dtos))
 }
 
-/// The SVELTE-SPECIFIC snippet-slot normalizer (gap 3).
+/// The SVELTE-SPECIFIC snippet-slot normalizer.
 ///
 /// Unlike Vue's shared `slots_from_typeinfo_surface` (which surfaces ONLY a
 /// slot callable's FIRST-parameter object), a Svelte `Snippet<[a, b]>` exposes

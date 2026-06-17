@@ -180,7 +180,7 @@ fn workspace_host_with_svelte(
 
 #[test]
 fn realized_snippet_call_signature_is_this_plus_rest_tuple() {
-    // GAP 3 IMPL-VERIFY (discriminating): confirm the ACTUAL realized shape
+    // IMPL-VERIFY (discriminating): confirm the ACTUAL realized shape
     // a `Snippet<[item: Item, index: number]>` member lowers to through the
     // shared resolver — the vendored `Snippet<Params>` call signature is
     // `(this: void, ...args: Params)`, so the realized callable MUST carry a
@@ -318,7 +318,7 @@ fn snippet_ref(params: Vec<verter_type_expr::TupleElement>) -> TypeExpr {
 
 #[test]
 fn snippet_ref_carrier_expands_params_tuple_in_order() {
-    // GAP 3 CORE (PRIMARY shape, DISCRIMINATING): a `Snippet<[item: Item,
+    // CORE (PRIMARY shape, DISCRIMINATING): a `Snippet<[item: Item,
     // index: number]>` carrier Ref expands its single `Params` tuple type
     // argument into TWO ordered bindings — `item` then `index`. The shared
     // Vue normalizer would never touch the carrier's type arguments; this
@@ -354,7 +354,7 @@ fn snippet_ref_carrier_expands_params_tuple_in_order() {
 
 #[test]
 fn snippet_ref_carrier_empty_params_yields_no_bindings() {
-    // GAP 3 DISCRIMINATING: a `Snippet<[]>` carrier yields NO bindings.
+    // DISCRIMINATING: a `Snippet<[]>` carrier yields NO bindings.
     let scope = verter_type_expr::TypeExprScope::new("/Owner.svelte");
     let carrier = snippet_ref(Vec::new());
     let bindings = snippet_callable_positional_bindings(&carrier, &scope).unwrap();
@@ -366,7 +366,7 @@ fn snippet_ref_carrier_empty_params_yields_no_bindings() {
 
 #[test]
 fn snippet_ref_carrier_open_params_yields_no_bindings() {
-    // GAP 3: a `Snippet<Params>` whose single type argument is NOT a tuple
+    // A `Snippet<Params>` whose single type argument is NOT a tuple
     // (an open generic) carries no enumerable positional bindings.
     let scope = verter_type_expr::TypeExprScope::new("/Owner.svelte");
     let carrier = TypeExpr::Ref {
@@ -387,7 +387,7 @@ fn snippet_ref_carrier_open_params_yields_no_bindings() {
 
 #[test]
 fn snippet_normalizer_expands_rest_tuple_and_skips_this() {
-    // GAP 3 CORE (DISCRIMINATING): the realized `Snippet<[item: Item, index:
+    // CORE (DISCRIMINATING): the realized `Snippet<[item: Item, index:
     // number]>` callable is `(this: void, ...args: [item: Item, index:
     // number])`. The Svelte normalizer must SKIP `this` and EXPAND the
     // rest-tuple into TWO ordered bindings — `item: Item` then `index:
@@ -437,7 +437,7 @@ fn snippet_normalizer_expands_rest_tuple_and_skips_this() {
 
 #[test]
 fn snippet_normalizer_empty_tuple_yields_no_bindings() {
-    // GAP 3 DISCRIMINATING: a `Snippet<[]>` realizes to `(this: void,
+    // DISCRIMINATING: a `Snippet<[]>` realizes to `(this: void,
     // ...args: [])` — the `this` is skipped and the empty rest-tuple
     // expands to nothing, so NO bindings.
     let scope = verter_type_expr::TypeExprScope::new("/Owner.svelte");
@@ -453,7 +453,7 @@ fn snippet_normalizer_empty_tuple_yields_no_bindings() {
 
 #[test]
 fn snippet_normalizer_unlabelled_tuple_elements_fall_back_to_arg_index() {
-    // GAP 3: an unlabelled tuple element (`Snippet<[Item, number]>`) falls
+    // An unlabelled tuple element (`Snippet<[Item, number]>`) falls
     // back to `arg{index}` binding names while preserving order + types.
     let scope = verter_type_expr::TypeExprScope::new("/Owner.svelte");
     let mut e0 = tuple_el("", TypeExpr::Primitive(PrimitiveName::String));
@@ -472,7 +472,7 @@ fn snippet_normalizer_unlabelled_tuple_elements_fall_back_to_arg_index() {
 
 #[test]
 fn snippet_normalizer_union_arms_combine_by_index() {
-    // GAP 3: a UNION of two snippet callables combines positional bindings
+    // A UNION of two snippet callables combines positional bindings
     // by index (intersecting types). `Snippet<[a: A]> | Snippet<[a: B]>`
     // yields one binding `a: A & B`.
     let scope = verter_type_expr::TypeExprScope::new("/Owner.svelte");
@@ -503,7 +503,7 @@ fn snippet_normalizer_union_arms_combine_by_index() {
 
 #[test]
 fn snippet_normalizer_non_callable_value_yields_none() {
-    // GAP 3 NEGATIVE: a non-callable member value is not a snippet — the
+    // NEGATIVE: a non-callable member value is not a snippet — the
     // normalizer returns None (no bindings).
     let scope = verter_type_expr::TypeExprScope::new("/Owner.svelte");
     assert!(
@@ -515,7 +515,7 @@ fn snippet_normalizer_non_callable_value_yields_none() {
 
 #[test]
 fn userland_snippet_lookalike_is_not_published_as_a_slot() {
-    // GAP 3 NEGATIVE: a `Snippet` imported from a userland module (NOT the
+    // NEGATIVE: a `Snippet` imported from a userland module (NOT the
     // `svelte` package) is NOT validated, so the snippet-slots surface is
     // Missing — the structural package check is upheld end-to-end.
     let component = "/workspace/FakeSnippet.svelte";
@@ -546,7 +546,7 @@ fn userland_snippet_lookalike_is_not_published_as_a_slot() {
 
 #[test]
 fn inline_local_props_carry_a_local_member_declaration_origin() {
-    // GAP 2 (MEMBER-DECLARATION provenance): every prop member DECLARED in a
+    // MEMBER-DECLARATION provenance: every prop member DECLARED in a
     // local/inline props type carries a `Local` origin hop whose declaration
     // file is the OWNER. This is MEMBER-declaration provenance, NOT value-type
     // provenance — so the PRIMITIVE prop `count: number` ALSO carries a `Local`
@@ -597,7 +597,7 @@ fn inline_local_props_carry_a_local_member_declaration_origin() {
 
 #[test]
 fn prop_defaults_sidecar_carries_default_values_on_the_resolved_bundle() {
-    // GAP 1 (resolved-bundle DATA, DISCRIMINATING): the resolved
+    // resolved-bundle DATA (DISCRIMINATING): the resolved
     // `MacroSurfaceDtos.prop_defaults` SIDECAR carries the default VALUE source
     // text keyed by prop — `size = 'md'` -> "'md'", `disabled = $bindable(false)`
     // -> "false" — while a prop WITHOUT a default (`label`) has NO entry. The
@@ -659,7 +659,7 @@ fn prop_defaults_sidecar_carries_default_values_on_the_resolved_bundle() {
 
 #[test]
 fn imported_props_members_carry_an_import_member_declaration_origin() {
-    // GAP 2 (MEMBER-DECLARATION provenance, DISCRIMINATING): when the props type
+    // MEMBER-DECLARATION provenance (DISCRIMINATING): when the props type
     // itself is an IMPORTED interface, EVERY prop member is DECLARED in that
     // imported module — so each member's origin is an IMPORT hop pointing at the
     // declaring module, with the member's declaration on THAT file. This holds

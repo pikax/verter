@@ -538,7 +538,7 @@ pub(crate) async fn configure_provider_paths_for_source(
         return;
     };
 
-    // Re-inject the Svelte IDE-projection assets (D-av / D-ay) on EVERY
+    // Re-inject the Svelte IDE-projection assets on EVERY
     // provider path-config — a subsequent owned sync sends the supplied `paths`
     // verbatim, so without re-injection it would OVERWRITE the startup-injected
     // `@verter/svelte-jsx` + `svelte/*` rows and strand `.svelte.tsx` module

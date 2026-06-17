@@ -1,4 +1,4 @@
-// Vendored minimal `svelte/store` type declarations for the B8g store
+// Vendored minimal `svelte/store` type declarations for the store
 // auto-subscription (F11) type-check validity gate (Testing-Hermeticity: no npm
 // install, no third-party checkout). Pinned to the audited Svelte 5.56.x store
 // contract the F11 projection depends on — a DELIBERATELY minimal subset

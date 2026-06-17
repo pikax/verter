@@ -3,7 +3,7 @@
 // A `.svelte.tsx` projection opens with `/** @jsxImportSource @verter/svelte-jsx */`,
 // which directs TypeScript's automatic JSX runtime to consult the `JSX`
 // namespace EXPORTED from this module — overriding the project-level
-// `jsxImportSource: "vue"` for that file only (D-ae(a)).
+// `jsxImportSource: "vue"` for that file only.
 //
 // The namespace is Svelte-true: intrinsic elements and their attributes are
 // typed by `svelte/elements`' `SvelteHTMLElements` (lowercase event

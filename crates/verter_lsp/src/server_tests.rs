@@ -1691,7 +1691,7 @@ fn svelte_component_virtual_still_resolves_to_carrier() {
 
 #[test]
 fn build_workspace_components_enumerates_svelte_and_strips_extension() {
-    // Gap 2: component auto-import must enumerate `.svelte` carriers and
+    // Component auto-import must enumerate `.svelte` carriers and
     // derive the PascalCase component name via the registry-backed strip
     // (`MyButton.svelte` → `MyButton`). A plain `.ts` is NOT a carrier and is
     // excluded. Discrimination: pre-change (`!kind.is_vue()`) the Svelte
@@ -9306,8 +9306,8 @@ fn test_carrier_language_for() {
 }
 
 /// The watcher glob is registry-derived: it covers every carrier row,
-/// including `.svelte` (a registered carrier since B8a). The IDE TSX
-/// projection for `.svelte` is a later vertical (B8c), so `resync` still
+/// including `.svelte` (a registered carrier). The IDE TSX
+/// projection for `.svelte` is a separate vertical, so `resync` still
 /// produces no provider sync state for it — the watcher coverage is the
 /// load-bearing assertion here.
 #[test]
@@ -11354,7 +11354,7 @@ async fn did_change_watched_files_resyncs_rune_module_via_adapter_module_glob() 
     );
 }
 
-/// Gap 7: the `did_change_watched_files` batch routes EVERY carrier
+/// The `did_change_watched_files` batch routes EVERY carrier
 /// (`.vue`, `.svelte`, …) through the shared resync/delete queues — the
 /// inner `language.is_vue()` gate is gone. A watched `.svelte` change whose
 /// canonical falls outside every project root (owner-unresolved) enters the
@@ -11438,7 +11438,7 @@ fn open_test_svelte(server: &VerterLanguageServer, path: &str, source: &str) -> 
     uri
 }
 
-/// Gap 4: `$/verter/getProjectOverview` counts `.svelte` carriers in the
+/// `$/verter/getProjectOverview` counts `.svelte` carriers in the
 /// component graph and the carrier-neutral `totalComponentFiles` stat, with
 /// the per-file kind discriminant `"component"`. DISCRIMINATING: under the
 /// pre-change `is_vue()` gates the Svelte file was neither counted nor kinded
@@ -11504,7 +11504,7 @@ async fn project_overview_counts_svelte_in_component_graph() {
     );
 }
 
-/// Gap 6: `$/onFileChanged` for a `.svelte` carrier routes through the
+/// `$/onFileChanged` for a `.svelte` carrier routes through the
 /// carrier cleanup (delete) path. DISCRIMINATING: the pre-change
 /// `params.uri.ends_with(".vue")` gate dropped the `.svelte` delete event
 /// entirely, so a closed-file `.svelte` delete would NOT clean up host state;
@@ -11564,7 +11564,7 @@ async fn on_file_changed_resyncs_and_cleans_svelte() {
     );
 }
 
-/// Gap 5: a default import of a `.svelte` child component resolves to the
+/// A default import of a `.svelte` child component resolves to the
 /// child carrier through the carrier-generic `is_default_export_component_carrier`
 /// gate — exactly like a `.vue` child. DISCRIMINATING: the pre-change
 /// `ends_with(".vue")` gate would skip the `.svelte` resolved target and the

@@ -29,7 +29,7 @@ use verter_semantic::analysis::framework_facts::{ScriptFactProvider, ScriptFactS
 /// One framework's carrier leg — the received carrier registration proof.
 ///
 /// The token is RECEIVED from `verter_language`'s carrier-row registration
-/// channel, never minted here (D-ba: `verter_language` is the sole minting
+/// channel, never minted here (`verter_language` is the sole minting
 /// authority). A carrier-less adapter has no leg (`carrier: None`).
 #[derive(Debug, Clone)]
 pub struct CarrierLeg {
@@ -490,7 +490,7 @@ fn vue_registration(carrier_token: CarrierAccessToken) -> FrameworkRegistration 
 /// Registers ALL legs — carrier + synth + script-fact provider + api projector +
 /// the real `SvelteFrameworkAdapter` SURFACE leg. The surface store is keyed by
 /// the Svelte adapter remainder ([`SvelteSurfaceKey`](crate::typeinfo::framework_surface::SvelteSurfaceKey)
-/// — one source family per row, D-bc).
+/// — one source family per row).
 fn svelte_registration(carrier_token: CarrierAccessToken) -> FrameworkRegistration {
     let store: Arc<dyn ErasedFrameworkSurfaceStore> =
         Arc::new(crate::framework::surface_store::FrameworkSurfaceStore::<

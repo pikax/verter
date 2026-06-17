@@ -30,8 +30,8 @@ fn workspace_accessor_visibility() {
     t.compile_fail("tests/compile-fail/workspace_accessor_visibility.rs");
 }
 
-/// API-surface half of `carrier_access_token_minted_only_in_verter_language`
-/// (D-ba): an out-of-crate `CarrierAccessToken` struct literal must fail
+/// API-surface half of `carrier_access_token_minted_only_in_verter_language`:
+/// an out-of-crate `CarrierAccessToken` struct literal must fail
 /// to compile — the `_private: ()` field is the in-language forging
 /// barrier; the static guard is the cross-crate enforcement authority.
 #[test]

@@ -15,7 +15,7 @@
 //! - the Svelte api-content shim (`get_public_api`) — class default with
 //!   `$props: __VerterProps`, refs preserved un-inlined, the type-only prelude;
 //!   `get_public_api_with_mode(Testing)` returns `None`;
-//! - synth parse-domain invariance (D-au).
+//! - synth parse-domain invariance.
 
 use std::sync::Arc;
 
@@ -628,7 +628,7 @@ fn svelte_get_public_api_renders_the_declaration_shim() {
         !code.contains("label: string"),
         "the props alias body must NOT be inlined into the shim:\n{code}"
     );
-    // The D-at type-only import prelude line for the preserved reference.
+    // The type-only import prelude line for the preserved reference.
     assert!(
         code.contains("import type") && code.contains("WidgetProps") && code.contains("./props"),
         "the type-only import prelude imports the preserved WidgetProps reference:\n{code}"
@@ -731,7 +731,7 @@ fn svelte_get_public_api_testing_mode_returns_none() {
     );
 }
 
-// ── Test 9: synth parse-domain invariance (D-au) ────────────────────────
+// ── Test 9: synth parse-domain invariance ───────────────────────────────
 
 #[test]
 fn svelte_synth_is_identical_with_real_vs_fake_svelte_package() {

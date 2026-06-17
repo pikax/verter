@@ -1030,11 +1030,10 @@ mod tests {
     }
 
     /// A `.svelte` framework carrier opened in the editor routes through the
-    /// language classifier to the REGISTERED Svelte carrier (B8a): the upsert
+    /// language classifier to the REGISTERED Svelte carrier: the upsert
     /// succeeds and the host holds a Svelte carrier source snapshot — it is NOT
-    /// silently misparsed as a plain TypeScript script, and the B2-era
-    /// known-but-unsupported rejection has gone dead naturally now the carrier
-    /// is registered.
+    /// silently misparsed as a plain TypeScript script, and NOT rejected as a
+    /// known-but-unsupported file.
     #[test]
     fn did_open_svelte_parses_through_the_registered_carrier() {
         let host = Arc::new(verter_session::VerterHost::new_standalone(

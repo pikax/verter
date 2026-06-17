@@ -1,17 +1,13 @@
-//! D-bk architecture guards: `.svelte.ts`/`.svelte.js` are first-class
-//! NON-COMPONENT rune-module carriers.
+//! Rune-module architecture guards: `.svelte.ts`/`.svelte.js` are
+//! first-class NON-COMPONENT rune-module carriers.
 //!
-//! These guards pin the B8j contract:
+//! These guards pin the rune-module contract:
 //! - `svelte_rune_module_not_component_carrier` — a `.svelte.ts`/`.svelte.js`
 //!   path classifies as the rune-module carrier (NOT plain `Script`, NOT the
 //!   component carrier) and exposes NO component-API surface (no synthesised
 //!   component default, no component api virtual file); a plain `.ts`/`.js`
-//!   stays plain and a `.svelte` stays the component carrier (negatives). The
-//!   B8a discriminating `.svelte.ts`-is-NOT-a-carrier guard fixture (D-bg) is
-//!   RETIRED in the same change (it was the registry test
-//!   `svelte_ts_and_svelte_js_are_plain_scripts_not_carriers`, replaced by the
-//!   positive `svelte_rune_modules_classify_as_non_component_adapter_modules`).
-//! - `svelte_feature_rows_supported_no_diagnostic` (B8j row) — a rune module
+//!   stays plain and a `.svelte` stays the component carrier (negatives).
+//! - `svelte_feature_rows_supported_no_diagnostic` — a rune module
 //!   emits NO typed-unsupported diagnostic and serves a real type-checked
 //!   surface (the rune-module provider content); it does NOT route through the
 //!   carrier `unsupported_language` path.
@@ -228,7 +224,7 @@ fn framework_envelope(canonical: &str, adapter_id: &str) -> wire::TypeInfoGraphR
 
 #[test]
 fn svelte_feature_rows_supported_no_diagnostic() {
-    // B8j row (D-bl): a rune module is SUPPORTED (it serves a real type-checked
+    // A rune module is SUPPORTED (it serves a real type-checked
     // rune-module surface) and emits NO typed-unsupported diagnostic. It does
     // NOT route through the carrier `unsupported_language` path — the upsert
     // SUCCEEDS as a script (asserted by `host()` + `upsert` not panicking).

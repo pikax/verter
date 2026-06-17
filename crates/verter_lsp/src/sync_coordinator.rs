@@ -484,7 +484,7 @@ async fn publish_merged_diagnostics(deps: &SyncCoordinatorDeps, canonical_id: &s
         )
     };
 
-    // D-ae(d) / D-ay: a `.svelte` file whose owner workspace has NO `svelte`
+    // A `.svelte` file whose owner workspace has NO `svelte`
     // install fails CLOSED (module-not-found on the shim's `svelte` import) —
     // surface the typed `svelte-package-missing` diagnostic on the source file
     // so the failure is explained, not just a raw TS module-not-found. The

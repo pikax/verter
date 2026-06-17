@@ -238,7 +238,7 @@ fn component_vs_intrinsic_classification() {
 
 #[test]
 fn svelte5_event_attribute_is_a_plain_lowercase_attribute() {
-    // D-u: the PRIMARY event path is a plain lowercase `onclick={...}` attribute.
+    // The PRIMARY event path is a plain lowercase `onclick={...}` attribute.
     let src = "<button onclick={handle}>x</button>";
     let p = parse_clean(src);
     let mut els = Vec::new();
@@ -297,7 +297,7 @@ fn class_directive_parses() {
 
 #[test]
 fn css_custom_property_parses_as_plain_attribute() {
-    // D-ap: `--name={expr}` parses as a plain attribute (NOT a directive).
+    // `--name={expr}` parses as a plain attribute (NOT a directive).
     let src = "<Comp --accent={color} --size=\"4px\" />";
     let p = parse_clean(src);
     let mut els = Vec::new();
@@ -671,7 +671,7 @@ fn nested_style_element_inside_template_parses_without_crash() {
         .any(|e| matches!(e.kind, SvelteElementKind::NestedStyle)));
 }
 
-// ── Await expressions (OUT-OF-SCOPE) + comments-in-tags (D-bg) ──────────
+// ── Await expressions (OUT-OF-SCOPE) + comments-in-tags ──────────
 
 #[test]
 fn await_as_ordinary_expression_position_parses() {
@@ -693,7 +693,7 @@ fn await_as_ordinary_expression_position_parses() {
 
 #[test]
 fn comments_in_element_open_tag_parse_without_crash() {
-    // D-bg additive: comments inside element open tags (5.53) — the carrier
+    // Comments inside element open tags — the carrier
     // parse-without-crash contract. DISCRIMINATING: the comment is INSIDE the
     // open tag, between attributes; the attributes AFTER it must still parse (a
     // naive scan would stop at the comment's `>` and lose `onclick`).

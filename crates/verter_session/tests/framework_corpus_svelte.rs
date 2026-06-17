@@ -448,7 +448,7 @@ fn svelte_surface_corpus_resolves_every_fixture() {
 
 #[test]
 fn svelte_prop_defaults_make_props_optional_on_the_surface() {
-    // GAP 1 (framework-surface DATA, DISCRIMINATING): a runes prop with a
+    // Framework-surface DATA (DISCRIMINATING): a runes prop with a
     // destructuring default (`size = 'md'`) or a `$bindable(<default>)` fallback
     // (`disabled = $bindable(false)`) is OPTIONAL on the framework-surface wire
     // (`required = false`), while a prop WITHOUT a default (`label`) stays

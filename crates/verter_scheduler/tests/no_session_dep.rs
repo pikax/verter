@@ -2,7 +2,7 @@
 //!
 //! The dependency direction is one-way: `verter_session → verter_scheduler`.
 //! Re-introducing `verter_session` as a dependency of the scheduler crate
-//! is a cycle and a violation of the leaf-substrate rule. The new B7a leaf
+//! is a cycle and a violation of the leaf-substrate rule. The leaf
 //! modules (`cancellation`, `cpu_concurrency`, `cache_id`, `dedupe_hook`)
 //! must stay pure scheduler substrate with no back-edge to the session.
 //!
@@ -93,8 +93,8 @@ fn scheduler_does_not_depend_on_verter_session() {
     );
 }
 
-/// H20 (BLOCKING): the scheduler crate source — including the new B7a
-/// leaf modules — must not reference a `verter_session` path. The leaf
+/// H20 (BLOCKING): the scheduler crate source — including the leaf
+/// modules — must not reference a `verter_session` path. The leaf
 /// substrate stays domain-agnostic; the session-side concretes wrap
 /// scheduler-owned opaque carriers, not the other way around.
 #[test]

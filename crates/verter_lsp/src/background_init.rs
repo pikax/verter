@@ -243,7 +243,7 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
                     tsconfig_path,
                     base_url,
                 );
-                // Inject the Svelte IDE-projection assets (D-av / D-ay) HERE —
+                // Inject the Svelte IDE-projection assets HERE —
                 // the COMMON per-owner-project path-config call site, so EVERY
                 // provider (extension / TSGO / tsserver) receives the
                 // @verter/svelte-jsx shim rows + the transitive `svelte` rows

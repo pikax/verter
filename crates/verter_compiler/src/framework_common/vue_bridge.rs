@@ -265,7 +265,7 @@ pub const VUE_CARRIER_PARSER_VERSION: u32 = 3;
 /// Delegates call-for-call to the existing Vue pipeline (`parse_sfc` +
 /// `compile_from_parsed`): it edits NO Vue parser or codegen module and
 /// reaches the parsed SFC back out of the type-erased artifact through
-/// the compiler-side blessed [`CarrierCompilerCtx`] downcast (D-m).
+/// the compiler-side blessed [`CarrierCompilerCtx`] downcast.
 pub struct VueCarrierCompiler {
     ctx: CarrierCompilerCtx,
 }

@@ -90,12 +90,12 @@ const TOKEN_MINTING_ALLOWLIST: &[&str] = &[
 /// confined: tokens flow only to verter_language internals and the
 /// sanctioned receipt sites — the session's per-carrier adapter accessors
 /// (`receive_vue_carrier_token` / the Svelte `svelte_carrier_token`) and
-/// the compiler-side blessed carrier ctx (D-m: each carrier bridge's
+/// the compiler-side blessed carrier ctx (each carrier bridge's
 /// `CarrierCompilerCtx` receives its carrier proof through this channel to
 /// downcast its own carrier back out of the type-erased artifact). Any
 /// OTHER production call site would let an arbitrary crate mint an
 /// adapter's token through the public row constructor — the same forging
-/// vector D-ba bans for a public arbitrary-id constructor.
+/// vector bans for a public arbitrary-id constructor.
 const TOKEN_RECEIPT_ALLOWLIST: &[&str] = &[
     "crates/verter_language/src/",
     "crates/verter_session/src/typeinfo/adapters/vue/parse_access.rs",
@@ -174,7 +174,7 @@ fn carrier_access_token_minted_only_in_verter_language() {
         "`CarrierAccessToken` construction expressions are confined to the \
          `verter_language` minting files {TOKEN_MINTING_ALLOWLIST:?}, and the \
          registration channel to the sanctioned receipt sites \
-         {TOKEN_RECEIPT_ALLOWLIST:?} (D-ba: `verter_language` is the SOLE minting \
+         {TOKEN_RECEIPT_ALLOWLIST:?} (`verter_language` is the SOLE minting \
          authority — the token is minted during `LanguageRegistry` carrier-row \
          construction and returned exactly once as the carrier row's registration \
          proof). Violations:\n{violations:#?}"
@@ -234,7 +234,7 @@ fn carrier_access_token_minted_only_in_verter_language() {
     }
     assert!(
         offending.is_empty(),
-        "CarrierAccessToken API surface violation (D-ba pins: no public arbitrary-id \
+        "CarrierAccessToken API surface violation (pinned: no public arbitrary-id \
          constructor, no `From`/`Default`, no public by-id token lookup — the token is \
          returned only through carrier-row construction):\n{offending:#?}"
     );
@@ -261,7 +261,7 @@ pub(crate) fn misplaced(parsed: &verter_compiler::parser::types::ParsedSfc) {\n\
 
 #[test]
 fn scanner_detects_misplaced_bare_parse_sfc_call() {
-    // D-bb: a type-inferred `let parsed = parse_sfc(…)` call carries NO
+    // A type-inferred `let parsed = parse_sfc(…)` call carries NO
     // `ParsedSfc` token — the scanner must catch the producer-call
     // token itself.
     let synthetic = "\

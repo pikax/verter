@@ -20,8 +20,7 @@
 //! `NamedTypeCache` trait and cache-key identities owned by
 //! `crate::utils::oxc::vue::script::named_type_keys` — that cache identity
 //! backs the host's Vue resolved-named-type identity and is Vue semantics,
-//! not part of this neutral surface capture (decision row D-l in
-//! `docs/arch/multi-framework-adapters-plan.md`).
+//! not part of this neutral surface capture.
 
 #![allow(dead_code)]
 

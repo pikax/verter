@@ -625,7 +625,7 @@ fn provider_paths_derive_both_virtual_files_for_svelte_carriers() {
 
 #[test]
 fn rune_modules_are_not_carriers_and_serve_their_own_provider_path() {
-    // D-bk: `.svelte.ts` / `.svelte.js` rune modules are NOT carriers, so
+    // `.svelte.ts` / `.svelte.js` rune modules are NOT carriers, so
     // `path_is_carrier` MUST exclude them (the watcher-glob / virtual-file
     // routing source) and `carrier_extensions` MUST NOT list them. A rune
     // module serves its OWN canonical path (no `{carrier}.tsx`/`.ts` virtual

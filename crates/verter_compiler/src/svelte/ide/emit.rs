@@ -64,7 +64,7 @@ impl UnsupportedKind {
 }
 
 /// Whether an attribute name is a CSS custom property (`--x`) — these are
-/// stripped from the projected JSX attribute position (D-ap), their value
+/// stripped from the projected JSX attribute position, their value
 /// void-checked.
 #[must_use]
 pub fn is_css_custom_property(name: &str) -> bool {

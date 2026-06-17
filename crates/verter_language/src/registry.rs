@@ -67,7 +67,7 @@ impl LanguageRow {
     }
 
     /// A framework CARRIER row. The SOLE [`CarrierAccessToken`] minting
-    /// point (D-ba): the row's token is minted here, during carrier-row
+    /// point: the row's token is minted here, during carrier-row
     /// construction, and returned exactly ONCE to the
     /// registry-construction caller as the carrier row's registration
     /// proof. Consumers (adapter descriptors, the session's blessed
@@ -407,8 +407,8 @@ mod tests {
 
     #[test]
     fn svelte_is_a_known_carrier_row_not_an_unknown_extension() {
-        // D-ao: `.svelte` classifies through a landed registry row, and (since
-        // B8a) the carrier implementation registers behind it. Classification is
+        // `.svelte` classifies through a registry row, and the carrier
+        // implementation registers behind it. Classification is
         // KNOWN, never unknown-extension fallthrough.
         let registry = LanguageRegistry::built_in();
         match registry.classify_static("/src/Box.svelte") {
@@ -425,7 +425,6 @@ mod tests {
 
     #[test]
     fn svelte_rune_modules_classify_as_non_component_adapter_modules() {
-        // D-bk (REVERSES the D-ad/D-bg ".svelte.ts is not a carrier" ruling):
         // `.svelte.ts` / `.svelte.js` are first-class NON-COMPONENT rune-module
         // carriers — adapter-module SCRIPTS, matched BEFORE the plain `.ts` /
         // `.js` rows. They are NOT plain scripts and NOT component carriers.

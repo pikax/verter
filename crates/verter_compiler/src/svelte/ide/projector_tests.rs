@@ -114,12 +114,12 @@ fn snippet_block_projects_to_a_branded_declarator_hoisted_to_scope_top() {
     );
     // The render call referencing `row` is still present.
     assert!(code.contains("{row()}"), "render call present: {code}");
-    // D-ap ordering: the declarator precedes the `return (` of the render fn.
+    // Ordering: the declarator precedes the `return (` of the render fn.
     let decl_idx = code.find("const row = __verter_snippet(").unwrap();
     let return_idx = code.find("return (<>").unwrap();
     assert!(
         decl_idx < return_idx,
-        "snippet declarator must be hoisted ABOVE the render return (D-ap TDZ): {code}"
+        "snippet declarator must be hoisted ABOVE the render return (TDZ): {code}"
     );
 }
 
@@ -184,7 +184,7 @@ fn svelte5_event_attribute_stays_verbatim_lowercase() {
 fn css_custom_property_attribute_is_stripped_from_jsx_position() {
     let code = project("<div --track-color={c}>x</div>");
     // A `--`-prefixed name is not a valid JSX attribute identifier — no
-    // `--track-color` residue survives in the projection (D-ap).
+    // `--track-color` residue survives in the projection.
     assert!(
         !code.contains("--track-color"),
         "no `--` custom-property attribute residue: {code}"
@@ -695,7 +695,7 @@ fn const_declaration_tag_hoists_to_a_sibling_visible_statement() {
         !code.contains("<div>{const total"),
         "no declaration-tag residue: {code}"
     );
-    // The const is HOISTED to a real statement (D-ap sibling-run scope) — it
+    // The const is HOISTED to a real statement (sibling-run scope) — it
     // precedes the render `return` so the sibling `{total}` reference resolves.
     assert!(
         code.contains("const") && code.contains("total = a + b"),
@@ -858,7 +858,7 @@ fn await_expression_in_interpolation_projects_the_promise_like_helper() {
 
 #[test]
 fn await_in_instance_script_top_level_records_the_diagnostic() {
-    // P2-2: await at instance-script top level (D-bg position 1).
+    // Await at instance-script top level (position 1).
     let source = "<script lang=\"ts\">const x = await fetchThing();</script>\n<div>x</div>";
     let parsed = parse_svelte(source);
     let projection = project_svelte_ide(source, &parsed, Some("C.svelte"), false);
@@ -1579,7 +1579,7 @@ fn default_namespace_keeps_the_base_pragma() {
 
 #[test]
 fn bound_expression_maps_back_to_the_original_source_byte() {
-    // B8e test-3 (fast-follow): a `bind:value={expr}` bound token maps back to
+    // A `bind:value={expr}` bound token maps back to
     // the original source byte through the projection source map — hover /
     // go-to on the bound identifier lands on the original `name`. The bind
     // projection strips only the `bind:` prefix, so the value expression keeps
@@ -1669,7 +1669,7 @@ fn empty_template_still_produces_a_valid_module() {
 
 #[test]
 fn function_binding_comma_scanner_skips_string_literals() {
-    // B8e NIT: a comma INSIDE a string literal in a single-getter `bind:x`
+    // A comma INSIDE a string literal in a single-getter `bind:x`
     // value must NOT be mistaken for the `get, set` function-binding separator —
     // `bind:value={pick("a,b")}` is a plain value binding, not a function
     // binding. (If it were misread as a function binding it would project

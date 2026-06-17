@@ -1,8 +1,8 @@
 //! `CancellationToken` — cheap, clonable, thread-safe cancellation flag.
 //!
-//! This is the substrate later B7 blocks use for `DagHandle`-drop
+//! This is the substrate the DAG scheduler uses for `DagHandle`-drop
 //! cancellation: a node's `cancellation_token` is checked before / during
-//! dispatch and tripped when the owning handle drops. B7a adds the leaf
+//! dispatch and tripped when the owning handle drops. This is the leaf
 //! primitive only.
 //!
 //! Pinned properties:

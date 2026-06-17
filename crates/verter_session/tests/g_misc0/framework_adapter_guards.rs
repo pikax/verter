@@ -380,7 +380,7 @@ fn framework_surface_wire_executor_validates_first() {
 
 #[test]
 fn svelte_fact_capture_defaults_are_syntax_only() {
-    // GAP 1 guard: the Svelte prop-DEFAULT capture is SYNTAX-ONLY — it walks the
+    // Prop-default guard: the Svelte prop-DEFAULT capture is SYNTAX-ONLY — it walks the
     // OXC destructuring + slices the source default-value text, but MUST NOT
     // resolve imports or read capability bits (the
     // `script_fact_capture_is_syntax_only` discipline). The default-capture
@@ -416,7 +416,7 @@ fn svelte_fact_capture_defaults_are_syntax_only() {
 
 #[test]
 fn resolve_snippet_props_does_not_call_shared_slots_normalizer() {
-    // GAP 3 guard: the shared Vue `slots_from_typeinfo_surface` is VUE-ONLY.
+    // Slot-normalizer guard: the shared Vue `slots_from_typeinfo_surface` is VUE-ONLY.
     // The Svelte snippet path must call its OWN normalizer
     // (`svelte_snippet_slots_from_typeinfo_surface`), never the shared Vue one
     // (which surfaces only a slot callable's first-parameter object and would
@@ -446,7 +446,7 @@ fn resolve_snippet_props_does_not_call_shared_slots_normalizer() {
 
 #[test]
 fn vue_shared_slot_normalizer_uses_first_param_only() {
-    // GAP 3 NO-REGRESSION guard: the shared Vue slot normalizer
+    // Slot-normalizer NO-REGRESSION guard: the shared Vue slot normalizer
     // (`slot_callable_param_and_return`) stays byte-identical to its
     // first-parameter-only behavior — a `TypeExpr::Function` arm surfaces
     // `func.parameters.first()`, NOT every positional param. If a future edit
@@ -475,7 +475,7 @@ fn vue_shared_slot_normalizer_uses_first_param_only() {
 
 #[test]
 fn svelte_executor_no_source_or_regex_type_parsing() {
-    // GAP 2/3 guard: the Svelte executor drives slot / origin / prop TYPES from
+    // Slot/origin/prop-type guard: the Svelte executor drives slot / origin / prop TYPES from
     // the typed IR — NO source slicing, NO regex, NO parse-then-reparse of type
     // text. The ONE allowed source read is the legacy `<slot>` NAME slice
     // (`slice_attr_value`, an existing carve-out) — never type-text parsing.

@@ -3,18 +3,18 @@
 //! The Svelte IDE TSX projection opens each `.svelte.tsx` with the per-file
 //! pragma `/** @jsxImportSource @verter/svelte-jsx */`, which directs
 //! TypeScript to resolve the `JSX` namespace from the Verter-owned shim
-//! package `@verter/svelte-jsx` (D-ae). The canonical hand-written content
+//! package `@verter/svelte-jsx`. The canonical hand-written content
 //! lives in the real workspace package `packages/svelte-jsx/`; the host
 //! materializes a version-matched copy on disk and path-maps the inferred
 //! project at it (the host data directory for provider-inferred/TSGO
-//! consumers — `configure_paths`, D-av).
+//! consumers — `configure_paths`).
 //!
 //! These embedded constants are the bytes the host materializes. They are
 //! `include_str!`'d from IN-CRATE MIRROR files (`svelte_jsx_assets/`), NOT
 //! from the cross-tree package files — a cross-tree `include_str!` would
 //! make the byte-pin compare the package against itself (vacuous) and break
-//! crates.io packaging (`cargo package` cannot reach outside the crate root,
-//! D-av). The byte-pin freshness test
+//! crates.io packaging (`cargo package` cannot reach outside the crate
+//! root). The byte-pin freshness test
 //! (`crates/verter_session/tests/svelte_jsx_shim_freshness.rs`) compares each
 //! in-crate mirror against its `packages/svelte-jsx/` canonical, so drift
 //! between the authority and the embedded copy fails the gate.

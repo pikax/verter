@@ -1,8 +1,8 @@
 //! The Svelte IDE TSX projection.
 //!
 //! Projects a [`ParsedSvelte`] into ONE valid `.svelte.tsx` file that
-//! type-checks CLEAN through the TSGO/tsserver path (the LSP parity contract,
-//! D-u). Every edit goes through one [`CodeTransform`] (the single source of
+//! type-checks CLEAN through the TSGO/tsserver path (the LSP parity
+//! contract). Every edit goes through one [`CodeTransform`] (the single source of
 //! truth for generated-code edits — no post-hoc string munging), so the
 //! emitted source map stays token-precise: script expressions and template
 //! expressions keep their original source spans (hover / go-to-definition land
@@ -16,7 +16,7 @@
 //! <module script body>         // mapped, hoisted to top-level
 //! <instance script body>       // mapped, hoisted to top-level
 //! ;function __verter_render() {
-//!   <snippet declarators>      // hoisted to the top of the scope (D-ap order)
+//!   <snippet declarators>      // hoisted to the top of the scope (source order)
 //!   return (<> ...template... </>);
 //! }
 //! ```

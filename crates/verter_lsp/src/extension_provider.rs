@@ -920,7 +920,7 @@ impl TypeProvider for ExtensionTypeProvider {
     fn configure_paths(&self, base_url: &str, paths: serde_json::Value) -> ProviderFuture<'_, ()> {
         let base_url = base_url.to_string();
         // The Svelte IDE-projection assets (the `@verter/svelte-jsx` shim +
-        // transitive `svelte` rows, D-av / D-ay) are injected at the COMMON
+        // transitive `svelte` rows) are injected at the COMMON
         // per-owner-project path-config call site in `background_init` (so
         // EVERY provider — extension / TSGO / tsserver — receives them, keyed
         // to the owner project root), NOT here in a single provider.

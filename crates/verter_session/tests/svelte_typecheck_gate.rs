@@ -1,4 +1,4 @@
-//! The Svelte IDE-projection TYPE-CHECK VALIDITY gate (D-u / D-ae).
+//! The Svelte IDE-projection TYPE-CHECK VALIDITY gate.
 //!
 //! OXC parse-only is NOT sufficient: the projected `.svelte.tsx` must type-check
 //! CLEAN through the TSGO path. This harness projects each fixture through the
@@ -6,10 +6,10 @@
 //! `svelte` types + the in-repo `@verter/svelte-jsx` shim `paths`-mapped — no
 //! npm install, Testing-Hermeticity), and runs `tsgo --noEmit`.
 //!
-//! GATE PRECONDITION (D-ae): the pragma-parity fixture proves the
+//! GATE PRECONDITION: the pragma-parity fixture proves the
 //! `@jsxImportSource @verter/svelte-jsx` pragma OVERRIDES a project-level
-//! `jsxImportSource: "vue"` under TSGO. If TSGO fails the override, the named
-//! D-ae fallback is a STOP-and-redesign (escalate) — never a silent degrade.
+//! `jsxImportSource: "vue"` under TSGO. If TSGO fails the override, the
+//! fallback is a STOP-and-redesign (escalate) — never a silent degrade.
 //!
 //! The harness is GATED behind the locally-resolvable `tsgo` binary: when no
 //! `tsgo`/`tsc` is found (a machine without the native-preview install) the
@@ -141,7 +141,7 @@ fn typecheck_projected_with_options(
 
     // tsconfig: project-level `jsxImportSource: "vue"` (the live provider
     // default the pragma must override), `paths`-map `@verter/svelte-jsx`
-    // directly at the in-repo package (D-av — no npm install).
+    // directly at the in-repo package (no npm install).
     let shim_dir = workspace_root().join("packages/svelte-jsx");
     let shim = shim_dir.to_string_lossy().replace('\\', "/");
     // The live provider config enables `allowJs` + `checkJs` so a `.svelte.js`
@@ -245,7 +245,7 @@ fn skip_note(name: &str) {
 
 #[test]
 fn precondition_pragma_overrides_project_level_vue_jsx_import_source_under_tsgo() {
-    // The D-ae GATE PRECONDITION: a `.svelte.tsx`-shaped file whose
+    // GATE PRECONDITION: a `.svelte.tsx`-shaped file whose
     // `@jsxImportSource @verter/svelte-jsx` pragma overrides the project-level
     // `jsxImportSource: "vue"`. The fixture uses a lowercase `onclick` — which
     // ONLY type-checks under the Svelte intrinsic table (Vue's JSX would reject
@@ -264,7 +264,7 @@ fn precondition_pragma_overrides_project_level_vue_jsx_import_source_under_tsgo(
         ok,
         "PRAGMA-PARITY PRECONDITION FAILED: the @jsxImportSource pragma did not \
          override the project-level jsxImportSource:\"vue\" under TSGO. This is \
-         the named D-ae STOP-and-redesign — escalate, do NOT degrade.\n{out}"
+         the named STOP-and-redesign — escalate, do NOT degrade.\n{out}"
     );
 }
 
@@ -679,7 +679,7 @@ fn shim_slots_index_is_name_exact_and_binding_precise() {
 
 #[test]
 fn projected_snippet_ordering_fixture_type_checks_clean_discriminating_tdz() {
-    // D-ap DISCRIMINATING: a `{@render mySnip()}` PRECEDING its `{#snippet}` in
+    // DISCRIMINATING: a `{@render mySnip()}` PRECEDING its `{#snippet}` in
     // the same scope type-checks clean. In-place declarator projection would
     // fail with a TS use-before-declaration error — the hoist (declarators at
     // module scope, above the render fn) makes it pass.
@@ -691,7 +691,7 @@ fn projected_snippet_ordering_fixture_type_checks_clean_discriminating_tdz() {
     };
     assert!(
         ok,
-        "snippet-before-render must type-check clean (D-ap hoist, no TDZ):\n{out}"
+        "snippet-before-render must type-check clean (hoist, no TDZ):\n{out}"
     );
 }
 
@@ -723,7 +723,7 @@ fn runes_props_member_is_not_any_discriminating() {
 
 #[test]
 fn attach_mistyped_attachment_fails_typecheck_discriminating() {
-    // D-ad: a mistyped `{@attach}` — an `Attachment<HTMLInputElement>` on a
+    // A mistyped `{@attach}` — an `Attachment<HTMLInputElement>` on a
     // `<canvas>` — FAILS type-check (discriminating both ways). The projector
     // routes `{@attach e}` through `__verter_attach(e)`; here we probe the
     // checker directly with an input-typed attachment used where a canvas is
@@ -748,7 +748,7 @@ fn attach_mistyped_attachment_fails_typecheck_discriminating() {
 
 #[test]
 fn snippet_brand_rejects_a_plain_function_discriminating() {
-    // D-ae(c): a plain function passed where `Snippet<[T]>` is expected stays an
+    // A plain function passed where `Snippet<[T]>` is expected stays an
     // ERROR (the brand). DISCRIMINATING: the `__verter_snippet`-bridged binding
     // is accepted; a bare arrow is not.
     let projected = "/** @jsxImportSource @verter/svelte-jsx */\n\
@@ -846,7 +846,7 @@ fn projected_key_block_type_checks_clean() {
 
 #[test]
 fn projected_declaration_tag_is_visible_to_a_following_sibling() {
-    // D-ap: a `{const}` value is typed AND visible to a sibling. The hoist makes
+    // A `{const}` value is typed AND visible to a sibling. The hoist makes
     // `{total}` after `{const total = …}` resolve cleanly.
     let projected = project(
         "<script lang=\"ts\">let a = 1; let b = 2;</script>\n\
@@ -859,7 +859,7 @@ fn projected_declaration_tag_is_visible_to_a_following_sibling() {
     assert!(
         ok,
         "a declaration-tag const must be visible to a following sibling \
-         (D-ap hoist):\n{out}"
+         (hoist):\n{out}"
     );
 }
 
@@ -890,7 +890,7 @@ fn projected_special_element_and_trailing_style_type_check_clean() {
 
 #[test]
 fn projected_css_custom_property_strips_and_void_checks() {
-    // D-ap: `--x={expr}` strips the JSX attribute (no `--` residue) and
+    // `--x={expr}` strips the JSX attribute (no `--` residue) and
     // void-checks the value. A deliberate type error in the value surfaces.
     let good = project("<script lang=\"ts\">let c = \"red\";</script>\n<div --accent={c}>x</div>");
     let Some((ok, out)) = typecheck_projected(&good, "CssProp.svelte.tsx", &[], true) else {
@@ -1258,7 +1258,7 @@ fn projected_top_level_script_await_type_checks_clean() {
 
 #[test]
 fn projected_inline_await_destructuring_binding_strands_no_close_brace() {
-    // FOLD-IN (B8f/B8g carry-forward): an INLINE `{#await p then {a,b}}` with a
+    // An INLINE `{#await p then {a,b}}` with a
     // DESTRUCTURING binding contains its OWN `}` — the open-tag close-brace search
     // must start PAST the binding span, else the pattern's inner `}` strands and
     // produces invalid TSX. The destructuring binding is also DECLARED so the body
@@ -1865,7 +1865,7 @@ fn function_binding_on_value_intrinsic_type_checks_clean_for_a_correct_pair() {
 }
 
 #[test]
-#[ignore = "known tsgo native-preview gap (same family as B8d-P2-1): under the \
+#[ignore = "known tsgo native-preview limitation: under the \
             @jsxImportSource pragma, tsgo does NOT fully type-check a generic \
             checker call whose type argument is an indexed-access into an \
             imported interface (`SvelteHTMLElements[\"input\"][\"value\"]`) when it \
@@ -1940,14 +1940,14 @@ fn function_binding_on_a_component_checks_against_instancetype_props() {
 }
 
 #[test]
-#[ignore = "B8d-P2-1 known gap: tsgo native-preview silently accepts a wrong-typed \
+#[ignore = "known tsgo native-preview limitation: it silently accepts a wrong-typed \
             value on a transition-param property NOT shared with TransitionConfig \
             (e.g. fly's `y`) under the @jsxImportSource pragma. Red against \
             current tsgo; flips green when the upstream tsgo bug is fixed. \
             Upstream: contravariant optional-param inference loses the param \
             discrimination for non-shared interface members."]
 fn transition_specific_param_wrong_type_is_rejected_known_tsgo_gap() {
-    // B8d-P2-1 (R10 ledger, DISCRIMINATING): `transition:fly={{ y: "200" }}` — a
+    // R10 ledger (DISCRIMINATING): `transition:fly={{ y: "200" }}` — a
     // wrong-typed `y` (string where number is expected) on the `fly`-SPECIFIC
     // param SHOULD be rejected. Under tsgo native-preview it is silently ACCEPTED
     // (the `delay` fixture — a TransitionConfig-SHARED member — discriminates
@@ -1971,7 +1971,7 @@ fn transition_specific_param_wrong_type_is_rejected_known_tsgo_gap() {
 
 #[test]
 fn missing_svelte_package_fails_closed_with_module_not_found() {
-    // D-ae(d): a workspace WITHOUT `svelte` fails CLOSED — the shim's
+    // A workspace WITHOUT `svelte` fails CLOSED — the shim's
     // `import type { Snippet } from "svelte"` is module-not-found, no ambient
     // stub, no `any`. DISCRIMINATING: do NOT vendor svelte here.
     let projected = project("<div>{x}</div>");
@@ -1990,7 +1990,7 @@ fn missing_svelte_package_fails_closed_with_module_not_found() {
     );
 }
 
-// --- B8f F8/F9/F10 special-element + namespace TSGO fixtures ---
+// --- F8/F9/F10 special-element + namespace TSGO fixtures ---
 
 #[test]
 fn dynamic_component_wrong_prop_is_rejected() {
@@ -2232,7 +2232,7 @@ fn svg_namespace_component_type_checks_svg_intrinsics_and_rejects_html_only_attr
     );
 }
 
-// --- B8g F11/F12 legacy store + magic-object TSGO fixtures ---
+// --- F11/F12 legacy store + magic-object TSGO fixtures ---
 
 #[test]
 fn store_read_checks_against_the_readable_value_type() {
@@ -3579,7 +3579,7 @@ fn a_bind_this_store_target_emits_valid_tsx_without_a_cannot_find_name_error() {
     );
 }
 
-// ── D-bk: Svelte rune-module (`.svelte.ts`/`.svelte.js`) TSGO validity ──────
+// ── Svelte rune-module (`.svelte.ts`/`.svelte.js`) TSGO validity ────────────
 //
 // A standalone rune module is a NON-COMPONENT carrier. Its provider surface
 // (Channel B) is `<module rune prelude> + <real module bytes>`, served from the

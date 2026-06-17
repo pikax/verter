@@ -5,7 +5,7 @@
 // component with the per-file pragma `/** @jsxImportSource @verter/svelte-jsx/svg */`,
 // which directs TypeScript's automatic JSX runtime to consult the `JSX`
 // namespace EXPORTED from this module (its `/svg/jsx-runtime` subpath) —
-// overriding the project-level `jsxImportSource` for that file only (D-ae(a)).
+// overriding the project-level `jsxImportSource` for that file only.
 //
 // The namespace is SVG-ONLY: `IntrinsicElements` is the SVG element set, each
 // typed by `svelte/elements`' exported `SVGAttributes` against the matching DOM

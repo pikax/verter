@@ -257,7 +257,7 @@ impl SvelteCarrierCompiler {
         let ide = IdeOutput {
             code: projection.code,
             source_map: projection.source_map,
-            // A `.svelte` always projects TS `.tsx` (D-x): the projection emits
+            // A `.svelte` always projects TS `.tsx`: the projection emits
             // TS with the `@jsxImportSource` pragma; it is never `.jsx`.
             is_jsx: false,
             duration_ms,
