@@ -2623,6 +2623,298 @@ divergence (`(props?: mapped): string` vs vcm's arrow form).
 
 ---
 
+### UP — LSP / Compiler Performance Backlog (tracked, not yet scheduled)
+
+Tracked perf follow-ups handed off from the retired lsp-perf line. NOT on the
+§3.5 critical path; NO deps-graph edges into the U-chain EXCEPT the explicit
+unblock edges named below. Ungated UP.1 / UP.2 are parallel capacity (like
+U1/U4/U5). Every item is a branch-independent SPEC (the source perf branches are
+retired; SHAs are historical only — except UP.1's three, whose diffs landed in
+this integration and cite their real refactor-history commit SHAs).
+
+This block is the perf-track HOME: the prior `docs/arch/perf-handoff-to-semantic-overhaul.md`
+is now a thin pointer to here, and `docs/arch/perf-lsp-orchestration-plan.md`
+remains only for the historical multi-track integration model. The gated items
+have their DELIVERABLE in an owning U-block (cross-ref'd in §B below); **UP.G is
+the inventory index, the U-block carries the work.**
+
+**Off-critical-path disclaimer.** Nothing in UP gates a U-block and no U-block
+depends on a UP item except via the explicit unblock edges recorded in the
+owning U-block's scope bullet (U11.C17 → UP.C4; U11.C19 → UP.C2b; U11.C20 →
+UP.C8 host-reach; U11.F1 / U3.F2 / U3.B-typeinfo land their own deliverables).
+The 3.5 critical path is unchanged.
+
+**Governance NOTES (future-touch points; recorded for the governance reviewer +
+future implementers — no CLAUDE.md / skill edit is made now):**
+- **C15** (UP.D) touches a CodeTransform-CRITICAL surface and proposes a new
+  static guard (`codetransform_no_post_build_provider_text_rewrite_static_guard`) —
+  a future CLAUDE.md / skill touch when it lands.
+- **D-F4** (UP.D) is an output-breaking CSS scoped-hash cutover — it interacts
+  with the Cross-Platform byte-equality rule AND the CodeTransform-single-source
+  rule; future-governance touch when it lands.
+- **B-typeinfo / F2** (U3) must respect the single-engine
+  `no_new_resolve_type_engine_path*` cluster + R6 / R21 + `no_off_store_host_caches`
+  — a NEW cache DB off `ProjectTypeStore` would trip the R6 meta-guard. No new
+  off-store cache is sanctioned by this backlog.
+- **L-B TypeLocation** (UP.G homeless) may require a Typeinfo Wire Contract schema
+  bump if `TypeLocation` is inside the closed-enum surface — confirm before
+  implementing; STOP for user sign-off.
+
+#### UP.0 — Prerequisites
+
+- **PRE-0 — restore the LSP perf-counter substrate.** The framework-agnostic
+  refactor deleted `crates/verter_lsp/src/perf_counters.rs`; only a generic
+  disabled-by-default `statistics.rs` survives. Revive `perf_counters` (or extend
+  `statistics.rs`) with the named counters `lsp.did_change.total_ms`,
+  `host_upsert_ms`, `line_index_rebuild_ms`, `position_mapper_from_json_ms`, plus
+  the drain / scanner / restart-replay counters. **Gates every UP.M item** — those
+  land unmeasured without it.
+- **PRE-1 — decide where the open/close-session epoch lives (`OpenSessionEpochAuthority`).**
+  The C keystone's close-ABA fix (UP.C2) and item 8's completion-freshness rail
+  (UP.C8) were designed to reuse the sync-coordinator's open-session epoch; the
+  refactor replaced `sync_coordinator` with a function-based
+  `spawn_sync_coordinator` / `coordinator_loop` carrying only `ownership_ready`
+  flags — there is no epoch authority to reuse. This is a real design decision
+  (an LSP-local server field vs a thin shared seam), NOT a port. **Blocks UP.C2
+  and UP.C8.**
+
+#### UP.1 — LANDED in THIS integration (ungated, real tested commits — NOT spec-only)
+
+These three rode into the refactor on the fast-forward as real, tested,
+separately-gated commits (touching only verter_scheduler / verter_workspace /
+verter_lsp). Their diffs ARE in refactor history; the source perf branch is
+retired and the SHAs below are the refactor-history commits, branch-independent.
+
+- **G8.2 — scheduler supersede reverse-indices.** **LANDED ✅ (commit
+  `24532fbca` in refactor history — branch-independent, source branch retired).**
+  O(1) supersede via per-canonical reverse maps;
+  `verter_scheduler/src/dag.rs` + `dag/{blocker_registry,terminal_failures}.rs`
+  (+ `dag_supersede_index_tests.rs`).
+- **G9.1 — workspace realpath memo.** **LANDED ✅ (commit `a4333b753` in
+  refactor history — branch-independent, source branch retired).** Memoize
+  `NativeFs` realpath with dir-index invalidation;
+  `verter_workspace/src/{native_fs,filesystem}.rs` (+ `filesystem_tests.rs`).
+- **G14.1 — `Arc<PositionMapper>` read-path share.** **LANDED ✅ (commit
+  `0f2e19fc1` in refactor history — branch-independent, source branch retired).**
+  Hand out `Arc` clones instead of deep-cloning the mapper + lookup tables on
+  every hot provider read; `verter_lsp/src/documents/{mod.rs,provider_projection.rs}`
+  (`Arc<PositionMapper>` on the `CarrierIde` / `SourceMap` carriers) + an
+  `Arc::ptr_eq` regression test. **CROSS-NOTE for U13 / U14:** do NOT regress this
+  `Box → Arc` read-path share if the published-projection layer reshapes
+  `DocumentProviderProjection` / `ProviderPositionMapper` — re-apply the
+  read-path Arc share, never revert to a per-read `Box` deep-clone.
+
+#### UP.2 — Track-C ungated (LSP-local; no `verter_session/src` edit)
+
+LSP-local perf items, all branch-independent specs. Preserve the handoff's
+serialized order and the internal deps (UP.C4 ← UP.C2a; UP.C9 ← UP.C8). Carry
+the §4 wave-1 review lessons (item-12 ABA = compare-and-swap from the SAME single
+snapshot; item-23 / keystone TOCTOU + close-ABA = a single non-atomic version
+check on a detached task does NOT close the ABA hole; the armed-restart monitor
+owns its own cancellation) into UP.C2 / UP.C12 / UP.C19.
+
+Suggested serialized order: PRE-0 → PRE-1 → quick LSP-local wins (C5, C14, C3) →
+keystone C2a + C2A-residual → **C4 (AFTER C2a — C4 consumes `editor_source_version`
+that C2a introduces)** → background/diagnostics cluster (C7 → C6 → C10+C13 → C7A)
+→ transactionality (C12, C13a) → C23 active-first replay → C8 → C9.
+
+- **C3 — LineIndex shared `Arc<str>` source.** `verter_type_runtime/src/codec.rs`
+  `LineIndex.source: Vec<u8>` full-copies; `did_change_incremental` rebuilds per
+  change. Back `LineIndex` by `Arc<str>`.
+- **C5 — SFC-block-scan cache.** No `sfc_blocks` field on `DocumentState`; every
+  handler re-runs `scan_sfc_blocks(&doc.source)` (nav_features / aux_features /
+  custom_methods / component_resolve sites). Add `sfc_blocks: Arc<[SfcBlock]>`,
+  populate in did_open / did_change, key off `FileLanguage::is_framework_carrier()`
+  (carrier-general, NOT a `.vue` literal).
+- **C11 — single-walk scanner.** Two full FS walks remain
+  (`collect_carrier_paths` / `collect_source_paths` in `workspace_scanner.rs`);
+  priority is a post-collect reorder. Add `walk_streaming` to `WorkspaceRead` /
+  `NativeFs`; fold into one streaming inventory + `BinaryHeap`; re-express onto
+  the refactor's async `scanner_loop` / `ScannerSignal`.
+- **C12 — provider-sync single-snapshot CAS.** `prepare_sync_transition` /
+  `commit_sync_transition` exist but commit is a bare `states.insert` with NO
+  CAS. Add an explicit-previous-snapshot transition + `commit_if_state_unchanged(expected)`
+  CAS; route non-carrier shadow transitions through one two-phase helper. (Carry
+  the wave-1 ABA lesson: prepare from the same snapshot you later compare.)
+- **C13a — drain-liveness split.** `drain_pending_snapshot_provider_sync`
+  re-collects all pending with no reconciliation memo. Add a
+  `ReconciliationSignal` / `ReconciledMemo` gate over the `SyncOutcome` drain.
+- **C14 — canonical reverse-index O(1).** `canonical_id_to_uri`
+  (`documents/mod.rs`) linear-scans. Add a `DashMap<canonical,uri>` maintained on
+  did_open / close / change. Pairs with C8.
+- **C2a — keystone, provider-sync off the `did_change` critical path + 2 freshness
+  fields.** `handle_did_change` still awaits `sync_tsx` under `did_change_mutex`.
+  Add `edit_arrival_version` + `editor_source_version` fences (a per-canonical
+  map, or onto `DocumentState`); read the epoch from the PRE-1
+  `OpenSessionEpochAuthority`; move eager sync into a detached version-checked
+  task that self-drops when `live_edit_arrival > captured`. This part alone does
+  NOT make same-canonical push race-free (TOCTOU / close-ABA per §4); the robust
+  fix is C2b. **Uses PRE-1.**
+- **C2A — keystone, style-only skip.** The provider-sync block is already skipped
+  on `slice_changes.is_style_only()`; the residual compile / get_ide / mapper
+  rebuild in the delegated `DocumentRegistry::did_change` still runs
+  unconditionally. Gate the carrier compile / mapper rebuild on an `affects_ide`
+  flag passed down from `handle_did_change`. (`is_style_only()` is already public
+  on `HostUpdateResult.slice_changes`.)
+- **C4 — cached `MappingContext`.** `provider_projection_context` re-builds
+  `LineIndex::new` + a mapper clone per request. Cache
+  `{Arc<str>, Arc<LineIndex>, Arc<PositionMapper>}` keyed
+  `(canonical, editor_source_version, ide_path, artifact_hash)`. **Depends on
+  C2a's `editor_source_version`** (sequence after C2a). Interim identity: derive
+  `artifact_hash` LSP-side by hashing host-returned `ide.code` + `source_map`
+  (NOT the doc version — `ensure_current_file_synced` can refresh artifacts
+  without a version bump; the hard-invalidation test
+  `mapping_context_invalidates_when_artifact_hash_changes_without_doc_version_change`
+  must pass on the interim hash). **GATED-on-U11.C17 for the identity-complete
+  version** (edge UP.C4 ← U11.C17): once the host returns an artifact id/hash,
+  re-key onto it and STOP hashing generated strings (guard
+  `mapping_context_uses_host_returned_artifact_identity_only`). Land ungated with
+  the interim hash now; re-key when C17 lands.
+- **C6 — background diagnostics + publish-token.** Non-interactive pulls use
+  normal `get_diagnostics` with no token. Use background priority + a 6-field
+  publish token revalidated post-await.
+- **C7 — explicit background sync priority.** Background paths call plain
+  `sync_tsx`. Make priority explicit in the API.
+- **C7A — SyncCoordinator execution split.** `spawn_sync_coordinator` /
+  `coordinator_loop` still `await`s sync + publish inline, blocking `rx.recv()`.
+  Dispatch sync / publish as cancellable versioned tasks so the loop keeps
+  draining.
+- **C8 — VerterRequestIngress + completion freshness.** `completion_generation`
+  is checked globally; the provider await has no post-await freshness check; no
+  ingress. Per-request tokens / deadlines / cancel; scoped completion
+  supersession; a freshness oracle. **Largest item; needs PRE-1.** (The
+  host-reach cancellation half is GATED — U11.C20; the provider-native cancel
+  half is measurement-held — UP.M.)
+- **C9 — remove completion retry-sleeps.** `tokio::time::sleep` is on the
+  completion path. Replace with `isIncomplete:true` + background repair.
+  **Depends on C8.**
+- **C10 — single `DiagnosticPublisher`.** Now 3-way duplicated
+  (background_init ×2, sync_coordinator, rune_module_diagnostics). Collapse into
+  one publisher taking the cached `MappingContext` + the C6 token.
+- **C13 — collapse background-init dup.** Two open-file diag loops in
+  background_init; folds into C10.
+- **C2b — keystone, robust same-canonical push serialization. GATED.** Per-canonical
+  push ordering with a monotonic accepted-version so a stale provider push can
+  never clobber a newer one and close can never resurrect a closed doc (the ABA
+  hole). **GATED on U11.C19** (edge UP.C2b ← U11.C19 — the per-canonical-lock +
+  host-concurrency-contract territory). Lands with / after C19; do NOT pretend
+  C2a closes the ABA hole. **MUST NOT depend on `verter_scheduler::CpuConcurrencySemaphore`**
+  (U9 records it deletion-bound).
+- **C23 (active-first replay, UNGATED).** On provider restart, replay active /
+  open files first → mark the provider usable → background-replay the remainder;
+  stale-replay linearization (per-path commit mutex + `restart_generation`).
+  Re-express onto the refactor's single generic `ResilientProvider<P,B>` /
+  `ResilientBackend` (`verter_type_runtime/src/resilient.rs`). Protected
+  invariant: every previously-replayed file stays replayed; the K active files
+  replay and the provider is marked usable before the bulk cached files finish.
+  The armed-restart `restart_generation` rail must own its own cancellation
+  (forward spawn-failure into the monitor; never abort it from a generation
+  read), and the test matrix must include the wake-before-poll scheduler
+  ordering. **The shared content-store half (Arc<str> provider content) is
+  MEASUREMENT-HELD — UP.M — keep it OUT of this replay commit.**
+
+#### UP.D — Compiler-perf, gated
+
+- **D-F4 — output-breaking CSS scoped-hash cutover. GATED (measurement + a
+  tested output diff).** A changed CSS scoped-hash changes generated bytes, so it
+  is a tested cutover that interacts with the Cross-Platform byte-equality rule.
+  Land with the output-diff cutover tests (the changed CSS hash byte-tested).
+  **GOVERNANCE-FLAG:** Cross-Platform byte-equality CRITICAL + CodeTransform
+  single-source CRITICAL (no post-`build_string()` rewrites).
+- **C15 — ranged provider updates only over provider-materialized text. GATED
+  (HARD-ORDER prerequisite).** Boundary is `verter_type_runtime` TSGO `ipc.rs` +
+  a compiler/codegen handoff (NOT `verter_session`). Ranged provider `didChange` /
+  diff updates instead of full-document re-sends. **HARD-ORDER:** TSGO mutates
+  provider-visible text via `rewrite_vue_imports_for_tsgo`
+  (`crates/verter_type_runtime/src/tsgo/ipc.rs`, around `:1301`) before the
+  update / open / load variants — a source range after a rewritten `.vue` import
+  lands at the wrong provider offset. Direct source-range forwarding is FORBIDDEN
+  until that rewrite is emitted through `CodeTransform` before `build_string()` /
+  source-map emission (a compiler/codegen workstream) OR eliminated by
+  byte-preserving resolver behaviour. Until then, every provider range/diff is
+  computed ONLY over previous/current provider-materialized `ide.code`, never
+  source ranges. **GOVERNANCE-FLAG:** CodeTransform single-source CRITICAL +
+  proposed guard `codetransform_no_post_build_provider_text_rewrite_static_guard`
+  (fails on any post-`CodeTransform` provider-text replace / regex / splice once
+  the rewrite is deleted).
+
+#### UP.M — Measurement-gated (run CPU-idle AFTER PRE-0; do NOT benchmark during implementation)
+
+Gated on the PRE-0 named counters; do NOT benchmark while implementing.
+
+- **C23 shared content-store half** — separate provider content storage from
+  open/load mode; share `Arc<str>` content between `ResilientProvider` and
+  concrete providers instead of per-provider `String` copies. Gated on the named
+  counters `resilient_file_cache_bytes` + provider-contents bytes. DISTINCT from
+  the UNGATED active-first replay half (UP.2 C23); do NOT bundle.
+- **C8 provider-native cancel** (D1 / D2 / D3 counters) — distinct from the
+  ungated ingress half (UP.2 C8) and the host-reach half (U11.C20).
+- **C21 / C22 / C24 / C25 (speculative)** — config-aware FS pruning, lazy
+  code-actions / ranged tokens, encoding prefix-scan, bounded node_modules
+  provider-sync graph.
+- **D ancestor-walk + Vapor effects-bubbling** conflicts.
+- **B Stage5 ResolvedElements deletion / StoreView MVCC / frontier BFS batching**
+  (the deliverables live in the U-blocks — see §B; benches gated here).
+- **L-A storm counters** — go/no-go: duplicate same-text `didChange` → 0
+  parse/compile/provider delta; typing burst → ≤1 parse + ≤1 IDE compile for the
+  final content. (See L-A in UP.G / its U-owner.)
+
+#### UP.G — Gated-item index (the inventory; the OWNING U-block carries the deliverable)
+
+Each row names the deliverable's home. UP.G is an index — read the owning
+U-block's scope bullet for the contract.
+
+- **F1** host-owned retained-close → **U11** (§B).
+- **C16** delta `UpsertRequest` → **U11**.
+- **C17** host artifact-bundle return → **U11** (UNBLOCKS UP.C4).
+- **C18** fold `notify_upsert` → **U11**.
+- **C19** per-canonical locks → **U11** (UNBLOCKS UP.C2b; MUST NOT use
+  `CpuConcurrencySemaphore`).
+- **C20** cooperative cancel (host half) → **U11** (UNBLOCKS UP.C8 host-reach).
+- **B-typeinfo cache items 1–11** (expr cache, header probe, route frontier,
+  generic lower-once, combined cm-view cache, StoreView token-shortcut,
+  `Arc<str>` identity, memo/arena, hash-cons reverse index, typeinfo wire/Stage5,
+  `ensure_indexed_ready_many`) → split by surface across **U3** (cache substrate),
+  **U10** (result-DB / StoreView), **U8** (wire/Stage5 — HARD-GATE U8+), **U12**
+  (exporter-side) (§B).
+- **D-I3** virtual-file-pipeline string-surgery removal → **U14**.
+- **D-custom_elements** customElement host reach → **U14**.
+- **D-F4** output-breaking CSS hash cutover → **UP.D** (gov-flagged).
+- **F2** resolved-type read-set fact-scoping → **U3** (§B; F2 correction recorded
+  there).
+- **L-A** re-parse / re-compile storm on active typing → **needs an owner
+  near host_upsert + scheduler admission; overlaps Track C** (shares
+  documents/mod.rs, lifecycle.rs, sync_coordinator.rs, sync_orchestration.rs,
+  project_sync.rs). Lands AFTER the host_upsert / scheduler cutover, co-designed
+  with it; measurement-held (UP.M counters). An in-crate LSP-only
+  "skip byte-identical didChange" is INSUFFICIENT.
+- **L-event-args** imported-component `InstanceType<typeof C>["$props"]`
+  materialization under tsgo → **U14**.
+- **C15** ranged provider updates (CodeTransform hard-order) → **UP.D**
+  (gov-flagged).
+- **L-C.2 (HOMELESS — needs an owner; STOP for user sign-off).** Ownership race
+  after a real snapshot: a published root flagged `ownership_ready:true` whose
+  resolver membership does not consistently claim an open, genuinely-owned `.vue`.
+  Boundary: `verter_workspace/src/resolver.rs` + snapshot publish / `ownership_ready`
+  (the no-owner branch lives at `sync_coordinator.rs:216`). No clean U-owner
+  today (nearest relative is the B.1 program-model work, §1.1 / l.504).
+  Co-design with the ownership/publish cutover; STOP for user sign-off before
+  editing `verter_workspace`; coordinate with Track C (shares
+  `sync_coordinator.rs`).
+- **L-B (HOMELESS — needs an owner; STOP for user sign-off).** References /
+  rename / code-actions + `TypeLocation` protocol. The go-to-DEFINITION /
+  TYPE-DEFINITION non-gated half is LANDED; this is the remaining half.
+  `TypeLocation` is byte-offset-only (`verter_type_runtime/src/protocol.rs:130`,
+  `pub start: u32, pub end: u32`, no line:col / offset-kind discriminant); carry
+  a resolved line:col `Range` (or an offset-kind discriminant), update TSGO +
+  tsserver so refs/rename/code-actions never pack line/char into byte-offset
+  fields, then remove the fake external `Range::default()` fallbacks in
+  `tsgo/merge.rs`. Shared-runtime protocol change → STOP for user sign-off.
+  **GOVERNANCE-FLAG:** confirm whether `TypeLocation` is inside the Typeinfo Wire
+  Contract closed-enum surface — if so it is a schema bump.
+
+---
+
 ### U0 — Finish Typeinfo Contract Gaps  **(U0-FINISH-A + U0-FINISH-B substrate landed — current state derives from §1.1)**
 
 - **Source track:** semantic-graph (R-0a).
@@ -3153,6 +3445,32 @@ divergence (`(props?: mapped): string` vs vcm's arrow form).
   graphs are not invalidation authority (validated lazy revalidation only); regression
   tests that same-canonical edits are caught by strict self-root validation and
   cross-file edits invalidate lazily through recorded facts.
+- **Perf-backlog cross-ref (UP / §B):** this block OWNS the cache-side perf
+  deliverables indexed in UP.G.
+  - **F2 — resolved-type read-set fact-scoping.** Fact-scope the resolved-type
+    cache read-set onto the `ReadSetSignature.facts` + `self_root_canonicals`
+    validity rail. Targets `host_resolve/{external_type_resolution,frontier_engine,
+    frontier_helpers}.rs` + `project_type_store.rs` + the `resolver_core/*resolver_context.rs`
+    read-set plumbing. **SPEC-DRIFT CORRECTION:** the perf handoff's claim that
+    `ResolvedTypeCacheDb` is "retired" is FALSE on this tree — the symbol EXISTS
+    (`crates/verter_session/src/host_construction.rs:961`,
+    `resolved_type_cache() -> &project_type_store::ResolvedTypeCacheDb`). F2 targets
+    the `ReadSetSignature.facts` rail + verify-against-live-HEAD (path-precise R21
+    read-set, `ReturnOnly` never publishes torn results, cold/warm equivalence),
+    NOT a DB removal; re-verify the DB-vs-fact-rail split against live HEAD before
+    implementing. Pair with the `r6_*` / migrated-query-identity-key guard cluster.
+  - **B-typeinfo cache-substrate sub-items** (expr cache, header probe, route
+    frontier, generic lower-once, combined component-meta view cache, `Arc<str>`
+    identity, memo/arena, hash-cons reverse index). For EACH: **verify
+    already-landed before re-implementing** (several overlap substrate already on
+    the tree — `SemanticGraphStore` / hash-cons memos / the demand-scope
+    declaration-body lowering); route through the shared resolver (single-engine
+    rule — `no_new_resolve_type_engine_path*`); **NO new off-`ProjectTypeStore`
+    cache DB** (R6 / `no_off_store_host_caches` — a new cache DB trips the R6
+    meta-guard). Preserve `ReadSetSignature.facts` validity (R21) and the typeinfo
+    wire-contract guards. No second resolution engine. (StoreView token-shortcut +
+    `ensure_indexed_ready_many` → U10; typeinfo wire/Stage5 → U8 HARD-GATE;
+    exporter-side projection → U12.)
 
 ---
 
@@ -3421,6 +3739,12 @@ divergence (`(props?: mapped): string` vs vcm's arrow form).
   block-contract row in `gen-typeinfo-ignore-manifest.py` carries this exact set); plus
   the four wire-contract guards (proto/TS oneof parity, byte-equal TS freshness, audit
   parity, request validation).
+- **Perf-backlog cross-ref (UP / §B):** the **B-typeinfo "typeinfo wire / Stage5"**
+  sub-item (UP.G) is owned here. **HARD CONSTRAINT: U8+ ONLY — FORBIDDEN before
+  S5.B11/B12** (the `U8 ← {U6, S5.B12}` HARD GATE of §3.1.1, l.1567, bet #4): do
+  NOT build the new wire/result/export stack around the `VueMacroElements` /
+  `HostResolvedNamedTypeKey` / `resolve_type/` sidecar that S5.B11/B12 delete. Any
+  wire-side typeinfo perf rides this block's schema closure, never a pre-S5 shape.
 
 ---
 
@@ -3532,6 +3856,12 @@ bridge.
   / `skeleton_is_typeparamshells_plus_carrier_stop_not_special_mode` (defined at U2,
   depended on here); a guard that there is no second retry constant; a zero-alloc warm-hit
   test (no audit payload allocation without accumulator).
+- **Perf-backlog cross-ref (UP / §B):** the **B-typeinfo StoreView token-shortcut**
+  + **`ensure_indexed_ready_many`** sub-items (UP.G) are owned here on the
+  result-DB / `StoreView` surface. Verify what is already landed before
+  re-implementing (the StoreView token + the indexed-ready-many path overlap
+  substrate already on the tree); route through the shared resolver / the existing
+  `TypeInfoGraphResultDb` admission; NO new off-`ProjectTypeStore` cache.
 
 ---
 
@@ -3547,7 +3877,7 @@ bridge.
   (`U11.PUBLIC_RELATION_SESSION`), under parent `docs/arch/native-typeinfo-parity.md`
   (§4, PART 2 §§10–11, the audit infrastructure). INDEX entry — the child doc owns the
   full contract.
-- **Scope (the session boundary the exporter feeds):**
+- **Scope (the session + document-lifecycle host surface the exporter feeds):**
   - Public `relate()` returning the public `RelationPayload` (outcome / inference
     bindings / relation proof + typed `BudgetExceeded`), the proof carried off the
     type-values surface via the payload-side proof table — NOT the bare tri-state
@@ -3594,6 +3924,62 @@ bridge.
   discriminating; `every_typeinfo_request_carries_schema_version` (per-request echo);
   `server_supported_versions_have_encoders` (never advertise a version without a
   registered encoder).
+- **Perf-backlog cross-ref (UP / §B — the gated `verter_session` host-surface +
+  document-lifecycle perf deliverables; UP.G indexes them):** all of these clean-room
+  re-implement under the §4 wave-1 lessons (ABA / TOCTOU / armed-monitor) — the
+  source perf branches are retired, no diff safety net.
+  - **F1 — host-owned retained-close (ENTIRE item).** Retain read-only externals
+    across close; distinguish dirty-vs-clean; serialize close-vs-upsert. Needs
+    `VerterHost::close_document() -> HostCloseDisposition` (+ `HostCloseEvictReason`
+    / `HostCloseAbsentReason`), `evict_after_close_decision`,
+    `DependencyState.retained_source_content_generation`, the workspace retain
+    authority (`WorkspaceAccess::is_retainable_read_only` + `WorkspaceCloseEffect`),
+    then the LSP gate/generation layer (`open_seq` discipline + `*_serialized` /
+    `*_gated` mutators). Target: `host_lifecycle.rs` (the close/evict authority),
+    `host_upsert.rs`, `crates/verter_workspace/src/`, and
+    `crates/verter_lsp/src/server/lifecycle.rs` `handle_did_close`. **F1 has NO
+    diff safety net** (the source commit is gone from this repo) — clean-room
+    re-impl; **preserve the Svelte rune-module branches now in `handle_did_close`**
+    (the source predates them). Named race tests: close-vs-reopen (stale close must
+    not clobber a concurrent reopen), dirty-buffer-evict (a dirty buffer is NOT
+    retained), close-after-open provider-window. The race it closes is still live.
+  - **C16 — delta `UpsertRequest`.** `UpsertRequest` (`verter_session/src/types.rs:1426`)
+    carries only full `source: Arc<str>`. Make it delta-capable; host stays
+    canonical source authority, APPLIES the delta, computes the final whole-content
+    hash, routes through `upsert_many_with_priority`, publishes the same
+    `IndexedReady` / facts a cold full upsert would; stale-base / torn deltas fail
+    closed. Guards: `delta_host_upsert_cold_full_delta_equivalence`,
+    `delta_host_upsert_stale_base_rejects_closed`. Re-confirm `types.rs:1426` is
+    still full-source-only at impl time.
+  - **C17 — host artifact-bundle return.** `IdeResponse` (`types.rs:1807`) carries
+    NO artifact id. One host call returns update result + IDE artifact metadata
+    (generated code `Arc<str>`, source-map handle, **artifact id/hash**, diagnostics,
+    public API if materialized). **UNBLOCKS UP.C4** (edge UP.C4 ← U11.C17) — lets
+    the LSP stop hashing generated strings. Guard:
+    `mapping_context_uses_host_returned_artifact_identity_only`.
+  - **C18 — fold `notify_upsert`.** The LSP calls both `host.upsert` and
+    `host.notify_upsert` for one edit; `upsert` already calls `notify_upsert`
+    internally (`host_upsert.rs:824`), and the artifact-only eviction arm is a no-op
+    early return. Remove the extra LSP `notify_upsert` + source clone; fold overlay
+    semantics into the authoritative upsert. Guard:
+    `notify_upsert_fold_preserves_scheduler_tracked_noop_and_artifact_only_eviction`.
+  - **C19 — cross-file concurrent upsert + per-canonical locks.** The global
+    `Server::did_change_mutex` (taken at `lifecycle.rs:597`) serializes ALL
+    cross-file edits. Host must explicitly support concurrent upserts for DIFFERENT
+    canonical ids with same-canonical ordering preserved; THEN replace the global
+    mutex with per-canonical keyed locks + an LSP-owned admission limiter. **Do NOT
+    depend on `verter_scheduler::CpuConcurrencySemaphore`** (U9 records it
+    deletion-bound, ~l.3451 region — cross-constraint with U9's required deletions).
+    **UNBLOCKS UP.C2b** — the robust same-canonical push serialization. Guard:
+    `host_upsert_cross_canonical_concurrency_same_canonical_serialization`.
+  - **C20 — cooperative cancellation (host half).** `tokio::time::timeout` stops
+    awaiting but cannot cancel synchronous `block_in_place` host work. Reach the LSP
+    request-cancellation token into host computations; cancelled / superseded work
+    may finish privately but must NOT publish cache-visible artifacts / diagnostics
+    / facts unless current (aligns with this block's existing
+    "cancelled/superseded never publishes" rule). **UNBLOCKS UP.C8's host-reach
+    cancel** (the LSP-local ingress half is ungated — UP.C8). Guard:
+    `host_cooperative_cancellation_no_publish_after_stale`.
 
 ---
 
@@ -3672,6 +4058,11 @@ bridge.
   `known_variants_at_version_rows_are_cumulative_exact_sets`,
   `downgrade_encoder_never_emits_variant_unknown_to_target_version`,
   `known_variants_table_matches_proto_at_version` (CI — table regenerated from proto).
+- **Perf-backlog cross-ref (UP / §B):** any **B-typeinfo exporter-side perf**
+  (UP.G) — the combined component-meta view projection / zero-dispatch projection —
+  rides this block's thin-projection cutover. The exporter does NO query-time
+  resolution (single-engine rule); perf here means a cheaper projection of the
+  already-resolved typed results, never a second resolver or a new off-store cache.
 
 ---
 
@@ -3725,6 +4116,11 @@ bridge.
   wire-purity guards kept green over the published surface;
   `capability_rows_map_to_expected_query_fact_mechanisms` (no published-surface row mapped
   to U13); projection round-trip discriminators.
+- **Perf-backlog cross-note (UP.1 G14.1):** if this block reshapes
+  `DocumentProviderProjection` / `ProviderPositionMapper`, do NOT regress the
+  landed `Box → Arc<PositionMapper>` read-path share (UP.1 G14.1, commit
+  `0f2e19fc1`) — re-apply the Arc read-path share, never revert to a per-read
+  `Box` deep-clone.
 
 ---
 
@@ -3759,6 +4155,23 @@ bridge.
 - **Guards:** the 4 mismatch-case regression tests (each fails on the legacy path,
   passes on the rebuilt adapter); a guard that component-meta is a thin adapter
   (no second resolver/expander) per the native-vs-compat CRITICAL rule.
+- **Perf-backlog cross-ref (UP / §B — the gated Vue-adapter / materialization perf
+  deliverables; UP.G indexes them):**
+  - **D-I3 — virtual-file-pipeline string-surgery removal.** Remove the
+    `verter_session` string-surgery in the compile / IDE path
+    (`crates/verter_session/src/host_resolve/virtual_file_pipeline.rs` + the compile
+    lane); add regression coverage that the removal preserves codegen. Honour
+    CodeTransform-as-single-source (no post-`build_string()` rewrites).
+  - **D-custom_elements — `customElement` host reach.** The `customElement` handling
+    surfaces in `host_resolve/virtual_file_pipeline.rs` + `types.rs`; needs
+    regression coverage that the reach preserves codegen.
+  - **L-event-args — imported-component event-arg payload resolution under tsgo.**
+    The codegen is already byte-exact; the REMAINING gap is resolution: an imported
+    component's `InstanceType<typeof C>["$props"]` resolves to `any` under tsgo, so
+    a component-spread `$event.<member>` completion cannot expose members. Fix is a
+    host/API edit to the cross-component `.vue.ts` synthesized-instance-type
+    materialization this block owns; once the host materializes imported-component
+    instance types under tsgo, the skipped real-provider rows assert live.
 
 ---
 
