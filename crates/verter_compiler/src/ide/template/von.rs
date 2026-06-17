@@ -15,8 +15,8 @@
 //! anchor MAPPED to the source event token. Object braces, computed-key template
 //! literals, the `($event) => { … }` handler-wrapper scaffolding (with an explicit
 //! event-payload annotation on the spread path, where JSX contextual typing cannot
-//! flow), and the v-if narrowing guard are unmapped synthetic text. Extracted from
-//! `props.rs` to keep both files within the production line-count budget.
+//! flow), and the v-if narrowing guard are unmapped synthetic text. This module
+//! lives apart from `props.rs` so each stays within the production line-count budget.
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::Expression;
@@ -336,9 +336,8 @@ pub(super) fn process_v_on<'alloc>(
             } else if has_event_param {
                 // Inline expression with `$event` on a spread key. Name the sole callback
                 // parameter `$event` and annotate it explicitly with the payload type (JSX
-                // contextual typing cannot reach it through the spread). This replaces the
-                // former `eventCallbacks<TArgs extends Array<any>>` helper, which forced
-                // `$event` to `any`.
+                // contextual typing cannot reach it through the spread, so the explicit
+                // annotation is what keeps `$event` from collapsing to `any`).
                 let types = spread_event_types(
                     el,
                     source,
@@ -683,9 +682,9 @@ fn spread_event_types<'alloc>(
 ///
 /// Typed-IR-first: when OXC parsed the handler into binding facts, `$event` use is
 /// an EXACT identifier match in `exp.bindings` (the binding visitor records every
-/// identifier, including the ignored `$event` built-in). This never matches `$event`
-/// inside a string literal, a comment, or a longer identifier like `my$eventBus` —
-/// unlike the former `resolved_expr.contains("$event")`.
+/// identifier, including the ignored `$event` built-in). The match is identifier-
+/// exact: it never fires for `$event` inside a string literal, a comment, or a
+/// longer identifier like `my$eventBus`.
 ///
 /// For an INCOMPLETE handler that OXC could not lower into facts (e.g. `$event.`
 /// mid-completion), fall back to a token-level identifier scan that skips string and

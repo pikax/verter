@@ -6453,9 +6453,8 @@ fn bare_event_no_value_removed() {
 fn event_handler_native_event_param_is_contextually_typed() {
     // Native `$event` is bound as the handler's sole parameter so it is
     // contextually typed by the JSX event prop (`onClick`) — the same mechanism
-    // that types an inline-arrow parameter. This replaces the generic
-    // `eventCallbacks` wrapper, which left `$event` as `any` because contextual
-    // typing does not flow through a synthetic rest parameter into a generic call.
+    // that types an inline-arrow parameter, so `$event` resolves to the real
+    // event type rather than `any`.
     let result =
         gen_tsx_template(r#"<template><div @click="handleClick($event)">click</div></template>"#);
     assert!(

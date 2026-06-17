@@ -871,7 +871,7 @@ fn resolve_carrier_tsx_range(
 ///
 /// Returns `None` (FAIL-CLOSED) when the source cannot be read or an offset falls outside it.
 /// Callers MUST then drop the location — never substitute `Range::default()`, which silently
-/// sends the editor to line 0 of the wrong place (the original bug this replaces).
+/// sends the editor to line 0 of the wrong place.
 ///
 /// This resolves an external definition/type-definition range from the target's own on-disk
 /// source: the provider already read this file to compute the offsets, and this re-reads it
@@ -3623,8 +3623,8 @@ mod tests {
     fn merge_hover_does_not_rewrite_label_without_typed_provenance() {
         // Discriminating: even when the verter hover TEXT contains a backticked
         // `@custom` token, the merge layer must NOT rewrite the TypeProvider label
-        // unless TYPED provenance is supplied. This proves the markdown side-channel
-        // (the former `extract_vue_attr_label` text reparse) is gone.
+        // unless TYPED provenance is supplied. This proves the label rewrite is
+        // driven only by typed provenance, never by reparsing the hover markdown.
         let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
         let verter = make_verter_hover("`@custom`\n\nSome descriptive context.");
         let type_hover = HoverInfo {

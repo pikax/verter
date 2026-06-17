@@ -5,9 +5,9 @@
 //! task to populate the enrichment cache on a miss — and its private
 //! `append_markdown` hover-suffix helper.
 //!
-//! Extracted from `nav_features` to keep that source under the
-//! file-size guard (`no_oversize_files`); `handle_hover` calls
-//! `enrich_hover_with_provenance` through this sibling module.
+//! `handle_hover` calls `enrich_hover_with_provenance` through this sibling
+//! module; it lives apart from `nav_features` so each stays under the file-size
+//! guard (`no_oversize_files`).
 
 use std::sync::Arc;
 

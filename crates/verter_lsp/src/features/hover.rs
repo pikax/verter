@@ -33,9 +33,9 @@ pub struct VerterHoverResult {
 /// from the source token the user wrote.
 ///
 /// This is the typed channel the merge layer reads to decide whether (and how) to
-/// rewrite a TypeProvider hover label back to Vue source syntax. It replaces the
-/// former practice of embedding a backticked `@event` label in the rendered hover
-/// text and reparsing it — display text is now display-only.
+/// rewrite a TypeProvider hover label back to Vue source syntax. The label travels
+/// through this typed channel, never through the rendered hover text: display text
+/// is display-only and is never reparsed for a backticked `@event` label.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HoverSourceToken {
     /// A `v-on` / `@event` directive token. `vue_attr` is the canonical Vue

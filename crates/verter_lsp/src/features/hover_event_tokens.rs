@@ -10,11 +10,11 @@
 //! TypeProvider hover back to `@click` — never a blind `on*` name match, never a reparse
 //! of the rendered hover markdown.
 //!
-//! Extracted from `hover.rs` to keep that module within the production line-count budget;
-//! the canonicalization helpers ([`vue_event_attr_label`], [`capitalize_first`],
-//! [`camelize_event_name`], [`hyphenate_event_name`]) live here too because they are the
-//! event-name primitives the directive hovers are built from, and are re-exported for the
-//! handler-signature summarizers that remain in `hover.rs`.
+//! This module lives apart from `hover.rs` so each stays within the production
+//! line-count budget; the canonicalization helpers ([`vue_event_attr_label`],
+//! [`capitalize_first`], [`camelize_event_name`], [`hyphenate_event_name`]) live
+//! here because they are the event-name primitives the directive hovers are built
+//! from, and are re-exported for the handler-signature summarizers in `hover.rs`.
 
 use tower_lsp_server::ls_types::*;
 use verter_session::FileAnalysisSnapshot;
