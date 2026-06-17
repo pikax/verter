@@ -13,6 +13,14 @@ no disagreement with the framing) against the live tree on branch
 `block/svelte-compiler-plan` (base `feat/framework-adapters-clean`). All file references were
 verified against that tree. Every reconciliation is recorded in the Decisions Log (§8).
 
+The ground-truth code citations below were RE-VERIFIED against `feat/framework-adapters-clean`
+@ `3f5dc431` AFTER the lsp-perf integration landed. That integration added an upstream
+framework-NEUTRAL parse lifecycle (`FrameworkParseArtifact` / `parse_carrier_counted` /
+`ensure_indexed_ready_serve`) that AIDS Block 1 — the carrier-neutral `snapshot.framework_parse`
+artifact is already threaded into `compile_entry`, currently opened only via `vue_parse` — but it did
+NOT pre-land any runtime-codegen carrier work. Block 1's scope, deliverables, and "before" state are
+therefore unchanged; the only effect on this plan is shifted line citations (≈ +170 lines).
+
 ---
 
 ## 1. Context
@@ -37,10 +45,11 @@ instance + module script regions at their raw byte offsets (position-exact). Par
 What is ACTUALLY missing is the SECOND codegen path — a RUNTIME compiler that emits an executable
 `.js` module — and the live `compile_entry()` runtime path is ORPHANED for Svelte. This is the real
 P0 (the "onclick throws" symptom). Verified at
-`crates/verter_session/src/host_resolve/virtual_file_pipeline.rs::compile_entry()` (≈ lines
-1700-1896): it parses through the Vue adapter and then UNCONDITIONALLY calls `compile_sfc` /
-`compile_from_parsed` (Vue's SFC compiler, ≈ lines 1857-1861) followed by `assemble_main_module`
-(≈ line 1896) — there is NO framework dispatch. A `.svelte` file routed here is handed to the Vue
+`crates/verter_session/src/host_resolve/virtual_file_pipeline.rs::compile_entry()` (begins ≈ line
+1873): it parses through the Vue adapter and then UNCONDITIONALLY calls `compile_from_parsed` /
+`compile_sfc` (Vue's SFC compiler, the direct calls at ≈ lines 2030-2032) followed by
+`assemble_main_module` (≈ line 2068, defined in `crates/verter_session/src/compile.rs:54`) — there is
+NO framework dispatch. A `.svelte` file routed here is handed to the Vue
 compiler and produces broken runtime output. The fix is the carrier-routed runtime path (Block 1),
 NOT touching the working IDE-TSX projection.
 
@@ -136,7 +145,8 @@ executed against the pinned runtime. Verified by the jsdom behavioral harness (�
   (parse/eval/IDE-TSX/template_data only). Registry `framework_common/registry.rs::
   CarrierCompilerRegistry::built_in()`. **The host RUNTIME path is NOT routed through the carrier
   today**: `crates/verter_session/src/host_resolve/virtual_file_pipeline.rs::compile_entry()` calls
-  `compile_sfc` / `compile_from_parsed` directly (a hardcoded Vue call), then `assemble_main_module`.
+  `compile_from_parsed` / `compile_sfc` directly (a hardcoded Vue call, ≈ lines 2030-2032), then
+  `assemble_main_module` (≈ line 2068).
 - **Shared Svelte parser** (`crates/verter_compiler/src/svelte/parser/`, ~2045 lines core):
   `parse_svelte(source) -> ParsedSvelte` (lossless, span-based, infallible). AST (`template_ast.rs`):
   `SvelteNode {Text, Comment, Interpolation, Element, Block, Tag}`; `SvelteElement {name, kind, attributes, children, open_span, close_span}`; `SvelteSpecialKind`; `SvelteAttribute {Plain, Spread, Directive(SvelteDirectiveKind)}`; `SvelteBlock {If, Each, Await, Key, Snippet}`; `SvelteTag {Render, Html, Const, …}`. Expression interiors are SPANS; runes are expression content recognized at the IDE layer via `is_rune()` (`ide/store_scan.rs`).
