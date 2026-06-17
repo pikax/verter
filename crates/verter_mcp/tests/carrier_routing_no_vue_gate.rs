@@ -317,6 +317,38 @@ fn code_opens_block_comment(line: &str) -> Option<bool> {
     Some(open)
 }
 
+/// Whether `head` (the text BEFORE a `=>`, already right-trimmed) is a
+/// `match`-arm PATTERN that includes a bare `"vue"` literal, rather than an
+/// arbitrary expression. A match-arm pattern over string literals is a
+/// `|`-joined list of quoted literals, optionally preceded by an arm/block
+/// boundary token (`{`, `,`, `;`, `}`). We take the fragment after the last such
+/// boundary and require it to be composed ONLY of string literals, `|`
+/// alternation separators, and whitespace, with `"vue"` as one alternative —
+/// so `"vue" => {}` and `"vue" | "vuex" => …` both flag. This deliberately
+/// REJECTS value-side lines like `kind => "vue".to_string()` (the head is
+/// `kind`, not a `"vue"` literal pattern), `label => format!("{}.vue", …)`
+/// (head `label`), and a comparison head such as `ext == "vue"` (not pure
+/// pattern syntax).
+fn pattern_head_is_match_arm(head: &str) -> bool {
+    // Cut at the last arm/block boundary so a multi-arm line or a `match x {`
+    // prefix does not pollute the pattern check.
+    let frag = head
+        .rsplit(['{', ';', ',', '}'])
+        .next()
+        .unwrap_or(head)
+        .trim();
+    if frag.is_empty() {
+        return false;
+    }
+    // The fragment must be `"<lit>" ( | "<lit>" )*` — an alternation of bare
+    // string literals only — AND one of those literals must be exactly `"vue"`.
+    let alts: Vec<&str> = frag.split('|').map(str::trim).collect();
+    let all_literals = alts.iter().all(|a| {
+        a.len() >= 2 && a.starts_with('"') && a.ends_with('"') && !a[1..a.len() - 1].contains('"')
+    });
+    all_literals && alts.iter().any(|a| *a == "\"vue\"")
+}
+
 /// Classify a single (comment-stripped) executable code line as a Vue-only
 /// routing/classification GATE, returning a human-readable gate kind for the
 /// failure diagnostic, or `None` when the line is carrier-generic / not a gate.
@@ -353,6 +385,23 @@ fn line_gate_kind(code: &str) -> Option<&'static str> {
     // (3) `.vue` EQUALITY gate.
     if code.contains("== \".vue\"") || code.contains("!= \".vue\"") {
         return Some(".vue equality gate (== / !=)");
+    }
+
+    // (3b) `"vue"` MATCH-ARM carrier gate: a bare `"vue" =>` (or
+    //      `"vue" | "vuex" => `) pattern arm over an extension / language-id
+    //      `match` — the exact shape that stranded `.svelte` in the MCP scanner
+    //      (`match ext { "vue" => {} ... _ => continue }`). None of the
+    //      equality / method-call needles fire on a bare match-arm pattern, so
+    //      this clause closes that blind spot. We flag only when the `"vue"`
+    //      literal sits in PATTERN position: it is the last pattern token before
+    //      the arm's `=>`, with only match-pattern syntax (`|`-joined string
+    //      literals / whitespace) between it and the fat arrow — never an
+    //      arbitrary `... => ...vue...` display line.
+    if let Some(arrow) = code.find("=>") {
+        let head = code[..arrow].trim_end();
+        if pattern_head_is_match_arm(head) {
+            return Some("\"vue\" match-arm carrier gate (\"vue\" => ...)");
+        }
     }
 
     // (4) `"vue"`-as-language-id EQUALITY / `matches!` / classification gate.
@@ -436,6 +485,12 @@ const PRE_CHANGE_VIOLATING_LINES: &[(&str, &str)] = &[
         "if !found_test && file.ends_with(\".vue\") {",
         "ends_with(\".vue\")",
     ),
+    // The MCP-scanner blind spot: a bare `"vue" =>` match-arm carrier gate.
+    ("            \"vue\" => {}", "\"vue\" => match-arm"),
+    (
+        "        \"vue\" | \"vuex\" => keep(),",
+        "\"vue\" => alternation match-arm",
+    ),
 ];
 
 /// The carrier-generic post-change shapes. The detector MUST NOT flag any.
@@ -449,6 +504,14 @@ const POST_CHANGE_CLEAN_LINES: &[&str] = &[
     "\"componentFiles\": component_files.len(),",
     "\"vue_files\": component_files.len(),",
     "if file_language.is_svelte() {",
+    // The carrier-generic scanner gate that REPLACES the `"vue" => {}` arm —
+    // a path-based carrier check, not a match-arm literal.
+    "let is_carrier = verter_workspace::path_is_carrier(&canonical);",
+    "if !is_carrier && !is_script_dep {",
+    // A `=>` line whose `"vue"` is on the VALUE side (display / mapping), not in
+    // pattern position, must NOT be flagged by the match-arm clause.
+    "label => format!(\"{}.vue\", stem),",
+    "kind => \"vue\".to_string(),",
 ];
 
 /// Per-line detector mirroring the file scanner's executable-line decision
@@ -489,6 +552,29 @@ fn comments_are_not_flagged() {
     assert!(!line_flags(&strip_comment(
         "let x = k.is_framework_carrier(); // was: k.is_vue()"
     )));
+}
+
+#[test]
+fn match_arm_vue_gate_is_flagged_but_value_side_vue_is_not() {
+    // The bare match-arm carrier gate (the MCP-scanner blind spot) IS flagged…
+    assert!(line_flags(&strip_comment("            \"vue\" => {}")));
+    assert!(line_flags(&strip_comment(
+        "    \"vue\" => host.upsert(req),"
+    )));
+    assert!(line_flags(&strip_comment(
+        "        \"vue\" | \"svelte\" => keep(),"
+    )));
+    // …but a `"vue"` literal on the VALUE side of an arm (display / mapping) is
+    // NOT a gate, and neither is a plain comparison.
+    assert!(!line_flags(&strip_comment("label => format!(\"{}.vue\", s),")));
+    assert!(!line_flags(&strip_comment("kind => \"vue\".to_string(),")));
+    assert!(!line_flags(&strip_comment(
+        "let label = \"vue\"; // a value, not a gate"
+    )));
+    // `pattern_head_is_match_arm` rejects a comparison head outright.
+    assert!(!pattern_head_is_match_arm("ext == \"vue\""));
+    assert!(pattern_head_is_match_arm("\"vue\""));
+    assert!(pattern_head_is_match_arm("\"vue\" | \"vuex\""));
 }
 
 #[test]
