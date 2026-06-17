@@ -1,5 +1,5 @@
 import type { VerterHost, HostDependencyResolution } from "@verter/native";
-import { stripVueVirtualSuffix } from "./utils";
+import { normalizePath, stripVueVirtualSuffixBackingAware } from "./utils";
 
 interface MacroTypeDep {
   importSource: string;
@@ -17,16 +17,26 @@ interface FileAnalysisSnapshot {
 export interface MacroTypeDependencyAccess {
   resolveModule(containingFile: string, specifier: string): string | undefined;
   readSource(fileName: string): string | undefined;
+  /**
+   * Whether a candidate file exists (the TS language-service host's
+   * `fileExists`). Used to disambiguate an AMBIGUOUS carrier virtual suffix
+   * (`X.svelte.ts`) from a real standalone rune module: a `X.svelte.ts` path is
+   * only normalised to `X.svelte` when the backing `X.svelte` carrier exists.
+   */
+  fileExists(fileName: string): boolean;
 }
 
 /**
  * Strip a carrier virtual-file suffix (`*.vue.ts` / `*.vue.d.ts` /
- * `*.svelte.ts` / …) back to the bare carrier path, falling through to a
- * normalised plain path. Carrier-generic: derived from the manifest naming
- * table via `stripVueVirtualSuffix`, NOT a hardcoded `.vue` suffix list.
+ * `*.svelte.ts` / …) back to the bare carrier path, BACKING-FILE-AWARE so a real
+ * standalone rune module (`store.svelte.ts` with no backing `store.svelte`) is
+ * NOT corrupted into a phantom component path. Carrier-generic: derived from the
+ * manifest naming table, NOT a hardcoded `.vue` suffix list. The strip fires
+ * only when the backing carrier source exists, which it always does for an
+ * unambiguous Vue virtual (`Foo.vue.ts` ⇒ `Foo.vue`).
  */
-function normalizeSourcePath(fileName: string): string {
-  return stripVueVirtualSuffix(fileName);
+function normalizeSourcePath(fileName: string, access: MacroTypeDependencyAccess): string {
+  return stripVueVirtualSuffixBackingAware(fileName, (candidate) => access.fileExists(candidate));
 }
 
 function isRelativeImport(specifier: string): boolean {
@@ -64,7 +74,7 @@ function resolveRelativeImports(
     if (next) {
       resolutions.push({
         specifier: entry.source,
-        resolvedCanonicalId: normalizeSourcePath(next),
+        resolvedCanonicalId: normalizeSourcePath(next, access),
       });
     }
   }
@@ -80,7 +90,7 @@ export function hydrateMacroTypeDependencies(
     return;
   }
 
-  const normalizedEntry = normalizeSourcePath(entryFile);
+  const normalizedEntry = normalizeSourcePath(entryFile, access);
   const queue = [normalizedEntry];
   const visited = new Set<string>();
 
@@ -113,7 +123,11 @@ export function hydrateMacroTypeDependencies(
       if (!resolved) {
         continue;
       }
-      const sourcePath = normalizeSourcePath(resolved);
+      // Backing-file-aware: a real `store.svelte.ts` rune module (no backing
+      // `store.svelte`) keeps its own path here, so its source is upserted under
+      // the rune path and classified as a rune module — NOT corrupted into a
+      // phantom `store.svelte` component carrier.
+      const sourcePath = normalizeSourcePath(resolved, access);
       if (visited.has(sourcePath)) {
         continue;
       }

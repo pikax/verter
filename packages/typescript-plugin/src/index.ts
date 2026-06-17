@@ -11,6 +11,7 @@ import {
   normalizePath,
   resolveVuePublicApiMode,
   stripVueVirtualSuffix,
+  stripVueVirtualSuffixBackingAware,
   toVueVirtualFileName,
 } from "./helpers/utils";
 import { parseFile, FALLBACK_STUB, remapVirtualSpan } from "./helpers/getDtsSnapshot";
@@ -59,6 +60,14 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
 
     const _fileExists = info.serverHost.fileExists.bind(info.serverHost);
     const _readFile = info.serverHost.readFile.bind(info.serverHost);
+
+    // Backing-file-aware carrier virtual-suffix strip bound to the UNDERLYING
+    // host `fileExists`. Unlike the pure-shape `normalizeSourcePath`, this only
+    // strips an AMBIGUOUS `X.svelte.ts` virtual suffix when the backing
+    // `X.svelte` carrier exists, so a real standalone rune module is never
+    // collapsed into a phantom component path on the resolve / hydration path.
+    const stripBackingAware = (fileName: string): string =>
+      stripVueVirtualSuffixBackingAware(fileName, _fileExists);
 
     const resolvePublicApiMode = (containingFile: string) =>
       resolveVuePublicApiMode(exposeBindingsTesting, containingFile, (sourceFileName) =>
@@ -187,7 +196,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       resolveModule(containingFile, specifier) {
         const resolved = ts.resolveModuleName(
           specifier,
-          normalizeSourcePath(containingFile),
+          stripBackingAware(containingFile),
           info.project.getCompilerOptions(),
           {
             fileExists: _fileExists,
@@ -200,11 +209,11 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
           },
         );
         return resolved.resolvedModule
-          ? normalizeSourcePath(resolved.resolvedModule.resolvedFileName)
+          ? stripBackingAware(resolved.resolvedModule.resolvedFileName)
           : undefined;
       },
       readSource(fileName) {
-        const normalized = normalizeSourcePath(fileName);
+        const normalized = stripBackingAware(fileName);
         const snapshot =
           info.languageServiceHost.getScriptSnapshot?.(normalized) ??
           (normalized !== fileName
@@ -214,6 +223,14 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
           return snapshot.getText(0, snapshot.getLength());
         }
         return _readFile(normalized) ?? (normalized !== fileName ? _readFile(fileName) : undefined);
+      },
+      // The UNDERLYING host existence predicate (not the carrier-virtual-aware
+      // override installed below). Macro-type hydration uses this to prove a
+      // backing carrier source exists before normalising an AMBIGUOUS
+      // `X.svelte.ts` virtual suffix, so a real rune module is never corrupted
+      // into a phantom `X.svelte` component path.
+      fileExists(fileName) {
+        return _fileExists(fileName);
       },
     };
 
@@ -270,7 +287,10 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
     const languageService = info.languageService;
 
     function fixVuePath(fileName: string): string {
-      return stripVueVirtualSuffix(fileName);
+      // Backing-file-aware: a navigation / completion target that is a real
+      // `store.svelte.ts` rune module (no backing `store.svelte`) keeps its own
+      // path, so go-to-definition does not jump to a phantom `store.svelte`.
+      return stripBackingAware(fileName);
     }
 
     function remapDefinitionLike<
@@ -369,7 +389,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
 
       const result = ts.resolveModuleName(
         moduleName,
-        normalizeSourcePath(containingFile),
+        stripBackingAware(containingFile),
         info.project.getCompilerOptions(),
         {
           fileExists: _fileExists,
@@ -607,10 +627,10 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       );
       if (result?.codeActions) {
         for (const action of result.codeActions) {
-          action.description = cleanupCarrierVirtualImportPath(action.description);
+          action.description = cleanupCarrierVirtualImportPath(action.description, _fileExists);
           for (const change of action.changes) {
             for (const edit of change.textChanges) {
-              edit.newText = cleanupCarrierVirtualImportPath(edit.newText);
+              edit.newText = cleanupCarrierVirtualImportPath(edit.newText, _fileExists);
             }
           }
         }
@@ -618,7 +638,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       if (result?.sourceDisplay) {
         result.sourceDisplay = result.sourceDisplay.map((part) => ({
           ...part,
-          text: cleanupCarrierVirtualImportPath(part.text),
+          text: cleanupCarrierVirtualImportPath(part.text, _fileExists),
         }));
       }
       return result;
@@ -638,7 +658,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
           if (entry.sourceDisplay) {
             entry.sourceDisplay = entry.sourceDisplay.map((part) => ({
               ...part,
-              text: cleanupCarrierVirtualImportPath(part.text),
+              text: cleanupCarrierVirtualImportPath(part.text, _fileExists),
             }));
           }
           if (entry.source) {

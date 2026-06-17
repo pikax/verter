@@ -9,6 +9,7 @@ import {
   isVueTs,
   isVueTestingTs,
   resolveVuePublicApiMode,
+  stripVueVirtualSuffixBackingAware,
 } from "./utils";
 
 describe("isVue", () => {
@@ -170,26 +171,45 @@ describe("resolveVuePublicApiMode", () => {
 });
 
 describe("cleanupCarrierVirtualImportPath", () => {
-  it("strips the Vue carrier virtual suffixes back to the bare carrier path", () => {
+  it("strips the UNAMBIGUOUS Vue carrier virtual suffixes by shape (no host needed)", () => {
+    // `.vue.ts` / `.vue.d.ts` / `.vue.__verter_test.ts` never collide with a
+    // real source extension, so they strip by shape regardless of `fileExists`.
     expect(cleanupCarrierVirtualImportPath("./Foo.vue.ts")).toBe("./Foo.vue");
     expect(cleanupCarrierVirtualImportPath("./Foo.vue.d.ts")).toBe("./Foo.vue");
     expect(cleanupCarrierVirtualImportPath("./Foo.vue.__verter_test.ts")).toBe("./Foo.vue");
   });
 
-  it("strips the Svelte carrier virtual suffixes too (carrier-generic, not Vue-only)", () => {
-    // The pre-change implementation hardcoded `.vue` and left `.svelte.ts`
-    // untouched — this is the discriminating assertion for the carrier-generic
-    // rewrite.
-    expect(cleanupCarrierVirtualImportPath("./Bar.svelte.ts")).toBe("./Bar.svelte");
-    expect(cleanupCarrierVirtualImportPath("./Bar.svelte.d.ts")).toBe("./Bar.svelte");
-  });
-
-  it("strips suffixes embedded in free-form text (quick-fix descriptions / edits)", () => {
+  it("strips Vue suffixes embedded in free-form text (quick-fix descriptions / edits)", () => {
     expect(cleanupCarrierVirtualImportPath('import Foo from "./Foo.vue.ts"')).toBe(
       'import Foo from "./Foo.vue"',
     );
-    expect(cleanupCarrierVirtualImportPath('Update import from "../Card.svelte.d.ts"')).toBe(
-      'Update import from "../Card.svelte"',
+  });
+
+  it("does NOT strip an AMBIGUOUS .svelte.ts without a backing-file check (no host)", () => {
+    // `.svelte.ts` collides with a real standalone rune-module extension, so
+    // without a `fileExists` predicate it must be left intact — a real
+    // `./store.svelte.ts` rune import in display text is never mangled to
+    // `./store.svelte`. This is the F2 regression: the prior implementation
+    // stripped it unconditionally.
+    expect(cleanupCarrierVirtualImportPath("./store.svelte.ts")).toBe("./store.svelte.ts");
+    expect(cleanupCarrierVirtualImportPath("./store.svelte.d.ts")).toBe("./store.svelte.d.ts");
+    expect(cleanupCarrierVirtualImportPath('import { count } from "./store.svelte.ts"')).toBe(
+      'import { count } from "./store.svelte.ts"',
+    );
+  });
+
+  it("strips an AMBIGUOUS .svelte.ts ONLY when the backing .svelte carrier exists", () => {
+    // Backing carrier present ⇒ proven virtual ⇒ strip.
+    const backingExists = (p: string) => p === "./Comp.svelte";
+    expect(cleanupCarrierVirtualImportPath("./Comp.svelte.ts", backingExists)).toBe("./Comp.svelte");
+    expect(
+      cleanupCarrierVirtualImportPath('import Comp from "./Comp.svelte.ts"', backingExists),
+    ).toBe('import Comp from "./Comp.svelte"');
+
+    // No backing carrier ⇒ real rune module ⇒ left intact even WITH a predicate.
+    const noBacking = () => false;
+    expect(cleanupCarrierVirtualImportPath("./store.svelte.ts", noBacking)).toBe(
+      "./store.svelte.ts",
     );
   });
 
@@ -198,5 +218,33 @@ describe("cleanupCarrierVirtualImportPath", () => {
     expect(cleanupCarrierVirtualImportPath("./Bar.svelte")).toBe("./Bar.svelte");
     expect(cleanupCarrierVirtualImportPath("./util.ts")).toBe("./util.ts");
     expect(cleanupCarrierVirtualImportPath("nothing to strip here")).toBe("nothing to strip here");
+  });
+});
+
+describe("stripVueVirtualSuffixBackingAware (F2 rune-module disambiguation)", () => {
+  it("strips a virtual X.svelte.ts to X.svelte when the backing carrier exists", () => {
+    const backingExists = (p: string) => p === "/src/Comp.svelte";
+    expect(stripVueVirtualSuffixBackingAware("/src/Comp.svelte.ts", backingExists)).toBe(
+      "/src/Comp.svelte",
+    );
+    expect(stripVueVirtualSuffixBackingAware("/src/Comp.svelte.d.ts", backingExists)).toBe(
+      "/src/Comp.svelte",
+    );
+  });
+
+  it("leaves a real X.svelte.ts rune module unchanged when no backing carrier exists", () => {
+    const noBacking = () => false;
+    expect(stripVueVirtualSuffixBackingAware("/src/store.svelte.ts", noBacking)).toBe(
+      "/src/store.svelte.ts",
+    );
+  });
+
+  it("preserves Vue behavior — Foo.vue.ts always strips because Foo.vue exists", () => {
+    const vueBackingExists = (p: string) => p === "/src/Foo.vue";
+    expect(stripVueVirtualSuffixBackingAware("/src/Foo.vue.ts", vueBackingExists)).toBe(
+      "/src/Foo.vue",
+    );
+    // A plain module with no virtual shape passes through normalised.
+    expect(stripVueVirtualSuffixBackingAware("/src/util.ts", () => true)).toBe("/src/util.ts");
   });
 });

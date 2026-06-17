@@ -30,6 +30,7 @@ function normalizePath(fileName: string): string {
 function createInMemoryAccess(files: Record<string, string>): {
   resolveModule: (containingFile: string, specifier: string) => string | undefined;
   readSource: (fileName: string) => string | undefined;
+  fileExists: (fileName: string) => boolean;
 } {
   const normalizedFiles = new Map(
     Object.entries(files).map(([fileName, source]) => [normalizePath(fileName), source]),
@@ -64,6 +65,9 @@ function createInMemoryAccess(files: Record<string, string>): {
     },
     readSource(fileName) {
       return normalizedFiles.get(normalizePath(fileName));
+    },
+    fileExists(fileName) {
+      return normalizedFiles.has(normalizePath(fileName));
     },
   };
 }

@@ -70,6 +70,40 @@ const CARRIERS: readonly CarrierNaming[] = Object.values(VIRTUAL_FILE_NAMING)
     };
   });
 
+/**
+ * The set of REAL standalone-module extensions a manifest row owns via a
+ * `selfFile` import surface (e.g. Svelte's `.svelte.ts` / `.svelte.js` rune
+ * modules — a file that serves its OWN path, NOT a generated carrier virtual).
+ * A row contributes its `carrierExtension` here iff its import surface is
+ * `selfFile`. This is the manifest-derived authority that makes a component
+ * carrier's `{ext}.ts` virtual suffix AMBIGUOUS: when `{ext}.ts` is also a real
+ * self-file extension (`.svelte` + `.ts` == `.svelte.ts`), a `X.{ext}.ts` path
+ * may be either the virtual API of component `X.{ext}` OR a real standalone
+ * module — and stripping it to `X.{ext}` corrupts the real module.
+ */
+const SELF_FILE_MODULE_EXTENSIONS: readonly string[] = Object.values(VIRTUAL_FILE_NAMING)
+  .filter((row) => row.carrierExtension !== null && row.importSurface.kind === "selfFile")
+  .map((row) => row.carrierExtension as string);
+
+/**
+ * Whether a component carrier's virtual suffix (e.g. `.svelte` + `.ts`,
+ * `.svelte` + `.d.ts`) is AMBIGUOUS against a real self-file module family. A
+ * carrier extension is ambiguous when it is the leading SEGMENT of a registered
+ * self-file module extension — i.e. some self-file extension starts with
+ * `{carrierExt}.` (Svelte's rune family `.svelte.ts` makes `.svelte` ambiguous,
+ * so EVERY `.svelte`-rooted virtual — `.svelte.ts`, `.svelte.d.ts` — is
+ * ambiguous, because `X.svelte.ts` / `X.svelte.d.ts` may belong to a real
+ * `X.svelte.ts` rune module rather than a `X.svelte` component). Such a path
+ * cannot be classified as virtual purely by SHAPE — it needs a backing-file
+ * check (the `X{carrierExt}` carrier source must exist). Vue's `.vue` is NOT the
+ * stem of any self-file extension, so `.vue.*` virtuals are unambiguous and
+ * strip by shape alone.
+ */
+function virtualSuffixIsAmbiguous(carrierExt: string, _virtualSuffix: string): boolean {
+  const stem = `${carrierExt}.`;
+  return SELF_FILE_MODULE_EXTENSIONS.some((ext) => ext.startsWith(stem));
+}
+
 const isRelative = (fileName: string) => RELATIVE_REGEXP.test(fileName);
 
 export function normalizePath(fileName: string): string {
@@ -131,25 +165,63 @@ export function stripVueVirtualSuffix(fileName: string): string {
 }
 
 /**
+ * Backing-file-aware carrier virtual-suffix strip for consumers that RESOLVE or
+ * UPSERT a path (where mis-stripping corrupts classification), e.g. macro-type
+ * hydration's `resolveModule`/`upsert`. Unlike the pure-shape
+ * [`stripVueVirtualSuffix`], this strips `X.{ext}.ts` → `X.{ext}` ONLY when the
+ * backing carrier source `X.{ext}` actually exists, so a real standalone rune
+ * module (`store.svelte.ts` with no `store.svelte`) is left UNCHANGED rather
+ * than corrupted into a phantom component path.
+ *
+ * `fileExists` is the host's existence predicate (the TS language-service
+ * host's `fileExists`). A path with no virtual shape, or an ambiguous virtual
+ * shape whose backing carrier does not exist, returns the plain normalised path.
+ */
+export function stripVueVirtualSuffixBackingAware(
+  fileName: string,
+  fileExists: (candidate: string) => boolean,
+): string {
+  const info = getVueVirtualFileInfo(fileName);
+  if (info && fileExists(info.sourceFileName)) {
+    return info.sourceFileName;
+  }
+  return normalizePath(fileName);
+}
+
+/**
  * The carrier virtual-suffix strip rules, derived ONCE from the carrier naming
  * table, longest-suffix-first so `*.vue.__verter_test.ts` and `*.vue.d.ts` win
  * over `*.vue.ts` (and every carrier — `.vue`, `.svelte` — is covered). Each
  * rule maps a carrier virtual-file suffix (e.g. `.vue.ts`) embedded anywhere in
  * a string back to the bare carrier extension (`.vue`).
  */
-const CARRIER_VIRTUAL_SUFFIX_STRIPPERS: readonly { pattern: RegExp; carrierExt: string }[] = CARRIERS.flatMap(
-  (c) => {
-    const suffixes: string[] = [];
-    if (c.testingApiSuffix) suffixes.push(`${c.extension}${c.testingApiSuffix}`);
-    // The `.d.ts` accepted-spelling alias is `{carrier_ext}.d.ts` uniformly.
-    suffixes.push(`${c.extension}.d.ts`);
-    if (c.apiSuffix) suffixes.push(`${c.extension}${c.apiSuffix}`);
-    return suffixes.map((suffix) => ({
-      pattern: new RegExp(escapeRegExp(suffix), "g"),
-      carrierExt: c.extension,
-    }));
-  },
-);
+const CARRIER_VIRTUAL_SUFFIX_STRIPPERS: readonly {
+  pattern: RegExp;
+  carrierExt: string;
+  virtualSuffix: string;
+  /**
+   * Whether `{carrierExt}{virtualSuffix}` collides with a real self-file module
+   * extension (Svelte's `.svelte.ts`). An ambiguous suffix only strips when a
+   * backing-file check proves the path is virtual; an unambiguous one (Vue)
+   * strips by shape.
+   */
+  ambiguous: boolean;
+}[] = CARRIERS.flatMap((c) => {
+  const suffixes: string[] = [];
+  if (c.testingApiSuffix) suffixes.push(c.testingApiSuffix);
+  // The `.d.ts` accepted-spelling alias is `{carrier_ext}.d.ts` uniformly.
+  suffixes.push(".d.ts");
+  if (c.apiSuffix) suffixes.push(c.apiSuffix);
+  return suffixes.map((virtualSuffix) => ({
+    pattern: new RegExp(escapeRegExp(`${c.extension}${virtualSuffix}`), "g"),
+    carrierExt: c.extension,
+    virtualSuffix,
+    ambiguous: virtualSuffixIsAmbiguous(c.extension, virtualSuffix),
+  }));
+});
+
+/** A path-like token: a run of non-whitespace, non-quote, non-paren chars. */
+const PATH_TOKEN_REGEXP = /[^\s"'`()<>]+/g;
 
 /**
  * Strip carrier virtual-file suffixes (`*.vue.ts` / `*.vue.d.ts` /
@@ -158,13 +230,61 @@ const CARRIER_VIRTUAL_SUFFIX_STRIPPERS: readonly { pattern: RegExp; carrierExt: 
  * bare carrier path (`*.vue` / `*.svelte`). Carrier-generic: derived from the
  * manifest naming table, NOT a hardcoded `.vue` regex. Longest-suffix-first so
  * the `.d.ts` / testing variants are stripped before the bare `.ts` API suffix.
+ *
+ * AMBIGUOUS suffixes (a carrier's `{ext}.ts` that collides with a real self-file
+ * module extension — Svelte's `.svelte.ts`) are only stripped when `fileExists`
+ * is supplied AND the reconstructed backing carrier path resolves to a real
+ * file, so a real `./store.svelte.ts` rune import in display text is NOT mangled
+ * to `./store.svelte`. Without `fileExists`, ambiguous suffixes are left intact
+ * (the no-host display path never corrupts a real rune path). Unambiguous
+ * suffixes (Vue) always strip by shape.
  */
-export function cleanupCarrierVirtualImportPath(text: string): string {
+export function cleanupCarrierVirtualImportPath(
+  text: string,
+  fileExists?: (candidate: string) => boolean,
+): string {
   let result = text;
-  for (const { pattern, carrierExt } of CARRIER_VIRTUAL_SUFFIX_STRIPPERS) {
-    result = result.replace(pattern, carrierExt);
+  for (const { pattern, carrierExt, virtualSuffix, ambiguous } of CARRIER_VIRTUAL_SUFFIX_STRIPPERS) {
+    if (!ambiguous) {
+      // Unambiguous (Vue `.vue.ts` / `.vue.d.ts` / `.vue.__verter_test.ts`):
+      // a SHAPE match is always a virtual file — strip directly.
+      result = result.replace(pattern, carrierExt);
+      continue;
+    }
+    // Ambiguous (`.svelte.ts` etc.): strip a match ONLY when a backing-file
+    // check proves the surrounding path token is the virtual API of a real
+    // carrier (`X.{ext}` exists). Reconstruct the backing path from the path
+    // token containing the match; with no host predicate, leave it intact.
+    if (!fileExists) {
+      continue;
+    }
+    result = result.replace(PATH_TOKEN_REGEXP, (token) =>
+      stripAmbiguousSuffixInToken(token, carrierExt, virtualSuffix, fileExists),
+    );
   }
   return result;
+}
+
+/**
+ * Within a single path-like `token`, replace a trailing ambiguous virtual
+ * suffix `{carrierExt}{virtualSuffix}` with the bare `{carrierExt}` ONLY when
+ * the backing carrier path (`token` minus `virtualSuffix`) exists. A token that
+ * is a real self-file module (`store.svelte.ts` with no `store.svelte`) is
+ * returned unchanged. The check is anchored to the END of the token so a
+ * mid-token coincidence never triggers.
+ */
+function stripAmbiguousSuffixInToken(
+  token: string,
+  carrierExt: string,
+  virtualSuffix: string,
+  fileExists: (candidate: string) => boolean,
+): string {
+  const full = `${carrierExt}${virtualSuffix}`;
+  if (!token.endsWith(full)) {
+    return token;
+  }
+  const backing = token.slice(0, token.length - virtualSuffix.length);
+  return fileExists(backing) ? backing : token;
 }
 
 export function isLikelyTestFileName(fileName: string): boolean {
