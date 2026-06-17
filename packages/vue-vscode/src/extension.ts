@@ -1158,7 +1158,7 @@ function addCompilePreviewCommand(
   context.subscriptions.push(
     commands.registerTextEditorCommand("verter.showCompiledCodeToSide", async (editor) => {
       if (!isFrameworkCarrierLanguageId(editor?.document?.languageId)) {
-        window.showInformationMessage("Not a Vue file");
+        window.showInformationMessage("Not a component file");
         return;
       }
 
@@ -1183,7 +1183,7 @@ function addWriteVirtualFilesCommand(
   context.subscriptions.push(
     commands.registerTextEditorCommand("verter.writeVirtualFiles", async (editor) => {
       if (!isFrameworkCarrierLanguageId(editor?.document?.languageId)) {
-        window.showInformationMessage("Not a Vue file");
+        window.showInformationMessage("Not a component file");
         return;
       }
 
@@ -1405,7 +1405,7 @@ function addVerterAnalysis(getClient: GetClient, context: ExtensionContext) {
     commands.registerCommand("verter.showSourceMapVisualization", async () => {
       const sourceUri = getLastCarrierUri();
       if (!sourceUri) {
-        window.showInformationMessage("No Vue file active");
+        window.showInformationMessage("No active component file");
         return;
       }
 
@@ -1427,7 +1427,7 @@ function addVerterAnalysis(getClient: GetClient, context: ExtensionContext) {
       async (item: UnifiedVirtualFileItem) => {
         const sourceUri = item.sourceUri || getLastCarrierUri();
         if (!sourceUri) {
-          window.showInformationMessage("No Vue file active");
+          window.showInformationMessage("No active component file");
           return;
         }
 
