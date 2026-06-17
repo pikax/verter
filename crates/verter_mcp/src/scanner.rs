@@ -64,8 +64,7 @@ pub fn scan_directory(root: &Path, host: &VerterHost, include_script_deps: bool)
         // behavior. A new carrier vertical participates the moment its row is
         // registered, with no edit here.
         let is_carrier = verter_workspace::path_is_carrier(&canonical);
-        let is_script_dep =
-            include_script_deps && matches!(ext, "ts" | "tsx" | "js" | "jsx");
+        let is_script_dep = include_script_deps && matches!(ext, "ts" | "tsx" | "js" | "jsx");
         if !is_carrier && !is_script_dep {
             continue;
         }
