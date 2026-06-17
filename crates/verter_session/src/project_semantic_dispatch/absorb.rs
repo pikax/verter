@@ -630,9 +630,9 @@ impl ProjectSemanticDispatch<'_> {
                 // structural carrier-arg accessor so a future carrier with
                 // args is covered here in one place rather than silently
                 // treated as an infer-free leaf.
-                SemanticNodeData::ImportType { .. }
-                | SemanticNodeData::TypeOf { .. }
-                | SemanticNodeData::BareRef { .. } => {
+                SemanticNodeData::ImportType(_)
+                | SemanticNodeData::TypeOf(_)
+                | SemanticNodeData::BareRef(_) => {
                     stack.extend(data.carrier_type_args().iter().copied());
                 }
                 SemanticNodeData::ConstructorType { signature } => stack.push(*signature),

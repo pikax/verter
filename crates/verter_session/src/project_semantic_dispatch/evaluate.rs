@@ -377,9 +377,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         _ => break self.opaque(QueryError::Miss),
                     }
                 }
-                SemanticNodeData::TypeOf {
-                    value_root, path, ..
-                } => {
+                SemanticNodeData::TypeOf(_) => {
                     // TODO(carrier-resolution): apply TypeOf.type_args
                     // (apply_typeof_instantiation_args) once the structural
                     // lowerer is wired; carriers are dormant today so no
@@ -389,6 +387,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     // The enclosing evaluation's demand rides the key —
                     // operator recursion never widens a deferred typeof
                     // carrier past the caller's mode.
+                    let (value_root, path) = data.typeof_head().expect("TypeOf carrier head");
                     let read = self
                         .execute_read(self.typeof_key_for(value_root.clone(), reduction_context));
                     result_is_partial |= read.result_is_partial;

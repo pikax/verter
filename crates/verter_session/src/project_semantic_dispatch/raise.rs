@@ -470,11 +470,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     None => None,
                 },
             },
-            SemanticNodeData::TypeOf {
-                value_root,
-                path,
-                type_args,
-            } => {
+            SemanticNodeData::TypeOf(_) => {
+                let (value_root, path) = data.typeof_head().expect("TypeOf carrier head");
+                let type_args = data.carrier_type_args();
                 let mut segments = value_root
                     .name
                     .split('.')
@@ -656,9 +654,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // an empty slice raises to the bare `Foo` case. A miss on any
             // arg becomes the `<raise miss>` placeholder so the outer
             // reference still constructs (mirrors the `ImportType` arm).
-            SemanticNodeData::BareRef {
-                name, type_args, ..
-            } => {
+            SemanticNodeData::BareRef(_) => {
+                let (name, _scope) = data.bare_ref_head().expect("BareRef carrier head");
+                let type_args = data.carrier_type_args();
                 let raised_args: Vec<TypeExpr> = type_args
                     .iter()
                     .map(|id| {
@@ -677,12 +675,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // Unresolved dynamic-import carrier → `TypeExpr::ImportType`.
             // A miss on any type-arg raise becomes the `<raise miss>`
             // placeholder so the outer import-type still constructs.
-            SemanticNodeData::ImportType {
-                specifier,
-                qualifier,
-                type_args,
-                typeof_query,
-            } => {
+            SemanticNodeData::ImportType(_) => {
+                let (specifier, qualifier, typeof_query) =
+                    data.import_type_head().expect("ImportType carrier head");
+                let type_args = data.carrier_type_args();
                 let raised_args: Vec<TypeExpr> = type_args
                     .iter()
                     .map(|id| {
@@ -696,7 +692,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 TypeExpr::ImportType {
                     specifier: std::sync::Arc::clone(specifier),
                     qualifier: std::sync::Arc::clone(qualifier),
-                    typeof_query: *typeof_query,
+                    typeof_query,
                     type_arguments: std::sync::Arc::from(raised_args.into_boxed_slice()),
                 }
             }
@@ -1059,15 +1055,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
             | SemanticNodeData::Opaque(_)
             | SemanticNodeData::Infer { .. }
             | SemanticNodeData::TemplateLiteral { .. }
-            | SemanticNodeData::TypeOf { .. }
+            | SemanticNodeData::TypeOf(_)
             | SemanticNodeData::VueMacroElements(_)
             | SemanticNodeData::DeclRef { .. }
             // Unresolved bare-name / dynamic-import / raw-fallback /
             // synthetic-binding carriers are resolved as a whole by the
             // dispatch, not rebuilt by this reducer, so they expose no
             // operand children to pre-resolve here.
-            | SemanticNodeData::BareRef { .. }
-            | SemanticNodeData::ImportType { .. }
+            | SemanticNodeData::BareRef(_)
+            | SemanticNodeData::ImportType(_)
             | SemanticNodeData::RawFallback { .. }
             | SemanticNodeData::SyntheticBinding { .. } => {}
             SemanticNodeData::Alias(target) => {
@@ -1348,8 +1344,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // Unresolved bare-name / dynamic-import / raw-fallback /
             // synthetic-binding carriers pass through this reducer
             // unchanged — the dispatch resolves them as a whole.
-            | SemanticNodeData::BareRef { .. }
-            | SemanticNodeData::ImportType { .. }
+            | SemanticNodeData::BareRef(_)
+            | SemanticNodeData::ImportType(_)
             | SemanticNodeData::RawFallback { .. }
             | SemanticNodeData::SyntheticBinding { .. } => node,
 
@@ -1470,7 +1466,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     state,
                 )
             }
-            SemanticNodeData::TypeOf { value_root, .. } => {
+            SemanticNodeData::TypeOf(_) => {
                 // TODO(carrier-resolution): apply TypeOf.type_args
                 // (apply_typeof_instantiation_args) once the structural lowerer
                 // is wired; carriers are dormant today so no non-empty
@@ -1479,6 +1475,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // which preserves type_args at raise_node_to_type_expr_inner).
                 // See docs/arch/parselower-design.md (demand-time
                 // carrier-resolution debt note).
+                let (value_root, _path) = data.typeof_head().expect("TypeOf carrier head");
                 let typeof_key = self.typeof_key_for(value_root.clone(), context);
                 self.dispatch_operator_with_recurse(node, typeof_key, context, state)
             }
@@ -4427,9 +4424,9 @@ impl OpenWalk {
             // enumeration-domain walk and closed for the value-body walk — the
             // existing undecidable-root rule, now applied AFTER the type-arg
             // openness check.
-            SemanticNodeData::TypeOf { .. }
-            | SemanticNodeData::ImportType { .. }
-            | SemanticNodeData::BareRef { .. } => {
+            SemanticNodeData::TypeOf(_)
+            | SemanticNodeData::ImportType(_)
+            | SemanticNodeData::BareRef(_) => {
                 data.carrier_type_args()
                     .iter()
                     .any(|a| self.node_is_open(ctx, *a))

@@ -34,7 +34,7 @@ pub(super) fn is_deferred(data: &SemanticNodeData) -> bool {
             | SemanticNodeData::IndexedAccess { .. }
             | SemanticNodeData::Mapped { .. }
             | SemanticNodeData::Conditional { .. }
-            | SemanticNodeData::TypeOf { .. }
+            | SemanticNodeData::TypeOf(_)
             | SemanticNodeData::TemplateLiteral { .. }
             // The unresolved-reference carriers (`DeclRef` / `InstantiationRef`
             // / `BareRef` / `ImportType`) are references whose concrete content
@@ -54,8 +54,8 @@ pub(super) fn is_deferred(data: &SemanticNodeData) -> bool {
             // resolved-root verdict.
             | SemanticNodeData::DeclRef { .. }
             | SemanticNodeData::InstantiationRef { .. }
-            | SemanticNodeData::BareRef { .. }
-            | SemanticNodeData::ImportType { .. }
+            | SemanticNodeData::BareRef(_)
+            | SemanticNodeData::ImportType(_)
     )
 }
 

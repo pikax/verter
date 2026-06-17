@@ -589,11 +589,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     true,
                 )
             }
-            SemanticNodeData::TypeOf {
-                value_root,
-                path,
-                type_args,
-            } => {
+            SemanticNodeData::TypeOf(_) => {
                 // The value-root + path are opaque to substitution (they are
                 // not node ids). Structural child-integrity requires descending
                 // into the instantiation `type_args` so a `T` inside
@@ -601,7 +597,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // semantic instantiation application (that is a demand-time
                 // carrier-resolution reduction). An empty / no-change arg list
                 // returns unchanged and records the opaque counter, preserving
-                // the dormant-state behaviour.
+                // the dormant-state behaviour. Descent reads the args through
+                // the shared `carrier_type_args` accessor; the rebuild
+                // preserves the head fields via `map_carrier_type_args`.
+                let type_args = data.carrier_type_args();
                 let mut new_args = Vec::with_capacity(type_args.len());
                 let mut any_changed = false;
                 for arg_node in type_args.iter() {
@@ -611,24 +610,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     new_args.push(sub);
                 }
                 if !any_changed {
-                    // "opaque TypeOf returns" counter (brief site
-                    // `substitute.rs:452`).
+                    // "opaque TypeOf returns" counter.
                     if let Some(observer) = verter_audit::current_observer() {
                         observer.record_event(verter_audit::AuditEvent::SubstituteTypeOfOpaque);
                     }
                     return (node, false);
                 }
-                (
-                    self.graph().intern_preserving_scope(
-                        node,
-                        SemanticNodeData::TypeOf {
-                            value_root: value_root.clone(),
-                            path: path.clone(),
-                            type_args: Arc::from(new_args.into_boxed_slice()),
-                        },
-                    ),
-                    true,
-                )
+                let rebuilt = data
+                    .map_carrier_type_args(Arc::from(new_args.into_boxed_slice()))
+                    .expect("TypeOf is a carrier");
+                (self.graph().intern_preserving_scope(node, rebuilt), true)
             }
             SemanticNodeData::Conditional {
                 check,
@@ -792,11 +783,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // NOT semantic instantiation application (a demand-time
             // carrier-resolution concern). `name` / `scope` are preserved
             // verbatim. An empty / no-change arg list returns unchanged.
-            SemanticNodeData::BareRef {
-                name,
-                scope,
-                type_args,
-            } => {
+            SemanticNodeData::BareRef(_) => {
+                let type_args = data.carrier_type_args();
                 let mut new_args = Vec::with_capacity(type_args.len());
                 let mut any_changed = false;
                 for arg_node in type_args.iter() {
@@ -808,17 +796,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 if !any_changed {
                     return (node, false);
                 }
-                (
-                    self.graph().intern_preserving_scope(
-                        node,
-                        SemanticNodeData::BareRef {
-                            name: Arc::clone(name),
-                            scope: scope.clone(),
-                            type_args: Arc::from(new_args.into_boxed_slice()),
-                        },
-                    ),
-                    true,
-                )
+                let rebuilt = data
+                    .map_carrier_type_args(Arc::from(new_args.into_boxed_slice()))
+                    .expect("BareRef is a carrier");
+                (self.graph().intern_preserving_scope(node, rebuilt), true)
             }
             // Unresolved import-type carrier `import("m").Q<arg…>`: descend into
             // the structural `type_args` so a `T` inside an applied import-type
@@ -827,12 +808,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // application or import resolution (a demand-time carrier-resolution
             // concern). `specifier` / `qualifier` / `typeof_query` are preserved
             // verbatim. An empty / no-change arg list returns unchanged.
-            SemanticNodeData::ImportType {
-                specifier,
-                qualifier,
-                type_args,
-                typeof_query,
-            } => {
+            SemanticNodeData::ImportType(_) => {
+                let type_args = data.carrier_type_args();
                 let mut new_args = Vec::with_capacity(type_args.len());
                 let mut any_changed = false;
                 for arg_node in type_args.iter() {
@@ -844,18 +821,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 if !any_changed {
                     return (node, false);
                 }
-                (
-                    self.graph().intern_preserving_scope(
-                        node,
-                        SemanticNodeData::ImportType {
-                            specifier: Arc::clone(specifier),
-                            qualifier: qualifier.clone(),
-                            type_args: Arc::from(new_args.into_boxed_slice()),
-                            typeof_query: *typeof_query,
-                        },
-                    ),
-                    true,
-                )
+                let rebuilt = data
+                    .map_carrier_type_args(Arc::from(new_args.into_boxed_slice()))
+                    .expect("ImportType is a carrier");
+                (self.graph().intern_preserving_scope(node, rebuilt), true)
             }
             _ => (node, false),
         }

@@ -384,15 +384,35 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             // resolver.
             "session_graph_lowerer_makes_no_query",
             "unresolved_carriers_not_materialized_during_emission",
-            // ANTI-TAIL: a structural graph SCAN/CLASSIFY walker must read a
-            // carrier's (`BareRef`/`TypeOf`/`ImportType`) type arguments
-            // through the shared `SemanticNodeData::carrier_type_args` accessor
-            // — a NEW production site hand-binding a carrier `type_args` field
-            // outside the enumerated identity/reconstruction/construction
-            // boundaries is forbidden, so a future carrier-scan cannot silently
-            // drop the args the way the absorb / open-node / `is_deferred`
-            // carrier scans previously did.
-            "no_new_direct_carrier_type_args_traversal_outside_accessor_or_allowlist",
+            // ANTI-TAIL (ENCAPSULATION): the three structural carriers
+            // (`BareRef`/`TypeOf`/`ImportType`) are opaque tuple payloads
+            // (`semantic_query::carrier`) with PRIVATE fields, so a production
+            // site hand-binding a carrier `type_args` field outside the sole
+            // `SemanticNodeData::carrier_type_args` descent accessor is
+            // UNREPRESENTABLE BY CONSTRUCTION — the compiler enforces the
+            // boundary on the real compiled program (cfg / `#[path]` / macro /
+            // alias included), replacing the retired `CARRIER_TYPEARGS_*`
+            // source scanner. These tripwires pin the shape that makes that
+            // enforcement true plus the surviving wildcard-free compile-fences
+            // (a new variant must classify itself in BOTH the descent accessor
+            // `carrier_type_args` AND the rebuild channel
+            // `map_carrier_type_args`). Tripwire 1 pins the payload TYPE (a raw
+            // `Arc<[SemanticNodeId]>` tuple is rejected, not just non-tuple);
+            // tripwire 2 is a STRICT EXACT-SHAPE ALLOWLIST over `carrier.rs`:
+            // it accepts the module ONLY if every item matches the precise
+            // known-good shape (the two sanctioned imports — no renames/extras;
+            // the three head-view aliases; the three carrier structs with their
+            // exact private fields + the five built-in derives only; one private
+            // inherent impl per carrier with its exact private method
+            // signatures; one `impl SemanticNodeData` with EXACTLY the eight
+            // sanctioned accessors at their exact visibility + signatures; no
+            // macro in any body; no raw-args read outside the descent/rebuild
+            // bodies) and the `mod carrier;` decl is unadorned — so the raw-args
+            // surface stays compiler-confined to `carrier.rs`.
+            "carrier_variants_are_opaque_tuple_payloads",
+            "carrier_module_has_no_public_type_args_surface",
+            "carrier_type_args_accessor_is_exhaustive_and_wildcard_free",
+            "map_carrier_type_args_is_exhaustive_and_wildcard_free",
             // DORMANT-WIRING: the structural lowerer's public entry
             // `lower_type_expr_structural` has ZERO production call sites — it
             // stays dormant until the carrier-resolution work wires it together

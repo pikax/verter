@@ -81,6 +81,15 @@ pub mod index_key;
 /// gating `Warm` on the presence of the rooting FACT — never on the taint
 /// enum class as a proxy.
 pub mod admit;
+
+/// Opaque structural-carrier payloads ([`carrier::TypeOfCarrier`],
+/// [`carrier::BareRefCarrier`], [`carrier::ImportTypeCarrier`]). Their PRIVATE
+/// fields make the anti-tail `node.type_args` direct bind unrepresentable
+/// outside this module — the boundary is compiler-enforced, not source-scanned.
+/// The sole crate-wide carrier-arg descent channel is
+/// [`SemanticNodeData::carrier_type_args`]; the sole rebuild channel is
+/// [`SemanticNodeData::map_carrier_type_args`].
+pub mod carrier;
 pub use index_key::CanonicalIndexInt;
 
 pub use demand::{
@@ -4489,23 +4498,14 @@ pub enum SemanticNodeData {
     /// value-rooted lookup plus any remaining member path segments as a
     /// first-class semantic node.
     ///
-    /// `value_root` is the mode-free `typeof` query identity; `path`
-    /// stores the remaining dotted member segments that must be
-    /// projected from that root; `type_args` carries any
-    /// instantiation-expression arguments (`typeof C.make<string>`),
-    /// each already structurally lowered. Empty for a bare
-    /// `typeof a.b.c`.
-    TypeOf {
-        value_root: ValueRootKey,
-        path: Arc<[Arc<str>]>,
-        /// Instantiation-expression type arguments
-        /// (`typeof C.make<string>` → `[string]`), structurally lowered.
-        /// Empty for a bare `typeof`. Mirrors
-        /// [`verter_type_expr::ValueRef::type_args`]; carried unresolved
-        /// so the structural lowerer applies no instantiation at lowering
-        /// time.
-        type_args: Arc<[SemanticNodeId]>,
-    },
+    /// The fields live on the opaque [`carrier::TypeOfCarrier`] payload
+    /// (private, so `node.type_args` cannot be hand-bound outside the
+    /// sanctioned [`carrier_type_args`](Self::carrier_type_args) accessor).
+    /// Construct via [`new_typeof`](Self::new_typeof); read head fields via
+    /// [`typeof_head`](Self::typeof_head); descend / rebuild args via
+    /// [`carrier_type_args`](Self::carrier_type_args) /
+    /// [`map_carrier_type_args`](Self::map_carrier_type_args).
+    TypeOf(carrier::TypeOfCarrier),
     TypeParam {
         /// Declaration identity. Distinguishes cross-declaration
         /// same-name parameters (`type A<T>` vs `type B<T>` in the
@@ -4672,21 +4672,13 @@ pub enum SemanticNodeData {
     /// boundary — the unresolved bare reference is the shallow-by-default
     /// published shape. An empty `type_args` slice is the bare `Foo` case;
     /// a non-empty slice is `Foo<Arg, …>`.
-    BareRef {
-        /// The unresolved type name as written.
-        name: Arc<str>,
-        /// The lexical scope the reference was captured in (the
-        /// declaration-origin file + content generation + optional inner
-        /// scope), so demand-time resolution can re-key its bare-name
-        /// lookup without a host query at lowering time.
-        scope: NodeScopeId,
-        /// Type arguments applied at the reference site (`Foo<Arg>`), each
-        /// already structurally lowered. Empty for a bare `Foo`. Carried
-        /// unresolved so the query-free structural lowerer can represent
-        /// `Foo<Arg>` without performing the eager `InstantiationRef`
-        /// resolution; demand-time carrier resolution instantiates them.
-        type_args: Arc<[SemanticNodeId]>,
-    },
+    ///
+    /// The fields live on the opaque [`carrier::BareRefCarrier`] payload
+    /// (private, so `node.type_args` cannot be hand-bound outside the
+    /// sanctioned [`carrier_type_args`](Self::carrier_type_args) accessor).
+    /// Construct via [`new_bare_ref`](Self::new_bare_ref); read head fields via
+    /// [`bare_ref_head`](Self::bare_ref_head).
+    BareRef(carrier::BareRefCarrier),
 
     /// Unresolved dynamic-import type carrier.
     ///
@@ -4698,19 +4690,13 @@ pub enum SemanticNodeData {
     /// the qualifier path at demand time.
     ///
     /// Raises to [`TypeExpr::ImportType`](verter_type_expr::TypeExpr::ImportType).
-    ImportType {
-        /// The module specifier inside `import("…")`.
-        specifier: Arc<str>,
-        /// The dotted qualifier path after the import (`import("m").A.B`
-        /// → `["A", "B"]`); empty for a bare module reference.
-        qualifier: Arc<[Arc<str>]>,
-        /// Type arguments applied at the import-type site
-        /// (`import("m").Generic<Arg>`).
-        type_args: Arc<[SemanticNodeId]>,
-        /// `true` for `typeof import("…")` (the module's VALUE-export
-        /// namespace); `false` for `import("…")` in type position.
-        typeof_query: bool,
-    },
+    ///
+    /// The fields live on the opaque [`carrier::ImportTypeCarrier`] payload
+    /// (private, so `node.type_args` cannot be hand-bound outside the
+    /// sanctioned [`carrier_type_args`](Self::carrier_type_args) accessor).
+    /// Construct via [`new_import_type`](Self::new_import_type); read head
+    /// fields via [`import_type_head`](Self::import_type_head).
+    ImportType(carrier::ImportTypeCarrier),
 
     /// Raw-fallback carrier — the typed-IR home for a type the lowering
     /// could not represent structurally.
@@ -4785,7 +4771,7 @@ impl SemanticNodeData {
             Self::KeyOf { .. } => 10,
             Self::IndexedAccess { .. } => 11,
             Self::Mapped { .. } => 12,
-            Self::TypeOf { .. } => 13,
+            Self::TypeOf(_) => 13,
             Self::TypeParam { .. } => 14,
             Self::Infer { .. } => 15,
             Self::MergedDecl { .. } => 16,
@@ -4794,68 +4780,13 @@ impl SemanticNodeData {
             Self::Function { .. } => 19,
             Self::DeclRef { .. } => 20,
             Self::InstantiationRef { .. } => 21,
-            Self::BareRef { .. } => 22,
-            Self::ImportType { .. } => 23,
+            Self::BareRef(_) => 22,
+            Self::ImportType(_) => 23,
             Self::RawFallback { .. } => 24,
             // Index 25 is intentionally unused so the surviving variants
             // keep stable bucket indices independent of declaration order.
             Self::ConstructorType { .. } => 26,
             Self::SyntheticBinding { .. } => 27,
-        }
-    }
-
-    /// The structural `type_args` carrier slice for the three unresolved
-    /// carriers that apply type arguments at their reference site —
-    /// [`BareRef`](Self::BareRef) (`Foo<Arg>`), [`TypeOf`](Self::TypeOf)
-    /// (`typeof f<Arg>`), and [`ImportType`](Self::ImportType)
-    /// (`import("m").G<Arg>`). Returns the empty slice for every other
-    /// variant.
-    ///
-    /// This is the SINGLE structural accessor a graph walker uses to reach
-    /// a carrier's type arguments, so a future carrier that grows a
-    /// `type_args` field is covered by extending this one method rather than
-    /// each walker hand-matching every carrier. The non-carrier arm is an
-    /// EXHAUSTIVE enumeration with NO `_` wildcard: a new `SemanticNodeData`
-    /// variant fails to compile HERE, forcing the author to classify it as a
-    /// carrier (the first arm) or not (the second). A wildcard would instead
-    /// silently return `&[]` for a future carrier that grew a `type_args`
-    /// field, defeating that contract. It is PURE — no host / query /
-    /// resolution: it only EXPOSES the args for structural descent
-    /// (preservation, rendering, rewriting, scanning, classification) and
-    /// never RESOLVES a carrier or APPLIES instantiation meaning (that is
-    /// demand-time carrier resolution).
-    #[must_use]
-    pub(crate) fn carrier_type_args(&self) -> &[SemanticNodeId] {
-        match self {
-            Self::BareRef { type_args, .. }
-            | Self::TypeOf { type_args, .. }
-            | Self::ImportType { type_args, .. } => type_args,
-            // EXHAUSTIVE non-carrier enumeration — NO `_` wildcard, so a new
-            // variant forces a compile error at this accessor (see docstring).
-            Self::Alias(_)
-            | Self::Object(_)
-            | Self::Union(_)
-            | Self::Intersection(_)
-            | Self::Primitive(_)
-            | Self::Literal(_)
-            | Self::Opaque(_)
-            | Self::Array { .. }
-            | Self::Tuple { .. }
-            | Self::TemplateLiteral { .. }
-            | Self::KeyOf { .. }
-            | Self::IndexedAccess { .. }
-            | Self::Mapped { .. }
-            | Self::TypeParam { .. }
-            | Self::Infer { .. }
-            | Self::MergedDecl { .. }
-            | Self::Conditional { .. }
-            | Self::VueMacroElements(_)
-            | Self::Function { .. }
-            | Self::DeclRef { .. }
-            | Self::InstantiationRef { .. }
-            | Self::RawFallback { .. }
-            | Self::ConstructorType { .. }
-            | Self::SyntheticBinding { .. } => &[],
         }
     }
 }
@@ -4948,18 +4879,10 @@ impl PartialEq for SemanticNodeData {
                     mapper: bm,
                 },
             ) => asrc == bsrc && am == bm,
-            (
-                Self::TypeOf {
-                    value_root: ar,
-                    path: ap,
-                    type_args: ata,
-                },
-                Self::TypeOf {
-                    value_root: br,
-                    path: bp,
-                    type_args: bta,
-                },
-            ) => ar == br && ap == bp && ata == bta,
+            // Opaque carriers compare via the payload's derived `PartialEq`
+            // (every field, incl `type_args`) — same identity as the prior
+            // hand-written field-by-field arms.
+            (Self::TypeOf(a), Self::TypeOf(b)) => a == b,
             (
                 Self::TypeParam {
                     decl: ad,
@@ -5020,32 +4943,8 @@ impl PartialEq for SemanticNodeData {
                 Self::InstantiationRef { base: bb, args: ba },
             ) => ab == bb && aa == ba,
             (Self::MergedDecl { contributors: a }, Self::MergedDecl { contributors: b }) => a == b,
-            (
-                Self::BareRef {
-                    name: an,
-                    scope: asc,
-                    type_args: ata,
-                },
-                Self::BareRef {
-                    name: bn,
-                    scope: bsc,
-                    type_args: bta,
-                },
-            ) => an == bn && asc == bsc && ata == bta,
-            (
-                Self::ImportType {
-                    specifier: asp,
-                    qualifier: aq,
-                    type_args: ata,
-                    typeof_query: atq,
-                },
-                Self::ImportType {
-                    specifier: bsp,
-                    qualifier: bq,
-                    type_args: bta,
-                    typeof_query: btq,
-                },
-            ) => asp == bsp && aq == bq && ata == bta && atq == btq,
+            (Self::BareRef(a), Self::BareRef(b)) => a == b,
+            (Self::ImportType(a), Self::ImportType(b)) => a == b,
             (Self::RawFallback { raw: a }, Self::RawFallback { raw: b }) => a == b,
             (Self::ConstructorType { signature: a }, Self::ConstructorType { signature: b }) => {
                 a == b
@@ -5120,15 +5019,11 @@ impl std::hash::Hash for SemanticNodeData {
                 source.hash(state);
                 mapper.hash(state);
             }
-            Self::TypeOf {
-                value_root,
-                path,
-                type_args,
-            } => {
-                value_root.hash(state);
-                path.hash(state);
-                type_args.hash(state);
-            }
+            // Opaque carriers hash via the payload's derived `Hash` (every
+            // field, incl `type_args`) — same field order as the prior
+            // hand-written arms; the discriminant tag was already mixed in
+            // above.
+            Self::TypeOf(c) => c.hash(state),
             Self::TypeParam {
                 decl,
                 param_index,
@@ -5188,26 +5083,8 @@ impl std::hash::Hash for SemanticNodeData {
             Self::MergedDecl { contributors } => {
                 contributors.hash(state);
             }
-            Self::BareRef {
-                name,
-                scope,
-                type_args,
-            } => {
-                name.hash(state);
-                scope.hash(state);
-                type_args.hash(state);
-            }
-            Self::ImportType {
-                specifier,
-                qualifier,
-                type_args,
-                typeof_query,
-            } => {
-                specifier.hash(state);
-                qualifier.hash(state);
-                type_args.hash(state);
-                typeof_query.hash(state);
-            }
+            Self::BareRef(c) => c.hash(state),
+            Self::ImportType(c) => c.hash(state),
             Self::RawFallback { raw } => {
                 raw.hash(state);
             }
@@ -5453,40 +5330,40 @@ mod tests {
         let arg = SemanticNodeId(7);
         let args: Arc<[SemanticNodeId]> = Arc::from(vec![arg].into_boxed_slice());
 
-        let bare = SemanticNodeData::BareRef {
-            name: Arc::from("Foo"),
-            scope: NodeScopeId::Global,
-            type_args: Arc::clone(&args),
-        };
+        let bare = SemanticNodeData::new_bare_ref(
+            Arc::from("Foo"),
+            NodeScopeId::Global,
+            Arc::clone(&args),
+        );
         assert_eq!(
             bare.carrier_type_args(),
             &[arg],
             "BareRef must expose its `Foo<Arg>` type args"
         );
 
-        let type_of = SemanticNodeData::TypeOf {
-            value_root: ValueRootKey {
+        let type_of = SemanticNodeData::new_typeof(
+            ValueRootKey {
                 scope: ScopeId {
                     canonical_id: Arc::from("/m.ts"),
                     local_scope: None,
                 },
                 name: Arc::from("factory"),
             },
-            path: Arc::from(vec![Arc::<str>::from("make")].into_boxed_slice()),
-            type_args: Arc::clone(&args),
-        };
+            Arc::from(vec![Arc::<str>::from("make")].into_boxed_slice()),
+            Arc::clone(&args),
+        );
         assert_eq!(
             type_of.carrier_type_args(),
             &[arg],
             "TypeOf must expose its `typeof f<Arg>` instantiation args"
         );
 
-        let import_type = SemanticNodeData::ImportType {
-            specifier: Arc::from("./m"),
-            qualifier: Arc::from(vec![Arc::<str>::from("G")].into_boxed_slice()),
-            type_args: Arc::clone(&args),
-            typeof_query: false,
-        };
+        let import_type = SemanticNodeData::new_import_type(
+            Arc::from("./m"),
+            Arc::from(vec![Arc::<str>::from("G")].into_boxed_slice()),
+            Arc::clone(&args),
+            false,
+        );
         assert_eq!(
             import_type.carrier_type_args(),
             &[arg],

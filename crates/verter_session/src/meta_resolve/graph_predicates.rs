@@ -825,7 +825,7 @@ pub(crate) fn has_complex_cycle_guard_surface_node(
         | SemanticNodeData::Conditional { .. }
         | SemanticNodeData::Mapped { .. }
         | SemanticNodeData::KeyOf { .. }
-        | SemanticNodeData::TypeOf { .. }
+        | SemanticNodeData::TypeOf(_)
         | SemanticNodeData::TemplateLiteral { .. } => true,
         _ => false,
     }

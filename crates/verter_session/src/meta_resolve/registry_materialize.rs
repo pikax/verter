@@ -71,7 +71,7 @@ pub(crate) fn component_meta_registry_prefers_structural_materialization_node(
         | SemanticNodeData::Primitive(_)
         | SemanticNodeData::Literal(_)
         | SemanticNodeData::Opaque(_)
-        | SemanticNodeData::TypeOf { .. }
+        | SemanticNodeData::TypeOf(_)
         | SemanticNodeData::TypeParam { .. }
         | SemanticNodeData::Infer { .. }
         // A merged declaration is a concrete peer-merged object surface — like
@@ -81,8 +81,8 @@ pub(crate) fn component_meta_registry_prefers_structural_materialization_node(
         // Unresolved bare-name / dynamic-import / raw-fallback /
         // synthetic-binding carriers are references / terminals, not
         // structural shapes to materialise.
-        | SemanticNodeData::BareRef { .. }
-        | SemanticNodeData::ImportType { .. }
+        | SemanticNodeData::BareRef(_)
+        | SemanticNodeData::ImportType(_)
         | SemanticNodeData::RawFallback { .. }
         | SemanticNodeData::SyntheticBinding { .. } => false,
     }

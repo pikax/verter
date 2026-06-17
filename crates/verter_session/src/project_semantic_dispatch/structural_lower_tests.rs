@@ -108,11 +108,9 @@ fn lowers_bare_ref_with_empty_type_args() {
     };
     let (graph, root) = lower_root(&host, &expr);
     match &*node(&graph, root) {
-        SemanticNodeData::BareRef {
-            name,
-            scope,
-            type_args,
-        } => {
+        n @ SemanticNodeData::BareRef(_) => {
+            let (name, scope) = n.bare_ref_head().expect("BareRef head");
+            let type_args = n.carrier_type_args();
             assert_eq!(name.as_ref(), "Foo");
             assert_eq!(
                 *scope,
@@ -138,9 +136,9 @@ fn lowers_generic_ref_with_structurally_lowered_args() {
     };
     let (graph, root) = lower_root(&host, &expr);
     let arg = match &*node(&graph, root) {
-        SemanticNodeData::BareRef {
-            name, type_args, ..
-        } => {
+        n @ SemanticNodeData::BareRef(_) => {
+            let (name, _scope) = n.bare_ref_head().expect("BareRef head");
+            let type_args = n.carrier_type_args();
             assert_eq!(name.as_ref(), "Foo");
             assert_eq!(type_args.len(), 1, "Foo<string> carries exactly one arg");
             type_args[0]
@@ -181,10 +179,7 @@ fn bound_type_param_ref_returns_binder_node_not_bare_ref() {
         "a bound `T` resolves to its binder node"
     );
     assert!(
-        !matches!(
-            &*node(&graph, handle.node()),
-            SemanticNodeData::BareRef { .. }
-        ),
+        !matches!(&*node(&graph, handle.node()), SemanticNodeData::BareRef(_)),
         "a bound type-param must NOT emit a BareRef carrier"
     );
 }
@@ -280,11 +275,9 @@ fn lowers_typeof_preserving_root_path_and_type_args() {
     });
     let (graph, root) = lower_root(&host, &expr);
     let arg = match &*node(&graph, root) {
-        SemanticNodeData::TypeOf {
-            value_root,
-            path,
-            type_args,
-        } => {
+        n @ SemanticNodeData::TypeOf(_) => {
+            let (value_root, path) = n.typeof_head().expect("TypeOf head");
+            let type_args = n.carrier_type_args();
             assert_eq!(
                 value_root.name.as_ref(),
                 "factory",
@@ -326,16 +319,14 @@ fn lowers_import_type_with_qualifier_and_args() {
     };
     let (graph, root) = lower_root(&host, &expr);
     let arg = match &*node(&graph, root) {
-        SemanticNodeData::ImportType {
-            specifier,
-            qualifier,
-            type_args,
-            typeof_query,
-        } => {
+        n @ SemanticNodeData::ImportType(_) => {
+            let (specifier, qualifier, typeof_query) =
+                n.import_type_head().expect("ImportType head");
+            let type_args = n.carrier_type_args();
             assert_eq!(specifier.as_ref(), "./m");
             assert_eq!(qualifier.len(), 1);
             assert_eq!(qualifier[0].as_ref(), "Box");
-            assert!(!*typeof_query, "import(...).Box is type position");
+            assert!(!typeof_query, "import(...).Box is type position");
             assert_eq!(type_args.len(), 1);
             type_args[0]
         }
@@ -361,13 +352,11 @@ fn lowers_typeof_import_type_sets_typeof_query() {
     };
     let (graph, root) = lower_root(&host, &expr);
     match &*node(&graph, root) {
-        SemanticNodeData::ImportType {
-            qualifier,
-            typeof_query,
-            type_args,
-            ..
-        } => {
-            assert!(*typeof_query, "typeof import(...) sets typeof_query");
+        n @ SemanticNodeData::ImportType(_) => {
+            let (_specifier, qualifier, typeof_query) =
+                n.import_type_head().expect("ImportType head");
+            let type_args = n.carrier_type_args();
+            assert!(typeof_query, "typeof import(...) sets typeof_query");
             assert_eq!(qualifier[0].as_ref(), "make");
             assert_eq!(type_args.len(), 1);
         }
@@ -474,7 +463,7 @@ fn lowers_constructor_type_wrapping_a_function_signature() {
             // resolved decl.
             assert!(matches!(
                 &*node(&graph, *return_type),
-                SemanticNodeData::BareRef { .. }
+                SemanticNodeData::BareRef(_)
             ));
         }
         other => panic!("expected Function signature, got {other:?}"),
@@ -642,7 +631,7 @@ fn generic_function_constraint_sees_prior_type_param_binder() {
                 "U's constraint resolves to the T TypeParam binder"
             );
             assert!(
-                !matches!(&*node(&graph, u_constraint), SemanticNodeData::BareRef { .. }),
+                !matches!(&*node(&graph, u_constraint), SemanticNodeData::BareRef(_)),
                 "pre-fix the constraint lowered under the OUTER context → BareRef(T); must not regress"
             );
         }
@@ -709,7 +698,7 @@ fn generic_function_default_sees_prior_type_param_binder() {
                 "U's default resolves to the T TypeParam binder"
             );
             assert!(
-                !matches!(&*node(&graph, u_default), SemanticNodeData::BareRef { .. }),
+                !matches!(&*node(&graph, u_default), SemanticNodeData::BareRef(_)),
                 "pre-fix the default lowered under the OUTER context → BareRef(T); must not regress"
             );
         }
@@ -734,7 +723,7 @@ fn lowers_indexed_access_as_deferred_shell_with_string_key() {
     match &*node(&graph, root) {
         SemanticNodeData::IndexedAccess { object, index } => {
             assert!(
-                matches!(&*node(&graph, *object), SemanticNodeData::BareRef { .. }),
+                matches!(&*node(&graph, *object), SemanticNodeData::BareRef(_)),
                 "the object operand is structurally lowered, not resolved"
             );
             match index {
@@ -860,7 +849,7 @@ fn conditional_binds_bare_infer_in_true_branch() {
             assert!(
                 !matches!(
                     &*node(&graph, *true_branch_ref),
-                    SemanticNodeData::BareRef { .. }
+                    SemanticNodeData::BareRef(_)
                 ),
                 "a bound infer name must NOT leak out as a BareRef"
             );
@@ -918,7 +907,7 @@ fn conditional_binds_nested_infer_in_true_branch() {
             assert!(
                 !matches!(
                     &*node(&graph, *true_branch_ref),
-                    SemanticNodeData::BareRef { .. }
+                    SemanticNodeData::BareRef(_)
                 ),
                 "a bound nested infer name must NOT leak out as a BareRef"
             );
@@ -987,7 +976,7 @@ fn conditional_binds_object_member_infer_in_true_branch() {
             assert!(
                 !matches!(
                     &*node(&graph, *true_branch_ref),
-                    SemanticNodeData::BareRef { .. }
+                    SemanticNodeData::BareRef(_)
                 ),
                 "a bound object-member infer name must NOT leak out as a BareRef"
             );
@@ -1058,7 +1047,7 @@ fn conditional_binds_function_param_infer_in_true_branch() {
             assert!(
                 !matches!(
                     &*node(&graph, *true_branch_ref),
-                    SemanticNodeData::BareRef { .. }
+                    SemanticNodeData::BareRef(_)
                 ),
                 "a bound function-param infer name must NOT leak out as a BareRef"
             );
@@ -1121,7 +1110,7 @@ fn conditional_binds_mapped_as_remap_infer_in_true_branch() {
             assert!(
                 !matches!(
                     &*node(&graph, *true_branch_ref),
-                    SemanticNodeData::BareRef { .. }
+                    SemanticNodeData::BareRef(_)
                 ),
                 "a bound mapped-remap infer name must NOT leak out as a BareRef"
             );
@@ -1164,9 +1153,9 @@ fn lowers_interface_heritage_preserving_ref_args_and_member_provenance() {
     };
     assert_eq!(arms.len(), 2, "heritage ref arm + own-body object arm");
     match &*node(&graph, arms[0]) {
-        SemanticNodeData::BareRef {
-            name, type_args, ..
-        } => {
+        n @ SemanticNodeData::BareRef(_) => {
+            let (name, _scope) = n.bare_ref_head().expect("BareRef head");
+            let type_args = n.carrier_type_args();
             assert_eq!(name.as_ref(), "Base");
             assert_eq!(type_args.len(), 1, "heritage `Base<string>` keeps its arg");
             assert!(matches!(
@@ -1223,7 +1212,7 @@ fn lowers_mapped_type_as_deferred_shell() {
     match &*node(&graph, root) {
         SemanticNodeData::Mapped { source, mapper } => {
             assert!(
-                matches!(&*node(&graph, *source), SemanticNodeData::BareRef { .. }),
+                matches!(&*node(&graph, *source), SemanticNodeData::BareRef(_)),
                 "the keyof source unwraps to the underlying T"
             );
             match &*node(&graph, mapper.key_space) {
@@ -1271,7 +1260,7 @@ fn structural_root_is_an_unmaterialized_carrier() {
     };
     let (graph, root) = lower_root(&host, &generic);
     assert!(
-        matches!(&*node(&graph, root), SemanticNodeData::BareRef { .. }),
+        matches!(&*node(&graph, root), SemanticNodeData::BareRef(_)),
         "the `Foo<Bar>` root stays a BareRef carrier, not a materialized fallback"
     );
     let import = TypeExpr::ImportType {
@@ -1282,7 +1271,7 @@ fn structural_root_is_an_unmaterialized_carrier() {
     };
     let (graph, root) = lower_root(&host, &import);
     assert!(
-        matches!(&*node(&graph, root), SemanticNodeData::ImportType { .. }),
+        matches!(&*node(&graph, root), SemanticNodeData::ImportType(_)),
         "the import-type root stays an ImportType carrier, not a materialized fallback"
     );
 }

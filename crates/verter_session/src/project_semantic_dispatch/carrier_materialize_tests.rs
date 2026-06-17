@@ -83,11 +83,11 @@ fn materialize_bare_ref_round_trips_to_bare_ref() {
     let host = VerterHost::new_standalone(Default::default());
     let expr = materialize(
         &host,
-        SemanticNodeData::BareRef {
-            name: Arc::from("Foo"),
-            scope: NodeScopeId::Global,
-            type_args: Arc::from(Vec::new().into_boxed_slice()),
-        },
+        SemanticNodeData::new_bare_ref(
+            Arc::from("Foo"),
+            NodeScopeId::Global,
+            Arc::from(Vec::new().into_boxed_slice()),
+        ),
     );
     match &expr {
         TypeExpr::Ref {
@@ -110,11 +110,11 @@ fn materialize_bare_ref_round_trips_type_args() {
     let host = VerterHost::new_standalone(Default::default());
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let arg = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
-    let node = graph.intern_node(SemanticNodeData::BareRef {
-        name: Arc::from("Foo"),
-        scope: NodeScopeId::Global,
-        type_args: Arc::from(vec![arg].into_boxed_slice()),
-    });
+    let node = graph.intern_node(SemanticNodeData::new_bare_ref(
+        Arc::from("Foo"),
+        NodeScopeId::Global,
+        Arc::from(vec![arg].into_boxed_slice()),
+    ));
     let dispatch = ProjectSemanticDispatch::new(&host);
     let expr = dispatch.materialize_type_expr(HotTypeRef::new(node));
     match &expr {
@@ -146,17 +146,17 @@ fn materialize_typeof_round_trips_type_args() {
     let host = VerterHost::new_standalone(Default::default());
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let arg = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let node = graph.intern_node(SemanticNodeData::TypeOf {
-        value_root: ValueRootKey {
+    let node = graph.intern_node(SemanticNodeData::new_typeof(
+        ValueRootKey {
             scope: ScopeId {
                 canonical_id: Arc::from("/m.ts"),
                 local_scope: None,
             },
             name: Arc::from("factory"),
         },
-        path: Arc::from(vec![Arc::<str>::from("make")].into_boxed_slice()),
-        type_args: Arc::from(vec![arg].into_boxed_slice()),
-    });
+        Arc::from(vec![Arc::<str>::from("make")].into_boxed_slice()),
+        Arc::from(vec![arg].into_boxed_slice()),
+    ));
     let dispatch = ProjectSemanticDispatch::new(&host);
     let expr = dispatch.materialize_type_expr(HotTypeRef::new(node));
     match &expr {
@@ -185,12 +185,12 @@ fn materialize_import_type_round_trips() {
     let host = VerterHost::new_standalone(Default::default());
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let arg = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
-    let node = graph.intern_node(SemanticNodeData::ImportType {
-        specifier: Arc::from("./module"),
-        qualifier: Arc::from(vec![Arc::<str>::from("A"), Arc::<str>::from("B")].into_boxed_slice()),
-        type_args: Arc::from(vec![arg].into_boxed_slice()),
-        typeof_query: true,
-    });
+    let node = graph.intern_node(SemanticNodeData::new_import_type(
+        Arc::from("./module"),
+        Arc::from(vec![Arc::<str>::from("A"), Arc::<str>::from("B")].into_boxed_slice()),
+        Arc::from(vec![arg].into_boxed_slice()),
+        true,
+    ));
     let dispatch = ProjectSemanticDispatch::new(&host);
     let expr = dispatch.materialize_type_expr(HotTypeRef::new(node));
 

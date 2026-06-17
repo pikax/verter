@@ -1055,14 +1055,15 @@ pub fn audit_key_for_node(
             IndexKey::TypeNode(n) => format!("IndexedAccess({}[<type:{}>])", object.0, n.0),
         },
         SemanticNodeData::Mapped { source, .. } => format!("Mapped(source={})", source.0),
-        SemanticNodeData::TypeOf {
-            value_root, path, ..
-        } => format!(
-            "TypeOf({}::{},path[{}])",
-            value_root.scope.canonical_id,
-            value_root.name,
-            path.len()
-        ),
+        SemanticNodeData::TypeOf(_) => {
+            let (value_root, path) = data.typeof_head().expect("TypeOf carrier head");
+            format!(
+                "TypeOf({}::{},path[{}])",
+                value_root.scope.canonical_id,
+                value_root.name,
+                path.len()
+            )
+        }
         SemanticNodeData::TypeParam {
             decl,
             display_name,
@@ -1090,16 +1091,18 @@ pub fn audit_key_for_node(
         SemanticNodeData::MergedDecl { contributors } => {
             format!("MergedDecl[{}]", contributors.len())
         }
-        SemanticNodeData::BareRef { name, .. } => format!("BareRef({name})"),
-        SemanticNodeData::ImportType {
-            specifier,
-            qualifier,
-            typeof_query,
-            ..
-        } => format!(
-            "ImportType({specifier},q[{}],typeof={typeof_query})",
-            qualifier.len()
-        ),
+        SemanticNodeData::BareRef(_) => {
+            let (name, _scope) = data.bare_ref_head().expect("BareRef carrier head");
+            format!("BareRef({name})")
+        }
+        SemanticNodeData::ImportType(_) => {
+            let (specifier, qualifier, typeof_query) =
+                data.import_type_head().expect("ImportType carrier head");
+            format!(
+                "ImportType({specifier},q[{}],typeof={typeof_query})",
+                qualifier.len()
+            )
+        }
         SemanticNodeData::RawFallback { raw } => format!("RawFallback(\"{raw}\")"),
         SemanticNodeData::ConstructorType { signature } => {
             format!("ConstructorType({})", signature.0)

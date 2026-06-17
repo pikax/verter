@@ -5295,7 +5295,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 SemanticNodeData::TypeParam { .. }
                 | SemanticNodeData::IndexedAccess { .. }
                 | SemanticNodeData::Mapped { .. }
-                | SemanticNodeData::TypeOf { .. }
+                | SemanticNodeData::TypeOf(_)
                 | SemanticNodeData::Conditional { .. }
                 | SemanticNodeData::Alias(_)
                 // Un-resolved reference carriers. Navigate / Skeleton body

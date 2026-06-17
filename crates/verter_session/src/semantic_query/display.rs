@@ -369,11 +369,9 @@ pub(crate) fn display_type_node(
             };
             format!("{{ {readonly}[{param} in {key_space}{remap}]{optionality}: {value} }}")
         }
-        SemanticNodeData::TypeOf {
-            value_root,
-            path,
-            type_args,
-        } => {
+        SemanticNodeData::TypeOf(_) => {
+            let (value_root, path) = data.typeof_head().expect("TypeOf carrier head");
+            let type_args = data.carrier_type_args();
             let mut s = format!("typeof {}", value_root.name);
             for seg in path.iter() {
                 s.push('.');
@@ -474,9 +472,9 @@ pub(crate) fn display_type_node(
         // applied type arguments (`Foo<Arg>`), matching the `ImportType` /
         // `InstantiationRef` convention; an empty `type_args` stays bare.
         // Display never re-resolves a carrier — the args render structurally.
-        SemanticNodeData::BareRef {
-            name, type_args, ..
-        } => {
+        SemanticNodeData::BareRef(_) => {
+            let (name, _scope) = data.bare_ref_head().expect("BareRef carrier head");
+            let type_args = data.carrier_type_args();
             if type_args.is_empty() {
                 name.to_string()
             } else {
@@ -489,13 +487,11 @@ pub(crate) fn display_type_node(
         }
         // Dynamic-import carrier renders the import expression + qualifier
         // path + any type arguments.
-        SemanticNodeData::ImportType {
-            specifier,
-            qualifier,
-            type_args,
-            typeof_query,
-        } => {
-            let mut out = if *typeof_query {
+        SemanticNodeData::ImportType(_) => {
+            let (specifier, qualifier, typeof_query) =
+                data.import_type_head().expect("ImportType carrier head");
+            let type_args = data.carrier_type_args();
+            let mut out = if typeof_query {
                 format!("typeof import(\"{specifier}\")")
             } else {
                 format!("import(\"{specifier}\")")
@@ -970,7 +966,7 @@ fn prec_of(data: &SemanticNodeData) -> Prec {
         | SemanticNodeData::Tuple { .. }
         | SemanticNodeData::TemplateLiteral { .. }
         | SemanticNodeData::Mapped { .. }
-        | SemanticNodeData::TypeOf { .. }
+        | SemanticNodeData::TypeOf(_)
         | SemanticNodeData::TypeParam { .. }
         | SemanticNodeData::VueMacroElements(_)
         | SemanticNodeData::MergedDecl { .. }
@@ -978,8 +974,8 @@ fn prec_of(data: &SemanticNodeData) -> Prec {
         | SemanticNodeData::InstantiationRef { .. }
         // Unresolved bare-name / dynamic-import / raw-fallback /
         // synthetic-binding carriers all render as atomic references.
-        | SemanticNodeData::BareRef { .. }
-        | SemanticNodeData::ImportType { .. }
+        | SemanticNodeData::BareRef(_)
+        | SemanticNodeData::ImportType(_)
         | SemanticNodeData::RawFallback { .. }
         | SemanticNodeData::SyntheticBinding { .. } => Prec::Atom,
     }

@@ -484,11 +484,7 @@ fn lower_node(
             }
             let type_args = lower_args(graph, type_arguments, scope, ctx)?;
             Ok(graph.intern_node_with_scope(
-                SemanticNodeData::BareRef {
-                    name: Arc::clone(name),
-                    scope: scope.clone(),
-                    type_args,
-                },
+                SemanticNodeData::new_bare_ref(Arc::clone(name), scope.clone(), type_args),
                 scope.clone(),
             ))
         }
@@ -532,11 +528,7 @@ fn lower_node(
             let path: Arc<[Arc<str>]> = rest.iter().map(|s| Arc::from(s.as_str())).collect();
             let type_args = lower_args(graph, &value_ref.type_args, scope, ctx)?;
             Ok(graph.intern_node_with_scope(
-                SemanticNodeData::TypeOf {
-                    value_root,
-                    path,
-                    type_args,
-                },
+                SemanticNodeData::new_typeof(value_root, path, type_args),
                 scope.clone(),
             ))
         }
@@ -553,12 +545,12 @@ fn lower_node(
         } => {
             let type_args = lower_args(graph, type_arguments, scope, ctx)?;
             Ok(graph.intern_node_with_scope(
-                SemanticNodeData::ImportType {
-                    specifier: Arc::clone(specifier),
-                    qualifier: Arc::clone(qualifier),
+                SemanticNodeData::new_import_type(
+                    Arc::clone(specifier),
+                    Arc::clone(qualifier),
                     type_args,
-                    typeof_query: *typeof_query,
-                },
+                    *typeof_query,
+                ),
                 scope.clone(),
             ))
         }

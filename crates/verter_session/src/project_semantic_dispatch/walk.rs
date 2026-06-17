@@ -1878,17 +1878,15 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     }
                     current = resolved;
                 }
-                SemanticNodeData::TypeOf {
-                    value_root,
-                    path: typeof_path,
-                    ..
-                } => {
+                SemanticNodeData::TypeOf(_) => {
                     // TODO(carrier-resolution): apply TypeOf.type_args
                     // (apply_typeof_instantiation_args) once the structural
                     // lowerer is wired; carriers are dormant today so no
                     // non-empty type_args reaches here. See
                     // docs/arch/parselower-design.md (demand-time
                     // carrier-resolution debt note).
+                    let (value_root, typeof_path) =
+                        data.typeof_head().expect("TypeOf carrier head");
                     let value_root = value_root.clone();
                     let typeof_path = typeof_path.clone();
                     // PathWalker hop = a demand point: the typeof root
@@ -2233,8 +2231,8 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 // constructor / synthetic-binding carriers cannot be
                 // path-navigated as-is — they are resolved by the dispatch
                 // before a walk descends. Return Opaque(Miss).
-                | SemanticNodeData::BareRef { .. }
-                | SemanticNodeData::ImportType { .. }
+                | SemanticNodeData::BareRef(_)
+                | SemanticNodeData::ImportType(_)
                 | SemanticNodeData::RawFallback { .. }
                 | SemanticNodeData::ConstructorType { .. }
                 | SemanticNodeData::SyntheticBinding { .. } => {
@@ -3523,13 +3521,13 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             | SemanticNodeData::Function { .. }
             | SemanticNodeData::KeyOf { .. }
             | SemanticNodeData::IndexedAccess { .. }
-            | SemanticNodeData::TypeOf { .. }
+            | SemanticNodeData::TypeOf(_)
             // Unresolved bare-name / dynamic-import / raw-fallback /
             // constructor / synthetic-binding carriers contribute no shallow
             // surface members (they are resolved by the dispatch before a
             // surface synthesis descends).
-            | SemanticNodeData::BareRef { .. }
-            | SemanticNodeData::ImportType { .. }
+            | SemanticNodeData::BareRef(_)
+            | SemanticNodeData::ImportType(_)
             | SemanticNodeData::RawFallback { .. }
             | SemanticNodeData::ConstructorType { .. }
             | SemanticNodeData::SyntheticBinding { .. } => {

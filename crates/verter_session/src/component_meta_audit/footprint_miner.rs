@@ -451,7 +451,7 @@ fn map_node_kind(data: &SemanticNodeData) -> SemanticNodeKind {
         SemanticNodeData::KeyOf { .. } => SemanticNodeKind::KeyOf,
         SemanticNodeData::IndexedAccess { .. } => SemanticNodeKind::IndexedAccess,
         SemanticNodeData::Mapped { .. } => SemanticNodeKind::Mapped,
-        SemanticNodeData::TypeOf { .. } => SemanticNodeKind::TypeOf,
+        SemanticNodeData::TypeOf(_) => SemanticNodeKind::TypeOf,
         SemanticNodeData::TypeParam { .. } => SemanticNodeKind::TypeParam,
         SemanticNodeData::Infer { .. } => SemanticNodeKind::Other {
             name: Arc::from("Infer"),
@@ -472,10 +472,10 @@ fn map_node_kind(data: &SemanticNodeData) -> SemanticNodeKind {
         SemanticNodeData::MergedDecl { .. } => SemanticNodeKind::Other {
             name: Arc::from("MergedDecl"),
         },
-        SemanticNodeData::BareRef { .. } => SemanticNodeKind::Other {
+        SemanticNodeData::BareRef(_) => SemanticNodeKind::Other {
             name: Arc::from("BareRef"),
         },
-        SemanticNodeData::ImportType { .. } => SemanticNodeKind::Other {
+        SemanticNodeData::ImportType(_) => SemanticNodeKind::Other {
             name: Arc::from("ImportType"),
         },
         SemanticNodeData::RawFallback { .. } => SemanticNodeKind::Other {
@@ -517,7 +517,8 @@ fn display_label_for(data: &SemanticNodeData) -> Arc<str> {
             Arc::from(format!("IndexedAccess({})", index_key_label(index)))
         }
         SemanticNodeData::Mapped { .. } => Arc::from("Mapped"),
-        SemanticNodeData::TypeOf { value_root, .. } => {
+        SemanticNodeData::TypeOf(_) => {
+            let (value_root, _path) = data.typeof_head().expect("TypeOf carrier head");
             Arc::from(format!("typeof {}", value_root.name))
         }
         SemanticNodeData::TypeParam { display_name, .. } => Arc::clone(display_name),
@@ -542,8 +543,13 @@ fn display_label_for(data: &SemanticNodeData) -> Arc<str> {
         SemanticNodeData::MergedDecl { contributors } => {
             Arc::from(format!("MergedDecl[{}]", contributors.len()))
         }
-        SemanticNodeData::BareRef { name, .. } => Arc::from(format!("BareRef({name})")),
-        SemanticNodeData::ImportType { specifier, .. } => {
+        SemanticNodeData::BareRef(_) => {
+            let (name, _scope) = data.bare_ref_head().expect("BareRef carrier head");
+            Arc::from(format!("BareRef({name})"))
+        }
+        SemanticNodeData::ImportType(_) => {
+            let (specifier, _qualifier, _typeof_query) =
+                data.import_type_head().expect("ImportType carrier head");
             Arc::from(format!("import(\"{specifier}\")"))
         }
         SemanticNodeData::RawFallback { .. } => Arc::from("RawFallback"),

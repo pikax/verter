@@ -1083,22 +1083,22 @@ fn bare_ref_carrier_renders_type_args() {
     let store = SemanticGraphStore::new();
     let number_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
 
-    let bare = store.intern_node(SemanticNodeData::BareRef {
-        name: Arc::from("Foo"),
-        scope: NodeScopeId::Global,
-        type_args: Arc::from(Vec::new().into_boxed_slice()),
-    });
+    let bare = store.intern_node(SemanticNodeData::new_bare_ref(
+        Arc::from("Foo"),
+        NodeScopeId::Global,
+        Arc::from(Vec::new().into_boxed_slice()),
+    ));
     assert_eq!(
         render(&store, bare),
         "Foo",
         "a bare BareRef renders its name only"
     );
 
-    let applied = store.intern_node(SemanticNodeData::BareRef {
-        name: Arc::from("Foo"),
-        scope: NodeScopeId::Global,
-        type_args: Arc::from(vec![number_id].into_boxed_slice()),
-    });
+    let applied = store.intern_node(SemanticNodeData::new_bare_ref(
+        Arc::from("Foo"),
+        NodeScopeId::Global,
+        Arc::from(vec![number_id].into_boxed_slice()),
+    ));
     assert_eq!(
         render(&store, applied),
         "Foo<number>",
@@ -1118,22 +1118,22 @@ fn typeof_carrier_renders_type_args() {
         name: Arc::from("factory"),
     };
 
-    let bare = store.intern_node(SemanticNodeData::TypeOf {
-        value_root: value_root.clone(),
-        path: Arc::from(vec![Arc::<str>::from("make")].into_boxed_slice()),
-        type_args: Arc::from(Vec::new().into_boxed_slice()),
-    });
+    let bare = store.intern_node(SemanticNodeData::new_typeof(
+        value_root.clone(),
+        Arc::from(vec![Arc::<str>::from("make")].into_boxed_slice()),
+        Arc::from(Vec::new().into_boxed_slice()),
+    ));
     assert_eq!(
         render(&store, bare),
         "typeof factory.make",
         "a bare TypeOf renders root + path only"
     );
 
-    let applied = store.intern_node(SemanticNodeData::TypeOf {
+    let applied = store.intern_node(SemanticNodeData::new_typeof(
         value_root,
-        path: Arc::from(vec![Arc::<str>::from("make")].into_boxed_slice()),
-        type_args: Arc::from(vec![string_id].into_boxed_slice()),
-    });
+        Arc::from(vec![Arc::<str>::from("make")].into_boxed_slice()),
+        Arc::from(vec![string_id].into_boxed_slice()),
+    ));
     assert_eq!(
         render(&store, applied),
         "typeof factory.make<string>",
