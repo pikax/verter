@@ -25,7 +25,7 @@ skill is the module map + contract reference behind it.
 | `framework/descriptor.rs` | `FrameworkAdapterDescriptor` (id, tag, supported surface kinds, carrier language, `VirtualFileNaming` column) + `vue_descriptor()`. Reuses the prost wire enums (`FrameworkTag`, `FrameworkSurfaceKind`) — no parallel host taxonomy. |
 | `framework/registry.rs` | `FrameworkAdapterRegistry` (built once at host construction) + `FrameworkRegistration` (descriptor, optional carrier leg, synth, api-projector, script-fact providers, `SurfaceRegistration{Adapter,Deferred}`) + the `TagDisposition` table + `ActiveProviderIndex`. `framework_registry_complete` walks every wire tag. |
 | `framework/ctx.rs` | `FrameworkAdapterCtx` — the facts/carrier-only adapter surface with EXACTLY two ops (`carrier_for`, `script_facts_for`). |
-| `framework/surface_store.rs` | Generic `FrameworkSurfaceStore<K,B>` + `FullKey<K>` + erasure (`ErasedFrameworkSurfaceStore`) + the `FrameworkSurfaceDtoBundle` marker. Strict same-generation + fact-rail warm reads. |
+| `framework/surface_store.rs` | Generic `FrameworkSurfaceStore<K,B>` + `FullKey<K>` + erasure (`ErasedFrameworkSurfaceStore`) + the `FrameworkSurfaceDtoBundle` marker. Strict same-generation + fact-rail warm reads. PROVISIONAL: this store (and `FrameworkScriptCaches` in `script_facts.rs`) live on the framework registry rows, NOT the single `ProjectTypeStore`, and have no in-flight collapse — U10 OWES consolidating `FrameworkSurfaceStore` onto `ProjectTypeStore`/`TypeInfoGraphResultDb` + adding true singleflight. |
 | `framework/synth.rs` | `ComponentDefaultSynth` trait + parse-domain `ComponentDefaultSynthCtx` + `VueComponentDefaultSynth`. |
 | `framework/script_facts.rs` | The resolved-validation half: `ActiveProviderIndex`-gated `resolve_script_facts`, the content-addressed candidate store, the fact-rail-validated resolved-fact store. |
 | `framework/api_projector.rs` + `api_projectors/vue.rs` | `ComponentApiProjector` trait + the Vue leg delegating to `render_vue_public_api_legacy`. |
@@ -86,8 +86,14 @@ source) + the TS specs `frameworkWiring.spec.ts` /
 
 `VerterHost::resolve_framework_surface_with_audit(TypeInfoGraphRequest)` is
 the SOLE audited entry for the `GRAPH_OPERATION_FRAMEWORK_SURFACES`
-operation. It rides the EXISTING typeinfo graph envelope — no proto /
-schema-version change. Flow:
+operation. It rides the EXISTING typeinfo graph envelope. The current
+`FrameworkSurfacePayload`/embedded-`SemanticTypeGraph` shape is PROVISIONAL,
+NOT final: the `S5.B11/B12 → U8` gate landed ahead of order, so U8 still
+OWES the retag of `FrameworkSurfacePayload.graph` to a `TypeInfoGraphPayload`
+carrier + the `SemanticTypeGraph.schema_version` bump (currently
+`TYPEINFO_GRAPH_SCHEMA_VERSION = 4`) + reserving the old field per the
+Typeinfo Wire Contract. Until U8 lands the wire stays pinned but is not a
+permanent "no schema change" guarantee. Flow:
 
 1. `validate_type_info_graph_request` FIRST (op/payload-arm match, schema
    echo, nested framework-surface validator). A malformed envelope returns
@@ -113,10 +119,11 @@ schema-version change. Flow:
    type-resolution engine, then `normalize`, then `graph_export`.
 
 The executor is NOT a second resolver: it plans, dispatches to the shared
-engine, and encodes. `PlannedDemand` is a closed 4-variant taxonomy
-(`PublicTypeInstance` / `MacroPayload` / `PathProjection` / `ShallowSurface`)
-— no `Custom` / `Raw` arm, no source text, no OXC handles, no raw
-`SemanticQueryKey`s. `ResolvedOutcome` (Resolved / Partial / Unsupported /
+engine, and encodes. `PlannedDemand` is a closed 5-variant taxonomy
+(`PublicTypeInstance` / `MacroPayload` / `PathProjection` / `ShallowSurface`
+plus the Svelte arm `SvelteSurface` — its own `SvelteSurfaceSource` family,
+NOT the Vue-coupled `MacroPayload` arm) — no `Custom` / `Raw` arm, no source
+text, no OXC handles, no raw `SemanticQueryKey`s. `ResolvedOutcome` (Resolved / Partial / Unsupported /
 Missing) maps DIRECTLY onto the wire `SUPPORTED` / `PARTIAL` / `UNSUPPORTED`
 status; a supported-empty kind stays distinct from an unsupported kind.
 

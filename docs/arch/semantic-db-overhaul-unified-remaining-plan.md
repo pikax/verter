@@ -1518,6 +1518,14 @@ the one mandatory shared gate that binds Stage5 and typeinfo together.
 
 #### 3.1.1 The shared macro-surface gate (THE crux)
 
+> INTEGRATION NOTE (framework-adapters merged ahead of order, 2026-06-17): the merged
+> framework-surface producer (`typeinfo/framework_surface/vue_exec`, `graph_export.rs`)
+> and the Vue + Svelte adapter paths are NEW consumers of the `VueMacroElements` /
+> `type_surface` sidecar — add them to this block's sidecar cutover repoint+deletion
+> surface, including the guards around `type_surface` (e.g.
+> `no_new_type_surface_engine_path_production_file`). The sidecar cutover (`S5.B5`–`S5.B12`)
+> must repoint these merged producers, not leave a second sidecar consumer alive.
+
 **Macro-resolution end-state (one path, one normalizer).** Vue macro resolution has
 exactly ONE semantic path: `ResolveMacroPayload → ProjectSemanticDispatch::execute →
 SemanticGraphStore`, followed by ONE shared macro normalizer. `VueMacroElements`,
@@ -2821,6 +2829,12 @@ divergence (`(props?: mapped): string` vs vcm's arrow form).
 
 ### U2 — Semantic Key + B4 Cache-Node Convergence  **(CONVERGENCE GATE — highest correctness risk)**
 
+> INTEGRATION NOTE (framework-adapters merged ahead of order, 2026-06-17): when finalizing
+> the key model, fold in the already-landed `FileArtifactKey.file_language_id` dimension and
+> the `IndexedReady.framework_parse` slot. The `file_language_id` value is a static
+> extension-derived `FileLanguage` classification today; threading live explicit overrides is
+> a TODO to carry here.
+
 - **Source track:** MERGED (semantic-graph R-1 + cache-runtime B4-completion).
   See the dedicated co-sequencing section (§5).
 - **Parity docs:** parent `docs/arch/native-typeinfo-parity.md` (query-key
@@ -3077,6 +3091,12 @@ divergence (`(props?: mapped): string` vs vcm's arrow form).
 
 ### U3 — Cache / Fact Model (`U3.CACHE_FACT_MODEL`)
 
+> INTEGRATION NOTE (framework-adapters merged ahead of order, 2026-06-17): add
+> `file_language_id` to this block's R21 per-file artifact-dimension list, and extend the
+> nested-off-store-cache detection to cover the merged `FrameworkRegistration.surface_store`
+> (`FrameworkSurfaceStore`) + `FrameworkScriptCaches` (both currently live on registry rows,
+> off `ProjectTypeStore`).
+
 - **Source track:** semantic-graph (cache/fact model end-state, with cache-runtime
   coupling).
 - **Parity docs:** child `docs/arch/native-typeinfo-parity-cache-export-session.md`
@@ -3182,6 +3202,11 @@ divergence (`(props?: mapped): string` vs vcm's arrow form).
 ---
 
 ### U6 — Native Flow Return (B11)
+
+> INTEGRATION NOTE (framework-adapters merged ahead of order, 2026-06-17): when deleting the
+> legacy return / type-surface machinery, this block also OWNS shrinking/deleting the merged
+> `no_new_type_surface_engine_path_production_file` guard — it must NOT preserve the old
+> engine count once the `type_surface` sidecar is gone.
 
 - **Source track:** cache-runtime (with a semantic-key touch).
 - **Parity docs:** child `docs/arch/native-flow-return.md` (the U6 flow chapter —
@@ -3318,6 +3343,15 @@ divergence (`(props?: mapped): string` vs vcm's arrow form).
 
 ### U8 — Wire-Surface Closure
 
+> INTEGRATION NOTE (framework-adapters merged ahead of order, 2026-06-17): expand this
+> block's migration scope to include the merged framework-surface wire —
+> `FrameworkSurfacePayload.graph`, `typeinfo/framework_surface/graph_export.rs`,
+> `TYPEINFO_GRAPH_SCHEMA_VERSION` (currently 4), and the framework-surface proto/taxonomy
+> guards. Retag `FrameworkSurfacePayload.graph` to a `TypeInfoGraphPayload` carrier at a
+> fresh tag, bump the schema version, reserve the old field, and provide downlevel handling
+> for pre-bump consumers (the merged producer landed the provisional embedded
+> `SemanticTypeGraph` ahead of this gate).
+
 - **Source track:** semantic-graph (R-2).
 - **Parity docs:** child `docs/arch/native-typeinfo-parity-cache-export-session.md`
   (`U8.WIRE_SURFACE_CLOSURE` — the keystone block of that subplan), under parent
@@ -3430,6 +3464,12 @@ bridge.
 
 ### U10 — Result DB + Mode/Demand Exactness
 
+> INTEGRATION NOTE (framework-adapters merged ahead of order, 2026-06-17): add consolidation
+> of the merged `FrameworkSurfaceStore` onto `ProjectTypeStore` / `TypeInfoGraphResultDb`
+> (leaving the framework-surface result cache on registry rows is NOT the final architecture)
+> AND add true singleflight for it — the current `FrameworkSurfaceStore` /
+> `FrameworkScriptCaches` have no in-flight collapse.
+
 - **Source track:** semantic-graph (R-3 + R-4).
 - **Parity docs:** child `docs/arch/native-typeinfo-parity-cache-export-session.md`
   (`U10.RESULT_DB`), under parent `docs/arch/native-typeinfo-parity.md` (§§5–6, the
@@ -3497,6 +3537,11 @@ bridge.
 
 ### U11 — Public Relation / Session Surfaces + Audit Execution
 
+> INTEGRATION NOTE (framework-adapters merged ahead of order, 2026-06-17): include
+> `GRAPH_OPERATION_FRAMEWORK_SURFACES` in this block's schema-version negotiation / downlevel
+> policy — the merged framework-surface operation rides the same envelope and must negotiate
+> the post-U8 schema like every other typeinfo operation.
+
 - **Source track:** semantic-graph (R-6 + R-5).
 - **Parity docs:** child `docs/arch/native-typeinfo-parity-cache-export-session.md`
   (`U11.PUBLIC_RELATION_SESSION`), under parent `docs/arch/native-typeinfo-parity.md`
@@ -3553,6 +3598,13 @@ bridge.
 ---
 
 ### U12 — TypeInfo Graph Exporter
+
+> INTEGRATION NOTE (framework-adapters merged ahead of order, 2026-06-17): this block no
+> longer BUILDS the exporter from scratch for framework surfaces — it FOLDS/REPLACES the
+> merged old-shape `typeinfo/framework_surface/graph_export.rs` as the thin zero-dispatch
+> projection exporter emitting the post-U8 `TypeInfoGraphPayload` carrier (the provisional
+> embedded-`SemanticTypeGraph` producer landed ahead of order and must be cut over, not
+> dual-pathed).
 
 - **Source track:** semantic-graph (R-2 + R-7).
 - **Parity docs:** child `docs/arch/native-typeinfo-parity-cache-export-session.md`
@@ -3625,6 +3677,10 @@ bridge.
 
 ### U13 — Published Projection (GraphTypeNode + TS TypeDescriptor)
 
+> INTEGRATION NOTE (framework-adapters merged ahead of order, 2026-06-17): the TS / public
+> projection MUST consume framework surfaces via the post-U8 `TypeInfoGraphPayload`, NOT the
+> current embedded `SemanticTypeGraph` shape the merged producer emits provisionally.
+
 - **Source track:** semantic-graph (R-9 + R-10).
 - **Parity docs:** child `docs/arch/native-typeinfo-parity-cache-export-session.md`
   (`U13.PROJECTION`), under parent `docs/arch/native-typeinfo-parity.md` (§1, §8, the
@@ -3674,6 +3730,13 @@ bridge.
 
 ### U14 — Vue Framework Adapter Rebuild
 
+> INTEGRATION NOTE (framework-adapters merged ahead of order, 2026-06-17): the
+> `FrameworkAdapterRegistry` + thin plan/normalize adapter shape ALREADY LANDED, so this
+> block is no longer "build the registry/surface adapter" — it RE-WIRES the merged
+> `FrameworkAdapterRegistry` / adapters onto the U11/U13 public session + projection
+> surfaces. Preserve U14's 4 Vue mismatch-case regression tests as the acceptance bar; the
+> re-wire must NOT rebuild macro meaning (no parallel surface/expander in the adapter).
+
 - **Source track:** semantic-graph / component-meta (R-11).
 - **Parity docs:** child `docs/arch/native-typeinfo-parity-adapters-final-lift.md`
   (owns U14 / U15 — framework adapters, integrations, final lift), under parent
@@ -3700,6 +3763,12 @@ bridge.
 ---
 
 ### U15 — Integrations, Ignored-Test Lift, Bench Schema
+
+> INTEGRATION NOTE (framework-adapters merged ahead of order, 2026-06-17): the final-lift
+> checklist must additionally REQUIRE: zero provisional pre-U8 framework wire remaining; no
+> old-shape `graph_export` producer left; consolidated framework-surface cache ownership (on
+> `ProjectTypeStore`, per U10); true singleflight in place; and BOTH Vue and Svelte
+> registered on the final graph path.
 
 - **Source track:** MERGED terminal (semantic-graph Phases 6/7/8 + cache-runtime
   B12).
@@ -3966,6 +4035,19 @@ NEW failing name on a block tip is a real regression.
   field's binding/eval type takes precedence and ignores the available raised
   `resolved_field.type_expr` even when binding/eval yields `Unknown { raw }` —
   the surface-raised type should backstop an unknown literal-side type.
+
+**Framework-adapters merge debt (merged ahead of order, 2026-06-17).** The
+`feat/framework-adapters-clean` merge (`9e10f2324`) landed U8/U12/U14-shaped
+substrate (typeinfo framework-surface wire + producer + `FrameworkAdapterRegistry`
+/ thin adapters, Vue + Svelte) AHEAD of the hard gate `S5.B11/B12 → U8`, over the
+still-live `VueMacroElements` / `type_surface` sidecar. The provisional pieces are
+enumerated in the per-block `INTEGRATION NOTE`s above (§3.1.1, U2, U3, U6, U8, U10,
+U11, U12, U13, U14, U15): the provisional pre-U8 `FrameworkSurfacePayload` /
+embedded-`SemanticTypeGraph` wire, the old-shape `graph_export.rs` producer, the
+off-`ProjectTypeStore` `FrameworkSurfaceStore` cache, and the missing true
+singleflight are tracked to U8/U10/U12. Engine-compatible (the merge routes through
+the one shared resolver); the re-base obligations are owned by the named blocks, not
+a new block.
 
 ---
 
