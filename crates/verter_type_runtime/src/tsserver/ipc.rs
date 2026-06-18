@@ -106,92 +106,95 @@ impl TsserverTransport {
         command: &str,
         arguments: serde_json::Value,
     ) -> Result<serde_json::Value, TypeProviderError> {
-        let _trace = crate::type_runtime_trace_scope!(
+        crate::type_runtime_trace_scope_async!(
             "tsserver_transport_request",
             format!(
                 "command={} {}",
                 command,
                 summarize_tsserver_args(&arguments),
             ),
-        );
-        let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
+            async {
+                let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
 
-        let msg = serde_json::json!({
-            "seq": seq,
-            "type": "request",
-            "command": command,
-            "arguments": arguments,
-        });
-        let body = serde_json::to_string(&msg)
-            .map_err(|e| TypeProviderError::new(format!("serialize error: {e}")))?;
+                let msg = serde_json::json!({
+                    "seq": seq,
+                    "type": "request",
+                    "command": command,
+                    "arguments": arguments,
+                });
+                let body = serde_json::to_string(&msg)
+                    .map_err(|e| TypeProviderError::new(format!("serialize error: {e}")))?;
 
-        let (tx, rx) = oneshot::channel();
-        self.pending.lock().await.insert(seq, tx);
+                let (tx, rx) = oneshot::channel();
+                self.pending.lock().await.insert(seq, tx);
 
-        // tsserver uses newline-delimited JSON (no Content-Length framing)
-        let frame = format!("{body}\n");
-        self.stdin_tx
-            .send(TsserverStdinMessage::Frame(frame.into_bytes()))
-            .await
-            .map_err(|_| TypeProviderError::new("stdin writer closed"))?;
+                // tsserver uses newline-delimited JSON (no Content-Length framing)
+                let frame = format!("{body}\n");
+                self.stdin_tx
+                    .send(TsserverStdinMessage::Frame(frame.into_bytes()))
+                    .await
+                    .map_err(|_| TypeProviderError::new("stdin writer closed"))?;
 
-        let result = tokio::time::timeout(std::time::Duration::from_secs(10), rx).await;
-        match result {
-            Ok(Ok(val)) => {
-                // Check for tsserver error
-                if let Some(false) = val.get("success").and_then(|v| v.as_bool()) {
-                    let msg = val
-                        .get("message")
-                        .and_then(|m| m.as_str())
-                        .unwrap_or("unknown error");
-                    crate::type_runtime_trace_event!(
-                        "tsserver_transport_request_error",
-                        format!("command={} seq={} message={}", command, seq, msg),
-                    );
-                    return Err(TypeProviderError::new(msg));
+                let result = tokio::time::timeout(std::time::Duration::from_secs(10), rx).await;
+                match result {
+                    Ok(Ok(val)) => {
+                        // Check for tsserver error
+                        if let Some(false) = val.get("success").and_then(|v| v.as_bool()) {
+                            let msg = val
+                                .get("message")
+                                .and_then(|m| m.as_str())
+                                .unwrap_or("unknown error");
+                            crate::type_runtime_trace_event!(
+                                "tsserver_transport_request_error",
+                                format!("command={} seq={} message={}", command, seq, msg),
+                            );
+                            return Err(TypeProviderError::new(msg));
+                        }
+                        crate::type_runtime_trace_event!(
+                            "tsserver_transport_request_result",
+                            format!(
+                                "command={} seq={} body_kind={}",
+                                command,
+                                seq,
+                                val.get("body")
+                                    .map(|body| match body {
+                                        serde_json::Value::Null => "null",
+                                        serde_json::Value::Array(_) => "array",
+                                        serde_json::Value::Object(_) => "object",
+                                        serde_json::Value::String(_) => "string",
+                                        serde_json::Value::Bool(_) => "bool",
+                                        serde_json::Value::Number(_) => "number",
+                                    })
+                                    .unwrap_or("missing"),
+                            ),
+                        );
+                        Ok(val.get("body").cloned().unwrap_or(serde_json::Value::Null))
+                    }
+                    Ok(Err(_)) => {
+                        crate::type_runtime_trace_event!(
+                            "tsserver_transport_request_error",
+                            format!(
+                                "command={} seq={} message=response channel closed",
+                                command, seq
+                            ),
+                        );
+                        Err(TypeProviderError::new("response channel closed"))
+                    }
+                    Err(_) => {
+                        // Timeout — clean up the pending entry to prevent leak
+                        self.pending.lock().await.remove(&seq);
+                        crate::type_runtime_trace_event!(
+                            "tsserver_transport_request_error",
+                            format!("command={} seq={} message=timeout", command, seq),
+                        );
+                        Err(TypeProviderError::new(format!(
+                            "request '{command}' timed out after 10s"
+                        )))
+                    }
                 }
-                crate::type_runtime_trace_event!(
-                    "tsserver_transport_request_result",
-                    format!(
-                        "command={} seq={} body_kind={}",
-                        command,
-                        seq,
-                        val.get("body")
-                            .map(|body| match body {
-                                serde_json::Value::Null => "null",
-                                serde_json::Value::Array(_) => "array",
-                                serde_json::Value::Object(_) => "object",
-                                serde_json::Value::String(_) => "string",
-                                serde_json::Value::Bool(_) => "bool",
-                                serde_json::Value::Number(_) => "number",
-                            })
-                            .unwrap_or("missing"),
-                    ),
-                );
-                Ok(val.get("body").cloned().unwrap_or(serde_json::Value::Null))
             }
-            Ok(Err(_)) => {
-                crate::type_runtime_trace_event!(
-                    "tsserver_transport_request_error",
-                    format!(
-                        "command={} seq={} message=response channel closed",
-                        command, seq
-                    ),
-                );
-                Err(TypeProviderError::new("response channel closed"))
-            }
-            Err(_) => {
-                // Timeout — clean up the pending entry to prevent leak
-                self.pending.lock().await.remove(&seq);
-                crate::type_runtime_trace_event!(
-                    "tsserver_transport_request_error",
-                    format!("command={} seq={} message=timeout", command, seq),
-                );
-                Err(TypeProviderError::new(format!(
-                    "request '{command}' timed out after 10s"
-                )))
-            }
-        }
+        )
+        .await
     }
 
     /// Send a tsserver command without waiting for a response.
@@ -200,36 +203,39 @@ impl TsserverTransport {
         command: &str,
         arguments: serde_json::Value,
     ) -> Result<(), TypeProviderError> {
-        let _trace = crate::type_runtime_trace_scope!(
+        crate::type_runtime_trace_scope_async!(
             "tsserver_transport_command",
             format!(
                 "command={} {}",
                 command,
                 summarize_tsserver_args(&arguments),
             ),
-        );
-        let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
+            async {
+                let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
 
-        let msg = serde_json::json!({
-            "seq": seq,
-            "type": "request",
-            "command": command,
-            "arguments": arguments,
-        });
-        let body = serde_json::to_string(&msg)
-            .map_err(|e| TypeProviderError::new(format!("serialize error: {e}")))?;
+                let msg = serde_json::json!({
+                    "seq": seq,
+                    "type": "request",
+                    "command": command,
+                    "arguments": arguments,
+                });
+                let body = serde_json::to_string(&msg)
+                    .map_err(|e| TypeProviderError::new(format!("serialize error: {e}")))?;
 
-        let frame = format!("{body}\n");
-        self.stdin_tx
-            .send(TsserverStdinMessage::Frame(frame.into_bytes()))
-            .await
-            .map_err(|_| TypeProviderError::new("stdin writer closed"))?;
+                let frame = format!("{body}\n");
+                self.stdin_tx
+                    .send(TsserverStdinMessage::Frame(frame.into_bytes()))
+                    .await
+                    .map_err(|_| TypeProviderError::new("stdin writer closed"))?;
 
-        crate::type_runtime_trace_event!(
-            "tsserver_transport_command_result",
-            format!("command={} seq={} queued=true", command, seq),
-        );
-        Ok(())
+                crate::type_runtime_trace_event!(
+                    "tsserver_transport_command_result",
+                    format!("command={} seq={} queued=true", command, seq),
+                );
+                Ok(())
+            }
+        )
+        .await
     }
 }
 
@@ -738,7 +744,7 @@ impl TypeProvider for TsserverTypeProvider {
         let opened_files = Arc::clone(&self.opened_files);
         let project_root = self.project_root_for(&file);
         Box::pin(async move {
-            let _trace = crate::type_runtime_trace_scope!(
+            crate::type_runtime_trace_scope_async!(
                 "tsserver_open_file",
                 format!(
                     "file={} content_len={} project_root={}",
@@ -746,33 +752,36 @@ impl TypeProvider for TsserverTypeProvider {
                     content.len(),
                     project_root,
                 ),
-            );
-            contents_cache
-                .lock()
-                .await
-                .insert(file.clone(), content.clone());
-            opened_files.lock().await.insert(file.clone());
-            // tsserver `open` command doesn't return a response.
-            // projectRootPath tells tsserver where to find tsconfig.json.
-            transport
-                .command_no_response(
-                    "open",
-                    serde_json::json!({
-                        "file": file,
-                        "fileContent": content,
-                        "scriptKindName": if file.ends_with(".tsx") { "TSX" }
-                            else if file.ends_with(".jsx") { "JSX" }
-                            else if file.ends_with(".js") { "JS" }
-                            else { "TS" },
-                        "projectRootPath": project_root,
-                    }),
-                )
-                .await?;
-            crate::type_runtime_trace_event!(
-                "tsserver_open_file_result",
-                format!("file={} opened=true", file),
-            );
-            Ok(())
+                async {
+                    contents_cache
+                        .lock()
+                        .await
+                        .insert(file.clone(), content.clone());
+                    opened_files.lock().await.insert(file.clone());
+                    // tsserver `open` command doesn't return a response.
+                    // projectRootPath tells tsserver where to find tsconfig.json.
+                    transport
+                        .command_no_response(
+                            "open",
+                            serde_json::json!({
+                                "file": file,
+                                "fileContent": content,
+                                "scriptKindName": if file.ends_with(".tsx") { "TSX" }
+                                    else if file.ends_with(".jsx") { "JSX" }
+                                    else if file.ends_with(".js") { "JS" }
+                                    else { "TS" },
+                                "projectRootPath": project_root,
+                            }),
+                        )
+                        .await?;
+                    crate::type_runtime_trace_event!(
+                        "tsserver_open_file_result",
+                        format!("file={} opened=true", file),
+                    );
+                    Ok(())
+                }
+            )
+            .await
         })
     }
 
@@ -787,16 +796,19 @@ impl TypeProvider for TsserverTypeProvider {
         let content = content.to_string();
         let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
-            let _trace = crate::type_runtime_trace_scope!(
+            crate::type_runtime_trace_scope_async!(
                 "tsserver_load_file",
                 format!("file={} content_len={}", file, content.len()),
-            );
-            contents_cache.lock().await.insert(file, content);
-            crate::type_runtime_trace_event!(
-                "tsserver_load_file_result",
-                "cached_only=true".to_string()
-            );
-            Ok(())
+                async {
+                    contents_cache.lock().await.insert(file, content);
+                    crate::type_runtime_trace_event!(
+                        "tsserver_load_file_result",
+                        "cached_only=true".to_string()
+                    );
+                    Ok(())
+                }
+            )
+            .await
         })
     }
 
@@ -808,7 +820,7 @@ impl TypeProvider for TsserverTypeProvider {
         let opened_files = Arc::clone(&self.opened_files);
         let project_root = self.project_root_for(&file);
         Box::pin(async move {
-            let _trace = crate::type_runtime_trace_scope!(
+            crate::type_runtime_trace_scope_async!(
                 "tsserver_update_file",
                 format!(
                     "file={} content_len={} project_root={}",
@@ -816,58 +828,90 @@ impl TypeProvider for TsserverTypeProvider {
                     content.len(),
                     project_root,
                 ),
-            );
-            // Read old content's line count BEFORE inserting new content.
-            // tsserver validates the end line against the old file's line map,
-            // so we must use the actual old line count (not a hardcoded sentinel).
-            let old_line_count = {
-                let cache = contents_cache.lock().await;
-                cache.get(&file).map(|c| c.lines().count() as u32 + 1)
-            };
+                async {
+                    // Read old content's line count BEFORE inserting new content.
+                    // tsserver validates the end line against the old file's line map,
+                    // so we must use the actual old line count (not a hardcoded sentinel).
+                    let old_line_count = {
+                        let cache = contents_cache.lock().await;
+                        cache.get(&file).map(|c| c.lines().count() as u32 + 1)
+                    };
 
-            contents_cache
-                .lock()
-                .await
-                .insert(file.clone(), content.clone());
+                    contents_cache
+                        .lock()
+                        .await
+                        .insert(file.clone(), content.clone());
 
-            let mut opened = opened_files.lock().await;
-            if opened.contains(&file) {
-                drop(opened);
-                if let Some(end_line) = old_line_count {
-                    tracing::debug!(
-                        "tsserver update_file: updateOpen for {file} (end_line={end_line})"
-                    );
-                    // Use updateOpen with textChanges spanning the old content
-                    transport
-                        .command_no_response(
-                            "updateOpen",
-                            serde_json::json!({
-                                "changedFiles": [{
-                                    "fileName": file,
-                                    "textChanges": [{
-                                        "start": { "line": 1, "offset": 1 },
-                                        "end": { "line": end_line, "offset": 1 },
-                                        "newText": content,
-                                    }]
-                                }]
-                            }),
-                        )
-                        .await?;
-                    crate::type_runtime_trace_event!(
-                        "tsserver_update_file_result",
-                        format!("file={} mode=update_open old_line_count={}", file, end_line),
-                    );
-                    Ok(())
-                } else {
-                    // No old content in cache (shouldn't happen since opened_files
-                    // is only set when content was sent) — close and reopen
-                    tracing::warn!("tsserver update_file: no cached content for open file {file}, closing and reopening");
-                    transport
-                        .command_no_response(
-                            "updateOpen",
-                            serde_json::json!({
-                                "closedFiles": [&file],
-                                "openFiles": [{
+                    let mut opened = opened_files.lock().await;
+                    if opened.contains(&file) {
+                        drop(opened);
+                        if let Some(end_line) = old_line_count {
+                            tracing::debug!(
+                                "tsserver update_file: updateOpen for {file} (end_line={end_line})"
+                            );
+                            // Use updateOpen with textChanges spanning the old content
+                            transport
+                                .command_no_response(
+                                    "updateOpen",
+                                    serde_json::json!({
+                                        "changedFiles": [{
+                                            "fileName": file,
+                                            "textChanges": [{
+                                                "start": { "line": 1, "offset": 1 },
+                                                "end": { "line": end_line, "offset": 1 },
+                                                "newText": content,
+                                            }]
+                                        }]
+                                    }),
+                                )
+                                .await?;
+                            crate::type_runtime_trace_event!(
+                                "tsserver_update_file_result",
+                                format!(
+                                    "file={} mode=update_open old_line_count={}",
+                                    file, end_line
+                                ),
+                            );
+                            Ok(())
+                        } else {
+                            // No old content in cache (shouldn't happen since opened_files
+                            // is only set when content was sent) — close and reopen
+                            tracing::warn!("tsserver update_file: no cached content for open file {file}, closing and reopening");
+                            transport
+                                .command_no_response(
+                                    "updateOpen",
+                                    serde_json::json!({
+                                        "closedFiles": [&file],
+                                        "openFiles": [{
+                                            "file": file,
+                                            "fileContent": content,
+                                            "scriptKindName": if file.ends_with(".tsx") { "TSX" }
+                                                else if file.ends_with(".jsx") { "JSX" }
+                                                else if file.ends_with(".js") { "JS" }
+                                                else { "TS" },
+                                            "projectRootPath": project_root,
+                                        }]
+                                    }),
+                                )
+                                .await?;
+                            crate::type_runtime_trace_event!(
+                                "tsserver_update_file_result",
+                                format!("file={} mode=reopen_after_cache_miss", file),
+                            );
+                            Ok(())
+                        }
+                    } else {
+                        // File not open yet — open it and track
+                        opened.insert(file.clone());
+                        drop(opened);
+                        tracing::info!(
+                            "tsserver update_file: first open for {file} ({} bytes)",
+                            content.len()
+                        );
+                        transport
+                            .command_no_response(
+                                "open",
+                                serde_json::json!({
                                     "file": file,
                                     "fileContent": content,
                                     "scriptKindName": if file.ends_with(".tsx") { "TSX" }
@@ -875,44 +919,18 @@ impl TypeProvider for TsserverTypeProvider {
                                         else if file.ends_with(".js") { "JS" }
                                         else { "TS" },
                                     "projectRootPath": project_root,
-                                }]
-                            }),
-                        )
-                        .await?;
-                    crate::type_runtime_trace_event!(
-                        "tsserver_update_file_result",
-                        format!("file={} mode=reopen_after_cache_miss", file),
-                    );
-                    Ok(())
+                                }),
+                            )
+                            .await?;
+                        crate::type_runtime_trace_event!(
+                            "tsserver_update_file_result",
+                            format!("file={} mode=first_open", file),
+                        );
+                        Ok(())
+                    }
                 }
-            } else {
-                // File not open yet — open it and track
-                opened.insert(file.clone());
-                drop(opened);
-                tracing::info!(
-                    "tsserver update_file: first open for {file} ({} bytes)",
-                    content.len()
-                );
-                transport
-                    .command_no_response(
-                        "open",
-                        serde_json::json!({
-                            "file": file,
-                            "fileContent": content,
-                            "scriptKindName": if file.ends_with(".tsx") { "TSX" }
-                                else if file.ends_with(".jsx") { "JSX" }
-                                else if file.ends_with(".js") { "JS" }
-                                else { "TS" },
-                            "projectRootPath": project_root,
-                        }),
-                    )
-                    .await?;
-                crate::type_runtime_trace_event!(
-                    "tsserver_update_file_result",
-                    format!("file={} mode=first_open", file),
-                );
-                Ok(())
-            }
+            )
+            .await
         })
     }
 
@@ -922,18 +940,23 @@ impl TypeProvider for TsserverTypeProvider {
         let contents_cache = Arc::clone(&self.contents);
         let opened_files = Arc::clone(&self.opened_files);
         Box::pin(async move {
-            let _trace =
-                crate::type_runtime_trace_scope!("tsserver_close_file", format!("file={}", file));
-            contents_cache.lock().await.remove(&file);
-            opened_files.lock().await.remove(&file);
-            transport
-                .command_no_response("close", serde_json::json!({ "file": file }))
-                .await?;
-            crate::type_runtime_trace_event!(
-                "tsserver_close_file_result",
-                "closed=true".to_string()
-            );
-            Ok(())
+            crate::type_runtime_trace_scope_async!(
+                "tsserver_close_file",
+                format!("file={}", file),
+                async {
+                    contents_cache.lock().await.remove(&file);
+                    opened_files.lock().await.remove(&file);
+                    transport
+                        .command_no_response("close", serde_json::json!({ "file": file }))
+                        .await?;
+                    crate::type_runtime_trace_event!(
+                        "tsserver_close_file_result",
+                        "closed=true".to_string()
+                    );
+                    Ok(())
+                }
+            )
+            .await
         })
     }
 
@@ -1008,79 +1031,81 @@ impl TypeProvider for TsserverTypeProvider {
                     None => (1, offset + 1, false),
                 }
             };
-            let _trace = crate::type_runtime_trace_scope!(
+            crate::type_runtime_trace_scope_async!(
                 "tsserver_get_hover",
                 format!(
                     "file={} offset={} line={} col={} content_cache_hit={}",
                     file, offset, line, col, cache_hit,
                 ),
-            );
+                async {
+                    let result = transport
+                        .request(
+                            "quickinfo",
+                            serde_json::json!({
+                                "file": file,
+                                "line": line,
+                                "offset": col,
+                            }),
+                        )
+                        .await;
 
-            let result = transport
-                .request(
-                    "quickinfo",
-                    serde_json::json!({
-                        "file": file,
-                        "line": line,
-                        "offset": col,
-                    }),
-                )
-                .await;
+                    match result {
+                        Ok(body) => {
+                            let display = body
+                                .get("displayString")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default();
+                            let docs = body
+                                .get("documentation")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default();
+                            let kind = body
+                                .get("kind")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default();
 
-            match result {
-                Ok(body) => {
-                    let display = body
-                        .get("displayString")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default();
-                    let docs = body
-                        .get("documentation")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default();
-                    let kind = body
-                        .get("kind")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default();
+                            if display.is_empty() {
+                                tracing::debug!(
+                                    "tsserver quickinfo: empty displayString for {file} at {line}:{col}"
+                                );
+                                crate::type_runtime_trace_event!(
+                                    "tsserver_get_hover_result",
+                                    format!("file={} empty_display=true", file),
+                                );
+                                return Ok(None);
+                            }
 
-                    if display.is_empty() {
-                        tracing::debug!(
-                            "tsserver quickinfo: empty displayString for {file} at {line}:{col}"
-                        );
-                        crate::type_runtime_trace_event!(
-                            "tsserver_get_hover_result",
-                            format!("file={} empty_display=true", file),
-                        );
-                        return Ok(None);
+                            let contents = format_quickinfo_hover(kind, display, docs);
+                            crate::type_runtime_trace_event!(
+                                "tsserver_get_hover_result",
+                                format!(
+                                    "file={} empty_display=false kind={} display_len={} docs_len={} preview={}",
+                                    file,
+                                    kind,
+                                    display.len(),
+                                    docs.len(),
+                                    trace_preview(&contents, 120),
+                                ),
+                            );
+
+                            Ok(Some(HoverInfo {
+                                contents,
+                                range_start: None,
+                                range_end: None,
+                            }))
+                        }
+                        Err(e) => {
+                            tracing::warn!("tsserver quickinfo error for {file}: {e}");
+                            crate::type_runtime_trace_event!(
+                                "tsserver_get_hover_result",
+                                format!("file={} error={}", file, e),
+                            );
+                            Ok(None)
+                        }
                     }
-
-                    let contents = format_quickinfo_hover(kind, display, docs);
-                    crate::type_runtime_trace_event!(
-                        "tsserver_get_hover_result",
-                        format!(
-                            "file={} empty_display=false kind={} display_len={} docs_len={} preview={}",
-                            file,
-                            kind,
-                            display.len(),
-                            docs.len(),
-                            trace_preview(&contents, 120),
-                        ),
-                    );
-
-                    Ok(Some(HoverInfo {
-                        contents,
-                        range_start: None,
-                        range_end: None,
-                    }))
                 }
-                Err(e) => {
-                    tracing::warn!("tsserver quickinfo error for {file}: {e}");
-                    crate::type_runtime_trace_event!(
-                        "tsserver_get_hover_result",
-                        format!("file={} error={}", file, e),
-                    );
-                    Ok(None)
-                }
-            }
+            )
+            .await
         })
     }
 
@@ -1105,7 +1130,7 @@ impl TypeProvider for TsserverTypeProvider {
                     None => (1, offset + 1),
                 }
             };
-            let _trace = crate::type_runtime_trace_scope!(
+            crate::type_runtime_trace_scope_async!(
                 "tsserver_get_completion_details",
                 format!(
                     "file={} offset={} line={} col={} item_count={}",
@@ -1115,60 +1140,66 @@ impl TypeProvider for TsserverTypeProvider {
                     col,
                     items.len(),
                 ),
-            );
-
-            let entry_names: Vec<_> = items
-                .iter()
-                .map(build_completion_entry_details_request)
-                .collect();
-            let result = transport
-                .request(
-                    "completionEntryDetails",
-                    serde_json::json!({
-                        "file": file,
-                        "line": line,
-                        "offset": col,
-                        "entryNames": entry_names,
-                    }),
-                )
-                .await;
-
-            match result {
-                Ok(body) => {
-                    let detail_map: HashMap<String, &serde_json::Value> = body
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .filter_map(|detail| {
-                            detail
-                                .get("name")
-                                .and_then(|value| value.as_str())
-                                .map(|name| (name.to_string(), detail))
-                        })
-                        .collect();
-                    let enriched = items
+                async {
+                    let entry_names: Vec<_> = items
                         .iter()
-                        .map(|item| {
-                            detail_map
-                                .get(&item.label)
-                                .map(|detail| enrich_tsserver_completion(item, detail))
-                                .unwrap_or_else(|| item.clone())
-                        })
-                        .collect::<Vec<_>>();
-                    crate::type_runtime_trace_event!(
-                        "tsserver_get_completion_details_result",
-                        format!("file={} item_count={} enriched=true", file, enriched.len()),
-                    );
-                    Ok(enriched)
+                        .map(build_completion_entry_details_request)
+                        .collect();
+                    let result = transport
+                        .request(
+                            "completionEntryDetails",
+                            serde_json::json!({
+                                "file": file,
+                                "line": line,
+                                "offset": col,
+                                "entryNames": entry_names,
+                            }),
+                        )
+                        .await;
+
+                    match result {
+                        Ok(body) => {
+                            let detail_map: HashMap<String, &serde_json::Value> = body
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .filter_map(|detail| {
+                                    detail
+                                        .get("name")
+                                        .and_then(|value| value.as_str())
+                                        .map(|name| (name.to_string(), detail))
+                                })
+                                .collect();
+                            let enriched = items
+                                .iter()
+                                .map(|item| {
+                                    detail_map
+                                        .get(&item.label)
+                                        .map(|detail| enrich_tsserver_completion(item, detail))
+                                        .unwrap_or_else(|| item.clone())
+                                })
+                                .collect::<Vec<_>>();
+                            crate::type_runtime_trace_event!(
+                                "tsserver_get_completion_details_result",
+                                format!(
+                                    "file={} item_count={} enriched=true",
+                                    file,
+                                    enriched.len()
+                                ),
+                            );
+                            Ok(enriched)
+                        }
+                        Err(error) => {
+                            crate::type_runtime_trace_event!(
+                                "tsserver_get_completion_details_result",
+                                format!("file={} item_count={} error={}", file, items.len(), error),
+                            );
+                            Ok(items.to_vec())
+                        }
+                    }
                 }
-                Err(error) => {
-                    crate::type_runtime_trace_event!(
-                        "tsserver_get_completion_details_result",
-                        format!("file={} item_count={} error={}", file, items.len(), error),
-                    );
-                    Ok(items.to_vec())
-                }
-            }
+            )
+            .await
         })
     }
 

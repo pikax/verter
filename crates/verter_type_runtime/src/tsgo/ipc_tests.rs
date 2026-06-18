@@ -30,6 +30,64 @@ fn test_transport_with_pending(
     }
 }
 
+/// RAII guard that forces the type-runtime trace ON (routed to a throwaway
+/// temp file) for the duration of a test, restoring the prior environment on
+/// drop. Used by the concurrency regression so the span-stack path is actually
+/// exercised — with tracing off the test would pass without touching the fix.
+///
+/// Holds the crate-wide trace-env mutex so it serializes against the `trace.rs`
+/// tests that flip the same global `VERTER_*` variables; without that, a
+/// parallel env-test would observe this test's forced-on state and fail.
+struct ForcedTraceEnv {
+    _env_guard: std::sync::MutexGuard<'static, ()>,
+    prev_enabled: Option<std::ffi::OsString>,
+    prev_path: Option<std::ffi::OsString>,
+    path: std::path::PathBuf,
+}
+
+impl ForcedTraceEnv {
+    fn enable() -> Self {
+        let env_guard = crate::trace::test_trace_env_guard();
+        let prev_enabled = std::env::var_os("VERTER_TYPE_RUNTIME_TRACE");
+        let prev_path = std::env::var_os("VERTER_TYPE_RUNTIME_TRACE_PATH");
+        // Unique per-process+invocation so parallel tests never share a file.
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let nonce = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "verter-type-runtime-trace-concurrency-{}-{}.log",
+            std::process::id(),
+            nonce
+        ));
+        let _ = std::fs::remove_file(&path);
+        unsafe {
+            std::env::set_var("VERTER_TYPE_RUNTIME_TRACE", "1");
+            std::env::set_var("VERTER_TYPE_RUNTIME_TRACE_PATH", &path);
+        }
+        Self {
+            _env_guard: env_guard,
+            prev_enabled,
+            prev_path,
+            path,
+        }
+    }
+}
+
+impl Drop for ForcedTraceEnv {
+    fn drop(&mut self) {
+        unsafe {
+            match &self.prev_enabled {
+                Some(value) => std::env::set_var("VERTER_TYPE_RUNTIME_TRACE", value),
+                None => std::env::remove_var("VERTER_TYPE_RUNTIME_TRACE"),
+            }
+            match &self.prev_path {
+                Some(value) => std::env::set_var("VERTER_TYPE_RUNTIME_TRACE_PATH", value),
+                None => std::env::remove_var("VERTER_TYPE_RUNTIME_TRACE_PATH"),
+            }
+        }
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 /// rewrite_vue_imports_for_tsgo rewrites .vue imports to .vue.ts for type resolution
 #[test]
 fn test_rewrite_vue_imports_to_vue_ts() {
@@ -1611,21 +1669,23 @@ async fn stdin_writer_loop_exits_on_shutdown() {
 /// Regression test for Fix 1: proves the channel approach handles concurrent writes
 /// + read_loop replies without hanging.
 ///
-/// TODO(follow-up): un-ignore once the type-runtime trace span stack is made
-/// task-scoped. This test fires 10 concurrent `request_with_priority` futures on
-/// one current-thread runtime; each holds a `type_runtime_trace_scope!` guard
-/// across its `.await` points. The trace stack is a `thread_local!` LIFO
-/// (`TYPE_RUNTIME_TRACE_STACK` in `trace.rs`), so interleaved push/pop across the
-/// concurrent tasks pops a different span than the dropping guard expects and
-/// trips the `debug_assert_eq!` span-id invariant in `trace.rs` whenever tracing
-/// is active in the shared test process. The bug is in the thread-local trace
-/// stack (unsound for guards held across `.await`), not in the transport under
-/// test; the fix is to scope the trace stack per async task rather than per OS
-/// thread. Passes in isolation (tracing inactive); deterministically fails under
-/// the full crate suite.
-#[ignore = "reveals pre-existing trace-span-stack bug: thread_local LIFO is unsound for trace guards held across .await in concurrent tasks (see TODO)"]
+/// Also the discriminating regression for the per-task trace span stack: 10
+/// concurrent `request_with_priority` futures run on one current-thread runtime,
+/// each opening an await-crossing `tsgo_transport_request` trace scope held
+/// across its `.await` points. Tracing is FORCED on for the duration so the
+/// span-stack path is exercised even when this test runs alone. Under the
+/// retired thread-local LIFO, interleaved push/pop across the concurrent tasks
+/// popped a span other than the one a dropping guard expected and tripped the
+/// `debug_assert_eq!` span-id invariant; with the per-future task-local trace
+/// state each guard pops its own span, so all tasks complete without panicking.
 #[tokio::test]
 async fn concurrent_requests_with_server_requests_do_not_deadlock() {
+    // Force tracing on (with output to a throwaway temp file so we neither spam
+    // stderr nor leave artifacts), and restore the prior environment on the way
+    // out. Active tracing is what makes this test discriminate the span-stack
+    // fix instead of passing trivially with tracing inactive.
+    let _trace_env = ForcedTraceEnv::enable();
+
     // Create duplex streams to simulate child stdin/stdout
     let (client_stdout_reader, mut mock_stdout_writer) = tokio::io::duplex(64 * 1024);
     let (mock_stdin_reader, _client_stdin_writer) = tokio::io::duplex(64 * 1024);

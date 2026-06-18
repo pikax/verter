@@ -216,7 +216,7 @@ impl GeneratedQueryBackend for TypeProviderAdapter {
             let content_hash = Self::content_hash(content);
             let offset_translation =
                 OffsetTranslation::for_backend_content(&self.backend_label, &path, content);
-            let _trace = crate::type_runtime_trace_scope!(
+            crate::type_runtime_trace_scope_async!(
                 "runtime_sync_file",
                 format!(
                     "backend={} path={} profile={:?} runtime_key={} revision={} content_len={} content_hash={:016x}",
@@ -228,84 +228,90 @@ impl GeneratedQueryBackend for TypeProviderAdapter {
                     content.len(),
                     content_hash,
                 ),
-            );
-            let existing_state = {
-                let revisions = self.synced_revisions.lock().await;
-                if revisions.get(&path)
-                    == Some(&SyncedFileState {
-                        revision,
-                        content_hash,
-                        offset_translation: offset_translation.clone(),
-                    })
-                {
+                async {
+                    let existing_state = {
+                        let revisions = self.synced_revisions.lock().await;
+                        if revisions.get(&path)
+                            == Some(&SyncedFileState {
+                                revision,
+                                content_hash,
+                                offset_translation: offset_translation.clone(),
+                            })
+                        {
+                            crate::type_runtime_trace_event!(
+                                "runtime_sync_file_result",
+                                format!(
+                                    "backend={} path={} cache_hit=true provider_op=skip revision={} content_hash={:016x}",
+                                    self.backend_label, path, revision, content_hash
+                                ),
+                            );
+                            return Ok(());
+                        }
+                        revisions.get(&path).cloned()
+                    };
+
+                    let provider_op = if existing_state.is_some() {
+                        "update"
+                    } else {
+                        "open"
+                    };
+                    if existing_state.is_some() {
+                        self.provider
+                            .update_file(&path, content)
+                            .await
+                            .map_err(|e| BackendError::BackendReported(e.message))?;
+                    } else {
+                        self.provider
+                            .open_file(&path, content)
+                            .await
+                            .map_err(|e| BackendError::BackendReported(e.message))?;
+                    }
+
+                    self.synced_revisions.lock().await.insert(
+                        path.clone(),
+                        SyncedFileState {
+                            revision,
+                            content_hash,
+                            offset_translation,
+                        },
+                    );
                     crate::type_runtime_trace_event!(
                         "runtime_sync_file_result",
                         format!(
-                            "backend={} path={} cache_hit=true provider_op=skip revision={} content_hash={:016x}",
-                            self.backend_label, path, revision, content_hash
+                            "backend={} path={} cache_hit=false provider_op={} previous_state={:?} next_revision={} next_content_hash={:016x}",
+                            self.backend_label, path, provider_op, existing_state, revision, content_hash
                         ),
                     );
-                    return Ok(());
+                    Ok(())
                 }
-                revisions.get(&path).cloned()
-            };
-
-            let provider_op = if existing_state.is_some() {
-                "update"
-            } else {
-                "open"
-            };
-            if existing_state.is_some() {
-                self.provider
-                    .update_file(&path, content)
-                    .await
-                    .map_err(|e| BackendError::BackendReported(e.message))?;
-            } else {
-                self.provider
-                    .open_file(&path, content)
-                    .await
-                    .map_err(|e| BackendError::BackendReported(e.message))?;
-            }
-
-            self.synced_revisions.lock().await.insert(
-                path.clone(),
-                SyncedFileState {
-                    revision,
-                    content_hash,
-                    offset_translation,
-                },
-            );
-            crate::type_runtime_trace_event!(
-                "runtime_sync_file_result",
-                format!(
-                    "backend={} path={} cache_hit=false provider_op={} previous_state={:?} next_revision={} next_content_hash={:016x}",
-                    self.backend_label, path, provider_op, existing_state, revision, content_hash
-                ),
-            );
-            Ok(())
+            )
+            .await
         })
     }
 
     fn close_file<'a>(&'a self, file_id: &'a GeneratedFileId) -> BackendFuture<'a, ()> {
         Box::pin(async move {
             let path = Self::virtual_path(file_id);
-            let _trace = crate::type_runtime_trace_scope!(
+            crate::type_runtime_trace_scope_async!(
                 "runtime_close_file",
                 format!(
                     "backend={} path={} profile={:?} runtime_key={}",
                     self.backend_label, path, file_id.profile, file_id.runtime_key
                 ),
-            );
-            self.provider
-                .close_file(&path)
-                .await
-                .map_err(|e| BackendError::BackendReported(e.message))?;
-            self.synced_revisions.lock().await.remove(&path);
-            crate::type_runtime_trace_event!(
-                "runtime_close_file_result",
-                format!("backend={} path={}", self.backend_label, path),
-            );
-            Ok(())
+                async {
+                    self.provider
+                        .close_file(&path)
+                        .await
+                        .map_err(|e| BackendError::BackendReported(e.message))?;
+                    self.synced_revisions.lock().await.remove(&path);
+                    crate::type_runtime_trace_event!(
+                        "runtime_close_file_result",
+                        format!("backend={} path={}", self.backend_label, path),
+                    );
+                    Ok(())
+                }
+            )
+            .await
         })
     }
 
@@ -322,7 +328,7 @@ impl GeneratedQueryBackend for TypeProviderAdapter {
     ) -> BackendFuture<'a, BackendTypeData> {
         Box::pin(async move {
             let path = Self::virtual_path(file_id);
-            let _trace = crate::type_runtime_trace_scope!(
+            crate::type_runtime_trace_scope_async!(
                 "runtime_query_type_data",
                 format!(
                     "backend={} path={} profile={:?} runtime_key={} revision={} query={:?} offset={}",
@@ -334,142 +340,147 @@ impl GeneratedQueryBackend for TypeProviderAdapter {
                     query,
                     generated_offset,
                 ),
-            );
+                async {
+                    {
+                        let revisions = self.synced_revisions.lock().await;
+                        match revisions.get(&path) {
+                            Some(state) if state.revision != expected_revision => {
+                                crate::type_runtime_trace_event!(
+                                    "runtime_query_type_data_stale",
+                                    format!(
+                                        "backend={} path={} expected_revision={} synced_revision={} synced_content_hash={:016x}",
+                                        self.backend_label, path, expected_revision, state.revision, state.content_hash
+                                    ),
+                                );
+                                return Err(BackendError::ProtocolViolation(format!(
+                                    "stale query: expected revision {expected_revision}, synced {}",
+                                    state.revision
+                                )));
+                            }
+                            None => {
+                                crate::type_runtime_trace_event!(
+                                    "runtime_query_type_data_unsynced",
+                                    format!(
+                                        "backend={} path={} expected_revision={}",
+                                        self.backend_label, path, expected_revision
+                                    ),
+                                );
+                                return Err(BackendError::ProtocolViolation(
+                                    "file not synced".to_string(),
+                                ));
+                            }
+                            _ => {}
+                        }
+                    }
 
-            {
-                let revisions = self.synced_revisions.lock().await;
-                match revisions.get(&path) {
-                    Some(state) if state.revision != expected_revision => {
+                    let translated_offset = {
+                        let revisions = self.synced_revisions.lock().await;
+                        revisions
+                            .get(&path)
+                            .map(|state| state.translate_offset(generated_offset))
+                            .unwrap_or(generated_offset)
+                    };
+                    if translated_offset != generated_offset {
                         crate::type_runtime_trace_event!(
-                            "runtime_query_type_data_stale",
+                            "runtime_query_type_data_offset_translation",
                             format!(
-                                "backend={} path={} expected_revision={} synced_revision={} synced_content_hash={:016x}",
-                                self.backend_label, path, expected_revision, state.revision, state.content_hash
+                                "backend={} path={} original_offset={} translated_offset={}",
+                                self.backend_label, path, generated_offset, translated_offset
                             ),
                         );
-                        return Err(BackendError::ProtocolViolation(format!(
-                            "stale query: expected revision {expected_revision}, synced {}",
-                            state.revision
-                        )));
                     }
-                    None => {
-                        crate::type_runtime_trace_event!(
-                            "runtime_query_type_data_unsynced",
-                            format!(
-                                "backend={} path={} expected_revision={}",
-                                self.backend_label, path, expected_revision
-                            ),
-                        );
-                        return Err(BackendError::ProtocolViolation(
-                            "file not synced".to_string(),
-                        ));
-                    }
-                    _ => {}
-                }
-            }
 
-            let translated_offset = {
-                let revisions = self.synced_revisions.lock().await;
-                revisions
-                    .get(&path)
-                    .map(|state| state.translate_offset(generated_offset))
-                    .unwrap_or(generated_offset)
-            };
-            if translated_offset != generated_offset {
-                crate::type_runtime_trace_event!(
-                    "runtime_query_type_data_offset_translation",
-                    format!(
-                        "backend={} path={} original_offset={} translated_offset={}",
-                        self.backend_label, path, generated_offset, translated_offset
-                    ),
-                );
-            }
+                    match query {
+                        BackendTypeQuery::TypeAtOffset => {
+                            let hover = self
+                                .provider
+                                .get_hover(&path, translated_offset)
+                                .await
+                                .map_err(|e| BackendError::BackendReported(e.message))?;
 
-            match query {
-                BackendTypeQuery::TypeAtOffset => {
-                    let hover = self
-                        .provider
-                        .get_hover(&path, translated_offset)
-                        .await
-                        .map_err(|e| BackendError::BackendReported(e.message))?;
+                            match hover {
+                                Some(info) => {
+                                    crate::type_runtime_trace_event!(
+                                        "runtime_query_type_data_hover",
+                                        format!(
+                                            "backend={} path={} has_hover=true text_len={} preview={}",
+                                            self.backend_label,
+                                            path,
+                                            info.contents.len(),
+                                            trace_preview(&info.contents, 120),
+                                        ),
+                                    );
+                                    Ok(BackendTypeData {
+                                        type_text: Some(info.contents),
+                                        members: vec![],
+                                        documentation: None,
+                                        completeness: BackendTypeCompleteness::Exact,
+                                    })
+                                }
+                                None => {
+                                    crate::type_runtime_trace_event!(
+                                        "runtime_query_type_data_hover",
+                                        format!(
+                                            "backend={} path={} has_hover=false",
+                                            self.backend_label, path
+                                        ),
+                                    );
+                                    Ok(BackendTypeData::default())
+                                }
+                            }
+                        }
+                        BackendTypeQuery::DefinitionTypeAtOffset => {
+                            self.query_definition_type_at_offset(&path, translated_offset)
+                                .await
+                        }
+                        BackendTypeQuery::MembersAtOffset => {
+                            self.query_members_at_offset(&path, translated_offset).await
+                        }
+                        BackendTypeQuery::DocumentationAtOffset => {
+                            let hover = self
+                                .provider
+                                .get_hover(&path, translated_offset)
+                                .await
+                                .map_err(|e| BackendError::BackendReported(e.message))?;
 
-                    match hover {
-                        Some(info) => {
                             crate::type_runtime_trace_event!(
                                 "runtime_query_type_data_hover",
                                 format!(
-                                    "backend={} path={} has_hover=true text_len={} preview={}",
+                                    "backend={} path={} has_hover={} documentation_len={}",
                                     self.backend_label,
                                     path,
-                                    info.contents.len(),
-                                    trace_preview(&info.contents, 120),
+                                    hover.is_some(),
+                                    hover.as_ref().map(|item| item.contents.len()).unwrap_or(0),
                                 ),
                             );
+
                             Ok(BackendTypeData {
-                                type_text: Some(info.contents),
+                                type_text: None,
                                 members: vec![],
-                                documentation: None,
+                                documentation: hover.map(|h| h.contents),
                                 completeness: BackendTypeCompleteness::Exact,
                             })
                         }
-                        None => {
-                            crate::type_runtime_trace_event!(
-                                "runtime_query_type_data_hover",
-                                format!(
-                                    "backend={} path={} has_hover=false",
-                                    self.backend_label, path
-                                ),
-                            );
-                            Ok(BackendTypeData::default())
-                        }
                     }
                 }
-                BackendTypeQuery::DefinitionTypeAtOffset => {
-                    self.query_definition_type_at_offset(&path, translated_offset)
-                        .await
-                }
-                BackendTypeQuery::MembersAtOffset => {
-                    self.query_members_at_offset(&path, translated_offset).await
-                }
-                BackendTypeQuery::DocumentationAtOffset => {
-                    let hover = self
-                        .provider
-                        .get_hover(&path, translated_offset)
-                        .await
-                        .map_err(|e| BackendError::BackendReported(e.message))?;
-
-                    crate::type_runtime_trace_event!(
-                        "runtime_query_type_data_hover",
-                        format!(
-                            "backend={} path={} has_hover={} documentation_len={}",
-                            self.backend_label,
-                            path,
-                            hover.is_some(),
-                            hover.as_ref().map(|item| item.contents.len()).unwrap_or(0),
-                        ),
-                    );
-
-                    Ok(BackendTypeData {
-                        type_text: None,
-                        members: vec![],
-                        documentation: hover.map(|h| h.contents),
-                        completeness: BackendTypeCompleteness::Exact,
-                    })
-                }
-            }
+            )
+            .await
         })
     }
 
     fn shutdown(&self) -> BackendFuture<'_, ()> {
         Box::pin(async move {
-            let _trace = crate::type_runtime_trace_scope!(
+            crate::type_runtime_trace_scope_async!(
                 "runtime_backend_shutdown",
                 format!("backend={}", self.backend_label),
-            );
-            self.provider
-                .shutdown()
-                .await
-                .map_err(|e| BackendError::BackendReported(e.message))
+                async {
+                    self.provider
+                        .shutdown()
+                        .await
+                        .map_err(|e| BackendError::BackendReported(e.message))
+                }
+            )
+            .await
         })
     }
 }

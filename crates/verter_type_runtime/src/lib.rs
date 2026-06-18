@@ -50,9 +50,10 @@ pub use discovery::{detect_ts_major_version, find_node, find_tsserver};
 pub use protocol::*;
 pub use provider_adapter::TypeProviderAdapter;
 pub use trace::{
-    format_type_runtime_trace_line, type_runtime_trace_enabled, type_runtime_trace_event,
-    type_runtime_trace_scope, with_type_runtime_trace_context, TypeRuntimeTraceContext,
-    TypeRuntimeTraceEvent,
+    current_type_runtime_trace_context, format_type_runtime_trace_line, type_runtime_trace_enabled,
+    type_runtime_trace_event, type_runtime_trace_scope, type_runtime_trace_scope_async,
+    with_type_runtime_trace_context, with_type_runtime_trace_context_async,
+    TypeRuntimeTraceContext, TypeRuntimeTraceEvent,
 };
 pub use traits::{ProviderFuture, ProviderPriority, TypeProvider};
 pub use uri::{

@@ -315,7 +315,7 @@ impl LspTransport {
         timeout_secs: u64,
         priority: ProviderPriority,
     ) -> Result<serde_json::Value, TypeProviderError> {
-        let _trace = crate::type_runtime_trace_scope!(
+        crate::type_runtime_trace_scope_async!(
             "tsgo_transport_request",
             format!(
                 "method={} priority={:?} {}",
@@ -323,98 +323,102 @@ impl LspTransport {
                 priority,
                 summarize_lsp_params(&params),
             ),
-        );
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+            async {
+                let id = self.next_id.fetch_add(1, Ordering::Relaxed);
 
-        let msg = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "method": method,
-            "params": params,
-        });
-        let body = serde_json::to_string(&msg)
-            .map_err(|e| TypeProviderError::new(format!("serialize error: {e}")))?;
+                let msg = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "method": method,
+                    "params": params,
+                });
+                let body = serde_json::to_string(&msg)
+                    .map_err(|e| TypeProviderError::new(format!("serialize error: {e}")))?;
 
-        let (tx, rx) = oneshot::channel();
-        self.pending.lock().await.insert(id, tx);
+                let (tx, rx) = oneshot::channel();
+                self.pending.lock().await.insert(id, tx);
 
-        let frame = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
-        self.tx_for_priority(priority)
-            .send(StdinMessage::Frame(frame.into_bytes()))
-            .await
-            .map_err(|_| TypeProviderError::new("stdin writer closed"))?;
+                let frame = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
+                self.tx_for_priority(priority)
+                    .send(StdinMessage::Frame(frame.into_bytes()))
+                    .await
+                    .map_err(|_| TypeProviderError::new("stdin writer closed"))?;
 
-        let result = tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), rx).await;
-        match result {
-            Ok(Ok(val)) => {
-                // Reset consecutive failures on any successful response
-                self.consecutive_failures.store(0, Ordering::Relaxed);
-                // Check for JSON-RPC error
-                if let Some(err) = val.get("error") {
-                    let msg = err
-                        .get("message")
-                        .and_then(|m| m.as_str())
-                        .unwrap_or("unknown error");
-                    crate::type_runtime_trace_event!(
-                        "tsgo_transport_request_error",
-                        format!("method={} id={} message={}", method, id, msg),
-                    );
-                    return Err(TypeProviderError::new(msg));
-                }
-                crate::type_runtime_trace_event!(
-                    "tsgo_transport_request_result",
-                    format!(
-                        "method={} id={} result_kind={}",
-                        method,
-                        id,
-                        val.get("result")
-                            .map(|result| match result {
-                                serde_json::Value::Null => "null",
-                                serde_json::Value::Array(_) => "array",
-                                serde_json::Value::Object(_) => "object",
-                                serde_json::Value::String(_) => "string",
-                                serde_json::Value::Bool(_) => "bool",
-                                serde_json::Value::Number(_) => "number",
-                            })
-                            .unwrap_or("missing"),
-                    ),
-                );
-                Ok(val
-                    .get("result")
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Null))
-            }
-            Ok(Err(_)) => {
-                crate::type_runtime_trace_event!(
-                    "tsgo_transport_request_error",
-                    format!(
-                        "method={} id={} message=response channel closed",
-                        method, id
-                    ),
-                );
-                Err(TypeProviderError::new("response channel closed"))
-            }
-            Err(_) => {
-                // Timeout — clean up the pending entry to prevent leak
-                self.pending.lock().await.remove(&id);
-                let count = self.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
-                if count >= HANG_THRESHOLD {
-                    tracing::error!(
-                        "TSGO appears hung ({count} consecutive timeouts) — triggering restart"
-                    );
-                    if let Some(notify) = &self.crash_notify {
-                        notify.notify_waiters();
+                let result =
+                    tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), rx).await;
+                match result {
+                    Ok(Ok(val)) => {
+                        // Reset consecutive failures on any successful response
+                        self.consecutive_failures.store(0, Ordering::Relaxed);
+                        // Check for JSON-RPC error
+                        if let Some(err) = val.get("error") {
+                            let msg = err
+                                .get("message")
+                                .and_then(|m| m.as_str())
+                                .unwrap_or("unknown error");
+                            crate::type_runtime_trace_event!(
+                                "tsgo_transport_request_error",
+                                format!("method={} id={} message={}", method, id, msg),
+                            );
+                            return Err(TypeProviderError::new(msg));
+                        }
+                        crate::type_runtime_trace_event!(
+                            "tsgo_transport_request_result",
+                            format!(
+                                "method={} id={} result_kind={}",
+                                method,
+                                id,
+                                val.get("result")
+                                    .map(|result| match result {
+                                        serde_json::Value::Null => "null",
+                                        serde_json::Value::Array(_) => "array",
+                                        serde_json::Value::Object(_) => "object",
+                                        serde_json::Value::String(_) => "string",
+                                        serde_json::Value::Bool(_) => "bool",
+                                        serde_json::Value::Number(_) => "number",
+                                    })
+                                    .unwrap_or("missing"),
+                            ),
+                        );
+                        Ok(val
+                            .get("result")
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Null))
+                    }
+                    Ok(Err(_)) => {
+                        crate::type_runtime_trace_event!(
+                            "tsgo_transport_request_error",
+                            format!(
+                                "method={} id={} message=response channel closed",
+                                method, id
+                            ),
+                        );
+                        Err(TypeProviderError::new("response channel closed"))
+                    }
+                    Err(_) => {
+                        // Timeout — clean up the pending entry to prevent leak
+                        self.pending.lock().await.remove(&id);
+                        let count = self.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
+                        if count >= HANG_THRESHOLD {
+                            tracing::error!(
+                                "TSGO appears hung ({count} consecutive timeouts) — triggering restart"
+                            );
+                            if let Some(notify) = &self.crash_notify {
+                                notify.notify_waiters();
+                            }
+                        }
+                        crate::type_runtime_trace_event!(
+                            "tsgo_transport_request_error",
+                            format!("method={} id={} message=timeout", method, id),
+                        );
+                        Err(TypeProviderError::new(format!(
+                            "request '{method}' timed out after {timeout_secs}s"
+                        )))
                     }
                 }
-                crate::type_runtime_trace_event!(
-                    "tsgo_transport_request_error",
-                    format!("method={} id={} message=timeout", method, id),
-                );
-                Err(TypeProviderError::new(format!(
-                    "request '{method}' timed out after {timeout_secs}s"
-                )))
             }
-        }
+        )
+        .await
     }
 
     /// Send an LSP notification at a specific priority (no response expected).
@@ -425,7 +429,7 @@ impl LspTransport {
         params: serde_json::Value,
         priority: ProviderPriority,
     ) -> Result<(), TypeProviderError> {
-        let _trace = crate::type_runtime_trace_scope!(
+        crate::type_runtime_trace_scope_async!(
             "tsgo_transport_notify",
             format!(
                 "method={} priority={:?} {}",
@@ -433,43 +437,48 @@ impl LspTransport {
                 priority,
                 summarize_lsp_params(&params),
             ),
-        );
-        let msg = serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": method,
-            "params": params,
-        });
-        let body = serde_json::to_string(&msg)
-            .map_err(|e| TypeProviderError::new(format!("serialize error: {e}")))?;
+            async {
+                let msg = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": method,
+                    "params": params,
+                });
+                let body = serde_json::to_string(&msg)
+                    .map_err(|e| TypeProviderError::new(format!("serialize error: {e}")))?;
 
-        let frame = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
-        match self
-            .tx_for_priority(priority)
-            .try_send(StdinMessage::Frame(frame.into_bytes()))
-        {
-            Ok(()) => {
-                crate::type_runtime_trace_event!(
-                    "tsgo_transport_notify_result",
-                    format!("method={} queued=true", method),
-                );
-                Ok(())
+                let frame = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
+                match self
+                    .tx_for_priority(priority)
+                    .try_send(StdinMessage::Frame(frame.into_bytes()))
+                {
+                    Ok(()) => {
+                        crate::type_runtime_trace_event!(
+                            "tsgo_transport_notify_result",
+                            format!("method={} queued=true", method),
+                        );
+                        Ok(())
+                    }
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        tracing::warn!(
+                            "TSGO stdin channel full — dropping notification '{method}'"
+                        );
+                        crate::type_runtime_trace_event!(
+                            "tsgo_transport_notify_result",
+                            format!("method={} queued=false reason=full", method),
+                        );
+                        Err(TypeProviderError::new("channel full"))
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                        crate::type_runtime_trace_event!(
+                            "tsgo_transport_notify_result",
+                            format!("method={} queued=false reason=closed", method),
+                        );
+                        Err(TypeProviderError::new("stdin writer closed"))
+                    }
+                }
             }
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                tracing::warn!("TSGO stdin channel full — dropping notification '{method}'");
-                crate::type_runtime_trace_event!(
-                    "tsgo_transport_notify_result",
-                    format!("method={} queued=false reason=full", method),
-                );
-                Err(TypeProviderError::new("channel full"))
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                crate::type_runtime_trace_event!(
-                    "tsgo_transport_notify_result",
-                    format!("method={} queued=false reason=closed", method),
-                );
-                Err(TypeProviderError::new("stdin writer closed"))
-            }
-        }
+        )
+        .await
     }
 
     /// Send an LSP notification at Interactive priority (no response expected).
@@ -1243,7 +1252,7 @@ impl TsgoTypeProvider {
         let versions = Arc::clone(&self.versions);
         let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
-            let _trace = crate::type_runtime_trace_scope!(
+            crate::type_runtime_trace_scope_async!(
                 "tsgo_update_file",
                 format!(
                     "path={} uri={} content_len={}",
@@ -1251,26 +1260,29 @@ impl TsgoTypeProvider {
                     uri,
                     content.len()
                 ),
-            );
-            contents_cache
-                .lock()
-                .await
-                .insert(path_owned.clone(), content.clone());
-            versions.lock().await.insert(path_owned, 1);
-            transport
-                .notify_with_priority(
-                    "textDocument/didOpen",
-                    serde_json::json!({
-                        "textDocument": {
-                            "uri": uri,
-                            "languageId": lang_id,
-                            "version": 1,
-                            "text": content,
-                        }
-                    }),
-                    priority,
-                )
-                .await
+                async {
+                    contents_cache
+                        .lock()
+                        .await
+                        .insert(path_owned.clone(), content.clone());
+                    versions.lock().await.insert(path_owned, 1);
+                    transport
+                        .notify_with_priority(
+                            "textDocument/didOpen",
+                            serde_json::json!({
+                                "textDocument": {
+                                    "uri": uri,
+                                    "languageId": lang_id,
+                                    "version": 1,
+                                    "text": content,
+                                }
+                            }),
+                            priority,
+                        )
+                        .await
+                }
+            )
+            .await
         })
     }
 
@@ -1431,7 +1443,7 @@ impl TypeProvider for TsgoTypeProvider {
         let versions = Arc::clone(&self.versions);
         let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
-            let _trace = crate::type_runtime_trace_scope!(
+            crate::type_runtime_trace_scope_async!(
                 "tsgo_open_file",
                 format!(
                     "path={} uri={} content_len={}",
@@ -1439,31 +1451,34 @@ impl TypeProvider for TsgoTypeProvider {
                     uri,
                     content.len()
                 ),
-            );
-            contents_cache
-                .lock()
-                .await
-                .insert(path_owned.clone(), content.clone());
-            // Mark as opened with version 1
-            versions.lock().await.insert(path_owned, 1);
-            transport
-                .notify(
-                    "textDocument/didOpen",
-                    serde_json::json!({
-                        "textDocument": {
-                            "uri": uri,
-                            "languageId": lang_id,
-                            "version": 1,
-                            "text": content,
-                        }
-                    }),
-                )
-                .await?;
-            crate::type_runtime_trace_event!(
-                "tsgo_open_file_result",
-                "opened=true version=1".to_string()
-            );
-            Ok(())
+                async {
+                    contents_cache
+                        .lock()
+                        .await
+                        .insert(path_owned.clone(), content.clone());
+                    // Mark as opened with version 1
+                    versions.lock().await.insert(path_owned, 1);
+                    transport
+                        .notify(
+                            "textDocument/didOpen",
+                            serde_json::json!({
+                                "textDocument": {
+                                    "uri": uri,
+                                    "languageId": lang_id,
+                                    "version": 1,
+                                    "text": content,
+                                }
+                            }),
+                        )
+                        .await?;
+                    crate::type_runtime_trace_event!(
+                        "tsgo_open_file_result",
+                        "opened=true version=1".to_string()
+                    );
+                    Ok(())
+                }
+            )
+            .await
         })
     }
 
@@ -1479,19 +1494,22 @@ impl TypeProvider for TsgoTypeProvider {
         let content_owned = rewrite_vue_imports_for_tsgo(content, path);
         let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
-            let _trace = crate::type_runtime_trace_scope!(
+            crate::type_runtime_trace_scope_async!(
                 "tsgo_load_file",
                 format!("path={} content_len={}", path_owned, content_owned.len()),
-            );
-            contents_cache
-                .lock()
-                .await
-                .insert(path_owned, content_owned);
-            crate::type_runtime_trace_event!(
-                "tsgo_load_file_result",
-                "cached_only=true".to_string()
-            );
-            Ok(())
+                async {
+                    contents_cache
+                        .lock()
+                        .await
+                        .insert(path_owned, content_owned);
+                    crate::type_runtime_trace_event!(
+                        "tsgo_load_file_result",
+                        "cached_only=true".to_string()
+                    );
+                    Ok(())
+                }
+            )
+            .await
         })
     }
 
@@ -1579,22 +1597,28 @@ impl TypeProvider for TsgoTypeProvider {
         let versions = Arc::clone(&self.versions);
         let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
-            let _trace = crate::type_runtime_trace_scope!(
+            crate::type_runtime_trace_scope_async!(
                 "tsgo_close_file",
                 format!("path={} uri={}", path_owned, uri),
-            );
-            contents_cache.lock().await.remove(&path_owned);
-            versions.lock().await.remove(&path_owned);
-            transport
-                .notify(
-                    "textDocument/didClose",
-                    serde_json::json!({
-                        "textDocument": { "uri": uri }
-                    }),
-                )
-                .await?;
-            crate::type_runtime_trace_event!("tsgo_close_file_result", "closed=true".to_string());
-            Ok(())
+                async {
+                    contents_cache.lock().await.remove(&path_owned);
+                    versions.lock().await.remove(&path_owned);
+                    transport
+                        .notify(
+                            "textDocument/didClose",
+                            serde_json::json!({
+                                "textDocument": { "uri": uri }
+                            }),
+                        )
+                        .await?;
+                    crate::type_runtime_trace_event!(
+                        "tsgo_close_file_result",
+                        "closed=true".to_string()
+                    );
+                    Ok(())
+                }
+            )
+            .await
         })
     }
 
@@ -1725,7 +1749,7 @@ impl TypeProvider for TsgoTypeProvider {
                 return Ok(Vec::new());
             }
             let enrich_count = items.len().min(MAX_COMPLETION_DETAIL_ENRICH);
-            let _trace = crate::type_runtime_trace_scope!(
+            crate::type_runtime_trace_scope_async!(
                 "tsgo_get_completion_details",
                 format!(
                     "path={} uri={} item_count={} enrich_count={}",
@@ -1734,80 +1758,90 @@ impl TypeProvider for TsgoTypeProvider {
                     items.len(),
                     enrich_count
                 ),
-            );
-
-            // Bounded-concurrency enrichment of the leading `enrich_count` items.
-            // Each task owns its inputs (the future cannot borrow `items`) and
-            // reports its index so the output preserves input order. A semaphore
-            // caps in-flight resolves.
-            let semaphore = Arc::new(tokio::sync::Semaphore::new(
-                COMPLETION_DETAIL_RESOLVE_CONCURRENCY,
-            ));
-            let mut join_set: tokio::task::JoinSet<(usize, Completion)> =
-                tokio::task::JoinSet::new();
-            for (idx, item) in items.iter().take(enrich_count).enumerate() {
-                // Only an upstream-LSP resolve handle can be re-issued via
-                // `completionItem/resolve`; an item without one cannot be enriched
-                // and is passed through unchanged (no task spawned).
-                let Some(CompletionResolveData::Lsp { label, data }) = item.data.as_ref() else {
-                    continue;
-                };
-                let resolve_item = serde_json::json!({
-                    "label": label,
-                    "data": data,
-                    "textDocument": { "uri": uri },
-                });
-                let transport = Arc::clone(&transport);
-                let semaphore = Arc::clone(&semaphore);
-                let item = item.clone();
-                join_set.spawn(async move {
-                    // The permit bounds in-flight resolves; if the semaphore is
-                    // somehow closed, fall back to the un-enriched item.
-                    let _permit = match semaphore.acquire().await {
-                        Ok(permit) => permit,
-                        Err(_) => return (idx, item),
-                    };
-                    match transport
-                        .request("completionItem/resolve", resolve_item)
-                        .await
-                    {
-                        Ok(resolved) => {
-                            let (detail, documentation) =
-                                extract_resolve_detail_and_documentation(&resolved);
-                            let folded = fold_lsp_resolve_detail_into_completion(
-                                &item,
-                                detail,
-                                documentation,
-                            );
-                            (idx, folded)
-                        }
-                        // A per-item resolve failure must not drop the item.
-                        Err(_) => (idx, item),
+                async {
+                    // Bounded-concurrency enrichment of the leading `enrich_count` items.
+                    // Each task owns its inputs (the future cannot borrow `items`) and
+                    // reports its index so the output preserves input order. A semaphore
+                    // caps in-flight resolves.
+                    let semaphore = Arc::new(tokio::sync::Semaphore::new(
+                        COMPLETION_DETAIL_RESOLVE_CONCURRENCY,
+                    ));
+                    let mut join_set: tokio::task::JoinSet<(usize, Completion)> =
+                        tokio::task::JoinSet::new();
+                    // Re-parent spawned resolves under this scope's span. A spawned
+                    // task runs on its own task-local, so capture the active context
+                    // here and seed each child future with it.
+                    let trace_ctx = crate::trace::current_type_runtime_trace_context();
+                    for (idx, item) in items.iter().take(enrich_count).enumerate() {
+                        // Only an upstream-LSP resolve handle can be re-issued via
+                        // `completionItem/resolve`; an item without one cannot be enriched
+                        // and is passed through unchanged (no task spawned).
+                        let Some(CompletionResolveData::Lsp { label, data }) = item.data.as_ref()
+                        else {
+                            continue;
+                        };
+                        let resolve_item = serde_json::json!({
+                            "label": label,
+                            "data": data,
+                            "textDocument": { "uri": uri },
+                        });
+                        let transport = Arc::clone(&transport);
+                        let semaphore = Arc::clone(&semaphore);
+                        let item = item.clone();
+                        join_set.spawn(crate::trace::with_type_runtime_trace_context_async(
+                            trace_ctx,
+                            async move {
+                                // The permit bounds in-flight resolves; if the semaphore is
+                                // somehow closed, fall back to the un-enriched item.
+                                let _permit = match semaphore.acquire().await {
+                                    Ok(permit) => permit,
+                                    Err(_) => return (idx, item),
+                                };
+                                match transport
+                                    .request("completionItem/resolve", resolve_item)
+                                    .await
+                                {
+                                    Ok(resolved) => {
+                                        let (detail, documentation) =
+                                            extract_resolve_detail_and_documentation(&resolved);
+                                        let folded = fold_lsp_resolve_detail_into_completion(
+                                            &item,
+                                            detail,
+                                            documentation,
+                                        );
+                                        (idx, folded)
+                                    }
+                                    // A per-item resolve failure must not drop the item.
+                                    Err(_) => (idx, item),
+                                }
+                            },
+                        ));
                     }
-                });
-            }
 
-            // Start from a verbatim clone (preserves the tail beyond the cap and
-            // any leading item without a resolve handle), then overlay enriched
-            // items by index.
-            let mut enriched: Vec<Completion> = items.to_vec();
-            while let Some(joined) = join_set.join_next().await {
-                if let Ok((idx, completion)) = joined {
-                    enriched[idx] = completion;
+                    // Start from a verbatim clone (preserves the tail beyond the cap and
+                    // any leading item without a resolve handle), then overlay enriched
+                    // items by index.
+                    let mut enriched: Vec<Completion> = items.to_vec();
+                    while let Some(joined) = join_set.join_next().await {
+                        if let Ok((idx, completion)) = joined {
+                            enriched[idx] = completion;
+                        }
+                        // A panicked/cancelled task leaves the verbatim clone in place.
+                    }
+
+                    crate::type_runtime_trace_event!(
+                        "tsgo_get_completion_details_result",
+                        format!(
+                            "path={} item_count={} enriched_count={} enriched=true",
+                            path,
+                            enriched.len(),
+                            enrich_count
+                        ),
+                    );
+                    Ok(enriched)
                 }
-                // A panicked/cancelled task leaves the verbatim clone in place.
-            }
-
-            crate::type_runtime_trace_event!(
-                "tsgo_get_completion_details_result",
-                format!(
-                    "path={} item_count={} enriched_count={} enriched=true",
-                    path,
-                    enriched.len(),
-                    enrich_count
-                ),
-            );
-            Ok(enriched)
+            )
+            .await
         })
     }
 
@@ -1828,94 +1862,100 @@ impl TypeProvider for TsgoTypeProvider {
                     None => (0, offset, false),
                 }
             };
-            let _trace = crate::type_runtime_trace_scope!(
+            crate::type_runtime_trace_scope_async!(
                 "tsgo_get_hover",
                 format!(
                     "path={} uri={} offset={} line={} character={} content_cache_hit={}",
                     path_owned, uri, offset, line, character, cache_hit,
                 ),
-            );
-            let result = transport
-                .request(
-                    "textDocument/hover",
-                    serde_json::json!({
-                        "textDocument": { "uri": uri },
-                        "position": { "line": line, "character": character },
-                    }),
-                )
-                .await?;
+                async {
+                    let result = transport
+                        .request(
+                            "textDocument/hover",
+                            serde_json::json!({
+                                "textDocument": { "uri": uri },
+                                "position": { "line": line, "character": character },
+                            }),
+                        )
+                        .await?;
 
-            if result.is_null() {
-                crate::type_runtime_trace_event!(
-                    "tsgo_get_hover_result",
-                    format!("path={} has_hover=false", path_owned),
-                );
-                return Ok(None);
-            }
-
-            tracing::debug!("TSGO hover raw response: {result}");
-
-            // Parse hover result — handles all LSP content formats:
-            //   MarkupContent: { kind, value }
-            //   MarkedString:  { language, value } | string
-            //   MarkedString[]: array of MarkedString
-            let contents = if let Some(c) = result.get("contents") {
-                if let Some(arr) = c.as_array() {
-                    // MarkedString[] — language blocks become fenced code,
-                    // plain strings become documentation outside the fence.
-                    let mut code_parts = Vec::new();
-                    let mut doc_parts = Vec::new();
-                    for item in arr {
-                        if let Some(s) = item.as_str() {
-                            doc_parts.push(s.to_string());
-                        } else if let Some(lang) = item.get("language").and_then(|l| l.as_str()) {
-                            let val = item
-                                .get("value")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or_default();
-                            code_parts.push(format!("```{lang}\n{val}\n```"));
-                        } else if let Some(val) = item.get("value").and_then(|v| v.as_str()) {
-                            code_parts.push(val.to_string());
-                        }
+                    if result.is_null() {
+                        crate::type_runtime_trace_event!(
+                            "tsgo_get_hover_result",
+                            format!("path={} has_hover=false", path_owned),
+                        );
+                        return Ok(None);
                     }
-                    let mut result = code_parts.join("\n");
-                    if !doc_parts.is_empty() {
-                        if !result.is_empty() {
-                            result.push_str("\n\n");
+
+                    tracing::debug!("TSGO hover raw response: {result}");
+
+                    // Parse hover result — handles all LSP content formats:
+                    //   MarkupContent: { kind, value }
+                    //   MarkedString:  { language, value } | string
+                    //   MarkedString[]: array of MarkedString
+                    let contents = if let Some(c) = result.get("contents") {
+                        if let Some(arr) = c.as_array() {
+                            // MarkedString[] — language blocks become fenced code,
+                            // plain strings become documentation outside the fence.
+                            let mut code_parts = Vec::new();
+                            let mut doc_parts = Vec::new();
+                            for item in arr {
+                                if let Some(s) = item.as_str() {
+                                    doc_parts.push(s.to_string());
+                                } else if let Some(lang) =
+                                    item.get("language").and_then(|l| l.as_str())
+                                {
+                                    let val = item
+                                        .get("value")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or_default();
+                                    code_parts.push(format!("```{lang}\n{val}\n```"));
+                                } else if let Some(val) = item.get("value").and_then(|v| v.as_str())
+                                {
+                                    code_parts.push(val.to_string());
+                                }
+                            }
+                            let mut result = code_parts.join("\n");
+                            if !doc_parts.is_empty() {
+                                if !result.is_empty() {
+                                    result.push_str("\n\n");
+                                }
+                                result.push_str(&doc_parts.join("\n\n"));
+                            }
+                            result
+                        } else if let Some(value) = c.get("value").and_then(|v| v.as_str()) {
+                            value.to_string()
+                        } else if let Some(s) = c.as_str() {
+                            s.to_string()
+                        } else {
+                            format!("{c}")
                         }
-                        result.push_str(&doc_parts.join("\n\n"));
-                    }
-                    result
-                } else if let Some(value) = c.get("value").and_then(|v| v.as_str()) {
-                    value.to_string()
-                } else if let Some(s) = c.as_str() {
-                    s.to_string()
-                } else {
-                    format!("{c}")
+                    } else {
+                        crate::type_runtime_trace_event!(
+                            "tsgo_get_hover_result",
+                            format!("path={} has_hover=false missing_contents=true", path_owned),
+                        );
+                        return Ok(None);
+                    };
+
+                    crate::type_runtime_trace_event!(
+                        "tsgo_get_hover_result",
+                        format!(
+                            "path={} has_hover=true contents_len={} preview={}",
+                            path_owned,
+                            contents.len(),
+                            trace_preview(&contents, 120),
+                        ),
+                    );
+
+                    Ok(Some(HoverInfo {
+                        contents,
+                        range_start: None,
+                        range_end: None,
+                    }))
                 }
-            } else {
-                crate::type_runtime_trace_event!(
-                    "tsgo_get_hover_result",
-                    format!("path={} has_hover=false missing_contents=true", path_owned),
-                );
-                return Ok(None);
-            };
-
-            crate::type_runtime_trace_event!(
-                "tsgo_get_hover_result",
-                format!(
-                    "path={} has_hover=true contents_len={} preview={}",
-                    path_owned,
-                    contents.len(),
-                    trace_preview(&contents, 120),
-                ),
-            );
-
-            Ok(Some(HoverInfo {
-                contents,
-                range_start: None,
-                range_end: None,
-            }))
+            )
+            .await
         })
     }
 
