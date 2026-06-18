@@ -20,7 +20,7 @@ use tower_lsp_server::ls_types::*;
 use crate::documents::line_index::LineIndex;
 use crate::documents::sfc_scanner::scan_sfc_blocks;
 use crate::documents::uri_to_canonical_id;
-use crate::tsgo::merge;
+use crate::type_provider::merge;
 
 use super::background_init::is_generated_verter_types_event;
 use super::protocol_types::*;

@@ -504,7 +504,7 @@ pub(crate) fn self_file_provider_content(
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn sync_self_file_shadow_state(
     documents: &DocumentRegistry,
-    project_sync: &crate::tsgo::project_sync::ProjectSync,
+    project_sync: &crate::type_provider::project_sync::ProjectSync,
     provider_sync_states: &DashMap<String, crate::provider_sync::ProviderSyncState>,
     snapshot: Option<&super::PublishedResolverSnapshot>,
     uri: &Uri,
@@ -1354,35 +1354,35 @@ pub(super) fn is_immediately_after_member_access_dot(content: &str, offset: usiz
 }
 
 pub(super) fn is_identifier_prefix_completion_kind(
-    kind: crate::tsgo::protocol::CompletionKind,
+    kind: crate::type_provider::protocol::CompletionKind,
 ) -> bool {
     matches!(
         kind,
-        crate::tsgo::protocol::CompletionKind::Variable
-            | crate::tsgo::protocol::CompletionKind::Function
-            | crate::tsgo::protocol::CompletionKind::Method
-            | crate::tsgo::protocol::CompletionKind::Property
-            | crate::tsgo::protocol::CompletionKind::Field
-            | crate::tsgo::protocol::CompletionKind::Constant
-            | crate::tsgo::protocol::CompletionKind::EnumMember
+        crate::type_provider::protocol::CompletionKind::Variable
+            | crate::type_provider::protocol::CompletionKind::Function
+            | crate::type_provider::protocol::CompletionKind::Method
+            | crate::type_provider::protocol::CompletionKind::Property
+            | crate::type_provider::protocol::CompletionKind::Field
+            | crate::type_provider::protocol::CompletionKind::Constant
+            | crate::type_provider::protocol::CompletionKind::EnumMember
     )
 }
 
 pub(super) fn is_member_access_completion_kind(
-    kind: crate::tsgo::protocol::CompletionKind,
+    kind: crate::type_provider::protocol::CompletionKind,
 ) -> bool {
     matches!(
         kind,
-        crate::tsgo::protocol::CompletionKind::Property
-            | crate::tsgo::protocol::CompletionKind::Field
-            | crate::tsgo::protocol::CompletionKind::Method
-            | crate::tsgo::protocol::CompletionKind::Constant
-            | crate::tsgo::protocol::CompletionKind::EnumMember
+        crate::type_provider::protocol::CompletionKind::Property
+            | crate::type_provider::protocol::CompletionKind::Field
+            | crate::type_provider::protocol::CompletionKind::Method
+            | crate::type_provider::protocol::CompletionKind::Constant
+            | crate::type_provider::protocol::CompletionKind::EnumMember
     )
 }
 
 pub(super) fn filter_type_provider_completion_result(
-    type_result: &mut crate::tsgo::protocol::CompletionResult,
+    type_result: &mut crate::type_provider::protocol::CompletionResult,
     expr_context: Option<&ExpressionContext>,
     identifier_prefix: Option<&str>,
     verter_items: Option<&Vec<CompletionItem>>,

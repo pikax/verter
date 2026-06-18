@@ -64,9 +64,11 @@ use std::path::{Path, PathBuf};
 /// The production routing source roots scanned by the guard (relative to the
 /// crate `src/`). Feature handlers + server methods + the editor-document
 /// INGRESS (`documents/`, where the client `languageId` is classified) + the
-/// TypeProvider merge / provider-path REVERSE-MAPPING (`tsgo/`) — every surface
-/// that classifies or routes a carrier path/language must be carrier-generic.
-const SCAN_DIRS: &[&str] = &["features", "server", "documents", "tsgo"];
+/// provider-neutral TypeProvider merge / provider-path REVERSE-MAPPING
+/// (`type_provider/`) + the backend-specific transport/respawn wrappers
+/// (`tsgo/`) — every surface that classifies or routes a carrier path/language
+/// must be carrier-generic.
+const SCAN_DIRS: &[&str] = &["features", "server", "documents", "type_provider", "tsgo"];
 const SCAN_FILES: &[&str] = &[
     "server_utils.rs",
     "background_drain.rs",

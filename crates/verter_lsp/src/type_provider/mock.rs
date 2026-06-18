@@ -10,8 +10,8 @@ pub use inner::*;
 mod inner {
     use std::sync::{Arc, Mutex};
 
-    use crate::tsgo::protocol::*;
-    use crate::tsgo::traits::{ProviderFuture, TypeProvider};
+    use crate::type_provider::protocol::*;
+    use crate::type_provider::traits::{ProviderFuture, TypeProvider};
 
     /// Return `Err` when failure injection is enabled, otherwise `Ok(())`.
     fn fail_or_ok(fail: bool, op: &str) -> Result<(), TypeProviderError> {

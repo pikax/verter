@@ -23,7 +23,7 @@
 //!     **SFC-absolute** `AnalyzedImport.span` ends directly (no double-offset) and filtering to
 //!     the selected `<script setup>` block (Volar parity).
 //!
-//! These gates exercise the pure translation surface (`verter_lsp::tsgo::auto_import`) directly on
+//! These gates exercise the pure translation surface (`verter_lsp::type_provider::auto_import`) directly on
 //! a faithful generated-TSX source map. They are GREEN with the fix and would be RED (or
 //! structurally different) without it. The full provider round-trip is covered by the VS Code e2e
 //! suite.
@@ -35,11 +35,11 @@ use verter_lsp::documents::line_index::LineIndex;
 use verter_lsp::documents::position_map::PositionMapper;
 use verter_lsp::documents::provider_projection::ProviderPositionMapper;
 use verter_lsp::documents::sfc_scanner::scan_sfc_blocks;
-use verter_lsp::tsgo::auto_import::{
+use verter_lsp::type_provider::auto_import::{
     resolve_script_import_anchor, translate_completion_import_edits, AutoImportEditMappingError,
     ProviderImportEdit, ScriptImportInsertionAnchor,
 };
-use verter_lsp::tsgo::merge::tsx_range_to_carrier_range;
+use verter_lsp::type_provider::merge::tsx_range_to_carrier_range;
 
 /// Inject the `x_verter_helper_preamble_end` source-map metadata member exactly as Verter's IDE
 /// codegen does — a leading object member carrying the generated-TSX position immediately after

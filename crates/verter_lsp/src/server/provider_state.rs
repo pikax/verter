@@ -18,7 +18,7 @@ use crate::provider_sync::{
     commit_sync_transition, prepare_sync_transition, remove_sync_state, ProviderPathKind,
     ProviderSyncState,
 };
-use crate::tsgo::merge;
+use crate::type_provider::merge;
 
 use super::server_utils::source_id_from_provider_carrier_path;
 use super::{TypeProviderContext, VerterLanguageServer};

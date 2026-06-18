@@ -24,9 +24,11 @@ use std::sync::Arc;
 use tokio::sync::{Notify, Semaphore};
 
 use crate::resilient_provider::{LspNotifier, ResilientBackend, ResilientProvider};
-use crate::tsgo::mock::{MockCall, MockTypeProvider};
-use crate::tsgo::protocol::{CompletionResolveData, CompletionResolveResult, ResolvedTextEdit};
-use crate::tsgo::traits::TypeProvider;
+use crate::type_provider::mock::{MockCall, MockTypeProvider};
+use crate::type_provider::protocol::{
+    CompletionResolveData, CompletionResolveResult, ResolvedTextEdit,
+};
+use crate::type_provider::traits::TypeProvider;
 use verter_type_runtime::protocol::TypeProviderError;
 
 /// Backend that respawns a pre-built [`MockTypeProvider`].

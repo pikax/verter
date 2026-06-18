@@ -13,10 +13,10 @@ use crate::documents::line_index::LineIndex;
 use crate::documents::provider_projection::ProviderPositionMapper;
 use crate::features::hover::HoverSourceToken;
 #[cfg(test)]
-use crate::tsgo::protocol::Completion;
+use crate::type_provider::protocol::Completion;
 #[cfg(test)]
-use crate::tsgo::protocol::CompletionResolveData;
-use crate::tsgo::protocol::{
+use crate::type_provider::protocol::CompletionResolveData;
+use crate::type_provider::protocol::{
     self, CompletionKind, CompletionResult, HoverInfo, InlayHint, InlayHintKind, RenameLocation,
     TypeCodeAction, TypeDiagnostic, TypeDiagnosticSeverity, TypeDocumentHighlight,
     TypeDocumentHighlightKind, TypeLocation,

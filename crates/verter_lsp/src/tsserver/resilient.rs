@@ -9,9 +9,9 @@ use tokio::sync::{Notify, OnceCell};
 use tower_lsp_server::Client;
 
 use crate::resilient_provider::{LspNotifier, ResilientBackend, ResilientProvider};
-use crate::tsgo::protocol::TypeProviderError;
-use crate::tsgo::traits::TypeProvider;
 use crate::tsserver::ipc::TsserverTypeProvider;
+use crate::type_provider::protocol::TypeProviderError;
+use crate::type_provider::traits::TypeProvider;
 
 struct TsserverBackend {
     node_path: String,

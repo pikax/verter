@@ -19,8 +19,10 @@ use verter_workspace::WorkspaceRead;
 use crate::documents::line_index::LineIndex;
 use crate::documents::provider_projection::ProviderPositionMapper;
 use crate::provider_sync::ProviderPathKind;
-use crate::tsgo::auto_import::{resolve_script_import_anchor, ScriptImportInsertionAnchor};
-use crate::tsgo::merge;
+use crate::type_provider::auto_import::{
+    resolve_script_import_anchor, ScriptImportInsertionAnchor,
+};
+use crate::type_provider::merge;
 
 use super::background_drain::configure_provider_paths_for_source;
 use super::background_init::{background_init, BackgroundInitArgs};

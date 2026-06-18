@@ -317,7 +317,7 @@ pub fn build_child_component_hover(
         let mut fallback_emits = handler_props
             .iter()
             .filter_map(|(name, signature)| {
-                let vue_attr = crate::tsgo::merge::jsx_prop_to_vue_attr(name)?;
+                let vue_attr = crate::type_provider::merge::jsx_prop_to_vue_attr(name)?;
                 if !vue_attr.starts_with('@') {
                     return None;
                 }
@@ -376,7 +376,7 @@ pub fn build_child_event_hover(
         .unwrap_or_default();
 
     if let Some(prop) = template.prop_definitions.iter().find(|prop| {
-        crate::tsgo::merge::jsx_prop_to_vue_attr(&prop.name).as_deref() == Some(vue_attr)
+        crate::type_provider::merge::jsx_prop_to_vue_attr(&prop.name).as_deref() == Some(vue_attr)
     }) {
         let signature = prop
             .type_annotation
@@ -385,7 +385,8 @@ pub fn build_child_event_hover(
                 handler_props
                     .iter()
                     .find(|(name, _)| {
-                        crate::tsgo::merge::jsx_prop_to_vue_attr(name).as_deref() == Some(vue_attr)
+                        crate::type_provider::merge::jsx_prop_to_vue_attr(name).as_deref()
+                            == Some(vue_attr)
                     })
                     .map(|(_, signature)| signature.clone())
             })
@@ -423,7 +424,7 @@ pub fn build_child_event_hover(
     handler_props
         .iter()
         .find(|(name, _)| {
-            crate::tsgo::merge::jsx_prop_to_vue_attr(name).as_deref() == Some(vue_attr)
+            crate::type_provider::merge::jsx_prop_to_vue_attr(name).as_deref() == Some(vue_attr)
         })
         .map(|(_, signature)| {
             make_hover(format!(
@@ -1399,7 +1400,7 @@ fn handler_signature_for_event(
             handler_props
                 .iter()
                 .find(|(name, _)| {
-                    crate::tsgo::merge::jsx_prop_to_vue_attr(name).as_deref()
+                    crate::type_provider::merge::jsx_prop_to_vue_attr(name).as_deref()
                         == Some(vue_attr.as_str())
                 })
                 .map(|(_, signature)| signature.clone())

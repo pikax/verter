@@ -24,7 +24,7 @@ use tower_lsp_server::ls_types::{Range, TextEdit};
 use crate::documents::line_index::LineIndex;
 use crate::documents::provider_projection::ProviderPositionMapper;
 use crate::documents::sfc_scanner::scan_sfc_blocks;
-use crate::tsgo::merge;
+use crate::type_provider::merge;
 
 /// One TypeProvider text edit as returned by completion resolve: byte offsets into the
 /// generated TSX plus the replacement text.

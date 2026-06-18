@@ -17,8 +17,8 @@ use crate::provider_sync::{
     ProviderPathKind, ProviderSyncState,
 };
 use crate::statistics::Statistics;
-use crate::tsgo::project_sync::ProjectSync;
-use crate::tsgo::traits::TypeProvider;
+use crate::type_provider::project_sync::ProjectSync;
+use crate::type_provider::traits::TypeProvider;
 use crate::LspConfig;
 
 // `server_tests.rs` (a child of `server`, included via `#[path]`) uses
@@ -32,7 +32,7 @@ use crate::features::cursor_context::{
 };
 #[cfg(test)]
 #[allow(unused_imports)]
-use crate::tsgo::merge;
+use crate::type_provider::merge;
 
 // ── Handler tracking for freeze diagnosis ──────────────────────────────
 // Moved to `handler_guard.rs`. Imported here so the

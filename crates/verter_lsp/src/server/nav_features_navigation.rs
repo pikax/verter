@@ -18,7 +18,7 @@ use crate::documents::uri_to_canonical_id;
 use crate::features::definition::definition_at_position;
 use crate::features::references::references_at_position;
 use crate::features::rename::{prepare_rename, rename_at_position};
-use crate::tsgo::merge;
+use crate::type_provider::merge;
 
 use super::handler_guard::{block_in_place_if_available, HandlerGuard};
 use super::VerterLanguageServer;

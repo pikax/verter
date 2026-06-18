@@ -14,6 +14,7 @@ pub mod svelte_assets;
 pub mod sync_coordinator;
 pub mod tsgo;
 pub mod tsserver;
+pub mod type_provider;
 pub mod utils;
 pub mod workspace_scanner;
 pub mod workspace_state;
@@ -41,7 +42,7 @@ mod test_utils;
 use std::sync::Arc;
 use verter_session::VerterHost;
 
-use tsgo::traits::TypeProvider;
+use type_provider::traits::TypeProvider;
 
 /// Which TypeScript type provider backend is active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

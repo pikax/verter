@@ -6,9 +6,9 @@ use tracing_subscriber::EnvFilter;
 use verter_lsp::server::VerterLanguageServer;
 use verter_lsp::tsgo::ipc::{find_tsgo_binary, TsgoTypeProvider};
 use verter_lsp::tsgo::resilient as tsgo_resilient;
-use verter_lsp::tsgo::traits::TypeProvider;
 use verter_lsp::tsserver::ipc::TsserverTypeProvider;
 use verter_lsp::tsserver::resilient as tsserver_resilient;
+use verter_lsp::type_provider::traits::TypeProvider;
 use verter_lsp::{LspConfig, ProjectSyncMode, TypeProviderKind};
 use verter_session::{HostConfig, VerterHost};
 

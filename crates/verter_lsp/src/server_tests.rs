@@ -8,12 +8,12 @@ use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 
 use crate::server::PublishedResolverSnapshot;
 use crate::test_utils::make_test_vfs_workspace_from_registry;
-use crate::tsgo::mock::{MockCall, MockTypeProvider};
-use crate::tsgo::protocol::{
+use crate::type_provider::mock::{MockCall, MockTypeProvider};
+use crate::type_provider::protocol::{
     CompletionResolveResult, CompletionResult, HoverInfo, InlayHint, RenameLocation, SemanticToken,
     SignatureHelp, TypeCodeAction, TypeDiagnostic, TypeDocumentHighlight, TypeLocation,
 };
-use crate::tsgo::traits::{ProviderFuture, TypeProvider};
+use crate::type_provider::traits::{ProviderFuture, TypeProvider};
 use crate::ProjectSyncMode;
 
 #[derive(Default)]
@@ -167,9 +167,9 @@ impl TypeProvider for TriggerSensitiveCompletionProvider {
                 Vec::new()
             } else {
                 vec![
-                    crate::tsgo::protocol::Completion {
+                    crate::type_provider::protocol::Completion {
                         label: "name".to_string(),
-                        kind: Some(crate::tsgo::protocol::CompletionKind::Property),
+                        kind: Some(crate::type_provider::protocol::CompletionKind::Property),
                         detail: Some("(property) name: string".to_string()),
                         documentation: None,
                         edit_range_start: None,
@@ -178,9 +178,9 @@ impl TypeProvider for TriggerSensitiveCompletionProvider {
                         sort_text: None,
                         data: None,
                     },
-                    crate::tsgo::protocol::Completion {
+                    crate::type_provider::protocol::Completion {
                         label: "id".to_string(),
-                        kind: Some(crate::tsgo::protocol::CompletionKind::Property),
+                        kind: Some(crate::type_provider::protocol::CompletionKind::Property),
                         detail: Some("(property) id: number".to_string()),
                         documentation: None,
                         edit_range_start: None,
@@ -307,9 +307,9 @@ impl TypeProvider for DotTriggerRequiredCompletionProvider {
         Box::pin(async move {
             let items = if trigger.as_deref() == Some(".") {
                 vec![
-                    crate::tsgo::protocol::Completion {
+                    crate::type_provider::protocol::Completion {
                         label: "disabled".to_string(),
-                        kind: Some(crate::tsgo::protocol::CompletionKind::Property),
+                        kind: Some(crate::type_provider::protocol::CompletionKind::Property),
                         detail: Some("(property) disabled: boolean".to_string()),
                         documentation: None,
                         edit_range_start: None,
@@ -318,9 +318,9 @@ impl TypeProvider for DotTriggerRequiredCompletionProvider {
                         sort_text: None,
                         data: None,
                     },
-                    crate::tsgo::protocol::Completion {
+                    crate::type_provider::protocol::Completion {
                         label: "label".to_string(),
-                        kind: Some(crate::tsgo::protocol::CompletionKind::Property),
+                        kind: Some(crate::type_provider::protocol::CompletionKind::Property),
                         detail: Some("(property) label: string".to_string()),
                         documentation: None,
                         edit_range_start: None,
@@ -329,9 +329,9 @@ impl TypeProvider for DotTriggerRequiredCompletionProvider {
                         sort_text: None,
                         data: None,
                     },
-                    crate::tsgo::protocol::Completion {
+                    crate::type_provider::protocol::Completion {
                         label: "handler".to_string(),
-                        kind: Some(crate::tsgo::protocol::CompletionKind::Method),
+                        kind: Some(crate::type_provider::protocol::CompletionKind::Method),
                         detail: Some("(method) handler(): void".to_string()),
                         documentation: None,
                         edit_range_start: None,
@@ -509,7 +509,7 @@ impl TypeProvider for LostContentCompletionProvider {
                 offset: 0,
             });
             if !self.open_paths.lock().unwrap().contains(&path) {
-                return Err(crate::tsgo::protocol::TypeProviderError::new(
+                return Err(crate::type_provider::protocol::TypeProviderError::new(
                     "No content available.",
                 ));
             }
@@ -519,16 +519,16 @@ impl TypeProvider for LostContentCompletionProvider {
                     .map(|prefix| format!("{prefix}.ts"))
                     .unwrap_or_else(|| path.clone());
                 if !self.open_paths.lock().unwrap().contains(&current_api_path) {
-                    return Err(crate::tsgo::protocol::TypeProviderError::new(
+                    return Err(crate::type_provider::protocol::TypeProviderError::new(
                         "No content available.",
                     ));
                 }
             }
             Ok(CompletionResult {
                 items: vec![
-                    crate::tsgo::protocol::Completion {
+                    crate::type_provider::protocol::Completion {
                         label: "disabled".to_string(),
-                        kind: Some(crate::tsgo::protocol::CompletionKind::Property),
+                        kind: Some(crate::type_provider::protocol::CompletionKind::Property),
                         detail: Some("(property) disabled: boolean".to_string()),
                         documentation: None,
                         edit_range_start: None,
@@ -537,9 +537,9 @@ impl TypeProvider for LostContentCompletionProvider {
                         sort_text: None,
                         data: None,
                     },
-                    crate::tsgo::protocol::Completion {
+                    crate::type_provider::protocol::Completion {
                         label: "label".to_string(),
-                        kind: Some(crate::tsgo::protocol::CompletionKind::Property),
+                        kind: Some(crate::type_provider::protocol::CompletionKind::Property),
                         detail: Some("(property) label: string".to_string()),
                         documentation: None,
                         edit_range_start: None,
@@ -755,9 +755,9 @@ fn completion_labels(response: Option<CompletionResponse>) -> Vec<String> {
 
 fn mock_completion(
     label: &str,
-    kind: crate::tsgo::protocol::CompletionKind,
-) -> crate::tsgo::protocol::Completion {
-    crate::tsgo::protocol::Completion {
+    kind: crate::type_provider::protocol::CompletionKind,
+) -> crate::type_provider::protocol::Completion {
+    crate::type_provider::protocol::Completion {
         label: label.to_string(),
         kind: Some(kind),
         detail: None,
@@ -851,7 +851,7 @@ fn set_type_completions_at_vue_position(
     provider: &MockTypeProvider,
     uri: &Uri,
     position: Position,
-    items: Vec<crate::tsgo::protocol::Completion>,
+    items: Vec<crate::type_provider::protocol::Completion>,
 ) {
     let ctx = synced_type_provider_context(server, uri);
     let tsx_offset = merge::carrier_position_to_tsx_offset_validated(
@@ -3859,9 +3859,9 @@ const outerLabel = 'outer'
         &slot_uri,
         position,
         vec![
-            crate::tsgo::protocol::Completion {
+            crate::type_provider::protocol::Completion {
                 label: "slotItem".to_string(),
-                kind: Some(crate::tsgo::protocol::CompletionKind::Variable),
+                kind: Some(crate::type_provider::protocol::CompletionKind::Variable),
                 detail: Some("const slotItem: SlotItem".to_string()),
                 documentation: None,
                 edit_range_start: None,
@@ -3870,9 +3870,9 @@ const outerLabel = 'outer'
                 sort_text: None,
                 data: None,
             },
-            crate::tsgo::protocol::Completion {
+            crate::type_provider::protocol::Completion {
                 label: "slotIndex".to_string(),
-                kind: Some(crate::tsgo::protocol::CompletionKind::Variable),
+                kind: Some(crate::type_provider::protocol::CompletionKind::Variable),
                 detail: Some("const slotIndex: number".to_string()),
                 documentation: None,
                 edit_range_start: None,
@@ -3881,9 +3881,9 @@ const outerLabel = 'outer'
                 sort_text: None,
                 data: None,
             },
-            crate::tsgo::protocol::Completion {
+            crate::type_provider::protocol::Completion {
                 label: "slotTotal".to_string(),
-                kind: Some(crate::tsgo::protocol::CompletionKind::Variable),
+                kind: Some(crate::type_provider::protocol::CompletionKind::Variable),
                 detail: Some("const slotTotal: number".to_string()),
                 documentation: None,
                 edit_range_start: None,
@@ -3892,9 +3892,9 @@ const outerLabel = 'outer'
                 sort_text: None,
                 data: None,
             },
-            crate::tsgo::protocol::Completion {
+            crate::type_provider::protocol::Completion {
                 label: "Set".to_string(),
-                kind: Some(crate::tsgo::protocol::CompletionKind::Class),
+                kind: Some(crate::type_provider::protocol::CompletionKind::Class),
                 detail: Some("global".to_string()),
                 documentation: None,
                 edit_range_start: None,
@@ -3998,9 +3998,9 @@ const outerLabel = 'outer'
         &slot_uri,
         position,
         vec![
-            crate::tsgo::protocol::Completion {
+            crate::type_provider::protocol::Completion {
                 label: "name".to_string(),
-                kind: Some(crate::tsgo::protocol::CompletionKind::Property),
+                kind: Some(crate::type_provider::protocol::CompletionKind::Property),
                 detail: Some("(property) name: string".to_string()),
                 documentation: None,
                 edit_range_start: None,
@@ -4009,9 +4009,9 @@ const outerLabel = 'outer'
                 sort_text: None,
                 data: None,
             },
-            crate::tsgo::protocol::Completion {
+            crate::type_provider::protocol::Completion {
                 label: "id".to_string(),
-                kind: Some(crate::tsgo::protocol::CompletionKind::Property),
+                kind: Some(crate::type_provider::protocol::CompletionKind::Property),
                 detail: Some("(property) id: number".to_string()),
                 documentation: None,
                 edit_range_start: None,
@@ -4020,9 +4020,9 @@ const outerLabel = 'outer'
                 sort_text: None,
                 data: None,
             },
-            crate::tsgo::protocol::Completion {
+            crate::type_provider::protocol::Completion {
                 label: "outerLabel".to_string(),
-                kind: Some(crate::tsgo::protocol::CompletionKind::Variable),
+                kind: Some(crate::type_provider::protocol::CompletionKind::Variable),
                 detail: Some("const outerLabel: string".to_string()),
                 documentation: None,
                 edit_range_start: None,
@@ -4132,7 +4132,7 @@ async fn script_member_access_completion_returns_number_members() {
         "script `a.` must classify as MemberAccess, got {expr_ctx:?}"
     );
 
-    use crate::tsgo::protocol::CompletionKind;
+    use crate::type_provider::protocol::CompletionKind;
     provider.set_completions(
         &ctx.tsx_path,
         tsx_offset,
@@ -4199,7 +4199,7 @@ async fn script_identifier_completion_is_not_suppressed() {
     )
     .expect("script identifier position should map to tsx");
 
-    use crate::tsgo::protocol::CompletionKind;
+    use crate::type_provider::protocol::CompletionKind;
     provider.set_completions(
         &ctx.tsx_path,
         tsx_offset,
@@ -4284,9 +4284,9 @@ const outerLabel = 'outer'
         &slot_uri,
         position,
         vec![
-            crate::tsgo::protocol::Completion {
+            crate::type_provider::protocol::Completion {
                 label: "name".to_string(),
-                kind: Some(crate::tsgo::protocol::CompletionKind::Property),
+                kind: Some(crate::type_provider::protocol::CompletionKind::Property),
                 detail: Some("(property) name: string".to_string()),
                 documentation: None,
                 edit_range_start: None,
@@ -4295,9 +4295,9 @@ const outerLabel = 'outer'
                 sort_text: None,
                 data: None,
             },
-            crate::tsgo::protocol::Completion {
+            crate::type_provider::protocol::Completion {
                 label: "id".to_string(),
-                kind: Some(crate::tsgo::protocol::CompletionKind::Property),
+                kind: Some(crate::type_provider::protocol::CompletionKind::Property),
                 detail: Some("(property) id: number".to_string()),
                 documentation: None,
                 edit_range_start: None,
@@ -4306,9 +4306,9 @@ const outerLabel = 'outer'
                 sort_text: None,
                 data: None,
             },
-            crate::tsgo::protocol::Completion {
+            crate::type_provider::protocol::Completion {
                 label: "outerLabel".to_string(),
-                kind: Some(crate::tsgo::protocol::CompletionKind::Variable),
+                kind: Some(crate::type_provider::protocol::CompletionKind::Variable),
                 detail: Some("const outerLabel: string".to_string()),
                 documentation: None,
                 edit_range_start: None,
@@ -4392,9 +4392,9 @@ const actions: Action[] = [{ label: 'ok', disabled: false, handler: () => {} }]
         &uri,
         position,
         vec![
-            crate::tsgo::protocol::Completion {
+            crate::type_provider::protocol::Completion {
                 label: "disabled".to_string(),
-                kind: Some(crate::tsgo::protocol::CompletionKind::Property),
+                kind: Some(crate::type_provider::protocol::CompletionKind::Property),
                 detail: Some("(property) disabled: boolean".to_string()),
                 documentation: None,
                 edit_range_start: None,
@@ -4403,9 +4403,9 @@ const actions: Action[] = [{ label: 'ok', disabled: false, handler: () => {} }]
                 sort_text: None,
                 data: None,
             },
-            crate::tsgo::protocol::Completion {
+            crate::type_provider::protocol::Completion {
                 label: "label".to_string(),
-                kind: Some(crate::tsgo::protocol::CompletionKind::Property),
+                kind: Some(crate::type_provider::protocol::CompletionKind::Property),
                 detail: Some("(property) label: string".to_string()),
                 documentation: None,
                 edit_range_start: None,
@@ -4414,9 +4414,9 @@ const actions: Action[] = [{ label: 'ok', disabled: false, handler: () => {} }]
                 sort_text: None,
                 data: None,
             },
-            crate::tsgo::protocol::Completion {
+            crate::type_provider::protocol::Completion {
                 label: "handler".to_string(),
-                kind: Some(crate::tsgo::protocol::CompletionKind::Method),
+                kind: Some(crate::type_provider::protocol::CompletionKind::Method),
                 detail: Some("(method) handler(): void".to_string()),
                 documentation: None,
                 edit_range_start: None,
@@ -4425,9 +4425,9 @@ const actions: Action[] = [{ label: 'ok', disabled: false, handler: () => {} }]
                 sort_text: None,
                 data: None,
             },
-            crate::tsgo::protocol::Completion {
+            crate::type_provider::protocol::Completion {
                 label: "actions".to_string(),
-                kind: Some(crate::tsgo::protocol::CompletionKind::Variable),
+                kind: Some(crate::type_provider::protocol::CompletionKind::Variable),
                 detail: Some("const actions: Action[]".to_string()),
                 documentation: None,
                 edit_range_start: None,
@@ -4499,9 +4499,9 @@ async fn completion_queries_type_provider_for_fixture_vfor_member_access_after_b
         &uri,
         position,
         vec![
-            crate::tsgo::protocol::Completion {
+            crate::type_provider::protocol::Completion {
                 label: "disabled".to_string(),
-                kind: Some(crate::tsgo::protocol::CompletionKind::Property),
+                kind: Some(crate::type_provider::protocol::CompletionKind::Property),
                 detail: Some("(property) disabled: boolean".to_string()),
                 documentation: None,
                 edit_range_start: None,
@@ -4510,9 +4510,9 @@ async fn completion_queries_type_provider_for_fixture_vfor_member_access_after_b
                 sort_text: None,
                 data: None,
             },
-            crate::tsgo::protocol::Completion {
+            crate::type_provider::protocol::Completion {
                 label: "label".to_string(),
-                kind: Some(crate::tsgo::protocol::CompletionKind::Property),
+                kind: Some(crate::type_provider::protocol::CompletionKind::Property),
                 detail: Some("(property) label: string".to_string()),
                 documentation: None,
                 edit_range_start: None,
@@ -4521,9 +4521,9 @@ async fn completion_queries_type_provider_for_fixture_vfor_member_access_after_b
                 sort_text: None,
                 data: None,
             },
-            crate::tsgo::protocol::Completion {
+            crate::type_provider::protocol::Completion {
                 label: "handler".to_string(),
-                kind: Some(crate::tsgo::protocol::CompletionKind::Method),
+                kind: Some(crate::type_provider::protocol::CompletionKind::Method),
                 detail: Some("(method) handler(): void".to_string()),
                 documentation: None,
                 edit_range_start: None,
@@ -4614,9 +4614,9 @@ const outerLabel = 'outer'
         &slot_uri,
         position,
         vec![
-            crate::tsgo::protocol::Completion {
+            crate::type_provider::protocol::Completion {
                 label: "name".to_string(),
-                kind: Some(crate::tsgo::protocol::CompletionKind::Property),
+                kind: Some(crate::type_provider::protocol::CompletionKind::Property),
                 detail: Some("(property) name: string".to_string()),
                 documentation: None,
                 edit_range_start: None,
@@ -4625,9 +4625,9 @@ const outerLabel = 'outer'
                 sort_text: None,
                 data: None,
             },
-            crate::tsgo::protocol::Completion {
+            crate::type_provider::protocol::Completion {
                 label: "id".to_string(),
-                kind: Some(crate::tsgo::protocol::CompletionKind::Property),
+                kind: Some(crate::type_provider::protocol::CompletionKind::Property),
                 detail: Some("(property) id: number".to_string()),
                 documentation: None,
                 edit_range_start: None,
@@ -4636,9 +4636,9 @@ const outerLabel = 'outer'
                 sort_text: None,
                 data: None,
             },
-            crate::tsgo::protocol::Completion {
+            crate::type_provider::protocol::Completion {
                 label: "outerLabel".to_string(),
-                kind: Some(crate::tsgo::protocol::CompletionKind::Variable),
+                kind: Some(crate::type_provider::protocol::CompletionKind::Variable),
                 detail: Some("const outerLabel: string".to_string()),
                 documentation: None,
                 edit_range_start: None,
@@ -4848,9 +4848,9 @@ const broken =
         &recovery_uri,
         position,
         vec![
-            crate::tsgo::protocol::Completion {
+            crate::type_provider::protocol::Completion {
                 label: "count".to_string(),
-                kind: Some(crate::tsgo::protocol::CompletionKind::Variable),
+                kind: Some(crate::type_provider::protocol::CompletionKind::Variable),
                 detail: Some("const count: Ref<number>".to_string()),
                 documentation: None,
                 edit_range_start: None,
@@ -4859,9 +4859,9 @@ const broken =
                 sort_text: None,
                 data: None,
             },
-            crate::tsgo::protocol::Completion {
+            crate::type_provider::protocol::Completion {
                 label: "safeAction".to_string(),
-                kind: Some(crate::tsgo::protocol::CompletionKind::Function),
+                kind: Some(crate::type_provider::protocol::CompletionKind::Function),
                 detail: Some("function safeAction(): void".to_string()),
                 documentation: None,
                 edit_range_start: None,
@@ -4870,9 +4870,9 @@ const broken =
                 sort_text: None,
                 data: None,
             },
-            crate::tsgo::protocol::Completion {
+            crate::type_provider::protocol::Completion {
                 label: "console".to_string(),
-                kind: Some(crate::tsgo::protocol::CompletionKind::Module),
+                kind: Some(crate::type_provider::protocol::CompletionKind::Module),
                 detail: Some("global".to_string()),
                 documentation: None,
                 edit_range_start: None,
@@ -4964,9 +4964,9 @@ const broken =
         &recovery_uri,
         position,
         vec![
-            crate::tsgo::protocol::Completion {
+            crate::type_provider::protocol::Completion {
                 label: "safeAction".to_string(),
-                kind: Some(crate::tsgo::protocol::CompletionKind::Function),
+                kind: Some(crate::type_provider::protocol::CompletionKind::Function),
                 detail: Some("function safeAction(): void".to_string()),
                 documentation: None,
                 edit_range_start: None,
@@ -4975,9 +4975,9 @@ const broken =
                 sort_text: None,
                 data: None,
             },
-            crate::tsgo::protocol::Completion {
+            crate::type_provider::protocol::Completion {
                 label: "count".to_string(),
-                kind: Some(crate::tsgo::protocol::CompletionKind::Variable),
+                kind: Some(crate::type_provider::protocol::CompletionKind::Variable),
                 detail: Some("const count: Ref<number>".to_string()),
                 documentation: None,
                 edit_range_start: None,
@@ -4986,9 +4986,9 @@ const broken =
                 sort_text: None,
                 data: None,
             },
-            crate::tsgo::protocol::Completion {
+            crate::type_provider::protocol::Completion {
                 label: "console".to_string(),
-                kind: Some(crate::tsgo::protocol::CompletionKind::Module),
+                kind: Some(crate::type_provider::protocol::CompletionKind::Module),
                 detail: Some("global".to_string()),
                 documentation: None,
                 edit_range_start: None,
@@ -5073,9 +5073,9 @@ const summary = computed(() => `${person.value.name}: ${person.value.age}`)
         &uri,
         position,
         vec![
-            crate::tsgo::protocol::Completion {
+            crate::type_provider::protocol::Completion {
                 label: "value".to_string(),
-                kind: Some(crate::tsgo::protocol::CompletionKind::Property),
+                kind: Some(crate::type_provider::protocol::CompletionKind::Property),
                 detail: Some("(property) value: string".to_string()),
                 documentation: None,
                 edit_range_start: None,
@@ -5084,9 +5084,9 @@ const summary = computed(() => `${person.value.name}: ${person.value.age}`)
                 sort_text: None,
                 data: None,
             },
-            crate::tsgo::protocol::Completion {
+            crate::type_provider::protocol::Completion {
                 label: "count".to_string(),
-                kind: Some(crate::tsgo::protocol::CompletionKind::Property),
+                kind: Some(crate::type_provider::protocol::CompletionKind::Property),
                 detail: Some("(property) count: number".to_string()),
                 documentation: None,
                 edit_range_start: None,
@@ -9714,7 +9714,7 @@ async fn provider_projection_context_serves_both_carrier_and_self_file() {
 /// self-file projection, so the Vue carrier re-anchor path stays reachable.
 #[tokio::test]
 async fn self_file_auto_import_resolve_fails_closed_with_no_edits() {
-    use crate::tsgo::auto_import::ProviderImportEdit;
+    use crate::type_provider::auto_import::ProviderImportEdit;
 
     let provider = Arc::new(MockTypeProvider::new());
     let type_provider: Arc<dyn TypeProvider> = provider.clone();
@@ -9813,7 +9813,7 @@ async fn self_file_auto_import_resolve_fails_closed_with_no_edits() {
 /// on the pre-fix success and PASSES once the branch fails closed.
 #[tokio::test]
 async fn missing_ide_context_for_real_carrier_fails_resolve_not_drops_edits() {
-    use crate::tsgo::auto_import::ProviderImportEdit;
+    use crate::type_provider::auto_import::ProviderImportEdit;
 
     let provider = Arc::new(MockTypeProvider::new());
     let type_provider: Arc<dyn TypeProvider> = provider.clone();
@@ -9903,7 +9903,7 @@ fn tsserver_resolve_envelope_item(
     entry_name: &str,
 ) -> CompletionItem {
     let provider_data = serde_json::to_value(
-        crate::tsgo::protocol::CompletionResolveData::TsserverEntry {
+        crate::type_provider::protocol::CompletionResolveData::TsserverEntry {
             name: entry_name.to_string(),
             source: Some("vue".to_string()),
             data: Some(serde_json::json!({ "exportName": entry_name })),
@@ -9936,11 +9936,12 @@ fn tsgo_resolve_envelope_item(
     provider_path: &str,
     entry_name: &str,
 ) -> CompletionItem {
-    let provider_data = serde_json::to_value(crate::tsgo::protocol::CompletionResolveData::Lsp {
-        label: entry_name.to_string(),
-        data: serde_json::json!({ "exportName": entry_name }),
-    })
-    .expect("resolve key serializes");
+    let provider_data =
+        serde_json::to_value(crate::type_provider::protocol::CompletionResolveData::Lsp {
+            label: entry_name.to_string(),
+            data: serde_json::json!({ "exportName": entry_name }),
+        })
+        .expect("resolve key serializes");
     CompletionItem {
         label: entry_name.to_string(),
         data: Some(serde_json::json!({
@@ -9967,7 +9968,7 @@ async fn completion_resolve_dispatches_neutral_envelope_to_provider() {
     let provider = Arc::new(MockTypeProvider::new());
     provider.set_provider_id("tsserver");
     // Configure a resolve response keyed on the exact resolve key the envelope carries.
-    let resolve_key = crate::tsgo::protocol::CompletionResolveData::TsserverEntry {
+    let resolve_key = crate::type_provider::protocol::CompletionResolveData::TsserverEntry {
         name: "computed".to_string(),
         source: Some("vue".to_string()),
         data: Some(serde_json::json!({ "exportName": "computed" })),
@@ -10047,11 +10048,11 @@ async fn completion_resolve_fails_closed_on_provider_id_mismatch() {
 async fn completion_resolve_envelope_resolves_for_both_provider_kinds() {
     // (provider kind, the resolve key that kind's real provider accepts, the
     // matching envelope-item builder).
-    let tsgo_key = crate::tsgo::protocol::CompletionResolveData::Lsp {
+    let tsgo_key = crate::type_provider::protocol::CompletionResolveData::Lsp {
         label: "computed".to_string(),
         data: serde_json::json!({ "exportName": "computed" }),
     };
-    let tsserver_key = crate::tsgo::protocol::CompletionResolveData::TsserverEntry {
+    let tsserver_key = crate::type_provider::protocol::CompletionResolveData::TsserverEntry {
         name: "computed".to_string(),
         source: Some("vue".to_string()),
         data: Some(serde_json::json!({ "exportName": "computed" })),
@@ -10114,7 +10115,7 @@ async fn completion_resolve_envelope_resolves_for_both_provider_kinds() {
 async fn completion_resolve_applies_detail_and_documentation() {
     let provider = Arc::new(MockTypeProvider::new());
     provider.set_provider_id("tsgo");
-    let resolve_key = crate::tsgo::protocol::CompletionResolveData::Lsp {
+    let resolve_key = crate::type_provider::protocol::CompletionResolveData::Lsp {
         label: "computed".to_string(),
         data: serde_json::json!({ "exportName": "computed" }),
     };
@@ -10439,7 +10440,7 @@ async fn self_file_rename_and_code_actions_gated_off() {
         vec![TypeCodeAction {
             title: "Convert to named import".to_string(),
             kind: Some("quickfix".to_string()),
-            edits: vec![crate::tsgo::protocol::TypeCodeEdit {
+            edits: vec![crate::type_provider::protocol::TypeCodeEdit {
                 path: canonical_id.to_string(),
                 start: 0,
                 end: 5,
@@ -12327,9 +12328,9 @@ async fn virtual_file_completion_routes_actionable_handle_through_envelope() {
     // An ACTIONABLE auto-import handle: a `TsserverEntry` carrying a module
     // `source` (the auto-import key). This is exactly the shape a real tsserver/
     // extension completion for an unimported `computed` from `vue` produces.
-    let actionable = crate::tsgo::protocol::Completion {
+    let actionable = crate::type_provider::protocol::Completion {
         label: "computed".to_string(),
-        kind: Some(crate::tsgo::protocol::CompletionKind::Function),
+        kind: Some(crate::type_provider::protocol::CompletionKind::Function),
         detail: None,
         documentation: None,
         edit_range_start: None,
@@ -12337,7 +12338,7 @@ async fn virtual_file_completion_routes_actionable_handle_through_envelope() {
         insert_text: None,
         sort_text: None,
         data: Some(
-            crate::tsgo::protocol::CompletionResolveData::TsserverEntry {
+            crate::type_provider::protocol::CompletionResolveData::TsserverEntry {
                 name: "computed".to_string(),
                 source: Some("vue".to_string()),
                 data: None,
@@ -12346,9 +12347,9 @@ async fn virtual_file_completion_routes_actionable_handle_through_envelope() {
         ),
     };
     // A NON-actionable local handle (no source/data) — must NOT earn an envelope.
-    let local = crate::tsgo::protocol::Completion {
+    let local = crate::type_provider::protocol::Completion {
         label: "localVar".to_string(),
-        kind: Some(crate::tsgo::protocol::CompletionKind::Variable),
+        kind: Some(crate::type_provider::protocol::CompletionKind::Variable),
         detail: None,
         documentation: None,
         edit_range_start: None,
@@ -12356,7 +12357,7 @@ async fn virtual_file_completion_routes_actionable_handle_through_envelope() {
         insert_text: None,
         sort_text: None,
         data: Some(
-            crate::tsgo::protocol::CompletionResolveData::TsserverEntry {
+            crate::type_provider::protocol::CompletionResolveData::TsserverEntry {
                 name: "localVar".to_string(),
                 source: None,
                 data: None,

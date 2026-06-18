@@ -30,7 +30,7 @@ use crate::features::formatting::format_document;
 use crate::features::linked_editing::linked_editing_ranges;
 use crate::features::organize_imports::organize_imports_actions;
 use crate::features::workspace_symbol::workspace_symbols;
-use crate::tsgo::merge;
+use crate::type_provider::merge;
 
 use super::handler_guard::HandlerGuard;
 use super::server_utils::*;
@@ -204,10 +204,10 @@ pub(super) async fn handle_document_highlight(
                                     end: vf_li.offset_to_position(h.end)?,
                                 },
                                 kind: Some(match h.kind {
-                                    crate::tsgo::protocol::TypeDocumentHighlightKind::Read => {
+                                    crate::type_provider::protocol::TypeDocumentHighlightKind::Read => {
                                         DocumentHighlightKind::READ
                                     }
-                                    crate::tsgo::protocol::TypeDocumentHighlightKind::Write => {
+                                    crate::type_provider::protocol::TypeDocumentHighlightKind::Write => {
                                         DocumentHighlightKind::WRITE
                                     }
                                     _ => DocumentHighlightKind::TEXT,
@@ -619,10 +619,10 @@ pub(super) async fn handle_inlay_hint(
                             .filter_map(|h| {
                                 let pos = vf_li.offset_to_position(h.position)?;
                                 let kind = h.kind.map(|k| match k {
-                                    crate::tsgo::protocol::InlayHintKind::Type => {
+                                    crate::type_provider::protocol::InlayHintKind::Type => {
                                         InlayHintKind::TYPE
                                     }
-                                    crate::tsgo::protocol::InlayHintKind::Parameter => {
+                                    crate::type_provider::protocol::InlayHintKind::Parameter => {
                                         InlayHintKind::PARAMETER
                                     }
                                 });

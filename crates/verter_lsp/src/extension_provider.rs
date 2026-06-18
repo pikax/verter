@@ -14,8 +14,6 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, OnceCell};
 
 use crate::server::{TsQuery, TsQueryParams};
-use crate::tsgo::protocol::*;
-use crate::tsgo::traits::{ProviderFuture, TypeProvider};
 use crate::tsserver::ipc::{
     build_completion_entry_details_request, build_entry_names_entry, byte_offset_to_tsserver_pos,
     completion_entry_details_to_resolve_result, concat_display_parts,
@@ -23,6 +21,8 @@ use crate::tsserver::ipc::{
     parse_tsserver_completion, parse_tsserver_diagnostic, parse_tsserver_location,
     parse_tsserver_rename_span, stamp_tsserver_completion_offset,
 };
+use crate::type_provider::protocol::*;
+use crate::type_provider::traits::{ProviderFuture, TypeProvider};
 
 /// A `TypeProvider` that delegates to the VS Code extension's in-process
 /// TypeScript language service via `$/verter/tsQuery` server→client requests.

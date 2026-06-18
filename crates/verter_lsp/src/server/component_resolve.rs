@@ -19,7 +19,7 @@ use crate::documents::line_index::LineIndex;
 use crate::documents::sfc_scanner::scan_sfc_blocks;
 use crate::documents::uri_to_canonical_id;
 use crate::features::hover;
-use crate::tsgo::merge;
+use crate::type_provider::merge;
 
 use super::server_utils::{
     event_name_match_rank, extract_word_at_offset, goto_response_from_locations,

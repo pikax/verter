@@ -10,8 +10,8 @@ use tower_lsp_server::Client;
 
 use crate::resilient_provider::{LspNotifier, ResilientBackend, ResilientProvider};
 use crate::tsgo::ipc::TsgoTypeProvider;
-use crate::tsgo::protocol::TypeProviderError;
-use crate::tsgo::traits::TypeProvider;
+use crate::type_provider::protocol::TypeProviderError;
+use crate::type_provider::traits::TypeProvider;
 
 struct TsgoBackend {
     tsgo_bin: String,

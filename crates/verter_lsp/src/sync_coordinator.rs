@@ -27,9 +27,9 @@ use crate::provider_sync::{
     revert_unsynced_kinds, ProviderPathKind, ProviderSyncState,
 };
 use crate::server::compute_verter_diagnostics_for_with_views;
-use crate::tsgo::merge;
-use crate::tsgo::project_sync::ProjectSync;
-use crate::tsgo::traits::TypeProvider;
+use crate::type_provider::merge;
+use crate::type_provider::project_sync::ProjectSync;
+use crate::type_provider::traits::TypeProvider;
 
 /// Signal sent to the coordinator when a file changes.
 pub struct SyncSignal {
@@ -636,7 +636,7 @@ async fn publish_merged_diagnostics(deps: &SyncCoordinatorDeps, canonical_id: &s
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tsgo::mock::{MockCall, MockTypeProvider};
+    use crate::type_provider::mock::{MockCall, MockTypeProvider};
     use crate::ProjectSyncMode;
     use tower_lsp_server::{LspService, Server};
     use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
@@ -1019,7 +1019,7 @@ mod tests {
         // mapper (prelude offset undone). The carrier IDE-source-map path
         // requires an `ide_path` a rune module never has, so without the
         // self-file route the type diagnostic would be dropped entirely.
-        use crate::tsgo::protocol::{TypeDiagnostic, TypeDiagnosticSeverity};
+        use crate::type_provider::protocol::{TypeDiagnostic, TypeDiagnosticSeverity};
 
         let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
         let canonical_id = "/workspace/store.svelte.ts";

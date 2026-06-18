@@ -4,7 +4,7 @@
 //! Symptom (BUG-REPORT.md): CTRL+CLICK on `defineProps` navigated to the CORRECT file
 //! (`runtime-core.d.ts`) but at **line 0** instead of the exact function definition.
 //!
-//! Root cause: `crates/verter_lsp/src/tsgo/merge.rs` — `merge_definitions_with_barrel_resolver`
+//! Root cause: `crates/verter_lsp/src/type_provider/merge.rs` — `merge_definitions_with_barrel_resolver`
 //! (and its wrapper `merge_definitions`) substituted `Range::default()` (line 0, char 0) for
 //! every non-`.vue` target instead of resolving the type provider's byte offsets to line:col.
 //! The type provider returns a `TypeLocation { path, start, end }` whose `start`/`end` are REAL
@@ -31,10 +31,10 @@ use tower_lsp_server::ls_types::*;
 use verter_lsp::documents::line_index::LineIndex;
 use verter_lsp::documents::position_map::PositionMapper;
 use verter_lsp::documents::provider_projection::ProviderPositionMapper;
-use verter_lsp::tsgo::merge::{
+use verter_lsp::type_provider::merge::{
     merge_definitions, merge_definitions_with_barrel_resolver, BarrelResolver, ExternalIdeResolver,
 };
-use verter_lsp::tsgo::protocol::TypeLocation;
+use verter_lsp::type_provider::protocol::TypeLocation;
 
 /// A minimal valid provider mapper. For an EXTERNAL (non-carrier) target the mapper is
 /// never consulted by `merge_definitions` — it only matters for carrier IDE targets — so a

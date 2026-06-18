@@ -442,7 +442,7 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
                                 );
                                 let mapper =
                                     crate::documents::provider_projection::ProviderPositionMapper::source_map(mapper);
-                                crate::tsgo::merge::merge_diagnostics(
+                                crate::type_provider::merge::merge_diagnostics(
                                     verter_diags,
                                     type_diags,
                                     &tsx_li,
@@ -528,7 +528,7 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
                                 crate::documents::line_index::LineIndex::new(&vue_src, encoding);
                             let mapper =
                                 crate::documents::provider_projection::ProviderPositionMapper::source_map(mapper);
-                            crate::tsgo::merge::merge_diagnostics(
+                            crate::type_provider::merge::merge_diagnostics(
                                 verter_diags,
                                 type_diags,
                                 &tsx_li,

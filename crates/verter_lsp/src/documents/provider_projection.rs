@@ -91,7 +91,7 @@ impl DocumentProviderProjection {
 /// Dispatches the three mapping operations to the source-map-backed
 /// [`PositionMapper`] (carrier IDE) or the line-only rewrite-aware
 /// [`SelfFileProviderMapper`] (self-file rune module). The return shapes match
-/// [`PositionMapper`] exactly, so the `tsgo::merge` helpers are projection-
+/// [`PositionMapper`] exactly, so the `type_provider::merge` helpers are projection-
 /// agnostic.
 #[derive(Clone)]
 pub enum ProviderPositionMapper {
@@ -166,7 +166,7 @@ impl ProviderPositionMapper {
 
     /// The generated provider-buffer position immediately after the last emitted synthetic
     /// helper import, the authoritative gate for classifying a TypeProvider auto-import
-    /// insertion (see [`crate::tsgo::auto_import`]).
+    /// insertion (see [`crate::type_provider::auto_import`]).
     ///
     /// Only the carrier-IDE `SourceMap` projection emits a synthetic helper-import preamble; a
     /// `SelfFile` rune-module projection has none, so it returns `None` (the auto-import

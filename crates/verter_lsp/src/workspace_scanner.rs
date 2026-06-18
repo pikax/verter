@@ -30,7 +30,7 @@ use crate::provider_sync::{
     commit_sync_transition, genuinely_stale_after_sync, prepare_sync_transition,
     revert_unsynced_kinds, ProviderPathKind, ProviderSyncState,
 };
-use crate::tsgo::project_sync::ProjectSync;
+use crate::type_provider::project_sync::ProjectSync;
 
 /// Handle for communicating with the background workspace scanner.
 ///
@@ -865,7 +865,7 @@ async fn close_stale_paths(sync: &ProjectSync, stale_paths: &[(ProviderPathKind,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tsgo::mock::{MockCall, MockTypeProvider};
+    use crate::type_provider::mock::{MockCall, MockTypeProvider};
     use crate::ProjectSyncMode;
     use std::fs;
     use tempfile::TempDir;

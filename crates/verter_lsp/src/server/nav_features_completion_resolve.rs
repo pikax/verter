@@ -16,7 +16,7 @@
 use tower_lsp_server::ls_types::*;
 
 use crate::documents::line_index::LineIndex;
-use crate::tsgo::auto_import::{
+use crate::type_provider::auto_import::{
     resolve_script_import_anchor, translate_completion_import_edits, ProviderImportEdit,
 };
 

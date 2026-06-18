@@ -279,6 +279,12 @@ and a mock would require introducing a transport-trait seam. That refactor is a
 separate scoped change; the shaping it would assert is simple non-branching code
 and the shared `entryNames` builder it calls IS unit-tested.
 
+FOLLOW-UP (`TODO`): the provider-neutral result-merge module
+`crates/verter_lsp/src/type_provider/merge.rs` (4634 lines) carries an
+oversize-file exemption in `no_oversize_files` (Guard 6). It should be split into
+sibling modules along its merge-surface boundaries (per the >400-line extraction
+convention) in a future block so the exemption can be retired.
+
 The CI gate runs the Rust unit layer (including the F1 virtual-file
 discriminator above) on every push. The real-provider parity integration test
 runs in require-mode (`DX_REQUIRE_PROVIDERS=1`) in the `dx-harness-hermetic` CI

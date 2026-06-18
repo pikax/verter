@@ -26,9 +26,9 @@ use verter_session::{
     VirtualNodeKind, VirtualQuery,
 };
 
-use verter_lsp::tsgo::protocol::{CompletionResult, TypeProviderError};
-use verter_lsp::tsgo::traits::TypeProvider;
 use verter_lsp::tsserver::ipc::TsserverTypeProvider;
+use verter_lsp::type_provider::protocol::{CompletionResult, TypeProviderError};
+use verter_lsp::type_provider::traits::TypeProvider;
 
 /// Request member completions, retrying on tsserver's transient
 /// `"No content available."`.

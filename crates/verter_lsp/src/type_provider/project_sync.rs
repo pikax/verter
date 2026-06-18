@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use crate::tsgo::protocol::TypeProviderError;
-use crate::tsgo::traits::TypeProvider;
+use crate::type_provider::protocol::TypeProviderError;
+use crate::type_provider::traits::TypeProvider;
 use crate::ProjectSyncMode;
 
 /// Syncs project files to a `TypeProvider`.
@@ -278,7 +278,7 @@ impl ProjectSync {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tsgo::mock::{FailingTypeProvider, MockCall, MockTypeProvider};
+    use crate::type_provider::mock::{FailingTypeProvider, MockCall, MockTypeProvider};
 
     fn make_sync(mock: &MockTypeProvider, mode: ProjectSyncMode) -> ProjectSync {
         ProjectSync::new(Arc::new(mock.clone()), mode)

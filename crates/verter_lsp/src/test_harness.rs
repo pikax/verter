@@ -16,7 +16,7 @@ use tower_lsp_server::LanguageServer;
 use verter_session::{HostConfig, VerterHost};
 
 use crate::server::VerterLanguageServer;
-use crate::tsgo::traits::TypeProvider;
+use crate::type_provider::traits::TypeProvider;
 use crate::LspConfig;
 
 // ---------------------------------------------------------------------------

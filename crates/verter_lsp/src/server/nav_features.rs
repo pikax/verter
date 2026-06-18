@@ -22,9 +22,9 @@ use crate::features::cursor_context::{
 };
 use crate::features::hover;
 use crate::features::hover::hover_at_position;
-use crate::tsgo::auto_import::ProviderImportEdit;
-use crate::tsgo::merge;
-use crate::tsgo::protocol::CompletionResolveData;
+use crate::type_provider::auto_import::ProviderImportEdit;
+use crate::type_provider::merge;
+use crate::type_provider::protocol::CompletionResolveData;
 
 use super::handler_guard::HandlerGuard;
 use super::nav_features_completion_resolve::{

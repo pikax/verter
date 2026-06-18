@@ -38,8 +38,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 /// Production routing / provider-sync / position-mapping source roots scanned
-/// by the guard (relative to the crate `src/`).
-const SCAN_DIRS: &[&str] = &["features", "server", "documents", "tsgo"];
+/// by the guard (relative to the crate `src/`). `type_provider/` holds the
+/// provider-neutral merge / auto-import / project-sync primitives; `tsgo/`
+/// holds the backend-specific transport/respawn wrappers.
+const SCAN_DIRS: &[&str] = &["features", "server", "documents", "type_provider", "tsgo"];
 const SCAN_FILES: &[&str] = &[
     "server_utils.rs",
     "background_drain.rs",
