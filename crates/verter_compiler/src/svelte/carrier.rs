@@ -363,9 +363,10 @@ impl CarrierCompiler for SvelteCarrierCompiler {
         };
 
         // Svelte's native RUNTIME compiler (source `.svelte` → JS importing
-        // `svelte/internal/client`) is a later block. Today the carrier
-        // projects ONLY the IDE surface: it yields the IDE `tsx` (when the host
-        // requests it) and NO runtime `main` / block side-files. The host
+        // `svelte/internal/client`) is not produced through this carrier yet.
+        // The carrier projects ONLY the IDE surface: it yields the IDE `tsx`
+        // (when the host requests it) and NO runtime `main` / block side-files.
+        // The host
         // detects the absent runtime surface (`has_runtime_surface() == false`)
         // and populates only its `CachedTsx` slot — it emits no `Main` virtual
         // node. The projection's typed-unsupported diagnostics are LIFTED into

@@ -76,7 +76,7 @@ pub use html::{DynamicSlot, NodePathPlan, PathBase};
 pub use ir::BindingId;
 pub use topology::{plan_client_topology, ClientTopologyPlan};
 
-/// The Block-local options the runtime lowering reads.
+/// The options the runtime lowering reads.
 ///
 /// Minimal by design: it carries only the inputs the binding/scope analysis and
 /// component-identity derivation actually consult. Backend output knobs (SSR,
@@ -101,7 +101,7 @@ pub struct SvelteRuntimeOptions {
 
 /// A runtime-lowering diagnostic.
 ///
-/// A thin Block-local wrapper carrying the same severity vocabulary as the
+/// A thin wrapper carrying the same severity vocabulary as the
 /// neutral [`RuntimeDiagnostic`](crate::framework_common::carrier_compiler::RuntimeDiagnostic),
 /// so a lowering problem surfaces as a typed diagnostic rather than a silent
 /// catch-all IR node.

@@ -219,8 +219,8 @@ pub struct RuntimeDiagnostic {
 /// `_sfc_main` shape is assembled host-side from the neutral block fields
 /// (host virtual-file concern: style/custom virtual imports + HMR), so Vue
 /// leaves `body_code` `None` and the host assembles. A framework whose
-/// runtime module is a single self-contained ESM (Svelte's official-shaped
-/// output, later blocks) returns `Some` here and the host emits it verbatim.
+/// runtime module is a single self-contained ESM (e.g. Svelte's official-shaped
+/// runtime output) returns `Some` here and the host emits it verbatim.
 #[derive(Debug, Clone, Default)]
 pub struct RuntimeMainModule {
     /// The framework-owned ESM body, when the carrier emits one directly.

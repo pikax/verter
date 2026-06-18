@@ -500,7 +500,7 @@ fn derived_or_effect_read_of_unwritten_state_is_plain_let() {
 // object `$props()` → Prop. The bindings enter the scope graph + binding table so
 // a template read resolves SCOPE-AWARELY to the right kind (a shadowing local of
 // the same name does NOT resolve to the rune binding). This is CLASSIFICATION +
-// resolution only — the read-rewrite emission ($.get / $.prop) is a later block.
+// resolution only — the read-rewrite emission ($.get / $.prop) is the client/SSR backend's concern.
 // Kinds confirmed against svelte@5.56.3: a $derived read is a $.get signal; a
 // $props destructure is $.prop / $$props.x; a $bindable is the $.prop bindable.
 // ---------------------------------------------------------------------------

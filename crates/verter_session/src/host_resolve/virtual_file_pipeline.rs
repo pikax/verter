@@ -2339,12 +2339,12 @@ impl VerterHost {
         // The `Main` virtual node is the framework RUNTIME module. A carrier
         // that produced a runtime surface assembles it; a carrier that
         // projects ONLY an IDE surface (Svelte today) emits NO `Main` node —
-        // `get_virtual_file(Main)` then reports missing until a later block
-        // lands Svelte runtime generation.
+        // `get_virtual_file(Main)` then reports missing until that carrier
+        // emits a runtime surface.
         if compiled.has_runtime_surface() {
             let main_code = match &compiled.main.body_code {
                 // A carrier that emits its own self-contained ESM body uses it
-                // verbatim (Svelte's official-shaped output, later blocks).
+                // verbatim (e.g. Svelte's official-shaped runtime output).
                 Some(body) => body.clone(),
                 // Vue: the host assembles the `_sfc_main` module from the
                 // neutral block fields (its virtual-file concern).

@@ -113,10 +113,13 @@ owner-decision list.
 3. **Typeinfo core add-only under the closed wire rules.** Closed-enum discipline, field numbers
    never reused, additive audit, validation-before-execution, schema-version gates, byte-pinned TS
    bindings. This program performs exactly ONE wire block (§B1).
-4. **Runtime codegen for non-Vue frameworks is OUT of scope.** New framework compilers target
-   `CompileTarget::TSX` (IDE) + `TEMPLATE_DATA` (analysis) only. Official Svelte/Astro/Angular
-   compilers remain the runtime authority; unsupported `CompileTarget` bits return typed
-   `CompileUnsupported` diagnostics, never silent empties.
+4. **Runtime codegen for non-Vue frameworks was out of scope for this adapter-substrate program.**
+   It targeted `CompileTarget::TSX` (IDE) + `TEMPLATE_DATA` (analysis) only. SUPERSEDED for Svelte:
+   native Svelte runtime codegen (source `.svelte` → `svelte/internal/{client,server}` JS) is now a
+   first-class program governed by [`svelte-native-compiler-plan.md`](./svelte-native-compiler-plan.md);
+   the shared `CarrierCompiler` runtime path serves it. Astro/Angular runtime codegen remain out of
+   scope here (their official compilers stay the runtime authority); unsupported `CompileTarget` bits
+   still return typed `CompileUnsupported` diagnostics, never silent empties.
 5. **CodeTransform is the sole mutation mechanism** for all generated output (sourcemap integrity).
 6. **Typed-IR-only.** No text sniffing, no identifier-suffix classification (`ends_with("Props")`
    banned), no synthesize-then-reparse, structural detection via resolved package symbols (e.g.
