@@ -138,6 +138,16 @@ The LSP delegates TypeScript type checking to an external **TypeProvider** proce
 - `tsserver/resilient.rs` -- `ResilientTsserverProvider` (crash detection + auto-restart)
 - `workspace_scanner.rs` -- Async background workspace scanner with priority-based file loading
 
+### Type-Runtime Trace Surface (documented invariant)
+
+The `verter_type_runtime` trace facility (`crates/verter_type_runtime/src/trace.rs`) is the per-request observability for backend-session work (the `tsgo`/`tsserver` IPC paths + the provider adapter). Its public surface is deliberately narrow, and one invariant is enforced rather than left to convention:
+
+- **Await-crossing spans MUST use `type_runtime_trace_scope_async`** (the function or the `type_runtime_trace_scope_async!` macro). Its span lives in a per-future tokio task-local state, so interleaved sibling futures on a single-threaded runtime cannot corrupt each other's span stack. The event (`type_runtime_trace_event!`) and context helpers (`current_type_runtime_trace_context`, `with_type_runtime_trace_context[_async]`) round out the public surface.
+- **The raw guard lifecycle is INTERNAL and same-state scoped.** `TypeRuntimeTraceGuard`, the raw opener `open_type_runtime_trace_span`, and the test-only `type_runtime_trace_scope!` macro are `pub(crate)` / `cfg(test)`. A guard is created AND dropped within ONE active trace state; production never holds a raw guard across `.await`. Holding one across an async-state boundary (or letting it escape its scope future) is out of contract.
+- **An identity-miss drop is FAULT CONTAINMENT, not a supported tracing path.** When a guard's own state is not the active task-local at drop time, the `Drop` pop is a safe no-op — never a panic — and the active state is not corrupted. The only residue is a possible stale origin span (a diagnostic-output blemish) in that unreachable misuse case. Genuine same-state out-of-order corruption is still caught by the within-state `debug_assert_eq!` (characterized by `same_state_out_of_order_drop_trips_lifo_assertion`).
+
+Enforcing guard: `trace_surface_guard` (`crates/verter_type_runtime/tests/trace_surface_guard.rs`) — a source scan that fails if any production file outside `trace.rs` references `TypeRuntimeTraceGuard`, `type_runtime_trace_scope(`, or `type_runtime_trace_scope!`.
+
 ### Background File Sync
 
 During `initialized()`, the LSP spawns a `WorkspaceScanner` background task that compiles ALL workspace `.vue` files to TSX and syncs them to the type provider asynchronously. For TSGO, both `.vue.tsx` (IDE artifact) and `.vue.ts` (public API) are synced; cross-file imports resolve through `.vue.ts` (via `rewrite_vue_imports_for_tsgo`). Ensures imports of non-open `.vue` files resolve to actual component types rather than the wildcard `declare module '*.vue'` fallback.

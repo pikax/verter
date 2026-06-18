@@ -246,12 +246,26 @@ struct TypeRuntimeTraceGuardState {
     state_id: u64,
 }
 
-pub struct TypeRuntimeTraceGuard {
+/// RAII guard that closes a trace span on drop.
+///
+/// This is an INTERNAL lifecycle primitive: it is `pub(crate)` so only the
+/// trace module (and its tests) can open one. Production await-crossing spans go
+/// through [`type_runtime_trace_scope_async`], which creates and drops the guard
+/// inside its own scope's active state. Holding a raw guard across an
+/// async-state boundary is out of contract — see the `Drop` impl for the
+/// fault-containment guarantee that covers that unreachable misuse.
+pub(crate) struct TypeRuntimeTraceGuard {
     state: Option<TypeRuntimeTraceGuardState>,
 }
 
 impl TypeRuntimeTraceGuard {
-    pub fn noop() -> Self {
+    /// A guard that closes no span on drop. TEST-ONLY: it backs the disabled
+    /// branch of the test-only `type_runtime_trace_scope!` macro. Production
+    /// builds the guard directly inside [`open_type_runtime_trace_span`] (which
+    /// returns a stateless guard when tracing is disabled), so this constructor
+    /// is only reachable from tests.
+    #[cfg(test)]
+    pub(crate) fn noop() -> Self {
         Self { state: None }
     }
 }
@@ -263,23 +277,30 @@ impl Drop for TypeRuntimeTraceGuard {
         };
 
         // Pop from the exact state this guard pushed onto, identified by
-        // `(storage, state_id)`. Because each async scope owns its own
-        // task-local state and tokio swaps that state around every poll, a
-        // guard held across `.await` pops against its own LIFO — sibling
+        // `(storage, state_id)`. In the supported lifecycle the guard is created
+        // AND dropped while its own state is active (every production guard is
+        // opened inside `type_runtime_trace_scope_async`'s scope), so the pop
+        // hits its own LIFO and balances. Because each async scope owns its own
+        // task-local state and tokio swaps that state around every poll, sibling
         // tasks interleaved on the same OS thread never corrupt it.
         //
-        // The pop is teardown-total: when the guard's own state is no longer
-        // reachable (the owning scope future was torn down before the guard
-        // dropped, or a *different* nested async state is the active task-local
-        // at drop time), `with_state_by_identity` returns `None` and the drop is
-        // a graceful no-op — never a panic. Tearing down its own outer state from
-        // under a nested state, or after the scope future is gone, is a legitimate
-        // condition, not a logic bug, so it must stay fault-contained.
+        // An IDENTITY MISS — `with_state_by_identity` returning `None` because
+        // the guard's own state is not the active task-local at drop time — is
+        // OUT OF CONTRACT, reachable only by misuse (holding a raw guard across
+        // an async-state boundary, or letting it escape its scope future). The
+        // raw guard opener is `pub(crate)` and production never does this, so the
+        // miss is structurally unreachable in production. When it does occur it is
+        // pure FAULT CONTAINMENT: the drop is a safe no-op — never a panic — and
+        // it does NOT corrupt whatever active state happens to be installed (the
+        // pop simply does not run). The only residue is a possible stale origin
+        // span left on the guard's own (now-suspended or gone) stack, which can
+        // mis-parent later events ONLY in that unreachable misuse case; it is a
+        // diagnostic-output blemish, not active-state corruption or a logic bug.
         //
         // The genuine-logic-bug check (a span mismatch *within* the guard's own
-        // live state) runs INSIDE the identity closure, so it only fires when the
-        // state actually exists and the LIFO is corrupt — never on the legitimate
-        // state-gone / nested-state path that returns `None`.
+        // live state) runs INSIDE the identity closure, so it fires only when the
+        // state exists and its LIFO is genuinely corrupt — never on the
+        // out-of-contract identity-miss path that returns `None`.
         with_state_by_identity(state.storage, state.state_id, |trace_state| {
             let popped = trace_state.stack.pop();
             debug_assert_eq!(
@@ -380,10 +401,12 @@ fn push_trace_span(state: &mut RuntimeTraceState, span_id: u64) -> (u64, Option<
 /// task-local scope when inside one, else the synchronous fallback) and return
 /// a guard that closes it on drop.
 ///
-/// The returned guard records the storage + state identity it pushed onto, so
-/// it pops from that exact state — this is what makes guards held across
-/// `.await` sound under [`type_runtime_trace_scope_async`].
-pub fn type_runtime_trace_scope(
+/// INTERNAL (`pub(crate)`): the raw guard lifecycle is not part of the public
+/// surface. The returned guard records the storage + state identity it pushed
+/// onto, so it pops from that exact state — this is what makes the span sound
+/// under [`type_runtime_trace_scope_async`], which is the ONLY supported caller
+/// (it opens the span and drops the guard within its own scope's active state).
+pub(crate) fn open_type_runtime_trace_span(
     name: &'static str,
     detail: impl Into<String>,
 ) -> TypeRuntimeTraceGuard {
@@ -478,11 +501,13 @@ where
 
 /// Open an await-crossing trace span around `future`.
 ///
-/// Equivalent to opening a [`type_runtime_trace_scope`] guard and holding it
-/// across the future, but the span lives inside a per-future task-local state
-/// (seeded from the current top span) so it is correct under concurrency. The
-/// guard is created and dropped inside the scoped future, so both its push and
-/// its pop run while this future's state is the active task-local.
+/// Equivalent to opening a raw [`open_type_runtime_trace_span`] guard and
+/// holding it across the future, but the span lives inside a per-future
+/// task-local state (seeded from the current top span) so it is correct under
+/// concurrency. The guard is created and dropped inside the scoped future, so
+/// both its push and its pop run while this future's state is the active
+/// task-local. This is the only supported way to hold a trace span across
+/// `.await`; the raw guard opener is internal.
 ///
 /// `detail` is `None` when tracing is disabled (the caller's
 /// [`type_runtime_trace_scope_async!`] macro skips building it), so the
@@ -502,7 +527,7 @@ where
 
     let context = current_type_runtime_trace_context();
     with_type_runtime_trace_context_async(context, async move {
-        let _trace = type_runtime_trace_scope(name, detail);
+        let _trace = open_type_runtime_trace_span(name, detail);
         future.await
     })
     .await
@@ -543,11 +568,19 @@ pub fn type_runtime_trace_event(name: &'static str, detail: impl Into<String>) {
     ));
 }
 
+/// Open a synchronous trace span guard. TEST-ONLY: production must NOT hold a
+/// raw span guard — it exposes only [`type_runtime_trace_scope_async`], events,
+/// and context helpers. This macro exists solely so the trace module's own
+/// tests can exercise the raw guard lifecycle (e.g. the same-state LIFO
+/// corruption and fault-containment characterizations); it is gated behind
+/// `cfg(test)` so it is absent from every production build and downstream crate,
+/// and the `trace_surface_guard` architecture test fences any production use.
+#[cfg(test)]
 #[macro_export]
 macro_rules! type_runtime_trace_scope {
     ($name:expr, $detail:expr $(,)?) => {{
         if $crate::trace::type_runtime_trace_enabled() {
-            $crate::trace::type_runtime_trace_scope($name, $detail)
+            $crate::trace::open_type_runtime_trace_span($name, $detail)
         } else {
             $crate::trace::TypeRuntimeTraceGuard::noop()
         }
@@ -556,10 +589,12 @@ macro_rules! type_runtime_trace_scope {
 
 /// Open an await-crossing trace span around `$future`.
 ///
-/// Use this instead of [`type_runtime_trace_scope!`] whenever the span must be
-/// held across `.await`: the span lives in a per-future task-local state, so
-/// interleaved sibling futures on a single-threaded runtime cannot corrupt each
-/// other's span stack. Awaiting the result yields the future's output.
+/// This is the public way to hold a trace span across `.await`: the span lives
+/// in a per-future task-local state, so interleaved sibling futures on a
+/// single-threaded runtime cannot corrupt each other's span stack. Awaiting the
+/// result yields the future's output. (The raw synchronous guard lifecycle —
+/// `open_type_runtime_trace_span` and the test-only `type_runtime_trace_scope!`
+/// macro — is internal; production must not hold a raw guard across `.await`.)
 ///
 /// `$detail` is only built when tracing is enabled (disabled-mode laziness),
 /// and it is materialised to an owned `String` *before* `$future` is
@@ -861,7 +896,7 @@ mod tests {
     /// the nested scope (tokio scopes the task-local to the polled future), so the
     /// drop must stay fault-contained — a graceful no-op, never a debug-panic —
     /// and it must NOT corrupt the *nested* (active) state's stack by popping the
-    /// wrong span. (Holding a `type_runtime_trace_scope` guard across a nested
+    /// wrong span. (Holding an `open_type_runtime_trace_span` guard across a nested
     /// async-state boundary is itself outside the production invariant: every
     /// production guard is created and dropped within its own scope's active
     /// state. This test characterizes the fault-containment of the drop, which is
@@ -902,13 +937,13 @@ mod tests {
                 }),
                 async {
                     // Guard pushed onto the OUTER async state.
-                    let outer_guard = type_runtime_trace_scope("f1_held", "held=true");
+                    let outer_guard = open_type_runtime_trace_span("f1_held", "held=true");
                     // Enter a NESTED async state; this becomes the active task-local.
                     with_type_runtime_trace_context_async(
                         current_type_runtime_trace_context(),
                         async move {
                             // Open a span on the NESTED (active) state, then snapshot it.
-                            let _nested = type_runtime_trace_scope("f1_nested", "nested=true");
+                            let _nested = open_type_runtime_trace_span("f1_nested", "nested=true");
                             let nested_top_before = current_type_runtime_trace_context()
                                 .expect("nested context before")
                                 .parent_span_id;
@@ -985,7 +1020,7 @@ mod tests {
                     parent_span_id: 1,
                     base_depth: 0,
                 }),
-                async { type_runtime_trace_scope("f2_escaped", "escaped=true") },
+                async { open_type_runtime_trace_span("f2_escaped", "escaped=true") },
             )
             .await
         });
@@ -1061,5 +1096,73 @@ mod tests {
             "panic in sync trace closure must not leak the replacement root into \
              later sync trace work on this thread"
         );
+    }
+
+    /// Genuine same-state LIFO corruption is STILL detected. The
+    /// fault-containment hardening only suppresses the assertion on an
+    /// out-of-contract identity MISS (the guard's own state is not active at
+    /// drop); it must NOT have neutered the within-state `debug_assert_eq!` that
+    /// catches a real out-of-order pop while the guard's own state IS live.
+    ///
+    /// Two raw guards are opened on the SAME active sync state, then the
+    /// FIRST-opened (outer) guard is dropped while the inner guard is still on
+    /// the stack. The outer's `Drop` pops the top — which is the INNER span —
+    /// and the within-state span-id assertion fires: the popped span id does not
+    /// match the outer guard's. Debug-only, because the assertion is a
+    /// `debug_assert_eq!` (compiled out in release).
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "trace guard must pop its own span from its own state")]
+    fn same_state_out_of_order_drop_trips_lifo_assertion() {
+        let _guard = test_trace_env_guard();
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "verter-type-runtime-trace-lifo-{}-{}.log",
+            std::process::id(),
+            type_runtime_next_span_id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        unsafe {
+            std::env::set_var("VERTER_TYPE_RUNTIME_TRACE", "1");
+            std::env::set_var("VERTER_TYPE_RUNTIME_TRACE_PATH", &path);
+        }
+        // Cleanup on the unwind path: the panic this test asserts unwinds OUT of
+        // the `drop(outer)` below, so restore the global trace env (held
+        // serialized by `_guard`) and reset the shared sync thread-local state
+        // before the panic propagates — otherwise a residual span left on the
+        // sync stack could leak into a later sync trace test on this thread.
+        struct LifoTestCleanup(std::path::PathBuf);
+        impl Drop for LifoTestCleanup {
+            fn drop(&mut self) {
+                TYPE_RUNTIME_SYNC_TRACE_STATE.with(|state| {
+                    *state.borrow_mut() = RuntimeTraceState::new(None);
+                });
+                let _ = std::fs::remove_file(&self.0);
+                unsafe {
+                    std::env::remove_var("VERTER_TYPE_RUNTIME_TRACE");
+                    std::env::remove_var("VERTER_TYPE_RUNTIME_TRACE_PATH");
+                }
+            }
+        }
+        let _cleanup = LifoTestCleanup(path.clone());
+
+        // Both guards push onto the same active SYNC thread-local state.
+        let outer = open_type_runtime_trace_span("lifo_outer", "pos=outer");
+        let inner = open_type_runtime_trace_span("lifo_inner", "pos=inner");
+
+        // `inner` is leaked so its own `Drop` never runs: the corruption we are
+        // characterizing is the OUTER guard popping the wrong (inner) span. If
+        // `inner` also dropped during unwind it would pop again and panic a
+        // SECOND time mid-unwind, aborting the process and defeating
+        // `#[should_panic]`. Leaking it leaves the inner span as the live top so
+        // the outer's pop is genuinely out of order.
+        std::mem::forget(inner);
+
+        // Dropping the outer guard pops the INNER span (the live top), so the
+        // within-state span-id `debug_assert_eq!` must fire here. The identity
+        // check passes (the sync state IS active and matches the outer guard), so
+        // this is the genuine-corruption path, NOT the fault-contained identity
+        // miss — proving the real detector still works.
+        drop(outer);
     }
 }
