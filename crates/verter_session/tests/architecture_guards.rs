@@ -4878,7 +4878,6 @@ mod foundations_guards {
             "crates/verter_lsp/src/config.rs",
             "crates/verter_lsp/src/features/completion.rs",
             "crates/verter_lsp/src/server/sync_orchestration.rs",
-            "crates/verter_lsp/src/type_provider/merge.rs",
             "crates/verter_lsp/src/workspace_scanner.rs",
             "crates/verter_mcp/src/server.rs",
             "crates/verter_napi/src/lib.rs",
