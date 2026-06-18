@@ -193,8 +193,15 @@ pub(super) async fn handle_initialize(
         );
     }
 
+    // Honest completion-resolve capability: advertise resolve only when the
+    // active provider actually implements it.
+    let resolve_provider = server
+        .type_provider
+        .as_ref()
+        .is_some_and(|tp| tp.supports_completion_resolve());
+
     Ok(InitializeResult {
-        capabilities: server_capabilities(&encoding),
+        capabilities: server_capabilities(&encoding, resolve_provider),
         server_info: Some(ServerInfo {
             name: "verter-lsp".into(),
             version: Some(env!("CARGO_PKG_VERSION").into()),

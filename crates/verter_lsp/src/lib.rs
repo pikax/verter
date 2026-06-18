@@ -32,6 +32,8 @@ mod integration_tests;
 #[cfg(test)]
 mod real_provider_tests;
 #[cfg(test)]
+mod resilient_provider_tests;
+#[cfg(test)]
 mod test_harness;
 #[cfg(test)]
 mod test_utils;

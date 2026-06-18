@@ -931,6 +931,18 @@ fn parse_completion_item(item: &serde_json::Value, content: Option<&str>) -> Opt
         })
         .unwrap_or((None, None));
 
+    // Preserve the upstream-LSP resolve handle as the provider-pure
+    // `CompletionResolveData::Lsp` variant: the item's own `label` plus its
+    // opaque `data` blob, replayed verbatim by `resolve_completion`. An item
+    // with no `data` carries no resolve handle.
+    let data = item
+        .get("data")
+        .filter(|d| !d.is_null())
+        .map(|d| CompletionResolveData::Lsp {
+            label: label.clone(),
+            data: d.clone(),
+        });
+
     Some(Completion {
         label,
         kind,
@@ -940,7 +952,7 @@ fn parse_completion_item(item: &serde_json::Value, content: Option<&str>) -> Opt
         edit_range_end,
         insert_text,
         sort_text,
-        data: item.get("data").cloned(),
+        data,
     })
 }
 
@@ -1332,6 +1344,14 @@ fn build_paths_config_payload(paths: serde_json::Value) -> serde_json::Value {
 }
 
 impl TypeProvider for TsgoTypeProvider {
+    fn provider_id(&self) -> &'static str {
+        "tsgo"
+    }
+
+    fn supports_completion_resolve(&self) -> bool {
+        true
+    }
+
     fn open_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
         tracing::debug!("TSGO open_file: {} ({} bytes)", path, content.len());
         let uri = Self::path_to_uri(path);
@@ -2152,16 +2172,25 @@ impl TypeProvider for TsgoTypeProvider {
     fn resolve_completion(
         &self,
         path: &str,
-        data: serde_json::Value,
+        data: CompletionResolveData,
     ) -> ProviderFuture<'_, Option<CompletionResolveResult>> {
         let uri = Self::path_to_uri(path);
         let transport = Arc::clone(&self.transport);
         let contents_cache = Arc::clone(&self.contents);
         let path_owned = path.to_string();
         Box::pin(async move {
-            // Build a minimal CompletionItem with the data field for resolve
+            // TSGO resolves through the upstream-LSP handle. A non-LSP resolve
+            // key cannot have originated from this provider — fail closed.
+            let CompletionResolveData::Lsp { label, data } = data else {
+                return Ok(None);
+            };
+            // Reissue the upstream `completionItem/resolve` with the entry's own
+            // `label` + opaque `data` carried on the typed `Lsp` resolve handle
+            // (both captured by `parse_tsgo_completion` at list time). The label
+            // is the entry's real label — the upstream server needs the original
+            // completion item identity to resolve its `additionalTextEdits`.
             let resolve_item = serde_json::json!({
-                "label": "",
+                "label": label,
                 "data": data,
                 "textDocument": { "uri": uri },
             });
@@ -2217,6 +2246,7 @@ impl TypeProvider for TsgoTypeProvider {
             } else {
                 Ok(Some(CompletionResolveResult {
                     additional_text_edits,
+                    ..Default::default()
                 }))
             }
         })

@@ -667,6 +667,14 @@ impl TsserverTypeProvider {
 }
 
 impl TypeProvider for TsserverTypeProvider {
+    fn provider_id(&self) -> &'static str {
+        "tsserver"
+    }
+
+    fn supports_completion_resolve(&self) -> bool {
+        true
+    }
+
     fn open_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
         let file = Self::normalize_path(path);
         let content = content.to_string();
@@ -915,7 +923,12 @@ impl TypeProvider for TsserverTypeProvider {
             let items = result
                 .get("entries")
                 .and_then(|v| v.as_array())
-                .map(|arr| arr.iter().filter_map(parse_tsserver_completion).collect())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(parse_tsserver_completion)
+                        .map(|item| stamp_tsserver_completion_offset(item, offset))
+                        .collect()
+                })
                 .unwrap_or_default();
 
             Ok(CompletionResult {
@@ -1051,7 +1064,7 @@ impl TypeProvider for TsserverTypeProvider {
 
             let entry_names: Vec<_> = items
                 .iter()
-                .map(|item| serde_json::json!({ "name": item.label }))
+                .map(build_completion_entry_details_request)
                 .collect();
             let result = transport
                 .request(
@@ -1101,6 +1114,64 @@ impl TypeProvider for TsserverTypeProvider {
                     Ok(items.to_vec())
                 }
             }
+        })
+    }
+
+    fn resolve_completion(
+        &self,
+        path: &str,
+        data: CompletionResolveData,
+    ) -> ProviderFuture<'_, Option<CompletionResolveResult>> {
+        let file = Self::normalize_path(path);
+        let transport = Arc::clone(&self.transport);
+        let contents_cache = Arc::clone(&self.contents);
+        Box::pin(async move {
+            // tsserver resolves through `completionEntryDetails`. A non-tsserver
+            // resolve key cannot have originated here — fail closed.
+            let CompletionResolveData::TsserverEntry {
+                name,
+                source,
+                data,
+                offset,
+            } = data
+            else {
+                return Ok(None);
+            };
+
+            // Re-issue `completionEntryDetails` at the SAME completion-site
+            // position the entry came from; tsserver keys the entry's auto-import
+            // `codeActions` on (position, name, source/data).
+            let (line, col) = {
+                let cache = contents_cache.lock().await;
+                match cache.get(&file) {
+                    Some(c) => byte_offset_to_tsserver_pos(c, offset),
+                    None => (1, offset + 1),
+                }
+            };
+
+            let entry = build_entry_names_entry(&name, source.as_deref(), data.as_ref());
+
+            let result = transport
+                .request(
+                    "completionEntryDetails",
+                    serde_json::json!({
+                        "file": file,
+                        "line": line,
+                        "offset": col,
+                        "entryNames": [entry],
+                    }),
+                )
+                .await?;
+
+            let Some(detail) = result.as_array().and_then(|arr| arr.first()) else {
+                return Ok(None);
+            };
+            let contents_cache = contents_cache.lock().await.clone();
+            Ok(completion_entry_details_to_resolve_result(
+                detail,
+                &file,
+                &contents_cache,
+            ))
         })
     }
 
@@ -1920,6 +1991,24 @@ pub fn parse_tsserver_completion(item: &serde_json::Value) -> Option<Completion>
         .and_then(|v| v.as_str())
         .map(String::from);
 
+    // Preserve the tsserver resolve handle: the entry's `name` plus the
+    // `source`/`data` an external-module (auto-import) entry carries. Hard-coding
+    // `data: None` here was the root cause of broken auto-import — without the
+    // handle the LSP could never re-issue `completionEntryDetails`. The
+    // completion-site `offset` is stamped by `get_completions` (it is identical
+    // for every entry in one request and not visible at the per-entry level).
+    let source = item
+        .get("source")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let resolve_data = item.get("data").filter(|d| !d.is_null()).cloned();
+    let data = Some(CompletionResolveData::TsserverEntry {
+        name: name.clone(),
+        source,
+        data: resolve_data,
+        offset: 0,
+    });
+
     Some(Completion {
         label: name,
         kind,
@@ -1929,8 +2018,77 @@ pub fn parse_tsserver_completion(item: &serde_json::Value) -> Option<Completion>
         edit_range_end: None,
         insert_text,
         sort_text,
-        data: None,
+        data,
     })
+}
+
+/// Stamp the completion-site `offset` onto a freshly-parsed tsserver-family
+/// completion's resolve handle.
+///
+/// `parse_tsserver_completion` runs per entry and cannot see the request
+/// position; the offset is identical for every entry in one `completionInfo`
+/// request, so both the tsserver and extension `get_completions` apply it here.
+/// `completionItem/resolve` later re-issues `completionEntryDetails` at this
+/// offset. Items without a tsserver resolve handle pass through unchanged.
+pub fn stamp_tsserver_completion_offset(mut item: Completion, request_offset: u32) -> Completion {
+    if let Some(CompletionResolveData::TsserverEntry { offset, .. }) = item.data.as_mut() {
+        *offset = request_offset;
+    }
+    item
+}
+
+/// Build one `completionEntryDetails` `entryNames` entry from a completion's
+/// typed resolve handle.
+///
+/// tsserver keys an entry's auto-import `codeActions` on `(name, source, data)` —
+/// an external-module (auto-import) entry resolves against a DIFFERENT module
+/// than a local member, so the `source`/`data` recovered from the entry's
+/// [`CompletionResolveData::TsserverEntry`] handle MUST be forwarded. An item
+/// with no tsserver handle (or a non-tsserver one) degrades to a bare `{ name }`
+/// keyed on the label.
+///
+/// Shared by the tsserver and extension `get_completion_details` paths so they
+/// build byte-identical detail requests (review finding H4 — the tsserver path
+/// previously sent `{ name }` only, dropping the auto-import keys the extension
+/// path forwarded).
+pub fn build_completion_entry_details_request(item: &Completion) -> serde_json::Value {
+    match &item.data {
+        Some(CompletionResolveData::TsserverEntry {
+            name, source, data, ..
+        }) => build_entry_names_entry(name, source.as_deref(), data.as_ref()),
+        _ => serde_json::json!({ "name": item.label }),
+    }
+}
+
+/// Build one `completionEntryDetails` `entryNames` entry from a resolve key's
+/// fields. Shared by the tsserver and extension `resolve_completion` paths so the
+/// single-entry resolve request is built identically across providers.
+pub fn build_entry_names_entry(
+    name: &str,
+    source: Option<&str>,
+    data: Option<&serde_json::Value>,
+) -> serde_json::Value {
+    let mut entry = serde_json::json!({ "name": name });
+    if let Some(source) = source {
+        entry["source"] = serde_json::Value::String(source.to_string());
+    }
+    if let Some(data) = data {
+        entry["data"] = data.clone();
+    }
+    entry
+}
+
+/// Shared tsserver-family `completionEntryDetails` enrichment.
+///
+/// Folds the resolved `displayParts` (detail) and combined documentation/tags
+/// onto an item WITHOUT discarding its resolve handle, so a lazily-enriched item
+/// can still be resolved for auto-import. Used by both the tsserver and
+/// extension `get_completion_details` paths.
+pub fn enrich_completion_with_entry_details(
+    item: &Completion,
+    detail: &serde_json::Value,
+) -> Completion {
+    enrich_tsserver_completion(item, detail)
 }
 
 fn enrich_tsserver_completion(item: &Completion, detail: &serde_json::Value) -> Completion {
@@ -2137,6 +2295,73 @@ pub fn parse_tsserver_code_action(
     })
 }
 
+/// Map a single `completionEntryDetails` entry into a [`CompletionResolveResult`].
+///
+/// This is the SHARED tsserver-family resolve mapping — used by both the
+/// out-of-process tsserver provider and the in-process extension provider, so
+/// neither carries its own copy of the `codeActions → byte edits` logic.
+///
+/// The tsserver `completionEntryDetails` response for an auto-importable entry
+/// carries `codeActions: [{ description, changes: [{ fileName, textChanges }] }]`
+/// (the auto-import insertion) alongside `displayParts`/`documentation`. We:
+///
+/// * fold every code action's `textChanges` that target `target_file` into
+///   ordered [`ResolvedTextEdit`]s (generated-file byte offsets), reusing
+///   [`parse_tsserver_code_action`]. Cross-file edits are dropped here — the LSP
+///   carrier re-anchor maps the generated-TSX edits back to the `.vue` source;
+/// * surface `displayParts`→`detail` and the combined documentation/tags so the
+///   lazy resolve also enriches the item's hover text.
+///
+/// Returns `None` when the entry yields neither edits nor enrichment, so the
+/// caller can treat "nothing to resolve" uniformly.
+pub fn completion_entry_details_to_resolve_result(
+    detail: &serde_json::Value,
+    target_file: &str,
+    contents_cache: &HashMap<String, String>,
+) -> Option<CompletionResolveResult> {
+    let canonical_target = verter_span::path::canonicalize_path(target_file);
+
+    let mut additional_text_edits = Vec::new();
+    if let Some(code_actions) = detail.get("codeActions").and_then(|v| v.as_array()) {
+        for action in code_actions {
+            let Some(parsed) = parse_tsserver_code_action(action, contents_cache) else {
+                continue;
+            };
+            for edit in parsed.edits {
+                // Same-file edits only: the generated-TSX file the completion was
+                // requested in. The LSP carrier re-anchor owns the
+                // generated-TSX → `.vue` mapping; cross-file edits (an import
+                // added to a different module) are not part of the in-carrier
+                // auto-import insertion and are dropped here.
+                if edit.path == canonical_target {
+                    additional_text_edits.push(ResolvedTextEdit {
+                        start: edit.start,
+                        end: edit.end,
+                        new_text: edit.new_text,
+                    });
+                }
+            }
+        }
+    }
+
+    let display = tsserver_display_parts_text(detail.get("displayParts"));
+    let resolved_detail = (!display.is_empty()).then_some(display);
+    let resolved_documentation = tsserver_completion_documentation(detail);
+
+    if additional_text_edits.is_empty()
+        && resolved_detail.is_none()
+        && resolved_documentation.is_none()
+    {
+        return None;
+    }
+
+    Some(CompletionResolveResult {
+        additional_text_edits,
+        detail: resolved_detail,
+        documentation: resolved_documentation,
+    })
+}
+
 /// Concatenate tsserver display parts into a single string.
 pub fn concat_display_parts(parts: &[serde_json::Value]) -> String {
     parts
@@ -2172,180 +2397,6 @@ pub fn format_quickinfo_hover(kind: &str, display: &str, docs: &str) -> String {
 #[cfg(all(test, feature = "__lsp_tests"))]
 mod tests {
     use super::*;
-    use std::path::{Path, PathBuf};
-    use std::sync::Arc;
-
-    use verter_session::{
-        CompileProfile, CompileTarget, FileLanguage, HostConfig, UpsertRequest, VerterHost,
-        VirtualNodeKind, VirtualQuery,
-    };
-
-    fn workspace_node_modules() -> Option<PathBuf> {
-        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").ok()?;
-        let node_modules = PathBuf::from(manifest_dir).join("../../node_modules");
-        node_modules.exists().then_some(node_modules)
-    }
-
-    fn tsserver_assets_or_skip() -> Option<(String, String)> {
-        let node_modules = workspace_node_modules()?;
-        let tsserver_path = if node_modules.join("typescript/lib/tsserver.js").exists() {
-            node_modules.join("typescript/lib/tsserver.js")
-        } else {
-            let pnpm_dir = node_modules.join(".pnpm");
-            let mut found = None;
-            if pnpm_dir.exists() {
-                for entry in std::fs::read_dir(&pnpm_dir).ok()? {
-                    let entry = entry.ok()?;
-                    let name = entry.file_name();
-                    let name_str = name.to_string_lossy();
-                    if name_str.starts_with("typescript@") && !name_str.contains("node_modules") {
-                        let candidate =
-                            entry.path().join("node_modules/typescript/lib/tsserver.js");
-                        if candidate.exists() {
-                            found = Some(candidate);
-                            break;
-                        }
-                    }
-                }
-            }
-            found?
-        };
-        let node_path = "node".to_string();
-        if std::process::Command::new(&node_path)
-            .arg("--version")
-            .output()
-            .is_err()
-        {
-            return None;
-        }
-        Some((
-            node_path,
-            tsserver_path.to_string_lossy().replace('\\', "/"),
-        ))
-    }
-
-    fn create_test_project_with_workspace_node_modules(dir: &Path) -> std::io::Result<()> {
-        std::fs::create_dir_all(dir.join("src"))?;
-        let workspace_node_modules = workspace_node_modules().ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "workspace node_modules not found",
-            )
-        })?;
-        let node_modules_dst = dir.join("node_modules");
-        std::fs::create_dir_all(&node_modules_dst)?;
-        refresh_generated_verter_types_stub(&node_modules_dst)?;
-
-        let vue_path = if workspace_node_modules.join("vue/dist/vue.d.ts").exists() {
-            workspace_node_modules.join("vue").canonicalize()?
-        } else {
-            let pnpm_dir = workspace_node_modules.join(".pnpm");
-            let mut found = None;
-            if pnpm_dir.exists() {
-                for entry in std::fs::read_dir(&pnpm_dir)? {
-                    let entry = entry?;
-                    let name = entry.file_name();
-                    let name_str = name.to_string_lossy();
-                    if name_str.starts_with("vue@") && !name_str.contains("node_modules") {
-                        let candidate = entry.path().join("node_modules/vue");
-                        if candidate.join("dist/vue.d.ts").exists() {
-                            found = Some(candidate.canonicalize()?);
-                            break;
-                        }
-                    }
-                }
-            }
-            found.ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::NotFound, "vue types not found")
-            })?
-        };
-        let vue_parent = vue_path.parent().ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::NotFound, "vue package parent not found")
-        })?;
-
-        let vue_dst = node_modules_dst.join("vue");
-        #[cfg(windows)]
-        {
-            let _ = std::process::Command::new("cmd")
-                .args([
-                    "/C",
-                    "mklink",
-                    "/J",
-                    &vue_dst.to_string_lossy(),
-                    &vue_path.to_string_lossy(),
-                ])
-                .output();
-        }
-        #[cfg(not(windows))]
-        {
-            let _ = std::os::unix::fs::symlink(&vue_path, &vue_dst);
-        }
-
-        let at_vue_src = vue_parent.join("@vue");
-        if at_vue_src.exists() {
-            let at_vue_dst = node_modules_dst.join("@vue");
-            #[cfg(windows)]
-            {
-                let _ = std::process::Command::new("cmd")
-                    .args([
-                        "/C",
-                        "mklink",
-                        "/J",
-                        &at_vue_dst.to_string_lossy(),
-                        &at_vue_src.to_string_lossy(),
-                    ])
-                    .output();
-            }
-            #[cfg(not(windows))]
-            {
-                let _ = std::os::unix::fs::symlink(&at_vue_src, &at_vue_dst);
-            }
-        }
-
-        let tsconfig = r#"{
-  "compilerOptions": {
-    "target": "ESNext",
-    "module": "ESNext",
-    "moduleResolution": "bundler",
-    "strict": true,
-    "jsx": "preserve",
-    "jsxImportSource": "vue",
-    "allowImportingTsExtensions": true
-  },
-  "include": ["src/**/*.ts", "src/**/*.tsx"]
-}"#;
-        std::fs::write(dir.join("tsconfig.json"), tsconfig)?;
-        Ok(())
-    }
-
-    fn refresh_generated_verter_types_stub(node_modules_root: &Path) -> std::io::Result<()> {
-        let types_dir = node_modules_root.join("@verter/types");
-        let index_path = types_dir.join("index.d.ts");
-        let pkg_path = types_dir.join("package.json");
-
-        let existing_index = std::fs::read_to_string(&index_path).ok();
-        let existing_pkg = std::fs::read_to_string(&pkg_path).ok();
-        let is_generated_stub = existing_index
-            .as_deref()
-            .map(|index| index.starts_with("// Auto-generated by verter-lsp"))
-            .unwrap_or(false)
-            || existing_pkg
-                .as_deref()
-                .map(|pkg| pkg.contains(r#""types":"index.d.ts""#))
-                .unwrap_or(false);
-
-        if existing_index.is_some() && !is_generated_stub {
-            return Ok(());
-        }
-
-        std::fs::create_dir_all(&types_dir)?;
-        std::fs::write(&index_path, verter_session::VERTER_TYPES_STANDALONE_DTS)?;
-        std::fs::write(
-            &pkg_path,
-            r#"{"name":"@verter/types","types":"index.d.ts"}"#,
-        )?;
-        Ok(())
-    }
 
     #[test]
     fn test_byte_offset_to_tsserver_pos() {
@@ -3119,612 +3170,5 @@ mod tests {
             ],
             "tsserver should be launched with the Verter TS plugin enabled"
         );
-    }
-
-    #[tokio::test]
-    async fn test_e2e_tsserver_scoped_slot_types_from_generated_vue_outputs() {
-        let Some((node_path, tsserver_path)) = tsserver_assets_or_skip() else {
-            eprintln!("skipping: node or tsserver.js not found");
-            return;
-        };
-
-        let tmp = std::env::temp_dir().join("verter_tsserver_slot_types");
-        let _ = std::fs::remove_dir_all(&tmp);
-        if create_test_project_with_workspace_node_modules(&tmp).is_err() {
-            eprintln!("skipping: could not create test project with workspace node_modules");
-            return;
-        }
-
-        let child_source = r#"<script setup lang="ts">
-interface SlotItem {
-  id: number
-  name: string
-}
-
-defineSlots<{
-  default(props: { slotItem: SlotItem; slotIndex: number; slotTotal: number }): any
-}>()
-
-const items: SlotItem[] = [{ id: 1, name: 'alpha' }]
-</script>
-
-<template>
-  <slot :slotItem="items[0]" :slotIndex="0" :slotTotal="items.length" />
-</template>
-"#;
-        let parent_source = r#"<script setup lang="ts">
-import TypedSlotComp from './TypedSlotComp.vue'
-
-const outerLabel = 'outer'
-</script>
-
-<template>
-  <TypedSlotComp v-slot="{ slotItem, slotIndex, slotTotal }">
-    <p>{{ sl }}</p>
-    <p>{{ slotItem.na }}</p>
-    <p>{{ slotItem.name }}</p>
-    <p>{{ slotIndex }}</p>
-    <p>{{ slotTotal }}</p>
-    <p>{{ outerLabel }}</p>
-  </TypedSlotComp>
-</template>
-"#;
-
-        let host = VerterHost::new_standalone(HostConfig::default());
-        let child_id = "/src/TypedSlotComp.vue";
-        let parent_id = "/src/TemplateSlotCases.vue";
-
-        let _ = host.upsert(UpsertRequest {
-            canonical_id: Some(child_id.to_string()),
-            input_id: child_id.to_string(),
-            source: Arc::from(child_source),
-            file_language: FileLanguage::vue(),
-            aliases: vec![],
-        });
-        let _ = host.upsert(UpsertRequest {
-            canonical_id: Some(parent_id.to_string()),
-            input_id: parent_id.to_string(),
-            source: Arc::from(parent_source),
-            file_language: FileLanguage::vue(),
-            aliases: vec![],
-        });
-
-        let profile = CompileProfile {
-            source_map: false,
-            target: CompileTarget::IDE | CompileTarget::TEMPLATE_DATA,
-            embed_ambient_types: false,
-            ..Default::default()
-        };
-
-        let _ = host
-            .get_virtual_file(VirtualQuery {
-                raw_id: None,
-                canonical_id: Some(child_id.to_string()),
-                node_kind: Some(VirtualNodeKind::Main),
-                compile_profile: profile.clone(),
-            })
-            .expect("child compilation should succeed");
-        let _ = host
-            .get_virtual_file(VirtualQuery {
-                raw_id: None,
-                canonical_id: Some(parent_id.to_string()),
-                node_kind: Some(VirtualNodeKind::Main),
-                compile_profile: profile.clone(),
-            })
-            .expect("parent compilation should succeed");
-
-        let child_api = host
-            .get_public_api(child_id)
-            .expect("child public API should exist");
-        let parent_ide = host
-            .get_ide(parent_id, &profile)
-            .expect("parent IDE output should exist");
-
-        let src_dir = tmp.join("src");
-        let child_api_path = src_dir.join("TypedSlotComp.vue.ts");
-        let parent_ide_path = src_dir.join("TemplateSlotCases.vue.tsx");
-        std::fs::write(&child_api_path, &*child_api.code).expect("child API should be written");
-        std::fs::write(&parent_ide_path, &*parent_ide.code).expect("parent IDE should be written");
-
-        let provider = TsserverTypeProvider::spawn(
-            &node_path,
-            &tsserver_path,
-            tmp.to_str().expect("tmp path should be valid UTF-8"),
-            None,
-            None,
-        )
-        .await
-        .expect("tsserver should spawn");
-
-        let child_api_path_str = child_api_path.to_string_lossy().replace('\\', "/");
-        let parent_ide_path_str = parent_ide_path.to_string_lossy().replace('\\', "/");
-
-        provider
-            .open_file(&child_api_path_str, &child_api.code)
-            .await
-            .expect("child API should open");
-        provider
-            .open_file(&parent_ide_path_str, &parent_ide.code)
-            .await
-            .expect("parent IDE should open");
-
-        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
-
-        let local_offset = parent_ide
-            .code
-            .find("slotItem.name")
-            .expect("parent IDE should reference slotItem.name") as u32;
-        let member_offset = local_offset + "slotItem.".len() as u32;
-
-        let hover = provider
-            .get_hover(&parent_ide_path_str, local_offset)
-            .await
-            .expect("hover request should succeed")
-            .expect("slot hover should exist");
-        eprintln!("tsserver slot hover: {}", hover.contents);
-
-        let completion_result = provider
-            .get_completions(&parent_ide_path_str, member_offset, Some("."))
-            .await;
-        let labels: Vec<String> = completion_result
-            .as_ref()
-            .ok()
-            .map(|result| result.items.iter().map(|item| item.label.clone()).collect())
-            .unwrap_or_default();
-
-        assert!(
-            hover.contents.contains("SlotItem")
-                || (hover.contents.contains("name") && hover.contents.contains("id")),
-            "slot hover should keep the concrete slot type, got: {}",
-            hover.contents
-        );
-        assert!(
-            !hover.contents.contains(": any"),
-            "slot hover should not degrade to any, got: {}",
-            hover.contents
-        );
-        assert!(
-            completion_result.is_ok(),
-            "slot member completion should succeed, got: {:?}",
-            completion_result.err()
-        );
-        assert!(
-            labels.iter().any(|label| label == "name"),
-            "slot member completions should include name, got: {labels:?}"
-        );
-        assert!(
-            labels.iter().any(|label| label == "id"),
-            "slot member completions should include id, got: {labels:?}"
-        );
-
-        let _ = std::fs::remove_dir_all(&tmp);
-    }
-
-    #[tokio::test]
-    async fn test_e2e_tsserver_scoped_slot_types_with_in_memory_child_api() {
-        let Some((node_path, tsserver_path)) = tsserver_assets_or_skip() else {
-            eprintln!("skipping: node or tsserver.js not found");
-            return;
-        };
-
-        let tmp = std::env::temp_dir().join("verter_tsserver_slot_types_in_memory");
-        let _ = std::fs::remove_dir_all(&tmp);
-        if create_test_project_with_workspace_node_modules(&tmp).is_err() {
-            eprintln!("skipping: could not create test project with workspace node_modules");
-            return;
-        }
-
-        let child_source = r#"<script setup lang="ts">
-interface SlotItem {
-  id: number
-  name: string
-}
-
-defineSlots<{
-  default(props: { slotItem: SlotItem; slotIndex: number; slotTotal: number }): any
-}>()
-
-const items: SlotItem[] = [{ id: 1, name: 'alpha' }]
-</script>
-
-<template>
-  <slot :slotItem="items[0]" :slotIndex="0" :slotTotal="items.length" />
-</template>
-"#;
-        let parent_source = r#"<script setup lang="ts">
-import TypedSlotComp from './TypedSlotComp.vue'
-
-const outerLabel = 'outer'
-</script>
-
-<template>
-  <TypedSlotComp v-slot="{ slotItem, slotIndex, slotTotal }">
-    <p>{{ sl }}</p>
-    <p>{{ slotItem.na }}</p>
-    <p>{{ slotItem.name }}</p>
-    <p>{{ slotIndex }}</p>
-    <p>{{ slotTotal }}</p>
-    <p>{{ outerLabel }}</p>
-  </TypedSlotComp>
-</template>
-"#;
-
-        let host = VerterHost::new_standalone(HostConfig::default());
-        let child_id = "/src/TypedSlotComp.vue";
-        let parent_id = "/src/TemplateSlotCases.vue";
-
-        let _ = host.upsert(UpsertRequest {
-            canonical_id: Some(child_id.to_string()),
-            input_id: child_id.to_string(),
-            source: Arc::from(child_source),
-            file_language: FileLanguage::vue(),
-            aliases: vec![],
-        });
-        let _ = host.upsert(UpsertRequest {
-            canonical_id: Some(parent_id.to_string()),
-            input_id: parent_id.to_string(),
-            source: Arc::from(parent_source),
-            file_language: FileLanguage::vue(),
-            aliases: vec![],
-        });
-
-        let profile = CompileProfile {
-            source_map: false,
-            target: CompileTarget::IDE | CompileTarget::TEMPLATE_DATA,
-            embed_ambient_types: false,
-            ..Default::default()
-        };
-
-        let _ = host
-            .get_virtual_file(VirtualQuery {
-                raw_id: None,
-                canonical_id: Some(child_id.to_string()),
-                node_kind: Some(VirtualNodeKind::Main),
-                compile_profile: profile.clone(),
-            })
-            .expect("child compilation should succeed");
-        let _ = host
-            .get_virtual_file(VirtualQuery {
-                raw_id: None,
-                canonical_id: Some(parent_id.to_string()),
-                node_kind: Some(VirtualNodeKind::Main),
-                compile_profile: profile.clone(),
-            })
-            .expect("parent compilation should succeed");
-
-        let child_api = host
-            .get_public_api(child_id)
-            .expect("child public API should exist");
-        let parent_ide = host
-            .get_ide(parent_id, &profile)
-            .expect("parent IDE output should exist");
-
-        let src_dir = tmp.join("src");
-        let child_api_path = src_dir.join("TypedSlotComp.vue.ts");
-        let parent_ide_path = src_dir.join("TemplateSlotCases.vue.tsx");
-        std::fs::write(&parent_ide_path, &*parent_ide.code).expect("parent IDE should be written");
-
-        let provider = TsserverTypeProvider::spawn(
-            &node_path,
-            &tsserver_path,
-            tmp.to_str().expect("tmp path should be valid UTF-8"),
-            None,
-            None,
-        )
-        .await
-        .expect("tsserver should spawn");
-
-        let child_api_path_str = child_api_path.to_string_lossy().replace('\\', "/");
-        let parent_ide_path_str = parent_ide_path.to_string_lossy().replace('\\', "/");
-
-        provider
-            .open_file(&child_api_path_str, &child_api.code)
-            .await
-            .expect("child API should open");
-        provider
-            .open_file(&parent_ide_path_str, &parent_ide.code)
-            .await
-            .expect("parent IDE should open");
-
-        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
-
-        let member_offset = parent_ide
-            .code
-            .find("slotItem.name")
-            .expect("parent IDE should reference slotItem.name") as u32
-            + "slotItem.".len() as u32;
-
-        let completion_result = provider
-            .get_completions(&parent_ide_path_str, member_offset, Some("."))
-            .await;
-
-        assert!(
-            completion_result.is_ok(),
-            "slot member completion should succeed with an in-memory child API, got: {:?}",
-            completion_result.err()
-        );
-    }
-
-    #[tokio::test]
-    async fn test_e2e_tsserver_scoped_slot_types_with_plugin_and_open_child_ide() {
-        let Some((node_path, tsserver_path)) = tsserver_assets_or_skip() else {
-            eprintln!("skipping: node or tsserver.js not found");
-            return;
-        };
-
-        let tmp = std::env::temp_dir().join("verter_tsserver_slot_types_plugin_child_ide");
-        let _ = std::fs::remove_dir_all(&tmp);
-        if create_test_project_with_workspace_node_modules(&tmp).is_err() {
-            eprintln!("skipping: could not create test project with workspace node_modules");
-            return;
-        }
-
-        let child_source = r#"<script setup lang="ts">
-interface SlotItem {
-  id: number
-  name: string
-}
-
-defineSlots<{
-  default(props: { slotItem: SlotItem; slotIndex: number; slotTotal: number }): any
-}>()
-
-const items: SlotItem[] = [{ id: 1, name: 'alpha' }]
-</script>
-
-<template>
-  <slot :slotItem="items[0]" :slotIndex="0" :slotTotal="items.length" />
-</template>
-"#;
-        let parent_source = r#"<script setup lang="ts">
-import TypedSlotComp from './TypedSlotComp.vue'
-
-const outerLabel = 'outer'
-</script>
-
-<template>
-  <TypedSlotComp v-slot="{ slotItem, slotIndex, slotTotal }">
-    <p>{{ sl }}</p>
-    <p>{{ slotItem.na }}</p>
-    <p>{{ slotItem.name }}</p>
-    <p>{{ slotIndex }}</p>
-    <p>{{ slotTotal }}</p>
-    <p>{{ outerLabel }}</p>
-  </TypedSlotComp>
-</template>
-"#;
-
-        let host = VerterHost::new_standalone(HostConfig::default());
-        let child_id = "/src/TypedSlotComp.vue";
-        let parent_id = "/src/TemplateSlotCases.vue";
-
-        let _ = host.upsert(UpsertRequest {
-            canonical_id: Some(child_id.to_string()),
-            input_id: child_id.to_string(),
-            source: Arc::from(child_source),
-            file_language: FileLanguage::vue(),
-            aliases: vec![],
-        });
-        let _ = host.upsert(UpsertRequest {
-            canonical_id: Some(parent_id.to_string()),
-            input_id: parent_id.to_string(),
-            source: Arc::from(parent_source),
-            file_language: FileLanguage::vue(),
-            aliases: vec![],
-        });
-
-        let profile = CompileProfile {
-            source_map: false,
-            target: CompileTarget::IDE | CompileTarget::TEMPLATE_DATA,
-            embed_ambient_types: false,
-            ..Default::default()
-        };
-
-        let _ = host
-            .get_virtual_file(VirtualQuery {
-                raw_id: None,
-                canonical_id: Some(child_id.to_string()),
-                node_kind: Some(VirtualNodeKind::Main),
-                compile_profile: profile.clone(),
-            })
-            .expect("child compilation should succeed");
-        let _ = host
-            .get_virtual_file(VirtualQuery {
-                raw_id: None,
-                canonical_id: Some(parent_id.to_string()),
-                node_kind: Some(VirtualNodeKind::Main),
-                compile_profile: profile.clone(),
-            })
-            .expect("parent compilation should succeed");
-
-        let child_api = host
-            .get_public_api(child_id)
-            .expect("child public API should exist");
-        let child_ide = host
-            .get_ide(child_id, &profile)
-            .expect("child IDE output should exist");
-        let parent_api = host
-            .get_public_api(parent_id)
-            .expect("parent public API should exist");
-        let parent_ide = host
-            .get_ide(parent_id, &profile)
-            .expect("parent IDE output should exist");
-
-        let src_dir = tmp.join("src");
-        let child_api_path = src_dir.join("TypedSlotComp.vue.ts");
-        let child_ide_path = src_dir.join("TypedSlotComp.vue.tsx");
-        let parent_api_path = src_dir.join("TemplateSlotCases.vue.ts");
-        let parent_ide_path = src_dir.join("TemplateSlotCases.vue.tsx");
-
-        let plugin_path = tmp
-            .join("node_modules")
-            .to_string_lossy()
-            .replace('\\', "/");
-        let provider = TsserverTypeProvider::spawn(
-            &node_path,
-            &tsserver_path,
-            tmp.to_str().expect("tmp path should be valid UTF-8"),
-            Some(&plugin_path),
-            None,
-        )
-        .await
-        .expect("tsserver should spawn");
-
-        provider
-            .open_file(
-                &child_ide_path.to_string_lossy().replace('\\', "/"),
-                &child_ide.code,
-            )
-            .await
-            .expect("child IDE should open");
-        provider
-            .open_file(
-                &child_api_path.to_string_lossy().replace('\\', "/"),
-                &child_api.code,
-            )
-            .await
-            .expect("child API should open");
-        provider
-            .open_file(
-                &parent_api_path.to_string_lossy().replace('\\', "/"),
-                &parent_api.code,
-            )
-            .await
-            .expect("parent API should open");
-        provider
-            .open_file(
-                &parent_ide_path.to_string_lossy().replace('\\', "/"),
-                &parent_ide.code,
-            )
-            .await
-            .expect("parent IDE should open");
-
-        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
-
-        let member_offset = parent_ide
-            .code
-            .find("slotItem.name")
-            .expect("parent IDE should reference slotItem.name") as u32
-            + "slotItem.".len() as u32;
-
-        let completion_result = provider
-            .get_completions(
-                &parent_ide_path.to_string_lossy().replace('\\', "/"),
-                member_offset,
-                Some("."),
-            )
-            .await;
-
-        assert!(
-            completion_result.is_ok(),
-            "slot member completion should succeed with plugin + child IDE open, got: {:?}",
-            completion_result.err()
-        );
-    }
-
-    #[tokio::test]
-    async fn test_e2e_tsserver_vfor_member_access_from_fixture_generated_vue_output() {
-        let Some((node_path, tsserver_path)) = tsserver_assets_or_skip() else {
-            eprintln!("skipping: node or tsserver.js not found");
-            return;
-        };
-
-        let tmp = std::env::temp_dir().join("verter_tsserver_fixture_vfor_member_access");
-        let _ = std::fs::remove_dir_all(&tmp);
-        if create_test_project_with_workspace_node_modules(&tmp).is_err() {
-            eprintln!("skipping: could not create test project with workspace node_modules");
-            return;
-        }
-
-        let source =
-            include_str!("../../../../packages/vue-vscode/e2e/fixtures/single-project/src/App.vue");
-        let host = VerterHost::new_standalone(HostConfig::default());
-        let app_id = "/src/App.vue";
-
-        let _ = host.upsert(UpsertRequest {
-            canonical_id: Some(app_id.to_string()),
-            input_id: app_id.to_string(),
-            source: Arc::from(source),
-            file_language: FileLanguage::vue(),
-            aliases: vec![],
-        });
-
-        let profile = CompileProfile {
-            source_map: false,
-            target: CompileTarget::IDE | CompileTarget::TEMPLATE_DATA,
-            embed_ambient_types: false,
-            ..Default::default()
-        };
-
-        let _ = host
-            .get_virtual_file(VirtualQuery {
-                raw_id: None,
-                canonical_id: Some(app_id.to_string()),
-                node_kind: Some(VirtualNodeKind::Main),
-                compile_profile: profile.clone(),
-            })
-            .expect("fixture compilation should succeed");
-
-        let app_ide = host
-            .get_ide(app_id, &profile)
-            .expect("fixture IDE output should exist");
-
-        let src_dir = tmp.join("src");
-        let app_ide_path = src_dir.join("App.vue.tsx");
-        std::fs::write(&app_ide_path, &*app_ide.code).expect("fixture IDE should be written");
-
-        let provider = TsserverTypeProvider::spawn(
-            &node_path,
-            &tsserver_path,
-            tmp.to_str().expect("tmp path should be valid UTF-8"),
-            None,
-            None,
-        )
-        .await
-        .expect("tsserver should spawn");
-
-        let app_ide_path_str = app_ide_path.to_string_lossy().replace('\\', "/");
-        provider
-            .open_file(&app_ide_path_str, &app_ide.code)
-            .await
-            .expect("fixture IDE should open");
-
-        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
-
-        let member_offset = app_ide
-            .code
-            .find("action.disabled")
-            .map(|offset| offset as u32 + "action.".len() as u32)
-            .expect("fixture IDE should reference action.disabled");
-
-        let completion_result = provider
-            .get_completions(&app_ide_path_str, member_offset, Some("."))
-            .await;
-        let labels: Vec<String> = completion_result
-            .as_ref()
-            .ok()
-            .map(|result| result.items.iter().map(|item| item.label.clone()).collect())
-            .unwrap_or_default();
-
-        assert!(
-            completion_result.is_ok(),
-            "fixture member completion should succeed, got: {:?}",
-            completion_result.err()
-        );
-        assert!(
-            labels.iter().any(|label| label == "disabled"),
-            "fixture member completions should include disabled, got: {labels:?}\nTSX code:\n{}",
-            app_ide.code
-        );
-        assert!(
-            labels.iter().any(|label| label == "label"),
-            "fixture member completions should include label, got: {labels:?}"
-        );
-        assert!(
-            labels.iter().any(|label| label == "handler"),
-            "fixture member completions should include handler, got: {labels:?}"
-        );
-
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

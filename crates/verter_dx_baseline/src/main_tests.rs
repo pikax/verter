@@ -51,6 +51,10 @@ macro_rules! ready {
 }
 
 impl TypeProvider for MockProvider {
+    fn provider_id(&self) -> &'static str {
+        "tsgo"
+    }
+
     fn open_file(&self, path: &str, _c: &str) -> ProviderFuture<'_, ()> {
         self.record(format!("open:{path}"));
         let r = self.apply_outcome();

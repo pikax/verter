@@ -14,6 +14,8 @@ use crate::documents::provider_projection::ProviderPositionMapper;
 use crate::features::hover::HoverSourceToken;
 #[cfg(test)]
 use crate::tsgo::protocol::Completion;
+#[cfg(test)]
+use crate::tsgo::protocol::CompletionResolveData;
 use crate::tsgo::protocol::{
     self, CompletionKind, CompletionResult, HoverInfo, InlayHint, InlayHintKind, RenameLocation,
     TypeCodeAction, TypeDiagnostic, TypeDiagnosticSeverity, TypeDocumentHighlight,
@@ -614,6 +616,88 @@ fn is_internal_dunder(label: &str) -> bool {
     )
 }
 
+/// Mint the provider-NEUTRAL `verter_resolve` envelope for a completion item's
+/// resolve handle, returning the LSP `data` JSON to stamp onto the item.
+///
+/// The envelope is namespaced SEPARATELY from the top-level workspace-component
+/// `auto_import` data shape (the two never overload one key). It carries the
+/// active provider's id, the carrier (generated-TSX) path the resolve must be
+/// re-issued against, and the serialized provider-pure resolve key.
+/// `completionItem/resolve` validates `provider_id` before routing.
+///
+/// Returns `None` (no envelope stamped) when:
+/// * the handle is NOT actionable — a local member (a `TsserverEntry` with no
+///   `source`/`data`) resolves to nothing but lazy detail, so stamping it would
+///   be per-keystroke payload bloat and a no-op resolve round-trip (review
+///   finding F3). Only an auto-import-capable handle is worth an envelope, OR
+/// * there is no carrier `tsx_path` to route the resolve back to.
+///
+/// This is the single place the envelope is built, shared by [`merge_completions`]
+/// and the virtual-file completion path (so a provider auto-import returned on
+/// EITHER path resolves identically — review finding F1).
+pub(crate) fn mint_resolve_envelope(
+    resolve_data: &protocol::CompletionResolveData,
+    provider_id: &str,
+    tsx_path: Option<&str>,
+) -> Option<serde_json::Value> {
+    // Only an actionable handle (auto-import) earns an envelope.
+    if !resolve_data.is_actionable() {
+        return None;
+    }
+    // No carrier path ⇒ the resolve cannot be routed back to a generated file;
+    // drop the handle rather than emit an unroutable envelope.
+    let tsx_path = tsx_path?;
+    let provider_data = serde_json::to_value(resolve_data).ok()?;
+    Some(serde_json::json!({
+        "verter_resolve": {
+            "kind": "type_provider",
+            "provider_id": provider_id,
+            "provider_path": tsx_path,
+            "provider_data": provider_data,
+        }
+    }))
+}
+
+/// Convert ONE provider [`protocol::Completion`] into an LSP [`CompletionItem`],
+/// stamping the provider-neutral `verter_resolve` envelope on an actionable
+/// resolve handle.
+///
+/// `text_edit` is the already-mapped carrier-source edit (the virtual-file path
+/// passes `None` because its byte offsets are already in the file the editor
+/// shows). `label` is the (possibly JSX→Vue-transformed) display label.
+///
+/// Shared by [`merge_completions`] and the virtual-file completion path so a
+/// provider auto-import completion resolves identically regardless of which path
+/// produced the item (review finding F1 — the virtual-file path previously
+/// stripped `Completion.data`, so its auto-imports could never resolve).
+pub(crate) fn provider_completion_to_lsp_item(
+    item: protocol::Completion,
+    label: String,
+    text_edit: Option<CompletionTextEdit>,
+    provider_id: &str,
+    tsx_path: Option<&str>,
+) -> CompletionItem {
+    let data = item
+        .data
+        .as_ref()
+        .and_then(|d| mint_resolve_envelope(d, provider_id, tsx_path));
+    CompletionItem {
+        label,
+        kind: item.kind.map(convert_completion_kind),
+        detail: item.detail,
+        documentation: item.documentation.map(|d| {
+            Documentation::MarkupContent(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: d,
+            })
+        }),
+        sort_text: item.sort_text,
+        text_edit,
+        data,
+        ..Default::default()
+    }
+}
+
 /// Merge verter completions with TypeProvider completions.
 ///
 /// Strategy:
@@ -622,6 +706,19 @@ fn is_internal_dunder(label: &str) -> bool {
 /// - Deduplicate by label (verter items take priority for sort ordering)
 /// - When `template_attr_context` is true, transform JSX prop names to Vue syntax
 ///   (e.g., `onClick` → `@click`, `modelValue` → `model-value`)
+///
+/// `provider_id` is the active provider's [`TypeProvider::provider_id`]. Items
+/// that carry an ACTIONABLE resolve handle are stamped with the provider-NEUTRAL
+/// `verter_resolve` envelope (kind + provider id + carrier path + the serialized
+/// provider resolve key) so `completionItem/resolve` can route back to the
+/// originating provider regardless of which backend produced the list. On a
+/// label collision the import-capable (actionable-envelope) item is preserved so
+/// the auto-import handle is never silently dropped (review finding F2).
+// The merge takes the verter items, the provider result, three position
+// indices, the carrier path, the provider id, and the template-context flag —
+// each is an independent input to one positional merge, not a bundle worth a
+// params struct.
+#[allow(clippy::too_many_arguments)]
 pub fn merge_completions(
     verter_items: Vec<CompletionItem>,
     type_result: CompletionResult,
@@ -629,6 +726,7 @@ pub fn merge_completions(
     tsx_line_index: &LineIndex,
     carrier_line_index: &LineIndex,
     tsx_path: Option<&str>,
+    provider_id: &str,
     template_attr_context: bool,
 ) -> (Vec<CompletionItem>, bool) {
     let is_incomplete = type_result.is_incomplete;
@@ -660,13 +758,31 @@ pub fn merge_completions(
             item.label.clone()
         };
 
-        // Skip if already seen (from verter or a previous TSGO item),
-        // but enrich the existing item's kind if the type provider has a richer one
+        // Already seen (from verter or a previous provider item). Do NOT silently
+        // discard the incoming item: it may be the one carrying the auto-import
+        // resolve handle while the retained item is a plain local with the same
+        // label (e.g. a local `computed` shadowing the `vue` auto-import, or two
+        // same-label external entries from different `source` modules). Enrich the
+        // retained item — upgrade its kind, and ADOPT an actionable resolve
+        // envelope when it has none yet — so the import-capable handle survives
+        // the dedupe (review finding F2).
         if !seen_labels.insert(label.clone()) {
-            if let Some(tp_kind) = item.kind {
-                if !matches!(tp_kind, CompletionKind::Text) {
-                    if let Some(existing) = result.iter_mut().find(|i| i.label == label) {
+            if let Some(existing) = result.iter_mut().find(|i| i.label == label) {
+                if let Some(tp_kind) = item.kind {
+                    if !matches!(tp_kind, CompletionKind::Text) {
                         existing.kind = Some(convert_completion_kind(tp_kind));
+                    }
+                }
+                // Preserve the import-capable handle: if the retained item has no
+                // actionable resolve envelope but the incoming one does, move the
+                // incoming envelope onto the retained item.
+                if !has_actionable_resolve_envelope(existing) {
+                    if let Some(envelope) = item
+                        .data
+                        .as_ref()
+                        .and_then(|d| mint_resolve_envelope(d, provider_id, tsx_path))
+                    {
+                        existing.data = Some(envelope);
                     }
                 }
             }
@@ -687,38 +803,31 @@ pub fn merge_completions(
             })
         });
 
-        // Tag TSGO items with marker data for completion resolve
-        let data = if item.data.is_some() {
-            let mut tagged = serde_json::json!({
-                "tsgo": true,
-                "original_data": item.data,
-            });
-            if let Some(p) = tsx_path {
-                tagged["tsx_path"] = serde_json::Value::String(p.to_string());
-            }
-            Some(tagged)
-        } else {
-            None
-        };
-
-        result.push(CompletionItem {
+        result.push(provider_completion_to_lsp_item(
+            item,
             label,
-            kind: item.kind.map(convert_completion_kind),
-            detail: item.detail,
-            documentation: item.documentation.map(|d| {
-                Documentation::MarkupContent(MarkupContent {
-                    kind: MarkupKind::Markdown,
-                    value: d,
-                })
-            }),
-            sort_text: item.sort_text,
             text_edit,
-            data,
-            ..Default::default()
-        });
+            provider_id,
+            tsx_path,
+        ));
     }
 
     (result, is_incomplete)
+}
+
+/// Whether an LSP completion item already carries an actionable provider-neutral
+/// `verter_resolve` envelope (a `type_provider` kind with `provider_data`).
+///
+/// Used by the dedupe path to decide whether a colliding provider item's handle
+/// should be adopted onto the retained item (review finding F2): a retained item
+/// that already has the envelope keeps it; one that does not adopts the incoming
+/// actionable handle.
+fn has_actionable_resolve_envelope(item: &CompletionItem) -> bool {
+    item.data
+        .as_ref()
+        .and_then(|d| d.get("verter_resolve"))
+        .map(|e| e.get("kind").and_then(|k| k.as_str()) == Some("type_provider"))
+        .unwrap_or(false)
 }
 
 fn convert_completion_kind(kind: CompletionKind) -> CompletionItemKind {
@@ -1911,6 +2020,319 @@ mod tests {
         }
     }
 
+    /// A resolve-bearing provider completion (one carrying a `CompletionResolveData`
+    /// handle) is tagged with the provider-NEUTRAL `verter_resolve` envelope —
+    /// kind + active provider id + carrier path + serialized typed resolve key —
+    /// and the old provider-baked `tsgo` / `original_data` keys are GONE.
+    ///
+    /// Discriminating: the pre-fix `merge_completions` emitted
+    /// `{ "tsgo": true, "original_data": …, "tsx_path": … }`. This asserts the
+    /// neutral envelope shape and the ABSENCE of those keys, so it fails on the
+    /// old emission and passes on the new one. It also proves the envelope is
+    /// namespaced separately from the workspace-component `auto_import` shape.
+    #[test]
+    fn merge_completions_emits_neutral_resolve_envelope() {
+        let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
+        let mut entry = make_type_completion("computed");
+        entry.data = Some(CompletionResolveData::TsserverEntry {
+            name: "computed".to_string(),
+            source: Some("vue".to_string()),
+            data: None,
+            offset: 7,
+        });
+        let type_result = CompletionResult {
+            items: vec![entry],
+            is_incomplete: false,
+        };
+
+        let (items, _) = merge_completions(
+            Vec::new(),
+            type_result,
+            &mapper,
+            &tsx_li,
+            &carrier_li,
+            Some("/workspace/App.vue.tsx"),
+            "tsserver",
+            false,
+        );
+
+        let item = items
+            .iter()
+            .find(|i| i.label == "computed")
+            .expect("the resolve-bearing item survives the merge");
+        let data = item
+            .data
+            .as_ref()
+            .expect("resolve-bearing item carries data");
+        let envelope = data
+            .get("verter_resolve")
+            .expect("the neutral verter_resolve envelope is present");
+        assert_eq!(
+            envelope.get("kind").and_then(|v| v.as_str()),
+            Some("type_provider")
+        );
+        assert_eq!(
+            envelope.get("provider_id").and_then(|v| v.as_str()),
+            Some("tsserver"),
+            "the active provider id is stamped onto the envelope"
+        );
+        assert_eq!(
+            envelope.get("provider_path").and_then(|v| v.as_str()),
+            Some("/workspace/App.vue.tsx")
+        );
+        // The serialized typed resolve key round-trips back to the entry.
+        let provider_data = envelope
+            .get("provider_data")
+            .cloned()
+            .expect("provider_data carries the serialized resolve key");
+        let parsed: CompletionResolveData =
+            serde_json::from_value(provider_data).expect("provider_data is a valid resolve key");
+        assert!(matches!(
+            parsed,
+            CompletionResolveData::TsserverEntry { ref name, .. } if name == "computed"
+        ));
+        // Negative assertions: the provider-baked keys must be DELETED.
+        assert!(
+            data.get("tsgo").is_none(),
+            "the provider-baked `tsgo` marker must be removed"
+        );
+        assert!(
+            data.get("original_data").is_none(),
+            "`original_data` must be removed (replaced by the typed provider_data)"
+        );
+    }
+
+    /// F3: a LOCAL completion (a `TsserverEntry` with no `source`/`data`) carries
+    /// NO `verter_resolve` envelope — it resolves to nothing actionable, so
+    /// stamping every local item is per-keystroke payload bloat and a no-op
+    /// resolve round-trip.
+    ///
+    /// Discriminating: the pre-fix `merge_completions` stamped the envelope for
+    /// ANY item with a `data` handle (every tsserver entry carries one). This
+    /// asserts the local item's `data` is `None` (no envelope) while an
+    /// auto-import item in the SAME list keeps its envelope — so it fails on the
+    /// blanket-stamp behavior and passes on actionable-only stamping.
+    #[test]
+    fn merge_completions_omits_envelope_for_nonactionable_local_item() {
+        let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
+        // A local member: name-only handle, no source/data → not actionable.
+        let mut local = make_type_completion("myLocalVar");
+        local.data = Some(CompletionResolveData::TsserverEntry {
+            name: "myLocalVar".to_string(),
+            source: None,
+            data: None,
+            offset: 7,
+        });
+        // An auto-import: source present → actionable.
+        let mut auto_import = make_type_completion("computed");
+        auto_import.data = Some(CompletionResolveData::TsserverEntry {
+            name: "computed".to_string(),
+            source: Some("vue".to_string()),
+            data: None,
+            offset: 7,
+        });
+        let type_result = CompletionResult {
+            items: vec![local, auto_import],
+            is_incomplete: false,
+        };
+
+        let (items, _) = merge_completions(
+            Vec::new(),
+            type_result,
+            &mapper,
+            &tsx_li,
+            &carrier_li,
+            Some("/workspace/App.vue.tsx"),
+            "tsserver",
+            false,
+        );
+
+        let local_item = items
+            .iter()
+            .find(|i| i.label == "myLocalVar")
+            .expect("the local item survives the merge");
+        assert!(
+            local_item.data.is_none(),
+            "a non-actionable local completion must NOT carry a resolve envelope — \
+             minting one is per-keystroke payload bloat and a no-op resolve"
+        );
+
+        let auto_item = items
+            .iter()
+            .find(|i| i.label == "computed")
+            .expect("the auto-import item survives the merge");
+        assert!(
+            auto_item
+                .data
+                .as_ref()
+                .and_then(|d| d.get("verter_resolve"))
+                .is_some(),
+            "an actionable auto-import completion KEEPS its resolve envelope"
+        );
+    }
+
+    /// F2: a label collision between a non-resolvable retained item and an
+    /// incoming provider item that carries the ACTIONABLE auto-import handle must
+    /// move the handle onto the retained item — never silently drop it.
+    ///
+    /// Discriminating: the pre-fix dedupe only upgraded `kind` on a collision and
+    /// dropped the incoming item wholesale, so the auto-import handle was lost
+    /// whenever a same-label local/plain item was already present. This asserts
+    /// the retained `computed` ends up carrying the envelope, which fails on the
+    /// old kind-only dedupe.
+    #[test]
+    fn merge_completions_dedupe_preserves_import_capable_handle() {
+        let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
+        // A verter (or earlier) item with the same label but NO resolve handle.
+        let plain = CompletionItem {
+            label: "computed".to_string(),
+            ..Default::default()
+        };
+        // The provider's auto-import entry for the same label, carrying the handle.
+        let mut auto_import = make_type_completion("computed");
+        auto_import.data = Some(CompletionResolveData::TsserverEntry {
+            name: "computed".to_string(),
+            source: Some("vue".to_string()),
+            data: Some(serde_json::json!({ "exportName": "computed" })),
+            offset: 7,
+        });
+        let type_result = CompletionResult {
+            items: vec![auto_import],
+            is_incomplete: false,
+        };
+
+        let (items, _) = merge_completions(
+            vec![plain],
+            type_result,
+            &mapper,
+            &tsx_li,
+            &carrier_li,
+            Some("/workspace/App.vue.tsx"),
+            "tsserver",
+            false,
+        );
+
+        // Only one `computed` survives (deduped), and it carries the auto-import
+        // envelope adopted from the colliding provider item.
+        let computed: Vec<_> = items.iter().filter(|i| i.label == "computed").collect();
+        assert_eq!(computed.len(), 1, "the label is deduped to one item");
+        let envelope = computed[0]
+            .data
+            .as_ref()
+            .and_then(|d| d.get("verter_resolve"))
+            .expect("the retained item ADOPTS the import-capable resolve handle");
+        assert_eq!(
+            envelope.get("provider_id").and_then(|v| v.as_str()),
+            Some("tsserver")
+        );
+    }
+
+    /// F2 (second case): two same-name external completions from DIFFERENT
+    /// `source` modules. The first carries the actionable handle and is retained;
+    /// the second collides. The retained item keeps an actionable handle (it does
+    /// not get clobbered into a non-resolvable state).
+    #[test]
+    fn merge_completions_dedupe_keeps_actionable_on_same_label_distinct_sources() {
+        let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
+        let mut from_vue = make_type_completion("ref");
+        from_vue.data = Some(CompletionResolveData::TsserverEntry {
+            name: "ref".to_string(),
+            source: Some("vue".to_string()),
+            data: None,
+            offset: 7,
+        });
+        let mut from_other = make_type_completion("ref");
+        from_other.data = Some(CompletionResolveData::TsserverEntry {
+            name: "ref".to_string(),
+            source: Some("@my/lib".to_string()),
+            data: None,
+            offset: 7,
+        });
+        let type_result = CompletionResult {
+            items: vec![from_vue, from_other],
+            is_incomplete: false,
+        };
+
+        let (items, _) = merge_completions(
+            Vec::new(),
+            type_result,
+            &mapper,
+            &tsx_li,
+            &carrier_li,
+            Some("/workspace/App.vue.tsx"),
+            "tsserver",
+            false,
+        );
+
+        let refs: Vec<_> = items.iter().filter(|i| i.label == "ref").collect();
+        assert_eq!(refs.len(), 1, "the label is deduped to one item");
+        assert!(
+            refs[0]
+                .data
+                .as_ref()
+                .and_then(|d| d.get("verter_resolve"))
+                .is_some(),
+            "the retained item keeps an actionable resolve handle"
+        );
+    }
+
+    /// F1: the shared `provider_completion_to_lsp_item` helper (used by BOTH the
+    /// merge path and the virtual-file completion path) preserves an actionable
+    /// resolve handle as a `verter_resolve` envelope. This is the unit that the
+    /// virtual-file path now routes through, so a provider auto-import returned on
+    /// that path can resolve into an import edit.
+    ///
+    /// Discriminating: the pre-fix virtual-file path built a `CompletionItem`
+    /// without the `data` field, dropping the handle entirely. This asserts the
+    /// helper carries it through, which the old inline mapping did not do.
+    #[test]
+    fn provider_completion_to_lsp_item_preserves_actionable_handle() {
+        let mut entry = make_type_completion("computed");
+        entry.data = Some(CompletionResolveData::TsserverEntry {
+            name: "computed".to_string(),
+            source: Some("vue".to_string()),
+            data: None,
+            offset: 7,
+        });
+        let item = provider_completion_to_lsp_item(
+            entry,
+            "computed".to_string(),
+            None,
+            "tsserver",
+            Some("/ws/App.vue.tsx"),
+        );
+        let envelope = item
+            .data
+            .as_ref()
+            .and_then(|d| d.get("verter_resolve"))
+            .expect("the virtual-file mapper preserves the actionable resolve handle");
+        assert_eq!(
+            envelope.get("provider_path").and_then(|v| v.as_str()),
+            Some("/ws/App.vue.tsx"),
+            "the resolve re-issues against the queried generated-TSX path"
+        );
+
+        // A local (non-actionable) item carries no envelope through the same helper.
+        let mut local = make_type_completion("x");
+        local.data = Some(CompletionResolveData::TsserverEntry {
+            name: "x".to_string(),
+            source: None,
+            data: None,
+            offset: 0,
+        });
+        let local_item = provider_completion_to_lsp_item(
+            local,
+            "x".to_string(),
+            None,
+            "tsserver",
+            Some("/ws/App.vue.tsx"),
+        );
+        assert!(
+            local_item.data.is_none(),
+            "a local item carries no envelope through the shared mapper either"
+        );
+    }
+
     /// @ai-generated — TypeProvider completions are added alongside verter completions
     #[test]
     fn merge_completions_combines_both() {
@@ -1928,6 +2350,7 @@ mod tests {
             &tsx_li,
             &carrier_li,
             None,
+            "tsgo",
             false,
         );
         assert_eq!(result.len(), 3);
@@ -1955,6 +2378,7 @@ mod tests {
             &tsx_li,
             &carrier_li,
             None,
+            "tsgo",
             false,
         );
         assert_eq!(result.len(), 1);
@@ -1981,6 +2405,7 @@ mod tests {
             &tsx_li,
             &carrier_li,
             None,
+            "tsgo",
             false,
         );
         assert_eq!(result.len(), 1);
@@ -2004,6 +2429,7 @@ mod tests {
             &tsx_li,
             &carrier_li,
             None,
+            "tsgo",
             false,
         );
         assert_eq!(result.len(), 2);
@@ -2033,6 +2459,7 @@ mod tests {
             &tsx_li,
             &carrier_li,
             None,
+            "tsgo",
             false,
         );
         assert_eq!(result.len(), 1);
@@ -2059,6 +2486,7 @@ mod tests {
             &tsx_li,
             &carrier_li,
             None,
+            "tsgo",
             false,
         );
         let on_mounted_count = result.iter().filter(|i| i.label == "onMounted").count();
@@ -2090,6 +2518,7 @@ mod tests {
             &tsx_li,
             &carrier_li,
             None,
+            "tsgo",
             false,
         );
         let on_mounted_count = result.iter().filter(|i| i.label == "onMounted").count();
@@ -2123,6 +2552,7 @@ mod tests {
             &tsx_li,
             &carrier_li,
             None,
+            "tsgo",
             false,
         );
         let labels: Vec<&str> = result.iter().map(|i| i.label.as_str()).collect();
@@ -4011,6 +4441,7 @@ mod tests {
             &tsx_li,
             &carrier_li,
             None,
+            "tsgo",
             true, // template_attr_context
         );
 
@@ -4084,6 +4515,7 @@ mod tests {
             &tsx_li,
             &carrier_li,
             None,
+            "tsgo",
             false, // NOT in template attr context — expression context
         );
 
@@ -4146,6 +4578,7 @@ mod tests {
             &tsx_li,
             &carrier_li,
             None,
+            "tsgo",
             false,
         );
         assert_eq!(result.len(), 1, "duplicate should be deduped");
@@ -4188,6 +4621,7 @@ mod tests {
             &tsx_li,
             &carrier_li,
             None,
+            "tsgo",
             false,
         );
         assert_eq!(result.len(), 1);

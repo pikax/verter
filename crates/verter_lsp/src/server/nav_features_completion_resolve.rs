@@ -1,9 +1,13 @@
 //! Completion-resolve auto-import edit translation for LSP.
 //!
-//! Hosts `resolve_tsgo_auto_import_edits` — which maps a TSGO
+//! Hosts `resolve_provider_auto_import_edits` — which maps ANY type provider's
 //! completion-resolve's generated-TSX `additionalTextEdits` back into
 //! carrier-source [`TextEdit`]s — and `completion_resolve_error`, the
 //! structured JSON-RPC error it reports those failures through.
+//!
+//! The translation is provider-neutral: the generated-TSX → `.vue` carrier
+//! re-anchor is identical whether TSGO, tsserver, or the extension produced the
+//! edits.
 //!
 //! `handle_completion_resolve` calls both functions through this sibling
 //! module; it lives apart from `nav_features` so each stays within the
@@ -18,8 +22,8 @@ use crate::tsgo::auto_import::{
 
 use super::VerterLanguageServer;
 
-/// Translate a TSGO completion-resolve's `additionalTextEdits` (generated-TSX byte offsets) into
-/// carrier-source [`TextEdit`]s.
+/// Translate a type provider's completion-resolve `additionalTextEdits` (generated-TSX byte
+/// offsets) into carrier-source [`TextEdit`]s.
 ///
 /// The auto-import re-anchor maps provider edits back through a Vue `<script setup>` carrier — it
 /// reverse-maps a carrier IDE TSX path to its `.vue` source and re-anchors the import at the SFC's
@@ -39,7 +43,7 @@ use super::VerterLanguageServer;
 /// * `Err(reason)` — a genuine carrier-resolve failure for a path that DID reverse-map to a Vue
 ///   carrier: missing IDE context / open document, or an edit that cannot be placed. The caller
 ///   turns the reason into a structured resolve error rather than dropping the import edits.
-pub(super) fn resolve_tsgo_auto_import_edits(
+pub(super) fn resolve_provider_auto_import_edits(
     server: &VerterLanguageServer,
     tsx_path: &str,
     provider_edits: &[ProviderImportEdit],

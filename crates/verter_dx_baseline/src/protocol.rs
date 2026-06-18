@@ -175,6 +175,32 @@ pub struct QueryRequest {
     pub requires_source_map: bool,
 }
 
+/// `resolveCompletion` — re-issue `completionItem/resolve` for ONE completion
+/// item's typed provider resolve handle, recovering its auto-import
+/// `additionalTextEdits`.
+///
+/// This is the lazy auto-import-on-accept route: the runner first runs a
+/// `completion` query, picks the item carrying an actionable
+/// [`rt::CompletionResolveData`] handle (`resolveData` on the
+/// [`NormalizedCompletionItem`]), and sends it back here so the SAME real
+/// provider (tsgo or tsserver) resolves the import edit. It is the bridge-side
+/// surface that lets the differential prove tsserver and tsgo return the SAME
+/// resolved edits.
+// Not `Eq`: `data` is a `CompletionResolveData` carrying a non-`Eq`
+// `serde_json::Value`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolveCompletionRequest {
+    /// Authored `.vue` URI (drives the overlay version gate, same as `query`).
+    pub uri: String,
+    /// Generated/provider-graph path the resolve is re-issued against.
+    pub path: String,
+    pub version: Version,
+    /// The provider-pure resolve handle minted on the completion item at list
+    /// time (the `resolveData` returned by a prior `completion` query).
+    pub data: rt::CompletionResolveData,
+}
+
 /// `diagnostics` — pull diagnostics for one generated file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -191,13 +217,15 @@ pub struct DiagnosticsRequest {
 }
 
 /// One bridge request line.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// Not `Eq`: `ResolveCompletion` carries a non-`Eq` resolve handle.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum Request {
     Hello(HelloRequest),
     Open(OpenRequest),
     SyncArtifacts(SyncArtifactsRequest),
     Query(QueryRequest),
+    ResolveCompletion(ResolveCompletionRequest),
     Diagnostics(DiagnosticsRequest),
     Shutdown,
 }
@@ -314,7 +342,9 @@ pub struct NormalizedLocation {
 }
 
 /// Normalized completion item.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// Not `Eq`: `resolve_data` carries a `CompletionResolveData` whose `data` blob is
+// a `serde_json::Value` (not `Eq`). `PartialEq` is enough for the round-trip tests.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NormalizedCompletionItem {
     pub label: String,
@@ -326,6 +356,13 @@ pub struct NormalizedCompletionItem {
     pub insert_text: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sort_text: Option<String>,
+    /// The provider-pure resolve handle minted on this item at list time, when it
+    /// carries one. The runner sends an item's `resolveData` back via
+    /// `resolveCompletion` to recover the auto-import edits — the bridge-side
+    /// surface for the lazy auto-import-on-accept differential. Omitted for an
+    /// item with no resolve handle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolve_data: Option<rt::CompletionResolveData>,
 }
 
 /// Normalized diagnostic.
@@ -341,7 +378,9 @@ pub struct NormalizedDiagnostic {
 }
 
 /// Normalized query result, keyed by the kind that produced it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// Not `Eq`: `Completion` carries `NormalizedCompletionItem`s whose resolve handle
+// is not `Eq`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum QueryResult {
     // The enum-level `rename_all` renames variant tags; the per-variant
@@ -359,13 +398,42 @@ pub enum QueryResult {
 }
 
 /// `query` reply.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// Not `Eq`: contains a `QueryResult` (non-`Eq` via the completion handle).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueryResponse {
     pub method: QueryMethod,
     pub uri: String,
     pub version: Version,
     pub result: QueryResult,
+    pub capabilities: ProviderCapabilities,
+}
+
+/// A normalized resolved auto-import text edit (generated-file byte offsets) —
+/// the bridge-side mirror of [`rt::ResolvedTextEdit`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NormalizedResolvedTextEdit {
+    pub start: u32,
+    pub end: u32,
+    pub new_text: String,
+}
+
+/// `resolveCompletion` reply: the resolved auto-import edits for one completion
+/// item, plus any lazy detail/documentation enrichment the provider returned.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolveCompletionResponse {
+    pub uri: String,
+    pub version: Version,
+    /// The auto-import additional text edits in generated-file byte offsets.
+    /// Empty when the entry resolved to no edits (a local symbol, or a
+    /// drifted/mis-keyed offset — fail-closed, never a wrong import).
+    pub additional_text_edits: Vec<NormalizedResolvedTextEdit>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub documentation: Option<String>,
     pub capabilities: ProviderCapabilities,
 }
 
@@ -429,13 +497,15 @@ pub struct ErrorResponse {
 }
 
 /// One bridge response line.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// Not `Eq`: `Query` carries a `QueryResponse` (non-`Eq` via the completion handle).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum Response {
     Hello(HelloResponse),
     Open(OpenResponse),
     SyncArtifacts(SyncArtifactsResponse),
     Query(QueryResponse),
+    ResolveCompletion(ResolveCompletionResponse),
     Diagnostics(DiagnosticsResponse),
     Shutdown(ShutdownResponse),
     Error(ErrorResponse),
@@ -513,6 +583,17 @@ impl From<&rt::Completion> for NormalizedCompletionItem {
             detail: c.detail.clone(),
             insert_text: c.insert_text.clone(),
             sort_text: c.sort_text.clone(),
+            resolve_data: c.data.clone(),
+        }
+    }
+}
+
+impl From<&rt::ResolvedTextEdit> for NormalizedResolvedTextEdit {
+    fn from(e: &rt::ResolvedTextEdit) -> Self {
+        NormalizedResolvedTextEdit {
+            start: e.start,
+            end: e.end,
+            new_text: e.new_text.clone(),
         }
     }
 }
@@ -775,6 +856,115 @@ mod tests {
         let json = serde_json::to_string(&completion).unwrap();
         assert!(json.contains(r#""kind":"completion""#), "{json}");
         assert!(json.contains(r#""isIncomplete":false"#), "{json}");
+    }
+
+    #[test]
+    fn resolve_completion_request_round_trips() {
+        // The runner sends back the item's `resolveData` handle (a TsserverEntry).
+        let line = r#"{"type":"resolveCompletion","uri":"file:///a.vue","path":"/a.vue.tsx","version":3,"data":{"kind":"tsserver_entry","name":"computed","source":"vue","offset":42}}"#;
+        match parse(line) {
+            Request::ResolveCompletion(r) => {
+                assert_eq!(r.uri, "file:///a.vue");
+                assert_eq!(r.path, "/a.vue.tsx");
+                assert_eq!(r.version, 3);
+                match r.data {
+                    rt::CompletionResolveData::TsserverEntry {
+                        name,
+                        source,
+                        offset,
+                        ..
+                    } => {
+                        assert_eq!(name, "computed");
+                        assert_eq!(source.as_deref(), Some("vue"));
+                        assert_eq!(offset, 42);
+                    }
+                    other => panic!("expected a TsserverEntry handle, got {other:?}"),
+                }
+            }
+            other => panic!("expected resolveCompletion, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_completion_request_carries_lsp_handle() {
+        // A TSGO list mints an `Lsp { label, data }` handle.
+        let line = r#"{"type":"resolveCompletion","uri":"file:///a.vue","path":"/a.vue.tsx","version":1,"data":{"kind":"lsp","label":"computed","data":{"exportName":"computed"}}}"#;
+        match parse(line) {
+            Request::ResolveCompletion(r) => match r.data {
+                rt::CompletionResolveData::Lsp { label, .. } => assert_eq!(label, "computed"),
+                other => panic!("expected an Lsp handle, got {other:?}"),
+            },
+            other => panic!("expected resolveCompletion, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_completion_response_round_trips_and_uses_camelcase() {
+        let resp = Response::ResolveCompletion(ResolveCompletionResponse {
+            uri: "file:///a.vue".to_string(),
+            version: 2,
+            additional_text_edits: vec![NormalizedResolvedTextEdit {
+                start: 0,
+                end: 0,
+                new_text: "import { computed } from 'vue'\n".to_string(),
+            }],
+            detail: Some("(alias) const computed".to_string()),
+            documentation: None,
+            capabilities: ProviderCapabilities::for_provider(ProviderName::Tsserver),
+        });
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains(r#""type":"resolveCompletion""#), "{json}");
+        assert!(json.contains(r#""additionalTextEdits""#), "{json}");
+        assert!(
+            json.contains(r#""newText":"import { computed } from 'vue'\n""#),
+            "{json}"
+        );
+        let back: Response = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, resp);
+    }
+
+    /// T4: the `resolveData` handle a `completion` query carries on each item is
+    /// the ACTUAL Rust-serialized `CompletionResolveData` — pin its bytes so a
+    /// serde rename on the shared protocol type can't silently break the
+    /// cross-process resolve round-trip (the TS bridge mirror is asserted against
+    /// THIS shape in the dx-harness serde fixture test).
+    #[test]
+    fn normalized_completion_item_serializes_resolve_handle() {
+        let item = NormalizedCompletionItem {
+            label: "computed".to_string(),
+            kind: Some("Function".to_string()),
+            detail: None,
+            insert_text: None,
+            sort_text: Some("11".to_string()),
+            resolve_data: Some(rt::CompletionResolveData::TsserverEntry {
+                name: "computed".to_string(),
+                source: Some("vue".to_string()),
+                data: Some(serde_json::json!({ "exportName": "computed" })),
+                offset: 42,
+            }),
+        };
+        let json = serde_json::to_value(&item).unwrap();
+        assert_eq!(json["label"], "computed");
+        // The handle rides as `resolveData` (camelCase) with the snake_case kind tag.
+        assert_eq!(json["resolveData"]["kind"], "tsserver_entry");
+        assert_eq!(json["resolveData"]["name"], "computed");
+        assert_eq!(json["resolveData"]["source"], "vue");
+        assert_eq!(json["resolveData"]["offset"], 42);
+
+        // An item with no handle omits `resolveData` entirely.
+        let bare = NormalizedCompletionItem {
+            label: "x".to_string(),
+            kind: None,
+            detail: None,
+            insert_text: None,
+            sort_text: None,
+            resolve_data: None,
+        };
+        let json = serde_json::to_value(&bare).unwrap();
+        assert!(
+            json.get("resolveData").is_none(),
+            "an item with no resolve handle omits resolveData: {json}"
+        );
     }
 
     #[test]

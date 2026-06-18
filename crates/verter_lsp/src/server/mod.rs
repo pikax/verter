@@ -93,12 +93,16 @@ mod aux_features;
 
 // LSP navigation feature handlers. Trait methods on
 // `LanguageServer for VerterLanguageServer` covering hover, completion,
-// completion_resolve, goto_definition, goto_type_definition, references,
-// prepare_rename, rename.
+// completion_resolve.
 mod nav_features;
 
+// Navigation method bodies that map source positions onto the generated
+// artifact and back: goto_definition, goto_type_definition, references,
+// prepare_rename, rename.
+mod nav_features_navigation;
+
 // Completion-resolve auto-import edit translation:
-// `resolve_tsgo_auto_import_edits` and `completion_resolve_error`, called
+// `resolve_provider_auto_import_edits` and `completion_resolve_error`, called
 // by `nav_features::handle_completion_resolve`.
 mod nav_features_completion_resolve;
 
@@ -480,7 +484,7 @@ impl LanguageServer for VerterLanguageServer {
         &self,
         params: GotoDefinitionParams,
     ) -> Result<Option<GotoDefinitionResponse>> {
-        nav_features::handle_goto_type_definition(self, params).await
+        nav_features_navigation::handle_goto_type_definition(self, params).await
     }
 
     async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
@@ -491,7 +495,7 @@ impl LanguageServer for VerterLanguageServer {
         &self,
         params: TextDocumentPositionParams,
     ) -> Result<Option<PrepareRenameResponse>> {
-        nav_features::handle_prepare_rename(self, params).await
+        nav_features_navigation::handle_prepare_rename(self, params).await
     }
 
     async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {

@@ -36,6 +36,24 @@ pub type ProviderFuture<'a, T> =
 ///
 /// Uses boxed futures instead of `async fn` to allow `dyn TypeProvider` usage.
 pub trait TypeProvider: Send + Sync {
+    /// Stable identity of this provider implementation.
+    ///
+    /// Returns one of `"tsgo"`, `"tsserver"`, `"extension"`. The LSP layer
+    /// stamps this onto the resolve envelope and validates it on the way back
+    /// in, so a completion item minted by one provider can never be resolved
+    /// against a different provider after a mid-session provider swap.
+    fn provider_id(&self) -> &'static str;
+
+    /// Whether this provider implements `completionItem/resolve` (auto-import
+    /// `additionalTextEdits` / lazy detail enrichment).
+    ///
+    /// Drives the honest `resolve_provider` server capability — a provider that
+    /// cannot resolve must not advertise that it can. Defaults to `false`;
+    /// providers with a real [`TypeProvider::resolve_completion`] override it.
+    fn supports_completion_resolve(&self) -> bool {
+        false
+    }
+
     /// Open a file in the type provider (marks it as "editor-open" — triggers diagnostics).
     fn open_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()>;
 
@@ -117,10 +135,14 @@ pub trait TypeProvider: Send + Sync {
     ) -> ProviderFuture<'_, Vec<InlayHint>>;
 
     /// Resolve a completion item to get additional text edits (e.g., auto-import).
+    ///
+    /// `data` is the provider's OWN typed resolve key ([`CompletionResolveData`])
+    /// minted on the originating [`Completion`] — never an arbitrary JSON blob.
+    /// The default returns `None` (provider does not implement resolve).
     fn resolve_completion(
         &self,
         _path: &str,
-        _data: serde_json::Value,
+        _data: CompletionResolveData,
     ) -> ProviderFuture<'_, Option<CompletionResolveResult>> {
         Box::pin(async { Ok(None) })
     }

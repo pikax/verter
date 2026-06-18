@@ -670,6 +670,10 @@ mod tests {
     }
 
     impl TypeProvider for MockTypeProvider {
+        fn provider_id(&self) -> &'static str {
+            "tsserver"
+        }
+
         fn open_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
             self.open_calls
                 .lock()

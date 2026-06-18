@@ -10,8 +10,8 @@ use crate::server::PublishedResolverSnapshot;
 use crate::test_utils::make_test_vfs_workspace_from_registry;
 use crate::tsgo::mock::{MockCall, MockTypeProvider};
 use crate::tsgo::protocol::{
-    CompletionResult, HoverInfo, InlayHint, RenameLocation, SemanticToken, SignatureHelp,
-    TypeCodeAction, TypeDiagnostic, TypeDocumentHighlight, TypeLocation,
+    CompletionResolveResult, CompletionResult, HoverInfo, InlayHint, RenameLocation, SemanticToken,
+    SignatureHelp, TypeCodeAction, TypeDiagnostic, TypeDocumentHighlight, TypeLocation,
 };
 use crate::tsgo::traits::{ProviderFuture, TypeProvider};
 use crate::ProjectSyncMode;
@@ -22,6 +22,10 @@ struct SlowConfigurePathsProvider {
 }
 
 impl TypeProvider for SlowConfigurePathsProvider {
+    fn provider_id(&self) -> &'static str {
+        "tsgo"
+    }
+
     fn open_file(&self, _path: &str, _content: &str) -> ProviderFuture<'_, ()> {
         Box::pin(async { Ok(()) })
     }
@@ -135,6 +139,10 @@ impl TypeProvider for SlowConfigurePathsProvider {
 struct TriggerSensitiveCompletionProvider;
 
 impl TypeProvider for TriggerSensitiveCompletionProvider {
+    fn provider_id(&self) -> &'static str {
+        "tsgo"
+    }
+
     fn open_file(&self, _path: &str, _content: &str) -> ProviderFuture<'_, ()> {
         Box::pin(async { Ok(()) })
     }
@@ -273,6 +281,10 @@ impl TypeProvider for TriggerSensitiveCompletionProvider {
 struct DotTriggerRequiredCompletionProvider;
 
 impl TypeProvider for DotTriggerRequiredCompletionProvider {
+    fn provider_id(&self) -> &'static str {
+        "tsgo"
+    }
+
     fn open_file(&self, _path: &str, _content: &str) -> ProviderFuture<'_, ()> {
         Box::pin(async { Ok(()) })
     }
@@ -443,6 +455,10 @@ impl LostContentCompletionProvider {
 }
 
 impl TypeProvider for LostContentCompletionProvider {
+    fn provider_id(&self) -> &'static str {
+        "tsgo"
+    }
+
     fn open_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
         let path = path.to_string();
         let content = content.to_string();
@@ -1830,10 +1846,38 @@ fn import_resolved_does_not_match_different_component() {
 /// We use push diagnostics exclusively to avoid flickering during typing.
 #[test]
 fn capabilities_do_not_include_pull_diagnostics() {
-    let caps = crate::capabilities::server_capabilities(&PositionEncodingKind::UTF16);
+    let caps = crate::capabilities::server_capabilities(&PositionEncodingKind::UTF16, true);
     assert!(
         caps.diagnostic_provider.is_none(),
         "diagnostic_provider must be removed — we use push diagnostics only"
+    );
+}
+
+/// The advertised `resolve_provider` capability is HONEST: it mirrors the
+/// `resolve_provider` argument (which the initialize handler derives from the
+/// active provider's `supports_completion_resolve`), never a hard-coded `true`.
+#[test]
+fn resolve_provider_capability_is_honest() {
+    let with_resolve = crate::capabilities::server_capabilities(&PositionEncodingKind::UTF16, true);
+    assert_eq!(
+        with_resolve
+            .completion_provider
+            .as_ref()
+            .and_then(|c| c.resolve_provider),
+        Some(true),
+        "a resolve-capable provider must advertise resolve_provider: true"
+    );
+
+    let without_resolve =
+        crate::capabilities::server_capabilities(&PositionEncodingKind::UTF16, false);
+    assert_eq!(
+        without_resolve
+            .completion_provider
+            .as_ref()
+            .and_then(|c| c.resolve_provider),
+        Some(false),
+        "a session without resolve support must advertise resolve_provider: false, not a \
+         dishonest true"
     );
 }
 
@@ -9653,7 +9697,7 @@ async fn provider_projection_context_serves_both_carrier_and_self_file() {
 
 /// Fail-closed auto-import completion-resolve for a self-file rune module.
 ///
-/// The TSGO auto-import re-anchor (`resolve_tsgo_auto_import_edits`) maps a
+/// The provider auto-import re-anchor (`resolve_provider_auto_import_edits`) maps a
 /// provider edit back through a Vue `<script setup>` carrier. A self-file rune
 /// module (Svelte `.svelte.ts` / `.svelte.js`) has NO `<script setup>` carrier
 /// to re-anchor into — its provider path reverse-maps to itself, not to a
@@ -9720,7 +9764,7 @@ async fn self_file_auto_import_resolve_fails_closed_with_no_edits() {
         end: 0,
         new_text: "import { foo } from './foo';\n".to_string(),
     }];
-    let resolved = super::nav_features_completion_resolve::resolve_tsgo_auto_import_edits(
+    let resolved = super::nav_features_completion_resolve::resolve_provider_auto_import_edits(
         server,
         "/workspace/store.svelte.ts",
         &provider_edits,
@@ -9754,7 +9798,7 @@ async fn self_file_auto_import_resolve_fails_closed_with_no_edits() {
 /// A REAL Vue carrier whose IDE context is MISSING (stale / not committed) is a
 /// hard error on completion-resolve — never a dropped-edit success.
 ///
-/// Contract: `resolve_tsgo_auto_import_edits` returns `Ok(None)` ONLY for the
+/// Contract: `resolve_provider_auto_import_edits` returns `Ok(None)` ONLY for the
 /// no-carrier / self-file cases. A path that DOES reverse-map to a `.vue`
 /// carrier (not self-file) but has no live IDE context (no committed provider
 /// sync state → `ide_context_by_path` is `None`) is a genuine carrier-resolve
@@ -9835,7 +9879,7 @@ async fn missing_ide_context_for_real_carrier_fails_resolve_not_drops_edits() {
         end: 0,
         new_text: "import { foo } from './foo';\n".to_string(),
     }];
-    let resolved = super::nav_features_completion_resolve::resolve_tsgo_auto_import_edits(
+    let resolved = super::nav_features_completion_resolve::resolve_provider_auto_import_edits(
         server,
         tsx_path,
         &provider_edits,
@@ -9847,6 +9891,263 @@ async fn missing_ide_context_for_real_carrier_fails_resolve_not_drops_edits() {
     );
 
     drain.abort();
+}
+
+/// Build the LSP completion item a tsserver-family provider's resolve handle
+/// becomes after `merge_completions`: the provider-NEUTRAL `verter_resolve`
+/// envelope with a `TsserverEntry` resolve key.
+#[cfg(test)]
+fn tsserver_resolve_envelope_item(
+    provider_id: &str,
+    provider_path: &str,
+    entry_name: &str,
+) -> CompletionItem {
+    let provider_data = serde_json::to_value(
+        crate::tsgo::protocol::CompletionResolveData::TsserverEntry {
+            name: entry_name.to_string(),
+            source: Some("vue".to_string()),
+            data: Some(serde_json::json!({ "exportName": entry_name })),
+            offset: 0,
+        },
+    )
+    .expect("resolve key serializes");
+    CompletionItem {
+        label: entry_name.to_string(),
+        data: Some(serde_json::json!({
+            "verter_resolve": {
+                "kind": "type_provider",
+                "provider_id": provider_id,
+                "provider_path": provider_path,
+                "provider_data": provider_data,
+            }
+        })),
+        ..Default::default()
+    }
+}
+
+/// Build the LSP completion item a TSGO (upstream-LSP) provider's resolve handle
+/// becomes after `merge_completions`: the provider-NEUTRAL `verter_resolve`
+/// envelope with an `Lsp { label, data }` resolve key — the ONLY key shape real
+/// `TsgoTypeProvider::resolve_completion` accepts. Tests must model the real
+/// per-provider data shape, not feed `TsserverEntry` to a tsgo provider.
+#[cfg(test)]
+fn tsgo_resolve_envelope_item(
+    provider_id: &str,
+    provider_path: &str,
+    entry_name: &str,
+) -> CompletionItem {
+    let provider_data = serde_json::to_value(crate::tsgo::protocol::CompletionResolveData::Lsp {
+        label: entry_name.to_string(),
+        data: serde_json::json!({ "exportName": entry_name }),
+    })
+    .expect("resolve key serializes");
+    CompletionItem {
+        label: entry_name.to_string(),
+        data: Some(serde_json::json!({
+            "verter_resolve": {
+                "kind": "type_provider",
+                "provider_id": provider_id,
+                "provider_path": provider_path,
+                "provider_data": provider_data,
+            }
+        })),
+        ..Default::default()
+    }
+}
+
+/// Dispatch reaches `resolve_completion` for the provider-NEUTRAL
+/// `verter_resolve` envelope — NOT the old provider-baked `data.tsgo` gate.
+///
+/// Discriminating: a tsserver-kind mock provider (NOT tsgo) carrying the neutral
+/// envelope MUST have `resolve_completion` invoked. The pre-fix code gated on
+/// `data.get("tsgo") == Some(true)`, so a tsserver item would never reach
+/// resolve — this asserts the call IS made, which fails on the old gate.
+#[tokio::test]
+async fn completion_resolve_dispatches_neutral_envelope_to_provider() {
+    let provider = Arc::new(MockTypeProvider::new());
+    provider.set_provider_id("tsserver");
+    // Configure a resolve response keyed on the exact resolve key the envelope carries.
+    let resolve_key = crate::tsgo::protocol::CompletionResolveData::TsserverEntry {
+        name: "computed".to_string(),
+        source: Some("vue".to_string()),
+        data: Some(serde_json::json!({ "exportName": "computed" })),
+        offset: 0,
+    };
+    provider.set_resolve_completion(
+        "/workspace/App.vue.tsx",
+        resolve_key,
+        Some(CompletionResolveResult {
+            additional_text_edits: vec![],
+            ..Default::default()
+        }),
+    );
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    install_test_resolver(server);
+
+    let item = tsserver_resolve_envelope_item("tsserver", "/workspace/App.vue.tsx", "computed");
+    let _ = super::nav_features::handle_completion_resolve(server, item).await;
+
+    assert!(
+        provider.calls().iter().any(|c| matches!(
+            c,
+            MockCall::ResolveCompletion { path, .. } if path == "/workspace/App.vue.tsx"
+        )),
+        "the neutral verter_resolve envelope must dispatch to the provider's resolve_completion \
+         (the old code gated on data.tsgo and never reached tsserver)"
+    );
+}
+
+/// Provider-id mismatch FAILS CLOSED: an item minted by one provider must never
+/// be resolved against a different active provider (mid-session swap safety).
+///
+/// Discriminating: the envelope says `provider_id: "tsgo"` but the active
+/// provider reports `"tsserver"`. `resolve_completion` must NOT be called. A
+/// dispatch that ignored provider identity would (wrongly) call it.
+#[tokio::test]
+async fn completion_resolve_fails_closed_on_provider_id_mismatch() {
+    let provider = Arc::new(MockTypeProvider::new());
+    provider.set_provider_id("tsserver");
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    install_test_resolver(server);
+
+    // Envelope stamped by a DIFFERENT provider ("tsgo") than the active one.
+    let item = tsserver_resolve_envelope_item("tsgo", "/workspace/App.vue.tsx", "computed");
+    let result = super::nav_features::handle_completion_resolve(server, item.clone()).await;
+
+    assert!(
+        result.is_ok(),
+        "a provider mismatch is a benign no-op (item returned unchanged), not an error"
+    );
+    assert!(
+        !provider
+            .calls()
+            .iter()
+            .any(|c| matches!(c, MockCall::ResolveCompletion { .. })),
+        "a provider-id mismatch must FAIL CLOSED — resolve_completion must not be called against \
+         a foreign provider's item"
+    );
+}
+
+/// BOTH a tsgo-kind and a tsserver-kind provider resolve through the SAME neutral
+/// envelope dispatch — provider-agnostic (one path, validated by id), not a
+/// tsgo-only branch — each carrying its OWN real resolve-key shape.
+///
+/// This models the REAL per-provider data shapes (review finding T3): TSGO mints
+/// `CompletionResolveData::Lsp { label, data }` (the only key its
+/// `resolve_completion` accepts), while the tsserver family mints
+/// `TsserverEntry`. Feeding `TsserverEntry` to a tsgo provider (as the old test
+/// did) proved only generic mock dispatch, not that the dispatch routes the
+/// provider's real key shape. The dispatch must reach resolve AND carry the exact
+/// key the matching provider would accept.
+#[tokio::test]
+async fn completion_resolve_envelope_resolves_for_both_provider_kinds() {
+    // (provider kind, the resolve key that kind's real provider accepts, the
+    // matching envelope-item builder).
+    let tsgo_key = crate::tsgo::protocol::CompletionResolveData::Lsp {
+        label: "computed".to_string(),
+        data: serde_json::json!({ "exportName": "computed" }),
+    };
+    let tsserver_key = crate::tsgo::protocol::CompletionResolveData::TsserverEntry {
+        name: "computed".to_string(),
+        source: Some("vue".to_string()),
+        data: Some(serde_json::json!({ "exportName": "computed" })),
+        offset: 0,
+    };
+
+    for (kind, resolve_key, build_item) in [
+        (
+            "tsgo",
+            tsgo_key,
+            tsgo_resolve_envelope_item as fn(&str, &str, &str) -> CompletionItem,
+        ),
+        (
+            "tsserver",
+            tsserver_key,
+            tsserver_resolve_envelope_item as fn(&str, &str, &str) -> CompletionItem,
+        ),
+    ] {
+        let provider = Arc::new(MockTypeProvider::new());
+        provider.set_provider_id(kind);
+        provider.set_resolve_completion(
+            "/workspace/App.vue.tsx",
+            resolve_key.clone(),
+            Some(CompletionResolveResult::default()),
+        );
+        let type_provider: Arc<dyn TypeProvider> = provider.clone();
+        let service = make_hover_test_service(type_provider);
+        let server = service.inner();
+        install_test_resolver(server);
+
+        let item = build_item(kind, "/workspace/App.vue.tsx", "computed");
+        let _ = super::nav_features::handle_completion_resolve(server, item).await;
+
+        // Resolve was reached AND the dispatched key is exactly the one this
+        // provider's real `resolve_completion` accepts (the `Lsp`/`TsserverEntry`
+        // shape — not a generic stand-in).
+        let dispatched_key = provider.calls().into_iter().find_map(|c| match c {
+            MockCall::ResolveCompletion { data, .. } => Some(data),
+            _ => None,
+        });
+        assert_eq!(
+            dispatched_key.as_ref(),
+            Some(&resolve_key),
+            "provider kind '{kind}' must receive its own real resolve-key shape, \
+             routed unchanged through the neutral envelope"
+        );
+    }
+}
+
+/// F4: lazy `completionItem/resolve` enrichment is APPLIED — the resolved
+/// `detail` and `documentation` are folded onto the returned `CompletionItem`.
+///
+/// Discriminating: `CompletionResolveResult` carries `detail`/`documentation`
+/// and the tsserver mapper populates them, but the pre-fix
+/// `handle_completion_resolve` consumed only `additional_text_edits`, dropping
+/// the enrichment (a dishonest contract). This resolves an item whose result has
+/// ONLY detail/docs (no edits) and asserts both land on the item — which fails on
+/// the old edits-only dispatch.
+#[tokio::test]
+async fn completion_resolve_applies_detail_and_documentation() {
+    let provider = Arc::new(MockTypeProvider::new());
+    provider.set_provider_id("tsgo");
+    let resolve_key = crate::tsgo::protocol::CompletionResolveData::Lsp {
+        label: "computed".to_string(),
+        data: serde_json::json!({ "exportName": "computed" }),
+    };
+    provider.set_resolve_completion(
+        "/workspace/App.vue.tsx",
+        resolve_key,
+        Some(CompletionResolveResult {
+            additional_text_edits: vec![],
+            detail: Some("(alias) const computed: …".to_string()),
+            documentation: Some("Takes a getter function…".to_string()),
+        }),
+    );
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    install_test_resolver(server);
+
+    let item = tsgo_resolve_envelope_item("tsgo", "/workspace/App.vue.tsx", "computed");
+    let resolved = super::nav_features::handle_completion_resolve(server, item)
+        .await
+        .expect("resolve returns the enriched item");
+
+    assert_eq!(
+        resolved.detail.as_deref(),
+        Some("(alias) const computed: …"),
+        "the resolved detail/signature must be applied onto the item"
+    );
+    match resolved.documentation {
+        Some(Documentation::MarkupContent(MarkupContent { value, .. })) => {
+            assert_eq!(value, "Takes a getter function…");
+        }
+        other => panic!("expected markdown documentation, got {other:?}"),
+    }
 }
 
 /// Open-before-ownership: `did_open` on a `.svelte.ts` rune module makes
@@ -10148,7 +10449,7 @@ async fn self_file_rename_and_code_actions_gated_off() {
     );
 
     // Rename: must be a CLEAN no-op (no edit), NOT a wrong/unmapped edit.
-    let rename = super::nav_features::handle_rename(
+    let rename = super::nav_features_navigation::handle_rename(
         server,
         RenameParams {
             text_document_position: TextDocumentPositionParams {
@@ -11983,5 +12284,228 @@ async fn component_resolve_targets_svelte_carrier() {
         resolved.uri.as_str().ends_with("Child.svelte"),
         "the resolved component-target must be the .svelte carrier, got {}",
         resolved.uri.as_str()
+    );
+}
+
+/// F1 (virtual-file completion routing) discriminating regression test.
+///
+/// `handle_completion` has TWO provider-completion paths:
+///   * the CARRIER path (`merge_completions`) for a real `.vue` URI, and
+///   * the `verter-virtual://` path (`nav_features.rs` virtual-file branch),
+///     which routes through `merge::provider_completion_to_lsp_item`.
+///
+/// The F1 fix was on the SECOND path: it previously stripped `Completion.data`,
+/// so a provider auto-import returned on the virtual-file branch could never
+/// carry its actionable `verter_resolve` envelope and could never resolve into
+/// an import edit. The shipped VS Code E2E "auto-import" test opens a real
+/// `.vue` URI — it exercises the CARRIER path, NOT this branch — so it does NOT
+/// discriminate the F1 fix (reverting the virtual-file branch to the
+/// `data`-stripping form leaves the whole corpus green).
+///
+/// This test drives `handle_completion` over a `verter-virtual://` URI with a
+/// mock provider returning an ACTIONABLE `TsserverEntry` (a `source`-bearing
+/// auto-import handle) and asserts the emitted LSP item carries the
+/// provider-neutral `verter_resolve` envelope (kind + provider id + carrier
+/// path + serialized provider key). Reverting the virtual-file branch to strip
+/// `data` (e.g. mapping each item to a bare `CompletionItem { label, ... }`
+/// with `data: None`) makes this assertion RED while the rest of the suite
+/// stays green — the discriminator the §1a verification found missing.
+#[tokio::test]
+async fn virtual_file_completion_routes_actionable_handle_through_envelope() {
+    // tsserver-kind mock so the envelope's `provider_id` is "tsserver" — proving
+    // the path is provider-neutral, not a tgo-only branch.
+    let provider = Arc::new(MockTypeProvider::new());
+    provider.set_provider_id("tsserver");
+
+    // The virtual file routes completions to the source `.vue`'s generated TSX.
+    let tsx_path = "/workspace/src/App.vue.tsx";
+    // Virtual document content (already in generated-TSX coordinates). The
+    // completion request lands at the end of `computed` on line 0.
+    let virtual_content = "computed\n";
+    let request_offset = "computed".len() as u32; // byte offset 8
+
+    // An ACTIONABLE auto-import handle: a `TsserverEntry` carrying a module
+    // `source` (the auto-import key). This is exactly the shape a real tsserver/
+    // extension completion for an unimported `computed` from `vue` produces.
+    let actionable = crate::tsgo::protocol::Completion {
+        label: "computed".to_string(),
+        kind: Some(crate::tsgo::protocol::CompletionKind::Function),
+        detail: None,
+        documentation: None,
+        edit_range_start: None,
+        edit_range_end: None,
+        insert_text: None,
+        sort_text: None,
+        data: Some(
+            crate::tsgo::protocol::CompletionResolveData::TsserverEntry {
+                name: "computed".to_string(),
+                source: Some("vue".to_string()),
+                data: None,
+                offset: 0,
+            },
+        ),
+    };
+    // A NON-actionable local handle (no source/data) — must NOT earn an envelope.
+    let local = crate::tsgo::protocol::Completion {
+        label: "localVar".to_string(),
+        kind: Some(crate::tsgo::protocol::CompletionKind::Variable),
+        detail: None,
+        documentation: None,
+        edit_range_start: None,
+        edit_range_end: None,
+        insert_text: None,
+        sort_text: None,
+        data: Some(
+            crate::tsgo::protocol::CompletionResolveData::TsserverEntry {
+                name: "localVar".to_string(),
+                source: None,
+                data: None,
+                offset: 0,
+            },
+        ),
+    };
+    // The provider answers the virtual file's TSX path at the request offset.
+    provider.set_completions(tsx_path, request_offset, vec![actionable, local]);
+
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    install_test_resolver(server);
+
+    // Open the backing `.vue` source so `get_canonical_id`/`active_ide_path_for_uri`
+    // can resolve the source URI to its generated-TSX path.
+    let source_uri: Uri = "file:///workspace/src/App.vue".parse().unwrap();
+    let _ = server.documents.did_open(&TextDocumentItem {
+        uri: source_uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: "<template><div/></template>".to_string(),
+    });
+
+    // Mark the source's provider sync state as IDE-loaded at the TSX path, so
+    // `active_ide_path_for_uri(source)` returns the carrier path the virtual-file
+    // branch routes completion + resolve against.
+    server.provider_sync_states.insert(
+        "/workspace/src/App.vue".to_string(),
+        ProviderSyncState {
+            owner_binding: crate::provider_sync::ProviderOwnerBinding::Unresolved,
+            ide_path: Some(tsx_path.to_string()),
+            api_path: None,
+            shadow_path: None,
+            ide_background_loaded: true,
+            api_background_loaded: false,
+            shadow_background_loaded: false,
+        },
+    );
+
+    // Open the virtual document (`verter-virtual://...?sourceUri=<vue-uri>`).
+    let virtual_uri_str = format!(
+        "verter-virtual://generated/App.vue.tsx?sourceUri={}",
+        source_uri.as_str()
+    );
+    let virtual_uri: Uri = virtual_uri_str.parse().expect("virtual uri parses");
+    let _ = server.documents.did_open(&TextDocumentItem {
+        uri: virtual_uri.clone(),
+        language_id: "typescriptreact".to_string(),
+        version: 1,
+        text: virtual_content.to_string(),
+    });
+
+    // Sanity: the virtual-file context resolves to the carrier TSX path (so we
+    // know the branch under test is actually entered, not silently fallen
+    // through to the normal completion path).
+    let (resolved_tsx, _li) = server
+        .virtual_file_context(&virtual_uri)
+        .expect("virtual-file context must resolve to the source TSX path");
+    assert_eq!(
+        resolved_tsx, tsx_path,
+        "virtual-file context must route to the backing .vue's generated TSX"
+    );
+
+    // Completion at byte offset 8 (end of `computed`) on line 0.
+    let position = Position {
+        line: 0,
+        character: request_offset,
+    };
+    let response = super::nav_features::handle_completion(
+        server,
+        completion_params(&virtual_uri, position, None),
+    )
+    .await
+    .expect("handle_completion succeeds");
+
+    let items = match response {
+        Some(CompletionResponse::List(list)) => list.items,
+        Some(CompletionResponse::Array(items)) => items,
+        None => panic!("virtual-file completion must return items"),
+    };
+
+    // The provider went through the virtual-file branch (keyed on the TSX path).
+    assert!(
+        provider.calls().iter().any(|c| matches!(
+            c,
+            MockCall::GetCompletions { path, offset }
+                if path == tsx_path && *offset == request_offset
+        )),
+        "completion must query the provider on the carrier TSX path via the virtual-file branch, \
+         calls={:?}",
+        provider.calls()
+    );
+
+    // The actionable auto-import item carries the neutral `verter_resolve` envelope.
+    let computed = items
+        .iter()
+        .find(|i| i.label == "computed")
+        .expect("the auto-import `computed` item must survive the virtual-file branch");
+    let envelope = computed
+        .data
+        .as_ref()
+        .and_then(|d| d.get("verter_resolve"))
+        .unwrap_or_else(|| {
+            panic!(
+                "F1: the virtual-file branch must preserve the actionable resolve handle as a \
+                 `verter_resolve` envelope (reverting the fix strips `data` and this is absent); \
+                 got data={:?}",
+                computed.data
+            )
+        });
+    assert_eq!(
+        envelope.get("kind").and_then(|v| v.as_str()),
+        Some("type_provider"),
+        "envelope kind must be type_provider"
+    );
+    assert_eq!(
+        envelope.get("provider_id").and_then(|v| v.as_str()),
+        Some("tsserver"),
+        "envelope must carry the active provider id"
+    );
+    assert_eq!(
+        envelope.get("provider_path").and_then(|v| v.as_str()),
+        Some(tsx_path),
+        "envelope must route resolve back to the carrier TSX path"
+    );
+    let provider_data = envelope
+        .get("provider_data")
+        .expect("envelope carries the serialized provider resolve key");
+    assert_eq!(
+        provider_data.get("source").and_then(|v| v.as_str()),
+        Some("vue"),
+        "the serialized handle must preserve the auto-import `source` key"
+    );
+
+    // Negative: the NON-actionable local item must NOT carry an envelope (no
+    // per-keystroke payload bloat for a no-op resolve — review finding F3).
+    let local = items
+        .iter()
+        .find(|i| i.label == "localVar")
+        .expect("the local item must also pass through the virtual-file branch");
+    assert!(
+        local
+            .data
+            .as_ref()
+            .and_then(|d| d.get("verter_resolve"))
+            .is_none(),
+        "a non-actionable local handle must NOT be stamped with a resolve envelope, got data={:?}",
+        local.data
     );
 }

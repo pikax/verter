@@ -92,7 +92,7 @@ mod inner {
         },
         ResolveCompletion {
             path: String,
-            data: serde_json::Value,
+            data: CompletionResolveData,
         },
         ConfigurePaths {
             base_url: String,
@@ -134,8 +134,15 @@ mod inner {
         code_action_responses: Vec<(String, u32, u32, Vec<TypeCodeAction>)>,
         semantic_token_responses: Vec<(String, Vec<SemanticToken>)>,
         inlay_hint_responses: Vec<(String, u32, u32, Vec<InlayHint>)>,
-        resolve_completion_responses:
-            Vec<(String, serde_json::Value, Option<CompletionResolveResult>)>,
+        resolve_completion_responses: Vec<(
+            String,
+            CompletionResolveData,
+            Option<CompletionResolveResult>,
+        )>,
+        /// Provider identity reported by [`MockTypeProvider::provider_id`].
+        /// Defaults to `"tsgo"`; tests that exercise provider-id validation set
+        /// it explicitly via [`MockTypeProvider::set_provider_id`].
+        provider_id: Option<&'static str>,
     }
 
     /// A mock `TypeProvider` for testing.
@@ -269,17 +276,27 @@ mod inner {
                 .push((path.to_string(), start_offset, end_offset, hints));
         }
 
-        /// Configure completion resolution for a specific path and data payload.
+        /// Configure completion resolution for a specific path and resolve key.
         pub fn set_resolve_completion(
             &self,
             path: &str,
-            data: serde_json::Value,
+            data: CompletionResolveData,
             result: Option<CompletionResolveResult>,
         ) {
             let mut state = self.state.lock().unwrap();
             state
                 .resolve_completion_responses
                 .push((path.to_string(), data, result));
+        }
+
+        /// Override the provider identity reported by `provider_id()`.
+        ///
+        /// Used by dispatch tests that need the mock to impersonate a specific
+        /// backend (`"tsgo"` / `"tsserver"` / `"extension"`) so provider-id
+        /// validation can be exercised in both the matching and mismatching
+        /// directions.
+        pub fn set_provider_id(&self, provider_id: &'static str) {
+            self.state.lock().unwrap().provider_id = Some(provider_id);
         }
 
         /// Get all recorded calls.
@@ -351,6 +368,10 @@ mod inner {
     }
 
     impl TypeProvider for FailingTypeProvider {
+        fn provider_id(&self) -> &'static str {
+            "tsgo"
+        }
+
         fn open_file(&self, _path: &str, _content: &str) -> ProviderFuture<'_, ()> {
             let msg = self.error_message.clone();
             Box::pin(async move { Err(TypeProviderError::new(msg)) })
@@ -468,7 +489,7 @@ mod inner {
         fn resolve_completion(
             &self,
             _path: &str,
-            _data: serde_json::Value,
+            _data: CompletionResolveData,
         ) -> ProviderFuture<'_, Option<CompletionResolveResult>> {
             let msg = self.error_message.clone();
             Box::pin(async move { Err(TypeProviderError::new(msg)) })
@@ -494,6 +515,14 @@ mod inner {
     }
 
     impl TypeProvider for MockTypeProvider {
+        fn provider_id(&self) -> &'static str {
+            self.state.lock().unwrap().provider_id.unwrap_or("tsgo")
+        }
+
+        fn supports_completion_resolve(&self) -> bool {
+            true
+        }
+
         fn open_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
             let mut state = self.state.lock().unwrap();
             state.calls.push(MockCall::OpenFile {
@@ -753,7 +782,7 @@ mod inner {
         fn resolve_completion(
             &self,
             path: &str,
-            data: serde_json::Value,
+            data: CompletionResolveData,
         ) -> ProviderFuture<'_, Option<CompletionResolveResult>> {
             let mut state = self.state.lock().unwrap();
             state.calls.push(MockCall::ResolveCompletion {

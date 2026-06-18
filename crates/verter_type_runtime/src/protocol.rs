@@ -52,9 +52,103 @@ pub struct Completion {
     pub edit_range_end: Option<u32>,
     pub insert_text: Option<String>,
     pub sort_text: Option<String>,
-    /// Opaque data preserved for `completionItem/resolve`.
+    /// Typed, provider-owned resolve key preserved for `completionItem/resolve`.
+    ///
+    /// This is the provider's OWN lazy-resolve handle — NOT an LSP routing
+    /// payload. Each provider mints the variant that lets it re-issue the
+    /// resolve request (`Lsp` for the upstream-LSP `data` blob; `TsserverEntry`
+    /// for a `completionEntryDetails` lookup). LSP routing fields (carrier path,
+    /// provider id) live in the LSP-side envelope, never inside this key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub data: Option<serde_json::Value>,
+    pub data: Option<CompletionResolveData>,
+}
+
+/// Provider-pure lazy-resolve key carried on a [`Completion`].
+///
+/// A type provider attaches the variant it can later re-issue a resolve with.
+/// It deliberately holds NO LSP routing information (no generated-file path, no
+/// `provider_id`); the LSP layer wraps this in its own envelope when it needs to
+/// route a `completionItem/resolve` back to the originating provider.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CompletionResolveData {
+    /// LSP-shaped resolve handle (TSGO and any upstream-LSP provider): the
+    /// completion item's original `label` plus its opaque upstream `data`
+    /// field, replayed verbatim into a `completionItem/resolve` request.
+    Lsp {
+        label: String,
+        data: serde_json::Value,
+    },
+    /// tsserver-family resolve handle: the entry `name` plus the optional
+    /// `source`/`data` fields a `completionEntryDetails` request keys on to
+    /// recover the auto-import code actions for that specific entry, and the
+    /// `offset` (byte offset into the generated file) of the completion request
+    /// the entry came from — `completionEntryDetails` must be re-issued at the
+    /// same position. The offset is provider-domain (a position in the
+    /// provider's own generated file), not LSP routing.
+    ///
+    /// STALE-OFFSET FRAGILITY (review finding H3): `offset` is captured at
+    /// completion-LIST time and re-converted to a tsserver `(line, offset)` via
+    /// [`crate::tsserver::ipc::byte_offset_to_tsserver_pos`] against the file
+    /// content the provider holds at RESOLVE time. If the open buffer changed
+    /// between the list request and the accept (the editor inserted/removed text
+    /// before this byte offset, advancing the generated artifact), the stored
+    /// byte offset now points at a DIFFERENT line/col, and tsserver may resolve
+    /// the wrong entry's `completionEntryDetails` (or none). This is acceptable
+    /// in practice because `completionItem/resolve` fires immediately on accept
+    /// (the user is not typing mid-accept) and a re-keyed resolve simply returns
+    /// no edits (fail-closed — never a wrong import), but it is a real lazy-resolve
+    /// limitation. The robust fix (re-anchoring the offset against the live
+    /// version, or carrying a version stamp) is a follow-up; until it lands a
+    /// drifted offset degrades to "no auto-import edit", not a corrupt one. The
+    /// characterization test `stamped_offset_drifts_when_buffer_changes_before_resolve`
+    /// pins this behavior.
+    TsserverEntry {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        data: Option<serde_json::Value>,
+        offset: u32,
+    },
+}
+
+impl CompletionResolveData {
+    /// Whether this resolve handle can produce a NON-trivial `completionItem/resolve`
+    /// result — i.e. an auto-import (additional text edits).
+    ///
+    /// Only an ACTIONABLE handle is worth minting an LSP resolve envelope for: a
+    /// local member completion (a `TsserverEntry` with neither `source` nor `data`)
+    /// resolves to nothing but lazy detail, so stamping it would be per-keystroke
+    /// payload bloat and a no-op resolve round-trip (review finding F3).
+    ///
+    /// - `Lsp { data }` — the upstream-LSP provider (TSGO) only attaches `data` on
+    ///   an entry that has a resolvable action; the parser drops `data` for entries
+    ///   without one, so any `Lsp` handle that exists is actionable.
+    /// - `TsserverEntry` — an auto-import (module-export) entry carries `source`
+    ///   and/or `data` (the `completionEntryDetails` resolve key). A bare
+    ///   name-only handle (a local symbol) is NOT actionable.
+    ///
+    /// `source`/`data` is the COMPLETE and durable actionability rail for the
+    /// auto-import class — `hasAction` is deliberately NOT modeled. tsserver's
+    /// `hasAction` is purely an output hint (not an input to the
+    /// `getCompletionEntryDetails` lookup, which keys on `name`/`source`/`data`),
+    /// and an auto-import entry ALWAYS carries `source` (the module specifier).
+    /// The remaining `hasAction: true`-without-`source`/`data` shapes —
+    /// class-member snippet completions, object-literal missing-comma insertion,
+    /// and type-only-alias wrappers — are a DIFFERENT code-action class that this
+    /// resolve path does NOT route as an import (routing them through the
+    /// auto-import envelope would mis-key their resolve and produce no edit). If a
+    /// future block adds support for that non-import action class it gets its OWN
+    /// handle variant, not a `hasAction` flag bolted onto the auto-import rail.
+    pub fn is_actionable(&self) -> bool {
+        match self {
+            CompletionResolveData::Lsp { .. } => true,
+            CompletionResolveData::TsserverEntry { source, data, .. } => {
+                source.is_some() || data.is_some()
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -79,10 +173,19 @@ pub enum CompletionKind {
 }
 
 /// Result of resolving a completion item (additional text edits, e.g., auto-import).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CompletionResolveResult {
     /// Additional text edits to apply (e.g., import statements).
     pub additional_text_edits: Vec<ResolvedTextEdit>,
+    /// Resolved detail/signature text (lazy `completionItem/resolve` enrichment),
+    /// when the provider returns one. `None` leaves the item's existing detail
+    /// untouched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// Resolved documentation (markdown/plaintext) for the item, when the
+    /// provider returns one. `None` leaves the item's existing docs untouched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub documentation: Option<String>,
 }
 
 /// A text edit within a completion resolve result.
@@ -220,4 +323,102 @@ pub enum TypeDocumentHighlightKind {
     Text,
     Read,
     Write,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lsp_resolve_handle_is_always_actionable() {
+        // TSGO only attaches `data` on an entry with a resolvable action, so any
+        // `Lsp` handle that exists is actionable.
+        let handle = CompletionResolveData::Lsp {
+            label: "computed".to_string(),
+            data: serde_json::json!({ "exportName": "computed" }),
+        };
+        assert!(handle.is_actionable());
+    }
+
+    #[test]
+    fn tsserver_auto_import_entry_is_actionable_local_is_not() {
+        // An auto-import (module-export) entry carries source and/or data.
+        let auto_import = CompletionResolveData::TsserverEntry {
+            name: "computed".to_string(),
+            source: Some("vue".to_string()),
+            data: Some(serde_json::json!({ "exportName": "computed" })),
+            offset: 7,
+        };
+        assert!(
+            auto_import.is_actionable(),
+            "an entry with source/data resolves to an auto-import edit"
+        );
+
+        // A bare name-only handle (a local symbol) resolves to nothing actionable.
+        let local = CompletionResolveData::TsserverEntry {
+            name: "myLocalVar".to_string(),
+            source: None,
+            data: None,
+            offset: 7,
+        };
+        assert!(
+            !local.is_actionable(),
+            "a local member entry (no source/data) must NOT be actionable — minting an \
+             envelope for it is per-keystroke payload bloat and a no-op resolve"
+        );
+
+        // Source-only (no data) is still an auto-import entry.
+        let source_only = CompletionResolveData::TsserverEntry {
+            name: "computed".to_string(),
+            source: Some("vue".to_string()),
+            data: None,
+            offset: 7,
+        };
+        assert!(source_only.is_actionable());
+    }
+
+    /// The serialized `CompletionResolveData` wire shape (the bytes the LSP
+    /// envelope embeds and a provider deserializes). Pins the `#[serde(tag =
+    /// "kind", rename_all = "snake_case")]` discriminant and field spellings so a
+    /// rename can't silently break the cross-process resolve round-trip.
+    #[test]
+    fn completion_resolve_data_wire_shape_is_pinned() {
+        let lsp = CompletionResolveData::Lsp {
+            label: "computed".to_string(),
+            data: serde_json::json!({ "exportName": "computed" }),
+        };
+        let json = serde_json::to_value(&lsp).unwrap();
+        assert_eq!(json["kind"], "lsp");
+        assert_eq!(json["label"], "computed");
+        assert_eq!(json["data"]["exportName"], "computed");
+
+        let entry = CompletionResolveData::TsserverEntry {
+            name: "computed".to_string(),
+            source: Some("vue".to_string()),
+            data: Some(serde_json::json!({ "exportName": "computed" })),
+            offset: 7,
+        };
+        let json = serde_json::to_value(&entry).unwrap();
+        assert_eq!(json["kind"], "tsserver_entry");
+        assert_eq!(json["name"], "computed");
+        assert_eq!(json["source"], "vue");
+        assert_eq!(json["offset"], 7);
+
+        // A local entry omits source/data (skip_serializing_if), keeping a local
+        // completion's payload minimal.
+        let local = CompletionResolveData::TsserverEntry {
+            name: "x".to_string(),
+            source: None,
+            data: None,
+            offset: 3,
+        };
+        let json = serde_json::to_value(&local).unwrap();
+        assert_eq!(json["kind"], "tsserver_entry");
+        assert!(json.get("source").is_none(), "absent source is omitted");
+        assert!(json.get("data").is_none(), "absent data is omitted");
+
+        // Round-trips back to the same value.
+        let back: CompletionResolveData = serde_json::from_value(json).unwrap();
+        assert_eq!(back, local);
+    }
 }

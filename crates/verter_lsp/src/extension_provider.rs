@@ -17,9 +17,11 @@ use crate::server::{TsQuery, TsQueryParams};
 use crate::tsgo::protocol::*;
 use crate::tsgo::traits::{ProviderFuture, TypeProvider};
 use crate::tsserver::ipc::{
-    byte_offset_to_tsserver_pos, concat_display_parts, format_quickinfo_hover,
-    parse_tsserver_code_action, parse_tsserver_completion, parse_tsserver_diagnostic,
-    parse_tsserver_location, parse_tsserver_rename_span,
+    build_completion_entry_details_request, build_entry_names_entry, byte_offset_to_tsserver_pos,
+    completion_entry_details_to_resolve_result, concat_display_parts,
+    enrich_completion_with_entry_details, format_quickinfo_hover, parse_tsserver_code_action,
+    parse_tsserver_completion, parse_tsserver_diagnostic, parse_tsserver_location,
+    parse_tsserver_rename_span, stamp_tsserver_completion_offset,
 };
 
 /// A `TypeProvider` that delegates to the VS Code extension's in-process
@@ -49,6 +51,18 @@ impl ExtensionTypeProvider {
     }
 
     /// Send a tsserver-format command to the extension and return the response body.
+    //
+    // TODO(follow-up): this `$/verter/tsQuery` transport seam (command names +
+    // arg-envelope shapes the completion/resolve methods emit) has no Rust-side
+    // test because `query` is bound to a concrete `tower_lsp_server::Client`.
+    // Covering it would mean introducing a transport-trait seam so a mock client
+    // can capture the emitted command/args. The extension-specific TS shaping is
+    // guarded headlessly by
+    // `packages/vue-vscode/src/extensionTsService.autoimport.spec.ts`, and the
+    // shared `entryNames` builders are unit-tested; the parse/envelope Rust path
+    // is identical to (and proven by) the tsserver real-provider parity gate. See
+    // docs/arch/provider-completion-resolve-design.md → "Extension provider
+    // auto-import".
     async fn query(
         &self,
         command: &str,
@@ -78,6 +92,14 @@ impl ExtensionTypeProvider {
 }
 
 impl TypeProvider for ExtensionTypeProvider {
+    fn provider_id(&self) -> &'static str {
+        "extension"
+    }
+
+    fn supports_completion_resolve(&self) -> bool {
+        true
+    }
+
     fn open_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
         let file = Self::normalize_path(path);
         let content = content.to_string();
@@ -244,13 +266,90 @@ impl TypeProvider for ExtensionTypeProvider {
             let items = result
                 .get("entries")
                 .and_then(|v| v.as_array())
-                .map(|arr| arr.iter().filter_map(parse_tsserver_completion).collect())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(parse_tsserver_completion)
+                        .map(|item| stamp_tsserver_completion_offset(item, offset))
+                        .collect()
+                })
                 .unwrap_or_default();
 
             Ok(CompletionResult {
                 items,
                 is_incomplete,
             })
+        })
+    }
+
+    fn get_completion_details<'a>(
+        &'a self,
+        path: &'a str,
+        offset: u32,
+        items: &'a [Completion],
+    ) -> ProviderFuture<'a, Vec<Completion>> {
+        let file = Self::normalize_path(path);
+        Box::pin(async move {
+            if items.is_empty() {
+                return Ok(Vec::new());
+            }
+
+            let (line, col) = {
+                let cache = self.contents.lock().await;
+                match cache.get(&file) {
+                    Some(c) => byte_offset_to_tsserver_pos(c, offset),
+                    None => (1, offset + 1),
+                }
+            };
+
+            // tsserver-family `completionEntryDetails` keys on the entry name plus
+            // the `source`/`data` recovered from the entry's resolve handle (an
+            // auto-import entry resolves against a different module than a local
+            // member). The shared builder forwards the typed handle's fields so an
+            // external-module entry resolves to the right symbol — identical to
+            // the tsserver provider's request (review finding H4).
+            let entry_names: Vec<_> = items
+                .iter()
+                .map(build_completion_entry_details_request)
+                .collect();
+
+            let result = self
+                .query(
+                    "completionEntryDetails",
+                    serde_json::json!({
+                        "file": file,
+                        "line": line,
+                        "offset": col,
+                        "entryNames": entry_names,
+                    }),
+                )
+                .await;
+
+            match result {
+                Ok(body) => {
+                    let detail_map: HashMap<String, &serde_json::Value> = body
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|detail| {
+                            detail
+                                .get("name")
+                                .and_then(|value| value.as_str())
+                                .map(|name| (name.to_string(), detail))
+                        })
+                        .collect();
+                    let enriched = items
+                        .iter()
+                        .map(|item| {
+                            detail_map
+                                .get(&item.label)
+                                .map(|detail| enrich_completion_with_entry_details(item, detail))
+                                .unwrap_or_else(|| item.clone())
+                        })
+                        .collect::<Vec<_>>();
+                    Ok(enriched)
+                }
+                Err(_) => Ok(items.to_vec()),
+            }
         })
     }
 
@@ -914,6 +1013,63 @@ impl TypeProvider for ExtensionTypeProvider {
                 }
                 Err(_) => Ok(vec![]),
             }
+        })
+    }
+
+    fn resolve_completion(
+        &self,
+        path: &str,
+        data: CompletionResolveData,
+    ) -> ProviderFuture<'_, Option<CompletionResolveResult>> {
+        let file = Self::normalize_path(path);
+        Box::pin(async move {
+            // The extension is a tsserver-family provider — it resolves through
+            // `completionEntryDetails`. A non-tsserver resolve key cannot have
+            // come from this provider, so fail closed.
+            let CompletionResolveData::TsserverEntry {
+                name,
+                source,
+                data,
+                offset,
+            } = data
+            else {
+                return Ok(None);
+            };
+
+            // Re-issue at the SAME completion-site position the entry came from;
+            // tsserver keys the entry's auto-import `codeActions` on
+            // (position, name, source/data).
+            let (line, col) = {
+                let cache = self.contents.lock().await;
+                match cache.get(&file) {
+                    Some(c) => byte_offset_to_tsserver_pos(c, offset),
+                    None => (1, offset + 1),
+                }
+            };
+
+            let entry = build_entry_names_entry(&name, source.as_deref(), data.as_ref());
+
+            let result = self
+                .query(
+                    "completionEntryDetails",
+                    serde_json::json!({
+                        "file": file,
+                        "line": line,
+                        "offset": col,
+                        "entryNames": [entry],
+                    }),
+                )
+                .await?;
+
+            let Some(detail) = result.as_array().and_then(|arr| arr.first()) else {
+                return Ok(None);
+            };
+            let contents_cache = self.contents.lock().await.clone();
+            Ok(completion_entry_details_to_resolve_result(
+                detail,
+                &file,
+                &contents_cache,
+            ))
         })
     }
 

@@ -322,6 +322,31 @@ where
     P: TypeProvider + Send + Sync + 'static,
     B: ResilientBackend<P>,
 {
+    fn provider_id(&self) -> &'static str {
+        // The wrapped provider's identity is stable across restarts (the backend
+        // always respawns the same provider type), so read it from the live
+        // inner when present, else fall back to the backend's user label.
+        self.state
+            .inner
+            .try_read()
+            .ok()
+            .and_then(|guard| guard.as_ref().map(|provider| provider.provider_id()))
+            .unwrap_or_else(|| self.state.backend.user_label())
+    }
+
+    fn supports_completion_resolve(&self) -> bool {
+        self.state
+            .inner
+            .try_read()
+            .ok()
+            .and_then(|guard| {
+                guard
+                    .as_ref()
+                    .map(|provider| provider.supports_completion_resolve())
+            })
+            .unwrap_or(false)
+    }
+
     fn open_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
         let path_owned = path.to_string();
         let content_owned = content.to_string();
@@ -500,7 +525,7 @@ where
     fn resolve_completion(
         &self,
         path: &str,
-        data: serde_json::Value,
+        data: CompletionResolveData,
     ) -> ProviderFuture<'_, Option<CompletionResolveResult>> {
         let path_owned = path.to_string();
         Box::pin(async move {
@@ -701,240 +726,5 @@ where
             let provider = self.get_inner().await?;
             provider.close_file_normal(&path_owned).await
         })
-    }
-}
-
-#[cfg(all(test, feature = "__lsp_tests"))]
-mod tests {
-    use super::*;
-    use crate::tsgo::mock::{MockCall, MockTypeProvider};
-
-    struct TestBackend {
-        replacement: MockTypeProvider,
-    }
-
-    impl ResilientBackend<MockTypeProvider> for TestBackend {
-        fn log_name(&self) -> &'static str {
-            "test-provider"
-        }
-
-        fn user_label(&self) -> &'static str {
-            "test"
-        }
-
-        fn restarting_error(&self) -> &'static str {
-            "test provider is restarting"
-        }
-
-        fn spawn<'a>(&'a self, _crash_notify: Arc<Notify>) -> SpawnFuture<'a, MockTypeProvider> {
-            let provider = self.replacement.clone();
-            Box::pin(async move { Ok(provider) })
-        }
-    }
-
-    fn make_resilient(
-        initial: MockTypeProvider,
-        replacement: MockTypeProvider,
-    ) -> (
-        ResilientProvider<MockTypeProvider, TestBackend>,
-        Arc<Notify>,
-    ) {
-        let crash_notify = Arc::new(Notify::new());
-        let provider = ResilientProvider::new(
-            initial,
-            Arc::clone(&crash_notify),
-            TestBackend { replacement },
-            Arc::new(OnceCell::new()),
-            3,
-        );
-        (provider, crash_notify)
-    }
-
-    #[tokio::test]
-    async fn update_workspace_folders_is_cached_while_restarting() {
-        let initial = MockTypeProvider::new();
-        let replacement = MockTypeProvider::new();
-        let (provider, _crash_notify) = make_resilient(initial, replacement);
-
-        {
-            let mut guard = provider.state.inner.write().await;
-            *guard = None;
-        }
-
-        let added = vec![serde_json::json!({ "uri": "file:///workspace-a" })];
-        let result = provider
-            .update_workspace_folders(added.clone(), vec![])
-            .await;
-
-        assert!(
-            result.is_ok(),
-            "workspace folder cache update should succeed"
-        );
-        assert_eq!(
-            provider.state.workspace_folders.read().await.clone(),
-            added,
-            "workspace folders should still be cached for replay"
-        );
-    }
-
-    #[tokio::test]
-    async fn restart_replays_cached_state_without_downgrading_loaded_files() {
-        let initial = MockTypeProvider::new();
-        let replacement = MockTypeProvider::new();
-        let replacement_clone = replacement.clone();
-        let (provider, crash_notify) = make_resilient(initial, replacement);
-
-        provider
-            .load_file("/project/src/loaded.vue.tsx", "const loaded = true;")
-            .await
-            .unwrap();
-        provider
-            .update_file("/project/src/loaded.vue.tsx", "const loaded = 2;")
-            .await
-            .unwrap();
-        provider
-            .open_file("/project/src/open.vue.tsx", "const open = true;")
-            .await
-            .unwrap();
-        provider
-            .configure_paths("/project/src", serde_json::json!({ "@/*": ["./*"] }))
-            .await
-            .unwrap();
-        provider
-            .update_workspace_folders(
-                vec![serde_json::json!({ "uri": "file:///project" })],
-                vec![],
-            )
-            .await
-            .unwrap();
-
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        crash_notify.notify_waiters();
-
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        while replacement_clone.calls().len() < 4 && std::time::Instant::now() < deadline {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-
-        let calls = replacement_clone.calls();
-        assert!(
-            calls.iter().any(|call| matches!(
-                call,
-                MockCall::LoadFile { path, .. } if path == "/project/src/loaded.vue.tsx"
-            )),
-            "loaded files should replay via load_file"
-        );
-        assert!(
-            !calls.iter().any(|call| matches!(
-                call,
-                MockCall::OpenFile { path, .. } if path == "/project/src/loaded.vue.tsx"
-            )),
-            "loaded files must not be replayed as open files"
-        );
-        assert!(
-            calls.iter().any(|call| matches!(
-                call,
-                MockCall::OpenFile { path, .. } if path == "/project/src/open.vue.tsx"
-            )),
-            "open files should replay via open_file"
-        );
-        assert!(
-            calls.iter().any(|call| matches!(
-                call,
-                MockCall::ConfigurePaths { base_url, .. } if base_url == "/project/src"
-            )),
-            "path configuration should be replayed after restart"
-        );
-        assert!(
-            calls.iter().any(|call| matches!(
-                call,
-                MockCall::UpdateWorkspaceFolders { added, .. }
-                    if added.iter().any(|folder| folder.get("uri").and_then(|value| value.as_str()) == Some("file:///project"))
-            )),
-            "workspace folders should be replayed after restart"
-        );
-    }
-
-    #[tokio::test]
-    async fn restart_replays_all_cached_path_configs() {
-        let initial = MockTypeProvider::new();
-        let replacement = MockTypeProvider::new();
-        let replacement_clone = replacement.clone();
-        let (provider, crash_notify) = make_resilient(initial, replacement);
-
-        provider
-            .configure_paths("/project/pkg-a", serde_json::json!({ "@a/*": ["./src/*"] }))
-            .await
-            .unwrap();
-        provider
-            .configure_paths("/project/pkg-b", serde_json::json!({ "@b/*": ["./lib/*"] }))
-            .await
-            .unwrap();
-
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        crash_notify.notify_waiters();
-
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        while replacement_clone.calls().len() < 2 && std::time::Instant::now() < deadline {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-
-        let calls = replacement_clone.calls();
-        assert!(
-            calls.iter().any(|call| matches!(
-                call,
-                MockCall::ConfigurePaths { base_url, paths }
-                    if base_url == "/project/pkg-a"
-                        && *paths == serde_json::json!({ "@a/*": ["./src/*"] })
-            )),
-            "restart should replay pkg-a path configuration, calls={calls:?}"
-        );
-        assert!(
-            calls.iter().any(|call| matches!(
-                call,
-                MockCall::ConfigurePaths { base_url, paths }
-                    if base_url == "/project/pkg-b"
-                        && *paths == serde_json::json!({ "@b/*": ["./lib/*"] })
-            )),
-            "restart should replay pkg-b path configuration, calls={calls:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn resolve_completion_delegates_to_the_inner_provider() {
-        let initial = MockTypeProvider::new();
-        let replacement = MockTypeProvider::new();
-        initial.set_resolve_completion(
-            "/project/src/App.vue.tsx",
-            serde_json::json!({ "kind": "import" }),
-            Some(CompletionResolveResult {
-                additional_text_edits: vec![ResolvedTextEdit {
-                    start: 0,
-                    end: 0,
-                    new_text: "import Foo from './Foo';".to_string(),
-                }],
-            }),
-        );
-        let (provider, _crash_notify) = make_resilient(initial.clone(), replacement);
-
-        let result = provider
-            .resolve_completion(
-                "/project/src/App.vue.tsx",
-                serde_json::json!({ "kind": "import" }),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(
-            result.map(|resolved| resolved.additional_text_edits.len()),
-            Some(1)
-        );
-        assert!(
-            initial.calls().iter().any(|call| matches!(
-                call,
-                MockCall::ResolveCompletion { path, .. } if path == "/project/src/App.vue.tsx"
-            )),
-            "resolve_completion should be forwarded"
-        );
     }
 }

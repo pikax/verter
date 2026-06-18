@@ -1,9 +1,9 @@
-//! LSP navigation feature method bodies.
+//! LSP navigation feature method bodies — hover and completion.
 //!
 //! Free functions hosting the bodies of `impl LanguageServer for
-//! VerterLanguageServer` navigation feature methods (hover,
-//! completion, completion_resolve, goto_definition,
-//! goto_type_definition, references, prepare_rename, rename). The
+//! VerterLanguageServer` hover/completion methods (hover, completion,
+//! completion_resolve). The definition/type-definition/references/rename
+//! bodies live in the `nav_features_navigation` sibling module; the
 //! hover-provenance enrichment helpers live in the
 //! `nav_features_hover_provenance` sibling module.
 //!
@@ -14,25 +14,21 @@
 use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::ls_types::*;
 
-use crate::documents::line_index::LineIndex;
 use crate::documents::sfc_scanner::scan_sfc_blocks;
-use crate::documents::uri_to_canonical_id;
 use crate::features::completion::completions_at_position;
 use crate::features::cursor_context::{
     classify_cursor_context, classify_expression_context_with_trigger, CursorContext,
     ExpressionContext, TemplateCursorContext,
 };
-use crate::features::definition::definition_at_position;
 use crate::features::hover;
 use crate::features::hover::hover_at_position;
-use crate::features::references::references_at_position;
-use crate::features::rename::{prepare_rename, rename_at_position};
 use crate::tsgo::auto_import::ProviderImportEdit;
 use crate::tsgo::merge;
+use crate::tsgo::protocol::CompletionResolveData;
 
-use super::handler_guard::{block_in_place_if_available, HandlerGuard};
+use super::handler_guard::HandlerGuard;
 use super::nav_features_completion_resolve::{
-    completion_resolve_error, resolve_tsgo_auto_import_edits,
+    completion_resolve_error, resolve_provider_auto_import_edits,
 };
 use super::nav_features_hover_provenance::enrich_hover_with_provenance;
 use super::server_utils::*;
@@ -347,23 +343,32 @@ pub(super) async fn handle_completion(
                     .get_completions(&tsx_path, offset, trigger_character)
                     .await
                 {
+                    // Route through the SAME provider→LSP envelope mapper as the
+                    // normal completion path so a provider auto-import returned on
+                    // the virtual-file path preserves its actionable
+                    // `verter_resolve` handle and can resolve into an import edit.
+                    // (Previously this branch stripped `Completion.data`, so the
+                    // likely real `.vue` completion path could never auto-import —
+                    // review finding F1.) Virtual-file positions are already in the
+                    // generated-TSX coordinates the editor shows, so no carrier
+                    // text-edit re-anchor applies (`text_edit = None`); the resolve
+                    // re-issues against this same `tsx_path`.
+                    let provider_id = tp.provider_id();
                     let items: Vec<CompletionItem> = result
                         .items
                         .into_iter()
                         .filter(|c| {
                             !c.label.starts_with("___VERTER___") && !c.label.starts_with("$V_")
                         })
-                        .map(|c| CompletionItem {
-                            label: c.label,
-                            detail: c.detail,
-                            documentation: c.documentation.map(|d| {
-                                Documentation::MarkupContent(MarkupContent {
-                                    kind: MarkupKind::Markdown,
-                                    value: d,
-                                })
-                            }),
-                            sort_text: c.sort_text,
-                            ..Default::default()
+                        .map(|c| {
+                            let label = c.label.clone();
+                            merge::provider_completion_to_lsp_item(
+                                c,
+                                label,
+                                None,
+                                provider_id,
+                                Some(&tsx_path),
+                            )
                         })
                         .collect();
                     return Ok(if items.is_empty() {
@@ -740,6 +745,7 @@ pub(super) async fn handle_completion(
                             &ctx.tsx_line_index,
                             &ctx.carrier_line_index,
                             Some(&ctx.tsx_path),
+                            tp.provider_id(),
                             is_template_attr_context,
                         );
                         return Ok(if merged.is_empty() {
@@ -790,18 +796,60 @@ pub(super) async fn handle_completion_resolve(
             }
         }
 
-        // Check if this item is from TSGO and needs resolve for auto-import
-        if data.get("tsgo").and_then(|v| v.as_bool()) == Some(true) {
-            if let Some(tp) = &server.type_provider {
-                if let (Some(tsx_path), Some(original_data)) = (
-                    data.get("tsx_path").and_then(|v| v.as_str()),
-                    data.get("original_data"),
-                ) {
-                    // Only call resolve if original_data is not null
-                    if !original_data.is_null() {
+        // Check if this item carries a provider-neutral resolve envelope and
+        // needs a `completionItem/resolve` round-trip for auto-import. The
+        // envelope is provider-agnostic: any registered provider that minted it
+        // (TSGO, tsserver, extension) resolves through the SAME path here.
+        if let Some(envelope) = data.get("verter_resolve") {
+            if envelope.get("kind").and_then(|v| v.as_str()) == Some("type_provider") {
+                if let Some(tp) = &server.type_provider {
+                    if let (Some(envelope_provider_id), Some(provider_path), Some(provider_data)) = (
+                        envelope.get("provider_id").and_then(|v| v.as_str()),
+                        envelope.get("provider_path").and_then(|v| v.as_str()),
+                        envelope.get("provider_data"),
+                    ) {
+                        // Fail CLOSED on a provider mismatch: an item minted by a
+                        // provider that is no longer active (mid-session swap)
+                        // must never be resolved against a different backend.
+                        if envelope_provider_id != tp.provider_id() {
+                            tracing::debug!(
+                                "completion_resolve: envelope provider '{}' != active '{}', \
+                                 skipping resolve",
+                                envelope_provider_id,
+                                tp.provider_id()
+                            );
+                            return Ok(item);
+                        }
+
+                        // The provider-pure resolve key is typed; deserialize it
+                        // back into `CompletionResolveData`. A malformed/foreign
+                        // key cannot be resolved — fail closed (leave unchanged).
+                        let Ok(resolve_data) =
+                            serde_json::from_value::<CompletionResolveData>(provider_data.clone())
+                        else {
+                            return Ok(item);
+                        };
+
                         if let Ok(Some(resolve_result)) =
-                            tp.resolve_completion(tsx_path, original_data.clone()).await
+                            tp.resolve_completion(provider_path, resolve_data).await
                         {
+                            // Lazy `completionItem/resolve` enrichment: fold the
+                            // provider's resolved detail (signature) and
+                            // documentation onto the item when it returned them.
+                            // `None` leaves the list-time value untouched. The
+                            // CompletionResolveResult contract carries these, so
+                            // dropping them here would make the contract dishonest
+                            // (review finding F4).
+                            if let Some(detail) = resolve_result.detail.clone() {
+                                item.detail = Some(detail);
+                            }
+                            if let Some(documentation) = resolve_result.documentation.clone() {
+                                item.documentation =
+                                    Some(Documentation::MarkupContent(MarkupContent {
+                                        kind: MarkupKind::Markdown,
+                                        value: documentation,
+                                    }));
+                            }
                             if !resolve_result.additional_text_edits.is_empty() {
                                 // The provider returned auto-import edits that MUST be placed. From
                                 // here on, missing IDE context / carrier URI / document OR an
@@ -818,15 +866,15 @@ pub(super) async fn handle_completion_resolve(
                                         new_text: e.new_text.clone(),
                                     })
                                     .collect();
-                                let resolved = resolve_tsgo_auto_import_edits(
+                                let resolved = resolve_provider_auto_import_edits(
                                     server,
-                                    tsx_path,
+                                    provider_path,
                                     &provider_edits,
                                 )
                                 .map_err(|reason| {
                                     tracing::warn!(
                                         "completion_resolve: rejecting auto-import for \
-                                                 {tsx_path}: {reason}"
+                                                 {provider_path}: {reason}"
                                     );
                                     completion_resolve_error(&reason)
                                 })?;
@@ -845,634 +893,4 @@ pub(super) async fn handle_completion_resolve(
         }
     }
     Ok(item)
-}
-
-pub(super) async fn handle_goto_definition(
-    server: &VerterLanguageServer,
-    params: GotoDefinitionParams,
-) -> Result<Option<GotoDefinitionResponse>> {
-    let _hg = HandlerGuard::new("goto_definition");
-    let uri = &params.text_document_position_params.text_document.uri;
-    let _timer = server
-        .statistics
-        .timer("definition", Some(uri.as_str().to_string()));
-    let position = &params.text_document_position_params.position;
-    tracing::debug!(
-        "definition: {} at {}:{}",
-        uri.as_str(),
-        position.line,
-        position.character
-    );
-
-    server.ensure_provider_synced(uri).await;
-
-    // Virtual file: route directly through TSGO (position is already in TSX coordinates)
-    if let Some(tp) = &server.type_provider {
-        if let Some((tsx_path, vf_li)) = server.virtual_file_context(uri) {
-            if let Some(offset) = vf_li.position_to_offset(position) {
-                if let Ok(type_defs) = tp.get_definition(&tsx_path, offset).await {
-                    let encoding = server.position_encoding.read().clone();
-                    let locations: Vec<Location> = type_defs
-                        .into_iter()
-                        .filter_map(|d| {
-                            // Strip virtual suffixes so user navigates to .vue
-                            let carrier_source_exists =
-                                |p: &str| server.documents.host().get_source(p).is_some();
-                            let target_path = merge::normalize_carrier_path_owned(
-                                &d.path,
-                                &carrier_source_exists,
-                            );
-                            let target_uri: Uri = merge::file_path_to_uri(&target_path)?;
-                            // Same-file refs use the virtual-file LineIndex. When path
-                            // normalization is a no-op the emitted URI IS the file the
-                            // provider's byte offsets index, so read it back and convert.
-                            // Fail closed otherwise — never manufacture a line-0 range.
-                            let range = if d.path == tsx_path {
-                                Range {
-                                    start: vf_li.offset_to_position(d.start)?,
-                                    end: vf_li.offset_to_position(d.end)?,
-                                }
-                            } else if target_path == d.path {
-                                merge::resolve_external_target_range(
-                                    &d.path,
-                                    d.start,
-                                    d.end,
-                                    encoding.clone(),
-                                    &|p: &str| {
-                                        block_in_place_if_available(|| {
-                                            server.documents.host().workspace_read().read_file(p)
-                                        })
-                                    },
-                                )?
-                            } else {
-                                return None;
-                            };
-                            Some(Location {
-                                uri: target_uri,
-                                range,
-                            })
-                        })
-                        .collect();
-                    if !locations.is_empty() {
-                        return Ok(Some(GotoDefinitionResponse::Array(locations)));
-                    }
-                }
-            }
-            return Ok(None);
-        }
-    }
-
-    let verter_result = (|| {
-        let doc = server.documents.get(uri)?;
-        let analysis = server.documents.get_analysis(uri);
-        let blocks = scan_sfc_blocks(&doc.source);
-        let canonical_id = uri_to_canonical_id(uri);
-        let resolve_path = {
-            let canonical_id = canonical_id.clone();
-            let host = &server.documents.host;
-            move |specifier: &str| -> Option<String> {
-                host.resolve_import_via_workspace(&canonical_id, specifier)
-            }
-        };
-        #[allow(clippy::type_complexity)]
-        let resolve_fn: Option<&dyn Fn(&str) -> Option<String>> =
-            Some(&resolve_path as &dyn Fn(&str) -> Option<String>);
-
-        let encoding = server.position_encoding.read().clone();
-        let host = &server.documents.host;
-        let resolve_export = |target_canonical_id: &str, binding_name: &str| -> Option<Location> {
-            // Follow re-exports (cycle-detected) to find the actual definition
-            let (resolved_id, start, end) = host
-                .get_export_span_follow_reexports(target_canonical_id, binding_name)
-                .or_else(|| {
-                    // Fallback to non-following version for backwards compat
-                    let (s, e) = host.get_export_span(target_canonical_id, binding_name)?;
-                    Some((target_canonical_id.to_string(), s, e))
-                })?;
-            let target_source = host.get_source(&resolved_id)?;
-            let target_li = LineIndex::new(&target_source, encoding.clone());
-            let start_pos = target_li.offset_to_position(start)?;
-            let end_pos = target_li.offset_to_position(end)?;
-            let normalized = resolved_id.replace('\\', "/");
-            let uri_str = if normalized.starts_with('/') {
-                format!("file://{normalized}")
-            } else if normalized.chars().nth(1) == Some(':') {
-                format!("file:///{normalized}")
-            } else {
-                return None;
-            };
-            let target_uri: Uri = uri_str.parse().ok()?;
-            Some(Location {
-                uri: target_uri,
-                range: Range {
-                    start: start_pos,
-                    end: end_pos,
-                },
-            })
-        };
-        #[allow(clippy::type_complexity)]
-        let resolve_export_fn = Some(&resolve_export as &dyn Fn(&str, &str) -> Option<Location>);
-
-        // Unified component contract resolution runs FIRST: props, events,
-        // v-model, slots. Returns early if any contract surface was hit.
-        if let Some(contract_def) = server.try_component_contract_definition(uri, position) {
-            return Some(contract_def);
-        }
-
-        // Barrel-file export symbol click: if the cursor is on an export
-        // signature in a re-export statement, follow the chain to the terminal.
-        if let Some(barrel_def) = server.try_barrel_export_definition(uri, position) {
-            return Some(barrel_def);
-        }
-
-        let mut def = definition_at_position(
-            position,
-            &doc.source,
-            &blocks,
-            analysis.as_ref(),
-            &doc.line_index,
-            resolve_fn,
-            resolve_export_fn,
-        )?;
-
-        // Fix up sentinel URIs: if the definition is in the same file, use the document URI
-        if let GotoDefinitionResponse::Scalar(ref mut loc) = def {
-            if loc.uri.as_str() == crate::features::definition::SAME_FILE_URI_STR {
-                loc.uri = uri.clone();
-            }
-        }
-
-        Some(def)
-    })();
-
-    tracing::debug!("definition: verter found={}", verter_result.is_some());
-
-    // If verter already resolved a cross-file definition, return it directly.
-    // Querying TSGO with a synthetic TSX position often crashes it.
-    if let Some(GotoDefinitionResponse::Scalar(ref loc)) = verter_result {
-        if loc.uri.as_str() != uri.as_str() {
-            tracing::debug!("definition: verter resolved cross-file, skipping type provider");
-            return Ok(verter_result);
-        }
-    }
-
-    // Component contract resolution (props, events, v-model, slots) now runs
-    // BEFORE definition_at_position inside the closure above via
-    // try_component_contract_definition. The old separate resolve_component_event_definition
-    // and resolve_component_prop_definition calls are subsumed by it.
-
-    // Enhance with TypeProvider for cross-file definitions.
-    // Extract all context synchronously — no DashMap guard held across await.
-    if let Some(tp) = &server.type_provider {
-        if let Some(ctx) = server.type_provider_context(uri) {
-            // Use validated mapping to avoid querying TSGO at synthetic TSX
-            // positions (e.g., <div> → generated JSX) which can crash it.
-            if let Some(tsx_offset) = merge::carrier_position_to_tsx_offset_validated(
-                position,
-                &ctx.carrier_line_index,
-                &ctx.mapper,
-                &ctx.tsx_line_index,
-            ) {
-                tracing::debug!(
-                    "definition: querying type provider at tsx offset {}",
-                    tsx_offset
-                );
-                match tp.get_definition(&ctx.tsx_path, tsx_offset).await {
-                    Ok(type_defs) => {
-                        tracing::debug!(
-                            "definition: type provider returned {} locations",
-                            type_defs.len()
-                        );
-                        let carrier_source_exists =
-                            |p: &str| server.documents.host().get_source(p).is_some();
-                        let barrel_resolver =
-                            |path: &str, start: u32, end: u32| -> Option<Location> {
-                                server.resolve_barrel_type_provider_location(path, start, end)
-                            };
-                        let negotiated_encoding = server.position_encoding.read().clone();
-                        let merged = merge::merge_definitions_with_barrel_resolver(
-                            verter_result,
-                            type_defs,
-                            &ctx.tsx_path,
-                            &ctx.tsx_line_index,
-                            &ctx.mapper,
-                            &ctx.carrier_line_index,
-                            Some(&|ide_path: &str| server.external_ide_context(ide_path)),
-                            uri,
-                            &carrier_source_exists,
-                            Some(&barrel_resolver),
-                            negotiated_encoding,
-                            &|p: &str| {
-                                block_in_place_if_available(|| {
-                                    server.documents.host().workspace_read().read_file(p)
-                                })
-                            },
-                        );
-                        // Post-process: if type provider resolved to a barrel file,
-                        // follow re-exports to the terminal declaration.
-                        return Ok(server.resolve_barrel_locations(merged));
-                    }
-                    Err(e) => {
-                        tracing::warn!("definition: type provider error: {e}");
-                    }
-                }
-            } else {
-                tracing::debug!(
-                    "definition: position mapping failed for {}:{}:{}",
-                    uri.as_str(),
-                    position.line,
-                    position.character
-                );
-            }
-        }
-    }
-
-    Ok(verter_result)
-}
-
-pub(super) async fn handle_goto_type_definition(
-    server: &VerterLanguageServer,
-    params: GotoDefinitionParams,
-) -> Result<Option<GotoDefinitionResponse>> {
-    let _hg = HandlerGuard::new("goto_type_definition");
-    let uri = &params.text_document_position_params.text_document.uri;
-    let _timer = server
-        .statistics
-        .timer("type_definition", Some(uri.as_str().to_string()));
-    let position = &params.text_document_position_params.position;
-    tracing::debug!(
-        "type_definition: {} at {}:{}",
-        uri.as_str(),
-        position.line,
-        position.character
-    );
-
-    server.ensure_provider_synced(uri).await;
-
-    // Virtual file: route directly through type provider (position is already in TSX coordinates)
-    if let Some(tp) = &server.type_provider {
-        if let Some((tsx_path, vf_li)) = server.virtual_file_context(uri) {
-            if let Some(offset) = vf_li.position_to_offset(position) {
-                if let Ok(type_defs) = tp.get_type_definition(&tsx_path, offset).await {
-                    let encoding = server.position_encoding.read().clone();
-                    let locations: Vec<Location> = type_defs
-                        .into_iter()
-                        .filter_map(|d| {
-                            let carrier_source_exists =
-                                |p: &str| server.documents.host().get_source(p).is_some();
-                            if let Some(location) = server
-                                .resolve_barrel_type_provider_location(&d.path, d.start, d.end)
-                            {
-                                return Some(location);
-                            }
-                            let target_path = merge::normalize_carrier_path_owned(
-                                &d.path,
-                                &carrier_source_exists,
-                            );
-                            let target_uri: Uri = merge::file_path_to_uri(&target_path)?;
-                            // Same-file refs use the virtual-file LineIndex. When path
-                            // normalization is a no-op the emitted URI IS the file the
-                            // provider's byte offsets index, so read it back and convert.
-                            // Fail closed otherwise — never manufacture a line-0 range.
-                            let range = if d.path == tsx_path {
-                                Range {
-                                    start: vf_li.offset_to_position(d.start)?,
-                                    end: vf_li.offset_to_position(d.end)?,
-                                }
-                            } else if target_path == d.path {
-                                merge::resolve_external_target_range(
-                                    &d.path,
-                                    d.start,
-                                    d.end,
-                                    encoding.clone(),
-                                    &|p: &str| {
-                                        block_in_place_if_available(|| {
-                                            server.documents.host().workspace_read().read_file(p)
-                                        })
-                                    },
-                                )?
-                            } else {
-                                return None;
-                            };
-                            Some(Location {
-                                uri: target_uri,
-                                range,
-                            })
-                        })
-                        .collect();
-                    if !locations.is_empty() {
-                        return Ok(Some(GotoDefinitionResponse::Array(locations)));
-                    }
-                }
-            }
-            return Ok(None);
-        }
-    }
-
-    // Type definition is purely a type provider operation — no verter analysis phase.
-    if let Some(tp) = &server.type_provider {
-        if let Some(ctx) = server.type_provider_context(uri) {
-            if let Some(tsx_offset) = merge::carrier_position_to_tsx_offset_validated(
-                position,
-                &ctx.carrier_line_index,
-                &ctx.mapper,
-                &ctx.tsx_line_index,
-            ) {
-                tracing::debug!(
-                    "type_definition: querying type provider at tsx offset {}",
-                    tsx_offset
-                );
-                match tp.get_type_definition(&ctx.tsx_path, tsx_offset).await {
-                    Ok(type_defs) => {
-                        tracing::debug!(
-                            "type_definition: type provider returned {} locations",
-                            type_defs.len()
-                        );
-                        let carrier_source_exists =
-                            |p: &str| server.documents.host().get_source(p).is_some();
-                        let barrel_resolver =
-                            |path: &str, start: u32, end: u32| -> Option<Location> {
-                                server.resolve_barrel_type_provider_location(path, start, end)
-                            };
-                        let negotiated_encoding = server.position_encoding.read().clone();
-                        return Ok(merge::merge_definitions_with_barrel_resolver(
-                            None,
-                            type_defs,
-                            &ctx.tsx_path,
-                            &ctx.tsx_line_index,
-                            &ctx.mapper,
-                            &ctx.carrier_line_index,
-                            Some(&|ide_path: &str| server.external_ide_context(ide_path)),
-                            uri,
-                            &carrier_source_exists,
-                            Some(&barrel_resolver),
-                            negotiated_encoding,
-                            &|p: &str| {
-                                block_in_place_if_available(|| {
-                                    server.documents.host().workspace_read().read_file(p)
-                                })
-                            },
-                        ));
-                    }
-                    Err(e) => {
-                        tracing::warn!("type_definition: type provider error: {e}");
-                    }
-                }
-            } else {
-                tracing::debug!(
-                    "type_definition: position mapping failed for {}:{}:{}",
-                    uri.as_str(),
-                    position.line,
-                    position.character
-                );
-            }
-        }
-    }
-
-    Ok(None)
-}
-
-pub(super) async fn handle_references(
-    server: &VerterLanguageServer,
-    params: ReferenceParams,
-) -> Result<Option<Vec<Location>>> {
-    let _hg = HandlerGuard::new("references");
-    let uri = &params.text_document_position.text_document.uri;
-    let _timer = server
-        .statistics
-        .timer("references", Some(uri.as_str().to_string()));
-    let position = &params.text_document_position.position;
-    let include_declaration = params.context.include_declaration;
-    tracing::debug!(
-        "references: {} at {}:{} (include_decl={})",
-        uri.as_str(),
-        position.line,
-        position.character,
-        include_declaration
-    );
-
-    // Virtual file: route directly through TSGO
-    if let Some(tp) = &server.type_provider {
-        if let Some((tsx_path, vf_li)) = server.virtual_file_context(uri) {
-            if let Some(offset) = vf_li.position_to_offset(position) {
-                if let Ok(type_refs) = tp.get_references(&tsx_path, offset).await {
-                    let locations: Vec<Location> = type_refs
-                        .into_iter()
-                        .filter_map(|r| {
-                            let carrier_source_exists =
-                                |p: &str| server.documents.host().get_source(p).is_some();
-                            let target_path = merge::normalize_carrier_path_owned(
-                                &r.path,
-                                &carrier_source_exists,
-                            );
-                            let target_uri: Uri = merge::file_path_to_uri(&target_path)?;
-                            let range = if r.path == tsx_path {
-                                Range {
-                                    start: vf_li.offset_to_position(r.start).unwrap_or_default(),
-                                    end: vf_li.offset_to_position(r.end).unwrap_or_default(),
-                                }
-                            } else {
-                                Range::default()
-                            };
-                            Some(Location {
-                                uri: target_uri,
-                                range,
-                            })
-                        })
-                        .collect();
-                    return Ok(if locations.is_empty() {
-                        None
-                    } else {
-                        Some(locations)
-                    });
-                }
-            }
-            return Ok(None);
-        }
-    }
-
-    let verter_result = (|| {
-        let doc = server.documents.get(uri)?;
-        let analysis = server.documents.get_analysis(uri);
-        let blocks = scan_sfc_blocks(&doc.source);
-        let mut locations = references_at_position(
-            position,
-            &doc.source,
-            &blocks,
-            analysis.as_ref(),
-            &doc.line_index,
-            include_declaration,
-        )?;
-
-        // Fix up sentinel URIs
-        for loc in &mut locations {
-            if loc.uri.as_str() == crate::features::references::SAME_FILE_URI_STR {
-                loc.uri = uri.clone();
-            }
-        }
-
-        Some(locations)
-    })();
-
-    tracing::debug!(
-        "references: verter found {}",
-        verter_result.as_ref().map_or(0, |v| v.len())
-    );
-
-    // Enhance with TypeProvider if available.
-    // Extract all context synchronously — no DashMap guard held across await.
-    if let Some(tp) = &server.type_provider {
-        if let Some(ctx) = server.type_provider_context(uri) {
-            if let Some(tsx_offset) = merge::carrier_position_to_tsx_offset_validated(
-                position,
-                &ctx.carrier_line_index,
-                &ctx.mapper,
-                &ctx.tsx_line_index,
-            ) {
-                tracing::debug!(
-                    "references: querying type provider at tsx offset {}",
-                    tsx_offset
-                );
-                match tp.get_references(&ctx.tsx_path, tsx_offset).await {
-                    Ok(type_refs) => {
-                        tracing::debug!(
-                            "references: type provider returned {} locations",
-                            type_refs.len()
-                        );
-                        let carrier_source_exists =
-                            |p: &str| server.documents.host().get_source(p).is_some();
-                        return Ok(merge::merge_references(
-                            verter_result,
-                            type_refs,
-                            &ctx.tsx_line_index,
-                            &ctx.mapper,
-                            &ctx.carrier_line_index,
-                            Some(&|ide_path: &str| server.external_ide_context(ide_path)),
-                            &carrier_source_exists,
-                        ));
-                    }
-                    Err(e) => {
-                        tracing::warn!("references: type provider error: {e}");
-                    }
-                }
-            } else {
-                tracing::debug!(
-                    "references: position mapping failed for {}:{}:{}",
-                    uri.as_str(),
-                    position.line,
-                    position.character
-                );
-            }
-        }
-    }
-
-    Ok(verter_result)
-}
-
-pub(super) async fn handle_prepare_rename(
-    server: &VerterLanguageServer,
-    params: TextDocumentPositionParams,
-) -> Result<Option<PrepareRenameResponse>> {
-    let _hg = HandlerGuard::new("prepare_rename");
-    let uri = &params.text_document.uri;
-    let position = &params.position;
-
-    // Virtual file: not supported (no Verter rename context for generated code)
-    if server.documents.get_virtual_source_uri(uri).is_some() {
-        return Ok(None);
-    }
-
-    let result = (|| {
-        let doc = server.documents.get(uri)?;
-        let analysis = server.documents.get_analysis(uri);
-        let blocks = scan_sfc_blocks(&doc.source);
-        let range = prepare_rename(
-            position,
-            &doc.source,
-            &blocks,
-            analysis.as_ref(),
-            &doc.line_index,
-        )?;
-        Some(PrepareRenameResponse::Range(range))
-    })();
-
-    Ok(result)
-}
-
-pub(super) async fn handle_rename(
-    server: &VerterLanguageServer,
-    params: RenameParams,
-) -> Result<Option<WorkspaceEdit>> {
-    let _hg = HandlerGuard::new("rename");
-    let uri = &params.text_document_position.text_document.uri;
-    let position = &params.text_document_position.position;
-    let new_name = &params.new_name;
-
-    // Virtual file: not supported (renaming in generated code isn't meaningful)
-    if server.documents.get_virtual_source_uri(uri).is_some() {
-        return Ok(None);
-    }
-
-    let verter_result = (|| {
-        let doc = server.documents.get(uri)?;
-        let analysis = server.documents.get_analysis(uri);
-        let blocks = scan_sfc_blocks(&doc.source);
-        let mut edit = rename_at_position(
-            position,
-            new_name,
-            &doc.source,
-            &blocks,
-            analysis.as_ref(),
-            &doc.line_index,
-        )?;
-
-        // Fix up sentinel URIs in workspace edit
-        if let Some(ref mut changes) = edit.changes {
-            let sentinel = crate::features::rename::SAME_FILE_URI.clone();
-            if let Some(edits) = changes.remove(&sentinel) {
-                changes.insert(uri.clone(), edits);
-            }
-        }
-
-        Some(edit)
-    })();
-
-    // Enhance with TypeProvider for cross-file renames.
-    // Extract all context synchronously — no DashMap guard held across await.
-    //
-    // GATED OFF for a SELF-FILE rune-module own buffer: its workspace-EDIT
-    // positions are not yet mapped through the self-file mapper, so a returned
-    // edit could land off by the prelude offset (or inside the prelude) and
-    // CORRUPT the module. Rename stays DEFERRED for the self-file projection —
-    // a clean no-op, never a wrong/unmapped edit. (Carrier rename unchanged.)
-    if !server.is_self_file_projection(uri) {
-        if let Some(tp) = &server.type_provider {
-            if let Some(ctx) = server.type_provider_context(uri) {
-                if let Some(tsx_offset) = merge::carrier_position_to_tsx_offset_validated(
-                    position,
-                    &ctx.carrier_line_index,
-                    &ctx.mapper,
-                    &ctx.tsx_line_index,
-                ) {
-                    if let Ok(type_locs) = tp.get_rename_locations(&ctx.tsx_path, tsx_offset).await
-                    {
-                        let carrier_source_exists =
-                            |p: &str| server.documents.host().get_source(p).is_some();
-                        return Ok(merge::merge_rename_locations(
-                            verter_result,
-                            type_locs,
-                            new_name,
-                            &ctx.tsx_line_index,
-                            &ctx.mapper,
-                            &ctx.carrier_line_index,
-                            Some(&|ide_path: &str| server.external_ide_context(ide_path)),
-                            &carrier_source_exists,
-                        ));
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(verter_result)
 }
