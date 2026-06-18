@@ -20,6 +20,3 @@ verter_language = { path = "../verter_language" }
 
 [features]
 default = []
-# Enables LSP-integration tests that depend on verter_session and LSP internals.
-# Not enabled by default — only used when running tests from verter_lsp context.
-__lsp_tests = []

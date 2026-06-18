@@ -1,9 +1,8 @@
 //! Provider-neutral completion-resolve mapping for the tsserver family.
 //!
 //! These are PURE unit tests (no `verter_session` / LSP dependency), so they run
-//! under the default `cargo test -p verter_type_runtime` gate — unlike the
-//! `__lsp_tests`-gated integration module, which depends on crates outside this
-//! one and never compiles here.
+//! under the default `cargo test -p verter_type_runtime` gate. Integration tests
+//! that depend on `verter_session` or LSP internals live in `verter_lsp`.
 //!
 //! They characterize the Issue #1 root-cause fixes:
 //!   * `parse_tsserver_completion` PRESERVES the entry's resolve handle
