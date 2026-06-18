@@ -285,15 +285,19 @@ jobs:
         # specs (packageManifest*/ssrReadiness) that block a blanket package run.
         run: |
           pnpm vitest run packages/typescript-plugin/src/carrier-routing-no-vue-gate.spec.ts packages/vue-vscode/src/carrier-routing-no-vue-gate.spec.ts
-      - name: Extension-provider auto-import guard (headless ExtensionTsService)
-        # Regression-guards the in-process EXTENSION type provider's auto-import:
-        # drives `ExtensionTsService` headlessly (no VS Code, no LSP) and asserts
-        # it surfaces an unimported export with a `source` resolve key and resolves
-        # the import edit. The shared Rust resolve path is covered by the tsserver
-        # parity gate; this proves the extension-specific TS-side shaping. Run by
-        # explicit path for the same reason as the carrier-routing guards above.
+      - name: Extension-provider headless guards (auto-import + diagnostics)
+        # Regression-guards the in-process EXTENSION type provider headlessly (no
+        # VS Code, no LSP) via `ExtensionTsService`:
+        #   - autoimport: surfaces an unimported export with a `source` resolve
+        #     key and resolves the import edit.
+        #   - diagnostics (GAP-2): unions the SEMANTIC + SYNTACTIC + SUGGESTION
+        #     passes, reaching parity with the native TS / TSGO pull model
+        #     (reverting the syntactic/suggestion handlers makes it throw).
+        # The shared Rust resolve path is covered by the tsserver parity gate;
+        # these prove the extension-specific TS-side shaping. Run by explicit path
+        # for the same reason as the carrier-routing guards above.
         run: |
-          pnpm vitest run packages/vue-vscode/src/extensionTsService.autoimport.spec.ts
+          pnpm vitest run packages/vue-vscode/src/extensionTsService.autoimport.spec.ts packages/vue-vscode/src/extensionTsService.diagnostics.spec.ts
       - name: Test report
         if: always()
         uses: dorny/test-reporter@v1
