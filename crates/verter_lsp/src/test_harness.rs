@@ -30,6 +30,82 @@ pub(crate) enum TestProviderKind {
     Tsgo,
 }
 
+impl TestProviderKind {
+    /// The require-mode env var that turns this provider's absence into a HARD
+    /// failure instead of a graceful skip. CI sets `VERTER_REQUIRE_TSGO=1` (see
+    /// `.github/workflows/ci.yml`), so the tgo real-provider parity tests
+    /// genuinely gate there and can never skip-as-pass on a runner where the
+    /// asset is expected. `VERTER_REQUIRE_TSSERVER` is the analogous knob for
+    /// the tsserver variant.
+    fn require_env(self) -> &'static str {
+        match self {
+            TestProviderKind::Tsserver => "VERTER_REQUIRE_TSSERVER",
+            TestProviderKind::Tsgo => "VERTER_REQUIRE_TSGO",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            TestProviderKind::Tsserver => "tsserver",
+            TestProviderKind::Tsgo => "tsgo",
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Require-mode (fail-closed) provider gating
+// ---------------------------------------------------------------------------
+
+/// What an absent provider means for a real-provider test: a HARD failure when
+/// the run requires that provider (`VERTER_REQUIRE_{TSGO,TSSERVER}=1`, e.g.
+/// strict CI), else a graceful skip. Pure so both branches are unit-tested
+/// regardless of whether the provider happens to be installed on the running
+/// machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProviderAbsence {
+    /// Required but missing — the test must FAIL (never skip-as-pass).
+    HardFail,
+    /// Not required — record a skip and degrade gracefully.
+    SkipWithReason,
+}
+
+/// Pure decision: given whether the provider is required, how should its
+/// absence be handled.
+pub(crate) fn provider_absence_outcome(required: bool) -> ProviderAbsence {
+    if required {
+        ProviderAbsence::HardFail
+    } else {
+        ProviderAbsence::SkipWithReason
+    }
+}
+
+/// Read the require-mode env var for a provider kind (`"1"` ⇒ required).
+fn provider_required(kind: TestProviderKind) -> bool {
+    std::env::var(kind.require_env())
+        .map(|v| v == "1")
+        .unwrap_or(false)
+}
+
+/// Resolve an absent-provider situation: under require-mode this PANICS (the
+/// fail-closed gate); otherwise it prints a skip marker and returns `None` so
+/// the caller returns early. A skip is never reported as a pass.
+///
+/// Split from the env read (`provider_required`) so the panic-vs-skip policy
+/// (`provider_absence_outcome`) is independently unit testable.
+fn handle_absent_provider(kind: TestProviderKind, reason: &str) -> Option<RealProviderTestSession> {
+    match provider_absence_outcome(provider_required(kind)) {
+        ProviderAbsence::HardFail => panic!(
+            "{}=1 but the {} real-provider test cannot run: {reason}",
+            kind.require_env(),
+            kind.label(),
+        ),
+        ProviderAbsence::SkipWithReason => {
+            eprintln!("skipping ({}): {reason}", kind.label());
+            None
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Session builder
 // ---------------------------------------------------------------------------
@@ -87,18 +163,12 @@ impl TestSessionBuilder {
                     .replace('\\', "/");
                 let node_path = match crate::tsserver::find_node() {
                     Some(p) => p,
-                    None => {
-                        eprintln!("skipping: node not found");
-                        return None;
-                    }
+                    None => return handle_absent_provider(self.kind, "node not found"),
                 };
                 let tsserver_path =
                     match crate::tsserver::find_tsserver(Some(&tsdk), Some(&workspace_id)) {
                         Some(p) => p,
-                        None => {
-                            eprintln!("skipping: tsserver.js not found");
-                            return None;
-                        }
+                        None => return handle_absent_provider(self.kind, "tsserver.js not found"),
                     };
                 let plugin_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                     .join("../../packages/vue-vscode/node_modules")
@@ -115,36 +185,38 @@ impl TestSessionBuilder {
                 {
                     Ok(p) => Arc::new(p),
                     Err(e) => {
-                        eprintln!("skipping: tsserver spawn failed: {e}");
-                        return None;
+                        return handle_absent_provider(
+                            self.kind,
+                            &format!("tsserver spawn failed: {e}"),
+                        )
                     }
                 }
             }
             TestProviderKind::Tsgo => {
-                // Prefer the repo-local tsgo (installed as a workspace dev
-                // dependency) so the parity tests run against the SAME tsgo the
-                // project pins, regardless of PATH / npm-cache state. Falls back
-                // to the system discovery (PATH + npm/npx cache).
-                let repo_node_modules =
-                    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../node_modules");
-                let tsgo_bin: String =
-                    match crate::tsgo::ipc::find_tsgo_binary_under_node_modules(&repo_node_modules)
-                    {
-                        Some(bin) => bin,
-                        None => match crate::tsgo::ipc::find_tsgo_binary() {
-                            Ok(bin) => bin,
-                            Err(err) => {
-                                eprintln!("skipping: tsgo binary not found: {err}");
-                                return None;
-                            }
-                        },
-                    };
+                // Canonical discovery: explicit `VERTER_TSGO_BIN` override >
+                // repo-local workspace `node_modules` (the SAME tsgo the project
+                // pins, regardless of PATH / npm-cache state) > PATH > npm/npx
+                // cache. This is the production discovery path — the harness must
+                // not fork its own discovery.
+                let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+                let tsgo_bin = match crate::tsgo::ipc::find_tsgo_binary_canonical(Some(&repo_root))
+                {
+                    Ok(bin) => bin,
+                    Err(err) => {
+                        return handle_absent_provider(
+                            self.kind,
+                            &format!("tsgo binary not found: {err}"),
+                        )
+                    }
+                };
                 let root_uri = crate::uri::path_to_file_uri_string(&workspace_id);
                 match crate::tsgo::ipc::TsgoTypeProvider::spawn(&tsgo_bin, &root_uri).await {
                     Ok(p) => Arc::new(p),
                     Err(e) => {
-                        eprintln!("skipping: tsgo spawn failed: {e}");
-                        return None;
+                        return handle_absent_provider(
+                            self.kind,
+                            &format!("tsgo spawn failed: {e}"),
+                        )
                     }
                 }
             }
@@ -309,6 +381,32 @@ impl RealProviderTestSession {
     /// Returns `true` when this session uses TSGO.
     pub(crate) fn is_tsgo(&self) -> bool {
         matches!(self.kind, TestProviderKind::Tsgo)
+    }
+
+    /// Fail-closed gate for a controlled provider result that came back empty.
+    ///
+    /// A real-provider regression test that needs a NON-empty result from a
+    /// known-good fixture (e.g. member completions for `obj.`) must not treat an
+    /// empty result as a silent skip: under require-mode (`VERTER_REQUIRE_{TSGO,
+    /// TSSERVER}=1`, set in CI) an empty result is a genuine provider /
+    /// materialization regression and PANICS. Off require-mode it returns `false`
+    /// so the caller can degrade gracefully (`return`), preserving local
+    /// ergonomics on a machine where the provider cannot materialize.
+    ///
+    /// Returns `true` only in the (non-required) skip case so the call reads
+    /// `if session.allow_empty_result_skip(reason) { return; }`.
+    #[must_use]
+    pub(crate) fn allow_empty_result_skip(&self, reason: &str) -> bool {
+        if provider_required(self.kind) {
+            panic!(
+                "{}=1 but the {} real-provider test got an empty result for a controlled \
+                 fixture (provider/materialization regression): {reason}",
+                self.kind.require_env(),
+                self.kind.label(),
+            );
+        }
+        eprintln!("skipping ({}): {reason}", self.kind.label());
+        true
     }
 
     /// Direct access to the underlying real type provider.
@@ -797,3 +895,95 @@ macro_rules! canary_assert_known_limitation {
 }
 
 pub(crate) use canary_assert_known_limitation;
+
+// ---------------------------------------------------------------------------
+// Require-mode fail-closed tests
+// ---------------------------------------------------------------------------
+//
+// These prove the harness is FAIL-CLOSED: an absent provider under require-mode
+// is a HARD failure, never a skip-as-pass (the exact vacuity class a prior fix
+// found and removed). They exercise the pure policy + the harness build path
+// with a guaranteed-absent provider, so they discriminate regardless of whether
+// a provider happens to be installed on the running machine.
+
+/// The require decision is non-vacuous: requiring a provider turns its absence
+/// into a HARD failure, so a provider-absent CI run can never report the gate
+/// green by skipping. Both branches are covered (pure function — no provider
+/// needed on the machine).
+#[test]
+fn provider_absence_is_hard_fail_when_required_else_skip() {
+    assert_eq!(
+        provider_absence_outcome(true),
+        ProviderAbsence::HardFail,
+        "a required-but-absent provider must FAIL the test, not skip"
+    );
+    assert_eq!(
+        provider_absence_outcome(false),
+        ProviderAbsence::SkipWithReason,
+        "a non-required absent provider degrades to a graceful skip"
+    );
+}
+
+/// `handle_absent_provider` PANICS (fail-closed) when the provider's require
+/// env is set — proven by forcing tgo absent via the require env regardless of
+/// whether tgo is installed. Reverting the require check (always-skip) makes
+/// this test stop panicking, so it is discriminating.
+///
+/// Serialized via a process-global mutex because it mutates a process env var,
+/// which other env-reading tests in this binary could observe.
+#[test]
+fn handle_absent_provider_fails_closed_under_require_env() {
+    let _guard = require_env_test_lock().lock().unwrap();
+    let key = TestProviderKind::Tsgo.require_env();
+    let prev = std::env::var_os(key);
+    std::env::set_var(key, "1");
+
+    let outcome = std::panic::catch_unwind(|| {
+        // Same-thread: the env var set above is visible. Forces the absent path.
+        handle_absent_provider(
+            TestProviderKind::Tsgo,
+            "forced-absent for fail-closed proof",
+        )
+    });
+
+    // Restore env before asserting so a failure cannot leak the override.
+    match prev {
+        Some(v) => std::env::set_var(key, v),
+        None => std::env::remove_var(key),
+    }
+
+    assert!(
+        outcome.is_err(),
+        "VERTER_REQUIRE_TSGO=1 with an absent provider must PANIC (fail-closed), not return a skip"
+    );
+}
+
+/// Without the require env set, an absent provider degrades to a graceful skip
+/// (`None`) — the non-CI developer ergonomics path. Pairs with the test above
+/// to pin both halves of the gate.
+#[test]
+fn handle_absent_provider_skips_without_require_env() {
+    let _guard = require_env_test_lock().lock().unwrap();
+    let key = TestProviderKind::Tsgo.require_env();
+    let prev = std::env::var_os(key);
+    std::env::remove_var(key);
+
+    let result = handle_absent_provider(TestProviderKind::Tsgo, "absent, not required");
+
+    match prev {
+        Some(v) => std::env::set_var(key, v),
+        None => std::env::remove_var(key),
+    }
+
+    assert!(
+        result.is_none(),
+        "an absent, non-required provider must return None (skip), not a session"
+    );
+}
+
+/// Process-global lock so the env-mutating require-mode tests do not race each
+/// other (or any other env-reading test) within this test binary.
+fn require_env_test_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}

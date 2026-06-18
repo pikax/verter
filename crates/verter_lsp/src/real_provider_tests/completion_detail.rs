@@ -71,10 +71,15 @@ export const out = obj.;
 
         let items = member_completions_until_nonempty(session, &path, offset).await;
         if items.is_empty() {
-            // Provider could not materialize members in this environment — do not
-            // over-fire (matches the completion suite's materialization probe).
-            eprintln!("skipping: provider returned no members for obj. at offset {offset}");
-            return;
+            // Fail-closed: under require-mode (CI sets `VERTER_REQUIRE_TSGO=1`) an
+            // empty member list for this controlled `obj.` fixture is a genuine
+            // provider/materialization regression and FAILS loudly. Off
+            // require-mode it degrades to a recorded skip (local ergonomics).
+            if session.allow_empty_result_skip(&format!(
+                "provider returned no members for obj. at offset {offset}"
+            )) {
+                return;
+            }
         }
 
         // The members we expect to see.

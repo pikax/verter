@@ -250,6 +250,26 @@ struct LspTransport {
 /// Default timeout for LSP requests (10 seconds).
 const REQUEST_TIMEOUT_SECS: u64 = 10;
 
+/// List-level cap on completion-detail enrichment
+/// ([`TsgoTypeProvider::get_completion_details`]).
+///
+/// Each enriched item costs one `completionItem/resolve` round-trip (a
+/// [`REQUEST_TIMEOUT_SECS`]-bounded request); a member enumeration can return a
+/// large list, so only the leading (sorted-order = most relevant) items are
+/// enriched and the tail passes through unchanged — still present in the list,
+/// still lazily resolvable. Bounds the worst-case enrichment cost independent of
+/// list size.
+const MAX_COMPLETION_DETAIL_ENRICH: usize = 50;
+
+/// Max in-flight `completionItem/resolve` requests while enriching a completion
+/// list ([`TsgoTypeProvider::get_completion_details`]).
+///
+/// Bounds concurrency over the (already list-capped) enriched subset so the
+/// worst case is `ceil(MAX_COMPLETION_DETAIL_ENRICH / this) × REQUEST_TIMEOUT_SECS`
+/// rather than a serial `N × REQUEST_TIMEOUT_SECS`, without flooding the
+/// single-process tsgo transport with the whole batch at once.
+const COMPLETION_DETAIL_RESOLVE_CONCURRENCY: usize = 8;
+
 /// Timeout for the `initialize` request (30 seconds).
 /// The first request can be slow if tsgo is cold-started (e.g., npx download,
 /// first launch, or heavy system load).
@@ -1684,8 +1704,22 @@ impl TypeProvider for TsgoTypeProvider {
     /// [`fold_lsp_resolve_detail_into_completion`], preserving its resolve handle
     /// so a later auto-import resolve still works. A per-item resolve failure
     /// degrades to the un-enriched item (never drops it). Returns a list the SAME
-    /// length as the input (empty only when the input is empty) so the adapter's
-    /// `if detailed.is_empty()` fallback keeps the original list.
+    /// length and ORDER as the input (empty only when the input is empty) so the
+    /// adapter's `if detailed.is_empty()` fallback keeps the original list.
+    ///
+    /// **Bounded** (review finding: an unbounded serial hot-path). Each item
+    /// needs its own `completionItem/resolve` round-trip (10s transport timeout
+    /// each); a naive serial loop costs `N × 10s` worst case on a wedged
+    /// provider, and `N` can be large for a member enumeration (`obj.` over a
+    /// wide type, a namespace import) reached through
+    /// [`crate::provider_adapter::TypeProviderAdapter::query_members_at_offset`].
+    /// Two bounds cap that:
+    ///   - a LIST-LEVEL cap ([`MAX_COMPLETION_DETAIL_ENRICH`]) — only the leading
+    ///     items (sorted-order = most relevant) are enriched; the tail passes
+    ///     through unchanged (still present, still resolvable lazily);
+    ///   - BOUNDED CONCURRENCY ([`COMPLETION_DETAIL_RESOLVE_CONCURRENCY`]) over
+    ///     the enriched subset, so the worst case is
+    ///     `ceil(cap / concurrency) × 10s`, not `N × 10s`.
     fn get_completion_details<'a>(
         &'a self,
         path: &'a str,
@@ -1698,17 +1732,32 @@ impl TypeProvider for TsgoTypeProvider {
             if items.is_empty() {
                 return Ok(Vec::new());
             }
+            let enrich_count = items.len().min(MAX_COMPLETION_DETAIL_ENRICH);
             let _trace = crate::type_runtime_trace_scope!(
                 "tsgo_get_completion_details",
-                format!("path={} uri={} item_count={}", path, uri, items.len()),
+                format!(
+                    "path={} uri={} item_count={} enrich_count={}",
+                    path,
+                    uri,
+                    items.len(),
+                    enrich_count
+                ),
             );
 
-            let mut enriched = Vec::with_capacity(items.len());
-            for item in items {
+            // Bounded-concurrency enrichment of the leading `enrich_count` items.
+            // Each task owns its inputs (the future cannot borrow `items`) and
+            // reports its index so the output preserves input order. A semaphore
+            // caps in-flight resolves.
+            let semaphore = Arc::new(tokio::sync::Semaphore::new(
+                COMPLETION_DETAIL_RESOLVE_CONCURRENCY,
+            ));
+            let mut join_set: tokio::task::JoinSet<(usize, Completion)> =
+                tokio::task::JoinSet::new();
+            for (idx, item) in items.iter().take(enrich_count).enumerate() {
                 // Only an upstream-LSP resolve handle can be re-issued via
-                // `completionItem/resolve`; an item without one cannot be enriched.
+                // `completionItem/resolve`; an item without one cannot be enriched
+                // and is passed through unchanged (no task spawned).
                 let Some(CompletionResolveData::Lsp { label, data }) = item.data.as_ref() else {
-                    enriched.push(item.clone());
                     continue;
                 };
                 let resolve_item = serde_json::json!({
@@ -1716,27 +1765,55 @@ impl TypeProvider for TsgoTypeProvider {
                     "data": data,
                     "textDocument": { "uri": uri },
                 });
-                match transport
-                    .request("completionItem/resolve", resolve_item)
-                    .await
-                {
-                    Ok(resolved) => {
-                        let (detail, documentation) =
-                            extract_resolve_detail_and_documentation(&resolved);
-                        enriched.push(fold_lsp_resolve_detail_into_completion(
-                            item,
-                            detail,
-                            documentation,
-                        ));
+                let transport = Arc::clone(&transport);
+                let semaphore = Arc::clone(&semaphore);
+                let item = item.clone();
+                join_set.spawn(async move {
+                    // The permit bounds in-flight resolves; if the semaphore is
+                    // somehow closed, fall back to the un-enriched item.
+                    let _permit = match semaphore.acquire().await {
+                        Ok(permit) => permit,
+                        Err(_) => return (idx, item),
+                    };
+                    match transport
+                        .request("completionItem/resolve", resolve_item)
+                        .await
+                    {
+                        Ok(resolved) => {
+                            let (detail, documentation) =
+                                extract_resolve_detail_and_documentation(&resolved);
+                            let folded = fold_lsp_resolve_detail_into_completion(
+                                &item,
+                                detail,
+                                documentation,
+                            );
+                            (idx, folded)
+                        }
+                        // A per-item resolve failure must not drop the item.
+                        Err(_) => (idx, item),
                     }
-                    // A per-item resolve failure must not drop the item.
-                    Err(_) => enriched.push(item.clone()),
+                });
+            }
+
+            // Start from a verbatim clone (preserves the tail beyond the cap and
+            // any leading item without a resolve handle), then overlay enriched
+            // items by index.
+            let mut enriched: Vec<Completion> = items.to_vec();
+            while let Some(joined) = join_set.join_next().await {
+                if let Ok((idx, completion)) = joined {
+                    enriched[idx] = completion;
                 }
+                // A panicked/cancelled task leaves the verbatim clone in place.
             }
 
             crate::type_runtime_trace_event!(
                 "tsgo_get_completion_details_result",
-                format!("path={} item_count={} enriched=true", path, enriched.len()),
+                format!(
+                    "path={} item_count={} enriched_count={} enriched=true",
+                    path,
+                    enriched.len(),
+                    enrich_count
+                ),
             );
             Ok(enriched)
         })
@@ -2823,12 +2900,77 @@ fn extract_markup_string(v: &serde_json::Value) -> Option<String> {
         .or_else(|| v.get("value").and_then(|v2| v2.as_str()).map(String::from))
 }
 
-/// Find the tsgo binary on the system.
+/// The explicit, highest-precedence tsgo-binary override env var.
+///
+/// Mirrors how `--tsdk` lets a user pin the tsserver SDK: when set and pointing
+/// at an existing file, this exact path wins over every discovered location. It
+/// is the escape hatch for a non-standard install (e.g. a hand-built tsgo) and
+/// keeps the canonical precedence honest (explicit override first).
+pub const TSGO_BINARY_ENV: &str = "VERTER_TSGO_BIN";
+
+/// Canonical tsgo discovery for production and tests.
+///
+/// Searches in strict precedence order so the same tsgo is found regardless of
+/// entry point (R-Shared-Optimized-Codebase: one shared discovery path, not a
+/// test-harness-only fork):
+///
+/// 1. **Explicit override** — the `VERTER_TSGO_BIN` env var, when it names an
+///    existing file (the analog of `--tsdk` for tsserver).
+/// 2. **Workspace `node_modules`** — the `@typescript/native-preview-*` binary
+///    installed as a workspace dependency (flat-npm OR pnpm layout). This is the
+///    common real-project case (a project that pins `@typescript/native-preview`
+///    in `package.json`) that PATH + the npm/npx cache miss.
+/// 3. **PATH** — a `tsgo` on `PATH`.
+/// 4. **npm/npx cache** — the native binary / shim under the npm or npx cache.
+///
+/// `workspace_root` is the directory whose `node_modules` is searched in tier 2;
+/// pass `None` (or a root without a matching `node_modules`) to skip straight to
+/// PATH + cache. Returns the existing [`TsgoBinaryLookupError`] (PATH + cache
+/// checked-locations) when no binary is found in any tier.
+pub fn find_tsgo_binary_canonical(
+    workspace_root: Option<&std::path::Path>,
+) -> Result<String, TsgoBinaryLookupError> {
+    // Tier 1: explicit override.
+    if let Some(path) = tsgo_binary_env_override() {
+        tracing::debug!("TSGO discovery: using {TSGO_BINARY_ENV} override at {path}");
+        return Ok(path);
+    }
+
+    // Tier 2: workspace node_modules (flat-npm + pnpm).
+    if let Some(root) = workspace_root {
+        let node_modules = root.join("node_modules");
+        if let Some(path) = find_tsgo_binary_under_node_modules(&node_modules) {
+            tracing::debug!("TSGO discovery: found in workspace node_modules at {path}");
+            return Ok(path);
+        }
+    }
+
+    // Tiers 3 + 4: PATH, then npm/npx cache.
+    find_tsgo_binary()
+}
+
+/// Read the [`TSGO_BINARY_ENV`] override, returning it only when it names an
+/// existing file. An unset or stale (non-existent) override is ignored so a
+/// leftover env var never wedges discovery.
+fn tsgo_binary_env_override() -> Option<String> {
+    let raw = std::env::var_os(TSGO_BINARY_ENV)?;
+    if raw.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(&raw);
+    path.is_file().then(|| path.to_string_lossy().to_string())
+}
+
+/// Find the tsgo binary on PATH or the npm/npx cache.
 ///
 /// Checks (in order):
 /// 1. `tsgo` on PATH
 /// 2. Native binary from npm/npx cache (`@typescript/native-preview-{platform}/lib/tsgo`)
 /// 3. npm/npx shims in cache
+///
+/// This is tiers 3+4 of [`find_tsgo_binary_canonical`]; production should call
+/// the canonical entry point so the explicit override and workspace
+/// `node_modules` tiers are honored.
 pub fn find_tsgo_binary() -> Result<String, TsgoBinaryLookupError> {
     let cache_roots = collect_npm_cache_roots(
         npm_config_cache_from_env(),
@@ -2860,11 +3002,7 @@ pub fn find_tsgo_binary() -> Result<String, TsgoBinaryLookupError> {
 /// concatenation, so it is portable across macOS / Windows / Linux.
 pub fn find_tsgo_binary_under_node_modules(node_modules: &std::path::Path) -> Option<String> {
     // Flat npm layout: <node_modules>/@typescript/native-preview-*/lib/tsgo[.exe]
-    for rel in tsgo_native_binary_rel_paths() {
-        // `rel` is rooted at "node_modules/…"; strip that prefix to join under
-        // the given node_modules dir.
-        let rel_under_nm = rel.strip_prefix("node_modules/").unwrap_or(rel);
-        let candidate = node_modules.join(rel_under_nm);
+    for candidate in flat_npm_tsgo_candidate_paths(node_modules) {
         if candidate.exists() {
             return Some(candidate.to_string_lossy().to_string());
         }
@@ -2887,8 +3025,7 @@ pub fn find_tsgo_binary_under_node_modules(node_modules: &std::path::Path) -> Op
         // Prefer the most recently modified store entry (newest install).
         dirs.sort_by_key(|b| std::cmp::Reverse(entry_modified(b)));
         for dir in dirs {
-            for rel in tsgo_native_binary_rel_paths() {
-                let candidate = dir.join(rel);
+            for candidate in pnpm_store_tsgo_candidate_paths(&dir) {
                 if candidate.exists() {
                     return Some(candidate.to_string_lossy().to_string());
                 }
@@ -2897,6 +3034,36 @@ pub fn find_tsgo_binary_under_node_modules(node_modules: &std::path::Path) -> Op
     }
 
     None
+}
+
+/// Build the flat-npm tsgo candidate paths under a `node_modules` directory.
+///
+/// Pure path construction (no filesystem access) so the layout math is unit
+/// testable on every platform: `<node_modules>/@typescript/native-preview-{plat}-{arch}/lib/tsgo[.exe]`.
+/// Built with `Path::join` (never string concatenation) for portability.
+fn flat_npm_tsgo_candidate_paths(node_modules: &std::path::Path) -> Vec<PathBuf> {
+    tsgo_native_binary_rel_paths()
+        .into_iter()
+        .map(|rel| {
+            // `rel` is rooted at "node_modules/…"; strip that prefix to join
+            // under the given node_modules dir.
+            let rel_under_nm = rel.strip_prefix("node_modules/").unwrap_or(rel);
+            node_modules.join(rel_under_nm)
+        })
+        .collect()
+}
+
+/// Build the pnpm-store tsgo candidate paths under a single pnpm store entry
+/// (`<node_modules>/.pnpm/@typescript+native-preview-{plat}@{ver}`).
+///
+/// Pure path construction (no filesystem access): the store entry nests a real
+/// `node_modules/@typescript/native-preview-{plat}-{arch}/lib/tsgo[.exe]`, so
+/// the relative paths join verbatim. Built with `Path::join` for portability.
+fn pnpm_store_tsgo_candidate_paths(store_entry: &std::path::Path) -> Vec<PathBuf> {
+    tsgo_native_binary_rel_paths()
+        .into_iter()
+        .map(|rel| store_entry.join(rel))
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

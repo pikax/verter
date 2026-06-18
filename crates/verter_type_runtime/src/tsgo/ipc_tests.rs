@@ -1176,6 +1176,266 @@ fn test_find_tsgo_binary_in_reports_checked_roots_when_not_found() {
     let _ = std::fs::remove_dir_all(cache_root);
 }
 
+// ---------------------------------------------------------------------------
+// Workspace node_modules tsgo discovery + canonical precedence (FIX-1)
+// ---------------------------------------------------------------------------
+
+/// The flat-npm candidate paths are constructed under `<node_modules>` (NOT a
+/// nested `node_modules/node_modules`) and land on the current platform's
+/// `@typescript/native-preview-{plat}-{arch}/lib/tsgo[.exe]`. Pure path math —
+/// no filesystem, so it holds on every platform.
+#[test]
+fn flat_npm_tsgo_candidate_paths_are_rooted_directly_under_node_modules() {
+    let node_modules = std::path::Path::new("/proj/node_modules");
+    let candidates = flat_npm_tsgo_candidate_paths(node_modules);
+
+    assert!(
+        !candidates.is_empty(),
+        "expected at least the current-platform candidate"
+    );
+    // The current platform's binary is first; it must be joined directly under
+    // node_modules (the leading `node_modules/` of the rel path is stripped).
+    let first = &candidates[0];
+    assert!(
+        first.starts_with(node_modules),
+        "candidate must be under the node_modules dir, got: {}",
+        first.display()
+    );
+    assert!(
+        first.components().any(|c| c.as_os_str() == "@typescript"),
+        "candidate must descend into @typescript, got: {}",
+        first.display()
+    );
+    assert!(
+        first.ends_with("lib/tsgo") || first.ends_with("lib/tsgo.exe"),
+        "candidate must end at the lib/tsgo[.exe] binary, got: {}",
+        first.display()
+    );
+    // No double node_modules in the leading segment.
+    let s = first.to_string_lossy().replace('\\', "/");
+    assert!(
+        !s.contains("node_modules/node_modules"),
+        "flat-npm candidate must not nest node_modules, got: {s}"
+    );
+}
+
+/// The pnpm-store candidate paths are constructed under a single store entry,
+/// nesting the real `node_modules/@typescript/native-preview-*/lib/tsgo[.exe]`.
+/// Pure path math — no filesystem.
+#[test]
+fn pnpm_store_tsgo_candidate_paths_nest_under_store_entry() {
+    let store_entry =
+        std::path::Path::new("/proj/node_modules/.pnpm/@typescript+native-preview-x@1.0.0");
+    let candidates = pnpm_store_tsgo_candidate_paths(store_entry);
+
+    assert!(!candidates.is_empty());
+    let first = &candidates[0];
+    assert!(
+        first.starts_with(store_entry),
+        "pnpm candidate must be under the store entry, got: {}",
+        first.display()
+    );
+    let s = first.to_string_lossy().replace('\\', "/");
+    assert!(
+        s.contains(".pnpm/@typescript+native-preview-x@1.0.0/node_modules/@typescript/"),
+        "pnpm candidate must nest the real node_modules/@typescript path, got: {s}"
+    );
+    assert!(
+        first.ends_with("lib/tsgo") || first.ends_with("lib/tsgo.exe"),
+        "pnpm candidate must end at the lib/tsgo[.exe] binary, got: {}",
+        first.display()
+    );
+}
+
+/// Materialize a flat-npm tsgo binary under a fake workspace `node_modules` and
+/// prove `find_tsgo_binary_under_node_modules` discovers it (the production
+/// workspace-dependency case PATH + cache miss).
+#[test]
+fn find_tsgo_under_node_modules_discovers_flat_npm_layout() {
+    let root = std::env::temp_dir().join(format!(
+        "verter_tsgo_flat_npm_{}_{}",
+        std::process::id(),
+        line!()
+    ));
+    let node_modules = root.join("node_modules");
+    let _ = std::fs::remove_dir_all(&root);
+
+    // Use the current platform's rel path (first entry) so the test materializes
+    // the binary the running platform looks for.
+    let rel = tsgo_native_binary_rel_paths()[0];
+    let rel_under_nm = rel.strip_prefix("node_modules/").unwrap_or(rel);
+    let bin = node_modules.join(rel_under_nm);
+    std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+    std::fs::write(&bin, "tsgo").unwrap();
+
+    let found = find_tsgo_binary_under_node_modules(&node_modules);
+    assert_eq!(
+        found.map(std::path::PathBuf::from),
+        Some(bin),
+        "flat-npm workspace tsgo must be discovered under node_modules"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// Materialize a pnpm-store tsgo binary and prove `find_tsgo_binary_under_node_modules`
+/// discovers it via the `.pnpm` store walk.
+#[test]
+fn find_tsgo_under_node_modules_discovers_pnpm_layout() {
+    let root = std::env::temp_dir().join(format!(
+        "verter_tsgo_pnpm_{}_{}",
+        std::process::id(),
+        line!()
+    ));
+    let node_modules = root.join("node_modules");
+    let _ = std::fs::remove_dir_all(&root);
+
+    let store_entry = node_modules
+        .join(".pnpm")
+        .join("@typescript+native-preview-test@1.0.0");
+    let rel = tsgo_native_binary_rel_paths()[0];
+    let bin = store_entry.join(rel);
+    std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+    std::fs::write(&bin, "tsgo").unwrap();
+
+    let found = find_tsgo_binary_under_node_modules(&node_modules);
+    assert_eq!(
+        found.map(std::path::PathBuf::from),
+        Some(bin),
+        "pnpm-store workspace tsgo must be discovered under node_modules/.pnpm"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// `find_tsgo_binary_canonical` searches the WORKSPACE node_modules (tier 2) —
+/// the production-path proof: a binary present only in `<root>/node_modules`
+/// (not on PATH, not in the npm cache, no env override) is found. This is the
+/// canonical wiring the LSP `try_spawn_tsgo` now uses; reverting production to
+/// the bare `find_tsgo_binary()` would make a real project's pinned tsgo
+/// undiscoverable. Serialized because it touches the override env var.
+#[test]
+fn canonical_discovery_searches_workspace_node_modules() {
+    let _guard = tsgo_env_test_lock().lock().unwrap();
+    // Ensure no override env leaks in from the ambient environment.
+    let prev = std::env::var_os(TSGO_BINARY_ENV);
+    std::env::remove_var(TSGO_BINARY_ENV);
+
+    let root = std::env::temp_dir().join(format!(
+        "verter_tsgo_canon_ws_{}_{}",
+        std::process::id(),
+        line!()
+    ));
+    let node_modules = root.join("node_modules");
+    let _ = std::fs::remove_dir_all(&root);
+    let rel = tsgo_native_binary_rel_paths()[0];
+    let rel_under_nm = rel.strip_prefix("node_modules/").unwrap_or(rel);
+    let bin = node_modules.join(rel_under_nm);
+    std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+    std::fs::write(&bin, "tsgo").unwrap();
+
+    let found = find_tsgo_binary_canonical(Some(&root));
+
+    if let Some(v) = prev {
+        std::env::set_var(TSGO_BINARY_ENV, v);
+    }
+    let _ = std::fs::remove_dir_all(&root);
+
+    assert_eq!(
+        found.ok().map(std::path::PathBuf::from),
+        Some(bin),
+        "canonical discovery must find a tsgo pinned in the workspace node_modules"
+    );
+}
+
+/// The explicit `VERTER_TSGO_BIN` override is the HIGHEST-precedence tier: when
+/// it names an existing file it wins even over a workspace-node_modules binary.
+/// Serialized because it mutates the override env var.
+#[test]
+fn canonical_discovery_prefers_explicit_env_override() {
+    let _guard = tsgo_env_test_lock().lock().unwrap();
+    let prev = std::env::var_os(TSGO_BINARY_ENV);
+
+    let root = std::env::temp_dir().join(format!(
+        "verter_tsgo_canon_override_{}_{}",
+        std::process::id(),
+        line!()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+
+    // A workspace binary that would win at tier 2 …
+    let node_modules = root.join("node_modules");
+    let rel = tsgo_native_binary_rel_paths()[0];
+    let rel_under_nm = rel.strip_prefix("node_modules/").unwrap_or(rel);
+    let ws_bin = node_modules.join(rel_under_nm);
+    std::fs::create_dir_all(ws_bin.parent().unwrap()).unwrap();
+    std::fs::write(&ws_bin, "ws-tsgo").unwrap();
+
+    // … but an explicit override pointing at a different existing file wins.
+    let override_bin = root.join("custom-tsgo");
+    std::fs::write(&override_bin, "override-tsgo").unwrap();
+    std::env::set_var(TSGO_BINARY_ENV, &override_bin);
+
+    let found = find_tsgo_binary_canonical(Some(&root));
+
+    match prev {
+        Some(v) => std::env::set_var(TSGO_BINARY_ENV, v),
+        None => std::env::remove_var(TSGO_BINARY_ENV),
+    }
+    let _ = std::fs::remove_dir_all(&root);
+
+    assert_eq!(
+        found.ok().map(std::path::PathBuf::from),
+        Some(override_bin),
+        "the explicit VERTER_TSGO_BIN override must win over the workspace binary"
+    );
+}
+
+/// A stale (non-existent) `VERTER_TSGO_BIN` override is IGNORED so a leftover
+/// env var never wedges discovery — it falls through to the next tier.
+#[test]
+fn canonical_discovery_ignores_nonexistent_env_override() {
+    let _guard = tsgo_env_test_lock().lock().unwrap();
+    let prev = std::env::var_os(TSGO_BINARY_ENV);
+
+    let root = std::env::temp_dir().join(format!(
+        "verter_tsgo_canon_stale_{}_{}",
+        std::process::id(),
+        line!()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    let node_modules = root.join("node_modules");
+    let rel = tsgo_native_binary_rel_paths()[0];
+    let rel_under_nm = rel.strip_prefix("node_modules/").unwrap_or(rel);
+    let ws_bin = node_modules.join(rel_under_nm);
+    std::fs::create_dir_all(ws_bin.parent().unwrap()).unwrap();
+    std::fs::write(&ws_bin, "ws-tsgo").unwrap();
+
+    // Point the override at a path that does not exist.
+    std::env::set_var(TSGO_BINARY_ENV, root.join("does-not-exist-tsgo"));
+
+    let found = find_tsgo_binary_canonical(Some(&root));
+
+    match prev {
+        Some(v) => std::env::set_var(TSGO_BINARY_ENV, v),
+        None => std::env::remove_var(TSGO_BINARY_ENV),
+    }
+    let _ = std::fs::remove_dir_all(&root);
+
+    assert_eq!(
+        found.ok().map(std::path::PathBuf::from),
+        Some(ws_bin),
+        "a stale override must be ignored and discovery must fall through to the workspace tier"
+    );
+}
+
+/// Process-global lock so the override-env-mutating canonical-discovery tests do
+/// not race each other within this test binary.
+fn tsgo_env_test_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
 /// Verify that kill_on_drop prevents orphaned child processes.
 /// Spawns a long-lived child, drops it, then checks the process is dead.
 #[tokio::test]
@@ -1863,4 +2123,187 @@ fn fold_lsp_resolve_detail_keeps_existing_when_resolve_empty() {
         "None resolved detail leaves the list-time detail untouched"
     );
     assert_eq!(enriched.documentation.as_deref(), Some("the existing doc"));
+}
+
+// ── FIX-5: completion-detail enrichment is BOUNDED (list cap + concurrency) ──
+
+/// Build a completion carrying an `Lsp` resolve handle so it is eligible for
+/// `completionItem/resolve` enrichment.
+fn resolvable_completion(label: &str) -> Completion {
+    let mut c = bare_completion(label);
+    c.data = Some(CompletionResolveData::Lsp {
+        label: label.to_string(),
+        data: serde_json::json!({ "label": label }),
+    });
+    c
+}
+
+/// Drain the transport's stdin channel and answer every `completionItem/resolve`
+/// request by echoing a `detail` derived from the request's `label`. Returns the
+/// count of resolve requests it saw (so a test can assert the LIST-LEVEL cap was
+/// honored). Stops when the channel closes.
+async fn spawn_resolve_responder(
+    mut stdin_rx: mpsc::Receiver<StdinMessage>,
+    pending: Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>>,
+    seen: Arc<std::sync::atomic::AtomicUsize>,
+) {
+    while let Some(msg) = stdin_rx.recv().await {
+        let StdinMessage::Frame(bytes) = msg else {
+            break;
+        };
+        // Frame = `Content-Length: N\r\n\r\n{json}`; the body is the JSON tail.
+        let text = String::from_utf8_lossy(&bytes);
+        let Some(body_start) = text.find("\r\n\r\n") else {
+            continue;
+        };
+        let body = &text[body_start + 4..];
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(body) else {
+            continue;
+        };
+        let id = json.get("id").and_then(|v| v.as_i64());
+        let method = json.get("method").and_then(|v| v.as_str());
+        if method == Some("completionItem/resolve") {
+            seen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let label = json
+                .get("params")
+                .and_then(|p| p.get("label"))
+                .and_then(|l| l.as_str())
+                .unwrap_or("?")
+                .to_string();
+            if let Some(id) = id {
+                if let Some(tx) = pending.lock().await.remove(&id) {
+                    let _ = tx.send(serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": { "detail": format!("(property) {label}: number") },
+                    }));
+                }
+            }
+        }
+    }
+}
+
+/// A completion list LARGER than the list-level cap is enriched only up to the
+/// cap (leading items), preserving the FULL list length + order; the tail passes
+/// through UNCHANGED. Discriminating: an unbounded serial version would enrich
+/// every item (resolve count == N and every detail set), so the assertions on
+/// the capped resolve count and the un-enriched tail fail against it.
+#[tokio::test]
+async fn get_completion_details_bounds_enrichment_to_list_cap() {
+    // Real child only satisfies the `child` field; all I/O is the channel.
+    let child = spawn_long_lived_process(Stdio::null(), Stdio::null(), true);
+
+    let pending: Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+    let (stdin_tx, stdin_rx) = mpsc::channel::<StdinMessage>(256);
+    let seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    tokio::spawn(spawn_resolve_responder(
+        stdin_rx,
+        Arc::clone(&pending),
+        Arc::clone(&seen),
+    ));
+
+    let transport = Arc::new(test_transport_with_pending(stdin_tx, Arc::clone(&pending)));
+    let provider = TsgoTypeProvider {
+        transport,
+        child,
+        versions: Arc::new(Mutex::new(HashMap::new())),
+        contents: Arc::new(Mutex::new(HashMap::new())),
+        diagnostics_cache: Arc::new(Mutex::new(HashMap::new())),
+    };
+
+    let total = MAX_COMPLETION_DETAIL_ENRICH + 70;
+    let items: Vec<Completion> = (0..total)
+        .map(|i| resolvable_completion(&format!("m{i:03}")))
+        .collect();
+
+    let detailed = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        provider.get_completion_details("/proj/file.tsx", 0, &items),
+    )
+    .await
+    .expect("enrichment must not hang")
+    .expect("enrichment must succeed");
+
+    // Length + order preserved.
+    assert_eq!(
+        detailed.len(),
+        total,
+        "the enriched list must preserve the full input length"
+    );
+    for (i, c) in detailed.iter().enumerate() {
+        assert_eq!(c.label, format!("m{i:03}"), "order must be preserved");
+    }
+
+    // Only the leading `MAX_COMPLETION_DETAIL_ENRICH` items were resolved.
+    assert_eq!(
+        seen.load(std::sync::atomic::Ordering::Relaxed),
+        MAX_COMPLETION_DETAIL_ENRICH,
+        "exactly the list-cap many resolve requests should be issued (bounded)"
+    );
+
+    // Leading items are enriched …
+    assert!(
+        detailed[0].detail.is_some(),
+        "a leading item must be enriched"
+    );
+    assert!(
+        detailed[MAX_COMPLETION_DETAIL_ENRICH - 1].detail.is_some(),
+        "the last in-cap item must be enriched"
+    );
+    // … and the tail beyond the cap is passed through UN-enriched (still present).
+    assert!(
+        detailed[MAX_COMPLETION_DETAIL_ENRICH].detail.is_none(),
+        "the first item beyond the cap must be passed through un-enriched"
+    );
+    assert!(
+        detailed[total - 1].detail.is_none(),
+        "the last (beyond-cap) item must be passed through un-enriched"
+    );
+
+    drop(provider);
+}
+
+/// A SMALL completion list (under the cap) is fully enriched — the bound does
+/// not regress the common case. Pairs with the cap test to pin both regimes.
+#[tokio::test]
+async fn get_completion_details_enriches_full_small_list() {
+    let child = spawn_long_lived_process(Stdio::null(), Stdio::null(), true);
+    let pending: Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+    let (stdin_tx, stdin_rx) = mpsc::channel::<StdinMessage>(64);
+    let seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    tokio::spawn(spawn_resolve_responder(
+        stdin_rx,
+        Arc::clone(&pending),
+        Arc::clone(&seen),
+    ));
+    let transport = Arc::new(test_transport_with_pending(stdin_tx, Arc::clone(&pending)));
+    let provider = TsgoTypeProvider {
+        transport,
+        child,
+        versions: Arc::new(Mutex::new(HashMap::new())),
+        contents: Arc::new(Mutex::new(HashMap::new())),
+        diagnostics_cache: Arc::new(Mutex::new(HashMap::new())),
+    };
+
+    let items: Vec<Completion> = (0..5)
+        .map(|i| resolvable_completion(&format!("s{i}")))
+        .collect();
+    let detailed = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        provider.get_completion_details("/proj/file.tsx", 0, &items),
+    )
+    .await
+    .expect("must not hang")
+    .expect("must succeed");
+
+    assert_eq!(detailed.len(), 5);
+    assert_eq!(seen.load(std::sync::atomic::Ordering::Relaxed), 5);
+    assert!(
+        detailed.iter().all(|c| c.detail.is_some()),
+        "every item in a small list must be enriched"
+    );
+
+    drop(provider);
 }

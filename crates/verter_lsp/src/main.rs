@@ -4,7 +4,7 @@ use tokio::sync::{Notify, OnceCell};
 use tower_lsp_server::{LspService, Server};
 use tracing_subscriber::EnvFilter;
 use verter_lsp::server::VerterLanguageServer;
-use verter_lsp::tsgo::ipc::{find_tsgo_binary, TsgoTypeProvider};
+use verter_lsp::tsgo::ipc::{find_tsgo_binary_canonical, TsgoTypeProvider};
 use verter_lsp::tsgo::resilient as tsgo_resilient;
 use verter_lsp::tsserver::ipc::TsserverTypeProvider;
 use verter_lsp::tsserver::resilient as tsserver_resilient;
@@ -377,7 +377,11 @@ async fn try_spawn_tsgo(
     workspace_root: &str,
     client_cell: &Arc<OnceCell<tower_lsp_server::Client>>,
 ) -> Result<Arc<dyn TypeProvider>, String> {
-    let tsgo_bin = find_tsgo_binary().map_err(|err| err.to_string())?;
+    // Canonical discovery: explicit `VERTER_TSGO_BIN` override > workspace
+    // `node_modules` (the common real-project case a bare PATH/cache search
+    // misses) > PATH > npm/npx cache.
+    let tsgo_bin = find_tsgo_binary_canonical(Some(std::path::Path::new(workspace_root)))
+        .map_err(|err| err.to_string())?;
     tracing::info!("found tsgo binary: {tsgo_bin}");
 
     let root_uri = path_to_file_uri(workspace_root);
