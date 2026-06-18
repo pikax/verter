@@ -494,14 +494,6 @@ async fn drain_pending(pending: &Mutex<HashMap<i64, oneshot::Sender<serde_json::
     }
 }
 
-/// Test-only re-export of `drain_pending` for use in resilient.rs tests.
-#[cfg(test)]
-pub async fn drain_pending_for_test(
-    pending: &Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>,
-) {
-    drain_pending(pending).await;
-}
-
 /// Read loop that processes JSON-RPC messages from the child's stdout
 /// and dispatches responses to pending request channels.
 /// Also handles `textDocument/publishDiagnostics` notifications and
