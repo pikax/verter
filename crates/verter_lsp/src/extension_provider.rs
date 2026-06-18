@@ -9,6 +9,7 @@
 //! Uses tsserver command format so all existing response parsers work unchanged.
 
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::sync::Arc;
 
 use tokio::sync::{Mutex, OnceCell};
@@ -24,11 +25,73 @@ use crate::tsserver::ipc::{
 use crate::type_provider::protocol::*;
 use crate::type_provider::traits::{ProviderFuture, TypeProvider};
 
-/// A `TypeProvider` that delegates to the VS Code extension's in-process
-/// TypeScript language service via `$/verter/tsQuery` server→client requests.
-pub struct ExtensionTypeProvider {
+/// Transport seam for the `$/verter/tsQuery` server→client request.
+///
+/// `ExtensionTypeProvider` talks to the VS Code extension host over a single
+/// raw `command + arguments → JSON body` choke point. In production that body
+/// is delivered over a concrete `tower_lsp_server::Client`
+/// ([`LspTsQueryTransport`]); tests inject a scripted in-memory transport so the
+/// provider's completion / resolve / diagnostics request envelopes can be
+/// driven headlessly, without a live extension-host `Client`.
+///
+/// This is a TRANSPORT abstraction only — it carries the typed `command`/
+/// `arguments` envelope and returns the raw response body. It does NOT resolve
+/// types, parse responses, or duplicate any of the provider's
+/// tsserver-family mapping (`parse_tsserver_completion`,
+/// `completion_entry_details_to_resolve_result`, `merge_diagnostic_sets`, …)
+/// which remain the single shared owner in `verter_type_runtime::tsserver::ipc`.
+///
+/// The trait is statically dispatched (generic injection, no `dyn`,
+/// no `async_trait`, no boxed future) so the production path stays
+/// zero-overhead.
+pub trait TsQueryTransport: Send + Sync {
+    /// Send one `$/verter/tsQuery` request and return its raw JSON response body.
+    fn ts_query(
+        &self,
+        params: TsQueryParams,
+    ) -> impl Future<Output = Result<serde_json::Value, TypeProviderError>> + Send + '_;
+}
+
+/// Production [`TsQueryTransport`] — forwards each `$/verter/tsQuery` over the
+/// deferred extension-host LSP `Client`.
+pub struct LspTsQueryTransport {
     /// Deferred LSP client — populated during `LspService::build()`.
     client: Arc<OnceCell<tower_lsp_server::Client>>,
+}
+
+impl TsQueryTransport for LspTsQueryTransport {
+    // The trait declares an explicit `+ Send` return bound (load-bearing: the
+    // future is awaited from `Send` provider methods and downstream
+    // `ProviderFuture`s). `async fn` in a trait impl cannot express that bound,
+    // so the explicit `impl Future + Send` form stays — clippy's `async fn`
+    // suggestion would drop the requirement.
+    #[allow(clippy::manual_async_fn)]
+    fn ts_query(
+        &self,
+        params: TsQueryParams,
+    ) -> impl Future<Output = Result<serde_json::Value, TypeProviderError>> + Send + '_ {
+        async move {
+            let client = self
+                .client
+                .get()
+                .ok_or_else(|| TypeProviderError::new("LSP client not yet initialized"))?;
+            client
+                .send_request::<TsQuery>(params)
+                .await
+                .map_err(|e| TypeProviderError::new(format!("tsQuery failed: {e}")))
+        }
+    }
+}
+
+/// A `TypeProvider` that delegates to the VS Code extension's in-process
+/// TypeScript language service via `$/verter/tsQuery` server→client requests.
+///
+/// Generic over the [`TsQueryTransport`] so production binds the concrete
+/// [`LspTsQueryTransport`] (the default) while tests bind a scripted mock — the
+/// completion / resolve / diagnostics request shaping is identical across both.
+pub struct ExtensionTypeProvider<T = LspTsQueryTransport> {
+    /// Transport for the `$/verter/tsQuery` request envelope.
+    transport: T,
     /// Cached file contents for position conversion (byte offset ↔ line/col).
     contents: Arc<Mutex<HashMap<String, String>>>,
     /// Files that have been sent to the extension via `open` command.
@@ -39,10 +102,19 @@ pub struct ExtensionTypeProvider {
     project_roots: Arc<parking_lot::RwLock<Vec<String>>>,
 }
 
-impl ExtensionTypeProvider {
+impl ExtensionTypeProvider<LspTsQueryTransport> {
     pub fn new(client: Arc<OnceCell<tower_lsp_server::Client>>, workspace_root: &str) -> Self {
+        Self::with_transport(LspTsQueryTransport { client }, workspace_root)
+    }
+}
+
+impl<T: TsQueryTransport> ExtensionTypeProvider<T> {
+    /// Construct a provider over an arbitrary [`TsQueryTransport`]. Production
+    /// uses [`ExtensionTypeProvider::new`] (the concrete `Client`-backed
+    /// transport); tests inject a scripted mock.
+    pub fn with_transport(transport: T, workspace_root: &str) -> Self {
         Self {
-            client,
+            transport,
             contents: Arc::new(Mutex::new(HashMap::new())),
             opened_files: Arc::new(Mutex::new(HashSet::new())),
             workspace_root: verter_span::path::canonicalize_path(workspace_root),
@@ -51,34 +123,17 @@ impl ExtensionTypeProvider {
     }
 
     /// Send a tsserver-format command to the extension and return the response body.
-    //
-    // TODO(follow-up): this `$/verter/tsQuery` transport seam (command names +
-    // arg-envelope shapes the completion/resolve methods emit) has no Rust-side
-    // test because `query` is bound to a concrete `tower_lsp_server::Client`.
-    // Covering it would mean introducing a transport-trait seam so a mock client
-    // can capture the emitted command/args. The extension-specific TS shaping is
-    // guarded headlessly by
-    // `packages/vue-vscode/src/extensionTsService.autoimport.spec.ts`, and the
-    // shared `entryNames` builders are unit-tested; the parse/envelope Rust path
-    // is identical to (and proven by) the tsserver real-provider parity gate. See
-    // docs/arch/provider-completion-resolve-design.md → "Extension provider
-    // auto-import".
     async fn query(
         &self,
         command: &str,
         arguments: serde_json::Value,
     ) -> Result<serde_json::Value, TypeProviderError> {
-        let client = self
-            .client
-            .get()
-            .ok_or_else(|| TypeProviderError::new("LSP client not yet initialized"))?;
-        client
-            .send_request::<TsQuery>(TsQueryParams {
+        self.transport
+            .ts_query(TsQueryParams {
                 command: command.into(),
                 arguments,
             })
             .await
-            .map_err(|e| TypeProviderError::new(format!("tsQuery failed: {e}")))
     }
 
     fn normalize_path(path: &str) -> String {
@@ -91,7 +146,7 @@ impl ExtensionTypeProvider {
     }
 }
 
-impl TypeProvider for ExtensionTypeProvider {
+impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
     fn provider_id(&self) -> &'static str {
         "extension"
     }
@@ -1171,3 +1226,7 @@ impl TypeProvider for ExtensionTypeProvider {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "extension_provider_tests.rs"]
+mod tests;

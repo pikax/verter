@@ -245,7 +245,7 @@ proves a real provider behavior.
 **Extension provider auto-import (how it is regression-guarded):**
 
 The in-process **extension** provider (`provider_id = "extension"`) is a third
-provider mode whose auto-import-on-accept is guarded in TWO layers, because it
+provider mode whose auto-import-on-accept is guarded in THREE layers, because it
 cannot be driven through the DX real-spawn parity bridge (that bridge spawns
 child-process providers; the extension provider answers `$/verter/tsQuery` over
 a live extension-host LSP `Client`) and the VS Code E2E job is deliberately
@@ -270,14 +270,27 @@ disabled (flaky):
    crashing the import code-action builder in TypeScript 6.x — the extension
    provider could never have resolved an auto-import in production.
 
-FOLLOW-UP (`TODO`): the Rust extension TRANSPORT seam — the `$/verter/tsQuery`
-command names + arg-envelope shapes emitted by `ExtensionTypeProvider` (the
-static `completionInfo`/`completionEntryDetails` arg keys, beyond the shared
-`entryNames` builder) — is not yet covered by a Rust-side test, because
-`ExtensionTypeProvider::query` is bound to a concrete `tower_lsp_server::Client`
-and a mock would require introducing a transport-trait seam. That refactor is a
-separate scoped change; the shaping it would assert is simple non-branching code
-and the shared `entryNames` builder it calls IS unit-tested.
+3. **Rust transport-seam headless test** — `ExtensionTypeProvider` is generic
+   over a `TsQueryTransport` (`crates/verter_lsp/src/extension_provider.rs`): the
+   `$/verter/tsQuery` request choke point is a trait, bound in production to the
+   concrete `Client`-backed `LspTsQueryTransport` (the default type parameter, a
+   zero-overhead static-dispatch wiring — the production `new(client, ws)` path
+   is unchanged) and in tests to a scripted in-memory transport.
+   `extension_provider_transport_mock_drives_completion_resolve_and_diagnostics`
+   (`crates/verter_lsp/src/extension_provider_tests.rs`) drives the provider's
+   `get_completions` → `get_completion_details` → `resolve_completion` →
+   `get_diagnostics` flow headlessly (no `Client`, no VS Code), asserting the
+   emitted command names + arg envelopes (`completionInfo` flags + converted
+   position; `completionEntryDetails` `entryNames[0].source`/`data`
+   forwarding; the three `*DiagnosticsSync` passes) AND the typed results the
+   shared `verter_type_runtime::tsserver::ipc` mapping produces (the stamped
+   `TsserverEntry` handle, the same-file auto-import edit, the deduped
+   semantic ∪ syntactic ∪ suggestion union). It is discriminating: bypassing the
+   seam (routing `query()` around the transport) makes it RED ("no
+   `completionInfo` envelope was emitted"). The transport seam carries only the
+   `command + arguments → JSON body` envelope — it resolves nothing and
+   duplicates none of the tsserver-family mapping, which stays the single owner
+   in `verter_type_runtime::tsserver::ipc`.
 
 FOLLOW-UP (`TODO`): the provider-neutral result-merge module
 `crates/verter_lsp/src/type_provider/merge.rs` (4634 lines) carries an
