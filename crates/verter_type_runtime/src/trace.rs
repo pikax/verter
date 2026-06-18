@@ -266,17 +266,28 @@ impl Drop for TypeRuntimeTraceGuard {
         // `(storage, state_id)`. Because each async scope owns its own
         // task-local state and tokio swaps that state around every poll, a
         // guard held across `.await` pops against its own LIFO — sibling
-        // tasks interleaved on the same OS thread never corrupt it. A missing
-        // state (the scope future was already torn down) is handled as a
-        // no-op pop rather than a panic, keeping `Drop` fault-contained.
-        let popped = with_state_by_identity(state.storage, state.state_id, |trace_state| {
-            trace_state.stack.pop()
+        // tasks interleaved on the same OS thread never corrupt it.
+        //
+        // The pop is teardown-total: when the guard's own state is no longer
+        // reachable (the owning scope future was torn down before the guard
+        // dropped, or a *different* nested async state is the active task-local
+        // at drop time), `with_state_by_identity` returns `None` and the drop is
+        // a graceful no-op — never a panic. Tearing down its own outer state from
+        // under a nested state, or after the scope future is gone, is a legitimate
+        // condition, not a logic bug, so it must stay fault-contained.
+        //
+        // The genuine-logic-bug check (a span mismatch *within* the guard's own
+        // live state) runs INSIDE the identity closure, so it only fires when the
+        // state actually exists and the LIFO is corrupt — never on the legitimate
+        // state-gone / nested-state path that returns `None`.
+        with_state_by_identity(state.storage, state.state_id, |trace_state| {
+            let popped = trace_state.stack.pop();
+            debug_assert_eq!(
+                popped.map(|ctx| ctx.span_id),
+                Some(state.span_id),
+                "trace guard must pop its own span from its own state",
+            );
         });
-        debug_assert_eq!(
-            popped.map(|ctx| ctx.map(|ctx| ctx.span_id)),
-            Some(Some(state.span_id)),
-            "trace guard must pop its own span from its own state",
-        );
 
         type_runtime_trace_write_line(&format_type_runtime_trace_line(
             TypeRuntimeTraceEvent::End,
@@ -306,16 +317,32 @@ pub fn with_type_runtime_trace_context<T>(
         parent_span_id: context.parent_span_id,
         base_depth: context.base_depth,
     });
+
+    // Swap in the fresh state and hold the prior state in an RAII restorer.
+    // Restoring through `Drop` (rather than an inline assignment after `f()`)
+    // keeps the swap unwind-safe: a panic in `f()` still restores the prior
+    // thread-local state while unwinding, so the replacement root/stack can
+    // never leak into later sync trace work on this thread.
+    struct SyncStateRestorer {
+        previous: Option<RuntimeTraceState>,
+    }
+    impl Drop for SyncStateRestorer {
+        fn drop(&mut self) {
+            if let Some(previous) = self.previous.take() {
+                TYPE_RUNTIME_SYNC_TRACE_STATE.with(|state| {
+                    *state.borrow_mut() = previous;
+                });
+            }
+        }
+    }
+
     let previous = TYPE_RUNTIME_SYNC_TRACE_STATE
         .with(|state| std::mem::replace(&mut *state.borrow_mut(), RuntimeTraceState::new(root)));
+    let _restorer = SyncStateRestorer {
+        previous: Some(previous),
+    };
 
-    let result = f();
-
-    TYPE_RUNTIME_SYNC_TRACE_STATE.with(|state| {
-        *state.borrow_mut() = previous;
-    });
-
-    result
+    f()
 }
 
 /// Compute `(trace_id, parent_span_id, depth)` for a new span pushed onto
@@ -545,7 +572,13 @@ macro_rules! type_runtime_trace_scope_async {
         $crate::trace::type_runtime_trace_scope_async(
             $name,
             if $crate::trace::type_runtime_trace_enabled() {
-                ::core::option::Option::Some($detail)
+                // `.into()` lets the detail expression be anything that converts
+                // into `String` (`&str`, `String`, `Cow<str>`, …) rather than
+                // forcing every call site to materialise a `String` itself; a
+                // `String` argument converts by identity (no extra allocation).
+                ::core::option::Option::Some(::core::convert::Into::<::std::string::String>::into(
+                    $detail,
+                ))
             } else {
                 ::core::option::Option::None
             },
@@ -820,5 +853,213 @@ mod tests {
             std::env::remove_var("VERTER_TYPE_RUNTIME_TRACE");
             std::env::remove_var("VERTER_TYPE_RUNTIME_TRACE_PATH");
         }
+    }
+
+    /// F-1 adversarial: a guard opened on an OUTER async trace state but dropped
+    /// while a *different* NESTED async trace state is the active task-local.
+    /// `with_state_by_identity` cannot reach the suspended outer state from inside
+    /// the nested scope (tokio scopes the task-local to the polled future), so the
+    /// drop must stay fault-contained — a graceful no-op, never a debug-panic —
+    /// and it must NOT corrupt the *nested* (active) state's stack by popping the
+    /// wrong span. (Holding a `type_runtime_trace_scope` guard across a nested
+    /// async-state boundary is itself outside the production invariant: every
+    /// production guard is created and dropped within its own scope's active
+    /// state. This test characterizes the fault-containment of the drop, which is
+    /// the reachable, defensible guarantee — the pre-harden code debug-panicked
+    /// here on the `None`/nested path.)
+    #[test]
+    fn guard_dropped_under_foreign_nested_async_state_is_fault_contained() {
+        let _guard = test_trace_env_guard();
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "verter-type-runtime-trace-f1-{}-{}.log",
+            std::process::id(),
+            type_runtime_next_span_id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        unsafe {
+            std::env::set_var("VERTER_TYPE_RUNTIME_TRACE", "1");
+            std::env::set_var("VERTER_TYPE_RUNTIME_TRACE_PATH", &path);
+        }
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let (nested_top_before, nested_top_after) = rt.block_on(async {
+            // Install an OUTER async state WITHOUT an enclosing asserting guard
+            // (`with_type_runtime_trace_context_async` installs the state but opens
+            // no span), so the only `Drop`-time LIFO assertion exercised is the one
+            // under test — the held guard's foreign-state drop. (`type_runtime_-
+            // trace_scope_async!` would add its own outer guard whose later,
+            // legitimate same-state drop would trip the within-state LIFO assert on
+            // the stale span this anti-pattern inherently leaves — collateral that
+            // is orthogonal to the fault-containment invariant being characterized.)
+            with_type_runtime_trace_context_async(
+                Some(TypeRuntimeTraceContext {
+                    request_id: 7,
+                    parent_span_id: 1,
+                    base_depth: 0,
+                }),
+                async {
+                    // Guard pushed onto the OUTER async state.
+                    let outer_guard = type_runtime_trace_scope("f1_held", "held=true");
+                    // Enter a NESTED async state; this becomes the active task-local.
+                    with_type_runtime_trace_context_async(
+                        current_type_runtime_trace_context(),
+                        async move {
+                            // Open a span on the NESTED (active) state, then snapshot it.
+                            let _nested = type_runtime_trace_scope("f1_nested", "nested=true");
+                            let nested_top_before = current_type_runtime_trace_context()
+                                .expect("nested context before")
+                                .parent_span_id;
+                            // Drop the OUTER-state guard while the NESTED state is
+                            // active. Its recorded (Async, outer_state_id) is
+                            // unreachable from here (tokio scopes the task-local to
+                            // this nested future), so `with_state_by_identity` returns
+                            // `None`. The drop MUST be a graceful no-op — never a
+                            // debug-panic — and must NOT pop the nested state's
+                            // `f1_nested` span by mistake.
+                            drop(outer_guard);
+                            let nested_top_after = current_type_runtime_trace_context()
+                                .expect("nested context after")
+                                .parent_span_id;
+                            (nested_top_before, nested_top_after)
+                        },
+                    )
+                    .await
+                    // `outer_guard` already dropped; the outer scope's state tears
+                    // down here with its stale `f1_held` span, but no live guard
+                    // observes it, so no within-state LIFO assert fires.
+                },
+            )
+            .await
+        });
+
+        // The foreign-state drop did not corrupt the active nested state: the
+        // nested top span is unchanged across the drop (the no-op did not pop the
+        // wrong stack). Reaching this assertion at all proves no debug-panic fired.
+        assert_eq!(
+            nested_top_before, nested_top_after,
+            "dropping a foreign-state guard must not pop the active nested state's span"
+        );
+
+        let _ = std::fs::remove_file(&path);
+        unsafe {
+            std::env::remove_var("VERTER_TYPE_RUNTIME_TRACE");
+            std::env::remove_var("VERTER_TYPE_RUNTIME_TRACE_PATH");
+        }
+    }
+
+    /// F-2 adversarial: a guard whose recorded async state is GONE at drop time
+    /// (the scope future that owned the task-local was already torn down, leaving
+    /// the guard to drop on the bare runtime thread). `with_state_by_identity`
+    /// returns `None`; the drop must treat this as a graceful no-op, never trip
+    /// the debug assertion. Reproduces by moving the guard OUT of the scoped
+    /// future and dropping it after the scope future has fully completed.
+    #[test]
+    fn guard_dropped_after_async_state_gone_is_graceful_noop() {
+        let _guard = test_trace_env_guard();
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "verter-type-runtime-trace-f2-{}-{}.log",
+            std::process::id(),
+            type_runtime_next_span_id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        unsafe {
+            std::env::set_var("VERTER_TYPE_RUNTIME_TRACE", "1");
+            std::env::set_var("VERTER_TYPE_RUNTIME_TRACE_PATH", &path);
+        }
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        // The guard is created inside an async scope, smuggled out via the
+        // future's return value, and dropped here — after the task-local async
+        // state that backed it has been torn down. Its (Async, state_id) is no
+        // longer active anywhere.
+        let escaped: TypeRuntimeTraceGuard = rt.block_on(async {
+            with_type_runtime_trace_context_async(
+                Some(TypeRuntimeTraceContext {
+                    request_id: 5,
+                    parent_span_id: 1,
+                    base_depth: 0,
+                }),
+                async { type_runtime_trace_scope("f2_escaped", "escaped=true") },
+            )
+            .await
+        });
+
+        // Drop on the bare runtime thread; the guard's recorded async state is
+        // gone. The drop must be a graceful no-op — reaching the line after this
+        // drop at all (no debug-panic / abort) is the discriminator. We also
+        // confirm the unrelated sync thread-local fallback was never touched by
+        // the no-op pop.
+        let sync_stack_before =
+            TYPE_RUNTIME_SYNC_TRACE_STATE.with(|state| state.borrow().stack.len());
+        drop(escaped);
+        let sync_stack_after =
+            TYPE_RUNTIME_SYNC_TRACE_STATE.with(|state| state.borrow().stack.len());
+        assert_eq!(
+            sync_stack_before, sync_stack_after,
+            "state-gone guard drop must be a no-op, not touch the sync fallback stack"
+        );
+
+        let _ = std::fs::remove_file(&path);
+        unsafe {
+            std::env::remove_var("VERTER_TYPE_RUNTIME_TRACE");
+            std::env::remove_var("VERTER_TYPE_RUNTIME_TRACE_PATH");
+        }
+    }
+
+    /// F-3 adversarial: a panic inside the `with_type_runtime_trace_context` sync
+    /// closure must NOT leak the replacement root/stack into later sync trace work
+    /// on the same thread. The thread-local trace state must be restored even on
+    /// unwind (RAII), satisfying fault-containment.
+    #[test]
+    fn sync_trace_context_restores_thread_local_on_panic() {
+        let _guard = test_trace_env_guard();
+        unsafe {
+            std::env::remove_var("VERTER_META_TRACE");
+            std::env::remove_var("VERTER_TYPE_RUNTIME_TRACE");
+            std::env::remove_var("VERTER_TYPE_RUNTIME_TRACE_PATH");
+        }
+
+        // Snapshot the pristine sync state identity before entering any context.
+        let baseline_state_id = TYPE_RUNTIME_SYNC_TRACE_STATE.with(|state| state.borrow().state_id);
+
+        // Enter a sync trace context whose closure panics. catch_unwind contains
+        // the panic; the question is whether the thread-local was restored.
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            with_type_runtime_trace_context(
+                Some(TypeRuntimeTraceContext {
+                    request_id: 99,
+                    parent_span_id: 3,
+                    base_depth: 1,
+                }),
+                || {
+                    panic!("boom inside sync trace closure");
+                },
+            )
+        }))
+        .is_err();
+        assert!(panicked, "closure must have panicked");
+
+        // The thread-local must be the SAME pristine state it was before — not the
+        // leaked replacement state seeded from request_id=99.
+        let (restored_state_id, has_leaked_root) = TYPE_RUNTIME_SYNC_TRACE_STATE.with(|state| {
+            let state = state.borrow();
+            (state.state_id, state.root.is_some())
+        });
+        assert_eq!(
+            restored_state_id, baseline_state_id,
+            "panic in sync trace closure must restore the prior thread-local state \
+             (leaked state_id={restored_state_id}, expected baseline={baseline_state_id})"
+        );
+        assert!(
+            !has_leaked_root,
+            "panic in sync trace closure must not leak the replacement root into \
+             later sync trace work on this thread"
+        );
     }
 }

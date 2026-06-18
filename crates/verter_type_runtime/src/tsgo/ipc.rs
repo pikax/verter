@@ -1788,34 +1788,48 @@ impl TypeProvider for TsgoTypeProvider {
                         let transport = Arc::clone(&transport);
                         let semaphore = Arc::clone(&semaphore);
                         let item = item.clone();
-                        join_set.spawn(crate::trace::with_type_runtime_trace_context_async(
-                            trace_ctx,
-                            async move {
-                                // The permit bounds in-flight resolves; if the semaphore is
-                                // somehow closed, fall back to the un-enriched item.
-                                let _permit = match semaphore.acquire().await {
-                                    Ok(permit) => permit,
-                                    Err(_) => return (idx, item),
-                                };
-                                match transport
-                                    .request("completionItem/resolve", resolve_item)
-                                    .await
-                                {
-                                    Ok(resolved) => {
-                                        let (detail, documentation) =
-                                            extract_resolve_detail_and_documentation(&resolved);
-                                        let folded = fold_lsp_resolve_detail_into_completion(
-                                            &item,
-                                            detail,
-                                            documentation,
-                                        );
-                                        (idx, folded)
-                                    }
-                                    // A per-item resolve failure must not drop the item.
-                                    Err(_) => (idx, item),
+                        let resolve_future = async move {
+                            // The permit bounds in-flight resolves; if the semaphore is
+                            // somehow closed, fall back to the un-enriched item.
+                            let _permit = match semaphore.acquire().await {
+                                Ok(permit) => permit,
+                                Err(_) => return (idx, item),
+                            };
+                            match transport
+                                .request("completionItem/resolve", resolve_item)
+                                .await
+                            {
+                                Ok(resolved) => {
+                                    let (detail, documentation) =
+                                        extract_resolve_detail_and_documentation(&resolved);
+                                    let folded = fold_lsp_resolve_detail_into_completion(
+                                        &item,
+                                        detail,
+                                        documentation,
+                                    );
+                                    (idx, folded)
                                 }
-                            },
-                        ));
+                                // A per-item resolve failure must not drop the item.
+                                Err(_) => (idx, item),
+                            }
+                        };
+                        // Only seed the per-task trace state when there is an active
+                        // context to re-parent under. With tracing disabled (`trace_ctx
+                        // == None`) the spawn skips the task-local wrapper entirely, so
+                        // the default path pays no task-local install cost per resolve.
+                        match trace_ctx {
+                            Some(_) => {
+                                join_set.spawn(
+                                    crate::trace::with_type_runtime_trace_context_async(
+                                        trace_ctx,
+                                        resolve_future,
+                                    ),
+                                );
+                            }
+                            None => {
+                                join_set.spawn(resolve_future);
+                            }
+                        }
                     }
 
                     // Start from a verbatim clone (preserves the tail beyond the cap and
