@@ -4222,6 +4222,14 @@ bridge.
     host/API edit to the cross-component `.vue.ts` synthesized-instance-type
     materialization this block owns; once the host materializes imported-component
     instance types under tsgo, the skipped real-provider rows assert live.
+- **Framework-aware import placement (DEFERRED design, tracked).** Auto-import edit
+  placement is Vue-`<script setup>`-hardcoded + string-based in `verter_lsp`, so `.svelte`
+  and plain-`<script>` Vue get no/invalid auto-import. The codex-architect-recommended fix is
+  a framework-neutral `FrameworkImportPlacement` capability in `verter_session::framework`
+  (registry-dispatched, typed `ImportPlacementOutcome`, neutral parse-artifact root/block
+  layout, Vue + Svelte impls, LSP delegation) — captured in
+  `docs/arch/framework-import-placement-design.md`. It is a shared placement primitive that
+  `B.7` (candidate sources + auto-imports) and `B.8` (organize-imports) CONSUME, not reinvent.
 
 ---
 
