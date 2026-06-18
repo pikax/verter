@@ -1055,7 +1055,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // open-mapped predicate decides openness (no second
                 // walker).
                 if crate::project_semantic_dispatch::raise::mapped_type_is_open_or_unknown(
-                    self.ctx, source_sem, &mapper,
+                    self, source_sem, &mapper,
                 ) {
                     return graph.intern_node_with_scope(
                         SemanticNodeData::Mapped {

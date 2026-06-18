@@ -1643,7 +1643,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     .iter()
                     .map(|id| state.mapping.get(&(*id, context)).copied().unwrap_or(*id))
                     .collect();
-                if utility_enumeration_domain_is_open_or_unknown(self.ctx, base, &resolved_args) {
+                if utility_enumeration_domain_is_open_or_unknown(self, base, &resolved_args) {
                     return node;
                 }
                 let base_key =
@@ -2338,14 +2338,6 @@ fn observe_closedness_walk_consult(
     }
 }
 
-/// Node budget for the bounded TypeExpr key-domain walk
-/// ([`key_domain_type_expr_is_closed`] + the decl hops of
-/// [`prepared_decl_body_is_closed`]). Every inspected node (and every
-/// transparent alias / barrel hop) decrements it; a legitimate key domain
-/// — alias chains, heritage arms, finite key-literal unions — resolves
-/// well inside the cap. Exhaustion ⇒ conservatively OPEN.
-const KEY_DOMAIN_TYPE_EXPR_WALK_BUDGET: u32 = 256;
-
 /// Identity-preserving binding for ONE type-parameter slot of the
 /// key-domain walks — the replacement for the bool-only `open_args`
 /// environment. Beyond the open/closed verdict, a closed binding carries
@@ -2407,6 +2399,14 @@ enum OperandPosition {
     /// `Conditional.extends`, `IndexedAccess.object`): an instantiation
     /// is OPEN if ANY argument is open.
     ValueSensitive,
+    /// A mapped `as`-clause NAME-REMAP operand: KEY-PRODUCTION like
+    /// `KeyDomain`, but a CONCRETE (all-arguments-closed) instantiation is
+    /// taken CLOSED without a finiteness proof — a K-only transform over the
+    /// BOUND binder (`as Capitalize<K>`) is decidable per key and the
+    /// enumerator owns it. Mirrors the node-route
+    /// [`OpenRole::MappedNameRemap`] policy so the prepared-decl TypeExpr
+    /// route and the node route cannot diverge on an `as`-remap verdict.
+    NameRemap,
 }
 
 /// Whether `expr` resolves NO names — literals, primitives, and
@@ -2598,7 +2598,7 @@ fn binding_selection_operand_node(
 /// selects TRUE for ANY check); otherwise an unresolved operand ⇒
 /// `Deferred` (both branches classified).
 fn type_expr_conditional_branch_selection(
-    ctx: &dyn crate::resolver_core::ResolverContext,
+    dispatch: &ProjectSemanticDispatch<'_>,
     prepared: &verter_semantic::analysis::type_solver::prepared::PreparedTypeDecl,
     check: &TypeExpr,
     extends: &TypeExpr,
@@ -2607,7 +2607,14 @@ fn type_expr_conditional_branch_selection(
     super::ConditionalBranchSelection,
     Option<super::InferPatternSelection>,
 ) {
-    let dispatch = ProjectSemanticDispatch::new(ctx);
+    // Consult the shared branch-selection oracle THROUGH the ACTIVE
+    // dispatcher (NOT a freshly-constructed `ProjectSemanticDispatch::new`):
+    // the active dispatcher carries the `instantiate_active` /
+    // `carrier_normalizing` cycle-guard state, so a recursive ref reached
+    // through the check/extends operands (e.g. a carrier source recursing
+    // `BareRef` → `DeclRef`/`InstantiationRef` → this closedness route)
+    // terminates bounded instead of diverging.
+    let ctx = dispatch.ctx;
     let extends_node = conditional_selection_operand_node(ctx, prepared, extends, bindings);
     let check_node = conditional_selection_operand_node(ctx, prepared, check, bindings);
     match (check_node, extends_node) {
@@ -2650,7 +2657,7 @@ fn type_expr_conditional_branch_selection(
 /// unresolved name, a missing prepared decl, a genuine cycle, or exhausts
 /// the budget.
 fn prepared_decl_body_is_closed(
-    ctx: &dyn crate::resolver_core::ResolverContext,
+    dispatch: &ProjectSemanticDispatch<'_>,
     canonical_id: &str,
     decl_name: &str,
     budget: &mut u32,
@@ -2666,7 +2673,7 @@ fn prepared_decl_body_is_closed(
         return false;
     }
     let verdict =
-        prepared_decl_body_is_closed_unguarded(ctx, canonical_id, decl_name, budget, visited);
+        prepared_decl_body_is_closed_unguarded(dispatch, canonical_id, decl_name, budget, visited);
     visited.remove(&key);
     verdict
 }
@@ -2674,12 +2681,13 @@ fn prepared_decl_body_is_closed(
 /// Cycle-unguarded core of [`prepared_decl_body_is_closed`] — never call
 /// directly; the in-flight insert/remove discipline lives in the wrapper.
 fn prepared_decl_body_is_closed_unguarded(
-    ctx: &dyn crate::resolver_core::ResolverContext,
+    dispatch: &ProjectSemanticDispatch<'_>,
     canonical_id: &str,
     decl_name: &str,
     budget: &mut u32,
     visited: &mut FxHashSet<(Arc<str>, Arc<str>)>,
 ) -> bool {
+    let ctx = dispatch.ctx;
     if *budget == 0 {
         return false;
     }
@@ -2704,7 +2712,7 @@ fn prepared_decl_body_is_closed_unguarded(
         {
             if src_canonical.as_str() != canonical_id || src_name.as_str() != decl_name {
                 return prepared_decl_body_is_closed(
-                    ctx,
+                    dispatch,
                     &src_canonical,
                     &src_name,
                     budget,
@@ -2716,7 +2724,7 @@ fn prepared_decl_body_is_closed_unguarded(
     };
     let no_bindings: KeyDomainBindings = KeyDomainBindings::default();
     key_domain_type_expr_is_closed(
-        ctx,
+        dispatch,
         &prepared,
         &prepared.body,
         &no_bindings,
@@ -2755,11 +2763,12 @@ fn prepared_decl_body_is_closed_unguarded(
 /// Bounded by the same hop budget + a fresh visited set; prepared-decl cache
 /// reads ONLY — no reducer, no substitution, no `execute_read`.
 fn prepared_instantiation_key_domain_is_closed(
-    ctx: &dyn crate::resolver_core::ResolverContext,
+    dispatch: &ProjectSemanticDispatch<'_>,
     base: &crate::semantic_query::DeclIdentity,
     args: &[KeyDomainBinding<'_>],
     budget: &mut u32,
 ) -> bool {
+    let ctx = dispatch.ctx;
     let arg_count = args.len();
     // Root the consult of the target decl's file on the active fact tracer
     // — the key-domain verdict depends on the prepared body's content, so
@@ -2795,7 +2804,7 @@ fn prepared_instantiation_key_domain_is_closed(
                         decl_name: Arc::from(src_name.as_str()),
                     };
                     return prepared_instantiation_key_domain_is_closed(
-                        ctx, &resolved, args, budget,
+                        dispatch, &resolved, args, budget,
                     );
                 }
             }
@@ -2850,7 +2859,7 @@ fn prepared_instantiation_key_domain_is_closed(
             return false;
         };
         if !key_domain_type_expr_is_closed(
-            ctx,
+            dispatch,
             &prepared,
             default,
             &bindings,
@@ -2865,7 +2874,7 @@ fn prepared_instantiation_key_domain_is_closed(
     }
 
     key_domain_type_expr_is_closed(
-        ctx,
+        dispatch,
         &prepared,
         &prepared.body,
         &bindings,
@@ -2954,7 +2963,7 @@ fn collect_infer_names<'e>(expr: &'e TypeExpr, sink: &mut FxHashSet<&'e str>) {
 /// through transparent alias hops.
 #[allow(clippy::too_many_arguments)]
 fn key_domain_type_expr_is_closed<'e>(
-    ctx: &dyn crate::resolver_core::ResolverContext,
+    dispatch: &ProjectSemanticDispatch<'_>,
     prepared: &'e verter_semantic::analysis::type_solver::prepared::PreparedTypeDecl,
     body: &'e TypeExpr,
     bindings: &KeyDomainBindings<'e>,
@@ -2962,6 +2971,7 @@ fn key_domain_type_expr_is_closed<'e>(
     budget: &mut u32,
     visited: &mut FxHashSet<(Arc<str>, Arc<str>)>,
 ) -> bool {
+    let ctx = dispatch.ctx;
     if *budget == 0 {
         return false;
     }
@@ -2985,7 +2995,7 @@ fn key_domain_type_expr_is_closed<'e>(
         TypeExpr::Object(obj) => obj.properties.iter().all(|member| match member {
             verter_type_expr::ObjectMember::IndexSignature(sig) => {
                 key_domain_type_expr_is_closed(
-                    ctx,
+                    dispatch,
                     prepared,
                     &sig.key_type,
                     bindings,
@@ -2994,7 +3004,7 @@ fn key_domain_type_expr_is_closed<'e>(
                     visited,
                 ) && (position == OperandPosition::KeyDomain
                     || key_domain_type_expr_is_closed(
-                        ctx,
+                        dispatch,
                         prepared,
                         &sig.value_type,
                         bindings,
@@ -3006,7 +3016,7 @@ fn key_domain_type_expr_is_closed<'e>(
             verter_type_expr::ObjectMember::Property(prop) => {
                 position == OperandPosition::KeyDomain
                     || key_domain_type_expr_is_closed(
-                        ctx,
+                        dispatch,
                         prepared,
                         &prop.ty,
                         bindings,
@@ -3018,7 +3028,7 @@ fn key_domain_type_expr_is_closed<'e>(
             verter_type_expr::ObjectMember::Method(method) => {
                 position == OperandPosition::KeyDomain
                     || function_expr_value_is_closed(
-                        ctx,
+                        dispatch,
                         prepared,
                         &method.function,
                         bindings,
@@ -3030,12 +3040,12 @@ fn key_domain_type_expr_is_closed<'e>(
             | verter_type_expr::ObjectMember::ConstructSignature(function) => {
                 position == OperandPosition::KeyDomain
                     || function_expr_value_is_closed(
-                        ctx, prepared, function, bindings, budget, visited,
+                        dispatch, prepared, function, bindings, budget, visited,
                     )
             }
         }),
         TypeExpr::Parenthesized(inner) | TypeExpr::Rest(inner) => key_domain_type_expr_is_closed(
-            ctx, prepared, inner, bindings, position, budget, visited,
+            dispatch, prepared, inner, bindings, position, budget, visited,
         ),
         // Tuple/array ELEMENTS are VALUE positions: the KEY domain (the
         // indices / the Array-class signature surface) is fixed
@@ -3046,7 +3056,7 @@ fn key_domain_type_expr_is_closed<'e>(
         TypeExpr::Array { element, .. } => {
             position == OperandPosition::KeyDomain
                 || key_domain_type_expr_is_closed(
-                    ctx,
+                    dispatch,
                     prepared,
                     element,
                     bindings,
@@ -3058,7 +3068,9 @@ fn key_domain_type_expr_is_closed<'e>(
         // Composites close iff every arm closes (a heritage `Intersection`,
         // a finite union source, a key-literal union argument).
         TypeExpr::Union(arms) | TypeExpr::Intersection(arms) => arms.iter().all(|arm| {
-            key_domain_type_expr_is_closed(ctx, prepared, arm, bindings, position, budget, visited)
+            key_domain_type_expr_is_closed(
+                dispatch, prepared, arm, bindings, position, budget, visited,
+            )
         }),
         // A tuple's index KEY domain is fixed by its arity — EXCEPT a
         // `rest` element (`[string, ...T]`), whose arity contribution
@@ -3072,7 +3084,7 @@ fn key_domain_type_expr_is_closed<'e>(
             if position == OperandPosition::KeyDomain {
                 elements.iter().filter(|e| e.rest).all(|e| {
                     key_domain_type_expr_is_closed(
-                        ctx,
+                        dispatch,
                         prepared,
                         &e.ty,
                         bindings,
@@ -3084,7 +3096,7 @@ fn key_domain_type_expr_is_closed<'e>(
             } else {
                 elements.iter().all(|e| {
                     key_domain_type_expr_is_closed(
-                        ctx,
+                        dispatch,
                         prepared,
                         &e.ty,
                         bindings,
@@ -3102,7 +3114,9 @@ fn key_domain_type_expr_is_closed<'e>(
         // return type must close.
         TypeExpr::Function(function) | TypeExpr::ConstructorType(function) => {
             position == OperandPosition::ValueSensitive
-                && function_expr_value_is_closed(ctx, prepared, function, bindings, budget, visited)
+                && function_expr_value_is_closed(
+                    dispatch, prepared, function, bindings, budget, visited,
+                )
         }
         // A first-class type-parameter reference is a LEAF type variable.
         // Bound to a verified-closed arg/default/binder it is closed (it
@@ -3120,7 +3134,9 @@ fn key_domain_type_expr_is_closed<'e>(
         // key space, CLOSED; an interpolant reaching an OPEN param keeps
         // the produced keys undecidable.
         TypeExpr::TemplateLiteral { expressions, .. } => expressions.iter().all(|e| {
-            key_domain_type_expr_is_closed(ctx, prepared, e, bindings, position, budget, visited)
+            key_domain_type_expr_is_closed(
+                dispatch, prepared, e, bindings, position, budget, visited,
+            )
         }),
         TypeExpr::Ref {
             name,
@@ -3141,7 +3157,7 @@ fn key_domain_type_expr_is_closed<'e>(
                 }
                 return match prepared.name_resolution.get(name.as_ref()) {
                     Some(target) => prepared_decl_body_is_closed(
-                        ctx,
+                        dispatch,
                         &target.canonical_id,
                         &target.symbol_name,
                         budget,
@@ -3186,7 +3202,7 @@ fn key_domain_type_expr_is_closed<'e>(
                 .iter()
                 .map(|a| {
                     if key_domain_type_expr_is_closed(
-                        ctx, prepared, a, bindings, position, budget, visited,
+                        dispatch, prepared, a, bindings, position, budget, visited,
                     ) {
                         normalise_closed_arg_binding(ctx, prepared, a, bindings)
                     } else {
@@ -3204,6 +3220,19 @@ fn key_domain_type_expr_is_closed<'e>(
                     )
                     .is_some();
             }
+            if position == OperandPosition::NameRemap
+                && !arg_bindings.iter().any(|binding| binding.is_open())
+            {
+                // `as`-REMAP role: a CONCRETE (all-arguments-closed)
+                // instantiation is taken CLOSED without a finiteness proof —
+                // a K-only transform over the BOUND binder (`as Capitalize<K>`)
+                // is decidable per key and the mapped key ENUMERATOR owns it.
+                // Mirrors the node-route [`OpenRole::MappedNameRemap`]
+                // concrete-instantiation shortcut so the two closedness routes
+                // agree on an `as`-remap. (The SOURCE / key space stays at
+                // `KeyDomain` and must still PROVE finiteness below.)
+                return true;
+            }
             match prepared.name_resolution.get(name.as_ref()) {
                 Some(target) => {
                     let target_identity = crate::semantic_query::DeclIdentity {
@@ -3212,7 +3241,7 @@ fn key_domain_type_expr_is_closed<'e>(
                         decl_name: Arc::from(target.symbol_name.as_str()),
                     };
                     prepared_instantiation_key_domain_is_closed(
-                        ctx,
+                        dispatch,
                         &target_identity,
                         &arg_bindings,
                         budget,
@@ -3260,8 +3289,9 @@ fn key_domain_type_expr_is_closed<'e>(
                     .entry(infer_name)
                     .or_insert(KeyDomainBinding::ClosedAbstract);
             }
-            let (mut selection, infer) =
-                type_expr_conditional_branch_selection(ctx, prepared, check, extends, bindings);
+            let (mut selection, infer) = type_expr_conditional_branch_selection(
+                dispatch, prepared, check, extends, bindings,
+            );
             match infer {
                 Some(super::InferPatternSelection::BareInfer { name }) => {
                     // TRUE selected with `X := check` — bind the selected
@@ -3273,7 +3303,7 @@ fn key_domain_type_expr_is_closed<'e>(
                         infer_names.iter().copied().find(|n| *n == name.as_ref())
                     {
                         let check_binding = if key_domain_type_expr_is_closed(
-                            ctx,
+                            dispatch,
                             prepared,
                             check,
                             bindings,
@@ -3302,7 +3332,7 @@ fn key_domain_type_expr_is_closed<'e>(
             }
             match selection {
                 super::ConditionalBranchSelection::True => key_domain_type_expr_is_closed(
-                    ctx,
+                    dispatch,
                     prepared,
                     true_type,
                     &branch_bindings,
@@ -3311,7 +3341,7 @@ fn key_domain_type_expr_is_closed<'e>(
                     visited,
                 ),
                 super::ConditionalBranchSelection::False => key_domain_type_expr_is_closed(
-                    ctx,
+                    dispatch,
                     prepared,
                     false_type,
                     &branch_bindings,
@@ -3321,7 +3351,7 @@ fn key_domain_type_expr_is_closed<'e>(
                 ),
                 super::ConditionalBranchSelection::Deferred => {
                     key_domain_type_expr_is_closed(
-                        ctx,
+                        dispatch,
                         prepared,
                         check,
                         bindings,
@@ -3329,7 +3359,7 @@ fn key_domain_type_expr_is_closed<'e>(
                         budget,
                         visited,
                     ) && key_domain_type_expr_is_closed(
-                        ctx,
+                        dispatch,
                         prepared,
                         extends,
                         bindings,
@@ -3337,7 +3367,7 @@ fn key_domain_type_expr_is_closed<'e>(
                         budget,
                         visited,
                     ) && key_domain_type_expr_is_closed(
-                        ctx,
+                        dispatch,
                         prepared,
                         true_type,
                         &branch_bindings,
@@ -3345,7 +3375,7 @@ fn key_domain_type_expr_is_closed<'e>(
                         budget,
                         visited,
                     ) && key_domain_type_expr_is_closed(
-                        ctx,
+                        dispatch,
                         prepared,
                         false_type,
                         &branch_bindings,
@@ -3362,7 +3392,7 @@ fn key_domain_type_expr_is_closed<'e>(
         // access. The INDEX stays a key/keyspace question.
         TypeExpr::IndexedAccess { object, index } => {
             key_domain_type_expr_is_closed(
-                ctx,
+                dispatch,
                 prepared,
                 object,
                 bindings,
@@ -3370,7 +3400,7 @@ fn key_domain_type_expr_is_closed<'e>(
                 budget,
                 visited,
             ) && key_domain_type_expr_is_closed(
-                ctx,
+                dispatch,
                 prepared,
                 index,
                 bindings,
@@ -3380,7 +3410,7 @@ fn key_domain_type_expr_is_closed<'e>(
             )
         }
         TypeExpr::KeyOf(inner) => key_domain_type_expr_is_closed(
-            ctx,
+            dispatch,
             prepared,
             inner,
             bindings,
@@ -3416,7 +3446,7 @@ fn key_domain_type_expr_is_closed<'e>(
                 .entry(parameter.as_str())
                 .or_insert(KeyDomainBinding::ClosedAbstract);
             key_domain_type_expr_is_closed(
-                ctx,
+                dispatch,
                 prepared,
                 source,
                 &mapped_bindings,
@@ -3424,18 +3454,24 @@ fn key_domain_type_expr_is_closed<'e>(
                 budget,
                 visited,
             ) && name_type.as_deref().is_none_or(|n| {
+                // The `as`-clause name remap is KEY-PRODUCTION judged under the
+                // remap policy (`NameRemap`): a K-only transform over the bound
+                // binder stays CLOSED, mirroring the node-route
+                // `OpenRole::MappedNameRemap`. The SOURCE above stays at
+                // `KeyDomain` and must PROVE finiteness — so a value-producing
+                // builtin source (`ReturnType<…>`) still opens the mapped type.
                 key_domain_type_expr_is_closed(
-                    ctx,
+                    dispatch,
                     prepared,
                     n,
                     &mapped_bindings,
-                    OperandPosition::KeyDomain,
+                    OperandPosition::NameRemap,
                     budget,
                     visited,
                 )
             }) && (position == OperandPosition::KeyDomain
                 || key_domain_type_expr_is_closed(
-                    ctx,
+                    dispatch,
                     prepared,
                     value,
                     &mapped_bindings,
@@ -3447,10 +3483,161 @@ fn key_domain_type_expr_is_closed<'e>(
         // `infer T` is a conditional-inference binding placeholder, not an
         // unbound generic — it does not leave an open key space.
         TypeExpr::Infer { .. } => true,
+        // An `import("m").Q<args>` carrier in a prepared decl body (a mapped
+        // SOURCE / key space / `as`-remap such as
+        // `{ [K in keyof import("./dep").Foo<T>]: V }`). The TypeExpr layer has
+        // no `import`-head resolver, but the NODE route does
+        // (`resolve_carrier_subject_node` → `resolve_import_type_head`). Route
+        // this through the SAME node-route classifier so the prepared-decl /
+        // TypeExpr route cannot diverge from the node route: lower the carrier
+        // (binding-aware, in the prepared decl's file scope) to a
+        // `SemanticNodeData::ImportType` node and classify it with the node-route
+        // `OpenWalk` of the position's role. A carrier that does not resolve
+        // stays not-provably-closed (the question-correct undecidable answer the
+        // node route also produces).
+        TypeExpr::ImportType { .. } => import_type_expr_key_domain_is_closed(
+            dispatch, prepared, body, bindings, position, budget,
+        ),
         // `typeof x`, recursive refs, function/constructor types, and any
         // shape not modelled above stay conservatively not-provably-closed.
         _ => false,
     }
+}
+
+/// Node-route parity for a `TypeExpr::ImportType` carrier reached on the
+/// prepared-decl TypeExpr closedness route (a mapped SOURCE / key space /
+/// `as`-remap such as `{ [K in keyof import("./dep").Foo<T>]: V }`).
+///
+/// The TypeExpr layer has no `import`-head resolver, so without this an
+/// `import(...)` source carrier-stopped here even when the imported decl is a
+/// fixed-key type — while the NODE route (`OpenWalk`'s `ImportType` arm)
+/// resolves it through `resolve_carrier_subject_node`. To keep the two routes
+/// from diverging, lower the carrier to a `SemanticNodeData::ImportType` node
+/// (binding-aware, interned in the prepared decl's file scope) and classify it
+/// with the node-route `OpenWalk` of the position's role — the same resolver
+/// and the same per-argument key-domain semantics.
+///
+/// The lowering env maps the current key-domain `bindings`' closed entries to
+/// their identities (`ClosedNode` → the bound node; `ClosedExpr` → the
+/// environment-free lowering of the bound expr), so an `import(...).Foo<T>`
+/// whose `T` is bound to a closed arg lowers `T` to that arg. EVERY closed
+/// binding name (including a `ClosedAbstract` mapper binder such as the `[K in
+/// …]` parameter on the `as`-remap path) is then BOUND in the node walk —
+/// closed binding stays unmapped (it lowers to the free type parameter the
+/// node route's per-argument rule then judges). A carrier that does not resolve
+/// stays not-provably-closed (the node route's undecidable answer).
+///
+/// SCOPE: this bridge handles an import-type carrier in a SOURCE / key-space
+/// position (`OperandPosition::KeyDomain` / `ValueSensitive`) — the `as`-remap
+/// position (`OperandPosition::NameRemap`) is handled CONSERVATIVELY (returns
+/// not-provably-closed). A K-only `as import(...).Remap<K>` remap depends on
+/// the mapper binder `K`'s NODE identity surviving the re-lowering of the
+/// carrier here, which this TypeExpr→node bridge cannot guarantee (the
+/// separately re-lowered binder node need not equal the binder node inside the
+/// carrier's args); rather than risk a wrong verdict, the remap position
+/// carrier-stops (L1-safe, never wrong-closes), which is NO weaker than the
+/// pre-bridge behaviour where ALL import-type carriers carrier-stopped. A
+/// node-identity-preserving import-type remap classifier is a tracked residual.
+///
+/// `budget` is the ACTIVE TypeExpr walk budget — threaded INTO the node walk
+/// (seed) and written back (remaining) so a recursive / mutual
+/// `import("./self").Use<T>` carrier monotonically consumes the SAME budget
+/// across the bridge and terminates bounded (a fresh budget here would let the
+/// bridge re-enter unboundedly).
+fn import_type_expr_key_domain_is_closed(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    prepared: &verter_semantic::analysis::type_solver::prepared::PreparedTypeDecl,
+    import_type_expr: &TypeExpr,
+    bindings: &KeyDomainBindings<'_>,
+    position: OperandPosition,
+    budget: &mut u32,
+) -> bool {
+    if *budget == 0 {
+        return false;
+    }
+    *budget -= 1;
+    // The `as`-remap position needs the mapper binder's node identity to survive
+    // this TypeExpr→node re-lowering, which the bridge cannot guarantee — stay
+    // conservative (carrier-stop), L1-safe and no weaker than the pre-bridge
+    // all-import-types-carrier-stop behaviour.
+    if position == OperandPosition::NameRemap {
+        return false;
+    }
+    // The carrier's file scope is the prepared decl's owning file — the
+    // `whole_hash` is re-sourced by the head resolver from the live indexed
+    // state, so a default here is sound (the node-route head resolution keys on
+    // the canonical id + specifier, not the scope hash).
+    let scope = crate::semantic_query::NodeScopeId::File {
+        canonical_id: Arc::from(prepared.root_identity.canonical_id.as_str()),
+        whole_hash: crate::semantic_query::HashValue::default(),
+        local_scope: None,
+    };
+    // Env: every CLOSED-with-identity binding maps its name to its node, so the
+    // carrier's type-args lower to the bound identities.
+    let mut env: FxHashMap<String, SemanticNodeId> = FxHashMap::default();
+    for (name, binding) in bindings.iter() {
+        match binding {
+            KeyDomainBinding::ClosedNode(id) => {
+                env.insert((*name).to_string(), *id);
+            }
+            KeyDomainBinding::ClosedExpr(expr) => {
+                if let Some(id) = environment_free_operand_node(dispatch.ctx, expr) {
+                    env.insert((*name).to_string(), id);
+                }
+            }
+            KeyDomainBinding::Open | KeyDomainBinding::ClosedAbstract => {}
+        }
+    }
+    let shadowing = crate::resolver_core::scope_shadowing::ScopeShadowing::empty();
+    let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
+    let carrier_node = dispatch.shallow_lower_type_expr_with_context(
+        import_type_expr,
+        &env,
+        &scope,
+        &prepared.name_resolution,
+        None,
+        &shadowing,
+        &mut substitutions,
+        ProjectionReductionContext::structural_transit(),
+    );
+    // Bound-param set for the node walk: every CLOSED binding name (any closed
+    // kind, incl. `ClosedAbstract` mapper binders) must be treated as BOUND so
+    // the node route does not open on a `TypeParam` that the TypeExpr layer
+    // already considers closed. Lower each as a bare `Ref` to recover its
+    // `TypeParam` node identity under the same env/scope.
+    let mut bound_params: FxHashSet<SemanticNodeId> = FxHashSet::default();
+    for (name, binding) in bindings.iter() {
+        if matches!(binding, KeyDomainBinding::Open) {
+            continue;
+        }
+        let ref_expr = TypeExpr::Ref {
+            name: Arc::from(*name),
+            type_arguments: Arc::from(Vec::new().into_boxed_slice()),
+        };
+        let mut ref_subs: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
+        let bound_node = dispatch.shallow_lower_type_expr_with_context(
+            &ref_expr,
+            &env,
+            &scope,
+            &prepared.name_resolution,
+            None,
+            &shadowing,
+            &mut ref_subs,
+            ProjectionReductionContext::structural_transit(),
+        );
+        bound_params.insert(bound_node);
+    }
+    // Classify the lowered carrier node with the SOURCE / key-space role
+    // (`KeyDomainProof`, the finiteness-proving policy) — the `NameRemap`
+    // position returned conservatively above. Seed the walk budget from the
+    // active TypeExpr budget and write the remainder back so the bridge stays
+    // globally bounded.
+    let mut walk = OpenWalk::for_role(dispatch, OpenRole::KeyDomainProof, None);
+    walk.bound_params = bound_params;
+    walk.budget = *budget;
+    let open = walk.node_is_open_at(dispatch.ctx, carrier_node, position);
+    *budget = walk.budget;
+    !open
 }
 
 /// VALUE-closedness of a function signature — the `ValueSensitive`
@@ -3462,7 +3649,7 @@ fn key_domain_type_expr_is_closed<'e>(
 /// be the outer open generic), bound `or_insert` so an outer binding of
 /// the same name keeps the conservative outer verdict.
 fn function_expr_value_is_closed<'e>(
-    ctx: &dyn crate::resolver_core::ResolverContext,
+    dispatch: &ProjectSemanticDispatch<'_>,
     prepared: &'e verter_semantic::analysis::type_solver::prepared::PreparedTypeDecl,
     function: &'e verter_type_expr::FunctionExpr,
     bindings: &KeyDomainBindings<'e>,
@@ -3477,7 +3664,7 @@ fn function_expr_value_is_closed<'e>(
     }
     function.parameters.iter().all(|param| {
         key_domain_type_expr_is_closed(
-            ctx,
+            dispatch,
             prepared,
             &param.ty,
             &fn_bindings,
@@ -3487,7 +3674,7 @@ fn function_expr_value_is_closed<'e>(
         )
     }) && function.return_type.as_deref().is_none_or(|ret| {
         key_domain_type_expr_is_closed(
-            ctx,
+            dispatch,
             prepared,
             ret,
             &fn_bindings,
@@ -3637,7 +3824,7 @@ fn enumeration_domain_arg_index_for_name(decl_name: &str) -> Option<usize> {
 /// to this carrier-stop), preserving userland operator-helper and
 /// nominal-generic behaviour.
 pub(super) fn utility_enumeration_domain_is_open_or_unknown(
-    ctx: &dyn crate::resolver_core::ResolverContext,
+    dispatch: &ProjectSemanticDispatch<'_>,
     base: &crate::semantic_query::DeclIdentity,
     args: &[SemanticNodeId],
 ) -> bool {
@@ -3649,7 +3836,7 @@ pub(super) fn utility_enumeration_domain_is_open_or_unknown(
         // structurally undecidable — treat the domain as open.
         return true;
     };
-    OpenWalk::enumeration_domain().node_is_open(ctx, domain)
+    OpenWalk::enumeration_domain(dispatch).node_is_open(dispatch.ctx, domain)
 }
 
 /// Shallow-By-Default carrier-stop predicate (L1), MAPPED-TYPE family.
@@ -3681,18 +3868,19 @@ pub(super) fn utility_enumeration_domain_is_open_or_unknown(
 /// path-precisely. Pure typed-IR inspection — no reduction, no
 /// substitution, no string matching.
 pub(crate) fn mapped_type_is_open_or_unknown(
-    ctx: &dyn crate::resolver_core::ResolverContext,
+    dispatch: &ProjectSemanticDispatch<'_>,
     source: SemanticNodeId,
     mapper: &crate::semantic_query::MapperKey,
 ) -> bool {
-    if mapped_type_key_domain_is_open_or_unknown(ctx, source, mapper) {
+    if mapped_type_key_domain_is_open_or_unknown(dispatch, source, mapper) {
         return true;
     }
     // VALUE BODY: does the produced value still depend on an unbound
     // OUTER generic? The bound mapper binder `K` is closed; an intrinsic
     // / helper over `K` (`Capitalize<K>`) or a resolution miss does NOT
     // open it (only an outer-generic argument does).
-    OpenWalk::mapped_value_body(mapper.parameter_node).node_is_open(ctx, mapper.value_expr)
+    OpenWalk::mapped_value_body(dispatch, mapper.parameter_node)
+        .node_is_open(dispatch.ctx, mapper.value_expr)
 }
 
 /// Lowering-entrance builtin argument openness: does `node` (a lowered
@@ -3712,10 +3900,10 @@ pub(crate) fn mapped_type_is_open_or_unknown(
 /// per-key realization. Closed-argument builtins keep the eager
 /// execute, byte-for-byte.
 pub(crate) fn builtin_lowering_argument_is_open(
-    ctx: &dyn crate::resolver_core::ResolverContext,
+    dispatch: &ProjectSemanticDispatch<'_>,
     node: SemanticNodeId,
 ) -> bool {
-    OpenWalk::lowering_value_argument().node_is_open(ctx, node)
+    OpenWalk::lowering_value_argument(dispatch).node_is_open(dispatch.ctx, node)
 }
 
 /// KEY-PRODUCTION axis of [`mapped_type_is_open_or_unknown`]: is the
@@ -3732,170 +3920,252 @@ pub(crate) fn builtin_lowering_argument_is_open(
 /// the operator MATERIALISATION routes (the full predicate above), not
 /// the key enumeration.
 pub(crate) fn mapped_type_key_domain_is_open_or_unknown(
-    ctx: &dyn crate::resolver_core::ResolverContext,
+    dispatch: &ProjectSemanticDispatch<'_>,
     source: SemanticNodeId,
     mapper: &crate::semantic_query::MapperKey,
 ) -> bool {
-    // KEY DOMAIN: does the produced KEY SPACE depend on an unbound OUTER
-    // generic (making `keyof source` non-enumerable — the storm)? A mapped
-    // source / key space with NO outer generic is always enumerable at
-    // build time — a closed builtin-utility instantiation
+    // KEY DOMAIN: is the produced KEY SPACE open or undecidable (making
+    // `keyof source` non-enumerable — the storm)? A mapped source / key
+    // space with a CLOSED key domain is always enumerable at build time —
+    // a finite object surface, a closed builtin-utility instantiation
     // (`Omit<MenuProps, …>`), a closed conditional, a finite literal
     // union — so it must NOT carrier-stop (`Partial`/`Required`/`Readonly`
     // over a closed utility source still enumerate). The key-domain walk
-    // therefore asks the narrow "reaches outer generic" question, does
-    // NOT descend the source's member VALUES (a member value reaching `T`
-    // does not change WHICH keys exist: `{ [K in keyof {a: Foo<T>}]: V }`
-    // still has the finite key `a`), and judges an instantiation in the
-    // domain by the SAME per-argument key-domain closure rule as
-    // `Pick`/`Omit` (`prepared_instantiation_key_domain_is_closed`): an
-    // open argument confined to member VALUE positions of a fixed-key body
-    // keeps the key domain CLOSED, so `{ [K in keyof Foo<T>]: string }`
-    // over `interface Foo<T> { label?: string; items?: T }` still
-    // enumerates `label` / `items`.
-    if OpenWalk::mapped_key_domain(mapper.parameter_node).node_is_open(ctx, source) {
+    // asks the key-space-finiteness question (so an unresolved carrier
+    // head / a resolution miss / a recursive ref is OPEN — the keys cannot
+    // be enumerated), does NOT descend the source's member VALUES (a
+    // member value reaching `T` does not change WHICH keys exist: `{ [K in
+    // keyof {a: Foo<T>}]: V }` still has the finite key `a`), and judges a
+    // resolved instantiation in the domain by the SAME per-argument
+    // key-domain closure rule as `Pick`/`Omit`
+    // (`prepared_instantiation_key_domain_is_closed`): an open argument
+    // confined to member VALUE positions of a fixed-key body keeps the key
+    // domain CLOSED, so `{ [K in keyof Foo<T>]: string }` over `interface
+    // Foo<T> { label?: string; items?: T }` still enumerates `label` /
+    // `items`.
+    //
+    // The three key-domain operands split BY ROLE. The SOURCE and the key
+    // SPACE are [`OpenRole::KeyDomainProof`] — they MUST PROVE finiteness (a
+    // value-producing builtin source such as `ReturnType<…>` makes no
+    // closed-key claim and stays OPEN). The `as`-REMAP is
+    // [`OpenRole::MappedNameRemap`] — a K-only transform over the bound
+    // binder (`as keyof Foo<T>` over a fixed-key `Foo`, `as Capitalize<K>`)
+    // is decidable per key and stays CLOSED, while a direct outer-generic
+    // remap (`as T`) or an open-argument instantiation stays OPEN. The role
+    // is part of every verdict identity (`memo`/`in_flight` are role-keyed),
+    // so the proof and remap walks cannot alias a verdict; the proof walk's
+    // remaining budget is threaded into the remap walk so the whole
+    // classification stays globally bounded.
+    let mut proof = OpenWalk::mapped_source_keyspace(dispatch, mapper.parameter_node);
+    if proof.node_is_open(dispatch.ctx, source) {
         return true;
     }
-    if OpenWalk::mapped_key_domain(mapper.parameter_node).node_is_open(ctx, mapper.key_space) {
+    if proof.node_is_open(dispatch.ctx, mapper.key_space) {
         return true;
     }
-    // NAME REMAP: KEY-PRODUCTION, not a value body — the remap's result
-    // IS the produced key set, so it is judged by the binder-bound
-    // KEY-DOMAIN policy (the same per-argument rule as the source /
-    // keyspace, matching the TypeExpr route's `name_type` arm):
-    // `as keyof Foo<T>` over a fixed-key `Foo` (T value-confined) stays
-    // CLOSED and enumerates; a direct outer-generic remap (`as T`) or a
-    // value-sensitive conditional operand inside the remap stays OPEN.
     if let Some(remap) = mapper.name_remap {
-        if OpenWalk::mapped_key_domain(mapper.parameter_node).node_is_open(ctx, remap) {
+        let mut remap_walk = OpenWalk::mapped_name_remap(dispatch, mapper.parameter_node);
+        remap_walk.budget = proof.budget;
+        if remap_walk.node_is_open(dispatch.ctx, remap) {
             return true;
         }
     }
     false
 }
 
-/// Walk policy distinguishing the two openness predicates that share the
-/// bounded typed-IR open-structure walker
-/// ([`OpenWalk::node_is_open`]).
+/// The ROLE an [`OpenWalk`] plays — the SINGLE policy axis. Every other
+/// policy attribute (the [`OpenQuestion`], whether finite value surfaces
+/// are descended, how an `InstantiationRef` is judged, and whether a
+/// concrete no-open-argument instantiation is taken closed without a
+/// finiteness proof) is DERIVED from the role, so an invalid combination
+/// (e.g. the key-domain concrete-instantiation shortcut on a source that
+/// must prove finiteness) cannot be expressed.
 ///
-/// The enumeration-domain walk (`Pick`/`Omit` source key space) and the
-/// mapped value-body walk differ in three respects, captured here so the
-/// recursive walker stays a SINGLE implementation:
+/// The three roles are the three policies the walker actually runs:
 ///
-/// - `bound_params`: `TypeParam` node ids treated as BOUND (closed) for
-///   this walk. The mapped value-body walk binds the `[K in …]` mapper
-///   parameter; the enumeration-domain walk binds nothing.
-/// - `descend_value_surfaces`: whether finite value surfaces (`Object`,
-///   `Function`, `Array`, `Tuple`) are DESCENDED to find an unbound
-///   generic nested inside them. The enumeration-domain walk treats them
-///   as closed leaves (a function-typed property does not open a KEY
-///   domain); the mapped value-body walk descends (an outer `T` reached
-///   through a function parameter / object member still opens the
-///   produced value).
-/// - `outer_generic_only`: the openness QUESTION the walk answers. The
-///   enumeration-domain walk asks "is the KEY SPACE undecidable / not
-///   provably finite" — so a resolution miss (`Opaque`), an open-bodied
-///   alias chain (`DeclRef`), or a not-provably-closing instantiation all
-///   count as open (conservative; the keys cannot be enumerated). The
-///   mapped VALUE-body walk asks the NARROWER "does the value reach an
-///   UNBOUND OUTER generic (a `TypeParam` ∉ `bound_params`)" — a
-///   resolution miss, a `DeclRef` (declarations cannot reference the
-///   mapper's outer generic), or an intrinsic / helper instantiation over
-///   the BOUND binder `K` (`Capitalize<K>`, `MixedVis[K]`) does NOT
-///   propagate the outer generic and is CLOSED; only a `TypeParam` ∉
-///   `bound_params` reached directly OR through an instantiation /
-///   operator ARGUMENT opens it. This keeps the carrier-stop from
-///   over-firing on `Partial`/`Required`/`Readonly` / key-remap reducers
-///   (which are decidable per-key once `K` is bound) while still
-///   detecting the `ChatMessagesSlots<T>` / `TableSlots<T>` outer-generic
-///   value bodies.
-/// - `per_argument_key_domain`: how an `InstantiationRef` is judged. The
-///   KEY-DOMAIN walks (`Pick`/`Omit` enumeration domain AND the mapped
-///   source / key space) judge an instantiation by the per-argument
-///   key-domain closure rule (`prepared_instantiation_key_domain_is_closed`
-///   over the per-argument binding vector): an open argument confined to
-///   member VALUE positions of a fixed-key body does NOT open the produced
-///   key set. The mapped VALUE-body walk instead asks only "does an
-///   ARGUMENT reach the outer generic" (any open argument opens) — the
-///   target body is never consulted there.
-/// - `position`: the CURRENT [`OperandPosition`]. Every walk starts at
-///   `KeyDomain`; the `Conditional` arm enters its check/extends
-///   operands and the `IndexedAccess` arm enters its object operand at
-///   `ValueSensitive` (the enclosing operator consumes those operands'
-///   VALUES — an instantiation there is OPEN if ANY argument is open,
-///   regardless of `per_argument_key_domain`); conditional BRANCHES and
-///   the indexed-access INDEX stay in the surrounding position.
+/// - [`OpenRole::KeyDomainProof`] — the `Pick`/`Omit` enumeration domain
+///   AND the mapped SOURCE / key SPACE. It asks the key-space-finiteness
+///   question ([`OpenQuestion::KeyDomain`]) and MUST PROVE finiteness: a
+///   concrete no-open-argument instantiation is NOT taken closed by
+///   shortcut — it falls through to the builtin registry
+///   (`builtin_utility_key_domain_is_closed`) / prepared-decl proof, so a
+///   value-producing builtin (`ReturnType`, `InstanceType`, the string
+///   intrinsics, …) that makes NO closed-key claim stays OPEN. An
+///   instantiation is judged per-argument
+///   (`per_argument_key_domain = true`): an open argument confined to
+///   member VALUE positions of a fixed-key body keeps the key domain
+///   CLOSED. Finite value surfaces are closed leaves
+///   (`descend_value_surfaces = false`).
+/// - [`OpenRole::MappedNameRemap`] — the mapped `as`-clause name transform.
+///   It also asks [`OpenQuestion::KeyDomain`] and judges per-argument, but
+///   a CONCRETE no-open-argument instantiation IS taken closed without a
+///   separate finiteness proof: the produced key set is concrete at build
+///   time and the mapped key ENUMERATOR owns it, so a K-only transform over
+///   the BOUND binder `K` (`as `on${Capitalize<K>}``, `as Capitalize<K>`)
+///   is decidable per key. (The per-key remap classifier still validates
+///   the produced names downstream.) Finite value surfaces are closed
+///   leaves.
+/// - [`OpenRole::OuterGenericValue`] — the mapped VALUE body AND the
+///   lowering-entrance builtin-argument gate. It asks the NARROWER
+///   [`OpenQuestion::OuterGenericReachability`] ("does this reach an unbound
+///   OUTER generic?"), judges an instantiation open iff an ARGUMENT is open
+///   (`per_argument_key_domain = false`), and DESCENDS finite value surfaces
+///   (`descend_value_surfaces = true`) to find an outer generic nested in a
+///   member value / parameter / element.
 ///
-/// `Conditional` nodes are TRI-STATE through the shared branch-selection
-/// oracle ([`ProjectSemanticDispatch::conditional_branch_selection`] —
-/// the same `shallow_relation_check` → `relate_nodes` path
-/// `build_conditional` selects branches with): a SELECTED branch is the
-/// conditional's surface and is classified ALONE (an open losing branch
-/// is dead); a Deferred selection classifies the operands
-/// value-sensitively plus BOTH branches.
+/// The role is part of EVERY verdict identity: both `memo` and `in_flight`
+/// are keyed `(SemanticNodeId, OperandPosition, OpenRole)`, so a node
+/// reached under two different roles cannot alias one role's cached verdict
+/// (or one role's in-flight back-edge) to the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum OpenRole {
+    /// `Pick`/`Omit` enumeration domain + mapped source / key space — MUST
+    /// prove finiteness (no concrete-instantiation shortcut).
+    KeyDomainProof,
+    /// Mapped `as` name transform — K-only transforms over the bound binder
+    /// are taken closed (the concrete-instantiation shortcut applies).
+    MappedNameRemap,
+    /// Mapped value body + lowering-entrance builtin argument —
+    /// outer-generic-reachability question, value surfaces descended.
+    OuterGenericValue,
+}
+
+impl OpenRole {
+    /// The openness QUESTION this role asks (the undecidable-answer
+    /// direction). Key-domain roles ask [`OpenQuestion::KeyDomain`]; the
+    /// value role asks [`OpenQuestion::OuterGenericReachability`].
+    fn question(self) -> OpenQuestion {
+        match self {
+            OpenRole::KeyDomainProof | OpenRole::MappedNameRemap => OpenQuestion::KeyDomain,
+            OpenRole::OuterGenericValue => OpenQuestion::OuterGenericReachability,
+        }
+    }
+
+    /// Whether finite value surfaces (`Object`/`Function`/`Array`/`Tuple`)
+    /// are DESCENDED to find a nested outer generic. Only the value role
+    /// descends; the key-domain roles treat them as closed leaves (a member
+    /// value does not change WHICH keys a surface exposes).
+    fn descend_value_surfaces(self) -> bool {
+        matches!(self, OpenRole::OuterGenericValue)
+    }
+
+    /// Whether an `InstantiationRef` is judged by the per-argument
+    /// key-domain closure rule (`true` — key-domain roles) or simply
+    /// "does any argument reach the outer generic" (`false` — the value
+    /// role).
+    fn per_argument_key_domain(self) -> bool {
+        matches!(self, OpenRole::KeyDomainProof | OpenRole::MappedNameRemap)
+    }
+
+    /// Whether a CONCRETE (no-open-argument) instantiation in a per-argument
+    /// key-domain position is taken CLOSED WITHOUT a separate finiteness
+    /// proof. ONLY the `as`-remap role takes this shortcut: the produced key
+    /// set is concrete at build time and the mapped key enumerator owns it
+    /// (a `Capitalize<K>` over the bound binder is decidable per key). The
+    /// `KeyDomainProof` role must PROVE finiteness — it falls through to the
+    /// builtin registry / prepared-decl proof, which is what keeps a
+    /// value-producing builtin source (`ReturnType<…>`) OPEN.
+    fn concrete_no_open_arg_is_closed(self) -> bool {
+        matches!(self, OpenRole::MappedNameRemap)
+    }
+}
+
+/// The openness QUESTION an [`OpenWalk`] answers — the undecidable-answer
+/// direction, DERIVED from the walk's [`OpenRole`].
 ///
-/// Verdicts are MEMOIZED per `(node, position)` (`memo`): the
-/// `InstantiationRef` per-argument collect is non-short-circuiting, and
-/// the graph is hash-consed, so a repeated open node
-/// (`Pick<Foo<T, T>, K>` — both args are the SAME `TypeParam` id) must
-/// return its real verdict on revisit, not a "no new signal" `false`
-/// that would corrupt the per-argument vector into a false-CLOSED; the
-/// position key keeps a node reached both as a key-domain operand and as
-/// a value-sensitive operand on two independent verdicts. Only an
-/// IN-FLIGHT back-edge (`in_flight`) — a genuine cycle on the current
-/// walk frontier — is closed-for-revisit, and that answer is never
-/// memoized.
-struct OpenWalk {
+/// The two variants are the two undecidable-answer directions the roles
+/// need:
+///
+/// - [`OpenQuestion::KeyDomain`] — "is the KEY SPACE undecidable / not
+///   provably finite?" An undecidable node (a resolution miss, a degraded
+///   `Opaque`, an unresolved head, budget exhaustion) is OPEN, because the
+///   keys cannot be enumerated (conservative). This is the
+///   `Pick`/`Omit` enumeration domain AND the mapped source / key space /
+///   `as`-remap policy.
+/// - [`OpenQuestion::OuterGenericReachability`] — "does this reach an
+///   UNBOUND OUTER generic?" An undecidable node carries NO outer generic
+///   (a missing node, an unresolved head, a `DeclRef` whose own type
+///   parameters cannot be the mapper's outer generic), so it is CLOSED for
+///   this question. This is the [`OpenRole::OuterGenericValue`] question.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpenQuestion {
+    /// Key-space-finiteness question (the `KeyDomainProof` /
+    /// `MappedNameRemap` roles).
+    KeyDomain,
+    /// Outer-generic-reachability question (the `OuterGenericValue` role).
+    OuterGenericReachability,
+}
+
+impl OpenQuestion {
+    /// The question-correct answer for an UNDECIDABLE node (a resolution
+    /// miss, a degraded `Opaque`, an unresolved carrier head, or budget
+    /// exhaustion): OPEN for the key-domain question (the keys are not
+    /// provably finite), CLOSED for the outer-generic question (an
+    /// undecidable node carries no outer generic).
+    fn undecidable_is_open(self) -> bool {
+        matches!(self, OpenQuestion::KeyDomain)
+    }
+}
+
+struct OpenWalk<'a> {
+    /// The ACTIVE dispatcher (NOT a freshly-constructed one). The walk
+    /// resolves carrier heads and consults the shared branch-selection
+    /// oracle THROUGH this dispatcher so the dispatcher-local
+    /// `instantiate_active` + `carrier_normalizing` cycle-guard state is
+    /// shared — a freshly-constructed dispatch would lose that state and
+    /// diverge on recursive refs.
+    dispatch: &'a ProjectSemanticDispatch<'a>,
     bound_params: FxHashSet<SemanticNodeId>,
     /// Infer NAMES bound by an enclosing oracle-selected bare-infer
     /// conditional (`X := check` — see the tri-state `Conditional` arm):
     /// an `Infer` reference in the selected branch classifies as its
     /// bound node. Empty outside such a branch.
     bound_infers: FxHashMap<Arc<str>, SemanticNodeId>,
-    descend_value_surfaces: bool,
-    outer_generic_only: bool,
-    per_argument_key_domain: bool,
+    /// The SINGLE policy axis. The [`OpenQuestion`], value-surface descent,
+    /// per-argument key-domain judgement, and the concrete-instantiation
+    /// shortcut are all DERIVED from this role (see [`OpenRole`]) — there
+    /// are no independent policy bools to fall out of sync. The role is also
+    /// part of every verdict identity (it keys both `memo` and `in_flight`).
+    role: OpenRole,
     position: OperandPosition,
     budget: u32,
-    in_flight: FxHashSet<(SemanticNodeId, OperandPosition)>,
-    memo: FxHashMap<(SemanticNodeId, OperandPosition), bool>,
+    in_flight: FxHashSet<OpenMemoKey>,
+    memo: FxHashMap<OpenMemoKey, bool>,
 }
 
-impl OpenWalk {
-    /// Enumeration-domain policy (`Pick`/`Omit` source key space): finite
-    /// value surfaces are closed leaves, no bound mapper binders, and the
-    /// walk asks the "not-provably-finite key space" question
-    /// (`outer_generic_only = false`). Conditionals are tri-state through
-    /// the shared oracle (see [`OpenWalk`]).
-    fn enumeration_domain() -> Self {
-        Self {
-            outer_generic_only: false,
-            bound_params: FxHashSet::default(),
-            bound_infers: FxHashMap::default(),
-            descend_value_surfaces: false,
-            per_argument_key_domain: true,
-            position: OperandPosition::KeyDomain,
-            budget: ENUMERATION_DOMAIN_OPENNESS_NODE_BUDGET,
-            in_flight: FxHashSet::default(),
-            memo: FxHashMap::default(),
-        }
-    }
+/// Verdict identity for an [`OpenWalk`] node visit: the node, the operand
+/// position it was reached at, AND the walk's [`OpenRole`]. The role is
+/// load-bearing in BOTH `memo` and `in_flight`: a node reached under
+/// `KeyDomainProof` and under `MappedNameRemap` has two DIFFERENT verdict
+/// policies, so sharing a key would either alias one role's cached verdict
+/// to the other (memo) or report a cross-role revisit as a fake cycle
+/// (`in_flight`, the closed-for-revisit answer). Both maps use this key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct OpenMemoKey {
+    node: SemanticNodeId,
+    position: OperandPosition,
+    role: OpenRole,
+}
 
-    /// Mapped value-body policy: the bound mapper binder `K` is closed,
-    /// finite value surfaces are descended, and the walk asks the NARROW
-    /// "reaches an unbound outer generic" question (`outer_generic_only =
-    /// true`; an instantiation is open iff an ARGUMENT is open —
-    /// `per_argument_key_domain = false`). Conditionals are tri-state
-    /// through the shared oracle. See [`OpenWalk`].
-    fn mapped_value_body(bound_param: SemanticNodeId) -> Self {
+impl<'a> OpenWalk<'a> {
+    /// Construct an [`OpenWalk`] for `role` with the given bound binder
+    /// (`None` for roles that bind no mapper binder), starting at
+    /// `OperandPosition::KeyDomain` with a fresh memo / in-flight set and
+    /// the full node budget.
+    fn for_role(
+        dispatch: &'a ProjectSemanticDispatch<'a>,
+        role: OpenRole,
+        bound_param: Option<SemanticNodeId>,
+    ) -> Self {
         let mut bound_params = FxHashSet::default();
-        bound_params.insert(bound_param);
+        if let Some(binder) = bound_param {
+            bound_params.insert(binder);
+        }
         Self {
+            dispatch,
             bound_params,
             bound_infers: FxHashMap::default(),
-            descend_value_surfaces: true,
-            outer_generic_only: true,
-            per_argument_key_domain: false,
+            role,
             position: OperandPosition::KeyDomain,
             budget: ENUMERATION_DOMAIN_OPENNESS_NODE_BUDGET,
             in_flight: FxHashSet::default(),
@@ -3903,57 +4173,78 @@ impl OpenWalk {
         }
     }
 
-    /// Builtin lowering-argument policy: asks the NARROW "does this
-    /// ARGUMENT still depend on unsubstituted generic structure"
-    /// question for the lowering-entrance builtin carrier gate. No
-    /// bound binders (every reachable `TypeParam` — including a mapper
-    /// binder whose substitution happens later at a demand point — is
-    /// unbound at lowering time), value surfaces are descended (the
-    /// builtin consumes the argument's VALUES), and an instantiation is
-    /// open iff an argument is open (`per_argument_key_domain =
-    /// false`). Conditionals are tri-state through the shared oracle.
-    fn lowering_value_argument() -> Self {
-        Self {
-            bound_params: FxHashSet::default(),
-            bound_infers: FxHashMap::default(),
-            descend_value_surfaces: true,
-            outer_generic_only: true,
-            per_argument_key_domain: false,
-            position: OperandPosition::KeyDomain,
-            budget: ENUMERATION_DOMAIN_OPENNESS_NODE_BUDGET,
-            in_flight: FxHashSet::default(),
-            memo: FxHashMap::default(),
-        }
+    /// Enumeration-domain policy (`Pick`/`Omit` source key space):
+    /// [`OpenRole::KeyDomainProof`] with no bound mapper binder. Finite
+    /// value surfaces are closed leaves and the walk MUST prove finiteness
+    /// (no concrete-instantiation shortcut). Conditionals are tri-state
+    /// through the shared oracle (see [`OpenWalk`]).
+    fn enumeration_domain(dispatch: &'a ProjectSemanticDispatch<'a>) -> Self {
+        Self::for_role(dispatch, OpenRole::KeyDomainProof, None)
     }
 
-    /// Mapped key-domain policy (mapped SOURCE / key space): asks the
-    /// narrow "does the KEY SPACE reach an unbound outer generic"
-    /// question (`outer_generic_only = true`) but does NOT descend value
-    /// surfaces — a member value reaching the outer generic does not
-    /// change which KEYS the source exposes, so descending it would
-    /// wrongly carrier-stop `{ [K in keyof {a: Foo<T>}]: string }` (whose
-    /// finite key set `{a}` is enumerable). An instantiation in the
-    /// domain is judged by the SAME per-argument key-domain closure rule
-    /// as `Pick`/`Omit` (`per_argument_key_domain = true`): an open
-    /// argument confined to member VALUE positions of a fixed-key body
-    /// keeps the produced key set CLOSED (`{ [K in keyof Foo<T>]: V }`
-    /// with `T` value-position-only still enumerates). The bound binder
-    /// `K` is closed. Conditionals are tri-state through the shared
-    /// oracle. See [`OpenWalk`].
-    fn mapped_key_domain(bound_param: SemanticNodeId) -> Self {
-        let mut bound_params = FxHashSet::default();
-        bound_params.insert(bound_param);
-        Self {
-            bound_params,
-            bound_infers: FxHashMap::default(),
-            descend_value_surfaces: false,
-            outer_generic_only: true,
-            per_argument_key_domain: true,
-            position: OperandPosition::KeyDomain,
-            budget: ENUMERATION_DOMAIN_OPENNESS_NODE_BUDGET,
-            in_flight: FxHashSet::default(),
-            memo: FxHashMap::default(),
-        }
+    /// Mapped value-body policy ([`OpenRole::OuterGenericValue`]): the bound
+    /// mapper binder `K` is closed, finite value surfaces are descended, and
+    /// the walk asks the NARROW "reaches an unbound outer generic" question.
+    /// Conditionals are tri-state through the shared oracle. See
+    /// [`OpenWalk`].
+    fn mapped_value_body(
+        dispatch: &'a ProjectSemanticDispatch<'a>,
+        bound_param: SemanticNodeId,
+    ) -> Self {
+        Self::for_role(dispatch, OpenRole::OuterGenericValue, Some(bound_param))
+    }
+
+    /// Builtin lowering-argument policy ([`OpenRole::OuterGenericValue`]):
+    /// asks the NARROW "does this ARGUMENT still depend on unsubstituted
+    /// generic structure" question for the lowering-entrance builtin carrier
+    /// gate. No bound binders (every reachable `TypeParam` — including a
+    /// mapper binder whose substitution happens later at a demand point — is
+    /// unbound at lowering time), value surfaces are descended (the builtin
+    /// consumes the argument's VALUES), and an instantiation is open iff an
+    /// argument is open. Conditionals are tri-state through the shared
+    /// oracle.
+    fn lowering_value_argument(dispatch: &'a ProjectSemanticDispatch<'a>) -> Self {
+        Self::for_role(dispatch, OpenRole::OuterGenericValue, None)
+    }
+
+    /// Mapped SOURCE / key SPACE policy ([`OpenRole::KeyDomainProof`]): asks
+    /// the key-space-finiteness question and MUST PROVE finiteness — a
+    /// concrete no-open-argument instantiation is NOT taken closed by
+    /// shortcut, it falls through to the builtin registry / prepared-decl
+    /// proof, so a value-producing builtin source (`ReturnType<…>`,
+    /// `InstanceType<…>`, the string intrinsics) that makes no closed-key
+    /// claim stays OPEN (and `& T` opens the key domain → carrier-stop). It
+    /// does NOT descend value surfaces — a member value reaching the outer
+    /// generic does not change which KEYS the source exposes
+    /// (`{ [K in keyof {a: Foo<T>}]: string }` enumerates `{a}`). A resolved
+    /// instantiation is judged per-argument (`per_argument_key_domain`): an
+    /// open argument confined to member VALUE positions of a fixed-key body
+    /// keeps the produced key set CLOSED (`{ [K in keyof Foo<T>]: V }` with
+    /// `T` value-position-only still enumerates). The bound binder `K` is
+    /// closed. An undecidable source (unresolved carrier head, resolution
+    /// miss, recursive ref, budget exhaustion) is OPEN. Conditionals are
+    /// tri-state through the shared oracle. See [`OpenWalk`].
+    fn mapped_source_keyspace(
+        dispatch: &'a ProjectSemanticDispatch<'a>,
+        bound_param: SemanticNodeId,
+    ) -> Self {
+        Self::for_role(dispatch, OpenRole::KeyDomainProof, Some(bound_param))
+    }
+
+    /// Mapped `as`-clause NAME-REMAP policy ([`OpenRole::MappedNameRemap`]):
+    /// the remap's result IS the produced key set, judged per-argument like
+    /// the source/keyspace BUT a CONCRETE no-open-argument instantiation is
+    /// taken CLOSED without a separate finiteness proof — a K-only transform
+    /// over the BOUND binder (`as `on${Capitalize<K>}``, `as Capitalize<K>`)
+    /// is decidable per key and the enumerator owns it (the per-key remap
+    /// classifier validates the produced names downstream). A remap reaching
+    /// an outer generic directly, or an open-argument instantiation, still
+    /// opens. The bound binder `K` is closed. See [`OpenWalk`].
+    fn mapped_name_remap(
+        dispatch: &'a ProjectSemanticDispatch<'a>,
+        bound_param: SemanticNodeId,
+    ) -> Self {
+        Self::for_role(dispatch, OpenRole::MappedNameRemap, Some(bound_param))
     }
 
     /// A child walk with the SAME policy + remaining budget and `binder`
@@ -3964,15 +4255,22 @@ impl OpenWalk {
     /// the extended bind set must not leak into the outer walk's memo, and
     /// vice versa); the caller copies the child's spent budget back so the
     /// walk stays globally bounded.
-    fn scoped_with_bound_binder(&self, binder: SemanticNodeId) -> Self {
+    ///
+    /// Takes the child's [`OpenRole`] explicitly: a nested mapper's
+    /// key-production operands are re-classified per ROLE (nested source /
+    /// key space → [`OpenRole::KeyDomainProof`], nested `as`-remap →
+    /// [`OpenRole::MappedNameRemap`]), while its value body keeps the parent
+    /// value-consuming role. The fresh `memo`/`in_flight` (mandated by the
+    /// changed bound-binder environment) also re-key on the new role, so a
+    /// nested operand's verdict never aliases the parent role's.
+    fn scoped_with_bound_binder(&self, binder: SemanticNodeId, role: OpenRole) -> Self {
         let mut bound_params = self.bound_params.clone();
         bound_params.insert(binder);
         Self {
+            dispatch: self.dispatch,
             bound_params,
             bound_infers: self.bound_infers.clone(),
-            descend_value_surfaces: self.descend_value_surfaces,
-            outer_generic_only: self.outer_generic_only,
-            per_argument_key_domain: self.per_argument_key_domain,
+            role,
             position: self.position,
             budget: self.budget,
             in_flight: FxHashSet::default(),
@@ -3993,11 +4291,10 @@ impl OpenWalk {
         let mut bound_infers = self.bound_infers.clone();
         bound_infers.insert(name, node);
         Self {
+            dispatch: self.dispatch,
             bound_params: self.bound_params.clone(),
             bound_infers,
-            descend_value_surfaces: self.descend_value_surfaces,
-            outer_generic_only: self.outer_generic_only,
-            per_argument_key_domain: self.per_argument_key_domain,
+            role: self.role,
             position: self.position,
             budget: self.budget,
             in_flight: FxHashSet::default(),
@@ -4025,7 +4322,11 @@ impl OpenWalk {
         ctx: &dyn crate::resolver_core::ResolverContext,
         node: SemanticNodeId,
     ) -> bool {
-        let memo_key = (node, self.position);
+        let memo_key = OpenMemoKey {
+            node,
+            position: self.position,
+            role: self.role,
+        };
         if let Some(&verdict) = self.memo.get(&memo_key) {
             // Completed verdict: return it VERBATIM. The hash-consed graph
             // shares one `SemanticNodeId` per structure, and the
@@ -4034,8 +4335,8 @@ impl OpenWalk {
             // (`Pick<Foo<T, T>, K>`: arg1 revisits arg0's `T`), or the
             // per-argument vector would prove a key-positioned open param
             // CLOSED and re-open the storm class behind the fuse. The
-            // position key keeps key-domain and value-sensitive verdicts
-            // for the same node independent.
+            // position + role key keeps verdicts for the same node under
+            // different operand positions / policy roles independent.
             return verdict;
         }
         if !self.in_flight.insert(memo_key) {
@@ -4079,23 +4380,23 @@ impl OpenWalk {
         node: SemanticNodeId,
     ) -> bool {
         if self.budget == 0 {
-            // Walk budget exhausted. The enumeration-domain walk is
-            // conservatively undecidable ⇒ open; the value-body walk
-            // (`outer_generic_only`) asks "reaches an unbound outer
-            // generic" — not finding one within budget answers that
+            // Walk budget exhausted. The KEY-DOMAIN question is
+            // conservatively undecidable ⇒ open; the
+            // outer-generic-reachability question asks "reaches an unbound
+            // outer generic" — not finding one within budget answers that
             // question NO (closed), and the armed runaway fuse remains the
             // depth backstop. Over-firing the carrier-stop on a deep
             // CLOSED value would be the worse failure.
-            return !self.outer_generic_only;
+            return self.role.question().undecidable_is_open();
         }
         self.budget -= 1;
 
         let Some(data) = super::node_data_for(ctx, node) else {
-            // Unresolved / un-interned node: the enumeration-domain walk
-            // treats it as open (not provably finite); the value-body walk
-            // treats it as closed (a missing node carries no outer
-            // generic).
-            return !self.outer_generic_only;
+            // Unresolved / un-interned node: the KEY-DOMAIN question treats
+            // it as open (not provably finite); the
+            // outer-generic-reachability question treats it as closed (a
+            // missing node carries no outer generic).
+            return self.role.question().undecidable_is_open();
         };
         match data.as_ref() {
             // --- type parameter: open unless BOUND for this walk ---
@@ -4107,33 +4408,39 @@ impl OpenWalk {
             // A `DeclPlaceholder` is a RESOLVED-but-deferred declaration
             // reference (canonical + name) — semantically identical to a
             // `DeclRef` for openness, NOT a resolution miss. For the
-            // enumeration-domain walk its closedness is decided by the
-            // bounded prepared-decl transparent-alias-chain walk (a
+            // KEY-DOMAIN question its closedness is decided by the bounded
+            // prepared-decl transparent-alias-chain walk (a
             // not-provably-closed source key space is open). For the
-            // value-body walk a declaration reference CANNOT carry the
-            // mapper's outer generic, so it does NOT open the value.
+            // outer-generic-reachability question a declaration reference
+            // CANNOT carry the mapper's outer generic, so it does NOT open
+            // the value.
             SemanticNodeData::Opaque(crate::semantic_query::QueryError::DeclPlaceholder {
                 canonical_id,
                 name,
                 ..
             }) => {
-                if self.outer_generic_only {
+                if matches!(self.role.question(), OpenQuestion::OuterGenericReachability) {
                     return false;
                 }
+                // Thread the WALK's remaining budget through the prepared-decl
+                // hop (threading the WALK budget, NOT a fresh per-hop budget): a carrier
+                // source that resolves through this decl hop back into the walk
+                // (e.g. `type Self = { [K in keyof import("./self").Self]: V }`
+                // via the `ImportType` bridge) must consume ONE shared budget so
+                // the round-trip terminates bounded.
                 let mut chain_visited: FxHashSet<(Arc<str>, Arc<str>)> = FxHashSet::default();
-                let mut hop_budget = KEY_DOMAIN_TYPE_EXPR_WALK_BUDGET;
                 !prepared_decl_body_is_closed(
-                    ctx,
+                    self.dispatch,
                     canonical_id.as_ref(),
                     name.as_ref(),
-                    &mut hop_budget,
+                    &mut self.budget,
                     &mut chain_visited,
                 )
             }
             // A genuine resolution miss / degraded `Opaque` makes the KEY
-            // space undecidable (enumeration-domain ⇒ open) but carries no
-            // outer generic (value-body ⇒ closed).
-            SemanticNodeData::Opaque(_) => !self.outer_generic_only,
+            // space undecidable (key-domain question ⇒ open) but carries no
+            // outer generic (outer-generic-reachability question ⇒ closed).
+            SemanticNodeData::Opaque(_) => self.role.question().undecidable_is_open(),
 
             // `Infer` is a conditional-inference BINDING placeholder
             // (`extends UIMessage<infer M, …>`), NOT an unbound generic.
@@ -4176,8 +4483,14 @@ impl OpenWalk {
             } => {
                 let (check, extends) = (*check, *extends);
                 let (true_branch, false_branch) = (*true_branch_ref, *false_branch_ref);
+                // Consult the shared branch-selection oracle THROUGH the active
+                // dispatcher (NOT a freshly-constructed one): the active
+                // dispatcher carries the `instantiate_active` /
+                // `carrier_normalizing` cycle-guard state, so a recursive ref in
+                // the check/extends operands terminates bounded instead of
+                // diverging.
                 let (mut selection, infer) =
-                    ProjectSemanticDispatch::new(ctx).conditional_branch_selection(check, extends);
+                    self.dispatch.conditional_branch_selection(check, extends);
                 let mut bare_infer_binding: Option<(Arc<str>, SemanticNodeId)> = None;
                 match infer {
                     Some(super::InferPatternSelection::BareInfer { name }) => {
@@ -4226,37 +4539,51 @@ impl OpenWalk {
                 self.node_is_open_at(ctx, *object, OperandPosition::ValueSensitive)
                     || self.index_key_is_open(ctx, index)
             }
-            // A nested mapped type splits by ROLE. Its `source` / mapper
-            // `key_space` / `as`-clause `name_remap` are KEY-PRODUCTION —
-            // walked PINNED at `KeyDomain` regardless of the surrounding
-            // position (a value-sensitive parent consumes the mapped
-            // type's VALUES, but which KEYS the mapper produces is still
-            // a key-domain question: `{ [K in Keys<T>]: string }['a']`
-            // over a fixed-key `Keys<T>` must not false-OPEN). Its VALUE
-            // body is consumed exactly when the surrounding policy
-            // consumes values — a `ValueSensitive` operand position or a
-            // value-body-descending walk — so
-            // `{ [K in 'a']: T }['a']` IS the open `T` and opens. The
-            // nested mapper's OWN binder is BOUND for every inspection
-            // (the binder is bound in EVERY walk): a remap `` as
-            // `on${K}` `` over a finite key space is a K-only transform,
-            // not an open interpolant; a remap reaching an outer `T`
-            // stays open. The binder scope is local to this node, hence
-            // the scoped child walk (shared budget, fresh memo).
+            // A nested mapped type splits BY ROLE per operand. Its `source`
+            // / mapper `key_space` are KEY-PRODUCTION proof operands
+            // ([`OpenRole::KeyDomainProof`]); its `as`-clause `name_remap` is
+            // the K-only transform role ([`OpenRole::MappedNameRemap`]); its
+            // VALUE body keeps the SURROUNDING role (`self.role`). All
+            // key-production operands are walked PINNED at `KeyDomain`
+            // regardless of the surrounding position (a value-sensitive
+            // parent consumes the mapped type's VALUES, but which KEYS the
+            // mapper produces is still a key-domain question:
+            // `{ [K in Keys<T>]: string }['a']` over a fixed-key `Keys<T>`
+            // must not false-OPEN). The value body is consumed exactly when
+            // the surrounding policy consumes values — a `ValueSensitive`
+            // operand position or a value-body-descending walk — so
+            // `{ [K in 'a']: T }['a']` IS the open `T` and opens. The nested
+            // mapper's OWN binder is BOUND for every inspection: a remap ``
+            // as `on${Capitalize<K>}` `` over a finite key space is a K-only
+            // transform (decidable per key under the remap role), not an open
+            // interpolant; a remap reaching an outer `T` stays open. The
+            // binder + role scope is local to each operand, hence a scoped
+            // child walk per role (shared budget threaded, fresh memo).
             SemanticNodeData::Mapped { source, mapper } => {
-                let mut scoped = self.scoped_with_bound_binder(mapper.parameter_node);
-                let mut open = scoped.node_is_open_at(ctx, *source, OperandPosition::KeyDomain)
-                    || scoped.node_is_open_at(ctx, mapper.key_space, OperandPosition::KeyDomain)
-                    || mapper.name_remap.is_some_and(|n| {
-                        scoped.node_is_open_at(ctx, n, OperandPosition::KeyDomain)
-                    });
+                let mut proof =
+                    self.scoped_with_bound_binder(mapper.parameter_node, OpenRole::KeyDomainProof);
+                let mut open = proof.node_is_open_at(ctx, *source, OperandPosition::KeyDomain)
+                    || proof.node_is_open_at(ctx, mapper.key_space, OperandPosition::KeyDomain);
+                self.budget = proof.budget;
+                if !open {
+                    if let Some(remap) = mapper.name_remap {
+                        let mut remap_walk = self.scoped_with_bound_binder(
+                            mapper.parameter_node,
+                            OpenRole::MappedNameRemap,
+                        );
+                        open = remap_walk.node_is_open_at(ctx, remap, OperandPosition::KeyDomain);
+                        self.budget = remap_walk.budget;
+                    }
+                }
                 if !open
-                    && (self.descend_value_surfaces
+                    && (self.role.descend_value_surfaces()
                         || self.position == OperandPosition::ValueSensitive)
                 {
-                    open = scoped.node_is_open(ctx, mapper.value_expr);
+                    let mut value_walk =
+                        self.scoped_with_bound_binder(mapper.parameter_node, self.role);
+                    open = value_walk.node_is_open(ctx, mapper.value_expr);
+                    self.budget = value_walk.budget;
                 }
-                self.budget = scoped.budget;
                 open
             }
             SemanticNodeData::TemplateLiteral { expressions, .. } => {
@@ -4307,14 +4634,14 @@ impl OpenWalk {
                     if any_open {
                         return true;
                     }
-                    if self.outer_generic_only {
-                        // The outer-generic-only walks ask only "does an
-                        // argument reach the outer generic" — an
+                    if matches!(self.role.question(), OpenQuestion::OuterGenericReachability) {
+                        // The outer-generic-reachability question asks only
+                        // "does an argument reach the outer generic" — an
                         // unresolvable base carries none (the DeclRef
                         // rule), so all-closed args stay closed.
                         return false;
                     }
-                    // Enumeration-domain walk: all-closed arguments are a
+                    // KEY-DOMAIN question: all-closed arguments are a
                     // CONCRETE surface only when the base actually
                     // resolves (prepared decl / registry builtin) —
                     // mirroring the TypeExpr arm's
@@ -4322,21 +4649,26 @@ impl OpenWalk {
                     // base is undecidable ⇒ open.
                     return !instantiation_base_is_resolvable(ctx, base, &mut self.budget);
                 }
-                if !self.per_argument_key_domain {
-                    // The value-body walk asks only "does an ARGUMENT
-                    // reach the outer generic".
+                if !self.role.per_argument_key_domain() {
+                    // The outer-generic-reachability question asks only
+                    // "does an ARGUMENT reach the outer generic".
                     return any_open;
                 }
-                if self.outer_generic_only && !any_open {
-                    // Mapped KEY-DOMAIN policy with NO outer generic
-                    // reaching the instantiation: the produced key set is
-                    // concrete at build time — enumeration (or the
-                    // deferred mapped shell on plain unavailability) owns
-                    // it; no carrier-stop. Only the enumeration-domain
-                    // walk (`outer_generic_only = false`) must also PROVE
-                    // finiteness for concrete instantiations, because the
-                    // `Pick`/`Omit` reducer would otherwise materialise an
-                    // undecidable source.
+                if self.role.concrete_no_open_arg_is_closed() && !any_open {
+                    // `as`-REMAP role ([`OpenRole::MappedNameRemap`]) with NO
+                    // outer generic reaching the instantiation: the produced
+                    // key set is concrete at build time — the mapped key
+                    // ENUMERATOR (or the deferred `Mapped` shell on plain
+                    // unavailability) owns it; no carrier-stop. A
+                    // `Capitalize<K>` / `MixedVis[K]` remap over the BOUND
+                    // binder `K` is decidable per key. The source / key-space
+                    // ([`OpenRole::KeyDomainProof`]) and `Pick`/`Omit`
+                    // enumeration-domain roles do NOT take this shortcut — they
+                    // must PROVE finiteness below (fall through to the builtin
+                    // registry / prepared-decl proof), because a value-producing
+                    // builtin source (`ReturnType<…>`) makes NO closed-key claim
+                    // and `& T` opens the key domain: short-cutting it CLOSED
+                    // would leak the closed-arm keys (the false-closed defect).
                     return false;
                 }
                 if base.canonical_id.as_ref() == "__builtin__" {
@@ -4360,7 +4692,7 @@ impl OpenWalk {
                     );
                 }
                 !prepared_instantiation_key_domain_is_closed(
-                    ctx,
+                    self.dispatch,
                     base,
                     &arg_bindings,
                     &mut self.budget,
@@ -4370,27 +4702,31 @@ impl OpenWalk {
             // --- carriers we can follow one transparent hop ---
             SemanticNodeData::Alias(target) => self.node_is_open(ctx, *target),
             SemanticNodeData::DeclRef { identity } => {
-                // For the value-body walk a declaration reference cannot
-                // carry the mapper's outer generic (declarations have their
-                // own type parameters), so a bare `DeclRef` is CLOSED — an
-                // outer generic reaches the value only as an instantiation
-                // ARGUMENT (`Foo<T>`), handled by `InstantiationRef`. For
-                // the enumeration-domain walk a resolved declaration whose
-                // BOUNDED prepared-decl walk proves a finite key domain
-                // (`key_domain_type_expr_is_closed` under an empty binding
-                // environment) is CLOSED; anything else (a free type
-                // parameter, an unresolved name, a cycle, or budget
-                // exhaustion) is open.
-                if self.outer_generic_only {
+                // For the outer-generic-reachability question a declaration
+                // reference cannot carry the mapper's outer generic
+                // (declarations have their own type parameters), so a bare
+                // `DeclRef` is CLOSED — an outer generic reaches the value
+                // only as an instantiation ARGUMENT (`Foo<T>`), handled by
+                // `InstantiationRef`. For the KEY-DOMAIN question a resolved
+                // declaration whose BOUNDED prepared-decl walk proves a
+                // finite key domain (`key_domain_type_expr_is_closed` under
+                // an empty binding environment) is CLOSED; anything else (a
+                // free type parameter, an unresolved name, a cycle, or
+                // budget exhaustion) is open.
+                if matches!(self.role.question(), OpenQuestion::OuterGenericReachability) {
                     return false;
                 }
+                // Thread the WALK's remaining budget through the prepared-decl
+                // hop (threading the WALK budget, NOT a fresh per-hop budget): a
+                // zero-arg `DeclRef` carrier source that resolves back into the
+                // walk through this hop (the `ImportType` bridge round-trip) must
+                // consume ONE shared budget so the recursion terminates bounded.
                 let mut chain_visited: FxHashSet<(Arc<str>, Arc<str>)> = FxHashSet::default();
-                let mut hop_budget = KEY_DOMAIN_TYPE_EXPR_WALK_BUDGET;
                 !prepared_decl_body_is_closed(
-                    ctx,
+                    self.dispatch,
                     identity.canonical_id.as_ref(),
                     identity.decl_name.as_ref(),
-                    &mut hop_budget,
+                    &mut self.budget,
                     &mut chain_visited,
                 )
             }
@@ -4417,7 +4753,8 @@ impl OpenWalk {
                 {
                     return true;
                 }
-                (self.descend_value_surfaces || self.position == OperandPosition::ValueSensitive)
+                (self.role.descend_value_surfaces()
+                    || self.position == OperandPosition::ValueSensitive)
                     && (view.members.iter().any(|m| self.node_is_open(ctx, m.value))
                         || view
                             .call_signatures
@@ -4437,12 +4774,14 @@ impl OpenWalk {
                 return_type,
                 ..
             } => {
-                (self.descend_value_surfaces || self.position == OperandPosition::ValueSensitive)
+                (self.role.descend_value_surfaces()
+                    || self.position == OperandPosition::ValueSensitive)
                     && (params.iter().any(|p| self.node_is_open(ctx, p.ty))
                         || self.node_is_open(ctx, *return_type))
             }
             SemanticNodeData::Array { element, .. } => {
-                (self.descend_value_surfaces || self.position == OperandPosition::ValueSensitive)
+                (self.role.descend_value_surfaces()
+                    || self.position == OperandPosition::ValueSensitive)
                     && self.node_is_open(ctx, *element)
             }
             // A tuple's index KEY domain is fixed by its arity — EXCEPT
@@ -4460,7 +4799,8 @@ impl OpenWalk {
                 }) {
                     return true;
                 }
-                (self.descend_value_surfaces || self.position == OperandPosition::ValueSensitive)
+                (self.role.descend_value_surfaces()
+                    || self.position == OperandPosition::ValueSensitive)
                     && elements.iter().any(|e| self.node_is_open(ctx, e.value))
             }
             SemanticNodeData::Primitive(_)
@@ -4479,29 +4819,92 @@ impl OpenWalk {
             // A constructor type delegates to its inner function signature
             // (which carries the value-surface descent rule).
             SemanticNodeData::ConstructorType { signature } => self.node_is_open(ctx, *signature),
-            // The three unresolved carriers that apply type arguments
-            // (`typeof make<T>`, `import("m").Box<T>`, `Foo<T>`): OPEN if any
-            // applied type argument reaches the outer generic — scanned through
-            // the shared carrier-arg accessor so the value-body walk does NOT
-            // false-close `Foo<T>` / `typeof make<T>` over an open `T`. With NO
-            // open argument the carrier itself holds no outer generic (a
-            // value-rooted `typeof` lookup / an unresolved name / a dynamic
-            // import carries none), so it stays undecidable (open) for the
-            // enumeration-domain walk and closed for the value-body walk — the
-            // existing undecidable-root rule, now applied AFTER the type-arg
-            // openness check.
-            SemanticNodeData::TypeOf(_)
-            | SemanticNodeData::ImportType(_)
-            | SemanticNodeData::BareRef(_) => {
+            // A `typeof X` value-rooted lookup is NOT a resolvable
+            // type-position declaration head for this purpose (its root is a
+            // VALUE namespace, not a type declaration whose key domain we can
+            // classify): OPEN if any applied type argument reaches the outer
+            // generic — scanned through the shared carrier-arg accessor so the
+            // outer-generic-reachability question does NOT false-close `typeof
+            // make<T>` over an open `T`. With NO open argument the carrier
+            // itself holds no outer generic, so it stays undecidable (open for
+            // the key-domain question, closed for the outer-generic question).
+            SemanticNodeData::TypeOf(_) => {
                 data.carrier_type_args()
                     .iter()
                     .any(|a| self.node_is_open(ctx, *a))
-                    || !self.outer_generic_only
+                    || self.role.question().undecidable_is_open()
+            }
+            // A `BareRef` / `ImportType` carrier names an UNRESOLVED type-position
+            // reference head (`Foo` / `Foo<Arg>` / `import("m").G<Arg>`). The
+            // closed-vs-open decision must consult the UNDERLYING declaration's
+            // key domain, not just the carrier's applied type arguments:
+            //
+            //   1. FAST CHECK (policy-scoped) — if any applied type argument is
+            //      open AND this walk's policy treats an open argument as
+            //      opening, the carrier is OPEN without resolving
+            //      (`BareRef<Foo<OpenArg>>` stays open). This holds for the
+            //      outer-generic-reachability and the value-sensitive policies
+            //      (any open argument opens). It does NOT hold for the
+            //      per-argument KEY-DOMAIN policy at a key-domain position: there
+            //      an open argument CONFINED to member VALUE positions of a
+            //      fixed-key body keeps the key domain CLOSED
+            //      (`prepared_instantiation_key_domain_is_closed`). Short-cutting
+            //      OPEN on the open arg would re-introduce the silent-slot-loss
+            //      (`{ [K in keyof Foo<T>]: V }` with `T` value-position-only),
+            //      so that case SKIPS the fast check and resolves — the resolved
+            //      `InstantiationRef` arm then applies the per-argument rule.
+            //   2. RESOLVE the head through the ONE shared dispatch
+            //      (`resolve_carrier_subject_node` → `resolve_bare_ref_head` /
+            //      `resolve_import_type_head`) under a non-publication
+            //      `StructuralTransit` context — NOT a second resolver, NOT a
+            //      walker-local resolver, no string heuristics. The resolution
+            //      re-enters the SAME dispatcher (`self.dispatch`) so its
+            //      `instantiate_active` + `carrier_normalizing` cycle-guard state
+            //      is shared (a recursive ref terminates bounded).
+            //   3. If the head RESOLVED to a different node (a `DeclPlaceholder` /
+            //      `DeclRef` / `InstantiationRef` / `Object` / …), RECURSE at the
+            //      same position — the resolved arm (`prepared_decl_body_is_closed`
+            //      / `prepared_instantiation_key_domain_is_closed`) then decides
+            //      closedness CORRECTLY (a fixed-key `Foo<T>` with `T`
+            //      value-position-only stays CLOSED and enumerates; a genuinely
+            //      open declaration stays OPEN).
+            //   4. If the head did NOT resolve (miss / recursive-ref-guarded /
+            //      not head-resolvable), fall back to the question-correct
+            //      undecidable answer — OPEN for the key-domain question (the keys
+            //      cannot be enumerated), CLOSED for the outer-generic question (no
+            //      outer generic). This preserves the L1 carrier-stop on every
+            //      undecidable case (including an unresolvable carrier WITH an
+            //      open arg under the per-argument policy: it falls here and the
+            //      key-domain question answers OPEN).
+            SemanticNodeData::ImportType(_) | SemanticNodeData::BareRef(_) => {
+                // Own the carrier args so the `data` borrow can be released
+                // before the `&mut self` recursion / the dispatch re-entry.
+                let carrier_args: Vec<SemanticNodeId> = data.carrier_type_args().to_vec();
+                drop(data);
+                // The per-argument KEY-DOMAIN policy (mapped source / key space,
+                // `Pick`/`Omit` enumeration domain) at a key-domain position is
+                // the ONE policy where an open argument does not by itself open
+                // the produced key set — it must resolve and apply the
+                // per-argument closure rule. Every other policy/position treats
+                // any open argument as opening, so the fast check is sound.
+                let any_open_arg_opens = !(self.role.per_argument_key_domain()
+                    && self.position == OperandPosition::KeyDomain);
+                if any_open_arg_opens && carrier_args.iter().any(|a| self.node_is_open(ctx, *a)) {
+                    return true;
+                }
+                let resolved = self.dispatch.resolve_carrier_subject_node(
+                    node,
+                    ProjectionReductionContext::structural_transit(),
+                );
+                if resolved != node {
+                    return self.node_is_open_at(ctx, resolved, self.position);
+                }
+                self.role.question().undecidable_is_open()
             }
             // An unresolved raw-fallback carrier holds no type arguments and no
-            // outer generic (closed for the value-body walk) but is undecidable
-            // for the enumeration-domain walk.
-            SemanticNodeData::RawFallback { .. } => !self.outer_generic_only,
+            // outer generic (closed for the outer-generic question) but is
+            // undecidable for the key-domain question.
+            SemanticNodeData::RawFallback { .. } => self.role.question().undecidable_is_open(),
             // A synthetic slot-binding is a concrete shallow terminal.
             SemanticNodeData::SyntheticBinding { .. } => false,
         }
@@ -4869,6 +5272,7 @@ mod tests {
         };
 
         let host = VerterHost::new_standalone(Default::default());
+        let dispatch = ProjectSemanticDispatch::new(&host);
         let graph = Arc::clone(host.project_type_store().semantic_graph());
 
         let builtin_pick = DeclIdentity {
@@ -4898,7 +5302,7 @@ mod tests {
         });
         assert!(
             super::utility_enumeration_domain_is_open_or_unknown(
-                &host,
+                &dispatch,
                 &builtin_pick,
                 &[props_base_open, keys],
             ),
@@ -4932,7 +5336,7 @@ mod tests {
             });
         assert!(
             super::utility_enumeration_domain_is_open_or_unknown(
-                &host,
+                &dispatch,
                 &builtin_pick,
                 &[props_base_concrete_unresolved, keys],
             ),
@@ -4954,7 +5358,7 @@ mod tests {
         });
         assert!(
             super::utility_enumeration_domain_is_open_or_unknown(
-                &host,
+                &dispatch,
                 &builtin_pick,
                 &[bare_alias_unresolved, keys],
             ),
@@ -4973,7 +5377,7 @@ mod tests {
         }));
         assert!(
             !super::utility_enumeration_domain_is_open_or_unknown(
-                &host,
+                &dispatch,
                 &builtin_pick,
                 &[closed_object, keys],
             ),
@@ -4989,7 +5393,7 @@ mod tests {
         };
         assert!(
             !super::utility_enumeration_domain_is_open_or_unknown(
-                &host,
+                &dispatch,
                 &not_a_utility,
                 &[props_base_open, keys],
             ),
@@ -5012,7 +5416,7 @@ mod tests {
         });
         assert!(
             !super::utility_enumeration_domain_is_open_or_unknown(
-                &host,
+                &dispatch,
                 &builtin_pick,
                 &[tuple, keys]
             ),
@@ -5034,6 +5438,7 @@ mod tests {
         };
 
         let host = VerterHost::new_standalone(Default::default());
+        let dispatch = ProjectSemanticDispatch::new(&host);
         let graph = Arc::clone(host.project_type_store().semantic_graph());
 
         let builtin_pick = DeclIdentity {
@@ -5067,7 +5472,7 @@ mod tests {
         });
         assert!(
             super::utility_enumeration_domain_is_open_or_unknown(
-                &host,
+                &dispatch,
                 &builtin_pick,
                 &[indexed_open_key, keys],
             ),
@@ -5082,7 +5487,7 @@ mod tests {
         });
         assert!(
             !super::utility_enumeration_domain_is_open_or_unknown(
-                &host,
+                &dispatch,
                 &builtin_pick,
                 &[indexed_closed_key, keys],
             ),
@@ -5114,7 +5519,7 @@ mod tests {
         });
         assert!(
             super::utility_enumeration_domain_is_open_or_unknown(
-                &host,
+                &dispatch,
                 &builtin_pick,
                 &[mapped_open_keyspace, keys],
             ),
@@ -5146,6 +5551,7 @@ mod tests {
         };
 
         let host = VerterHost::new_standalone(Default::default());
+        let dispatch = ProjectSemanticDispatch::new(&host);
         let graph = Arc::clone(host.project_type_store().semantic_graph());
 
         let builtin_pick = DeclIdentity {
@@ -5208,7 +5614,7 @@ mod tests {
         // open OUTER interpolant.
         assert!(
             super::utility_enumeration_domain_is_open_or_unknown(
-                &host,
+                &dispatch,
                 &builtin_pick,
                 &[make_mapped(template(outer_t)), keys],
             ),
@@ -5220,7 +5626,7 @@ mod tests {
         // BOUND binder over a finite key space (a K-only transform).
         assert!(
             !super::utility_enumeration_domain_is_open_or_unknown(
-                &host,
+                &dispatch,
                 &builtin_pick,
                 &[make_mapped(template(binder_k)), keys],
             ),
@@ -5236,7 +5642,7 @@ mod tests {
         });
         assert!(
             !super::utility_enumeration_domain_is_open_or_unknown(
-                &host,
+                &dispatch,
                 &builtin_pick,
                 &[make_mapped(closed_remap), keys],
             ),

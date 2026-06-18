@@ -3809,7 +3809,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         // as a deferred carrier on the published binding — shallow
         // values, enumerated keys.
         if crate::project_semantic_dispatch::raise::mapped_type_key_domain_is_open_or_unknown(
-            self.dispatch.ctx,
+            self.dispatch,
             source,
             mapper,
         ) {
@@ -3873,24 +3873,65 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     // helper returns the full `SurfaceMember` list so
                     // the per-key build loop can pick Identity fast
                     // path values + source modifiers when available.
-                    match self
+                    if let Some((members, source_is_partial)) = self
                         .dispatch
                         .mapped_surface_source_members_for_projection(source, self.context)
                     {
-                        Some((members, source_is_partial)) => {
-                            // Two-signal fold: a genuinely-incomplete source
-                            // projection (budget / recursion / walker-fatal)
-                            // taints this synthesised mapped surface.
-                            if source_is_partial {
-                                self.result_is_partial = true;
-                            }
+                        // Two-signal fold: a genuinely-incomplete source
+                        // projection (budget / recursion / walker-fatal)
+                        // taints this synthesised mapped surface.
+                        if source_is_partial {
+                            self.result_is_partial = true;
+                        }
+                        if !members.is_empty() {
                             keys =
                                 crate::project_semantic_dispatch::enumerate::KeyDomainKey::from_names(
                                     members.iter().map(|m| Arc::clone(&m.name)).collect(),
                                 );
                             source_members = Some(members);
                         }
-                        None => return None,
+                    }
+                    // TODO(follow-up): do NOT taint `result_is_partial` on the
+                    // `None` return of `mapped_surface_source_members_for_projection`
+                    // here. That `None` is NOT exclusively "genuinely incomplete":
+                    // it ALSO covers the benign case where the source resolves to a
+                    // NON-Object surface (a literal union, or a generic carrier
+                    // under Shallow) — exactly the case the keyspace fallback below
+                    // exists to serve and which enumerates a COMPLETE key set
+                    // (`{ [K in BareRef(Keys)]: V }`, `{ [K in keyof Foo<T>]: V }`).
+                    // A blanket taint-on-`None` would mark those complete surfaces
+                    // partial, refusing their warm-cache admission and (under a
+                    // host-API caller) setting `synthesis_should_suppress` — an
+                    // over-broad taint that contradicts the A2 "budget / recursion
+                    // / walker-fatal" partiality contract. The proper fix is to
+                    // thread a real partiality REASON out of the helper (so a
+                    // Recursive/Error/budget source taints while a non-Object
+                    // literal-union source does not), not a blanket flag here.
+                    // Final fallback — the shared KEY-SPACE enumerator
+                    // (`build_mapped_type` consults it identically when the
+                    // source surface yields no members). It resolves a
+                    // `BareRef` / `ImportType` key-space carrier head and
+                    // reduces a `keyof <generic-instantiation>` key space
+                    // (`{ [K in keyof Foo<T>]: V }` over a fixed-key `Foo`, or
+                    // `{ [K in BareRef(Keys)]: V }` over a literal-union alias)
+                    // to its enumerated key set — the cases the source-member
+                    // projection cannot read because the source resolves to a
+                    // non-object surface (a literal union) or stays a generic
+                    // carrier under Shallow. The openness gate above already
+                    // carrier-stopped a genuinely-open key space, so reaching
+                    // here means the key domain is CLOSED; an empty / `None`
+                    // result means neither the source surface nor the key
+                    // space enumerated, so the deferred `Mapped` shell owns it.
+                    if keys.is_empty() {
+                        match self
+                            .dispatch
+                            .key_literals_from_keyspace_node(mapper.key_space)
+                        {
+                            Some(keyspace_keys) if !keyspace_keys.is_empty() => {
+                                keys = keyspace_keys;
+                            }
+                            _ => return None,
+                        }
                     }
                 }
             }

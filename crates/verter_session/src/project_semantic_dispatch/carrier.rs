@@ -243,14 +243,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 ) && (mode == ProjectionMode::Navigate
                     || crate::project_semantic_dispatch::raise::
                         utility_enumeration_domain_is_open_or_unknown(
-                            self.ctx,
+                            self,
                             &builtin_identity,
                             &type_args,
                         )))
                 || (matches!(mode, ProjectionMode::Navigate | ProjectionMode::Skeleton)
                     && type_args.iter().any(|arg| {
                         crate::project_semantic_dispatch::raise::builtin_lowering_argument_is_open(
-                            self.ctx, *arg,
+                            self, *arg,
                         )
                     }));
             if build_carrier {

@@ -372,7 +372,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         node: SemanticNodeId,
     ) -> Option<Vec<KeyDomainKey>> {
-        let resolved = self.evaluate_deferred_semantic_node(node);
+        // Key-domain enumeration needs the keyspace's literal KEY SET, never its
+        // member VALUES. Evaluate the deferred keyspace shell under the
+        // value-expansion-free STRUCTURAL-TRANSIT context (NOT the default
+        // `Published(Expanded)`): every operator re-dispatch along the
+        // evaluation (`KeyOf` / `MappedType` / decl-placeholder `Instantiate`,
+        // and a reducible conditional / mapped keyspace form) reduces to its key
+        // surface WITHOUT reifying per-member value edges — so a reducible
+        // keyspace node cannot enter expanded publication before the
+        // per-variant arms below (the `Published(Shallow)` / `structural_transit`
+        // carrier-head arms). The literal-union / name arms still recover the
+        // exact key set.
+        let resolved = self.evaluate_deferred_semantic_node_with_context(
+            node,
+            crate::semantic_query::ProjectionReductionContext::structural_transit(),
+        );
         let data = self.graph().node_data(resolved)?;
         match data.as_ref() {
             SemanticNodeData::Literal(LiteralValue::String(name)) => Some(vec![KeyDomainKey {
@@ -412,9 +426,65 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // tsgo keeps `keyof { 1: string }` numeric-kinded — the
             // surface-member model stores names only, so the declared
             // kind does not survive `keyof`.)
-            SemanticNodeData::KeyOf { base } => self
-                .key_names_from_base_node(*base)
-                .map(KeyDomainKey::from_names),
+            //
+            // When the member-name enumerator cannot resolve the base (the
+            // base is a `BareRef` / `ImportType` carrier head, or a generic
+            // `InstantiationRef` the name enumerator does not unwrap), route
+            // the `keyof` through the shared `SemanticQueryKey::KeyOf`
+            // producer (which normalises the base carrier at entry and
+            // reduces `keyof InstantiationRef<…>` to its literal key union)
+            // and recurse on the produced union — `keyof BareRef(Foo)<T>` /
+            // `keyof Foo<T>` over a fixed-key body then enumerates its keys.
+            SemanticNodeData::KeyOf { base } => {
+                if let Some(names) = self.key_names_from_base_node(*base) {
+                    return Some(KeyDomainKey::from_names(names));
+                }
+                // Key-domain enumeration needs the literal KEY UNION of `keyof
+                // base`, NOT the member VALUES of `base`. Resolve the `keyof`
+                // under the publication SHALLOW context (NOT `Expanded`): the
+                // `KeyOf` producer normalises the base carrier and reduces to
+                // the literal key union without materialising member value
+                // surfaces — the value-expansion-free key-domain enumeration
+                // semantics (no Table.vue-storm-adjacent eager value expansion).
+                let read = self.execute_read(crate::semantic_query::SemanticQueryKey::KeyOf {
+                    base: *base,
+                    context: crate::semantic_query::ProjectionReductionContext::published(
+                        crate::semantic_query::ProjectionMode::Shallow,
+                    ),
+                });
+                // A2 signal-split: fold a genuinely-incomplete keyof resolve.
+                crate::request_context::observe_component_meta_read_suppress(&read);
+                match read.value {
+                    crate::semantic_query::QueryResult::Value(reduced) if reduced != resolved => {
+                        self.key_literals_from_keyspace_node(reduced)
+                    }
+                    _ => None,
+                }
+            }
+            // A `BareRef` / `ImportType` carrier as the key space (`{ [K in
+            // BareRef(Keys)]: V }` where `type Keys = 'a' | 'b'`). The
+            // deferred-shell evaluator deliberately leaves these carriers
+            // symbolic, but key-domain enumeration IS the macro-shape
+            // enumeration path where the carrier head MUST resolve to its
+            // declared key set. Resolve the head through the ONE shared
+            // dispatch (`resolve_carrier_subject_node` → the head resolver)
+            // under the value-expansion-free STRUCTURAL-TRANSIT context (NOT
+            // `Published(Expanded)`): key-domain enumeration needs only the
+            // resolved key set / literal union, so the carrier head resolves
+            // under `Shallow` + `StructuralTransit` (member value surfaces are
+            // NOT materialised). Recurse on the resolved key space; a carrier
+            // that does not resolve (miss / recursive ref) stays unenumerated
+            // (`None` — the deferred mapped shell owns it).
+            SemanticNodeData::BareRef(_) | SemanticNodeData::ImportType(_) => {
+                let head_resolved = self.resolve_carrier_subject_node(
+                    resolved,
+                    crate::semantic_query::ProjectionReductionContext::structural_transit(),
+                );
+                if head_resolved == resolved {
+                    return None;
+                }
+                self.key_literals_from_keyspace_node(head_resolved)
+            }
             // Unresolved alias carrier on the key-domain enumeration path. The
             // deferred-shell evaluator deliberately leaves `DeclRef` /
             // `InstantiationRef` carriers symbolic (so intermediate
@@ -426,6 +496,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // through the shared dispatch (`Instantiate`) and recurse. This is
             // path-precise (the demanded key set), not a breadth walk.
             SemanticNodeData::DeclRef { identity } => {
+                // Key-domain enumeration needs the alias's declared key SET,
+                // not its expanded member VALUES — instantiate under SHALLOW
+                // (NOT `Expanded`): a keyspace alias (`type Keys = 'a' | 'b'`)
+                // reduces to its literal union and a fixed-key body to its
+                // one-level surface (names recovered by the recursive
+                // enumeration), with member values left shallow. Avoids the
+                // eager full-surface value expansion.
                 let read =
                     self.execute_read(crate::semantic_query::SemanticQueryKey::Instantiate {
                         base: self.type_slot_for(
@@ -436,7 +513,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         context: self.instantiate_context_for(
                             &identity.canonical_id,
                             crate::semantic_query::ProjectionReductionContext::published(
-                                crate::semantic_query::ProjectionMode::Expanded,
+                                crate::semantic_query::ProjectionMode::Shallow,
                             ),
                         ),
                     });
@@ -458,6 +535,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 self.key_literals_from_keyspace_node(instantiated)
             }
             SemanticNodeData::InstantiationRef { base, args } => {
+                // Same value-expansion-free key-domain enumeration as the
+                // `DeclRef` arm: instantiate the carrier under SHALLOW (NOT
+                // `Expanded`) to recover its key SET without materialising
+                // member value surfaces.
                 let read =
                     self.execute_read(crate::semantic_query::SemanticQueryKey::Instantiate {
                         base: self.type_slot_for(
@@ -468,7 +549,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         context: self.instantiate_context_for(
                             &base.canonical_id,
                             crate::semantic_query::ProjectionReductionContext::published(
-                                crate::semantic_query::ProjectionMode::Expanded,
+                                crate::semantic_query::ProjectionMode::Shallow,
                             ),
                         ),
                     });

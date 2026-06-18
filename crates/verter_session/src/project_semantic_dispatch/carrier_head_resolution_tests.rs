@@ -41,7 +41,7 @@ use crate::semantic_query::{
 use crate::types::HostConfig;
 use crate::{CompileErrorPolicy, FileLanguage, UpsertRequest, VerterHost};
 
-fn host() -> VerterHost {
+pub(super) fn host() -> VerterHost {
     VerterHost::new_standalone(HostConfig {
         dev_mode: false,
         compile_error_policy: CompileErrorPolicy::StrictError,
@@ -49,7 +49,7 @@ fn host() -> VerterHost {
     })
 }
 
-fn upsert_ts(host: &VerterHost, id: &str, source: &str) {
+pub(super) fn upsert_ts(host: &VerterHost, id: &str, source: &str) {
     let _ = host
         .upsert(UpsertRequest {
             canonical_id: None,
@@ -63,7 +63,7 @@ fn upsert_ts(host: &VerterHost, id: &str, source: &str) {
 
 /// The `NodeScopeId::File` for `canonical`, sourced from the host's live
 /// shallow state (so the `whole_hash` matches the eager lowering path's scope).
-fn file_scope(dispatch: &ProjectSemanticDispatch<'_>, canonical: &str) -> NodeScopeId {
+pub(super) fn file_scope(dispatch: &ProjectSemanticDispatch<'_>, canonical: &str) -> NodeScopeId {
     let shallow = dispatch
         .ctx
         .shallow_file_state(canonical)
@@ -77,7 +77,7 @@ fn file_scope(dispatch: &ProjectSemanticDispatch<'_>, canonical: &str) -> NodeSc
 
 /// Construct a `BareRef(name, scope, args)` carrier node, where `args` are the
 /// interned primitive type arguments (`Foo<string, …>`).
-fn bare_ref_carrier(
+pub(super) fn bare_ref_carrier(
     dispatch: &ProjectSemanticDispatch<'_>,
     name: &str,
     scope: NodeScopeId,
@@ -103,7 +103,7 @@ fn bare_ref_carrier(
 /// field; the owner canonical (needed to resolve the relative specifier) is the
 /// node-level scope — the structural lowerer interns it with the lowering
 /// file's scope, so the head resolver reads `node_scope` to recover the owner.
-fn import_type_carrier(
+pub(super) fn import_type_carrier(
     dispatch: &ProjectSemanticDispatch<'_>,
     specifier: &str,
     qualifier: &[&str],

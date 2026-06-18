@@ -9289,6 +9289,7 @@ fn mapped_predicate_each_dimension_opens_independently_with_k_only_controls() {
     use crate::semantic_query::{MapperKey, MapperKind, OptionalityMod, ReadonlyMod};
 
     let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let string_ty = primitive(&graph, PrimitiveKind::String);
     let closed_source = simple_object(&graph, &[("a", string_ty)]);
@@ -9316,7 +9317,7 @@ fn mapped_predicate_each_dimension_opens_independently_with_k_only_controls() {
     // SOURCE dimension: a bare outer `TypeParam` source opens.
     assert!(
         super::raise::mapped_type_is_open_or_unknown(
-            &host,
+            &dispatch,
             t_param,
             &mapper_with(string_ty, string_ty, None),
         ),
@@ -9326,7 +9327,7 @@ fn mapped_predicate_each_dimension_opens_independently_with_k_only_controls() {
     // KEYSPACE dimension: an outer `TypeParam` key space opens.
     assert!(
         super::raise::mapped_type_is_open_or_unknown(
-            &host,
+            &dispatch,
             closed_source,
             &mapper_with(t_param, string_ty, None),
         ),
@@ -9337,7 +9338,7 @@ fn mapped_predicate_each_dimension_opens_independently_with_k_only_controls() {
     // opens — even with closed source / keyspace / value.
     assert!(
         super::raise::mapped_type_is_open_or_unknown(
-            &host,
+            &dispatch,
             closed_source,
             &mapper_with(string_ty, string_ty, Some(template_over(t_param))),
         ),
@@ -9348,7 +9349,7 @@ fn mapped_predicate_each_dimension_opens_independently_with_k_only_controls() {
     // VALUE-BODY dimension: a value reaching the outer `T` opens.
     assert!(
         super::raise::mapped_type_is_open_or_unknown(
-            &host,
+            &dispatch,
             closed_source,
             &mapper_with(string_ty, t_param, None),
         ),
@@ -9360,7 +9361,7 @@ fn mapped_predicate_each_dimension_opens_independently_with_k_only_controls() {
     // CLOSED — the bound binder is not an open interpolant.
     assert!(
         !super::raise::mapped_type_is_open_or_unknown(
-            &host,
+            &dispatch,
             closed_source,
             &mapper_with(string_ty, k_param, Some(template_over(k_param))),
         ),
@@ -9371,7 +9372,7 @@ fn mapped_predicate_each_dimension_opens_independently_with_k_only_controls() {
     // CONTROL: fully closed mapped stays CLOSED.
     assert!(
         !super::raise::mapped_type_is_open_or_unknown(
-            &host,
+            &dispatch,
             closed_source,
             &mapper_with(string_ty, string_ty, None),
         ),
@@ -9390,6 +9391,7 @@ fn mapped_predicate_each_dimension_opens_independently_with_k_only_controls() {
 #[test]
 fn carrier_type_args_open_node_judges_bareref_and_typeof_open_over_outer_generic() {
     let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let t_param = outer_type_param(&graph, "T");
     let string_ty = primitive(&graph, PrimitiveKind::String);
@@ -9401,7 +9403,7 @@ fn carrier_type_args_open_node_judges_bareref_and_typeof_open_over_outer_generic
         Arc::from(vec![t_param].into_boxed_slice()),
     ));
     assert!(
-        super::raise::builtin_lowering_argument_is_open(&host, bare_open),
+        super::raise::builtin_lowering_argument_is_open(&dispatch, bare_open),
         "`Foo<T>` over an open outer generic must classify OPEN, not false-closed"
     );
 
@@ -9418,7 +9420,7 @@ fn carrier_type_args_open_node_judges_bareref_and_typeof_open_over_outer_generic
         Arc::from(vec![t_param].into_boxed_slice()),
     ));
     assert!(
-        super::raise::builtin_lowering_argument_is_open(&host, typeof_open),
+        super::raise::builtin_lowering_argument_is_open(&dispatch, typeof_open),
         "`typeof make<T>` over an open outer generic must classify OPEN, not false-closed"
     );
 
@@ -9430,7 +9432,7 @@ fn carrier_type_args_open_node_judges_bareref_and_typeof_open_over_outer_generic
         Arc::from(vec![string_ty].into_boxed_slice()),
     ));
     assert!(
-        !super::raise::builtin_lowering_argument_is_open(&host, bare_closed),
+        !super::raise::builtin_lowering_argument_is_open(&dispatch, bare_closed),
         "`Foo<string>` (closed arg) must stay CLOSED for the value-body walk"
     );
 }
@@ -9490,7 +9492,7 @@ fn mapped_key_domain_judges_instantiations_per_argument_not_by_arg_openness() {
     // must NOT carrier-stop.
     assert!(
         !super::raise::mapped_type_is_open_or_unknown(
-            &host,
+            &dispatch,
             foo_of_t,
             &mapper_with_value(string_ty),
         ),
@@ -9501,7 +9503,11 @@ fn mapped_key_domain_judges_instantiations_per_argument_not_by_arg_openness() {
     // OPEN value body: the same source/keyspace with a VALUE reaching the
     // outer `T` (through the instantiation argument) still carrier-stops.
     assert!(
-        super::raise::mapped_type_is_open_or_unknown(&host, foo_of_t, &mapper_with_value(foo_of_t),),
+        super::raise::mapped_type_is_open_or_unknown(
+            &dispatch,
+            foo_of_t,
+            &mapper_with_value(foo_of_t),
+        ),
         "{{ [K in keyof Foo<T>]: Foo<T> }} (value reaching the outer T) must still \
          carrier-stop — value-body openness keeps the any-outer-generic rule"
     );
@@ -9552,6 +9558,7 @@ fn repeated_open_type_param_argument_stays_open_on_revisit() {
     use crate::semantic_query::{DeclIdentity, HashValue, LiteralValue};
 
     let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
     upsert_ts(&host, "/types.ts", "export type Foo<A, B> = { x: A } & B;");
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
@@ -9574,7 +9581,7 @@ fn repeated_open_type_param_argument_stays_open_on_revisit() {
     };
     assert!(
         super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin_pick,
             &[foo_t_t, key_lit],
         ),
@@ -9604,6 +9611,7 @@ fn key_domain_classifier_ignores_mapped_value_positions_and_binds_mapper_binder(
     use crate::semantic_query::{DeclIdentity, HashValue, LiteralValue};
 
     let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
     upsert_ts(
         &host,
         "/types.ts",
@@ -9636,7 +9644,7 @@ fn key_domain_classifier_ignores_mapped_value_positions_and_binds_mapper_binder(
     });
     assert!(
         !super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin("Omit"),
             &[key_fixed_of_t, key_lit],
         ),
@@ -9655,7 +9663,7 @@ fn key_domain_classifier_ignores_mapped_value_positions_and_binds_mapper_binder(
     });
     assert!(
         !super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin("Pick"),
             &[my_partial_concrete, key_lit],
         ),
@@ -9675,6 +9683,7 @@ fn index_signature_key_type_opens_domain_concrete_key_stays_closed() {
     use crate::semantic_query::{DeclIdentity, HashValue, LiteralValue};
 
     let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let string_ty = primitive(&graph, PrimitiveKind::String);
     let t_param = outer_type_param(&graph, "T");
@@ -9710,7 +9719,7 @@ fn index_signature_key_type_opens_domain_concrete_key_stays_closed() {
     // OPEN: the index-signature KEY depends on the unbound outer T.
     assert!(
         super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin_pick,
             &[object_with_index_key(t_param), key_lit],
         ),
@@ -9722,7 +9731,7 @@ fn index_signature_key_type_opens_domain_concrete_key_stays_closed() {
     // (fixed) named-member enumeration.
     assert!(
         !super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin_pick,
             &[object_with_index_key(string_ty), key_lit],
         ),
@@ -9788,7 +9797,7 @@ fn nested_instantiation_wrappers_apply_per_argument_key_domain_rule() {
     // CLOSED: the alias wrapper forwards T into Foo's VALUE positions only.
     assert!(
         !super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin_omit,
             &[wrapper_of_t("AliasOuter"), items_lit],
         ),
@@ -9801,7 +9810,7 @@ fn nested_instantiation_wrappers_apply_per_argument_key_domain_rule() {
     // Intersection arm `Foo<T>`).
     assert!(
         !super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin_omit,
             &[wrapper_of_t("HeritageOuter"), items_lit],
         ),
@@ -9814,7 +9823,7 @@ fn nested_instantiation_wrappers_apply_per_argument_key_domain_rule() {
     // position (an intersection arm IS the open param).
     assert!(
         super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin_omit,
             &[wrapper_of_t("KeyReachingOuter"), items_lit],
         ),
@@ -9909,7 +9918,7 @@ fn k_only_remapped_mapped_alias_closes_on_prepared_decl_route() {
     // PREPARED-DECL route (bare DeclRef — the TypeExpr-layer walk).
     assert!(
         !super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin_pick,
             &[remapped_ref, ona_lit],
         ),
@@ -9930,7 +9939,7 @@ fn k_only_remapped_mapped_alias_closes_on_prepared_decl_route() {
     });
     assert!(
         super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin_pick,
             &[remapped_outer_of_t, ona_lit],
         ),
@@ -9968,6 +9977,290 @@ fn k_only_remapped_mapped_alias_closes_on_prepared_decl_route() {
              materialise an Object surface (NOT the builtin carrier), got {other:?}"
         ),
     }
+}
+
+/// A K-only `as`-remap whose transform is a builtin INSTANTIATION
+/// (`as Capitalize<K>`, not a template literal) on the PREPARED-DECL /
+/// TypeExpr route must AGREE with the node route: it is a finite K-only
+/// transform over the BOUND binder, so it is CLOSED while the matching
+/// `ReturnType<…>`-SOURCE shape stays OPEN. This is the role-split mirror —
+/// the `as`-remap operand is judged under the `NameRemap` policy (concrete
+/// all-args-closed instantiation ⇒ closed) while the mapped SOURCE is judged
+/// under the proof policy (a value-producing builtin source makes no
+/// closed-key claim ⇒ open).
+///
+/// **Discriminating.** Before the role-split mirror the TypeExpr route judged
+/// the `as Capitalize<K>` remap through `builtin_utility_key_domain_is_closed`,
+/// which gives `Capitalize` NO closed-key claim — so the remap (and thus the
+/// whole mapped type) was wrongly judged OPEN, diverging from the node route's
+/// `MappedNameRemap` shortcut. The CLOSED assertion fails against that
+/// pre-mirror implementation; the OPEN `ReturnType<…>`-source assertion fails
+/// against an implementation that instead WEAKENED the source proof.
+#[test]
+fn capitalize_remap_closes_but_returntype_source_opens_on_prepared_decl_route() {
+    use crate::semantic_query::{DeclIdentity, HashValue, LiteralValue};
+
+    let host = host();
+    upsert_ts(
+        &host,
+        "/cap.ts",
+        "export type CapRemap = { [K in 'a' | 'b' as Capitalize<K>]: string };\n\
+         export type RetSource<T> = { [K in keyof ReturnType<() => { fixed: string } & T>]: \
+         string };",
+    );
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let t_param = outer_type_param(&graph, "T");
+    let cap_a = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+        "A".to_string(),
+    )));
+    let builtin_pick = DeclIdentity {
+        canonical_id: Arc::from("__builtin__"),
+        whole_hash: HashValue::default(),
+        decl_name: Arc::from("Pick"),
+    };
+
+    // CLOSED: the `as Capitalize<K>` remap is a finite K-only transform over
+    // the bound binder, judged under the `NameRemap` policy on the TypeExpr
+    // route — agreeing with the node route's `MappedNameRemap` shortcut.
+    let cap_ref = graph.intern_node(SemanticNodeData::DeclRef {
+        identity: DeclIdentity {
+            canonical_id: Arc::from("/cap.ts"),
+            whole_hash: HashValue::default(),
+            decl_name: Arc::from("CapRemap"),
+        },
+    });
+    assert!(
+        !super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &dispatch,
+            &builtin_pick,
+            &[cap_ref, cap_a],
+        ),
+        "Pick<CapRemap, 'A'> over `{{ [K in 'a' | 'b' as Capitalize<K>]: string }}` must be \
+         CLOSED on the prepared-decl route — `Capitalize<K>` is a K-only transform over the \
+         bound binder (the `NameRemap` policy), matching the node route"
+    );
+
+    // OPEN: the matching `ReturnType<…>`-SOURCE shape stays OPEN — the SOURCE
+    // is judged under the proof policy, where a value-producing builtin makes
+    // no closed-key claim and `& T` opens the key domain.
+    let ret_source_of_t = graph.intern_node(SemanticNodeData::InstantiationRef {
+        base: DeclIdentity {
+            canonical_id: Arc::from("/cap.ts"),
+            whole_hash: HashValue::default(),
+            decl_name: Arc::from("RetSource"),
+        },
+        args: Arc::from(vec![t_param].into_boxed_slice()),
+    });
+    assert!(
+        super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &dispatch,
+            &builtin_pick,
+            &[ret_source_of_t, cap_a],
+        ),
+        "Pick<RetSource<T>, 'A'> over `{{ [K in keyof ReturnType<() => {{ fixed: string }} & T>]: \
+         string }}` must stay OPEN — the SOURCE is a value-producing builtin (`ReturnType`) that \
+         makes no closed-key claim, so the source proof keeps it open even though the remap \
+         policy would close a K-only transform"
+    );
+}
+
+/// A mapped SOURCE that is an `import("…").Foo<T>` carrier on the PREPARED-DECL
+/// / TypeExpr route must AGREE with the node route: when the imported `Foo<T>`
+/// is a fixed-key type (T value-position-only), the key domain is CLOSED and
+/// enumerates — the same as a `BareRef`/`keyof` carrier source.
+///
+/// **Discriminating.** Before the `TypeExpr::ImportType` arm, the prepared-decl
+/// classifier had no `import`-head resolver and fell through to the
+/// `_ => false` (open) catch-all, so `{ [K in keyof import("./dep").Foo<T>]:
+/// string }` carrier-stopped on the prepared-decl route while the node route
+/// enumerated it — a node-vs-TypeExpr parity gap. The CLOSED assertion fails
+/// against that pre-arm implementation.
+#[test]
+fn import_type_source_closes_on_prepared_decl_route_matching_node_route() {
+    use crate::semantic_query::{DeclIdentity, HashValue};
+
+    let host = host();
+    upsert_ts(
+        &host,
+        "/dep.ts",
+        "export interface Foo<T> { label?: string; items?: T }\n",
+    );
+    // A prepared decl whose mapped SOURCE is an import-type carrier over the
+    // fixed-key `Foo<T>`.
+    upsert_ts(
+        &host,
+        "/use.ts",
+        "export type Use<T> = { [K in keyof import('./dep').Foo<T>]: string };\n",
+    );
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let t = outer_type_param(&graph, "T");
+    let lit_label = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+        "label".to_string(),
+    )));
+    let builtin_pick = DeclIdentity {
+        canonical_id: Arc::from("__builtin__"),
+        whole_hash: HashValue::default(),
+        decl_name: Arc::from("Pick"),
+    };
+    let use_of_t = graph.intern_node(SemanticNodeData::InstantiationRef {
+        base: DeclIdentity {
+            canonical_id: Arc::from("/use.ts"),
+            whole_hash: HashValue::default(),
+            decl_name: Arc::from("Use"),
+        },
+        args: Arc::from(vec![t].into_boxed_slice()),
+    });
+    assert!(
+        !super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &dispatch,
+            &builtin_pick,
+            &[use_of_t, lit_label],
+        ),
+        "Pick<Use<T>, 'label'> over `{{ [K in keyof import('./dep').Foo<T>]: string }}` must be \
+         CLOSED on the prepared-decl route — the `import(...).Foo<T>` source resolves through the \
+         shared dispatch and `Foo`'s key domain is fixed (T value-position-only), matching the \
+         node route"
+    );
+}
+
+/// A self-referential `import("./self").X<T>` carrier in a prepared decl's
+/// mapped source must TERMINATE bounded on the prepared-decl route — the
+/// `TypeExpr::ImportType` bridge threads the ACTIVE TypeExpr walk budget into
+/// the node walk, so a recursive re-entry
+/// (`TypeExpr::ImportType` → node walk → prepared instantiation →
+/// `TypeExpr::ImportType`) monotonically consumes one budget and cannot loop
+/// unbounded.
+///
+/// Runs on a worker thread with a bounded stack so a divergence manifests as a
+/// failed `join` rather than a suite hang. Pre-budget-threading the bridge made
+/// a FRESH node-walk budget per re-entry, so this shape could recurse without
+/// consuming the TypeExpr budget; the LOAD-BEARING assertion is that the `join`
+/// completes.
+#[test]
+fn self_referential_import_type_source_terminates_on_prepared_decl_route() {
+    let handle = std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            use crate::semantic_query::{DeclIdentity, HashValue, LiteralValue};
+            let host = host();
+            // `SelfRec<T>` maps over `keyof import('./self').SelfRec<T>` — a
+            // self-referential import-type carrier source.
+            upsert_ts(
+                &host,
+                "/self.ts",
+                "export type SelfRec<T> = { [K in keyof import('./self').SelfRec<T>]: string };\n",
+            );
+            let dispatch = ProjectSemanticDispatch::new(&host);
+            let graph = Arc::clone(host.project_type_store().semantic_graph());
+            let t = outer_type_param(&graph, "T");
+            let lit = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+                "x".to_string(),
+            )));
+            let builtin_pick = DeclIdentity {
+                canonical_id: Arc::from("__builtin__"),
+                whole_hash: HashValue::default(),
+                decl_name: Arc::from("Pick"),
+            };
+            let self_of_t = graph.intern_node(SemanticNodeData::InstantiationRef {
+                base: DeclIdentity {
+                    canonical_id: Arc::from("/self.ts"),
+                    whole_hash: HashValue::default(),
+                    decl_name: Arc::from("SelfRec"),
+                },
+                args: Arc::from(vec![t].into_boxed_slice()),
+            });
+            // The verdict is question-correct: a self-referential recursive
+            // import-type source key domain is undecidable ⇒ OPEN (carrier-stop),
+            // never false-CLOSED — AND the point is it TERMINATES.
+            assert!(
+                super::raise::utility_enumeration_domain_is_open_or_unknown(
+                    &dispatch,
+                    &builtin_pick,
+                    &[self_of_t, lit],
+                ),
+                "a self-referential recursive import-type source key domain is undecidable ⇒ must \
+                 be OPEN (carrier-stop), not false-CLOSED"
+            );
+        })
+        .expect("spawn worker thread");
+    handle.join().expect(
+        "a self-referential import-type carrier source must TERMINATE bounded on the \
+         prepared-decl route — the ImportType bridge must thread the active TypeExpr budget into \
+         the node walk (a fresh budget per re-entry would let it loop)",
+    );
+}
+
+/// The ZERO-ARG self-import variant: `type Selfish = { [K in keyof
+/// import("./selfish").Selfish]: V }` resolves the import head to a ZERO-ARG
+/// `DeclRef` (not an `InstantiationRef`), so the recursion round-trips
+/// `TypeExpr::ImportType` → node walk → `DeclRef` arm →
+/// `prepared_decl_body_is_closed` → `TypeExpr::ImportType`. This must TERMINATE
+/// bounded.
+///
+/// This is a TERMINATION + VERDICT regression guard for the zero-arg
+/// import-bridge round-trip through the node-route `DeclRef` /
+/// `DeclPlaceholder` arms (which now thread the active walk budget through the
+/// prepared-decl hop instead of seeding a fresh per-hop budget — the
+/// soundness-hardening that gives the bridge a single monotonic budget). The
+/// shape also happens to be bounded by the `prepared_decl_body_is_closed`
+/// in-flight `visited` set and the carrier `carrier_normalizing` guard, so the
+/// budget-threading is defense-in-depth (the correct ownership model) rather
+/// than the sole bound; a regression that breaks termination OR flips the
+/// verdict fails this test. Runs on a worker thread so a divergence fails the
+/// `join` rather than hanging the suite.
+#[test]
+fn zero_arg_self_import_type_source_terminates_via_decl_hop() {
+    let handle = std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            use crate::semantic_query::{DeclIdentity, HashValue, LiteralValue};
+            let host = host();
+            // No type parameter ⇒ the import head resolves to a zero-arg DeclRef.
+            upsert_ts(
+                &host,
+                "/selfish.ts",
+                "export type Selfish = { [K in keyof import('./selfish').Selfish]: string };\n",
+            );
+            let dispatch = ProjectSemanticDispatch::new(&host);
+            let graph = Arc::clone(host.project_type_store().semantic_graph());
+            let lit = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+                "x".to_string(),
+            )));
+            let builtin_pick = DeclIdentity {
+                canonical_id: Arc::from("__builtin__"),
+                whole_hash: HashValue::default(),
+                decl_name: Arc::from("Pick"),
+            };
+            let selfish = graph.intern_node(SemanticNodeData::DeclRef {
+                identity: DeclIdentity {
+                    canonical_id: Arc::from("/selfish.ts"),
+                    whole_hash: HashValue::default(),
+                    decl_name: Arc::from("Selfish"),
+                },
+            });
+            // The verdict is question-correct: an undecidable self-recursive
+            // import-type source key domain is OPEN (carrier-stop), never a
+            // false-CLOSED. (And the point is bounded TERMINATION through the
+            // decl hop — a divergence fails the worker-thread `join`.)
+            assert!(
+                super::raise::utility_enumeration_domain_is_open_or_unknown(
+                    &dispatch,
+                    &builtin_pick,
+                    &[selfish, lit],
+                ),
+                "a zero-arg self-referential import-type source key domain is undecidable ⇒ must \
+                 be OPEN (carrier-stop), not false-CLOSED"
+            );
+        })
+        .expect("spawn worker thread");
+    handle.join().expect(
+        "a zero-arg self-import carrier source must TERMINATE bounded — the node-route DeclRef / \
+         DeclPlaceholder arms must thread the active walk budget through the prepared-decl hop (a \
+         fresh per-hop budget would let the import-bridge round-trip loop)",
+    );
 }
 
 /// Key-remapped mapped members judge declaration-site inheritance PER
@@ -10210,6 +10503,7 @@ fn nested_builtin_object_filter_key_domain_judged_by_family_semantics() {
     use crate::semantic_query::{DeclIdentity, HashValue, LiteralValue};
 
     let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     let string_ty = primitive(&graph, PrimitiveKind::String);
@@ -10238,7 +10532,7 @@ fn nested_builtin_object_filter_key_domain_judged_by_family_semantics() {
     // CLOSED: a nested builtin Pick over a closed source + closed keys.
     assert!(
         !super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin("Pick"),
             &[nested("Pick", vec![source, keys_ab]), lit("a")],
         ),
@@ -10249,7 +10543,7 @@ fn nested_builtin_object_filter_key_domain_judged_by_family_semantics() {
     // OPEN control: the nested filter's SOURCE is the unbound outer T.
     assert!(
         super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin("Pick"),
             &[nested("Pick", vec![t_param, lit("a")]), lit("a")],
         ),
@@ -10264,7 +10558,7 @@ fn nested_builtin_object_filter_key_domain_judged_by_family_semantics() {
     // `builtin_key_domain_is_judged_per_utility_output_key_semantics`).
     assert!(
         !super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin("Pick"),
             &[nested("Partial", vec![source]), lit("a")],
         ),
@@ -10339,7 +10633,7 @@ fn conditional_key_domain_classifies_only_the_oracle_selected_branch() {
     // branch — the key domain is the true branch's `{ label }` ⇒ CLOSED.
     assert!(
         !super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin_omit,
             &[source_of_t("Source"), x_lit],
         ),
@@ -10351,7 +10645,7 @@ fn conditional_key_domain_classifies_only_the_oracle_selected_branch() {
     // `T` lives only in the UNSELECTED true branch ⇒ CLOSED.
     assert!(
         !super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin_omit,
             &[source_of_t("SourceFalse"), x_lit],
         ),
@@ -10363,7 +10657,7 @@ fn conditional_key_domain_classifies_only_the_oracle_selected_branch() {
     // and the open `T` true branch keeps the domain OPEN.
     assert!(
         super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin_omit,
             &[source_of_t("SourceDeferred"), x_lit],
         ),
@@ -10395,7 +10689,7 @@ fn conditional_key_domain_classifies_only_the_oracle_selected_branch() {
     });
     assert!(
         super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin_omit,
             &[false_selected_open, x_lit],
         ),
@@ -10502,7 +10796,7 @@ fn value_sensitive_operands_judge_instantiations_by_any_open_argument() {
     // `type Sel<T> = Wrap<T>['a']` — `Wrap<T>['a']` IS `BigOpen<T>`.
     assert!(
         super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin("Omit"),
             &[inst("Sel", vec![t_param]), lit("x")],
         ),
@@ -10514,7 +10808,7 @@ fn value_sensitive_operands_judge_instantiations_by_any_open_argument() {
     // `Foo<T> extends XReq ? A : B` — selection depends on Foo<T>'s VALUES.
     assert!(
         super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin("Pick"),
             &[inst("CondSel", vec![t_param]), lit("a1")],
         ),
@@ -10530,7 +10824,7 @@ fn value_sensitive_operands_judge_instantiations_by_any_open_argument() {
     });
     assert!(
         super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin("Pick"),
             &[indexed, lit("x")],
         ),
@@ -10554,7 +10848,7 @@ fn value_sensitive_operands_judge_instantiations_by_any_open_argument() {
     });
     assert!(
         super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin("Pick"),
             &[cond, lit("a1")],
         ),
@@ -10567,7 +10861,7 @@ fn value_sensitive_operands_judge_instantiations_by_any_open_argument() {
     // 'a'>` is CLOSED (T confined to Wrap's member VALUE position).
     assert!(
         !super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin("Omit"),
             &[wrap_of_t, lit("a")],
         ),
@@ -10621,6 +10915,7 @@ fn builtin_key_domain_verdict_is_route_independent() {
     use crate::semantic_query::{DeclIdentity, HashValue, LiteralValue};
 
     let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
     upsert_ts(
         &host,
         "/types.ts",
@@ -10649,7 +10944,7 @@ fn builtin_key_domain_verdict_is_route_independent() {
     // NODE route: a `__builtin__` Partial InstantiationRef over a closed
     // object — CLOSED under the unified registry rule.
     let node_route_closed = !super::raise::utility_enumeration_domain_is_open_or_unknown(
-        &host,
+        &dispatch,
         &builtin_pick,
         &[
             graph.intern_node(SemanticNodeData::InstantiationRef {
@@ -10668,7 +10963,7 @@ fn builtin_key_domain_verdict_is_route_independent() {
     // prepared body is `Partial<{a, b}>` (the unresolved-Ref builtin
     // fallback in the TypeExpr classifier).
     let type_expr_route_closed = !super::raise::utility_enumeration_domain_is_open_or_unknown(
-        &host,
+        &dispatch,
         &builtin_pick,
         &[
             graph.intern_node(SemanticNodeData::DeclRef {
@@ -10696,7 +10991,7 @@ fn builtin_key_domain_verdict_is_route_independent() {
     // OPEN control, both routes: an OPEN argument keeps the builtin open.
     assert!(
         super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin_pick,
             &[
                 graph.intern_node(SemanticNodeData::InstantiationRef {
@@ -10715,7 +11010,7 @@ fn builtin_key_domain_verdict_is_route_independent() {
     );
     assert!(
         super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin_pick,
             &[
                 graph.intern_node(SemanticNodeData::InstantiationRef {
@@ -10788,7 +11083,7 @@ fn bare_infer_extends_selects_true_through_the_shared_oracle() {
     // false branch is dead, the key domain is `{ label }` ⇒ CLOSED.
     assert!(
         !super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin_omit,
             &[inst("InferSel"), x_lit],
         ),
@@ -10799,7 +11094,7 @@ fn bare_infer_extends_selects_true_through_the_shared_oracle() {
     // Control: the same pattern with the OPEN branch WINNING stays OPEN.
     assert!(
         super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin_omit,
             &[inst("InferSelOpenWin"), x_lit],
         ),
@@ -10822,7 +11117,7 @@ fn bare_infer_extends_selects_true_through_the_shared_oracle() {
     });
     assert!(
         !super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin_omit,
             &[node_cond, x_lit],
         ),
@@ -10841,7 +11136,7 @@ fn bare_infer_extends_selects_true_through_the_shared_oracle() {
     });
     assert!(
         !super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin_omit,
             &[bound_closed, x_lit],
         ),
@@ -10859,7 +11154,7 @@ fn bare_infer_extends_selects_true_through_the_shared_oracle() {
     });
     assert!(
         super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin_omit,
             &[bound_open, x_lit],
         ),
@@ -10915,6 +11210,7 @@ fn value_sensitive_operands_descend_compound_value_surfaces() {
     use crate::semantic_query::{DeclIdentity, FunctionParam, HashValue, IndexKey, LiteralValue};
 
     let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
     upsert_ts(
         &host,
         "/types.ts",
@@ -10953,7 +11249,7 @@ fn value_sensitive_operands_descend_compound_value_surfaces() {
     // of the value-sensitive IndexedAccess object.
     assert!(
         super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin_omit,
             &[inst("SelNested", vec![t_param]), x_lit],
         ),
@@ -10965,7 +11261,7 @@ fn value_sensitive_operands_descend_compound_value_surfaces() {
     // member value.
     assert!(
         super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin_omit,
             &[inst("SelInline", vec![t_param]), x_lit],
         ),
@@ -10977,7 +11273,7 @@ fn value_sensitive_operands_descend_compound_value_surfaces() {
     // function-valued) stay CLOSED — no over-fire.
     assert!(
         !super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin_omit,
             &[
                 graph.intern_node(SemanticNodeData::DeclRef {
@@ -10991,7 +11287,7 @@ fn value_sensitive_operands_descend_compound_value_surfaces() {
     );
     assert!(
         !super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin_omit,
             &[
                 graph.intern_node(SemanticNodeData::DeclRef {
@@ -11012,7 +11308,7 @@ fn value_sensitive_operands_descend_compound_value_surfaces() {
     });
     assert!(
         super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin_omit,
             &[node_nested, x_lit],
         ),
@@ -11026,7 +11322,7 @@ fn value_sensitive_operands_descend_compound_value_surfaces() {
     });
     assert!(
         super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin_omit,
             &[node_inline, x_lit],
         ),
@@ -11051,7 +11347,7 @@ fn value_sensitive_operands_descend_compound_value_surfaces() {
     });
     assert!(
         super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin_omit,
             &[node_fn_open, x_lit],
         ),
@@ -11073,7 +11369,7 @@ fn value_sensitive_operands_descend_compound_value_surfaces() {
     });
     assert!(
         !super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin_omit,
             &[node_fn_closed, x_lit],
         ),
@@ -11138,7 +11434,7 @@ fn defaulted_type_parameters_bind_their_default_identity() {
     // branch is dead ⇒ CLOSED.
     assert!(
         !super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin_omit,
             &[inst("SourceDefault", vec![t_param]), lit("x")],
         ),
@@ -11150,7 +11446,7 @@ fn defaulted_type_parameters_bind_their_default_identity() {
     // `A := 'q'` ⇒ `B extends string` selects TRUE.
     assert!(
         !super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin_omit,
             &[inst("SourceFwd", vec![t_param, lit("q")]), lit("x")],
         ),
@@ -11161,7 +11457,7 @@ fn defaulted_type_parameters_bind_their_default_identity() {
     // Control: an OPEN default keeps the instantiation OPEN.
     assert!(
         super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin_omit,
             &[inst("SourceDefaultOpen", vec![t_param]), lit("x")],
         ),
@@ -11258,7 +11554,7 @@ fn closed_named_ref_operands_select_through_the_shared_oracle() {
     });
     assert!(
         !super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin_omit,
             &[inst("SourceNamed", vec![marker_ref, t_param]), x_lit],
         ),
@@ -11271,7 +11567,7 @@ fn closed_named_ref_operands_select_through_the_shared_oracle() {
     // named ref's resolved identity, not degrade it to ClosedAbstract.
     assert!(
         !super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin_omit,
             &[inst("OuterNamed", vec![t_param]), x_lit],
         ),
@@ -11283,7 +11579,7 @@ fn closed_named_ref_operands_select_through_the_shared_oracle() {
     // keeps the domain OPEN.
     assert!(
         super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin_omit,
             &[inst("SourceNamed", vec![t_param, t_param]), x_lit],
         ),
@@ -11338,6 +11634,7 @@ fn mapped_name_remap_is_judged_by_key_domain_policy() {
     };
 
     let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
     upsert_ts(
         &host,
         "/types.ts",
@@ -11378,7 +11675,7 @@ fn mapped_name_remap_is_judged_by_key_domain_policy() {
     let keyof_foo = graph.intern_node(SemanticNodeData::KeyOf { base: foo_of_t });
     assert!(
         !super::raise::mapped_type_is_open_or_unknown(
-            &host,
+            &dispatch,
             closed_source,
             &mapper_with(keyof_foo)
         ),
@@ -11388,7 +11685,11 @@ fn mapped_name_remap_is_judged_by_key_domain_policy() {
 
     // Control: a DIRECT outer-generic remap stays OPEN.
     assert!(
-        super::raise::mapped_type_is_open_or_unknown(&host, closed_source, &mapper_with(t_param)),
+        super::raise::mapped_type_is_open_or_unknown(
+            &dispatch,
+            closed_source,
+            &mapper_with(t_param)
+        ),
         "`as T` (a direct outer-generic remap) must OPEN the mapped predicate"
     );
 
@@ -11402,7 +11703,11 @@ fn mapped_name_remap_is_judged_by_key_domain_policy() {
         distributive: false,
     });
     assert!(
-        !super::raise::mapped_type_is_open_or_unknown(&host, closed_source, &mapper_with(k_cond)),
+        !super::raise::mapped_type_is_open_or_unknown(
+            &dispatch,
+            closed_source,
+            &mapper_with(k_cond)
+        ),
         "a finite K-conditional remap (`K extends 'a' ? 'x' : 'y'`) must stay CLOSED"
     );
 
@@ -11424,7 +11729,7 @@ fn mapped_name_remap_is_judged_by_key_domain_policy() {
     });
     assert!(
         !super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin_omit,
             &[remap_decl_of_t, lit("a")],
         ),
@@ -11450,6 +11755,7 @@ fn tuple_and_array_elements_are_value_positions_on_both_routes() {
     use crate::semantic_query::{DeclIdentity, HashValue, IndexKey, LiteralValue, TupleElement};
 
     let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
     upsert_ts(
         &host,
         "/types.ts",
@@ -11483,7 +11789,7 @@ fn tuple_and_array_elements_are_value_positions_on_both_routes() {
     // TypeExpr route: `[T]` / `T[]` key domains are their INDICES —
     // CLOSED regardless of the open element value.
     let type_expr_tuple_closed = !super::raise::utility_enumeration_domain_is_open_or_unknown(
-        &host,
+        &dispatch,
         &builtin_omit,
         &[inst("TupleSrc"), lit("0")],
     );
@@ -11494,7 +11800,7 @@ fn tuple_and_array_elements_are_value_positions_on_both_routes() {
     );
     assert!(
         !super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin_omit,
             &[inst("ArraySrc"), lit("x")],
         ),
@@ -11517,7 +11823,7 @@ fn tuple_and_array_elements_are_value_positions_on_both_routes() {
         readonly: false,
     });
     let node_tuple_closed = !super::raise::utility_enumeration_domain_is_open_or_unknown(
-        &host,
+        &dispatch,
         &builtin_omit,
         &[tuple_node, lit("0")],
     );
@@ -11541,7 +11847,7 @@ fn tuple_and_array_elements_are_value_positions_on_both_routes() {
     });
     assert!(
         super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin_omit,
             &[tuple_indexed, lit("x")],
         ),
@@ -11601,7 +11907,7 @@ fn binding_identity_selects_conditionals_through_concrete_arguments() {
     // Direct: the check param `U` is bound to the concrete `'x'`.
     assert!(
         !super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin_omit,
             &[inst("SBind", vec![t_param, lit("x")]), lit("k")],
         ),
@@ -11613,7 +11919,7 @@ fn binding_identity_selects_conditionals_through_concrete_arguments() {
     // wrapper hop into SBind's check.
     assert!(
         !super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin_omit,
             &[inst("OuterBind", vec![t_param, lit("x")]), lit("k")],
         ),
@@ -11667,6 +11973,7 @@ fn node_keyof_operand_resets_to_key_domain_position() {
     use crate::semantic_query::{DeclIdentity, HashValue, LiteralValue};
 
     let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
     upsert_ts(
         &host,
         "/types.ts",
@@ -11714,7 +12021,7 @@ fn node_keyof_operand_resets_to_key_domain_position() {
     });
     assert!(
         !super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin_pick,
             &[cond, lit_a1],
         ),
@@ -11739,6 +12046,7 @@ fn value_sensitive_all_closed_instantiation_requires_resolvable_base() {
     use crate::semantic_query::{DeclIdentity, HashValue, LiteralValue};
 
     let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
     upsert_ts(
         &host,
         "/types.ts",
@@ -11785,7 +12093,7 @@ fn value_sensitive_all_closed_instantiation_requires_resolvable_base() {
     });
     assert!(
         super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin_pick,
             &[cond_with_check(ghost_check), lit_a1],
         ),
@@ -11800,7 +12108,7 @@ fn value_sensitive_all_closed_instantiation_requires_resolvable_base() {
     });
     assert!(
         !super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin_pick,
             &[cond_with_check(real_check), lit_a1],
         ),
@@ -11868,7 +12176,7 @@ fn builtin_key_domain_is_judged_per_utility_output_key_semantics() {
     let record_of_t = inst(builtin("Record"), vec![lit("a"), t_param]);
     assert!(
         !super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin_omit,
             &[record_of_t, lit("x")],
         ),
@@ -11886,7 +12194,7 @@ fn builtin_key_domain_is_judged_per_utility_output_key_semantics() {
     };
     assert!(
         !super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin_omit,
             &[inst(rec_decl("RecOf"), vec![t_param]), lit("x")],
         ),
@@ -11907,7 +12215,7 @@ fn builtin_key_domain_is_judged_per_utility_output_key_semantics() {
     });
     assert!(
         super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin_omit,
             &[inst(builtin("ReturnType"), vec![fn_to_t]), lit("x")],
         ),
@@ -11927,7 +12235,7 @@ fn builtin_key_domain_is_judged_per_utility_output_key_semantics() {
     });
     assert!(
         super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin_omit,
             &[inst(builtin("ReturnType"), vec![fn_to_obj]), lit("x")],
         ),
@@ -11938,7 +12246,7 @@ fn builtin_key_domain_is_judged_per_utility_output_key_semantics() {
     // TYPEEXPR route parity for the value-producing family.
     assert!(
         super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin_omit,
             &[inst(rec_decl("RetOf"), vec![t_param]), lit("x")],
         ),
@@ -12008,6 +12316,7 @@ fn mapped_role_split_pins_key_production_and_walks_value_bodies() {
     };
 
     let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
     upsert_ts(
         &host,
         "/types.ts",
@@ -12064,7 +12373,7 @@ fn mapped_role_split_pins_key_production_and_walks_value_bodies() {
     });
     assert!(
         super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin_omit,
             &[open_value_access, lit("x")],
         ),
@@ -12087,7 +12396,7 @@ fn mapped_role_split_pins_key_production_and_walks_value_bodies() {
     });
     assert!(
         !super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin_omit,
             &[fixed_keys_access, lit("x")],
         ),
@@ -12100,7 +12409,7 @@ fn mapped_role_split_pins_key_production_and_walks_value_bodies() {
     // same `{ [K in 'a']: T }['a']` shape — the mapped VALUE must open it.
     assert!(
         super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin_omit,
             &[inst_of_t("SVal"), lit("x")],
         ),
@@ -12113,7 +12422,7 @@ fn mapped_role_split_pins_key_production_and_walks_value_bodies() {
     // same value-sensitive parent.
     assert!(
         !super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin_omit,
             &[inst_of_t("SFix"), lit("x")],
         ),
@@ -12139,6 +12448,7 @@ fn variadic_tuple_rest_elements_open_the_key_domain_on_both_routes() {
     use crate::semantic_query::{DeclIdentity, HashValue, LiteralValue, TupleElement};
 
     let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
     upsert_ts(
         &host,
         "/types.ts",
@@ -12177,7 +12487,7 @@ fn variadic_tuple_rest_elements_open_the_key_domain_on_both_routes() {
     // conservative bound — no arity algebra).
     assert!(
         super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin_omit,
             &[inst_of_t("VarTup"), lit("0")],
         ),
@@ -12186,7 +12496,7 @@ fn variadic_tuple_rest_elements_open_the_key_domain_on_both_routes() {
     );
     assert!(
         !super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin_omit,
             &[inst_of_t("FixTup"), lit("0")],
         ),
@@ -12195,7 +12505,7 @@ fn variadic_tuple_rest_elements_open_the_key_domain_on_both_routes() {
     );
     assert!(
         !super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin_omit,
             &[inst_of_t("RestArr"), lit("0")],
         ),
@@ -12218,7 +12528,7 @@ fn variadic_tuple_rest_elements_open_the_key_domain_on_both_routes() {
     });
     assert!(
         super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin_omit,
             &[variadic_tuple, lit("0")],
         ),
@@ -12233,7 +12543,7 @@ fn variadic_tuple_rest_elements_open_the_key_domain_on_both_routes() {
     });
     assert!(
         !super::raise::utility_enumeration_domain_is_open_or_unknown(
-            &host,
+            &dispatch,
             &builtin_omit,
             &[no_rest_tuple, lit("0")],
         ),

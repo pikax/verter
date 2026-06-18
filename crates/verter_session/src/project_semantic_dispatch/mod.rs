@@ -2591,3 +2591,6 @@ mod carrier_reduction_tests;
 
 #[cfg(test)]
 mod carrier_head_resolution_tests;
+
+#[cfg(test)]
+mod mapped_key_domain_carrier_tests;

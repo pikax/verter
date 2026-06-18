@@ -1991,7 +1991,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 decl_name: Arc::clone(decl_name),
             };
             if crate::project_semantic_dispatch::raise::utility_enumeration_domain_is_open_or_unknown(
-                self.ctx,
+                self,
                 &builtin_identity,
                 args.as_ref(),
             ) {
@@ -5613,7 +5613,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // Closed]: Closed[K] }`, a K-only transform, a finite keyspace)
         // falls through to enumerate path-precisely.
         if crate::project_semantic_dispatch::raise::mapped_type_is_open_or_unknown(
-            self.ctx, source, mapper,
+            self, source, mapper,
         ) {
             let node = graph.intern_node(SemanticNodeData::Mapped {
                 source,
