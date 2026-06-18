@@ -1,0 +1,5 @@
+<table>
+  <colgroup>
+    <col />
+  </colgroup>
+</table>

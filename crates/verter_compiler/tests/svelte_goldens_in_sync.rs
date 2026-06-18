@@ -145,14 +145,28 @@ struct CommittedGolden {
     helper_set: Vec<String>,
     #[serde(rename = "helperCounts")]
     helper_counts: std::collections::BTreeMap<String, u32>,
+    /// The ordered delegated event-type set (the module `$.delegate([...])`
+    /// declaration), client backend only (empty on the server). NO `default`: every
+    /// committed golden MUST carry this field, so a golden missing it fails the
+    /// structural deserialize rather than silently defaulting to an empty list.
+    #[serde(rename = "delegatedEvents")]
+    delegated_events: Vec<String>,
     templates: Vec<TemplateSkeleton>,
     css: CssTopology,
 }
 
-/// Recursively collect every committed `*.json` golden path under `dir`.
+/// Recursively collect every committed `*.json` golden path under `dir`, EXCEPT
+/// the top-level `generated/` subtree. That subtree is the SEPARATE differential
+/// -parity corpus (the EXPANDED golden schema, owned by
+/// `scripts/gen-svelte-diff-corpus.mjs` + the `diff_oracle_tests` matrix); its
+/// goldens carry additional fields the hand-vendored [`CommittedGolden`]
+/// `deny_unknown_fields` schema intentionally rejects, and they are validated by
+/// `gen-svelte-diff-corpus.mjs --check` instead — so this hand-vendored hermetic
+/// guard skips them.
 fn collect_golden_paths(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
+    let generated_top = dir.join("generated");
     while let Some(d) = stack.pop() {
         for entry in
             std::fs::read_dir(&d).unwrap_or_else(|e| panic!("read dir {}: {e}", d.display()))
@@ -160,6 +174,9 @@ fn collect_golden_paths(dir: &Path) -> Vec<PathBuf> {
             let entry = entry.expect("dir entry");
             let p = entry.path();
             if p.is_dir() {
+                if p == generated_top {
+                    continue;
+                }
                 stack.push(p);
             } else if p.extension().and_then(|e| e.to_str()) == Some("json") {
                 out.push(p);
@@ -234,6 +251,27 @@ fn validate_committed_golden(path: &Path, raw: &str) -> Result<(), String> {
             path.display(),
             golden.templates.len()
         ));
+    }
+
+    // The delegated-event set is client-only and internally consistent: the server
+    // backend declares none; a non-empty client set must coincide with the
+    // `delegate` helper (the module-level `$.delegate([...])` declaration).
+    if golden.backend == "server" && !golden.delegated_events.is_empty() {
+        return Err(format!(
+            "{}: server golden must carry an empty `delegatedEvents` list, got {:?}",
+            path.display(),
+            golden.delegated_events
+        ));
+    }
+    if golden.backend == "client" {
+        let has_delegate = golden.helper_set.iter().any(|h| h == "delegate");
+        if golden.delegated_events.is_empty() == has_delegate {
+            return Err(format!(
+                "{}: `delegatedEvents` non-emptiness ({:?}) must match the `delegate` helper presence ({has_delegate})",
+                path.display(),
+                golden.delegated_events
+            ));
+        }
     }
     for tpl in &golden.templates {
         if !matches!(
@@ -320,10 +358,14 @@ fn golden_oracle_version_matches_pin(path: &Path, raw: &str, pin: &str) -> Resul
 
 /// Collect every committed `.svelte` fixture under `dir`, as `/`-joined slugs
 /// relative to `dir` with the `.svelte` suffix stripped — the SAME slug the
-/// generator (`fixtureSlug` + `goldenPathFor`) derives golden paths from.
+/// generator (`fixtureSlug` + `goldenPathFor`) derives golden paths from. The
+/// top-level `generated/` subtree is EXCLUDED (it is the differential-parity
+/// corpus, owned by `gen-svelte-diff-corpus.mjs`), so the hand-vendored
+/// fixture↔golden coverage check stays consistent with [`collect_golden_paths`].
 fn collect_fixture_slugs(dir: &Path) -> Vec<String> {
     let mut out = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
+    let generated_top = dir.join("generated");
     while let Some(d) = stack.pop() {
         for entry in
             std::fs::read_dir(&d).unwrap_or_else(|e| panic!("read dir {}: {e}", d.display()))
@@ -331,6 +373,9 @@ fn collect_fixture_slugs(dir: &Path) -> Vec<String> {
             let entry = entry.expect("dir entry");
             let p = entry.path();
             if p.is_dir() {
+                if p == generated_top {
+                    continue;
+                }
                 stack.push(p);
             } else if p.extension().and_then(|e| e.to_str()) == Some("svelte") {
                 let rel = p

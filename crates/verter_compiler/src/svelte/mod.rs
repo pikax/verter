@@ -14,6 +14,7 @@
 pub mod carrier;
 pub mod ide;
 pub mod parser;
+pub mod runtime;
 pub mod template_facts;
 
 pub use carrier::SvelteCarrierCompiler;

@@ -1,0 +1,55 @@
+{
+  "slug": "whitespace/svg_whitespace.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/internal/flags/legacy",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "svg_whitespace",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_svg",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "from_svg"
+  ],
+  "helperCounts": {
+    "from_svg": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_svg",
+      "html": "<svg><rect></rect><circle></circle><text>label</text></svg>",
+      "flag": null
+    }
+  ],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

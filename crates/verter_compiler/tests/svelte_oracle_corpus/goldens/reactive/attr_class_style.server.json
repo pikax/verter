@@ -32,6 +32,7 @@
     "attr_class": 1,
     "attr_style": 1
   },
+  "delegatedEvents": [],
   "templates": [],
   "css": {
     "present": false,

@@ -62,6 +62,9 @@
     "append": 1,
     "delegate": 1
   },
+  "delegatedEvents": [
+    "click"
+  ],
   "templates": [
     {
       "factory": "from_html",

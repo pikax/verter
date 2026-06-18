@@ -70,6 +70,7 @@
     "set_text": 2,
     "get": 2
   },
+  "delegatedEvents": [],
   "templates": [
     {
       "factory": "from_html",

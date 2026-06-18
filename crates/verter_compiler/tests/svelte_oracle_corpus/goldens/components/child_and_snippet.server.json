@@ -36,6 +36,7 @@
     "escape": 1,
     "ensure_array_like": 1
   },
+  "delegatedEvents": [],
   "templates": [],
   "css": {
     "present": false,

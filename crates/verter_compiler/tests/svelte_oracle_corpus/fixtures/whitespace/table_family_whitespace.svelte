@@ -1,0 +1,15 @@
+<select>
+	<option>a</option>
+	<option>b</option>
+</select>
+<table>
+	<tbody>
+		<tr>
+			<td>cell</td>
+		</tr>
+	</tbody>
+</table>
+<datalist>
+	<option>x</option>
+	<option>y</option>
+</datalist>

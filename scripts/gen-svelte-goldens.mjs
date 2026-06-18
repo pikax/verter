@@ -88,7 +88,6 @@
  * run this script (which restamps every golden), review the diff.
  */
 
-import { createRequire } from "node:module";
 import {
   mkdirSync,
   readFileSync,
@@ -100,6 +99,23 @@ import {
 } from "node:fs";
 import { dirname, join, parse as parsePath, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+
+// The shared topology-extraction primitives — the single source of truth both
+// Svelte golden generators consume (this hand-vendored corpus + the generated
+// differential corpus). The extractors here are byte-equivalent to the logic
+// this generator previously inlined; they were lifted into the shared lib so a
+// normalization fix lands once for both corpora.
+import {
+  extractDelegatedEvents,
+  extractExportDefault,
+  extractImports,
+  extractScopeHash,
+  extractTemplates,
+  helperCountsOf,
+  helperSequenceOf,
+  loadPinnedCompiler as loadPinnedCompilerFrom,
+  maskScopeHash,
+} from "./svelte-golden-lib.mjs";
 
 // ---------------------------------------------------------------------------
 // Pin constant — the single source of truth for the oracle version. The Rust
@@ -121,6 +137,14 @@ const REPO_ROOT = resolve(__dirname, "..");
 const ORACLE_ROOT = resolve(REPO_ROOT, "crates/verter_compiler/tests/svelte_oracle_corpus");
 const FIXTURES_DIR = join(ORACLE_ROOT, "fixtures");
 const GOLDENS_DIR = join(ORACLE_ROOT, "goldens");
+
+// The top-level `generated/` subtree of `fixtures/` and `goldens/` is owned by
+// the SEPARATE generated differential corpus generator
+// (`scripts/gen-svelte-diff-corpus.mjs`), which writes the EXPANDED schema there.
+// This hand-vendored generator owns everything EXCEPT that subtree — it skips it
+// in discovery, never deletes it in write mode, and ignores it in the
+// stale-orphan walk, so the two generators never collide.
+const GENERATED_SUBDIR = "generated";
 
 // Marker file the generator drops at the root of every EMIT dir it creates.
 // An EXISTING non-empty emit target is accepted only when it carries this
@@ -283,44 +307,23 @@ function isEmptyDir(dir) {
 // ---------------------------------------------------------------------------
 
 /**
- * Resolve the pinned svelte compiler. Pins the EXACT version directory under
- * pnpm so a different installed `svelte` cannot silently satisfy the oracle.
- * Throws a clear error (rather than resolving a floating `svelte`) when the
- * pinned version is not installed.
+ * Resolve the pinned svelte compiler (delegates to the shared loader, rooted at
+ * this generator's `REPO_ROOT`). Pins the EXACT version directory under pnpm so
+ * a different installed `svelte` cannot silently satisfy the oracle.
  */
 function loadPinnedCompiler() {
-  const require = createRequire(join(REPO_ROOT, "noop.js"));
-  // The pnpm content-addressed path for the pinned version. Pinning the exact
-  // version directory forbids a floating-version fallback.
-  const pinnedDir = join(
-    REPO_ROOT,
-    "node_modules/.pnpm",
-    `svelte@${SVELTE_ORACLE_VERSION}`,
-    "node_modules/svelte",
-  );
-  const pkgPath = join(pinnedDir, "package.json");
-  if (!existsSync(pkgPath)) {
-    throw new Error(
-      `pinned svelte@${SVELTE_ORACLE_VERSION} not installed at ${pinnedDir}. ` +
-        `Run \`pnpm install\` (svelte is a pinned devDependency).`,
-    );
-  }
-  const pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
-  if (pkg.version !== SVELTE_ORACLE_VERSION) {
-    throw new Error(
-      `installed svelte version ${pkg.version} != pinned SVELTE_ORACLE_VERSION ` +
-        `${SVELTE_ORACLE_VERSION}. Re-pin the oracle and regenerate the goldens.`,
-    );
-  }
-  const compilerPath = join(pinnedDir, "compiler/index.js");
-  return require(compilerPath);
+  return loadPinnedCompilerFrom(REPO_ROOT);
 }
 
 // ---------------------------------------------------------------------------
 // Corpus discovery
 // ---------------------------------------------------------------------------
 
-/** Recursively collect `.svelte` fixtures, sorted lexicographically. */
+/**
+ * Recursively collect `.svelte` fixtures, sorted lexicographically. The
+ * top-level `generated/` subtree (owned by the differential-corpus generator) is
+ * skipped — this generator never produces goldens for it.
+ */
 function discoverFixtures(dir) {
   const out = [];
   const walk = (d) => {
@@ -330,6 +333,8 @@ function discoverFixtures(dir) {
     for (const e of entries) {
       const p = join(d, e.name);
       if (e.isDirectory()) {
+        // Skip the differential-corpus subtree directly under `fixtures/`.
+        if (d === dir && e.name === GENERATED_SUBDIR) continue;
         walk(p);
       } else if (e.isFile() && e.name.endsWith(".svelte")) {
         out.push(p);
@@ -360,341 +365,18 @@ function componentNameFor(slug) {
 // Normalization (topology, not bytes)
 // ---------------------------------------------------------------------------
 
-const SCOPE_HASH_RE = /svelte-[0-9a-z]+/g;
-const SCOPE_HASH_PLACEHOLDER = "svelte-<scoped>";
+// The topology extractors (scope-hash masking, non-code masking,
+// helperSequenceOf, extractImports, extractExportDefault, extractTemplates,
+// extractDelegatedEvents) live in ./svelte-golden-lib.mjs (imported above) — the
+// single source of truth shared with scripts/gen-svelte-diff-corpus.mjs.
 
-/** First `svelte-<hash>` token in the source, or `null`. Topology, not bytes. */
-function extractScopeHash(text) {
-  const m = text.match(/svelte-[0-9a-z]+/);
-  return m ? m[0] : null;
-}
-
-function maskScopeHash(text) {
-  return text.replace(SCOPE_HASH_RE, SCOPE_HASH_PLACEHOLDER);
-}
-
-/**
- * Mask the NON-CODE regions of a JS module — string literals, the TEXT spans of
- * template literals, line comments, block comments, and regex literals — by
- * overwriting their contents with spaces (newlines preserved so line structure
- * is unchanged). The masked-out characters can no longer match the `$.<helper>`
- * member-access scan below, so a literal `$.<ident>` authored in MARKUP (which
- * the compiler emits into a template-literal TEXT span — `$.from_html(`…`)` on
- * the client, `$$payload.out += `…`` on the server) cannot pollute the helper
- * topology with a phantom call.
- *
- * Template-literal `${…}` INTERPOLATIONS are deliberately NOT masked: they are
- * real code, and the SSR backend renders genuine helper calls (`$.escape`,
- * `$.attr`, `$.get`, …) inside them. Masking the interpolations would DROP real
- * topology. The scanner tracks template-literal nesting (a template inside an
- * interpolation inside a template) via a brace-depth stack so it resumes
- * template TEXT masking exactly when an interpolation closes.
- *
- * This is a single-pass character scanner, not a full JS parse — it preserves
- * the helper FAMILY/sequence topology (the oracle bar) while excluding non-code
- * bytes, and stays var-rename / whitespace stable.
- */
-function maskNonCodeRegions(code) {
-  const out = Array.from(code);
-  const n = code.length;
-  // Stack of template-literal frames currently open. Each frame records the
-  // interpolation `{`-nesting depth at which the template TEXT resumes; while
-  // `interpDepth > 0` we are in CODE inside a `${…}` and must scan normally.
-  const tmplStack = [];
-  // Previous significant (non-whitespace, non-comment) character — used to
-  // decide whether a `/` begins a regex literal or is a division operator.
-  let prevSignificant = "";
-  let i = 0;
-
-  const inTemplateText = () =>
-    tmplStack.length > 0 && tmplStack[tmplStack.length - 1].interpDepth === 0;
-
-  const maskChar = (idx) => {
-    if (code[idx] !== "\n" && code[idx] !== "\r") out[idx] = " ";
-  };
-
-  while (i < n) {
-    // ----- inside template-literal TEXT (not an interpolation) -----
-    if (inTemplateText()) {
-      const ch = code[i];
-      if (ch === "\\") {
-        // Escaped char inside template text — mask both bytes.
-        maskChar(i);
-        if (i + 1 < n) maskChar(i + 1);
-        i += 2;
-        continue;
-      }
-      if (ch === "`") {
-        // Close this template literal — the backtick itself is code.
-        tmplStack.pop();
-        prevSignificant = "`";
-        i += 1;
-        continue;
-      }
-      if (ch === "$" && i + 1 < n && code[i + 1] === "{") {
-        // Open an interpolation — `${` is code; contents scanned as code.
-        tmplStack[tmplStack.length - 1].interpDepth = 1;
-        prevSignificant = "{";
-        i += 2;
-        continue;
-      }
-      // Plain template TEXT byte — mask it.
-      maskChar(i);
-      i += 1;
-      continue;
-    }
-
-    // ----- CODE (top level, or inside a `${…}` interpolation) -----
-    const ch = code[i];
-    const next = i + 1 < n ? code[i + 1] : "";
-
-    // Line comment.
-    if (ch === "/" && next === "/") {
-      maskChar(i);
-      maskChar(i + 1);
-      i += 2;
-      while (i < n && code[i] !== "\n") {
-        maskChar(i);
-        i += 1;
-      }
-      continue;
-    }
-    // Block comment.
-    if (ch === "/" && next === "*") {
-      maskChar(i);
-      maskChar(i + 1);
-      i += 2;
-      while (i < n && !(code[i] === "*" && i + 1 < n && code[i + 1] === "/")) {
-        maskChar(i);
-        i += 1;
-      }
-      if (i < n) {
-        maskChar(i); // '*'
-        maskChar(i + 1); // '/'
-        i += 2;
-      }
-      continue;
-    }
-    // Single- / double-quoted string literal.
-    if (ch === "'" || ch === '"') {
-      const quote = ch;
-      prevSignificant = quote;
-      i += 1; // opening quote is code
-      while (i < n && code[i] !== quote) {
-        if (code[i] === "\\") {
-          maskChar(i);
-          if (i + 1 < n) maskChar(i + 1);
-          i += 2;
-          continue;
-        }
-        maskChar(i);
-        i += 1;
-      }
-      if (i < n) i += 1; // closing quote is code
-      continue;
-    }
-    // Template-literal open.
-    if (ch === "`") {
-      tmplStack.push({ interpDepth: 0 });
-      prevSignificant = "`";
-      i += 1;
-      continue;
-    }
-    // Brace tracking for the innermost open interpolation, so a nested `{…}`
-    // inside `${…}` does not prematurely close the interpolation.
-    if (tmplStack.length > 0 && tmplStack[tmplStack.length - 1].interpDepth > 0) {
-      const frame = tmplStack[tmplStack.length - 1];
-      if (ch === "{") {
-        frame.interpDepth += 1;
-        prevSignificant = "{";
-        i += 1;
-        continue;
-      }
-      if (ch === "}") {
-        frame.interpDepth -= 1; // closing the `${…}` returns to template TEXT
-        prevSignificant = "}";
-        i += 1;
-        continue;
-      }
-    }
-    // Regex literal: only when a `/` in expression position (the previous
-    // significant token cannot end an expression). Generated svelte output is
-    // unlikely to embed `$.` in a regex, but masking it keeps the scan honest.
-    if (ch === "/" && regexAllowedAfter(prevSignificant)) {
-      i += 1; // opening slash is code
-      let inClass = false;
-      while (i < n) {
-        const rc = code[i];
-        if (rc === "\\") {
-          maskChar(i);
-          if (i + 1 < n) maskChar(i + 1);
-          i += 2;
-          continue;
-        }
-        if (rc === "[") inClass = true;
-        else if (rc === "]") inClass = false;
-        else if (rc === "/" && !inClass) {
-          i += 1; // closing slash is code
-          break;
-        }
-        if (rc === "\n") break; // unterminated — bail (treat as not-a-regex)
-        maskChar(i);
-        i += 1;
-      }
-      // Skip regex flags (code, harmless to the `$.` scan).
-      while (i < n && /[a-z]/i.test(code[i])) i += 1;
-      prevSignificant = "/";
-      continue;
-    }
-
-    if (!/\s/.test(ch)) prevSignificant = ch;
-    i += 1;
-  }
-
-  return out.join("");
-}
-
-/**
- * True when a `/` appearing after `prev` (the previous significant character)
- * begins a regex literal rather than a division operator. A regex may start
- * when the prior token cannot terminate an expression — i.e. `prev` is empty
- * (start of input) or one of the expression-position delimiters/operators.
- */
-function regexAllowedAfter(prev) {
-  if (prev === "") return true;
-  return "([{,;:=&|!?+-*%^~<>".includes(prev);
-}
-
-/**
- * Extract the ORDERED `$.<helper>` reference sequence from the module body.
- * The runtime namespace is imported as `$` (`import * as $ from …`), so every
- * helper call/reference is `$.<ident>`. The scan runs over the CODE-only view
- * of the module (`maskNonCodeRegions`): string literals, comments, and the TEXT
- * spans of template literals are masked, so a literal `$.<ident>` authored in
- * markup cannot pollute the topology, while real helper calls inside template
- * `${…}` interpolations (the SSR `$.escape`/`$.attr`/… calls) are preserved.
- * This is deliberately NOT a full JS parse — it captures the helper FAMILY
- * topology, which is the oracle bar, and is var-rename / whitespace stable.
- */
-function extractHelperSequence(code) {
-  const masked = maskNonCodeRegions(code);
-  const seq = [];
-  const re = /\$\.([A-Za-z_][A-Za-z0-9_]*)/g;
-  let m;
-  while ((m = re.exec(masked)) !== null) {
-    seq.push(m[1]);
-  }
-  return seq;
-}
-
-/**
- * Extract the import topology: bare side-effect imports, the runtime namespace
- * import, and named/default imports — as `{ source, kind, names }` rows, sorted
- * deterministically. Var-rename stable: a renamed local default import is
- * captured by its imported binding shape, not byte position.
- */
-function extractImports(code) {
-  const rows = [];
-  const lines = code.split("\n");
-  for (const raw of lines) {
-    const line = raw.trim();
-    if (!line.startsWith("import ")) continue;
-    // Bare side-effect import: `import 'x';`
-    let m = line.match(/^import\s+['"]([^'"]+)['"]\s*;?$/);
-    if (m) {
-      rows.push({ source: m[1], kind: "sideEffect", names: [] });
-      continue;
-    }
-    // Namespace import: `import * as $ from 'x';`
-    m = line.match(/^import\s+\*\s+as\s+([A-Za-z_$][\w$]*)\s+from\s+['"]([^'"]+)['"]\s*;?$/);
-    if (m) {
-      rows.push({ source: m[2], kind: "namespace", names: [m[1]] });
-      continue;
-    }
-    // Default + (optional) named: `import D from 'x';` / `import { a, b } from 'x';`
-    m = line.match(/^import\s+(.+?)\s+from\s+['"]([^'"]+)['"]\s*;?$/);
-    if (m) {
-      const clause = m[1].trim();
-      const source = m[2];
-      const names = [];
-      let kind = "named";
-      const braceIdx = clause.indexOf("{");
-      if (braceIdx === 0) {
-        kind = "named";
-      } else if (braceIdx > 0) {
-        kind = "defaultAndNamed";
-        names.push(`default:${clause.slice(0, braceIdx).replace(/,$/, "").trim()}`);
-      } else {
-        kind = "default";
-        names.push(`default:${clause}`);
-      }
-      const braceMatch = clause.match(/\{([^}]*)\}/);
-      if (braceMatch) {
-        for (const part of braceMatch[1].split(",")) {
-          const t = part.trim();
-          if (t) names.push(t);
-        }
-      }
-      rows.push({ source, kind, names });
-      continue;
-    }
-  }
-  // Deterministic multi-field tuple sort over (source, kind, names): a stable
-  // total order with no synthetic delimiter that could collide with field
-  // bytes (and no non-printable separator).
-  const cmp = (x, y) => (x < y ? -1 : x > y ? 1 : 0);
-  rows.sort(
-    (a, b) =>
-      cmp(a.source, b.source) || cmp(a.kind, b.kind) || cmp(a.names.join(","), b.names.join(",")),
-  );
-  return rows;
-}
-
-/**
- * Extract the default-exported component function shape: name + ordered param
- * identifier list. The body is intentionally not captured (the helper sequence
- * already pins the body topology).
- */
-function extractExportDefault(code) {
-  const m = code.match(/export\s+default\s+function\s+([A-Za-z_$][\w$]*)\s*\(([^)]*)\)/);
-  if (!m) return null;
-  const name = m[1];
-  const params = m[2]
-    .split(",")
-    .map((p) => p.trim())
-    .filter(Boolean)
-    // strip default-value noise — keep the param identifier only.
-    .map((p) => p.split("=")[0].trim());
-  return { name, params };
-}
-
-/**
- * Extract the template skeletons: every `$.from_html` / `$.from_svg` /
- * `$.from_mathml` first-argument template literal + the optional trailing
- * fragment flag. Scope hashes masked. Captures the DOM skeleton topology.
- */
-function extractTemplates(code) {
-  const out = [];
-  const re =
-    /\$\.(from_html|from_svg|from_mathml|from_tree)\(`((?:\\.|[^`\\])*)`(?:\s*,\s*([^)]+))?\)/g;
-  let m;
-  while ((m = re.exec(code)) !== null) {
-    out.push({
-      factory: m[1],
-      html: maskScopeHash(m[2]),
-      flag: m[3] !== undefined ? m[3].trim() : null,
-    });
-  }
-  return out;
-}
 
 /** Normalize one compiled fixture to its topology golden object. */
 function normalize(slug, backend, compiled) {
   const code = compiled.js.code;
-  const helperSequence = extractHelperSequence(code);
+  const helperSequence = helperSequenceOf(code);
   const helperSet = [...new Set(helperSequence)].sort();
-  const helperCounts = {};
-  for (const h of helperSequence) helperCounts[h] = (helperCounts[h] || 0) + 1;
+  const helperCounts = helperCountsOf(helperSequence);
 
   const cssCode = compiled.css && compiled.css.code ? compiled.css.code : null;
   const css = {
@@ -712,6 +394,9 @@ function normalize(slug, backend, compiled) {
     helperSequence,
     helperSet,
     helperCounts,
+    // The ordered delegated event-type set (the module `$.delegate([...])`
+    // declaration) — client backend only (the server does no event delegation).
+    delegatedEvents: backend === "client" ? extractDelegatedEvents(code) : [],
     templates: backend === "client" ? extractTemplates(code) : [],
     css,
   };
@@ -770,9 +455,17 @@ function buildAllGoldens(compiler, goldensDir = GOLDENS_DIR) {
 
 function writeMode(compiler) {
   const goldens = buildAllGoldens(compiler);
-  // Clean rewrite: drop the goldens tree, then write fresh. Idempotent.
+  // Clean rewrite: drop this generator's goldens, then write fresh. Idempotent.
+  // The top-level `generated/` subtree is PRESERVED (it is owned by the
+  // differential-corpus generator), so only the hand-vendored top-level entries
+  // are removed.
   assertSafeDestructiveDir(GOLDENS_DIR, { role: "write" });
-  rmSync(GOLDENS_DIR, { recursive: true, force: true });
+  if (existsSync(GOLDENS_DIR)) {
+    for (const e of readdirSync(GOLDENS_DIR, { withFileTypes: true })) {
+      if (e.name === GENERATED_SUBDIR) continue;
+      rmSync(join(GOLDENS_DIR, e.name), { recursive: true, force: true });
+    }
+  }
   for (const [path, content] of [...goldens].sort((a, b) => (a[0] < b[0] ? -1 : 1))) {
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, content);
@@ -800,14 +493,18 @@ function checkMode(compiler, goldensDir = GOLDENS_DIR) {
     }
   }
 
-  // Detect stale goldens with no corresponding fixture/backend.
+  // Detect stale goldens with no corresponding fixture/backend. The top-level
+  // `generated/` subtree is owned by the differential-corpus generator and is
+  // skipped here (its own `--check` validates it).
   const expected = new Set([...fresh.keys()]);
   const collectCommitted = (dir) => {
     if (!existsSync(dir)) return;
     for (const e of readdirSync(dir, { withFileTypes: true })) {
       const p = join(dir, e.name);
-      if (e.isDirectory()) collectCommitted(p);
-      else if (e.isFile() && e.name.endsWith(".json") && !expected.has(p)) {
+      if (e.isDirectory()) {
+        if (dir === goldensDir && e.name === GENERATED_SUBDIR) continue;
+        collectCommitted(p);
+      } else if (e.isFile() && e.name.endsWith(".json") && !expected.has(p)) {
         drift.push(`STALE golden (no fixture/backend): ${relative(REPO_ROOT, p)}`);
       }
     }

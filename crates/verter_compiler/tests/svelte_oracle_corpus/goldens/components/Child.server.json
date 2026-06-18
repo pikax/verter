@@ -27,6 +27,7 @@
   "helperCounts": {
     "escape": 1
   },
+  "delegatedEvents": [],
   "templates": [],
   "css": {
     "present": false,

@@ -573,10 +573,15 @@ impl<'a> SvelteParser<'a> {
                 span,
             }
         } else {
-            // Attribute-value shorthand `{name}` → name == value expression.
+            // Attribute-value shorthand `{name}` → name == value expression. The
+            // NAME is the FULLY-trimmed identifier (`{ foo }` ⇒ name `foo`, not
+            // `foo ` — official `read_attribute`'s shorthand produces the bare
+            // identifier name). The value EXPRESSION span stays the inner span
+            // (surrounding whitespace inside the braces is harmless to OXC's reparse
+            // of the identifier), kept SEPARATE from the trimmed name.
             SvelteAttribute {
                 kind: SvelteAttributeKind::Plain {
-                    name: body.to_string(),
+                    name: body.trim_end().to_string(),
                     name_span: inner,
                     value: Some(SvelteAttributeValue::Expression(inner)),
                 },
@@ -1168,88 +1173,12 @@ impl<'a> SvelteParser<'a> {
     /// index of the closing `}` (or EOF). STRING- AND COMMENT-AWARE so a `}`
     /// inside a quote, a `//` line comment, a `/* */` block comment, or a regex
     /// literal does not close the interpolation early.
+    ///
+    /// Delegates to the shared [`find_matching_brace_in`] free function so the
+    /// JS-aware brace scan is ONE implementation reused by the tokenizer and the
+    /// runtime mixed-attribute lowering (no second hand-rolled brace scanner).
     fn find_matching_brace(&self, inner_start: usize) -> usize {
-        let mut depth = 1usize;
-        let mut p = inner_start;
-        let mut quote: Option<u8> = None;
-        // The last significant byte, used to decide whether a `/` opens a regex
-        // (after an operator / `(` / `,` / `=` / …) vs a division (after a value).
-        let mut prev_significant: u8 = b'{';
-        while p < self.len() {
-            let b = self.at(p);
-            if let Some(q) = quote {
-                if b == b'\\' {
-                    p += 2;
-                    continue;
-                }
-                if b == q {
-                    quote = None;
-                }
-                p += 1;
-                continue;
-            }
-            // Comments.
-            if b == b'/' && self.at(p + 1) == b'/' {
-                p += 2;
-                while p < self.len() && self.at(p) != b'\n' {
-                    p += 1;
-                }
-                continue;
-            }
-            if b == b'/' && self.at(p + 1) == b'*' {
-                p += 2;
-                while p < self.len() && !self.starts_with_at(p, b"*/") {
-                    p += 1;
-                }
-                p = (p + 2).min(self.len());
-                continue;
-            }
-            // A regex literal opens only in expression position (after an
-            // operator/opener, never after a value/identifier/`)`). Skip its
-            // body (char-class- and escape-aware) so a `}` inside `/[}]/` does
-            // not close early.
-            if b == b'/' && regex_allowed_after(prev_significant) {
-                let mut q = p + 1;
-                let mut in_class = false;
-                while q < self.len() {
-                    let rb = self.at(q);
-                    if rb == b'\\' {
-                        q += 2;
-                        continue;
-                    }
-                    match rb {
-                        b'[' => in_class = true,
-                        b']' => in_class = false,
-                        b'/' if !in_class => {
-                            q += 1;
-                            break;
-                        }
-                        b'\n' => break,
-                        _ => {}
-                    }
-                    q += 1;
-                }
-                p = q;
-                prev_significant = b'/';
-                continue;
-            }
-            match b {
-                b'"' | b'\'' | b'`' => quote = Some(b),
-                b'{' => depth += 1,
-                b'}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return p;
-                    }
-                }
-                _ => {}
-            }
-            if !b.is_ascii_whitespace() {
-                prev_significant = b;
-            }
-            p += 1;
-        }
-        self.len()
+        find_matching_brace_in(self.src, inner_start)
     }
 }
 
@@ -1257,6 +1186,103 @@ impl<'a> SvelteParser<'a> {
 
 fn is_tag_name_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b':' || b == b'.'
+}
+
+/// Find the matching closing `}` for a brace opened just before `inner_start`
+/// (i.e. `inner_start` is the first inner byte) within `src`. Returns the index of
+/// the closing `}`, or `src.len()` at EOF.
+///
+/// STRING-, COMMENT-, and REGEX-AWARE: a `}` inside a single/double/backtick
+/// string, a `//` line comment, a `/* */` block comment, or a `/regex/` literal
+/// does NOT close the brace early. This is the SINGLE JS-aware brace scan shared by
+/// the parser's interpolation tokenizer and the runtime mixed-attribute lowering —
+/// the runtime never re-implements a byte-level `{`/`}` counter (which closes at a
+/// `}` inside a string, e.g. `class="x {format('}')} y"`).
+pub(crate) fn find_matching_brace_in(src: &[u8], inner_start: usize) -> usize {
+    let len = src.len();
+    let at = |p: usize| src.get(p).copied().unwrap_or(0);
+    let starts_with_at = |p: usize, needle: &[u8]| src.get(p..p + needle.len()) == Some(needle);
+    let mut depth = 1usize;
+    let mut p = inner_start;
+    let mut quote: Option<u8> = None;
+    // The last significant byte, used to decide whether a `/` opens a regex
+    // (after an operator / `(` / `,` / `=` / …) vs a division (after a value).
+    let mut prev_significant: u8 = b'{';
+    while p < len {
+        let b = at(p);
+        if let Some(q) = quote {
+            if b == b'\\' {
+                p += 2;
+                continue;
+            }
+            if b == q {
+                quote = None;
+            }
+            p += 1;
+            continue;
+        }
+        // Comments.
+        if b == b'/' && at(p + 1) == b'/' {
+            p += 2;
+            while p < len && at(p) != b'\n' {
+                p += 1;
+            }
+            continue;
+        }
+        if b == b'/' && at(p + 1) == b'*' {
+            p += 2;
+            while p < len && !starts_with_at(p, b"*/") {
+                p += 1;
+            }
+            p = (p + 2).min(len);
+            continue;
+        }
+        // A regex literal opens only in expression position (after an
+        // operator/opener, never after a value/identifier/`)`). Skip its body
+        // (char-class- and escape-aware) so a `}` inside `/[}]/` does not close
+        // early.
+        if b == b'/' && regex_allowed_after(prev_significant) {
+            let mut q = p + 1;
+            let mut in_class = false;
+            while q < len {
+                let rb = at(q);
+                if rb == b'\\' {
+                    q += 2;
+                    continue;
+                }
+                match rb {
+                    b'[' => in_class = true,
+                    b']' => in_class = false,
+                    b'/' if !in_class => {
+                        q += 1;
+                        break;
+                    }
+                    b'\n' => break,
+                    _ => {}
+                }
+                q += 1;
+            }
+            p = q;
+            prev_significant = b'/';
+            continue;
+        }
+        match b {
+            b'"' | b'\'' | b'`' => quote = Some(b),
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return p;
+                }
+            }
+            _ => {}
+        }
+        if !b.is_ascii_whitespace() {
+            prev_significant = b;
+        }
+        p += 1;
+    }
+    len
 }
 
 /// Whether a `/` in expression text opens a REGEX literal (vs a division).

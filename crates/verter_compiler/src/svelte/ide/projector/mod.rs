@@ -27,9 +27,9 @@ use super::store_scan::{
     text_uses_runes,
 };
 use crate::svelte::parser::{
-    ParsedSvelte, SvelteAttribute, SvelteAttributeKind, SvelteAttributeValue, SvelteBlock,
-    SvelteBlockKind, SvelteClauseKind, SvelteDirectiveKind, SvelteElement, SvelteElementKind,
-    SvelteNode, SvelteScript, SvelteSpecialKind, SvelteTag, SvelteTagKind,
+    forced_runes_option, ParsedSvelte, SvelteAttribute, SvelteAttributeKind, SvelteAttributeValue,
+    SvelteBlock, SvelteBlockKind, SvelteClauseKind, SvelteDirectiveKind, SvelteElement,
+    SvelteElementKind, SvelteNode, SvelteScript, SvelteSpecialKind, SvelteTag, SvelteTagKind,
 };
 use store::rewrite_store_sub;
 
@@ -58,7 +58,7 @@ use ident::{
     is_bare_tag_identifier, is_type_query_safe_lvalue, is_valid_binding_identifier,
     is_valid_component_reference, skip_string_literal,
 };
-use special::{detect_forced_runes_option, detect_jsx_namespace, extract_props_annotation};
+use special::{detect_jsx_namespace, extract_props_annotation};
 
 /// A typed diagnostic the projector emitted for a flagged matrix construct (the
 /// construct was still checked, never dropped). Re-exported with its severity:
@@ -168,7 +168,7 @@ pub fn project_svelte_ide(
     // LEGACY mode. Only legacy mode carries the `$$props`/`$$restProps`/`$$slots`
     // magic — so the F12 prelude declarations are emitted only when the component
     // is legacy. The rune-usage classification is STRUCTURAL (OXC), per script.
-    let legacy_mode = match detect_forced_runes_option(source, &parsed.template) {
+    let legacy_mode = match forced_runes_option(source, &parsed.template) {
         Some(forced_runes) => !forced_runes,
         None => {
             let uses_runes = [parsed.module_content(), parsed.instance_content()]

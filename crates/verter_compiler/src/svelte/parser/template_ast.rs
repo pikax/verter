@@ -54,6 +54,57 @@ impl ParsedSvelte {
     }
 }
 
+/// The explicit reactivity-mode forced by a top-level `<svelte:options runes={…}>`
+/// element (Svelte's own forced-mode switch). Returns `Some(true)` for `runes` /
+/// `runes={true}`, `Some(false)` for `runes={false}`, and `None` when no
+/// `<svelte:options runes>` is present (the caller then falls back to rune-USAGE
+/// detection).
+///
+/// Only a TOP-LEVEL options element counts (Svelte requires `<svelte:options>` at
+/// the component root). This is the SINGLE shared syntactic query both the IDE TSX
+/// projector (legacy-mode classification) and the runtime-IR mode inference
+/// consume — the parse-tree types are owned here, so the query lives here rather
+/// than being forked per surface.
+#[must_use]
+pub fn forced_runes_option(source: &str, nodes: &[SvelteNode]) -> Option<bool> {
+    for node in nodes {
+        if let SvelteNode::Element(el) = node {
+            if matches!(
+                el.kind,
+                SvelteElementKind::Special(SvelteSpecialKind::Options)
+            ) {
+                if let Some(v) = runes_option_value(source, el) {
+                    return Some(v);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// The `runes` option value on a `<svelte:options>` element: a valueless `runes`
+/// boolean-shorthand is `true`; `runes={true}` / `runes={false}` read the literal;
+/// any other form is treated as absent (`None`).
+fn runes_option_value(source: &str, el: &SvelteElement) -> Option<bool> {
+    el.attributes.iter().find_map(|a| match &a.kind {
+        SvelteAttributeKind::Plain { name, value, .. } if name == "runes" => match value {
+            // `runes` (no value) — boolean shorthand ⇒ true.
+            None => Some(true),
+            // `runes={true}` / `runes={false}` — read the expression literal.
+            Some(SvelteAttributeValue::Expression(span)) => {
+                let text = source[span.start as usize..span.end as usize].trim();
+                match text {
+                    "true" => Some(true),
+                    "false" => Some(false),
+                    _ => None,
+                }
+            }
+            _ => None,
+        },
+        _ => None,
+    })
+}
+
 /// One `<script>` block (instance or module).
 #[derive(Debug, Clone)]
 pub struct SvelteScript {

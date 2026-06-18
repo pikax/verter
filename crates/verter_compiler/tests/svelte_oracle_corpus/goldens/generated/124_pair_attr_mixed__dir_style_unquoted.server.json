@@ -1,0 +1,43 @@
+{
+  "slug": "generated/124_pair_attr_mixed__dir_style_unquoted.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "_24_pair_attr_mixed__dir_style_unquoted",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "attr_class",
+    "stringify",
+    "attr_style"
+  ],
+  "helperSet": [
+    "attr_class",
+    "attr_style",
+    "stringify"
+  ],
+  "helperCounts": {
+    "attr_class": 1,
+    "stringify": 1,
+    "attr_style": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

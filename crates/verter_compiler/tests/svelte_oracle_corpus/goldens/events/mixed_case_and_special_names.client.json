@@ -1,0 +1,67 @@
+{
+  "slug": "events/mixed_case_and_special_names.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/internal/flags/legacy",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "mixed_case_and_special_names",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "first_child",
+    "sibling",
+    "sibling",
+    "event",
+    "event",
+    "event",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "event",
+    "first_child",
+    "from_html",
+    "sibling"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "first_child": 1,
+    "sibling": 2,
+    "event": 3,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<button>capitalized</button> <button>trailing digit</button> <button>hyphen name</button>",
+      "flag": "1"
+    }
+  ],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

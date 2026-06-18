@@ -55,3 +55,48 @@ The corpus captures the official **client** + **server** passes now; the SSR
 harness and the per-family runtime backends extend the corpus by adding
 fixtures here (the generator sweeps the tree, so a new fixture only needs to be
 dropped in and the goldens regenerated).
+
+## Generated differential-parity corpus (`generated/`)
+
+The `generated/` subtree (under both `fixtures/` and `../goldens/`) is a
+SEPARATE, mechanically-generated differential-parity corpus owned by
+`scripts/gen-svelte-diff-corpus.mjs`. The hand-vendored generator
+(`gen-svelte-goldens.mjs`) and matrix (`runtime_tests.rs::topology_oracle`)
+SKIP this subtree; the differential generator and the
+`diff_oracle_tests::generated_differential_matrix_matches_oracle` matrix own it.
+
+The differential generator emits a DETERMINISTIC pairwise/combinatorial set of
+minimal `.svelte` fixtures across the topology axes (root kind, text, attributes,
+directives, events, blocks, namespace/special contexts) — reactive values come
+from `$props()` and components from a static import, so the official compiler
+does NOT constant-fold a "dynamic" fixture into a static one. Each fixture is
+compiled with the pinned compiler and normalized into an EXPANDED golden schema
+that adds, on top of the hand-vendored helper/skeleton/import fields:
+
+- `events` — per registered event: type + target-kind + delegation-kind
+  (delegated / direct / forwarded_prop).
+- `nonStaticProperties` — the `cannot_be_set_statically` set: name + kind.
+- `attrParts` — per dynamic / mixed attribute the emitted value-part topology.
+- `nodePaths` — per region, the multiset of node-path step sequences.
+- `dynamicSlots` — per-slot-kind dynamic-surface counts.
+
+The Rust matrix projects Verter's runtime IR into the SAME normalized schema and
+diffs it; any divergence is an automatically-failing test UNLESS the
+`(fixture, axis)` pair is on the honest `KNOWN_DIVERGENCES` allow-list
+(`diff_oracle_divergences.rs`), which enumerates the real long tail grouped by
+root cause. The `known_divergences_are_real` guard proves every allow-list row
+still genuinely diverges (a stale row fails).
+
+Regenerate / verify:
+
+```bash
+node scripts/gen-svelte-diff-corpus.mjs          # rewrite the generated corpus
+node scripts/gen-svelte-diff-corpus.mjs --check  # assert in sync (CI guard)
+```
+
+To rebuild the allow-list after changing the IR projection or the corpus, run
+the discovery harness and re-derive the rows:
+
+```bash
+cargo test -p verter_compiler --lib enumerate_divergences_discovery -- --ignored --nocapture
+```

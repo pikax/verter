@@ -14,9 +14,9 @@ mod template_ast_tests;
 pub mod tokenizer;
 
 pub use template_ast::{
-    ParsedSvelte, SvelteAttribute, SvelteAttributeKind, SvelteAttributeValue, SvelteBlock,
-    SvelteBlockClause, SvelteBlockKind, SvelteClauseKind, SvelteDirective, SvelteDirectiveKind,
-    SvelteElement, SvelteElementKind, SvelteNode, SvelteParseDiagnostic, SvelteScript,
-    SvelteSpecialKind, SvelteStyle, SvelteTag, SvelteTagKind,
+    forced_runes_option, ParsedSvelte, SvelteAttribute, SvelteAttributeKind, SvelteAttributeValue,
+    SvelteBlock, SvelteBlockClause, SvelteBlockKind, SvelteClauseKind, SvelteDirective,
+    SvelteDirectiveKind, SvelteElement, SvelteElementKind, SvelteNode, SvelteParseDiagnostic,
+    SvelteScript, SvelteSpecialKind, SvelteStyle, SvelteTag, SvelteTagKind,
 };
 pub use tokenizer::parse_svelte;

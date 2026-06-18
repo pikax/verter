@@ -1,0 +1,40 @@
+{
+  "slug": "generated/098_pair_root_each_block__attr_shorthand.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "_98_pair_root_each_block__attr_shorthand",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "ensure_array_like",
+    "attr"
+  ],
+  "helperSet": [
+    "attr",
+    "ensure_array_like"
+  ],
+  "helperCounts": {
+    "ensure_array_like": 1,
+    "attr": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

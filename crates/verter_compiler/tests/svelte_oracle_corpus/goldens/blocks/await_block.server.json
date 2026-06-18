@@ -29,6 +29,7 @@
     "await": 1,
     "escape": 1
   },
+  "delegatedEvents": [],
   "templates": [],
   "css": {
     "present": false,

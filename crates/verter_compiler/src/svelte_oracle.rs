@@ -220,10 +220,17 @@ pub fn load_golden(path: &Path) -> NormalizedGolden {
 }
 
 /// Recursively collect every `*.json` golden under `dir`, keyed by its path
-/// relative to `dir` (the stable identity the topology diff keys on).
+/// relative to `dir` (the stable identity the topology diff keys on). The
+/// top-level `generated/` subtree is EXCLUDED: it is the differential-parity
+/// corpus (the EXPANDED golden schema owned by the
+/// `gen-svelte-diff-corpus.mjs` generator and the `diff_oracle_tests` matrix),
+/// whose goldens carry fields this hand-vendored [`NormalizedGolden`] schema
+/// does not model. That corpus has its own `--check`, so this oracle engine
+/// never loads it.
 pub fn load_all_goldens(dir: &Path) -> BTreeMap<String, NormalizedGolden> {
     let mut out = BTreeMap::new();
     let mut stack = vec![dir.to_path_buf()];
+    let generated_top = dir.join("generated");
     while let Some(d) = stack.pop() {
         for entry in
             std::fs::read_dir(&d).unwrap_or_else(|e| panic!("read dir {}: {e}", d.display()))
@@ -231,6 +238,9 @@ pub fn load_all_goldens(dir: &Path) -> BTreeMap<String, NormalizedGolden> {
             let entry = entry.expect("dir entry");
             let p = entry.path();
             if p.is_dir() {
+                if p == generated_top {
+                    continue;
+                }
                 stack.push(p);
             } else if p.extension().and_then(|e| e.to_str()) == Some("json") {
                 let rel = p

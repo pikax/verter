@@ -31,6 +31,7 @@
     "derived": 1,
     "escape": 2
   },
+  "delegatedEvents": [],
   "templates": [],
   "css": {
     "present": false,

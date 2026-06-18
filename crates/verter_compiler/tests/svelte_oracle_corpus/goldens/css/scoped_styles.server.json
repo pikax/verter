@@ -26,6 +26,7 @@
   "helperCounts": {
     "attr_class": 1
   },
+  "delegatedEvents": [],
   "templates": [],
   "css": {
     "present": true,

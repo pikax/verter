@@ -1,0 +1,61 @@
+{
+  "slug": "generated/006_root_svelte_head.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/internal/flags/legacy",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "_06_root_svelte_head",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "head",
+    "effect",
+    "document"
+  ],
+  "helperSet": [
+    "document",
+    "effect",
+    "head"
+  ],
+  "helperCounts": {
+    "head": 1,
+    "effect": 1,
+    "document": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  },
+  "events": [],
+  "nonStaticProperties": [],
+  "attrParts": [],
+  "directiveExprs": [],
+  "decodedText": [],
+  "nodePaths": {
+    "regions": []
+  },
+  "dynamicSlots": {}
+}

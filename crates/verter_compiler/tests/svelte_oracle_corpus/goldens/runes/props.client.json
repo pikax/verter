@@ -51,6 +51,7 @@
     "set_text": 1,
     "append": 1
   },
+  "delegatedEvents": [],
   "templates": [
     {
       "factory": "from_html",

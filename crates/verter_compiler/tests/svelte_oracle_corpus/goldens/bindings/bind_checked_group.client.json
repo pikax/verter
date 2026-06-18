@@ -70,6 +70,7 @@
     "bind_group": 2,
     "append": 1
   },
+  "delegatedEvents": [],
   "templates": [
     {
       "factory": "from_html",

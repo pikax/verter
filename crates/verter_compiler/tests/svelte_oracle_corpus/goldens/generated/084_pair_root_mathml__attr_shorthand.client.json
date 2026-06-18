@@ -1,0 +1,93 @@
+{
+  "slug": "generated/084_pair_root_mathml__attr_shorthand.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "_84_pair_root_mathml__attr_shorthand",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_mathml",
+    "child",
+    "reset",
+    "template_effect",
+    "set_value",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "child",
+    "from_mathml",
+    "reset",
+    "set_value",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_mathml": 1,
+    "child": 1,
+    "reset": 1,
+    "template_effect": 1,
+    "set_value": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_mathml",
+      "html": "<math><mrow>x</mrow></math>",
+      "flag": null
+    }
+  ],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  },
+  "events": [],
+  "nonStaticProperties": [],
+  "attrParts": [
+    {
+      "helper": "set_value",
+      "attr": "value",
+      "chunks": [
+        "expr"
+      ]
+    }
+  ],
+  "directiveExprs": [],
+  "decodedText": [],
+  "nodePaths": {
+    "regions": [
+      {
+        "paths": [
+          {
+            "base": "fragment",
+            "steps": [
+              "child"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "dynamicSlots": {
+    "value": 1
+  }
+}

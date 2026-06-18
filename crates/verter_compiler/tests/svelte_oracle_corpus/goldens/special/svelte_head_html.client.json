@@ -49,6 +49,7 @@
     "reset": 1,
     "append": 1
   },
+  "delegatedEvents": [],
   "templates": [
     {
       "factory": "from_html",

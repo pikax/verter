@@ -521,6 +521,24 @@ fn is_self_excluded(path: &Path) -> bool {
     SELF_EXCLUDED_FILE_NAMES.contains(&name)
 }
 
+/// Basenames of GENERATED DATA modules under `crates/*/src/**`. These
+/// files hold a generator's verbatim data rows (each carries an
+/// "auto-generated" / "GENERATED ... DATA" header and is byte-pinned by a
+/// dedicated freshness test), not hand-authored source. The retired-symbol
+/// rail enforces a hand-authored-source rule (no revived helper names), so
+/// a generated data row that happens to contain a retired substring is not
+/// a re-introduction — and scanning thousands of rows is pure cost. Skip
+/// them by basename. Mirrors `architecture_guards.rs`'s
+/// `GENERATED_DATA_SOURCE_FILES` and the `no_oversize_files` exemption.
+const GENERATED_DATA_FILE_NAMES: &[&str] = &["entity_table.rs", "diff_oracle_divergences.rs"];
+
+fn is_generated_data_file(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .map(|name| GENERATED_DATA_FILE_NAMES.contains(&name))
+        .unwrap_or(false)
+}
+
 /// Walk a `crates/*/src/` tree and collect every `.rs` file that is
 /// production source (NOT a test file and NOT self-excluded).
 fn collect_production_rs(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -539,6 +557,7 @@ fn collect_production_rs(dir: &Path, out: &mut Vec<PathBuf>) {
             && path.extension().and_then(|e| e.to_str()) == Some("rs")
             && !is_test_file(&path)
             && !is_self_excluded(&path)
+            && !is_generated_data_file(&path)
         {
             out.push(path);
         }
@@ -747,6 +766,56 @@ fn line_contains_identifier(line: &str, ident: &str) -> bool {
     false
 }
 
+/// A single compiled `Regex` matching ANY [`RETIRED_SYMBOLS`] entry as a
+/// plain substring. Built ONCE (a compiled automaton — fast even in a
+/// debug build) and used to find candidate lines in ONE linear pass over a
+/// file's processed text, replacing the previous ~150 per-file
+/// `processed.contains(symbol)` whole-text scans (the O(symbols × files)
+/// cost that made this guard multi-second). Substring match only — the
+/// authoritative identifier-boundary decision stays with
+/// `line_contains_identifier`, run on the (rare) candidate lines.
+fn retired_symbol_substring_regex() -> &'static regex::Regex {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    RE.get_or_init(|| {
+        // ASCII byte semantics (`(?-u)`) so the automaton stays a simple
+        // byte DFA; the symbols are plain ASCII identifiers (escaped
+        // defensively). Substring (not boundary) match — a superset of the
+        // identifier-boundary hits the precise matcher confirms.
+        let alternation = RETIRED_SYMBOLS
+            .iter()
+            .map(|s| regex::escape(s))
+            .collect::<Vec<_>>()
+            .join("|");
+        regex::Regex::new(&format!("(?-u:{alternation})"))
+            .expect("retired-symbol substring regex must compile")
+    })
+}
+
+/// Return the (0-based) indices of every line in `processed` that contains
+/// at least one [`RETIRED_SYMBOLS`] substring, found in ONE linear regex
+/// pass. The result is a SUPERSET of the lines that could host a real
+/// identifier-boundary hit; the caller re-checks each with
+/// `line_contains_identifier`. On clean source this returns empty and the
+/// per-symbol check never runs.
+fn candidate_retired_symbol_lines(processed: &str) -> Vec<usize> {
+    let re = retired_symbol_substring_regex();
+    // Line-start byte offsets for offset→line mapping by binary search.
+    let line_starts: Vec<usize> = std::iter::once(0)
+        .chain(processed.match_indices('\n').map(|(i, _)| i + 1))
+        .collect();
+    let mut out: Vec<usize> = Vec::new();
+    for m in re.find_iter(processed) {
+        let li = match line_starts.binary_search(&m.start()) {
+            Ok(i) => i,
+            Err(i) => i - 1,
+        };
+        if out.last() != Some(&li) {
+            out.push(li);
+        }
+    }
+    out
+}
+
 /// Collect every production `.rs` file under `crates/*/src/` plus
 /// the optional self-exclusion list.
 fn collect_production_sources() -> Vec<PathBuf> {
@@ -785,32 +854,34 @@ fn retired_symbols_absent_from_production_source() {
             continue;
         };
         let processed = preprocess(&text);
+        // ONE compiled-automaton pass over the processed text finds every
+        // line that contains ANY retired symbol as a substring (a
+        // superset). Replaces the previous `RETIRED_SYMBOLS.len()`
+        // (~150) per-file `processed.contains(symbol)` whole-text scans —
+        // O(symbols × files) — which dominated the runtime. On clean
+        // source the automaton finds NOTHING and the per-symbol
+        // identifier-boundary check below never runs.
+        let candidate_lines = candidate_retired_symbol_lines(&processed);
+        if candidate_lines.is_empty() {
+            continue;
+        }
         let plines: Vec<&str> = processed.lines().collect();
-        for symbol in RETIRED_SYMBOLS {
-            // Cheap whole-text reject (coverage-identical): the per-line
-            // tokenized `line_contains_identifier` scan can only match when the
-            // symbol appears as a substring on some line, which implies the
-            // processed text contains it. A file lacking the substring entirely
-            // cannot host a hit, so skip the per-line scan for this symbol.
-            if !processed.contains(symbol) {
+        // Only the (few) candidate lines are re-checked with the
+        // authoritative identifier-boundary matcher (`line_contains_identifier`)
+        // over the full symbol list. Candidate lines are rare (clean source
+        // yields none), so the per-line × per-symbol cost is negligible.
+        for line_idx in candidate_lines {
+            let Some(line) = plines.get(line_idx) else {
                 continue;
-            }
-            let lines: Vec<usize> = plines
-                .iter()
-                .enumerate()
-                .filter_map(|(i, l)| {
-                    if line_contains_identifier(l, symbol) {
-                        Some(i + 1)
-                    } else {
-                        None
+            };
+            for symbol in RETIRED_SYMBOLS {
+                if line_contains_identifier(line, symbol) {
+                    let entry = hits_by_symbol.get_mut(symbol).expect("symbol pre-seeded");
+                    match entry.iter_mut().find(|(p, _)| p == file) {
+                        Some((_, lines)) => lines.push(line_idx + 1),
+                        None => entry.push((file.clone(), vec![line_idx + 1])),
                     }
-                })
-                .collect();
-            if !lines.is_empty() {
-                hits_by_symbol
-                    .get_mut(symbol)
-                    .expect("symbol pre-seeded")
-                    .push((file.clone(), lines));
+                }
             }
         }
     }
@@ -924,6 +995,75 @@ pub fn live_caller() {\n\
             .lines()
             .any(|l| line_contains_identifier(l, "parse_type_annotation")),
         "identifier-boundary matcher must not match `parse_type_annotation_v2`"
+    );
+}
+
+/// Discriminating self-test for the regex-driven candidate-line fast path
+/// (`candidate_retired_symbol_lines`) that the guard now uses instead of
+/// the per-symbol whole-text `contains` loop. It must be a SUPERSET of the
+/// real identifier-boundary hits (never miss a live retired-symbol line)
+/// and must NOT surface plainly inert lines (or the speedup is a no-op).
+///
+/// This pins the fast path against the exact regression the optimization
+/// could introduce: a candidate finder that silently drops a violating
+/// line would let the guard pass on a real reintroduction. The test plants
+/// a LIVE (non-comment) retired-symbol reference and asserts the candidate
+/// finder surfaces its line AND the authoritative `line_contains_identifier`
+/// confirms it there — discriminating because a stub finder returning
+/// `vec![]` fails the superset assertion.
+#[test]
+fn candidate_retired_symbol_lines_is_a_superset_finder() {
+    // A retired symbol appears on line 3 (1-based) as live production
+    // code; surrounding lines are inert.
+    let processed = preprocess(
+        "pub fn a() {}\n\
+         pub fn b() {}\n\
+         pub fn c() { let _ = walk_component_meta_member_surface_expr(x); }\n\
+         pub fn d() {}\n",
+    );
+    let candidates = candidate_retired_symbol_lines(&processed);
+    // Superset: the violating line (index 2, 0-based) MUST be a candidate.
+    assert!(
+        candidates.contains(&2),
+        "candidate finder must surface the line of a live retired symbol \
+         (a miss would let a real reintroduction pass the guard); got {candidates:?}"
+    );
+    // And the authoritative matcher must confirm it on that line.
+    let plines: Vec<&str> = processed.lines().collect();
+    assert!(
+        line_contains_identifier(plines[2], "walk_component_meta_member_surface_expr"),
+        "anti-vacuity: the authoritative identifier matcher must confirm the \
+         planted symbol on the candidate line"
+    );
+
+    // Soundness: a file of plainly inert lines (no retired-symbol
+    // substring) yields ZERO candidates — otherwise the fast path does no
+    // useful filtering.
+    let inert = preprocess(
+        "pub fn one() { let _ = compute(input); }\n\
+         pub fn two() -> usize { 42 }\n",
+    );
+    assert!(
+        candidate_retired_symbol_lines(&inert).is_empty(),
+        "inert source must yield no candidate lines (the filter must do work)"
+    );
+
+    // Substring-but-not-boundary: a longer identifier that merely CONTAINS
+    // a retired symbol as a substring is surfaced as a candidate (the
+    // regex is a substring superset) but the authoritative matcher must
+    // REJECT it — proving the boundary discipline survives the fast path.
+    let suffixed =
+        preprocess("pub fn e() { let _ = walk_component_meta_member_surface_expr_node(x); }\n");
+    let suffixed_candidates = candidate_retired_symbol_lines(&suffixed);
+    assert!(
+        suffixed_candidates.contains(&0),
+        "the substring superset surfaces the suffixed-identifier line"
+    );
+    let suffixed_lines: Vec<&str> = suffixed.lines().collect();
+    assert!(
+        !line_contains_identifier(suffixed_lines[0], "walk_component_meta_member_surface_expr"),
+        "the authoritative matcher must NOT flag the suffixed identifier \
+         `..._node` — boundary discipline must survive the fast path"
     );
 }
 

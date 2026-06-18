@@ -30,6 +30,45 @@ fn workspace_path(rel: &str) -> std::path::PathBuf {
     workspace_root().join(rel)
 }
 
+/// Relative paths (forward-slash, workspace-rooted) of GENERATED DATA
+/// modules under `crates/*/src/**`. These files are rendered by a
+/// generator script (each carries an "auto-generated" / "GENERATED ...
+/// DATA" header and is byte-pinned by a dedicated freshness test); they
+/// are NOT hand-authored source. The source-scanning architecture guards
+/// (phase-archaeology, retired-symbol) enforce hand-authored-source rules
+/// — final-state prose, no plan vocabulary, no revived symbols — which do
+/// not apply to a generator's verbatim data rows. Scanning them is both
+/// incorrect (a divergence-label or header path is generated data, not a
+/// phase reference) and the bulk of the scanners' cost (thousands of data
+/// rows), so they are excluded by path here. Mirrors the
+/// `no_oversize_files` exemption list, which already names these files.
+///
+/// Matched by path SUFFIX so the same set is usable against either a
+/// workspace-relative path or an absolute path string.
+const GENERATED_DATA_SOURCE_FILES: &[&str] = &[
+    // The canonical HTML5 named-character-reference table (~2231 rows),
+    // auto-generated from the pinned official svelte `entities.js` by
+    // `scripts/generate-svelte-entities.mjs` and byte-pinned by the
+    // `svelte_entity_table_in_sync` freshness test.
+    "crates/verter_compiler/src/svelte/runtime/entity_table.rs",
+    // The honest Svelte differential-parity divergence allow-list — one
+    // `DivergenceRow` per REAL `(fixture, axis)` divergence, GENERATED
+    // from the discovery pass over the pinned svelte@5.56.3 and byte-pinned
+    // by `known_divergences_are_real`.
+    "crates/verter_compiler/src/svelte/runtime/diff_oracle_divergences.rs",
+];
+
+/// True when `path_str` (a forward-slash path string, relative or
+/// absolute) is one of the [`GENERATED_DATA_SOURCE_FILES`]. The source-
+/// scanning guards skip these: they hold a generator's verbatim data
+/// rows, not hand-authored source subject to the final-state / no-plan-
+/// vocabulary / no-revived-symbol rules.
+fn is_generated_data_source(path_str: &str) -> bool {
+    GENERATED_DATA_SOURCE_FILES
+        .iter()
+        .any(|suffix| path_str == *suffix || path_str.ends_with(&format!("/{suffix}")))
+}
+
 #[test]
 fn vue_default_synth_uses_header_only_default_probe() {
     // The framework component-default-injection seam
@@ -4868,6 +4907,24 @@ mod foundations_guards {
             // Pending B-C5 split, this file is exempt.
             "crates/verter_session/src/host_manage/prepared_decl.rs",
             "crates/verter_compiler/src/compile/template_data.rs",
+            // The canonical HTML5 named-character-reference table (~2231 entries),
+            // auto-generated from the pinned official svelte `entities.js` by
+            // `scripts/generate-svelte-entities.mjs` and byte-pinned by the
+            // `svelte_entity_table_in_sync` freshness test. The size is intentional
+            // generated data (same precedent as `html_intrinsics_data.rs`); it is a
+            // pure data module with a tiny binary-search lookup.
+            "crates/verter_compiler/src/svelte/runtime/entity_table.rs",
+            // The honest Svelte differential-parity divergence allow-list — one
+            // `DivergenceRow` (fixture + axis + root-cause label + ground-truthed
+            // official-vs-Verter summary) per REAL `(fixture, axis)` divergence the
+            // generated matrix surfaces. GENERATED from the discovery pass
+            // (`enumerate_divergences_discovery`) over the pinned svelte@5.56.3 and
+            // byte-pinned by `known_divergences_are_real` (a stale, non-diverging
+            // row fails the gate). The size is intentional generated data — one row
+            // per divergence — and it is `include!`d into the `*_tests.rs` matrix,
+            // so it is not reachable as a runtime production module (same generated-
+            // data precedent as `entity_table.rs`); it cannot be meaningfully split.
+            "crates/verter_compiler/src/svelte/runtime/diff_oracle_divergences.rs",
             "crates/verter_compiler/src/ide/template/mod.rs",
             "crates/verter_compiler/src/template/code_gen/ssr/mod.rs",
             "crates/verter_compiler/src/template/code_gen/vapor/mod.rs",
@@ -5172,17 +5229,56 @@ mod foundations_guards {
     /// `Commit XY` markers (e.g. `Commit AX`, `Commit BX`) which the
     /// numeric-only `Commit \d+` scan does not see.
     pub fn line_has_phase_archaeology(line: &str) -> bool {
-        let bytes = line.as_bytes();
-        // Single lowercased view of the line, reused by every
-        // digit-bearing prefix-family scan below (phase / stage / block /
-        // slice / round). Scanning the already-lowercased line catches
-        // every capitalisation — including ALL-CAPS forms like `PHASE-1A`
-        // — in one pass, so the families never enumerate a brittle
-        // hand-written casing list. `to_ascii_lowercase` leaves digits,
-        // `:`, `-`, `.`, and byte indices unchanged, so the carve-out and
-        // word-boundary byte logic stays index-compatible with the
-        // original line.
+        // Thin wrapper: lowercase ONCE, then delegate to the lowered-input
+        // form. Callers that scan many lines of one file should lowercase
+        // the WHOLE file once and call `line_has_phase_archaeology_lowered`
+        // with per-line slices of it (no per-line allocation) — see
+        // `guard7_violations`.
         let lower = line.to_ascii_lowercase();
+        line_has_phase_archaeology_lowered(line, &lower)
+    }
+
+    /// [`line_has_phase_archaeology`] with the lowercased line supplied by
+    /// the caller. `lower` MUST equal `line.to_ascii_lowercase()` — the
+    /// ASCII lowercasing is byte-index-preserving, so the byte-offset and
+    /// word-boundary logic below stays valid against the original `line`.
+    /// Passing a precomputed slice lets a whole-file scan avoid the
+    /// per-line `to_ascii_lowercase()` allocation that dominated the cost.
+    pub fn line_has_phase_archaeology_lowered(line: &str, lower: &str) -> bool {
+        let bytes = line.as_bytes();
+        // Per-line FAST GATE (the load-bearing perf fix for the
+        // whole-codebase scan): every detailed branch below requires at
+        // least one trigger root, so a line with NONE cannot match.
+        // ~99% of source lines (data rows, ordinary code) are inert; this
+        // gate lets them out after the shared necessary-condition check,
+        // skipping the two normalised allocations and the ~30 detailed
+        // substring scans. The gate is the SAME necessary condition as the
+        // whole-file pre-reject (one source of truth), so it cannot change
+        // the result set.
+        if !text_has_phase_archaeology_trigger(lower, line) {
+            return false;
+        }
+        // Two normalised views of `lower`, each computed ONCE per
+        // (surviving) line and reused by every separator-tolerant scan
+        // below (instead of re-allocating a fresh
+        // `to_ascii_lowercase()`-then-map String inside each block — the
+        // per-line allocation that dominated the scan on large files):
+        //   * `norm_dash`           — `-` collapsed to space (codex-vocab,
+        //                             agent-attribution families).
+        //   * `norm_dash_underscore`— `-` and `_` collapsed to space
+        //                             (the `pre-C`/`post-C` cutover family,
+        //                             which also tolerates `_` separators).
+        // Collapsing `-`/`_` to a single space preserves byte length and
+        // byte indices (one byte in, one byte out), so the byte-offset
+        // logic in each block stays valid against the original `line`.
+        let norm_dash: String = lower
+            .chars()
+            .map(|c| if c == '-' { ' ' } else { c })
+            .collect();
+        let norm_dash_underscore: String = lower
+            .chars()
+            .map(|c| if c == '-' || c == '_' { ' ' } else { c })
+            .collect();
         // Substring matches for fixed vocabulary. These are unambiguous
         // in production source and never appear as legitimate prose.
         const FIXED_NEEDLES: &[&str] = &[
@@ -5246,8 +5342,9 @@ mod foundations_guards {
         // `runtime cutover`, the former `d-cutover` / `post-cutover`
         // fixed needles). Production source must read as final-state.
         // This single substring check subsumes every cutover-prefixed
-        // and cutover-suffixed form regardless of capitalisation.
-        if line.to_ascii_lowercase().contains("cutover") {
+        // and cutover-suffixed form regardless of capitalisation. Reuses
+        // the single `lower` view computed above (no per-line re-alloc).
+        if lower.contains("cutover") {
             return true;
         }
         // Case-insensitive `codex` vocabulary scan with separator
@@ -5261,13 +5358,10 @@ mod foundations_guards {
         // `codex-audit`, `codex-finding`) variants all trip the
         // scan — they are the same project-management marker.
         {
-            // Normalise: lowercase + collapse `-` to space so a single
-            // pass catches every capitalisation/separator variant.
-            let normalised: String = line
-                .to_ascii_lowercase()
-                .chars()
-                .map(|c| if c == '-' { ' ' } else { c })
-                .collect();
+            // Normalised view: lowercase + `-`→space so a single pass
+            // catches every capitalisation/separator variant. Reuses the
+            // shared `norm_dash` computed once at the top of the fn.
+            let normalised = &norm_dash;
             const CODEX_VOCAB: &[&str] = &[
                 "codex audit",
                 "codex finding",
@@ -6000,13 +6094,10 @@ mod foundations_guards {
         // phrases, and `codex Q<digit>` review-question markers. The
         // substantive description belongs in the comment WITHOUT the
         // agent label. Normalised: lowercase + `-`→space so every
-        // capitalisation / separator variant trips one pass.
+        // capitalisation / separator variant trips one pass. Reuses the
+        // shared `norm_dash` computed once at the top of the fn.
         {
-            let normalised: String = line
-                .to_ascii_lowercase()
-                .chars()
-                .map(|c| if c == '-' { ' ' } else { c })
-                .collect();
+            let normalised = &norm_dash;
             let norm_bytes = normalised.as_bytes();
             // Possessives — leading word-boundary so `llc's` / `acc's`
             // (substring `cc's`) and similar are not false-flagged.
@@ -6104,13 +6195,10 @@ mod foundations_guards {
         // `post-C17`). Case-insensitive on the leading verb; the `C`
         // immediately followed by an ASCII digit is the discriminator.
         // Ordinary prose (`pre-commit`, `preconfigured`) lacks the bare
-        // `C<digit>` tail and is preserved.
+        // `C<digit>` tail and is preserved. Reuses the shared
+        // `norm_dash_underscore` view (this family also tolerates `_`).
         {
-            let normalised: String = line
-                .to_ascii_lowercase()
-                .chars()
-                .map(|c| if c == '-' || c == '_' { ' ' } else { c })
-                .collect();
+            let normalised = &norm_dash_underscore;
             let norm_bytes = normalised.as_bytes();
             for prefix in ["pre c", "prec", "post c", "postc"] {
                 let mut from = 0usize;
@@ -6378,6 +6466,127 @@ mod foundations_guards {
         false
     }
 
+    /// Lowercased necessary roots covering every branch of
+    /// [`line_has_phase_archaeology`] except the uppercase-anchored
+    /// `PE\d+`, bare `C<digit>`, `D-<letters>`, `B<digit>`, Greek-capital,
+    /// and `U<digit>B` scans (which are checked against the raw text in
+    /// [`text_has_phase_archaeology_trigger`]). A line/file lacking ALL of
+    /// these necessary substrings cannot match any detailed branch.
+    const PHASE_ARCHAEOLOGY_LOWER_ROOTS: &[&str] = &[
+        "cutover",                   // bare cutover + pre-/post-/d-/runtime-cutover
+        "phase",                     // pre-Phase / phase \d / phase-archaeology
+        "retired in",                // retirement history
+        "stage",                     // pre-Stage / stage \d
+        "audit infrastructure plan", // audit-plan archaeology (spaced)
+        "audit-infrastructure-plan", // audit-plan archaeology (hyphenated)
+        "cache-runtime overhaul",    // cache-runtime plan archaeology
+        "ax-wip",                    // orchestrator codename
+        "pre-ax",                    // pre-AX / post-AX codename narrative
+        "post-ax",                   // pre-AX / post-AX codename narrative
+        "wip-",                      // WIP-[A-Z] phase markers
+        "gemini",                    // gemini's attribution
+        "cc's",                      // CC's attribution
+        "codex",                     // codex vocab + Codex Nth-consult
+        "consult #",                 // numbered `consult #<digit>` marker
+        "§",                         // plan § / decimal-section refs
+        "slice",                     // Slice \d
+        "wave",                      // Wave \d build-slice marker
+        "deleted in",                // deletion history
+        "deletion in",               // deletion history
+        "block",                     // \bblock \d\b / Block \d.x
+        "commit",                    // Commit \d / Commit XY
+        "revision",                  // revision \d
+        "rev ",                      // rev \d shorthand
+        "path ",                     // Path cluster marker
+        "round",                     // round \d markers
+        "cluster ",                  // Cluster [A-Z]
+        "/ fix ",                    // / Fix [A-Z]
+        "fix-",                      // Fix-[A-Z] / pre-Fix- / post-Fix-
+        "fork-",                     // FORK-[A-Z] staged-fork code-name
+        "scope-lock",                // SCOPE-LOCK plan vocabulary
+        "pre-c",                     // pre-C<digit> cutover marker
+        "pre_c",                     // pre_C<digit> cutover marker
+        "prec",                      // preC<digit> cutover marker
+        "post-c",                    // post-C<digit> cutover marker
+        "post_c",                    // post_C<digit> cutover marker
+        "postc",                     // postC<digit> cutover marker
+        "pass c",                    // Pass C<digit> cutover marker
+        "gap ",                      // gap <digit> framework-adapter marker
+    ];
+
+    /// The shared NECESSARY-CONDITION check for
+    /// [`line_has_phase_archaeology`], used both as the whole-file
+    /// pre-reject ([`file_may_have_phase_archaeology`]) and as the
+    /// per-line fast gate. Every detailed line-level branch requires at
+    /// least one of these triggers, so when this returns `false` no
+    /// detailed branch can match and the expensive per-line scan is
+    /// skipped without changing the result set.
+    ///
+    /// Takes BOTH the already-lowercased text (`lower`) and the raw text
+    /// (`raw`) so the caller allocates the lowercased view ONCE and reuses
+    /// it for the detailed scan. Most branches have a case-insensitive
+    /// necessary substring checked against `lower`; the `PE\d+`, bare
+    /// `C<digit>`, `D-<letters>`, `B<digit>`, Greek-capital, and
+    /// `U<digit>B` branches are case-sensitive (lowercasing `PE` to `pe`
+    /// would match common words like `type`/`operation`), so they are
+    /// checked against `raw`.
+    pub fn text_has_phase_archaeology_trigger(lower: &str, raw: &str) -> bool {
+        if PHASE_ARCHAEOLOGY_LOWER_ROOTS
+            .iter()
+            .any(|r| lower.contains(r))
+        {
+            return true;
+        }
+        // Uppercase-anchored `PE\d+` branch: check raw text.
+        if raw.contains("PE") {
+            return true;
+        }
+        // Bare cutover-pass label `C<digit>` branch: case-sensitive
+        // (uppercase `C` immediately followed by an ASCII digit). The
+        // detailed scan applies the word-boundary + trailing-context
+        // discriminator; the cheap necessary condition is the literal
+        // `C` followed by a digit.
+        let raw_bytes = raw.as_bytes();
+        if (0..raw_bytes.len().saturating_sub(1))
+            .any(|i| raw_bytes[i] == b'C' && raw_bytes[i + 1].is_ascii_digit())
+        {
+            return true;
+        }
+        // `D-<letters>` framework-adapter code-name branch: case-sensitive
+        // (uppercase `D` immediately followed by `-`). The detailed scan
+        // applies the word-boundary + 1..=3-lowercase-letter tail
+        // discriminator; the cheap necessary condition is the literal `D`
+        // followed by `-`.
+        if (0..raw_bytes.len().saturating_sub(1))
+            .any(|i| raw_bytes[i] == b'D' && raw_bytes[i + 1] == b'-')
+        {
+            return true;
+        }
+        // `B<digits><letter>` framework-adapter block-id branch:
+        // case-sensitive (uppercase `B` immediately followed by an ASCII
+        // digit). The detailed scan applies the word-boundary + trailing
+        // single-lowercase-letter discriminator; the cheap necessary
+        // condition is the literal `B` followed by a digit.
+        if (0..raw_bytes.len().saturating_sub(1))
+            .any(|i| raw_bytes[i] == b'B' && raw_bytes[i + 1].is_ascii_digit())
+        {
+            return true;
+        }
+        // Bare Greek-letter phase-codename branch: a Greek capital
+        // (U+0391..=U+03A9) is never part of legitimate source prose, so
+        // its mere presence is the necessary condition for the
+        // `Γ.<alnum>` scan to fire.
+        if raw.chars().any(|c| ('\u{0391}'..='\u{03A9}').contains(&c)) {
+            return true;
+        }
+        // `U<digit>B`-anchored plan-block branch: case-sensitive (the
+        // marker is uppercase `U…B`). The cheap necessary check is the
+        // `U` byte followed by a digit followed by `B`.
+        (0..raw_bytes.len().saturating_sub(2)).any(|i| {
+            raw_bytes[i] == b'U' && raw_bytes[i + 1].is_ascii_digit() && raw_bytes[i + 2] == b'B'
+        })
+    }
+
     /// Coverage-identical whole-file pre-reject for
     /// [`line_has_phase_archaeology`].
     ///
@@ -6386,122 +6595,81 @@ mod foundations_guards {
     /// returns `false` only when the WHOLE file contains NONE of those
     /// triggers — in which case no line in the file can match, so the
     /// per-line scan can be skipped without changing the result set.
-    ///
-    /// All branches except the `PE\d+` scan have a case-insensitive
-    /// necessary substring, checked against the lowercased file text.
-    /// The `PE\d+` branch is case-sensitive (uppercase `PE`), so it is
-    /// checked separately against the raw text (lowercasing it to `pe`
-    /// would match common words like `type`/`operation` and defeat the
-    /// pre-reject). The two checks together are a necessary condition
-    /// for ANY violation the predicate can report.
     pub fn file_may_have_phase_archaeology(src: &str) -> bool {
-        // Lowercased necessary roots covering every branch except the
-        // uppercase-anchored `PE\d+` scan.
-        const LOWER_ROOTS: &[&str] = &[
-            "cutover",                   // bare cutover + pre-/post-/d-/runtime-cutover
-            "phase",                     // pre-Phase / phase \d / phase-archaeology
-            "retired in",                // retirement history
-            "stage",                     // pre-Stage / stage \d
-            "audit infrastructure plan", // audit-plan archaeology (spaced)
-            "audit-infrastructure-plan", // audit-plan archaeology (hyphenated)
-            "cache-runtime overhaul",    // cache-runtime plan archaeology
-            "ax-wip",                    // orchestrator codename
-            "pre-ax",                    // pre-AX / post-AX codename narrative
-            "post-ax",                   // pre-AX / post-AX codename narrative
-            "wip-",                      // WIP-[A-Z] phase markers
-            "gemini",                    // gemini's attribution
-            "cc's",                      // CC's attribution
-            "codex",                     // codex vocab + Codex Nth-consult
-            "consult #",                 // numbered `consult #<digit>` marker
-            "§",                         // plan § / decimal-section refs
-            "slice",                     // Slice \d
-            "wave",                      // Wave \d build-slice marker
-            "deleted in",                // deletion history
-            "deletion in",               // deletion history
-            "block",                     // \bblock \d\b / Block \d.x
-            "commit",                    // Commit \d / Commit XY
-            "revision",                  // revision \d
-            "rev ",                      // rev \d shorthand
-            "path ",                     // Path cluster marker
-            "round",                     // round \d markers
-            "cluster ",                  // Cluster [A-Z]
-            "/ fix ",                    // / Fix [A-Z]
-            "fix-",                      // Fix-[A-Z] / pre-Fix- / post-Fix-
-            "fork-",                     // FORK-[A-Z] staged-fork code-name
-            "scope-lock",                // SCOPE-LOCK plan vocabulary
-            "pre-c",                     // pre-C<digit> cutover marker
-            "pre_c",                     // pre_C<digit> cutover marker
-            "prec",                      // preC<digit> cutover marker
-            "post-c",                    // post-C<digit> cutover marker
-            "post_c",                    // post_C<digit> cutover marker
-            "postc",                     // postC<digit> cutover marker
-            "pass c",                    // Pass C<digit> cutover marker
-            "gap ",                      // gap <digit> framework-adapter marker
-        ];
         let lower = src.to_ascii_lowercase();
-        if LOWER_ROOTS.iter().any(|r| lower.contains(r)) {
-            return true;
-        }
-        // Uppercase-anchored `PE\d+` branch: check raw text.
-        if src.contains("PE") {
-            return true;
-        }
-        // Bare cutover-pass label `C<digit>` branch: case-sensitive
-        // (uppercase `C` immediately followed by an ASCII digit). The
-        // per-line scan applies the word-boundary + trailing-context
-        // discriminator; the cheap necessary condition is the literal
-        // `C` followed by a digit anywhere in the file.
-        {
-            let raw = src.as_bytes();
-            if (0..raw.len().saturating_sub(1))
-                .any(|i| raw[i] == b'C' && raw[i + 1].is_ascii_digit())
-            {
-                return true;
+        text_has_phase_archaeology_trigger(&lower, src)
+    }
+
+    /// A single compiled `Regex` whose match set is a SUPERSET of the
+    /// per-line necessary condition ([`text_has_phase_archaeology_trigger`]):
+    /// every line that the necessary condition would accept also matches
+    /// this regex. Built ONCE (a compiled automaton — fast even in a debug
+    /// build) and used to find candidate lines in ONE linear pass over the
+    /// whole file, replacing a per-line invocation of the hand-rolled
+    /// 38-needle + raw-scan gate over the ~600k-line corpus (the cost that
+    /// made this scan multi-second). A line the regex over-includes is
+    /// harmless: the authoritative detailed predicate
+    /// ([`line_has_phase_archaeology_lowered`]) then decides it.
+    ///
+    /// The alternation mirrors the necessary condition: the lowercased
+    /// roots are matched case-insensitively (so they hit the raw text in
+    /// any casing); the raw-anchored families (`PE`, `C<digit>`,
+    /// `D-`, `B<digit>`, `U<digit>B`) stay case-sensitive via `(?-i:…)`;
+    /// the Greek-capital range is matched directly.
+    fn archaeology_candidate_regex() -> &'static regex::Regex {
+        static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+        RE.get_or_init(|| {
+            let mut alts: Vec<String> = Vec::new();
+            // Lowercased roots, case-insensitive, regex-escaped.
+            for root in PHASE_ARCHAEOLOGY_LOWER_ROOTS {
+                alts.push(format!("(?i:{})", regex::escape(root)));
+            }
+            // Raw case-sensitive families (lowercasing these would
+            // over-match common words like `type`/`operation`).
+            alts.push("(?-i:PE)".to_string());
+            alts.push("(?-i:C[0-9])".to_string());
+            // `D-<letters>` framework-adapter code-name necessary condition.
+            alts.push("(?-i:D-)".to_string());
+            // `B<digit>` framework-adapter block-id necessary condition.
+            alts.push("(?-i:B[0-9])".to_string());
+            alts.push("(?-i:U[0-9]B)".to_string());
+            // Greek capital block U+0391..=U+03A9.
+            alts.push("[\\x{0391}-\\x{03A9}]".to_string());
+            regex::Regex::new(&alts.join("|")).expect("archaeology candidate regex must compile")
+        })
+    }
+
+    /// Yield `(line_no, line)` for every line of `src` that COULD contain a
+    /// phase-archaeology trigger, found in ONE linear regex pass over the
+    /// whole file (not a per-line gate). `line_no` is 1-based. The result
+    /// is a SUPERSET of the violating lines; the caller runs the
+    /// authoritative detailed predicate on each.
+    pub fn candidate_archaeology_lines(src: &str) -> Vec<(usize, &str)> {
+        let re = archaeology_candidate_regex();
+        // Precompute line-start byte offsets so a match offset maps to a
+        // line number by binary search (O(matches·log lines), and the
+        // match count is tiny relative to the corpus).
+        let line_starts: Vec<usize> = std::iter::once(0)
+            .chain(src.match_indices('\n').map(|(i, _)| i + 1))
+            .collect();
+        let lines: Vec<&str> = src.lines().collect();
+        let mut candidate_idx: Vec<usize> = Vec::new();
+        for m in re.find_iter(src) {
+            // Line index = number of line-starts at or before the match
+            // offset, minus one.
+            let li = match line_starts.binary_search(&m.start()) {
+                Ok(i) => i,
+                Err(i) => i - 1,
+            };
+            if li < lines.len() {
+                candidate_idx.push(li);
             }
         }
-        // Bare Greek-letter phase-codename branch: a Greek capital
-        // (U+0391..=U+03A9) is never part of legitimate source prose, so
-        // its mere presence is the necessary condition for the per-line
-        // `Γ.<alnum>` scan to fire.
-        if src.chars().any(|c| ('\u{0391}'..='\u{03A9}').contains(&c)) {
-            return true;
-        }
-        // `D-<letters>` framework-adapter code-name branch: case-sensitive
-        // (uppercase `D` immediately followed by `-`). The per-line scan
-        // applies the word-boundary + 1..=3-lowercase-letter tail
-        // discriminator; the cheap necessary condition is the literal `D`
-        // followed by `-` anywhere in the file.
-        {
-            let raw = src.as_bytes();
-            if (0..raw.len().saturating_sub(1)).any(|i| raw[i] == b'D' && raw[i + 1] == b'-') {
-                return true;
-            }
-        }
-        // `B<digits><letter>` framework-adapter block-id branch:
-        // case-sensitive (uppercase `B` immediately followed by an ASCII
-        // digit). The per-line scan applies the word-boundary + trailing
-        // single-lowercase-letter discriminator; the cheap necessary
-        // condition is the literal `B` followed by a digit anywhere in the
-        // file.
-        {
-            let raw = src.as_bytes();
-            if (0..raw.len().saturating_sub(1))
-                .any(|i| raw[i] == b'B' && raw[i + 1].is_ascii_digit())
-            {
-                return true;
-            }
-        }
-        // `U<digit>B`-anchored plan-block branch: case-sensitive (the
-        // marker is uppercase `U…B`). A necessary condition is the
-        // literal `B` preceded by a digit preceded by `U` somewhere in
-        // the file; the per-line scan applies the word-boundary + tail
-        // discriminator. The cheap necessary check is the `U` byte
-        // followed by a digit followed by `B`.
-        {
-            let bytes = src.as_bytes();
-            (0..bytes.len().saturating_sub(2))
-                .any(|i| bytes[i] == b'U' && bytes[i + 1].is_ascii_digit() && bytes[i + 2] == b'B')
-        }
+        candidate_idx.dedup();
+        candidate_idx
+            .into_iter()
+            .map(|li| (li + 1, lines[li]))
+            .collect()
     }
 
     /// Walk the production tree and return `(rel_path, line_no, line)`
@@ -6524,19 +6692,28 @@ mod foundations_guards {
                 continue;
             }
             for file in walk_production_rs(&src_dir) {
+                let rel = relative_to_root(&file);
+                // Generated DATA modules hold a generator's verbatim data
+                // rows, not hand-authored source — the final-state /
+                // no-plan-vocabulary rules do not apply, and scanning them
+                // (thousands of rows) is the bulk of the cost. Skip by path.
+                if super::is_generated_data_source(&rel) {
+                    continue;
+                }
                 let src = match fs::read_to_string(&file) {
                     Ok(s) => s,
                     Err(_) => continue,
                 };
-                // Whole-file pre-reject: a file with none of the trigger
-                // roots cannot contain any matching line (coverage-safe).
-                if !file_may_have_phase_archaeology(&src) {
-                    continue;
-                }
-                let rel = relative_to_root(&file);
-                for (idx, line) in src.lines().enumerate() {
-                    if line_has_phase_archaeology(line) {
-                        violations.push((rel.clone(), idx + 1, line.to_string()));
+                // Lowercase the WHOLE file ONCE (not once per line — the
+                // per-line allocation dominated the whole-codebase scan).
+                // ASCII lowercasing is byte-index-preserving, so
+                // `lower_src.lines()` zips 1:1 with `src.lines()` and the
+                // per-line predicate's byte-offset logic stays valid.
+                for (idx, line) in candidate_archaeology_lines(&src) {
+                    let lower_line = line.to_ascii_lowercase();
+                    if line_has_phase_archaeology_lowered(line, &lower_line) {
+                        // `idx` from `candidate_archaeology_lines` is already 1-based.
+                        violations.push((rel.clone(), idx, line.to_string()));
                     }
                 }
             }
@@ -6813,6 +6990,18 @@ mod foundations_guards {
         // only these isolate the bare branch.
         "// G9 cutover left a soundness gap",
         "// typed-IR cutover note",
+        // Framework-adapters plan code-names — the `D-<letters>` block
+        // family, the `B<digits><letter>` block-id family, and the
+        // `gap <digit>` numbered-gap markers. Each fixture is isolated to
+        // its own branch (no other trigger root on the line) so it pins
+        // the dedicated necessary-condition coverage in
+        // `text_has_phase_archaeology_trigger` / the candidate regex.
+        "// the D-bk seam owns the carrier surface.", // `D-<letters>` branch
+        "/// (D-m) folds the augmenter contributions.", // parenthesised `D-<letters>`
+        "// the B8h seam owns the carrier surface.",  // `B<digits><letter>` branch
+        "/// B1a wires the descriptor registry.",     // `B<digits><letter>` branch
+        "// closing the gap 3 framework-adapter seam.", // `gap <digit>` branch
+        "/// resolves the gap 2 enumeration domain.", // `gap <digit>` branch
     ];
 
     #[test]
@@ -7062,7 +7251,45 @@ mod foundations_guards {
                  per-line predicate flags — the prefilter has a coverage hole \
                  and the sweep would silently miss this violation: {line:?}",
             );
+            // The regex-driven candidate-line finder (the fast path the
+            // sweeps now use) must ALSO surface this line — its match set
+            // is a superset of the necessary condition. A miss here is a
+            // silent coverage hole exactly like a prefilter miss.
+            let candidates = candidate_archaeology_lines(line);
+            assert!(
+                candidates.iter().any(|(_, l)| *l == *line),
+                "`candidate_archaeology_lines` (the fast-path regex filter \
+                 the sweeps drive) SKIPS a line the per-line predicate flags \
+                 — the sweep would silently miss this violation: {line:?}",
+            );
         }
+    }
+
+    /// The regex candidate filter is the SUPERSET gate the sweeps run
+    /// before the authoritative per-line predicate, so it must NEVER admit
+    /// FEWER lines than the predicate would flag — but it is allowed to
+    /// admit more (the predicate then rejects them). This pins both
+    /// directions on the negative fixtures: a legitimate line the
+    /// predicate does NOT flag may or may not be a candidate, but if it IS
+    /// a candidate the predicate must still reject it (no false positive
+    /// leaks through). Together with `prefilter_never_skips_a_flagged_line`
+    /// this characterizes the fast path: superset on positives, sound on
+    /// negatives.
+    #[test]
+    fn candidate_filter_is_sound_on_negatives() {
+        // A plainly inert line (no trigger root) must NOT be a candidate —
+        // otherwise the filter does no useful work.
+        let inert = "    let result = compute_value(input, &mut state);";
+        assert!(
+            candidate_archaeology_lines(inert).is_empty(),
+            "an inert line must not be a candidate (the filter would be a no-op)",
+        );
+        // A data-row shape like the generated entity table must be inert.
+        let data_row = "    (\"amp;\", 38),";
+        assert!(
+            candidate_archaeology_lines(data_row).is_empty(),
+            "a generated data row must be inert",
+        );
     }
 
     // ── Relation-surface plan-archaeology guard ──
@@ -9519,16 +9746,26 @@ mod w5f_test_archaeology {
                         .unwrap()
                         .to_string_lossy()
                         .replace('\\', "/");
-                    let src_text =
-                        std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {rel}: {e}"));
-                    // Whole-file pre-reject (coverage-safe): skip files
-                    // with none of the predicate's trigger roots.
-                    if !super::foundations_guards::file_may_have_phase_archaeology(&src_text) {
+                    // Generated DATA modules are not hand-authored source.
+                    if super::is_generated_data_source(&rel) {
                         continue;
                     }
-                    for (line_no, line) in src_text.lines().enumerate() {
-                        if super::foundations_guards::line_has_phase_archaeology(line) {
-                            violations.push(format!("{rel}:{}", line_no + 1));
+                    let src_text =
+                        std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {rel}: {e}"));
+                    // ONE linear regex pass finds candidate lines (a
+                    // superset); the authoritative detailed predicate then
+                    // decides each. Replaces the per-line gate over the
+                    // huge `*_tests.rs` files (the cost that dominated this
+                    // scan).
+                    for (line_no, line) in
+                        super::foundations_guards::candidate_archaeology_lines(&src_text)
+                    {
+                        let lower_line = line.to_ascii_lowercase();
+                        if super::foundations_guards::line_has_phase_archaeology_lowered(
+                            line,
+                            &lower_line,
+                        ) {
+                            violations.push(format!("{rel}:{line_no}"));
                         }
                     }
                 }
@@ -9570,15 +9807,24 @@ mod w5f_test_archaeology {
                             .unwrap()
                             .to_string_lossy()
                             .replace('\\', "/");
-                        let src_text = std::fs::read_to_string(path)
-                            .unwrap_or_else(|e| panic!("read {rel}: {e}"));
-                        // Whole-file pre-reject (coverage-safe).
-                        if !super::foundations_guards::file_may_have_phase_archaeology(&src_text) {
+                        // Generated DATA modules are not hand-authored source.
+                        if super::is_generated_data_source(&rel) {
                             continue;
                         }
-                        for (line_no, line) in src_text.lines().enumerate() {
-                            if super::foundations_guards::line_has_phase_archaeology(line) {
-                                violations.push(format!("{rel}:{}", line_no + 1));
+                        let src_text = std::fs::read_to_string(path)
+                            .unwrap_or_else(|e| panic!("read {rel}: {e}"));
+                        // ONE linear regex pass finds candidate lines (a
+                        // superset); the authoritative detailed predicate
+                        // then decides each.
+                        for (line_no, line) in
+                            super::foundations_guards::candidate_archaeology_lines(&src_text)
+                        {
+                            let lower_line = line.to_ascii_lowercase();
+                            if super::foundations_guards::line_has_phase_archaeology_lowered(
+                                line,
+                                &lower_line,
+                            ) {
+                                violations.push(format!("{rel}:{line_no}"));
                             }
                         }
                     }
@@ -9795,13 +10041,17 @@ mod general_test_archaeology {
                 }
                 let src_text =
                     std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {rel}: {e}"));
-                // Whole-file pre-reject (coverage-safe).
-                if !super::foundations_guards::file_may_have_phase_archaeology(&src_text) {
-                    continue;
-                }
-                for (line_no, line) in src_text.lines().enumerate() {
-                    if super::foundations_guards::line_has_phase_archaeology(line) {
-                        violations.push(format!("{rel}:{}", line_no + 1));
+                // ONE linear regex pass finds candidate lines (a superset);
+                // the authoritative detailed predicate then decides each.
+                for (line_no, line) in
+                    super::foundations_guards::candidate_archaeology_lines(&src_text)
+                {
+                    let lower_line = line.to_ascii_lowercase();
+                    if super::foundations_guards::line_has_phase_archaeology_lowered(
+                        line,
+                        &lower_line,
+                    ) {
+                        violations.push(format!("{rel}:{line_no}"));
                     }
                 }
             }
@@ -19312,13 +19562,33 @@ fn route_mutator_violations_in_labeled_source(
     allowlist: &[&str],
     source_label: &str,
 ) -> Vec<(String, String)> {
+    // HARD failure on unparseable input. The sources this guard walks
+    // compile (cargo proves them parseable), so the only way to get
+    // here with broken syntax is a mis-stripped `#[cfg(test)]` extent —
+    // exactly the case that previously skipped whole files into silent
+    // green. A guard that cannot read its scope must fail, not pass.
+    let file = syn::parse_file(src).unwrap_or_else(|err| {
+        panic!(
+            "route-mutator guard could not parse {source_label} (a silent \
+             skip here hollows the guard's per-fn claim — fix the cfg(test) \
+             stripper or the source): {err}"
+        )
+    });
+    route_mutator_violations_in_file(&file, allowlist)
+}
+
+/// The per-fn violation pass over an ALREADY-PARSED file. Split out so
+/// the real walk parses each production file exactly ONCE (this pass and
+/// the discovery counter both consume the single parsed AST) instead of
+/// re-running `syn::parse_file` per pass.
+fn route_mutator_violations_in_file(file: &syn::File, allowlist: &[&str]) -> Vec<(String, String)> {
     use syn::visit::Visit;
 
     struct FnCollector<'a> {
         allowlist: &'a [&'a str],
         violations: Vec<(String, String)>,
     }
-    impl<'a> FnCollector<'a> {
+    impl FnCollector<'_> {
         fn check_fn(&mut self, name: &str, block: &syn::Block) {
             if self.allowlist.contains(&name) {
                 return;
@@ -19359,7 +19629,7 @@ fn route_mutator_violations_in_labeled_source(
             }
         }
     }
-    impl<'a, 'ast> syn::visit::Visit<'ast> for FnCollector<'a> {
+    impl<'ast> syn::visit::Visit<'ast> for FnCollector<'_> {
         fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
             self.check_fn(&item.sig.ident.to_string(), &item.block);
             syn::visit::visit_item_fn(self, item);
@@ -19370,23 +19640,11 @@ fn route_mutator_violations_in_labeled_source(
         }
     }
 
-    // HARD failure on unparseable input. The sources this guard walks
-    // compile (cargo proves them parseable), so the only way to get
-    // here with broken syntax is a mis-stripped `#[cfg(test)]` extent —
-    // exactly the case that previously skipped whole files into silent
-    // green. A guard that cannot read its scope must fail, not pass.
-    let file = syn::parse_file(src).unwrap_or_else(|err| {
-        panic!(
-            "route-mutator guard could not parse {source_label} (a silent \
-             skip here hollows the guard's per-fn claim — fix the cfg(test) \
-             stripper or the source): {err}"
-        )
-    });
     let mut collector = FnCollector {
         allowlist,
         violations: Vec::new(),
     };
-    collector.visit_file(&file);
+    collector.visit_file(file);
     collector.violations
 }
 
@@ -19471,27 +19729,34 @@ fn route_mutators_bump_project_generation_after_the_mutation() {
         // Production scope only: strip `#[cfg(test)]`-gated items before
         // parsing (test-only helpers may legitimately skip the bump).
         let production_body = strip_cfg_test_gated_source(&body);
+        // Parse the production body exactly ONCE; both the violation pass
+        // and the discovery counter consume the single parsed AST (a
+        // second `syn::parse_file` per file was the guard's dominant cost).
+        // HARD failure on unparseable input — a silent skip here would
+        // hollow the guard's per-fn claim exactly where a cfg(test)
+        // stripper regression breaks a file.
+        let file = syn::parse_file(&production_body).unwrap_or_else(|err| {
+            panic!(
+                "route-mutator guard could not parse {path_str} (a silent \
+                 skip here hollows the guard's per-fn claim — fix the \
+                 cfg(test) stripper or the source): {err}"
+            )
+        });
         // File-scoped allowlist: only rows whose path suffix matches THIS
         // file exempt fn names in it.
         let file_allowlist: Vec<&str> = ROUTE_MUTATOR_NO_BUMP_ALLOWLIST
             .iter()
-            .filter(|(file, _)| path_str.ends_with(file))
+            .filter(|(f, _)| path_str.ends_with(f))
             .map(|(_, name)| *name)
             .collect();
-        for (fn_name, violation) in
-            route_mutator_violations_in_labeled_source(&production_body, &file_allowlist, &path_str)
-        {
+        for (fn_name, violation) in route_mutator_violations_in_file(&file, &file_allowlist) {
             all_violations.push((path_str.clone(), fn_name, violation));
         }
-        // Track discovery coverage (anti-vacuity floor below). The
-        // violation pass above already hard-failed on an unparseable
-        // body; parse again for the counter under the same contract.
+        // Track discovery coverage (anti-vacuity floor below) from the
+        // SAME parsed AST.
         let mut counter = RouteMutationVisitor { events: Vec::new() };
         {
             use syn::visit::Visit;
-            let file = syn::parse_file(&production_body).unwrap_or_else(|err| {
-                panic!("route-mutator discovery counter could not parse {path_str}: {err}")
-            });
             counter.visit_file(&file);
         }
         if counter
