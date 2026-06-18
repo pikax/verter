@@ -981,6 +981,68 @@ fn handle_absent_provider_skips_without_require_env() {
     );
 }
 
+/// `handle_absent_provider` PANICS (fail-closed) when `VERTER_REQUIRE_TSSERVER`
+/// is set — the symmetric counterpart of the tgo gate, proven by forcing the
+/// tsserver kind absent via its require env regardless of whether tsserver is
+/// installed. Reverting the require check (always-skip) makes this test stop
+/// panicking, so it is discriminating.
+///
+/// Serialized via the same process-global mutex as the tgo require tests because
+/// it mutates a process env var that other env-reading tests could observe.
+#[test]
+fn tsserver_handle_absent_provider_fails_closed_under_require_env() {
+    let _guard = require_env_test_lock().lock().unwrap();
+    let key = TestProviderKind::Tsserver.require_env();
+    assert_eq!(
+        key, "VERTER_REQUIRE_TSSERVER",
+        "the tsserver require knob must be VERTER_REQUIRE_TSSERVER (symmetric with tgo)"
+    );
+    let prev = std::env::var_os(key);
+    std::env::set_var(key, "1");
+
+    let outcome = std::panic::catch_unwind(|| {
+        // Same-thread: the env var set above is visible. Forces the absent path.
+        handle_absent_provider(
+            TestProviderKind::Tsserver,
+            "forced-absent for fail-closed proof",
+        )
+    });
+
+    // Restore env before asserting so a failure cannot leak the override.
+    match prev {
+        Some(v) => std::env::set_var(key, v),
+        None => std::env::remove_var(key),
+    }
+
+    assert!(
+        outcome.is_err(),
+        "VERTER_REQUIRE_TSSERVER=1 with an absent provider must PANIC (fail-closed), not return a skip"
+    );
+}
+
+/// Without `VERTER_REQUIRE_TSSERVER` set, an absent tsserver degrades to a
+/// graceful skip (`None`) — the non-CI developer ergonomics path. Pairs with the
+/// test above to pin both halves of the tsserver gate.
+#[test]
+fn tsserver_handle_absent_provider_skips_without_require_env() {
+    let _guard = require_env_test_lock().lock().unwrap();
+    let key = TestProviderKind::Tsserver.require_env();
+    let prev = std::env::var_os(key);
+    std::env::remove_var(key);
+
+    let result = handle_absent_provider(TestProviderKind::Tsserver, "absent, not required");
+
+    match prev {
+        Some(v) => std::env::set_var(key, v),
+        None => std::env::remove_var(key),
+    }
+
+    assert!(
+        result.is_none(),
+        "an absent, non-required tsserver must return None (skip), not a session"
+    );
+}
+
 /// Process-global lock so the env-mutating require-mode tests do not race each
 /// other (or any other env-reading test) within this test binary.
 fn require_env_test_lock() -> &'static std::sync::Mutex<()> {
