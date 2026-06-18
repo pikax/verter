@@ -956,6 +956,55 @@ fn parse_completion_item(item: &serde_json::Value, content: Option<&str>) -> Opt
     })
 }
 
+/// Extract the lazy `detail` (signature) and `documentation` from an LSP
+/// `completionItem/resolve` response.
+///
+/// LSP returns `documentation` as either a plain string or a
+/// `MarkupContent { kind, value }` object; both spellings are handled. Either
+/// field may be absent (the server returned no enrichment for that item), in
+/// which case the corresponding slot is `None`.
+fn extract_resolve_detail_and_documentation(
+    resolve_response: &serde_json::Value,
+) -> (Option<String>, Option<String>) {
+    let detail = resolve_response
+        .get("detail")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let documentation = resolve_response.get("documentation").and_then(|v| {
+        v.as_str()
+            .map(String::from)
+            .or_else(|| v.get("value").and_then(|v2| v2.as_str()).map(String::from))
+    });
+    (detail, documentation)
+}
+
+/// Overlay a resolved `detail`/`documentation` onto a completion item without
+/// discarding any of its other fields — crucially the typed resolve handle, so a
+/// detail-enriched item can still be resolved for auto-import.
+///
+/// `None` for either slot leaves the item's list-time value untouched (the
+/// resolve did not enrich that slot). This mirrors the tsserver-family
+/// [`crate::tsserver::ipc::enrich_completion_with_entry_details`] convention so
+/// the two provider families behave identically through
+/// [`crate::traits::TypeProvider::get_completion_details`].
+fn fold_lsp_resolve_detail_into_completion(
+    item: &Completion,
+    detail: Option<String>,
+    documentation: Option<String>,
+) -> Completion {
+    Completion {
+        label: item.label.clone(),
+        kind: item.kind,
+        detail: detail.or_else(|| item.detail.clone()),
+        documentation: documentation.or_else(|| item.documentation.clone()),
+        edit_range_start: item.edit_range_start,
+        edit_range_end: item.edit_range_end,
+        insert_text: item.insert_text.clone(),
+        sort_text: item.sort_text.clone(),
+        data: item.data.clone(),
+    }
+}
+
 /// Convert a byte offset into an LSP `(line, character)` position with explicit encoding.
 ///
 /// Returns `character` according to the given encoding:
@@ -1614,6 +1663,82 @@ impl TypeProvider for TsgoTypeProvider {
                 items,
                 is_incomplete,
             })
+        })
+    }
+
+    /// Enrich a completion list with lazy `detail`/`documentation` via the LSP
+    /// `completionItem/resolve` round-trip.
+    ///
+    /// The bare `textDocument/completion` list omits the signature detail and
+    /// documentation for most entries (the server computes them lazily on
+    /// resolve). TSGO inheriting the trait default returned items UNCHANGED, so
+    /// TSGO-backed members reached the type-expansion backend
+    /// (`TypeProviderAdapter::query_members_at_offset`) with no detail while
+    /// tsserver-backed members carried `completionEntryDetails` enrichment — the
+    /// completion-detail parity gap (GAP-1).
+    ///
+    /// Only an item carrying the upstream-LSP resolve handle
+    /// ([`CompletionResolveData::Lsp`]) can be resolved; an item without one
+    /// (no `data` at list time) passes through unchanged. Each resolved item
+    /// folds its `detail`/`documentation` via
+    /// [`fold_lsp_resolve_detail_into_completion`], preserving its resolve handle
+    /// so a later auto-import resolve still works. A per-item resolve failure
+    /// degrades to the un-enriched item (never drops it). Returns a list the SAME
+    /// length as the input (empty only when the input is empty) so the adapter's
+    /// `if detailed.is_empty()` fallback keeps the original list.
+    fn get_completion_details<'a>(
+        &'a self,
+        path: &'a str,
+        _offset: u32,
+        items: &'a [Completion],
+    ) -> ProviderFuture<'a, Vec<Completion>> {
+        let uri = Self::path_to_uri(path);
+        let transport = Arc::clone(&self.transport);
+        Box::pin(async move {
+            if items.is_empty() {
+                return Ok(Vec::new());
+            }
+            let _trace = crate::type_runtime_trace_scope!(
+                "tsgo_get_completion_details",
+                format!("path={} uri={} item_count={}", path, uri, items.len()),
+            );
+
+            let mut enriched = Vec::with_capacity(items.len());
+            for item in items {
+                // Only an upstream-LSP resolve handle can be re-issued via
+                // `completionItem/resolve`; an item without one cannot be enriched.
+                let Some(CompletionResolveData::Lsp { label, data }) = item.data.as_ref() else {
+                    enriched.push(item.clone());
+                    continue;
+                };
+                let resolve_item = serde_json::json!({
+                    "label": label,
+                    "data": data,
+                    "textDocument": { "uri": uri },
+                });
+                match transport
+                    .request("completionItem/resolve", resolve_item)
+                    .await
+                {
+                    Ok(resolved) => {
+                        let (detail, documentation) =
+                            extract_resolve_detail_and_documentation(&resolved);
+                        enriched.push(fold_lsp_resolve_detail_into_completion(
+                            item,
+                            detail,
+                            documentation,
+                        ));
+                    }
+                    // A per-item resolve failure must not drop the item.
+                    Err(_) => enriched.push(item.clone()),
+                }
+            }
+
+            crate::type_runtime_trace_event!(
+                "tsgo_get_completion_details_result",
+                format!("path={} item_count={} enriched=true", path, enriched.len()),
+            );
+            Ok(enriched)
         })
     }
 
@@ -2718,6 +2843,60 @@ pub fn find_tsgo_binary() -> Result<String, TsgoBinaryLookupError> {
         Err(err) => tracing::debug!("TSGO discovery failed: {err}"),
     }
     result
+}
+
+/// Resolve the tsgo native binary from a workspace `node_modules` directory.
+///
+/// `find_tsgo_binary` searches PATH + the npm/npx cache, which misses a tsgo
+/// installed as a workspace dependency (pnpm or flat npm layout). This locates
+/// the platform-specific `@typescript/native-preview-{plat}-{arch}` binary
+/// directly under `<node_modules>`:
+///
+/// - flat npm: `<node_modules>/@typescript/native-preview-{plat}/lib/tsgo[.exe]`
+/// - pnpm:     `<node_modules>/.pnpm/@typescript+native-preview-{plat}@*/node_modules/@typescript/native-preview-{plat}/lib/tsgo[.exe]`
+///
+/// Platform-aware (reuses [`tsgo_native_binary_rel_paths`]); returns `None` when
+/// no binary is present. Paths are built with `Path::join`, never string
+/// concatenation, so it is portable across macOS / Windows / Linux.
+pub fn find_tsgo_binary_under_node_modules(node_modules: &std::path::Path) -> Option<String> {
+    // Flat npm layout: <node_modules>/@typescript/native-preview-*/lib/tsgo[.exe]
+    for rel in tsgo_native_binary_rel_paths() {
+        // `rel` is rooted at "node_modules/…"; strip that prefix to join under
+        // the given node_modules dir.
+        let rel_under_nm = rel.strip_prefix("node_modules/").unwrap_or(rel);
+        let candidate = node_modules.join(rel_under_nm);
+        if candidate.exists() {
+            return Some(candidate.to_string_lossy().to_string());
+        }
+    }
+
+    // pnpm layout: <node_modules>/.pnpm/<pkg>@<ver>/node_modules/@typescript/native-preview-*/lib/tsgo[.exe]
+    let pnpm_dir = node_modules.join(".pnpm");
+    if let Ok(entries) = std::fs::read_dir(&pnpm_dir) {
+        let mut dirs: Vec<PathBuf> = entries
+            .flatten()
+            .filter(|e| e.file_type().map(|ft| ft.is_dir()).unwrap_or(false))
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.starts_with("@typescript+native-preview-"))
+                    .unwrap_or(false)
+            })
+            .collect();
+        // Prefer the most recently modified store entry (newest install).
+        dirs.sort_by_key(|b| std::cmp::Reverse(entry_modified(b)));
+        for dir in dirs {
+            for rel in tsgo_native_binary_rel_paths() {
+                let candidate = dir.join(rel);
+                if candidate.exists() {
+                    return Some(candidate.to_string_lossy().to_string());
+                }
+            }
+        }
+    }
+
+    None
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

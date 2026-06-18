@@ -121,13 +121,24 @@ impl TestSessionBuilder {
                 }
             }
             TestProviderKind::Tsgo => {
-                let tsgo_bin = match crate::tsgo::ipc::find_tsgo_binary() {
-                    Ok(bin) => bin,
-                    Err(err) => {
-                        eprintln!("skipping: {err}");
-                        return None;
-                    }
-                };
+                // Prefer the repo-local tsgo (installed as a workspace dev
+                // dependency) so the parity tests run against the SAME tsgo the
+                // project pins, regardless of PATH / npm-cache state. Falls back
+                // to the system discovery (PATH + npm/npx cache).
+                let repo_node_modules =
+                    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../node_modules");
+                let tsgo_bin: String =
+                    match crate::tsgo::ipc::find_tsgo_binary_under_node_modules(&repo_node_modules)
+                    {
+                        Some(bin) => bin,
+                        None => match crate::tsgo::ipc::find_tsgo_binary() {
+                            Ok(bin) => bin,
+                            Err(err) => {
+                                eprintln!("skipping: tsgo binary not found: {err}");
+                                return None;
+                            }
+                        },
+                    };
                 let root_uri = crate::uri::path_to_file_uri_string(&workspace_id);
                 match crate::tsgo::ipc::TsgoTypeProvider::spawn(&tsgo_bin, &root_uri).await {
                     Ok(p) => Arc::new(p),
@@ -298,6 +309,31 @@ impl RealProviderTestSession {
     /// Returns `true` when this session uses TSGO.
     pub(crate) fn is_tsgo(&self) -> bool {
         matches!(self.kind, TestProviderKind::Tsgo)
+    }
+
+    /// Direct access to the underlying real type provider.
+    ///
+    /// For provider-level integration tests (diagnostics / completion-detail
+    /// parity) that exercise the provider contract directly rather than the full
+    /// LSP carrier-mapping path.
+    pub(crate) fn provider(&self) -> &Arc<dyn TypeProvider> {
+        &self.provider
+    }
+
+    /// Open a generated `.tsx`/`.ts` file DIRECTLY in the type provider (as an
+    /// editor-open buffer that triggers diagnostics) and return its provider
+    /// path. Used by provider-level integration tests to drive the real backend's
+    /// own diagnostics / completion paths without the Vue carrier indirection.
+    ///
+    /// The path is rooted under the fixture workspace so the provider resolves it
+    /// against the fixture's `tsconfig` + `node_modules`.
+    pub(crate) async fn open_in_provider(&self, relative_path: &str, content: &str) -> String {
+        let abs_path = format!("{}/{relative_path}", self.workspace_id);
+        self.provider
+            .open_file(&abs_path, content)
+            .await
+            .expect("provider open_file should succeed");
+        abs_path
     }
 
     /// Build a `file://` URI from a fixture-relative path.

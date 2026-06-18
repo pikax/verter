@@ -29,6 +29,7 @@
 //!   tsconfig's `references` field, but multi-root features are not fully exercised.
 
 mod completion;
+mod completion_detail;
 mod definition;
 mod document_symbols;
 mod hover;

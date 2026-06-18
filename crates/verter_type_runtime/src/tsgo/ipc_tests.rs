@@ -1751,3 +1751,116 @@ async fn test_read_loop_skips_diagnostics_for_unknown_files() {
         "tsconfig diagnostics should NOT be cached (not a synced file)"
     );
 }
+
+// ── GAP-1: tgo completion-detail enrichment (completionItem/resolve) ──
+
+fn bare_completion(label: &str) -> Completion {
+    Completion {
+        label: label.to_string(),
+        kind: Some(CompletionKind::Function),
+        detail: None,
+        documentation: None,
+        edit_range_start: None,
+        edit_range_end: None,
+        insert_text: None,
+        sort_text: None,
+        data: None,
+    }
+}
+
+#[test]
+fn extract_resolve_detail_reads_detail_and_string_documentation() {
+    // GAP-1: the LSP `completionItem/resolve` response carries the lazy detail
+    // (signature) and documentation that the bare completion list omits.
+    let resolve_response = serde_json::json!({
+        "label": "computed",
+        "detail": "function computed<T>(getter: () => T): ComputedRef<T>",
+        "documentation": "Takes a getter function and returns a readonly reactive ref."
+    });
+    let (detail, documentation) = extract_resolve_detail_and_documentation(&resolve_response);
+    assert_eq!(
+        detail.as_deref(),
+        Some("function computed<T>(getter: () => T): ComputedRef<T>"),
+        "detail (signature) must be extracted from the resolve response"
+    );
+    assert_eq!(
+        documentation.as_deref(),
+        Some("Takes a getter function and returns a readonly reactive ref."),
+        "string documentation must be extracted"
+    );
+}
+
+#[test]
+fn extract_resolve_detail_reads_markupcontent_documentation() {
+    // tgo/LSP returns documentation as MarkupContent { kind, value }.
+    let resolve_response = serde_json::json!({
+        "label": "ref",
+        "detail": "function ref<T>(value: T): Ref<T>",
+        "documentation": { "kind": "markdown", "value": "Reactive **ref** wrapper." }
+    });
+    let (detail, documentation) = extract_resolve_detail_and_documentation(&resolve_response);
+    assert_eq!(detail.as_deref(), Some("function ref<T>(value: T): Ref<T>"));
+    assert_eq!(
+        documentation.as_deref(),
+        Some("Reactive **ref** wrapper."),
+        "MarkupContent.value must be extracted as the documentation text"
+    );
+}
+
+#[test]
+fn extract_resolve_detail_handles_missing_fields() {
+    let resolve_response = serde_json::json!({ "label": "x" });
+    let (detail, documentation) = extract_resolve_detail_and_documentation(&resolve_response);
+    assert!(detail.is_none(), "no detail field → None");
+    assert!(documentation.is_none(), "no documentation field → None");
+}
+
+#[test]
+fn fold_lsp_resolve_detail_overlays_detail_and_docs() {
+    // GAP-1: folding a resolved detail/doc onto a bare item must enrich it
+    // WITHOUT discarding its other fields (label/kind/edit range/resolve handle).
+    let mut item = bare_completion("computed");
+    item.edit_range_start = Some(40);
+    item.edit_range_end = Some(48);
+    item.data = Some(CompletionResolveData::Lsp {
+        label: "computed".to_string(),
+        data: serde_json::json!({ "k": 1 }),
+    });
+
+    let enriched = fold_lsp_resolve_detail_into_completion(
+        &item,
+        Some("function computed<T>(): ComputedRef<T>".to_string()),
+        Some("Computed ref doc.".to_string()),
+    );
+
+    assert_eq!(
+        enriched.detail.as_deref(),
+        Some("function computed<T>(): ComputedRef<T>"),
+        "resolved detail overlays the bare item"
+    );
+    assert_eq!(enriched.documentation.as_deref(), Some("Computed ref doc."));
+    assert_eq!(enriched.label, "computed", "label preserved");
+    assert_eq!(enriched.edit_range_start, Some(40), "edit range preserved");
+    assert_eq!(enriched.edit_range_end, Some(48));
+    assert!(
+        enriched.data.is_some(),
+        "the resolve handle must NOT be dropped by detail enrichment"
+    );
+}
+
+#[test]
+fn fold_lsp_resolve_detail_keeps_existing_when_resolve_empty() {
+    // A resolve that returns no detail/doc must leave the item's list-time values
+    // untouched (None overlays nothing).
+    let mut item = bare_completion("count");
+    item.detail = Some("(property) count: number".to_string());
+    item.documentation = Some("the existing doc".to_string());
+
+    let enriched = fold_lsp_resolve_detail_into_completion(&item, None, None);
+    assert_eq!(
+        enriched.detail.as_deref(),
+        Some("(property) count: number"),
+        "None resolved detail leaves the list-time detail untouched"
+    );
+    assert_eq!(enriched.documentation.as_deref(), Some("the existing doc"));
+}
