@@ -430,6 +430,61 @@ pub fn parse_tsserver_diagnostic(
     })
 }
 
+/// Union the three tsserver-family diagnostic passes into one ordered, deduplicated set.
+///
+/// Native TypeScript surfaces three distinct diagnostic categories — SEMANTIC
+/// (`semanticDiagnosticsSync`), SYNTACTIC (`syntacticDiagnosticsSync`, parse
+/// errors), and SUGGESTION (`suggestionDiagnosticsSync`, unused-symbol / hint
+/// findings). A semantic-only path drops parse errors and suggestions, leaving
+/// the tsserver-family providers behind the native experience (and behind TSGO,
+/// whose pull-diagnostics model already returns the full set). This shared helper
+/// is the single merge point both [`TsserverTypeProvider`] and the extension
+/// provider route through (one shared owner, not a per-provider fork).
+///
+/// All three passes return the SAME `parse_tsserver_diagnostic`-shaped value, so
+/// the merge is provider-neutral. Order is semantic → syntactic → suggestion.
+/// Duplicates (a diagnostic reported by more than one pass) collapse on the full
+/// identity `(start, end, code, message)` — a same-span finding with a different
+/// code or message is a DISTINCT diagnostic and is preserved.
+pub fn merge_diagnostic_sets(
+    semantic: Vec<TypeDiagnostic>,
+    syntactic: Vec<TypeDiagnostic>,
+    suggestion: Vec<TypeDiagnostic>,
+) -> Vec<TypeDiagnostic> {
+    let mut seen: HashSet<(u32, u32, Option<String>, String)> = HashSet::new();
+    let mut merged = Vec::with_capacity(semantic.len() + syntactic.len() + suggestion.len());
+    for diag in semantic.into_iter().chain(syntactic).chain(suggestion) {
+        let key = (
+            diag.start,
+            diag.end,
+            diag.code.clone(),
+            diag.message.clone(),
+        );
+        if seen.insert(key) {
+            merged.push(diag);
+        }
+    }
+    merged
+}
+
+/// Parse a `*DiagnosticsSync` response body into a `TypeDiagnostic` vec.
+///
+/// All three tsserver diagnostic-pull commands (`semanticDiagnosticsSync`,
+/// `syntacticDiagnosticsSync`, `suggestionDiagnosticsSync`) return an array of
+/// the same diagnostic shape, so a single parser serves them all.
+fn parse_tsserver_diagnostics_body(
+    body: &serde_json::Value,
+    content: Option<&str>,
+) -> Vec<TypeDiagnostic> {
+    body.as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|d| parse_tsserver_diagnostic(d, content))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Convert a byte offset to tsserver's 1-based (line, offset) position.
 ///
 /// tsserver uses 1-based line and offset, where offset counts UTF-16 code units.
@@ -1186,23 +1241,47 @@ impl TypeProvider for TsserverTypeProvider {
                 cache.get(&file).cloned()
             };
 
-            // Request semantic diagnostics synchronously
-            let result = transport
+            // Pull all three tsserver diagnostic passes synchronously and union
+            // them: SEMANTIC (type errors), SYNTACTIC (parse errors), and
+            // SUGGESTION (unused-symbol / hint findings). A semantic-only request
+            // would drop parse errors and suggestions that the native TS
+            // experience (and TSGO's pull model) surface — the tsserver-family
+            // parity gap (GAP-2). The semantic pass is authoritative for the
+            // success/fallback decision; syntactic/suggestion failures degrade to
+            // an empty set for that category rather than failing the whole pull.
+            let semantic_result = transport
                 .request(
                     "semanticDiagnosticsSync",
                     serde_json::json!({ "file": file }),
                 )
                 .await;
 
-            match result {
-                Ok(body) => {
-                    let diags = if let Some(arr) = body.as_array() {
-                        arr.iter()
-                            .filter_map(|d| parse_tsserver_diagnostic(d, content.as_deref()))
-                            .collect()
-                    } else {
-                        vec![]
-                    };
+            match semantic_result {
+                Ok(semantic_body) => {
+                    let semantic =
+                        parse_tsserver_diagnostics_body(&semantic_body, content.as_deref());
+
+                    let syntactic = transport
+                        .request(
+                            "syntacticDiagnosticsSync",
+                            serde_json::json!({ "file": file }),
+                        )
+                        .await
+                        .ok()
+                        .map(|body| parse_tsserver_diagnostics_body(&body, content.as_deref()))
+                        .unwrap_or_default();
+
+                    let suggestion = transport
+                        .request(
+                            "suggestionDiagnosticsSync",
+                            serde_json::json!({ "file": file }),
+                        )
+                        .await
+                        .ok()
+                        .map(|body| parse_tsserver_diagnostics_body(&body, content.as_deref()))
+                        .unwrap_or_default();
+
+                    let diags = merge_diagnostic_sets(semantic, syntactic, suggestion);
                     diagnostics_cache.lock().await.insert(file, diags.clone());
                     Ok(diags)
                 }

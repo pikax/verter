@@ -31,6 +31,7 @@
 mod completion;
 mod completion_detail;
 mod definition;
+mod diagnostics;
 mod document_symbols;
 mod hover;
 mod multi_fixture;

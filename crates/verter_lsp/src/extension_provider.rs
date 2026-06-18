@@ -17,9 +17,9 @@ use crate::server::{TsQuery, TsQueryParams};
 use crate::tsserver::ipc::{
     build_completion_entry_details_request, build_entry_names_entry, byte_offset_to_tsserver_pos,
     completion_entry_details_to_resolve_result, concat_display_parts,
-    enrich_completion_with_entry_details, format_quickinfo_hover, parse_tsserver_code_action,
-    parse_tsserver_completion, parse_tsserver_diagnostic, parse_tsserver_location,
-    parse_tsserver_rename_span, stamp_tsserver_completion_offset,
+    enrich_completion_with_entry_details, format_quickinfo_hover, merge_diagnostic_sets,
+    parse_tsserver_code_action, parse_tsserver_completion, parse_tsserver_diagnostic,
+    parse_tsserver_location, parse_tsserver_rename_span, stamp_tsserver_completion_offset,
 };
 use crate::type_provider::protocol::*;
 use crate::type_provider::traits::{ProviderFuture, TypeProvider};
@@ -420,23 +420,51 @@ impl TypeProvider for ExtensionTypeProvider {
                 cache.get(&file).cloned()
             };
 
-            let result = self
+            // Pull all three tsserver-family diagnostic passes and union them:
+            // SEMANTIC (type errors) + SYNTACTIC (parse errors) + SUGGESTION
+            // (unused-symbol / hint findings) — the tsserver-family parity gap
+            // (GAP-2). The semantic pass gates success; syntactic/suggestion
+            // failures degrade that category to empty rather than failing the
+            // whole pull. The union/dedup is the shared `merge_diagnostic_sets`
+            // owner (one merge point, not a per-provider fork).
+            let parse_body = |body: serde_json::Value| -> Vec<TypeDiagnostic> {
+                body.as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|d| parse_tsserver_diagnostic(d, content.as_deref()))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
+
+            match self
                 .query(
                     "semanticDiagnosticsSync",
                     serde_json::json!({ "file": file }),
                 )
-                .await;
-
-            match result {
-                Ok(body) => {
-                    let diags = if let Some(arr) = body.as_array() {
-                        arr.iter()
-                            .filter_map(|d| parse_tsserver_diagnostic(d, content.as_deref()))
-                            .collect()
-                    } else {
-                        vec![]
-                    };
-                    Ok(diags)
+                .await
+            {
+                Ok(semantic_body) => {
+                    let semantic = parse_body(semantic_body);
+                    let syntactic = self
+                        .query(
+                            "syntacticDiagnosticsSync",
+                            serde_json::json!({ "file": file }),
+                        )
+                        .await
+                        .ok()
+                        .map(parse_body)
+                        .unwrap_or_default();
+                    let suggestion = self
+                        .query(
+                            "suggestionDiagnosticsSync",
+                            serde_json::json!({ "file": file }),
+                        )
+                        .await
+                        .ok()
+                        .map(parse_body)
+                        .unwrap_or_default();
+                    Ok(merge_diagnostic_sets(semantic, syntactic, suggestion))
                 }
                 Err(_) => Ok(vec![]),
             }

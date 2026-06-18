@@ -770,3 +770,163 @@ fn test_tsserver_plugin_args_enable_verter_plugin() {
         "tsserver should be launched with the Verter TS plugin enabled"
     );
 }
+
+// ── GAP-2: tsserver-family diagnostics parity (semantic + syntactic + suggestion) ──
+
+fn diag(message: &str, severity: TypeDiagnosticSeverity, start: u32, end: u32) -> TypeDiagnostic {
+    TypeDiagnostic {
+        message: message.to_string(),
+        severity,
+        start,
+        end,
+        code: None,
+    }
+}
+
+fn diag_with_code(
+    message: &str,
+    severity: TypeDiagnosticSeverity,
+    start: u32,
+    end: u32,
+    code: &str,
+) -> TypeDiagnostic {
+    TypeDiagnostic {
+        message: message.to_string(),
+        severity,
+        start,
+        end,
+        code: Some(code.to_string()),
+    }
+}
+
+#[test]
+fn merge_diagnostic_sets_unions_all_three_categories() {
+    // GAP-2: tsserver-family diagnostics must merge the semantic set with the
+    // syntactic and suggestion sets that the native TS experience surfaces.
+    let semantic = vec![diag_with_code(
+        "Type 'number' is not assignable to type 'string'.",
+        TypeDiagnosticSeverity::Error,
+        6,
+        9,
+        "2322",
+    )];
+    let syntactic = vec![diag_with_code(
+        "';' expected.",
+        TypeDiagnosticSeverity::Error,
+        20,
+        21,
+        "1005",
+    )];
+    let suggestion = vec![diag_with_code(
+        "'foo' is declared but its value is never read.",
+        TypeDiagnosticSeverity::Hint,
+        30,
+        33,
+        "6133",
+    )];
+
+    let merged = merge_diagnostic_sets(semantic, syntactic, suggestion);
+
+    assert_eq!(
+        merged.len(),
+        3,
+        "all three categories must survive the merge"
+    );
+    assert!(
+        merged.iter().any(|d| d.code.as_deref() == Some("2322")),
+        "semantic type error must be present, got: {merged:?}"
+    );
+    assert!(
+        merged.iter().any(|d| d.code.as_deref() == Some("1005")),
+        "syntactic parse error must be present (GAP-2), got: {merged:?}"
+    );
+    assert!(
+        merged.iter().any(|d| d.code.as_deref() == Some("6133")
+            && matches!(d.severity, TypeDiagnosticSeverity::Hint)),
+        "suggestion (unused-symbol hint) must be present (GAP-2), got: {merged:?}"
+    );
+}
+
+#[test]
+fn merge_diagnostic_sets_dedups_identical_diagnostic_across_categories() {
+    // tsserver can report the same diagnostic from more than one pass; the merge
+    // must not surface a visual duplicate keyed on (start, end, code, message).
+    let shared = diag_with_code("dup", TypeDiagnosticSeverity::Error, 1, 2, "9999");
+    let merged = merge_diagnostic_sets(
+        vec![shared.clone()],
+        vec![shared.clone()],
+        vec![diag_with_code(
+            "unique",
+            TypeDiagnosticSeverity::Hint,
+            5,
+            6,
+            "6133",
+        )],
+    );
+    assert_eq!(
+        merged.len(),
+        2,
+        "the duplicated diagnostic collapses to one, the unique one survives: {merged:?}"
+    );
+    assert_eq!(
+        merged
+            .iter()
+            .filter(|d| d.code.as_deref() == Some("9999"))
+            .count(),
+        1,
+        "exactly one copy of the duplicated diagnostic"
+    );
+}
+
+#[test]
+fn merge_diagnostic_sets_keeps_same_span_distinct_message() {
+    // Two diagnostics at the SAME span but with different messages/codes are
+    // distinct findings — neither must be dropped (a same-span dedup would be a
+    // correctness regression).
+    let merged = merge_diagnostic_sets(
+        vec![diag_with_code(
+            "error A",
+            TypeDiagnosticSeverity::Error,
+            1,
+            4,
+            "2322",
+        )],
+        vec![],
+        vec![diag_with_code(
+            "hint B",
+            TypeDiagnosticSeverity::Hint,
+            1,
+            4,
+            "6133",
+        )],
+    );
+    assert_eq!(
+        merged.len(),
+        2,
+        "same span, different code/message → both kept: {merged:?}"
+    );
+}
+
+#[test]
+fn merge_diagnostic_sets_empty_inputs_yield_empty() {
+    let merged = merge_diagnostic_sets(vec![], vec![], vec![]);
+    assert!(merged.is_empty(), "no diagnostics in → none out");
+}
+
+#[test]
+fn merge_diagnostic_sets_preserves_a_lone_suggestion() {
+    // A file with no semantic/syntactic errors but an unused import must still
+    // surface the suggestion — the pre-GAP-2 semantic-only path dropped this.
+    let merged = merge_diagnostic_sets(
+        vec![],
+        vec![],
+        vec![diag(
+            "'unusedRef' is declared but its value is never read.",
+            TypeDiagnosticSeverity::Hint,
+            12,
+            21,
+        )],
+    );
+    assert_eq!(merged.len(), 1);
+    assert!(matches!(merged[0].severity, TypeDiagnosticSeverity::Hint));
+}

@@ -414,22 +414,23 @@ export class ExtensionTsService {
       case "semanticDiagnosticsSync": {
         const file = args.file as string;
         const text = this.getFileText(file);
-        const diags = this.service.getSemanticDiagnostics(file);
-        return diags.map((d) => ({
-          start: d.start !== undefined ? this.offsetToPosition(text, d.start) : undefined,
-          end:
-            d.start !== undefined && d.length !== undefined
-              ? this.offsetToPosition(text, d.start + d.length)
-              : undefined,
-          text: this.ts.flattenDiagnosticMessageText(d.messageText, "\n"),
-          code: d.code,
-          category:
-            d.category === this.ts.DiagnosticCategory.Error
-              ? "error"
-              : d.category === this.ts.DiagnosticCategory.Warning
-                ? "warning"
-                : "suggestion",
-        }));
+        return this.service.getSemanticDiagnostics(file).map((d) => this.mapDiagnostic(text, d));
+      }
+
+      // Parse-error diagnostics. The native TS experience merges these with the
+      // semantic set; a semantic-only path drops them (tsserver-family parity).
+      case "syntacticDiagnosticsSync": {
+        const file = args.file as string;
+        const text = this.getFileText(file);
+        return this.service.getSyntacticDiagnostics(file).map((d) => this.mapDiagnostic(text, d));
+      }
+
+      // Suggestion diagnostics (unused-symbol / hint findings) — also part of the
+      // native merged set, dropped by a semantic-only path (tsserver-family parity).
+      case "suggestionDiagnosticsSync": {
+        const file = args.file as string;
+        const text = this.getFileText(file);
+        return this.service.getSuggestionDiagnostics(file).map((d) => this.mapDiagnostic(text, d));
       }
 
       case "getCodeFixes": {
@@ -544,6 +545,29 @@ export class ExtensionTsService {
   }
 
   // ── Helpers ─────────────────────────────────────────────────
+
+  /**
+   * Map a TS `Diagnostic` (from any of the semantic/syntactic/suggestion passes)
+   * onto the wire diagnostic shape the Rust extension provider parses. All three
+   * passes share one mapping so they merge into a uniform set on the Rust side.
+   */
+  private mapDiagnostic(text: string, d: ts.Diagnostic) {
+    return {
+      start: d.start !== undefined ? this.offsetToPosition(text, d.start) : undefined,
+      end:
+        d.start !== undefined && d.length !== undefined
+          ? this.offsetToPosition(text, d.start + d.length)
+          : undefined,
+      text: this.ts.flattenDiagnosticMessageText(d.messageText, "\n"),
+      code: d.code,
+      category:
+        d.category === this.ts.DiagnosticCategory.Error
+          ? "error"
+          : d.category === this.ts.DiagnosticCategory.Warning
+            ? "warning"
+            : "suggestion",
+    };
+  }
 
   private getFileText(file: string): string {
     const snap = this.fileSnapshots.get(file);
