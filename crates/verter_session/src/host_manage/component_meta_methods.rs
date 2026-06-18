@@ -1286,19 +1286,14 @@ impl VerterHost {
                 tracked_dependencies.insert(canonical_id.to_string());
             }
         }
+        // The registry-symbol "stay symbolic" root predicate. Delegates
+        // to the single shared definition in `meta_resolve::exactness`,
+        // whose graph-native sibling (`node_root_should_stay_symbolic`)
+        // is proven equivalent to it by the handle-capable equivalence
+        // fixtures — so the `TypeExpr` arm and the handle arm classify
+        // identically.
         fn imported_registry_alias_should_stay_symbolic(expr: &verter_type_expr::TypeExpr) -> bool {
-            use verter_type_expr::TypeExpr;
-
-            match expr {
-                TypeExpr::Parenthesized(inner) => {
-                    imported_registry_alias_should_stay_symbolic(inner)
-                }
-                TypeExpr::Mapped { .. }
-                | TypeExpr::Conditional { .. }
-                | TypeExpr::IndexedAccess { .. }
-                | TypeExpr::TypeOf(_) => true,
-                _ => false,
-            }
+            crate::meta_resolve::exactness::expr_root_should_stay_symbolic(expr)
         }
         /// Owner-local generic-alias registry substitution via the shared
         /// dispatch `Instantiate` query (Navigate mode).

@@ -423,6 +423,24 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             // lowerer cannot feed non-empty carriers to those walkers without
             // removing this guard.
             "structural_lowerer_has_no_production_caller_until_carrier_resolution",
+            // HANDLE-CAPABLE DUAL-READ (additive, ahead of the producer
+            // flip): the listed component-meta consumers accept BOTH a
+            // parser-produced `TypeExpr` and an already-lowered handle,
+            // routing BOTH arms through the SAME dispatch (read-compat,
+            // ONE resolver). G-A forbids a reverse `materialize_type_expr`
+            // bridge in a hot handle arm (the single boundary stays an
+            // output seam); G-B is the per-inventory ordering gate (each
+            // hot carrier has a handle-native consumer BEFORE the producer
+            // flip; the verter_semantic prepared-wrapper payloads are
+            // recorded as crate-boundary-deferred, and a short-lived
+            // absence-of-direct-reference tripwire asserts non-test
+            // verter_session production source does not directly name the
+            // deferred payload API (the four payload type names /
+            // .target_args); it is an ordering tripwire, not a semantic
+            // dataflow proof).
+            "no_hot_path_materialize_type_expr_bridge",
+            "stage4_carrier_inventory_handle_native_consumers_present",
+            "stage4_deferred_carriers_have_no_session_resolution_consumer",
         ],
     ),
     (

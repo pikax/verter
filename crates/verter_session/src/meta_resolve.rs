@@ -35,6 +35,9 @@ pub(crate) mod diagnostic_convert;
 pub(crate) mod dispatch_helpers;
 pub(crate) mod exactness;
 mod graph_predicates;
+#[cfg(test)]
+#[path = "meta_resolve/handle_capable_equivalence_tests.rs"]
+mod handle_capable_equivalence_tests;
 mod macro_member_walk;
 pub(crate) mod materialize;
 mod origin_graph;

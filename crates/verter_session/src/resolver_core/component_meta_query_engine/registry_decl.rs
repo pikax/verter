@@ -388,19 +388,25 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     }
 
     /// Graph-native member-surface materialiser. Lowers `expr` to a
-    /// `SemanticNodeId` via Navigate, runs the materialiser,
-    /// accumulates the dep_signature into the per-request thread-local
-    /// accumulator, and raises the materialised node back to TypeExpr.
+    /// `SemanticNodeId` via Navigate, then delegates to the shared
+    /// node-core [`Self::materialize_member_surface_node`].
+    ///
+    /// This is the `TypeExpr`-input arm of the member-surface seam: it
+    /// lowers ONCE through the single dispatch, then routes the lowered
+    /// node into the same core the handle-input arm uses. A consumer
+    /// that already holds a settled graph node (a [`HotTypeRef`]) skips
+    /// the lowering and calls `materialize_member_surface_node`
+    /// directly — both arms reduce the SAME node through the SAME
+    /// dispatch (read-compat, one resolver), never a reverse
+    /// materialize-then-re-lower bridge.
+    ///
+    /// [`HotTypeRef`]: crate::semantic_query::HotTypeRef
     pub(crate) fn materialize_member_surface_expr(
         &mut self,
         scope_canonical_id: &str,
         expr: &verter_type_expr::TypeExpr,
         nested_surface: bool,
     ) -> verter_type_expr::TypeExpr {
-        use crate::component_meta_materialize::{
-            materialize_component_meta_structure, MaterializationScope, MaterializeOutcome,
-            MaterializeRuntimeKey,
-        };
         use crate::project_semantic_dispatch::ProjectSemanticDispatch;
         use crate::semantic_query::ProjectionMode;
 
@@ -412,6 +418,35 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         ) else {
             return expr.clone();
         };
+        self.materialize_member_surface_node(scope_canonical_id, base, nested_surface)
+            .unwrap_or_else(|| expr.clone())
+    }
+
+    /// Handle-input arm of the member-surface seam: materialise an
+    /// ALREADY-LOWERED graph node (`base`) through the single dispatch,
+    /// returning the same public surface the `TypeExpr` arm
+    /// ([`Self::materialize_member_surface_expr`]) produces for the
+    /// node it lowers `expr` to.
+    ///
+    /// This is the shared node-core both arms route through. It NEVER
+    /// materialises `base` back to a `TypeExpr` to re-lower it — it
+    /// reduces the node directly. `None` signals a materialisation
+    /// error (the `TypeExpr` arm falls back to its input clone; a
+    /// handle-only caller treats `None` as "no surface").
+    pub(crate) fn materialize_member_surface_node(
+        &mut self,
+        scope_canonical_id: &str,
+        base: crate::semantic_query::SemanticNodeId,
+        nested_surface: bool,
+    ) -> Option<verter_type_expr::TypeExpr> {
+        use crate::component_meta_materialize::{
+            materialize_component_meta_structure, MaterializationScope, MaterializeOutcome,
+            MaterializeRuntimeKey,
+        };
+        use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+        use crate::semantic_query::ProjectionMode;
+
+        let dispatch = ProjectSemanticDispatch::new(self.ctx);
         // Publication demand per scope axis, shallow-by-default. The
         // TOP-LEVEL registry-symbol surface materialises at `Shallow` —
         // the interpretable one-level surface whose heritage arms merge
@@ -449,11 +484,9 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             | MaterializeOutcome::Miss(id)
             | MaterializeOutcome::Recursive(id)
             | MaterializeOutcome::Tainted(id) => id,
-            MaterializeOutcome::Error(_) => return expr.clone(),
+            MaterializeOutcome::Error(_) => return None,
         };
-        dispatch
-            .raise_node_to_type_expr(materialised_id)
-            .unwrap_or_else(|| expr.clone())
+        dispatch.raise_node_to_type_expr(materialised_id)
     }
 
     /// Resolve a type declaration, cached per query.
@@ -692,6 +725,34 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .borrow_mut()
             .insert(name.to_string(), body.clone());
         body
+    }
+
+    /// Handle-input arm of the owner-collection seam: reduce an
+    /// ALREADY-LOWERED owner-collection body node (`body_node`) through
+    /// the single dispatch, returning the same public surface the
+    /// `TypeExpr` arm ([`Self::owner_collection_expr`]) yields once its
+    /// body is materialised.
+    ///
+    /// The `TypeExpr` arm returns the raw alias body (a `TypeExpr`) that
+    /// the registry walker classifies and routes; a consumer holding a
+    /// settled body handle reduces it here through the SAME
+    /// member-surface node-core, never materialising the handle back to
+    /// a `TypeExpr` and re-lowering it. It deliberately does NOT touch
+    /// the `owner_collection_exprs` read-through view — that view mirrors
+    /// the `TypeExpr`-keyed `OwnerCollectionDb`, which a handle-derived
+    /// value must never populate.
+    ///
+    /// Dormant-but-ready: proven by the handle-capable equivalence
+    /// fixtures; it gains a production caller when the structural-lowerer
+    /// producer is wired to emit handles. No production path holds a
+    /// settled owner-collection body handle yet.
+    #[allow(dead_code)]
+    pub(crate) fn owner_collection_surface_from_node(
+        &mut self,
+        owner_canonical: &str,
+        body_node: crate::semantic_query::SemanticNodeId,
+    ) -> Option<TypeExpr> {
+        self.materialize_member_surface_node(owner_canonical, body_node, false)
     }
 
     pub fn named_decl_body(&mut self, canonical_id: &str, name: &str) -> Option<TypeExpr> {
